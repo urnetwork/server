@@ -108,3 +108,36 @@ func TestRequirePgReadOnlyConnectsDirectly(t *testing.T) {
 		t.Fatal("a read-only process connects through the transaction pooler", got)
 	}
 }
+
+// Only sessions on the direct maintenance resource carry an operator
+// process's name: a session on the pooled default resource may share a
+// PgBouncer server connection with other clients, so a cancel by the name
+// must never reach it. A read-only process's main pool connects directly too.
+// The resources are synthetic overrides; nothing connects.
+func TestPgDirectApplicationNameNamesOnlyDirectSessions(t *testing.T) {
+	t.Cleanup(Vault.PushSimpleResource(DefaultPgVaultResourceName, []byte("authority: pooled.example:6432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n")))
+	t.Cleanup(Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte("authority: direct.example:5432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n")))
+	t.Cleanup(Config.PushSimpleResource(DefaultPgConfigResourceName, []byte("min_connections: 1\nmax_connections: 2\n")))
+	SetPgDirectApplicationName("cleanup-deleted synthetic")
+	t.Cleanup(func() { SetPgDirectApplicationName("") })
+	named := func(pool *safePgPool) string {
+		vaultKeys, direct, _ := pool.resolveResourcesDirect()
+		config, err := pgxpool.ParseConfig("postgres://synthetic:synthetic@" + vaultKeys.RequireString("authority") + "/synthetic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		configurePgPoolApplicationName(config, direct)
+		return config.ConnConfig.RuntimeParams["application_name"]
+	}
+	if got := named(safePool); got != "" {
+		t.Fatalf("a pooled session carries the name %q", got)
+	}
+	if got := named(safeMaintenancePool); got != "cleanup-deleted synthetic" {
+		t.Fatalf("a direct maintenance session carries %q, want the name", got)
+	}
+	pgReadOnly.Store(true)
+	t.Cleanup(func() { pgReadOnly.Store(false) })
+	if got := named(safePool); got != "cleanup-deleted synthetic" {
+		t.Fatalf("a read-only process's direct main session carries %q, want the name", got)
+	}
+}

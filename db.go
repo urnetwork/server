@@ -183,23 +183,33 @@ func configurePgPoolReadOnly(config *pgxpool.Config) {
 	}
 }
 
-// Set only by an operator process that names its sessions, so that an operator
-// can find exactly that process's backends in pg_stat_activity (for example to
-// cancel them after stopping the process).
-var pgApplicationName atomic.Value
+// Set only by an operator process that names its direct sessions, so that an
+// operator can find exactly that process's backends in pg_stat_activity (for
+// example to cancel them after stopping the process).
+var pgDirectApplicationName atomic.Value
 
-// Every session this process opens carries the name as its application_name.
-// PostgreSQL keeps 63 bytes of it. Pools opened earlier are reset.
-func SetPgApplicationName(name string) {
-	pgApplicationName.Store(name)
+// Every session this process opens directly with the maintenance resource
+// (pg_maintenance.yml: the maintenance pool, and every pool of a read-only
+// process) carries the name as its application_name, so a backend with the
+// name is this process's own. PostgreSQL keeps 63 bytes of it. Sessions on
+// the default resource keep the driver's default: they may reach PostgreSQL
+// through PgBouncer, whose server connections serve other clients in turn, and
+// a cancel by the name could reach another client's statement. Pools opened
+// earlier are reset.
+func SetPgDirectApplicationName(name string) {
+	pgDirectApplicationName.Store(name)
 	PgReset()
 }
 
-// An ordinary process's sessions keep the driver's default.
-func configurePgPoolApplicationName(config *pgxpool.Config) {
-	if name, ok := pgApplicationName.Load().(string); ok && name != "" {
+// An ordinary process's sessions, and every session on the default resource,
+// keep the driver's default.
+func configurePgPoolApplicationName(config *pgxpool.Config, direct bool) {
+	if !direct {
+		return
+	}
+	if name, ok := pgDirectApplicationName.Load().(string); ok && name != "" {
 		config.ConnConfig.RuntimeParams["application_name"] = name
-		glog.Infof("[db]application_name = %s\n", name)
+		glog.Infof("[db]direct session application_name = %s\n", name)
 	}
 }
 
@@ -233,6 +243,13 @@ type safePgPool struct {
 // fallback still tolerates that resource being absent. The main pool's names
 // ARE the defaults, so its resolution is unchanged.
 func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
+	vaultKeys, _, configKeys = self.resolveResourcesDirect()
+	return
+}
+
+// resolveResources, and whether the sessions connect with the maintenance
+// resource, which reaches PostgreSQL directly rather than through PgBouncer.
+func (self *safePgPool) resolveResourcesDirect() (vaultKeys *SimpleResource, direct bool, configKeys *SimpleResource) {
 	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
 	vaultResourceName := self.vaultResourceName
 	if pgReadOnly.Load() {
@@ -244,6 +261,7 @@ func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKey
 	if vaultResourceName != DefaultPgVaultResourceName {
 		if r, err := Vault.SimpleResource(vaultResourceName); err == nil {
 			vaultKeys = r
+			direct = true
 		}
 	}
 	configKeys = Config.RequireSimpleResource(DefaultPgConfigResourceName)
@@ -263,7 +281,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 	if self.pool == nil {
 		// Logger().Printf("Db init\n")
 
-		dbKeys, dbConfigKeys := self.resolveResources()
+		dbKeys, direct, dbConfigKeys := self.resolveResourcesDirect()
 
 		minConnections := dbConfigKeys.RequireInt("min_connections")
 		maxConnections := dbConfigKeys.RequireInt("max_connections")
@@ -341,7 +359,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
 		configurePgPoolReadOnly(config)
-		configurePgPoolApplicationName(config)
+		configurePgPoolApplicationName(config, direct)
 		glog.Infof("[db]statement_tag = %s\n", processPgStatementTag())
 		self.startupMetrics = configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)

@@ -26,9 +26,12 @@
 // --count_statement_timeout bounds each count of the dry run: every count runs
 // under its own savepoint and statement timeout, and a count past it is
 // reported as timed out for its table and network set while the counting goes
-// on. --run_tag names the run: every session, dry or commit, carries the
-// application_name "cleanup-deleted <tag>" (by default the tag is pid<pid>),
-// so an operator who stops the run can cancel exactly its backends.
+// on. --run_tag names the run: every direct session of it, dry or commit (the
+// maintenance pool, where all the counting and deleting runs, and every pool
+// of the read-only dry run), carries the application_name "cleanup-deleted
+// <tag>" (by default the tag is pid<pid>), so an operator who stops the run
+// can cancel exactly its backends. Sessions through PgBouncer keep the default
+// name: their server connections serve other clients too.
 package main
 
 import (
@@ -71,8 +74,8 @@ type networkCleanupDeletedOptions struct {
 	runTag string
 }
 
-// The application_name of every session of a run, dry or commit, so that an
-// operator who stops the run can find and cancel exactly its backends:
+// The application_name of every direct session of a run, dry or commit, so
+// that an operator who stops the run can find and cancel exactly its backends:
 // `SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE
 // application_name = '<this name>'`.
 func networkCleanupDeletedApplicationName(runTag string) string {
@@ -100,7 +103,7 @@ func networkCleanupDeletedCommand(opts docopt.Opts) int {
 		return 1
 	}
 	applicationName := networkCleanupDeletedApplicationName(options.runTag)
-	server.SetPgApplicationName(applicationName)
+	server.SetPgDirectApplicationName(applicationName)
 	fmt.Fprintf(os.Stdout, "application_name: %s\n", applicationName)
 	// the dry run writes nothing: its process is read only, so PostgreSQL
 	// refuses any write on its path
