@@ -297,23 +297,24 @@ func evidenceSnapshotOptions(opts docopt.Opts) (settings evidencemove.SnapshotSe
 	if outPath == "" {
 		return settings, "", fmt.Errorf("--out is required")
 	}
-	if value, _ := opts.String("--rows-per-second"); value != "" {
-		if settings.RowsPerSecond, err = strconv.ParseFloat(value, 64); err != nil {
-			return settings, "", fmt.Errorf("--rows-per-second: %w", err)
+	if value, _ := opts.String("--pages-per-second"); value != "" {
+		if settings.PagesPerSecond, err = strconv.ParseFloat(value, 64); err != nil {
+			return settings, "", fmt.Errorf("--pages-per-second: %w", err)
 		}
 	}
-	if value, _ := opts.String("--batch-rows"); value != "" {
-		if settings.BatchRows, err = strconv.Atoi(value); err != nil {
-			return settings, "", fmt.Errorf("--batch-rows: %w", err)
+	if value, _ := opts.String("--batch-pages"); value != "" {
+		if settings.BatchPages, err = strconv.Atoi(value); err != nil {
+			return settings, "", fmt.Errorf("--batch-pages: %w", err)
 		}
 	}
 	return settings, outPath, settings.Validate()
 }
 
-// Snapshots every st_client_key_history row's evidence hash into --out,
-// resuming a file an earlier run left, paced and gated on Main's health. A
-// finished snapshot gets its manifest: rows, sha256, and a sample of records
-// checked against the table.
+// Snapshots every st_client_key_history row's evidence hash: the heap in page
+// order into <out>.raw (resuming one an earlier run left), paced and gated on
+// Main's health, then sorted into key order at --out. A finished snapshot gets
+// its manifest: rows, sha256, and 2,000 random records checked against the
+// table; the raw file is removed once the manifest is written.
 func evidenceSnapshotHashesCommand(opts docopt.Opts) {
 	settings, outPath, err := evidenceSnapshotOptions(opts)
 	if err != nil {
@@ -322,34 +323,33 @@ func evidenceSnapshotHashesCommand(opts docopt.Opts) {
 	evidenceReadOnlyDb("snapshot-hashes")
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	writer, err := evidencemove.OpenSnapshotWriter(outPath)
-	if err != nil {
-		evidenceFail(err)
-	}
-	evidenceLogf("snapshot %s: %d rows held, resuming after %s; %.0f rows a second, %d a statement", outPath, writer.Rows(), writer.Cursor(), settings.RowsPerSecond, settings.BatchRows)
+	evidenceLogf("snapshot %s: %.0f heap pages a second, %d a statement", outPath, settings.PagesPerSecond, settings.BatchPages)
 	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.MainHealthGates(evidencemove.DefaultPromUrl)...)
 	gates.Start(ctx)
-	report, err := evidencemove.ExportSnapshot(ctx, writer, gates, settings, evidenceLogf)
-	closeErr := writer.Close()
+	report, err := evidencemove.ExportSnapshotPages(ctx, outPath, gates, settings, evidenceLogf)
 	if report != nil {
-		evidencePrintJson("snapshot report", report)
+		evidencePrintJson("export report", report)
 	}
 	if err != nil {
 		evidenceFail(err)
-	}
-	if closeErr != nil {
-		evidenceFail(closeErr)
 	}
 	if !report.Finished {
 		evidenceLogf("snapshot stopped before the table's end; rerun the same command to resume")
 		return
 	}
+	// about 1 GB of records a sorted run
+	sorted, err := evidencemove.SortSnapshot(evidencemove.SnapshotRawPath(outPath), outPath, 8*1024*1024)
+	if err != nil {
+		evidenceFail(err)
+	}
+	evidencePrintJson("sort report", sorted)
 	manifest, err := evidencemove.SummarizeSnapshot(outPath)
 	if err != nil {
 		evidenceFail(err)
 	}
 	manifest.Finished = time.Now().UTC()
 	manifest.Export = *report
+	manifest.Sort = sorted
 	sample, err := evidencemove.SampleSnapshot(outPath, 2000, uint64(time.Now().UnixNano()))
 	if err != nil {
 		evidenceFail(err)
@@ -363,5 +363,8 @@ func evidenceSnapshotHashesCommand(opts docopt.Opts) {
 	evidencePrintJson("manifest "+evidencemove.SnapshotManifestPath(outPath), manifest)
 	if manifest.Sample.Differ != 0 {
 		evidenceFail(fmt.Errorf("%d sampled records differ from the table", manifest.Sample.Differ))
+	}
+	if err := evidencemove.RemoveSnapshotRaw(outPath); err != nil {
+		evidenceFail(err)
 	}
 }

@@ -103,7 +103,7 @@ func TestEvidenceCommandsAreReadOnly(t *testing.T) {
 		{"func evidenceMoveFlatCommand(", "mover.Run(ctx)"},
 		{"func evidenceMoveFlatVerifyCommand(", "ClientKeyHistorySource{}).Next("},
 		{"func evidenceFlatCensusCommand(", "ClientKeyHistoryRowEstimate("},
-		{"func evidenceSnapshotHashesCommand(", "evidencemove.ExportSnapshot("},
+		{"func evidenceSnapshotHashesCommand(", "evidencemove.ExportSnapshotPages("},
 	} {
 		start := strings.Index(text, command.function)
 		if start < 0 {
@@ -139,27 +139,27 @@ func TestEvidenceCommandsAreReadOnly(t *testing.T) {
 func TestEvidenceSnapshotCommandParses(t *testing.T) {
 	defaults := evidencemove.DefaultSnapshotSettings()
 	for _, test := range []struct {
-		args          []string
-		rowsPerSecond float64
-		batchRows     int
+		args           []string
+		pagesPerSecond float64
+		batchPages     int
 	}{
-		{args: []string{"--out=/tmp/hashes.bin"}, rowsPerSecond: defaults.RowsPerSecond, batchRows: defaults.BatchRows},
-		{args: []string{"--out=/tmp/hashes.bin", "--rows-per-second=30000", "--batch-rows=10000"}, rowsPerSecond: 30000, batchRows: 10000},
+		{args: []string{"--out=/tmp/hashes.bin"}, pagesPerSecond: defaults.PagesPerSecond, batchPages: defaults.BatchPages},
+		{args: []string{"--out=/tmp/hashes.bin", "--pages-per-second=4000", "--batch-pages=2000"}, pagesPerSecond: 4000, batchPages: 2000},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "snapshot-hashes"}, test.args...), "synthetic")
 		if err != nil {
 			t.Fatalf("%v: %v", test.args, err)
 		}
 		settings, out, err := evidenceSnapshotOptions(opts)
-		if err != nil || out != "/tmp/hashes.bin" || settings.RowsPerSecond != test.rowsPerSecond || settings.BatchRows != test.batchRows {
+		if err != nil || out != "/tmp/hashes.bin" || settings.PagesPerSecond != test.pagesPerSecond || settings.BatchPages != test.batchPages {
 			t.Fatalf("%v: %+v %q %v", test.args, settings, out, err)
 		}
 	}
 	for _, args := range [][]string{
-		{"--out=/tmp/hashes.bin", "--rows-per-second=0"},
-		{"--out=/tmp/hashes.bin", "--rows-per-second=fast"},
-		{"--out=/tmp/hashes.bin", "--batch-rows=0"},
-		{"--out=/tmp/hashes.bin", "--batch-rows=100000"},
+		{"--out=/tmp/hashes.bin", "--pages-per-second=0"},
+		{"--out=/tmp/hashes.bin", "--pages-per-second=fast"},
+		{"--out=/tmp/hashes.bin", "--batch-pages=0"},
+		{"--out=/tmp/hashes.bin", "--batch-pages=100000"},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "snapshot-hashes"}, args...), "synthetic")
 		if err != nil {
