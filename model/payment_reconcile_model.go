@@ -101,6 +101,11 @@ const (
 	// transaction and whether a paid window credited to the deleted account
 	// moved with it.
 	PaymentReconcileActionSubscriptionMoved = "subscription_moved"
+	// Apple reversed a refund (REFUND_REVERSED), the way a won dispute gives
+	// the money back (apple_refund_reversal_controller.go). Evidence is the
+	// transaction; details say whether the paid window the refund ended came
+	// back, and if not, why.
+	PaymentReconcileActionRefundReversed = "refund_reversed"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
