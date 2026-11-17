@@ -339,7 +339,7 @@ type abuseGateEntry struct {
 	// every entry condition of trusted held at the load (ABUSE-M6-01)
 	trusted  bool
 	verified bool
-	loadTime        time.Time
+	loadTime time.Time
 	// unix nanoseconds of the last read, which eviction reads
 	readTime atomic.Int64
 }

@@ -222,3 +222,26 @@ func TestAbuseFlaggerKillCap(t *testing.T) {
 		}
 	})
 }
+
+// FS-49's clock for a flagger's kill: the machine's 24 h, held to business hours in v0, so a kill at Friday's close
+// waits for Monday's open, and a flagger's URL is the only one of its reports that is a kill signal.
+func TestAbuseFlaggerKillTakesTheMachineClock(t *testing.T) {
+	calendar, err := NewAbuseCalendar(DefaultAbuseReviewHours(), DefaultAbusePolicySettings())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fridayClose := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	if due := AbuseReviewDue(AbuseSignalTrustedFlaggerUrl, AbuseTierFree, AbuseStandingStandard, fridayClose, calendar); !due.Equal(time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("a flagger's kill at Friday's close is due %v", due)
+	}
+	thursdayNoon := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	if due := AbuseReviewDue(AbuseSignalTrustedFlaggerUrl, AbuseTierFree, AbuseStandingStandard, thursdayNoon, calendar); !due.Equal(thursdayNoon.Add(24 * time.Hour)) {
+		t.Fatalf("a flagger's kill on Thursday is due %v", due)
+	}
+	if signal := AbuseSignalOfReport(AbuseReporterClassTrustedFlagger, AbuseCategoryPhishing, true); signal != AbuseSignalTrustedFlaggerUrl || AbuseMachineAction(signal) != AbuseActionKindHostKill {
+		t.Fatalf("a flagger's url: %s", signal)
+	}
+	if signal := AbuseSignalOfReport(AbuseReporterClassTrustedFlagger, AbuseCategoryPhishing, false); AbuseMachineAction(signal) != AbuseActionKindNone {
+		t.Fatalf("a flagger's report naming no url: %s", signal)
+	}
+}

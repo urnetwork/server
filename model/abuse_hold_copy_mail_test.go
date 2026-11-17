@@ -1,3 +1,5 @@
+//go:build sidecar_pending
+
 package model
 
 import (
