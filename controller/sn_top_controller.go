@@ -1208,28 +1208,50 @@ func snTopMeasureIncentive(agreement *snTopAgreement, summary *SnTopValidatorSum
  */
 
 // snTopHeadFromSnapshot fills the head estimate from the snapshot the board
-// shows, so /sn/head, the Top 200 page and the Protocol tab agree. It
-// reports false when there is no snapshot yet.
+// shows, so /sn/head, the Top 200 page, the Protocol tab and the Earnings
+// tile agree. It reports false when there is no snapshot yet. Every read
+// comes before the first write, so a read that fails (snTopSafe) leaves the
+// result as it was for the live estimate.
 func snTopHeadFromSnapshot(ctx context.Context, networkId server.Id, result *SnHeadResult) (bound snHeadBound, ok bool) {
 	snapshot := snTopLatestSnapshot(ctx)
 	if snapshot == nil {
 		return
 	}
-	ok = true
-	result.Floor = model.SnTopFinite(snapshot.ProjectedCutoff)
 	row := model.GetSnTopNetworkRow(ctx, snapshot.SnapshotId, networkId)
-	if row == nil || row.Position <= 0 {
-		return
-	}
-	result.Score = model.SnTopFinite(row.ProjectedScore)
-	result.RankEstimate = row.Position
-	result.Eligible = 0 < result.Score && row.Position <= SnHeadCutoff
-	if row.Claimed {
+	if row != nil && 0 < row.Position && row.Claimed {
 		if fleets := model.GetSnTopFleets(ctx, snapshot.SnapshotId, []server.Id{networkId})[networkId]; 0 < len(fleets) {
 			bound = snHeadBound{bound: true, hotkey: fleets[0].Key.Hotkey, uid: uint64(fleets[0].Key.Uid)}
 		}
 	}
+	ok = true
+	result.Floor = model.SnTopFinite(snapshot.ProjectedCutoff)
+	snHeadStandingFromSnTopRow(row, result)
 	return
+}
+
+// snHeadStandingFromSnTopRow is the head standing the network's row in the
+// board's newest snapshot gives; row is nil when the snapshot has none. The
+// rank alone puts a network in the head (a score, inside the cutoff), and it
+// qualifies (eligible) only while the validator can measure it too: the
+// board's claim prompt and the published guide hold the same rule (owner
+// decision 2026-11-17). Without a row no provider of the network was
+// verify-eligible in the tempo, which /sn/top/me calls not providing; an
+// unranked row is not a rank and keeps its own reason.
+func snHeadStandingFromSnTopRow(row *model.SnTopNetworkRow, result *SnHeadResult) {
+	if row == nil {
+		result.NotMeasurableReason = model.SnTopReasonNotProviding
+		return
+	}
+	result.Measurable = row.Measurable
+	result.NotMeasurableReason = row.NotMeasurableReason
+	if row.Position <= 0 {
+		return
+	}
+	result.Score = model.SnTopFinite(row.ProjectedScore)
+	result.RankEstimate = row.Position
+	result.InHead = 0 < result.Score && row.Position <= SnHeadCutoff
+	result.Eligible = result.InHead && row.Measurable
+	result.ClaimPrompt = row.ClaimPrompt
 }
 
 // snTopSafe turns a failed read into a missing snapshot, so /sn/head keeps

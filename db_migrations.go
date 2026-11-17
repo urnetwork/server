@@ -11764,7 +11764,13 @@ var migrations = []any{
 			PRIMARY KEY (original_transaction_id)
 		)
 	`),
-	newSqlMigration(`
+	newSqlMigration(DeletedNetworkBackfillSql),
+}
+
+// The deleted_network backfill (the migration above): every network an App
+// Store record names whose row is gone, recorded once with source backfill.
+// Exported for its database test (model/deleted_network_model_db_test.go).
+const DeletedNetworkBackfillSql = `
 		INSERT INTO deleted_network (network_id, delete_time, source)
 		SELECT gone.network_id, now() AT TIME ZONE 'utc', 'backfill'
 		FROM (
@@ -11777,5 +11783,4 @@ var migrations = []any{
 			SELECT 1 FROM network WHERE network.network_id = gone.network_id
 		  )
 		ON CONFLICT (network_id) DO NOTHING
-	`),
-}
+	`

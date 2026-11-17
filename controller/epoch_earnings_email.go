@@ -31,9 +31,10 @@ type EpochEarningsTemplate struct {
 	ShareBps int
 	Rank     int
 	Total    int
-	// Top200Eligible: the server estimate places the network inside the
-	// cutoff; Top200Rank is that estimate. Top200Bound/Top200Uid: an active
-	// head binding.
+	// Top200Eligible: the board's newest snapshot ranks the network inside
+	// the cutoff and the validator can measure it, as GET /sn/head says;
+	// Top200Rank is its position there while inside the cutoff, measurable
+	// or not. Top200Bound/Top200Uid: an active head binding.
 	Top200Eligible bool
 	Top200Bound    bool
 	Top200Uid      uint64
@@ -84,8 +85,8 @@ func (self *EpochEarningsTemplate) RankText() string {
 }
 
 // Top200Text is the badge line: the bound status when a head binding is
-// active, "you qualify" when the estimate is inside the cutoff, else "" (the
-// templates omit the section).
+// active, "you qualify" when the network is eligible (Top200Eligible), else
+// "" (the templates omit the section).
 func (self *EpochEarningsTemplate) Top200Text() string {
 	if self.Top200Bound {
 		if 0 < self.Top200Rank {
@@ -199,10 +200,26 @@ func stEpochPoolTotal(ctx context.Context, epoch uint64, noId uint64) *big.Int {
 	return pool.PoolTotalRao
 }
 
+// snTopHeadNetworkRows are the rows the board's newest snapshot ranks inside
+// the cutoff, by network, in one read; empty before the first snapshot.
+func snTopHeadNetworkRows(ctx context.Context) map[server.Id]*model.SnTopNetworkRow {
+	headNetworkRows := map[server.Id]*model.SnTopNetworkRow{}
+	snapshot := snTopLatestSnapshot(ctx)
+	if snapshot == nil {
+		return headNetworkRows
+	}
+	for _, row := range model.GetSnTopPage(ctx, snapshot.SnapshotId, 0, SnHeadCutoff, model.SnTopFilterAll) {
+		headNetworkRows[row.NetworkId] = row
+	}
+	return headNetworkRows
+}
+
 // stEpochEarningsTemplates assembles the per-network templates: points from
 // the epoch window, share and alpha from stEpochNetworkEarnings, rank from the
-// leaderboard ranking, Top 200 from the head estimate and the binding
-// registry.
+// leaderboard ranking, Top 200 from the board's newest snapshot by the rule
+// GET /sn/head uses (snHeadStandingFromSnTopRow: only a measurable network
+// qualifies) and the binding registry. A failed board read leaves the Top
+// 200 line out rather than the email.
 func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, row *model.StEpoch) map[server.Id]*EpochEarningsTemplate {
 	start, end := snEpochWindow(ctx, row)
 	points := model.GetNetworkNanoPointsInWindow(ctx, start, end)
@@ -215,7 +232,9 @@ func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploym
 	if err != nil {
 		rankings = map[server.Id]model.NetworkRanking{}
 	}
-	head := snHeadRankingSafe(ctx)
+	headNetworkRows, _ := snTopSafe(func() (map[server.Id]*model.SnTopNetworkRow, bool) {
+		return snTopHeadNetworkRows(ctx), true
+	})
 
 	recipients := map[server.Id]bool{}
 	for networkId := range points {
@@ -238,13 +257,13 @@ func stEpochEarningsTemplates(ctx context.Context, deploymentKey model.StDeploym
 			UnclaimedRao: unclaimed[networkId],
 			EpochEnd:     end,
 		}
-		if head != nil {
-			score := head.scores[networkId]
-			rank := head.rankOf(score)
-			if 0 < score && rank <= SnHeadCutoff {
-				template.Top200Eligible = true
-				template.Top200Rank = rank
+		if headNetworkRow := headNetworkRows[networkId]; headNetworkRow != nil {
+			standing := &SnHeadResult{}
+			snHeadStandingFromSnTopRow(headNetworkRow, standing)
+			if standing.InHead {
+				template.Top200Rank = standing.RankEstimate
 			}
+			template.Top200Eligible = standing.Eligible
 		}
 		if bound := snHeadBoundState(ctx, networkId, false, nil); bound.bound {
 			template.Top200Bound = true
