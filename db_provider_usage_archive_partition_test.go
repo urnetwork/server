@@ -783,13 +783,14 @@ func TestProviderUsageArchiveDropRefusedWithoutOptIn(t *testing.T) {
 	})
 }
 
-// The contract tables' archive step deletes a retired week's contracts
-// through the capture trigger, and each one's proof passes the guard and lands
-// in its own contract week of the partitioned archive: a week from before the
-// contract cutover, archived 23 weeks later from the legacy partition, and a
-// week after the cutover. Those archive weeks exist before the contracts are
-// written, and the runway keeps the archive four weeks ahead at any later
-// time.
+// The contract horizon reaper deletes a retired week's contracts through the
+// capture trigger (here as testReapContract does), and each one's proof passes
+// the guard and lands in its own contract week of the partitioned archive: a
+// week from before the contract cutover, deleted 23 weeks later from the legacy
+// partition, and a week after the cutover. Retirement then compacts and drops
+// the emptied weeks, and archives nothing itself (S1). Those archive weeks
+// exist before the contracts are written, and the runway keeps the archive
+// four weeks ahead at any later time.
 func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T) {
 	testArchivePlainEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -828,9 +829,16 @@ func TestProviderUsageArchiveContractRetentionWritesHistoricalWeek(t *testing.T)
 		connect.AssertEqual(t, runway.FutureRanges, ContractPartitionAheadWeeks)
 
 		later := week(20).Add(time.Hour)
+		// retirement alone archives nothing
 		report, _ := MaintainContractPartitions(ctx, later, ContractRetentionCursor{}, time.Minute)
+		connect.AssertEqual(t, len(testArchiveRows(t, ctx)), 0)
+		connect.AssertEqual(t, report.Kept[ContractLegacyPartitionName("transfer_contract")], int64(len(ContractPartitionTables)))
+		connect.AssertEqual(t, report.Kept[ContractPartitionName("transfer_contract", week(1))], int64(len(ContractPartitionTables)))
+		// the reaper's deletes archive, and retirement drops the emptied weeks
+		testReapContract(t, ctx, historicalId)
+		testReapContract(t, ctx, laterId)
+		report, _ = MaintainContractPartitions(ctx, later, ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, len(report.Blocked), 0)
-		connect.AssertEqual(t, report.Archived, int64(2))
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractLegacyPartitionName("transfer_contract")), true)
 		connect.AssertEqual(t, slices.Contains(report.Dropped, ContractPartitionName("transfer_contract", week(1))), true)
 
