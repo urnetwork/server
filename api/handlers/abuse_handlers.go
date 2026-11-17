@@ -14,14 +14,16 @@ package handlers
 // of vault's abuse-flaggers.yml under abuse.yml's list sets class trusted_flagger, so a URL the report names takes the
 // machine's host kill; a wrong or absent key is a plain report, and the answer says neither.
 // Each URL and each header block is its own report, since each names its own host or sender, and each counts
-// against its caller's keyed /29 or /56 address hash (server.ClientIpHashForAddr, peppered; QD-1024), never against
-// its address; an infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. A request counts once
-// before its reports are read, so a body refused for its content counts once, and its reports past the first
-// count once read; the first count past the limit refuses the whole request with nothing taken, and the counts it
-// made stand. The count is kept in Redis through server.CheckIpRateLimitAttempt, one attempt per report, at
-// abuse_report.{address_<hash>}.address, so the limit holds across api processes (§2.8 api-14; owner decision
-// 536, QD-895): the history holds an opaque id per attempt, scored by when it leaves the window, and the key
-// expires with AbuseRouteSettings' window. No address reaches Redis, and nothing here logs one (R-ABUSE-6). A
+// against its caller's keyed /29 or /56 address hash (server.ClientIpHashForAddr, peppered), never against its
+// address, so a request of n reports spends n of the limit (owner decision 582, QD-1024); an infrastructure
+// address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. A request counts once before its reports are read, so a
+// body refused for its content counts once, and its reports past the first count once read, before any is taken;
+// the first count past the limit refuses the whole request with nothing taken, and the counts it made stand. The
+// count is kept in Redis at abuse_report.{address_<hash>}.address through server.CheckIpRateLimitAttempt, the
+// unweighted check the other routes share, one script call per report (at most ReportUrlMaxCount plus
+// ReportHeaderBlockMaxCount a request), so the limit holds across api processes (§2.8 api-14; owner decision 536,
+// QD-895): the history holds an opaque id per attempt, scored by when it leaves the window, and the key expires
+// with AbuseRouteSettings' window. No address reaches Redis, and nothing here logs one (R-ABUSE-6). A
 // count Redis does not answer refuses the request as a store that did not answer does, so no report goes
 // uncounted.
 //
@@ -54,8 +56,8 @@ import (
 
 // Tunables of the customer routes.
 type AbuseRouteSettings struct {
-	// The most bytes of a report's body: 512 KiB, ReportUrlMaxCount URLs and ReportHeaderBlockMaxCount header
-	// blocks at their bounds with room for the JSON, far under the router's own cap.
+	// The most bytes of a request's body, which holds its reports: 512 KiB, ReportUrlMaxCount URLs and
+	// ReportHeaderBlockMaxCount header blocks at their bounds with room for the JSON, far under the router's own cap.
 	ReportBodyMaxByteCount int64
 	// The most URLs one request takes: 16. Each is its own report, and counts as one.
 	ReportUrlMaxCount int
@@ -67,11 +69,13 @@ type AbuseRouteSettings struct {
 	// The most bytes of one header block: §14.8's parse's own bound (smtpedgeservice's ReportHeaderByteCount,
 	// 64 KiB), past which it reads nothing.
 	ReportHeaderBlockMaxByteCount int
-	// One caller address hash's reports in ReportAddressLookback, each URL and each header block one: 30 an hour, a
-	// person reporting what they found many times over, or an office behind one address. A refused report counts
-	// too, so a caller past the limit stays there until it stops. Every api process shares the count through
-	// Redis, where a hash's history expires with the lookback. Non-positive limits nothing. A lookback under a
-	// millisecond cannot be kept, so with a positive limit every request is refused as one the count did not answer.
+	// One caller address hash's reports in ReportAddressLookback, each URL and each header block one, never each
+	// request: 30 an hour, a person reporting what they found many times over, or an office behind one address. A
+	// request of n reports spends n, and one that would pass the limit is refused whole, taking none of its reports
+	// (owner decision 582). A refused report counts too, so a caller past the limit stays there until it stops.
+	// Every api process shares the count through Redis, where a hash's history expires with the lookback.
+	// Non-positive limits nothing. A lookback under a millisecond cannot be kept, so with a positive limit every
+	// request is refused as one the count did not answer.
 	ReportAddressLimit    int
 	ReportAddressLookback time.Duration
 }
