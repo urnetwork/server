@@ -72,7 +72,7 @@ Usage:
     bringyourctl locations add-default [-a]
     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
     bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
-    bringyourctl network cleanup-deleted [--network_ids=<network_ids>] [--ids_file=<path>] [--page=<count>] [--count_chunk=<count>] [--client_batch=<count>] [--row_batch=<count>] [--network_pause=<duration>] [--start_after=<network_id>] [--max_networks=<count>] [(--commit --expect=<digest>)]
+    bringyourctl network cleanup-deleted [--network_ids=<network_ids>] [--ids_file=<path>] [--page=<count>] [--count_chunk=<count>] [--count_statement_timeout=<duration>] [--client_batch=<count>] [--row_batch=<count>] [--network_pause=<duration>] [--start_after=<network_id>] [--max_networks=<count>] [--run_tag=<tag>] [(--commit --expect=<digest>)]
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
