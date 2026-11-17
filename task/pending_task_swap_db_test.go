@@ -393,33 +393,25 @@ func TestPendingTaskSwapRepeatableReadProducerRerunsAfterTheSwap(t *testing.T) {
 	})
 }
 
-// Holds the swap script under pending_task's lock: its locked check also
-// waits on a transaction advisory lock the returned session holds, until
-// release. Waits until the swap is there. The swap's lock wait must outlast
-// the hold.
-func pendingTaskSwapHoldUnderLock(t testing.TB, ctx context.Context) (release func()) {
-	t.Helper()
-	const holdKey = 726437
-	holder, err := server.AcquireMaintenanceDbConn(ctx)
-	if err != nil {
-		t.Fatal(err)
+// Holds the swap script under pending_task's lock, inside its locked
+// transaction (server.TableSwapHooks.UnderLock), until release; held closes
+// once it is there. The swap's transaction is cut off LockTimeout +
+// MaxLockHold after its request for the lock, so the hold must end before.
+// (The hold was a wait in the profile's locked check until 11-17; the
+// rehearsal now runs that check too, outside the lock.)
+func pendingTaskSwapHoldUnderLock(ctx context.Context) (hooks *server.TableSwapHooks, held <-chan struct{}, release func()) {
+	heldSignal, releaseSignal := make(chan struct{}), make(chan struct{})
+	var heldOnce, releaseOnce sync.Once
+	hooks = &server.TableSwapHooks{
+		UnderLock: func(ctx context.Context) {
+			heldOnce.Do(func() { close(heldSignal) })
+			taskQueueWait(ctx, releaseSignal)
+		},
 	}
-	server.RaisePgResult(holder.Exec(ctx, `SELECT pg_advisory_lock($1::bigint)`, holdKey))
-	original := pendingTaskSwapProfile.LockedCheckSql
-	pendingTaskSwapProfile.LockedCheckSql = func() string {
-		return original() + fmt.Sprintf(";\nSELECT pg_advisory_xact_lock(%d::bigint)", holdKey)
-	}
-	released := false
 	release = func() {
-		if released {
-			return
-		}
-		released = true
-		server.RaisePgResult(holder.Exec(ctx, `SELECT pg_advisory_unlock($1::bigint)`, holdKey))
-		holder.Release()
-		pendingTaskSwapProfile.LockedCheckSql = original
+		releaseOnce.Do(func() { close(releaseSignal) })
 	}
-	return
+	return hooks, heldSignal, release
 }
 
 // Waits until some statement waits for a lock of the given type.
@@ -451,16 +443,16 @@ func TestPendingTaskSwapClaimWaitingOnTheLockReadsTheNewTable(t *testing.T) {
 		defer worker.Close()
 		due := ScheduleTask(runOnceGenerationWork, &runOnceGenerationArgs{Scope: server.NewId()}, owner, RunAt(server.NowUtc().Add(-time.Hour)))
 
-		release := pendingTaskSwapHoldUnderLock(t, ctx)
+		hooks, held, release := pendingTaskSwapHoldUnderLock(ctx)
 		defer release()
 		settings := testPendingTaskSwapSettings()
 		settings.LockTimeout = 45 * time.Second
 		swapDone := make(chan error, 1)
 		go func() {
-			swapDone <- swapPendingTask(t, ctx, server.TableSwapOptions{Settings: settings})
+			swapDone <- swapPendingTask(t, ctx, server.TableSwapOptions{Settings: settings, Hooks: hooks})
 		}()
-		// the swap holds pending_task and waits on the hold
-		pendingTaskSwapAwaitLockWait(t, ctx, "advisory")
+		// the swap holds pending_task's lock, inside its locked transaction
+		taskQueueWait(ctx, held)
 
 		evalDone := make(chan error, 1)
 		var finished []server.Id
@@ -556,7 +548,7 @@ func TestPendingTaskSwapLockKeyMatchesTheOwnersKey(t *testing.T) {
 			if key != taskAdvisoryLockKey(taskId) {
 				t.Fatalf("%s: the database's key %d, the owner's %d", taskId, key, taskAdvisoryLockKey(taskId))
 			}
-			if !strings.Contains(pendingTaskSwapLeasesSql(), fmt.Sprintf("# (%d)::bigint", int64(taskAdvisoryLockNamespace))) {
+			if !strings.Contains(pendingTaskSwapLeasesSql(pendingTaskSwapTable), fmt.Sprintf("# (%d)::bigint", int64(taskAdvisoryLockNamespace))) {
 				t.Fatal("the leases query does not use the owner's namespace")
 			}
 		}
