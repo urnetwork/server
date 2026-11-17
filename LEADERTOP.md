@@ -88,12 +88,12 @@ The "top 200" is the head. The validator never ranks individual providers or net
 
 ### 3.7 Binding open
 
-`snTopBindingOpen` is true, by the owner's decision: `GET /sn/top` answers `binding_open: true` and an empty `binding_note`, the claim prompt is live and the "claiming isn't open yet" banner is gone (Q16). The value is stored in each snapshot by the taskworker that folds it, so the apps follow at the first fold of that build, and a client pinning an older snapshot still sees it closed. `GET /sn/head` and `POST /sn/head/binding` never read the flag.
+`snTopBindingOpen` is true, by the owner's decision (2026-11-17): `GET /sn/top` answers `binding_open: true` and an empty `binding_note`, the claim prompt is live and the "claiming isn't open yet" banner is gone (Q16). The value is stored in each snapshot by the taskworker that folds it, so the apps follow at the first fold of that build, and a client pinning an older snapshot still sees it closed. `GET /sn/head` and `POST /sn/head/binding` never read the flag. The same value opens the one-tap claim (`controller/sn_fleet_auto.go`): its routes, schedule and relayed binds run from that build on, and a device learns of it at its next check, at most `snFleetAutoCheckClosed` (7 days) after its last.
 
 Opening rests on, in this order:
 
-- **Weights.** The validator steers again and its row pays selected fleets: UID 145 earned 3% of miner incentive from block 9,402,996 until the validator's last write at block 9,410,050, and nothing under the fallback row after it.
-- **Mirrors.** `sn-commitment-oracle` runs live on snow (xops `SN-MAINNET-COMMITMENT-ORACLE.md`). Without it every `bindFleetMember` reverts `StaleCommitment()`.
+- **Weights.** A selected fleet is paid only while the validator steers. From 2026-11-11 to the runtime 491 upgrade on 2026-11-16, UID 145 held incentive 1966, the whole head channel, 3% of miner incentive. Under the weight fallback's row a bound fleet earns nothing and its members still leave the pool.
+- **Mirrors.** `sn-commitment-oracle` runs live on snow since 2026-11-14 (xops `SN-MAINNET-COMMITMENT-ORACLE.md`) and mirrors every fresh tagged fleet commitment; its approved-hotkey list gates only a playbook run. Without a mirror every `bindFleetMember` reverts `StaleCommitment()`.
 - **Authority.** The owner's reviewed fleet runtime authority is published (sn `miner/FLEET-MAINNET-RUNTIME.md`). Each runtime upgrade needs a new one.
 
 Limits a fleet meets once it binds:
@@ -477,7 +477,7 @@ The recommendation is (a) for the ranking plus (c) in `/me`.
   - With a 2,000-provider lifetime cap and carried members first, the validator can only ever measure a fixed few thousand providers. About 700k are online.
   - Without design question 6, the board can only say "not measurable" to most miners.
 - **Binding depends on the validator.** Binding is open (§3.7), but a selected fleet earns only while the validator steers. Under the fallback row, a bound fleet earns nothing and its members still leave the pool.
-- **Validator refuses the whole row for one idle fleet.** The treasury path refuses the row when a selected head UID rounds to 0 in u16 (sn `validator/recycle_planner.go:352-358`). A bound fleet that stays in the census but isn't observed decays by ¾ each tempo and never reaches zero. Reproduced on 2026-11-02 against `completeOwnerRecycleRow`: refused after 32 idle tempos (38 h) with one other fleet at EMA 1, and after 14 idle tempos (17 h) with 199 others at EMA 3. Steering then stops for every fleet and pool until the idle fleet returns, its binding ends or the validator changes.
+- **An idle fleet leaves the row.** A bound fleet that stays in the census but isn't observed decays by ¾ each tempo and never reaches zero. Until 2026-11-14 the treasury path refused the whole row once such a fleet's share rounded to 0 in u16 (reproduced on 2026-11-02 against `completeOwnerRecycleRow`: after 32 idle tempos with one other fleet at EMA 1, after 14 with 199 others at EMA 3), which stopped steering for every fleet and pool. The validator since then (sn `47ae3006`) leaves that fleet out of the tempo's row and names it in `excluded_head_uids` instead, so only the idle fleet stops earning.
 - **Gaming.** Networks can split or merge to change claim counts, or run Sybil networks behind shared prefixes. The board mirrors the validator's rules and doesn't add its own; unusual patterns get a flag.
 - **Validator randomness.** Hop draws and trail completion are random, so a projection is an estimate. The board shows its confidence (§5.6) and the measured agreement (§6.3).
 - **Plumbing defects found while researching:**
