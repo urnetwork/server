@@ -89,11 +89,14 @@ type ContractWeekRetirementSettings struct {
 
 func DefaultContractWeekRetirementSettings() *ContractWeekRetirementSettings {
 	return &ContractWeekRetirementSettings{
-		RetireDelay:       24 * time.Hour,
-		LockSettings:      *DefaultContractPartitionLockSettings(),
-		LockTimeout:       time.Second,
-		ProbeGateRows:     1000000,
-		MaxCompactRows:    20000,
+		RetireDelay:   24 * time.Hour,
+		LockSettings:  *DefaultContractPartitionLockSettings(),
+		LockTimeout:   time.Second,
+		ProbeGateRows: 1000000,
+		// CLUSTER of 20,000 to 40,000 rows took 55-174 ms on PostgreSQL 18.7
+		// (14 indexes on transfer_contract's leaf, a tmpfs volume); half that
+		// leaves Main's busier disk margin under CompactTimeout
+		MaxCompactRows:    10000,
 		ProbeTimeout:      5 * time.Second,
 		CompactTimeout:    500 * time.Millisecond,
 		CompactAboveBytes: 256 * 1024 * 1024,

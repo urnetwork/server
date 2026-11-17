@@ -693,7 +693,7 @@ last deletes. The legacy partition expires the same way from the cutover week.
      stale, for good.
    - A first build gated on `n_dead_tup` and `reltuples`, which would have kept
      such a week forever (`TestContractWeekRetiresWithoutVacuum`).
-2. **Count its live rows** along its key, up to 20,000 (`MaxCompactRows`), in
+2. **Count its live rows** along its key, up to 10,000 (`MaxCompactRows`), in
    a read-only statement of at most 5 s. Above the bound the leaf waits,
    reported.
    - Like any index scan, the walk marks the key entries of rows every snapshot
@@ -755,7 +755,7 @@ recent weeks at plan time and never meet an old week's lock. The drop locks
 the parents for its catalog work, as the swap does.
 
 **Work under a lock is bounded.** CLUSTER handles at most the rows the reaper
-keeps (20,000 per leaf); the drop is catalog work. On Main, the reaper kept
+keeps (10,000 per leaf); the drop is catalog work. On Main, the reaper kept
 about 1 row in 900,000 of early October's contracts at the horizon (4
 unsettled and 4 recent_close an hour out of 7.2M read), about 1,000 a week at
 1,439 contracts a second.
@@ -763,6 +763,22 @@ unsettled and 4 recent_close an hour out of 7.2M read), about 1,000 a week at
 **Removed:** the archive step (`contractArchiveBatchSql`), the old blockers
 (`contractWeekBlocker`), and the cursor's `archive_partition` and
 `archive_cursor`, which an old cursor still carries and which are now ignored.
+
+**Rehearsed on PostgreSQL 18.7** (a throwaway container): two identical
+weeks of 500,000 contracts each, reaped down to 1,000 or 20,000 kept and
+vacuumed. Eight sessions ran statements that lock every leaf, each with the
+2 s lock bound.
+
+| | 1,000 kept | 20,000 kept |
+|---|---|---|
+| count, per leaf | 9–33 ms | 9–214 ms |
+| CLUSTER, per leaf (`pg_stat_progress_cluster`: "index scanning heap") | 18–57 ms | 19–174 ms |
+| transfer_contract leaf | 136 MB → 272 kB heap | 136 MB → 5.4 MB heap |
+| other statements during it (p99 / max / errors) | 24 / 29 ms / 0 | 54 / 117 ms / 0 |
+| the empty week's compaction and drop | 204 ms, statements max 16 ms | 232 ms, max 24 ms |
+| CLUSTER of the other week's identical leaf at the default costs | "seq scanning heap": 120 ms here, a full read of a ~400 GiB leaf on Main | the same |
+
+Logs: `temp/contract-cutover-1117/s1/logs/rehearsal-500k-*`.
 
 ### Each keep rule survives a retirement
 
@@ -829,7 +845,7 @@ contract the reaper keeps. On 11-17 its pass had kept:
 - 19.4M paid recently (these go within a week);
 - about 57k with an unsettled escrow.
 
-That is far over the 20,000-row bound, so the legacy partition stays, reported.
+That is far over the 10,000-row bound, so the legacy partition stays, reported.
 Its indexes can be rebuilt once the reaper has emptied it (C3: about 53% of
 its size, `db reindex-index` on the `_l` names). Its heap, about 2.4 TiB
 today, stays until those rows go. **That needs an owner decision** (see
