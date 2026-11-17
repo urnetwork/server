@@ -11722,4 +11722,8 @@ var migrations = []any{
 	// its epoch rows without the column, which leaves it null, so it applies
 	// before or after any deploy.
 	stLedgerV2ExtenderRelayMigration,
+
+	// Epoch two substitutes a separately pinned official Astra reviewer only;
+	// genuine prereview timestamps and all normal downstream gates are retained.
+	newSqlMigration(competitionOfficialReviewEpochTwoMigration()),
 }

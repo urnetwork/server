@@ -4,6 +4,8 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"net/http"
@@ -61,9 +63,6 @@ func (self PostgresStore) ImportOfficialReview(ctx context.Context, settings *Se
 // The immutable authority and review commit together; replay keeps the original
 // actor, bytes and time. An expired native owner is not touched or fabricated.
 func (self PostgresStore) authorizeOfficialReviewInTx(ctx context.Context, tx server.PgTx, settings *Settings, actor string, request model.CompetitionOfficialReviewImport, policy model.CompetitionAutomationPolicy) error {
-	if err := model.ValidateCompetitionOfficialReviewImport(request, policy); err != nil {
-		return err
-	}
 	digest, err := model.CompetitionAutomationDigest(request)
 	if err != nil || digest != settings.OfficialReviewImportSha256 || digest == "" {
 		return ErrConflict
@@ -73,8 +72,11 @@ func (self PostgresStore) authorizeOfficialReviewInTx(ctx context.Context, tx se
 	if err := tx.QueryRow(ctx, `SELECT epoch_number,staging FROM competition_round WHERE round_id=$1`, request.RoundId).Scan(&epoch, &staging); err != nil {
 		return err
 	}
-	if epoch != 1 || staging {
+	if staging {
 		return ErrConflict
+	}
+	if err := model.ValidateCompetitionOfficialReviewImportForEpoch(request, policy, epoch); err != nil {
+		return err
 	}
 	now, err := reviewHandoffDatabaseTime(ctx, tx)
 	if err != nil {
@@ -86,6 +88,21 @@ func (self PostgresStore) authorizeOfficialReviewInTx(ctx context.Context, tx se
 	content, err := json.Marshal(request)
 	if err != nil {
 		return err
+	}
+	if epoch == 2 {
+		// Exact replays retain their original authority even after a legitimate
+		// disqualification changes the election. New insertions still recheck it.
+		var same bool
+		err := tx.QueryRow(ctx, `SELECT round_id=$2 AND actor_id=$3 AND import_sha256=$4 AND import_json=$5::jsonb FROM competition_official_review_authorization WHERE authorization_sha256=$1`, request.Review.OfficialReviewOverride.AuthorizationSha256, request.RoundId, actor, digest, string(content)).Scan(&same)
+		if err == nil {
+			if !same {
+				return ErrConflict
+			}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `SELECT set_config('urnetwork.competition_official_review_actor',$1,true),set_config('urnetwork.competition_official_review_import_sha256',$2,true)`, actor, digest); err != nil {
 		return err

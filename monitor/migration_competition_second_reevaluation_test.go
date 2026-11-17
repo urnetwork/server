@@ -17,7 +17,7 @@ func migrationSecondRecoveryTestOwner(t testing.TB) migrationArtifact {
 	previous := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
 	current := migrationCurrentSuffixTestContract(t, version).artifact
 	if version <= previous || migrationCurrentSuffixTestContract(t, previous).artifact.removedVersion != version ||
-		current.name != "exact-job second recovery with immutable prior receipt" || current.removedVersion != 0 {
+		current.name != "exact-job second recovery with immutable prior receipt" || current.removedVersion != server.CompetitionOfficialReviewEpochTwoMigrationVersion() {
 		t.Fatal("second recovery catalog owner has an unreviewed boundary")
 	}
 	return current
