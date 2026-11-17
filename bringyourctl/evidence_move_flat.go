@@ -69,6 +69,11 @@ func evidenceMoveFlatOptions(opts docopt.Opts) (settings evidencemove.Settings, 
 			return settings, "", "", fmt.Errorf("--max-moves: %w", err)
 		}
 	}
+	if value, _ := opts.String("--until-created"); value != "" {
+		if settings.UntilCreated, err = time.Parse(time.RFC3339, value); err != nil {
+			return settings, "", "", fmt.Errorf("--until-created: %w", err)
+		}
+	}
 	if checkpointPath == "" && !settings.DryRun {
 		return settings, "", "", fmt.Errorf("a run that removes objects needs --checkpoint")
 	}
@@ -119,7 +124,12 @@ func evidenceMoveFlatCommand(opts docopt.Opts) {
 	defer stop()
 	store, config := evidenceMoveStore(ctx, settings.Workers)
 	latency := evidencemove.NewLatencies()
-	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.DefaultGates(store.HealthURL(), latency)...)
+	// the validator idle, MinIO healthy, and Main healthy too: the move's
+	// load reaches Main's clients through MinIO
+	gates := evidencemove.NewGateKeeper(evidenceLogf, append(
+		evidencemove.DefaultGates(store.HealthURL(), latency, evidencemove.DefaultPromUrl),
+		evidencemove.MainHealthGates(evidencemove.DefaultPromUrl)...,
+	)...)
 	gates.Start(ctx)
 	var source evidencemove.Source = &evidencemove.ClientKeyHistorySource{}
 	if snapshotPath, _ := opts.String("--snapshot"); snapshotPath != "" {
@@ -165,8 +175,8 @@ func evidenceMoveFlatCommand(opts docopt.Opts) {
 		mover.Journal = journal
 	}
 	evidenceLogf(
-		"move-flat: %.0f objects a second, %d workers, batches of %d, max moves %d, dry run %v",
-		settings.ObjectsPerSecond, settings.Workers, settings.BatchRows, settings.MaxMoves, settings.DryRun,
+		"move-flat: %.0f objects a second, %d workers, batches of %d, max moves %d, until created %s, dry run %v",
+		settings.ObjectsPerSecond, settings.Workers, settings.BatchRows, settings.MaxMoves, settings.UntilCreated.Format(time.RFC3339), settings.DryRun,
 	)
 	report, err := mover.Run(ctx)
 	if report != nil {
@@ -217,7 +227,7 @@ func evidenceMoveFlatVerifyCommand(opts docopt.Opts) {
 		}
 	}
 	latency := evidencemove.NewLatencies()
-	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.DefaultGates(store.HealthURL(), latency)...)
+	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.DefaultGates(store.HealthURL(), latency, evidencemove.DefaultPromUrl)...)
 	gates.Start(ctx)
 	evidenceLogf("verify: %d moved hashes from %s, %d unmoved rows after the checkpoint", len(moved), journalPath, len(unmoved))
 	start := time.Now()

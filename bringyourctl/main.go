@@ -52,7 +52,7 @@ Usage:
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
-    bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--dry-run]
+    bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--until-created=<time>] [--dry-run]
     bringyourctl evidence snapshot-hashes --out=<path> [--pages-per-second=<n>] [--batch-pages=<n>]
     bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
     bringyourctl evidence flat-census [--sample-rows=<n>]
@@ -288,6 +288,10 @@ Options:
                    (default 96).
     --batch-rows=<n>  With evidence move-flat, st_client_key_history rows a
                    batch; the checkpoint advances per batch (default 1000).
+    --until-created=<time>  With evidence move-flat, end the run before the
+                   first row of a client created at or after this RFC 3339
+                   time (its id's leading 48 bits): clients created after the
+                   sharded-write cutover (2026-11-16) have sharded evidence.
     --snapshot=<path>  With evidence move-flat, read the content hashes from
                    this evidence snapshot-hashes file instead of the live
                    st_client_key_history, in the same key order, so the same

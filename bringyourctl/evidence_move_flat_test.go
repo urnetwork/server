@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docopt/docopt-go"
 
@@ -42,6 +43,13 @@ func TestEvidenceMoveFlatCommandParses(t *testing.T) {
 				return settings.DryRun && settings.MaxMoves == 500
 			},
 		},
+		{
+			args:       []string{"--checkpoint=/tmp/move.json", "--until-created=2026-11-16T18:00:00Z"},
+			checkpoint: "/tmp/move.json",
+			check: func(settings evidencemove.Settings) bool {
+				return settings.UntilCreated.Equal(time.Date(2026, 11, 16, 18, 0, 0, 0, time.UTC))
+			},
+		},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "move-flat"}, test.args...), "synthetic")
 		if err != nil {
@@ -67,6 +75,8 @@ func TestEvidenceMoveFlatCommandParses(t *testing.T) {
 		{"--checkpoint=/tmp/move.json", "--workers=many"},
 		{"--checkpoint=/tmp/move.json", "--batch-rows=0"},
 		{"--checkpoint=/tmp/move.json", "--max-moves=-1"},
+		{"--checkpoint=/tmp/move.json", "--until-created=2026-11-16"},
+		{"--checkpoint=/tmp/move.json", "--until-created=soon"},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "move-flat"}, args...), "synthetic")
 		if err != nil {
