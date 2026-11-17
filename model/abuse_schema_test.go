@@ -176,8 +176,12 @@ var abuseSchemaColumnWords = map[string]string{
 	"abuse_legal_hold.case_id":     "case",
 	"abuse_legal_hold.kind":        "kind",
 	"abuse_legal_hold.scope":       "scope",
-	"abuse_legal_hold.expire_time": "expiry",
+	"abuse_legal_hold.place_time":  "place, report, renew and expire times",
+	"abuse_legal_hold.report_time": "place, report, renew and expire times",
+	"abuse_legal_hold.renew_time":  "place, report, renew and expire times",
+	"abuse_legal_hold.expire_time": "place, report, renew and expire times",
 	"abuse_legal_hold.copied_rows": "copied_rows",
+	"abuse_legal_hold.copy_state":  "copy_state",
 	"abuse_legal_hold.part":        "keyed by network, case and part",
 
 	"abuse_access_log.log_id":      "every abuse-role read",
@@ -195,26 +199,18 @@ var abuseSchemaColumnWords = map[string]string{
 	"legal_request.seal_until":       "sealing orders",
 	"legal_request.due_time":         "legal requests",
 	"legal_request.production_state": "productions",
-	"legal_request.create_time":      "legal requests",
-	"legal_request.close_time":       "legal requests",
+	// owner decision 259 (QD-916, abuse-m5-03-signoff-ids)
+	"legal_request.legal_signoff_id":       "the legal and engineering ids that sign a production off",
+	"legal_request.engineering_signoff_id": "the legal and engineering ids that sign a production off",
+	"legal_request.create_time":            "legal requests",
+	"legal_request.close_time":             "legal requests",
 }
 
 // The columns whose words wait on a records pass, by the decided entry that
-// gives them.
-var abuseSchemaPendingColumns = map[string]abuseSchemaPendingWords{
-	"abuse_legal_hold.place_time":  {words: "place_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
-	"abuse_legal_hold.report_time": {words: "report_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
-	"abuse_legal_hold.renew_time":  {words: "renew_time", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
-	"abuse_legal_hold.copy_state":  {words: "copy_state", resolution: "plan-ABUSE-metadata-rows #2 (QD-058)"},
-	"legal_request.legal_signoff_id": {
-		words:      "sign-off",
-		resolution: "abuse-m5-03-signoff-ids, beside plan-ABUSE-metadata-rows #6",
-	},
-	"legal_request.engineering_signoff_id": {
-		words:      "sign-off",
-		resolution: "abuse-m5-03-signoff-ids, beside plan-ABUSE-metadata-rows #6",
-	},
-}
+// gives them. None waits now: the folds of 2026-11-16 gave api-14 the hold
+// times and copy state (plan-ABUSE-metadata-rows #2, QD-058) and the sign-off
+// ids (owner decision 259).
+var abuseSchemaPendingColumns = map[string]abuseSchemaPendingWords{}
 
 // A row of §2.8's list: its id line and the indented lines under it, or "".
 func abuseSchemaRowText(listBytes []byte, rowId string) string {

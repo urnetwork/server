@@ -4,11 +4,13 @@ package handlers
 
 // §21.16's customer routes over the router (abuse_handlers.go; ABUSE-M5-11) on a private database and Redis: the
 // report route's one answer whether or not a report joined, its limit on a fake clock with infrastructure
-// uncounted, its refusals, the appeal route's answers for an unknown, a barred and another network's case alike,
-// and the cases and status bodies. The router's class gates are api's (route_authz_test.go); the handlers' own
-// refusal of a client token on cases and appeal is here.
+// uncounted, the limit shared in Redis by two api instances with no address kept there and a count not kept
+// refusing (owner decision 536, QD-895), its refusals, the appeal route's answers for an unknown, a barred and
+// another network's case alike, and the cases and status bodies. The router's class gates are api's
+// (route_authz_test.go); the handlers' own refusal of a client token on cases and appeal is here.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,10 +19,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/sidecar"
 
@@ -260,6 +266,371 @@ func TestAbuseReportLimitOnAFakeClock(t *testing.T) {
 		}
 		if sink.count() != before+10 {
 			t.Fatalf("infrastructure reports were not all taken")
+		}
+	})
+}
+
+// The report count's histories in the test's Redis, sorted.
+func testAbuseReportLimitKeys(t testing.TB, ctx context.Context) []string {
+	t.Helper()
+	var keys []string
+	var err error
+	server.Redis(ctx, func(r server.RedisClient) {
+		keys, err = r.Keys(ctx, abuseReportRateLimitKeyPrefix+"*").Result()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// Two api processes' routes over one Redis count a caller once (owner decision 536, QD-895): a /29's 31st report
+// in an hour is refused whichever instance takes it, though neither took more than 16; refusals on one instance
+// keep the caller refused on the other after the first reports leave the window; and the next /29 is another
+// caller. Each instance alone would have taken every one of its reports under the in-process count this replaces.
+func TestAbuseReportLimitHoldsAcrossApiInstances(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		instances := []*AbuseHandlers{}
+		for range 2 {
+			instances = append(instances, NewAbuseHandlers(&AbuseHandlersDeps{
+				Now:               clock.Now,
+				RateLimitExcluded: func(addr netip.Addr) bool { return false },
+				AcceptReport:      sink.accept,
+				Settings:          settings,
+			}))
+		}
+		body := testAbuseReportBody(t, "phishing", []string{"https://elsewhere.example/"}, nil)
+		// the i-th request goes to instance i mod 2, from one of 192.0.2.8/29's eight addresses
+		report := func(i int) *testAbuseRouteAnswer {
+			return testAbuseRouteCall(t, instances[i%2], "POST", "/abuse/report", "", fmt.Sprintf("192.0.2.%d:%d", 8+i%8, 41000+i), body)
+		}
+		if settings.ReportAddressLimit != 30 || settings.ReportAddressLookback != time.Hour {
+			t.Fatalf("the default limit is %d in %s, want 30 an hour", settings.ReportAddressLimit, settings.ReportAddressLookback)
+		}
+
+		for i := range settings.ReportAddressLimit {
+			if answer := report(i); answer.status != http.StatusOK {
+				t.Fatalf("report %d: %d %q", i+1, answer.status, answer.body)
+			}
+		}
+		for i := settings.ReportAddressLimit; i < settings.ReportAddressLimit+2; i += 1 {
+			if answer := report(i); answer.status != http.StatusTooManyRequests || answer.header.Get("Retry-After") != "3600" {
+				t.Fatalf("report %d, on instance %d: %d, Retry-After %q", i+1, i%2, answer.status, answer.header.Get("Retry-After"))
+			}
+		}
+		if sink.count() != settings.ReportAddressLimit {
+			t.Fatalf("%d reports taken, want %d", sink.count(), settings.ReportAddressLimit)
+		}
+		if answer := testAbuseRouteCall(t, instances[1], "POST", "/abuse/report", "", "192.0.2.16:41000", body); answer.status != http.StatusOK {
+			t.Fatalf("an address of the next /29: %d", answer.status)
+		}
+
+		// refused reports count too, wherever they were refused
+		clock.Advance(time.Hour - time.Minute)
+		for i := range settings.ReportAddressLimit {
+			if answer := testAbuseRouteCall(t, instances[0], "POST", "/abuse/report", "", "192.0.2.9:41000", body); answer.status != http.StatusTooManyRequests {
+				t.Fatalf("refusal %d near the window's end: %d", i+1, answer.status)
+			}
+		}
+		clock.Advance(time.Minute)
+		if answer := testAbuseRouteCall(t, instances[1], "POST", "/abuse/report", "", "192.0.2.14:41000", body); answer.status != http.StatusTooManyRequests {
+			t.Fatalf("on the other instance once the first reports left the window: %d", answer.status)
+		}
+		clock.Advance(time.Hour)
+		if answer := testAbuseRouteCall(t, instances[1], "POST", "/abuse/report", "", "192.0.2.14:41000", body); answer.status != http.StatusOK {
+			t.Fatalf("past the window: %d", answer.status)
+		}
+	})
+}
+
+// The members of addr's report count history in the test's Redis.
+func testAbuseReportLimitCount(t testing.TB, ctx context.Context, addr netip.Addr) int64 {
+	t.Helper()
+	addressHash := server.ClientIpHashForAddr(addr)
+	var count int64
+	var err error
+	server.Redis(ctx, func(r server.RedisClient) {
+		count, err = r.ZCard(ctx, abuseReportRateLimitKeyPrefix+"{address_"+hex.EncodeToString(addressHash[:])+"}.address").Result()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+// Each URL and each header block counts as one report (QD-1024): a request of 16 URLs spends 16 of the hour's 30;
+// a body refused for its content counts once; a request that would pass the limit is refused whole with nothing
+// taken, and the counts it made stand, so the caller stays refused; and the window's end frees the caller again.
+func TestAbuseReportLimitCountsEachReport(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			Now:               clock.Now,
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		caller := netip.MustParseAddr("192.0.2.10")
+		urls := func(count int) []string {
+			urls := []string{}
+			for i := range count {
+				urls = append(urls, fmt.Sprintf("https://h%d.elsewhere.example/", i))
+			}
+			return urls
+		}
+		headerBlocks := func(count int) []string {
+			headerBlocks := []string{}
+			for i := range count {
+				headerBlocks = append(headerBlocks, fmt.Sprintf("From: s%d@elsewhere.example\nSubject: hello\n\n", i))
+			}
+			return headerBlocks
+		}
+		report := func(body string) *testAbuseRouteAnswer {
+			return testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body)
+		}
+
+		if answer := report(testAbuseReportBody(t, "nonsense", urls(settings.ReportUrlMaxCount), nil)); answer.status != http.StatusBadRequest {
+			t.Fatalf("a body refused for its content: %d", answer.status)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 1 {
+			t.Fatalf("a body refused for its content counted %d", count)
+		}
+		if answer := report(testAbuseReportBody(t, "phishing", urls(16), nil)); answer.status != http.StatusOK || sink.count() != 16 {
+			t.Fatalf("16 URLs: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 17 {
+			t.Fatalf("16 URLs after a refused body counted %d, want 17", count)
+		}
+		if answer := report(testAbuseReportBody(t, "spam", urls(4), headerBlocks(4))); answer.status != http.StatusOK || sink.count() != 24 {
+			t.Fatalf("4 URLs and 4 header blocks: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 25 {
+			t.Fatalf("after 24 reports and a refused body, %d counted, want 25", count)
+		}
+
+		// 16 more would pass 30: refused whole, nothing taken, and its counts up to the refusal stand
+		refused := report(testAbuseReportBody(t, "phishing", urls(16), nil))
+		if refused.status != http.StatusTooManyRequests || refused.header.Get("Retry-After") != "3600" || sink.count() != 24 {
+			t.Fatalf("a request past the limit: %d, Retry-After %q, %d reports taken", refused.status, refused.header.Get("Retry-After"), sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit+1) {
+			t.Fatalf("after the refusal, %d counted, want the history held at %d", count, settings.ReportAddressLimit+1)
+		}
+		if answer := report(testAbuseReportBody(t, "phishing", urls(1), nil)); answer.status != http.StatusTooManyRequests || sink.count() != 24 {
+			t.Fatalf("one URL after the refusal: %d, %d reports taken", answer.status, sink.count())
+		}
+
+		clock.Advance(settings.ReportAddressLookback)
+		if answer := report(testAbuseReportBody(t, "spam", urls(16), headerBlocks(4))); answer.status != http.StatusOK || sink.count() != 44 {
+			t.Fatalf("a full request past the window: %d, %d reports taken", answer.status, sink.count())
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 20 {
+			t.Fatalf("past the window, %d counted, want 20", count)
+		}
+	})
+}
+
+// An infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS, through the dep that stands for it) is never counted: past
+// twice the limit, as an IPv4-mapped IPv6 address too, every report is taken and Redis holds no history, while the
+// first caller outside it is counted.
+func TestAbuseReportLimitNeverCountsExcludedInfrastructure(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		excluded := netip.MustParsePrefix("198.51.100.0/24")
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			RateLimitExcluded: func(addr netip.Addr) bool { return excluded.Contains(addr) },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		body := testAbuseReportBody(t, "phishing", []string{"https://elsewhere.example/"}, nil)
+
+		for i := range 2 * settings.ReportAddressLimit {
+			remoteAddr := "198.51.100.7:41000"
+			if i%2 == 1 {
+				remoteAddr = "[::ffff:198.51.100.7]:41000"
+			}
+			if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", remoteAddr, body); answer.status != http.StatusOK {
+				t.Fatalf("infrastructure report %d from %s: %d", i+1, remoteAddr, answer.status)
+			}
+		}
+		if sink.count() != 2*settings.ReportAddressLimit {
+			t.Fatalf("%d infrastructure reports taken", sink.count())
+		}
+		if keys := testAbuseReportLimitKeys(t, ctx); len(keys) != 0 {
+			t.Fatalf("infrastructure reports left histories %v", keys)
+		}
+
+		if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body); answer.status != http.StatusOK {
+			t.Fatalf("a caller outside the infrastructure: %d", answer.status)
+		}
+		if keys := testAbuseReportLimitKeys(t, ctx); len(keys) != 1 {
+			t.Fatalf("a counted caller left histories %v", keys)
+		}
+	})
+}
+
+// The count keeps no address in Redis (I-13, R-ABUSE-6; §2.8 api-14): one history per caller at
+// abuse_report.{address_<hash>}.address, the hash the peppered one of the caller's /29 or /56, expiring within the
+// window and holding one member per report, and no key or value in the store holds the address, its network, either
+// one's bytes or an unpeppered hash of either.
+func TestAbuseReportLimitKeepsNoAddressInRedis(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      (&testAbuseReportSink{}).accept,
+			Settings:          settings,
+		})
+		body := testAbuseReportBody(t, "phishing", []string{"https://elsewhere.example/"}, nil)
+		callers := []struct {
+			remoteAddr string
+			addr       netip.Addr
+			network    netip.Addr
+		}{
+			{remoteAddr: "192.0.2.10:41000", addr: netip.MustParseAddr("192.0.2.10"), network: netip.MustParseAddr("192.0.2.8")},
+			{remoteAddr: "[2001:db8:1:100::1]:41000", addr: netip.MustParseAddr("2001:db8:1:100::1"), network: netip.MustParseAddr("2001:db8:1:100::")},
+		}
+		reportCount := 3
+		wantKeys := []string{}
+		needles := [][]byte{}
+		for _, caller := range callers {
+			for range reportCount {
+				if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", caller.remoteAddr, body); answer.status != http.StatusOK {
+					t.Fatalf("a report from %s: %d", caller.remoteAddr, answer.status)
+				}
+			}
+			addressHash := server.ClientIpHashForAddr(caller.addr)
+			wantKeys = append(wantKeys, "abuse_report.{address_"+hex.EncodeToString(addressHash[:])+"}.address")
+			for _, addr := range []netip.Addr{caller.addr, caller.network} {
+				plainHash := sha256.Sum256(addr.AsSlice())
+				needles = append(needles, []byte(addr.String()), addr.AsSlice(), []byte(hex.EncodeToString(plainHash[:])))
+			}
+		}
+		slices.Sort(wantKeys)
+		if keys := testAbuseReportLimitKeys(t, ctx); !slices.Equal(keys, wantKeys) {
+			t.Fatalf("histories %v, want %v", keys, wantKeys)
+		}
+
+		findings := []string{}
+		var err error
+		server.Redis(ctx, func(r server.RedisClient) {
+			var keys []string
+			keys, err = r.Keys(ctx, "*").Result()
+			if err != nil {
+				return
+			}
+			for _, key := range keys {
+				values := [][]byte{[]byte(key)}
+				var keyType string
+				keyType, err = r.Type(ctx, key).Result()
+				if err != nil {
+					return
+				}
+				switch keyType {
+				case "string":
+					var value []byte
+					value, err = r.Get(ctx, key).Bytes()
+					values = append(values, value)
+				case "zset":
+					var members []redis.Z
+					members, err = r.ZRangeWithScores(ctx, key, 0, -1).Result()
+					for _, member := range members {
+						values = append(values, []byte(fmt.Sprint(member.Member)), []byte(strconv.FormatFloat(member.Score, 'f', -1, 64)))
+					}
+					if err == nil && slices.Contains(wantKeys, key) {
+						if len(members) != reportCount {
+							findings = append(findings, fmt.Sprintf("%s holds %d members, want %d", key, len(members), reportCount))
+						}
+						var ttl time.Duration
+						ttl, err = r.PTTL(ctx, key).Result()
+						if err == nil && (ttl <= 0 || settings.ReportAddressLookback < ttl) {
+							findings = append(findings, fmt.Sprintf("%s expires in %s, want within %s", key, ttl, settings.ReportAddressLookback))
+						}
+					}
+				case "hash":
+					var fields map[string]string
+					fields, err = r.HGetAll(ctx, key).Result()
+					for field, value := range fields {
+						values = append(values, []byte(field), []byte(value))
+					}
+				case "set":
+					var members []string
+					members, err = r.SMembers(ctx, key).Result()
+					for _, member := range members {
+						values = append(values, []byte(member))
+					}
+				case "list":
+					var items []string
+					items, err = r.LRange(ctx, key, 0, -1).Result()
+					for _, item := range items {
+						values = append(values, []byte(item))
+					}
+				default:
+					findings = append(findings, fmt.Sprintf("%s is a %s, which this test cannot read", key, keyType))
+				}
+				if err != nil {
+					return
+				}
+				for _, value := range values {
+					for _, needle := range needles {
+						if bytes.Contains(value, needle) {
+							findings = append(findings, fmt.Sprintf("%s holds a caller's address, network or unpeppered hash", key))
+						}
+					}
+				}
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if 0 < len(findings) {
+			t.Fatalf("the store:\n%s", strings.Join(findings, "\n"))
+		}
+	})
+}
+
+// A count that cannot be kept refuses the request with the route's 503, as a store that did not answer, and takes
+// no report, so no report passes uncounted: a lookback too short for the count's history is such a count. With no
+// limit nothing is counted.
+func TestAbuseReportRefusedWhenItsCountIsNotKept(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sink := &testAbuseReportSink{}
+		body := testAbuseReportBody(t, "phishing", []string{"https://elsewhere.example/"}, nil)
+		unkept := DefaultAbuseRouteSettings()
+		unkept.ReportAddressLookback = 0
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          unkept,
+		})
+		if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body); answer.status != http.StatusServiceUnavailable || sink.count() != 0 {
+			t.Fatalf("a count not kept: %d %q, %d reports taken", answer.status, answer.body, sink.count())
+		}
+
+		unlimited := DefaultAbuseRouteSettings()
+		unlimited.ReportAddressLimit = 0
+		unlimited.ReportAddressLookback = 0
+		handlers = NewAbuseHandlers(&AbuseHandlersDeps{
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          unlimited,
+		})
+		if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body); answer.status != http.StatusOK || sink.count() != 1 {
+			t.Fatalf("no limit: %d, %d reports taken", answer.status, sink.count())
+		}
+		if keys := testAbuseReportLimitKeys(t, ctx); len(keys) != 0 {
+			t.Fatalf("histories %v", keys)
 		}
 	})
 }
