@@ -37,7 +37,7 @@ func x402FreeProxyCapRefusal() *model.AuthNetworkClientResult {
 		Error: &model.AuthNetworkClientError{
 			ClientLimitExceeded: true,
 			UpgradeRequired:     true,
-			Message:             "Your plan's limit of 5 active proxies is reached. Remove a proxy to create another, or upgrade to UR Pro for more.",
+			Message:             "Your plan's limit of 5 active proxies is reached. Remove a proxy you no longer use at https://ur.io/app/proxies to create another, or upgrade to UR Pro for more.",
 		},
 	}
 }
@@ -212,7 +212,7 @@ func TestWriteX402UpgradeRequiredQuotesAnAgentThatAsks(t *testing.T) {
 	noUpgrade := &model.AuthNetworkClientResult{
 		Error: &model.AuthNetworkClientError{
 			ClientLimitExceeded: true,
-			Message:             "Your plan's limit of 1000 active proxies is reached. Remove a proxy to create another.",
+			Message:             "Your plan's limit of 1000 active proxies is reached. Remove a proxy you no longer use at https://ur.io/app/proxies to create another.",
 		},
 	}
 	w = httptest.NewRecorder()
