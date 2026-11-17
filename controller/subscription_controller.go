@@ -398,6 +398,12 @@ const (
 	// (subscription_stripe_card_check.go). Only the purchase report
 	// (/subscription/verify-stripe-checkout) answers it.
 	PurchaseErrorCodeIncorrectCvc = "incorrect_cvc"
+	// an App Store sandbox purchase (a TestFlight build, a sandbox tester) for
+	// a network that is not an internal tester: sandbox purchases are free, so
+	// they unlock nothing (apple_sandbox_testers.go). Only the App Store
+	// purchase report (/subscription/verify-apple-transaction) answers it, with
+	// the invalid status; the app shows a neutral line.
+	PurchaseErrorCodeSandboxPurchase = "sandbox_purchase"
 )
 
 const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."

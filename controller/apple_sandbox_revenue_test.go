@@ -143,8 +143,8 @@ func appleSandboxRevenueNotification(claims map[string]any, now time.Time) Apple
 	}
 }
 
-// The webhook credits a TestFlight purchase: Pro through the ledger gate, no
-// revenue, no sales notice, and a redelivery adds nothing.
+// The webhook credits an internal tester's TestFlight purchase: Pro through
+// the ledger gate, no revenue, no sales notice, and a redelivery adds nothing.
 func TestAppleSandboxNotificationCreditsProWithoutRevenue(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -154,6 +154,7 @@ func TestAppleSandboxNotificationCreditsProWithoutRevenue(t *testing.T) {
 
 		networkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "applesandboxwebhook", server.NewId())
+		installAppleSandboxTesters(t, networkId)
 		transactionId := "2000000000000801"
 		notification := appleSandboxRevenueNotification(appleSandboxRevenueClaims(networkId, transactionId, "Sandbox", now), now)
 
@@ -202,9 +203,9 @@ func TestAppleProductionNotificationRevenueUnchanged(t *testing.T) {
 	})
 }
 
-// The reconciler's credit leg shares the gate: a sandbox transaction keeps Pro
-// without revenue or a notice, and a production one records its revenue and
-// posts once.
+// The reconciler's credit leg shares the gate: an internal tester's sandbox
+// transaction keeps Pro without revenue or a notice, and a production one
+// records its revenue and posts once.
 func TestAppleReconcileCreditLegSandboxWithoutRevenue(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -214,6 +215,7 @@ func TestAppleReconcileCreditLegSandboxWithoutRevenue(t *testing.T) {
 
 		sandboxNetworkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, sandboxNetworkId, "applesandboxreconcile", server.NewId())
+		installAppleSandboxTesters(t, sandboxNetworkId)
 		sandboxTransactionId := "2000000000000901"
 		credited, networkId, err := appleReconcileCreditTransaction(
 			ctx,
@@ -243,12 +245,14 @@ func TestAppleReconcileCreditLegSandboxWithoutRevenue(t *testing.T) {
 	})
 }
 
-// The shared gate, without a database: a sandbox credit posts no notice and
-// its ledger row still gates a second credit; a production credit posts once.
+// The shared gate, without a database: an internal tester's sandbox credit
+// posts no notice and its ledger row still gates a second credit; a
+// production credit posts once.
 func TestAppleSandboxCreditPostsNoSalesNotice(t *testing.T) {
 	notices := captureSalesNotices(t)
 	ctx := context.Background()
 	networkId := server.NewId()
+	installAppleSandboxTesters(t, networkId)
 	tx := newSalesLedgerTx(networkId)
 
 	sandbox := appleSalesTransaction(networkId, "2000000000001001")
