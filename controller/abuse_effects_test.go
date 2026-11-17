@@ -791,7 +791,8 @@ func TestAbuseEffectRefusals(t *testing.T) {
 			return testAbuseLiftEffect(owners.action(model.AbuseActionKindMailHalt, "mail.abcdefghij.root.example"), model.AbuseReviewStateLifted)
 		}},
 		{name: "an unknown kind", want: ErrAbuseEffectKindUnbuilt, effect: func() *AbuseEffect {
-			return &AbuseEffect{Action: owners.action(model.AbuseActionKind("screen_allow"), "shop")}
+			// a breaker level, ABUSE-M9-02's
+			return &AbuseEffect{Action: owners.action(model.AbuseActionKind("mail_breaker"), "shop")}
 		}},
 		{name: "no network", want: ErrAbuseEffectTarget, effect: func() *AbuseEffect {
 			action := owners.action(model.AbuseActionKindLabelKill, "abcdefghij.root.example")
@@ -828,6 +829,18 @@ func TestAbuseEffectRefusals(t *testing.T) {
 	}
 	if ops := owners.takeOps(); len(ops) != 0 {
 		t.Fatalf("a refused effect called %v", ops)
+	}
+	// a reviewer's screen_allow withholds nothing, so its effect and its lift's do nothing outside Postgres
+	// (ABUSE-M5-08)
+	allow := owners.action(model.AbuseActionKindScreenAllow, "paypal-support")
+	if err := effects.ApplyAbuseEffect(ctx, &AbuseEffect{Action: allow}); err != nil {
+		t.Fatalf("a screen allow's effect: %v", err)
+	}
+	if err := effects.ApplyAbuseEffect(ctx, testAbuseLiftEffect(allow, model.AbuseReviewStateLifted)); err != nil {
+		t.Fatalf("a screen allow's lift: %v", err)
+	}
+	if ops := owners.takeOps(); len(ops) != 0 {
+		t.Fatalf("a screen allow called %v", ops)
 	}
 
 	deps := owners.deps()
