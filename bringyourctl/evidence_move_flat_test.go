@@ -103,6 +103,7 @@ func TestEvidenceCommandsAreReadOnly(t *testing.T) {
 		{"func evidenceMoveFlatCommand(", "mover.Run(ctx)"},
 		{"func evidenceMoveFlatVerifyCommand(", "ClientKeyHistorySource{}).Next("},
 		{"func evidenceFlatCensusCommand(", "ClientKeyHistoryRowEstimate("},
+		{"func evidenceSnapshotHashesCommand(", "evidencemove.ExportSnapshot("},
 	} {
 		start := strings.Index(text, command.function)
 		if start < 0 {
@@ -125,9 +126,60 @@ func TestEvidenceCommandsAreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, call := range []string{"evidenceMoveFlatCommand(opts)", "evidenceMoveFlatVerifyCommand(opts)", "evidenceFlatCensusCommand(opts)"} {
+	for _, call := range []string{"evidenceMoveFlatCommand(opts)", "evidenceMoveFlatVerifyCommand(opts)", "evidenceFlatCensusCommand(opts)", "evidenceSnapshotHashesCommand(opts)"} {
 		if !strings.Contains(string(main), call) {
 			t.Fatalf("main does not run %s", call)
+		}
+	}
+}
+
+// The snapshot's command line parses to the defaults overridden by each
+// option (the usage requires --out), and refused values are refused before
+// anything is read. move-flat takes a snapshot that exists as its source.
+func TestEvidenceSnapshotCommandParses(t *testing.T) {
+	defaults := evidencemove.DefaultSnapshotSettings()
+	for _, test := range []struct {
+		args          []string
+		rowsPerSecond float64
+		batchRows     int
+	}{
+		{args: []string{"--out=/tmp/hashes.bin"}, rowsPerSecond: defaults.RowsPerSecond, batchRows: defaults.BatchRows},
+		{args: []string{"--out=/tmp/hashes.bin", "--rows-per-second=30000", "--batch-rows=10000"}, rowsPerSecond: 30000, batchRows: 10000},
+	} {
+		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "snapshot-hashes"}, test.args...), "synthetic")
+		if err != nil {
+			t.Fatalf("%v: %v", test.args, err)
+		}
+		settings, out, err := evidenceSnapshotOptions(opts)
+		if err != nil || out != "/tmp/hashes.bin" || settings.RowsPerSecond != test.rowsPerSecond || settings.BatchRows != test.batchRows {
+			t.Fatalf("%v: %+v %q %v", test.args, settings, out, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"--out=/tmp/hashes.bin", "--rows-per-second=0"},
+		{"--out=/tmp/hashes.bin", "--rows-per-second=fast"},
+		{"--out=/tmp/hashes.bin", "--batch-rows=0"},
+		{"--out=/tmp/hashes.bin", "--batch-rows=100000"},
+	} {
+		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"evidence", "snapshot-hashes"}, args...), "synthetic")
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if _, _, err := evidenceSnapshotOptions(opts); err == nil {
+			t.Fatalf("%v was accepted", args)
+		}
+	}
+	snapshot := t.TempDir() + "/hashes.bin"
+	if err := os.WriteFile(snapshot, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for snapshotPath, valid := range map[string]bool{snapshot: true, snapshot + ".missing": false} {
+		opts, err := docopt.ParseArgs(bringyourctlUsage, []string{"evidence", "move-flat", "--checkpoint=/tmp/move.json", "--snapshot=" + snapshotPath}, "synthetic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := evidenceMoveFlatOptions(opts); (err == nil) != valid {
+			t.Fatalf("--snapshot=%s gave %v", snapshotPath, err)
 		}
 	}
 }

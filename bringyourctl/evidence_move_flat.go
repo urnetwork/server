@@ -40,6 +40,11 @@ func evidenceMoveFlatOptions(opts docopt.Opts) (settings evidencemove.Settings, 
 	settings = evidencemove.DefaultSettings()
 	checkpointPath, _ = opts.String("--checkpoint")
 	journalPath, _ = opts.String("--journal")
+	if snapshotPath, _ := opts.String("--snapshot"); snapshotPath != "" {
+		if _, statErr := os.Stat(snapshotPath); statErr != nil {
+			return settings, "", "", fmt.Errorf("--snapshot: %w", statErr)
+		}
+	}
 	settings.DryRun, _ = opts.Bool("--dry-run")
 	if value, _ := opts.String("--objects-per-second"); value != "" {
 		if settings.ObjectsPerSecond, err = strconv.ParseFloat(value, 64); err != nil {
@@ -116,10 +121,20 @@ func evidenceMoveFlatCommand(opts docopt.Opts) {
 	latency := evidencemove.NewLatencies()
 	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.DefaultGates(store.HealthURL(), latency)...)
 	gates.Start(ctx)
+	var source evidencemove.Source = &evidencemove.ClientKeyHistorySource{}
+	if snapshotPath, _ := opts.String("--snapshot"); snapshotPath != "" {
+		snapshot, err := evidencemove.OpenSnapshotSource(snapshotPath)
+		if err != nil {
+			evidenceFail(err)
+		}
+		defer snapshot.Close()
+		source = snapshot
+		evidenceLogf("source: snapshot %s, %d rows", snapshotPath, snapshot.Rows())
+	}
 	mover := &evidencemove.Mover{
 		Store:    store,
 		Prefix:   config.Prefix,
-		Source:   &evidencemove.ClientKeyHistorySource{},
+		Source:   source,
 		Gates:    gates,
 		Pacer:    evidencemove.NewPacer(settings.ObjectsPerSecond),
 		Settings: settings,
@@ -272,4 +287,81 @@ func evidenceFlatCensusCommand(opts docopt.Opts) {
 		float64(estimate)*share(counts.WouldMove+counts.WouldDedupe), float64(estimate)*share(counts.WouldDedupe), float64(estimate),
 	)
 	evidenceLogf("latency %s", latency.Line())
+}
+
+// The snapshot's settings from the command line: the defaults, overridden by
+// each option given.
+func evidenceSnapshotOptions(opts docopt.Opts) (settings evidencemove.SnapshotSettings, outPath string, err error) {
+	settings = evidencemove.DefaultSnapshotSettings()
+	outPath, _ = opts.String("--out")
+	if outPath == "" {
+		return settings, "", fmt.Errorf("--out is required")
+	}
+	if value, _ := opts.String("--rows-per-second"); value != "" {
+		if settings.RowsPerSecond, err = strconv.ParseFloat(value, 64); err != nil {
+			return settings, "", fmt.Errorf("--rows-per-second: %w", err)
+		}
+	}
+	if value, _ := opts.String("--batch-rows"); value != "" {
+		if settings.BatchRows, err = strconv.Atoi(value); err != nil {
+			return settings, "", fmt.Errorf("--batch-rows: %w", err)
+		}
+	}
+	return settings, outPath, settings.Validate()
+}
+
+// Snapshots every st_client_key_history row's evidence hash into --out,
+// resuming a file an earlier run left, paced and gated on Main's health. A
+// finished snapshot gets its manifest: rows, sha256, and a sample of records
+// checked against the table.
+func evidenceSnapshotHashesCommand(opts docopt.Opts) {
+	settings, outPath, err := evidenceSnapshotOptions(opts)
+	if err != nil {
+		evidenceFail(err)
+	}
+	evidenceReadOnlyDb("snapshot-hashes")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	writer, err := evidencemove.OpenSnapshotWriter(outPath)
+	if err != nil {
+		evidenceFail(err)
+	}
+	evidenceLogf("snapshot %s: %d rows held, resuming after %s; %.0f rows a second, %d a statement", outPath, writer.Rows(), writer.Cursor(), settings.RowsPerSecond, settings.BatchRows)
+	gates := evidencemove.NewGateKeeper(evidenceLogf, evidencemove.MainHealthGates(evidencemove.DefaultPromUrl)...)
+	gates.Start(ctx)
+	report, err := evidencemove.ExportSnapshot(ctx, writer, gates, settings, evidenceLogf)
+	closeErr := writer.Close()
+	if report != nil {
+		evidencePrintJson("snapshot report", report)
+	}
+	if err != nil {
+		evidenceFail(err)
+	}
+	if closeErr != nil {
+		evidenceFail(closeErr)
+	}
+	if !report.Finished {
+		evidenceLogf("snapshot stopped before the table's end; rerun the same command to resume")
+		return
+	}
+	manifest, err := evidencemove.SummarizeSnapshot(outPath)
+	if err != nil {
+		evidenceFail(err)
+	}
+	manifest.Finished = time.Now().UTC()
+	manifest.Export = *report
+	sample, err := evidencemove.SampleSnapshot(outPath, 2000, uint64(time.Now().UnixNano()))
+	if err != nil {
+		evidenceFail(err)
+	}
+	if manifest.Sample, err = evidencemove.CheckSnapshotSample(ctx, sample); err != nil {
+		evidenceFail(err)
+	}
+	if err := evidencemove.WriteSnapshotManifest(outPath, manifest); err != nil {
+		evidenceFail(err)
+	}
+	evidencePrintJson("manifest "+evidencemove.SnapshotManifestPath(outPath), manifest)
+	if manifest.Sample.Differ != 0 {
+		evidenceFail(fmt.Errorf("%d sampled records differ from the table", manifest.Sample.Differ))
+	}
 }

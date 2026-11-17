@@ -52,7 +52,8 @@ Usage:
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
-    bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--dry-run]
+    bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--dry-run]
+    bringyourctl evidence snapshot-hashes --out=<path> [--rows-per-second=<n>] [--batch-rows=<n>]
     bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
     bringyourctl evidence flat-census [--sample-rows=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
@@ -284,6 +285,14 @@ Options:
                    (default 96).
     --batch-rows=<n>  With evidence move-flat, st_client_key_history rows a
                    batch; the checkpoint advances per batch (default 1000).
+                   With evidence snapshot-hashes, rows a statement (default
+                   5000).
+    --snapshot=<path>  With evidence move-flat, read the content hashes from
+                   this evidence snapshot-hashes file instead of the live
+                   st_client_key_history, in the same key order, so the same
+                   checkpoint continues on either.
+    --rows-per-second=<n>  With evidence snapshot-hashes, rows read a second
+                   (default 20000), while Main's health gates are open.
     --max-moves=<n>  With evidence move-flat, stop once this many flat objects
                    are removed (in a dry run, would be); objects in flight
                    then finish (a canary). Omitted, run to the end.
@@ -393,6 +402,8 @@ func main() {
 			evidenceMoveFlatVerifyCommand(opts)
 		} else if moveFlat, _ := opts.Bool("move-flat"); moveFlat {
 			evidenceMoveFlatCommand(opts)
+		} else if snapshotHashes, _ := opts.Bool("snapshot-hashes"); snapshotHashes {
+			evidenceSnapshotHashesCommand(opts)
 		} else if flatCensus, _ := opts.Bool("flat-census"); flatCensus {
 			evidenceFlatCensusCommand(opts)
 		}
