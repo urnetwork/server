@@ -50,6 +50,17 @@ rehearsal or the drop on Main: each is DDL on production.
    - It builds the twin, copies every row with its count and checksums,
      builds the indexes, and compares the twin with the table column for
      column and index for index.
+   - **Column options:** the comparison and the fingerprint cover the options
+     a user sets (`n_distinct`). PostgreSQL's internal ones are left out.
+     Since 18.7 (Main from 11-16 02:02Z) every new column, the twin's
+     included, gets `pg_attver`: its row-type version, the WAL position when
+     it was created. A twin can never carry its table's version (the server
+     drops a value that `ALTER COLUMN SET` names). pending_task, created
+     before 18.7, has none.
+     - On 11-17 at 04:53Z the rehearsal on Main, built from server
+       57d13666d, compared these options too and refused ("the rehearsed twin
+       pending_task_next does not match pending_task"). Nothing changed. The
+       next rehearsal needs a binary built from server main with the fix.
    - It reports how long the copy and the index builds took. **That is about
      how long the swap will hold its lock.**
    - It warms the live rows into shared buffers, and reads the table's catalog
