@@ -374,7 +374,14 @@ func oweAbuseActionNoticeInTx(
 		eventAction = adminEventActionAbuseLift
 	}
 	messages := []*accountMessage{}
-	for _, recipient := range model.AbuseNoticeRecipientsInTx(ctx, tx, networkId) {
+	// a reviewer's allow of a held name withholds nothing and is appealed by no one, so it mails no notice, which
+	// says an action holds and may be appealed; the network's retry passing is its answer, and the admin event
+	// below records it (ABUSE-M5-08)
+	recipients := model.AbuseNoticeRecipientsInTx(ctx, tx, networkId)
+	if action.Kind == model.AbuseActionKindScreenAllow || (lifted != nil && lifted.Kind == model.AbuseActionKindScreenAllow) {
+		recipients = nil
+	}
+	for _, recipient := range recipients {
 		messages = append(messages, &accountMessage{
 			key:       action.ActionId.String() + "/" + recipient,
 			networkId: &networkId,
