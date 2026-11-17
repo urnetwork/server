@@ -347,6 +347,14 @@ type PartitionFamily struct {
 	// A closed leaf is analyzed once, this long after its range ends, when
 	// late writes and updates have landed. Zero leaves leaves to autovacuum.
 	LeafAnalyzeDelay time.Duration
+	// Runs before each ANALYZE of a leaf (leaf) or a parent: why the relation
+	// must wait for a later run, such as an autovacuum or a long transaction
+	// holding a lock ANALYZE's SHARE UPDATE EXCLUSIVE conflicts with, or "".
+	// A waiting ANALYZE cancels a routine autovacuum after deadlock_timeout and
+	// waits out an anti-wraparound one. nil analyzes at once.
+	AnalyzeAdmission func(ctx context.Context, relation string, leaf bool) string
+	// Bounds each ANALYZE's lock wait. Zero waits as long as it takes.
+	AnalyzeLockTimeout time.Duration
 	// The family's own task analyzes its parents and leaves, and the registry
 	// does not.
 	AnalyzeByOwnTask bool
@@ -1227,8 +1235,12 @@ func (self *PartitionFamily) Retire(ctx context.Context, now time.Time, state Pa
 
 // One ANALYZE in its own maintenance transaction, without a statement or
 // transaction bound: a large leaf's ANALYZE can outlast the role's 15 minutes.
-func partitionRegistryAnalyze(ctx context.Context, statement string) bool {
+// A positive lockTimeout bounds its lock wait.
+func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout time.Duration) bool {
 	err := partitionRegistryTx(ctx, func(tx PgTx) {
+		if 0 < lockTimeout {
+			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", max(int64(1), lockTimeout.Milliseconds()))))
+		}
 		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
 		RaisePgResult(tx.Exec(ctx, liftTransactionTimeoutInTxSql))
 		RaisePgResult(tx.Exec(ctx, statement))
@@ -1252,7 +1264,14 @@ func (self *PartitionFamily) AnalyzeParents(ctx context.Context, now time.Time, 
 	}
 	parents := true
 	for _, table := range self.Tables {
-		if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table))) {
+		if self.AnalyzeAdmission != nil {
+			if reason := self.AnalyzeAdmission(ctx, table, false); reason != "" {
+				glog.Infof("[partitions]%s: the analyze of %s waits for a later run: %s\n", self.Name, table, reason)
+				parents = false
+				continue
+			}
+		}
+		if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table)), self.AnalyzeLockTimeout) {
 			analyzed = append(analyzed, table)
 		} else {
 			parents = false
@@ -1304,7 +1323,13 @@ func (self *PartitionFamily) AnalyzeClosedLeaves(ctx context.Context, now time.T
 			if lastAnalyze != nil && !lastAnalyze.Before(settled) {
 				continue
 			}
-			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name))) {
+			if self.AnalyzeAdmission != nil {
+				if reason := self.AnalyzeAdmission(ctx, leaf.Name, true); reason != "" {
+					glog.Infof("[partitions]%s: the analyze of %s waits for a later run: %s\n", self.Name, leaf.Name, reason)
+					continue
+				}
+			}
+			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout) {
 				analyzed = append(analyzed, leaf.Name)
 			}
 		}
