@@ -25,6 +25,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -459,6 +460,60 @@ func TestMonitorFileClusterUserReadsNoObject(t *testing.T) {
 		_, err = cluster.PutIfNoneMatch(ctx, "monitor/_", []byte("synthetic"), nil)
 		requireFileClusterAccessDenied(t, "monitor PUT on "+clusterId, err)
 	}
+}
+
+// sockets reads rev/ on the first cluster and nothing else (QD-1029): its GET of a rev/ object answers, and of
+// one not there finds none, while a PUT of rev/, a GET of proj/ or repo/, a LIST and a DELETE are refused, and
+// the segment bucket too.
+func TestSocketsFileClusterUserReadsRevAlone(t *testing.T) {
+	ctx := t.Context()
+	admin, meta, segment, root := fileClusterPolicyStack(t)
+	socketsMeta := admin.makeBlockUser(t, "sockets", meta, nil)
+	clusters := fileClusterPolicyClusters(t, socketsMeta)
+	if !clusters.Ready() {
+		t.Fatal("sockets' cluster is not ready: its user cannot read admin info or the sentinel")
+	}
+	cluster, err := clusters.FirstCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	putFileClusterPolicyObject(t, root, meta.Bucket, "rev/n1/client/c1/_")
+	_, err = cluster.Get(ctx, "rev/n1/client/c1/_")
+	requireFileClusterAllowed(t, "sockets GET rev/", err)
+	if _, err := cluster.Get(ctx, "rev/n1/client/c2/_"); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Errorf("sockets GET of a rev/ object not there: %v, want not found", err)
+	}
+
+	_, err = cluster.PutIfNoneMatch(ctx, "rev/n1/client/c3/_", []byte("synthetic"), nil)
+	requireFileClusterAccessDenied(t, "sockets PUT rev/", err)
+	if fileClusterPolicyObjectExists(t, root, meta.Bucket, "rev/n1/client/c3/_") {
+		t.Error("sockets' refused PUT of rev/ wrote it")
+	}
+	for _, key := range []string{"proj/n1/00000000000000000001/_", "repo/r1"} {
+		putFileClusterPolicyObject(t, root, meta.Bucket, key)
+		_, err = cluster.Get(ctx, key)
+		requireFileClusterAccessDenied(t, "sockets GET "+key, err)
+	}
+	_, _, err = cluster.List(ctx, "rev/", "", 10)
+	requireFileClusterAccessDenied(t, "sockets LIST rev/", err)
+	err = cluster.Delete(ctx, "rev/n1/client/c1/_")
+	requireFileClusterAccessDenied(t, "sockets DELETE rev/", err)
+	if !fileClusterPolicyObjectExists(t, root, meta.Bucket, "rev/n1/client/c1/_") {
+		t.Error("sockets' refused DELETE removed rev/")
+	}
+
+	// sockets' user, sent at the segment bucket, which it holds no user on in production
+	stray := *socketsMeta
+	stray.ClusterId = segment.ClusterId
+	stray.Bucket = segment.Bucket
+	stray.Kind = FileClusterKindMetadata
+	strayClusters := fileClusterPolicyClusters(t, &stray)
+	strayCluster, err := strayClusters.FirstCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = strayCluster.Get(ctx, fileClusterSentinelKey)
+	requireFileClusterAccessDenied(t, "sockets GET of the segment bucket", err)
 }
 
 // taskworker holds every cluster whole, the segment bucket's DELETE included.
