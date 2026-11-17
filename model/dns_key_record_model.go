@@ -8,14 +8,29 @@ package model
 // _25._tcp.<host> is rebuilt from every published key of the host, 3 1 1 a key, TTL dns.yml's tlsa, in one write
 // through §12.6's path with an admin event, whose post hints the network's sidecars (DnsWritePost).
 //
+// A rotation retires its old key through the same write (§15.5; owner decision 443): once its new key serves, the
+// receiver posts that key again, a repeat, with the rotated-out key's SPKI hash in retire_spki_sha256, and the write
+// retires, in its own transaction, the caller's own published mail_host_key rows of the host the list names before it
+// rebuilds the RRset, so a key rotated on suspicion leaves TLSA as soon as its successor serves. A hash naming no
+// published key of the caller's at the host matches no row and is ignored: another receiver's key, or one of another
+// host, is never retired. A post with no list retires nothing.
+//
 // A removal ends a receiver's TLSA in the deactivation's own transaction (I-15): the "dns_tlsa" removal effect retires
 // the receiver's keys and rebuilds every TLSA RRset its network's zones hold from the keys still published, so it
 // is idempotent, whichever of MAIL's effect and this one runs first, and §19.10's replay of a removal after the dump
 // commits it again above restore_serial as an ordinary write, or writes nothing.
 //
+// A write and a removal of the same receiver serialize on the receiver's lock (lockMailHostReceiverInTx), which each
+// takes before it reads the receiver's identity or touches its keys: a write that waited out a removal reads the
+// identity the removal revoked and is refused, and a removal that waited out a write retires the key the write
+// published. Without it a write that read the identity before a removal committed could publish the removed
+// receiver's key after it, and a write locking two of a receiver's rows could deadlock a removal locking them in
+// another order.
+//
 // Nothing here reads or writes unless the binary links MG2, MG5 and MG7.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -38,6 +53,10 @@ const AdminEventActionDnsKeyRecord = "dns.key_record"
 
 // The name the TLSA removal effect registers under (§7.10).
 const RemovalEffectDnsTlsa = "dns_tlsa"
+
+// The barrier a key-record write passes inside its transaction just before it takes the receiver's lock (§22.8),
+// called with the root like the write path's: a schedule holds it to commit a removal of the receiver first.
+const DnsKeyRecordBarrierLock = "model.dns_key_record.lock"
 
 // One key-record write: the receiver the dns block authenticated and found holding the listen, and its body.
 type DnsKeyRecord struct {
@@ -83,6 +102,16 @@ func PublishDnsKeyRecord(ctx context.Context, record *DnsKeyRecord) (*sidecar.Dn
 		return nil, dnsRecordsInvalid("the key is not a P-256 SubjectPublicKeyInfo")
 	}
 	spkiSha256 := sha256.Sum256(request.Spki)
+	// the keys to retire: each a SHA-256, and never the key this write publishes, which the caller would then hold
+	// with no TLSA; the body's bound bounds the list, and a hash listed twice matches its row once
+	for _, retireSpkiSha256 := range request.RetireSpkiSha256s {
+		switch {
+		case len(retireSpkiSha256) != sha256.Size:
+			return nil, dnsRecordsInvalid("a key to retire is not named by its SPKI's SHA-256")
+		case bytes.Equal(retireSpkiSha256, spkiSha256[:]):
+			return nil, dnsRecordsInvalid("the write retires the key it publishes")
+		}
+	}
 	root := dnsLabelRoot(record.Root)
 	var answer *sidecar.DnsKeyRecordAnswer
 	var returnErr error
@@ -109,6 +138,10 @@ func publishDnsKeyRecordInTx(ctx context.Context, tx server.PgTx, root string, s
 			return nil, dnsRecordsRefused("%s is no Team scope of the network", scope)
 		}
 	}
+	// the receiver's lock before its identity is read (the file header): a removal that committed while this write
+	// waited is seen below, and one that comes later waits for this write, then retires what it published
+	dnsWriteBarrier(DnsKeyRecordBarrierLock, root)
+	lockMailHostReceiverInTx(ctx, tx, networkId, record.ReceiverSidecarId)
 	identityPublicKey := getActiveSidecarIdentityKeyInTx(ctx, tx, networkId, record.ReceiverSidecarId)
 	if identityPublicKey == nil {
 		return nil, dnsRecordsRefused("the caller is no active sidecar of the network")
@@ -145,6 +178,9 @@ func publishDnsKeyRecordInTx(ctx context.Context, tx server.PgTx, root string, s
 	}); err != nil {
 		return nil, err
 	}
+	if 0 < len(record.Request.RetireSpkiSha256s) {
+		retireMailHostReceiverKeysInTx(ctx, tx, networkId, record.Request.Host, record.ReceiverSidecarId, record.Request.RetireSpkiSha256s)
+	}
 	receiverId := record.ReceiverSidecarId
 	result, err := DnsPutTlsaInTx(ctx, tx, networkId, root, record.Request.Host, &AdminEvent{
 		NetworkId:  networkId,
@@ -163,12 +199,52 @@ func publishDnsKeyRecordInTx(ctx context.Context, tx server.PgTx, root string, s
 		version = result.Serial
 	}
 	if version == 0 {
-		// nothing changed: the key was published already, as after a restore's re-registration (§19.10)
+		// nothing changed: the key was published already, as after a restore's re-registration (§19.10), and nothing
+		// listed was the caller's published key, as at a repeat of a retirement whose answer was lost
 		if version, err = getDnsZoneVersionOrZeroInTx(ctx, tx, root, networkId); err != nil {
 			return nil, err
 		}
 	}
 	return &sidecar.DnsKeyRecordAnswer{Version: version}, nil
+}
+
+// Takes the receiver's lock for the rest of the caller's transaction (the file header): a key-record write takes it
+// before it reads the receiver's identity, and the removal effect before it retires the receiver's keys. A
+// transaction holding it already takes it again at once.
+func lockMailHostReceiverInTx(ctx context.Context, tx server.PgTx, networkId server.Id, receiverSidecarId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('mail_host_key:' || $1::uuid::text || ':' || $2::uuid::text, 0))`,
+		networkId,
+		receiverSidecarId,
+	))
+}
+
+// Retires the receiver's published keys of host whose SPKI SHA-256 spkiSha256s names, in the caller's transaction
+// under the receiver's lock, retire_time now: a rotation's retirement (owner decision 443). A hash naming no published
+// key of this receiver's at host matches no row, so another receiver's key or a key of another host stays as it is,
+// and a key retired already keeps its retire_time.
+func retireMailHostReceiverKeysInTx(ctx context.Context, tx server.PgTx, networkId server.Id, host string, receiverSidecarId server.Id, spkiSha256s [][]byte) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE mail_host_key
+			SET state = $5, retire_time = $6
+			WHERE
+				network_id = $1 AND
+				host = $2 AND
+				receiver_sidecar_id = $3 AND
+				spki_sha256 = ANY($4::bytea[]) AND
+				state = $7
+		`,
+		networkId,
+		host,
+		receiverSidecarId,
+		spkiSha256s,
+		string(MailHostKeyStateRetired),
+		server.NowUtc(),
+		string(MailHostKeyStatePublished),
+	))
 }
 
 // The identity key of the network's sidecar while it is active, nil otherwise.
@@ -288,16 +364,20 @@ func dnsTlsaValuesEqual(first []string, second []string) bool {
 }
 
 // Retires every key of the network's receiver and rebuilds each TLSA RRset the network's zones hold from the keys
-// still published, in the caller's transaction: the "dns_tlsa" removal effect's work for one receiver (I-15). A
-// second run writes nothing.
+// still published, in the caller's transaction: the "dns_tlsa" removal effect's work for one receiver (I-15). It
+// takes the receiver's lock first, so a key-record write under way finishes before the keys are read, and the zones'
+// locks root by root in name order. A second run writes nothing.
 func DnsDeleteTlsaInTx(ctx context.Context, tx server.PgTx, networkId server.Id, receiverSidecarId server.Id) error {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() || !server.SidecarMg7Linked() {
 		return nil
 	}
+	lockMailHostReceiverInTx(ctx, tx, networkId, receiverSidecarId)
 	if _, err := RetireMailHostKeysInTx(ctx, tx, networkId, receiverSidecarId); err != nil {
 		return err
 	}
-	for _, root := range getNetworkDnsRootsInTx(ctx, tx, networkId) {
+	roots := getNetworkDnsRootsInTx(ctx, tx, networkId)
+	slices.Sort(roots)
+	for _, root := range roots {
 		apexes := getDnsZoneApexesInTx(ctx, tx, root, networkId)
 		if len(apexes) == 0 {
 			continue
@@ -322,9 +402,24 @@ func DnsDeleteTlsaInTx(ctx context.Context, tx server.PgTx, networkId server.Id,
 	return nil
 }
 
-// The removal effect: each removed sidecar's TLSA (I-15).
+// The removal effect: each removed sidecar's TLSA (I-15). Every removed receiver's lock comes first, in id order, so a
+// removal of several never holds a zone's lock while it waits on a receiver's write that needs that zone, and two
+// removals take their receivers' locks in one order.
 func applyDnsTlsaRemovalEffectInTx(ctx context.Context, tx server.PgTx, removal *Removal) error {
-	for _, subject := range removal.SubjectsOf(sidecar.RevocationKindSidecar) {
+	subjects := removal.SubjectsOf(sidecar.RevocationKindSidecar)
+	if server.SidecarMg2Linked() && server.SidecarMg5Linked() && server.SidecarMg7Linked() {
+		ordered := slices.Clone(subjects)
+		slices.SortFunc(ordered, func(a *RemovalSubject, b *RemovalSubject) int {
+			if order := a.NetworkId.Cmp(b.NetworkId); order != 0 {
+				return order
+			}
+			return a.SubjectId.Cmp(b.SubjectId)
+		})
+		for _, subject := range ordered {
+			lockMailHostReceiverInTx(ctx, tx, subject.NetworkId, subject.SubjectId)
+		}
+	}
+	for _, subject := range subjects {
 		if err := DnsDeleteTlsaInTx(ctx, tx, subject.NetworkId, subject.SubjectId); err != nil {
 			return err
 		}
