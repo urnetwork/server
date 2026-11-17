@@ -611,7 +611,7 @@
       "id": 20,
       "type": "stat",
       "title": "cohort census",
-      "description": "Providers the deployment has ever admitted to the verify cohort, at the last rotation: the validator's census. Unclaimed providers never grow it past the lifetime limit (2,000); claimed fleets' members may grow it to the census limit (3,072, three quarters of the validator's 4,096).",
+      "description": "Providers the verify cohort counts: in the legacy census every provider it ever admitted, at the last rotation (unclaimed providers never past the lifetime limit, 2,000; claimed fleets' members up to the census limit, 3,072); in the rolling census (sn VERIFY-COHORT-V2.md) the members not yet expired, at most the lifetime limit.",
       "gridPos": {
         "h": 5,
         "w": 6,
@@ -885,6 +885,260 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "cohort rolling census",
+      "description": "1 while the verify cohort runs the rolling census (sn VERIFY-COHORT-V2.md §2.4): the validator's head summaries carry its census and it has folded a settlement window with the retirement rule since the first of them. 0 while it runs the legacy lifetime census.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_rolling_mode{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "rolling",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "stat",
+      "title": "cohort rolling members",
+      "description": "Members the verify cohort counts against its limit, and the limit (cohort_lifetime_limit, 2,000). In the rolling census a member stops counting two validator folds after its last assignment.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_rolling_members{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "members",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_verify_cohort_rolling_limit{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "limit",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "validator census",
+      "description": "The validator's measurement census for this operator from its latest head summary (census_providers): the set it bounds by its signed max_providers, 4,096. New admissions stop at 3,584 counting the admissions since its last two reports. -1 while no fresh summary reports one.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_validator_census{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "census",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "validator census age",
+      "description": "Age of the head summary the validator census was read from. The validator reports once a tempo, about every 72 minutes; past 3 hours the report is stale, and the rolling census frees nothing and admits no new provider.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 57
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_verify_cohort_validator_census_age_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "cohort admissions by tier",
+      "description": "Next hops admitted to this epoch's verify cohort per interval, by the source they were drawn from: claimed (claimed fleets' members, tier A), ranked (one representative per unclaimed top-400 network, tier B, rolling census only), carried (members still counted) and sample (the uniform draw).",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tier) (increase(urnetwork_verify_cohort_admissions_total{env=\"$env\",service=\"api\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{tier}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "cohort admission refusals",
+      "description": "Candidates the admission script refused per interval, by reason: epoch_full, rolling_full (the rolling census at its tier's bound, or its copy being restored), interlock (the validator's reported census plus recent admissions at 3,584, or its census unknown) and census_full (the legacy limits).",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(urnetwork_verify_cohort_admission_refusals_total{env=\"$env\",service=\"api\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "cohort expirations and ranked members",
+      "description": "Members the rolling census stopped counting per interval (the validator has folded a window with an assignment after their last one), and the representatives in the ranked set after the last board fold (tier B).",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 62
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_verify_cohort_expirations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "expired"
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_verify_cohort_ranked_members{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "ranked"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "claimed member coverage",
+      "description": "Of the eligible bound clients in the validator's last head summary, the share that served a verified trail hop that tempo (bound_clients_observed / bound_clients). A claimed fleet's prefixes count in a tempo only through members drawn in it; below 95% the cohort should draw claimed members first within each tempo.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 68
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(urnetwork_sn_head_summary_bound_client_coverage_ratio{env=\"$env\",service=\"api\",instance!=\"\"})",
+          "legendFormat": "coverage",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
         },
         "overrides": []
       }

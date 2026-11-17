@@ -1086,6 +1086,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{deletedNetworkMigrationContract},
 	[]snMainnetMigrationContract{appleSubscriptionMoveMigrationContract},
 	[]snMainnetMigrationContract{deletedNetworkBackfillMigrationContract},
+	// the verify cohort's rolling census: the validator's reported census on
+	// each head summary, each member's last epoch and when the rolling census
+	// started, versioned by its position
+	[]snMainnetMigrationContract{verifyCohortRollingMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

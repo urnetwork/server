@@ -319,7 +319,15 @@ func snClaimedFleets(ctx context.Context, deploymentKey model.StDeploymentKey, e
 // Refreshes what the claimed fleets at the current settlement epoch drive,
 // after each sync run: the dashboard counts, the verify cohort's priority
 // set of live claimed-fleet members, at most a per-fleet share of each, and
-// the cohort's stale rotation (LEADERTOP.md design question 6).
+// the cohort's census (LEADERTOP.md design question 6; sn VERIFY-COHORT-V2.md):
+//   - the validator's report from its head summaries, and the rolling census's
+//     state that the admission script reads, with the headroom held for
+//     claimed members waiting now and for fleets bound from the next epoch;
+//   - in the rolling census, expiry of the members the validator no longer
+//     holds (model.ExpireVerifyCohort);
+//   - before it, the legacy census's stale rotation, exactly as before
+//     (model.RotateVerifyCohort). A database without the rolling census's
+//     migration runs the legacy census too.
 func refreshSnClaimedFleetsNow(ctx context.Context) {
 	server.HandleError(func() {
 		claimed, ok, err := SnClaimedFleetsNow(ctx)
@@ -351,16 +359,71 @@ func refreshSnClaimedFleetsNow(ctx context.Context) {
 			}
 			fleets = append(fleets, clientIds)
 		}
-		priority := model.SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, fleets, model.VerifyCohortPriorityPerFleet(settings))
+		perFleet := model.VerifyCohortPriorityPerFleet(settings)
+		priority := model.SetVerifyCohortPriority(ctx, settings.CohortDeploymentKey, fleets, perFleet)
 		snVerifyCohortPriorityMembers.Set(float64(priority))
-		// with the priority set fresh, rotate stale members out for the
-		// claimed members still waiting for room
-		if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored) {
-			glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d of %d before rotation and %d after, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active+rotation.Rotated, settings.CohortLifetimeLimit, rotation.Active, rotation.Restored)
+		// with the priority set fresh, the validator's report and the rolling
+		// state, then expiry or the legacy rotation
+		now := server.NowUtc()
+		upcoming := snUpcomingClaimedMembers(model.GetSnFleetBindingVersions(ctx, settings.CohortDeploymentKey), claimed.SettlementEpoch, perFleet)
+		state, readable := snRefreshVerifyCohortState(ctx, settings, upcoming, now)
+		switch {
+		case state != nil && state.Rolling:
+			if expiry := model.ExpireVerifyCohort(ctx, settings, state); expiry != nil && (0 < expiry.Expired || expiry.Restored) {
+				glog.Infof("[sn]verify cohort rolling census: %d members expired, %d counted of %d (validator at epoch %d, census %d known %t, headroom %d, restored %t)\n", expiry.Expired, expiry.Members, settings.CohortLifetimeLimit, state.ValidatorEpoch, state.Census, state.CensusKnown, state.Headroom, expiry.Restored)
+			}
+		case readable:
+			// rotate stale members out for the claimed members still waiting
+			// for room
+			if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored) {
+				glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d of %d before rotation and %d after, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active+rotation.Rotated, settings.CohortLifetimeLimit, rotation.Active, rotation.Restored)
+			}
 		}
 	}, func(err error) {
 		glog.Infof("[sn]claimed fleet refresh failed: %s\n", err)
 	})
+}
+
+// Reads the validator's report and refreshes the rolling census's state.
+// readable is false when the state could not be read this run, which changes
+// nothing; a database without the rolling census's migration reads as the
+// legacy census.
+func snRefreshVerifyCohortState(ctx context.Context, settings *model.VerifySettings, upcoming int, now time.Time) (state *model.VerifyCohortRollingState, readable bool) {
+	cfg := stConfig()
+	if cfg == nil || cfg.Netuid == 0 || uint64(^uint16(0)) < cfg.Netuid {
+		return nil, true
+	}
+	server.HandleError(func() {
+		report := model.GetVerifyCohortValidatorReport(ctx, uint16(cfg.Netuid), now)
+		state = model.RefreshVerifyCohortState(ctx, settings, report, upcoming, now)
+		readable = true
+	}, func(err error) {
+		if model.VerifyCohortRollingSchemaMissing(err) {
+			readable = true
+			return
+		}
+		glog.Infof("[sn]verify cohort rolling state unreadable; nothing changes this run: %s\n", err)
+	})
+	return
+}
+
+// The claimed members of fleets whose bindings start at the next settlement
+// epoch, at most perFleet of each: the room the rolling census holds for them
+// before their bindings go live (sn VERIFY-COHORT-V2.md §2.6, headroom H). A
+// fleet's UID can't be tested before its epoch, so each counts.
+func snUpcomingClaimedMembers(versions []*model.SnFleetBindingVersion, epoch uint64, perFleet int) int {
+	members := map[model.SnFleetKey]int{}
+	for _, version := range model.SnFleetBindingsAt(versions, epoch+1) {
+		if version.ValidFromEpoch != epoch+1 {
+			continue
+		}
+		members[model.SnFleetKey{FleetId: version.FleetId, Hotkey: version.Hotkey, Generation: version.Generation, Uid: version.Uid}] += 1
+	}
+	upcoming := 0
+	for _, count := range members {
+		upcoming += min(count, max(0, perFleet))
+	}
+	return upcoming
 }
 
 // RefreshSnClaimedFleetsNow is refreshSnClaimedFleetsNow for the taskworker.

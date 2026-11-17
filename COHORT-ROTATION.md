@@ -86,3 +86,41 @@ The lifetime set becomes the **active** set: the providers drawn ahead of new on
 - Without the census table, draws admit as before rotation; any other census read failure refuses new providers without failing the draw, and is not cached.
 
 The existing cohort tests pass unchanged.
+
+## Verify cohort v2: the rolling census
+
+**Status:** owner approval 2026-11-17 ~20:15Z ("Approve, ride 11-27"), design in sn `VERIFY-COHORT-V2.md` §2.4-2.6. Built on branch `feat/verify-cohort-v2-1117`; not merged or deployed.
+
+The census above never shrinks, because the validator never forgot a provider it scored. From `VERIFY-COHORT-V2.md` on, the validator drops at each settlement fold the carried quality of every provider with no assignment in the closing window, unless nobody had one. Its census during window v is then within the providers assigned in windows v-1 and v, and the server counts a member only until the validator has folded two windows after the member's last assignment (`model/verify_cohort_rolling.go`).
+
+**Two modes, one script.** The admission script (`model/verify_cohort_model.go`) reads the rolling state hash `{verify_cohort:<deployment>}state` itself, so the mode can't change between the read and the write. Without its `rolling` field it is exactly the legacy rule above, and the taskworker runs `RotateVerifyCohort` as before. Nothing changes until the validator reports its census.
+
+**Starting.** The validator's head summaries carry `census_providers` from `VERIFY-COHORT-V2.md` on (sn `docs/spec/head-summary-v2.md`), stored on `sn_head_summary`. The taskworker starts the rolling census once a summary carries a census and the validator has folded a settlement window since the first such summary: that fold used the retirement rule. It records the start once in `verify_cohort_state` (summaries are kept only 7 days) and from then on runs `ExpireVerifyCohort` instead of rotation.
+
+**Counting.** The census set holds the members still counted, mirrored in `verify_cohort_census` with each member's `last_epoch` (null for a legacy row).
+- A member expires once some server epoch w with `max(last+2, E0) <= w <= v*-1` had an assignment. v* is the validator's settlement epoch in its latest signed head summary, and E0 the first window it folded with the rule. Boundary skew puts a member in validator windows `last-1` to `last+1` at most, so `last+2` is the first window that can retire it; an epoch with no assignment may have been an empty validator window, which retires nobody, and never counts.
+- A legacy member (last assigned before the rolling census started) expires at the first fold with the rule, unless it was assigned since.
+- A stale report (over 3 hours old) or one without a census frees nothing and admits no new provider.
+- One script per batch removes the expired members and re-checks this epoch's and the next epoch's cohorts, so an admission racing the expiry is never lost. Postgres rows go after; the next run mirrors anything Postgres lacks.
+- A Redis that lost the census restores it from Postgres and counts every member as assigned that epoch, since its epoch sets are gone too.
+
+**Admitting.** Draws go claimed fleets' members (tier A, 7 a fleet as before), then one representative of each unclaimed network ranked in the board's top 400 in 3 of the last 4 folds, one per /29 or /48 prefix (tier B, `model/verify_cohort_ranked.go`, computed at each board fold), then carried members, then the uniform sample. A new member needs:
+- the census under the lifetime limit (2,000) for a claimed member, or under it less the headroom for any other tier. The headroom is the claimed members waiting now plus 7 × the fleets whose bindings start at the next epoch;
+- the validator's reported census plus the admissions since its last two reports under 3,584 (7/8 of its 4,096), never with the census unknown.
+
+**Durability and limits.** No new verify.yml key: the lifetime limit bounds the rolling census, and the 3,072 claimed census limit applies only to the legacy census. The validator holds at most two windows' members, each counted under 2,000 when admitted, so 4,000 < 4,096 even if it keeps one window more than the server counts (an empty-window edge).
+
+### Deploy
+
+1. Apply the migration: `sn_head_summary` gains `census_providers`, `bound_clients` and `bound_clients_observed`; `verify_cohort_census` gains `last_epoch`; `verify_cohort_state` is new. Additive, under a 2 s lock wait.
+2. Deploy every **api** and **alt**: they store the census from summaries and run the two-mode script. A summary with the new members is refused by an older api's decoder, so the operator goes before the validator.
+3. Deploy the **taskworker**: it reads the report, writes the state, and runs rotation or expiry. A database without the migration runs the legacy census.
+4. Deploy the validator with the retirement rule (sn). Its first summaries carry the census; after its first settlement fold the taskworker starts the rolling census on its own.
+
+Rollback: the taskworker first (expiry stops and the census is monotone again), then apis and alt. If the validator goes back to a build that keeps every prior, the interlock stops admissions as its reported census climbs.
+
+### Tests
+
+Pure (`model/verify_cohort_rolling_rule_test.go`, `model/verify_cohort_ranked_test.go`, `controller/verify_cohort_rolling_test.go`): the expiry horizon, exhaustively over boundary skew; when the rolling census starts; tier B's selection; the headroom from bindings; the summary's census and coverage.
+
+Test environment (`model/verify_cohort_rolling_test.go`): a full legacy census of idle members refuses a top-ranked network's representative until the rolling census starts, then frees the idle members, keeps the measured one and admits the representative (root cause); the interlock; a stale report; the headroom; an expiry racing a re-draw; a Redis restore. The existing cohort and rotation tests run unchanged.
