@@ -12,6 +12,11 @@
 // effective grants; its persistence, replica identity, access method and
 // tablespace; and its owned sequences. Whatever the swap cannot copy
 // faithfully is a refusal instead.
+//
+// Of a column's options, the swap copies and compares those a user sets
+// (tableSwapUserOptions). PostgreSQL keeps options of its own in attoptions
+// too, which every new relation, the twin included, gets fresh from the
+// server.
 package server
 
 import (
@@ -66,11 +71,41 @@ type tableSwapColumn struct {
 	compression string
 	collation   string
 	statistics  int
-	// sorted for comparison, and in the catalog's order
+	// attoptions as the catalog has them, PostgreSQL's internal options
+	// included: sorted for comparison, and in the catalog's order
 	options        []string
 	orderedOptions []string
 	comment        string
 	granted        bool
+}
+
+// The prefix PostgreSQL reserves for the options it keeps in attoptions for
+// itself. The pg_attribute documentation: "Can also contain some internal
+// options prefixed with pg_, which cannot be set via DDL. Currently the only
+// internal option is pg_attver." pg_attver came with 18.7 (and 17.12, 16.16,
+// 15.20 and 14.25, released 2026-11-12, CVE-2026-6460): the version of a
+// column in its relation's row type, the WAL insert position when the column
+// was created or its type last changed (src/backend/catalog/README.attver.md
+// in the PostgreSQL source). Composite datums of the row type carry it, and
+// are checked against it when read.
+//
+// The server stamps every new column with it, the twin's included, and drops
+// a value that ALTER COLUMN SET or RESET names. So a twin never carries its
+// table's versions, and needs none of them: they describe only the table's
+// own row type, and the twin's row type is its own.
+const tableSwapInternalOptionPrefix = "pg_"
+
+// The options a user set on a column (n_distinct, n_distinct_inherited),
+// which the swap copies to the twin and compares: options without
+// PostgreSQL's internal ones, in their order.
+func tableSwapUserOptions(options []string) []string {
+	userOptions := []string{}
+	for _, option := range options {
+		if !strings.HasPrefix(option, tableSwapInternalOptionPrefix) {
+			userOptions = append(userOptions, option)
+		}
+	}
+	return userOptions
 }
 
 type tableSwapConstraint struct {
@@ -424,8 +459,9 @@ func tableSwapQuotedColumns(columns []tableSwapColumn, stored bool) string {
 // The statements that create twin, without indexes, as the table: columns with
 // their defaults, generated expressions, storage, compression, collations,
 // NOT NULL and CHECK constraints and comments (LIKE), then what LIKE does not
-// copy: the storage settings, column statistics targets and options, the
-// owner, the grants and the table's comment.
+// copy: the storage settings, column statistics targets and user options, the
+// owner, the grants and the table's comment. The server gives the twin's
+// columns their internal options itself.
 func (self *tableSwapShape) twinSql(twin string) []string {
 	quotedTwin := "public." + quoteIdentifier(twin)
 	statements := []string{
@@ -448,8 +484,8 @@ func (self *tableSwapShape) twinSql(twin string) []string {
 		if 0 <= column.statistics {
 			statements = append(statements, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET STATISTICS %d", quotedTwin, quoteIdentifier(column.name), column.statistics))
 		}
-		if 0 < len(column.orderedOptions) {
-			statements = append(statements, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET (%s)", quotedTwin, quoteIdentifier(column.name), strings.Join(column.orderedOptions, ", ")))
+		if options := tableSwapUserOptions(column.orderedOptions); 0 < len(options) {
+			statements = append(statements, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET (%s)", quotedTwin, quoteIdentifier(column.name), strings.Join(options, ", ")))
 		}
 	}
 	statements = append(statements, fmt.Sprintf("ALTER TABLE %s OWNER TO %s", quotedTwin, quoteIdentifier(self.owner)))
@@ -536,15 +572,16 @@ $table_swap$`,
 }
 
 // The canonical description of public.<relation> as one md5, read by the
-// database: its storage, owner, grants and comment, its columns, its CHECK and
-// NOT NULL constraints, its indexes and their constraints, and the counts of
-// what the swap refuses (triggers, rules, policies, publications, foreign
-// keys, inheritance, extended statistics, dependent views and functions, and
-// users of its row type). Neither the relation's name nor any oid enters it,
-// and an index's name enters with indexSuffix removed, so a twin whose
-// indexes carry the suffix describes the same as its table. The swap compares
-// the table's under its lock with the one the rehearsal read, and the twin's
-// with the table's.
+// database: its storage, owner, grants and comment, its columns with their
+// user options (tableSwapUserOptions), its CHECK and NOT NULL constraints, its
+// indexes and their constraints, and the counts of what the swap refuses
+// (triggers, rules, policies, publications, foreign keys, inheritance,
+// extended statistics, dependent views and functions, and users of its row
+// type). Neither the relation's name, any oid nor PostgreSQL's internal
+// column options enter it, and an index's name enters with indexSuffix
+// removed, so a twin whose indexes carry the suffix describes the same as its
+// table. The swap compares the table's under its lock with the one the
+// rehearsal read, and the twin's with the table's.
 func tableSwapFingerprintSql(relation string, indexSuffix string) string {
 	regclass := tableSwapLiteral("public."+quoteIdentifier(relation)) + "::regclass"
 	indexName := "ic.relname::text"
@@ -566,7 +603,7 @@ func tableSwapFingerprintSql(relation string, indexSuffix string) string {
 	(SELECT string_agg(concat_ws('|', a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, a.attgenerated, a.attidentity,
 		coalesce(pg_get_expr(d.adbin, d.adrelid), ''), a.attstorage, a.attcompression,
 		coalesce(column_collation.collname, ''), coalesce(a.attstattarget::integer, -1),
-		coalesce((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(coalesce(a.attoptions, ARRAY[]::text[])) o), ''),
+		coalesce((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(coalesce(a.attoptions, ARRAY[]::text[])) o WHERE NOT starts_with(o, %[3]s)), ''),
 		coalesce(col_description(a.attrelid, a.attnum), ''), a.attacl IS NULL), E'\n' ORDER BY a.attnum)
 	 FROM pg_attribute a
 	 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
@@ -598,7 +635,7 @@ func tableSwapFingerprintSql(relation string, indexSuffix string) string {
 		(SELECT count(*) FROM pg_depend
 			WHERE refclassid = 'pg_type'::regclass AND deptype = 'n'
 				AND refobjid = (SELECT reltype FROM pg_class WHERE oid = %[1]s)))))))`,
-		regclass, indexName)
+		regclass, indexName, tableSwapLiteral(tableSwapInternalOptionPrefix))
 }
 
 // The statements that build the table's indexes on target under name(index):
@@ -645,15 +682,16 @@ func (self *tableSwapShape) dropIndexSql() []string {
 }
 
 // How target differs from the table, with the table's index named
-// indexName(index) on target. None means target is the table under other
-// names.
+// indexName(index) on target, each difference naming which relation holds
+// which value. None means target is the table under other names. Columns
+// compare by their user options (tableSwapUserOptions).
 func (self *tableSwapShape) differences(target *tableSwapShape, indexName func(string) string) (differences []string) {
 	if target == nil {
 		return []string{"the target does not exist"}
 	}
 	differ := func(what string, expected any, actual any) {
 		if fmt.Sprint(expected) != fmt.Sprint(actual) {
-			differences = append(differences, fmt.Sprintf("%s: %v, not %v", what, actual, expected))
+			differences = append(differences, fmt.Sprintf("%s: %s has %v, %s has %v", what, target.name, actual, self.name, expected))
 		}
 	}
 	differ("kind", self.kind, target.kind)
@@ -667,16 +705,17 @@ func (self *tableSwapShape) differences(target *tableSwapShape, indexName func(s
 	differ("toast storage settings", self.toastReloptions, target.toastReloptions)
 	differ("comment", self.comment, target.comment)
 	if len(self.columns) != len(target.columns) {
-		differences = append(differences, fmt.Sprintf("%d columns, not %d", len(target.columns), len(self.columns)))
+		differences = append(differences, fmt.Sprintf("%s has %d columns, %s has %d", target.name, len(target.columns), self.name, len(self.columns)))
 	} else {
 		for i, column := range self.columns {
 			expected, actual := column, target.columns[i]
+			expected.options, actual.options = tableSwapUserOptions(expected.options), tableSwapUserOptions(actual.options)
 			expected.orderedOptions, actual.orderedOptions = nil, nil
 			differ(fmt.Sprintf("column %d", i+1), fmt.Sprintf("%+v", expected), fmt.Sprintf("%+v", actual))
 		}
 	}
 	if len(self.constraints) != len(target.constraints) {
-		differences = append(differences, fmt.Sprintf("constraints %+v, not %+v", target.constraints, self.constraints))
+		differences = append(differences, fmt.Sprintf("constraints: %s has %+v, %s has %+v", target.name, target.constraints, self.name, self.constraints))
 	} else {
 		for i, constraint := range self.constraints {
 			differ(fmt.Sprintf("constraint %s", constraint.name), fmt.Sprintf("%+v", constraint), fmt.Sprintf("%+v", target.constraints[i]))
