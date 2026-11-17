@@ -124,12 +124,30 @@ type CloseStrandedGrantContractsResult struct {
 // unsettled escrow through the unsettled-escrow index, before the payers are
 // ordered: ordered by network_id alone, PostgreSQL could walk a network index
 // across every grant until a page of payers matched.
-const strandedGrantPayersSql = `WITH stranded AS MATERIALIZED (
+//
+// An escrow is published only while its grant is current
+// (redisGrantSelectedCurrent and the legacy selection), so its contract was
+// created inside the grant: its id is at least the floor of the grant's start
+// less the margin (ContractIdCreatedFromSql; start_time holds UTC, which the
+// floor reads as UTC), and it is inside the weeks that hold the window's end
+// plus the margin, rendered as a literal (strandedGrantEscrowWeeks). Each probe
+// reads that range of the grant's balance in the index: on partitioned
+// contract tables, the partitions of the grant's lifetime, where each probe
+// read every partition before (C1 readiness, 2026-11-17).
+var strandedGrantPayersSql = `WITH stranded AS MATERIALIZED (
 		SELECT b.network_id FROM transfer_balance b
 		WHERE b.end_time > $1 AND b.end_time <= $2
-			AND EXISTS (SELECT 1 FROM transfer_escrow e WHERE e.balance_id = b.balance_id AND e.settled = false)
+			AND EXISTS (SELECT 1 FROM transfer_escrow e WHERE e.balance_id = b.balance_id AND e.settled = false
+				AND e.contract_id >= ` + ContractIdCreatedFromSql("b.start_time") + ` AND e.contract_id < ` + contractWeeksUpperSql + `)
 	)
 	SELECT DISTINCT network_id FROM stranded WHERE network_id > $3 ORDER BY network_id LIMIT $4`
+
+// The weeks that hold every contract id of an escrow on a grant that ended by
+// endedBefore: the grant was current when the escrow was published, and a
+// contract id is within the margin of its creation time.
+func strandedGrantEscrowWeeks(endedBefore time.Time) contractWeeks {
+	return contractWeeksHolding(endedBefore, endedBefore.Add(ContractIdCreateTimeMargin))
+}
 
 // The payers, after afterNetworkId in network order and at most limit, of the
 // grants that ended after endedAfter up to endedBefore and still hold an
@@ -141,7 +159,8 @@ func ReadStrandedGrantPayers(ctx context.Context, endedAfter time.Time, endedBef
 	}
 	server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, err := conn.Query(ctx, strandedGrantPayersSql, endedAfter.UTC(), endedBefore.UTC(), afterNetworkId, limit)
+			rows, err := conn.Query(ctx, strandedGrantEscrowWeeks(endedBefore).render(strandedGrantPayersSql),
+				endedAfter.UTC(), endedBefore.UTC(), afterNetworkId, limit)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var payerNetworkId server.Id

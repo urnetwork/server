@@ -241,36 +241,48 @@ func queueClientRemovedClose(clientId server.Id) {
 	}
 }
 
+// The removed client $1's open contracts, at most $2 in each direction, each
+// with its counterparty. Each arm is a range of its endpoint's unresolved pair
+// index bounded as every hot read of unexpired contracts is
+// (unexpiredContractIdBoundSql), so on partitioned contract tables each reads
+// only the partitions of its weeks. An open contract older than the bound is
+// past its deadline, and closing it belongs to the force-close sweep, as when a
+// full queue drops this read. A counterparty with a live sequence with the
+// client holds an open contract inside the bound, so it is still asked to
+// close every sequence with the client (C1 readiness, 2026-11-17).
+var removedClientOpenContractsSql = `
+	(
+		SELECT contract_id, destination_id
+		FROM transfer_contract
+		WHERE
+			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			` + unexpiredContractIdBoundSql("contract_id") + ` AND
+			source_id = $1 AND
+			destination_id IS NOT NULL
+		LIMIT $2
+	)
+	UNION ALL
+	(
+		SELECT contract_id, source_id
+		FROM transfer_contract
+		WHERE
+			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+			` + unexpiredContractIdBoundSql("contract_id") + ` AND
+			destination_id = $1 AND
+			source_id IS NOT NULL
+		LIMIT $2
+	)
+`
+
 // Asks each counterparty of the removed client's open contracts to close
 // them, and every sequence with the client. Reads at most
 // `clientRemovedOpenContractLimit` contracts in each direction.
 func RequestRemovedClientContractCloses(ctx context.Context, clientId server.Id) {
 	peerContractIds := map[server.Id][]server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
-		// each arm is a range of its endpoint's unresolved pair index
 		result, err := conn.Query(
 			ctx,
-			`
-				(
-					SELECT contract_id, destination_id
-					FROM transfer_contract
-					WHERE
-						(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-						source_id = $1 AND
-						destination_id IS NOT NULL
-					LIMIT $2
-				)
-				UNION ALL
-				(
-					SELECT contract_id, source_id
-					FROM transfer_contract
-					WHERE
-						(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-						destination_id = $1 AND
-						source_id IS NOT NULL
-					LIMIT $2
-				)
-			`,
+			unexpiredContractWeeksAt(server.NowUtc()).render(removedClientOpenContractsSql),
 			clientId,
 			clientRemovedOpenContractLimit,
 		)
