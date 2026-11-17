@@ -2,8 +2,11 @@ package model
 
 import (
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server"
 )
 
 // Tests of the drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, K2,
@@ -18,6 +21,8 @@ func TestLagDriftCalibrationDefaults(t *testing.T) {
 	connect.AssertEqual(t, calibration.Sigma0Ms, 1.0)
 	connect.AssertEqual(t, calibration.RelayThresholdMs, 80.0)
 	connect.AssertEqual(t, calibration.Calibrated(), false)
+	connect.AssertEqual(t, calibration.CalibrationId, (*server.Id)(nil))
+	connect.AssertEqual(t, calibration.CalibratedAt, (*time.Time)(nil))
 	for _, continentCode := range append([]string{""}, ContinentCodes...) {
 		for _, networkType := range append([]string{""}, LagDriftNetworkTypes...) {
 			connect.AssertEqual(t, calibration.RelayThresholdMsFor(continentCode, networkType), 80.0)

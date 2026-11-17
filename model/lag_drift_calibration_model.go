@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // The drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, K2, Q12).
@@ -145,6 +147,9 @@ type LagDriftCalibration struct {
 	// every type: only where the calibration had enough tracks. Empty for the
 	// defaults
 	RelayThresholdsMs map[string]map[string]float64
+	// the calibration these are, for a verdict to record what it was judged
+	// with; nil for the defaults
+	CalibrationId *server.Id
 	// when the calibration ran; nil for the defaults
 	CalibratedAt *time.Time
 }
@@ -161,7 +166,7 @@ func DefaultLagDriftCalibration() *LagDriftCalibration {
 
 // Whether the values are a calibration's rather than the defaults.
 func (self *LagDriftCalibration) Calibrated() bool {
-	return self.CalibratedAt != nil
+	return self.CalibrationId != nil
 }
 
 // RelayThresholdMsFor is the relay threshold in ms for a visitor on a
