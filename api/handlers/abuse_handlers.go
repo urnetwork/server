@@ -13,12 +13,15 @@ package handlers
 // Its one key is a trusted flagger's, in X-UR-Flagger-Key (ABUSE-M8-01, QD-111): a key whose digest matches an entry
 // of vault's abuse-flaggers.yml under abuse.yml's list sets class trusted_flagger, so a URL the report names takes the
 // machine's host kill; a wrong or absent key is a plain report, and the answer says neither.
-// Each URL and each header block is its own report, since each names its own host or sender. A report counts
-// against its caller's keyed /29 or /56 address hash (server.ClientIpHashForAddr), never against its address,
-// and an infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. The count is held in this process's
-// memory, under AbuseRouteSettings' window, until §2.8 names a Redis family for it
-// (questions/abuse-m5-11-report-limit-row.md): no client address and no counter leaves the process, and nothing
-// here logs an address (R-ABUSE-6).
+// Each URL and each header block is its own report, since each names its own host or sender. A request counts once
+// against its caller's keyed /29 or /56 address hash (server.ClientIpHashForAddr, peppered), never against its
+// address, however many reports it holds (questions/abuse-report-limit-redis-count-unit.md asks whether each
+// report should count), and an infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. The count is
+// kept in Redis through server.CheckIpRateLimitAttempt, at abuse_report.{address_<hash>}.address, so the limit
+// holds across api processes (§2.8 api-14; owner decision 536, QD-895): the history holds an opaque id per
+// attempt, scored by when it leaves the window, and the key expires with AbuseRouteSettings' window. No address
+// reaches Redis, and nothing here logs one (R-ABUSE-6). A count Redis does not answer refuses the request as a
+// store that did not answer does, so no request goes uncounted.
 //
 // A barred case is absent from the cases route, its appeal answers exactly as an unknown id's, and status shows
 // only its standing (plan-ABUSE-small-readings #6). No read here touches a hold, so no field, status code, timing
@@ -62,15 +65,17 @@ type AbuseRouteSettings struct {
 	// The most bytes of one header block: §14.8's parse's own bound (smtpedgeservice's ReportHeaderByteCount,
 	// 64 KiB), past which it reads nothing.
 	ReportHeaderBlockMaxByteCount int
-	// One caller address hash's reports in ReportAddressLookback: 30 an hour, a person reporting what they found
-	// many times over, or an office behind one address. A refused report counts too, so a caller past the limit
-	// stays there until it stops. Non-positive limits nothing.
+	// One caller address hash's report requests in ReportAddressLookback: 30 an hour, a person reporting what they
+	// found many times over, or an office behind one address. A refused request counts too, so a caller past the
+	// limit stays there until it stops. Every api process shares the count through Redis, where a hash's history
+	// expires with the lookback. Non-positive limits nothing. A lookback under a millisecond cannot be kept, so
+	// with a positive limit every request is refused as one the count did not answer.
 	ReportAddressLimit    int
 	ReportAddressLookback time.Duration
-	// The most address hashes the in-process count holds: 100,000, a few megabytes. Past it the expired go first,
-	// then the longest held.
-	ReportAddressMaxCount int
 }
+
+// The prefix of the report count's Redis histories, abuse_report.{address_<hash>}.address (§2.8 api-14).
+const abuseReportRateLimitKeyPrefix = "abuse_report."
 
 // §21's bounds.
 func DefaultAbuseRouteSettings() *AbuseRouteSettings {
@@ -82,7 +87,6 @@ func DefaultAbuseRouteSettings() *AbuseRouteSettings {
 		ReportHeaderBlockMaxByteCount: smtpedgeservice.DefaultSmtpEdgeSettings().ReportHeaderByteCount,
 		ReportAddressLimit:            30,
 		ReportAddressLookback:         time.Hour,
-		ReportAddressMaxCount:         100 * 1000,
 	}
 }
 
@@ -137,7 +141,8 @@ type AbuseHandlersDeps struct {
 	Settings *AbuseRouteSettings
 }
 
-// The four routes, the file header's. Safe for concurrent use.
+// The four routes, the file header's. Safe for concurrent use. The report count is Redis's, so instances in one
+// process or many count each caller once.
 type AbuseHandlers struct {
 	now               func() time.Time
 	rateLimitExcluded func(addr netip.Addr) bool
@@ -146,7 +151,6 @@ type AbuseHandlers struct {
 	flaggerSettings   func() *model.AbuseFlaggerSettings
 	customerSettings  func() *model.AbuseCustomerSettings
 	settings          *AbuseRouteSettings
-	limiter           *abuseReportLimiter
 }
 
 // The routes on deps, nil taking api's own.
@@ -190,11 +194,10 @@ func NewAbuseHandlers(deps *AbuseHandlersDeps) *AbuseHandlers {
 	if self.settings == nil {
 		self.settings = DefaultAbuseRouteSettings()
 	}
-	self.limiter = newAbuseReportLimiter(self.settings)
 	return self
 }
 
-// api's routes, made on first use: its one report count lives here.
+// api's routes, made on first use.
 var defaultAbuseHandlers = sync.OnceValue(func() *AbuseHandlers {
 	return NewAbuseHandlers(nil)
 })
@@ -279,9 +282,9 @@ func (self *AbuseHandlers) abuseReportsOf(args *AbuseReportArgs, reporterClass m
 	return reports, nil
 }
 
-// Counts one report against the caller's keyed address hash, refusing past the limit. An infrastructure address
-// counts nothing, and a caller whose address cannot be read is not counted: refusing it would deny every caller
-// behind an unreadable proxy chain while teaching nothing.
+// Counts one request against the caller's keyed address hash in Redis, refusing past the limit. An infrastructure
+// address counts nothing and touches no store, and a caller whose address cannot be read is not counted: refusing
+// it would deny every caller behind an unreadable proxy chain while teaching nothing.
 func (self *AbuseHandlers) limitReport(clientSession *session.ClientSession) error {
 	if self.settings.ReportAddressLimit <= 0 {
 		return nil
@@ -304,7 +307,30 @@ func (self *AbuseHandlers) limitReport(clientSession *session.ClientSession) err
 	if self.rateLimitExcluded(addr) {
 		return nil
 	}
-	if !self.limiter.allow(server.ClientIpHashForAddr(addr), self.now()) {
+	// the history is the keyed hash's alone: the address leaves this function only as that hash
+	_, allowed, err := server.CheckIpRateLimitAttempt(
+		clientSession.Ctx,
+		server.NewStoredRateLimitClient(server.ClientIpHashForAddr(addr)),
+		"",
+		self.now(),
+		server.IpRateLimitAttemptSettings{
+			KeyPrefix:       abuseReportRateLimitKeyPrefix,
+			AddressLookback: self.settings.ReportAddressLookback,
+			// the history holds this attempt and refuses at its limit; with no identity scope there is no global
+			// history, though the settings still need its window and count
+			AddressLimit:   self.settings.ReportAddressLimit + 1,
+			GlobalLookback: self.settings.ReportAddressLookback,
+			GlobalLimit:    self.settings.ReportAddressLimit + 1,
+		},
+	)
+	if err != nil {
+		// a count not kept refuses the request rather than let it pass uncounted; the cause names no caller
+		if glog.V(1) {
+			glog.Infof("[abuse]a report's count was not kept, so it is refused: %s\n", err)
+		}
+		return errAbuseReportClosed
+	}
+	if !allowed {
 		return &abuseReportLimitError{retryAfterSeconds: int(self.settings.ReportAddressLookback / time.Second)}
 	}
 	return nil
@@ -410,60 +436,4 @@ func (self *AbuseHandlers) Status(w http.ResponseWriter, r *http.Request) {
 		return status, nil
 	}
 	router.WrapRequireAuth(router.PrivateErrors(impl), w, r)
-}
-
-// The report count's memory: each counted address hash's attempt times inside the lookback, newest last. Safe
-// for concurrent use; no I/O under the lock.
-type abuseReportLimiter struct {
-	settings *AbuseRouteSettings
-
-	stateLock               sync.Mutex
-	addressHashAttemptTimes map[[32]byte][]time.Time
-}
-
-func newAbuseReportLimiter(settings *AbuseRouteSettings) *abuseReportLimiter {
-	return &abuseReportLimiter{
-		settings:                settings,
-		addressHashAttemptTimes: map[[32]byte][]time.Time{},
-	}
-}
-
-// Counts one attempt of the address hash at now, and whether it is inside the limit. The attempt counts either
-// way, as server.CheckIpRateLimitAttempt's history does, held at the limit and one.
-func (self *abuseReportLimiter) allow(addressHash [32]byte, now time.Time) bool {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	since := now.Add(-self.settings.ReportAddressLookback)
-	live := func(attemptTimes []time.Time) []time.Time {
-		return slices.DeleteFunc(attemptTimes, func(attemptTime time.Time) bool {
-			return !since.Before(attemptTime)
-		})
-	}
-	attemptTimes, held := self.addressHashAttemptTimes[addressHash]
-	if !held && self.settings.ReportAddressMaxCount <= len(self.addressHashAttemptTimes) {
-		// the expired go first, then the hash whose newest attempt is oldest
-		var oldestHash [32]byte
-		var oldestTime time.Time
-		for heldHash, heldTimes := range self.addressHashAttemptTimes {
-			heldTimes = live(heldTimes)
-			if len(heldTimes) == 0 {
-				delete(self.addressHashAttemptTimes, heldHash)
-				continue
-			}
-			self.addressHashAttemptTimes[heldHash] = heldTimes
-			if newest := heldTimes[len(heldTimes)-1]; oldestTime.IsZero() || newest.Before(oldestTime) {
-				oldestHash = heldHash
-				oldestTime = newest
-			}
-		}
-		if self.settings.ReportAddressMaxCount <= len(self.addressHashAttemptTimes) {
-			delete(self.addressHashAttemptTimes, oldestHash)
-		}
-	}
-	attemptTimes = append(live(attemptTimes), now)
-	if keep := self.settings.ReportAddressLimit + 1; keep < len(attemptTimes) {
-		attemptTimes = slices.Delete(attemptTimes, 0, len(attemptTimes)-keep)
-	}
-	self.addressHashAttemptTimes[addressHash] = attemptTimes
-	return len(attemptTimes) <= self.settings.ReportAddressLimit
 }
