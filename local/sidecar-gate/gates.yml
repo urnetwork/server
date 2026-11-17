@@ -582,6 +582,10 @@ gates:
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M5:
+    - row: FS-25
+      case: dns-route
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs25DnsRouteOnT3]}
     - row: FS-34
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs34]}
@@ -811,6 +815,10 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs124Team]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs124TeamOnT3]}
+    - row: FS-126
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestP2pOffByDefault, TestP2pPairMovesAndBackUnderALiveRpcAndStream, TestP2pForgedControlIdStaysDroppedWithP2pOn]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs126OnT3]}
   M7-in:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
