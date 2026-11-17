@@ -186,6 +186,7 @@ type fullTunPath struct {
 	carrierMeasurementEnd             *perfvarCarrierBoundary
 	activePackFailureFloor            *perfvarPackFailureCounts
 	allowProviderDatagramPackFailures bool
+	allowDeviceNativeAckPressure      bool
 	carrierFencePackets               int
 	readinessAppFence                 atomic.Bool
 	readinessObservation              fullTunRouteReadinessObservation
@@ -802,14 +803,15 @@ func (self *fullTunPath) activePackFailureFloorSnapshot() (
 	*perfvarPackFailureCounts,
 	bool,
 	bool,
+	bool,
 ) {
 	self.measurementLock.Lock()
 	defer self.measurementLock.Unlock()
 	if self.activePackFailureFloor == nil {
-		return nil, false, self.allowProviderDatagramPackFailures
+		return nil, false, self.allowProviderDatagramPackFailures, self.allowDeviceNativeAckPressure
 	}
 	packFailureFloor := *self.activePackFailureFloor
-	return &packFailureFloor, true, self.allowProviderDatagramPackFailures
+	return &packFailureFloor, true, self.allowProviderDatagramPackFailures, self.allowDeviceNativeAckPressure
 }
 
 // A successful boundary accounts every failure through that exact carrier
@@ -838,6 +840,16 @@ func (self *fullTunPath) setAllowProviderDatagramPackFailures(allow bool) bool {
 	defer self.measurementLock.Unlock()
 	previous := self.allowProviderDatagramPackFailures
 	self.allowProviderDatagramPackFailures = allow
+	return previous
+}
+
+// Only the healthy native correctness fixture accepts proven ready-only
+// pure ACK refusals and detached ACK retries superseded before serialization.
+func (self *fullTunPath) setAllowDeviceNativeAckPressure(allow bool) bool {
+	self.measurementLock.Lock()
+	defer self.measurementLock.Unlock()
+	previous := self.allowDeviceNativeAckPressure
+	self.allowDeviceNativeAckPressure = allow
 	return previous
 }
 
@@ -5461,15 +5473,14 @@ func (self *fullTunPath) joinSourcePackCarrierBoundary(
 }
 
 // A measured interval rejects terminal failures newer than its exact
-// workload-local start unless the exact native input owner proves successful
-// final admission after an enqueue refusal, or the provider's enclosing TCP
-// state retains the exact bytes or can regenerate the control packet.
-// Setup candidate failures remain before the floor; UDP outside an explicitly
-// lossy probe, public callbacks, and unclassified failures remain fatal.
+// workload-local start. Exact native admission recovery, fixture-scoped ACK
+// pressure and retry supersession, and provider TCP recovery each have a
+// separate receipt. Setup candidate failures remain before the floor, and
+// provider UDP loss requires an explicitly lossy probe scope.
 func (self *fullTunPath) validateMeasuredPackFailures(
 	carrierEnd perfvarCarrierBoundary,
 ) error {
-	packFailureFloor, active, allowProviderDatagramFailures :=
+	packFailureFloor, active, allowProviderDatagramFailures, allowNativeAckPressure :=
 		self.activePackFailureFloorSnapshot()
 	if !active {
 		return nil
@@ -5477,6 +5488,8 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	packFailures := carrierEnd.packFailures
 	if packFailures.deviceFailureCount < packFailureFloor.deviceFailureCount ||
 		packFailures.deviceRecoveredAdmissionFailureCount < packFailureFloor.deviceRecoveredAdmissionFailureCount ||
+		packFailures.deviceNativeReadyPureAckRefusalCount < packFailureFloor.deviceNativeReadyPureAckRefusalCount ||
+		packFailures.deviceNativeAckRetrySupersededCount < packFailureFloor.deviceNativeAckRetrySupersededCount ||
 		packFailures.providerFailureCount < packFailureFloor.providerFailureCount ||
 		packFailures.providerRecoverableFailureCount <
 			packFailureFloor.providerRecoverableFailureCount ||
@@ -5494,10 +5507,21 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		packFailureFloor.deviceFailureCount
 	deviceRecoveredAdmissionFailureCount := packFailures.deviceRecoveredAdmissionFailureCount -
 		packFailureFloor.deviceRecoveredAdmissionFailureCount
+	deviceNativeReadyPureAckRefusalCount := packFailures.deviceNativeReadyPureAckRefusalCount -
+		packFailureFloor.deviceNativeReadyPureAckRefusalCount
+	deviceNativeAckRetrySupersededCount := packFailures.deviceNativeAckRetrySupersededCount -
+		packFailureFloor.deviceNativeAckRetrySupersededCount
 	if deviceRecoveredAdmissionFailureCount > deviceFailureCount {
 		return fmt.Errorf("device recovered admission failures exceeded all failures: start=%+v end=%+v", *packFailureFloor, packFailures)
 	}
 	deviceUnrecoveredFailureCount := deviceFailureCount - deviceRecoveredAdmissionFailureCount
+	if deviceNativeReadyPureAckRefusalCount > deviceUnrecoveredFailureCount ||
+		deviceNativeAckRetrySupersededCount > deviceUnrecoveredFailureCount-deviceNativeReadyPureAckRefusalCount {
+		return fmt.Errorf("device admission and ACK outcomes exceeded raw failures: start=%+v end=%+v", *packFailureFloor, packFailures)
+	}
+	if allowNativeAckPressure {
+		deviceUnrecoveredFailureCount -= deviceNativeReadyPureAckRefusalCount + deviceNativeAckRetrySupersededCount
+	}
 	providerFailureCount := packFailures.providerFailureCount -
 		packFailureFloor.providerFailureCount
 	providerRecoverableFailureCount :=
@@ -5534,6 +5558,11 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	providerUnrecoverableFailureCount :=
 		providerFailureCount - providerAllowedFailureCount
 	if deviceUnrecoveredFailureCount == 0 && providerUnrecoverableFailureCount == 0 {
+		if allowNativeAckPressure && self.t != nil {
+			self.t.Logf("[perfvar] measured Pack accounting raw-device=%d recovered-admission=%d native-ready-pure-ack-refusals=%d native-ack-retry-superseded=%d admitted-or-unknown-device-failures=%d raw-provider=%d provider-unrecoverable=%d start=%+v end=%+v",
+				deviceFailureCount, deviceRecoveredAdmissionFailureCount, deviceNativeReadyPureAckRefusalCount, deviceNativeAckRetrySupersededCount,
+				deviceUnrecoveredFailureCount, providerFailureCount, providerUnrecoverableFailureCount, *packFailureFloor, packFailures)
+		}
 		if !self.advanceActivePackFailureFloor(*packFailureFloor, packFailures) {
 			return fmt.Errorf(
 				"Pack failure floor changed while validating: start=%+v end=%+v",
@@ -5552,11 +5581,14 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		providerFailureSamples = self.providerPackSends.workloadFailureSnapshot()
 	}
 	return fmt.Errorf(
-		"measured Pack terminal failures device=%d provider=%d device-recovered-admission=%d device-unrecovered=%d provider-recoverable=%d provider-datagram=%d provider-overlap=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
+		"measured Pack terminal failures device=%d provider=%d device-recovered-admission=%d device-unrecovered=%d native-ready-pure-ack-refusals=%d native-ack-retry-superseded=%d allow-native-ack-pressure=%t provider-recoverable=%d provider-datagram=%d provider-overlap=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
 		deviceFailureCount,
 		providerFailureCount,
 		deviceRecoveredAdmissionFailureCount,
 		deviceUnrecoveredFailureCount,
+		deviceNativeReadyPureAckRefusalCount,
+		deviceNativeAckRetrySupersededCount,
+		allowNativeAckPressure,
 		providerRecoverableFailureCount,
 		providerDatagramFailureCount,
 		providerRecoverableDatagramFailureCount,

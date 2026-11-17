@@ -1205,6 +1205,8 @@ func subtractPlatformTransportReceiveStats(
 type perfvarPackFailureCounts struct {
 	deviceFailureCount                      uint64
 	deviceRecoveredAdmissionFailureCount    uint64
+	deviceNativeReadyPureAckRefusalCount    uint64
+	deviceNativeAckRetrySupersededCount     uint64
 	providerFailureCount                    uint64
 	providerRecoverableFailureCount         uint64
 	providerDatagramFailureCount            uint64
@@ -2122,6 +2124,10 @@ func snapshotPerfvarPackFailures(path *fullTunPath) perfvarPackFailureCounts {
 		counts.deviceFailureCount = path.devicePackSends.workloadFailures.Load()
 		counts.deviceRecoveredAdmissionFailureCount =
 			path.devicePackSends.workloadRecoveredAdmissionFailures.Load()
+		counts.deviceNativeReadyPureAckRefusalCount =
+			path.devicePackSends.workloadNativeReadyPureAckRefusals.Load()
+		counts.deviceNativeAckRetrySupersededCount =
+			path.devicePackSends.workloadNativeAckRetrySupersessions.Load()
 	}
 	if path.providerPackSends != nil {
 		counts.providerFailureCount = path.providerPackSends.workloadFailures.Load()
@@ -2241,6 +2247,9 @@ func beginPerfvarCarrierMeasurementNow(
 		deviceReceive:           snapshotPerfvarDeviceReceive(path),
 		providerReceive:         snapshotPerfvarClientReceive(path.providerClient),
 	}
+	if path.bridgeSends != nil {
+		boundary.bridgeBatches = path.bridgeSends.batchSnapshot()
+	}
 	if path.p2pNetwork != nil {
 		p2pNetwork, p2pOk := path.p2pNetwork.beginMeasurementSnapshot(path.ctx)
 		if !p2pOk {
@@ -2327,7 +2336,7 @@ func perfvarCarrierBaselinePassStable(
 			return false
 		}
 	}
-	if before.packFailures != after.packFailures ||
+	if before.packFailures != after.packFailures || before.bridgeBatches != after.bridgeBatches ||
 		!perfvarClientReceiveBoundaryEqual(before.deviceReceive, after.deviceReceive) ||
 		!perfvarClientReceiveBoundaryEqual(before.providerReceive, after.providerReceive) ||
 		before.devicePlatformReceive != after.devicePlatformReceive ||
@@ -2504,6 +2513,15 @@ func TestPerfvarCarrierBaselinePassStableCoversEveryRouteCarrier(t *testing.T) {
 		name   string
 		mutate func(*perfvarCarrierBoundary)
 	}{
+		{name: "bridge batch histogram", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.bridgeBatches.packetCountByBatchSize[1]++
+		}},
+		{name: "bridge application delay", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.bridgeBatches.delayDuration += time.Nanosecond
+		}},
+		{name: "bridge send duration", mutate: func(boundary *perfvarCarrierBoundary) {
+			boundary.bridgeBatches.sendDuration += time.Nanosecond
+		}},
 		{name: "device Pack failures", mutate: func(boundary *perfvarCarrierBoundary) {
 			boundary.packFailures.deviceFailureCount += 1
 		}},
@@ -2848,6 +2866,66 @@ func TestPerfvarCarrierGenerationStableRejectsPostBaselineSubmission(t *testing.
 	}
 	if perfvarCarrierGenerationStable(path, boundary) {
 		t.Fatal("post-baseline carrier submission preserved stale generation")
+	}
+}
+
+// The real start helper must baseline setup batches before interval subtraction.
+// Complete synchronous bridge calls supply the source join without a timer.
+func TestPerfvarCarrierMeasurementStartPreservesBridgeBaseline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	network := newSimulatedIPNetwork(ctx)
+	defer network.close()
+	tracker := newFullTunBridgeSendTracker()
+	path := &fullTunPath{
+		t: t, ctx: ctx, environment: &routeEnvironment{network: network},
+		deviceStats: &clientconnect.P2pDataPlaneStats{}, providerStats: &clientconnect.P2pDataPlaneStats{},
+		bridgeSends: tracker,
+	}
+	// A refused setup batch is retained as raw history, never measured traffic.
+	sendFullTunBridgeBatch(tracker, [][]byte{{1}, {2}, {3}, {4}, {5}}, 0, nil,
+		func(_ [][]byte, _ []bool) int { return 0 })
+	setup := tracker.batchSnapshot()
+	start, err := beginPerfvarCarrierMeasurementNow(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start.bridgeBatches != setup {
+		t.Fatalf("MEASUREMENT_START_DROPPED_BRIDGE_BASELINE: start=%+v setup=%+v", start.bridgeBatches, setup)
+	}
+	sendFullTunBridgeBatch(tracker, [][]byte{{6}, {7}}, 0, nil,
+		func(packets [][]byte, accepted []bool) int {
+			for index := range accepted {
+				accepted[index] = true
+			}
+			return len(packets)
+		})
+	observation := observePerfvarCarrier(path, start)
+	if observation.BridgeBatches.BatchCount != 1 || observation.BridgeBatches.PacketCount != 2 ||
+		observation.BridgeBatches.MaximumBatchPacketCount != 2 || tracker.failureCount.Load() != 5 {
+		t.Fatalf("bridge interval included setup or erased its raw refusals: observed=%+v raw-refusals=%d", observation.BridgeBatches, tracker.failureCount.Load())
+	}
+}
+
+// The existing reset seam publishes a complete joined batch after the first
+// snapshot. Its changed monotonic source counters must invalidate that pass.
+func TestPerfvarCarrierResetPassRejectsBridgePublication(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	network := newSimulatedIPNetwork(ctx)
+	defer network.close()
+	tracker := newFullTunBridgeSendTracker()
+	path := &fullTunPath{
+		t: t, ctx: ctx, environment: &routeEnvironment{network: network},
+		deviceStats: &clientconnect.P2pDataPlaneStats{}, providerStats: &clientconnect.P2pDataPlaneStats{},
+		bridgeSends: tracker,
+	}
+	path.afterAccessCarrierStartForTest = func() {
+		sendFullTunBridgeBatch(tracker, [][]byte{{1}}, 0, nil,
+			func(_ [][]byte, accepted []bool) int { accepted[0] = true; return 1 })
+	}
+	if _, err := beginPerfvarCarrierMeasurementNow(path); !errors.Is(err, errPerfvarCarrierStartCrossed) {
+		t.Fatalf("RESET_PASS_IGNORED_BRIDGE_PUBLICATION: error=%v snapshot=%+v", err, tracker.batchSnapshot())
 	}
 }
 

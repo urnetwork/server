@@ -4,6 +4,8 @@ package perfvar
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -16,6 +18,8 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 const h3LowBarPacketTrackPayloadByteCount = int64(64 * 1024)
@@ -1142,6 +1146,82 @@ func h3FullTunPacketTrackDatagramSettings(maximumDatagramFragmentCount int) *cli
 	return settings
 }
 
+// Bounds the experimental multi-frame payload for the actual maximum frame
+// count, compact head, AEAD and delay header. Indivisible MTU packets advance
+// alone; their separate wire-size control proves that boundary.
+func h3FullTunPacketTrackChunkMessageByteCount(
+	applicationMtu int,
+	chunkSettings clientconnect.SendBufferChunkSettings,
+) clientconnect.ByteCount {
+	defaults := clientconnect.DefaultSendBufferChunkSettings()
+	sharedFrameCount := chunkSettings.SharedMaxFrames
+	if sharedFrameCount <= 0 {
+		sharedFrameCount = defaults.SharedMaxFrames
+	}
+	maxFrameCount := max(sharedFrameCount, chunkSettings.PureTcpAckMaxFrames)
+	maxFrameCount = min(maxFrameCount, defaults.PureTcpAckMaxFrames)
+	frame := &protocol.Frame{MessageType: protocol.MessageType_IpIpPacketToProvider,
+		Raw: true, MessageBytes: make([]byte, applicationMtu)}
+	frameByteCount := proto.Size(frame)
+	frameOverheadByteCount := int(protowire.SizeTag(5)) + protowire.SizeBytes(frameByteCount) - applicationMtu
+	path := &protocol.TransferPath{SourceId: make([]byte, 16), DestinationId: make([]byte, 16)}
+	pack := &protocol.Pack{MessageId: make([]byte, 16), SequenceId: make([]byte, 16),
+		SequenceNumber: ^uint64(0), Head: true, Nack: true,
+		Tag: &protocol.Tag{SendTime: ^uint64(0)}, ContractId: make([]byte, 16),
+		ForceStream: true, CompanionContract: true, LogicalLane: 8, DeliverImmediately: true}
+	inner := &protocol.TransferFrame{TransferPath: path,
+		MessageType: protocol.MessageType_TransferPack.Enum(),
+		SessionRole: protocol.SequenceRole_SequenceRoleServer.Enum(), SessionCompanion: proto.Bool(true)}
+	outer := &protocol.TransferFrame{TransferPath: path,
+		SessionRole: protocol.SequenceRole_SequenceRoleServer.Enum(), SessionCompanion: proto.Bool(true)}
+	block, err := aes.NewCipher(make([]byte, 32))
+	if err != nil {
+		panic(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		panic(err)
+	}
+	delay := clientconnect.NewTransportDelayH3Peer(clientconnect.Id{}, clientconnect.DefaultFramerSettings(clientconnect.DefaultH3DatagramSettings().MaxMessageByteCount))
+	maxWireByteCount := clientconnect.H3InitialDatagramByteCount - clientconnect.H3DatagramHeaderByteCount - delay.HeaderByteCount()
+	low, high := 0, applicationMtu
+	for low < high {
+		middle := low + (high-low+1)/2
+		packByteCount := proto.Size(pack) + maxFrameCount*frameOverheadByteCount + middle
+		plainByteCount := proto.Size(inner) + int(protowire.SizeTag(4)) + protowire.SizeBytes(packByteCount)
+		cipherByteCount := aead.NonceSize() + plainByteCount + aead.Overhead()
+		wireByteCount := proto.Size(outer) + int(protowire.SizeTag(6)) + protowire.SizeBytes(cipherByteCount)
+		if wireByteCount <= maxWireByteCount {
+			low = middle
+		} else {
+			high = middle - 1
+		}
+	}
+	if low <= 0 {
+		panic("small-MTU packet-track policy has no bounded coalescing payload")
+	}
+	return clientconnect.ByteCount(low)
+}
+
+// The explicit small-MTU arm must bound coalesced messages as well as packets.
+// Copy settings before narrowing so another endpoint retains its own policy.
+func configureH3FullTunPacketTrackClient(
+	settings *clientconnect.ClientSettings,
+	applicationMtu int,
+	laneTrace *h3FullTunLaneTrace,
+) {
+	sendBufferSettings := *settings.SendBufferSettings
+	if 0 < applicationMtu && applicationMtu < clientconnect.DefaultMtu {
+		limit := h3FullTunPacketTrackChunkMessageByteCount(applicationMtu, sendBufferSettings.ChunkSettings)
+		currentByteCount := sendBufferSettings.ChunkSettings.SharedMaxMessageByteCount
+		if currentByteCount <= 0 || limit < currentByteCount {
+			sendBufferSettings.ChunkSettings.SharedMaxMessageByteCount = limit
+		}
+	}
+	sendBufferSettings.TransferWireMessageObserver = laneTrace.register
+	settings.SendBufferSettings = &sendBufferSettings
+}
+
 func testH3LowBarFullTcpPacketTrackMtu(
 	t *testing.T,
 	applicationMtu int,
@@ -1191,7 +1271,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 		var readinessEndTime time.Time
 		readinessSnapshotCount := 0
 		configureClient := func(settings *clientconnect.ClientSettings) {
-			settings.SendBufferSettings.TransferWireMessageObserver = laneTrace.register
+			configureH3FullTunPacketTrackClient(settings, applicationMtu, laneTrace)
 		}
 		configurePlatform := func(
 			settings *clientconnect.PlatformTransportSettings,
