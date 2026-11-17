@@ -52,6 +52,8 @@ func TestDeletedNetworkBackfillRecordsGoneAppStoreNetworks(t *testing.T) {
 					networkId,
 				))
 			}
+			// rows left by networks that are gone (AddSubscriptionRenewalInTx
+			// refuses a network without a row)
 			for _, renewal := range []struct {
 				networkId server.Id
 				market    SubscriptionMarket
@@ -59,15 +61,28 @@ func TestDeletedNetworkBackfillRecordsGoneAppStoreNetworks(t *testing.T) {
 				{renewalGoneId, SubscriptionMarketApple},
 				{stripeGoneId, SubscriptionMarketStripe},
 			} {
-				server.Raise(AddSubscriptionRenewalInTx(tx, ctx, &SubscriptionRenewal{
-					NetworkId:          renewal.networkId,
-					SubscriptionType:   SubscriptionTypeSupporter,
-					StartTime:          now.Add(-24 * time.Hour),
-					EndTime:            now.Add(24 * time.Hour),
-					NetRevenue:         UsdToNanoCents(1),
-					SubscriptionMarket: renewal.market,
-					TransactionId:      "backfill-renewal-" + server.NewId().String(),
-				}))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					INSERT INTO subscription_renewal (
+						network_id,
+						subscription_type,
+						start_time,
+						end_time,
+						net_revenue_nano_cents,
+						market,
+						transaction_id
+					)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+					`,
+					renewal.networkId,
+					SubscriptionTypeSupporter,
+					now.Add(-24*time.Hour),
+					now.Add(24*time.Hour),
+					UsdToNanoCents(1),
+					renewal.market,
+					"backfill-renewal-"+server.NewId().String(),
+				))
 			}
 			RecordNetworkDeletionInTx(tx, ctx, recordedGoneId, NetworkDeletionSourceAccount, now)
 		})
