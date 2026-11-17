@@ -451,18 +451,24 @@ func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId serve
 // call committed a new entitlement. The caller must refresh the pro cache
 // (model.UpdateProNetwork) after commit when true.
 //
-// A sandbox purchase (TestFlight, App Review) is credited like any other, so
-// the tester keeps Pro, through the same ledger gate. It records no revenue
-// on the renewal or the balance, and posts no sales notice. The balance's
-// paid column is generated from its revenue, so the sandbox balance is
-// unpaid: its contracts carry unpaid priority and payout planning counts its
-// traffic as unpaid.
+// A sandbox purchase (TestFlight, App Review) is credited only for an
+// internal tester's network (apple_sandbox_testers.go); for any other network
+// nothing is written, not even the ledger row, and false is returned. A
+// tester's sandbox purchase is credited like any other, through the same
+// ledger gate. It records no revenue on the renewal or the balance, and posts
+// no sales notice. The balance's paid column is generated from its revenue,
+// so the sandbox balance is unpaid: its contracts carry unpaid priority and
+// payout planning counts its traffic as unpaid.
 func appleCreditSubscriptionTransactionInTx(
 	tx server.PgTx,
 	ctx context.Context,
 	notificationId server.Id,
 	transaction *validatedAppleTransaction,
 ) bool {
+	if appleSandboxCreditRefused(transaction, transaction.networkId) {
+		// a free purchase for a network that is not an internal tester
+		return false
+	}
 	if appleTransactionCreditedBeforeLedgerInTx(tx, ctx, transaction) {
 		// the pre-ledger handler already credited this paid window; a second
 		// credit would add another Pro balance for it
@@ -572,6 +578,10 @@ func appleHoldGraceEntitlementInTx(
 ) (held bool, returnErr error) {
 	endTime := graceExpires.Add(SubscriptionGracePeriod)
 	if !now.Before(endTime) || !transaction.expiresTime.Before(graceExpires) {
+		return false, nil
+	}
+	if appleSandboxCreditRefused(transaction, transaction.networkId) {
+		// a sandbox subscription's grace holds Pro only for an internal tester
 		return false, nil
 	}
 	server.RaisePgResult(tx.Exec(
