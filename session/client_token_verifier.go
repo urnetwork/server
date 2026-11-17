@@ -98,7 +98,12 @@ type ClientTokenVerifierSettings struct {
 	// The wait a failed store, a keyring with no key or not the token's, or a
 	// record not yet enabled asks for: 1 s.
 	UnavailableRetryAfter time.Duration
-	Now                   func() time.Time
+	// The skew between clocks a token's exp, nbf and iat are read with: the
+	// issuer's, ByJwtSettings.ClockLeeway (30 s), so a token reads alike at the
+	// issuer and here. A strict_exp token's exp takes none (validateStrictExp).
+	// Zero reads each time exactly.
+	ClockLeeway time.Duration
+	Now         func() time.Time
 }
 
 // QD-040's grace and waits, on the block's mounted jwk set.
@@ -110,6 +115,7 @@ func DefaultClientTokenVerifierSettings() *ClientTokenVerifierSettings {
 		GraceWriteMemoCount:   64 * 1024,
 		MissRetryAfter:        5 * time.Second,
 		UnavailableRetryAfter: time.Second,
+		ClockLeeway:           DefaultByJwtSettings().ClockLeeway,
 		Now:                   server.NowUtc,
 	}
 }
@@ -178,7 +184,7 @@ func (self *ClientTokenVerifier) Verify(ctx context.Context, jwtSigned string) (
 	case err != nil:
 		return nil, clientTokenRefused(rejectByJwt(AuthRejectionSignature, "verify-only parse err = %v", err))
 	}
-	if err := validateClientTokenClaims(byJwt, self.settings.Now()); err != nil {
+	if err := validateClientTokenClaims(byJwt, self.settings.Now(), self.settings.ClockLeeway); err != nil {
 		return nil, clientTokenRefused(err)
 	}
 	if !RevocationRecordEnabled() {
@@ -198,10 +204,10 @@ func (self *ClientTokenVerifier) Verify(ctx context.Context, jwtSigned string) (
 // repaired, since fixByJwt's repair reads SQL: the registered claims as
 // reject_missing_expiration requires them, api's audience, the client's
 // network, user, device and root (QD-040), and exp enforced as reject_expired
-// enforces it, a strict_exp token's with no leeway (validateSessionHorizon).
-// sockets has no legacy client, so neither gate's tolerance applies.
-func validateClientTokenClaims(byJwt *ByJwt, now time.Time) error {
-	clockLeeway := DefaultByJwtSettings().ClockLeeway
+// enforces it, read with clockLeeway, a strict_exp token's with none
+// (validateSessionHorizon). sockets has no legacy client, so neither gate's
+// tolerance applies.
+func validateClientTokenClaims(byJwt *ByJwt, now time.Time, clockLeeway time.Duration) error {
 	if byJwt.Issuer != ByJwtIssuer ||
 		!slices.Contains(byJwt.Audience, ByJwtAudienceApi) ||
 		byJwt.Subject == "" || byJwt.Subject != byJwt.UserId.String() ||

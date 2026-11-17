@@ -75,8 +75,9 @@ func clientAuthTestList(t testing.TB, host *socketsHost, token string) (int, *si
 }
 
 // A real block, its Authenticator the block's own: a valid token with its sidecar passes offline and the route
-// answers; a token with no sidecar outside urnetwork-edge is denied; a removed client's token answers 401 at once; a
-// record that cannot answer and a lost store answer unavailable with a wait, never an allow.
+// answers, as does the token its refresh answers, which keeps the sidecar; a token with no sidecar outside
+// urnetwork-edge is denied; a removed client's tokens answer 401 at once; a record that cannot answer and a lost store
+// answer unavailable with a wait, never an allow.
 func TestHostAnswersAnAuthenticatedRouteWithClientTokens(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -105,6 +106,15 @@ func TestHostAnswersAnAuthenticatedRouteWithClientTokens(t *testing.T) {
 		if code != http.StatusOK || result.Error != nil {
 			t.Fatalf("a valid token with its sidecar answered %d, %+v", code, result)
 		}
+		// the sidecar's refresh keeps its sidecar, so the token it refreshes to is answered as the re-mint is
+		refreshedToken, err := session.RenewSessionCredential(session.Testing_CreateClientSession(ctx, listener), listener.NetworkName, listener.Pro)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, result = clientAuthTestList(t, host, refreshedToken)
+		if code != http.StatusOK || result.Error != nil {
+			t.Fatalf("the re-mint's refresh answered %d, %+v", code, result)
+		}
 		code, result = clientAuthTestList(t, host, unboundToken)
 		if code != http.StatusOK || result.Error == nil || result.Error.Code != sidecar.SocketErrorCodeDenied {
 			t.Fatalf("a token with no sidecar answered %d, %+v", code, result)
@@ -129,8 +139,10 @@ func TestHostAnswersAnAuthenticatedRouteWithClientTokens(t *testing.T) {
 			server.Raise(session.RevokeClientRecordsInTx(ctx, tx, listener.NetworkId, []server.Id{clientId}))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, clientId))
 		})
-		if code, result := clientAuthTestList(t, host, listenerToken); code != http.StatusUnauthorized {
-			t.Fatalf("a removed client's token answered %d, %+v", code, result)
+		for _, token := range []string{listenerToken, refreshedToken} {
+			if code, result := clientAuthTestList(t, host, token); code != http.StatusUnauthorized {
+				t.Fatalf("a removed client's token answered %d, %+v", code, result)
+			}
 		}
 	})
 }
