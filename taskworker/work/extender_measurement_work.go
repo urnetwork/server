@@ -298,11 +298,15 @@ const (
 
 // Renews the live certificates that are due (C6): two thirds of the way
 // through their lifetime, since the CA's renewal information is not read. A
-// renewal reuses the stored request -- the extender's latest when that is for
-// the same name, so a key the extender rotated is followed, else the
-// certificate's own -- and is a renewal to the CA too, outside the weekly cap
-// (C7). A certificate of an extender that may not be measured now, or that is
-// for another zone's name, is not renewed, and its renewal is put off by
+// renewal is for the certificate's own names -- the measurement name alone,
+// or with the family-pinned names (lag.dev/DRIFTTEST.md K6) -- and reuses
+// the stored request: the extender's latest when that is for the same names,
+// so a key the extender rotated is followed, else the certificate's own. So
+// it is a renewal to the CA too, outside the weekly cap (C7), and a
+// certificate for the measurement name alone is renewed as it is while the
+// extender's request for the family-pinned names waits for the cap. A
+// certificate of an extender that may not be measured now, or that is for
+// another zone's names, is not renewed, and its renewal is put off by
 // ExtenderMeasurementRenewalPostponeTimeout without counting a failure
 // (amendment 24). A tcp port moved off the measurement port, the loss of the
 // extender's public inbound address and a change of zone withdraw nothing
@@ -343,9 +347,9 @@ func renewExtenderMeasurementCerts(
 			postpone()
 			continue
 		}
-		names := []string{controller.ExtenderMeasurementName(cert.ExtenderId, measurementZone)}
-		if !slices.Equal(cert.Names, names) {
-			// a certificate for another zone's name
+		names := cert.Names
+		if certId, _, ok := controller.ParseExtenderMeasurementNames(names, measurementZone); !ok || certId != cert.ExtenderId {
+			// a certificate for another zone's names
 			postpone()
 			continue
 		}
@@ -550,7 +554,14 @@ func issuePendingExtenderMeasurementCerts(
 			refuse(reason)
 			continue
 		}
-		names := []string{request.Name}
+		// one certificate for every name the request asks for, its
+		// measurement name alone or with its family-pinned names (K6). To the
+		// CA, a set of names it has no unexpired certificate for is new, so
+		// the request of an extender whose certificate is for its measurement
+		// name alone, asking for the family-pinned names too, is held by the
+		// weekly cap like a new extender's, and serves that certificate
+		// meanwhile (controller.ExtenderMeasurementCert)
+		names := request.Names
 
 		capCounted := !model.HasUnexpiredNetworkExtenderMeasurementCertForNames(ctx, names, now)
 		if capCounted && issueCap <= issuedThisWeek {
@@ -632,7 +643,8 @@ type ExtenderMeasurementDnsArgs struct {
 
 type ExtenderMeasurementDnsResult struct {
 	Withdrawn int `json:"withdrawn"`
-	// extenders that serve, each one name
+	// extenders that serve, each with its measurement name and, when its
+	// certificate carries them, its family-pinned names
 	Names    int `json:"names"`
 	Upserted int `json:"upserted"`
 	Deleted  int `json:"deleted"`
@@ -747,9 +759,14 @@ func reconcileExtenderMeasurementDns(
 ) error {
 	hosts := controller.GetExtenderMeasurementHostsToPublish(ctx, config, now)
 	result.Names = len(hosts)
+	// the names of every certificate to publish: each host's measurement name,
+	// and its family-pinned names while a certificate carries them (K6)
 	names := []string{}
 	for _, host := range hosts {
 		names = append(names, host.Name)
+		if host.Ipv4Name != "" || host.Ipv6Name != "" {
+			names = append(names, host.Ipv4Name, host.Ipv6Name)
+		}
 	}
 	// every other name is going, or gone
 	model.UnpublishNetworkExtenderMeasurementNamesExcept(ctx, names)
@@ -771,6 +788,49 @@ func reconcileExtenderMeasurementDns(
 	result.Deleted = changes.deleted
 	result.Published = changes.newlyPublished
 	// also marks a renewal of a name that stayed published
-	model.PublishNetworkExtenderMeasurementNames(ctx, changes.published, server.NowUtc())
+	model.PublishNetworkExtenderMeasurementNames(
+		ctx,
+		extenderMeasurementPublishedNames(hosts, changes.published, plan.recordNames),
+		server.NowUtc(),
+	)
 	return err
+}
+
+// The names a reconcile records as published (C8), so a certificate is
+// published once all of its names are: each host's measurement name that is
+// published, and with it its family-pinned names (K6) once each of them that
+// has records is published too. A family's name without an address of that
+// family has no record to publish, and is published with the others, so an
+// IPv4 extender's certificate is published with its IPv6 name resolving to
+// nothing. A family-pinned name is never published without its measurement
+// name, which is what the lag.dev sample offers (A4).
+func extenderMeasurementPublishedNames(
+	hosts []*controller.ExtenderMeasurementHost,
+	published []string,
+	recordNames map[string]bool,
+) []string {
+	publishedNames := map[string]bool{}
+	for _, name := range published {
+		publishedNames[name] = true
+	}
+	names := []string{}
+	for _, host := range hosts {
+		if !publishedNames[host.Name] {
+			continue
+		}
+		names = append(names, host.Name)
+		if host.Ipv4Name == "" || host.Ipv6Name == "" {
+			continue
+		}
+		familyPublished := true
+		for _, familyName := range []string{host.Ipv4Name, host.Ipv6Name} {
+			if recordNames[familyName] && !publishedNames[familyName] {
+				familyPublished = false
+			}
+		}
+		if familyPublished {
+			names = append(names, host.Ipv4Name, host.Ipv6Name)
+		}
+	}
+	return names
 }

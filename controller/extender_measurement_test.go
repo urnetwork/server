@@ -230,6 +230,188 @@ func TestExtenderMeasurementCsrRefusesWhatC5Refuses(t *testing.T) {
 	}
 }
 
+// The family-pinned names (lag.dev/DRIFTTEST.md K6): the id under each family's
+// label in the zone, which parse back to the id and the family, while the
+// measurement name's own parse takes none of them.
+func TestExtenderMeasurementFamilyNames(t *testing.T) {
+	extenderId := server.NewId()
+	names := ExtenderMeasurementNames(extenderId, testMeasurementZone)
+	connect.AssertEqual(t, slices.Equal(names, []string{
+		extenderId.String() + "." + testMeasurementZone,
+		extenderId.String() + ".ipv4." + testMeasurementZone,
+		extenderId.String() + ".ipv6." + testMeasurementZone,
+	}), true)
+	connect.AssertEqual(t, ExtenderMeasurementFamilyName(extenderId, testMeasurementZone, 4), names[1])
+	connect.AssertEqual(t, ExtenderMeasurementFamilyName(extenderId, testMeasurementZone, 6), names[2])
+	connect.AssertEqual(t, ExtenderMeasurementFamilyName(extenderId, testMeasurementZone, 0), "")
+	connect.AssertEqual(t, ExtenderMeasurementFamilyName(server.Id{}, testMeasurementZone, 4), "")
+	for i, ipFamily := range []int{0, 4, 6} {
+		parsedId, parsedFamily, ok := ParseExtenderMeasurementFamilyName(names[i], testMeasurementZone)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, parsedId, extenderId)
+		connect.AssertEqual(t, parsedFamily, ipFamily)
+	}
+	for _, name := range names[1:] {
+		if _, ok := ParseExtenderMeasurementName(name, testMeasurementZone); ok {
+			t.Errorf("%s parsed as a measurement name", name)
+		}
+	}
+	for _, other := range []string{
+		"ipv4." + testMeasurementZone,
+		extenderId.String() + ".IPV4." + testMeasurementZone,
+		extenderId.String() + ".ipv5." + testMeasurementZone,
+		"_acme-challenge." + names[1],
+		extenderId.String() + ".ipv4.other.example",
+	} {
+		if _, _, ok := ParseExtenderMeasurementFamilyName(other, testMeasurementZone); ok {
+			t.Errorf("%s parsed as a measurement name", other)
+		}
+	}
+}
+
+// A request for the measurement name and both family-pinned names (K6), in
+// any order and with a common name that is any of them, is the extender's:
+// its names come back in the order ExtenderMeasurementNames writes them. A
+// request for the measurement name alone, an extender's from before K6, still
+// is, without them.
+func TestExtenderMeasurementCsrAcceptsTheFamilyNames(t *testing.T) {
+	key := testMeasurementKey(t)
+	extenderId := server.NewId()
+	names := ExtenderMeasurementNames(extenderId, testMeasurementZone)
+	name, ipv4Name, ipv6Name := names[0], names[1], names[2]
+
+	for _, order := range [][]string{
+		{name, ipv4Name, ipv6Name},
+		{name, ipv6Name, ipv4Name},
+		{ipv4Name, name, ipv6Name},
+		{ipv4Name, ipv6Name, name},
+		{ipv6Name, name, ipv4Name},
+		{ipv6Name, ipv4Name, name},
+	} {
+		csr := testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: order})
+		request, err := ParseExtenderMeasurementCsr(base64.StdEncoding.EncodeToString(csr), extenderId, testMeasurementZone)
+		if err != nil {
+			t.Fatalf("%v: a valid request was refused: %v", order, err)
+		}
+		connect.AssertEqual(t, request.Name, name)
+		connect.AssertEqual(t, request.FamilyNames, true)
+		if !slices.Equal(request.Names, names) {
+			t.Fatalf("%v: request names = %v, expected %v", order, request.Names, names)
+		}
+	}
+	for _, commonName := range names {
+		if _, err := ParseExtenderMeasurementCsrDer(testMeasurementCsr(t, key, &x509.CertificateRequest{
+			Subject:  pkix.Name{CommonName: commonName},
+			DNSNames: names,
+		}), extenderId, testMeasurementZone); err != nil {
+			t.Fatalf("a request with %s as the common name was refused: %v", commonName, err)
+		}
+	}
+
+	request, err := ParseExtenderMeasurementCsrDer(
+		testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: []string{name}}),
+		extenderId,
+		testMeasurementZone,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect.AssertEqual(t, request.FamilyNames, false)
+	if !slices.Equal(request.Names, []string{name}) {
+		t.Fatalf("request names = %v, expected %s alone", request.Names, name)
+	}
+}
+
+// Every other set of names is refused (K6): a family's name without the
+// measurement name or without the other family's, a name twice, a fourth
+// name, another extender's names in its own place, a family label in its
+// case, the names under another zone, and a common name that is none of them.
+func TestExtenderMeasurementCsrRefusesOtherNameSets(t *testing.T) {
+	key := testMeasurementKey(t)
+	extenderId := server.NewId()
+	names := ExtenderMeasurementNames(extenderId, testMeasurementZone)
+	name, ipv4Name, ipv6Name := names[0], names[1], names[2]
+	other := ExtenderMeasurementNames(server.NewId(), testMeasurementZone)
+
+	for kind, sets := range map[string][][]string{
+		"a family's name alone":      {{ipv4Name}, {ipv6Name}, {ipv4Name, ipv6Name}},
+		"one family's name missing":  {{name, ipv4Name}, {name, ipv6Name}},
+		"a name twice":               {{name, ipv4Name, ipv4Name}, {name, name, ipv4Name}, {name, ipv4Name, ipv6Name, ipv6Name}},
+		"a fourth name":              {{name, ipv4Name, ipv6Name, other[0]}, {name, ipv4Name, ipv6Name, "www." + testMeasurementZone}},
+		"another extender's names":   {other, {name, ipv4Name, other[2]}, {other[0], ipv4Name, ipv6Name}},
+		"a family label in its case": {{name, strings.Replace(ipv4Name, ".ipv4.", ".IPV4.", 1), ipv6Name}},
+		"another zone": {
+			ExtenderMeasurementNames(extenderId, "other.example"),
+			{name, ExtenderMeasurementFamilyName(extenderId, "other.example", 4), ipv6Name},
+		},
+		"a challenge name": {{name, "_acme-challenge." + ipv4Name, ipv6Name}},
+	} {
+		for _, set := range sets {
+			csr := testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: set})
+			if _, err := ParseExtenderMeasurementCsrDer(csr, extenderId, testMeasurementZone); err == nil {
+				t.Errorf("%s: %v was accepted", kind, set)
+			}
+		}
+	}
+	if _, err := ParseExtenderMeasurementCsrDer(testMeasurementCsr(t, key, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: other[1]},
+		DNSNames: names,
+	}), extenderId, testMeasurementZone); err == nil {
+		t.Errorf("a request with another extender's name as the common name was accepted")
+	}
+}
+
+// FamilyName (K6) is the family's name only while the extender answers to it
+// -- published with its certificate, which A8 has handed it -- and has an
+// address of that family; "" in every other case, the drift test then naming
+// the measurement name.
+func TestExtenderMeasurementHostFamilyName(t *testing.T) {
+	extenderId := server.NewId()
+	names := ExtenderMeasurementNames(extenderId, testMeasurementZone)
+	publishTime := server.NowUtc()
+	host := func(ips ...string) *ExtenderMeasurementHost {
+		host := &ExtenderMeasurementHost{
+			ExtenderId:        extenderId,
+			Name:              names[0],
+			Ipv4Name:          names[1],
+			Ipv6Name:          names[2],
+			PublishTime:       &publishTime,
+			FamilyPublishTime: &publishTime,
+			FamilyServing:     true,
+		}
+		for _, ip := range ips {
+			host.Ips = append(host.Ips, netip.MustParseAddr(ip))
+		}
+		return host
+	}
+
+	dual := host("203.0.113.7", "2001:db8::7")
+	connect.AssertEqual(t, dual.FamilyName(4), names[1])
+	connect.AssertEqual(t, dual.FamilyName(6), names[2])
+	for _, ipFamily := range []int{0, 5, 46} {
+		connect.AssertEqual(t, dual.FamilyName(ipFamily), "")
+	}
+	// no address of the family: its name has no record
+	connect.AssertEqual(t, host("203.0.113.7").FamilyName(6), "")
+	connect.AssertEqual(t, host("203.0.113.7").FamilyName(4), names[1])
+	connect.AssertEqual(t, host("2001:db8::7").FamilyName(4), "")
+	connect.AssertEqual(t, host("2001:db8::7").FamilyName(6), names[2])
+
+	// not served, not published, or no certificate carrying them
+	notServing := host("203.0.113.7", "2001:db8::7")
+	notServing.FamilyServing = false
+	notPublished := host("203.0.113.7", "2001:db8::7")
+	notPublished.FamilyPublishTime = nil
+	plainOnly := host("203.0.113.7", "2001:db8::7")
+	plainOnly.Ipv4Name = ""
+	plainOnly.Ipv6Name = ""
+	for _, other := range []*ExtenderMeasurementHost{notServing, notPublished, plainOnly} {
+		for _, ipFamily := range []int{4, 6} {
+			connect.AssertEqual(t, other.FamilyName(ipFamily), "")
+		}
+	}
+}
+
 func testMeasurementAddress(ip string, carriers ...string) *model.NetworkExtenderAddress {
 	addr := netip.MustParseAddr(ip)
 	ipVersion := 6
@@ -857,6 +1039,152 @@ func TestExtenderMeasurementCertAnswersThePoll(t *testing.T) {
 		// its request again, and it waits for a certificate once more
 		ask()
 		connect.AssertEqual(t, answer("").State, model.NetworkExtenderMeasurementStatePending)
+	})
+}
+
+// An extender whose certificate is for its measurement name alone asks for its
+// family-pinned names too (lag.dev/DRIFTTEST.md K6). To the CA that is a new
+// set of names, so the request waits for the weekly cap (C7), and meanwhile A8
+// answers it issued with the measurement name's newest certificate, which the
+// extender keeps serving and is handed each renewal of, and the lag.dev sample
+// (A4) keeps offering the extender, without family-pinned names. Once the
+// certificate for all three names is issued, A8 hands it over, and once it is
+// published the sample offers each family's name. A request for the
+// measurement name alone again, as an extender rolled back before K6 asks, is
+// answered by the measurement name's certificate, without family-pinned names
+// offered. Every answer says the operator issues for the family-pinned names.
+func TestExtenderMeasurementFamilyNamesUpgrade(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installLagTestExtenderConfig(t, true)
+		extender := newLagTestExtender(t, ctx, "203.0.113.20", "2001:db8::20")
+		names := ExtenderMeasurementNames(extender.extenderId, lagTestMeasurementZone)
+		plainNames := names[:1]
+		key := testMeasurementKey(t)
+		measurementConfig := &ExtenderConfig{Measurement: ExtenderMeasurementConfig{ZoneName: lagTestMeasurementZone}}
+		now := server.NowUtc()
+
+		// the extender's request for `askNames` under its key, as an activation
+		// stores it
+		ask := func(askNames []string) {
+			t.Helper()
+			csr := testMeasurementCsr(t, key, &x509.CertificateRequest{DNSNames: askNames})
+			storeExtenderMeasurementRequest(ctx, measurementConfig, extender.extenderId, base64.StdEncoding.EncodeToString(csr), server.NowUtc())
+		}
+		answer := func() *ExtenderMeasurementCertResult {
+			t.Helper()
+			result, err := ExtenderMeasurementCert(&ExtenderMeasurementCertArgs{}, extender.clientSession)
+			if err != nil {
+				t.Fatal(err)
+			}
+			connect.AssertEqual(t, result.FamilyNames, true)
+			return result
+		}
+		// a certificate for `certNames` under the key, as the issuance task
+		// stores it
+		issue := func(certNames []string, issueTime time.Time) *model.NetworkExtenderMeasurementCert {
+			t.Helper()
+			measurement := model.Testing_GetNetworkExtenderMeasurement(ctx, extender.extenderId)
+			cert := &model.NetworkExtenderMeasurementCert{
+				CertId:     server.NewId(),
+				ExtenderId: extender.extenderId,
+				Names:      certNames,
+				Csr:        measurement.Csr,
+				PublicKey:  measurement.PublicKey,
+				ChainPem:   "chain " + server.NewId().String(),
+				SerialHex:  "01",
+				NotBefore:  issueTime,
+				NotAfter:   issueTime.Add(90 * 24 * time.Hour),
+				IssueTime:  issueTime,
+				CapCounted: true,
+				RenewTime:  issueTime.Add(60 * 24 * time.Hour),
+			}
+			connect.AssertEqual(t, model.AddNetworkExtenderMeasurementCert(ctx, cert), true)
+			return cert
+		}
+		// the extender as the lag.dev sample serves it, nil when it does not
+		serving := func() *ExtenderMeasurementHost {
+			t.Helper()
+			for _, host := range GetLagServingHosts(ctx, server.NowUtc()) {
+				if host.ExtenderId == extender.extenderId {
+					return host
+				}
+			}
+			return nil
+		}
+		sameNames := func(a []string, b []string) bool {
+			a = slices.Sorted(slices.Values(a))
+			b = slices.Sorted(slices.Values(b))
+			return slices.Equal(a, b)
+		}
+
+		// issued for the measurement name alone, published and delivered: an
+		// extender from before K6
+		ask(plainNames)
+		plainCert := issue(plainNames, now.Add(-2*time.Hour))
+		model.PublishNetworkExtenderMeasurementNames(ctx, plainNames, now)
+		connect.AssertEqual(t, answer().ChainPem, plainCert.ChainPem)
+		host := serving()
+		if host == nil {
+			t.Fatal("the extender is not served")
+		}
+		connect.AssertEqual(t, host.FamilyName(4), "")
+		connect.AssertEqual(t, host.FamilyName(6), "")
+
+		// the request for all three waits, held by the weekly cap as a new set
+		// of names to the CA
+		ask(names)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extender.extenderId).State, model.NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, model.HasUnexpiredNetworkExtenderMeasurementCertForNames(ctx, names, server.NowUtc()), false)
+		// answered with the certificate the extender has, which it keeps
+		// serving, and offered without its family-pinned names
+		waiting := answer()
+		connect.AssertEqual(t, waiting.State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, waiting.ChainPem, plainCert.ChainPem)
+		connect.AssertEqual(t, sameNames(waiting.Names, plainNames), true)
+		connect.AssertEqual(t, waiting.KeySha256, testMeasurementKeySha256(t, &key.PublicKey))
+		if host = serving(); host == nil || host.FamilyName(4) != "" || host.FamilyName(6) != "" {
+			t.Fatalf("while the family-pinned names wait, served as %+v", host)
+		}
+
+		// a renewal of that certificate meanwhile is handed over, and the
+		// request still waits
+		renewed := issue(plainNames, now.Add(-time.Hour))
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extender.extenderId).State, model.NetworkExtenderMeasurementStatePending)
+		connect.AssertEqual(t, answer().ChainPem, renewed.ChainPem)
+		if host = serving(); host == nil || host.FamilyName(4) != "" {
+			t.Fatalf("after the renewal, served as %+v", host)
+		}
+
+		// issued for all three: handed over, and its names offered once
+		// published
+		familyCert := issue(names, now)
+		connect.AssertEqual(t, model.Testing_GetNetworkExtenderMeasurement(ctx, extender.extenderId).State, model.NetworkExtenderMeasurementStateIssued)
+		issued := answer()
+		connect.AssertEqual(t, issued.State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, issued.ChainPem, familyCert.ChainPem)
+		connect.AssertEqual(t, sameNames(issued.Names, names), true)
+		if host = serving(); host == nil || host.FamilyName(4) != "" {
+			t.Fatalf("before the family-pinned names are published, served as %+v", host)
+		}
+		model.PublishNetworkExtenderMeasurementNames(ctx, names, server.NowUtc())
+		host = serving()
+		if host == nil {
+			t.Fatal("the extender is not served once its family-pinned names are published")
+		}
+		connect.AssertEqual(t, host.FamilyName(4), names[1])
+		connect.AssertEqual(t, host.FamilyName(6), names[2])
+
+		// asked for the measurement name alone again: answered by the
+		// measurement name's certificate, without family-pinned names
+		ask(plainNames)
+		downgraded := answer()
+		connect.AssertEqual(t, downgraded.State, model.NetworkExtenderMeasurementStateIssued)
+		connect.AssertEqual(t, downgraded.ChainPem, renewed.ChainPem)
+		connect.AssertEqual(t, sameNames(downgraded.Names, plainNames), true)
+		if host = serving(); host == nil || host.FamilyName(4) != "" || host.FamilyName(6) != "" {
+			t.Fatalf("asked for the measurement name alone, served as %+v", host)
+		}
 	})
 }
 

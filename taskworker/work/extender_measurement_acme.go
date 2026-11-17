@@ -35,7 +35,10 @@ import (
 // is no CA-suggested window: a certificate renews at two thirds of its
 // lifetime (C6). An order sets no notBefore or notAfter, which Let's Encrypt
 // rejects, and names its identifiers only, so a change of the name shape
-// (PLAN.md Q5) changes nothing here.
+// (PLAN.md Q5) changes nothing here. One order carries every name of a
+// request -- the measurement name alone, or with the two family-pinned names
+// of lag.dev/DRIFTTEST.md K6 -- and each identifier's authorization is
+// answered with a DNS-01 challenge of its own, all written in one change.
 //
 // One client is kept per directory and account key for the process, since
 // the account url and the directory are worth one lookup, not one per pass.

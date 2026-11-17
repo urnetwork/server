@@ -419,18 +419,33 @@ func getLagExtenderPlacesInConn(ctx context.Context, conn server.PgConn, extende
 // certificate for it.
 type LagExtenderMeasurement struct {
 	*NetworkExtenderMeasurement
-	// whether a live certificate for the request's names and key has its name
-	// published (C8) and has been handed to the extender by A8 (deliver_time),
-	// which installs it only when it reads it there
+	// whether a live certificate that answers the request
+	// (networkExtenderMeasurementCertAnswersSql) -- for its names and key, or
+	// for the measurement name alone under its key, while the request adds
+	// the family-pinned names (lag.dev/DRIFTTEST.md K6) -- has its names
+	// published (C8) and has been handed to the extender by A8
+	// (deliver_time), which installs it only when it reads it there
 	Delivered bool
+	// whether a live certificate for exactly the request's names and key is
+	// published and delivered. For a request for the family-pinned names, the
+	// extender answers to those names too (K6)
+	NamesDelivered bool
 }
 
 // Whether the extender serves its measurement name now, as far as its
-// request says: the request is answered `issued`, and its certificate is
-// published and delivered. A pending, refused or withdrawn request, an
-// owner's opt-out included, is one that does not.
+// request says: the request is answered `issued` (A8) and a certificate that
+// answers it is published and delivered. A pending request for the
+// family-pinned names (K6) is answered so by the certificate for the
+// measurement name alone, which the extender serves while it waits. A
+// refused or withdrawn request, an owner's opt-out included, and any other
+// pending one, is one that does not.
 func (self *LagExtenderMeasurement) Serving() bool {
-	return self.State == NetworkExtenderMeasurementStateIssued && self.Delivered
+	switch self.State {
+	case NetworkExtenderMeasurementStateIssued, NetworkExtenderMeasurementStatePending:
+		return self.Delivered
+	default:
+		return false
+	}
 }
 
 // The latest measurement request of each of the given extenders, by extender
@@ -444,6 +459,14 @@ func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id, no
 	if len(extenderIds) == 0 {
 		return measurements
 	}
+	// a live certificate of the request's extender, published and delivered
+	served := `
+		network_extender_measurement_cert.extender_id = request.extender_id AND
+		network_extender_measurement_cert.withdraw_time IS NULL AND
+		network_extender_measurement_cert.publish_time IS NOT NULL AND
+		network_extender_measurement_cert.deliver_time IS NOT NULL AND
+		$2 < network_extender_measurement_cert.not_after
+	`
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -454,13 +477,16 @@ func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id, no
 					SELECT 1
 					FROM network_extender_measurement_cert
 					WHERE
-						network_extender_measurement_cert.extender_id = request.extender_id AND
+						`+served+` AND
+						`+networkExtenderMeasurementCertAnswersSql("network_extender_measurement_cert", "request.names", "request.public_key")+`
+				),
+				EXISTS (
+					SELECT 1
+					FROM network_extender_measurement_cert
+					WHERE
+						`+served+` AND
 						network_extender_measurement_cert.names = request.names AND
-						network_extender_measurement_cert.public_key = request.public_key AND
-						network_extender_measurement_cert.withdraw_time IS NULL AND
-						network_extender_measurement_cert.publish_time IS NOT NULL AND
-						network_extender_measurement_cert.deliver_time IS NOT NULL AND
-						$2 < network_extender_measurement_cert.not_after
+						network_extender_measurement_cert.public_key = request.public_key
 				)
 			FROM network_extender_measurement AS request
 			WHERE request.extender_id = ANY($1)
@@ -471,7 +497,11 @@ func GetLagExtenderMeasurements(ctx context.Context, extenderIds []server.Id, no
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				measurement := &LagExtenderMeasurement{}
-				measurement.NetworkExtenderMeasurement = scanNetworkExtenderMeasurement(result, &measurement.Delivered)
+				measurement.NetworkExtenderMeasurement = scanNetworkExtenderMeasurement(
+					result,
+					&measurement.Delivered,
+					&measurement.NamesDelivered,
+				)
 				measurements[measurement.ExtenderId] = measurement
 			}
 		})
