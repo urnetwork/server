@@ -78,6 +78,10 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		return competitionagent.Response{}, errors.Join(competitionagent.ErrIntegrity, errors.New("existing control cannot admit execution"))
 	}
 	settings := self.profile.Config.Settings
+	joinTimeout, err := settings.controlJoinAllowance()
+	if err != nil {
+		return competitionagent.Response{}, err
+	}
 	ctx, cancel := context.WithTimeout(parent, settings.RequestTimeout)
 	defer cancel()
 	request.Schema, request.HostId = competitionagent.Schema, self.host.HostId
@@ -96,10 +100,12 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		return err
 	}
 	response := competitionagent.Response{}
+	responsePhase := "frame"
 	readResponse := func(stdout io.Reader) error {
 		if err := competitionagent.ReadDocument(stdout, &response, settings.Limits.DocumentBytes); err != nil {
 			return err
 		}
+		responsePhase = "authentication"
 		key, err := base64.StdEncoding.DecodeString(self.host.AgentPublicKeyBase64)
 		if err != nil || len(key) != ed25519.PublicKeySize {
 			return errors.New("invalid frozen executor verification key")
@@ -111,6 +117,7 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 			return errors.Join(competitionagent.ErrIntegrity, errors.New("executor response belongs to another host, run or owner fence"))
 		}
 		if request.Operation == "artifacts" {
+			responsePhase = "files"
 			if outputDirectory == "" {
 				return errors.New("artifact request has no private destination")
 			}
@@ -118,9 +125,18 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 				return err
 			}
 		}
-		return readCompetitionAgentTrailer(stdout)
+		responsePhase = "trailer"
+		if err := readCompetitionAgentTrailer(stdout); err != nil {
+			return err
+		}
+		responsePhase = "complete"
+		return nil
 	}
-	if err := exchangeCompetitionAgentCommand(ctx, cancel, command, arguments, int(settings.MaximumDiagnosticBytes), writeRequest, readResponse); err != nil {
+	if err := exchangeCompetitionAgentCommandWithJoin(ctx, cancel, command, arguments, int(settings.MaximumDiagnosticBytes), joinTimeout, writeRequest, readResponse, nil); err != nil {
+		var failure *CompetitionAgentTransportError
+		if errors.As(err, &failure) {
+			failure.responsePhase = responsePhase
+		}
 		// Agent stderr may contain hidden request paths or runtime details; it
 		// is never included in a public error or echoed into service logs.
 		return competitionagent.Response{}, fmt.Errorf("authenticated executor transport failed: %w", err)

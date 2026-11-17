@@ -157,9 +157,12 @@ type competitionExistingControlConnection struct {
 // Operational bounds belong to the coordinator owner. No nonpositive bound
 // disables authentication, transfer limits or reconciliation.
 type competitionDistributedCoordinatorSettings struct {
-	SshCommand             string                  `json:"ssh_command"`
-	ConnectionTimeout      time.Duration           `json:"connection_timeout"`
-	RequestTimeout         time.Duration           `json:"request_timeout"`
+	SshCommand        string        `json:"ssh_command"`
+	ConnectionTimeout time.Duration `json:"connection_timeout"`
+	RequestTimeout    time.Duration `json:"request_timeout"`
+	// Cleanup outlives request cancellation without extending any job clock.
+	// Must cover the managed agent's full join; nonpositive refuses admission.
+	ControlJoinTimeout     time.Duration           `json:"control_join_timeout"`
 	PollInterval           time.Duration           `json:"poll_interval"`
 	CancelTimeout          time.Duration           `json:"cancel_timeout"`
 	MaximumDiagnosticBytes int64                   `json:"maximum_diagnostic_bytes"`
@@ -172,10 +175,21 @@ type competitionDistributedCoordinatorSettings struct {
 
 // Defaults are transport bounds, never calibration or scoring policy.
 func defaultCompetitionDistributedCoordinatorSettings() competitionDistributedCoordinatorSettings {
+	agent := competitionagent.DefaultManagementSshSettings()
 	return competitionDistributedCoordinatorSettings{SshCommand: "/usr/bin/ssh", ConnectionTimeout: 15 * time.Second,
 		RequestTimeout: 2 * time.Minute, PollInterval: 5 * time.Second, CancelTimeout: 30 * time.Second,
+		ControlJoinTimeout:        agent.JoinTimeout + agent.Agent.CancelGrace,
 		ExistingWitnessMaximumAge: 15 * time.Second,
 		MaximumDiagnosticBytes:    1024 * 1024, Limits: competitionagent.DefaultLimits()}
+}
+
+// Both decoded profiles and the real exchange entrypoint preserve the managed
+// agent's entire native join owner. A short caller request never shrinks it.
+func (self competitionDistributedCoordinatorSettings) controlJoinAllowance() (time.Duration, error) {
+	if self.ControlJoinTimeout < competitionagent.DefaultManagementSshSettings().JoinTimeout {
+		return 0, errors.New("coordinator control join truncates the managed cleanup owner")
+	}
+	return self.ControlJoinTimeout, nil
 }
 
 // Private, root-pinned deployment role. The approved public policy separately
@@ -222,6 +236,9 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(content), 1024*1024, &config); err != nil {
 		return err
 	}
+	if _, err := config.Settings.controlJoinAllowance(); err != nil {
+		return err
+	}
 	policy := settings.FutureEpochPolicy.DistributedEvaluationPolicy
 	if err := validateCompetitionSecurityToolchainShape(config.SecurityToolchainException); err != nil {
 		return err
@@ -230,7 +247,8 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 		return err
 	}
 	if config.Schema != 1 || config.Kind != "competition-distributed-coordinator/v1" || config.CoordinatorId != policy.CoordinatorId || len(config.Hosts) != len(policy.Hosts) ||
-		config.Settings.ConnectionTimeout <= 0 || config.Settings.RequestTimeout <= 0 || config.Settings.PollInterval <= 0 || config.Settings.CancelTimeout <= 0 || config.Settings.MaximumDiagnosticBytes <= 0 ||
+		config.Settings.ConnectionTimeout <= 0 || config.Settings.RequestTimeout <= 0 ||
+		config.Settings.PollInterval <= 0 || config.Settings.CancelTimeout <= 0 || config.Settings.MaximumDiagnosticBytes <= 0 ||
 		!filepath.IsAbs(config.Settings.SshCommand) || config.Settings.Limits.Validate() != nil || config.Settings.Limits.MaximumJobDuration != 3*time.Hour {
 		return errors.New("invalid distributed coordinator role or operational bounds")
 	}

@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // Closed facts are public-safe; Unwrap retains the original joined errors.
@@ -26,6 +28,8 @@ type CompetitionAgentTransportError struct {
 	ChildCloseFailed bool
 	ChildExitKnown   bool
 	ChildExitCode    int
+	ChildExitSignal  int
+	responsePhase    string
 	cause            error
 }
 
@@ -34,6 +38,16 @@ func (self *CompetitionAgentTransportError) Stage() string {
 	switch self.stage {
 	case "pipe", "start", "close", "read", "write", "diagnostic", "wait", "context":
 		return self.stage
+	default:
+		return "unknown"
+	}
+}
+
+// A phase is closed metadata, never a response, diagnostic or private error.
+func (self *CompetitionAgentTransportError) ResponsePhase() string {
+	switch self.responsePhase {
+	case "frame", "authentication", "files", "trailer", "complete":
+		return self.responsePhase
 	default:
 		return "unknown"
 	}
@@ -62,9 +76,9 @@ func competitionAgentTransportErrorClass(err error) string {
 // Before/after context facts distinguish caller expiry from cleanup-induced
 // cancellation. The remaining facts are only booleans and a numeric child exit.
 func (self *CompetitionAgentTransportError) Error() string {
-	return fmt.Sprintf("executor process transport stage=%s cause=%s context_before=%s context_after=%s read=%t write=%t diagnostic=%t wait=%t child_close=%t child_exit_known=%t child_exit=%d",
+	return fmt.Sprintf("executor process transport stage=%s cause=%s context_before=%s context_after=%s read=%t write=%t diagnostic=%t wait=%t child_close=%t child_exit_known=%t child_exit=%d child_signal=%d response_phase=%s",
 		self.Stage(), competitionAgentTransportErrorClass(self.firstErr), competitionAgentTransportErrorClass(self.contextBefore), competitionAgentTransportErrorClass(self.contextAfter),
-		self.ReadFailed, self.WriteFailed, self.DiagnosticFailed, self.WaitFailed, self.ChildCloseFailed, self.ChildExitKnown, self.ChildExitCode)
+		self.ReadFailed, self.WriteFailed, self.DiagnosticFailed, self.WaitFailed, self.ChildCloseFailed, self.ChildExitKnown, self.ChildExitCode, self.ChildExitSignal, self.ResponsePhase())
 }
 
 // Preserve errors.Is/As and every existing cancellation/integrity cause.
@@ -82,6 +96,31 @@ func exchangeCompetitionAgentCommand(ctx context.Context, cancel context.CancelF
 // tests may acknowledge actual Wait completion before consuming buffered bytes;
 // the observer must return synchronously and is never exposed by a public role.
 func exchangeCompetitionAgentCommandWithWaitObserver(ctx context.Context, cancel context.CancelFunc, command string, arguments []string, maximumDiagnosticBytes int, writeRequest func(io.Writer) error, readResponse func(io.Reader) error, observeWait func()) error {
+	return exchangeCompetitionAgentCommandWithJoin(ctx, cancel, command, arguments, maximumDiagnosticBytes,
+		defaultCompetitionDistributedCoordinatorSettings().ControlJoinTimeout, writeRequest, readResponse, observeWait)
+}
+
+// Cancellation first notifies only the held transport child, preserving its
+// independent native cleanup owner. WaitDelay bounds a wedged child's grace;
+// no process group or detached evaluator is signaled by this transport.
+func exchangeCompetitionAgentCommandWithJoin(ctx context.Context, cancel context.CancelFunc, command string, arguments []string, maximumDiagnosticBytes int, joinTimeout time.Duration, writeRequest func(io.Writer) error, readResponse func(io.Reader) error, observeWait func()) error {
+	return exchangeCompetitionAgentCommandWithHooks(ctx, cancel, command, arguments, maximumDiagnosticBytes, joinTimeout,
+		writeRequest, readResponse, competitionAgentCommandHooks{waited: observeWait})
+}
+
+// Production hooks are nil. Tests may acknowledge actual signal/Wait edges;
+// callbacks must return synchronously and are never chosen by a request/config.
+type competitionAgentCommandHooks struct {
+	waited   func()
+	canceled func(error)
+}
+
+// The concrete native implementation is shared by the uninstrumented owner
+// and deterministic tests; hooks never select another signal or target.
+func exchangeCompetitionAgentCommandWithHooks(ctx context.Context, cancel context.CancelFunc, command string, arguments []string, maximumDiagnosticBytes int, joinTimeout time.Duration, writeRequest func(io.Writer) error, readResponse func(io.Reader) error, hooks competitionAgentCommandHooks) error {
+	if joinTimeout <= 0 || maximumDiagnosticBytes <= 0 {
+		return errors.New("executor transport requires finite cleanup and diagnostic bounds")
+	}
 	var stateLock sync.Mutex
 	var firstStage string
 	var firstErr, contextBefore error
@@ -114,6 +153,12 @@ func exchangeCompetitionAgentCommandWithWaitObserver(ctx context.Context, cancel
 			ReadFailed: readErr != nil, WriteFailed: writeErr != nil, DiagnosticFailed: diagnosticErr != nil, WaitFailed: waitErr != nil, ChildCloseFailed: childCloseErr != nil, cause: cause}
 		if process != nil && process.ProcessState != nil {
 			failure.ChildExitKnown, failure.ChildExitCode = true, process.ProcessState.ExitCode()
+			if status, ok := process.ProcessState.Sys().(interface {
+				Signaled() bool
+				Signal() syscall.Signal
+			}); ok && status.Signaled() {
+				failure.ChildExitSignal = int(status.Signal())
+			}
 		}
 		return failure
 	}
@@ -148,6 +193,14 @@ func exchangeCompetitionAgentCommandWithWaitObserver(ctx context.Context, cancel
 	}
 	defer closeIo()
 	process = exec.CommandContext(ctx, command, arguments...)
+	process.Cancel = func() error {
+		err := process.Process.Signal(syscall.SIGTERM)
+		if hooks.canceled != nil {
+			hooks.canceled(err)
+		}
+		return err
+	}
+	process.WaitDelay = joinTimeout
 	process.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
 	process.Stdin, process.Stdout, process.Stderr = stdin, stdout, stderr
 	startErr := process.Start()
@@ -176,8 +229,8 @@ func exchangeCompetitionAgentCommandWithWaitObserver(ctx context.Context, cancel
 		defer close(waited)
 		waitErr = process.Wait()
 		noteFailure("wait", waitErr)
-		if observeWait != nil {
-			observeWait()
+		if hooks.waited != nil {
+			hooks.waited()
 		}
 	}()
 	written := make(chan struct{})
