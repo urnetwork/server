@@ -539,8 +539,8 @@ func TestContractWeekRetirementWaitsOutAnAutovacuum(t *testing.T) {
 }
 
 // A week that holds more live rows than a compaction may move under its lock,
-// or that the catalog says the reaper and vacuum have not emptied, is reported
-// and left as it is: no lock, no rewrite, no drop.
+// or that the statistics say the reaper has not emptied, is reported and left
+// as it is: no lock, no rewrite, no drop.
 func TestContractWeekRetirementBoundsItsWork(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -567,7 +567,7 @@ func TestContractWeekRetirementBoundsItsWork(t *testing.T) {
 		settings.ProbeGateRows = 2
 		report, _ = maintainContractPartitions(horizonCtx, now, ContractRetentionCursor{}, time.Minute, settings)
 		for _, leaf := range contractPartitionFamily.LeafNames(r) {
-			connect.AssertEqual(t, strings.Contains(report.Blocked[leaf], "by the catalog"), true)
+			connect.AssertEqual(t, strings.Contains(report.Blocked[leaf], "by the statistics"), true)
 		}
 		connect.AssertEqual(t, len(report.Compacted), 0)
 		connect.AssertEqual(t, testContractWeekFilenodes(t, ctx, r), filenodes)
@@ -632,4 +632,45 @@ func TestContractRetentionCursorIgnoresTheArchiveStep(t *testing.T) {
 			t.Errorf("the next cursor keeps %s: %s", field, encoded)
 		}
 	}
+}
+
+// A week the reaper has emptied retires even when vacuum has not run since:
+// Main's leaves inherit vacuum thresholds of 5M to 25M dead rows, so the
+// reaper's last deletes of a week can stay unvacuumed for good. The gate reads
+// the live rows the statistics count, which follow the deletes, and the
+// count's walk marks the deleted rows' key entries dead for CLUSTER. Gating on
+// dead rows, or on the row estimate the last vacuum or analyze left, would
+// keep such a week forever.
+func TestContractWeekRetiresWithoutVacuum(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		week := testContractWeeks(t, ctx)
+		r := week(1)
+		for i := range 200 {
+			contractId := testContractIdAt(r.Lower.Add(time.Duration(i+1) * time.Minute))
+			testInsertContractRows(t, ctx, contractId, true)
+			testReapContract(t, ctx, contractId)
+		}
+		// no vacuum; the statistics count the deletes and every snapshot sees them
+		leaf := ContractPartitionName("transfer_contract", r.Lower)
+		deadline := time.Now().Add(time.Minute)
+		for testContractPartitionScalar[int64](t, ctx, `SELECT coalesce((SELECT n_live_tup FROM pg_stat_user_tables WHERE relid = to_regclass('public.' || $1)), -1)`, leaf) != 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the statistics never counted the deletes")
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		testWaitForContractHorizon(t, ctx)
+		connect.AssertEqual(t, 0 < testContractPartitionScalar[int64](t, ctx, `SELECT pg_relation_size(to_regclass('public.' || $1))`, leaf), true)
+
+		settings := testContractWeekSettings()
+		// fewer rows than the week's deleted ones
+		settings.ProbeGateRows = 10
+		now := r.Upper.Add(ContractRetention + time.Hour)
+		report, _ := maintainContractPartitions(WithContractHorizon(ctx, ContractWeekRetentionFloor), now, ContractRetentionCursor{}, time.Minute, settings)
+		connect.AssertEqual(t, len(report.Blocked), 0)
+		connect.AssertEqual(t, slices.Contains(report.Compacted, leaf), true)
+		connect.AssertEqual(t, slices.Contains(report.Dropped, leaf), true)
+		connect.AssertEqual(t, testContractWeekExists(t, ctx, r), []bool{false, false, false, false, false, false})
+	})
 }

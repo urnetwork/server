@@ -17,8 +17,7 @@
 //     heap or its TOAST, is detached and dropped in one transaction. Nothing a
 //     snapshot could see goes with it.
 //   - An expired week that still holds rows has each leaf rewritten by CLUSTER
-//     once the reaper and vacuum have emptied it down to the rows the reaper
-//     keeps. CLUSTER copies every live and recently dead row version with its
+//     once the reaper has emptied it down to the rows it keeps. CLUSTER copies every live and recently dead row version with its
 //     transaction ids (it is MVCC-safe, unlike a copy or TRUNCATE), so every
 //     snapshot sees the same rows after it, and the old files go back to the
 //     filesystem. A leaf goes in its own transaction, which locks that leaf
@@ -57,8 +56,7 @@ const ContractWeekRetentionFloor = 35 * 24 * time.Hour
 // Tunables of the retirement of expired contract weeks.
 type ContractWeekRetirementSettings struct {
 	// How long past the horizon a week waits before it is examined: the reaper
-	// reads a contract only its close settle time (2 hours) past the horizon,
-	// and vacuum then removes the week's deleted rows.
+	// reads a contract only its close settle time (2 hours) past the horizon.
 	RetireDelay time.Duration
 	// Admission before each lock request (MaxTransactionAge must be positive).
 	LockSettings ContractPartitionLockSettings
@@ -67,10 +65,11 @@ type ContractWeekRetirementSettings struct {
 	// queue behind the request and give up after PgLockTimeout (2 s), so this
 	// and the work under the lock stay below it.
 	LockTimeout time.Duration
-	// A leaf's live rows are counted only while the catalog says it holds at
-	// most this many rows (reltuples) and this many dead rows (n_dead_tup):
-	// until vacuum has removed the reaper's deletes, a walk of the leaf's key
-	// would visit every deleted row.
+	// A leaf larger than CompactAboveBytes is counted only while the
+	// statistics count at most this many live rows in it (n_live_tup, which
+	// follows the reaper's deletes as they commit): a leaf the reaper has not
+	// emptied, or one that holds more kept rows than a compaction moves (the
+	// legacy partition), is left without a read.
 	ProbeGateRows int64
 	// The most live rows a leaf may hold to be compacted. CLUSTER's work, and
 	// so its hold on the leaf's lock, grows with them. A week the reaper keeps
@@ -164,11 +163,8 @@ type contractWeekLeaf struct {
 	toast      string
 	heapBytes  int64
 	toastBytes int64
-	// the catalog's estimate of its live rows; -1 before its first vacuum or
-	// analyze
-	estimatedRows int64
-	// dead rows the statistics count since its last vacuum
-	deadRows   int64
+	// the live rows the statistics count; -1 without statistics
+	liveRows   int64
 	primaryKey string
 }
 
@@ -179,7 +175,7 @@ func (self contractWeekLeaf) bytes() int64 {
 }
 
 // The six leaves of a week ($1, leaf names in table order), each with its
-// storage, row estimates and primary key.
+// storage, live row count and primary key.
 const contractWeekLeavesSql = `
 	SELECT
 		leaf.name,
@@ -187,8 +183,7 @@ const contractWeekLeavesSql = `
 		coalesce(toast.oid::regclass::text, ''),
 		coalesce(pg_relation_size(relation.oid), 0),
 		coalesce(pg_relation_size(toast.oid), 0),
-		coalesce(relation.reltuples, -1)::bigint,
-		coalesce(activity.n_dead_tup, 0),
+		coalesce(activity.n_live_tup, -1),
 		coalesce((
 			SELECT index_class.relname::text
 			FROM pg_index AS index
@@ -214,8 +209,7 @@ func readContractWeekLeavesInConn(ctx context.Context, conn PgQuerier, r Partiti
 				&leaf.toast,
 				&leaf.heapBytes,
 				&leaf.toastBytes,
-				&leaf.estimatedRows,
-				&leaf.deadRows,
+				&leaf.liveRows,
 				&leaf.primaryKey,
 			))
 			leaves = append(leaves, leaf)
@@ -253,8 +247,13 @@ func contractStatementTimeoutSql(timeout time.Duration) string {
 }
 
 // Counts a leaf's live rows, up to limit, along its key: the walk CLUSTER
-// makes, which also brings the leaf's pages into the cache for it. A read only
-// transaction; its lock (ACCESS SHARE) waits only behind an exclusive one.
+// makes, which also brings the kept rows' pages into the cache for it. Like any
+// index scan it marks the key entries of rows every snapshot sees deleted as
+// dead, so where vacuum has not removed the reaper's last deletes yet (Main's
+// leaves vacuum only every 5M to 25M dead rows), each run's walk gets further
+// until it finishes within ProbeTimeout, and CLUSTER then skips those entries.
+// A read only transaction; its lock (ACCESS SHARE) waits only behind an
+// exclusive one.
 func contractWeekLeafLiveRows(ctx context.Context, leaf contractWeekLeaf, limit int64, settings *ContractWeekRetirementSettings) (rows int64, err error) {
 	err = partitionRegistryRun(func() {
 		MaintenanceTx(ctx, func(tx PgTx) {
@@ -482,11 +481,10 @@ func retireContractWeek(ctx context.Context, r PartitionRange, settings *Contrac
 				return
 			}
 			small := leaf.bytes() <= settings.CompactAboveBytes
-			if !small && (leaf.estimatedRows < 0 || settings.ProbeGateRows < leaf.estimatedRows || settings.ProbeGateRows < leaf.deadRows) {
+			if !small && settings.ProbeGateRows < leaf.liveRows {
 				report.Blocked[leaf.name] = fmt.Sprintf(
-					"about %d rows and %d dead rows by the catalog in %d bytes: the reaper and vacuum have not emptied it",
-					leaf.estimatedRows,
-					leaf.deadRows,
+					"about %d live rows by the statistics in %d bytes: the reaper has not emptied it, or keeps more than a compaction moves",
+					leaf.liveRows,
 					leaf.bytes(),
 				)
 				blocked = true
