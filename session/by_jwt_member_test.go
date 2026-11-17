@@ -8,6 +8,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -201,6 +202,42 @@ func TestMemberClientCredential(t *testing.T) {
 		})
 		if err := ValidateByJwtState(ctx, credential, true); err == nil {
 			t.Fatal("a removed member's client still validates")
+		}
+	})
+}
+
+// A member refused for its reauth deadline is not remembered, whether or not
+// the revocation record is enabled, since a member's credential stays on the
+// state query either way: once an IdP sign-in moves the deadline on, the same
+// credential is answered again rather than refused from the refusal cache.
+func TestMemberRefusedForItsReauthDeadlineIsNotRemembered(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		for _, recordEnabled := range []bool{false, true} {
+			func() {
+				defer Testing_SetRevocationRecordEnabled(recordEnabled)()
+				ctx := t.Context()
+				team := newTestMemberTeam(t, ctx)
+				userId, _ := newTestMemberUser(t, ctx)
+				passed := server.NowUtc().Add(-time.Minute)
+				memberId := team.join(t, ctx, userId, false, &passed)
+				clientId := server.NewId()
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client(client_id,network_id,device_id,description,create_time,auth_time,active) VALUES($1,$2,$3,'synthetic',$4,$4,true)`, clientId, team.networkId, team.deviceId, server.NowUtc()))
+				})
+				credential := team.credential(userId, memberId).Client(team.deviceId, clientId)
+				for attempt := range 2 {
+					if err := ValidateByJwtState(ctx, credential, true); !errors.Is(err, ErrByJwtInactive) {
+						t.Fatalf("record %v, check %d answered a member past its deadline: %v", recordEnabled, attempt, err)
+					}
+				}
+				// as an IdP sign-in moves it
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE network_member SET reauth_deadline = $2 WHERE member_id = $1`, memberId, server.NowUtc().Add(time.Hour)))
+				})
+				if err := ValidateByJwtState(ctx, credential, true); err != nil {
+					t.Fatalf("record %v: the member after its deadline moved on: %v", recordEnabled, err)
+				}
+			}()
 		}
 	})
 }

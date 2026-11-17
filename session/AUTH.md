@@ -78,7 +78,7 @@ The reason is the shared domain. Any host under `bringyour.com` can set a cookie
 - `roles`, `principal`: assigned at client or auth code creation. They mean nothing to the network.
 - `lag_guest`: a lag.dev guest's credential (§1). Limits the token to the lag routes and keeps it off the connect transport.
 - `strict_exp`: a sidecar token. Every renewal and derived credential keeps it, and a mint reads it from the client's owner row, whoever asks.
-- `admin_refused`: the client's owner row marks it admin_refused (§4). A mint reads it from the row, whoever asks, never from the caller's token; every renewal, bind's re-mint and derived credential keeps it; a client with no mark carries none. The admin check reads the row, not this claim: a daemon's `Pair`, handed a child's token it did not mint, requires it beside `strict_exp` (owner decision 291).
+- `admin_refused`: the client's owner row marks it admin_refused (§4). A mint reads it from the row, whoever asks, never from the caller's token; every renewal and derived credential keeps it; a client with no mark carries none. The admin check reads the row, not this claim: a daemon's `Pair`, handed a child's token it did not mint, requires it beside `strict_exp` (owner decision 291).
 - `api_key_id`: the API key this credential descends from through an auth code (§1). Every renewal and derived credential keeps it.
 - `guest_mode`: deprecated, and false on new tokens.
 
@@ -112,7 +112,7 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
 **Connect transports.** These register before their final check. After admission, an authorization lease checks each connection again every 60 s and retires it after 90 s without a successful check. So a revoked session or a removed client loses its connections within about 90 s.
 
 **Redis revocation authority (owner decision, 2026-10-26; REVOKE-FINAL.md §14).** With vault `auth.yml` `revocation_record_enabled: true`, a tagged credential skips steps 4 and 5.
-- It reads one Redis revocation record, keyed by its root client or its session in one of 64 shards of its network. The record holds the session, own-client, root, admin and credential-cutoff state, and for a team member's credential, which carries `member_id`, the membership (its user and reauth deadline) and the member user's cutoff in place of the admin's (owner decision 561).
+- It reads one Redis revocation record, keyed by its root client or its session in one of 64 shards of its network. The record holds the session, own-client, root, admin and credential-cutoff state. A team member's credential, which carries `member_id`, stays on steps 4 and 5, since the record keeps no membership.
 - If the record cannot answer, the SQL state query does, after the session marker and the session journal, and its valid answer is projected into the record.
 - If Redis is unavailable, the credential is refused with 503 and nothing falls back to SQL.
 - Untagged credentials keep steps 4 and 5 unchanged.

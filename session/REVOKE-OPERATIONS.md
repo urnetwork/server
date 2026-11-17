@@ -93,11 +93,11 @@ The owner decided on 2026-10-26 that Redis becomes the authority (REVOKE-FINAL.m
 
 **Metrics:**
 - `urnetwork_jwt_state_record_checks_total{caller,operation,credential,outcome}`: `record_valid` and `record_refused` are answered by Redis, `record_miss` went to the SQL fallback, and `record_unavailable` was refused with 503. Expect misses at about one per active credential per hour once projections are warm. `urnetwork_jwt_state_queries_total` should fall by the same amount.
-- `urnetwork_session_revocation_record_writes_total{kind,outcome}`: a `failure` is a revocation that did not commit. A `stale` projection is harmless; it only leaves the next check to SQL. Since owner decision 561 the kinds include `member`, a team membership's tombstones, and `member_drop`, a membership projection an IdP sign-in's reauth deadline move dropped.
+- `urnetwork_session_revocation_record_writes_total{kind,outcome}`: a `failure` is a revocation that did not commit. A `stale` projection is harmless; it only leaves the next check to SQL.
 
 **Failure modes.**
-- **Redis down.** Tagged checks answer 503, and removals, password resets, network deletions, session revocations, team member removals and IdP sign-ins of team members fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
+- **Redis down.** Tagged checks answer 503, and removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
 - **Redis data loss.** Checks miss and the SQL fallback rebuilds the record. Watch the miss rate spike; no acceptance is lost or restored.
-- **Spurious tombstone** (a write succeeded but its commit failed). The client, or the team member (`m:`), is refused for at most ten minutes, then SQL answers. A spurious `n:del`, `n:cred` or `u:` lasts until the key expires (25 hours), and only an intended deletion or rotation can write it. A membership projection dropped by an IdP sign-in that then failed costs one SQL fallback.
+- **Spurious tombstone** (a write succeeded but its commit failed). The client is refused for at most ten minutes, then SQL answers. A spurious `n:del` or `n:cred` lasts until the key expires (25 hours), and only an intended deletion or rotation can write it.
 
 **Rollback.** Clear `revocation_record_enabled` and restart. Readers return to SQL; writers keep writing.

@@ -17,30 +17,19 @@
 //   - c:<client>, "a <device> <source client>" for an active client.
 //   - r:<root>, "a" for an active root client.
 //   - s:<session>, "a" for a session the network has not revoked.
-//   - m:<member>, "a <user> <reauth deadline in Unix milliseconds, 0 for
-//     none>" for a joined, admitted team membership (owner decision 561), never
-//     a pending one.
-//   - u:<user>, a team member's credential_change_time in Unix microseconds,
-//     only rising. A credential rotation writes it in every shard of each team
-//     the user belongs to, with no ttl of its own, as it writes n:cred; a
-//     fallback projects it with the positive ttl, so a value read before a
-//     rotation that could not yet see a membership lapses within the hour.
 //
-// A team member's credential, which carries member_id, reads m: and u: in
-// place of n:user and n:cred: in a team, n:user is a synthetic owner of record
-// that never signs in (D-TEAM-2). It is refused by a tombstone, another user, a
-// passed reauth deadline or a cutoff after its creation, as SQL refuses it.
+// The record keeps no membership: a team member's credential, which carries
+// member_id, stays on the SQL state query, which reads network_member
+// (TEAM-M6-02). sockets reads no record: it takes service tokens and the rev/
+// objects (QD-1029).
 //
 // A positive projection is written only after the SQL fallback found the
 // credential valid, from a read at most the settings' Freshness old, and
-// expires after PositiveTtl. A revocation, a membership's removal included,
-// writes the tombstone "x" before its SQL change commits, and no projection
-// overwrites a tombstone while it lives (TombstoneTtl). After the tombstone
-// expires, the absent field sends the next check to SQL, which already
-// refuses. A missing field is never read as "no revocation". A change that
-// keeps a membership but moves its reauth deadline drops the membership's
-// projected fields before it commits, keeping a tombstone, so the next check
-// reads SQL again (DropMemberRecordProjections).
+// expires after PositiveTtl. A revocation writes the tombstone "x" before its
+// SQL change commits, and no projection overwrites a tombstone while it lives
+// (TombstoneTtl). After the tombstone expires, the absent field sends the next
+// check to SQL, which already refuses. A missing field is never read as "no
+// revocation".
 package session
 
 import (
@@ -82,8 +71,8 @@ type RevocationRecordSettings struct {
 	KeyTtl time.Duration
 	// The oldest SQL read a projection may be built from, by Redis time: 1 min.
 	Freshness time.Duration
-	// The fields one tombstone or drop script call writes: 512. Non-positive
-	// writes one field a call.
+	// The fields one tombstone script call writes: 512. Non-positive writes one
+	// field a call.
 	FieldBatchCount int
 }
 
@@ -107,8 +96,6 @@ const (
 	revocationTombstone       = "x"
 	revocationActive          = "a"
 	revocationAbsent          = "-"
-	// a membership with no reauth deadline, in its m: field
-	revocationNoReauthDeadline = "0"
 )
 
 // The kinds of a network-wide write.
@@ -120,8 +107,6 @@ const (
 func revocationClientField(clientId server.Id) string   { return "c:" + clientId.String() }
 func revocationRootField(rootId server.Id) string       { return "r:" + rootId.String() }
 func revocationSessionField(sessionId server.Id) string { return "s:" + sessionId.String() }
-func revocationMemberField(memberId server.Id) string   { return "m:" + memberId.String() }
-func revocationUserField(userId server.Id) string       { return "u:" + userId.String() }
 
 func revocationRecordShard(settings *RevocationRecordSettings, lineageId server.Id) int {
 	hash := fnv.New32a()
@@ -187,9 +172,11 @@ func revocationRecordLineage(byJwt *ByJwt) (server.Id, bool) {
 // A credential that descends from an API key ends with the key, which only the
 // SQL state query reads. The record keeps no key state, so such a credential,
 // one logged in with a key's auth code, stays on the query. A team member's
-// credential reads the record's membership (owner decision 561).
+// credential stays there too.
 func usesRevocationRecord(byJwt *ByJwt) bool {
-	if !RevocationRecordEnabled() || byJwt.ApiKeyId != nil {
+	// nor does it keep membership: a team member's credential (TEAM-M6-02)
+	// stays on the query, which reads network_member
+	if !RevocationRecordEnabled() || byJwt.ApiKeyId != nil || byJwt.MemberId != nil {
 		return false
 	}
 	_, ok := revocationRecordLineage(byJwt)
@@ -207,12 +194,10 @@ const (
 	revocationSessionRevoked
 )
 
-// The fields one check reads, in a fixed order: the credential's identity
-// (n:user, or a member's m:), its credential cutoff (n:cred, or the member
-// user's u:), the network's deletion mark, then its client, root and session.
+// The fields one check reads, in a fixed order: n:user, n:cred, the network's
+// deletion mark, then the credential's client, root and session.
 type revocationRecordQuery struct {
 	key          string
-	member       bool
 	clientField  string
 	rootField    string
 	sessionField string
@@ -224,7 +209,7 @@ type revocationRecordQuery struct {
 }
 
 const (
-	revocationQueryIdentityIndex   = 0
+	revocationQueryUserIndex       = 0
 	revocationQueryCredentialIndex = 1
 	revocationQueryDeletedIndex    = 2
 )
@@ -232,16 +217,11 @@ const (
 func newRevocationRecordQuery(settings *RevocationRecordSettings, byJwt *ByJwt, lineage server.Id, parentClientId *server.Id) *revocationRecordQuery {
 	query := &revocationRecordQuery{
 		key:          revocationRecordKey(settings, byJwt.NetworkId, lineage),
-		member:       byJwt.MemberId != nil,
 		parentClient: parentClientId,
 		fields:       []string{revocationFieldUser, revocationFieldCredential, revocationFieldDeleted},
 		clientIndex:  -1,
 		rootIndex:    -1,
 		sessionIndex: -1,
-	}
-	if query.member {
-		query.fields[revocationQueryIdentityIndex] = revocationMemberField(*byJwt.MemberId)
-		query.fields[revocationQueryCredentialIndex] = revocationUserField(byJwt.UserId)
 	}
 	if byJwt.ClientId != nil {
 		query.clientIndex = len(query.fields)
@@ -262,36 +242,9 @@ func newRevocationRecordQuery(settings *RevocationRecordSettings, byJwt *ByJwt, 
 	return query
 }
 
-// Reads a member's m: field for a credential of userId at now: whether it
-// refuses the credential (a tombstone, another user, or a reauth deadline at or
-// before now, as the SQL state query reads it), and whether it holds a
-// well-formed admitted membership. A malformed value does neither, so the
-// record cannot answer.
-func revocationMembershipVerdict(membership string, userId server.Id, now time.Time) (refuses bool, admitted bool) {
-	if membership == revocationTombstone {
-		return true, false
-	}
-	parts := strings.Fields(membership)
-	if len(parts) != 3 || parts[0] != revocationActive {
-		return false, false
-	}
-	if parts[1] != userId.String() {
-		return true, false
-	}
-	deadlineMillis, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return false, false
-	}
-	if deadlineMillis != 0 && !now.Before(time.UnixMilli(deadlineMillis)) {
-		return true, false
-	}
-	return false, true
-}
-
-// Decides a credential from one HMGET reply at now, with the SQL path's
-// precedence: a revoked session first, then a missing or mismatched row or
-// membership, then rotation.
-func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any, now time.Time) (revocationVerdict, time.Time) {
+// Decides a credential from one HMGET reply, with the SQL path's precedence:
+// a revoked session first, then a missing or mismatched row, then rotation.
+func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any) (revocationVerdict, time.Time) {
 	value := func(index int) (string, bool) {
 		if index < 0 || len(values) <= index || values[index] == nil {
 			return "", false
@@ -305,27 +258,12 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any, now time.
 	if _, ok := value(revocationQueryDeletedIndex); ok {
 		return revocationNoActiveRow, time.Time{}
 	}
-	identity, identityOk := value(revocationQueryIdentityIndex)
-	membershipAdmitted := false
-	if self.member && identityOk {
-		// a removed membership, another user's or one past its deadline
-		// refuses whatever else the record lacks: a token naming another user
-		// reads that user's own cutoff field, which the record need not hold
-		refuses, admitted := revocationMembershipVerdict(identity, byJwt.UserId, now)
-		if refuses {
-			return revocationNoActiveRow, time.Time{}
-		}
-		membershipAdmitted = admitted
-	}
+	user, userOk := value(revocationQueryUserIndex)
 	credential, credentialOk := value(revocationQueryCredentialIndex)
-	if !identityOk || !credentialOk {
+	if !userOk || !credentialOk {
 		return revocationMiss, time.Time{}
 	}
-	if self.member {
-		if !membershipAdmitted {
-			return revocationMiss, time.Time{}
-		}
-	} else if identity != byJwt.UserId.String() {
+	if user != byJwt.UserId.String() {
 		return revocationNoActiveRow, time.Time{}
 	}
 	credentialMicros, err := strconv.ParseInt(credential, 10, 64)
@@ -382,7 +320,7 @@ var revocationRecordCheckCounter = prometheus.NewCounterVec(prometheus.CounterOp
 
 var revocationRecordWriteCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork", Subsystem: "session", Name: "revocation_record_writes_total",
-	Help: "Redis revocation record writes by kind: client, session, credential, network and member revocations, membership projections dropped by a reauth deadline's move (member_drop), and projections built from a SQL fallback; outcome success, failure, or stale for a projection refused by the freshness bound.",
+	Help: "Redis revocation record writes by kind: client, session, credential and network revocations, and projections built from a SQL fallback; outcome success, failure, or stale for a projection refused by the freshness bound.",
 }, []string{"kind", "outcome"})
 
 func init() {
@@ -433,10 +371,6 @@ func injectedRevocationRecordWriteFailure() error {
 	return nil
 }
 
-// Runs between a fallback's SQL reads and its projection, when a test's ctx
-// carries one: where a revocation racing the fallback lands.
-type revocationRecordBeforeProjectionKey struct{}
-
 // Answers a tagged credential's state check from its record, or through the
 // SQL fallback when the record cannot answer. A Redis failure is unavailable:
 // the record is the authority, so nothing is accepted without it.
@@ -452,7 +386,7 @@ func validateByJwtStateRecord(ctx context.Context, byJwt *ByJwt, parentClientId 
 		observeRevocationRecordCheck(ctx, byJwt, "record_unavailable")
 		return errors.Join(ErrAuthUnavailable, ErrSessionStoreUnavailable)
 	}
-	verdict, credentialChangeTime := query.verdict(byJwt, values, server.NowUtc())
+	verdict, credentialChangeTime := query.verdict(byJwt, values)
 	switch verdict {
 	case revocationValid:
 		observeRevocationRecordCheck(ctx, byJwt, "record_valid")
@@ -481,11 +415,6 @@ type revocationRecordFacts struct {
 	deviceId             *server.Id
 	sourceClientId       *server.Id
 	rootMatches          bool
-	// a member credential's membership, read joined, admitted and inside its
-	// reauth deadline
-	member bool
-	// the membership's reauth deadline, nil for none
-	reauthDeadline *time.Time
 }
 
 // The SQL state query decides; the record learns from a valid answer. A
@@ -518,7 +447,7 @@ func validateByJwtStateRecordFallback(ctx context.Context, settings *RevocationR
 			}
 			return
 		}
-		facts = readRevocationRecordFacts(ctx, conn, byJwt, lineage, observed)
+		facts = readRevocationRecordFacts(ctx, conn, byJwt, lineage)
 	})
 	if rememberable && noActiveRow {
 		stateRefusals.remember(key, time.Now())
@@ -526,9 +455,6 @@ func validateByJwtStateRecordFallback(ctx context.Context, settings *RevocationR
 	}
 	if returnErr != nil || facts == nil {
 		return
-	}
-	if hook, ok := ctx.Value(revocationRecordBeforeProjectionKey{}).(func()); ok {
-		hook()
 	}
 	// The answer is already valid; a projection that cannot be written only
 	// leaves the next check to SQL.
@@ -539,70 +465,36 @@ func validateByJwtStateRecordFallback(ctx context.Context, settings *RevocationR
 // Reads what the projection stores, after the state query found the
 // credential valid. A client that is no longer active, or a root claim that
 // is not the client's actual root, is not projected: deactivation tombstones
-// only the actual root's shard. A member credential whose membership is gone,
-// pending or past its reauth deadline at now projects nothing.
-func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, lineage server.Id, now time.Time) *revocationRecordFacts {
-	facts := &revocationRecordFacts{member: byJwt.MemberId != nil}
+// only the actual root's shard.
+func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, lineage server.Id) *revocationRecordFacts {
+	facts := &revocationRecordFacts{}
 	var clientId *server.Id
 	if byJwt.ClientId != nil {
 		clientId = byJwt.ClientId
 	}
+	result, err := conn.Query(ctx, `
+		SELECT
+			network_user.credential_change_time,
+			network_client.client_id IS NOT NULL,
+			network_client.device_id,
+			network_client.source_client_id
+		FROM network_user
+		INNER JOIN network ON
+			network.admin_user_id = network_user.user_id AND
+			network.network_id = $2
+		LEFT JOIN network_client ON
+			network_client.client_id = $3 AND
+			network_client.network_id = network.network_id AND
+			network_client.active
+		WHERE network_user.user_id = $1
+	`, byJwt.UserId, byJwt.NetworkId, clientId)
 	found := false
-	if facts.member {
-		if !server.SidecarMg6Linked() {
-			// no membership exists to project
-			return nil
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&facts.credentialChangeTime, &facts.clientActive, &facts.deviceId, &facts.sourceClientId))
+			found = true
 		}
-		result, err := conn.Query(ctx, `
-			SELECT
-				network_user.credential_change_time,
-				network_member.reauth_deadline,
-				network_client.client_id IS NOT NULL,
-				network_client.device_id,
-				network_client.source_client_id
-			FROM network_member
-			INNER JOIN network_user ON network_user.user_id = network_member.user_id
-			LEFT JOIN network_client ON
-				network_client.client_id = $3 AND
-				network_client.network_id = network_member.network_id AND
-				network_client.active
-			WHERE
-				network_member.member_id = $4 AND
-				network_member.network_id = $2 AND
-				network_member.user_id = $1 AND
-				NOT network_member.pending AND
-				(network_member.reauth_deadline IS NULL OR $5 < network_member.reauth_deadline)
-		`, byJwt.UserId, byJwt.NetworkId, clientId, *byJwt.MemberId, now)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&facts.credentialChangeTime, &facts.reauthDeadline, &facts.clientActive, &facts.deviceId, &facts.sourceClientId))
-				found = true
-			}
-		})
-	} else {
-		result, err := conn.Query(ctx, `
-			SELECT
-				network_user.credential_change_time,
-				network_client.client_id IS NOT NULL,
-				network_client.device_id,
-				network_client.source_client_id
-			FROM network_user
-			INNER JOIN network ON
-				network.admin_user_id = network_user.user_id AND
-				network.network_id = $2
-			LEFT JOIN network_client ON
-				network_client.client_id = $3 AND
-				network_client.network_id = network.network_id AND
-				network_client.active
-			WHERE network_user.user_id = $1
-		`, byJwt.UserId, byJwt.NetworkId, clientId)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&facts.credentialChangeTime, &facts.clientActive, &facts.deviceId, &facts.sourceClientId))
-				found = true
-			}
-		})
-	}
+	})
 	if !found {
 		return nil
 	}
@@ -613,32 +505,26 @@ func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJw
 	return facts
 }
 
-// ARGV: the read's time and the freshness bound in ms; n:user's value, empty
-// for a member credential, which writes none; the cutoff field, its value in
-// microseconds, and "1" when a raised cutoff takes the positive ttl; the
-// positive ttl and the key ttl in ms; then field and value pairs, each written
-// with the positive ttl unless it holds a tombstone. A cutoff only rises, and
-// one that takes the positive ttl renews it at an equal value.
+// ARGV: the read's time and the freshness bound in ms; n:user's value; n:cred's
+// value in microseconds, which only rises; the positive ttl and the key ttl in
+// ms; then field and value pairs, each written with the positive ttl unless it
+// holds a tombstone.
 const revocationRecordProjectLua = `
 local t=redis.call('TIME')
 local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
 if now-tonumber(ARGV[1])>tonumber(ARGV[2]) then return 'stale' end
 if redis.call('HEXISTS',KEYS[1],'n:del')==1 then return 'deleted' end
-if ARGV[3]~='' and redis.call('HEXISTS',KEYS[1],'n:user')==0 then redis.call('HSET',KEYS[1],'n:user',ARGV[3]) end
-local credential=tonumber(redis.call('HGET',KEYS[1],ARGV[4])) or -1
-local projected=tonumber(ARGV[5])
-if projected>credential or (ARGV[6]=='1' and projected==credential) then
- redis.call('HSET',KEYS[1],ARGV[4],ARGV[5])
- if ARGV[6]=='1' then redis.call('HPEXPIRE',KEYS[1],tonumber(ARGV[7]),'FIELDS',1,ARGV[4]) end
-end
-for i=9,#ARGV,2 do
+if redis.call('HEXISTS',KEYS[1],'n:user')==0 then redis.call('HSET',KEYS[1],'n:user',ARGV[3]) end
+local credential=tonumber(redis.call('HGET',KEYS[1],'n:cred')) or -1
+if tonumber(ARGV[4])>credential then redis.call('HSET',KEYS[1],'n:cred',ARGV[4]) end
+for i=7,#ARGV,2 do
  if redis.call('HGET',KEYS[1],ARGV[i])~='x' then
   redis.call('HSET',KEYS[1],ARGV[i],ARGV[i+1])
-  redis.call('HPEXPIRE',KEYS[1],tonumber(ARGV[7]),'FIELDS',1,ARGV[i])
+  redis.call('HPEXPIRE',KEYS[1],tonumber(ARGV[5]),'FIELDS',1,ARGV[i])
  end
 end
 local ttl=redis.call('PTTL',KEYS[1])
-if ttl<tonumber(ARGV[8]) then redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[8])) end
+if ttl<tonumber(ARGV[6]) then redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[6])) end
 return 'ok'
 `
 
@@ -649,37 +535,19 @@ func revocationIdOrAbsent(id *server.Id) string {
 	return id.String()
 }
 
-// A membership's m: value: "a <user> <reauth deadline in ms, 0 for none>".
-func revocationMembershipValue(userId server.Id, reauthDeadline *time.Time) string {
-	deadline := revocationNoReauthDeadline
-	if reauthDeadline != nil {
-		deadline = strconv.FormatInt(reauthDeadline.UnixMilli(), 10)
-	}
-	return fmt.Sprintf("%s %s %s", revocationActive, userId, deadline)
-}
-
 // Projects a valid fallback answer into the credential's record.
 func projectRevocationRecord(ctx context.Context, settings *RevocationRecordSettings, byJwt *ByJwt, lineage server.Id, observed time.Time, facts *revocationRecordFacts) {
 	positiveTtl := settings.PositiveTtl
 	if 0 < settings.PositiveTtlJitter {
 		positiveTtl -= time.Duration(rand.Int64N(int64(settings.PositiveTtlJitter)))
 	}
-	identityValue, credentialField, credentialExpires := byJwt.UserId.String(), revocationFieldCredential, "0"
-	if facts.member {
-		identityValue, credentialField, credentialExpires = "", revocationUserField(byJwt.UserId), "1"
-	}
 	args := []any{
 		observed.UnixMilli(),
 		settings.Freshness.Milliseconds(),
-		identityValue,
-		credentialField,
+		byJwt.UserId.String(),
 		facts.credentialChangeTime.UnixMicro(),
-		credentialExpires,
 		positiveTtl.Milliseconds(),
 		settings.KeyTtl.Milliseconds(),
-	}
-	if facts.member {
-		args = append(args, revocationMemberField(*byJwt.MemberId), revocationMembershipValue(byJwt.UserId, facts.reauthDeadline))
 	}
 	if byJwt.ClientId != nil && facts.clientActive && facts.rootMatches {
 		args = append(args, revocationClientField(*byJwt.ClientId), fmt.Sprintf("%s %s %s", revocationActive, revocationIdOrAbsent(facts.deviceId), revocationIdOrAbsent(facts.sourceClientId)))
@@ -712,26 +580,17 @@ if ttl<tonumber(ARGV[2]) then redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[2])) en
 return #ARGV-2
 `
 
-// Drops each named field unless it holds a tombstone.
-const revocationRecordDropLua = `
-local dropped=0
-for i=1,#ARGV do
- if redis.call('HGET',KEYS[1],ARGV[i])~='x' then dropped=dropped+redis.call('HDEL',KEYS[1],ARGV[i]) end
-end
-return dropped
-`
-
-// ARGV: the write's kind, del or cred; the field; the cutoff in microseconds,
-// which only rises; the key ttl in ms.
+// ARGV: the write's kind, del or cred; the cutoff in microseconds, which only
+// rises; the key ttl in ms.
 const revocationRecordNetworkLua = `
 if ARGV[1]=='del' then
- redis.call('HSET',KEYS[1],ARGV[2],'1')
+ redis.call('HSET',KEYS[1],'n:del','1')
 else
- local credential=tonumber(redis.call('HGET',KEYS[1],ARGV[2])) or -1
- if tonumber(ARGV[3])>credential then redis.call('HSET',KEYS[1],ARGV[2],ARGV[3]) end
+ local credential=tonumber(redis.call('HGET',KEYS[1],'n:cred')) or -1
+ if tonumber(ARGV[2])>credential then redis.call('HSET',KEYS[1],'n:cred',ARGV[2]) end
 end
 local ttl=redis.call('PTTL',KEYS[1])
-if ttl<tonumber(ARGV[4]) then redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[4])) end
+if ttl<tonumber(ARGV[3]) then redis.call('PEXPIRE',KEYS[1],tonumber(ARGV[3])) end
 return 1
 `
 
@@ -779,17 +638,10 @@ func writeRevocationTombstones(ctx context.Context, settings *RevocationRecordSe
 	return writeRevocationFieldBatches(ctx, settings, revocationRecordTombstoneLua, args, keyFields)
 }
 
-// One network-wide write: field in every shard of the network.
-type revocationNetworkWrite struct {
-	networkId server.Id
-	field     string
-}
-
-// Writes kind to every shard of each write's network: del marks the network
-// deleted in the write's field, cred raises the write's field, a credential
-// cutoff, to value.
-func writeRevocationNetworkFields(ctx context.Context, settings *RevocationRecordSettings, writes []revocationNetworkWrite, kind string, value string) error {
-	if len(writes) == 0 {
+// Writes kind to every shard of each network: del marks the network deleted,
+// cred raises its credential cutoff to value.
+func writeRevocationNetworkFields(ctx context.Context, settings *RevocationRecordSettings, networkIds []server.Id, kind string, value string) error {
+	if len(networkIds) == 0 {
 		return nil
 	}
 	if err := injectedRevocationRecordWriteFailure(); err != nil {
@@ -797,9 +649,9 @@ func writeRevocationNetworkFields(ctx context.Context, settings *RevocationRecor
 	}
 	return server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
 		commands, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, write := range writes {
-				for _, key := range revocationRecordNetworkKeys(settings, write.networkId) {
-					pipe.Eval(ctx, revocationRecordNetworkLua, []string{key}, kind, write.field, value, settings.KeyTtl.Milliseconds())
+			for _, networkId := range networkIds {
+				for _, key := range revocationRecordNetworkKeys(settings, networkId) {
+					pipe.Eval(ctx, revocationRecordNetworkLua, []string{key}, kind, value, settings.KeyTtl.Milliseconds())
 				}
 			}
 			return nil
@@ -986,113 +838,35 @@ func RevokeSessionRecords(ctx context.Context, networkId server.Id, sessionIds [
 	return writeRevocationTombstones(ctx, settings, keyFields)
 }
 
-// The m: fields of each network's members, in every shard of the network: a
-// member's credentials can name any root or session.
-func revocationMemberKeyFields(settings *RevocationRecordSettings, networkMemberIds map[server.Id][]server.Id) map[string][]string {
-	keyFields := map[string][]string{}
-	for networkId, memberIds := range networkMemberIds {
-		if len(memberIds) == 0 {
-			continue
-		}
-		fields := make([]string, 0, len(memberIds))
-		for _, memberId := range memberIds {
-			fields = append(fields, revocationMemberField(memberId))
-		}
-		for _, key := range revocationRecordNetworkKeys(settings, networkId) {
-			keyFields[key] = append(keyFields[key], fields...)
-		}
-	}
-	return keyFields
-}
-
-// Tombstones the memberships, by network, that the caller is ending in its
-// transaction, in every shard of each network, before it commits: a removal,
-// or the end of a membership a re-join replaces (owner decision 561). Every
-// credential naming one of the memberships is refused while the tombstone
-// lives, and SQL refuses it after. A failure must fail the transaction: a
-// committed removal without its tombstone could leave a projection accepting
-// the removed member for up to the positive ttl.
-func RevokeMemberRecords(ctx context.Context, networkMemberIds map[server.Id][]server.Id) (returnErr error) {
-	settings := DefaultRevocationRecordSettings()
-	keyFields := revocationMemberKeyFields(settings, networkMemberIds)
-	if len(keyFields) == 0 {
-		return nil
-	}
-	defer func() { observeRevocationRecordWrite("member", returnErr) }()
-	return writeRevocationTombstones(ctx, settings, keyFields)
-}
-
-// Drops the projected m: fields of memberships of networkId that the caller's
-// transaction keeps but changes, a reauth deadline moved by an IdP sign-in, in
-// every shard of the network, before it commits, so the next check of each
-// member's credentials reads SQL and projects the new state. A tombstone
-// stays. A projection whose SQL read preceded the commit can still land after
-// the drop with the earlier state, which refuses at most until its positive
-// ttl, and only once its earlier deadline passes. A failure must fail the
-// transaction, or an earlier deadline could refuse a member SQL accepts.
-func DropMemberRecordProjections(ctx context.Context, networkId server.Id, memberIds []server.Id) (returnErr error) {
-	settings := DefaultRevocationRecordSettings()
-	keyFields := revocationMemberKeyFields(settings, map[server.Id][]server.Id{networkId: memberIds})
-	if len(keyFields) == 0 {
-		return nil
-	}
-	defer func() { observeRevocationRecordWrite("member_drop", returnErr) }()
-	return writeRevocationFieldBatches(ctx, settings, revocationRecordDropLua, nil, keyFields)
-}
-
-// The ids one query of a single uuid column answers.
-func queryRevocationNetworkIds(ctx context.Context, tx server.PgCanQuery, sql string, args ...any) ([]server.Id, error) {
-	rows, err := tx.Query(ctx, sql, args...)
+// Raises the credential cutoff of every network the user administers, in tx,
+// before the credential change commits. Credentials created before the cutoff
+// are refused by every record of those networks.
+func RotateCredentialRecordsInTx(ctx context.Context, tx server.PgCanQuery, userId server.Id, cutoff time.Time) (returnErr error) {
+	defer func() { observeRevocationRecordWrite("credential", returnErr) }()
+	rows, err := tx.Query(ctx, `SELECT network_id FROM network WHERE admin_user_id = $1`, userId)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
 	networkIds := []server.Id{}
 	for rows.Next() {
 		var networkId server.Id
 		if err := rows.Scan(&networkId); err != nil {
-			return nil, err
+			rows.Close()
+			return err
 		}
 		networkIds = append(networkIds, networkId)
 	}
-	return networkIds, rows.Err()
-}
-
-// Raises the credential cutoff of every network the user administers, and of
-// every team the user belongs to, in tx, before the credential change commits:
-// n:cred in each administered network's records, and u:<user> in each team's.
-// Credentials created before the cutoff are refused by every record of those
-// networks, a member's included.
-func RotateCredentialRecordsInTx(ctx context.Context, tx server.PgCanQuery, userId server.Id, cutoff time.Time) (returnErr error) {
-	defer func() { observeRevocationRecordWrite("credential", returnErr) }()
-	settings := DefaultRevocationRecordSettings()
-	writes := []revocationNetworkWrite{}
-	adminNetworkIds, err := queryRevocationNetworkIds(ctx, tx, `SELECT network_id FROM network WHERE admin_user_id = $1`, userId)
-	if err != nil {
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, networkId := range adminNetworkIds {
-		writes = append(writes, revocationNetworkWrite{networkId: networkId, field: revocationFieldCredential})
-	}
-	if server.SidecarMg6Linked() {
-		// a pending membership too: it is cheap, and its user's cutoff is then
-		// already in place should it be admitted
-		memberNetworkIds, err := queryRevocationNetworkIds(ctx, tx, `SELECT network_id FROM network_member WHERE user_id = $1`, userId)
-		if err != nil {
-			return err
-		}
-		for _, networkId := range memberNetworkIds {
-			writes = append(writes, revocationNetworkWrite{networkId: networkId, field: revocationUserField(userId)})
-		}
-	}
-	return writeRevocationNetworkFields(ctx, settings, writes, revocationNetworkWriteCredential, strconv.FormatInt(cutoff.UnixMicro(), 10))
+	return writeRevocationNetworkFields(ctx, DefaultRevocationRecordSettings(), networkIds, revocationNetworkWriteCredential, strconv.FormatInt(cutoff.UnixMicro(), 10))
 }
 
 // Marks every record of a network deleted, before the deletion commits.
 func RetireNetworkRecords(ctx context.Context, networkId server.Id) (returnErr error) {
 	defer func() { observeRevocationRecordWrite("network", returnErr) }()
-	writes := []revocationNetworkWrite{{networkId: networkId, field: revocationFieldDeleted}}
-	return writeRevocationNetworkFields(ctx, DefaultRevocationRecordSettings(), writes, revocationNetworkWriteDeleted, "1")
+	return writeRevocationNetworkFields(ctx, DefaultRevocationRecordSettings(), []server.Id{networkId}, revocationNetworkWriteDeleted, "1")
 }
 
 // Testing_RevocationRecordField reads one field of a record key, for tests
@@ -1125,13 +899,6 @@ func Testing_RevocationClientField(clientId server.Id) string { return revocatio
 func Testing_RevocationRootField(rootId server.Id) string     { return revocationRootField(rootId) }
 func Testing_RevocationSessionField(sessionId server.Id) string {
 	return revocationSessionField(sessionId)
-}
-func Testing_RevocationMemberField(memberId server.Id) string { return revocationMemberField(memberId) }
-func Testing_RevocationUserField(userId server.Id) string     { return revocationUserField(userId) }
-
-// A projected membership's m: value, for tests outside the package.
-func Testing_RevocationMembershipValue(userId server.Id, reauthDeadline *time.Time) string {
-	return revocationMembershipValue(userId, reauthDeadline)
 }
 
 const (

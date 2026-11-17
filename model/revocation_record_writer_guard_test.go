@@ -19,20 +19,12 @@ import (
 )
 
 // Statements that end what the state query reads: an active client, a client
-// row, a network row, or a credential epoch; and a team membership, whose
-// record field m:<member_id> holds its user and reauth deadline (owner
-// decision 561): its deletion, a membership a join replaces in place, or a
-// rewrite of what its field holds or of whether it is admitted.
+// row, a network row, or a credential epoch.
 var revokingStatementPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)\bupdate\s+network_client\b.*\bset\b.*\bactive\s*=\s*false\b`),
 	regexp.MustCompile(`(?is)\bdelete\s+from\s+network_client\b`),
 	regexp.MustCompile(`(?is)\bdelete\s+from\s+network(\s|$)`),
 	regexp.MustCompile(`(?is)\bupdate\s+network_user\b.*\bset\b.*\bcredential_change_time\s*=`),
-	regexp.MustCompile(`(?is)\bdelete\s+from\s+network_member\b`),
-	regexp.MustCompile(`(?is)\binsert\s+into\s+network_member\b.*\bon\s+conflict\b.*\bdo\s+update\b`),
-	// an assignment in the set clause, before the where clause, so a where
-	// clause naming the row's ids is no match
-	regexp.MustCompile(`(?is)\bupdate\s+network_member\s+set\s+[^;]*?\b(user_id|network_id|member_id|pending|reauth_deadline)\s*=[^;]*\bwhere\b`),
 }
 
 // file:function (or file:const) -> the record writes it must call, or the
@@ -57,13 +49,6 @@ var revokingStatementOwners = map[string]struct {
 	"model/auth_model.go:AuthPasswordSet":                                   {hooks: []string{"RotateCredentialRecordsInTx"}},
 	// bringyourctl network sign-out-all runs the password reset's rotation
 	"model/network_sign_out_model.go:CommitNetworkSignOut": {hooks: []string{"RotateCredentialRecordsInTx"}},
-	// a team membership's end tombstones m:<member_id> in every shard of its
-	// network (owner decision 561)
-	"model/network_member_deny_model.go:DenyNetworkMemberInTx":         {hooks: []string{"RevokeMemberRecords"}},
-	"model/config_log_effects.go:removeConfigMemberInTx":               {hooks: []string{"RevokeMemberRecords"}},
-	"model/network_member_model.go:removeNetworkMembershipsOfUserInTx": {hooks: []string{"RevokeMemberRecords"}},
-	// an IdP sign-in moves the reauth deadline m:<member_id> holds
-	"model/network_idp_model.go:ResolveNetworkSsoLoginInTx": {hooks: []string{"DropMemberRecordProjections"}},
 }
 
 func TestEveryRevokingStatementWritesTheRevocationRecord(t *testing.T) {

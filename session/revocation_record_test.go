@@ -372,7 +372,7 @@ func TestRevocationRecordProjectionKeepsTombstonesAndRefusesStaleReads(t *testin
 			t.Error("a stale read was projected")
 		}
 
-		if err := writeRevocationNetworkFields(ctx, settings, []revocationNetworkWrite{{networkId: networkId, field: revocationFieldCredential}}, revocationNetworkWriteCredential, "5000000"); err != nil {
+		if err := writeRevocationNetworkFields(ctx, settings, []server.Id{networkId}, revocationNetworkWriteCredential, "5000000"); err != nil {
 			t.Fatal(err)
 		}
 		lower := credential()
