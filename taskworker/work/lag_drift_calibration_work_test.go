@@ -24,54 +24,45 @@ import (
 )
 
 // The drift model's weekly calibration (lag.dev/DRIFTTEST.md V4, V11): when
-// it runs, its chain, its window, its alert on a region size it can't give,
-// and that what it keeps outlives no visitor (R1).
+// it runs, its chain, its window, its region-size alarms, and that what it
+// keeps outlives no visitor (R1).
 
-// A region size beyond the histograms' last edge, for a continent with enough
-// tracks, is alerted on and counted by continent and confidence, and keeps
-// lagdrift.DefaultK; a continent with too few tracks keeps its default
-// without an alert (drift-review V-3). Pure.
-func TestAlertLagDriftKOverflows(t *testing.T) {
-	calibrationId := server.NewId()
-	calibration := model.DefaultLagDriftCalibration()
-	calibration.CalibrationId = &calibrationId
-	calibration.CalibratedK = map[string]*model.LagDriftCalibratedK{
-		"SA": {Tracks: 20000, Quantiles: []float64{2.7, math.NaN()}},
-		"OC": {Tracks: 15000, Quantiles: []float64{math.NaN(), math.NaN()}},
-		"EU": {Tracks: 40000, Quantiles: []float64{2.5, 3.3}},
-		"AF": {Tracks: model.LagDriftKMinTracks - 1, Quantiles: []float64{math.NaN(), math.NaN()}},
+// Each region-size alarm is counted by continent and kind, once, and the
+// kinds come back by continent; with none, nothing is counted (V11). Pure.
+func TestAlertLagDriftKAlarms(t *testing.T) {
+	counted := func(continentCode string, kind string) float64 {
+		return testutil.ToFloat64(lagDriftCalibrationKAlarmTotal.WithLabelValues(continentCode, kind))
 	}
-	counted := func(continentCode string, confidence string) float64 {
-		return testutil.ToFloat64(lagDriftCalibrationKOverflowTotal.WithLabelValues(continentCode, confidence))
+	keys := [][2]string{
+		{"EU", model.LagDriftKAlarmTail},
+		{"EU", model.LagDriftKAlarmDrift},
+		{"NA", model.LagDriftKAlarmDrift},
+		{"NA", model.LagDriftKAlarmOverflow},
+		{"OC", model.LagDriftKAlarmTail},
 	}
-	before := map[string]float64{
-		"SA 0.99": counted("SA", "0.99"),
-		"SA 0.95": counted("SA", "0.95"),
-		"OC 0.95": counted("OC", "0.95"),
-		"OC 0.99": counted("OC", "0.99"),
-		"AF 0.99": counted("AF", "0.99"),
+	before := map[[2]string]float64{}
+	for _, key := range keys {
+		before[key] = counted(key[0], key[1])
 	}
 
-	overflows := alertLagDriftKOverflows(calibration)
-	connect.AssertEqual(t, overflows, map[string][]float64{
-		"SA": {0.99},
-		"OC": {0.95, 0.99},
+	kinds := alertLagDriftKAlarms(server.NewId(), []*model.LagDriftKAlarm{
+		{ContinentCode: "EU", Kind: model.LagDriftKAlarmTail, BoundK: 4.05, Tracks: 26000, WeekTracks: 2500, ShareBeyond: 0.03},
+		{ContinentCode: "NA", Kind: model.LagDriftKAlarmDrift, BoundK: math.NaN(), Tracks: 12000, EarlierBoundK: 4.05, EarlierTracks: 12000},
+		{ContinentCode: "NA", Kind: model.LagDriftKAlarmOverflow, BoundK: math.NaN(), Tracks: 12000},
 	})
-	connect.AssertEqual(t, counted("SA", "0.99"), before["SA 0.99"]+1)
-	connect.AssertEqual(t, counted("SA", "0.95"), before["SA 0.95"])
-	connect.AssertEqual(t, counted("OC", "0.95"), before["OC 0.95"]+1)
-	connect.AssertEqual(t, counted("OC", "0.99"), before["OC 0.99"]+1)
-	connect.AssertEqual(t, counted("AF", "0.99"), before["AF 0.99"])
-	// and the drift test keeps the default there
-	connect.AssertEqual(t, calibration.K(0.99, "SA"), lagdrift.DefaultK(0.99, "SA"))
-	connect.AssertEqual(t, calibration.K(0.95, "SA"), 2.7)
+	connect.AssertEqual(t, kinds, map[string][]string{
+		"EU": {model.LagDriftKAlarmTail},
+		"NA": {model.LagDriftKAlarmDrift, model.LagDriftKAlarmOverflow},
+	})
+	connect.AssertEqual(t, counted("EU", model.LagDriftKAlarmTail), before[keys[0]]+1)
+	connect.AssertEqual(t, counted("EU", model.LagDriftKAlarmDrift), before[keys[1]])
+	connect.AssertEqual(t, counted("NA", model.LagDriftKAlarmDrift), before[keys[2]]+1)
+	connect.AssertEqual(t, counted("NA", model.LagDriftKAlarmOverflow), before[keys[3]]+1)
+	connect.AssertEqual(t, counted("OC", model.LagDriftKAlarmTail), before[keys[4]])
 
-	// nothing unusable: nothing alerted
-	calibration.CalibratedK = map[string]*model.LagDriftCalibratedK{
-		"EU": {Tracks: 40000, Quantiles: []float64{2.5, 3.3}},
-	}
-	connect.AssertEqual(t, alertLagDriftKOverflows(calibration), map[string][]float64(nil))
-	connect.AssertEqual(t, alertLagDriftKOverflows(nil), map[string][]float64(nil))
+	// none: nothing counted, no kinds
+	connect.AssertEqual(t, alertLagDriftKAlarms(server.NewId(), nil), map[string][]string(nil))
+	connect.AssertEqual(t, counted("EU", model.LagDriftKAlarmTail), before[keys[0]]+1)
 }
 
 // A run's window starts where the window of the calibration in force ended,

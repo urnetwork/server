@@ -95,54 +95,132 @@ func TestLagDriftHistogramUpperBoundCoverage(t *testing.T) {
 	}
 }
 
-// A continent's k is the larger of the textbook k and its calibrated
-// quantile once its summed histograms hold 10,000 tracks, and else
-// lagdrift.DefaultK; the defaults always answer DefaultK, as the drift test
-// judges while calibration is switched off. Pure.
+// k is the fixed table, lagdrift.DefaultK, for the defaults and for a
+// calibration alike, whatever region size it measured: a k measured on
+// lag.dev's tracks doesn't carry over to a drift run (V11, review V-8). Pure.
 func TestLagDriftCalibrationK(t *testing.T) {
-	textbook95 := lagdrift.KForConfidence(0.95)
-	textbook99 := lagdrift.KForConfidence(0.99)
-
-	calibration := DefaultLagDriftCalibration()
-	for _, continentCode := range append([]string{""}, ContinentCodes...) {
-		for _, confidence := range LagDriftKConfidences {
-			connect.AssertEqual(t, calibration.K(confidence, continentCode), lagdrift.DefaultK(confidence, continentCode))
-		}
-	}
-	// V11's defaults, from T3
-	connect.AssertEqual(t, calibration.K(0.99, "OC"), 7.88)
-	connect.AssertEqual(t, calibration.K(0.99, "EU"), textbook99)
-	connect.AssertEqual(t, calibration.K(0.95, "AF"), 2.50)
-
-	calibration.CalibratedK = map[string]*LagDriftCalibratedK{
-		// enough tracks: the quantile, never below the textbook k
-		"EU": {Tracks: 12000, Quantiles: []float64{2.3, 3.4}},
-		// one short: the default
-		"OC": {Tracks: LagDriftKMinTracks - 1, Quantiles: []float64{3.0, 9.5}},
-		// enough, and narrower than T3 found: the calibration wins
-		"AF": {Tracks: LagDriftKMinTracks, Quantiles: []float64{2.6, 3.3}},
-		// enough, but the 99% bound beyond the histograms' last edge:
-		// unusable, the default there
+	calibrationId := server.NewId()
+	calibratedAt := time.Now().UTC()
+	calibrated := DefaultLagDriftCalibration()
+	calibrated.CalibrationId = &calibrationId
+	calibrated.CalibratedAt = &calibratedAt
+	calibrated.Kappa = 0.31
+	calibrated.CalibratedK = map[string]*LagDriftCalibratedK{
+		"EU": {Tracks: 50000, Quantiles: []float64{4.1, 6.2}},
+		"OC": {Tracks: 50000, Quantiles: []float64{2.2, 2.9}},
 		"SA": {Tracks: 20000, Quantiles: []float64{2.7, math.NaN()}},
 	}
-	connect.AssertEqual(t, calibration.K(0.95, "SA"), 2.7)
-	connect.AssertEqual(t, calibration.K(0.99, "SA"), lagdrift.DefaultK(0.99, "SA"))
-	connect.AssertEqual(t, calibration.CalibratedK["SA"].Counts(1), false)
-	connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(1), true)
-	connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(0), false)
-	// too few tracks is no overflow: the default is expected there
-	connect.AssertEqual(t, calibration.CalibratedK["OC"].Overflows(1), false)
-	connect.AssertEqual(t, calibration.K(0.95, "EU"), textbook95)
-	connect.AssertEqual(t, calibration.K(0.99, "EU"), 3.4)
-	connect.AssertEqual(t, calibration.K(0.99, "eu"), 3.4)
-	connect.AssertEqual(t, calibration.K(0.99, "OC"), lagdrift.DefaultK(0.99, "OC"))
-	connect.AssertEqual(t, calibration.K(0.95, "OC"), lagdrift.DefaultK(0.95, "OC"))
-	connect.AssertEqual(t, calibration.K(0.95, "AF"), 2.6)
-	connect.AssertEqual(t, calibration.K(0.99, "AF"), 3.3)
-	// a continent with none: the default
-	connect.AssertEqual(t, calibration.K(0.99, "NA"), lagdrift.DefaultK(0.99, "NA"))
-	// a confidence V11 doesn't calibrate: the default, which is its textbook k
-	connect.AssertEqual(t, calibration.K(0.9, "EU"), lagdrift.DefaultK(0.9, "EU"))
+	for _, calibration := range []*LagDriftCalibration{DefaultLagDriftCalibration(), calibrated} {
+		for _, continentCode := range append([]string{"", "eu", "oc", "XX"}, ContinentCodes...) {
+			for _, confidence := range append([]float64{0.9}, LagDriftKConfidences...) {
+				connect.AssertEqual(t, calibration.K(confidence, continentCode), lagdrift.DefaultK(confidence, continentCode))
+			}
+		}
+	}
+	// V11's table, from T3, never below the textbook k
+	connect.AssertEqual(t, calibrated.K(0.99, "OC"), 7.88)
+	connect.AssertEqual(t, calibrated.K(0.95, "AF"), 2.50)
+	connect.AssertEqual(t, calibrated.K(0.99, "EU"), lagdrift.KForConfidence(0.99))
+}
+
+// A week's histograms by continent for the alarm tests: tracks at d, the
+// rest below the first edge.
+func testLagDriftKWeek(tracks int, d float64, share float64) *LagDriftHistogram {
+	histogram := newLagDriftHistogram(LagDriftKEdges)
+	atD := int(share * float64(tracks))
+	for range atD {
+		histogram.add(LagDriftKEdges, d)
+	}
+	histogram.Counts[0] += int64(tracks - atD)
+	histogram.Tracks = tracks
+	return histogram
+}
+
+// The alarms (V11): a week with 2,000 tracks and more than 2% of them beyond
+// the trailing 26 weeks' 99% bound is a tail; the 26 weeks' 99% bound more
+// than 15% from 26 weeks before, both with 10,000 tracks, is drift, as is one
+// of the two beyond the histograms' last edge; the 26 weeks' bound beyond that
+// edge is an overflow. Pure.
+func TestLagDriftKAlarms(t *testing.T) {
+	kinds := func(alarms []*LagDriftKAlarm) map[string][]string {
+		out := map[string][]string{}
+		for _, alarm := range alarms {
+			out[alarm.ContinentCode] = append(out[alarm.ContinentCode], alarm.Kind)
+		}
+		return out
+	}
+	// the trailing 26 weeks: 1% at 4, so the 99% bound is 4.05
+	trailing := map[string]*LagDriftHistogram{
+		"EU": testLagDriftKWeek(26000, 4, 0.01),
+		"NA": testLagDriftKWeek(26000, 4, 0.01),
+		"AS": testLagDriftKWeek(26000, 4, 0.01),
+		"AF": testLagDriftKWeek(26000, 4, 0.01),
+	}
+	bound, ok := lagDriftHistogramUpperBound(LagDriftKEdges, trailing["EU"].Counts, LagDriftKAlarmConfidence)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, bound, 4.05)
+	week := map[string]*LagDriftHistogram{
+		// 3% beyond: a tail
+		"EU": testLagDriftKWeek(2500, 5, 0.03),
+		// 2% beyond, not more than twice the expected: none
+		"NA": testLagDriftKWeek(2500, 5, 0.02),
+		// 10% beyond, but under 2,000 tracks: none
+		"AS": testLagDriftKWeek(1999, 5, 0.10),
+		// as far out as the trailing tail, at 4: within the bound, none
+		"AF": testLagDriftKWeek(2500, 4, 0.05),
+	}
+	alarms := lagDriftKAlarms(week, trailing, map[string]*LagDriftHistogram{}, map[string]*LagDriftHistogram{})
+	connect.AssertEqual(t, kinds(alarms), map[string][]string{"EU": {LagDriftKAlarmTail}})
+	connect.AssertEqual(t, alarms[0].BoundK, 4.05)
+	connect.AssertEqual(t, alarms[0].WeekTracks, int64(2500))
+	if !(math.Abs(alarms[0].ShareBeyond-0.03) < 1e-9) {
+		t.Fatalf("share beyond %v, want 0.03", alarms[0].ShareBeyond)
+	}
+
+	// the 26 weeks up to the week against the 26 weeks before them: bounds
+	// of 4.05 and 3.05 at 1% beyond, and 12 and up beyond the last edge
+	current := map[string]*LagDriftHistogram{
+		// 4.05 from 3.6: moved 12.5%, none
+		"EU": testLagDriftKWeek(12000, 4, 0.02),
+		// 4.05 from 3.05: moved 33%, drift
+		"NA": testLagDriftKWeek(12000, 4, 0.02),
+		// moved, but the earlier 26 weeks have under 10,000 tracks: none
+		"AS": testLagDriftKWeek(12000, 4, 0.02),
+		// beyond the last edge from within it: drift, and an overflow
+		"AF": testLagDriftKWeek(12000, 13, 0.02),
+		// beyond the last edge, both times: an overflow only
+		"OC": testLagDriftKWeek(12000, 13, 0.02),
+		// beyond it, but under 10,000 tracks: none
+		"SA": testLagDriftKWeek(9999, 13, 0.02),
+	}
+	earlier := map[string]*LagDriftHistogram{
+		"EU": testLagDriftKWeek(12000, 3.55, 0.02),
+		"NA": testLagDriftKWeek(12000, 3, 0.02),
+		"AS": testLagDriftKWeek(9999, 3, 0.02),
+		"AF": testLagDriftKWeek(12000, 4, 0.02),
+		"OC": testLagDriftKWeek(12000, 13, 0.02),
+	}
+	for continentCode, histogram := range map[string]*LagDriftHistogram{"EU": current["EU"], "EU earlier": earlier["EU"], "NA earlier": earlier["NA"]} {
+		b, _ := lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, LagDriftKAlarmConfidence)
+		t.Logf("%s: 99%% bound %.2f", continentCode, b)
+	}
+	alarms = lagDriftKAlarms(map[string]*LagDriftHistogram{}, map[string]*LagDriftHistogram{}, current, earlier)
+	connect.AssertEqual(t, kinds(alarms), map[string][]string{
+		"NA": {LagDriftKAlarmDrift},
+		"AF": {LagDriftKAlarmDrift, LagDriftKAlarmOverflow},
+		"OC": {LagDriftKAlarmOverflow},
+	})
+	for _, alarm := range alarms {
+		if alarm.ContinentCode == "NA" {
+			connect.AssertEqual(t, alarm.BoundK, 4.05)
+			connect.AssertEqual(t, alarm.EarlierBoundK, 3.05)
+			connect.AssertEqual(t, alarm.Tracks, int64(12000))
+			connect.AssertEqual(t, alarm.EarlierTracks, int64(12000))
+		}
+	}
+
+	// nothing to compare: no alarm
+	connect.AssertEqual(t, len(lagDriftKAlarms(nil, nil, nil, nil)), 0)
 }
 
 // Of a population drawn from the calibrated model, the city points' distances
@@ -258,32 +336,25 @@ func TestCalibrateLagDriftTracksRegionSizeLeavesOutUnreachableCities(t *testing.
 	connect.AssertEqual(t, result.KHistograms["EU"].Tracks+result.KHistograms["NA"].Tracks, 600-left)
 }
 
-// A calibration's k sums the region-size histograms of the calibrations in
-// force over the 26 weeks up to it: a withdrawn one's count for nothing, and
-// one older than the window for nothing. A continent counts from 10,000
-// tracks; below, it has DefaultK.
+// Stores a calibration whose week has the given region-size histograms.
+func testAddLagDriftKCalibration(ctx context.Context, calibratedAt time.Time, histograms map[string]*LagDriftHistogram) server.Id {
+	result := testLagDriftCalibrationResult(0.25, 1.0, 70)
+	result.KEdges = LagDriftKEdges
+	result.KHistograms = histograms
+	return AddLagDriftCalibration(ctx, calibratedAt, calibratedAt.Add(-7*24*time.Hour), calibratedAt, result)
+}
+
+// A calibration's measured region size sums the region-size histograms of
+// the calibrations in force over the 26 weeks up to it, at each confidence's
+// upper bound: a withdrawn one's count for nothing, and one older than the
+// window for nothing. k stays the fixed table throughout.
 func TestGetLagDriftCalibrationRegionSize(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc().Truncate(time.Second)
-
-		// a week's histogram for a continent: tracks at d, the rest of them
-		// below the first edge
-		week := func(tracks int, d float64, share float64) *LagDriftHistogram {
-			histogram := newLagDriftHistogram(LagDriftKEdges)
-			atD := int(share * float64(tracks))
-			for range atD {
-				histogram.add(LagDriftKEdges, d)
-			}
-			histogram.Counts[0] += int64(tracks - atD)
-			histogram.Tracks = tracks
-			return histogram
-		}
+		week := testLagDriftKWeek
 		add := func(calibratedAt time.Time, histograms map[string]*LagDriftHistogram) server.Id {
-			result := testLagDriftCalibrationResult(0.25, 1.0, 70)
-			result.KEdges = LagDriftKEdges
-			result.KHistograms = histograms
-			return AddLagDriftCalibration(ctx, calibratedAt, calibratedAt.Add(-7*24*time.Hour), calibratedAt, result)
+			return testAddLagDriftKCalibration(ctx, calibratedAt, histograms)
 		}
 
 		// OC: 4,000 tracks a week, 2% of them at a distance of 9. SA: as
@@ -296,27 +367,24 @@ func TestGetLagDriftCalibrationRegionSize(t *testing.T) {
 		calibration := GetLagDriftCalibration(ctx)
 		// the three weeks in the window, not the one 27 weeks old
 		connect.AssertEqual(t, calibration.CalibratedK["OC"].Tracks, int64(12000))
-		// 2% at 9: the bound's rank, 11,898 of 12,000, is in the bin
-		// [9, 9.05), and the bound is its upper edge
-		connect.AssertEqual(t, calibration.K(0.99, "OC"), 9.05)
-		// the 95% bound is below the first edge: the textbook k
-		connect.AssertEqual(t, calibration.K(0.95, "OC"), lagdrift.KForConfidence(0.95))
-		// SA's 99% bound is beyond the last edge: unusable, its default there,
-		// while its 95% bound counts
-		connect.AssertEqual(t, calibration.CalibratedK["SA"].Overflows(1), true)
-		connect.AssertEqual(t, calibration.K(0.99, "SA"), lagdrift.DefaultK(0.99, "SA"))
-		connect.AssertEqual(t, calibration.CalibratedK["SA"].Counts(0), true)
-		connect.AssertEqual(t, calibration.K(0.95, "SA"), lagdrift.KForConfidence(0.95))
-		// EU's 500 tracks are too few: its default
+		// 2% at 9: the 99% bound's rank, 11,898 of 12,000, is in the bin
+		// [9, 9.05), and the bound is its upper edge; the 95% bound is below
+		// the first edge, at it
+		connect.AssertEqual(t, calibration.CalibratedK["OC"].Quantiles, []float64{1.5, 9.05})
+		// SA's 99% bound is beyond the last edge: unusable
+		connect.AssertEqual(t, math.IsNaN(calibration.CalibratedK["SA"].Quantiles[1]), true)
 		connect.AssertEqual(t, calibration.CalibratedK["EU"].Tracks, int64(500))
-		connect.AssertEqual(t, calibration.K(0.99, "EU"), lagdrift.DefaultK(0.99, "EU"))
+		// none of it sets k
+		for _, continentCode := range []string{"OC", "SA", "EU"} {
+			for _, confidence := range LagDriftKConfidences {
+				connect.AssertEqual(t, calibration.K(confidence, continentCode), lagdrift.DefaultK(confidence, continentCode))
+			}
+		}
 
-		// withdrawing the middle week takes its histograms with it: 8,000
-		// tracks are too few, and OC goes back to its default
+		// withdrawing the middle week takes its histograms with it
 		connect.AssertEqual(t, WithdrawLagDriftCalibration(ctx, middle, now), true)
 		calibration = GetLagDriftCalibration(ctx)
 		connect.AssertEqual(t, calibration.CalibratedK["OC"].Tracks, int64(8000))
-		connect.AssertEqual(t, calibration.K(0.99, "OC"), lagdrift.DefaultK(0.99, "OC"))
 		_, ok := calibration.CalibratedK["EU"]
 		connect.AssertEqual(t, ok, false)
 
@@ -324,10 +392,59 @@ func TestGetLagDriftCalibrationRegionSize(t *testing.T) {
 		byId := GetLagDriftCalibrationById(ctx, middle)
 		connect.AssertEqual(t, byId.CalibratedK["OC"].Tracks, int64(4000))
 
-		// every calibration withdrawn: the defaults, DefaultK everywhere
+		// every calibration withdrawn: the defaults
 		WithdrawLagDriftCalibrations(ctx, now)
 		calibration = GetLagDriftCalibration(ctx)
 		connect.AssertEqual(t, len(calibration.CalibratedK), 0)
 		connect.AssertEqual(t, calibration.K(0.99, "OC"), lagdrift.DefaultK(0.99, "OC"))
+	})
+}
+
+// A stored week's alarms compare it with the stored weeks: its tail against
+// the 26 weeks before it, and the 26 weeks up to it against the 26 before
+// those. A withdrawn calibration counts for nothing (V11).
+func TestGetLagDriftKAlarms(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+		weekAgo := func(weeks int) time.Time {
+			return now.Add(-time.Duration(weeks) * 7 * 24 * time.Hour)
+		}
+		week := testLagDriftKWeek
+
+		// 26 to 52 weeks ago: NA's tail at 3, EU's at 4
+		testAddLagDriftKCalibration(ctx, weekAgo(40), map[string]*LagDriftHistogram{
+			"NA": week(12000, 3, 0.01),
+			"EU": week(12000, 4, 0.01),
+		})
+		// the 26 weeks before this one: both tails at 4
+		testAddLagDriftKCalibration(ctx, weekAgo(10), map[string]*LagDriftHistogram{
+			"NA": week(12000, 4, 0.01),
+			"EU": week(12000, 4, 0.01),
+		})
+		// a withdrawn week, with a tail at 10, counts for nothing
+		withdrawn := testAddLagDriftKCalibration(ctx, weekAgo(5), map[string]*LagDriftHistogram{
+			"EU": week(12000, 10, 0.5),
+		})
+		connect.AssertEqual(t, WithdrawLagDriftCalibration(ctx, withdrawn, now), true)
+		// this week: EU's tail far beyond the trailing bound, NA's within it
+		latest := testAddLagDriftKCalibration(ctx, now, map[string]*LagDriftHistogram{
+			"NA": week(2500, 4, 0.05),
+			"EU": week(2500, 6, 0.05),
+		})
+
+		alarms := GetLagDriftKAlarms(ctx, latest)
+		kinds := map[string][]string{}
+		for _, alarm := range alarms {
+			kinds[alarm.ContinentCode] = append(kinds[alarm.ContinentCode], alarm.Kind)
+		}
+		// EU: 5% of the week beyond the trailing 4.05, a tail. NA: its 26
+		// weeks' bound moved from 3.05 to 4.05, drift; its week is at the
+		// trailing tail, not beyond it
+		connect.AssertEqual(t, kinds, map[string][]string{
+			"EU": {LagDriftKAlarmTail},
+			"NA": {LagDriftKAlarmDrift},
+		})
+		connect.AssertEqual(t, len(GetLagDriftKAlarms(ctx, server.NewId())), 0)
 	})
 }

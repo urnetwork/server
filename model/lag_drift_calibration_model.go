@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"math"
 	"slices"
 	"strings"
@@ -26,9 +27,11 @@ import (
 //
 // It also measures the region's size (V11): how far, in its own σ, each
 // track's city point lies from the track's single-run fit, as a histogram per
-// continent. A calibration's k at a confidence is the larger of the textbook
-// k and the quantile of the histograms of the 26 weeks up to it, where a
-// continent's hold 10,000 tracks, and else lagdrift.DefaultK.
+// continent. k itself is a fixed table, lagdrift.DefaultK, since lag.dev's
+// tracks, with no mid band, need a wider region than a drift run (review V-8).
+// The measurement is an alarm: a week whose tail is far beyond the trailing 26
+// weeks', or a 26 weeks' 99% bound far from the one 26 weeks before, means
+// the network changed and the table needs deriving again (GetLagDriftKAlarms).
 //
 // Only aggregates are kept: the two numbers, histograms and thresholds. No
 // track, visitor, address or place is, so nothing per visitor outlives lag's
@@ -158,9 +161,11 @@ type LagDriftCalibration struct {
 	// every type: only where the calibration had enough tracks. Empty for the
 	// defaults
 	RelayThresholdsMs map[string]map[string]float64
-	// the calibrated region size (V11) by continent code: the region-size
+	// the measured region size (V11) by continent code: the region-size
 	// histograms of the calibrations in force over the LagDriftKWindow up to
-	// this one, summed. Empty for the defaults
+	// this one, summed. It doesn't set k, which is a fixed table (K); the
+	// weekly job's alarms watch it (GetLagDriftKAlarms). Empty for the
+	// defaults
 	CalibratedK map[string]*LagDriftCalibratedK
 	// the calibration these are, for a verdict to record what it was judged
 	// with; nil for the defaults
@@ -169,19 +174,19 @@ type LagDriftCalibration struct {
 	CalibratedAt *time.Time
 }
 
-// The confidences a drift test judges at (V11, P2), the ones a calibration
-// gives a region size for.
+// The confidences a drift test judges at (V11, P2), the ones the measured
+// region size is kept for.
 var LagDriftKConfidences = []float64{0.95, 0.99}
 
-// A continent's calibrated region size counts from this many tracks in its
-// summed histograms, about ±0.15 at 99%; below it the continent uses
-// lagdrift.DefaultK (V11).
+// A continent's 26 weeks of region-size histograms are enough to hold a 99%
+// bound to about ±0.15 from this many tracks (V11): the drift alarm compares
+// two such bounds only when both have them.
 const LagDriftKMinTracks = 10000
 
 // The weeks of region-size histograms summed up to a calibration (V11).
 const LagDriftKWindow = 26 * 7 * 24 * time.Hour
 
-// A continent's calibrated region size (V11).
+// A continent's measured region size (V11).
 type LagDriftCalibratedK struct {
 	// the tracks in its summed histograms
 	Tracks int64
@@ -190,20 +195,6 @@ type LagDriftCalibratedK struct {
 	// fit (lagDriftHistogramUpperBound); NaN where it is unusable, beyond the
 	// histogram's last edge
 	Quantiles []float64
-}
-
-// Whether the quantile at the i-th of LagDriftKConfidences counts for k: the
-// continent's histograms hold LagDriftKMinTracks tracks, and its bound is
-// within them. One that is not keeps lagdrift.DefaultK.
-func (self *LagDriftCalibratedK) Counts(i int) bool {
-	return LagDriftKMinTracks <= self.Tracks && i < len(self.Quantiles) && !math.IsNaN(self.Quantiles[i])
-}
-
-// Whether the quantile at the i-th of LagDriftKConfidences would count but for
-// its bound lying beyond the histogram's last edge, which the weekly job
-// alerts on (V11).
-func (self *LagDriftCalibratedK) Overflows(i int) bool {
-	return LagDriftKMinTracks <= self.Tracks && i < len(self.Quantiles) && math.IsNaN(self.Quantiles[i])
 }
 
 // The design's values, for when nothing has been calibrated.
@@ -223,19 +214,14 @@ func (self *LagDriftCalibration) Calibrated() bool {
 }
 
 // K is the region's size at a confidence for a visitor on a continent, the
-// continent code of client_ip's country (V11): the larger of the textbook k and
-// the calibrated bound, where the continent's summed histograms hold
-// LagDriftKMinTracks tracks and the bound is within them, and else
-// lagdrift.DefaultK, T3's per-region k. The defaults, as the drift test judges
-// with while drift.calibration_enabled is off, always answer DefaultK.
+// continent code of client_ip's country (V11): lagdrift.DefaultK, a fixed
+// table from T3's drift geometry, for every calibration and the defaults
+// alike. A k measured on lag.dev's tracks doesn't carry over to a drift run:
+// lag.dev pings 8 extenders with no mid band, whose fits need 1.5–2 times the
+// k a drift run's 12 do (review V-8). So the weekly measurement only alarms
+// (GetLagDriftKAlarms). The drift test asks here, so a change of rule is made
+// in one place.
 func (self *LagDriftCalibration) K(confidence float64, continentCode string) float64 {
-	if calibrated := self.CalibratedK[strings.ToUpper(continentCode)]; calibrated != nil {
-		for i, kConfidence := range LagDriftKConfidences {
-			if math.Abs(kConfidence-confidence) < 1e-9 && calibrated.Counts(i) {
-				return math.Max(lagdrift.KForConfidence(confidence), calibrated.Quantiles[i])
-			}
-		}
-	}
 	return lagdrift.DefaultK(confidence, continentCode)
 }
 
@@ -275,13 +261,40 @@ func lagDriftHistogramUpperBound(edges []float64, counts []int64, q float64) (fl
 	return math.NaN(), false
 }
 
-// The calibrated region size by continent from the region-size histograms of
-// the calibrations in force over the LagDriftKWindow up to calibratedAt
-// (V11). A withdrawn calibration's histograms count for nothing, and a row
-// over other edges is left out.
-func getLagDriftCalibratedKInConn(ctx context.Context, conn server.PgConn, calibratedAt time.Time) map[string]*LagDriftCalibratedK {
-	counts := map[string][]int64{}
-	tracks := map[string]int64{}
+// A calibration's region-size histograms by continent, from its summary's
+// JSON; nil when it has none, or has them over other edges.
+func parseLagDriftKHistograms(edgesJson []byte, histogramsJson []byte) map[string]*LagDriftHistogram {
+	if len(edgesJson) == 0 || len(histogramsJson) == 0 {
+		return nil
+	}
+	var edges []float64
+	var histograms map[string]*LagDriftHistogram
+	if json.Unmarshal(edgesJson, &edges) != nil || !slices.Equal(edges, LagDriftKEdges) {
+		return nil
+	}
+	if json.Unmarshal(histogramsJson, &histograms) != nil {
+		return nil
+	}
+	parsed := map[string]*LagDriftHistogram{}
+	for continentCode, histogram := range histograms {
+		if histogram != nil && len(histogram.Counts) == len(LagDriftKEdges)+1 {
+			parsed[continentCode] = histogram
+		}
+	}
+	return parsed
+}
+
+// The region-size histograms of the calibrations in force calibrated after
+// `after` and up to `through`, or before it when through is excluded, summed
+// by continent (V11). A withdrawn calibration's histograms count for nothing.
+func sumLagDriftKHistogramsInConn(
+	ctx context.Context,
+	conn server.PgConn,
+	after time.Time,
+	through time.Time,
+	throughIncluded bool,
+) map[string]*LagDriftHistogram {
+	sums := map[string]*LagDriftHistogram{}
 	result, err := conn.Query(
 		ctx,
 		`
@@ -290,52 +303,224 @@ func getLagDriftCalibratedKInConn(ctx context.Context, conn server.PgConn, calib
 		WHERE
 			withdrawn_at IS NULL AND
 			$1 < calibrated_at AND
-			calibrated_at <= $2
+			(calibrated_at < $2 OR ($3 AND calibrated_at = $2))
 		`,
-		calibratedAt.Add(-LagDriftKWindow).UTC(),
-		calibratedAt.UTC(),
+		after.UTC(),
+		through.UTC(),
+		throughIncluded,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var edgesJson []byte
 			var histogramsJson []byte
 			server.Raise(result.Scan(&edgesJson, &histogramsJson))
-			if len(edgesJson) == 0 || len(histogramsJson) == 0 {
-				continue
-			}
-			var edges []float64
-			var histograms map[string]*LagDriftHistogram
-			if json.Unmarshal(edgesJson, &edges) != nil || !slices.Equal(edges, LagDriftKEdges) {
-				continue
-			}
-			if json.Unmarshal(histogramsJson, &histograms) != nil {
-				continue
-			}
-			for continentCode, histogram := range histograms {
-				if histogram == nil || len(histogram.Counts) != len(LagDriftKEdges)+1 {
-					continue
+			for continentCode, histogram := range parseLagDriftKHistograms(edgesJson, histogramsJson) {
+				sum := sums[continentCode]
+				if sum == nil {
+					sum = newLagDriftHistogram(LagDriftKEdges)
+					sums[continentCode] = sum
 				}
-				if counts[continentCode] == nil {
-					counts[continentCode] = make([]int64, len(LagDriftKEdges)+1)
-				}
-				for bin, count := range histogram.Counts {
-					counts[continentCode][bin] += count
-				}
-				tracks[continentCode] += int64(histogram.Tracks)
+				sum.addHistogram(histogram)
 			}
 		}
 	})
+	return sums
+}
+
+// The measured region size by continent from summed histograms: each
+// confidence's upper bound, NaN where unusable.
+func lagDriftCalibratedK(sums map[string]*LagDriftHistogram) map[string]*LagDriftCalibratedK {
 	calibratedK := map[string]*LagDriftCalibratedK{}
-	for continentCode, continentCounts := range counts {
-		k := &LagDriftCalibratedK{Tracks: tracks[continentCode]}
+	for continentCode, sum := range sums {
+		k := &LagDriftCalibratedK{Tracks: int64(sum.Tracks)}
 		for _, confidence := range LagDriftKConfidences {
-			// NaN when unusable
-			bound, _ := lagDriftHistogramUpperBound(LagDriftKEdges, continentCounts, confidence)
+			bound, _ := lagDriftHistogramUpperBound(LagDriftKEdges, sum.Counts, confidence)
 			k.Quantiles = append(k.Quantiles, bound)
 		}
 		calibratedK[continentCode] = k
 	}
 	return calibratedK
+}
+
+// The measured region size by continent over the LagDriftKWindow up to
+// calibratedAt (V11).
+func getLagDriftCalibratedKInConn(ctx context.Context, conn server.PgConn, calibratedAt time.Time) map[string]*LagDriftCalibratedK {
+	return lagDriftCalibratedK(sumLagDriftKHistogramsInConn(ctx, conn, calibratedAt.Add(-LagDriftKWindow), calibratedAt, true))
+}
+
+// The weekly measurement's alarms (V11): either means the network's geometry
+// or paths changed, and the k table should be derived again with T3 before
+// the next release.
+const (
+	// a week puts more than twice the expected share of its tracks beyond the
+	// trailing 26 weeks' 99% bound
+	LagDriftKAlarmTail = "tail"
+	// the 26 weeks' 99% bound moved more than 15% from 26 weeks earlier
+	LagDriftKAlarmDrift = "drift"
+	// the 26 weeks' 99% bound is beyond the histograms' last edge, with
+	// enough tracks to tell: a tail no honest fit has
+	LagDriftKAlarmOverflow = "overflow"
+)
+
+// The alarms' thresholds (V11).
+const (
+	// the confidence they watch
+	LagDriftKAlarmConfidence = 0.99
+	// a week needs this many tracks for the tail alarm to judge it
+	LagDriftKAlarmTailMinTracks = 2000
+	// the share of a week's tracks beyond the trailing 99% bound that raises
+	// the tail alarm: twice the 1% expected
+	LagDriftKAlarmTailShare = 0.02
+	// the relative move of the 99% bound over 26 weeks that raises the drift
+	// alarm
+	LagDriftKAlarmDriftShare = 0.15
+)
+
+// One alarm of the weekly measurement, for a continent (V11).
+type LagDriftKAlarm struct {
+	ContinentCode string
+	// LagDriftKAlarmTail, LagDriftKAlarmDrift or LagDriftKAlarmOverflow
+	Kind string
+	// the 99% bound it is about: the trailing 26 weeks' (tail) or the 26 weeks'
+	// up to the week (drift, overflow), NaN when unusable, and their tracks
+	BoundK float64
+	Tracks int64
+	// tail: the week's tracks, and the share of them beyond BoundK
+	WeekTracks  int64
+	ShareBeyond float64
+	// drift: the 26 weeks' bound 26 weeks earlier, NaN when unusable, and
+	// their tracks
+	EarlierBoundK float64
+	EarlierTracks int64
+}
+
+// The share of a histogram's tracks at or beyond bound, an edge of
+// LagDriftKEdges: those in the bins from that edge up.
+func lagDriftShareBeyond(histogram *LagDriftHistogram, bound float64) float64 {
+	total := int64(0)
+	beyond := int64(0)
+	for bin, count := range histogram.Counts {
+		total += count
+		// bin is [edges[bin−1], edges[bin]); the last is from the last edge up
+		if 0 < bin && bound <= LagDriftKEdges[bin-1] {
+			beyond += count
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(beyond) / float64(total)
+}
+
+// The alarms of a week's histograms by continent, against the 26 weeks before
+// it (trailing), the 26 weeks up to and with it (current) and the 26 weeks
+// before those (earlier), in continent order (V11). Pure.
+//
+//   - tail: the week has LagDriftKAlarmTailMinTracks tracks, and more than
+//     LagDriftKAlarmTailShare of them are beyond the trailing 26 weeks' 99%
+//     upper bound, where that bound can be had;
+//   - drift: the current and the earlier 26 weeks each have LagDriftKMinTracks
+//     tracks, and their 99% upper bounds differ by more than
+//     LagDriftKAlarmDriftShare of the earlier, or one of them is beyond the
+//     histograms' last edge and the other is not;
+//   - overflow: the current 26 weeks have LagDriftKMinTracks tracks and their
+//     99% upper bound is beyond the histograms' last edge.
+func lagDriftKAlarms(week, trailing, current, earlier map[string]*LagDriftHistogram) []*LagDriftKAlarm {
+	continentCodes := map[string]bool{}
+	for _, sums := range []map[string]*LagDriftHistogram{week, current} {
+		for continentCode := range sums {
+			continentCodes[continentCode] = true
+		}
+	}
+	bound := func(histogram *LagDriftHistogram) (float64, bool) {
+		return lagDriftHistogramUpperBound(LagDriftKEdges, histogram.Counts, LagDriftKAlarmConfidence)
+	}
+	alarms := []*LagDriftKAlarm{}
+	for _, continentCode := range slices.Sorted(maps.Keys(continentCodes)) {
+		if w, t := week[continentCode], trailing[continentCode]; w != nil && t != nil && LagDriftKAlarmTailMinTracks <= w.Tracks {
+			if b, ok := bound(t); ok {
+				if share := lagDriftShareBeyond(w, b); LagDriftKAlarmTailShare < share {
+					alarms = append(alarms, &LagDriftKAlarm{
+						ContinentCode: continentCode,
+						Kind:          LagDriftKAlarmTail,
+						BoundK:        b,
+						Tracks:        int64(t.Tracks),
+						WeekTracks:    int64(w.Tracks),
+						ShareBeyond:   share,
+					})
+				}
+			}
+		}
+		c := current[continentCode]
+		if c == nil || int64(c.Tracks) < LagDriftKMinTracks {
+			continue
+		}
+		now, nowOk := bound(c)
+		if e := earlier[continentCode]; e != nil && LagDriftKMinTracks <= int64(e.Tracks) {
+			then, thenOk := bound(e)
+			moved := nowOk != thenOk || (nowOk && thenOk && LagDriftKAlarmDriftShare*then < math.Abs(now-then))
+			if moved {
+				alarms = append(alarms, &LagDriftKAlarm{
+					ContinentCode: continentCode,
+					Kind:          LagDriftKAlarmDrift,
+					BoundK:        now,
+					Tracks:        int64(c.Tracks),
+					EarlierBoundK: then,
+					EarlierTracks: int64(e.Tracks),
+				})
+			}
+		}
+		if !nowOk {
+			alarms = append(alarms, &LagDriftKAlarm{
+				ContinentCode: continentCode,
+				Kind:          LagDriftKAlarmOverflow,
+				BoundK:        now,
+				Tracks:        int64(c.Tracks),
+			})
+		}
+	}
+	return alarms
+}
+
+// GetLagDriftKAlarms is the weekly measurement's alarms for a stored
+// calibration's week (V11): its own region-size histograms against the 26
+// weeks before it, and the 26 weeks up to it against the 26 before those
+// (lagDriftKAlarms). Calibrations withdrawn count for nothing; nil when the
+// calibration is gone or has no histograms.
+func GetLagDriftKAlarms(ctx context.Context, calibrationId server.Id) []*LagDriftKAlarm {
+	var alarms []*LagDriftKAlarm
+	server.Db(ctx, func(conn server.PgConn) {
+		var calibratedAt time.Time
+		var edgesJson []byte
+		var histogramsJson []byte
+		found := false
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT calibrated_at, summary_json->'k_edges', summary_json->'k_histograms'
+			FROM lag_drift_calibration
+			WHERE calibration_id = $1
+			`,
+			calibrationId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&calibratedAt, &edgesJson, &histogramsJson))
+				found = true
+			}
+		})
+		week := parseLagDriftKHistograms(edgesJson, histogramsJson)
+		if !found || week == nil {
+			return
+		}
+		alarms = lagDriftKAlarms(
+			week,
+			sumLagDriftKHistogramsInConn(ctx, conn, calibratedAt.Add(-LagDriftKWindow), calibratedAt, false),
+			sumLagDriftKHistogramsInConn(ctx, conn, calibratedAt.Add(-LagDriftKWindow), calibratedAt, true),
+			sumLagDriftKHistogramsInConn(ctx, conn, calibratedAt.Add(-2*LagDriftKWindow), calibratedAt.Add(-LagDriftKWindow), true),
+		)
+	})
+	return alarms
 }
 
 // RelayThresholdMsFor is the relay threshold in ms for a visitor on a

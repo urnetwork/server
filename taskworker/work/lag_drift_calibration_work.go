@@ -2,7 +2,6 @@ package work
 
 import (
 	"context"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,10 +22,11 @@ import (
 // (model.CalibrateLagDrift). The window starts no earlier than the window of
 // the calibration in force ended, so no track is binned twice. A calibration
 // that applies is stored and in force from then on
-// (model.GetLagDriftCalibration), and a region size it can't give is alerted
-// on; one that does not apply changes nothing, and its result says why. Only
-// aggregates are stored, and the result holds only counts and the fitted
-// values, so nothing per visitor outlives the retention (R1).
+// (model.GetLagDriftCalibration), and its week's region-size alarms are raised
+// (alertLagDriftKAlarms); one that does not apply changes nothing, and its
+// result says why. Only aggregates are stored, and the result holds only
+// counts and the fitted values, so nothing per visitor outlives the retention
+// (R1).
 //
 // An operator runs it at once by pulling its pending row forward:
 //
@@ -87,65 +87,76 @@ type LagDriftCalibrationResult struct {
 	Converged        bool `json:"converged"`
 	AtBound          bool `json:"at_bound"`
 	// the week's tracks in each continent's region-size histogram (V11), and
-	// those left out because light rules out their city point; a continent's
-	// k counts once 26 weeks of the first sum to 10,000
+	// those left out because light rules out their city point
 	KTracks           map[string]int `json:"k_tracks"`
 	KImpossibleTracks map[string]int `json:"k_impossible_tracks"`
-	// by continent, the confidences whose region size the stored calibration
-	// can't give, its bound beyond the histogram's last edge, so the
-	// continent keeps lagdrift.DefaultK there (alertLagDriftKOverflows)
-	KOverflows map[string][]float64 `json:"k_overflows,omitempty"`
+	// by continent, the region-size alarms the stored week raised: tail,
+	// drift or overflow (alertLagDriftKAlarms)
+	KAlarms map[string][]string `json:"k_alarms,omitempty"`
 }
 
-// The calibrations whose region size came out unusable for a continent with
-// enough tracks (V11, drift-review V-3): its bound at a confidence beyond the
-// histograms' last edge, so the continent keeps lagdrift.DefaultK there. Its
-// labels are bounded: the continent codes and V11's two confidences.
-var lagDriftCalibrationKOverflowTotal = prometheus.NewCounterVec(
+// The region-size alarms the weekly calibration raised (V11), by continent
+// and kind: tail, a week far beyond the trailing 26 weeks' 99% bound; drift,
+// that bound moved more than 15% in 26 weeks; overflow, that bound beyond the
+// histograms' last edge (model.GetLagDriftKAlarms). Any one means the k table
+// should be derived again with T3. Its labels are bounded: the continent codes
+// and the three kinds.
+var lagDriftCalibrationKAlarmTotal = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "lag",
-		Name:      "drift_calibration_k_overflow_total",
-		Help:      "Weekly drift calibrations whose region size for a continent with 10,000 tracks was beyond its histogram's last edge at a confidence, so the continent keeps lagdrift.DefaultK there (lag.dev/DRIFTTEST.md V11), by continent and confidence",
+		Name:      "drift_calibration_k_alarm_total",
+		Help:      "Region-size alarms of the weekly drift calibration (lag.dev/DRIFTTEST.md V11), by continent and kind: tail (more than 2% of a week of 2,000 tracks beyond the trailing 26 weeks' 99% bound), drift (that bound moved more than 15% from 26 weeks earlier) or overflow (that bound beyond the histograms' last edge). Any one means the k table should be derived again",
 	},
-	[]string{"continent", "confidence"},
+	[]string{"continent", "kind"},
 )
 
 func init() {
-	prometheus.MustRegister(lagDriftCalibrationKOverflowTotal)
+	prometheus.MustRegister(lagDriftCalibrationKAlarmTotal)
 }
 
-// Alerts on each region size the calibration can't give: a continent with
-// enough tracks whose bound lies beyond the histograms' last edge, which
-// keeps lagdrift.DefaultK there. Such a tail is no honest fit's, and is most
-// likely visitors whose city points are wrong far beyond what light rules out,
-// such as many on VPNs outside the hosting list. Logs each and counts it, and
-// answers them by continent.
-func alertLagDriftKOverflows(calibration *model.LagDriftCalibration) map[string][]float64 {
-	if calibration == nil {
-		return nil
-	}
-	overflows := map[string][]float64{}
-	for continentCode, calibrated := range calibration.CalibratedK {
-		for i, confidence := range model.LagDriftKConfidences {
-			if !calibrated.Overflows(i) {
-				continue
-			}
-			overflows[continentCode] = append(overflows[continentCode], confidence)
-			lagDriftCalibrationKOverflowTotal.WithLabelValues(continentCode, strconv.FormatFloat(confidence, 'f', -1, 64)).Inc()
+// Raises each region-size alarm of a stored week (V11): logs it as an error,
+// counts it by continent and kind, and answers the kinds by continent, nil
+// for none. The k table stays as it is: an alarm is for a person to derive it
+// again with T3 before the next release.
+func alertLagDriftKAlarms(calibrationId server.Id, alarms []*model.LagDriftKAlarm) map[string][]string {
+	kinds := map[string][]string{}
+	for _, alarm := range alarms {
+		kinds[alarm.ContinentCode] = append(kinds[alarm.ContinentCode], alarm.Kind)
+		lagDriftCalibrationKAlarmTotal.WithLabelValues(alarm.ContinentCode, alarm.Kind).Inc()
+		switch alarm.Kind {
+		case model.LagDriftKAlarmTail:
 			glog.Errorf(
-				"[lag]drift calibration %s: %s's region size at %g is beyond its histograms' last edge over %d tracks, so it keeps lagdrift.DefaultK there (lag.dev/DRIFTTEST.md V11); read k_histograms and k_impossible_tracks in the summaries\n",
-				calibration.CalibrationId,
-				continentCode,
-				confidence,
-				calibrated.Tracks,
+				"[lag]drift calibration %s: %s's week puts %.1f%% of its %d tracks beyond the trailing 26 weeks' 99%% bound of %.2f, over twice the 1%% expected; derive the k table again (lag.dev/DRIFTTEST.md V11)\n",
+				calibrationId,
+				alarm.ContinentCode,
+				100*alarm.ShareBeyond,
+				alarm.WeekTracks,
+				alarm.BoundK,
+			)
+		case model.LagDriftKAlarmDrift:
+			glog.Errorf(
+				"[lag]drift calibration %s: %s's 26 weeks' 99%% bound moved to %.2f over %d tracks from %.2f over %d 26 weeks earlier (NaN is beyond the histograms' last edge); derive the k table again (lag.dev/DRIFTTEST.md V11)\n",
+				calibrationId,
+				alarm.ContinentCode,
+				alarm.BoundK,
+				alarm.Tracks,
+				alarm.EarlierBoundK,
+				alarm.EarlierTracks,
+			)
+		default:
+			glog.Errorf(
+				"[lag]drift calibration %s: %s's 26 weeks' 99%% bound over %d tracks is beyond the histograms' last edge, a tail no honest fit has; read k_histograms and k_impossible_tracks in the summaries, and derive the k table again (lag.dev/DRIFTTEST.md V11)\n",
+				calibrationId,
+				alarm.ContinentCode,
+				alarm.Tracks,
 			)
 		}
 	}
-	if len(overflows) == 0 {
+	if len(kinds) == 0 {
 		return nil
 	}
-	return overflows
+	return kinds
 }
 
 // The first weekly time after `now`.
@@ -249,7 +260,7 @@ func calibrateLagDrift(
 			result.FitObservations,
 			result.Observations,
 		)
-		result.KOverflows = alertLagDriftKOverflows(model.GetLagDriftCalibrationById(ctx, *result.CalibrationId))
+		result.KAlarms = alertLagDriftKAlarms(*result.CalibrationId, model.GetLagDriftKAlarms(ctx, *result.CalibrationId))
 	} else {
 		glog.Infof(
 			"[lag]drift calibration not applied (%s): %d tracks read, %d fitted; the calibration in force stays\n",
