@@ -304,21 +304,55 @@ func (self *evsDropReindexWorld) resolve(drops ...*evsservice.DropListDrop) {
 	}
 }
 
-// Where the fake store keeps the job's list file of sequence.
+// The name the fake store's Dump gives the job's list file of sequence. Dump's values are a privacy scan's, the key
+// and metadata before the body, so they compare with each other and never with an object's bytes.
 func (self *evsDropReindexWorld) listFileName(sequence uint32) string {
 	return self.segment.ClusterId() + "/" + evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileList, sequence)
 }
 
-// Replaces the job's list file of sequence with its bytes, the last one flipped so its trailer fails, and returns the
-// bytes resolve wrote.
+// The bytes of the object the world's cluster clusterId holds at key, nil when it holds none.
+func (self *evsDropReindexWorld) object(clusterId string, key string) []byte {
+	self.t.Helper()
+	cluster, err := self.host.Blobs.Cluster(clusterId)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	object, err := cluster.Get(self.ctx, key)
+	if errors.Is(err, sidecar.ErrBlobNotFound) {
+		return nil
+	}
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	defer object.Body.Close()
+	objectBytes, err := io.ReadAll(object.Body)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	return objectBytes
+}
+
+// The bytes of the job's list file of sequence, nil when there is none.
+func (self *evsDropReindexWorld) listFile(sequence uint32) []byte {
+	return self.object(self.segment.ClusterId(), evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileList, sequence))
+}
+
+// Replaces the job's list file of sequence with its bytes, the last one, the trailer's, flipped, and returns the bytes
+// resolve wrote.
 func (self *evsDropReindexWorld) corruptListFile(sequence uint32) []byte {
 	self.t.Helper()
-	original := self.host.Blobs.Dump()[self.listFileName(sequence)]
+	original := self.listFile(sequence)
 	if len(original) == 0 {
 		self.t.Fatalf("no list file %d", sequence)
 	}
+	if _, err := evsservice.DecodeDropListFile(original, self.repoId, self.jobId, sequence); err != nil {
+		self.t.Fatalf("resolve's list file %d does not read: %v", sequence, err)
+	}
 	corrupt := bytes.Clone(original)
 	corrupt[len(corrupt)-1] ^= 1
+	if _, err := evsservice.DecodeDropListFile(corrupt, self.repoId, self.jobId, sequence); !errors.Is(err, evsservice.ErrDropFileInvalid) {
+		self.t.Fatalf("a flipped trailer reads as %v", err)
+	}
 	key := evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileList, sequence)
 	if err := self.segment.Delete(self.ctx, key); err != nil {
 		self.t.Fatal(err)
@@ -391,7 +425,7 @@ func TestEvsDropReindexWritesACorruptListFileAgainAndNamesItsSequence(t *testing
 	listed := world.write(path, 2)
 	drop := world.drop(evsDropReindexTestId("drop x"), path, listed)
 	world.resolve(drop)
-	if world.host.Blobs.Dump()[world.listFileName(1)] == nil {
+	if world.listFile(1) == nil {
 		t.Fatal("the job's resolve wrote one list file, so this tests no whole file beside the corrupt one")
 	}
 	original := world.corruptListFile(1)
@@ -402,7 +436,7 @@ func TestEvsDropReindexWritesACorruptListFileAgainAndNamesItsSequence(t *testing
 	if code != 0 {
 		t.Fatalf("exited %d: %s", code, stderr)
 	}
-	if !bytes.Equal(world.host.Blobs.Dump()[world.listFileName(1)], original) {
+	if !bytes.Equal(world.listFile(1), original) {
 		t.Fatal("the list file was written again with bytes other than resolve's")
 	}
 	if !maps.EqualFunc(evsDropReindexObjectsBesides(world, 1), before, bytes.Equal) {
@@ -458,7 +492,7 @@ func TestEvsDropReindexTakesTheNamedDropsWhenNoListFileReadsWhole(t *testing.T) 
 	if code != 0 || !strings.Contains(stdout, "\nrewritten 0\nwritten none\nstray none\n") {
 		t.Fatalf("with the drop named: exited %d, printing %q and %q", code, stdout, stderr)
 	}
-	if !bytes.Equal(world.host.Blobs.Dump()[world.listFileName(0)], original) {
+	if !bytes.Equal(world.listFile(0), original) {
 		t.Fatal("the list file was written again with bytes other than resolve's")
 	}
 }
@@ -470,7 +504,7 @@ func TestEvsDropReindexWritesAMissingListFileFresh(t *testing.T) {
 	path := evsDropReindexTestPath("x")
 	drop := world.drop(evsDropReindexTestId("drop x"), path, world.write(path, 1))
 	world.resolve(drop)
-	original := world.host.Blobs.Dump()[world.listFileName(0)]
+	original := world.listFile(0)
 	if err := world.segment.Delete(world.ctx, evsservice.DropFileKey(world.repoId, world.jobId, evsservice.DropFileList, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +513,7 @@ func TestEvsDropReindexWritesAMissingListFileFresh(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "\nrewritten none\nwritten 0\nstray none\n") {
 		t.Fatalf("exited %d, printing %q and %q", code, stdout, stderr)
 	}
-	if !bytes.Equal(world.host.Blobs.Dump()[world.listFileName(0)], original) {
+	if !bytes.Equal(world.listFile(0), original) {
 		t.Fatal("the list file was written with bytes other than resolve's")
 	}
 }
