@@ -80,6 +80,9 @@ type LagDriftCalibrationSettings struct {
 	RelayMinTracks int
 	// a histogram needs this many tracks
 	HistogramMinTracks int
+	// a track's fit counts toward the region's size (V11) with this many
+	// extenders, as a drift run counts with this many usable ones (E5)
+	KMinExtenders int
 }
 
 // The design's settings (lag.dev/DRIFTTEST.md V4, K2, E5).
@@ -93,6 +96,7 @@ func DefaultLagDriftCalibrationSettings() *LagDriftCalibrationSettings {
 		RelayFloorMs:       LagDriftRelayFloorMs,
 		RelayMinTracks:     200,
 		HistogramMinTracks: 20,
+		KMinExtenders:      6,
 	}
 }
 
@@ -116,6 +120,18 @@ var LagDriftResidualEdges = func() []float64 {
 	edges := []float64{}
 	for i := -12; i <= 12; i += 1 {
 		edges = append(edges, float64(i)/2)
+	}
+	return edges
+}()
+
+// The edges of the region size's histogram (V11): the Mahalanobis distance of
+// a track's city point from its fit, 1.5 to 12 by 0.05. Below 1.5 lies about
+// two thirds of an honest population, which no confidence V11 allows reaches
+// down to; from 12 up is one bin.
+var LagDriftKEdges = func() []float64 {
+	edges := []float64{}
+	for i := 30; i <= 240; i += 1 {
+		edges = append(edges, float64(i)/20)
 	}
 	return edges
 }()
@@ -219,6 +235,17 @@ type LagDriftCalibrationResult struct {
 	ResidualEdges   []float64                                `json:"residual_edges"`
 	LastMileEdgesMs []float64                                `json:"last_mile_edges_ms"`
 	Continents      map[string]*LagDriftCalibrationContinent `json:"continents"`
+
+	// the region size's histograms (V11), by continent code where it had
+	// HistogramMinTracks tracks: each track's Mahalanobis distance of its city
+	// point from its single-run fit, under the fit's covariance alone, over
+	// KEdges. The 26 weeks before a calibration sum to its k (GetLagDriftCalibration).
+	// Beside each, the tracks left out because the speed of light rules out
+	// their city point from two or more extenders: a place the test exists to
+	// reject, such as a VPN's virtual location, rather than an honest fit's tail
+	KEdges            []float64                     `json:"k_edges"`
+	KHistograms       map[string]*LagDriftHistogram `json:"k_histograms"`
+	KImpossibleTracks map[string]int                `json:"k_impossible_tracks"`
 }
 
 // The model the calibration found, for lagdrift's fits.
@@ -277,8 +304,11 @@ type lagDriftCalibrationTrackPaths struct {
 	// s_c, km
 	cityErrorKm float64
 	paths       []lagDriftCalibrationPath
-	// whether its city point is possible at all (V5)
+	// whether its city point is possible at all (V5): within reach of every
+	// extender
 	possible bool
+	// the extenders whose reach the city point is beyond
+	outOfReach int
 	// the paths the current pass keeps; nil when the track is trimmed
 	kept []int
 }
@@ -292,7 +322,6 @@ func newLagDriftCalibrationTrackPaths(track *LagDriftCalibrationTrack, cityError
 		track:       track,
 		cityErrorKm: cityErrorKm,
 		paths:       make([]lagDriftCalibrationPath, 0, len(track.Observations)),
-		possible:    true,
 	}
 	k := lagdrift.MsPerKm
 	for _, observation := range track.Observations {
@@ -303,7 +332,7 @@ func newLagDriftCalibrationTrackPaths(track *LagDriftCalibrationTrack, cityError
 			fastestMs = observation.RoundTrip.Ms
 		}
 		if fastestMs/2*lagdrift.VacuumKmPerMs+placeKm+3*cityErrorKm < dKm {
-			self.possible = false
+			self.outOfReach += 1
 		}
 		// the shared part fades for an extender within s_c of the city,
 		// where the direction to it says little
@@ -320,7 +349,30 @@ func newLagDriftCalibrationTrackPaths(track *LagDriftCalibrationTrack, cityError
 			cityVar:    k * k * cityErrorKm * cityErrorKm * (1 - g*g),
 		})
 	}
+	self.possible = self.outOfReach == 0
 	return self
+}
+
+// The Mahalanobis distance of p from a fit under the fit's position
+// covariance alone, as the region test measures it (V6): p in the azimuthal
+// equidistant projection centered on the fit, whitened by the covariance's
+// Cholesky factor with lagdrift.Judge's variance floors. False when the
+// covariance gives no number.
+func lagDriftMahalanobis(fit *lagdrift.Fit, p lagdrift.Point) (float64, bool) {
+	const minVarianceKm2 = 1e-9
+	s00 := math.Max(minVarianceKm2, fit.Cov[0][0])
+	s01 := (fit.Cov[0][1] + fit.Cov[1][0]) / 2
+	l11 := math.Sqrt(s00)
+	l21 := s01 / l11
+	l22 := math.Sqrt(math.Max(minVarianceKm2, fit.Cov[1][1]-l21*l21))
+	eastKm, northKm := lagdrift.AzimuthalKm(fit.At, p)
+	x := eastKm / l11
+	y := (northKm - l21*x) / l22
+	d := math.Hypot(x, y)
+	if math.IsNaN(d) || math.IsInf(d, 0) {
+		return 0, false
+	}
+	return d, true
 }
 
 // Reused buffers for one track's evaluation.
@@ -809,6 +861,9 @@ func CalibrateLagDriftTracks(tracks []*LagDriftCalibrationTrack, settings *LagDr
 		ResidualEdges:     LagDriftResidualEdges,
 		LastMileEdgesMs:   LagDriftLastMileEdgesMs,
 		Continents:        map[string]*LagDriftCalibrationContinent{},
+		KEdges:            LagDriftKEdges,
+		KHistograms:       map[string]*LagDriftHistogram{},
+		KImpossibleTracks: map[string]int{},
 	}
 
 	all := make([]*lagDriftCalibrationTrackPaths, 0, len(tracks))
@@ -901,6 +956,9 @@ func CalibrateLagDriftTracks(tracks []*LagDriftCalibrationTrack, settings *LagDr
 	type continentValues struct {
 		continent *LagDriftCalibrationContinent
 		lastMile  map[string]*LagDriftHistogram
+		// the region size's (V11)
+		k           *LagDriftHistogram
+		kOutOfReach int
 	}
 	continents := map[string]*continentValues{}
 	lastMileMs := map[string]map[string][]float64{}
@@ -922,6 +980,7 @@ func CalibrateLagDriftTracks(tracks []*LagDriftCalibrationTrack, settings *LagDr
 						LastMileMs: map[string]*LagDriftHistogram{},
 					},
 					lastMile: map[string]*LagDriftHistogram{},
+					k:        newLagDriftHistogram(LagDriftKEdges),
 				}
 				continents[continentCode] = values
 			}
@@ -965,6 +1024,22 @@ func CalibrateLagDriftTracks(tracks []*LagDriftCalibrationTrack, settings *LagDr
 			}
 			histogram.Tracks += 1
 			histogram.add(LagDriftLastMileEdgesMs, b)
+
+			// the region size (V11), from a fit the drift test would judge:
+			// how far, in its own σ, the city point lies from it. A city
+			// point light rules out from two or more extenders, so that one
+			// misplaced extender can't, is a place the test exists to reject
+			// and is counted apart
+			if settings.KMinExtenders <= fit.Extenders {
+				if track.outOfReach <= 1 {
+					if d, ok := lagDriftMahalanobis(fit, track.track.City); ok {
+						values.k.Tracks += 1
+						values.k.add(LagDriftKEdges, d)
+					}
+				} else {
+					values.kOutOfReach += 1
+				}
+			}
 		}
 	}
 
@@ -976,6 +1051,11 @@ func CalibrateLagDriftTracks(tracks []*LagDriftCalibrationTrack, settings *LagDr
 		LastMileMs: map[string]*LagDriftHistogram{},
 	}
 	for continentCode, values := range continents {
+		// the region size's by its own tracks, which are fewer
+		if settings.HistogramMinTracks <= values.k.Tracks {
+			result.KHistograms[continentCode] = values.k
+			result.KImpossibleTracks[continentCode] = values.kOutOfReach
+		}
 		if values.continent.Tracks < settings.HistogramMinTracks {
 			continue
 		}

@@ -3,6 +3,8 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,7 +13,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, K2, Q12).
+// The drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, V11, K2, Q12).
 //
 // Each extender's round trip in a drift fit has the variance
 // σ_meas² + σ₀² + (κ · K · d)² + (K · s_ext)² (V3). κ, the route error as a
@@ -21,6 +23,12 @@ import (
 // last-mile offset b by continent and network type, and from it the relay
 // threshold: a run whose b is above it is reported `relay_suspected`, an
 // advisory flag that never changes the verdict (K2, Q12).
+//
+// It also measures the region's size (V11): how far, in its own σ, each
+// track's city point lies from the track's single-run fit, as a histogram per
+// continent. A calibration's k at a confidence is the larger of the textbook
+// k and the quantile of the histograms of the 26 weeks up to it, where a
+// continent's hold 10,000 tracks, and else lagdrift.DefaultK.
 //
 // Only aggregates are kept: the two numbers, histograms and thresholds. No
 // track, visitor, address or place is, so nothing per visitor outlives lag's
@@ -150,11 +158,36 @@ type LagDriftCalibration struct {
 	// every type: only where the calibration had enough tracks. Empty for the
 	// defaults
 	RelayThresholdsMs map[string]map[string]float64
+	// the calibrated region size (V11) by continent code: the region-size
+	// histograms of the calibrations in force over the LagDriftKWindow up to
+	// this one, summed. Empty for the defaults
+	CalibratedK map[string]*LagDriftCalibratedK
 	// the calibration these are, for a verdict to record what it was judged
 	// with; nil for the defaults
 	CalibrationId *server.Id
 	// when the calibration ran; nil for the defaults
 	CalibratedAt *time.Time
+}
+
+// The confidences a drift test judges at (V11, P2), the ones a calibration
+// gives a region size for.
+var LagDriftKConfidences = []float64{0.95, 0.99}
+
+// A continent's calibrated region size counts from this many tracks in its
+// summed histograms, about ±0.15 at 99%; below it the continent uses
+// lagdrift.DefaultK (V11).
+const LagDriftKMinTracks = 10000
+
+// The weeks of region-size histograms summed up to a calibration (V11).
+const LagDriftKWindow = 26 * 7 * 24 * time.Hour
+
+// A continent's calibrated region size (V11).
+type LagDriftCalibratedK struct {
+	// the tracks in its summed histograms
+	Tracks int64
+	// the empirical quantile of the Mahalanobis distance of a city point from
+	// its track's fit at each of LagDriftKConfidences, in their order
+	Quantiles []float64
 }
 
 // The design's values, for when nothing has been calibrated.
@@ -164,12 +197,125 @@ func DefaultLagDriftCalibration() *LagDriftCalibration {
 		Sigma0Ms:          LagDriftDefaultSigma0Ms,
 		RelayThresholdMs:  LagDriftDefaultRelayThresholdMs,
 		RelayThresholdsMs: map[string]map[string]float64{},
+		CalibratedK:       map[string]*LagDriftCalibratedK{},
 	}
 }
 
 // Whether the values are a calibration's rather than the defaults.
 func (self *LagDriftCalibration) Calibrated() bool {
 	return self.CalibrationId != nil
+}
+
+// K is the region's size at a confidence for a visitor on a continent, the
+// continent code of client_ip's country (V11): the larger of the textbook k and
+// the calibrated quantile, where the continent's summed histograms hold
+// LagDriftKMinTracks tracks, and else lagdrift.DefaultK, T3's per-region k.
+// The defaults, as the drift test judges with while drift.calibration_enabled
+// is off, always answer DefaultK.
+func (self *LagDriftCalibration) K(confidence float64, continentCode string) float64 {
+	calibrated := self.CalibratedK[strings.ToUpper(continentCode)]
+	if calibrated != nil && LagDriftKMinTracks <= calibrated.Tracks {
+		for i, kConfidence := range LagDriftKConfidences {
+			if math.Abs(kConfidence-confidence) < 1e-9 && i < len(calibrated.Quantiles) {
+				return math.Max(lagdrift.KForConfidence(confidence), calibrated.Quantiles[i])
+			}
+		}
+	}
+	return lagdrift.DefaultK(confidence, continentCode)
+}
+
+// The q quantile of a histogram over edges, interpolated within its bin. The
+// bin below the first edge starts at 0, and a quantile in the bin from the
+// last edge up is the last edge: the most the histogram can tell.
+func lagDriftHistogramQuantile(edges []float64, counts []int64, q float64) float64 {
+	total := int64(0)
+	for _, count := range counts {
+		total += count
+	}
+	if total == 0 || len(counts) != len(edges)+1 {
+		return math.NaN()
+	}
+	target := q * float64(total)
+	cumulative := 0.0
+	for bin, count := range counts {
+		if count == 0 {
+			continue
+		}
+		if target <= cumulative+float64(count) {
+			if bin == len(edges) {
+				return edges[len(edges)-1]
+			}
+			lower := 0.0
+			if 0 < bin {
+				lower = edges[bin-1]
+			}
+			upper := edges[bin]
+			return lower + (upper-lower)*(target-cumulative)/float64(count)
+		}
+		cumulative += float64(count)
+	}
+	return edges[len(edges)-1]
+}
+
+// The calibrated region size by continent from the region-size histograms of
+// the calibrations in force over the LagDriftKWindow up to calibratedAt
+// (V11). A withdrawn calibration's histograms count for nothing, and a row
+// over other edges is left out.
+func getLagDriftCalibratedKInConn(ctx context.Context, conn server.PgConn, calibratedAt time.Time) map[string]*LagDriftCalibratedK {
+	counts := map[string][]int64{}
+	tracks := map[string]int64{}
+	result, err := conn.Query(
+		ctx,
+		`
+		SELECT summary_json->'k_edges', summary_json->'k_histograms'
+		FROM lag_drift_calibration
+		WHERE
+			withdrawn_at IS NULL AND
+			$1 < calibrated_at AND
+			calibrated_at <= $2
+		`,
+		calibratedAt.Add(-LagDriftKWindow).UTC(),
+		calibratedAt.UTC(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var edgesJson []byte
+			var histogramsJson []byte
+			server.Raise(result.Scan(&edgesJson, &histogramsJson))
+			if len(edgesJson) == 0 || len(histogramsJson) == 0 {
+				continue
+			}
+			var edges []float64
+			var histograms map[string]*LagDriftHistogram
+			if json.Unmarshal(edgesJson, &edges) != nil || !slices.Equal(edges, LagDriftKEdges) {
+				continue
+			}
+			if json.Unmarshal(histogramsJson, &histograms) != nil {
+				continue
+			}
+			for continentCode, histogram := range histograms {
+				if histogram == nil || len(histogram.Counts) != len(LagDriftKEdges)+1 {
+					continue
+				}
+				if counts[continentCode] == nil {
+					counts[continentCode] = make([]int64, len(LagDriftKEdges)+1)
+				}
+				for bin, count := range histogram.Counts {
+					counts[continentCode][bin] += count
+				}
+				tracks[continentCode] += int64(histogram.Tracks)
+			}
+		}
+	})
+	calibratedK := map[string]*LagDriftCalibratedK{}
+	for continentCode, continentCounts := range counts {
+		k := &LagDriftCalibratedK{Tracks: tracks[continentCode]}
+		for _, confidence := range LagDriftKConfidences {
+			k.Quantiles = append(k.Quantiles, lagDriftHistogramQuantile(LagDriftKEdges, continentCounts, confidence))
+		}
+		calibratedK[continentCode] = k
+	}
+	return calibratedK
 }
 
 // RelayThresholdMsFor is the relay threshold in ms for a visitor on a
@@ -271,6 +417,9 @@ func GetLagDriftCalibration(ctx context.Context) *LagDriftCalibration {
 				calibration = scanLagDriftCalibration(result)
 			}
 		})
+		if calibration.CalibratedAt != nil {
+			calibration.CalibratedK = getLagDriftCalibratedKInConn(ctx, conn, *calibration.CalibratedAt)
+		}
 	})
 	return calibration
 }
@@ -295,6 +444,9 @@ func GetLagDriftCalibrationById(ctx context.Context, calibrationId server.Id) *L
 				calibration = scanLagDriftCalibration(result)
 			}
 		})
+		if calibration != nil {
+			calibration.CalibratedK = getLagDriftCalibratedKInConn(ctx, conn, *calibration.CalibratedAt)
+		}
 	})
 	return calibration
 }

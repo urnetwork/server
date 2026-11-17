@@ -351,6 +351,7 @@ func testLagDriftSummaryIsAggregate(t testing.TB, summaryJson string) {
 		"tracks", "observations", "fit_tracks", "fit_observations", "impossible_tracks", "unfitted_tracks",
 		"city_error_km", "place_error_km", "relay_quantile", "relay_floor_ms",
 		"residual_edges", "last_mile_edges_ms", "continents", "residuals", "last_mile_ms", "counts",
+		"k_edges", "k_histograms", "k_impossible_tracks",
 	} {
 		allowed[key] = true
 	}
