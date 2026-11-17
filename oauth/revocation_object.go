@@ -1,7 +1,7 @@
 package oauth
 
 // The signature on §7.8's rev/ objects: a compact JWS (RFC 7515) under the svc-
-// key set, the set evs and gkm already mount to verify service tokens. The
+// key set, the set evs, gkm and sockets already mount to verify service tokens. The
 // payload is sidecar.EncodeRevocationPayload's bytes, signed as they are, and
 // the header names the type sidecar.RevocationJwsType:
 //
@@ -10,9 +10,9 @@ package oauth
 //
 // The typ keeps a rev/ object from ever verifying as a service token, which
 // carries a JWT's claims and no such type, and keeps a service token from
-// reading as a rev/ object. api signs (model's rev/ writer); evs and gkm verify
-// through sidecar.RevocationChecker, which takes VerifyRevocation as its
-// function, so the engines never import this package.
+// reading as a rev/ object. api signs (model's rev/ writer); evs, gkm and
+// sockets' block (QD-1029) verify through sidecar.RevocationChecker, which takes
+// VerifyRevocation as its function, so the engines never import this package.
 
 import (
 	"crypto/ecdsa"
@@ -121,9 +121,10 @@ func verifyRevocationWith(object []byte, publicKeyOf func(kid string) *ecdsa.Pub
 }
 
 // The payload of a rev/ object by the process's verifier: a non-issuer block's
-// mounted svc- jwks, else the issuer's own (VerifyServiceToken's). What evs and
-// gkm pass to sidecar.NewRevocationChecker. A process with no usable verifier
-// refuses every object with an error that is not ErrInvalidRevocationObject.
+// mounted svc- jwks, else the issuer's own (VerifyServiceToken's). What evs, gkm
+// and sockets' block pass to sidecar.NewRevocationChecker. A process with no
+// usable verifier refuses every object with an error that is not
+// ErrInvalidRevocationObject.
 func VerifyRevocation(object []byte) ([]byte, error) {
 	verifier, err := currentServiceTokenVerifier()
 	if err != nil {

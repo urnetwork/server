@@ -3,9 +3,9 @@ package model
 // §7.8's revocation objects at api (owner decision 2; §2.8 evs-18): the writer
 // of rev/<network_id>/<kind>/<subject_id>/_ on the first metadata cluster, and
 // taskworker's deletion of each 20 minutes after its last write. The format and
-// evs's and gkm's reader are the root's (sidecar/config_rev.go); the signature
-// is oauth.SignRevocation's, which api and taskworker pass in, since model may
-// not import oauth.
+// the reader evs, gkm and sockets' block use (sockets' since QD-1029) are the
+// root's (sidecar/config_rev.go); the signature is oauth.SignRevocation's, which
+// api and taskworker pass in, since model may not import oauth.
 //
 //	owe     WriteRevocation, in the caller's transaction: schedules a write
 //	        task that retries until it lands, and after the commit tries the
