@@ -647,22 +647,39 @@ type SnHeadError struct {
 // `Bound`/`Hotkey`/`Uid` reflect an active head binding; `Rank` is the bound
 // network's estimated rank. `Source` is "server" until validators publish
 // consensus scores on chain.
+//
+// A network qualifies for a spot only while the validator can measure it
+// (owner decision 2026-11-17, matching the published claim guide): `InHead`
+// is the rank alone (a score, inside the cutoff), and `Eligible` is `InHead`
+// and `Measurable`. Until 2026-11-17 `Eligible` meant the rank alone. The
+// apps that read it (2026-09 to 2026-10 builds) show their "You qualify"
+// claim tile only while it is true and nothing otherwise, so the stricter
+// meaning makes them follow the guide too. `NotMeasurableReason` says why a
+// network is not measurable, as GET /sn/top/me does: "not_in_cohort",
+// "shared_egress", "not_providing", or "" when it is measurable or the
+// board has no snapshot to say. `ClaimPrompt` is the board's claim prompt
+// (measurable, inside the cutoff, not claimed yet), the one the Earnings
+// tile shows "Claim your spot" on.
 type SnHeadResult struct {
-	Eligible     bool         `json:"eligible"`
-	Score        float64      `json:"score"`
-	Floor        float64      `json:"floor"`
-	RankEstimate int          `json:"rank_estimate"`
-	Cutoff       int          `json:"cutoff"`
-	Bound        bool         `json:"bound"`
-	Hotkey       string       `json:"hotkey,omitempty"`
-	Uid          uint64       `json:"uid"`
-	Rank         int          `json:"rank"`
-	Epoch        uint64       `json:"epoch"`
-	Netuid       uint64       `json:"netuid"`
-	ChainId      uint64       `json:"chain_id"`
-	Coordinator  string       `json:"coordinator,omitempty"`
-	Source       string       `json:"source"`
-	Error        *SnHeadError `json:"error,omitempty"`
+	Eligible            bool         `json:"eligible"`
+	Score               float64      `json:"score"`
+	Floor               float64      `json:"floor"`
+	RankEstimate        int          `json:"rank_estimate"`
+	Cutoff              int          `json:"cutoff"`
+	InHead              bool         `json:"in_head"`
+	Measurable          bool         `json:"measurable"`
+	NotMeasurableReason string       `json:"not_measurable_reason"`
+	ClaimPrompt         bool         `json:"claim_prompt"`
+	Bound               bool         `json:"bound"`
+	Hotkey              string       `json:"hotkey,omitempty"`
+	Uid                 uint64       `json:"uid"`
+	Rank                int          `json:"rank"`
+	Epoch               uint64       `json:"epoch"`
+	Netuid              uint64       `json:"netuid"`
+	ChainId             uint64       `json:"chain_id"`
+	Coordinator         string       `json:"coordinator,omitempty"`
+	Source              string       `json:"source"`
+	Error               *SnHeadError `json:"error,omitempty"`
 }
 
 // snHeadRanking is the fleet-wide score table. Scores split each live egress
@@ -875,9 +892,10 @@ func snHeadWithChainSettings(result *SnHeadResult, cfg *StConfig) {
 // SnHead reports the caller network's Top 200 standing. It reads the SN Top
 // board's newest snapshot (LEADERTOP.md §7, Q15), so this route, the Top 200
 // page and the Protocol tab agree: the score is the network's projected
-// score, the floor the projected 200th score, and the rank its position in
-// the board's total order. Before the board's first snapshot it falls back
-// to the live estimate.
+// score, the floor the projected 200th score, the rank its position in the
+// board's total order, and measurability the board's. Before the board's
+// first snapshot it falls back to the live estimate, which knows nothing of
+// measurability, so it never qualifies a network.
 func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
@@ -899,7 +917,8 @@ func SnHead(clientSession *session.ClientSession) (*SnHeadResult, error) {
 			result.Score = ranking.scores[networkId]
 			result.Floor = ranking.floor()
 			result.RankEstimate = ranking.rankOf(result.Score)
-			result.Eligible = 0 < result.Score && result.RankEstimate <= SnHeadCutoff
+			// measurability unknown: in the head, never eligible
+			result.InHead = 0 < result.Score && result.RankEstimate <= SnHeadCutoff
 			prefer = ranking.liveClients[networkId]
 		}
 	}
