@@ -2,8 +2,8 @@ package server
 
 // An edge block's platform clients (TLS-M5-11, QD-812, QD-873): edge.yml admits only the block, host, slot and
 // index it names; the derivation is fixed; two processes of one block on one host in different slots hold
-// disjoint clients, and one slot holds the same clients across restarts; WARP_SLOT reads only a slot the key
-// admits; and PlatformClientSource asks api for each index at start, holds each client's id for its life,
+// disjoint clients and both connect their pools, and one slot holds the same clients across restarts; WARP_SLOT
+// reads only a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's id for its life,
 // refreshes each jwt at its refresh point, rides an api outage on the jwt it holds until that ends, and never
 // puts the bearer or a jwt in an error. api is an httptest server and time a fake clock: nothing sleeps.
 
@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
 
@@ -395,6 +397,105 @@ func TestPlatformClientSourcesInTwoSlotsHoldDisjointClients(t *testing.T) {
 	oldSource.Close()
 	if oldSource.Ready() || !newSource.Ready() {
 		t.Fatalf("after the old process ended: ready old %t new %t", oldSource.Ready(), newSource.Ready())
+	}
+}
+
+// connect as a test models it for one client id: connected from one process at a time, the newest to open it taking
+// it over, so a process whose client id another process opened since is no longer connected. Each process opens
+// its clients through process(name).
+type platformClientTestPlatform struct {
+	stateLock sync.Mutex
+	// client id -> the process connected as it
+	clientIdHolders map[connect.Id]string
+}
+
+func newPlatformClientTestPlatform() *platformClientTestPlatform {
+	return &platformClientTestPlatform{clientIdHolders: map[connect.Id]string{}}
+}
+
+func (self *platformClientTestPlatform) process(name string) sidecar.SidecarPlatform {
+	return &platformClientTestProcess{platform: self, name: name}
+}
+
+// One process's view of the platform.
+type platformClientTestProcess struct {
+	platform *platformClientTestPlatform
+	name     string
+}
+
+func (self *platformClientTestProcess) OpenClient(ctx context.Context, args *sidecar.SidecarPlatformClientArgs) (*sidecar.SidecarPlatformClient, error) {
+	platform := self.platform
+	clientId := args.ClientId
+	func() {
+		platform.stateLock.Lock()
+		defer platform.stateLock.Unlock()
+		platform.clientIdHolders[clientId] = self.name
+	}()
+	client := connect.NewClient(ctx, clientId, connect.NewNoContractClientOob(), args.ClientSettings)
+	return &sidecar.SidecarPlatformClient{
+		Client:  client,
+		SetAuth: func(auth *connect.ClientAuth) {},
+		Connected: func() (bool, <-chan struct{}) {
+			platform.stateLock.Lock()
+			defer platform.stateLock.Unlock()
+			return platform.clientIdHolders[clientId] == self.name, nil
+		},
+		CloseAndWait: func(ctx context.Context) error {
+			client.Cancel()
+			platform.stateLock.Lock()
+			defer platform.stateLock.Unlock()
+			if platform.clientIdHolders[clientId] == self.name {
+				delete(platform.clientIdHolders, clientId)
+			}
+			return nil
+		},
+	}, nil
+}
+
+// A deploy's old and new process of one block on one host, each its own K clients in an EdgeClientPool on its slot's
+// source: both connect and stay connected, on a platform that lets one client id be connected from one process
+// alone. A third process in the old one's slot, as before QD-873, takes the old one's clients over, which is what
+// the slot keeps from a deploy.
+func TestPlatformClientSourcesInTwoSlotsBothConnect(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	platform := newPlatformClientTestPlatform()
+	clientCount := 2
+	openPool := func(name string, slot int) *sidecar.EdgeClientPool {
+		settings := sidecar.DefaultEdgeClientPoolSettings()
+		settings.ClientCount = clientCount
+		settings.AppVersion = "0.0.0-test"
+		pool, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
+			Source:   api.newSlotSource(ctx, slot, clientCount),
+			Platform: platform.process(name),
+			Settings: settings,
+			Clock:    clock,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pool.Close)
+		return pool
+	}
+	oldPool := openPool("old", 0)
+	if !oldPool.Ready() {
+		t.Fatal("the old process is not connected")
+	}
+	newPool := openPool("new", 1)
+	if !oldPool.Ready() || !newPool.Ready() {
+		t.Fatalf("connected: old %d new %d of %d", oldPool.ConnectedCount(), newPool.ConnectedCount(), clientCount)
+	}
+	for index := range clientCount {
+		if oldPool.ClientIds()[index] != sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, index)) ||
+			newPool.ClientIds()[index] != sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 1, index)) {
+			t.Fatalf("index %d's clients are not their slots'", index)
+		}
+	}
+	sameSlotPool := openPool("same-slot", 0)
+	if !sameSlotPool.Ready() || oldPool.Ready() || oldPool.ConnectedCount() != 0 || !newPool.Ready() {
+		t.Fatalf("a process in the old one's slot: old %d, new %d, same slot %d connected", oldPool.ConnectedCount(), newPool.ConnectedCount(), sameSlotPool.ConnectedCount())
 	}
 }
 
