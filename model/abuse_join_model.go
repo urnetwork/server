@@ -74,6 +74,17 @@ type AbuseReport struct {
 	HeaderBlock []byte
 	// An edge connection id (tls-3), as tlsedge showed it.
 	ConnectionId string
+	// A trusted flagger's id from abuse.yml, its key matched (ABUSE-M8-01), with class trusted_flagger: the case
+	// keeps it as its class, trusted_flagger:<id>, so a kill's review shows the flagger. Empty for any other report.
+	FlaggerId string
+}
+
+// The reporter class a report's case keeps: its class, a trusted flagger's carrying its id (AbuseFlaggerReporterClass).
+func (self *AbuseReport) caseReporterClass() AbuseReporterClass {
+	if self.ReporterClass == AbuseReporterClassTrustedFlagger && self.FlaggerId != "" {
+		return AbuseFlaggerReporterClass(self.FlaggerId)
+	}
+	return self.ReporterClass
 }
 
 // What tied a report to a network.
@@ -138,6 +149,9 @@ func (self *AbuseReport) Validate() error {
 	}
 	if !abuseReportClassAllowed(self.ReporterClass) {
 		return fmt.Errorf("%w: a class no report may claim", ErrAbuseReportInvalid)
+	}
+	if self.FlaggerId != "" && (self.ReporterClass != AbuseReporterClassTrustedFlagger || !server.IsAbuseFlaggerId(self.FlaggerId)) {
+		return fmt.Errorf("%w: a flagger id on a report no flagger's key carried", ErrAbuseReportInvalid)
 	}
 	return nil
 }
@@ -544,7 +558,7 @@ func OpenAbuseReportCase(
 			NetworkId:     &networkId,
 			Category:      report.Category,
 			Target:        join.Target,
-			ReporterClass: report.ReporterClass,
+			ReporterClass: report.caseReporterClass(),
 			JoinKind:      join.JoinKind,
 			JoinKey:       join.JoinKey,
 			Barred:        reportCase.Barred,

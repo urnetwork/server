@@ -24,7 +24,10 @@ package model
 //  7. dns_changes_per_hour (§12.7's abuse cap), counted by the user writes' admin events in the window;
 //  8. dnsservice.ValidateUserRecordSet on each upsert, then §21.6's host screen, sidecar.ScreenHost, on each host
 //     label of a new owner: the brand rules and §12.7's owner table, not §12.5's reserved block, which guards labels
-//     and aliases, so www, api, status and login are a network's to write in its own zone (owner, QD-807);
+//     and aliases, so www, api, status and login are a network's to write in its own zone (owner, QD-807). A host a
+//     reviewer allowed the network (screen_allow) passes review; one sent to review is refused as
+//     QuotaRefusal{limit_key: screen_review}, its case opened once this transaction has rolled back (QD-235,
+//     abuse_screen_model.go);
 //  9. the compare-and-swap on the version the caller read, under the zone's lock, which step 2 took after the
 //     label's, the zone's system set on first need (EnsureNetworkZoneInTx), then DnsWriteInTx with its admin event
 //     (§7.11), all in this transaction.
@@ -456,10 +459,27 @@ func WriteDnsRecords(ctx context.Context, write *DnsRecordsWrite) ([]byte, error
 			}
 		}, server.TxReadCommitted)
 	})
+	if review := AbuseScreenReviewOf(err); review != nil {
+		return nil, dnsScreenReviewAnswer(ctx, review, now)
+	}
 	if err != nil {
 		return nil, dnsRecordsApiError(err)
 	}
 	return body, nil
+}
+
+// A name a write's screen held for review (§21.6, QD-235), once the write's transaction has rolled back: its case
+// opened or joined in a transaction of its own, answered as QuotaRefusal{limit_key: screen_review}, or the deny the
+// screen falls back to when no case can hold it.
+func dnsScreenReviewAnswer(ctx context.Context, review *AbuseScreenReviewError, now time.Time) error {
+	err := OpenAbuseScreenReview(ctx, review, now)
+	if opened := AbuseScreenReviewOf(err); opened != nil {
+		return sidecar.NewDnsQuotaError(opened.Refusal())
+	}
+	if errors.Is(err, ErrAbuseScreenDenied) {
+		return dnsRecordsRefused("the name %s is refused (§21.6)", review.Name)
+	}
+	return dnsRecordsApiError(err)
 }
 
 // One user row the zone holds, or a row of another kind at a key a write names.
@@ -650,20 +670,26 @@ func applyDnsRecordsInTx(
 			return nil, dnsRecordsInvalid("%v", err)
 		}
 	}
-	var screenFacts *sidecar.ScreenFacts
+	var screenFacts *NetworkScreenFacts
 	for _, set := range parsed.upserts {
 		if heldOwners[set.Owner] {
 			continue
 		}
 		if screenFacts == nil {
-			screenFacts = &sidecar.ScreenFacts{
+			screenFacts = &NetworkScreenFacts{
 				VerifiedDomains: getNetworkVerifiedDomainsInTx(ctx, tx, networkId),
 				Probation:       probation,
 				ScopeLabels:     scopeLabels,
+				AllowedNames:    GetNetworkScreenAllowedNamesInTx(ctx, tx, networkId, DefaultAbuseScreenSettings()),
 			}
 		}
 		for _, ownerLabel := range dnsScreenedOwnerLabels(dnsUserRecordContextFor(recordContext, set.Owner, scopeLabels), set.Owner) {
-			if verdict := sidecar.ScreenHost(ownerLabel, screenFacts); verdict != sidecar.ScreenVerdictAllow {
+			err := ScreenWithNetworkFacts(networkId, AbuseScreenSubjectHost, ownerLabel, screenFacts)
+			if review := AbuseScreenReviewOf(err); review != nil {
+				// QD-235: refused, and once this transaction has rolled back the review opens its case
+				return nil, review
+			}
+			if err != nil {
 				return nil, dnsRecordsRefused("the name %s is refused (§21.6)", ownerLabel)
 			}
 		}

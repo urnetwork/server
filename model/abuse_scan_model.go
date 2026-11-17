@@ -26,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -355,19 +354,12 @@ func OpenAbuseRootIncident(
 	return
 }
 
-// The facts ScreenName and ScreenHost read for a live name of the network at now, as the CT watch screens it: its
-// verified domains (none before MG6), and probation for a network on probation or restricted. ReviewAllowed stays
-// false until ABUSE-M5-08's screen_allow exists, so a brand with a keyword reads as a name the lists refuse.
-func GetAbuseScanScreenFacts(ctx context.Context, networkId server.Id, now time.Time) *sidecar.ScreenFacts {
-	facts := &sidecar.ScreenFacts{
-		VerifiedDomains: GetNetworkVerifiedDomains(ctx, networkId),
-	}
-	if standing, found := GetNetworkAbuseStanding(ctx, networkId, now); found {
-		switch standing.Standing {
-		case AbuseStandingProbation, AbuseStandingRestricted:
-			facts.Probation = true
-		}
-	}
+// The facts ScreenName and ScreenHost read for a live name of the network at now, as the CT watch screens it: every
+// gate's (GetNetworkScreenFacts, ABUSE-M5-08), its verified domains (none before MG6), probation for a network on
+// probation or restricted, and the names a reviewer allowed it, so a brand with a keyword a reviewer allowed reads as
+// allowed. A network that does not exist reads as one of which nothing is known.
+func GetAbuseScanScreenFacts(ctx context.Context, networkId server.Id, now time.Time) *NetworkScreenFacts {
+	facts, _ := GetNetworkScreenFacts(ctx, networkId, now)
 	return facts
 }
 

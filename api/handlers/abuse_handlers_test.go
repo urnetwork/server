@@ -10,6 +10,8 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -436,6 +438,72 @@ func TestAbuseActionLookupThroughTheRoute(t *testing.T) {
 		}
 		if answer := testAbuseActionCall(t, handlers, "Bearer reviewer-bearer", `{"kind":"lookup_case","case_id":"`+server.NewId().String()+`"}`); answer.status != http.StatusNotFound {
 			t.Fatalf("an unknown case: %d", answer.status)
+		}
+	})
+}
+
+// One call of the routes with a trusted flagger's key header, as testAbuseRouteCall makes it.
+func testAbuseRouteCallWithFlaggerKey(t testing.TB, handlers *AbuseHandlers, remoteAddr string, flaggerKey string, body string) *testAbuseRouteAnswer {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	apiRouter := router.NewRouter(ctx, []*router.Route{
+		router.NewRoute("POST", "/abuse/report", handlers.Report),
+	})
+	request := httptest.NewRequest("POST", "/abuse/report", strings.NewReader(body))
+	request.RemoteAddr = remoteAddr
+	if flaggerKey != "" {
+		request.Header.Set(model.AbuseFlaggerKeyHeader, flaggerKey)
+	}
+	w := httptest.NewRecorder()
+	apiRouter.ServeHTTP(w, request)
+	return &testAbuseRouteAnswer{status: w.Code, body: w.Body.String(), header: w.Header()}
+}
+
+// A trusted flagger's key (ABUSE-M8-01): a listed key sets the class and the flagger on each report, a wrong or
+// absent key is a plain report, the answer is one body for all three, and the caller's address limit still counts
+// a flagger's reports.
+func TestAbuseReportTakesAFlaggersKey(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		digest := sha256.Sum256([]byte("synthetic-flagger-key-a"))
+		file := []byte("flaggers:\n  - id: flagger-a\n    sha256: " + hex.EncodeToString(digest[:]) + "\n")
+		flaggers := model.NewAbuseFlaggerSource(func() (*model.AbuseFlaggerVerifier, error) {
+			return model.NewAbuseFlaggerVerifier(file, []string{"flagger-a"})
+		}, nil)
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		settings.ReportAddressLimit = 3
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Flaggers:          flaggers,
+			FlaggerSettings:   model.DefaultAbuseFlaggerSettings,
+			Settings:          settings,
+		})
+		body := testAbuseReportBody(t, "phishing", []string{"https://elsewhere.example/"}, nil)
+		answers := []*testAbuseRouteAnswer{}
+		for _, key := range []string{"synthetic-flagger-key-a", "synthetic-flagger-key-b", ""} {
+			answers = append(answers, testAbuseRouteCallWithFlaggerKey(t, handlers, "192.0.2.10:41000", key, body))
+		}
+		for _, answer := range answers {
+			if answer.status != http.StatusOK || answer.body != answers[0].body {
+				t.Fatalf("answers %d %q and %d %q", answer.status, answer.body, answers[0].status, answers[0].body)
+			}
+		}
+		if len(sink.reports) != 3 {
+			t.Fatalf("%d reports taken", len(sink.reports))
+		}
+		if report := sink.reports[0]; report.ReporterClass != model.AbuseReporterClassTrustedFlagger || report.FlaggerId != "flagger-a" {
+			t.Fatalf("the flagger's report: %+v", report)
+		}
+		for _, report := range sink.reports[1:] {
+			if report.ReporterClass != model.AbuseReporterClassPublic || report.FlaggerId != "" {
+				t.Fatalf("a plain report: %+v", report)
+			}
+		}
+		// the address limit counts a flagger as any caller
+		if answer := testAbuseRouteCallWithFlaggerKey(t, handlers, "192.0.2.10:41000", "synthetic-flagger-key-a", body); answer.status != http.StatusTooManyRequests {
+			t.Fatalf("a flagger past the address limit: %d", answer.status)
 		}
 	})
 }

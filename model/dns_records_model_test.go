@@ -309,9 +309,18 @@ func TestDnsRecordsRefusesInOrder(t *testing.T) {
 				name:     "the screen",
 				standing: sidecar.AbuseStandingStandard, verified: true,
 				request: func(world *testDnsRecordsWorld) *sidecar.DnsRecordsRequest {
-					return testDnsUpsert("paypal-login."+world.apex, "TXT", `"x"`)
+					return testDnsUpsert("paypal."+world.apex, "TXT", `"x"`)
 				},
 				status: http.StatusForbidden, code: sidecar.DnsApiCodeRefused,
+			},
+			{
+				// held for review with a case (QD-235, ABUSE-M5-08)
+				name:     "the screen's review",
+				standing: sidecar.AbuseStandingStandard, verified: true,
+				request: func(world *testDnsRecordsWorld) *sidecar.DnsRecordsRequest {
+					return testDnsUpsert("paypal-login."+world.apex, "TXT", `"x"`)
+				},
+				status: http.StatusTooManyRequests, code: sidecar.DnsApiCodeQuota, limit: AbuseScreenReviewLimitKey,
 			},
 			{
 				name:     "a name outside the zone",

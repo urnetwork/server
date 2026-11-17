@@ -31,6 +31,8 @@ import (
 //	appeal_url: https://...
 //	form_url: https://...
 //	protected_names: {roots: [...], platform: [...]}
+//	trusted_flaggers: [{id: <id>}]     # §21.8's keyed flaggers (QD-111); each key's SHA-256 is vault's abuse-flaggers.yml
+//	flagger_kills_per_day: 20          # a flagger's machine kills a day, past which its reports take §21.8's report row
 //
 // business_hours is plan-ABUSE-small-readings #2's spelling of the plan's
 // review block, mode included; legal_request_mailbox is #12's; protected_names
@@ -114,6 +116,25 @@ type abuseConfigYaml struct {
 		Roots    []string `yaml:"roots"`
 		Platform []string `yaml:"platform"`
 	} `yaml:"protected_names"`
+	TrustedFlaggers []struct {
+		Id string `yaml:"id"`
+	} `yaml:"trusted_flaggers"`
+	FlaggerKillsPerDay *int `yaml:"flagger_kills_per_day"`
+}
+
+// Whether id can name a trusted flagger: 1 to 16 lowercase letters, digits and dashes, short enough that
+// trusted_flagger:<id> fits abuse_case.reporter_class.
+func IsAbuseFlaggerId(id string) bool {
+	if id == "" || 16 < len(id) {
+		return false
+	}
+	for index := range len(id) {
+		c := id[index]
+		if !(('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // A notice sender's class (plan-ABUSE-notice-intake): the reporter classes
@@ -141,6 +162,9 @@ type AbuseConfig struct {
 	formUrl             string
 	rootNames           []string
 	platformNames       []string
+	trustedFlaggerIds   []string
+	// nil when the file sets none, so model's default stands
+	flaggerKillsPerDay *int
 }
 
 // Whether a hold may be placed (§23.7, plan-ABUSE-small-readings #20): false
@@ -213,6 +237,23 @@ func (self *AbuseConfig) AppealUrl() string {
 // none.
 func (self *AbuseConfig) FormUrl() string {
 	return self.formUrl
+}
+
+// The trusted flaggers' ids (QD-111): only a listed id's key sets the class, so removing a line revokes it.
+func (self *AbuseConfig) TrustedFlaggerIds() []string {
+	if self == nil {
+		return []string{}
+	}
+	return slices.Clone(self.trustedFlaggerIds)
+}
+
+// One flagger's machine kills a day, past which its reports take §21.8's report row (QD-111), and whether the file
+// sets it: unset, model's default stands (AbuseFlaggerSettings), and a negative value reads 0, no kill at all.
+func (self *AbuseConfig) FlaggerKillsPerDay() (int, bool) {
+	if self == nil || self.flaggerKillsPerDay == nil {
+		return 0, false
+	}
+	return *self.flaggerKillsPerDay, true
 }
 
 // The roots, such as <root>, which no action targets (abuse-core-protected-names).
@@ -302,6 +343,20 @@ func newAbuseConfig(y *abuseConfigYaml) *AbuseConfig {
 		if domain = abuseConfigDomain(domain); domain != "" {
 			config.noticeSenders[domain] = class
 		}
+	}
+	for _, flagger := range y.TrustedFlaggers {
+		id := strings.TrimSpace(flagger.Id)
+		if !IsAbuseFlaggerId(id) {
+			glog.Errorf("[abuse]%s lists a trusted flagger whose id is not 1 to 16 lowercase letters, digits and dashes, so it counts for nothing\n", abuseConfigResourceName)
+			continue
+		}
+		if !slices.Contains(config.trustedFlaggerIds, id) {
+			config.trustedFlaggerIds = append(config.trustedFlaggerIds, id)
+		}
+	}
+	if y.FlaggerKillsPerDay != nil {
+		killsPerDay := max(*y.FlaggerKillsPerDay, 0)
+		config.flaggerKillsPerDay = &killsPerDay
 	}
 	switch {
 	case y.AppealWindow == 0:

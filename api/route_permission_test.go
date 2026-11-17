@@ -151,3 +151,39 @@ func TestSpecListsRolePermissionRefused(t *testing.T) {
 		t.Fatal("the spec's description does not say when RolePermissionRefused answers")
 	}
 }
+
+// §21.16's two customer routes against every role, table-driven (ABUSE-M6-01): GET /abuse/cases to the read roles
+// and POST /abuse/appeal to an Owner or an Admin alone.
+func TestAbuseRoutesAgainstEachRole(t *testing.T) {
+	routes := map[string]map[model.NetworkMemberRole]bool{
+		"GET /abuse/cases": {
+			model.NetworkMemberRoleOwner:        true,
+			model.NetworkMemberRoleAdmin:        true,
+			model.NetworkMemberRoleNetworkAdmin: true,
+			model.NetworkMemberRoleItAdmin:      true,
+			model.NetworkMemberRoleBillingAdmin: true,
+			model.NetworkMemberRoleAuditor:      true,
+			model.NetworkMemberRoleMember:       false,
+		},
+		"POST /abuse/appeal": {
+			model.NetworkMemberRoleOwner:        true,
+			model.NetworkMemberRoleAdmin:        true,
+			model.NetworkMemberRoleNetworkAdmin: false,
+			model.NetworkMemberRoleItAdmin:      false,
+			model.NetworkMemberRoleBillingAdmin: false,
+			model.NetworkMemberRoleAuditor:      false,
+			model.NetworkMemberRoleMember:       false,
+		},
+	}
+	for route, roleAllowed := range routes {
+		permission, mapped := routePermissionByRoute[route]
+		if !mapped {
+			t.Fatalf("%s is not mapped", route)
+		}
+		for role, allowed := range roleAllowed {
+			if role.Permits(permission) != allowed {
+				t.Errorf("%s by %s: %t, want %t", route, role, role.Permits(permission), allowed)
+			}
+		}
+	}
+}

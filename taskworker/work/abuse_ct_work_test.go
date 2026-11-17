@@ -88,8 +88,8 @@ func (self *testAbuseCtIntake) deps(clock *testAbuseScanClock, sources ...sideca
 			networkId, ok := self.labelNetworks[label]
 			return networkId, ok, nil
 		},
-		screenFacts: func(ctx context.Context, networkId server.Id, now time.Time) *sidecar.ScreenFacts {
-			return &sidecar.ScreenFacts{}
+		screenFacts: func(ctx context.Context, networkId server.Id, now time.Time) *model.NetworkScreenFacts {
+			return &model.NetworkScreenFacts{}
 		},
 		accept: func(ctx context.Context, report *model.AbuseReport) (*controller.AbuseIntakeResult, error) {
 			self.stateLock.Lock()
@@ -272,22 +272,28 @@ func TestAbuseCtWatchReadsAgainWhenTheListsChange(t *testing.T) {
 
 // What a certificate's name reports: the label when the lists refuse it, the whole name for a refused host label,
 // nothing for an allowed name, the root, another root's name, a malformed name or a label no network holds; a
-// verified brand domain lets the brand's own name pass.
+// verified brand domain lets the brand's own name pass, and a reviewer's screen_allow the one name it names
+// (ABUSE-M5-08).
 func TestAbuseCtWatchRefusedName(t *testing.T) {
 	ctx := context.Background()
 	clock := newTestAbuseScanClock(time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC))
 	verifiedNetworkId := server.NewId()
+	allowedNetworkId := server.NewId()
 	intake := &testAbuseCtIntake{labelNetworks: map[string]server.Id{
 		"zephyr":        server.NewId(),
 		"paypal-secure": server.NewId(),
 		"verified":      verifiedNetworkId,
+		"allowed":       allowedNetworkId,
 	}}
 	deps := intake.deps(clock)
-	deps.screenFacts = func(ctx context.Context, networkId server.Id, now time.Time) *sidecar.ScreenFacts {
-		if networkId == verifiedNetworkId {
-			return &sidecar.ScreenFacts{VerifiedDomains: []string{"paypal.com"}}
+	deps.screenFacts = func(ctx context.Context, networkId server.Id, now time.Time) *model.NetworkScreenFacts {
+		switch networkId {
+		case verifiedNetworkId:
+			return &model.NetworkScreenFacts{VerifiedDomains: []string{"paypal.com"}}
+		case allowedNetworkId:
+			return &model.NetworkScreenFacts{AllowedNames: []string{"paypal-login"}}
 		}
-		return &sidecar.ScreenFacts{}
+		return &model.NetworkScreenFacts{}
 	}
 	watch := &abuseCtWatch{settings: DefaultAbuseCtWatchSettings(), deps: deps}
 	cases := map[string]string{
@@ -298,6 +304,8 @@ func TestAbuseCtWatchRefusedName(t *testing.T) {
 		"www.paypal-secure.root.example":      "paypal-secure.root.example",
 		"paypal.verified.root.example":        "",
 		"paypal-login.verified.root.example":  "paypal-login.verified.root.example",
+		"paypal-login.allowed.root.example":   "",
+		"paypal-secure.allowed.root.example":  "paypal-secure.allowed.root.example",
 		"_acme-challenge.zephyr.root.example": "",
 		"root.example":                        "",
 		"*.root.example":                      "",
@@ -306,7 +314,7 @@ func TestAbuseCtWatchRefusedName(t *testing.T) {
 		"paypal.nobody.root.example":          "",
 	}
 	for dnsName, want := range cases {
-		got, err := watch.refusedName(ctx, testAbuseScanRoot, dnsName, clock.now(), map[server.Id]*sidecar.ScreenFacts{}, &AbuseCtWatchResult{})
+		got, err := watch.refusedName(ctx, testAbuseScanRoot, dnsName, clock.now(), map[server.Id]*model.NetworkScreenFacts{}, &AbuseCtWatchResult{})
 		if err != nil || got != want {
 			t.Errorf("%s: %q, %v, want %q", dnsName, got, err, want)
 		}

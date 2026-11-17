@@ -187,6 +187,20 @@ func abuseActionErrorAnswer(err error) (int, string) {
 		return http.StatusConflict, "A reviewer of the case's actions cannot decide its appeal."
 	case errors.Is(err, model.ErrAbuseAppealActionsPending):
 		return http.StatusConflict, "An action of the case waits on its first review."
+	// legal requests and productions (ABUSE-M5-17)
+	case errors.Is(err, model.ErrLegalRequestInvalid),
+		errors.Is(err, model.ErrAbuseTransparencyWindowInvalid):
+		return http.StatusBadRequest, "The request does not read as the kind's, or misses what it needs."
+	case errors.Is(err, model.ErrLegalRequestNotFound):
+		return http.StatusNotFound, "Not found."
+	case errors.Is(err, model.ErrLegalRequestConflict):
+		return http.StatusConflict, "The id names another legal request."
+	case errors.Is(err, model.ErrLegalRequestClosed):
+		return http.StatusConflict, "The legal request is closed."
+	case errors.Is(err, model.ErrLegalSignoffRefused):
+		return http.StatusConflict, "A production takes one legal and one engineering sign-off, by two people."
+	case errors.Is(err, model.ErrLegalProductionUnsigned):
+		return http.StatusConflict, "The production lacks a sign-off."
 	}
 	return http.StatusServiceUnavailable, "Unavailable."
 }

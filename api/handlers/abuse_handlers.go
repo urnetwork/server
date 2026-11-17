@@ -10,6 +10,9 @@ package handlers
 //
 // The report route answers the same body whether or not a report joined a URnetwork name, so it is no oracle for
 // which names exist (plan-ABUSE-small-readings #7), and it reads no credential: a bearer grants a report nothing.
+// Its one key is a trusted flagger's, in X-UR-Flagger-Key (ABUSE-M8-01, QD-111): a key whose digest matches an entry
+// of vault's abuse-flaggers.yml under abuse.yml's list sets class trusted_flagger, so a URL the report names takes the
+// machine's host kill; a wrong or absent key is a plain report, and the answer says neither.
 // Each URL and each header block is its own report, since each names its own host or sender. A report counts
 // against its caller's keyed /29 or /56 address hash (server.ClientIpHashForAddr), never against its address,
 // and an infrastructure address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. The count is held in this process's
@@ -124,6 +127,10 @@ type AbuseHandlersDeps struct {
 	RateLimitExcluded func(addr netip.Addr) bool
 	// Takes one report. nil: controller.AcceptAbuseReport.
 	AcceptReport func(ctx context.Context, report *model.AbuseReport) (*controller.AbuseIntakeResult, error)
+	// The trusted flaggers' keys (ABUSE-M8-01). nil: vault's abuse-flaggers.yml under abuse.yml's list.
+	Flaggers *model.AbuseFlaggerSource
+	// The flaggers' daily kill cap, each call. nil: the defaults with abuse.yml's flagger_kills_per_day.
+	FlaggerSettings func() *model.AbuseFlaggerSettings
 	// The customer reads' settings, each call. nil: the defaults with abuse.yml's appeal window and link.
 	CustomerSettings func() *model.AbuseCustomerSettings
 	// nil: the defaults.
@@ -135,6 +142,8 @@ type AbuseHandlers struct {
 	now               func() time.Time
 	rateLimitExcluded func(addr netip.Addr) bool
 	acceptReport      func(ctx context.Context, report *model.AbuseReport) (*controller.AbuseIntakeResult, error)
+	flaggers          *model.AbuseFlaggerSource
+	flaggerSettings   func() *model.AbuseFlaggerSettings
 	customerSettings  func() *model.AbuseCustomerSettings
 	settings          *AbuseRouteSettings
 	limiter           *abuseReportLimiter
@@ -149,6 +158,8 @@ func NewAbuseHandlers(deps *AbuseHandlersDeps) *AbuseHandlers {
 		now:               deps.Now,
 		rateLimitExcluded: deps.RateLimitExcluded,
 		acceptReport:      deps.AcceptReport,
+		flaggers:          deps.Flaggers,
+		flaggerSettings:   deps.FlaggerSettings,
 		customerSettings:  deps.CustomerSettings,
 		settings:          deps.Settings,
 	}
@@ -160,6 +171,14 @@ func NewAbuseHandlers(deps *AbuseHandlersDeps) *AbuseHandlers {
 	}
 	if self.acceptReport == nil {
 		self.acceptReport = controller.AcceptAbuseReport
+	}
+	if self.flaggerSettings == nil {
+		self.flaggerSettings = func() *model.AbuseFlaggerSettings {
+			return model.AbuseFlaggerSettingsOf(server.GetAbuseConfig())
+		}
+	}
+	if self.flaggers == nil {
+		self.flaggers = model.NewAbuseFlaggerSource(nil, self.flaggerSettings())
 	}
 	if self.customerSettings == nil {
 		self.customerSettings = func() *model.AbuseCustomerSettings {
@@ -221,8 +240,9 @@ var (
 	errAbuseReportClosed   = fmt.Errorf("%d Reports cannot be taken right now. Try again later.", http.StatusServiceUnavailable)
 )
 
-// The reports args holds, one a URL and one a header block, each its own, or a refusal of the whole body.
-func (self *AbuseHandlers) abuseReportsOf(args *AbuseReportArgs) ([]*model.AbuseReport, error) {
+// The reports args holds, one a URL and one a header block, each its own, as reporterClass with flaggerId, or a
+// refusal of the whole body.
+func (self *AbuseHandlers) abuseReportsOf(args *AbuseReportArgs, reporterClass model.AbuseReporterClass, flaggerId string) ([]*model.AbuseReport, error) {
 	category := model.AbuseCategory(args.Category)
 	if !slices.Contains(AbusePublicReportCategories(), category) {
 		return nil, errAbuseReportCategory
@@ -240,8 +260,9 @@ func (self *AbuseHandlers) abuseReportsOf(args *AbuseReportArgs) ([]*model.Abuse
 		}
 		reports = append(reports, &model.AbuseReport{
 			Category:      category,
-			ReporterClass: model.AbuseReporterClassPublic,
+			ReporterClass: reporterClass,
 			Url:           url,
+			FlaggerId:     flaggerId,
 		})
 	}
 	for _, headerBlock := range args.HeaderBlocks {
@@ -250,8 +271,9 @@ func (self *AbuseHandlers) abuseReportsOf(args *AbuseReportArgs) ([]*model.Abuse
 		}
 		reports = append(reports, &model.AbuseReport{
 			Category:      category,
-			ReporterClass: model.AbuseReporterClassPublic,
+			ReporterClass: reporterClass,
 			HeaderBlock:   []byte(headerBlock),
+			FlaggerId:     flaggerId,
 		})
 	}
 	return reports, nil
@@ -298,11 +320,21 @@ func (self *AbuseHandlers) Report(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, self.settings.ReportBodyMaxByteCount)
 	}
+	// a trusted flagger's key (ABUSE-M8-01): a match sets its class unless it spent its day's kills, and a wrong or
+	// absent key is a plain report, which the answer never tells apart
+	flaggerKey := r.Header.Get(model.AbuseFlaggerKeyHeader)
 	impl := func(args AbuseReportArgs, clientSession *session.ClientSession) (*AbuseReportResult, error) {
 		if err := self.limitReport(clientSession); err != nil {
 			return nil, err
 		}
-		reports, err := self.abuseReportsOf(&args)
+		reporterClass, flaggerId := model.AbuseReporterClassPublic, ""
+		if flaggerKey != "" {
+			now := self.now()
+			if id, ok := self.flaggers.Verifier(now).Authenticate(flaggerKey); ok {
+				reporterClass, flaggerId = model.AbuseFlaggerReportClass(clientSession.Ctx, id, now, self.flaggerSettings())
+			}
+		}
+		reports, err := self.abuseReportsOf(&args, reporterClass, flaggerId)
 		if err != nil {
 			return nil, err
 		}

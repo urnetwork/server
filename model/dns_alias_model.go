@@ -4,8 +4,10 @@ package model
 // <alias>.<root>, equal to its network_name, "public forever (CT)".
 //
 //   - ClaimDnsAlias, POST /network/dns/alias-claim: the caller names its network_name as it stands, which
-//     must pass ValidateDnsName and ScreenName under the network's facts, with network_verified and no
-//     probation, and no dns_label row may hold it in any state, since labels and aliases share the primary
+//     must pass ValidateDnsName and ScreenName under the network's facts (a name a reviewer allowed it passing
+//     review, one sent to review refused as QuotaRefusal{limit_key: screen_review} with its case opened once the
+//     claim's transaction has rolled back, QD-235), with network_verified and no probation, and no dns_label row may
+//     hold it in any state, since labels and aliases share the primary
 //     key (root, label). The claim writes the alias row with no rdata, which holds the alias's apex for its
 //     own challenges alone (dnsservice zone_alias.go), and moves the label map's cursor, so tlsedge routes
 //     the alias and certs can prove it. A network holding another live alias changes it: the old one retires
@@ -213,6 +215,9 @@ func ClaimDnsAlias(ctx context.Context, request *DnsAliasRequest) (*sidecar.DnsA
 			}
 		}, server.TxReadCommitted)
 	})
+	if review := AbuseScreenReviewOf(err); review != nil {
+		return nil, dnsScreenReviewAnswer(ctx, review, server.NowUtc())
+	}
 	if err != nil {
 		return nil, dnsRecordsApiError(err)
 	}
@@ -258,8 +263,16 @@ func claimDnsAliasInTx(ctx context.Context, tx server.PgTx, root string, name st
 	if !verified {
 		return nil, nil, sidecar.NewDnsQuotaError(&sidecar.QuotaRefusal{LimitKey: DnsVerificationLimitKey, Upgrade: true})
 	}
-	facts := &sidecar.ScreenFacts{VerifiedDomains: getNetworkVerifiedDomainsInTx(ctx, tx, networkId)}
-	if verdict := sidecar.ScreenName(name, facts); verdict != sidecar.ScreenVerdictAllow {
+	facts := &NetworkScreenFacts{
+		VerifiedDomains: getNetworkVerifiedDomainsInTx(ctx, tx, networkId),
+		AllowedNames:    GetNetworkScreenAllowedNamesInTx(ctx, tx, networkId, DefaultAbuseScreenSettings()),
+	}
+	screenErr := ScreenWithNetworkFacts(networkId, AbuseScreenSubjectName, name, facts)
+	if review := AbuseScreenReviewOf(screenErr); review != nil {
+		// QD-235: refused, and once this transaction has rolled back the review opens its case
+		return nil, nil, review
+	}
+	if screenErr != nil {
 		return nil, nil, dnsRecordsRefused("the name %s is refused (§21.6)", name)
 	}
 	lockDnsZoneInTx(ctx, tx, root, networkId)
