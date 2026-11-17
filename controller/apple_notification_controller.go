@@ -135,6 +135,17 @@ type validatedAppleTransaction struct {
 	// all (an offer-code redemption through the App Store redeem sheet or
 	// link). networkId is then zero until the binding resolves it.
 	unboundAccountToken bool
+	// revoked is set when the claims carry a revocationDate: Apple refunded
+	// the transaction or revoked its family sharing
+	revoked bool
+	// familyShared is set when the transaction is a family member's access to
+	// the purchaser's subscription (inAppOwnershipType FAMILY_SHARED), not a
+	// purchase of the account's own
+	familyShared bool
+	// movedFromNetworkId is the deleted network the appAccountToken names when
+	// networkId is the network the subscription moved to
+	// (apple_subscription_move_controller.go); nil otherwise
+	movedFromNetworkId *server.Id
 }
 
 // sandbox reports whether the transaction is a sandbox purchase: TestFlight,
@@ -179,6 +190,11 @@ func ProcessAppleNotification(
 	// validated the same way minus the entitlement fields a revocation payload
 	// need not carry.
 	revocation := notification.NotificationType == "REFUND" || notification.NotificationType == "REVOKE"
+	// REFUND_REVERSED: Apple reversed a refund, and the paid window the REFUND
+	// ended comes back for what is left of it (appleReverseRefund). It needs
+	// the transaction's paid window, so its claims are validated like a
+	// credit's.
+	reversal := notification.NotificationType == "REFUND_REVERSED"
 	var transaction *validatedAppleTransaction
 	// DID_FAIL_TO_RENEW in the billing grace period holds Pro to its end
 	// (appleHoldGraceEntitlementInTx). The hold needs the transaction's paid
@@ -186,7 +202,7 @@ func ProcessAppleNotification(
 	// nothing.
 	var graceTransaction *validatedAppleTransaction
 	if notification.TransactionInfo != nil {
-		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable)
+		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable || reversal)
 		if err != nil {
 			if actionable && errors.Is(err, errAppleAccountTokenInvalid) {
 				appleRecordUnownedTransaction(ctx, notification, "destination_unresolved", nil)
@@ -199,17 +215,19 @@ func ProcessAppleNotification(
 				graceTransaction = nil
 			}
 		}
-	} else if actionable || revocation || notification.NotificationType == "EXPIRED" {
+	} else if actionable || revocation || reversal || notification.NotificationType == "EXPIRED" {
 		return false, errors.New("missing verified transaction claims")
 	}
 
 	var revokedNetworkIds []server.Id
 	graceHeld := false
+	var restored *model.ReconcileSubscriptionRenewal
 	server.Tx(ctx, func(tx server.PgTx) {
 		processed = false
 		returnErr = nil
 		revokedNetworkIds = nil
 		graceHeld = false
+		restored = nil
 
 		if transaction != nil {
 			if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
@@ -235,7 +253,12 @@ func ProcessAppleNotification(
 			notification.Subtype,
 			time.UnixMilli(notification.SignedDate).UTC(),
 		))
-		if notificationTag.RowsAffected() == 0 || !(actionable || revocation || graceTransaction != nil) {
+		if notificationTag.RowsAffected() == 0 || !(actionable || revocation || reversal || graceTransaction != nil) {
+			return
+		}
+
+		if reversal {
+			restored = appleReverseRefund(&appleRefundReversalDbTx{tx: tx, ctx: ctx}, transaction, notification, server.NowUtc())
 			return
 		}
 
@@ -297,6 +320,15 @@ func ProcessAppleNotification(
 		// the entitlement ended under the network -- make the downgrade visible
 		// immediately rather than after ProCacheTtl
 		model.UpdateProNetwork(ctx, networkId)
+	}
+	if restored != nil {
+		// a marker retention removed has no row to reopen; the repair's own
+		// checks make this a no-op when the marker came back with the window
+		if _, err := model.RepairReconciledProEntitlement(ctx, model.SubscriptionMarketApple, restored, server.NowUtc(), false); err != nil {
+			glog.Errorf("[sub]apple refund reversal of transaction %s: could not repair the Pro marker: %v\n", transaction.transactionId, err)
+		}
+		model.UpdateProNetwork(ctx, restored.NetworkId)
+		glog.Infof("[sub]apple refund reversal: restored transaction %s on network %s\n", transaction.transactionId, restored.NetworkId)
 	}
 	if actionable && errors.Is(returnErr, errAppleAccountNetworkMissing) {
 		appleRecordUnownedTransaction(ctx, notification, "destination_deleted", &transaction.networkId)
@@ -451,18 +483,24 @@ func appleNetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId serve
 // call committed a new entitlement. The caller must refresh the pro cache
 // (model.UpdateProNetwork) after commit when true.
 //
-// A sandbox purchase (TestFlight, App Review) is credited like any other, so
-// the tester keeps Pro, through the same ledger gate. It records no revenue
-// on the renewal or the balance, and posts no sales notice. The balance's
-// paid column is generated from its revenue, so the sandbox balance is
-// unpaid: its contracts carry unpaid priority and payout planning counts its
-// traffic as unpaid.
+// A sandbox purchase (TestFlight, App Review) is credited only for an
+// internal tester's network (apple_sandbox_testers.go); for any other network
+// nothing is written, not even the ledger row, and false is returned. A
+// tester's sandbox purchase is credited like any other, through the same
+// ledger gate. It records no revenue on the renewal or the balance, and posts
+// no sales notice. The balance's paid column is generated from its revenue,
+// so the sandbox balance is unpaid: its contracts carry unpaid priority and
+// payout planning counts its traffic as unpaid.
 func appleCreditSubscriptionTransactionInTx(
 	tx server.PgTx,
 	ctx context.Context,
 	notificationId server.Id,
 	transaction *validatedAppleTransaction,
 ) bool {
+	if appleSandboxCreditRefused(transaction, transaction.networkId) {
+		// a free purchase for a network that is not an internal tester
+		return false
+	}
 	if appleTransactionCreditedBeforeLedgerInTx(tx, ctx, transaction) {
 		// the pre-ledger handler already credited this paid window; a second
 		// credit would add another Pro balance for it
@@ -572,6 +610,10 @@ func appleHoldGraceEntitlementInTx(
 ) (held bool, returnErr error) {
 	endTime := graceExpires.Add(SubscriptionGracePeriod)
 	if !now.Before(endTime) || !transaction.expiresTime.Before(graceExpires) {
+		return false, nil
+	}
+	if appleSandboxCreditRefused(transaction, transaction.networkId) {
+		// a sandbox subscription's grace holds Pro only for an internal tester
 		return false, nil
 	}
 	server.RaisePgResult(tx.Exec(
@@ -705,6 +747,12 @@ func validateAppleTransactionAccount(
 	validated.offerDiscountType, _ = appleControllerStringClaim(transactionClaims, "offerDiscountType")
 	validated.transactionReason, _ = appleControllerStringClaim(transactionClaims, "transactionReason")
 	validated.environment, _ = appleControllerStringClaim(transactionClaims, "environment")
+	if revocationMillis, ok := appleControllerInt64Claim(transactionClaims, "revocationDate"); ok && 0 < revocationMillis {
+		validated.revoked = true
+	}
+	if ownership, _ := appleControllerStringClaim(transactionClaims, "inAppOwnershipType"); ownership == "FAMILY_SHARED" {
+		validated.familyShared = true
+	}
 	if !requireEntitlementFields {
 		return validated, nil
 	}

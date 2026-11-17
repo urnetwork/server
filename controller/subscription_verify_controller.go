@@ -49,11 +49,13 @@ const (
 type VerifyStorePurchaseResult struct {
 	Status     string     `json:"status"`
 	ExpiryTime *time.Time `json:"expiry_time,omitempty"`
-	// Why the purchase will never credit, beside status invalid, when there is
-	// something the buyer can do about it: a Stripe trial whose card failed its
-	// check when it was attached (PurchaseErrorCodeIncorrectCvc). The buyer
-	// tries again with a new payment sheet or checkout. Added after status;
-	// older clients ignore it and stop at invalid.
+	// Why the purchase will never credit, beside status invalid, when the app
+	// has something to say about it: a Stripe trial whose card failed its
+	// check when it was attached (PurchaseErrorCodeIncorrectCvc; the buyer
+	// tries again with a new payment sheet or checkout), or an App Store
+	// sandbox purchase for a network that is not an internal tester
+	// (PurchaseErrorCodeSandboxPurchase; the app shows a neutral line). Added
+	// after status; older clients ignore it and stop at invalid.
 	Error *OnboardingError `json:"error,omitempty"`
 }
 
@@ -343,12 +345,23 @@ type VerifyAppleTransactionArgs struct {
 // decision table (claims -> status):
 //
 //	validation fails (account token, product, dates, price) -> invalid
+//	a sandbox purchase (TestFlight) and the session network
+//	is not an internal tester (apple_sandbox_testers.go)    -> invalid, with
+//	                                                           error code
+//	                                                           sandbox_purchase
 //	no appAccountToken                                      -> the offer-code
 //	                                                           binding rules
 //	                                                           (credited /
 //	                                                           already_credited
 //	                                                           / invalid)
-//	appAccountToken != session network                      -> wrong_network
+//	appAccountToken != session network                      -> wrong_network,
+//	                                                           unless the move
+//	                                                           rules move the
+//	                                                           subscription of a
+//	                                                           deleted account
+//	                                                           here (credited /
+//	                                                           already_credited;
+//	                                                           apple_subscription_move_controller.go)
 //	ledger insert landed                                    -> credited
 //	transaction already in the ledger                       -> already_credited
 //
@@ -371,6 +384,12 @@ func VerifyAppleTransactionClaims(
 		glog.Infof("[sub]verify apple transaction: %s\n", err)
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
+	// every credit this report can make goes to the session network (its own
+	// token, or its offer-code binding), so that network decides a sandbox
+	// purchase
+	if appleSandboxCreditRefused(transaction, clientSession.ByJwt.NetworkId) {
+		return appleSandboxPurchaseRefusal(), nil
+	}
 	if transaction.unboundAccountToken {
 		// no appAccountToken: an offer-code redemption, bound only through
 		// the welcome offer this server issued to the session network
@@ -379,12 +398,9 @@ func VerifyAppleTransactionClaims(
 	}
 
 	if transaction.networkId != clientSession.ByJwt.NetworkId {
-		glog.Infof(
-			"[sub]verify apple transaction: appAccountToken names network %s, session is %s\n",
-			transaction.networkId,
-			clientSession.ByJwt.NetworkId,
-		)
-		return verifyStatusResult(VerifyPurchaseStatusWrongNetwork), nil
+		// another account's purchase stays its own (wrong_network), unless
+		// that account is deleted and the subscription moves here
+		return verifyAppleTransactionForAnotherNetwork(clientSession.Ctx, transaction, clientSession.ByJwt.NetworkId)
 	}
 
 	credited := false

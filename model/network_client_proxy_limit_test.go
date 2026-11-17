@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,30 @@ func TestProxyClientLimitReached(t *testing.T) {
 	connect.AssertEqual(t, proxyClientLimitReached(1000, 300006), true)
 	connect.AssertEqual(t, strings.Contains(proxyClientLimitMessage(1000, true), "1000 active proxies"), true)
 	connect.AssertEqual(t, strings.Contains(proxyClientLimitMessage(2, false), "upgrade to UR Pro"), true)
+}
+
+// Pure: the cap refusal says where to remove a proxy. Clients show the message
+// as the server wrote it (the published browser extensions show it word for
+// word), and none of them can list or remove the network's other proxies. A
+// refusal that said only "Remove a proxy" left a free user whose old extension
+// proxies held the cap with nothing to do but wait for the 30-day idle reap
+// (support inbox 8244). The owner, 2026-11-17: the cap message points to ur.io.
+func TestProxyClientLimitMessageNamesTheProxiesPage(t *testing.T) {
+	for _, c := range []struct {
+		limit   int
+		isPro   bool
+		upgrade bool
+	}{
+		{limit: 5, isPro: false, upgrade: true},
+		{limit: 1000, isPro: true, upgrade: false},
+		// an Embed plan row's limit on a network without Pro
+		{limit: 12, isPro: false, upgrade: true},
+	} {
+		message := proxyClientLimitMessage(c.limit, c.isPro)
+		connect.AssertEqual(t, strings.Contains(message, fmt.Sprintf("Your plan's limit of %d active proxies is reached.", c.limit)), true)
+		connect.AssertEqual(t, strings.Contains(message, "https://ur.io/app/proxies"), true)
+		connect.AssertEqual(t, strings.Contains(message, "upgrade to UR Pro"), c.upgrade)
+	}
 }
 
 // Pure: the count stops at the limit itself (the first release counted to

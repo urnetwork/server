@@ -6,17 +6,52 @@ and apple report-before-finish. These require real sandbox accounts and
 devices and cannot run on the build host — this document is the execution
 plan; check items off in a copy per test pass.
 
-Server-side prerequisites (all verified in code/config, nothing to change):
+Server-side prerequisites:
 - The verify endpoints accept both `Production` and `Sandbox` environments
   (`vault/main/apple.yml app_store_notifications.environments`), so TestFlight
-  JWS verifies rather than answering `invalid`. Note the standing tradeoff
-  this implies (pre-existing, webhook path included): a sandbox (free)
-  purchase can credit real entitlement. Accepted for TestFlight testing.
+  JWS verifies rather than answering `invalid`.
+- **Sandbox purchases credit internal testers only** (owner, 2026-11-17:
+  "Both fixes", then "Keep buttons, neutral notice";
+  `controller/apple_sandbox_testers.go`). A sandbox purchase is free, so it
+  is credited only when its network is listed in
+  `vault/main/apple.yml app_store_notifications.sandbox_tester_network_ids`,
+  a YAML list of network id strings (an App Store `appAccountToken` is the
+  network id):
+
+  ```yaml
+  app_store_notifications:
+    sandbox_tester_network_ids:
+      - "<network id>"
+  ```
+
+  A missing or empty list credits no sandbox purchase. Every Apple test pass
+  below runs on a listed network, and so does App Review: the App Review demo
+  account's network must be on the list, or the reviewer's purchase is
+  refused. For any other network:
+  - the purchase report (verify and restore) answers `invalid` with
+    `error.code = "sandbox_purchase"`, and the app finishes the transaction
+    and shows its neutral line ("Test purchases in test builds don't unlock
+    Pro.");
+  - the webhook acknowledges the notification and credits nothing (no ledger
+    row, so the same purchase is credited once its network is listed);
+  - a sandbox subscription's billing grace holds nothing.
+
+  Production purchases are unchanged, and nothing already credited is ended:
+  an existing sandbox window runs out, and its next sandbox renewal is
+  credited only for a listed network. The apps keep their purchase buttons
+  in TestFlight builds, so App Review can buy.
 - Rate limit: `verify_store_purchase` 30/account/hour — the bounded client
   retries (≤3/session + daily worker/redelivery) stay well inside it, but
   watch for tight loops in logs during the failure drills below.
 
 ## Apple (StoreKit sandbox / TestFlight)
+
+0. **Not a tester**: on a network that is not in `sandbox_tester_network_ids`,
+   buy in a TestFlight build → the server answers `invalid` with
+   `sandbox_purchase`, the transaction finishes, the sheet shows "Test
+   purchases in test builds don't unlock Pro.", and the plan stays Free.
+   Restore purchases shows the same line. Then add the network to the list
+   and restore → `credited`.
 
 1. **Happy path**: purchase → server answers `credited` → transaction
    finishes; confirmation poll starts only after the server answer (not at
