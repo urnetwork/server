@@ -306,6 +306,11 @@ type AuthNetworkClientError struct {
 	// rate was spent.
 	NoUniqueSupply bool   `json:"no_unique_supply,omitempty"`
 	Message        string `json:"message"`
+	// the refusal's structured code, which a client reads in place of the
+	// message: not_preview for the preview refusal (D-TRUST-3, owner decision
+	// 326), the code POST /network/enroll answers it with. Empty, and so absent
+	// from the body, for every other refusal, so their bodies are what they were
+	Code string `json:"code,omitempty"`
 }
 
 type ProxyConfigResult struct {
@@ -811,10 +816,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				// (I-6, D-TEAM-14)
 				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
 			}
-			if message := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, authClient.ProxyConfig != nil); message != "" {
+			if message, code := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, authClient.ProxyConfig != nil); message != "" {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: message,
+						Code:    code,
 					},
 				}
 				return
@@ -1346,10 +1352,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			if clientSession.ByJwt.StrictExp {
 				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
 			}
-			if message := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, false); message != "" {
+			if message, code := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, false); message != "" {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: message,
+						Code:    code,
 					},
 				}
 				return

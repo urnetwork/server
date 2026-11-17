@@ -17,8 +17,9 @@ import (
 // releases; every other binary keeps stage 1's routes and this gate
 // (sidecar_stage2_off.go). The switch is question team-m1-07-stage2-switch.
 
-// The refusal's text. No code names it yet (question
-// core-m1-08-enroll-preview-code), so a client tells it apart by status alone.
+// The refusal's text. A client tells the refusal apart by its code, not_preview,
+// never by this text: enroll's 403 and auth-client's error object both carry it
+// (owner decision 326).
 const SidecarPreviewRefusedMessage = "This network cannot hold sidecar clients yet."
 
 // Whether the network may hold strict_exp clients now: only one sidecar.yml's
