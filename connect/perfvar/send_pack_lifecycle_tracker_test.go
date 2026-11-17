@@ -37,14 +37,16 @@ type sendPackLifecycleTracker struct {
 	// Terminal failure counts are monotonic measurement watermarks. Exact
 	// ownership joins accept a failed terminal; measured intervals compare
 	// their start and end watermarks separately.
-	failures                           atomic.Uint64
-	recoverableFailures                atomic.Uint64
-	started                            atomic.Uint64
-	publishing                         atomic.Int64
-	workloadFailures                   atomic.Uint64
-	workloadRecoverableFailures        atomic.Uint64
-	workloadRecoveredAdmissionFailures atomic.Uint64
-	workloadDatagramFailures           atomic.Uint64
+	failures                            atomic.Uint64
+	recoverableFailures                 atomic.Uint64
+	started                             atomic.Uint64
+	publishing                          atomic.Int64
+	workloadFailures                    atomic.Uint64
+	workloadRecoverableFailures         atomic.Uint64
+	workloadRecoveredAdmissionFailures  atomic.Uint64
+	workloadNativeReadyPureAckRefusals  atomic.Uint64
+	workloadNativeAckRetrySupersessions atomic.Uint64
+	workloadDatagramFailures            atomic.Uint64
 	// Raw categories intentionally overlap: an owned UDP admission refusal
 	// remains both recoverable and a datagram failure. The measured gate uses
 	// this explicit intersection when forming their allowed-failure union.
@@ -112,14 +114,16 @@ type sendPackLifecycleKey struct {
 
 // sendPackLifecycleEntry retains immutable identity and terminal publication.
 type sendPackLifecycleEntry struct {
-	key                 sendPackLifecycleKey
-	clientId            clientconnect.Id
-	destinationId       clientconnect.Id
-	ackRequired         bool
-	messageType         protocol.MessageType
-	upstreamRecoverable bool
-	healthProbe         bool
-	phase               atomic.Uint32
+	key                                 sendPackLifecycleKey
+	clientId                            clientconnect.Id
+	destinationId                       clientconnect.Id
+	ackRequired                         bool
+	messageType                         protocol.MessageType
+	upstreamRecoverable                 bool
+	healthProbe                         bool
+	nativeReadyRefusedBeforeWrite       bool
+	nativeAckRetrySupersededBeforeWrite bool
+	phase                               atomic.Uint32
 }
 
 // sendPackLifecycleBoundary captures exact unfinished identities plus the
@@ -359,6 +363,8 @@ func (self *sendPackLifecycleTracker) run() {
 				self.invalid.Store(true)
 				break
 			}
+			entry.nativeReadyRefusedBeforeWrite = nativeReadyPureAckAdmissionRefusal(observation)
+			entry.nativeAckRetrySupersededBeforeWrite = nativeAckRetrySupersededWithoutWrite(observation)
 		case clientconnect.SendPackLifecyclePhaseTerminal:
 			entry, ok := entries[key]
 			if !ok || !sameSendPackLifecycleIdentity(entry, observation) ||
@@ -388,8 +394,13 @@ func (self *sendPackLifecycleTracker) run() {
 				}
 				if sendPackLifecycleWorkload(observation) {
 					self.workloadFailures.Add(1)
-					if recoveredAdmission {
+					switch {
+					case recoveredAdmission:
 						self.workloadRecoveredAdmissionFailures.Add(1)
+					case entry.nativeReadyRefusedBeforeWrite && nativeReadyPureAckAdmissionRefusal(observation):
+						self.workloadNativeReadyPureAckRefusals.Add(1)
+					case entry.nativeAckRetrySupersededBeforeWrite && nativeAckRetrySupersededWithoutWrite(observation):
+						self.workloadNativeAckRetrySupersessions.Add(1)
 					}
 					if recoverableAttempt {
 						self.workloadRecoverableFailures.Add(1)
@@ -419,6 +430,27 @@ func (self *sendPackLifecycleTracker) run() {
 		}
 		self.notify()
 	}
+}
+
+// Canonical native ready-refusal evidence is eligible only when the tracker
+// also observed it as the first writer disposition for this exact identity;
+// a written group prefix, generic caller, or unknown error keeps its failure.
+func nativeReadyPureAckAdmissionRefusal(observation clientconnect.SendPackLifecycleObservation) bool {
+	var admissionErr *clientconnect.SendPackAdmissionError
+	return observation.AckRequired && !observation.UpstreamRecoverable && !observation.HealthProbe &&
+		observation.MessageType == protocol.MessageType_IpIpPacketToProvider &&
+		errors.As(observation.Err, &admissionErr) && admissionErr.NativeReadyPureTcpAck &&
+		admissionErr.Boundary == "pack-admission" && admissionErr.Timeout == 0 &&
+		!admissionErr.RecoveredByOwner && !admissionErr.OwnerTrackingOverflow &&
+		errors.Is(admissionErr.Err, clientconnect.ErrSendPackNotAdmitted)
+}
+
+// Only the exact locally superseded device replay can use this outcome.
+// A successful first writer disposition keeps any later failure strict.
+func nativeAckRetrySupersededWithoutWrite(observation clientconnect.SendPackLifecycleObservation) bool {
+	return observation.AckRequired && !observation.UpstreamRecoverable && !observation.HealthProbe &&
+		observation.MessageType == protocol.MessageType_IpIpPacketToProvider &&
+		clientconnect.IsSendPackNativeAckRetrySuperseded(observation.Err)
 }
 
 // failureSnapshot returns bounded immutable diagnostic samples without

@@ -241,6 +241,9 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 			afterStage: func(stage fullTunConstructionStage, path *fullTunPath) error {
 				if stage == fullTunConstructionStageMultiClient {
 					path.nativeIngressForTest = true
+					if !loss && !controlledMixed {
+						path.bridgeSends.observeAdmission = true
+					}
 					if mixedBroker != nil {
 						mixedBroker.bind(path)
 					}
@@ -270,6 +273,10 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 			}
 		}()
 		path := fixture.path
+		// Only the plain healthy control accounts for native ACK pressure and
+		// exact unwritten retry supersession.
+		previousNativePressure := path.setAllowDeviceNativeAckPressure(!loss && !controlledMixed)
+		defer path.setAllowDeviceNativeAckPressure(previousNativePressure)
 		_, native := any(path.multiClient).(nativeBrowsingResultsClient)
 		if !native || returnResendTimeout <= 0 {
 			t.Fatalf("native capability or actual provider timer absent: native=%t timeout=%s", native, returnResendTimeout)
@@ -429,10 +436,15 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 		}
 		state.stateLock.Unlock()
 		encoded, _ := json.Marshal(census)
+		bridgeAdmission, _ := json.Marshal(observation.Carrier.BridgeBatches)
+		t.Logf("[perfvar] native-bridge-admission %s", bridgeAdmission)
 		t.Logf("[perfvar] native-duplicate-ack-recovery %s workload_duration=%s useful_bytes=%d content_hash=%s loaded_probe_successes=%d measure_error=%v baseline_eligible=false", encoded,
 			observation.Result.Duration, observation.Result.UsefulByteCount, observation.Result.ContentHash, observation.Result.LoadedProbeSuccessCount, measureErr)
 		if measureErr != nil {
 			t.Fatal(measureErr)
+		}
+		if observation.Carrier.BridgeBatches.AdmissionInvalid || observation.Carrier.BridgeBatches.AdmissionRefused[1] != 0 {
+			t.Fatal("native bridge reported invalid accounting or refused a non-pure-ACK input")
 		}
 		result := observation.Result
 		if result.UsefulByteCount != bulkByteCount || result.ContentHash != deterministicPayloadHash(bulkByteCount) ||
