@@ -79,6 +79,8 @@ Usage:
     bringyourctl network cleanup-deleted [--network_ids=<network_ids>] [--ids_file=<path>] [--page=<count>] [--count_chunk=<count>] [--count_statement_timeout=<duration>] [--client_batch=<count>] [--row_batch=<count>] [--network_pause=<duration>] [--start_after=<network_id>] [--max_networks=<count>] [--run_tag=<tag>] [(--commit --expect=<digest>)]
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
+    bringyourctl network drift-test --network_id=<network_id> [--origins=<origins> | --clear] [--enable | --disable]
+    bringyourctl lag drift-test --drift_test_id=<drift_test_id> [--revoke]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
     bringyourctl network trim-proxies [--network_ids=<network_ids>] [--include_pro] [--keep=<keep>] [--keep_described] [--keep_used_since=<since>] [--rate=<rate>] [--list] [(--commit --expect=<digest>)]
     bringyourctl health status
@@ -194,7 +196,8 @@ Options:
     --set=<limit>  Set the network's Embed plan client allowance: the top-level
                    client limit and the concurrent connection limit (the defaults
                    are 100 and the tier's concurrent_clients).
-    --clear        Return the network to the default limits.
+    --clear        Return the network to the default limits. With network
+                   drift-test, remove the network's drift test origins.
     --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new close
                    reports (or provider work session events) go to weekly
                    partitions; prepare only.
@@ -312,6 +315,16 @@ Options:
     --disable      Disable Embed for the network and return it to the default
                    limits. Caps and ACL groups already set stay enforced, and
                    the network's client tokens stay refused on admin routes.
+                   With network drift-test, switch the network's drift tests
+                   off: it allocates none and its tokens start no more runs,
+                   until an --enable switches them on again.
+    --origins=<origins>  With network drift-test, the parent origins the
+                   network's drift tests may be framed from, comma separated:
+                   https origins, or http://localhost and http://127.0.0.1 on
+                   any port.
+    --drift_test_id=<drift_test_id>  A drift test, for lag drift-test.
+    --revoke       With lag drift-test, revoke the drift test: it keeps its
+                   runs and verdict and starts no more runs.
     --level=<level>  The public health level: degraded (the default), partial,
                    major or full, mildest first.
 
@@ -464,10 +477,16 @@ func main() {
 			networkClientLimit(opts)
 		} else if embed, _ := opts.Bool("embed"); embed {
 			networkEmbed(opts)
+		} else if driftTest, _ := opts.Bool("drift-test"); driftTest {
+			networkDriftTest(opts)
 		} else if signOutAll, _ := opts.Bool("sign-out-all"); signOutAll {
 			os.Exit(networkSignOutAllCommand(opts))
 		} else if trimProxies, _ := opts.Bool("trim-proxies"); trimProxies {
 			os.Exit(networkTrimProxiesCommand(opts))
+		}
+	} else if lag, _ := opts.Bool("lag"); lag {
+		if driftTest, _ := opts.Bool("drift-test"); driftTest {
+			lagDriftTestCommand(opts)
 		}
 	} else if health, _ := opts.Bool("health"); health {
 		os.Exit(healthCommand(opts, os.Stdout))
