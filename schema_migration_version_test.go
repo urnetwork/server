@@ -32,6 +32,9 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{name: "client key history seven-day floor", sql: clientKeyHistoryRetentionSevenDayFloorSql, version: ClientKeyHistoryRetentionSevenDayFloorMigrationVersion},
 		{name: "exact-job second recovery", sql: CompetitionSecondRecoveryMigrationSql(), version: CompetitionSecondRecoveryMigrationVersion},
 		{name: "lingering origins' side table", sql: contractOriginLingerSchemaSql, version: ContractOriginLingerMigrationVersion},
+		{name: "record of deleted accounts", sql: deletedNetworkSchemaSql, version: DeletedNetworkSchemaMigrationVersion},
+		{name: "App Store subscriptions moved from deleted accounts", sql: appleSubscriptionMoveSchemaSql, version: AppleSubscriptionMoveSchemaMigrationVersion},
+		{name: "accounts deleted before their record, backfilled", sql: DeletedNetworkBackfillSql, version: DeletedNetworkBackfillMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {
