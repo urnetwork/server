@@ -6,6 +6,10 @@ exists, where the build differs from this plan, and the production runbook.
 **S1 (2026-11-17):** the weeks retire at the contract horizon reaper's
 horizon, and retirement deletes no row: it keeps exactly what the reaper
 keeps (section "S1", below).
+**B1 and B3 (2026-11-17):** the hot contract reads carry their partition
+weeks as literals, so a partitioned table prunes them at plan time, and the
+stranded grant and removed client reads are bounded by contract id (section
+"The hot reads' partition weeks", under Implementation).
 
 ## Decisions (settled 2026-10-23)
 
@@ -229,6 +233,10 @@ the bound the closed-origin branches already use:
 
 These bounds also help today: they shrink each read to the last 75 minutes
 of each index. They can ship before partitioning and be measured.
+
+As built, the reads in item 1 and 2 also carry the bounds of their partition
+weeks as literals, which is what lets a partitioned table prune them at plan
+time (see "The hot reads' partition weeks" under Implementation).
 
 ### Probing every partition is acceptable
 
@@ -545,6 +553,93 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
 9. **The legacy partition covers the weeks before the cutover week** until
    that week starts. Maintenance neither creates partitions for those weeks
    nor counts them as missing.
+
+### The hot reads' partition weeks (2026-11-17)
+
+Gaps B1 and B3 of the 11-17 readiness review (`temp/contract-cutover-1117/RUNBOOK.md`
+§2 and §4.3), built on branch `fix/contract-hot-read-bounds-1117`: commits
+4a2e9b0b8 (B1), 5c7df1bfb (B3) and 7df8e6bbd (tests), merged to main on
+2026-11-17. No migration. The change is default on and ships with any build
+from main.
+
+- **B1, the hot reads.** Each read bounded by the 75-minute floor on
+  `statement_timestamp()` also carries the bounds of the whole partition weeks
+  that hold every id the floor admits. They are computed in the process and
+  rendered into the statement as uuid literals before it runs
+  (`model/contract_id_bound.go`: `unexpiredContractIdBoundSql`,
+  `unexpiredContractWeeksAt`).
+  - The weeks run from the start of the week of now less 90 minutes (the
+    floor's age plus the 15-minute margin for this process's clock against the
+    database's) to the end of the week of now plus 30 minutes.
+  - The reads: the companion origin existence read, the plain and chained
+    origin selections and the zero escrow origin reads, each in its side-table
+    and its legacy form, and `GetOpenTransferEscrowsOrderedByPriorityCreateTime`.
+  - PostgreSQL prunes partitions at plan time only by constants, so the
+    literals prune the custom plans and the generic plan it caches alike. A
+    statement's text changes only when a week boundary passes the window,
+    twice a week, so each keeps one cached plan.
+  - The floor still decides the rows. Bound parameters in its place were
+    measured and rejected: PostgreSQL replanned every execution on the
+    partitioned layout (a generic plan keeps every partition and never costs
+    less than a pruned custom one), and estimated a range on a parameter at
+    0.5% of the table, which turned the generic chained origin selection on
+    the plain table from its ordered pair index to
+    `transfer_contract_open_source_id` and a sort.
+- **B3a, `strandedGrantPayersSql`.** Each grant's escrow probe reads only the
+  ids of the grant's lifetime: `e.contract_id >= ContractIdCreatedFromSql(b.start_time)`
+  (an escrow is published only while its grant is current), and below the end
+  of the week that holds the window's end plus the margin, a rendered literal.
+  On the partitioned layout each probe executes only the partitions from the
+  grant's start, and the weeks after the window are not planned.
+- **B3b, `RequestRemovedClientContractCloses`.** Both arms carry the hot
+  reads' bound (`removedClientOpenContractsSql`). An open contract minted
+  before the 75-minute floor is past its deadline and is left to the
+  force-close sweep, as when a full queue drops the read. A counterparty with
+  a live sequence with the client holds an open contract inside the bound, so
+  it is still asked to close every sequence with the client.
+- **Tests** (model): on the partitioned layout each read plans and locks only
+  its weeks, in custom and generic plans, while its statement with the floor
+  alone plans and locks the weeks ahead; the stranded grant read probes only
+  the grant's weeks. On the plain tables each read returns the same rows and
+  scans the same indexes as before, in both plan modes.
+- **Measured** on postgres:18.7 with 1M contracts, the plain tables against
+  the legacy leaf and five weekly leaves (the layout between the swap and the
+  cutover week), 64 pgbench clients sending every argument as a parameter, as
+  the app does. Medians of three alternating rounds, under outside load, so
+  compare within a row. "Fresh" plans every execution (`-M extended`);
+  "cached" is the plan cache (`-M prepared`), which chose generic plans in
+  every case.
+
+  | Read | Plain, floor | Partitioned, floor | Partitioned, weeks | Plain, weeks |
+  |---|---|---|---|---|
+  | rehearsal pair read, fresh / cached | 29.8k / 134k tps | 7.2k / 77k | 25.6k / 154k | 25.2k / 139k |
+  | companion origin exists | 14.1k / 97k | 3.2k / 44k | 12.0k / 108k | 13.4k / 94k |
+  | legacy companion origin exists (Main today) | 16.6k / 120k | 4.3k / 49k | 11.2k / 107k | 16.1k / 110k |
+  | open transfer escrows | 14.8k / 116k | 3.7k / 40k | 11.3k / 119k | 12.8k / 107k |
+  | removed client open contracts (vs the floor) | 18.2k / 127k | 5.6k / 63k | 17.7k / 158k | 18.0k / 123k |
+  | plain origin selection | 2.6k / 58k | 0.7k / 23k | 2.1k / 58k | 2.6k / 53k |
+  | legacy plain origin selection (Main today) | 3.5k / 68k | 0.7k / 27k | 1.8k / 72k | 2.4k / 69k |
+  | chained origin selection | 4.3k / 55k | 1.0k / 23k | 3.1k / 58k | 3.7k / 50k |
+
+  - Locks per execution of a custom plan on the partitioned layout fell from
+    106-155 (64 fast-path) to 31-49, all fast-path; the plain table's are
+    16-30.
+  - Against the plain tables today, the partitioned reads with their weeks run
+    3-47% slower when planned fresh and between 11% slower and 24% faster
+    from the cached plan; with the floor alone they ran 69-80% slower fresh
+    and 42-65% slower cached.
+  - On the plain tables the weeks cost fresh plans 1-31% (the planner
+    estimates two more range conditions per bound) and cached executions up
+    to 9% on some reads (two more conditions to set up and check), within
+    noise on others. PostgreSQL plans fresh only for a statement's first five
+    executions on a connection and after an invalidation such as an ANALYZE.
+  - B3a's per-grant bound costs about 1 µs a probe on the plain tables, about
+    1.1 s on a read of Main's heaviest window (1.1M grants, about 5 s today).
+- Not changed: `contractHoleMembersSql`, `hasOpenContractForPairSQL`,
+  `GetOpenTransferByteCount` and the `GetOpenContractIds` reads have no
+  contract id bound at all, and the first two admit contracts with no
+  deadline, so a bound would change their rows. They probe one partial index
+  per partition, as accepted in b23fb286b.
 
 ### Retention as built
 

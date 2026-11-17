@@ -10,10 +10,31 @@
 // function comes from a migration that production applies as a separate
 // operator step, and a hot read must not depend on deploy order. The rendered
 // expression is the function's body, so the two agree for every timestamptz.
+//
+// A hot read of unexpired contracts bounds the id twice
+// (unexpiredContractIdBoundSql):
+//   - by the floor on statement_timestamp(), which decides the rows;
+//   - by the partition weeks that hold every id the floor admits, computed in
+//     the process and rendered into the statement as literals before it runs
+//     (unexpiredContractWeeksAt), which only prune.
+//
+// PostgreSQL prunes partitions at plan time only by constants. With the floor
+// alone, each read planned every partition of the partitioned layout and
+// locked it and its indexes, 106-141 locks against 16-21 on the plain table,
+// beyond the 64 fast-path slots (C1 readiness, 2026-11-17). The week literals
+// prune the plan PostgreSQL caches, and change only when a week boundary
+// passes the window, twice a week. The floor stays the deciding bound: a bound
+// parameter in its place prunes no cached plan, since a generic plan keeps
+// every partition and never costs less than a pruned one, and PostgreSQL
+// estimates a range on a parameter at 0.5% of the table, which turns cached
+// plans on the plain tables to the contract id indexes
+// (TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum). PostgreSQL
+// estimates the floor by its value, as before, and the weeks hold it.
 package model
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -90,3 +111,65 @@ var unexpiredContractIdFloorSql = contractIdFloorSql(fmt.Sprintf(
 	`statement_timestamp() - interval '%d milliseconds'`,
 	unexpiredContractIdAge.Milliseconds(),
 ))
+
+// Where a statement takes the bounds of its contract weeks: SQL comments, so a
+// statement run without rendering them fails to parse instead of reading
+// unbounded.
+const (
+	contractWeeksLowerSql = `/*contract weeks: lower*/`
+	contractWeeksUpperSql = `/*contract weeks: upper*/`
+)
+
+// A hot read's bound on a contract id column: the floor, which decides the
+// rows, and the unexpired contract weeks, which only prune. The statement runs
+// rendered with unexpiredContractWeeksAt.
+func unexpiredContractIdBoundSql(column string) string {
+	return fmt.Sprintf(
+		`%[1]s >= %[2]s AND %[1]s >= %[3]s AND %[1]s < %[4]s`,
+		column,
+		unexpiredContractIdFloorSql,
+		contractWeeksLowerSql,
+		contractWeeksUpperSql,
+	)
+}
+
+// The contract ids [lower, upper) of whole partition weeks (CONTRACT-PARTITION.md,
+// "Partition key and bounds": weekly, from Monday 00:00 UTC).
+type contractWeeks struct {
+	lower server.Id
+	upper server.Id
+}
+
+// The fewest whole partition weeks that hold every id minted in [start, end].
+func contractWeeksHolding(start time.Time, end time.Time) contractWeeks {
+	return contractWeeks{
+		lower: server.ContractIdFloor(server.ContractPartitionWeekStart(start)),
+		upper: server.ContractIdFloor(server.ContractPartitionWeekStart(end).AddDate(0, 0, 7)),
+	}
+}
+
+// The weeks that hold every id an unexpired read admits at now, by this
+// process's clock. The floor reads the database clock, which may differ from
+// this one by the margin either way, so the weeks cover the margin once more
+// on each side: they start with the week of now less the unexpired age and the
+// margin, and end with the week of now plus twice the margin. An id after them
+// was minted by a host more than twice the margin ahead of this one.
+func unexpiredContractWeeksAt(now time.Time) contractWeeks {
+	return contractWeeksHolding(
+		now.Add(-unexpiredContractIdAge-ContractIdCreateTimeMargin),
+		now.Add(2*ContractIdCreateTimeMargin),
+	)
+}
+
+// The statement with the weeks' bounds written in as uuid literals.
+func (self contractWeeks) render(sql string) string {
+	return strings.NewReplacer(
+		contractWeeksLowerSql, contractIdLiteralSql(self.lower),
+		contractWeeksUpperSql, contractIdLiteralSql(self.upper),
+	).Replace(sql)
+}
+
+// A contract id as a uuid literal.
+func contractIdLiteralSql(contractId server.Id) string {
+	return "'" + contractId.String() + "'::uuid"
+}
