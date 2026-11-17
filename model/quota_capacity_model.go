@@ -63,11 +63,14 @@ func CheckCapacityInTx(ctx context.Context, tx server.PgTx, networkId server.Id,
 // (D-QUOTA-11): its tier, then every key's limit after its network_sidecar_limit rows,
 // the sidecar_abuse: keys among them, directory_* included, so §21.7's tightening reaches
 // daemons and readers. It reports the limits as configured whether or not
-// enforce_sidecar_limits is on, as ProConfig.FeatureEnabled reports the plan.
+// enforce_sidecar_limits is on, as ProConfig.FeatureEnabled reports the plan, and the
+// switch beside them as Enforced, which a daemon's or a reader's local pre-checks follow,
+// refusing on a limit only while it is true (§20.5; owner decision 520).
 func NetworkQuotaLimits(ctx context.Context, networkId server.Id) *sidecar.QuotaLimits {
 	tier, limits := networkSidecarLimitsWithTier(ctx, nil, networkId)
 	return &sidecar.QuotaLimits{
-		Tier:   string(tier),
-		Limits: limits.Limits(),
+		Tier:     string(tier),
+		Limits:   limits.Limits(),
+		Enforced: Pro().EnforceSidecarLimits,
 	}
 }

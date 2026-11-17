@@ -234,6 +234,28 @@ func TestQuotaLimitsServeTheCacheAndRefreshBehindIt(t *testing.T) {
 	connect.AssertEqual(t, again.Limits["tls_endpoints"], int64(1))
 }
 
+// enforce_sidecar_limits's state rides the cached limits to the host's engines and changes with a refresh, as a
+// tightening does: the source's answer is what Quota.Limits answers (owner decision 520).
+func TestQuotaLimitsCarryEnforced(t *testing.T) {
+	api := newTestingQuotaApi()
+	quota, clock := newTestingApiQuota(t, api)
+	ctx := t.Context()
+	networkId := connect.NewId()
+	api.setLimits(server.Id(networkId), &sidecar.QuotaLimits{Tier: string(model.NetworkTierPro), Limits: map[string]int64{"tls_endpoints": 10}})
+	limits, err := quota.Limits(ctx, networkId)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, limits.Enforced, false)
+
+	api.setLimits(server.Id(networkId), &sidecar.QuotaLimits{Tier: string(model.NetworkTierPro), Limits: map[string]int64{"tls_endpoints": 10}, Enforced: true})
+	clock.Advance(quota.settings.LimitsTtl)
+	limits, _ = quota.Limits(ctx, networkId)
+	connect.AssertEqual(t, limits.Enforced, false)
+	quota.limitsLoadGroup.Wait()
+	limits, _ = quota.Limits(ctx, networkId)
+	connect.AssertEqual(t, limits.Enforced, true)
+	connect.AssertEqual(t, limits.Limits["tls_endpoints"], int64(10))
+}
+
 // A network with nothing cached waits for its first load only as long as the caller's ctx allows, and a
 // load that failed is not tried again before LimitsTtl: its error answers meanwhile.
 func TestQuotaLimitsColdCallerIsBoundedByItsContext(t *testing.T) {
@@ -362,13 +384,13 @@ func TestHttpQuotaApiCallsEachRouteWithItsBearer(t *testing.T) {
 	balanceId := server.NewId()
 	spentId := server.NewId()
 	endTime := time.Unix(1_800_000_000, 0).UTC()
-	stub.setBody(QuotaApiLimitsPath, `{"tier":"pro","limits":{"tls_endpoints":10}}`)
+	stub.setBody(QuotaApiLimitsPath, `{"tier":"pro","limits":{"tls_endpoints":10},"enforced":true}`)
 	stub.setBody(QuotaApiOverLimitPath, `{"storage":[],"spent":[{"network_id":"`+spentId.String()+`","refusal":{"limit_key":"data","limit":0,"used":0,"retry_after_ms":0,"upgrade":true}}]}`)
 	stub.setBody(QuotaApiDrawOrderPath, `{"balances":[{"balance_id":"`+balanceId.String()+`","credit_byte_count":-5,"credit":true,"end_time":"`+endTime.Format(time.RFC3339)+`"}]}`)
 
 	limits, err := transport.LoadLimits(ctx, networkId)
 	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, limits, &sidecar.QuotaLimits{Tier: "pro", Limits: map[string]int64{"tls_endpoints": 10}})
+	connect.AssertEqual(t, limits, &sidecar.QuotaLimits{Tier: "pro", Limits: map[string]int64{"tls_endpoints": 10}, Enforced: true})
 	overLimit, err := transport.LoadOverLimit(ctx)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, len(overLimit.StorageNetworkIdRefusals), 0)
