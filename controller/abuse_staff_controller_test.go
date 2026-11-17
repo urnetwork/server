@@ -352,6 +352,9 @@ func TestEveryAbuseReadLogs(t *testing.T) {
 		"ListNetworkAbuseCases": true,
 		"GetNetworkAbuseStatus": true,
 		"CreateAbuseAppeal":     true,
+		// a count of a trusted flagger's own machine kills, which the report route reads to cap the flagger and
+		// never shows: its answer is one body either way (ABUSE-M8-01)
+		"AbuseFlaggerReportClass": true,
 	}
 	scanned := 0
 	for _, path := range handlerPaths {

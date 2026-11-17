@@ -562,3 +562,66 @@ func TestAcceptAbuseReportJoinsAConnectionByItsClock(t *testing.T) {
 		}
 	})
 }
+
+// A trusted flagger's report (ABUSE-M8-01): its URL kills the host at once, on the machine's clock, its case keeping
+// the flagger as its class; the same URL from a plain report kills nothing; a header block from the flagger opens a
+// case only; and the kill is lifted like any other, as a granted appeal lifts it, as wrong.
+func TestAcceptAbuseReportFromATrustedFlagger(t *testing.T) {
+	requireAbuseTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		effects, _ := newTestAbuseDeps(t)
+		newTestAbuseIntake(t)
+		_, zone := newTestAbuseIntakeNetwork(t, ctx)
+
+		plain := testAcceptAbuseReport(t, ctx, &model.AbuseReport{
+			Category: model.AbuseCategoryPhishing, ReporterClass: model.AbuseReporterClassPublic, Url: "https://login." + zone + "/",
+		})
+		if plain.Signal == model.AbuseSignalTrustedFlaggerUrl || len(plain.Actions) != 0 {
+			t.Fatalf("a plain report: %+v", plain)
+		}
+
+		flagged := testAcceptAbuseReport(t, ctx, &model.AbuseReport{
+			Category: model.AbuseCategoryPhishing, ReporterClass: model.AbuseReporterClassTrustedFlagger, FlaggerId: "flagger-a",
+			Url: "https://shop." + zone + "/login",
+		})
+		if flagged.Signal != model.AbuseSignalTrustedFlaggerUrl || testAbuseIntakeKinds(flagged) != "host_kill" {
+			t.Fatalf("a flagger's url: %+v", flagged)
+		}
+		abuseCase := model.GetAbuseCase(ctx, flagged.CaseId)
+		if abuseCase.ReporterClass != model.AbuseFlaggerReporterClass("flagger-a") || abuseCase.ReviewDueTime == nil {
+			t.Fatalf("the flagger's case: %+v", abuseCase)
+		}
+		if flaggerId, ok := model.AbuseFlaggerIdOf(abuseCase.ReporterClass); !ok || flaggerId != "flagger-a" {
+			t.Fatalf("the case names %q", flaggerId)
+		}
+
+		block := testAcceptAbuseReport(t, ctx, &model.AbuseReport{
+			Category: model.AbuseCategoryPhishing, ReporterClass: model.AbuseReporterClassTrustedFlagger, FlaggerId: "flagger-a",
+			HeaderBlock: []byte("From: Shop <billing@" + zone + ">\r\nSubject: invoice\r\n\r\n"),
+		})
+		if !block.Joined || len(block.Actions) != 0 {
+			t.Fatalf("a flagger's header block: %+v", block)
+		}
+
+		// the kill takes §21's one lift path, which a granted appeal runs (DecideAbuseAppeal)
+		kill := flagged.Actions[0].Action
+		lift, err := LiftAbuseAction(ctx, &model.AbuseLiftArgs{
+			ActionId:       server.NewId(),
+			CaseId:         flagged.CaseId,
+			LiftedActionId: kill.ActionId,
+			ReviewState:    model.AbuseReviewStateLiftedWrong,
+			ReviewerId:     &[]server.Id{server.NewId()}[0],
+			ReviewReason:   "the flagged page was the network's own",
+		})
+		if err != nil || !lift.Inserted {
+			t.Fatalf("the lift: %+v %v", lift, err)
+		}
+		if lifted := model.GetAbuseAction(ctx, kill.ActionId); lifted.ReviewState != model.AbuseReviewStateLiftedWrong {
+			t.Fatalf("the kill reads %s", lifted.ReviewState)
+		}
+		if applied := effects.applied(); len(applied) < 2 || applied[len(applied)-1].Lifted == nil {
+			t.Fatalf("the lift's effect: %+v", applied)
+		}
+	})
+}
