@@ -550,8 +550,9 @@ func TestQuotaRateOpensWhenRedisIsLost(t *testing.T) {
 }
 
 // While enforce_sidecar_limits is off, the limits pro.yml alone sets (drops, previews, receipts) neither
-// count nor refuse, with no Redis call, so an absent pro.yml locks no one out; the closure bounds still
-// hold, since evs asks for them only at the limit and while spent, and spent is never dark.
+// count nor refuse, with no Redis call, so an absent pro.yml locks no one out; the closure bounds, the
+// allowance, the push class and the pacing, still hold, since evs asks for them only at the limit and
+// while spent, and spent is never dark.
 func TestQuotaRateDarkLimitsCountNothing(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -596,6 +597,15 @@ func TestQuotaRateDarkLimitsCountNothing(t *testing.T) {
 		}
 		refusal, _ = network.count(ctx, map[string]int64{sidecar.QuotaRateKeyErasurePush: 1})
 		connect.AssertEqual(t, refusal != nil && refusal.LimitKey == "evs_erasure_pushes_per_min", true)
+
+		// the pacing seats erasers whatever the switch (owner decision 520): a second eraser asking at the
+		// first's instant waits for its turn
+		refusal, err = network.count(ctx, map[string]int64{sidecar.QuotaRateKeyClosureUpload(connect.Id(server.NewId())): 1})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, refusal, (*sidecar.QuotaRefusal)(nil))
+		refusal, err = network.count(ctx, map[string]int64{sidecar.QuotaRateKeyClosureUpload(connect.Id(server.NewId())): 1})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, refusal != nil && refusal.LimitKey == "evs_closure_uploads_per_s", true)
 	})
 }
 
