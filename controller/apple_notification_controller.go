@@ -135,6 +135,17 @@ type validatedAppleTransaction struct {
 	// all (an offer-code redemption through the App Store redeem sheet or
 	// link). networkId is then zero until the binding resolves it.
 	unboundAccountToken bool
+	// revoked is set when the claims carry a revocationDate: Apple refunded
+	// the transaction or revoked its family sharing
+	revoked bool
+	// familyShared is set when the transaction is a family member's access to
+	// the purchaser's subscription (inAppOwnershipType FAMILY_SHARED), not a
+	// purchase of the account's own
+	familyShared bool
+	// movedFromNetworkId is the deleted network the appAccountToken names when
+	// networkId is the network the subscription moved to
+	// (apple_subscription_move_controller.go); nil otherwise
+	movedFromNetworkId *server.Id
 }
 
 // sandbox reports whether the transaction is a sandbox purchase: TestFlight,
@@ -705,6 +716,12 @@ func validateAppleTransactionAccount(
 	validated.offerDiscountType, _ = appleControllerStringClaim(transactionClaims, "offerDiscountType")
 	validated.transactionReason, _ = appleControllerStringClaim(transactionClaims, "transactionReason")
 	validated.environment, _ = appleControllerStringClaim(transactionClaims, "environment")
+	if revocationMillis, ok := appleControllerInt64Claim(transactionClaims, "revocationDate"); ok && 0 < revocationMillis {
+		validated.revoked = true
+	}
+	if ownership, _ := appleControllerStringClaim(transactionClaims, "inAppOwnershipType"); ownership == "FAMILY_SHARED" {
+		validated.familyShared = true
+	}
 	if !requireEntitlementFields {
 		return validated, nil
 	}
