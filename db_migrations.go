@@ -11732,4 +11732,50 @@ var migrations = []any{
 	// owner-run prepare of the partition cutover dropped it, and the drop
 	// under a five-second lock bound elsewhere. Merge only after that prepare.
 	auditDeviceEventUniqueRecordMigration,
+
+	// The record that an account was deleted (model/deleted_network_model.go)
+	// and the App Store subscriptions moved from a deleted account to the
+	// account its owner restores them from (model/apple_subscription_move_model.go;
+	// owner 2026-11-17, "Restore moves it."): two new tables, nothing existing
+	// locked beyond a read or rewritten. The third statement records, once, the
+	// accounts deleted before the first: every network an App Store record
+	// (the credit ledger, about 300 rows on Main, or an App Store renewal, about
+	// 7,000 renewals of every market) names whose row is gone, as the deleted
+	// network cleanup finds them (FindDeletedNetworkIds). Apply before
+	// deploying the api, alt and taskworker that read them; a running release
+	// reads neither table.
+	newSqlMigration(`
+		CREATE TABLE deleted_network (
+			network_id uuid NOT NULL,
+			delete_time timestamp NOT NULL,
+			source varchar(32) NOT NULL,
+
+			PRIMARY KEY (network_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE TABLE apple_subscription_move (
+			original_transaction_id varchar(128) NOT NULL,
+			from_network_id uuid NOT NULL,
+			to_network_id uuid NOT NULL,
+			transaction_id varchar(128) NOT NULL,
+			move_time timestamp NOT NULL,
+
+			PRIMARY KEY (original_transaction_id)
+		)
+	`),
+	newSqlMigration(`
+		INSERT INTO deleted_network (network_id, delete_time, source)
+		SELECT gone.network_id, now() AT TIME ZONE 'utc', 'backfill'
+		FROM (
+			SELECT network_id FROM apple_subscription_transaction
+			UNION
+			SELECT network_id FROM subscription_renewal WHERE market = 'apple'
+		) gone
+		WHERE gone.network_id <> '00000000-0000-0000-0000-000000000000'
+		  AND NOT EXISTS (
+			SELECT 1 FROM network WHERE network.network_id = gone.network_id
+		  )
+		ON CONFLICT (network_id) DO NOTHING
+	`),
 }
