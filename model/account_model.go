@@ -438,10 +438,6 @@ func RemoveNetworkWithRemovals(
 			`,
 			networkId,
 		))
-		// the record that the account is deleted, with the deletion, so a
-		// store purchase of the account can move to its owner's new account
-		// (deleted_network_model.go)
-		RecordNetworkDeletionInTx(tx, ctx, networkId, NetworkDeletionSourceAccount, server.NowUtc())
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
