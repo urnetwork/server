@@ -78,6 +78,7 @@ The reason is the shared domain. Any host under `bringyour.com` can set a cookie
 - `roles`, `principal`: assigned at client or auth code creation. They mean nothing to the network.
 - `lag_guest`: a lag.dev guest's credential (§1). Limits the token to the lag routes and keeps it off the connect transport.
 - `strict_exp`: a sidecar token. Every renewal and derived credential keeps it, and a mint reads it from the client's owner row, whoever asks.
+- `admin_refused`: the client's owner row marks it admin_refused (§4). A mint reads it from the row, whoever asks, never from the caller's token; every renewal, bind's re-mint and derived credential keeps it; a client with no mark carries none. The admin check reads the row, not this claim: a daemon's `Pair`, handed a child's token it did not mint, requires it beside `strict_exp` (owner decision 291).
 - `api_key_id`: the API key this credential descends from through an auth code (§1). Every renewal and derived credential keeps it.
 - `guest_mode`: deprecated, and false on new tokens.
 

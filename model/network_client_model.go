@@ -1191,7 +1191,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
+			// the marks the owner row holds, not the caller's own claims, which
+			// Renew copied (owner decision 291)
 			byJwtWithClientId.SetStrictExp(marks.strictExp)
+			byJwtWithClientId.AdminRefused = marks.adminRefused
 			byJwtWithClientId.DeclaresNoEgress = marks.declaresNoEgress
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
@@ -1468,7 +1471,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
+			// the marks the owner row holds (the new-client branch above)
 			byJwtWithClientId.SetStrictExp(marks.strictExp)
+			byJwtWithClientId.AdminRefused = marks.adminRefused
 			byJwtWithClientId.DeclaresNoEgress = marks.declaresNoEgress
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)

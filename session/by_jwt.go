@@ -182,6 +182,15 @@ type ByJwt struct {
 	// client's owner row at mint; renewal and every credential derived from it
 	// keep it.
 	StrictExp bool `json:"strict_exp,omitempty"`
+	// the client's owner row marks it admin_refused (§7.4; owner decision 291):
+	// it administers nothing in its network. Set from the owner row at mint, as
+	// strict_exp and declares_no_egress are; renewal, bind's re-mint and every
+	// credential derived from it keep it. Additive: api's admin gate reads the
+	// row (model.ClientRefusesAdmin), never this claim, and what reads it is a
+	// holder of a token it did not mint, a daemon's Pair, which requires it
+	// beside strict_exp before it sends anything (D-CORE-7). A client with no
+	// mark carries no claim.
+	AdminRefused bool `json:"admin_refused,omitempty"`
 	// the client declares it provides no egress (§20.8): connect reads it here,
 	// so it needs no query to keep the client out of the concurrent and create
 	// caps and refuse it Public contracts. Set from the client's owner row at
@@ -998,6 +1007,7 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		Principal:        self.Principal,
 		LagGuest:         self.LagGuest,
 		StrictExp:        self.StrictExp,
+		AdminRefused:     self.AdminRefused,
 		DeclaresNoEgress: self.DeclaresNoEgress,
 		ApiKeyId:         self.ApiKeyId,
 		MemberId:         self.MemberId,

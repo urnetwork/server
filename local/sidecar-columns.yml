@@ -555,6 +555,27 @@ tables:
     existing: true
     columns:
       tier: api-13
+  stripe_meter_report:
+    group: MG6
+    columns:
+      attempts: api-13
+      identifier: api-13
+      meter: api-13
+      network_id: api-13
+      next_time: api-13
+      state: api-13
+      usage_day: api-13
+      value: api-13
+      version: api-13
+  team_subscription:
+    group: MG6
+    columns:
+      anchor_time: api-13
+      customer_id: api-13
+      end_time: api-13
+      network_id: api-13
+      start_time: api-13
+      subscription_id: api-13
   mail_network:
     group: MG7
     columns:
