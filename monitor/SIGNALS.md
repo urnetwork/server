@@ -49371,32 +49371,77 @@ Classes:
 Probe: `evs-format2`
 
 EVS2-M10-34 (§19.8's versionless and drop history rows, §19.10's drop rows,
-D-OPS-9, D-PHASE-10). Every 5 min, one Mimir query of the series format 2's
-purge, sweep and drop jobs push, summed across processes, none with a network
-or repo label: the versionless sweep's DELETEs over the last day,
-`urnetwork_evs_versionless_sweep_deletes_total{result}`; drop jobs' moves
-between states over 7 days, `urnetwork_evs_drop_jobs{state}`; and the jobs'
-scan and delete progress over the last hour,
-`urnetwork_evs_drop_scan_bytes_total` and `urnetwork_evs_drop_deletes_total`. A
-series no process has counted reads as zero, which is every series before
+D-OPS-9, D-PHASE-10; QD-635, QD-855). Every 5 min, one Mimir query of the
+series format 2's purge, sweep and drop jobs push, summed across processes,
+none with a network or repo label, in these partitions:
+
+- `sweep_deleted` and `sweep_all`: evacuation's sweep DELETEs over the last
+  day, `urnetwork_evs_versionless_sweep_deletes_total{pass="evacuation",result}`,
+  the deleted ones and all. The sweep labels each DELETE with the pass that
+  judged it, `evacuation`, `hold_end` or `turn_on`; a hold's end and the turn-on
+  delete what a hold or observe mode kept on purpose, so only evacuation's count
+  toward the share.
+- `drop_refused`, `drop_entered` and `drop_left`: drop jobs' moves between
+  states over 7 days, `urnetwork_evs_drop_jobs{state}`.
+- `drop_scanned` and `drop_deleted`: the jobs' scan and delete progress over the
+  last hour, `urnetwork_evs_drop_scan_bytes_total` and
+  `urnetwork_evs_drop_deletes_total`.
+- `observed`: what observe mode kept over the last 14 days,
+  `urnetwork_evs_versionless_observed_total`, candidate ids the committing
+  processes' purge and the sweep each count as they keep them under
+  `format2.purge: observe` (a marked list counts one). It rises only while
+  observe keeps content.
+- `turn_on`: the turn-on pass's DELETEs over the same 14 days,
+  `urnetwork_evs_versionless_sweep_deletes_total{pass="turn_on"}`, either
+  result, since a rerun finds what an earlier one deleted absent.
+
+The other partitions take `increase()` over their window. `observed` and
+`turn_on` are counted per process series instead: each process pushes its own
+(its `instance` label), which never resets, so its count in the window is its
+largest value there less its value at the window's start, or less zero for a
+series born inside it. `increase()` reads a series born at its total as flat,
+and a turn-on pass short enough for one 15 s push to carry whole is one, so it
+would read as never run.
+
+A series no process has counted reads as zero, which is every series before
 format 2 runs. It runs under monitor.yml's `file_clusters` block, as §29.1 does.
+
+The turn-on row also reads `config/<env>/sidecar.yml` through server's loader,
+as every service and `sidecarctl evs purge-turn-on` read it: purge counts as on
+while `format2` is enabled with `purge: on`, the state the command needs to
+schedule the pass. How long it has read on is this watcher's memory, dated from
+its first read of on and forgotten at a read of off, so a restarted watcher
+warns up to a day late; a read that fails leaves the memory and is blind for the
+row. The turn-on pass's DELETEs are counted over the same 14 days as observe's
+keeps, not over the last day alone, so the row stays quiet after a pass that
+ran: observe stops keeping once purge reads on, and its keeps leave the window
+no later than the pass's DELETEs. Purge set back to observe and on again within
+14 days of a pass reads that pass as the turn-on until it leaves the window, so
+a second turn-on forgotten then warns late.
 
 §19.8 exempts a stalled job whose cluster is past 50% of capacity or whose
 candidates are young, and no series shows either yet, so a job waiting on one
-by design may warn; its finding says so. §19.8's fourth format-2 row, observe's
-retained count staying flat for a day while purge is on (QD-635), is not built:
-no process exports a retained count (question
-`evs2-m10-34-observe-retained-series`).
+by design may warn; its finding says so.
 
 Classes:
 
 - `evs-drop-refused` **PAGE**: a drop job ended refused {verify} or {mismatch},
   storage integrity, in the last 7 days; §19.10's drop rows.
-- `evs-sweep-deleted-share` **WARN**, sustained 2 runs: the sweep's `deleted`
-  share of its DELETEs past 1% in a day.
+- `evs-sweep-deleted-share` **WARN**, sustained 2 runs: evacuation's sweep
+  `deleted` share of its DELETEs past 1% in a day.
 - `evs-drop-stalled` **WARN**, sustained 2 runs: more drops moved into executing
   than out of it over 7 days, with no scan or delete progress in an hour.
-- `evs-format2-unobservable` (visibility): Mimir did not read.
+- `evs-purge-turn-on-missing` **WARN**, sustained 2 runs: §19.8's fourth
+  format-2 row (owner decision 206, QD-855). `format2.purge` has read on in the
+  env's sidecar.yml for a day, `observed` is above zero and `turn_on` is zero:
+  `sidecarctl evs purge-turn-on <env>` was not run, or its pass did no work (a
+  host still reading observe keeps everything; a pass whose every candidate a
+  hold keeps or the newest version names counts nothing). Run the command (xops
+  FILE-CLUSTERS.md's format 2 rollout, step 2); the pass is idempotent, and what
+  observe kept costs storage, never content. The warn clears once a turn-on
+  DELETE counts, or 14 days after observe's last keep.
+- `evs-format2-unobservable` (visibility): Mimir did not read, or the env's
+  sidecar.yml did not.
 
 ## 30. Sidecar services — §19.8's SLOs, failures and the primary
 

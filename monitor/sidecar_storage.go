@@ -193,6 +193,14 @@ type SidecarStorageSettings struct {
 	DropJobLookback time.Duration
 	// A drop job executing with no scan or delete progress over this, an hour, warns.
 	DropProgressWindow time.Duration
+	// §19.8's turn-on row (QD-855): how long the env's sidecar.yml must have read format2.purge on, at every read of
+	// this watcher, before the row may warn: a day, the runbook step's time to run the turn-on command.
+	PurgeTurnOnGrace time.Duration
+	// The span observe's keeps and the turn-on pass's DELETEs are both counted over: two weeks, so a warn that opens a
+	// day after the turn-on stays open about thirteen days if nothing deletes, and one span on both keeps a pass that
+	// ran from reading as missing, since observe stops keeping once purge reads on. Past it the row forgets what
+	// observe kept, which costs storage, never content.
+	PurgeTurnOnLookback time.Duration
 }
 
 // §19.6's and §19.8's lines, and the write budget's own defaults for its drive and depth.
@@ -241,6 +249,8 @@ func DefaultSidecarStorageSettings() *SidecarStorageSettings {
 		SweepShareWindow:            24 * time.Hour,
 		DropJobLookback:             7 * 24 * time.Hour,
 		DropProgressWindow:          1 * time.Hour,
+		PurgeTurnOnGrace:            24 * time.Hour,
+		PurgeTurnOnLookback:         14 * 24 * time.Hour,
 	}
 }
 

@@ -84,6 +84,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"write-budget-unobservable":       visibilityAlertClass,
 	"evs-sweep-deleted-share":         incidentAlertClass,
 	"evs-drop-stalled":                incidentAlertClass,
+	"evs-purge-turn-on-missing":       incidentAlertClass,
 	"evs-format2-unobservable":        visibilityAlertClass,
 	"sidecar-dump-run-failed":         incidentAlertClass,
 	"sidecar-dump-offsite-stale":      incidentAlertClass,
