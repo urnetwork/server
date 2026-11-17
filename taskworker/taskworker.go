@@ -263,6 +263,13 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleGammaBiller(clientSession, tx)
 		// lag.dev guest expiry and result retention (lag.dev/PLAN.md A2, A5)
 		work.ScheduleSweepLag(clientSession, tx)
+		// lag.dev drift tests: runs completed past their report wait, the
+		// client_ip hashes of closed tokens, and retention
+		// (lag.dev/DRIFTTEST.md E5, K3, R1)
+		work.ScheduleSweepLagDrift(clientSession, tx)
+		// the drift model's weekly calibration: κ, σ₀ and the relay
+		// thresholds from lag.dev's tracks (lag.dev/DRIFTTEST.md V4)
+		work.ScheduleLagDriftCalibration(clientSession, tx)
 	}, server.TxReadCommitted)
 	work.ScheduleSettlementAccountingTasks(ctx)
 	// After the commit, in its own bounded transactions.
@@ -936,6 +943,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.SweepLag,
 			work.SweepLagPost,
+		),
+		// lag.dev/DRIFTTEST.md E5, K3, R1
+		task.NewTaskTargetWithPost(
+			work.SweepLagDrift,
+			work.SweepLagDriftPost,
+		),
+		// lag.dev/DRIFTTEST.md V4
+		task.NewTaskTargetWithPost(
+			work.LagDriftCalibration,
+			work.LagDriftCalibrationPost,
 		),
 	)
 
