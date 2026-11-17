@@ -10,7 +10,9 @@ package controller
 // flows under the forwarding key's tags; each refused delegation, a key no Delegation names, a superseded one's, a
 // revoked one's, another sidecar's, a short key id and a lapse, opens no upstream socket; the operator's minted
 // contracts carrying a forged or replayed forwarding delegation open none either, beside server's honest ones; and a
-// DelegationRevoke ends the live connection its key admitted while the identity key's carries on.
+// DelegationRevoke ends the live connection its key admitted while the identity key's carries on. The same rows at an
+// app host, whose device role its own Forwarder feeds with the app's sidecar stopped, run §22.5's forwarding cases and
+// Fwd.tla's twins as schedules (sidecar/sidecartest/fault/fs_bridge_forwarding_app_m8.go) on server's contracts.
 //
 // The authorization log is sidecartest's FakeApi here, as on T2 (connect_bridge_m4_test.go says why). §7.4's
 // forward_only rule, that a forwarding client's exchange gets the config's r alone, is server/oauth's
@@ -47,5 +49,52 @@ func TestFs38ForwardingRevocationOnT3(t *testing.T) {
 func TestFs38ForwardingForgedOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
 		bridgeM4RunSchedule(t, ctx, "FS-38's forwarding forged case", fault.Fs38ForwardingForgedCase)
+	})
+}
+
+// An app host fed by its own Forwarder with the app's sidecar stopped (DESIGN-DETAILS 4.6), on server's contracts: its
+// twin admitting the subject's forwarding key; a grant at CompileDelay and a revocation at once with no compile; a
+// DelegationRevoke racing a held compile; and a supersession racing a contract.
+func TestFwdAppHostOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "an app host's forwarding twin", fault.FwdAppHostAdmits)
+		bridgeM4RunSchedule(t, ctx, "an app host within §8.9's targets", fault.FwdAppWithinTargetsCase)
+		bridgeM4RunSchedule(t, ctx, "a DelegationRevoke racing an app host's compile", fault.FwdAppRevokeRacesCompileCase)
+		bridgeM4RunSchedule(t, ctx, "a supersession racing a contract at an app host", fault.FwdAppSupersedeRacesContractCase)
+	})
+}
+
+// Fwd.tla's LowerStateAccepted and StateDropsOverlay as schedules on server's contracts: a restarted Forwarder over a
+// lost store and a lagging api refused below the posture's pin, the revoked key refused throughout.
+func TestFwdAppCompileBelowANewerStateOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "a compile below the state in force", fault.FwdAppLowerStateDroppedCase)
+		bridgeM4RunSchedule(t, ctx, "a compile below an overlay revocation", fault.FwdAppStateKeepsOverlayCase)
+	})
+}
+
+// Fwd.tla's OverlayLifts as schedules on server's contracts: an Unsuspend lifts nothing until its compile, and one the
+// rule table refuses, which the in-process api sequences anyway, lifts nothing at all.
+func TestFwdAppUnsuspendOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "an Unsuspend no compile judged", fault.FwdAppUnsuspendWaitsCase)
+		bridgeM4RunSchedule(t, ctx, "a refused Unsuspend", fault.FwdAppRefusedUnsuspendCase)
+	})
+}
+
+// FwdReach-NoCompile and Fwd.tla's RepeatsOnly as schedules on server's contracts, under the heap ceiling and over
+// the memory cap.
+func TestFwdAppNoCompileOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "an uncheckable revocation with compiles deferred", fault.FwdAppNoCompileCase)
+		bridgeM4RunSchedule(t, ctx, "an uncheckable revocation over the memory cap", fault.FwdAppOverCapCase)
+	})
+}
+
+// Fwd.tla's NoFloor as a schedule on server's contracts, beside its twin.
+func TestFwdAppRollbackOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		bridgeM4RunSchedule(t, ctx, "a restart with no rollback", fault.FwdAppRestartKeepsTheState)
+		bridgeM4RunSchedule(t, ctx, "a rolled-back posture store", fault.FwdAppRollbackCase)
 	})
 }
