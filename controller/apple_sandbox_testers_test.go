@@ -113,9 +113,14 @@ func TestAppleSandboxGraceHoldOnlyForInternalTesters(t *testing.T) {
 // The purchase report names the refusal, so the app can show its neutral line
 // rather than "couldn't be verified": status invalid (the app finishes the
 // transaction) with the sandbox_purchase code. A tester's sandbox purchase and
-// a production purchase go on to the usual rules (here: wrong_network, which
-// is decided before any database read).
+// a production purchase go on to the usual rules (here: another live
+// network's purchase, wrong_network).
 func TestVerifyAppleSandboxPurchaseNamesTheRefusal(t *testing.T) {
+	// another network's purchase goes to the restore move rules
+	// (apple_subscription_move_controller.go); their fake store answers
+	// without a database, and the other network is live, so it stays
+	// wrong_network
+	moveEnv := installMoveFakes(t)
 	now := time.Date(2026, 11, 17, 20, 30, 0, 0, time.UTC)
 	previousNow := appleVerifyNowFunc
 	t.Cleanup(func() {
@@ -151,6 +156,9 @@ func TestVerifyAppleSandboxPurchaseNamesTheRefusal(t *testing.T) {
 	testerNetworkId := server.NewId()
 	networkId := server.NewId()
 	otherNetworkId := server.NewId()
+	for _, live := range []server.Id{testerNetworkId, networkId, otherNetworkId} {
+		moveEnv.state.networks[live] = true
+	}
 	installAppleSandboxTesters(t, testerNetworkId)
 
 	// a TestFlight purchase of this network, and an offer-code redemption
