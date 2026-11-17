@@ -19,11 +19,11 @@ package handlers
 // address (WARP_LIMIT_EXCLUDE_SUBNETS) counts nothing. A request counts once before its reports are read, so a
 // body refused for its content counts once, and its reports past the first count once read, before any is taken;
 // the first count past the limit refuses the whole request with nothing taken, and the counts it made stand. The
-// count is kept in Redis through server.CheckIpRateLimitAttempt, one script call per report, so at most
-// ReportUrlMaxCount plus ReportHeaderBlockMaxCount calls a request, through the unweighted check the other routes
-// share, at abuse_report.{address_<hash>}.address, so the limit holds across api processes (§2.8 api-14; owner
-// decision 536, QD-895): the history holds an opaque id per attempt, scored by when it leaves the window, and the
-// key expires with AbuseRouteSettings' window. No address reaches Redis, and nothing here logs one (R-ABUSE-6). A
+// count is kept in Redis at abuse_report.{address_<hash>}.address through server.CheckIpRateLimitAttempt, the
+// unweighted check the other routes share, one script call per report (at most ReportUrlMaxCount plus
+// ReportHeaderBlockMaxCount a request), so the limit holds across api processes (§2.8 api-14; owner decision 536,
+// QD-895): the history holds an opaque id per attempt, scored by when it leaves the window, and the key expires
+// with AbuseRouteSettings' window. No address reaches Redis, and nothing here logs one (R-ABUSE-6). A
 // count Redis does not answer refuses the request as a store that did not answer does, so no report goes
 // uncounted.
 //
