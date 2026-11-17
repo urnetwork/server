@@ -1697,9 +1697,9 @@ func TestTaskCanariesSignalClassifiesContractPartitionRebuilds(t *testing.T) {
 		wholeTable bool
 	}{
 		{name: "legacy priority leaf", relation: "transfer_escrow_legacy", index: "transfer_escrow_unsettled_balance_contract_l_ccnew", published: "transfer_escrow_unsettled_balance_contract"},
-		{name: "weekly priority leaf", relation: "transfer_escrow_w20261026", index: "transfer_escrow_w20261026_balance_id_contract_id_balance_b_ccnew", published: "transfer_escrow_unsettled_balance_contract"},
+		{name: "daily priority leaf", relation: "transfer_escrow_p20261026", index: "transfer_escrow_p20261026_balance_id_contract_id_balance_b_ccnew", published: "transfer_escrow_unsettled_balance_contract"},
 		{name: "legacy whole table", relation: "transfer_escrow_legacy", index: "transfer_escrow_pkey_l_ccnew", published: "transfer_escrow_pkey", wholeTable: true},
-		{name: "weekly whole table", relation: "transfer_escrow_w20261026", index: "transfer_escrow_w20261026_pkey_ccnew", published: "transfer_escrow_pkey"},
+		{name: "daily whole table", relation: "transfer_escrow_p20261026", index: "transfer_escrow_p20261026_pkey_ccnew", published: "transfer_escrow_pkey"},
 	} {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			switch {

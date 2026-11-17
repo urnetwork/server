@@ -1202,7 +1202,7 @@ func (self pgStatsLandmineProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		if structuralIndexShapes == 3 && statisticsTarget != "300" {
 			action = "Apply the bounded open-statistics migration. If legacy readers need immediate relief first, temporarily set the open-column target to 300, run ANALYZE transfer_contract (open) with a measured deadline, verify the three legacy plans, and restore only the intended persistent settings."
 		} else if structuralIndexShapes == 3 && leafTargetsDiffer {
-			action = "Restore the parent's open-column target 300 on each differing partition (ALTER TABLE <partition> ALTER COLUMN open SET STATISTICS 300). New weekly partitions copy the parent's per-column targets when the maintenance task creates them, so a differing one was changed afterwards or made another way; find which before its next ANALYZE samples with the wrong target."
+			action = "Restore the parent's open-column target 300 on each differing partition (ALTER TABLE <partition> ALTER COLUMN open SET STATISTICS 300). New daily partitions copy the parent's per-column targets when the maintenance task creates them, so a differing one was changed afterwards or made another way; find which before its next ANALYZE samples with the wrong target."
 		}
 		symptom := fmt.Sprintf("transfer_contract open-plan protection is incomplete: n_distinct=%s zero-row legacy partial indexes=%d valid structural index shapes=%d/3 statistics target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget)
 		observed := fmt.Sprintf("n_distinct=%s zero_legacy_partial_indexes=%d valid_structural_index_shapes=%d statistics_target=%s", nDistinct, zeroLegacyPartialIndexes, structuralIndexShapes, statisticsTarget)

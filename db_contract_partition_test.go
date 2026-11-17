@@ -122,7 +122,7 @@ func TestContractPartitionCutover(t *testing.T) {
 		}
 		logf := testContractPartitionLogf(t)
 		now := NowUtc()
-		cutoverWeek := ContractPartitionWeekStart(now).Add(2 * contractPartitionWeek)
+		cutoverDay := ContractPartitionDayStart(now).AddDate(0, 0, 2)
 
 		openContractId := NewId()
 		settledContractId := NewId()
@@ -192,32 +192,36 @@ func TestContractPartitionCutover(t *testing.T) {
 		}
 
 		// dry runs change nothing
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, DryRun: true, Logf: logf}), nil)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, DryRun: true, Logf: logf}), nil)
 		connect.AssertEqual(t, relkind("transfer_contract_p"), "")
-		_, prepared := preparedContractCutoverWeek(ctx)
+		_, prepared := preparedContractCutoverDay(ctx)
 		connect.AssertEqual(t, prepared, false)
 
-		// a cutover week must start on a Monday and leave a day to prepare
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek.Add(time.Hour), Logf: logf}) != nil, true)
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: ContractPartitionWeekStart(now), Logf: logf}) != nil, true)
+		// a cutover day must start at 00:00 UTC and leave a day to prepare
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay.Add(time.Hour), Logf: logf}) != nil, true)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: ContractPartitionDayStart(now), Logf: logf}) != nil, true)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: now.Add(time.Hour), Logf: logf}) != nil, true)
 
 		// finalize refuses an unprepared cutover
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Finalize: true, Logf: logf}) != nil, true)
 
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: logf}), nil)
-		week, prepared := preparedContractCutoverWeek(ctx)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf}), nil)
+		day, prepared := preparedContractCutoverDay(ctx)
 		connect.AssertEqual(t, prepared, true)
-		connect.AssertEqual(t, week, cutoverWeek)
+		connect.AssertEqual(t, day, cutoverDay)
 		for _, table := range ContractPartitionTables {
 			connect.AssertEqual(t, relkind(contractStagedParentName(table)), "p")
-			for i := 0; i <= ContractPartitionAheadWeeks; i += 1 {
-				connect.AssertEqual(t, relkind(ContractPartitionName(table, cutoverWeek.Add(time.Duration(i)*contractPartitionWeek))), "r")
+			// the cutover day and the days ahead of it, and no more
+			for i := 0; i <= ContractPartitionAheadDays; i += 1 {
+				connect.AssertEqual(t, relkind(ContractPartitionName(table, cutoverDay.AddDate(0, 0, i))), "r")
 			}
+			connect.AssertEqual(t, relkind(ContractPartitionName(table, cutoverDay.AddDate(0, 0, ContractPartitionAheadDays+1))), "")
+			connect.AssertEqual(t, testContractPartitionScalar[int](t, ctx, `SELECT count(*)::int FROM pg_inherits WHERE inhparent = to_regclass($1)`, "public."+contractStagedParentName(table)), ContractPartitionAheadDays+1)
 		}
 		// resumable
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: logf}), nil)
-		// a different week needs an abort first
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek.Add(contractPartitionWeek), Logf: logf}) != nil, true)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf}), nil)
+		// a different day needs an abort first
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay.AddDate(0, 0, 1), Logf: logf}) != nil, true)
 		// the prepared bound still admits current contracts
 		laterContractId := NewId()
 		testInsertContractRows(t, ctx, laterContractId, false)
@@ -279,20 +283,29 @@ func TestContractPartitionCutover(t *testing.T) {
 			connect.AssertEqual(t, testContractPartitionOf(t, ctx, table, openContractId), ContractLegacyPartitionName(table))
 			connect.AssertEqual(t, testContractPartitionOf(t, ctx, table, laterContractId), ContractLegacyPartitionName(table))
 		}
-		// a contract id of the cutover week routes to its weekly partition
-		weeklyContractId := testContractIdAt(cutoverWeek.Add(time.Hour))
-		testInsertContractRows(t, ctx, weeklyContractId, true)
+		// a contract id of the cutover day routes to its daily partition, and
+		// one of the last millisecond of a day to that day's
+		dailyContractId := testContractIdAt(cutoverDay.Add(time.Hour))
+		testInsertContractRows(t, ctx, dailyContractId, true)
 		for _, table := range ContractPartitionTables {
-			connect.AssertEqual(t, testContractPartitionOf(t, ctx, table, weeklyContractId), ContractPartitionName(table, cutoverWeek))
+			connect.AssertEqual(t, testContractPartitionOf(t, ctx, table, dailyContractId), ContractPartitionName(table, cutoverDay))
 		}
+		lastMillisecondId := testContractIdAt(cutoverDay.AddDate(0, 0, 2).Add(-time.Millisecond))
+		testInsertContractRows(t, ctx, lastMillisecondId, false)
+		connect.AssertEqual(t, testContractPartitionOf(t, ctx, "transfer_contract", lastMillisecondId), ContractPartitionName("transfer_contract", cutoverDay.AddDate(0, 0, 1)))
+		Tx(ctx, func(tx PgTx) {
+			for _, table := range []string{"contract_extender", "contract_close_report", "transfer_escrow_sweep", "contract_close", "transfer_escrow", "transfer_contract"} {
+				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`DELETE FROM public.%s WHERE contract_id = $1`, quoteIdentifier(table)), lastMillisecondId))
+			}
+		})
 		// past the last partition an insert fails
-		farContractId := testContractIdAt(cutoverWeek.Add(time.Duration(ContractPartitionAheadWeeks+1) * contractPartitionWeek))
+		farContractId := testContractIdAt(cutoverDay.AddDate(0, 0, ContractPartitionAheadDays+1))
 		connect.AssertEqual(t, testContractPartitionRecover(func() {
 			testInsertContractRows(t, ctx, farContractId, false)
 		}) != nil, true)
 
 		// the usage guard fires through the parent on both kinds of partition
-		for _, contractId := range []Id{testContractIdAt(cutoverWeek.Add(2 * time.Hour)), NewId()} {
+		for _, contractId := range []Id{testContractIdAt(cutoverDay.Add(2 * time.Hour)), NewId()} {
 			err := testContractPartitionRecover(func() {
 				Tx(ctx, func(tx PgTx) {
 					RaisePgResult(tx.Exec(
@@ -310,7 +323,7 @@ func TestContractPartitionCutover(t *testing.T) {
 
 		// deleting a settled contract archives its usage proof in both kinds of
 		// partition
-		for _, contractId := range []Id{settledContractId, weeklyContractId} {
+		for _, contractId := range []Id{settledContractId, dailyContractId} {
 			Tx(ctx, func(tx PgTx) {
 				RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id = $1`, contractId))
 			})
@@ -325,7 +338,7 @@ func TestContractPartitionCutover(t *testing.T) {
 		connect.AssertEqual(t, valid, true)
 
 		// a TRUNCATE that names a partition is refused
-		for _, name := range []string{ContractLegacyPartitionName("transfer_contract"), ContractPartitionName("transfer_contract", cutoverWeek), ContractLegacyPartitionName("transfer_escrow")} {
+		for _, name := range []string{ContractLegacyPartitionName("transfer_contract"), ContractPartitionName("transfer_contract", cutoverDay), ContractLegacyPartitionName("transfer_escrow")} {
 			err := testContractPartitionRecover(func() {
 				MaintenanceTx(ctx, func(tx PgTx) {
 					RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`TRUNCATE public.%s`, quoteIdentifier(name))))
@@ -334,17 +347,17 @@ func TestContractPartitionCutover(t *testing.T) {
 			connect.AssertEqual(t, err != nil, true)
 		}
 
-		// before the cutover week the legacy partition covers the weeks ahead
+		// before the cutover day the legacy partition covers the days ahead
 		// of it: maintenance creates nothing there and counts them as covered
 		report, _ := MaintainContractPartitions(ctx, now, ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, len(report.Created), 0)
-		connect.AssertEqual(t, ContractPartitionAheadWeeks <= report.FutureWeeks, true)
+		connect.AssertEqual(t, ContractPartitionAheadDays <= report.FutureDays, true)
 
-		// rollback refuses while a weekly partition holds a row
+		// rollback refuses while a daily partition holds a row
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Rollback: true, Logf: logf}) != nil, true)
 		Tx(ctx, func(tx PgTx) {
 			for _, table := range []string{"contract_extender", "contract_close_report", "transfer_escrow_sweep", "contract_close", "transfer_escrow"} {
-				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`DELETE FROM public.%s WHERE contract_id = $1`, quoteIdentifier(table)), weeklyContractId))
+				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`DELETE FROM public.%s WHERE contract_id = $1`, quoteIdentifier(table)), dailyContractId))
 			}
 		})
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Rollback: true, Logf: logf}), nil)
@@ -372,9 +385,9 @@ func TestContractPartitionCutover(t *testing.T) {
 		testInsertContractRows(t, ctx, NewId(), false)
 
 		// prepare then abort leaves the plain tables
-		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: logf}), nil)
+		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf}), nil)
 		connect.AssertEqual(t, MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Abort: true, Logf: logf}), nil)
-		_, prepared = preparedContractCutoverWeek(ctx)
+		_, prepared = preparedContractCutoverDay(ctx)
 		connect.AssertEqual(t, prepared, false)
 		for _, table := range ContractPartitionTables {
 			connect.AssertEqual(t, relkind(contractStagedParentName(table)), "")

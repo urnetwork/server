@@ -253,9 +253,12 @@ func providerUsageArchiveDropFence(ctx context.Context, tx PgTx, r PartitionRang
 	}
 }
 
+// Weeks after the current one whose archive partitions always exist.
+const providerUsageArchiveAheadWeeks = 4
+
 // The archive in the partition registry, from its cutover on. Weeks run four
-// ahead, as the contract weeks do, so a contract's archive week exists long
-// before retention deletes the contract. A week is dropped under the retention
+// ahead (providerUsageArchiveAheadWeeks), so a contract's archive week exists
+// long before retention deletes the contract. A week is dropped under the retention
 // opt-in once it ended 52 weeks ago; nothing else keeps it, since a contract
 // archived after its week was dropped lands in the DEFAULT partition. A week
 // whose verified export holds its rows may drop sooner, under the export
@@ -269,7 +272,7 @@ var providerUsageArchivePartitionFamily = RegisterPartitionFamily(&PartitionFami
 	KeyColumn:        "contract_id",
 	KeyKind:          PartitionKeyId,
 	Granularity:      PartitionGranularityWeekly,
-	AheadRanges:      ContractPartitionAheadWeeks,
+	AheadRanges:      providerUsageArchiveAheadWeeks,
 	Retention:        providerUsageArchiveRetention,
 	DefaultPartition: true,
 	DropGuardSetting: providerUsageArchiveRetentionSetting,

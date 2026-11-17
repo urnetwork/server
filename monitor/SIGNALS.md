@@ -8337,31 +8337,33 @@ Probe: `contract-partition-runway`
 Why: after the contract partition cutover (`server/CONTRACT-PARTITION.md`)
 the six contract tables (`transfer_contract`, `transfer_escrow`,
 `contract_close`, `transfer_escrow_sweep`, `contract_close_report`,
-`contract_extender`) are range-partitioned by `contract_id` with weekly
-partitions and no DEFAULT partition, as with `client_reliability`. An insert
-whose id lies past the last partition fails, so every new contract fails.
-`maintain_contract_partitions` creates each table's partitions 4 weeks ahead
-(`ContractPartitionAheadWeeks`); a runway under 2 weeks means it has stopped.
+`contract_extender`) are range-partitioned by `contract_id` with daily
+partitions (weekly until the owner's decision of 2026-11-17) and no DEFAULT
+partition, as with `client_reliability`. An insert whose id lies past the last
+partition fails, so every new contract fails. `maintain_contract_partitions`
+creates each table's partitions 3 days ahead (`ContractPartitionAheadDays`); a
+runway under 2 days means it has stopped, and leaves a day or two before
+contract creation fails.
 
-Check: a week counts as covered for a table when one attached partition's
-range holds every contract id of it, `[contract_id_floor(W),
-contract_id_floor(W + 7 days))`. Between the swap and the cutover week C the
-legacy partition `FROM (MINVALUE) TO (contract_id_floor(C))` covers every week
-that ends at or before C, so those weeks count without a weekly partition.
-Covered weeks are counted consecutively from the week after the current one
-(Monday 00:00 UTC, the primary's statement clock); a gap ends the count.
+Check: a day counts as covered for a table when one attached partition's
+range holds every contract id of it, `[contract_id_floor(D),
+contract_id_floor(D + 1 day))`. Between the swap and the cutover day C the
+legacy partition `FROM (MINVALUE) TO (contract_id_floor(C))` covers every day
+before C, so those days count without a daily partition. Covered days are
+counted consecutively from the day after the current one (00:00 UTC, the
+primary's statement clock), up to 90; a gap ends the count.
 
 - `contract-partition-runway` (PAGE, target `<primary>/contract-partitions`,
   frame the thinnest table, sustain 2 at a 15-minute cadence): partitioned,
-  and some contract table covers fewer than 2 weeks after the current one, or
-  does not cover the current week (contract creation is already failing).
+  and some contract table covers fewer than 2 days after the current one, or
+  does not cover the current day (contract creation is already failing).
 - `contract-partition-runway-unobservable` (same target, sustain 2): no or
   several primaries, a failed read, a wrong host or role, a skewed clock, an
   incomplete or malformed frame, an unparseable partition bound, an over-cap
   census (4,096 partitions), or a mixed layout (`transfer_contract`
   partitioned and another contract table not). Following the 2026-10-22
   emission rule 1 it pages when the last complete observation of this signal
-  instance, at most 7 days old, had at most 2 future weeks; otherwise it
+  instance, at most 7 days old, had at most 2 future days; otherwise it
   warns. The memory is process-local and starts empty at every watcher start.
 - Plain contract tables have no runway: the check is healthy before the
   cutover.
@@ -8373,58 +8375,60 @@ table's kind, its staged parent `<table>_p` and its prepared
 `<table>_legacy_bound` check definition; and every attached partition's name
 and `pg_get_expr(relpartbound)` bound. No contract row is read. Coverage is
 computed from the bounds, not the names; names are rendered only when they are
-the maintenance scheme's own (`<table>_legacy`, `<table>_wYYYYMMDD` with its
-own week's bounds). Every tunable is a field of
+the maintenance scheme's own (`<table>_legacy`, `<table>_pYYYYMMDD` with its
+own day's bounds). Every tunable is a field of
 `ContractPartitionRunwaySettings`.
 
-Synthetic controls: plain tables, the healthy weekly layout, a cutover week two
-weeks ahead with no weekly partition before it (healthy), one and zero future
-weeks, a gap, an uncovered current week, a MAXVALUE and a default partition,
-malformed frames and bounds, the remembered unknown severity, inventory
-authority and cancellation. A native PostgreSQL 18 test runs the real query on
-plain tables, on a cutover finalized two weeks ahead and on the current-week
-layout, and drops future partitions to fire it.
+Synthetic controls: plain tables, the healthy daily layout, a cutover day ahead
+with no daily partition before it (healthy), one and zero future days, a gap,
+an uncovered current day, a MAXVALUE and a default partition, malformed frames
+and bounds, the remembered unknown severity, inventory authority and
+cancellation. A native PostgreSQL 18 test runs the real query on plain tables,
+on a cutover finalized days ahead and on the current-day layout, and drops
+future partitions to fire it.
 
 The contract tables are the partition registry's `contract` family
 (`server/db_partition_registry.go`); its declaration names this probe, so
-§2.4p leaves it alone, and the registry's runway task creates its weeks ahead
+§2.4p leaves it alone, and the registry's runway task creates its days ahead
 too.
 
 ACTION: restore `maintain_contract_partitions` (task canaries, `[cp]` log
 lines, lock waits behind its creates). If it cannot run in time, the owner runs
 its partition creation (`server.MaintainContractPartitions`); a partition
-written by hand must match its week's bounds, columns, storage settings and
+written by hand must match its day's bounds, columns, storage settings and
 TRUNCATE guards exactly. Never add a DEFAULT partition. VERIFY: two
-consecutive complete observations with every table covering the current week
-and at least 2 weeks after it.
+consecutive complete observations with every table covering the current day
+and at least 2 days after it.
 
-### 2.4i Contract partition retention — expired weeks that were not dropped
+### 2.4i Contract partition retention — expired days that were not dropped
 Probe: `contract-partition-retention-blocked`
 
 Why: once the contract tables are partitioned, size is bounded only by
 retention. Since S1 (server/CONTRACT-PARTITION.md, 2026-11-17)
-`maintain_contract_partitions` retires a week a day after its upper bound
+`maintain_contract_partitions` retires a day 6 hours after its upper bound
 passes the contract horizon reaper's horizon: 35 days while the reaper's mode
 is on, otherwise R = 13 weeks (`ContractRetention`). It deletes no row: the
 reaper alone deletes contracts, by its keep rules, archiving their usage. Once
-the reaper has emptied a week, the task rewrites each leaf down to
-the rows the reaper keeps (CLUSTER, MVCC-safe) and drops the six partitions
-together once they hold no row at all. A week that waits stays, and the task
-reports why: rows the reaper keeps, a week the reaper has not emptied, a
-vacuum or long transaction holding a leaf, or more live rows than a compaction
-moves. The check below still judges at R plus 2 weeks, so it names weeks held
-far past S1's 36 days: kept rows nothing releases (the legacy partition's
-contracts under attribution review), the reaper off, or the task stopped.
+the reaper has emptied a day, the task rewrites each leaf down to the rows the
+reaper keeps (CLUSTER, MVCC-safe) and drops the six partitions together once
+they hold no row at all. A day that waits stays, and the task reports why:
+rows the reaper keeps, a day the reaper has not emptied, a vacuum or long
+transaction holding a leaf, more live rows than a compaction moves, or deleted
+rows that the oldest open transaction of any database still keeps from
+CLUSTER. The check below still judges at R plus 2 weeks, so it names days held
+far past S1's 35 days and 6 hours: kept rows nothing releases (the legacy
+partition's contracts under attribution review), the reaper off, or the task
+stopped.
 
-Check, on the §2.4h catalog read: a partition, legacy or weekly, whose upper
+Check, on the §2.4h catalog read: a partition, legacy or daily, whose upper
 bound plus R plus 2 weeks is in the past and that still exists. The legacy
-partition's upper bound is the cutover week, so it is judged like the weeks
+partition's upper bound is the cutover day, so it is judged like the days
 before the cutover.
 
 - `contract-partition-retention-blocked` (WARN, target
   `<primary>/contract-partitions`, sustain 1 at an hourly cadence): at least
   one such partition. The finding names the oldest (by its upper bound), the
-  count per table, and the blocked week ends.
+  count per table, and the blocked day ends.
 - `contract-partition-retention-unobservable` (same target, sustain 2): the
   §2.4h unknown reasons.
 - Plain contract tables have no partition to drop (reaping is §2.4g's): the
@@ -8432,32 +8436,32 @@ before the cutover.
 
 Every tunable (R, the grace, the list bound) is a field of
 `ContractPartitionRetentionSettings`. Synthetic controls cover the horizon
-edge, a blocked legacy partition and blocked weekly partitions, plain tables,
+edge, a blocked legacy partition and blocked daily partitions, plain tables,
 malformed frames and bounds; a native test runs the real query on the
-current-week layout with the horizon shortened.
+current-day layout with the horizon shortened.
 
 The contract tables' registry declaration names this probe, so §2.4q leaves
 the contract family alone.
 
-ACTION: read the task's reason for the oldest week (`[cp]` log lines, its run
+ACTION: read the task's reason for the oldest day (`[cp]` log lines, its run
 report). If the reaper keeps its rows, resolve the reason at its owner (the
 reaper's protected reasons, `urnetwork_contract_horizon_pass_skipped_contracts`).
 If the reaper has not emptied it, check its mode, horizon and lag (§2.4r).
 Check that the task runs. Never drop, detach or rewrite a contract partition
 by hand: a drop bypasses the usage archive capture and would delete rows the
-reaper keeps. VERIFY: the next runs drop the week and a complete observation
+reaper keeps. VERIFY: the next runs drop the day and a complete observation
 shows no partition past the horizon plus grace.
 
-### 2.4j Contract partition cutover pending — the legacy bound refuses its week
+### 2.4j Contract partition cutover pending — the legacy bound refuses its day
 Probe: `contract-partition-cutover-pending`
 
 Why: preparing the cutover (`bringyourctl model migrate contract-partition`)
 stages `<table>_p` and adds `<table>_legacy_bound`, `CHECK (contract_id <
 contract_id_floor(C))`, to each contract table. The check refuses every
-contract id of the cutover week C onward, so `--finalize` must complete before
-C (it refuses within 10 minutes of it). `maintain_contract_partitions`
-abandons a prepared cutover 6 hours before C; this alert gives the owner the
-day before that.
+contract id from the cutover day C on (00:00 UTC; prepared with
+`--cutover-day`), so `--finalize` must complete before C (it refuses within 10
+minutes of it). `maintain_contract_partitions` abandons a prepared cutover 6
+hours before C; this alert gives the owner the day before that.
 
 Check, on the §2.4h catalog read: the tables are not partitioned, a
 `<table>_legacy_bound` check exists (C is the earliest of their bound ids; the
@@ -8476,12 +8480,12 @@ healthy.
 
 Every tunable (the window, the mirrored abandonment margin) is a field of
 `ContractPartitionCutoverSettings`. Synthetic controls cover the window edge,
-the abandonment line, a passed cutover week, staged parents without a bound,
-mixed bound weeks, a finalized layout and malformed bounds; a native test
-prepares a real cutover two weeks ahead and widens the window to fire it.
+the abandonment line, a passed cutover day, staged parents without a bound,
+mixed bound days, a finalized layout and malformed bounds; a native test
+prepares a real cutover days ahead and widens the window to fire it.
 
 ACTION: the owner decides at once: `--finalize`, or `--abort` and prepare a
-later week. Do not drop the bound checks or the staged parents by hand.
+later day. Do not drop the bound checks or the staged parents by hand.
 VERIFY: a complete observation shows the tables partitioned (finalized) or no
 bound check and no staged parent (aborted).
 
@@ -8514,7 +8518,7 @@ for 90 days, one per measured relation of every public table:
   fillfactor; other access methods are recorded unmeasured.
 
 A partitioned table has no storage of its own, so each partition leaf is
-measured and reported as its own table (a contract week by its leaf name,
+measured and reported as its own table (a contract day by its leaf name,
 which leaves with its partition).
 
 Check, hourly: each relation's newest measurement within 35 days, credited
@@ -28220,7 +28224,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 | partition-retention-stuck (contract-reap-stalled retired 2026-11-13) | pg | §2.4g | WARN |
 | contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
 | usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
-| contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
+| contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover, daily since 2026-11-17 | runway PAGE under 2 covered future days; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its day |
 | contract-stage-latency / contract-stage-latency-unobservable | Mimir | §2.30 total mean, implemented by `contract-stage-latency` | WARN over 250 ms, PAGE over 1 s, 10 min held in Mimir |
 | identity-churn / identity-churn-loop / identity-churn-unobservable | Mimir proxy metrics + pg | §14.8, implemented by `identity-churn` | WARN on per-device mints, retire/mint ratio, refusals, unresolved discovery or short-lived identities; PAGE when combined with PgBouncer waiting over 500 or §2.30 over 1 s |
 | modern-gate-readiness-unknown / modern-gate-decision-missing | Mimir + alert log | §2.29 addendum | PAGE |

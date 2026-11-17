@@ -31,7 +31,7 @@ func TestMigrationsContractPartitionFormsCoverOnlyTheContractTables(t *testing.T
 		"legacy_settlement_intent",
 		"network_extender_release_request",
 		server.ContractLegacyPartitionName("transfer_contract"),
-		server.ContractPartitionName("contract_close_report", server.ContractPartitionWeekStart(server.NowUtc())),
+		server.ContractPartitionName("contract_close_report", server.ContractPartitionDayStart(server.NowUtc())),
 	} {
 		if isMigrationContractTable(table) {
 			t.Fatalf("%s is read as a contract table", table)
@@ -116,10 +116,10 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 			}
 		})
 
-		week := server.ContractPartitionWeekStart(server.NowUtc())
-		contractWeek := server.ContractPartitionName("transfer_contract", week)
+		day := server.ContractPartitionDayStart(server.NowUtc())
+		contractDay := server.ContractPartitionName("transfer_contract", day)
 		reportLegacy := server.ContractLegacyPartitionName("contract_close_report")
-		reportWeek := server.ContractPartitionName("contract_close_report", week)
+		reportDay := server.ContractPartitionName("contract_close_report", day)
 		for _, fault := range []struct {
 			name     string
 			sql      string
@@ -158,7 +158,7 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 			},
 			{
 				name:     "partition usage guard disabled",
-				sql:      fmt.Sprintf(`ALTER TABLE %s DISABLE TRIGGER transfer_contract_usage_guard`, contractWeek),
+				sql:      fmt.Sprintf(`ALTER TABLE %s DISABLE TRIGGER transfer_contract_usage_guard`, contractDay),
 				artifact: "transfer_contract immutable usage and terminal attribution guard@v745",
 			},
 			{
@@ -178,12 +178,12 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 			},
 			{
 				name:     "partition sweep owner guard disabled",
-				sql:      fmt.Sprintf(`ALTER TABLE %s DISABLE TRIGGER payment_plan_sweep_owner_guard`, server.ContractPartitionName("transfer_escrow_sweep", week)),
+				sql:      fmt.Sprintf(`ALTER TABLE %s DISABLE TRIGGER payment_plan_sweep_owner_guard`, server.ContractPartitionName("transfer_escrow_sweep", day)),
 				artifact: "durable payout plan assignment and sweep owner guard@v814",
 			},
 			{
 				name:     "leaf without its analyze threshold",
-				sql:      fmt.Sprintf(`ALTER TABLE %s RESET (autovacuum_analyze_threshold)`, contractWeek),
+				sql:      fmt.Sprintf(`ALTER TABLE %s RESET (autovacuum_analyze_threshold)`, contractDay),
 				artifact: "transfer_contract bounded open statistics@v635",
 			},
 			{
@@ -213,7 +213,7 @@ func TestMigrationsContractPartitionedCatalog(t *testing.T) {
 			},
 			{
 				name:     "report partition trigger",
-				sql:      fmt.Sprintf(`CREATE TRIGGER synthetic_report_guard BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION transfer_contract_usage_guard()`, reportWeek),
+				sql:      fmt.Sprintf(`CREATE TRIGGER synthetic_report_guard BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION transfer_contract_usage_guard()`, reportDay),
 				artifact: "logical contract close report receipts@v764",
 			},
 		} {
@@ -251,13 +251,13 @@ func TestMigrationsContractPartitionedLegacySettlementKeyClones(t *testing.T) {
 		if _, drift := migrationPingDatabaseCheck(t, ctx); drift != "" {
 			t.Fatalf("partitioned contract tables report drift before the retirement: %s", drift)
 		}
-		contractWeek := server.ContractPartitionName("transfer_contract", server.ContractPartitionWeekStart(server.NowUtc()))
+		contractDay := server.ContractPartitionName("transfer_contract", server.ContractPartitionDayStart(server.NowUtc()))
 		var triggers []uint32
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT t.oid FROM pg_catalog.pg_trigger t
  JOIN pg_constraint k ON k.oid=t.tgconstraint
  WHERE k.conrelid=to_regclass('public.legacy_settlement_intent') AND k.confrelid=to_regclass('public.'||$1)
- AND k.contype='f' AND k.conparentid<>0 AND t.tgisinternal ORDER BY t.oid`, contractWeek)
+ AND k.contype='f' AND k.conparentid<>0 AND t.tgisinternal ORDER BY t.oid`, contractDay)
 			server.Raise(err)
 			defer rows.Close()
 			for rows.Next() {
@@ -268,7 +268,7 @@ func TestMigrationsContractPartitionedLegacySettlementKeyClones(t *testing.T) {
 			server.Raise(rows.Err())
 		})
 		if len(triggers) != 2 {
-			t.Fatalf("%s carries %d cloned legacy settlement key triggers, want its delete and update actions", contractWeek, len(triggers))
+			t.Fatalf("%s carries %d cloned legacy settlement key triggers, want its delete and update actions", contractDay, len(triggers))
 		}
 		for _, oid := range triggers {
 			for _, enabled := range []string{"D", "R", "A"} {
@@ -324,8 +324,8 @@ func TestMigrationsContractCloseReportKeyAbsentOnlyWhenPartitioned(t *testing.T)
 		})
 
 		prepare := server.ContractPartitionMigrateOptions{
-			CutoverWeek: server.ContractPartitionWeekStart(server.NowUtc()).Add(14 * 24 * time.Hour),
-			Logf:        t.Logf,
+			CutoverDay: server.ContractPartitionDayStart(server.NowUtc()).Add(2 * 24 * time.Hour),
+			Logf:       t.Logf,
 		}
 		if err := server.MigrateContractsToPartitions(ctx, prepare); err != nil {
 			t.Fatal(err)

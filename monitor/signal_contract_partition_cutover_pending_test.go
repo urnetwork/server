@@ -28,14 +28,14 @@ func TestContractPartitionCutoverPendingRegistered(t *testing.T) {
 	}
 }
 
-// Plain tables prepared for a week that starts in until, with the bound on
+// Plain tables prepared for a day that starts in until, with the bound on
 // every table.
 func contractPartitionTestPrepared(until time.Duration, notValid bool) contractPartitionTestSource {
 	source := contractPartitionTestPlain()
-	week := source.now.Add(until)
+	day := source.now.Add(until)
 	for _, table := range server.ContractPartitionTables {
 		source.staged[table] = "p"
-		source.bounds[table] = fmt.Sprintf("CHECK ((contract_id < '%s'::uuid))", contractPartitionTestId(week))
+		source.bounds[table] = fmt.Sprintf("CHECK ((contract_id < '%s'::uuid))", contractPartitionTestId(day))
 		if notValid {
 			source.bounds[table] += " NOT VALID"
 		}
@@ -45,7 +45,7 @@ func contractPartitionTestPrepared(until time.Duration, notValid bool) contractP
 
 // Unprepared, finalized, far, staged-only and window-edge states are healthy.
 func TestContractPartitionCutoverPendingHealthy(t *testing.T) {
-	currentWeek := server.ContractPartitionWeekStart(syntheticSettings(nil).Now())
+	currentDay := server.ContractPartitionDayStart(syntheticSettings(nil).Now())
 	stagedOnly := contractPartitionTestPlain()
 	for _, table := range server.ContractPartitionTables {
 		stagedOnly.staged[table] = "p"
@@ -55,7 +55,7 @@ func TestContractPartitionCutoverPendingHealthy(t *testing.T) {
 		source contractPartitionTestSource
 	}{
 		{name: "plain", source: contractPartitionTestPlain()},
-		{name: "finalized", source: contractPartitionTestPartitioned(currentWeek, 4)},
+		{name: "finalized", source: contractPartitionTestPartitioned(currentDay, server.ContractPartitionAheadDays)},
 		{name: "days away", source: contractPartitionTestPrepared(5*24*time.Hour, false)},
 		{name: "at the window", source: contractPartitionTestPrepared(24*time.Hour, true)},
 		{name: "staged without a bound", source: stagedOnly},
@@ -66,8 +66,8 @@ func TestContractPartitionCutoverPendingHealthy(t *testing.T) {
 	}
 }
 
-// Inside the window it warns with the hours to the week and to the task's
-// abandonment; past the abandonment line and past the week it says so.
+// Inside the window it warns with the hours to the day and to the task's
+// abandonment; past the abandonment line and past the day it says so.
 func TestContractPartitionCutoverPendingFires(t *testing.T) {
 	for _, test := range []struct {
 		name     string
@@ -77,27 +77,28 @@ func TestContractPartitionCutoverPendingFires(t *testing.T) {
 	}{
 		{name: "inside the window", until: 20 * time.Hour, observed: "hours_until_cutover=20.0 hours_until_abandon=14.0", wording: "14.0 hours remain until then"},
 		{name: "past abandonment", until: 5 * time.Hour, observed: "hours_until_cutover=5.0 hours_until_abandon=-1.0", wording: "The abandonment margin passed 1.0 hours ago"},
-		{name: "past the week", until: -2 * time.Hour, observed: "hours_until_cutover=-2.0 hours_until_abandon=-8.0", wording: "new contracts are refused now"},
+		{name: "past the day", until: -2 * time.Hour, observed: "hours_until_cutover=-2.0 hours_until_abandon=-8.0", wording: "new contracts are refused now"},
 	} {
 		source := contractPartitionTestPrepared(test.until, test.name == "inside the window")
 		alert := requireAlertClass(t, contractPartitionTestRun(t, NewContractPartitionCutoverPendingSignal(), source), "contract-partition-cutover-pending")
 		if alert.Severity != SeverityWarn || alert.Sustain != 1 || alert.Target != "pg-1/contract-partitions" ||
 			!strings.Contains(alert.Observed, test.observed) || !strings.Contains(alert.Context, test.wording) ||
 			!strings.Contains(alert.Observed, "bounded_tables=[transfer_contract transfer_escrow contract_close transfer_escrow_sweep contract_close_report contract_extender]") ||
-			!strings.Contains(alert.Observed, "distinct_bound_weeks=1") {
+			!strings.Contains(alert.Observed, "cutover_day="+source.now.Add(test.until).Format(time.DateOnly)+" ") ||
+			!strings.Contains(alert.Observed, "distinct_bound_days=1") {
 			t.Fatalf("%s: wrong cutover alert: %s / %s", test.name, alert.Observed, alert.Context)
 		}
-		if test.until < 0 && !strings.Contains(alert.Symptom, "refuses every contract id of that week") {
-			t.Fatalf("%s: a passed week was not called out: %s", test.name, alert.Symptom)
+		if test.until < 0 && !strings.Contains(alert.Symptom, "refuses every contract id from that day") {
+			t.Fatalf("%s: a passed day was not called out: %s", test.name, alert.Symptom)
 		}
 	}
 
-	// tables prepared for different weeks: the earliest decides
+	// tables prepared for different days: the earliest decides
 	mixed := contractPartitionTestPrepared(5*24*time.Hour, false)
 	mixed.bounds["contract_extender"] = fmt.Sprintf("CHECK ((contract_id < '%s'::uuid))", contractPartitionTestId(mixed.now.Add(10*time.Hour)))
 	alert := requireAlertClass(t, contractPartitionTestRun(t, NewContractPartitionCutoverPendingSignal(), mixed), "contract-partition-cutover-pending")
-	if !strings.Contains(alert.Observed, "hours_until_cutover=10.0 ") || !strings.Contains(alert.Observed, "distinct_bound_weeks=2") {
-		t.Fatalf("mixed bounds did not take the earliest week: %s", alert.Observed)
+	if !strings.Contains(alert.Observed, "hours_until_cutover=10.0 ") || !strings.Contains(alert.Observed, "distinct_bound_days=2") {
+		t.Fatalf("mixed bounds did not take the earliest day: %s", alert.Observed)
 	}
 }
 

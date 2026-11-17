@@ -4,7 +4,7 @@
 // measurement that required an ordinary table skipped every priority index,
 // and the rotation's exact-name skip list let the parents and every partition
 // into REINDEX TABLE CONCURRENTLY. The fixtures build the shape the cutover
-// leaves: a legacy partition with the renamed _l leaf indexes and a weekly
+// leaves: a legacy partition with the renamed _l leaf indexes and a daily
 // partition with the leaves PostgreSQL names on attach.
 package server
 
@@ -18,21 +18,21 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// The cutover week of the synthetic partitioned fixtures.
-var testDbMaintenanceCutoverWeek = time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+// The cutover day of the synthetic partitioned fixtures.
+var testDbMaintenanceCutoverDay = time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
 
-// The bounds clause of the cutover week's partition and of the legacy
+// The bounds clause of the cutover day's partition and of the legacy
 // partition before it.
-func testDbMaintenanceWeekBounds(weekStart time.Time) string {
+func testDbMaintenanceDayBounds(dayStart time.Time) string {
 	return fmt.Sprintf(
 		"FOR VALUES FROM (%s) TO (%s)",
-		contractIdLiteral(ContractIdFloor(weekStart)),
-		contractIdLiteral(ContractIdFloor(weekStart.Add(contractPartitionWeek))),
+		contractIdLiteral(ContractIdFloor(dayStart)),
+		contractIdLiteral(ContractIdFloor(dayStart.AddDate(0, 0, 1))),
 	)
 }
 
-func testDbMaintenanceLegacyBounds(cutoverWeek time.Time) string {
-	return fmt.Sprintf("FOR VALUES FROM (MINVALUE) TO (%s)", contractIdLiteral(ContractIdFloor(cutoverWeek)))
+func testDbMaintenanceLegacyBounds(cutoverDay time.Time) string {
+	return fmt.Sprintf("FOR VALUES FROM (MINVALUE) TO (%s)", contractIdLiteral(ContractIdFloor(cutoverDay)))
 }
 
 // The leaf of parentIndex attached for partition, by name.
@@ -84,11 +84,11 @@ func testDbMaintenanceIndexValid(ctx context.Context, indexName string) (valid b
 
 // A transfer_escrow partitioned the way the cutover leaves it, carrying the
 // production unsettled partial index: its legacy leaf keeps the renamed _l
-// index, and the cutover week's leaf gets the one PostgreSQL builds on
+// index, and the cutover day's leaf gets the one PostgreSQL builds on
 // attach. The legacy escrows churn the way contracts settle, all but one in
-// fifty leaving the predicate, so the legacy leaf is bloated; the weekly
+// fifty leaving the predicate, so the legacy leaf is bloated; the daily
 // escrows stay unsettled, so its leaf is compact.
-func testDbMaintenanceCreatePartitionedEscrowFixture(ctx context.Context, cutoverWeek time.Time) {
+func testDbMaintenanceCreatePartitionedEscrowFixture(ctx context.Context, cutoverDay time.Time) {
 	Db(ctx, func(conn PgConn) {
 		RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
 			`
@@ -110,9 +110,9 @@ func testDbMaintenanceCreatePartitionedEscrowFixture(ctx context.Context, cutove
 				INCLUDE (balance_byte_count)
 				WHERE settled = false
 			`,
-			testDbMaintenanceLegacyBounds(cutoverWeek),
-			quoteIdentifier(ContractPartitionName("transfer_escrow", cutoverWeek)),
-			testDbMaintenanceWeekBounds(cutoverWeek),
+			testDbMaintenanceLegacyBounds(cutoverDay),
+			quoteIdentifier(ContractPartitionName("transfer_escrow", cutoverDay)),
+			testDbMaintenanceDayBounds(cutoverDay),
 		)))
 		// legacy contract ids lead with millisecond zero; sixteen balances
 		RaisePgResult(conn.Exec(ctx, `
@@ -124,7 +124,7 @@ func testDbMaintenanceCreatePartitionedEscrowFixture(ctx context.Context, cutove
 			FROM generate_series(1, $1::bigint) n
 		`, testDbMaintenanceChurnRowCount))
 		RaisePgResult(conn.Exec(ctx, `UPDATE transfer_escrow SET settled = true WHERE balance_byte_count % 50 <> 0`))
-		// cutover week contract ids lead with the week's first millisecond
+		// cutover day contract ids lead with the day's first millisecond
 		RaisePgResult(conn.Exec(ctx, `
 			INSERT INTO transfer_escrow (contract_id, balance_id, balance_byte_count)
 			SELECT
@@ -132,14 +132,14 @@ func testDbMaintenanceCreatePartitionedEscrowFixture(ctx context.Context, cutove
 				('b' || lpad(to_hex(n % 16), 31, '0'))::uuid,
 				n
 			FROM generate_series(1, 1000) n
-		`, cutoverWeek.UnixMilli()))
+		`, cutoverDay.UnixMilli()))
 	})
 	testDbMaintenanceVacuumAnalyze(ctx, "transfer_escrow")
 }
 
 // A partitioned priority index is measured and rebuilt one leaf at a time:
 // the bloated legacy leaf alone is rebuilt with REINDEX INDEX CONCURRENTLY and
-// stays attached under the published index, while the compact weekly leaf,
+// stays attached under the published index, while the compact daily leaf,
 // the partitioned index and the tables are left alone. Before the fix the
 // measurement required an ordinary table, so no priority index of a
 // partitioned table was ever measured or rebuilt.
@@ -151,12 +151,12 @@ func TestDbMaintenanceRebuildsBloatedLeafOfPartitionedPriorityIndex(t *testing.T
 		ctx := t.Context()
 		const indexName = "transfer_escrow_unsettled_balance_contract"
 		legacyLeafName := indexName + contractLegacyIndexSuffix
-		weekly := ContractPartitionName("transfer_escrow", testDbMaintenanceCutoverWeek)
-		testDbMaintenanceCreatePartitionedEscrowFixture(ctx, testDbMaintenanceCutoverWeek)
+		daily := ContractPartitionName("transfer_escrow", testDbMaintenanceCutoverDay)
+		testDbMaintenanceCreatePartitionedEscrowFixture(ctx, testDbMaintenanceCutoverDay)
 		if attached := testDbMaintenanceAttachedLeafIndex(t, ctx, indexName, "transfer_escrow_legacy"); attached != legacyLeafName {
 			t.Fatalf("legacy leaf = %s, want %s", attached, legacyLeafName)
 		}
-		weeklyLeafName := testDbMaintenanceAttachedLeafIndex(t, ctx, indexName, weekly)
+		dailyLeafName := testDbMaintenanceAttachedLeafIndex(t, ctx, indexName, daily)
 
 		measured, err := dbMaintenancePriorityIndexSizes(ctx, []string{indexName})
 		if err != nil || len(measured) != 2 {
@@ -166,12 +166,12 @@ func TestDbMaintenanceRebuildsBloatedLeafOfPartitionedPriorityIndex(t *testing.T
 		for _, leaf := range measured {
 			leaves[leaf.indexName] = leaf
 		}
-		legacyLeaf, weeklyLeaf := leaves[legacyLeafName], leaves[weeklyLeafName]
+		legacyLeaf, dailyLeaf := leaves[legacyLeafName], leaves[dailyLeafName]
 		if legacyLeaf.tableName != "transfer_escrow_legacy" || !legacyLeaf.bloated() {
 			t.Fatalf("legacy leaf measurement %+v, want a bloated leaf on transfer_escrow_legacy", legacyLeaf)
 		}
-		if weeklyLeaf.tableName != weekly || weeklyLeaf.bloated() {
-			t.Fatalf("weekly leaf measurement %+v, want a compact leaf on %s", weeklyLeaf, weekly)
+		if dailyLeaf.tableName != daily || dailyLeaf.bloated() {
+			t.Fatalf("daily leaf measurement %+v, want a compact leaf on %s", dailyLeaf, daily)
 		}
 		// a leaf named on its own measures that leaf alone
 		if alone, err := dbMaintenancePriorityIndexSizes(ctx, []string{legacyLeafName}); err != nil || len(alone) != 1 || alone[0].indexName != legacyLeafName {
@@ -180,7 +180,7 @@ func TestDbMaintenanceRebuildsBloatedLeafOfPartitionedPriorityIndex(t *testing.T
 
 		parentOid := testDbMaintenanceIndexOid(ctx, indexName)
 		legacyOid := testDbMaintenanceIndexOid(ctx, legacyLeafName)
-		weeklyOid := testDbMaintenanceIndexOid(ctx, weeklyLeafName)
+		dailyOid := testDbMaintenanceIndexOid(ctx, dailyLeafName)
 		legacyPkeyOid := testDbMaintenanceIndexOid(ctx, "transfer_escrow_legacy_pkey")
 		beforeBytes := testDbMaintenanceRelationBytes(ctx, legacyLeafName)
 
@@ -198,8 +198,8 @@ func TestDbMaintenanceRebuildsBloatedLeafOfPartitionedPriorityIndex(t *testing.T
 		if afterBytes := testDbMaintenanceRelationBytes(ctx, legacyLeafName); beforeBytes < 4*afterBytes {
 			t.Fatalf("%s is %d bytes after its rebuild, was %d", legacyLeafName, afterBytes, beforeBytes)
 		}
-		if testDbMaintenanceIndexOid(ctx, weeklyLeafName) != weeklyOid {
-			t.Fatalf("the compact %s was rebuilt", weeklyLeafName)
+		if testDbMaintenanceIndexOid(ctx, dailyLeafName) != dailyOid {
+			t.Fatalf("the compact %s was rebuilt", dailyLeafName)
 		}
 		if testDbMaintenanceIndexOid(ctx, indexName) != parentOid || !testDbMaintenanceIndexValid(ctx, indexName) {
 			t.Fatalf("the partitioned %s was replaced or left invalid", indexName)
@@ -211,7 +211,7 @@ func TestDbMaintenanceRebuildsBloatedLeafOfPartitionedPriorityIndex(t *testing.T
 		if attached := testDbMaintenanceAttachedLeafIndex(t, ctx, indexName, "transfer_escrow_legacy"); attached != legacyLeafName {
 			t.Fatalf("legacy leaf after the rebuild = %s, want %s", attached, legacyLeafName)
 		}
-		for _, table := range []string{"transfer_escrow_legacy", weekly} {
+		for _, table := range []string{"transfer_escrow_legacy", daily} {
 			if _, invalid := testDbMaintenanceIndexes(ctx, table); len(invalid) != 0 {
 				t.Fatalf("%s has invalid indexes after the rebuild: %v", table, invalid)
 			}
@@ -231,9 +231,9 @@ func TestDbMaintenanceRotationLeavesPartitionedContractTablesToCleanup(t *testin
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		week := testDbMaintenanceCutoverWeek
-		extenderWeekly := ContractPartitionName("contract_extender", week)
-		stagedWeekly := ContractPartitionName("transfer_escrow", week.Add(contractPartitionWeek))
+		day := testDbMaintenanceCutoverDay
+		extenderDaily := ContractPartitionName("contract_extender", day)
+		stagedDaily := ContractPartitionName("transfer_escrow", day.AddDate(0, 0, 1))
 		Db(ctx, func(conn PgConn) {
 			RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
 				`
@@ -258,16 +258,16 @@ func TestDbMaintenanceRotationLeavesPartitionedContractTablesToCleanup(t *testin
 				) PARTITION BY RANGE (contract_id);
 				CREATE TABLE %s PARTITION OF transfer_escrow_p %s
 				`,
-				testDbMaintenanceLegacyBounds(week),
-				quoteIdentifier(extenderWeekly),
-				testDbMaintenanceWeekBounds(week),
-				quoteIdentifier(stagedWeekly),
-				testDbMaintenanceWeekBounds(week.Add(contractPartitionWeek)),
+				testDbMaintenanceLegacyBounds(day),
+				quoteIdentifier(extenderDaily),
+				testDbMaintenanceDayBounds(day),
+				quoteIdentifier(stagedDaily),
+				testDbMaintenanceDayBounds(day.AddDate(0, 0, 1)),
 			)))
 		})
-		partitionedNames := []string{"contract_extender", "contract_extender_legacy", extenderWeekly, "transfer_escrow_p", stagedWeekly}
+		partitionedNames := []string{"contract_extender", "contract_extender_legacy", extenderDaily, "transfer_escrow_p", stagedDaily}
 		leafIndexOids := map[string]uint32{}
-		for _, table := range []string{"contract_extender_legacy", extenderWeekly, stagedWeekly} {
+		for _, table := range []string{"contract_extender_legacy", extenderDaily, stagedDaily} {
 			valid, _ := testDbMaintenanceIndexes(ctx, table)
 			for _, indexName := range valid {
 				leafIndexOids[indexName] = testDbMaintenanceIndexOid(ctx, indexName)
@@ -318,8 +318,8 @@ func TestDbMaintenanceCleanupKeepsPartitionedIndexes(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		week := testDbMaintenanceCutoverWeek
-		weekly := ContractPartitionName("contract_extender", week)
+		day := testDbMaintenanceCutoverDay
+		daily := ContractPartitionName("contract_extender", day)
 		Db(ctx, func(conn PgConn) {
 			RaisePgResult(conn.Exec(ctx, fmt.Sprintf(
 				`
@@ -342,9 +342,9 @@ func TestDbMaintenanceCleanupKeepsPartitionedIndexes(t *testing.T) {
 				-- a shell named like a copy of the valid partitioned index
 				CREATE INDEX contract_extender_create_time_contract_id_ccnew ON ONLY contract_extender (create_time, contract_id)
 				`,
-				testDbMaintenanceLegacyBounds(week),
-				quoteIdentifier(weekly),
-				testDbMaintenanceWeekBounds(week),
+				testDbMaintenanceLegacyBounds(day),
+				quoteIdentifier(daily),
+				testDbMaintenanceDayBounds(day),
 			)))
 		})
 		// a genuine copy of the legacy leaf

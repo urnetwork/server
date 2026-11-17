@@ -587,16 +587,20 @@ how much that cuts contracts is not known.
 ### 5.3 Structural
 
 **S1. Contract partitioning (C1).** Built 10-23; its review findings were fixed in
-09cd98565; not cut over. What is left:
+09cd98565; not cut over. **Daily partitions since 2026-11-17** (owner decision ~15:35Z;
+CONTRACT-PARTITION.md "Daily partitions"): one partition per UTC day, not per week. What
+is left:
 - ~~Drops at the reaper's horizon (35 days), not the 91-day `ContractRetention`, as C4
   and C5 already do (`db_contract_partition_maintenance.go:49`). Code, guard and tests.~~
-  **Built 2026-11-17** (2d55bc9f3; CONTRACT-PARTITION.md "S1"). A week retires a day
-  after its upper bound passes the reaper's horizon. Retirement deletes no row: it
-  compacts each week the reaper has emptied down to the rows the reaper keeps
-  (CLUSTER) and drops it once it holds none. The free space C needs is in that
-  section: 5.9–7.4 TiB with the legacy indexes rebuilt once emptied, more than this
+  **Built 2026-11-17** (2d55bc9f3; CONTRACT-PARTITION.md "S1"), reworked for days the
+  same day. A day retires 6 hours after its upper bound passes the reaper's horizon.
+  Retirement deletes no row: it compacts each day the reaper has emptied down to the
+  rows the reaper keeps (CLUSTER) and drops it once it holds none. Daily holds 0.9–1.2
+  TiB less than weekly at the top of the cycle (35.25–36.25 days of inflow instead of
+  36–43). The free space C needs is in that section: 5.8–7.2 TiB with the legacy
+  indexes rebuilt once emptied (6.05–7.5 TiB weekly in the same model), more than this
   volume has.
-- Headroom. After the cutover new weeks stop reusing the legacy leaf's freed space, so
+- Headroom. After the cutover new days stop reusing the legacy leaf's freed space, so
   it needs about 35 days of new contract data free, at 1.5–2 KB a contract: about 6–7
   TiB at today's load, 4–5.5 TiB after a 20–35% trim *(inferred)*. **Not available on
   the current volume**: C1 waits for the capacity of §5.2.
@@ -606,8 +610,8 @@ how much that cuts contracts is not known.
 - Prepare's VALIDATE of the legacy bounds reads each heap under SHARE UPDATE EXCLUSIVE
   and holds the horizon for hours; run it off-peak and outside backups.
 - What it buys: retention by DROP, no sparse-survivor bloat, no rebuild loans, smaller
-  insert-path indexes. The weekly drop still archives each contract by row delete
-  first.
+  insert-path indexes. Since S1 the reaper alone deletes (and archives) contracts; a
+  day's drop takes only the storage of rows it has deleted.
 
 **S2. Close evidence partitioning (C5).** Built, not cut over. Its legacy leaf is never
 dropped and `vacuum_truncate` is off, so a cutover returns nothing until a legacy-drop

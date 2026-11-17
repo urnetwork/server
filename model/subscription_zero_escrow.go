@@ -466,12 +466,12 @@ func zeroEscrowCompanionOriginInTx(
 	if !lingerReads {
 		plainOriginSql, chainedOriginSql = legacyZeroEscrowPlainOriginSql, legacyZeroEscrowChainedOriginSql
 	}
-	weeks := unexpiredContractWeeksAt(server.NowUtc())
+	days := unexpiredContractDaysAt(server.NowUtc())
 	func() {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leaveRead()
 		// the origin direction is reversed
-		result, err := tx.Query(ctx, weeks.render(plainOriginSql), destinationId, sourceId, lingerCloseTime)
+		result, err := tx.Query(ctx, days.render(plainOriginSql), destinationId, sourceId, lingerCloseTime)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&originContractId))
@@ -486,7 +486,7 @@ func zeroEscrowCompanionOriginInTx(
 		defer leaveRead()
 		result, err := tx.Query(
 			ctx,
-			weeks.render(chainedOriginSql),
+			days.render(chainedOriginSql),
 			destinationId,
 			sourceId,
 			lingerCloseTime,

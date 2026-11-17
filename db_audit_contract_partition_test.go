@@ -14,8 +14,8 @@ func TestAuditSchemaCleanThroughTheContractCutover(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		if !IsContractPartitioned(ctx) {
-			cutoverWeek := ContractPartitionWeekStart(NowUtc()).Add(2 * contractPartitionWeek)
-			if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: testContractPartitionLogf(t)}); err != nil {
+			cutoverDay := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
+			if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: testContractPartitionLogf(t)}); err != nil {
 				t.Fatal(err)
 			}
 			if result := AuditSchema(ctx); result.Diff.HasDifferences() {

@@ -34,20 +34,20 @@ func contractPartitionTestId(at time.Time) string {
 	return server.ContractIdFloor(at).String()
 }
 
-// The weekly partition the maintenance task creates for weekStart.
-func contractPartitionTestWeekly(table string, weekStart time.Time) contractPartitionTestPartition {
+// The daily partition the maintenance task creates for dayStart.
+func contractPartitionTestDaily(table string, dayStart time.Time) contractPartitionTestPartition {
 	return contractPartitionTestPartition{
-		name: server.ContractPartitionName(table, weekStart),
+		name: server.ContractPartitionName(table, dayStart),
 		bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')",
-			contractPartitionTestId(weekStart), contractPartitionTestId(weekStart.Add(contractPartitionWeek))),
+			contractPartitionTestId(dayStart), contractPartitionTestId(dayStart.Add(contractPartitionDay))),
 	}
 }
 
-// The legacy partition of a cutover at cutoverWeek.
-func contractPartitionTestLegacy(table string, cutoverWeek time.Time) contractPartitionTestPartition {
+// The legacy partition of a cutover at cutoverDay.
+func contractPartitionTestLegacy(table string, cutoverDay time.Time) contractPartitionTestPartition {
 	return contractPartitionTestPartition{
 		name:  server.ContractLegacyPartitionName(table),
-		bound: fmt.Sprintf("FOR VALUES FROM (MINVALUE) TO ('%s')", contractPartitionTestId(cutoverWeek)),
+		bound: fmt.Sprintf("FOR VALUES FROM (MINVALUE) TO ('%s')", contractPartitionTestId(cutoverDay)),
 	}
 }
 
@@ -66,16 +66,16 @@ func contractPartitionTestPlain() contractPartitionTestSource {
 	return source
 }
 
-// Tables swapped at cutoverWeek with weekly partitions from it through the
-// given number of weeks after the current week.
-func contractPartitionTestPartitioned(cutoverWeek time.Time, aheadWeeks int) contractPartitionTestSource {
+// Tables swapped at cutoverDay with daily partitions from it through the
+// given number of days after the current day.
+func contractPartitionTestPartitioned(cutoverDay time.Time, aheadDays int) contractPartitionTestSource {
 	source := contractPartitionTestPlain()
-	currentWeek := server.ContractPartitionWeekStart(source.now)
+	currentDay := server.ContractPartitionDayStart(source.now)
 	for _, table := range server.ContractPartitionTables {
 		source.kinds[table] = "p"
-		source.partitions[table] = append(source.partitions[table], contractPartitionTestLegacy(table, cutoverWeek))
-		for week := cutoverWeek; !week.After(currentWeek.Add(time.Duration(aheadWeeks) * contractPartitionWeek)); week = week.Add(contractPartitionWeek) {
-			source.partitions[table] = append(source.partitions[table], contractPartitionTestWeekly(table, week))
+		source.partitions[table] = append(source.partitions[table], contractPartitionTestLegacy(table, cutoverDay))
+		for day := cutoverDay; !day.After(currentDay.Add(time.Duration(aheadDays) * contractPartitionDay)); day = day.Add(contractPartitionDay) {
+			source.partitions[table] = append(source.partitions[table], contractPartitionTestDaily(table, day))
 		}
 	}
 	return source
@@ -125,63 +125,71 @@ func contractPartitionTestRun(t *testing.T, signal Signal, source contractPartit
 }
 
 // Bounds parse into id ranges; names count as the scheme's only with their
-// own bounds.
+// own bounds. A week-long partition under its weekly name, the scheme before
+// 2026-11-17, is judged by its bounds and is not the scheme's.
 func TestContractPartitionRangeParsing(t *testing.T) {
+	day := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	daily := contractPartitionTestDaily("transfer_contract", day)
+	legacy := contractPartitionTestLegacy("transfer_contract", day)
 	week := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
-	weekly := contractPartitionTestWeekly("transfer_contract", week)
-	legacy := contractPartitionTestLegacy("transfer_contract", week)
 	for _, test := range []struct {
 		name, partition, bound string
 		ok, scheme             bool
 		covers                 []time.Time
 		misses                 []time.Time
 	}{
-		{name: "weekly", partition: weekly.name, bound: weekly.bound, ok: true, scheme: true, covers: []time.Time{week}, misses: []time.Time{week.Add(-contractPartitionWeek), week.Add(contractPartitionWeek)}},
-		{name: "legacy", partition: legacy.name, bound: legacy.bound, ok: true, scheme: true, covers: []time.Time{week.Add(-contractPartitionWeek), week.Add(-52 * contractPartitionWeek)}, misses: []time.Time{week}},
-		{name: "weekly named for another week", partition: server.ContractPartitionName("transfer_contract", week.Add(contractPartitionWeek)), bound: weekly.bound, ok: true, covers: []time.Time{week}},
-		{name: "another table's name", partition: server.ContractPartitionName("transfer_escrow", week), bound: weekly.bound, ok: true, covers: []time.Time{week}},
-		{name: "open above", partition: "transfer_contract_rest", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO (MAXVALUE)", contractPartitionTestId(week)), ok: true, covers: []time.Time{week, week.Add(520 * contractPartitionWeek)}, misses: []time.Time{week.Add(-contractPartitionWeek)}},
-		{name: "default", partition: "transfer_contract_default", bound: "DEFAULT", ok: true, covers: []time.Time{week}},
-		{name: "two weeks", partition: "transfer_contract_pair", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(week), contractPartitionTestId(week.Add(2*contractPartitionWeek))), ok: true, covers: []time.Time{week, week.Add(contractPartitionWeek)}},
-		{name: "partial week", partition: "transfer_contract_part", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(week), contractPartitionTestId(week.Add(contractPartitionWeek-time.Millisecond))), ok: true, misses: []time.Time{week}},
-		{name: "reversed", partition: weekly.name, bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(week.Add(contractPartitionWeek)), contractPartitionTestId(week))},
-		{name: "list bound", partition: weekly.name, bound: "FOR VALUES IN ('a')"},
-		{name: "not a uuid", partition: weekly.name, bound: "FOR VALUES FROM ('xyz') TO ('abc')"},
-		{name: "empty", partition: weekly.name, bound: ""},
+		{name: "daily", partition: daily.name, bound: daily.bound, ok: true, scheme: true, covers: []time.Time{day}, misses: []time.Time{day.Add(-contractPartitionDay), day.Add(contractPartitionDay)}},
+		{name: "legacy", partition: legacy.name, bound: legacy.bound, ok: true, scheme: true, covers: []time.Time{day.Add(-contractPartitionDay), day.Add(-365 * contractPartitionDay)}, misses: []time.Time{day}},
+		{name: "daily named for another day", partition: server.ContractPartitionName("transfer_contract", day.Add(contractPartitionDay)), bound: daily.bound, ok: true, covers: []time.Time{day}},
+		{name: "another table's name", partition: server.ContractPartitionName("transfer_escrow", day), bound: daily.bound, ok: true, covers: []time.Time{day}},
+		{name: "a week under the weekly name", partition: "transfer_contract_w20261026", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(week), contractPartitionTestId(week.Add(7*contractPartitionDay))), ok: true, covers: []time.Time{week, day, week.Add(6 * contractPartitionDay)}, misses: []time.Time{week.Add(-contractPartitionDay), week.Add(7 * contractPartitionDay)}},
+		{name: "open above", partition: "transfer_contract_rest", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO (MAXVALUE)", contractPartitionTestId(day)), ok: true, covers: []time.Time{day, day.Add(3650 * contractPartitionDay)}, misses: []time.Time{day.Add(-contractPartitionDay)}},
+		{name: "default", partition: "transfer_contract_default", bound: "DEFAULT", ok: true, covers: []time.Time{day}},
+		{name: "two days", partition: "transfer_contract_pair", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(day), contractPartitionTestId(day.Add(2*contractPartitionDay))), ok: true, covers: []time.Time{day, day.Add(contractPartitionDay)}},
+		{name: "partial day", partition: "transfer_contract_part", bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(day), contractPartitionTestId(day.Add(contractPartitionDay-time.Millisecond))), ok: true, misses: []time.Time{day}},
+		{name: "reversed", partition: daily.name, bound: fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(day.Add(contractPartitionDay)), contractPartitionTestId(day))},
+		{name: "list bound", partition: daily.name, bound: "FOR VALUES IN ('a')"},
+		{name: "not a uuid", partition: daily.name, bound: "FOR VALUES FROM ('xyz') TO ('abc')"},
+		{name: "empty", partition: daily.name, bound: ""},
 	} {
 		partition, ok := parseContractPartitionRange("transfer_contract", test.partition, test.bound)
 		if ok != test.ok || ok && partition.scheme != test.scheme {
 			t.Fatalf("%s: ok=%t scheme=%t, want ok=%t scheme=%t", test.name, ok, partition.scheme, test.ok, test.scheme)
 		}
 		for _, at := range test.covers {
-			if !partition.coversWeek(at) {
-				t.Fatalf("%s does not cover the week of %s", test.name, at.Format(time.DateOnly))
+			if !partition.coversDay(at) {
+				t.Fatalf("%s does not cover the day of %s", test.name, at.Format(time.DateOnly))
 			}
 		}
 		for _, at := range test.misses {
-			if partition.coversWeek(at) {
-				t.Fatalf("%s covers the week of %s", test.name, at.Format(time.DateOnly))
+			if partition.coversDay(at) {
+				t.Fatalf("%s covers the day of %s", test.name, at.Format(time.DateOnly))
 			}
 		}
+	}
+	weekly, ok := parseContractPartitionRange("transfer_contract", "transfer_contract_w20261026", fmt.Sprintf("FOR VALUES FROM ('%s') TO ('%s')", contractPartitionTestId(week), contractPartitionTestId(week.Add(7*contractPartitionDay))))
+	if !ok || weekly.label("transfer_contract") != "unnamed-partition-of-transfer_contract" {
+		t.Fatal("a weekly partition name was rendered as the scheme's")
 	}
 	if label := (contractPartitionRange{name: "Private Source Canary"}).label("transfer_contract"); label != "unnamed-partition-of-transfer_contract" {
 		t.Fatal("an unscheme partition name was rendered")
 	}
 }
 
-// The prepared bound check names its week in its uuid.
-func TestContractPartitionLegacyBoundWeek(t *testing.T) {
-	week := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+// The prepared bound check names its day in its uuid; any day may be the
+// cutover day, a Wednesday here.
+func TestContractPartitionLegacyBoundDay(t *testing.T) {
+	day := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
 	for _, definition := range []string{
-		fmt.Sprintf("CHECK ((contract_id < '%s'::uuid))", contractPartitionTestId(week)),
-		fmt.Sprintf("CHECK ((contract_id < '%s'::uuid)) NOT VALID", contractPartitionTestId(week)),
+		fmt.Sprintf("CHECK ((contract_id < '%s'::uuid))", contractPartitionTestId(day)),
+		fmt.Sprintf("CHECK ((contract_id < '%s'::uuid)) NOT VALID", contractPartitionTestId(day)),
 	} {
-		if parsed, ok := parseContractLegacyBoundWeek(definition); !ok || !parsed.Equal(week) {
+		if parsed, ok := parseContractLegacyBoundDay(definition); !ok || !parsed.Equal(day) {
 			t.Fatalf("bound %q read as %s %t", definition, parsed, ok)
 		}
 	}
 	for _, definition := range []string{"", "CHECK ((contract_id > '00000000-0000-0000-0000-000000000000'::uuid))", "CHECK ((outcome IS NOT NULL))"} {
-		if _, ok := parseContractLegacyBoundWeek(definition); ok {
+		if _, ok := parseContractLegacyBoundDay(definition); ok {
 			t.Fatalf("unexpected bound %q parsed", definition)
 		}
 	}
@@ -189,7 +197,7 @@ func TestContractPartitionLegacyBoundWeek(t *testing.T) {
 
 // Every frame defect leaves all three signals unknown, never healthy.
 func TestContractPartitionFramesStayUnknown(t *testing.T) {
-	currentWeek := server.ContractPartitionWeekStart(syntheticSettings(nil).Now())
+	currentDay := server.ContractPartitionDayStart(syntheticSettings(nil).Now())
 	for _, test := range []struct {
 		name   string
 		mutate func(*contractPartitionTestSource)
@@ -248,7 +256,7 @@ func TestContractPartitionFramesStayUnknown(t *testing.T) {
 			s.mutate = func(rows []Row) []Row { rows[8][1] = "private-source-canary"; return rows }
 		}, reason: "invalid-partition-row"},
 	} {
-		source := contractPartitionTestPartitioned(currentWeek, 4)
+		source := contractPartitionTestPartitioned(currentDay, server.ContractPartitionAheadDays)
 		test.mutate(&source)
 		for _, signal := range []Signal{NewContractPartitionRunwaySignal(), NewContractPartitionRetentionBlockedSignal(), NewContractPartitionCutoverPendingSignal()} {
 			alerts := contractPartitionTestRun(t, signal, source)
@@ -264,7 +272,7 @@ func TestContractPartitionFramesStayUnknown(t *testing.T) {
 	// over-cap census
 	settings := DefaultContractPartitionRunwaySettings()
 	settings.Catalog.MaxPartitions = 10
-	source := contractPartitionTestPartitioned(currentWeek, 4)
+	source := contractPartitionTestPartitioned(currentDay, server.ContractPartitionAheadDays)
 	alerts, err := NewContractPartitionRunwaySignalWithSettings(settings).Run(context.Background(), syntheticSettings(&syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		if !strings.Contains(query, "LIMIT 11") {
 			t.Fatal("the census bound did not reach the read")

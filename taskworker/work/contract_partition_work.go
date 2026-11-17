@@ -18,8 +18,8 @@ import (
 // goes at the contract horizon, read from the horizon reaper's control once
 // per run (model.WithContractHorizonControl), at the pace of its own brake,
 // read before every batch (server.RemoveExpiredCloseEvidence). The contract
-// weeks retire at the same horizon (S1, server.ContractWeekRetention): a week
-// the reaper has emptied is compacted down to the rows the reaper keeps and
+// days retire at the same horizon (S1, server.ContractDayRetention): a day the
+// reaper has emptied is compacted down to the rows the reaper keeps and
 // dropped once it holds none.
 
 type MaintainContractPartitionsArgs struct {
@@ -63,7 +63,7 @@ func MaintainContractPartitions(
 	)
 	if 0 < len(report.Created) || 0 < len(report.Compacted) || 0 < len(report.Dropped) || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, compacted %v, dropped %v, rows kept by week %v, removed %d close evidence rows at a retention of %s (stop %s), abandoned cutover %t, abandoned close evidence cutover %t\n",
+			"[cp]created %v, compacted %v, dropped %v, rows kept by day %v, removed %d close evidence rows at a retention of %s (stop %s), abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Compacted,
 			report.Dropped,
@@ -78,8 +78,8 @@ func MaintainContractPartitions(
 	for partition, reason := range report.Blocked {
 		glog.V(1).Infof("[cp]expired %s stays: %s\n", partition, reason)
 	}
-	if report.Partitioned && report.FutureWeeks < 2 {
-		glog.Errorf("[cp]only %d future contract partition week(s) exist\n", report.FutureWeeks)
+	if report.Partitioned && report.FutureDays < 2 {
+		glog.Errorf("[cp]only %d future contract partition day(s) exist\n", report.FutureDays)
 	}
 	return &MaintainContractPartitionsResult{
 		Cursor: cursor,

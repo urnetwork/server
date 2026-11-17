@@ -125,6 +125,10 @@ func DefaultCloseEvidencePartitionSettings() *CloseEvidencePartitionSettings {
 	}
 }
 
+// Weeks after the current one whose close evidence partitions always exist.
+// The evidence keeps its weeks; the contract tables are daily since 2026-11-17.
+const closeEvidenceAheadWeeks = 4
+
 // The partition registry's family of the close evidence (see the file
 // comment). Registered from init, since its hooks refer back to it.
 var closeEvidencePartitionFamily *PartitionFamily
@@ -142,7 +146,7 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		KeyColumn:   "report_id",
 		KeyKind:     PartitionKeyId,
 		Granularity: PartitionGranularityWeekly,
-		AheadRanges: ContractPartitionAheadWeeks,
+		AheadRanges: closeEvidenceAheadWeeks,
 		// the longest retention, which the monitor judges blocked weeks by;
 		// a week expires at the contract horizon (closeEvidenceRangeExpired)
 		Retention: ContractRetention,

@@ -107,8 +107,9 @@ func TestMigrationsUsageArchivePartitionedCatalog(t *testing.T) {
 			t.Fatal("the archive's partition or custody contract reads absent at the head")
 		}
 
-		week := server.ContractPartitionWeekStart(server.NowUtc())
-		leaf := server.ContractPartitionName("st_provider_usage_archive", week)
+		// the archive keeps its weeks; the contract tables are daily
+		archive := server.GetPartitionFamily("st_provider_usage_archive")
+		leaf := archive.LeafName("st_provider_usage_archive", archive.RangeAt(server.NowUtc()))
 		for _, fault := range []struct {
 			name     string
 			sql      string

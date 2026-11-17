@@ -29,7 +29,7 @@ func TestCloseEvidencePartitionFamilyDeclaration(t *testing.T) {
 		family.KeyKind != PartitionKeyId || family.Granularity != PartitionGranularityWeekly {
 		t.Fatalf("family shape %+v", family)
 	}
-	if family.Retention != 91*24*time.Hour || family.AheadRanges != ContractPartitionAheadWeeks {
+	if family.Retention != 91*24*time.Hour || family.AheadRanges != closeEvidenceAheadWeeks {
 		t.Fatalf("retention %s, ahead %d", family.Retention, family.AheadRanges)
 	}
 	if !family.DefaultPartition || !family.KeepLegacyPartition || !family.ReindexExempt ||

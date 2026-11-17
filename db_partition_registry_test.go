@@ -72,10 +72,10 @@ func TestPartitionGranularityCanonicalBounds(t *testing.T) {
 			t.Errorf("%s range of %s is %+v", test.granularity, test.at, r)
 		}
 	}
-	// the weekly ranges are the contract weeks
+	// the daily ranges are the contract days
 	for at := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC); at.Before(time.Date(2027, 2, 1, 0, 0, 0, 0, time.UTC)); at = at.Add(7 * time.Hour) {
-		if !PartitionGranularityWeekly.RangeStart(at).Equal(ContractPartitionWeekStart(at)) {
-			t.Fatalf("weekly range of %s differs from its contract week", at)
+		if !PartitionGranularityDaily.RangeStart(at).Equal(ContractPartitionDayStart(at)) {
+			t.Fatalf("daily range of %s differs from its contract day", at)
 		}
 	}
 	if got := PartitionGranularityWeekly.AddRanges(time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC), -2); !got.Equal(time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)) {
@@ -98,8 +98,8 @@ func TestPartitionLeafNames(t *testing.T) {
 		t.Errorf("weekly leaves %v", names)
 	}
 	// the contract partitions keep their names
-	if name := weekly.LeafName("transfer_contract", week); name != ContractPartitionName("transfer_contract", week.Lower) {
-		t.Errorf("weekly leaf %s is not the contract partition's name", name)
+	if name := daily.LeafName("transfer_contract", day); name != ContractPartitionName("transfer_contract", day.Lower) {
+		t.Errorf("daily leaf %s is not the contract partition's name", name)
 	}
 	if name := weekly.LeafName("transfer_contract", PartitionRange{Legacy: true}); name != ContractLegacyPartitionName("transfer_contract") {
 		t.Errorf("legacy leaf %s", name)
@@ -529,8 +529,8 @@ func TestPartitionRegistryReindexExemption(t *testing.T) {
 	if contract := GetPartitionFamily("contract"); contract == nil || !contract.ReindexExempt || !slices.Equal(contract.Tables, ContractPartitionTables) {
 		t.Fatalf("the contract family is not registered as declared: %+v", contract)
 	}
-	if !PartitionRegistryReindexExempt(ContractPartitionName("transfer_escrow", time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)), false) {
-		t.Error("a contract week left the exemption")
+	if !PartitionRegistryReindexExempt(ContractPartitionName("transfer_escrow", time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)), false) {
+		t.Error("a contract day left the exemption")
 	}
 	if PartitionRegistryReindexExempt("contract_close_report", false) {
 		t.Error("a plain contract table left the rotation before its cutover")

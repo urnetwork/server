@@ -70,7 +70,7 @@ const contractIndexMigrationLockRetryWait = 5 * time.Second
 
 // The name of the leaf a migration builds on a partition: the legacy
 // partition's leaves carry the published name and the legacy suffix, as the
-// cutover leaves them, and a weekly partition's leaf takes the partition's
+// cutover leaves them, and a daily partition's leaf takes the partition's
 // name in place of the table's. A name longer than PostgreSQL keeps ends in a
 // hash of the whole name instead, so it stays unique and is never truncated
 // by the server.

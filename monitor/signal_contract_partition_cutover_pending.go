@@ -1,7 +1,7 @@
 // SIGNALS.md §2.4j (contract-partition-cutover-pending): a prepared contract
 // partition cutover adds a CHECK that refuses contract ids from its cutover
-// week on, so it must be finalized, or abandoned, before that week starts.
-// Warns while a prepared, unfinalized cutover's week is less than a day away.
+// day on, so it must be finalized, or abandoned, before that day starts.
+// Warns while a prepared, unfinalized cutover's day is less than a day away.
 package monitor
 
 import (
@@ -29,10 +29,10 @@ func NewContractPartitionCutoverPendingSignalWithSettings(settings *ContractPart
 type ContractPartitionCutoverSettings struct {
 	Catalog ContractPartitionCatalogSettings
 	Cadence time.Duration
-	// Warn when the prepared cutover week starts within this.
+	// Warn when the prepared cutover day starts within this.
 	Window time.Duration
 	// The maintenance task abandons a prepared cutover this long before its
-	// week (the server's contractCutoverAbandonMargin, 6 hours).
+	// day (the server's contractCutoverAbandonMargin, 6 hours).
 	AbandonMargin time.Duration
 	Sustain       int
 }
@@ -80,9 +80,9 @@ func (self contractPartitionCutoverProbe) check(ctx context.Context, env *probeE
 		// Finalized: the bound moved to the legacy partitions with the swap.
 		return healthy, nil
 	}
-	var cutoverWeek time.Time
+	var cutoverDay time.Time
 	bounded, staged := []string{}, []string{}
-	distinctWeeks := map[time.Time]bool{}
+	distinctDays := map[time.Time]bool{}
 	for _, table := range catalog.tables {
 		if table.stagedKind != "" {
 			staged = append(staged, table.name)
@@ -90,30 +90,30 @@ func (self contractPartitionCutoverProbe) check(ctx context.Context, env *probeE
 		if table.legacyBound == "" {
 			continue
 		}
-		week, ok := parseContractLegacyBoundWeek(table.legacyBound)
+		day, ok := parseContractLegacyBoundDay(table.legacyBound)
 		if !ok {
 			return []finding{self.unknown(target, "invalid-legacy-bound", nil)}, nil
 		}
 		bounded = append(bounded, table.name)
-		distinctWeeks[week] = true
-		if cutoverWeek.IsZero() || week.Before(cutoverWeek) {
-			cutoverWeek = week
+		distinctDays[day] = true
+		if cutoverDay.IsZero() || day.Before(cutoverDay) {
+			cutoverDay = day
 		}
 	}
-	// A staged parent alone refuses nothing; only a bound check has a week.
-	if cutoverWeek.IsZero() {
+	// A staged parent alone refuses nothing; only a bound check has a day.
+	if cutoverDay.IsZero() {
 		return healthy, nil
 	}
-	untilCutover := cutoverWeek.Sub(catalog.observed)
+	untilCutover := cutoverDay.Sub(catalog.observed)
 	if settings.Window <= untilCutover {
 		return healthy, nil
 	}
 	untilAbandon := untilCutover - settings.AbandonMargin
-	symptom := fmt.Sprintf("A contract partition cutover is prepared and not finalized, and its week starts in %.1f hours", untilCutover.Hours())
-	contextDetail := fmt.Sprintf("The maintenance task abandons a prepared cutover %.0f hours before its week (drops the staged parents and the bound checks); %.1f hours remain until then.", settings.AbandonMargin.Hours(), untilAbandon.Hours())
+	symptom := fmt.Sprintf("A contract partition cutover is prepared and not finalized, and its day starts in %.1f hours", untilCutover.Hours())
+	contextDetail := fmt.Sprintf("The maintenance task abandons a prepared cutover %.0f hours before its day (drops the staged parents and the bound checks); %.1f hours remain until then.", settings.AbandonMargin.Hours(), untilAbandon.Hours())
 	switch {
 	case untilCutover <= 0:
-		symptom = fmt.Sprintf("A prepared contract partition cutover's week started %.1f hours ago and its bound check still refuses every contract id of that week", -untilCutover.Hours())
+		symptom = fmt.Sprintf("A prepared contract partition cutover's day started %.1f hours ago and its bound check still refuses every contract id from that day", -untilCutover.Hours())
 		contextDetail = "The abandonment margin has passed: the maintenance task is not running or its abandon failed, and new contracts are refused now. Contract creation (§1.1) shows the outage."
 	case untilAbandon <= 0:
 		contextDetail = fmt.Sprintf("The abandonment margin passed %.1f hours ago without the task abandoning the cutover: check that maintain_contract_partitions runs.", -untilAbandon.Hours())
@@ -122,13 +122,13 @@ func (self contractPartitionCutoverProbe) check(ctx context.Context, env *probeE
 		{
 			probeId: contractPartitionCutoverProbeId, tier: tierWarn, class: "contract-partition-cutover-pending", target: target, sustain: settings.Sustain,
 			symptom:   symptom,
-			mechanism: "Preparing the cutover (bringyourctl model migrate contract-partition) stages the partitioned parents <table>_p and adds the check <table>_legacy_bound, contract_id < contract_id_floor(C), to each contract table. The check refuses every contract id of the cutover week C onward, so the swap (--finalize) must complete before C; until then the tables stay plain.",
-			baseline:  fmt.Sprintf("No prepared cutover is unfinalized within %.0f hours of its week.", settings.Window.Hours()),
-			observed: fmt.Sprintf("cutover_week=%s hours_until_cutover=%.1f hours_until_abandon=%.1f bounded_tables=[%s] staged_parents=[%s] distinct_bound_weeks=%d",
-				cutoverWeek.Format(time.DateOnly), untilCutover.Hours(), untilAbandon.Hours(), strings.Join(bounded, " "), strings.Join(staged, " "), len(distinctWeeks)),
-			evidence: "One primary-guarded read-only catalog query of the contract tables' kinds, their staged parents and the <table>_legacy_bound check definitions; the cutover week is the bound's contract id, whose first six bytes are its Unix millisecond.",
+			mechanism: "Preparing the cutover (bringyourctl model migrate contract-partition) stages the partitioned parents <table>_p and adds the check <table>_legacy_bound, contract_id < contract_id_floor(C), to each contract table. The check refuses every contract id from the cutover day C on, so the swap (--finalize) must complete before C; until then the tables stay plain.",
+			baseline:  fmt.Sprintf("No prepared cutover is unfinalized within %.0f hours of its day.", settings.Window.Hours()),
+			observed: fmt.Sprintf("cutover_day=%s hours_until_cutover=%.1f hours_until_abandon=%.1f bounded_tables=[%s] staged_parents=[%s] distinct_bound_days=%d",
+				cutoverDay.Format(time.DateOnly), untilCutover.Hours(), untilAbandon.Hours(), strings.Join(bounded, " "), strings.Join(staged, " "), len(distinctDays)),
+			evidence: "One primary-guarded read-only catalog query of the contract tables' kinds, their staged parents and the <table>_legacy_bound check definitions; the cutover day is the bound's contract id, whose first six bytes are its Unix millisecond.",
 			context:  contextDetail,
-			action:   "The owner decides now: run --finalize (it refuses within 10 minutes of the week), or abort with --abort and prepare a later week. Do not drop the bound checks or the staged parents by hand.",
+			action:   "The owner decides now: run --finalize (it refuses within 10 minutes of the day), or abort with --abort and prepare a later day. Do not drop the bound checks or the staged parents by hand.",
 			verify:   "The tables are partitioned (finalized) or the bound checks and staged parents are gone (aborted), on a complete observation.",
 			playbook: "SIGNALS.md §2.4j",
 		},
@@ -144,7 +144,7 @@ func (self contractPartitionCutoverProbe) unknown(target, reason string, err err
 	return finding{
 		probeId: contractPartitionCutoverProbeId, tier: tierWarn, class: "contract-partition-cutover-unobservable", target: target, sustain: 2,
 		symptom:   "Whether a contract partition cutover is pending is unknown",
-		mechanism: "The primary inventory, its hostname and role guard, the bounded catalog read, its fixed framing or a prepared bound check could not be established, so a prepared cutover and its week are unknown.",
+		mechanism: "The primary inventory, its hostname and role guard, the bounded catalog read, its fixed framing or a prepared bound check could not be established, so a prepared cutover and its day are unknown.",
 		baseline:  "One configured primary answers the guarded catalog read with a complete frame and parseable bound checks.",
 		observed:  observed,
 		evidence:  "Only fixed reasons, counts and error classes are retained; SQL errors, relation contents and credentials stay private.",

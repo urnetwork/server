@@ -87,7 +87,7 @@ func TestStatsLandmineNativePartitionTargets(t *testing.T) {
 		if alerts := run(); len(alerts) != 0 {
 			t.Fatalf("the partitioned table alerted: %s", alerts.Markdown())
 		}
-		leaf := server.ContractPartitionName("transfer_contract", server.ContractPartitionWeekStart(server.NowUtc()).Add(14*24*time.Hour))
+		leaf := server.ContractPartitionName("transfer_contract", server.ContractPartitionDayStart(server.NowUtc()).Add(2*24*time.Hour))
 		contractPartitionNativeExec(t, ctx, "ALTER TABLE public."+leaf+" ALTER COLUMN open SET STATISTICS 100")
 		if row := read(); row[5] != "1" || row[6] != leaf+"=100" {
 			t.Fatalf("a leaf target change was not read: %v", row)
@@ -152,7 +152,7 @@ func TestVacuumHealthNativeGroupsContractPartitions(t *testing.T) {
 			}
 			server.Testing_PartitionContracts(ctx)
 		}
-		// ids of the current millisecond land in the current week's partition;
+		// ids of the current millisecond land in the current day's partition;
 		// a plain table's dead tuples stay with it as the legacy partition
 		churn()
 		var leaves string

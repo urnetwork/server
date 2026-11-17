@@ -2400,7 +2400,7 @@ func companionOriginExists(
 		// the origin direction is reversed
 		server.Raise(conn.QueryRow(
 			ctx,
-			unexpiredContractWeeksAt(server.NowUtc()).render(existsSql),
+			unexpiredContractDaysAt(server.NowUtc()).render(existsSql),
 			destinationId,
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
@@ -2488,8 +2488,8 @@ func createCompanionTransferEscrow(
 		// A payer handoff must re-read the current origin, without retaining
 		// the previous selection's clamp or payer.
 		companionContractId, proberReservationByteCount, inheritedPayer = nil, nil, nil
-		// the selection's unexpired contract weeks
-		weeks := unexpiredContractWeeksAt(server.NowUtc())
+		// the selection's unexpired contract days
+		days := unexpiredContractDaysAt(server.NowUtc())
 		// find the earliest open transfer contract in the opposite direction
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
@@ -2504,7 +2504,7 @@ func createCompanionTransferEscrow(
 		if lingerReads {
 			result, err = conn.Query(
 				ctx,
-				weeks.render(`
+				days.render(`
                 SELECT contract_id,
                     CASE WHEN transfer_byte_count >= $5::bigint THEN NULL
                     WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2579,7 +2579,7 @@ func createCompanionTransferEscrow(
 		} else {
 			result, err = conn.Query(
 				ctx,
-				weeks.render(legacyCompanionPlainOriginSql),
+				days.render(legacyCompanionPlainOriginSql),
 				// note the origin direction is reversed
 				destinationId,
 				sourceId,
@@ -2620,7 +2620,7 @@ func createCompanionTransferEscrow(
 			if lingerReads {
 				result, err = conn.Query(
 					ctx,
-					weeks.render(`
+					days.render(`
                     SELECT contract_id,
                         CASE WHEN transfer_byte_count >= $7::bigint THEN NULL
                         WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2704,7 +2704,7 @@ func createCompanionTransferEscrow(
 			} else {
 				result, err = conn.Query(
 					ctx,
-					weeks.render(legacyCompanionChainedOriginSql),
+					days.render(legacyCompanionChainedOriginSql),
 					destinationId,
 					sourceId,
 					server.NowUtc().Add(-originContractTimeout),
@@ -2827,7 +2827,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			unexpiredContractWeeksAt(server.NowUtc()).render(`
+			unexpiredContractDaysAt(server.NowUtc()).render(`
                 SELECT
 
                     transfer_contract.contract_id,

@@ -28,25 +28,25 @@ func testContractIndexAttachedLeaf(t testing.TB, ctx context.Context, parentInde
 	)
 }
 
-// The leaf names: the legacy leaf takes the cutover's suffix, a weekly leaf
+// The leaf names: the legacy leaf takes the cutover's suffix, a daily leaf
 // the partition's name, and a name PostgreSQL would truncate ends in a hash
 // instead.
 func TestContractIndexMigrationLeafNames(t *testing.T) {
-	week := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	day := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
 	migration := newContractIndexMigration("transfer_contract", "transfer_contract_close_day", "(close_time)").contractIndex
 	connect.AssertEqual(t, migration.leafName(ContractLegacyPartitionName("transfer_contract")), "transfer_contract_close_day_l")
-	connect.AssertEqual(t, migration.leafName(ContractPartitionName("transfer_contract", week)), "transfer_contract_w20261026_close_day")
+	connect.AssertEqual(t, migration.leafName(ContractPartitionName("transfer_contract", day)), "transfer_contract_p20261027_close_day")
 
 	unprefixed := newContractIndexMigration("contract_extender", "extender_lookup", "(extender_id)").contractIndex
-	connect.AssertEqual(t, unprefixed.leafName(ContractPartitionName("contract_extender", week)), "contract_extender_w20261026_extender_lookup")
+	connect.AssertEqual(t, unprefixed.leafName(ContractPartitionName("contract_extender", day)), "contract_extender_p20261027_extender_lookup")
 
 	long := newContractIndexMigration("transfer_escrow_sweep", "transfer_escrow_sweep_network_id_payment_id_payout_byte_count", "(network_id)").contractIndex
-	for _, partition := range []string{ContractLegacyPartitionName("transfer_escrow_sweep"), ContractPartitionName("transfer_escrow_sweep", week)} {
+	for _, partition := range []string{ContractLegacyPartitionName("transfer_escrow_sweep"), ContractPartitionName("transfer_escrow_sweep", day)} {
 		name := long.leafName(partition)
 		connect.AssertEqual(t, len(name) <= pgMaxIdentifierLength, true)
 		connect.AssertEqual(t, name, long.leafName(partition))
 	}
-	connect.AssertEqual(t, long.leafName(ContractPartitionName("transfer_escrow_sweep", week)) != long.leafName(ContractPartitionName("transfer_escrow_sweep", week.Add(contractPartitionWeek))), true)
+	connect.AssertEqual(t, long.leafName(ContractPartitionName("transfer_escrow_sweep", day)) != long.leafName(ContractPartitionName("transfer_escrow_sweep", day.AddDate(0, 0, 1))), true)
 
 	// only the contract tables take this migration
 	connect.AssertEqual(t, HandleError(func() {
@@ -73,9 +73,9 @@ func TestContractIndexMigrationBuildsInEitherLayout(t *testing.T) {
 		migration := newContractIndexMigration(table, index, shape)
 		connect.AssertEqual(t, migration.sql, "CREATE INDEX CONCURRENTLY IF NOT EXISTS "+index+" ON "+table+" "+shape)
 		connect.AssertEqual(t, migration.auditSql, "CREATE INDEX IF NOT EXISTS "+index+" ON "+table+" "+shape)
-		// a contract from before the current week, which is where the test
+		// a contract from before the current day, which is where the test
 		// cutover puts its legacy bound
-		testInsertContractRows(t, ctx, testContractIdAt(ContractPartitionWeekStart(NowUtc()).Add(-time.Hour)), true)
+		testInsertContractRows(t, ctx, testContractIdAt(ContractPartitionDayStart(NowUtc()).Add(-time.Hour)), true)
 
 		if !IsContractPartitioned(ctx) {
 			testDbMaintenanceInterruptIndexBuild(t, ctx, table, "CREATE INDEX CONCURRENTLY "+index+" ON "+table+" "+shape)
@@ -138,11 +138,11 @@ func TestContractIndexMigrationBuildsInEitherLayout(t *testing.T) {
 		connect.AssertEqual(t, testExecuteOnlineMigration(ctx, migration), nil)
 		connect.AssertEqual(t, testDbMaintenanceIndexOid(ctx, legacyLeaf), before)
 
-		// a week created later builds its own leaf when it is attached
-		lastWeek := partitions[len(partitions)-1].weekStart
-		created, _, err := ensureContractWeekPartitions(ctx, lastWeek.Add(contractPartitionWeek))
+		// a day created later builds its own leaf when it is attached
+		lastDay := partitions[len(partitions)-1].dayStart
+		created, _, err := ensureContractDayPartitions(ctx, lastDay.AddDate(0, 0, 1))
 		connect.AssertEqual(t, err, nil)
-		next := ContractPartitionName(table, lastWeek.Add(contractPartitionWeek))
+		next := ContractPartitionName(table, lastDay.AddDate(0, 0, 1))
 		found := false
 		for _, name := range created {
 			if name == next {

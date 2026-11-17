@@ -26,8 +26,8 @@ const contractIdFloorSql = `
 	`
 
 // The contract tables, partitioned together by contract_id with the same
-// weekly bounds: transfer_contract first, then the tables keyed by its contract
-// id. A week's partitions are dropped together, children first.
+// daily bounds: transfer_contract first, then the tables keyed by its contract
+// id. A day's partitions are dropped together, children first.
 var ContractPartitionTables = []string{
 	"transfer_contract",
 	"transfer_escrow",
@@ -37,37 +37,48 @@ var ContractPartitionTables = []string{
 	"contract_extender",
 }
 
-// The retention horizon (owner decision 2026-10-23): a week's partitions are
-// dropped once the week ended longer ago than this and it holds nothing that
-// must stay. Close evidence keeps at most the same 91 days, and as little as
-// the contract horizon (CloseEvidenceRetention).
+// The retention horizon (owner decision 2026-10-23): the longest a day's
+// partitions are kept past its end, the retention with the contract horizon
+// reaper's mode off (ContractDayRetention). Close evidence keeps at most the
+// same 91 days, and as little as the contract horizon (CloseEvidenceRetention).
 const ContractRetention = 13 * 7 * 24 * time.Hour
 
-// Weeks after the current one that always have partitions. An insert past the
-// last partition fails, so the monitor alerts when fewer than 2 exist.
-const ContractPartitionAheadWeeks = 4
+// The contract partitions divide contract ids by the UTC day of their creation
+// millisecond, 00:00 to 00:00 (owner decision 2026-11-17, replacing the weeks
+// of 2026-10-23): a day's six partitions retire together, so at most a day of
+// contracts waits past the reaper's horizon for its partitions to go, where a
+// week's waited up to seven.
+const ContractPartitionGranularity = PartitionGranularityDaily
 
-const contractPartitionWeek = 7 * 24 * time.Hour
+// Days after the current one that always have partitions. An insert past the
+// last partition fails, so the monitor pages when fewer than 2 exist (SIGNALS.md
+// §2.4h), which leaves a day or two to repair the maintenance task before
+// contract creation stops. A read without a contract id bound plans and locks
+// every partition with its indexes, so each day more ahead costs every such
+// read of transfer_contract 15 more locks (its leaf and the leaf's 14 indexes,
+// as on Main 2026-11-17), and the runway is kept to the days the page needs.
+const ContractPartitionAheadDays = 3
 
-// The prepared legacy bound check refuses ids from the cutover week on, so a
-// cutover that is not finalized this long before that week is abandoned
+const contractPartitionDay = 24 * time.Hour
+
+// The prepared legacy bound check refuses ids from the cutover day on, so a
+// cutover that is not finalized this long before that day is abandoned
 // (MaintainContractPartitions) before it can refuse a new contract.
 const contractCutoverAbandonMargin = 6 * time.Hour
 
-// The swap refuses to start this close to the cutover week.
+// The swap refuses to start this close to the cutover day.
 const contractCutoverFinalizeMargin = 10 * time.Minute
 
 // Outcomes whose provider usage the archive keeps, the predicate of
 // ProviderUsageArchiveCaptureFunctionBodySql.
 const contractCreditOutcomesSql = `('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`
 
-var contractPartitionNamePattern = regexp.MustCompile(`^(transfer_contract|transfer_escrow|contract_close|transfer_escrow_sweep|contract_close_report|contract_extender)_(w([0-9]{8})|legacy)$`)
+var contractPartitionNamePattern = regexp.MustCompile(`^(transfer_contract|transfer_escrow|contract_close|transfer_escrow_sweep|contract_close_report|contract_extender)_(p([0-9]{8})|legacy)$`)
 
-// The Monday 00:00 UTC that starts t's week.
-func ContractPartitionWeekStart(t time.Time) time.Time {
-	t = t.UTC()
-	day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
-	return day.AddDate(0, 0, -((int(day.Weekday()) + 6) % 7))
+// 00:00 UTC of t's day, the lower bound of the partition that holds the ids
+// minted at t.
+func ContractPartitionDayStart(t time.Time) time.Time {
+	return ContractPartitionGranularity.RangeStart(t)
 }
 
 // The smallest contract id of t's millisecond, the value of contract_id_floor.
@@ -89,9 +100,10 @@ func ContractIdTime(id Id) time.Time {
 	return time.UnixMilli(int64(ms)).UTC()
 }
 
-// Weekly partitions are named for their Monday: transfer_contract_w20261026.
-func ContractPartitionName(table string, weekStart time.Time) string {
-	return fmt.Sprintf("%s_w%s", table, weekStart.UTC().Format("20060102"))
+// Daily partitions are named for their day, as the partition registry names a
+// daily range (PartitionFamily.LeafName): transfer_contract_p20261221.
+func ContractPartitionName(table string, dayStart time.Time) string {
+	return fmt.Sprintf("%s_%s%s", table, ContractPartitionGranularity.namePrefix(), dayStart.UTC().Format("20060102"))
 }
 
 // The partition that holds every row from before the cutover.
@@ -99,9 +111,9 @@ func ContractLegacyPartitionName(table string) string {
 	return table + "_legacy"
 }
 
-// Parses a contract partition name. A weekly partition has its week start; the
+// Parses a contract partition name. A daily partition has its day's start; the
 // legacy partition has legacy set.
-func ParseContractPartitionName(name string) (table string, weekStart time.Time, legacy bool, ok bool) {
+func ParseContractPartitionName(name string) (table string, dayStart time.Time, legacy bool, ok bool) {
 	groups := contractPartitionNamePattern.FindStringSubmatch(name)
 	if groups == nil {
 		return
@@ -110,11 +122,11 @@ func ParseContractPartitionName(name string) (table string, weekStart time.Time,
 	if groups[2] == "legacy" {
 		return table, time.Time{}, true, true
 	}
-	weekStart, err := time.Parse("20060102", groups[3])
-	if err != nil || !ContractPartitionWeekStart(weekStart).Equal(weekStart) {
+	dayStart, err := time.Parse("20060102", groups[3])
+	if err != nil || !ContractPartitionDayStart(dayStart).Equal(dayStart) {
 		return "", time.Time{}, false, false
 	}
-	return table, weekStart, false, true
+	return table, dayStart, false, true
 }
 
 // While a cutover is prepared, each table has a partitioned parent staged

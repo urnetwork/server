@@ -13,7 +13,7 @@ import (
 )
 
 // Reads the fixture's actual boundary, including when the suite already cut over.
-func testContractPartitionSafetyWeek(t testing.TB, ctx context.Context) time.Time {
+func testContractPartitionSafetyDay(t testing.TB, ctx context.Context) time.Time {
 	Testing_PartitionContracts(ctx)
 	partitions, err := listContractPartitions(ctx, "transfer_contract")
 	if err != nil {
@@ -37,12 +37,12 @@ func testContractPartitionRollbackWriter(t testing.TB, attach bool) {
 		cancel()
 		workers.Wait()
 	}()
-	week := testContractPartitionSafetyWeek(t, ctx)
+	day := testContractPartitionSafetyDay(t, ctx)
 	if attach {
-		week = week.Add(time.Duration(ContractPartitionAheadWeeks+1) * contractPartitionWeek)
+		day = day.AddDate(0, 0, ContractPartitionAheadDays+1)
 	}
-	contractId := testContractIdAt(week.Add(time.Hour))
-	partitionName := ContractPartitionName("transfer_contract", week)
+	contractId := testContractIdAt(day.Add(time.Hour))
+	partitionName := ContractPartitionName("transfer_contract", day)
 	writerReady := make(chan uint32, 1)
 	commitWriter := make(chan struct{})
 	writerDone := make(chan error, 1)
@@ -53,8 +53,8 @@ func testContractPartitionRollbackWriter(t testing.TB, attach bool) {
 			if attach {
 				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
 					"CREATE TABLE public.%s PARTITION OF transfer_contract FOR VALUES FROM (%s) TO (%s)",
-					quoteIdentifier(partitionName), contractIdLiteral(ContractIdFloor(week)),
-					contractIdLiteral(ContractIdFloor(week.Add(contractPartitionWeek))),
+					quoteIdentifier(partitionName), contractIdLiteral(ContractIdFloor(day)),
+					contractIdLiteral(ContractIdFloor(day.AddDate(0, 0, 1))),
 				)))
 			}
 			networkId := NewId()
@@ -139,7 +139,7 @@ func testContractPartitionRollbackWriter(t testing.TB, attach bool) {
 	}
 }
 
-// The first weekly writer is invisible to an unlocked emptiness check.
+// The first daily writer is invisible to an unlocked emptiness check.
 func TestContractPartitionRollbackPreservesConcurrentInsert(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		testContractPartitionRollbackWriter(t, false)
@@ -153,7 +153,7 @@ func TestContractPartitionRollbackRefreshesConcurrentPartition(t *testing.T) {
 	})
 }
 
-// One independently retiring week per payment state prevents one hold from
+// One independently retiring day per payment state prevents one hold from
 // hiding a missing predicate for another payment.
 type testContractPartitionPaymentHold struct {
 	name             string
@@ -166,12 +166,12 @@ type testContractPartitionPaymentHold struct {
 	protected  bool
 	contractId Id
 	paymentId  Id
-	week       PartitionRange
+	day        PartitionRange
 }
 
 // Includes each external-attempt marker and controls that must remain eligible.
 func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]testContractPartitionPaymentHold, time.Time) {
-	week := testContractPartitionSafetyWeek(t, ctx)
+	cutover := testContractPartitionSafetyDay(t, ctx)
 	cases := []testContractPartitionPaymentHold{
 		{name: "pending", protected: true},
 		{name: "canceled idempotency key", canceled: true, marker: "circle_idempotency_key", protected: true},
@@ -189,21 +189,21 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 		{name: "closed without attempt", canceled: true, closed: true},
 		{name: "pending with a closure", closed: true, protected: true},
 	}
-	// a runway covers the week it is ensured from and ContractPartitionAheadWeeks
-	// past it: the first the cases through week 6, the second the rest
-	for _, ensured := range []time.Time{week.Add(3 * contractPartitionWeek), week.Add(6 * contractPartitionWeek)} {
-		if _, _, err := ensureContractWeekPartitions(ctx, ensured); err != nil {
+	// a runway covers the day it is ensured from and ContractPartitionAheadDays
+	// past it: the first the cases through day 6, the second the rest
+	for _, ensured := range []time.Time{cutover.AddDate(0, 0, 3), cutover.AddDate(0, 0, 6)} {
+		if _, _, err := ensureContractDayPartitions(ctx, ensured); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for i := range cases {
 		c := &cases[i]
-		start := week.Add(time.Duration(i-1) * contractPartitionWeek)
+		start := cutover.AddDate(0, 0, i-1)
 		c.contractId = testContractIdAt(start.Add(time.Hour))
 		c.paymentId = NewId()
-		c.week = contractPartitionFamily.RangeAt(start)
+		c.day = contractPartitionFamily.RangeAt(start)
 		if i == 0 {
-			c.week = PartitionRange{Upper: week, Legacy: true}
+			c.day = PartitionRange{Upper: cutover, Legacy: true}
 		}
 		testInsertContractRows(t, ctx, c.contractId, true)
 		Tx(ctx, func(tx PgTx) {
@@ -211,7 +211,7 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 				(payment_id, payment_plan_id, wallet_id, payout_byte_count, payout_nano_cents,
 				 min_sweep_time, completed, canceled, contract_retention_pending, complete_time)
 				VALUES ($1,$2,$3,1,1,$4,$5,$6,$7,CASE WHEN $5 THEN $4::timestamp ELSE NULL END)`,
-				c.paymentId, NewId(), NewId(), week, c.completed, c.canceled, c.retentionPending))
+				c.paymentId, NewId(), NewId(), cutover, c.completed, c.canceled, c.retentionPending))
 			if c.marker != "" {
 				RaisePgResult(tx.Exec(ctx, fmt.Sprintf("UPDATE account_payment SET %s=$2 WHERE payment_id=$1", quoteIdentifier(c.marker)), c.paymentId, NewId().String()))
 			}
@@ -222,14 +222,14 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 			RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow_sweep SET payment_id=$2 WHERE contract_id=$1`, c.contractId, c.paymentId))
 		})
 	}
-	// when the last case's week is ContractRetention (13 weeks) past
-	return cases, week.Add(time.Duration(len(cases)+12) * contractPartitionWeek)
+	// when the last case's day is ContractRetention (13 weeks) past
+	return cases, cutover.AddDate(0, 0, len(cases)-1).Add(ContractRetention)
 }
 
 // Retirement deletes no contract and archives none, whatever its payment's
 // state (S1): the contract horizon reaper alone judges a payment. Past the
 // 91-day horizon, and past the 35-day one, every case keeps all six tables'
-// rows and no usage is archived; each week is reported kept. Clearing the
+// rows and no usage is archived; each day is reported kept. Clearing the
 // holds changes nothing until the reaper deletes a contract. The build before
 // S1 archived and dropped every contract its own, narrower, payment check
 // admitted.
@@ -237,7 +237,7 @@ func TestContractPartitionRetirementPreservesPaymentHolds(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		cases, now := testContractPartitionPaymentHolds(t, ctx)
-		settings := DefaultContractWeekRetirementSettings()
+		settings := DefaultContractDayRetirementSettings()
 		check := func(ctx context.Context, report *ContractPartitionReport) {
 			for _, c := range cases {
 				for _, table := range ContractPartitionTables {
@@ -248,21 +248,21 @@ func TestContractPartitionRetirementPreservesPaymentHolds(t *testing.T) {
 				if testContractPartitionScalar[bool](t, ctx, `SELECT EXISTS (SELECT 1 FROM st_provider_usage_archive WHERE contract_id=$1)`, c.contractId) {
 					t.Errorf("%s: retirement archived the contract", c.name)
 				}
-				if _, kept := report.Kept[contractPartitionFamily.LeafName("transfer_contract", c.week)]; !kept {
-					t.Errorf("%s: week not reported kept: blocked %q", c.name, report.Blocked[contractPartitionFamily.LeafName("transfer_contract", c.week)])
+				if _, kept := report.Kept[contractPartitionFamily.LeafName("transfer_contract", c.day)]; !kept {
+					t.Errorf("%s: day not reported kept: blocked %q", c.name, report.Blocked[contractPartitionFamily.LeafName("transfer_contract", c.day)])
 				}
 			}
 			for _, c := range cases {
-				for _, leaf := range contractPartitionFamily.LeafNames(c.week) {
+				for _, leaf := range contractPartitionFamily.LeafNames(c.day) {
 					if slices.Contains(report.Dropped, leaf) {
 						t.Errorf("%s: retirement dropped %s", c.name, leaf)
 					}
 				}
 			}
 		}
-		for _, horizonCtx := range []context.Context{ctx, WithContractHorizon(ctx, ContractWeekRetentionFloor)} {
+		for _, horizonCtx := range []context.Context{ctx, WithContractHorizon(ctx, ContractDayRetentionFloor)} {
 			report := &ContractPartitionReport{Blocked: map[string]string{}, Kept: map[string]int64{}}
-			retireExpiredContractWeeks(horizonCtx, now, settings, time.Now().Add(time.Minute), report)
+			retireExpiredContractDays(horizonCtx, now, settings, time.Now().Add(time.Minute), report)
 			check(horizonCtx, report)
 		}
 		Tx(ctx, func(tx PgTx) {
@@ -271,33 +271,33 @@ func TestContractPartitionRetirementPreservesPaymentHolds(t *testing.T) {
 			}
 		})
 		report := &ContractPartitionReport{Blocked: map[string]string{}, Kept: map[string]int64{}}
-		retireExpiredContractWeeks(ctx, now, settings, time.Now().Add(time.Minute), report)
+		retireExpiredContractDays(ctx, now, settings, time.Now().Add(time.Minute), report)
 		check(ctx, report)
 	})
 }
 
-// The drop refuses, under its locks, any week that still holds a tuple, and
-// keeps every row: a week with a held contract, or any contract, never drops.
-// The build before S1 dropped a week once its own payment check passed.
+// The drop refuses, under its locks, any day that still holds a tuple, and
+// keeps every row: a day with a held contract, or any contract, never drops.
+// The build before S1 dropped a range once its own payment check passed.
 func TestContractPartitionDropPreservesPaymentHolds(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		cases, _ := testContractPartitionPaymentHolds(t, ctx)
-		settings := DefaultContractWeekRetirementSettings()
+		settings := DefaultContractDayRetirementSettings()
 		for _, c := range cases {
-			leaves, err := readContractWeekLeaves(ctx, c.week)
+			leaves, err := readContractDayLeaves(ctx, c.day)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := dropContractWeekLeaves(ctx, c.week, leaves, settings); !errors.Is(err, errContractWeekNotEmpty) {
-				t.Errorf("%s: a week that holds rows was not refused: %v", c.name, err)
+			if _, err := dropContractDayLeaves(ctx, c.day, leaves, settings); !errors.Is(err, errContractDayNotEmpty) {
+				t.Errorf("%s: a day that holds rows was not refused: %v", c.name, err)
 			}
 			for _, table := range ContractPartitionTables {
 				if !testContractPartitionScalar[bool](t, ctx, fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM public.%s WHERE contract_id=$1)", quoteIdentifier(table)), c.contractId) {
 					t.Errorf("%s: drop discarded %s", c.name, table)
 				}
-				if testContractPartitionScalar[bool](t, ctx, `SELECT to_regclass('public.' || $1) IS NULL`, contractPartitionFamily.LeafName(table, c.week)) {
-					t.Errorf("%s: drop detached %s", c.name, contractPartitionFamily.LeafName(table, c.week))
+				if testContractPartitionScalar[bool](t, ctx, `SELECT to_regclass('public.' || $1) IS NULL`, contractPartitionFamily.LeafName(table, c.day)) {
+					t.Errorf("%s: drop detached %s", c.name, contractPartitionFamily.LeafName(table, c.day))
 				}
 			}
 		}
@@ -312,10 +312,10 @@ func TestContractPartitionPrepareReportsAbandonmentDeadline(t *testing.T) {
 		if IsContractPartitioned(ctx) {
 			t.Skip("prepare starts from plain tables")
 		}
-		week := ContractPartitionWeekStart(NowUtc()).Add(2 * contractPartitionWeek)
+		day := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
 		var deadline time.Time
 		err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{
-			CutoverWeek: week,
+			CutoverDay: day,
 			Logf: func(format string, args ...any) {
 				message := fmt.Sprintf(format, args...)
 				if value, found := strings.CutPrefix(message, "prepared; run --finalize before "); found {

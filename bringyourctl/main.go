@@ -147,7 +147,7 @@ Usage:
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
-    bringyourctl model migrate contract-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
+    bringyourctl model migrate contract-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-egress-health-partition [--copy-days=<n>] [--dry-run] [--swap] [--verify] [--rollback] [--abort] [--drop-old]
     bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort] [--drop-legacy]
@@ -195,10 +195,10 @@ Options:
                    client limit and the concurrent connection limit (the defaults
                    are 100 and the tier's concurrent_clients).
     --clear        Return the network to the default limits.
-    --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new contracts
-                   (or close reports, or provider work session events) go to
-                   weekly partitions; prepare only.
-    --rollback     Undo the contract partition swap while no weekly
+    --cutover-week=<date>  The Monday (YYYY-MM-DD, UTC) from which new close
+                   reports (or provider work session events) go to weekly
+                   partitions; prepare only.
+    --rollback     Undo the contract partition swap while no daily
                    partition holds a row (the close evidence swap while few
                    rows are outside its legacy partition; the finished_task
                    swap, copying back the rows of its daily partitions); or
@@ -213,6 +213,9 @@ Options:
     --cutover-day=<date>  The day (YYYY-MM-DD, UTC) from which finished tasks
                    (or device audit events) go to daily partitions, at least 12
                    hours ahead; prepare only.
+                   With contract-partition, the day from which new contracts
+                   go to daily partitions, at least 24 hours ahead; prepare
+                   only.
                    With debit-journal-partition, the day from whose contracts
                    the transfer debit journal's rows go to daily partitions,
                    at least 12 hours ahead; prepare only.
@@ -2680,8 +2683,8 @@ func modelMigrateClientReliabilityPartition(opts docopt.Opts) {
 	}
 }
 
-// Partitions the contract tables by contract id (CONTRACT-PARTITION.md):
-// prepare (with --cutover-week), then --finalize before that week; --rollback
+// Partitions the contract tables by contract id, daily (CONTRACT-PARTITION.md):
+// prepare (with --cutover-day), then --finalize before that day; --rollback
 // and --abort undo. Each step can be rehearsed with --dry-run.
 func modelMigrateContractPartition(opts docopt.Opts) {
 	options, err := contractPartitionMigrateOptions(opts)
@@ -2905,17 +2908,17 @@ func modelMigrateCloseEvidencePartition(opts docopt.Opts) {
 }
 
 func closeEvidencePartitionMigrateOptions(opts docopt.Opts) (options server.CloseEvidencePartitionMigrateOptions, err error) {
-	contractOptions, err := contractPartitionMigrateOptions(opts)
-	if err != nil {
-		return
+	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
+		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
+		if err != nil {
+			return
+		}
 	}
-	return server.CloseEvidencePartitionMigrateOptions{
-		CutoverWeek: contractOptions.CutoverWeek,
-		DryRun:      contractOptions.DryRun,
-		Finalize:    contractOptions.Finalize,
-		Rollback:    contractOptions.Rollback,
-		Abort:       contractOptions.Abort,
-	}, nil
+	options.DryRun, _ = opts.Bool("--dry-run")
+	options.Finalize, _ = opts.Bool("--finalize")
+	options.Rollback, _ = opts.Bool("--rollback")
+	options.Abort, _ = opts.Bool("--abort")
+	return
 }
 
 // Partitions provider_egress_health_history by day
@@ -2952,8 +2955,8 @@ func providerEgressHealthPartitionOptions(opts docopt.Opts) (options model.Provi
 }
 
 func contractPartitionMigrateOptions(opts docopt.Opts) (options server.ContractPartitionMigrateOptions, err error) {
-	if cutoverWeek, _ := opts.String("--cutover-week"); cutoverWeek != "" {
-		options.CutoverWeek, err = time.Parse(time.DateOnly, cutoverWeek)
+	if cutoverDay, _ := opts.String("--cutover-day"); cutoverDay != "" {
+		options.CutoverDay, err = time.Parse(time.DateOnly, cutoverDay)
 		if err != nil {
 			return
 		}

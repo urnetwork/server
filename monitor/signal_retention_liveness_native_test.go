@@ -75,21 +75,21 @@ func TestRetentionLivenessNativeContractPartitions(t *testing.T) {
 		probe := retentionLivenessProbe{settings: settings}
 
 		now := server.NowUtc()
-		currentWeek := server.ContractPartitionWeekStart(now)
-		// before the current week, so in the legacy partition after a cutover
+		currentDay := server.ContractPartitionDayStart(now)
+		// before the current day, so in the legacy partition after a cutover
 		for range 3 {
-			retentionNativeInsertContract(t, ctx, retentionNativeContractId(currentWeek.Add(-24*time.Hour)), now.Add(-30*24*time.Hour))
+			retentionNativeInsertContract(t, ctx, retentionNativeContractId(currentDay.Add(-24*time.Hour)), now.Add(-30*24*time.Hour))
 		}
 		wasPartitioned := server.IsContractPartitioned(ctx)
 		growth := retentionNativeObserve(t, ctx, probe)
 		if partitioned, ok := growth["transfer_contract"]; !ok || partitioned != wasPartitioned || len(growth) != 1 {
-			t.Fatalf("growth candidates before the weekly rows: %v", growth)
+			t.Fatalf("growth candidates before the daily rows: %v", growth)
 		}
 
 		if !wasPartitioned {
 			server.Testing_PartitionContracts(ctx)
 		}
-		// the current week's weekly partition
+		// the current day's daily partition
 		for range 2 {
 			retentionNativeInsertContract(t, ctx, retentionNativeContractId(now), now.Add(-30*24*time.Hour))
 		}

@@ -1142,9 +1142,9 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"transfer_escrow",
 		"transfer_escrow_sweep",
 		"transfer_contract_legacy",
-		"transfer_escrow_w20261026",
+		"transfer_escrow_p20261026",
 		"contract_close_report_legacy",
-		"contract_extender_w20261102",
+		"contract_extender_p20261102",
 	} {
 		for _, prefix := range []string{"[db]maintenance reindex[1/22] ", "[db]maintenance table[1/22] reindex "} {
 			line := prefix + tableName
@@ -1170,7 +1170,10 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		`[db]maintenance table[1/22] reindex contract_extender`,
 		`[db]maintenance table[1/22] cleanup-before transfer_contract_legacy`,
 		`[db]maintenance priority index[1/2] reindex transfer_contract_outcome_null_l`,
-		`[db]maintenance table[1/22] reindex transfer_contract_w2026102`,
+		`[db]maintenance table[1/22] reindex transfer_contract_p2026102`,
+		// the weekly leaf names the contract tables never took (daily since
+		// 2026-11-17)
+		`[db]maintenance table[1/22] reindex transfer_contract_w20261026`,
 		// network_client_connection is back in the rotation (2026-10-24), and
 		// the churn tables' hourly index pass is the bounded one
 		`[db]maintenance table[1/22] reindex network_client_connection`,

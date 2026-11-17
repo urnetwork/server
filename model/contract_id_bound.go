@@ -14,22 +14,25 @@
 // A hot read of unexpired contracts bounds the id twice
 // (unexpiredContractIdBoundSql):
 //   - by the floor on statement_timestamp(), which decides the rows;
-//   - by the partition weeks that hold every id the floor admits, computed in
+//   - by the partition days that hold every id the floor admits, computed in
 //     the process and rendered into the statement as literals before it runs
-//     (unexpiredContractWeeksAt), which only prune.
+//     (unexpiredContractDaysAt), which only prune.
 //
 // PostgreSQL prunes partitions at plan time only by constants. With the floor
 // alone, each read planned every partition of the partitioned layout and
 // locked it and its indexes, 106-141 locks against 16-21 on the plain table,
-// beyond the 64 fast-path slots (C1 readiness, 2026-11-17). The week literals
-// prune the plan PostgreSQL caches, and change only when a week boundary
-// passes the window, twice a week. The floor stays the deciding bound: a bound
-// parameter in its place prunes no cached plan, since a generic plan keeps
-// every partition and never costs less than a pruned one, and PostgreSQL
-// estimates a range on a parameter at 0.5% of the table, which turns cached
-// plans on the plain tables to the contract id indexes
+// beyond the 64 fast-path slots (C1 readiness, 2026-11-17). The day literals
+// prune the plan PostgreSQL caches to the partition of the current day, and of
+// the day before or after while the window crosses midnight (23:30 to 01:30
+// UTC). A statement's text changes when a day boundary enters or leaves the
+// window, at 23:30 and at 01:30 UTC, so each connection plans it afresh twice a
+// day: five custom plans, then the cached generic one. The floor stays the
+// deciding bound: a bound parameter in its place prunes no cached plan, since
+// a generic plan keeps every partition and never costs less than a pruned one,
+// and PostgreSQL estimates a range on a parameter at 0.5% of the table, which
+// turns cached plans on the plain tables to the contract id indexes
 // (TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum). PostgreSQL
-// estimates the floor by its value, as before, and the weeks hold it.
+// estimates the floor by its value, as before, and the days hold it.
 package model
 
 import (
@@ -112,60 +115,61 @@ var unexpiredContractIdFloorSql = contractIdFloorSql(fmt.Sprintf(
 	unexpiredContractIdAge.Milliseconds(),
 ))
 
-// Where a statement takes the bounds of its contract weeks: SQL comments, so a
+// Where a statement takes the bounds of its contract days: SQL comments, so a
 // statement run without rendering them fails to parse instead of reading
 // unbounded.
 const (
-	contractWeeksLowerSql = `/*contract weeks: lower*/`
-	contractWeeksUpperSql = `/*contract weeks: upper*/`
+	contractDaysLowerSql = `/*contract days: lower*/`
+	contractDaysUpperSql = `/*contract days: upper*/`
 )
 
 // A hot read's bound on a contract id column: the floor, which decides the
-// rows, and the unexpired contract weeks, which only prune. The statement runs
-// rendered with unexpiredContractWeeksAt.
+// rows, and the unexpired contract days, which only prune. The statement runs
+// rendered with unexpiredContractDaysAt.
 func unexpiredContractIdBoundSql(column string) string {
 	return fmt.Sprintf(
 		`%[1]s >= %[2]s AND %[1]s >= %[3]s AND %[1]s < %[4]s`,
 		column,
 		unexpiredContractIdFloorSql,
-		contractWeeksLowerSql,
-		contractWeeksUpperSql,
+		contractDaysLowerSql,
+		contractDaysUpperSql,
 	)
 }
 
-// The contract ids [lower, upper) of whole partition weeks (CONTRACT-PARTITION.md,
-// "Partition key and bounds": weekly, from Monday 00:00 UTC).
-type contractWeeks struct {
+// The contract ids [lower, upper) of whole partition days (CONTRACT-PARTITION.md,
+// "Partition key and bounds": daily, from 00:00 UTC; server.ContractPartitionGranularity).
+type contractDays struct {
 	lower server.Id
 	upper server.Id
 }
 
-// The fewest whole partition weeks that hold every id minted in [start, end].
-func contractWeeksHolding(start time.Time, end time.Time) contractWeeks {
-	return contractWeeks{
-		lower: server.ContractIdFloor(server.ContractPartitionWeekStart(start)),
-		upper: server.ContractIdFloor(server.ContractPartitionWeekStart(end).AddDate(0, 0, 7)),
+// The fewest whole partition days that hold every id minted in [start, end].
+func contractDaysHolding(start time.Time, end time.Time) contractDays {
+	return contractDays{
+		lower: server.ContractIdFloor(server.ContractPartitionDayStart(start)),
+		upper: server.ContractIdFloor(server.ContractPartitionGranularity.NextRangeStart(server.ContractPartitionDayStart(end))),
 	}
 }
 
-// The weeks that hold every id an unexpired read admits at now, by this
+// The days that hold every id an unexpired read admits at now, by this
 // process's clock. The floor reads the database clock, which may differ from
-// this one by the margin either way, so the weeks cover the margin once more
-// on each side: they start with the week of now less the unexpired age and the
-// margin, and end with the week of now plus twice the margin. An id after them
-// was minted by a host more than twice the margin ahead of this one.
-func unexpiredContractWeeksAt(now time.Time) contractWeeks {
-	return contractWeeksHolding(
+// this one by the margin either way, so the days cover the margin once more on
+// each side: they start with the day of now less the unexpired age and the
+// margin (90 minutes), and end with the day of now plus twice the margin (30
+// minutes). An id after them was minted by a host more than twice the margin
+// ahead of this one.
+func unexpiredContractDaysAt(now time.Time) contractDays {
+	return contractDaysHolding(
 		now.Add(-unexpiredContractIdAge-ContractIdCreateTimeMargin),
 		now.Add(2*ContractIdCreateTimeMargin),
 	)
 }
 
-// The statement with the weeks' bounds written in as uuid literals.
-func (self contractWeeks) render(sql string) string {
+// The statement with the days' bounds written in as uuid literals.
+func (self contractDays) render(sql string) string {
 	return strings.NewReplacer(
-		contractWeeksLowerSql, contractIdLiteralSql(self.lower),
-		contractWeeksUpperSql, contractIdLiteralSql(self.upper),
+		contractDaysLowerSql, contractIdLiteralSql(self.lower),
+		contractDaysUpperSql, contractIdLiteralSql(self.upper),
 	).Replace(sql)
 }
 

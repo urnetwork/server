@@ -172,7 +172,7 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 			t.Skip("prepare starts from plain contract tables")
 		}
 		logf := testContractPartitionLogf(t)
-		cutoverWeek := ContractPartitionWeekStart(NowUtc()).Add(2 * contractPartitionWeek)
+		cutoverDay := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
 		busy := "transfer_escrow"
 
 		// A vacuum-like holder of transfer_escrow, older than the admission's
@@ -215,7 +215,7 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 		defer cancel()
 		var err error
 		if failure := testContractPartitionRecover(func() {
-			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: logf})
+			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf})
 		}); failure != nil {
 			err = fmt.Errorf("%v", failure)
 		}
@@ -238,7 +238,7 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 
 		// once the holder is gone, the next run completes the deferred table
 		releaseHolder()
-		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverWeek: cutoverWeek, Logf: logf}); err != nil {
+		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf}); err != nil {
 			t.Fatal(err)
 		}
 		shapes = readContractShapes(ctx, contractTableName)
