@@ -108,8 +108,13 @@ func TestScreenWithNetworkFactsVerdicts(t *testing.T) {
 	if review == nil || review.CaseId != nil || review.Name != "paypal-login" || review.Subject != AbuseScreenSubjectHost {
 		t.Fatalf("a brand with a keyword: %+v", review)
 	}
-	if refusal := review.Refusal(); refusal.LimitKey != AbuseScreenReviewLimitKey || refusal.Upgrade {
-		t.Fatalf("the refusal: %+v", refusal)
+	if refusal := review.Refusal(); refusal.LimitKey != AbuseScreenReviewLimitKey || refusal.Upgrade || refusal.CaseId != "" {
+		t.Fatalf("the refusal before its case: %+v", refusal)
+	}
+	caseId := server.NewId()
+	opened := &AbuseScreenReviewError{NetworkId: networkId, Subject: AbuseScreenSubjectHost, Name: "paypal-login", CaseId: &caseId}
+	if refusal := opened.Refusal(); refusal.LimitKey != AbuseScreenReviewLimitKey || refusal.CaseId != caseId.String() {
+		t.Fatalf("the refusal with its case: %+v", refusal)
 	}
 	allowed := &NetworkScreenFacts{AllowedNames: []string{"paypal-login"}}
 	if err := ScreenWithNetworkFacts(networkId, AbuseScreenSubjectHost, "paypal-login", allowed); err != nil {

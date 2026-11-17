@@ -14,7 +14,8 @@ package model
 //     the name is not available. A review verdict opens a case, category brand, reporter class screen, joined by the
 //     network, or joins the case already open for that name (any age, so a retry a week on counts on the first case),
 //     and answers *AbuseScreenReviewError with the case's id, which a gate answers as QuotaRefusal{limit_key:
-//     screen_review} (AbuseScreenReviewRefusal). Nothing is stored in §12's tables and nothing reserves the name
+//     screen_review, case_id} (AbuseScreenReviewError.Refusal, QD-1014). Nothing is stored in §12's tables and nothing
+//     reserves the name
 //     meanwhile. On probation the pure screen already turns review into deny, so no case opens (§21.7: "no names held
 //     for review").
 //   - A gate that screens inside its own transaction (dns_records_model.go, dns_alias_model.go) screens with
@@ -85,11 +86,14 @@ func (self *AbuseScreenReviewError) Error() string {
 	return "name held for review"
 }
 
-// The refusal a gate answers. QD-235 has it carry the case id, which QuotaRefusal (operator-core's, owner decision
-// 251) has no field for yet (questions/abuse-m5-17-screen-review-case-id.md), so the wire carries the limit key alone
-// and the case id stays in this error until the field lands.
+// The refusal a gate answers: QuotaRefusal{limit_key: screen_review} with the review case's id once
+// OpenAbuseScreenReview has opened or joined it (QD-235, QD-1014), so the network can name the case.
 func (self *AbuseScreenReviewError) Refusal() *sidecar.QuotaRefusal {
-	return &sidecar.QuotaRefusal{LimitKey: AbuseScreenReviewLimitKey}
+	refusal := &sidecar.QuotaRefusal{LimitKey: AbuseScreenReviewLimitKey}
+	if self.CaseId != nil {
+		refusal.CaseId = self.CaseId.String()
+	}
+	return refusal
 }
 
 // The review error err holds, or nil.

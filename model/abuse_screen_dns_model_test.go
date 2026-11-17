@@ -70,11 +70,16 @@ func TestDnsRecordsScreenReviewHoldsUntilAllowed(t *testing.T) {
 		if len(cases) != 1 || cases[0].TargetKind != AbuseTargetKindHost || cases[0].Category != AbuseCategoryBrand {
 			t.Fatalf("the cases: %+v", cases)
 		}
+		// the refusal names the case it opened (QD-1014)
+		_, err := world.write(ctx, testDnsUpsert(owner, "TXT", `"x"`))
+		if apiError := testDnsApiError(t, err); apiError.Refusal == nil || apiError.Refusal.CaseId != cases[0].CaseId.String() {
+			t.Fatalf("the refusal names %+v", apiError.Refusal)
+		}
 		testScreenAllow(t, ctx, cases[0].CaseId, "paypal-login")
 		if _, err := world.write(ctx, testDnsUpsert(owner, "TXT", `"x"`)); err != nil {
 			t.Fatalf("the allowed host: %v", err)
 		}
-		_, err := world.write(ctx, testDnsUpsert("paypal."+world.apex, "TXT", `"x"`))
+		_, err = world.write(ctx, testDnsUpsert("paypal."+world.apex, "TXT", `"x"`))
 		if apiError := testDnsApiError(t, err); apiError.Status != http.StatusForbidden || apiError.Code != sidecar.DnsApiCodeRefused {
 			t.Fatalf("an unverified brand: %+v", apiError)
 		}
