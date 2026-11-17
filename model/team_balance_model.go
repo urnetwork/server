@@ -347,52 +347,99 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 	return
 }
 
-// When the network left a tier: the end of its newest renewal of the tier it left (reading 12),
-// the tier above its tier now whose renewals ended last, and that tier. ok is false while the
-// network has left no tier: it holds every tier it ever renewed, or none of its renewals has
-// ended. QUOTA-M6-05's 14-day withholding counts from this time, and DNS-M6-07's effects with it.
-// Read from the source of truth, never the tier cache, for a daily job.
+// When the network left a tier, and which: when its entitlement to a tier above its tier now ended
+// (QD-946, owner decision 523; DESIGN.md 20.5's Source and 20.7's downgrade clock). That is the
+// end_time of the newest window, already ended, of a balance that conferred such a tier, each
+// balance conferring what NetworkTierOf reads from it: team with pro = true and tier 'team', a Team
+// period's grant, whose window holds its one-day grace; pro with pro = true and any other tier,
+// Pro's monthly grant and the balances a Pro subscription or purchase writes. The newest end wins,
+// a tie going to the higher tier. So a Team whose cycle invoice never pays, which
+// RefreshTeamTransferBalances granted a period past its newest renewal, left team when that
+// period's grant ended, the moment NetworkTierOf dropped, not when the renewal ended, and 20.7's
+// 14 days count from there for a Team as for Pro. ok is false while the network has left no tier:
+// no balance of a tier above its tier now has ended. A balance that has not ended, in its window or
+// not yet started, is never the answer.
+//
+// A binary that does not link MG6 has no tier column and no Team, and answers as before MG6 from
+// renewals: the end of the newest renewal, already ended, of a tier above the network's tier now, a
+// team renewal for team and a supporter renewal for pro. It tells by server.SidecarMg6Linked, the
+// switch the tier's own load reads (loadNetworkTierWithConn), so the tier and the clock read one
+// source in either binary.
+//
+// QUOTA-M6-05's 14-day withholding counts from this time, and DNS-M6-07's effects and the TLS listen
+// facts' standing grants with it. Read from the source of truth, never the tier cache, for a daily
+// job.
 func NetworkDowngradeTime(ctx context.Context, networkId server.Id) (downgradeTime time.Time, fromTier NetworkTier, ok bool) {
-	now := server.NowUtc()
 	server.Db(ctx, func(conn server.PgConn) {
-		// a tier above the network's own, and the renewals that confer it
-		type leftTier struct {
-			tier             NetworkTier
-			subscriptionType SubscriptionType
-		}
 		_, tier := loadNetworkTierWithConn(ctx, conn, networkId)
-		leftTiers := []leftTier{}
+		// read after the tier, so a balance that ends between the two reads was in its window for the
+		// tier's read, which answered its tier or a higher one
+		now := server.NowUtc()
+		// the tiers above the network's, highest first, so a tie goes to the higher
+		leftTiers := []NetworkTier{}
 		switch tier.tier {
 		case NetworkTierFree:
-			leftTiers = append(leftTiers,
-				leftTier{tier: NetworkTierTeam, subscriptionType: SubscriptionTypeTeam},
-				leftTier{tier: NetworkTierPro, subscriptionType: SubscriptionTypeSupporter},
-			)
+			leftTiers = append(leftTiers, NetworkTierTeam, NetworkTierPro)
 		case NetworkTierPro:
-			leftTiers = append(leftTiers, leftTier{tier: NetworkTierTeam, subscriptionType: SubscriptionTypeTeam})
+			leftTiers = append(leftTiers, NetworkTierTeam)
 		}
-		for _, candidate := range leftTiers {
-			var endTime *time.Time
+		if len(leftTiers) == 0 {
+			return
+		}
+		// the newest end, at or before now, of what conferred each tier; nil when none has ended
+		tierEndTimes := map[NetworkTier]*time.Time{}
+		if server.SidecarMg6Linked() {
+			var teamEndTime *time.Time
+			var proEndTime *time.Time
 			server.Raise(conn.QueryRow(
 				ctx,
 				`
-					SELECT MAX(end_time)
-					FROM subscription_renewal
+					SELECT
+						MAX(end_time) FILTER (WHERE tier = 'team'),
+						MAX(end_time) FILTER (WHERE tier IS DISTINCT FROM 'team')
+					FROM transfer_balance
 					WHERE
 						network_id = $1 AND
-						subscription_type = $2 AND
-						end_time <= $3
+						pro = true AND
+						end_time <= $2
 				`,
 				networkId,
-				candidate.subscriptionType,
 				now,
-			).Scan(&endTime))
+			).Scan(&teamEndTime, &proEndTime))
+			tierEndTimes[NetworkTierTeam] = teamEndTime
+			tierEndTimes[NetworkTierPro] = proEndTime
+		} else {
+			for _, leftTier := range leftTiers {
+				subscriptionType := SubscriptionTypeSupporter
+				if leftTier == NetworkTierTeam {
+					subscriptionType = SubscriptionTypeTeam
+				}
+				var endTime *time.Time
+				server.Raise(conn.QueryRow(
+					ctx,
+					`
+						SELECT MAX(end_time)
+						FROM subscription_renewal
+						WHERE
+							network_id = $1 AND
+							subscription_type = $2 AND
+							end_time <= $3
+					`,
+					networkId,
+					subscriptionType,
+					now,
+				).Scan(&endTime))
+				tierEndTimes[leftTier] = endTime
+			}
+		}
+		for _, leftTier := range leftTiers {
+			endTime := tierEndTimes[leftTier]
 			if endTime == nil {
 				continue
 			}
 			if !ok || downgradeTime.Before(*endTime) {
 				downgradeTime = endTime.UTC()
-				fromTier = candidate.tier
+				fromTier = leftTier
 				ok = true
 			}
 		}

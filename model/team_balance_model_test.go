@@ -3,7 +3,8 @@
 package model
 
 // QUOTA-M6-01: a Team's balances, the team tier, the job that writes each period and the downgrade
-// clock, under -tags sidecar_pending, since transfer_balance.tier and network_team are MG6's.
+// clock (QD-946), under -tags sidecar_pending, since transfer_balance.tier and network_team are
+// MG6's. The clock's release leg, which reads renewals, is team_balance_model_release_test.go's.
 
 import (
 	"context"
@@ -380,70 +381,268 @@ func TestTeamPeriodEnd(t *testing.T) {
 	}
 }
 
-// The downgrade clock: a lapse counts from the end of the newest renewal of the tier left, a live
-// renewal leaves nothing, and a Team that became Pro left team at its team renewal's end.
-func TestNetworkDowngradeTime(t *testing.T) {
+// Writes a renewal of the network's subscription of subscriptionType over [start, end).
+func testingAddDowngradeRenewal(t testing.TB, ctx context.Context, networkId server.Id, subscriptionType SubscriptionType, start time.Time, end time.Time) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.Raise(AddSubscriptionRenewalInTx(tx, ctx, &SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   subscriptionType,
+			StartTime:          start,
+			EndTime:            end,
+			SubscriptionMarket: SubscriptionMarketStripe,
+		}))
+	})
+}
+
+// Writes one monthly Pro grant over [start, end), a window that holds its grace as the monthly
+// job's does, and refreshes the tier after the commit.
+func testingAddProGrant(t testing.TB, ctx context.Context, networkId server.Id, start time.Time, end time.Time) {
+	t.Helper()
+	server.Tx(ctx, func(tx server.PgTx) {
+		if err := AddGrantTransferBalanceInTx(tx, ctx, networkId, GrantKindPro, 10*Tib, start, end); err != nil {
+			t.Fatal(err)
+		}
+	})
+	UpdateProNetwork(ctx, networkId)
+}
+
+// A pro balance over [start, end) with no grant kind, as a Pro subscription's activation or a
+// purchase writes one.
+func testingAddProSubscriptionBalance(ctx context.Context, networkId server.Id, start time.Time, end time.Time) {
+	AddTransferBalance(ctx, &TransferBalance{
+		NetworkId:             networkId,
+		StartTime:             start,
+		EndTime:               end,
+		StartBalanceByteCount: 10 * Tib,
+		BalanceByteCount:      10 * Tib,
+		NetRevenue:            UsdToNanoCents(5),
+		Pro:                   true,
+	})
+}
+
+// QD-946: a Team whose cycle invoice never paid. Its newest renewal ended 30 days ago, and the
+// period RefreshTeamTransferBalances granted past it ended, with its one-day grace, an hour ago. The
+// clock is that grant's end, when NetworkTierOf dropped, not the renewal's. The TLS listen facts,
+// which read the clock, keep the network's standing grants on day 13 after it and withhold them on
+// day 14, where the renewal's end would have withheld them from day 0.
+func TestNetworkDowngradeTimeIsTheTeamGrantsEnd(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		defer testingSetTeamProConfig()()
 		pop := Testing_SetEscrowDrawOrder(true)
 		defer pop()
 		now := server.NowUtc()
-		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		renew := func(networkId server.Id, subscriptionType SubscriptionType, start time.Time, end time.Time) {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.Raise(AddSubscriptionRenewalInTx(tx, ctx, &SubscriptionRenewal{
-					NetworkId:          networkId,
-					SubscriptionType:   subscriptionType,
-					StartTime:          start,
-					EndTime:            end,
-					SubscriptionMarket: SubscriptionMarketStripe,
-				}))
-			})
-		}
+		day := 24 * time.Hour
+		renewalEnd := now.Add(-30 * day)
+		renewalStart := renewalEnd.AddDate(0, -1, 0)
 
-		// a lapse: a Team whose last period and its grace have ended reads free
-		lapsed := testingCreateTeamNetwork(t, ctx)
-		lapsedEnd := today.AddDate(0, 0, -20)
-		renew(lapsed, SubscriptionTypeTeam, lapsedEnd.AddDate(0, -1, 0), lapsedEnd)
-		testingAddTeamGrant(t, ctx, lapsed, lapsedEnd.AddDate(0, -1, 0), lapsedEnd)
+		networkId := testingCreateTeamNetwork(t, ctx)
+		testingAddDowngradeRenewal(t, ctx, networkId, SubscriptionTypeTeam, renewalStart, renewalEnd)
+		// the paid period, as invoice.paid writes it, then the unpaid one the job wrote at the anchor
+		paidGrant := testingAddTeamGrant(t, ctx, networkId, renewalStart, renewalEnd)
+		grant := testingAddTeamGrant(t, ctx, networkId, renewalEnd, now.Add(-time.Hour).Add(-ProGrantGrace))
+		connect.AssertEqual(t, paidGrant.EndTime, renewalEnd.Add(ProGrantGrace))
+		connect.AssertEqual(t, grant.EndTime, now.Add(-time.Hour))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, networkId), NetworkTierFree)
+
+		downgradeTime, fromTier, ok := NetworkDowngradeTime(ctx, networkId)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierTeam)
+		connect.AssertEqual(t, downgradeTime, grant.EndTime)
+
+		settings := DefaultTlsListenFactsSettings()
+		connect.AssertEqual(t, settings.DowngradeGrace, 14*day)
+		// the renewal's 14 days had run out before day 0 of the grant's
+		connect.AssertEqual(t, renewalEnd.Add(settings.DowngradeGrace).Before(grant.EndTime), true)
+		// day 13 changes nothing: the standing grants hold to the end of the 14 days
+		facts, err := GetTlsListenFactsWithSettings(ctx, networkId, grant.EndTime.Add(13*day), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, facts.Tier, string(NetworkTierFree))
+		connect.AssertEqual(t, facts.StandingGrantsEndTime, grant.EndTime.Add(settings.DowngradeGrace))
+		// day 14 withholds them
+		facts, err = GetTlsListenFactsWithSettings(ctx, networkId, grant.EndTime.Add(14*day), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, facts.Tier, string(NetworkTierFree))
+		connect.AssertEqual(t, facts.StandingGrantsEndTime.IsZero(), true)
+	})
+}
+
+// A lapsed Pro network left pro when its last balance conferring pro ended: its last monthly
+// grant's end, grace included, not its supporter renewal's, which ended weeks before; and where a
+// subscription's own pro balance outlasted its grants, that balance's end, since NetworkTierOf read
+// pro until then.
+func TestNetworkDowngradeTimeIsTheLastProGrantsEnd(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		day := 24 * time.Hour
+		now := server.NowUtc()
+		renewalEnd := now.Add(-40 * day)
+		grantEnd := now.Add(-10 * day)
+
+		lapsed := server.NewId()
+		Testing_CreateNetwork(ctx, lapsed, "lapsed-pro-"+lapsed.String(), server.NewId())
+		testingAddDowngradeRenewal(t, ctx, lapsed, SubscriptionTypeSupporter, renewalEnd.AddDate(0, -1, 0), renewalEnd)
+		testingAddProGrant(t, ctx, lapsed, grantEnd.AddDate(0, -2, 0), grantEnd.AddDate(0, -1, 0))
+		testingAddProGrant(t, ctx, lapsed, grantEnd.AddDate(0, -1, 0).Add(-ProGrantGrace), grantEnd)
 		connect.AssertEqual(t, NetworkTierOfFresh(ctx, lapsed), NetworkTierFree)
 		downgradeTime, fromTier, ok := NetworkDowngradeTime(ctx, lapsed)
 		connect.AssertEqual(t, ok, true)
-		connect.AssertEqual(t, fromTier, NetworkTierTeam)
-		connect.AssertEqual(t, downgradeTime, lapsedEnd)
+		connect.AssertEqual(t, fromTier, NetworkTierPro)
+		connect.AssertEqual(t, downgradeTime, grantEnd)
 
-		// a renewal: the Team renews and holds its tier, so it has left nothing
+		subscribed := server.NewId()
+		Testing_CreateNetwork(ctx, subscribed, "subscribed-pro-"+subscribed.String(), server.NewId())
+		testingAddProGrant(t, ctx, subscribed, grantEnd.AddDate(0, -1, 0), grantEnd)
+		balanceEnd := now.Add(-5 * day)
+		testingAddProSubscriptionBalance(ctx, subscribed, balanceEnd.AddDate(0, -1, 0), balanceEnd)
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, subscribed), NetworkTierFree)
+		downgradeTime, fromTier, ok = NetworkDowngradeTime(ctx, subscribed)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierPro)
+		connect.AssertEqual(t, downgradeTime, balanceEnd)
+	})
+}
+
+// A network that moved from Team to Pro left team when its last team grant ended, whatever its pro
+// balances hold. Back at Community, the tier it left last is the answer: pro after a later pro
+// balance, and team when its grant and a pro balance end together.
+func TestNetworkDowngradeTimeAcrossTiers(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer testingSetTeamProConfig()()
+		pop := Testing_SetEscrowDrawOrder(true)
+		defer pop()
+		day := 24 * time.Hour
+		now := server.NowUtc()
+		teamPeriodEnd := now.Add(-20 * day)
+
+		// Team to Pro: a supporter renewal and its pro balance from the team grant's period on
+		changed := testingCreateTeamNetwork(t, ctx)
+		testingAddDowngradeRenewal(t, ctx, changed, SubscriptionTypeTeam, teamPeriodEnd.AddDate(0, -1, 0), teamPeriodEnd)
+		grant := testingAddTeamGrant(t, ctx, changed, teamPeriodEnd.AddDate(0, -1, 0), teamPeriodEnd)
+		testingAddDowngradeRenewal(t, ctx, changed, SubscriptionTypeSupporter, teamPeriodEnd, teamPeriodEnd.AddDate(1, 0, 0))
+		testingAddProSubscriptionBalance(ctx, changed, teamPeriodEnd, now.Add(20*day))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, changed), NetworkTierPro)
+		downgradeTime, fromTier, ok := NetworkDowngradeTime(ctx, changed)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierTeam)
+		connect.AssertEqual(t, downgradeTime, grant.EndTime)
+
+		// Team, then Pro until 3 days ago: it left pro last
+		lapsed := testingCreateTeamNetwork(t, ctx)
+		testingAddTeamGrant(t, ctx, lapsed, teamPeriodEnd.AddDate(0, -1, 0), teamPeriodEnd)
+		proEnd := now.Add(-3 * day)
+		testingAddProSubscriptionBalance(ctx, lapsed, teamPeriodEnd, proEnd)
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, lapsed), NetworkTierFree)
+		downgradeTime, fromTier, ok = NetworkDowngradeTime(ctx, lapsed)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierPro)
+		connect.AssertEqual(t, downgradeTime, proEnd)
+
+		// a team grant and a pro balance that end together: it was team to the end
+		together := testingCreateTeamNetwork(t, ctx)
+		grant = testingAddTeamGrant(t, ctx, together, teamPeriodEnd.AddDate(0, -1, 0), teamPeriodEnd)
+		testingAddProSubscriptionBalance(ctx, together, teamPeriodEnd.AddDate(0, -1, 0), grant.EndTime)
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, together), NetworkTierFree)
+		downgradeTime, fromTier, ok = NetworkDowngradeTime(ctx, together)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierTeam)
+		connect.AssertEqual(t, downgradeTime, grant.EndTime)
+	})
+}
+
+// A network with a current balance of the highest tier it held has left nothing, whatever ended
+// before it: a Team in its period's grant, a Team that renewed, a Pro network in its monthly grant.
+// Nor has a network that never held a tier.
+func TestNetworkDowngradeTimeWhileTheTierHolds(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer testingSetTeamProConfig()()
+		pop := Testing_SetEscrowDrawOrder(true)
+		defer pop()
+		day := 24 * time.Hour
+		now := server.NowUtc()
+		periodStart := now.Add(-5 * day)
+
+		// pro until it became Team, then a period ended and the next is in its window
+		team := testingCreateTeamNetwork(t, ctx)
+		testingAddProSubscriptionBalance(ctx, team, periodStart.AddDate(0, -3, 0), periodStart.AddDate(0, -1, 0))
+		testingAddTeamGrant(t, ctx, team, periodStart.AddDate(0, -1, 0), periodStart)
+		testingAddTeamGrant(t, ctx, team, periodStart, periodStart.AddDate(0, 1, 0))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, team), NetworkTierTeam)
+		_, _, ok := NetworkDowngradeTime(ctx, team)
+		connect.AssertEqual(t, ok, false)
+
+		// a Team that renews holds its tier
 		renewed := testingCreateTeamNetwork(t, ctx)
-		renew(renewed, SubscriptionTypeTeam, lapsedEnd.AddDate(0, -1, 0), lapsedEnd)
-		renew(renewed, SubscriptionTypeTeam, lapsedEnd, lapsedEnd.AddDate(0, 1, 0))
-		testingAddTeamGrant(t, ctx, renewed, lapsedEnd, lapsedEnd.AddDate(0, 1, 0))
+		testingAddDowngradeRenewal(t, ctx, renewed, SubscriptionTypeTeam, periodStart.AddDate(0, -1, 0), periodStart)
+		testingAddDowngradeRenewal(t, ctx, renewed, SubscriptionTypeTeam, periodStart, periodStart.AddDate(0, 1, 0))
+		testingAddTeamGrant(t, ctx, renewed, periodStart, periodStart.AddDate(0, 1, 0))
 		connect.AssertEqual(t, NetworkTierOfFresh(ctx, renewed), NetworkTierTeam)
 		_, _, ok = NetworkDowngradeTime(ctx, renewed)
 		connect.AssertEqual(t, ok, false)
 
-		// a tier change: the Team lapsed into Pro, so it left team when its team renewal ended
-		changed := testingCreateTeamNetwork(t, ctx)
-		renew(changed, SubscriptionTypeTeam, lapsedEnd.AddDate(0, -1, 0), lapsedEnd)
-		renew(changed, SubscriptionTypeSupporter, lapsedEnd, lapsedEnd.AddDate(1, 0, 0))
-		AddTransferBalance(ctx, &TransferBalance{
-			NetworkId:             changed,
-			StartTime:             lapsedEnd,
-			EndTime:               lapsedEnd.AddDate(0, 1, 0),
-			StartBalanceByteCount: 10 * Tib,
-			BalanceByteCount:      10 * Tib,
-			Pro:                   true,
-		})
-		connect.AssertEqual(t, NetworkTierOfFresh(ctx, changed), NetworkTierPro)
-		downgradeTime, fromTier, ok = NetworkDowngradeTime(ctx, changed)
-		connect.AssertEqual(t, ok, true)
-		connect.AssertEqual(t, fromTier, NetworkTierTeam)
-		connect.AssertEqual(t, downgradeTime, lapsedEnd)
+		// Pro in this month's grant, last month's ended
+		pro := server.NewId()
+		Testing_CreateNetwork(ctx, pro, "pro-"+pro.String(), server.NewId())
+		testingAddProGrant(t, ctx, pro, periodStart.AddDate(0, -1, 0), periodStart)
+		testingAddProGrant(t, ctx, pro, periodStart.Add(-ProGrantGrace), periodStart.AddDate(0, 1, 0))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, pro), NetworkTierPro)
+		_, _, ok = NetworkDowngradeTime(ctx, pro)
+		connect.AssertEqual(t, ok, false)
 
-		// a network that never renewed anything has left nothing
 		never := server.NewId()
 		Testing_CreateNetwork(ctx, never, "never-"+never.String(), server.NewId())
 		_, _, ok = NetworkDowngradeTime(ctx, never)
+		connect.AssertEqual(t, ok, false)
+	})
+}
+
+// A balance whose window has not ended is never the answer: a lapsed Pro network holding a pro
+// balance that starts tomorrow left pro when its last grant ended; a Pro network that was Team, with
+// a team period written ahead, left team at its ended grant; and a network whose only balance above
+// Community starts tomorrow has left nothing.
+func TestNetworkDowngradeTimeSkipsBalancesThatHaveNotEnded(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer testingSetTeamProConfig()()
+		pop := Testing_SetEscrowDrawOrder(true)
+		defer pop()
+		day := 24 * time.Hour
+		now := server.NowUtc()
+		tomorrow := now.Add(day)
+
+		lapsed := server.NewId()
+		Testing_CreateNetwork(ctx, lapsed, "lapsed-"+lapsed.String(), server.NewId())
+		grantEnd := now.Add(-3 * day)
+		testingAddProGrant(t, ctx, lapsed, grantEnd.AddDate(0, -1, 0), grantEnd)
+		testingAddProSubscriptionBalance(ctx, lapsed, tomorrow, tomorrow.AddDate(0, 1, 0))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, lapsed), NetworkTierFree)
+		downgradeTime, fromTier, ok := NetworkDowngradeTime(ctx, lapsed)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierPro)
+		connect.AssertEqual(t, downgradeTime, grantEnd)
+
+		ahead := testingCreateTeamNetwork(t, ctx)
+		grant := testingAddTeamGrant(t, ctx, ahead, now.Add(-36*day), now.Add(-6*day))
+		testingAddProSubscriptionBalance(ctx, ahead, now.Add(-6*day), now.Add(20*day))
+		testingAddTeamGrant(t, ctx, ahead, tomorrow, tomorrow.AddDate(0, 1, 0))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, ahead), NetworkTierPro)
+		downgradeTime, fromTier, ok = NetworkDowngradeTime(ctx, ahead)
+		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, fromTier, NetworkTierTeam)
+		connect.AssertEqual(t, downgradeTime, grant.EndTime)
+
+		pending := testingCreateTeamNetwork(t, ctx)
+		testingAddTeamGrant(t, ctx, pending, tomorrow, tomorrow.AddDate(0, 1, 0))
+		testingAddProSubscriptionBalance(ctx, pending, tomorrow, tomorrow.AddDate(0, 1, 0))
+		connect.AssertEqual(t, NetworkTierOfFresh(ctx, pending), NetworkTierFree)
+		_, _, ok = NetworkDowngradeTime(ctx, pending)
 		connect.AssertEqual(t, ok, false)
 	})
 }
