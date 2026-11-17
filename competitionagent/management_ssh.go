@@ -25,29 +25,6 @@ import (
 // admission receipt remains inspectable and is never replayed or silently gc'd.
 var ErrManagedSshUnknown = errors.New("managed SSH control-service outcome remains unknown")
 
-// All session budgets are owned by one wrapper. Child caps are inside the
-// existing private aggregate, never another allowance outside the reserve.
-type ManagementSshSettings struct {
-	// Selected only by the separate fixed entrypoint, never request/config data.
-	existingOnly    bool
-	Agent           AgentSettings
-	MemoryBytes     int64         // Per-control child maximum; default 256 MiB requires separate native peak proof.
-	TasksMaximum    int64         // Per-control tasks; default 128 includes bounded native control helpers.
-	MaximumControls int           // Retained unknown sessions; a full registry refuses new admission.
-	MaximumRuntime  time.Duration // Full healthy RPC allowance, not a shorter framing or evaluation clock.
-	JoinTimeout     time.Duration // Finite stop/manager/client join owner after transport withdrawal.
-	PollInterval    time.Duration // Positive rate limit while monitoring the exact ephemeral unit.
-}
-
-// Framing/transfer/cleanup each retain their full allowance in addition to the
-// largest signed job lifetime. These defaults do not assert native readiness.
-func DefaultManagementSshSettings() ManagementSshSettings {
-	agent := DefaultAgentSettings()
-	maximum := DefaultLimits().MaximumJobDuration + agent.ControlTimeout + agent.SelfCheckTimeout + agent.InputTransferTimeout + agent.OutputTransferTimeout + agent.CleanupTimeout + agent.CancelGrace
-	return ManagementSshSettings{Agent: agent, MemoryBytes: 256 * 1024 * 1024, TasksMaximum: 128, MaximumControls: 128,
-		MaximumRuntime: maximum, JoinTimeout: agent.ControlTimeout + agent.ControlTimeout + agent.CancelGrace, PollInterval: agent.OwnerPollInterval}
-}
-
 // No peer can choose the unit, marker, executable, properties or clock.
 type managementSshPlan struct {
 	ExistingOnly     bool          `json:"existing_only,omitempty"`
