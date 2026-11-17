@@ -3,12 +3,18 @@
 Status: BUILT, NOT CUT OVER. Planned 2026-10-22; the owner settled every
 **Decision** on 2026-10-23 (below). See "Implementation (2026-10-23)" for what
 exists, where the build differs from this plan, and the production runbook.
+**S1 (2026-11-17):** the weeks retire at the contract horizon reaper's
+horizon, and retirement deletes no row: it keeps exactly what the reaper
+keeps (section "S1", below).
 
 ## Decisions (settled 2026-10-23)
 
 - **Retention horizon R: 13 weeks (91 days).** A weekly partition is dropped
   once its upper bound is older than R and it passes the preconditions in
-  "Retention".
+  "Retention". *Superseded by S1 (2026-11-17):* a week retires a day after
+  its upper bound passes the contract horizon reaper's horizon, 35 days while
+  the reaper's mode is on, and keeps every row the reaper keeps. R stays the
+  longest retention, the one that applies with the reaper's mode off.
 - **Granularity: weekly**, Monday 00:00 UTC bounds, the same on every table.
 - **`contract_close_report_evidence`: the same horizon, by age.** A migration
   lets only the retention task delete rows older than R, in batches; the
@@ -355,6 +361,11 @@ Expose the cutover as an operator command, not a boot migration:
 
 ## Retention (Decision)
 
+*Superseded by S1 (2026-11-17), below:* retirement no longer checks these
+preconditions or archives anything. The reaper alone deletes contracts, by its
+keep rules, and a week's partitions drop once they hold no row. This section
+is the 2026-10-22 plan.
+
 Today the horizon is effectively 300 days, because `reap_time` is stamped only
 from completed payments. To make dropping partitions possible, define a
 horizon R. A weekly partition is dropped only when its upper bound is older
@@ -390,7 +401,9 @@ Extend the existing task pattern from `remove_old_client_reliability_stats`:
 - Create partitions 4 weeks ahead. Each new partition gets the leaf
   autovacuum settings.
 - Drop partitions that have expired and pass the precondition check, with a
-  5 s lock_timeout, retrying on the next run.
+  5 s lock_timeout, retrying on the next run. *Since S1:* compact each
+  expired week the reaper has emptied, and drop it once it holds no row, under
+  the 11-17 lock admission with waits of at most 1 s.
 - Run `ANALYZE` on a partition once its week has closed.
 - Exclude closed partitions from the REINDEX rotation.
 - Alert when fewer than 2 future partitions exist, or when an expired
@@ -535,6 +548,11 @@ Step 7 needs no action: the maintenance task drops each week once it qualifies.
 
 ### Retention as built
 
+*Superseded by S1 (2026-11-17), below.* This was the 2026-10-23 build: the
+drop at 91 days, its blockers and its archive step. S1 removed the blockers
+and the archive step, which deleted contracts the contract horizon reaper
+keeps.
+
 - **Dropping a week.** A week's partitions are dropped once the week ended
   more than 13 weeks ago and none of these blockers holds: an unresolved
   contract, an unsettled escrow, or a payment hold on a sweep. (A legacy
@@ -621,6 +639,283 @@ cutover week is chosen for disk headroom, not as the nearest Monday.
      peak: `ALTER TABLE contract_close_report VALIDATE CONSTRAINT contract_close_report_contract_id_fkey`.
    - Once partitioned, the monitor requires that key to stay absent: a key
      restored by hand, or by `db audit --fix`, would block each week's drop.
+
+## S1: weeks retire at the reaper's horizon (2026-11-17)
+
+Status: **BUILT** (owner go 2026-11-17 ~08:30Z): code 2d55bc9f3, tests
+de9552b8e, branch `feat/contract-week-reaper-horizon-1117`. No migration;
+it ships with the taskworker. It supersedes the 91-day drop and the archive step of "Retention
+as built" above. It is a prerequisite for the cutover week C (RUNBOOK gates
+C1 and C2); it does not make C feasible on edge-2's current volume (below).
+
+### The problem
+
+- The weeks dropped only at `ContractRetention`, 91 days. From C, new weeks
+  grow 140–180 GiB a day (1,439 contracts a second), so 91 days is 12–17 TiB
+  of weeks, more than edge-2's 13.75 TiB volume.
+- The 91-day drop deleted, through its archive step, every contract its own
+  narrower checks admitted (resolved, escrows settled, no pending payment).
+  That loses contracts the contract horizon reaper keeps on purpose: paid
+  under attribution review, paid by a payment with no row, paid within the
+  discharge time, closed inside the horizon, and unpaid sweeps an operator
+  block award can still read.
+
+### Design
+
+**The reaper is the only judge.** `model/contract_horizon_reaper.go` deletes a
+contract with its closes, escrows, sweeps, extender parties and close reports
+in one transaction, under its keep rules, and the usage archive trigger copies
+the proof in the same statement. Retirement deletes no row and evaluates no
+keep rule. It only returns the storage of rows the reaper has already
+deleted. That makes "keep exactly what the reaper keeps" true by construction,
+for every rule the reaper has today and any it gains later.
+
+**Expiry** (`ContractWeekRetention`, `contractWeekRangeExpired`): a week
+expires a day (`RetireDelay`) after its upper bound passes the reaper's
+horizon. The horizon comes from the reaper's control once per run, the same
+way close evidence reads it (`model.WithContractHorizonControl`):
+- while the mode is on, the control's `horizonDays`, between 35 and 91 days;
+- with the mode off, in a dry run, or with the control unread, 91 days. The
+  reaper then deletes nothing, so the week stays.
+
+The day covers the reaper's 2-hour close settle time and the vacuum after its
+last deletes. The legacy partition expires the same way from the cutover week.
+
+**Per expired week**, oldest first, each run
+(`db_contract_week_retirement.go`):
+1. **Wait for the reaper.** A leaf is examined only once the catalog shows it
+   emptied: at most 1M rows (`reltuples`) and 1M dead rows (`n_dead_tup`), or
+   at most 256 MiB on disk. Until vacuum has removed the reaper's deletes, a
+   walk of its key would visit every deleted row.
+2. **Count its live rows** along its key, up to 20,000 (`MaxCompactRows`), in
+   a read-only statement of at most 5 s. Above the bound the leaf waits,
+   reported. The walk also brings the kept rows into the cache.
+3. **Compact** each leaf that holds more than 256 MiB, or no live row:
+   `CLUSTER` along its primary key, in its own transaction.
+   - It takes that leaf's ACCESS EXCLUSIVE lock first, waiting at most 1 s, and
+     gives the rewrite 500 ms.
+   - Every planner cost is set to zero, so CLUSTER always scans the key and
+     never the whole heap. PostgreSQL 18 counts disabled plans apart from their
+     costs, so `enable_*` settings cannot force this, and physical correlation
+     would otherwise choose a sequential scan of the full week.
+   - CLUSTER copies every live and recently dead row version with its
+     transaction ids. It is MVCC-safe; a copy or TRUNCATE is not. Every
+     snapshot, including the epoch usage reader's long REPEATABLE READ one,
+     sees the same rows afterwards.
+   - The old files are unlinked after the commit releases the lock.
+   - Then `SET WITHOUT CLUSTER`, so the leaf's catalog matches the others.
+4. **Drop** once the week's six leaves hold no tuple at all, live or dead, in
+   any heap or TOAST table: detach and drop all six in one transaction,
+   children first. It locks the six parents `ONLY` and the week's leaves, waits
+   at most 1 s, gives the work 500 ms, and reads the leaves again under its
+   locks. Nothing any snapshot could see goes with them.
+
+A week whose rows the reaper keeps stays compacted, a few small leaves,
+until the reaper's weekly rescans delete those rows. The next run then
+empties the leaves and drops the week.
+
+**Locks (the 11-17 rules).** Every step reads `contractLockAdmission` first.
+It never queues behind an autovacuum, a prepared transaction, or a transaction
+older than 5 s holding or awaiting a conflicting lock. A busy leaf or week is
+left for the next run, reported. The scopes are exact:
+- CLUSTER: the leaf and its TOAST table, found through `reltoastrelid`;
+- the drop: the six parents `ONLY`, plus the week's leaves and their TOAST.
+
+Neither waits for the vacuums of other leaves, such as the legacy one.
+- Every exclusive wait is at most 1 s. The wait plus the work stays under the
+  application's 2 s `PgLockTimeout`.
+- The family's own drop lock timeout goes from 5 s to 1 s.
+- **Found by S1's tests:** the task's closed-leaf and parent `ANALYZE` had no
+  admission and no lock timeout. It queued behind a vacuum on a leaf, which
+  would cancel a routine autovacuum after `deadlock_timeout`, or wait out an
+  anti-wraparound one with the whole task stalled behind it. It now uses the
+  same admission (registry `AnalyzeAdmission`) and a 1 s lock timeout.
+
+**Who waits for a compaction.** Only the statements that lock that week's
+leaf:
+- unbounded reads that probe every leaf (sweeps by payment, provider stats);
+- generic plans;
+- before B1, the hot reads, whose `statement_timestamp()` bound locks every
+  leaf (RUNBOOK §4.3).
+
+They wait for the lock wait plus the rewrite, under the application's 2 s
+bound. B1 is a precondition of the swap, so after it the hot reads prune to
+recent weeks at plan time and never meet an old week's lock. The drop locks
+the parents for its catalog work, as the swap does.
+
+**Work under a lock is bounded.** CLUSTER handles at most the rows the reaper
+keeps (20,000 per leaf); the drop is catalog work. On Main, the reaper kept
+about 1 row in 900,000 of early October's contracts at the horizon (4
+unsettled and 4 recent_close an hour out of 7.2M read), about 1,000 a week at
+1,439 contracts a second.
+
+**Removed:** the archive step (`contractArchiveBatchSql`), the old blockers
+(`contractWeekBlocker`), and the cursor's `archive_partition` and
+`archive_cursor`, which an old cursor still carries and which are now ignored.
+
+### Each keep rule survives a retirement
+
+| Reaper keeps (reason) | Why it survives S1 | Covered by |
+|---|---|---|
+| `open`, `unresolved` (no outcome, dispute) | not deleted by the reaper, so its rows are live; CLUSTER copies every live row; the drop needs zero tuples | TestContractWeekRetirementKeepsWhatTheReaperKeeps (week B) |
+| `recent_close` | same | same (week A) |
+| `unsettled` escrow | same; the escrow, its contract and every dependent stay together | same (week B) |
+| `payment_hold` (pending, or an external attempt) | same | same (week B); TestContractPartitionRetirementPreservesPaymentHolds |
+| `payment_incomplete` (incl. a payment row that does not exist) | same | same (week A) |
+| `payment_recent` (within `CompletedContractExpiration`) | same | same (week A) |
+| `block_points` (unpaid sweep in a block still to be awarded) | same | same (week A) |
+| `payment_review` (attribution review, never cleared) | same | same (week A) |
+| `busy` (another transaction holds it) | the reaper retries it; the leaf's lock or row locks make S1 wait or skip it, never take it | TestContractWeekRetirementDoesNotQueueBehindALeafLock |
+| a deleted row an older snapshot still sees | CLUSTER keeps recently dead versions with their xmin/xmax | TestContractWeekCompactionKeepsEveryRowVersion |
+
+On ab2d3ed87 (before S1) the same test lost every week-A contract: the reviewed,
+missing-payment, recently paid, recently closed and block-points ones were
+archived, deleted and dropped with their week.
+
+### Related tables
+
+- **The six C1 tables** have the same weekly bounds. A compaction keeps every
+  row of its leaf. Every pair (contract with escrow, close, sweep, report,
+  extender) therefore stays exactly as the reaper left it, which deletes a
+  contract and all its dependents in one transaction. The drop removes all six
+  leaves of a week together, and only when every one is empty.
+- **`contract_close_report_evidence` (C5)** keeps its own rule, unchanged:
+  35 days from acceptance for a resolved or deleted contract (owner,
+  2026-11-01), not the reaper's keep rules. S1 never makes a live contract
+  "gone", so the evidence retention sees exactly the contract states it saw
+  before.
+- **`st_provider_usage_archive`** is written only by the reaper's deletes.
+  S1 never drops a live contract, so it never needs the capture trigger and
+  archives nothing.
+- **`account_payment`, `payment_report` (block awards)**: read by the reaper,
+  untouched by S1.
+
+### With the reaper, before and after C
+
+- **Plain tables (today):** retirement is a no-op (`IsContractPartitioned`
+  false). The reaper works as it does now.
+- **Between the swap and C:** the legacy partition's bound is C, and the
+  weekly partitions are empty and in the future. Nothing expires before
+  C + 36 days.
+- **From C:** the reaper deletes each contract 35 days and 2 hours after
+  creation, through the parent, pruned per leaf, exactly as before. Vacuum
+  removes those rows from the leaves; a day after the week's upper bound
+  passes the horizon, S1 compacts and drops it.
+- **No double work.** S1 never classifies or deletes, and its reads are
+  bounded by the kept rows. The reaper's rescans reread a compacted week's
+  few kept rows, as they reread kept rows today.
+- **No gap.** At no point is a row the reaper keeps outside a live,
+  attached partition or invisible to a snapshot.
+- **Reaper off or behind:** the week waits ("the reaper and vacuum have not
+  emptied it"), reported each run. With the mode off it waits from 91 days.
+
+### The legacy partition
+
+At C + 36 days the legacy partition expires. It then holds every pre-C
+contract the reaper keeps. On 11-17 its pass had kept:
+- about 20.7M under attribution review, which no code clears
+  (`attribution_review_required` is never reset);
+- 19.4M paid recently (these go within a week);
+- about 57k with an unsettled escrow.
+
+That is far over the 20,000-row bound, so the legacy partition stays, reported.
+Its indexes can be rebuilt once the reaper has emptied it (C3: about 53% of
+its size, `db reindex-index` on the `_l` names). Its heap, about 2.4 TiB
+today, stays until those rows go. **That needs an owner decision** (see
+"Decisions" below).
+
+### Disk
+
+`temp/contract-cutover-1117/s1/scripts/disk_model.py` steps a day at a time
+from C. Each day after C consumes that day's inflow, because the frozen
+legacy partition's freed space is never reused.
+
+**Weeks held at steady state.** A week drops about 36 days after it ends, so
+36 to 43 days of inflow are on disk; with two days of vacuum lag, 38 to 45.
+
+| GiB/day | S1 (36 d) | S1 (38 d) | Before S1 (91 d) |
+|---|---|---|---|
+| 140 | 4.9–5.9 TiB | 5.2–6.2 TiB | 12.4–13.4 TiB |
+| 180 | 6.3–7.6 TiB | 6.7–7.9 TiB | 16.0–17.2 TiB |
+
+This is about the plain tables' steady state at the same load: 35 days, 4.8–6.2
+TiB compact, plus their index bloat. With S1 there is no bloat and no rebuild
+cycle.
+
+**Free space needed at C**, at the peak between C and C+45. Each case
+includes a 500 GiB floor and +10 GiB a day from the other families:
+
+| Legacy partition after C | 140 GiB/day | 180 GiB/day | Peak |
+|---|---|---|---|
+| stays whole | 6.6–6.9 TiB | 8.3–8.7 TiB | C+42..44 |
+| its indexes rebuilt once the reaper has emptied it (C+38..45), or the whole leaf compacted or dropped at C+38 by an owner decision | 5.9 TiB | 7.4 TiB | C+37 |
+| its indexes rebuilt each week as the reaper empties it (legacy 5–7 TiB at C) | 3.0–4.4 TiB | 4.7–6.1 TiB | C+42..44 |
+| before S1 (91 d) | 14.9 TiB | 18.7 TiB | C+118 |
+
+**edge-2 had 5.4 TiB free** (5,467 GiB, 11-17 ~09:40Z), with no trim and no
+new disk. The plain tables are still refilling to 35 days at the higher rate.
+On 11-17 they held 2.28B contracts, against about 4.35B at 35 days and 1,439
+a second. That is about 1.8–2.3 TiB more by about 12-22, net of the free space
+the backlog deletes left, before the other families *(inferred)*.
+
+So C needs about 3.0–8.7 TiB free on the day, and 5.9–7.4 TiB with the plan
+in the RUNBOOK (the legacy indexes rebuilt once emptied). The current volume
+cannot provide that unless one of these comes first:
+- the RAID-1 tablespace (DBDISK §5.2, about +6.8 TiB);
+- a trim of 35% or more together with weekly legacy index rebuilds; each
+  round rereads the legacy heap once per index.
+
+**Implied C:** the first Monday at least a week after the tablespace is online
+and the swap's preconditions hold (B1–B3). With drives in 1–3 weeks, that is
+2027-01-04 or later, not 12-21. S1 turns the cutover from impossible
+(15–19 TiB) into one capacity step.
+
+### Decisions for the owner
+
+1. **The legacy partition's kept rows.** About 20.7M USDC-era contracts under
+   attribution review are kept by the reaper for good. Its options:
+   - (a) keep them: the legacy heap (about 2.4 TiB) stays, and its indexes are
+     rebuilt once emptied;
+   - (b) close the reviews, so the reaper deletes the contracts and S1 drops
+     the legacy partition (about −5 TiB);
+   - (c) compact the legacy partition in a window: CLUSTER of about 21M kept
+     contracts holds its lock for an hour or more, with the taskworker stopped;
+   - (d) export the reviewed contracts to edge-6 and let the reaper delete
+     them, a new keep-rule exception.
+2. **Capacity for C:** the RAID-1 tablespace, or the trim with weekly legacy
+   index rebuilds (above).
+3. **The monitor's §2.4i** still judges a week at 91 + 14 days, since the
+   monitor does not read the reaper's horizon. A 36-day line needs the reaper's
+   horizon in the monitor (the `urnetwork_contract_horizon_horizon_seconds`
+   gauge). Until then, the days-to-full alert (DBDISK §5.6) is the earlier
+   signal.
+4. **Granularity.** Weekly leaves hold up to 7 days past the horizon, about
+   1.0–1.3 TiB at 140–180 GiB a day. Daily contract leaves would cut that to a
+   day. That is a change to C1's design, not S1's.
+
+### Tests
+
+PostgreSQL 18.7 (throwaway container) and the local test environment (18.6,
+launcher 10.213.0.1):
+- `TestContractWeekRetentionFollowsTheReaperHorizon`
+- `TestContractWeekRetirementLockBoundsStayBelowTheApplicationBound`
+- `TestContractWeekRetiresAtTheReaperHorizon`
+- `TestContractWeekCompactionKeepsEveryRowVersion`
+- `TestContractWeekRetirementDoesNotQueueBehindALeafLock`
+- `TestContractWeekRetirementWaitsOutAnAutovacuum`
+- `TestContractWeekRetirementBoundsItsWork`
+- `TestContractWeekRetirementIsANoOpOnPlainTables`
+- `model.TestContractWeekRetirementKeepsWhatTheReaperKeeps`
+- `TestContractPartitionMaintenance` and the payment-hold, archive and registry
+  tests, rewritten for S1.
+
+On ab2d3ed87, scratch variants that use only that build's API fail on each
+root cause:
+- the week is still there 36 days past its end at a 35-day horizon;
+- a live contract's six rows are removed;
+- the closed-leaf ANALYZE queues behind a long leaf lock;
+- the drop waits up to 5 s for each lock;
+- week A's five kinds of kept contracts are archived and dropped.
 
 ## Related: MinIO and client-key history
 
