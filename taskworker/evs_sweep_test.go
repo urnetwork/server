@@ -9,8 +9,9 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest"
 )
 
-// evs's registry binds the sweep's one-off passes with no chain of its own: the turn-on's start queues one scan per
-// metadata cluster, each scan of an empty cluster ends clean, and args of no run's shape fail.
+// evs's registry binds the sweep's one-off passes with no chain of its own: the turn-on's start, reading the host's
+// own gate, waits and queues nothing while purge reads observe (owner decision 412; QD-960) and once it reads on
+// queues one scan per metadata cluster, each scan of an empty cluster ends clean, and args of no run's shape fail.
 func TestEvsJobsBindTheSweepPasses(t *testing.T) {
 	var sweep *evsJob
 	for _, job := range evsJobs {
@@ -25,6 +26,16 @@ func TestEvsJobsBindTheSweepPasses(t *testing.T) {
 	fake := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil)
 	sidecartest.RegisterEvsTwins(fake.Redis)
 	host := fake.ServiceHost()
+	// no sidecar.yml: purge reads observe, and the start retries on the backoff
+	if err := sweep.run(t.Context(), host, evsservice.EvsSweepTurnOnTaskRequest().Args); !errors.Is(err, evsservice.ErrSweepRetry) {
+		t.Fatalf("a turn-on start under observe: %v", err)
+	}
+	if requests := fake.Tasks.AllRequests(); len(requests) != 0 {
+		t.Fatalf("a turn-on start under observe queued %d", len(requests))
+	}
+	if err := fake.Gates.Set("sidecar:\n  format2: {enabled: true, purge: on}\n"); err != nil {
+		t.Fatal(err)
+	}
 	if err := sweep.run(t.Context(), host, evsservice.EvsSweepTurnOnTaskRequest().Args); err != nil {
 		t.Fatal(err)
 	}

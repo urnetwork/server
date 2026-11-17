@@ -3,12 +3,13 @@ package taskworker
 // EVSB-M10-02's one-off sweep passes among evs's jobs (evs_jobs.go; §11.13's sweep row), a sidecar job on the process's
 // evs host. evs.sweep has no chain of its own: a hold's end and the purge's turn-on from observe queue its starts
 // (evsservice.EvsSweepHoldEndTaskRequest, evsservice.EvsSweepTurnOnTaskRequest), each start queueing a scan or a pass
-// per repo it covers. What queues a start is not yet settled (questions/evsb-m3-02-sweep-pass-triggers.md), so until
-// it is nothing does, and what a hold or observe mode kept stays.
+// per repo it covers. The side that ends each condition queues its start (owner decision 206; QD-635): the abuse hold
+// pass for each hold it ends, and `sidecarctl evs purge-turn-on` in the runbook step that sets format2.purge to on.
 //
-// A run reads §19.11's purge mode from the host's gates, as evacuation does, so a pass under observe deletes nothing. A
-// pass that could not finish returns its error, and server/task's backoff reruns it; what it deleted stays deleted, and
-// a rerun counts it absent.
+// A run reads §19.11's purge mode from the host's gates, as evacuation does, so a pass under observe deletes nothing,
+// and the turn-on's start waits, returning evsservice.ErrSweepRetry, until this host reads on (owner decision 412;
+// QD-960). A run that could not finish returns its error, and server/task's backoff reruns it; what it deleted stays
+// deleted, and a rerun counts it absent.
 
 import (
 	"context"
