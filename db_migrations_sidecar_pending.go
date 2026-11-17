@@ -1600,7 +1600,10 @@ func sidecarMg6AclMigrations() []any {
 // padding, minted with the zone's system set and fixed for the network's life,
 // public in _dmarc's and _smtp._tls's rua (DNS-M8-01), and the key mxedge's
 // report listener maps a report to its network by. Nothing reads any of these
-// columns unless the binary links MG6 (server.SidecarMg6Linked).
+// columns unless the binary links MG6 (server.SidecarMg6Linked). acme_token's
+// unique index is built in the transaction, since this group's §7 part creates
+// network_domain; report_token's is built online, since MG5 creates
+// network_dns_zone and it holds rows by the time this group applies (§19.7).
 func sidecarMg6DnsMigrations() []any {
 	return []any{
 		newSqlMigration(`
@@ -1616,10 +1619,18 @@ func sidecarMg6DnsMigrations() []any {
 		newSqlMigration(`
 			ALTER TABLE network_dns_zone ADD COLUMN report_token varchar(26) NULL
 		`),
-		// a token names one zone, which a report's rua resolves
-		newSqlMigration(`
-			CREATE UNIQUE INDEX network_dns_zone_report_token ON network_dns_zone (report_token) WHERE report_token IS NOT NULL
-		`),
+		// a token names one zone, which a report's rua resolves. Built
+		// concurrently, so the zones' writers keep writing through the scan,
+		// and so outside a transaction, where a concurrent build cannot run.
+		// The restart step drops only what an interrupted build of this index
+		// left, an invalid index that writes may still maintain. No token
+		// exists yet to collide: only a binary that links MG6 mints one, and it
+		// is unready until the database reaches MG6's marker, after this entry.
+		newRestartableOnlineSqlMigration(
+			`DROP INDEX CONCURRENTLY IF EXISTS network_dns_zone_report_token`,
+			`CREATE UNIQUE INDEX CONCURRENTLY network_dns_zone_report_token ON network_dns_zone (report_token) WHERE report_token IS NOT NULL`,
+			`CREATE UNIQUE INDEX network_dns_zone_report_token ON network_dns_zone (report_token) WHERE report_token IS NOT NULL`,
+		),
 	}
 }
 
