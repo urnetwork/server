@@ -164,7 +164,7 @@ func readCompetitionExpiredControlRecord(connection competitionExecutorConnectio
 		return record, errors.New("expired bridge record changed during authentication")
 	}
 	afterStat, ok := after.Sys().(*syscall.Stat_t)
-	if !ok || afterStat.Nlink != 1 || afterStat.Uid != 0 || afterStat.Gid != 0 || afterStat.Ctim != stat.Ctim {
+	if !ok || afterStat.Nlink != 1 || afterStat.Uid != 0 || afterStat.Gid != 0 || !statChangeTimeEqual(afterStat, stat) {
 		return record, errors.New("expired bridge record custody changed during authentication")
 	}
 	return record, nil
