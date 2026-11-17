@@ -6,6 +6,10 @@ exists, where the build differs from this plan, and the production runbook.
 **S1 (2026-11-17):** the weeks retire at the contract horizon reaper's
 horizon, and retirement deletes no row: it keeps exactly what the reaper
 keeps (section "S1", below).
+**B1 and B3 (2026-11-17):** the hot contract reads carry their partition
+weeks as literals, so a partitioned table prunes them at plan time, and the
+stranded grant and removed client reads are bounded by contract id (section
+"The hot reads' partition weeks", under Implementation).
 
 ## Decisions (settled 2026-10-23)
 
