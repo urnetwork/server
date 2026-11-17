@@ -106,7 +106,7 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 	return findNetworkResults, nil
 }
 
-// What RemoveNetworkWithStoreSnapshot did.
+// How RemoveNetworkWithStoreSnapshot ended.
 type RemoveNetworkOutcome string
 
 const (
@@ -120,7 +120,22 @@ const (
 	// name is active: one credited after the deletion's store steps ran, or,
 	// with no snapshot, any active one. The store steps must run again.
 	RemoveNetworkStoreRenewalUnchecked RemoveNetworkOutcome = "store_renewal_unchecked"
+	// the user is the only live Owner of a team (§7.5's last Owner, owner
+	// decision 329): another member must be made Owner, or the team deleted,
+	// first. Nothing is deleted (account_last_owner_model.go)
+	RemoveNetworkLastTeamOwner RemoveNetworkOutcome = "last_team_owner"
 )
+
+// What RemoveNetworkWithStoreSnapshot did.
+type RemoveNetworkResult struct {
+	Outcome RemoveNetworkOutcome
+	// the removed users' sign-ins, for their product-update removals; set with
+	// RemoveNetworkRemoved
+	UserAuths map[string]bool
+	// the team the deletion would leave with no live Owner; set with
+	// RemoveNetworkLastTeamOwner
+	LastOwnerTeam *LastOwnerTeam
+}
 
 // Names the App Store and Google Play renewals an account deletion checked with
 // the stores before it removes the network: the App Store transactions it
@@ -212,34 +227,36 @@ func removeNetworkStoreRenewals(
 }
 
 // RemoveNetworkWithStoreSnapshot with no store snapshot: it refuses while any
-// Stripe, App Store or Google Play renewal is active.
+// Stripe, App Store or Google Play renewal is active, and while its user is the
+// last Owner of a team.
 func RemoveNetwork(
 	ctx context.Context,
 	networkId server.Id,
 	adminUserId *server.Id,
 ) (success bool, userAuths map[string]bool) {
-	outcome, userAuths := RemoveNetworkWithStoreSnapshot(ctx, networkId, adminUserId, nil)
-	return outcome == RemoveNetworkRemoved, userAuths
+	removal := RemoveNetworkWithStoreSnapshot(ctx, networkId, adminUserId, nil)
+	return removal.Outcome == RemoveNetworkRemoved, removal.UserAuths
 }
 
 // Removes the network and its users. storeSnapshot names the App Store and
 // Google Play renewals the caller already checked with the stores; any other
 // active renewal from those stores refuses the removal. Pass nil when no store
-// steps ran.
+// steps ran. A user that is the last live Owner of a team refuses it before
+// anything is deleted, and the refusal names the team
+// (account_last_owner_model.go).
 func RemoveNetworkWithStoreSnapshot(
 	ctx context.Context,
 	networkId server.Id,
 	adminUserId *server.Id,
 	storeSnapshot *RemoveNetworkStoreSnapshot,
-) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
+) (removal *RemoveNetworkResult) {
 	var posts []server.PostFunction
 	retirementId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.Raise(session.LockSessionLifecycle(ctx, tx, networkId, true))
 		// Tx may rerun the callback after a transient database failure. Never let
 		// a value produced by an aborted attempt escape a later refusal.
-		outcome = ""
-		userAuths = nil
+		removal = &RemoveNetworkResult{}
 		posts = nil
 
 		// Serialize deletion against every renewal credit. The matching credit
@@ -249,7 +266,19 @@ func RemoveNetworkWithStoreSnapshot(
 		// commit rather than retain a pre-wait RepeatableRead snapshot.
 		networkAdminUserId, networkFound := lockPaymentNetworkForRemoveInTx(tx, ctx, networkId)
 		if !networkFound || (adminUserId != nil && *adminUserId != networkAdminUserId) {
-			outcome = RemoveNetworkNotFound
+			removal.Outcome = RemoveNetworkNotFound
+			return
+		}
+		userIds := map[server.Id]bool{networkAdminUserId: true}
+
+		// §7.5's last Owner, before the refusals the store steps answer and
+		// before anything is deleted. The users' memberships and their teams'
+		// live Owners stay locked to the commit, so no member removal, deletion
+		// or role change moves an Owner under the check, and ReadCommitted lets a
+		// check that waited read what the winner committed.
+		if lastOwnerTeam := lockLastOwnerTeamInTx(ctx, tx, slices.Collect(maps.Keys(userIds)), networkId); lastOwnerTeam != nil {
+			removal.Outcome = RemoveNetworkLastTeamOwner
+			removal.LastOwnerTeam = lastOwnerTeam
 			return
 		}
 
@@ -277,7 +306,7 @@ func RemoveNetworkWithStoreSnapshot(
 			}
 		})
 		if activeStripeRenewal {
-			outcome = RemoveNetworkStripeRenewalActive
+			removal.Outcome = RemoveNetworkStripeRenewalActive
 			return
 		}
 
@@ -287,13 +316,12 @@ func RemoveNetworkWithStoreSnapshot(
 		// deleted account. The retry runs the store steps on it.
 		for _, renewal := range removeNetworkStoreRenewals(ctx, tx, networkId) {
 			if !storeSnapshot.Covers(renewal) {
-				outcome = RemoveNetworkStoreRenewalUnchecked
+				removal.Outcome = RemoveNetworkStoreRenewalUnchecked
 				return
 			}
 		}
 
-		userIds := map[server.Id]bool{networkAdminUserId: true}
-		userAuths = map[string]bool{}
+		userAuths := map[string]bool{}
 
 		server.CreateTempTableInTx(ctx, tx, "temp_user_id(user_id uuid)", slices.Collect(maps.Keys(userIds))...)
 
@@ -443,10 +471,11 @@ func RemoveNetworkWithStoreSnapshot(
 		// removal has committed
 		posts = append(posts, networkNameSearch().RemoveInTxPost(ctx, networkId, tx))
 
-		outcome = RemoveNetworkRemoved
+		removal.Outcome = RemoveNetworkRemoved
+		removal.UserAuths = userAuths
 	}, server.TxReadCommitted)
 
-	if outcome == RemoveNetworkRemoved {
+	if removal.Outcome == RemoveNetworkRemoved {
 		server.RunPosts(ctx, posts...)
 		// the networks stats series (ComputeStats) replays created/deleted
 		// events; creation is recorded in network_model.go, and without this

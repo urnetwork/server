@@ -426,7 +426,7 @@ func TestRemoveNetworkRechecksStoreRenewalsAfterWaitingForCredit(t *testing.T) {
 
 			var outcome RemoveNetworkOutcome
 			removeDone := runPaymentModelTest(func() error {
-				outcome, _ = RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot)
+				outcome = RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome
 				return nil
 			})
 
@@ -479,7 +479,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 			addRenewal("synthetic-store-checked", now.Add(-time.Minute), now.Add(time.Hour))
 
 			// no store steps ran: any active store renewal refuses
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil); outcome != RemoveNetworkStoreRenewalUnchecked {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil).Outcome; outcome != RemoveNetworkStoreRenewalUnchecked {
 				t.Fatalf("removal without a snapshot: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
 			}
 			if success, _ := RemoveNetwork(ctx, networkId, &userId); success {
@@ -490,7 +490,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 
 			// credited after the store steps
 			addRenewal("synthetic-store-credited-later", now.Add(-time.Minute), now.Add(2*time.Hour))
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkStoreRenewalUnchecked {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome; outcome != RemoveNetworkStoreRenewalUnchecked {
 				t.Fatalf("removal after a later credit: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
 			}
 			if !removeNetworkTestNetworkExists(ctx, networkId) {
@@ -510,7 +510,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 				}
 			}
 
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkRemoved {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome; outcome != RemoveNetworkRemoved {
 				t.Fatalf("removal with a current snapshot: outcome %q, want %q", outcome, RemoveNetworkRemoved)
 			}
 			if removeNetworkTestNetworkExists(ctx, networkId) {

@@ -21,6 +21,8 @@ import (
 // store answer is fixed by the test, so the outcome depends on nothing but
 // the deletion logic.
 type networkRemoveStepsFake struct {
+	// the team the first check finds the caller the last Owner of; nil for none
+	lastOwnerTeam *model.LastOwnerTeam
 	storeSnapshot *model.RemoveNetworkStoreSnapshot
 	appleRenewing bool
 	appleErr      error
@@ -28,6 +30,8 @@ type networkRemoveStepsFake struct {
 	playErr       error
 	// the removal's outcome; empty means removed
 	removeOutcome model.RemoveNetworkOutcome
+	// the team the removal names with RemoveNetworkLastTeamOwner
+	removeLastOwnerTeam *model.LastOwnerTeam
 
 	calls   []string
 	removed bool
@@ -39,6 +43,10 @@ type networkRemoveStepsFake struct {
 
 func (self *networkRemoveStepsFake) steps() *networkRemoveSteps {
 	return &networkRemoveSteps{
+		lastOwnerTeam: func(clientSession *session.ClientSession) *model.LastOwnerTeam {
+			self.calls = append(self.calls, "last-owner")
+			return self.lastOwnerTeam
+		},
 		storeSnapshot: func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot {
 			self.calls = append(self.calls, "snapshot")
 			if self.storeSnapshot == nil {
@@ -60,14 +68,20 @@ func (self *networkRemoveStepsFake) steps() *networkRemoveSteps {
 			self.playPurchaseTokens = purchaseTokens
 			return self.playErr
 		},
-		removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool) {
+		removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) *model.RemoveNetworkResult {
 			self.calls = append(self.calls, "remove")
 			self.removeStoreSnapshot = storeSnapshot
 			if self.removeOutcome != "" && self.removeOutcome != model.RemoveNetworkRemoved {
-				return self.removeOutcome, nil
+				return &model.RemoveNetworkResult{
+					Outcome:       self.removeOutcome,
+					LastOwnerTeam: self.removeLastOwnerTeam,
+				}
 			}
 			self.removed = true
-			return model.RemoveNetworkRemoved, map[string]bool{"synthetic@example.invalid": true}
+			return &model.RemoveNetworkResult{
+				Outcome:   model.RemoveNetworkRemoved,
+				UserAuths: map[string]bool{"synthetic@example.invalid": true},
+			}
 		},
 		scheduleRemoveProductUpdates: func(clientSession *session.ClientSession, userAuths map[string]bool) {
 			self.calls = append(self.calls, "product-updates")
@@ -91,7 +105,7 @@ func TestNetworkRemoveCancelsPlayBeforeRemoval(t *testing.T) {
 	if err != nil || result == nil || result.Error != nil {
 		t.Fatalf("remove result=%+v err=%v, want success", result, err)
 	}
-	want := []string{"snapshot", "apple", "stripe", "play", "remove", "product-updates"}
+	want := []string{"last-owner", "snapshot", "apple", "stripe", "play", "remove", "product-updates"}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("steps = %v, want %v", fake.calls, want)
 	}
@@ -135,7 +149,7 @@ func TestNetworkRemoveStoreRenewalChangedAsksForRetry(t *testing.T) {
 	if result == nil || result.Error == nil || result.Error.Message != networkRemoveStoreRenewalChangedMessage {
 		t.Fatalf("remove result = %+v, want the retry message", result)
 	}
-	if want := []string{"snapshot", "apple", "stripe", "play", "remove"}; !reflect.DeepEqual(fake.calls, want) {
+	if want := []string{"last-owner", "snapshot", "apple", "stripe", "play", "remove"}; !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("steps = %v, want %v (no product-update removal)", fake.calls, want)
 	}
 }
@@ -171,8 +185,8 @@ func TestNetworkRemoveAppleRenewingBlocksRemoval(t *testing.T) {
 			if fake.removed {
 				t.Fatalf("network removed while an App Store subscription renews (steps %v)", fake.calls)
 			}
-			if !reflect.DeepEqual(fake.calls, []string{"snapshot", "apple"}) {
-				t.Fatalf("steps = %v, want only the snapshot and the App Store check", fake.calls)
+			if !reflect.DeepEqual(fake.calls, []string{"last-owner", "snapshot", "apple"}) {
+				t.Fatalf("steps = %v, want only the last Owner check, the snapshot and the App Store check", fake.calls)
 			}
 			if result == nil || result.Error == nil || result.Error.Message != networkRemoveAppleRenewingMessage {
 				t.Fatalf("remove result = %+v, want the App Store message", result)
@@ -187,8 +201,119 @@ func TestNetworkRemoveStripeFailureBlocksRemoval(t *testing.T) {
 	if err != nil || result == nil || result.Error == nil || result.Error.Message != networkRemoveStripeFailedMessage {
 		t.Fatalf("remove result=%+v err=%v, want the Stripe failure message", result, err)
 	}
-	if !reflect.DeepEqual(fake.calls, []string{"snapshot", "apple", "stripe"}) {
-		t.Fatalf("steps = %v, want the snapshot, the App Store check and Stripe only", fake.calls)
+	if !reflect.DeepEqual(fake.calls, []string{"last-owner", "snapshot", "apple", "stripe"}) {
+		t.Fatalf("steps = %v, want the last Owner check, the snapshot, the App Store check and Stripe only", fake.calls)
+	}
+}
+
+// Requires the refusal of a team's last Owner, naming team, or no team for nil.
+func requireNetworkRemoveLastTeamOwner(t testing.TB, result *NetworkRemoveResult, err error, team *model.LastOwnerTeam) {
+	t.Helper()
+	if err != nil || result == nil || result.Error == nil {
+		t.Fatalf("remove result=%+v err=%v, want the last Owner's refusal", result, err)
+	}
+	refusal := result.Error
+	if refusal.Message != networkRemoveLastTeamOwnerMessage || refusal.Code != networkRemoveLastTeamOwnerCode {
+		t.Fatalf("refusal = %+v, want message %q and code %q", refusal, networkRemoveLastTeamOwnerMessage, networkRemoveLastTeamOwnerCode)
+	}
+	if team == nil {
+		if refusal.TeamNetworkId != nil || refusal.TeamNetworkName != "" {
+			t.Fatalf("refusal names team %v %q, want none", refusal.TeamNetworkId, refusal.TeamNetworkName)
+		}
+		return
+	}
+	if refusal.TeamNetworkId == nil || *refusal.TeamNetworkId != team.NetworkId || refusal.TeamNetworkName != team.NetworkName {
+		t.Fatalf("refusal names team %v %q, want %s %q", refusal.TeamNetworkId, refusal.TeamNetworkName, team.NetworkId, team.NetworkName)
+	}
+}
+
+// §7.5's last Owner (owner decision 329): the check runs before every store
+// step, so its refusal reads and cancels nothing at any store and removes
+// nothing.
+func TestNetworkRemoveChecksTheLastOwnerBeforeAnyStoreStep(t *testing.T) {
+	team := &model.LastOwnerTeam{NetworkId: server.NewId(), NetworkName: "synthetic-team"}
+	fake := &networkRemoveStepsFake{
+		lastOwnerTeam: team,
+		storeSnapshot: &model.RemoveNetworkStoreSnapshot{
+			AppleTransactionIds: []string{"synthetic-apple-1"},
+			PlayPurchaseTokens:  []string{"synthetic-play-1"},
+		},
+	}
+	result, err := networkRemoveWithSteps(networkRemoveStepsTestSession(), fake.steps())
+	requireNetworkRemoveLastTeamOwner(t, result, err, team)
+	if fake.removed {
+		t.Fatal("the last Owner's network was removed")
+	}
+	if want := []string{"last-owner"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("steps = %v, want %v", fake.calls, want)
+	}
+}
+
+// An Owner who left the team after the first check leaves the caller the last
+// one under the removal's lock: the removal refuses, after the store steps,
+// with the same answer, and no product-update removal is scheduled.
+func TestNetworkRemoveRefusesALastOwnerFoundUnderTheLock(t *testing.T) {
+	team := &model.LastOwnerTeam{NetworkId: server.NewId(), NetworkName: "synthetic-team"}
+	fake := &networkRemoveStepsFake{
+		removeOutcome:       model.RemoveNetworkLastTeamOwner,
+		removeLastOwnerTeam: team,
+	}
+	result, err := networkRemoveWithSteps(networkRemoveStepsTestSession(), fake.steps())
+	requireNetworkRemoveLastTeamOwner(t, result, err, team)
+	if fake.removed {
+		t.Fatal("the last Owner's network was removed")
+	}
+	if want := []string{"last-owner", "snapshot", "apple", "stripe", "play", "remove"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("steps = %v, want %v (no product-update removal)", fake.calls, want)
+	}
+
+	// a removal that names no team still answers the refusal, without a team
+	fake = &networkRemoveStepsFake{removeOutcome: model.RemoveNetworkLastTeamOwner}
+	result, err = networkRemoveWithSteps(networkRemoveStepsTestSession(), fake.steps())
+	requireNetworkRemoveLastTeamOwner(t, result, err, nil)
+}
+
+// The route's existing error shape carries the refusal's code and team beside
+// its message; every other refusal answers byte for byte what it did.
+func TestNetworkRemoveLastTeamOwnerAnswerShape(t *testing.T) {
+	teamNetworkId := server.NewId()
+	teamNetworkIdJson, err := json.Marshal(teamNetworkId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageJson, err := json.Marshal(networkRemoveLastTeamOwnerMessage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(networkRemoveLastTeamOwnerError(&model.LastOwnerTeam{NetworkId: teamNetworkId, NetworkName: "synthetic-team"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"error":{"message":` + string(messageJson) + `,"code":"last_team_owner","team_network_id":` + string(teamNetworkIdJson) + `,"team_network_name":"synthetic-team"}}`
+	if string(body) != want {
+		t.Fatalf("refusal body = %s, want %s", body, want)
+	}
+
+	for _, message := range []string{
+		networkRemoveStripeFailedMessage,
+		networkRemovePlayFailedMessage,
+		networkRemoveAppleRenewingMessage,
+		networkRemoveStoreRenewalChangedMessage,
+	} {
+		messageJson, err := json.Marshal(message)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(networkRemoveError(message))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := `{"error":{"message":` + string(messageJson) + `}}`; string(body) != want {
+			t.Errorf("refusal body = %s, want %s", body, want)
+		}
+	}
+	if body, err := json.Marshal(&NetworkRemoveResult{}); err != nil || string(body) != `{}` {
+		t.Fatalf("removal body = %s %v, want {}", body, err)
 	}
 }
 
@@ -231,11 +356,13 @@ type playCancelFake struct {
 	subs       map[string]*PlaySubscription
 	gone       map[string]bool
 	cancelFail map[string]bool
+	// the tokens looked up, in order
+	looked     []string
 	cancelled  []string
 	cancelBody []map[string]any
 }
 
-func newPlayCancelFake(t *testing.T) *playCancelFake {
+func newPlayCancelFake(t testing.TB) *playCancelFake {
 	t.Helper()
 	fake := &playCancelFake{
 		subs:       map[string]*PlaySubscription{},
@@ -248,6 +375,7 @@ func newPlayCancelFake(t *testing.T) *playCancelFake {
 		fake.lock.Lock()
 		defer fake.lock.Unlock()
 		token := request.PathValue("token")
+		fake.looked = append(fake.looked, token)
 		if fake.gone[token] {
 			http.Error(response, "gone", http.StatusGone)
 			return
