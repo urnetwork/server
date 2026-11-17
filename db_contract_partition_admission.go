@@ -94,21 +94,42 @@ const (
 
 // The relations a step locks, the lock it requests and its admission.
 type contractLockScope struct {
+	// each relation and every partition below it
 	relations []string
-	request   contractLockRequest
-	settings  ContractPartitionLockSettings
+	// relations the step locks ONLY, without their partitions: a week's
+	// retirement locks the parents and that week's leaves, never the other
+	// leaves, whose vacuums it need not wait for
+	only []string
+	// with the TOAST table of each relation: a step that rewrites or drops a
+	// table locks its TOAST table too, which autovacuum vacuums on its own
+	toast    bool
+	request  contractLockRequest
+	settings ContractPartitionLockSettings
 }
 
 // Every relation lock that another backend holds or awaits in the scope ($1,
-// relation names, and every partition below them), with what the admission
-// judges it by. A prepared transaction has no backend (backend_type null).
+// relation names, and every partition below them; $2, relation names alone;
+// with $3, the TOAST table of each), with what the admission judges it by. A
+// prepared transaction has no backend (backend_type null). TOAST tables are
+// found by their owner's reltoastrelid, never by name: a name lookup in
+// pg_toast needs a privilege on that schema.
 const contractScopeLocksSql = `
-	WITH RECURSIVE scope (relid) AS (
+	WITH RECURSIVE tree (relid) AS (
 		SELECT to_regclass(name) FROM unnest($1::text[]) AS name WHERE to_regclass(name) IS NOT NULL
 		UNION
 		SELECT inheritance.inhrelid
 		FROM pg_inherits AS inheritance
-		JOIN scope ON inheritance.inhparent = scope.relid
+		JOIN tree ON inheritance.inhparent = tree.relid
+	), named (relid) AS (
+		SELECT relid FROM tree
+		UNION
+		SELECT to_regclass(name) FROM unnest($2::text[]) AS name WHERE to_regclass(name) IS NOT NULL
+	), scope (relid) AS (
+		SELECT relid FROM named
+		UNION
+		SELECT relation.reltoastrelid
+		FROM pg_class AS relation
+		WHERE $3 AND relation.oid IN (SELECT relid FROM named) AND relation.reltoastrelid <> 0
 	)
 	SELECT
 		coalesce(lock.pid, 0),
@@ -189,11 +210,24 @@ func (self contractScopeLock) String() string {
 	return line
 }
 
+// Sees the locks each admission read found, and returns the locks it judges.
+// Nil in production; a test presents a lock no test session can take, such
+// as an autovacuum worker's.
+var contractScopeLocksObserved func(scope *contractLockScope, locks []contractScopeLock) []contractScopeLock
+
 // The backends the scope's lock request should not queue behind, one line
 // each (one per backend), or none.
 func contractLockBlockers(ctx context.Context, conn PgQuerier, scope *contractLockScope) (blockers []string) {
-	result, err := conn.Query(ctx, contractScopeLocksSql, scope.relations)
-	blocking := map[int64]bool{}
+	relations := scope.relations
+	if relations == nil {
+		relations = []string{}
+	}
+	only := scope.only
+	if only == nil {
+		only = []string{}
+	}
+	var locks []contractScopeLock
+	result, err := conn.Query(ctx, contractScopeLocksSql, relations, only, scope.toast)
 	WithPgResult(result, err, func() {
 		for result.Next() {
 			var lock contractScopeLock
@@ -207,13 +241,20 @@ func contractLockBlockers(ctx context.Context, conn PgQuerier, scope *contractLo
 			if age != nil {
 				lock.transactionAge = time.Duration(*age * float64(time.Second))
 			}
-			if blocking[lock.pid] || !contractScopeLockBlocks(scope.request, lock, scope.settings.MaxTransactionAge) {
-				continue
-			}
-			blocking[lock.pid] = true
-			blockers = append(blockers, lock.String())
+			locks = append(locks, lock)
 		}
 	})
+	if contractScopeLocksObserved != nil {
+		locks = contractScopeLocksObserved(scope, locks)
+	}
+	blocking := map[int64]bool{}
+	for _, lock := range locks {
+		if blocking[lock.pid] || !contractScopeLockBlocks(scope.request, lock, scope.settings.MaxTransactionAge) {
+			continue
+		}
+		blocking[lock.pid] = true
+		blockers = append(blockers, lock.String())
+	}
 	return
 }
 
