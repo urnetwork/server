@@ -405,3 +405,130 @@ func TestSnapshotExportMatchesTheTable(t *testing.T) {
 		}
 	})
 }
+
+// The validator's progress from its health exporter in Mimir: a fresh, current
+// sample names the intent's epoch and status; a stale sample, an intent
+// observation that is not current, or a missing series is unreadable.
+func TestPromProgressReader(t *testing.T) {
+	type answers struct {
+		age, current, epoch, status string
+	}
+	var current answers
+	prometheus := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		value := ""
+		switch {
+		case strings.Contains(query, "sample_timestamp_seconds"):
+			value = current.age
+		case strings.Contains(query, "intent_current"):
+			value = current.current
+		case strings.Contains(query, "intent_native_epoch"):
+			value = current.epoch
+		case strings.Contains(query, "intent_status"):
+			value = current.status
+		}
+		if !strings.Contains(query, `host="snow"`) || value == "" {
+			writer.Write([]byte(`{"status":"success","data":{"resultType":"vector","result":[]}}`))
+			return
+		}
+		fmt.Fprintf(writer, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1,%q]}]}}`, value)
+	}))
+	defer prometheus.Close()
+	reader := &PromProgressReader{Url: prometheus.URL + "/prometheus"}
+	for _, test := range []struct {
+		answers answers
+		want    *ValidatorProgress
+	}{
+		{answers{"60", "1", "26405", "2"}, &ValidatorProgress{26405, "finalized"}},
+		{answers{"5", "1", "26405", "3"}, &ValidatorProgress{26405, "applied"}},
+		{answers{"5", "1", "26406", "1"}, &ValidatorProgress{26406, "pending"}},
+		{answers{"5", "1", "26406", "4"}, &ValidatorProgress{26406, "failed"}},
+		{answers{"5", "1", "26406", "-1"}, &ValidatorProgress{26406, "unrecognized"}},
+		// stale, not current, or missing: unreadable
+		{answers{"600", "1", "26405", "2"}, nil},
+		{answers{"5", "0", "26405", "2"}, nil},
+		{answers{"5", "1", "", "2"}, nil},
+		{answers{"", "1", "26405", "2"}, nil},
+		{answers{"5", "1", "26405.5", "2"}, nil},
+	} {
+		current = test.answers
+		progress, err := reader.ReadProgress(t.Context())
+		if test.want == nil {
+			if err == nil {
+				t.Fatalf("%+v read %+v", test.answers, progress)
+			}
+			continue
+		}
+		if err != nil || progress != *test.want {
+			t.Fatalf("%+v read %+v, %v; want %+v", test.answers, progress, err, *test.want)
+		}
+	}
+	// the production gates read it, not ssh
+	gates := DefaultGates("http://minio.invalid/minio/health/cluster", NewLatencies(), DefaultPromUrl)
+	validator, ok := gates[0].(*ValidatorGate)
+	if !ok {
+		t.Fatalf("the first gate is %T", gates[0])
+	}
+	if reader, ok := validator.Progress.(*PromProgressReader); !ok || reader.Url != DefaultPromUrl {
+		t.Fatalf("the validator gate reads %T", validator.Progress)
+	}
+}
+
+// A client id created at the given time, as connect.NewId lays it out.
+func testClientIdAt(at time.Time, entropy byte) server.Id {
+	var id server.Id
+	ms := uint64(at.UnixMilli())
+	for index := range 6 {
+		id[index] = byte(ms >> (8 * (5 - index)))
+	}
+	id[15] = entropy
+	return id
+}
+
+// A run with UntilCreated ends before the first row of a client created at or
+// after it, wherever the batch boundary falls, leaves those rows' objects
+// alone, and records the cursor of the last row before it.
+func TestMoveStopsAtItsCreationBound(t *testing.T) {
+	evidence := testEvidenceSet(t, 10)
+	store := newMemoryStore()
+	start := time.Date(2026, 11, 16, 0, 0, 0, 0, time.UTC)
+	items := make([]Item, len(evidence))
+	for index, entry := range evidence {
+		store.put(testKeys(t, entry.hash).Flat, entry.bytes)
+		items[index] = Item{
+			Cursor: Cursor{ClientId: testClientIdAt(start.Add(time.Duration(index)*time.Hour), byte(index)), Generation: 1},
+			Hash:   "sha256:" + entry.hash,
+			Size:   int64(len(entry.bytes)),
+		}
+	}
+	if items[3].Cursor.Time() != start.Add(3*time.Hour) {
+		t.Fatalf("cursor time %s", items[3].Cursor.Time())
+	}
+	for _, batchRows := range []int{1, 3, 7, 100} {
+		t.Run(fmt.Sprintf("batches of %d", batchRows), func(t *testing.T) {
+			store := newMemoryStore()
+			for _, entry := range evidence {
+				store.put(testKeys(t, entry.hash).Flat, entry.bytes)
+			}
+			mover := testMover(t, store, items, filepath.Join(t.TempDir(), "checkpoint.json"))
+			mover.Settings.BatchRows = batchRows
+			mover.Settings.UntilCreated = start.Add(5 * time.Hour)
+			report, err := mover.Run(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Finished || report.Counts.Moved != 5 || !strings.Contains(report.Stopped, "2026-11-16T05:00:00Z") {
+				t.Fatalf("report %+v", report)
+			}
+			if mover.Checkpoint.State.Cursor != items[4].Cursor {
+				t.Fatalf("checkpoint at %s, want %s", mover.Checkpoint.State.Cursor, items[4].Cursor)
+			}
+			for index, entry := range evidence {
+				_, flat := store.get(testKeys(t, entry.hash).Flat)
+				if flat != (5 <= index) {
+					t.Fatalf("item %d: flat object kept %v", index, flat)
+				}
+			}
+		})
+	}
+}

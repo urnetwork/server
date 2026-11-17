@@ -508,15 +508,84 @@ const (
 	DefaultMinioHealthMaxLatency = time.Second
 )
 
-// The production gates: the validator idle, and MinIO healthy within a
-// second at the store's own server.
-func DefaultGates(healthUrl string, latency *Latencies) []Gate {
+// The production gates: the validator idle, read from the validator's health
+// exporter in Mimir (PromProgressReader), so they need no ssh to the
+// validator host and run the same from the operator's Mac and from a LAN
+// host, and MinIO healthy within a second at the store's own server.
+func DefaultGates(healthUrl string, latency *Latencies, promUrl string) []Gate {
 	return []Gate{
 		&ValidatorGate{
-			Progress:     &SSHProgressReader{Target: DefaultValidatorProgressTarget, Path: DefaultValidatorProgressPath},
+			Progress:     &PromProgressReader{Url: promUrl},
 			Head:         &RpcHeadReader{Url: DefaultChainRpcUrl},
 			MinRemaining: DefaultValidatorMinRemaining,
 		},
 		&MinioHealthGate{Url: healthUrl, MaxLatency: DefaultMinioHealthMaxLatency, Latency: latency},
 	}
+}
+
+// The validator's progress as its health exporter on snow publishes it to
+// Mimir from progress.json every minute (xops files/sn-validator-health/
+// health.py): the newest intent's native epoch and status (1 pending, 2
+// finalized, 3 applied, 4 failed). A sample older than MaxAge, or an intent
+// observation the exporter marks not current, is unreadable, which keeps the
+// gate closed.
+type PromProgressReader struct {
+	Url string
+	// the validator host's label (default snow)
+	Host string
+	// the oldest sample accepted (default 3 minutes)
+	MaxAge time.Duration
+}
+
+func (self *PromProgressReader) ReadProgress(ctx context.Context) (ValidatorProgress, error) {
+	host := self.Host
+	if host == "" {
+		host = "snow"
+	}
+	maxAge := self.MaxAge
+	if maxAge <= 0 {
+		maxAge = 3 * time.Minute
+	}
+	selector := fmt.Sprintf(`{host=%q}`, host)
+	age, err := promInstantQuery(ctx, self.Url, "time() - max(urnetwork_sn_validator_sample_timestamp_seconds"+selector+")")
+	if err != nil {
+		return ValidatorProgress{}, fmt.Errorf("validator sample age: %w", err)
+	}
+	if maxAge.Seconds() < age {
+		return ValidatorProgress{}, fmt.Errorf("the validator's newest sample is %.0f s old", age)
+	}
+	current, err := promInstantQuery(ctx, self.Url, "min(urnetwork_sn_validator_intent_current"+selector+")")
+	if err != nil {
+		return ValidatorProgress{}, fmt.Errorf("validator intent observation: %w", err)
+	}
+	if current != 1 {
+		return ValidatorProgress{}, errors.New("the validator's intent observation is not current")
+	}
+	epoch, err := promInstantQuery(ctx, self.Url, "max(urnetwork_sn_validator_intent_native_epoch"+selector+")")
+	if err != nil {
+		return ValidatorProgress{}, fmt.Errorf("validator intent epoch: %w", err)
+	}
+	status, err := promInstantQuery(ctx, self.Url, "max(urnetwork_sn_validator_intent_status"+selector+")")
+	if err != nil {
+		return ValidatorProgress{}, fmt.Errorf("validator intent status: %w", err)
+	}
+	if epoch < 0 || epoch != float64(uint64(epoch)) {
+		return ValidatorProgress{}, fmt.Errorf("validator intent epoch %v is not a whole number", epoch)
+	}
+	return ValidatorProgress{NativeEpoch: uint64(epoch), Status: promIntentStatus(status)}, nil
+}
+
+// The exporter's intent status codes as progress.json names them.
+func promIntentStatus(value float64) string {
+	switch value {
+	case 1:
+		return "pending"
+	case 2:
+		return "finalized"
+	case 3:
+		return "applied"
+	case 4:
+		return "failed"
+	}
+	return "unrecognized"
 }
