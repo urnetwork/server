@@ -130,14 +130,19 @@ func run(ctx context.Context) ([]*server.FileClusterSuiteReport, error) {
 	return reports, nil
 }
 
-// blobsuite's cases as the suite's: each by name under store/, a case that waits not run.
+// blobsuite's cases as the suite's: each by name under store/, a case that waits not run. The settle cases take
+// blobsuite's defaults, LateBy among them, so a late request is late by the hosts' clocks and not only this one's
+// (QD-892).
 func StoreCases(ctx context.Context, target *server.FileClusterSuiteStoreTarget) []*server.FileClusterSuiteCase {
+	settle := blobsuite.DefaultSettle()
+	settle.Now = target.Now
+	settle.Delayed = target.Delayed
 	results := blobsuite.RunCases(ctx, &blobsuite.Target{
 		Cluster: target.Cluster,
 		Now:     target.Now,
 		// a real store rounds LastModified to the second
 		ClockTolerance: 2 * time.Second,
-		Settle:         &blobsuite.Settle{Now: target.Now, Delayed: target.Delayed},
+		Settle:         settle,
 	})
 	cases := []*server.FileClusterSuiteCase{}
 	for _, result := range results {
