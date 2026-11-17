@@ -19,9 +19,11 @@ import (
 // sidecar.yml say. Pure: tokens are signed with the local vault key, and every
 // refusal here comes before any store is read.
 
-// What sidecar.yml can say about M0's p0_enforce switch, none of which moves the
-// expiry since M1: absent, off and on.
-var strictExpP0EnforceConfigs = []string{
+// sidecar.yml as an environment may hold it: absent, and, as files an old
+// deployment may still carry, with M0's p0_enforce switch off and on. The key is
+// retired (owner decision 510): the expiry is code since M1, the reader has no
+// field for the key, and none of these moves it.
+var strictExpRetiredP0EnforceConfigs = []string{
 	"",
 	"sidecar:\n  p0_enforce: {enabled: false}\n",
 	"sidecar:\n  p0_enforce: {enabled: true}\n",
@@ -97,7 +99,7 @@ func TestExpiredStrictExpTokenIsRefusedWithRejectExpiredOff(t *testing.T) {
 		t.Fatal("the fixture should sit inside AcceptUntil")
 	}
 	signed := expired.Testing_Sign()
-	for _, config := range strictExpP0EnforceConfigs {
+	for _, config := range strictExpRetiredP0EnforceConfigs {
 		func() {
 			defer server.Testing_PushSidecarConfig(config)()
 			for _, audience := range []string{ByJwtAudienceApi, ByJwtAudienceConnect} {
@@ -194,7 +196,7 @@ func TestAuthorizationLeaseEndsAtAStrictExpTokensExp(t *testing.T) {
 	}
 
 	byJwt := newStrictExpTestClient(t)
-	for _, config := range strictExpP0EnforceConfigs {
+	for _, config := range strictExpRetiredP0EnforceConfigs {
 		func() {
 			defer server.Testing_PushSidecarConfig(config)()
 			connect.AssertEqual(t, start(byJwt).terminal.Equal(byJwt.ExpiresAt.Time), true)

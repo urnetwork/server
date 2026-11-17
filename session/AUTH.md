@@ -7,7 +7,7 @@ How the server authenticates a request or a connection, and what each credential
 - [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md): tracked sessions and revocation.
 - [EMBED1.md](../EMBED1.md): the Embed plan.
 
-State as of 2026-11-08. What the sidecar's P0 auth fix adds (DESIGN.md §7.4) is marked below. M0 built it log-only behind `p0_enforce` (§8); since M1 it refuses in code.
+State as of 2026-11-08. What the sidecar's P0 auth fix adds (DESIGN.md §7.4) is marked below. M0 built it log-only behind `p0_enforce` (§8); since M1 it refuses in code, and the key is retired (owner decision 510).
 
 ## Terms
 
@@ -159,7 +159,7 @@ Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.
 
 **The lag guest gate.** Separate from the classes, every route except `GET /lag/extenders` and `POST /lag/track` (`lagGuestRoutes`) refuses a lag guest's token (§1) with **403**, "A lag.dev guest token works only on the lag.dev routes.". This includes the Public routes. The gate reads the `lag_guest` claim unverified, so any other credential costs one decode of its claims. It verifies a token that claims to be a guest's before refusing it; a token that fails verification goes to the handler, as above. `TestLagGuestTokenServesOnlyTheLagRoutes` keeps every route but the two gated.
 
-**The P0 auth fix (DESIGN.md §7.4, stage 1 and D-TEAM-14).** Each of the three `refusal` values below refuses the call and is counted in `urnetwork_auth_child_admin_calls_total{route,refusal,result}` with `result="refused"`. M0 ran them log-only behind `p0_enforce` (§8), counting `result="logged"` and letting the call through, for stage 1's 14 days in production; since M1 they refuse in code, whatever `sidecar.yml` says or whether it is there. None of this changes what a network credential does.
+**The P0 auth fix (DESIGN.md §7.4, stage 1 and D-TEAM-14).** Each of the three `refusal` values below refuses the call and is counted in `urnetwork_auth_child_admin_calls_total{route,refusal,result}` with `result="refused"`. M0 ran them log-only behind `p0_enforce` (§8), counting `result="logged"` and letting the call through, for stage 1's 14 days in production; since M1 they refuse in code, whatever `sidecar.yml` says or whether it is there, and the key is retired (§8). None of this changes what a network credential does.
 
 - **Marks.** `POST /network/auth-client` takes `admin_refused: true` and `strict_exp: true` and confirms them in its reply. `strict_exp` implies `admin_refused`. A new client keeps them for life, its children inherit both, and a re-auth may repeat them but never add one. A binary that does not link migration group MG0 refuses a request for a mark rather than dropping it.
 - **`refusal="client_admin"`.** On the 27 AppAdmin and 10 OwnClientPayout routes, a child's token or an `admin_refused` client's token is refused with the client token message (`model.ClientRefusesAdmin`). So is one whose client cannot be read; those count in `urnetwork_auth_client_admin_lookup_errors_total` too. A top-level client with no owner row is a legacy client and keeps the routes until the hard gate. Both facts are immutable, so each process caches the answer.
@@ -251,10 +251,10 @@ The values are read once per process, so a flip needs a restart.
 
 | config `sidecar.yml` | main, 2026-11-06 | Effect |
 |---|---|---|
-| `p0_enforce: {enabled: …}` | absent (false) | M0's switch: the P0 auth fix (§4) and the sidecar token's `exp` refused only while it was on. Since M1 they refuse in code and nothing reads it |
+| `p0_enforce: {enabled: …}` | retired | M0's switch: the P0 auth fix (§4) and the sidecar token's `exp` refused only while it was on. Since M1 they refuse in code, and the key is retired (DESIGN.md owner decision 510): the reader has no field for it, a file that still holds the line reads as one without it, and `config/<env>/sidecar.yml` no longer carries it |
 | `preview_networks: […]` | absent (empty) | The networks that may hold sidecar tokens before stage 2 |
 
-`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse, or is there but cannot be read (a dangling link, a directory, an inaccessible config home), keeps the last good read, and on a process's first read it previews nothing. Only a file absent from every config home is inert. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
+`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse, or is there but cannot be read (a dangling link, a directory, an inaccessible config home), keeps the last good read and is logged at each reread; on a process's first read it previews nothing and opens nothing, as an absent file does. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
 
 **Migration group MG0** (`network_client_owner` and the altered `account_api_key` and `auth_code`) stays pending under the `sidecar_pending` build tag, in `db_migrations_sidecar_pending.go`, until its Gn-out moves it into the migrations slice. A build with the tag panics at start outside `local`, `canary` and tests. Code reads the group only where `server.SidecarMg0Linked()` says the binary links it, and then the group is part of the head the binary requires, so without the tables the binary never reports ready.
 

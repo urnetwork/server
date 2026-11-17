@@ -26,9 +26,11 @@ import (
 // local vault key, the model's decisions are replaced, and no request reaches a
 // handler.
 
-// What sidecar.yml can say about M0's p0_enforce switch, none of which moves a
-// refusal since M1: absent, off and on.
-var p0EnforceConfigs = []string{
+// sidecar.yml as an environment may hold it: absent, and, as files an old
+// deployment may still carry, with M0's p0_enforce switch off and on. The key is
+// retired (owner decision 510): the refusals are code since M1, the reader has
+// no field for the key, and none of these moves a refusal.
+var retiredP0EnforceConfigs = []string{
 	"",
 	"sidecar:\n  p0_enforce: {enabled: false}\n",
 	"sidecar:\n  p0_enforce: {enabled: true}\n",
@@ -115,7 +117,7 @@ func TestClientAdminRefusalIsEnforcedWhateverTheConfigSays(t *testing.T) {
 	}
 	authorization := "Bearer " + tokens.clientToken
 
-	for _, config := range p0EnforceConfigs {
+	for _, config := range retiredP0EnforceConfigs {
 		func() {
 			defer server.Testing_PushSidecarConfig(config)()
 			for _, route := range routes {
@@ -421,7 +423,7 @@ func TestStrictExpGateRefusesWhateverTheConfigSays(t *testing.T) {
 		return routes[slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })]
 	}
 
-	for _, config := range p0EnforceConfigs {
+	for _, config := range retiredP0EnforceConfigs {
 		func() {
 			defer server.Testing_PushSidecarConfig(config)()
 			for _, key := range []string{"GET /transfer/stats", "POST /stats/leaderboard", "POST /account/api-key"} {
@@ -604,7 +606,7 @@ func TestStrictExpProofGateRefusesAClientWithNoBoundKey(t *testing.T) {
 	tokens := newStrictExpTokens()
 	strictExpProofStub(t)
 
-	for _, config := range p0EnforceConfigs {
+	for _, config := range retiredP0EnforceConfigs {
 		func() {
 			defer server.Testing_PushSidecarConfig(config)()
 			for _, route := range proofRoutes() {

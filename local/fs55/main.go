@@ -233,25 +233,29 @@ func gitShow(serverDirectory string, ref string, path string) (string, error) {
 }
 
 // The gate N+1 runs with in phase 4, and the group's own routes, for each group.
-// A group none of whose routes a smoke can ask without a credential yet has
-// none here, which phase 4's report says.
+// A group with no gate of its own has "" here, and N+1 starts with no
+// sidecar.yml. A group none of whose routes a smoke can ask without a credential
+// yet has none here, which phase 4's report says.
 func fs55GroupPlan(groupName string) (gateYaml string, groupRoutes []fs55Route) {
 	switch groupName {
 	case "MG0", "MG1":
-		// §7.4's stage 1 and D-TEAM-14, which MG0's and MG1's code serves
-		return "sidecar:\n  p0_enforce: {enabled: true}\n", nil
+		// §7.4's stage 1 and D-TEAM-14, which MG0's and MG1's code serves, refuse
+		// in code since M1 and have no gate: sidecar.yml's p0_enforce, M0's
+		// log-only switch, is retired (owner decision 510), so N+1 starts with no
+		// file, as an environment without one runs
+		return "", nil
 	case "MG2":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  evs: {enabled: true, percent: 100}\n  gkm: {enabled: true, percent: 100}\n", nil
+		return "sidecar:\n  evs: {enabled: true, percent: 100}\n  gkm: {enabled: true, percent: 100}\n", nil
 	case "MG5":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  dns: {enabled: true}\n  sockets: {enabled: true, percent: 100}\n  tlsedge: {enabled: true, percent: 100}\n", nil
+		return "sidecar:\n  dns: {enabled: true}\n  sockets: {enabled: true, percent: 100}\n  tlsedge: {enabled: true, percent: 100}\n", nil
 	case "MG6":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  bridge: {enabled: true}\n", nil
+		return "sidecar:\n  bridge: {enabled: true}\n", nil
 	case "MG7":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  mxedge: {enabled: true, percent: 100}\n", nil
+		return "sidecar:\n  mxedge: {enabled: true, percent: 100}\n", nil
 	case "MG8":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  push: {enabled: true}\n  wake: {enabled: true}\n", nil
+		return "sidecar:\n  push: {enabled: true}\n  wake: {enabled: true}\n", nil
 	case "MG9":
-		return "sidecar:\n  p0_enforce: {enabled: true}\n  smtpedge: {enabled: true, percent: 100}\n", nil
+		return "sidecar:\n  smtpedge: {enabled: true, percent: 100}\n", nil
 	}
 	return "", nil
 }

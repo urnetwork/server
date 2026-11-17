@@ -175,7 +175,7 @@ func fixturePlan(n *fixtureRelease, n1 *fixtureRelease) *fs55Plan {
 		n1:          n1,
 		routes:      fixtureRoutes(),
 		groupRoutes: []fs55Route{{method: http.MethodGet, path: "/group", wantCodes: []int{http.StatusOK}}},
-		gateYaml:    "sidecar:\n  p0_enforce: {enabled: true}\n",
+		gateYaml:    "sidecar:\n  push: {enabled: true}\n",
 		explain:     fixtureExplain,
 		settings:    defaultFs55Settings(),
 	}
@@ -208,10 +208,34 @@ func TestFs55PassesAGroupThatAddsATableAndAColumn(t *testing.T) {
 		if n.starts.Load() != 2 || n1.starts.Load() != 1 {
 			t.Fatalf("N started %d times and N+1 %d", n.starts.Load(), n1.starts.Load())
 		}
-		if gate := n1.lastYaml.Load(); gate == nil || !strings.Contains(*gate, "p0_enforce") {
+		if gate := n1.lastYaml.Load(); gate == nil || !strings.Contains(*gate, "push: {enabled: true}") {
 			t.Fatal("N+1 did not start with the group's gate on")
 		}
 	})
+}
+
+// Each group's phase-4 gate is a sidecar.yml that parses, and none carries the
+// retired p0_enforce (owner decision 510), which nothing reads since M1: MG0 and
+// MG1, whose refusals are code, have no gate and start N+1 with no file.
+func TestFs55GroupPlansWriteNoRetiredKey(t *testing.T) {
+	for _, groupName := range []string{"MG0", "MG1", "MG2", "MG3", "MG4", "MG5", "MG6", "MG7", "MG8", "MG9"} {
+		gateYaml, _ := fs55GroupPlan(groupName)
+		if strings.Contains(gateYaml, "p0_enforce") {
+			t.Errorf("%s's gate carries the retired p0_enforce: %q", groupName, gateYaml)
+		}
+		if gateYaml == "" {
+			continue
+		}
+		gate := map[string]map[string]any{}
+		if err := yaml.Unmarshal([]byte(gateYaml), &gate); err != nil || len(gate["sidecar"]) == 0 {
+			t.Errorf("%s's gate %q does not parse as a sidecar block that opens something (%v)", groupName, gateYaml, err)
+		}
+	}
+	for _, groupName := range []string{"MG0", "MG1"} {
+		if gateYaml, _ := fs55GroupPlan(groupName); gateYaml != "" {
+			t.Errorf("%s has a gate, %q, where its refusals are code", groupName, gateYaml)
+		}
+	}
 }
 
 // A group that drops a column N reads fails at the second smoke, while N serves,

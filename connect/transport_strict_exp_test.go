@@ -22,9 +22,11 @@ func newExpiredStrictExpToken() *session.ByJwt {
 
 // §22.5's §7 row: with reject_expired off, connect's transport auth refuses a
 // strict_exp token past its exp (D-TEAM-14), on both the h1 and the h3 path, which
-// share the verifier and connectClientAuthentication, whatever sidecar.yml says
-// about M0's p0_enforce switch. A definitive refusal, before any state is read,
-// so a sidecar re-enrolls and does not retry. Pure.
+// share the verifier and connectClientAuthentication, whatever sidecar.yml holds:
+// absent, or, as a file an old deployment may still carry, with M0's p0_enforce
+// switch off or on, a key retired because the refusal is code since M1 (owner
+// decision 510). A definitive refusal, before any state is read, so a sidecar
+// re-enrolls and does not retry. Pure.
 func TestConnectRefusesAnExpiredStrictExpToken(t *testing.T) {
 	defer session.Testing_SetRejectExpired(false)()
 	ctx := context.Background()
