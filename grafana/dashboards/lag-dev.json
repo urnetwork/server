@@ -1366,6 +1366,923 @@
     }
    ],
    "description": "Passes in which most of a family failed, at least three addresses, so the prober held it to be its own fault and recorded the failures unprobed rather than failed (lagprobe.ProbeAll). The unreachable gauge reads 0 meanwhile. One now and then is a moment of the taskworker's own network; a run of them means the probes are blind to that family. A recheck has no such guard. The counter is per process, so this is summed across processes through increase()."
+  },
+  {
+   "id": 29,
+   "type": "row",
+   "title": "drift test",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 95
+   },
+   "panels": []
+  },
+  {
+   "id": 30,
+   "type": "timeseries",
+   "title": "drift runs and verdicts per day",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 96
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]))",
+     "refId": "A",
+     "legendFormat": "runs"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (verdict) ((last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\"}[1d]))",
+     "refId": "B",
+     "legendFormat": "{{verdict}}"
+    }
+   ],
+   "description": "Drift test runs started, and verdicts computed, in the trailing day (lag.dev/DRIFTTEST.md P7). During market discovery nothing is billed, and the tables keep 7 days, so these counters are the record of usage (ops/drift-test.md 7). A verdict is recomputed after every completed run from the token's last 3 counting runs (V7), so a test adds one per completed run: agree is Pass, disagree is Reject, inconclusive is neither. The api counts a run at its start; whichever process completes it counts the verdict: the api as reports arrive and as tests are read, or the taskworker's sweep. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 31,
+   "type": "table",
+   "title": "drift tests by network, last day",
+   "description": "Runs started and verdicts computed in the trailing day, for the 10 networks with the most runs (topk), so the table stays bounded however many networks enable Embed. A network here is an Embed customer's (P7), never a visitor's. A blank verdict cell is none. Mostly inconclusive for one network is its integration, such as the wrong client_ip, or its audience; ops/drift-test.md 7.1 and 7.2 break it down from the tables, and name the network. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 96
+   },
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto",
+      "filterable": true,
+      "cellOptions": {
+       "type": "auto"
+      }
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "network_id"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "network"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Value #A"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "runs"
+       },
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Value #B"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "agree"
+       },
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Value #C"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "disagree"
+       },
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Value #D"
+      },
+      "properties": [
+       {
+        "id": "displayName",
+        "value": "inconclusive"
+       },
+       {
+        "id": "unit",
+        "value": "short"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "sortBy": [
+     {
+      "displayName": "runs",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d])))",
+     "refId": "A",
+     "format": "table",
+     "instant": true,
+     "range": false
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (network_id) ((last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"agree\"}[1d]) - last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"agree\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"agree\"}[1d])) and on (network_id) topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d])))",
+     "refId": "B",
+     "format": "table",
+     "instant": true,
+     "range": false
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (network_id) ((last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"disagree\"}[1d]) - last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"disagree\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"disagree\"}[1d])) and on (network_id) topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d])))",
+     "refId": "C",
+     "format": "table",
+     "instant": true,
+     "range": false
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (network_id) ((last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"inconclusive\"}[1d]) - last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"inconclusive\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_verdicts_total{env=\"$env\",verdict=\"inconclusive\"}[1d])) and on (network_id) topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d]) - last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d] offset 1d)) or last_over_time(urnetwork_lag_drift_runs_total{env=\"$env\"}[1d])))",
+     "refId": "D",
+     "format": "table",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "indexByName": {
+       "network_id": 0,
+       "Value #A": 1,
+       "Value #B": 2,
+       "Value #C": 3,
+       "Value #D": 4
+      },
+      "renameByName": {}
+     }
+    }
+   ]
+  },
+  {
+   "id": 32,
+   "type": "timeseries",
+   "title": "drift verdict mix per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 104
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (verdict, reason) ((last_over_time(urnetwork_lag_drift_verdict_reasons_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_verdict_reasons_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_verdict_reasons_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{verdict}} {{reason}}"
+    }
+   ],
+   "description": "Verdicts computed in the trailing hour, stacked by verdict and reason (P4, V6), counted with each verdict. agree inside_ip_country is the bulk; agree region_overlaps rises as ellipses widen; disagree region_outside follows the customers' audiences, such as VPNs. inconclusive by why: low_precision, no extenders near; too_few_extenders, sessions failing; inconsistent, the speed-of-light check, so misplaced extenders or a broken path (ops/drift-test.md 9.2, and LagDriftInconsistentSpike); ip_mismatch, the wrong client_ip; ip_family_mismatch; ip_country_unknown, a code the border file lacks, or a process without the file; reports_missing and stopped_early (the outcome panels below). A step that starts with a calibration, a border file or a release points at it (ops 6, 5, 7.2). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 33,
+   "type": "timeseries",
+   "title": "drift run stops per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 104
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (stop) ((last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{stop}}"
+    }
+   ],
+   "description": "Runs completed in the trailing hour, stacked by the browser's stop (V10): converged, the usual, about 3 to 5 s in; clear, a decisive result; interrupted, no pong from any extender for 4 s; cap, 12 s without a steady estimate; none, a frame that never called finish (the tab closed), so the run moved to processing 30 s after its start, and a small share is normal. More cap after a lag.dev or SDK release is a regression in the frame's stop rule; more interrupted is extenders going quiet mid-run, or visitors' networks dropping the sessions (ops/drift-test.md 7.3). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 34,
+   "type": "timeseries",
+   "title": "drift run outcomes per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 112
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      }
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) ((last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "Runs completed in the trailing hour, stacked by outcome (E5, K3, K4, V10), decided in this order: ip_mismatch, started from another /29 (/56) than client_ip; reports_missing, fewer than 6 sessions reported by report_wait_ms; ip_family_mismatch, most sessions took the start's other family; too_few_extenders, fewer than 6 usable reports; stopped_early, the reports support no stop where the browser stopped; else counted. Only counted runs enter a verdict, but every run uses one of the token's 6. Mostly ip_mismatch for every network is the api seeing the wrong address for start; for one, its client_ip (ops/drift-test.md 7.1, 3.3). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 35,
+   "type": "timeseries",
+   "title": "drift runs reports_missing or stopped_early per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 112
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) ((last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\",outcome=~\"reports_missing|stopped_early\"}[1h]) - last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\",outcome=~\"reports_missing|stopped_early\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_run_outcomes_total{env=\"$env\",outcome=~\"reports_missing|stopped_early\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "The two run outcomes that point at the platform rather than a customer (ops/drift-test.md 7.3). reports_missing: fewer than 6 sessions reported by report_wait_ms; everywhere at once, report posts failing or rejected (the report outcome panels above) or real tickets carrying NoReport after a deploy; in one network, its audience blocks extenders or someone scripts its tokens. stopped_early: the signed reports support no stop where the browser stopped (V10); a small rate is clock skew between browsers and extenders; in one network, a custom client stopping at a lucky moment; everywhere after a release, a parity break between the frame's rules and the server's (V9). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 36,
+   "type": "timeseries",
+   "title": "drift processing latency, finish to complete",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 112
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "decimals": 1,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 20
+       },
+       {
+        "color": "red",
+        "value": 35
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) ((last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h])))",
+     "refId": "A",
+     "legendFormat": "p50"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.9, sum by (le) ((last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h])))",
+     "refId": "B",
+     "legendFormat": "p90"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) ((last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_processing_seconds_bucket{env=\"$env\"}[1h])))",
+     "refId": "C",
+     "legendFormat": "p99"
+    }
+   ],
+   "description": "How long a verdict took after the frame finished its run (E5): p50, p90 and p99 over the trailing hour, of runs the frame finished; a run without a finish is left out, as in ops/drift-test.md 7.4. Under 2 s when every opened session's extender reports promptly (ReportPromptly, E4); a hump near 10 s is extenders without it, whose batch timer sends the report, and it shrinks as they update (ops 8); a wall at 20 s is runs completed by report_wait_ms with reports missing; over 35 s, report_wait_ms plus a sweep, is stuck (ops 9.1). The lines mark 20 s and 35 s. Each process's histogram buckets are counted as the counters are, and summed by bucket."
+  },
+  {
+   "id": 37,
+   "type": "timeseries",
+   "title": "drift runs stuck and tests failed",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 0,
+    "y": 120
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_lag_drift_stuck_runs{env=\"$env\",service=\"taskworker\"})",
+     "refId": "A",
+     "legendFormat": "runs stuck"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_failures_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_failures_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_failures_total{env=\"$env\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "tests failed in the hour"
+    }
+   ],
+   "description": "Runs stuck: runs still started or processing a minute past their report wait (E5), as the taskworker's drift sweep last found them, read with max across taskworkers, each of which keeps the count of its own last sweep. Any is ops/drift-test.md 9.1: a process without the border file, lock waits on lag_drift_test rows, or Main's health; LagDriftRunsStuck warns after 5 minutes. Tests failed: drift tests marked failed by an internal error in the trailing hour (P4), each logged as [lag]drift test <id> failed; one is a bug to chase and a burst is ops 9.1, and LagDriftTestFailed warns on any. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 38,
+   "type": "timeseries",
+   "title": "drift demo starts per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 8,
+    "y": 120
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"demo\"}[1h]) - last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"demo\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"demo\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "demo starts"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"started\"}[1h]) - last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"started\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"started\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "token starts"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_demo_reports_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_demo_reports_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_demo_reports_total{env=\"$env\"}[1h]))",
+     "refId": "C",
+     "legendFormat": "demo reports dropped"
+    }
+   ],
+   "description": "Starts of the demo token, lag.dev/?t=demo (W8), beside real tokens' starts for scale. The demo stores nothing, so this counter is its only record. Expect a low, steady count from the docs, demos and testing; a spike is ops/drift-test.md 9.3. Demo reports dropped: reports of demo sessions from extenders that predate NoReport (E4), which the api drops unstored; they shrink as extenders update (ops 8). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 39,
+   "type": "timeseries",
+   "title": "drift rate-limit refusals per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 120
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\",outcome=\"refused_limit\"}[1h]) - last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\",outcome=\"refused_limit\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\",outcome=\"refused_limit\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "allocations, per network"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum((last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"refused_limit\"}[1h]) - last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"refused_limit\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\",outcome=\"refused_limit\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "starts, per /24 (/48), demo included"
+    }
+   ],
+   "description": "Requests the drift test's limits refused (P7, W8): allocations over allocate_limit, 600 a minute per network, answered 429; starts over start_limit, 120 runs an hour per /24 (/48), or demo starts over demo_starts_per_hour, 30 per /24 (/48), which share refused_limit. A /24 is shared by everyone on that network, so a burst here is not always one visitor; a few /24s at the demo limit is someone scripting it (ops/drift-test.md 9.3, 4). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 40,
+   "type": "timeseries",
+   "title": "drift requests per hour by outcome",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 16,
+    "x": 0,
+    "y": 128
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     },
+     "decimals": 0
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) ((last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_allocations_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "allocate {{outcome}}"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) ((last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\"}[1h]) - last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\"}[1h] offset 1h)) or last_over_time(urnetwork_lag_drift_starts_total{env=\"$env\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "start {{outcome}}"
+    }
+   ],
+   "description": "Every answer to POST /lag/drift-test (allocate) and POST /lag/drift-test/start, by outcome (P1, P5): created, started, and demo for the demo token; refused_<code>, where embed is a network without Embed, disabled a network whose drift tests are switched off, expired, closed and busy are the token's state, origin a parent origin not allowed, limit a rate limit, and unavailable no extenders or no border file; rejected, a 4xx; error. Mostly refused_unavailable after a deploy is a process without the border file (ops/drift-test.md 5). Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
+  },
+  {
+   "id": 41,
+   "type": "timeseries",
+   "title": "drift calibration age",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 128
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true,
+      "thresholdsStyle": {
+       "mode": "line"
+      }
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 604800
+       },
+       {
+        "color": "red",
+        "value": 1296000
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_lag_drift_calibration_age_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "calibration in force"
+    }
+   ],
+   "description": "Age of the drift model's calibration in force (V4): kappa, sigma0 and the relay thresholds, which size every ellipse (V3). The weekly job keeps it under 7 days while each run applies; a failed week leaves the last good one in force, up to 14 days (ops/drift-test.md 6), and LagDriftCalibrationStale warns past 15 days. No value while the defaults apply: before the first calibration, or after every one is withdrawn. The lines mark 7 and 15 days. The stats collector runs in every taskworker and each publishes the same database reading, so this reads the gauge with max across hosts rather than a bare series."
   }
  ]
 }

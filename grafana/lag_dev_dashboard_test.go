@@ -80,7 +80,9 @@ func TestLagDevDashboardAnswersEachQuestion(t *testing.T) {
 }
 
 // Every lag stats gauge is read with max across hosts, and every lag counter
-// through increase() inside a sum.
+// through increase() inside a sum. The drift test's counters are read per
+// process instead, by the drift row's own rules
+// (lag_dev_drift_dashboard_test.go).
 func TestLagDevDashboardReadsAreInstanceSafe(t *testing.T) {
 	dashboard := readTestDashboard(t, "lag-dev.json")
 
@@ -94,6 +96,9 @@ func TestLagDevDashboardReadsAreInstanceSafe(t *testing.T) {
 			}
 			for _, index := range counter.FindAllStringIndex(expression, -1) {
 				metric := expression[index[0]:index[1]]
+				if strings.HasPrefix(metric, lagDevDriftMetricPrefix) {
+					continue
+				}
 				if !strings.HasSuffix(expression[:index[0]], "increase(") {
 					t.Errorf("panel %q reads counter %s without increase(): %s", panel.Title, metric, expression)
 				}
@@ -109,7 +114,9 @@ func TestLagDevDashboardReadsAreInstanceSafe(t *testing.T) {
 // end reason, family, outcome, state, a country among the top 10 or other,
 // the sweep's kind, why a track is automated, and which client ran it.
 // Nothing names a visitor, an address, an extender or an agent (amendments 9
-// and 12).
+// and 12). A drift test query is held to the drift row's own labels instead,
+// which add the network of an Embed customer, bounded to the top 10
+// (lag_dev_drift_dashboard_test.go).
 func TestLagDevDashboardGroupsOnlyByBoundedLabels(t *testing.T) {
 	dashboard := readTestDashboard(t, "lag-dev.json")
 
@@ -125,6 +132,9 @@ func TestLagDevDashboardGroupsOnlyByBoundedLabels(t *testing.T) {
 	}
 	byClause := regexp.MustCompile(`by \(([^)]*)\)`)
 	for _, expression := range dashboardExpressions(dashboard) {
+		if strings.Contains(expression, lagDevDriftMetricPrefix) {
+			continue
+		}
 		for _, match := range byClause.FindAllStringSubmatch(expression, -1) {
 			for _, label := range strings.Split(match[1], ",") {
 				label = strings.TrimSpace(label)
