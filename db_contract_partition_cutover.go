@@ -42,6 +42,9 @@ type ContractPartitionMigrateOptions struct {
 	Logf        func(string, ...any)
 	// nil uses the default rollback lock and retry budgets.
 	RollbackSettings *ContractPartitionRollbackSettings
+	// nil uses DefaultContractPartitionCutoverSettings for prepare, finalize
+	// and abort.
+	CutoverSettings *ContractPartitionCutoverSettings
 }
 
 // The foreign key that the cutover drops for good (owner decision
@@ -76,15 +79,22 @@ func MigrateContractsToPartitions(ctx context.Context, options ContractPartition
 	if 1 < actions {
 		return errors.New("choose one of finalize, rollback and abort")
 	}
+	settings := options.CutoverSettings
+	if settings == nil {
+		settings = DefaultContractPartitionCutoverSettings()
+	}
+	if err := settings.validate(); err != nil {
+		return err
+	}
 	switch {
 	case options.Finalize:
-		return finalizeContractPartitionCutover(ctx, options.DryRun, logf)
+		return finalizeContractPartitionCutover(ctx, options.DryRun, logf, settings)
 	case options.Rollback:
 		return rollbackContractPartitionCutover(ctx, options.DryRun, logf, options.RollbackSettings)
 	case options.Abort:
-		return abortContractPartitionCutover(ctx, options.DryRun, logf)
+		return abortContractPartitionCutover(ctx, options.DryRun, logf, settings)
 	default:
-		return prepareContractPartitionCutover(ctx, options.CutoverWeek, options.DryRun, logf)
+		return prepareContractPartitionCutover(ctx, options.CutoverWeek, options.DryRun, logf, settings)
 	}
 }
 
@@ -130,8 +140,10 @@ func DefaultContractPartitionLockSettings() *ContractPartitionLockSettings {
 	}
 }
 
-// The transactions that would stall an ACCESS EXCLUSIVE request on the contract
-// tables: older than maxTransactionAge and holding a lock on one.
+// The transactions older than maxTransactionAge that hold a lock on one of the
+// contract tables' parents. The weekly drop's admission; the cutover's steps
+// use contractLockAdmission, which also counts autovacuum workers and the
+// locks of partitions.
 func contractTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (busy int, err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -150,40 +162,40 @@ func contractTablesBusy(ctx context.Context, maxTransactionAge time.Duration) (b
 
 // Runs statements in one transaction, retrying while their locks are busy.
 func contractPartitionExecRetry(ctx context.Context, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) error {
-	return contractPartitionExecRetryWhen(ctx, false, statements, attempts, wait, logf)
+	return contractPartitionRetryWhen(ctx, nil, func() error {
+		return contractPartitionExec(ctx, statements)
+	}, attempts, wait, logf)
 }
 
-// As contractPartitionExecRetry, for statements that take ACCESS EXCLUSIVE on
-// a contract table: each attempt first waits for the tables to be free of long
-// transactions, so the lock request never queues traffic behind one.
-func contractPartitionExecQuietRetry(ctx context.Context, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) error {
-	return contractPartitionExecRetryWhen(ctx, true, statements, attempts, wait, logf)
-}
-
-func contractPartitionExecRetryWhen(ctx context.Context, quiet bool, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) error {
-	var lockSettings *ContractPartitionLockSettings
-	if quiet {
-		lockSettings = DefaultContractPartitionLockSettings()
-	}
-	return contractPartitionRetryWhen(ctx, lockSettings, func() error {
+// As contractPartitionExecRetry, for statements that lock the scope's live
+// contract tables: each attempt first waits until no autovacuum and no long
+// transaction holds a lock there (contractLockAdmission), so the lock request
+// never queues traffic behind one and never cancels a vacuum.
+func contractPartitionExecQuietRetry(ctx context.Context, scope *contractLockScope, statements []string, attempts int, wait time.Duration, logf func(string, ...any)) error {
+	return contractPartitionRetryWhen(ctx, scope, func() error {
 		return contractPartitionExec(ctx, statements)
 	}, attempts, wait, logf)
 }
 
 // Repeats the entire operation so each attempt can read authoritative state
 // after taking its locks, rather than reusing a previously checked catalog.
-func contractPartitionRetryWhen(ctx context.Context, lockSettings *ContractPartitionLockSettings, run func() error, attempts int, wait time.Duration, logf func(string, ...any)) (err error) {
+// With a scope, each attempt first reads the scope's admission and waits while
+// it is busy; a run that ends busy returns ContractPartitionBusyError.
+func contractPartitionRetryWhen(ctx context.Context, scope *contractLockScope, run func() error, attempts int, wait time.Duration, logf func(string, ...any)) (err error) {
 	for attempt := 1; attempt <= attempts; attempt += 1 {
-		busy := 0
-		if lockSettings != nil {
-			var busyErr error
-			if busy, busyErr = contractTablesBusy(ctx, lockSettings.MaxTransactionAge); busyErr != nil {
-				return busyErr
+		var blockers []string
+		if scope != nil {
+			var admissionErr error
+			if blockers, admissionErr = contractLockAdmission(ctx, scope); admissionErr != nil {
+				return admissionErr
 			}
 		}
-		if 0 < busy {
-			logf("%d transaction(s) older than %s hold contract table locks (attempt %d/%d)", busy, lockSettings.MaxTransactionAge, attempt, attempts)
-			err = fmt.Errorf("%d long transaction(s) hold contract table locks", busy)
+		if 0 < len(blockers) {
+			logf("not queueing behind (attempt %d/%d): %s", attempt, attempts, strings.Join(blockers, "; "))
+			err = &ContractPartitionBusyError{Blockers: blockers}
+			if attempt == attempts {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -196,6 +208,9 @@ func contractPartitionRetryWhen(ctx context.Context, lockSettings *ContractParti
 			return
 		}
 		logf("lock busy (attempt %d/%d): %v", attempt, attempts, err)
+		if attempt == attempts {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -549,17 +564,49 @@ func (self *contractTableShape) legacyBoundWeek() (cutoverWeek time.Time, err er
 	return ContractIdTime(floor), nil
 }
 
-func prepareContractPartitionCutover(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any)) error {
+func prepareContractPartitionCutover(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
 	if cutoverWeek.IsZero() {
 		return errors.New("the cutover week is required to prepare")
 	}
 	if cutoverWeek.Before(NowUtc().Add(24 * time.Hour)) {
 		return fmt.Errorf("the cutover week %s must start at least 24h from now, to leave time for validation and the swap", cutoverWeek.UTC().Format(time.DateOnly))
 	}
-	return prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, dryRun, logf)
+	return prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, dryRun, logf, settings)
 }
 
-func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any)) error {
+// The statement that adds table's legacy bound, NOT VALID: a brief ACCESS
+// EXCLUSIVE lock, without a scan.
+func contractLegacyBoundAddSql(table string, floor Id) string {
+	return fmt.Sprintf(
+		"ALTER TABLE public.%s ADD CONSTRAINT %s CHECK (contract_id < %s) NOT VALID",
+		quoteIdentifier(table),
+		quoteIdentifier(contractLegacyBoundName(table)),
+		contractIdLiteral(floor),
+	)
+}
+
+// Runs one prepare step on table's lock scope: up to StepAttempts admission
+// reads, then the statements once under their own lock timeout. A scope that
+// stays busy, or a lock wait that times out, defers the step to the next run
+// (the reason is returned, nothing changed); any other failure is an error.
+func contractPreparedStep(ctx context.Context, scope *contractLockScope, statements []string, settings *ContractPartitionCutoverSettings, logf func(string, ...any)) (deferred string, err error) {
+	err = contractPartitionRetryWhen(ctx, scope, func() error {
+		return contractPartitionExec(ctx, statements)
+	}, settings.StepAttempts, settings.StepRetryInterval, logf)
+	var busy *ContractPartitionBusyError
+	switch {
+	case err == nil:
+		return "", nil
+	case errors.As(err, &busy):
+		return strings.Join(busy.Blockers, "; "), nil
+	case contractPartitionLockBusy(err):
+		return err.Error(), nil
+	default:
+		return "", err
+	}
+}
+
+func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek time.Time, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
 	if IsContractPartitioned(ctx) {
 		return errors.New("the contract tables are already partitioned")
 	}
@@ -604,6 +651,8 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 		return fmt.Errorf("%d problem(s) block the cutover", len(problems))
 	}
 
+	// table: why its legacy bound waits for the next run
+	var deferred []string
 	for _, table := range ContractPartitionTables {
 		shape := shapes[table]
 		stagedName := contractStagedParentName(table)
@@ -659,19 +708,23 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 		}
 
 		bound := contractLegacyBoundName(table)
+		// Neither step queues behind an autovacuum or a long transaction on
+		// the table: a busy table is deferred to the next run, and the other
+		// tables go on.
 		if shape.legacyBound == nil {
-			statement := fmt.Sprintf(
-				"ALTER TABLE public.%s ADD CONSTRAINT %s CHECK (contract_id < %s) NOT VALID",
-				quoteIdentifier(table),
-				quoteIdentifier(bound),
-				contractIdLiteral(floor),
-			)
+			statement := contractLegacyBoundAddSql(table, floor)
 			if dryRun {
 				logf("would add %s: %s", bound, statement)
 			} else {
-				// a brief ACCESS EXCLUSIVE lock, without a scan
-				if err := contractPartitionExecQuietRetry(ctx, []string{`SET LOCAL lock_timeout = '5s'`, statement}, 60, 10*time.Second, logf); err != nil {
+				scope := &contractLockScope{relations: []string{"public." + table}, request: contractLockAccessExclusive, settings: settings.LockSettings}
+				reason, err := contractPreparedStep(ctx, scope, []string{contractLockTimeoutSql(settings.LockTimeout), statement}, settings, logf)
+				if err != nil {
 					return fmt.Errorf("add %s: %w", bound, err)
+				}
+				if reason != "" {
+					logf("deferred adding %s to the next run: %s", bound, reason)
+					deferred = append(deferred, fmt.Sprintf("%s: %s", table, reason))
+					continue
 				}
 				logf("added %s", bound)
 			}
@@ -684,18 +737,27 @@ func prepareContractPartitionCutoverForWeek(ctx context.Context, cutoverWeek tim
 			}
 			logf("validating %s: scans %s under SHARE UPDATE EXCLUSIVE; reads and writes continue", bound, table)
 			validateStart := time.Now()
-			err := contractPartitionExecRetry(ctx, []string{`SET LOCAL lock_timeout = '60s'`, `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, 10, 30*time.Second, logf)
+			scope := &contractLockScope{relations: []string{"public." + table}, request: contractLockShareUpdateExclusive, settings: settings.LockSettings}
+			reason, err := contractPreparedStep(ctx, scope, []string{contractLockTimeoutSql(settings.ValidateLockTimeout), `SET LOCAL statement_timeout = 0`, liftTransactionTimeoutInTxSql, statement}, settings, logf)
 			if err != nil {
 				return fmt.Errorf("validate %s: %w", bound, err)
+			}
+			if reason != "" {
+				logf("deferred validating %s to the next run: %s", bound, reason)
+				deferred = append(deferred, fmt.Sprintf("%s: %s", table, reason))
+				continue
 			}
 			logf("validated %s in %s", bound, time.Since(validateStart).Round(time.Second))
 		}
 	}
 	if dryRun {
 		logf("dry run: nothing changed")
-	} else {
-		logf("prepared; run --finalize before %s", cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339))
+		return nil
 	}
+	if 0 < len(deferred) {
+		return &ContractPartitionDeferredError{Deferred: deferred}
+	}
+	logf("prepared; run --finalize before %s", cutoverWeek.Add(-contractCutoverAbandonMargin).Format(time.RFC3339))
 	return nil
 }
 
@@ -785,12 +847,31 @@ func contractExternalForeignKeys(shapes map[string]*contractTableShape) (externa
 	return
 }
 
+// The swap transaction with the default lock timeout.
+func contractSwapSql(shapes map[string]*contractTableShape, staged map[string]*contractTableShape, floor Id) (statements []string) {
+	return contractSwapSqlWithin(shapes, staged, floor, DefaultContractPartitionCutoverSettings().LockTimeout)
+}
+
+// The relations the swap locks: every table and its staged parent (with the
+// staged weekly partitions below it), and the tables of outside foreign keys.
+func contractSwapLockRelations(shapes map[string]*contractTableShape) (relations []string) {
+	for _, table := range ContractPartitionTables {
+		relations = append(relations, "public."+table, "public."+contractStagedParentName(table))
+	}
+	external, _ := contractExternalForeignKeys(shapes)
+	for _, foreignKey := range external {
+		relations = append(relations, "public."+foreignKey.table)
+	}
+	return
+}
+
 // The swap transaction. Every table is locked first, in table order, so the
 // renames and attaches see no concurrent statement.
-func contractSwapSql(shapes map[string]*contractTableShape, staged map[string]*contractTableShape, floor Id) (statements []string) {
+func contractSwapSqlWithin(shapes map[string]*contractTableShape, staged map[string]*contractTableShape, floor Id, lockTimeout time.Duration) (statements []string) {
 	// catalog work only: a statement that would scan or build is cut short,
-	// and a lock wait queues traffic for at most a few seconds
-	statements = append(statements, `SET LOCAL lock_timeout = '3s'`, `SET LOCAL statement_timeout = '30s'`)
+	// and each lock wait queues application statements, which give up after
+	// PgLockTimeout, for at most lockTimeout
+	statements = append(statements, contractLockTimeoutSql(lockTimeout), `SET LOCAL statement_timeout = '30s'`)
 	external, internal := contractExternalForeignKeys(shapes)
 	locked := []string{}
 	for _, table := range ContractPartitionTables {
@@ -870,11 +951,11 @@ func contractTriggerEnabledSql(table string, trigger contractTrigger) []string {
 	return []string{fmt.Sprintf("ALTER TABLE public.%s %s %s", quoteIdentifier(table), mode, quoteIdentifier(trigger.name))}
 }
 
-func finalizeContractPartitionCutover(ctx context.Context, dryRun bool, logf func(string, ...any)) error {
-	return finalizeContractPartitionCutoverWithDeadline(ctx, true, dryRun, logf)
+func finalizeContractPartitionCutover(ctx context.Context, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
+	return finalizeContractPartitionCutoverWithDeadline(ctx, true, dryRun, logf, settings)
 }
 
-func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline bool, dryRun bool, logf func(string, ...any)) error {
+func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline bool, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
 	if IsContractPartitioned(ctx) {
 		return errors.New("the contract tables are already partitioned")
 	}
@@ -958,20 +1039,35 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 	}
 	logf("probed the swap: every parent index adopts a legacy index")
 
-	statements := contractSwapSql(shapes, staged, floor)
+	statements := contractSwapSqlWithin(shapes, staged, floor, settings.LockTimeout)
+	scope := &contractLockScope{relations: contractSwapLockRelations(shapes), request: contractLockAccessExclusive, settings: settings.LockSettings}
 	if dryRun {
+		if blockers, err := contractLockAdmission(ctx, scope); err != nil {
+			return err
+		} else if 0 < len(blockers) {
+			logf("the swap would wait now, without queueing, for: %s", strings.Join(blockers, "; "))
+		} else {
+			logf("the swap would be admitted now: no autovacuum and no transaction older than %s holds a lock on the contract tables", settings.LockSettings.MaxTransactionAge)
+		}
 		logf("would swap in one transaction:\n%s", strings.Join(statements, ";\n"))
 		logf("would preserve extended statistics under the swap locks: rename originals for rollback, then copy their definitions and metadata to the published parents")
 		logf("dry run: nothing changed")
 		return nil
 	}
 	swapStart := time.Now()
-	if err := contractPartitionRetryWhen(ctx, DefaultContractPartitionLockSettings(), func() error {
-		return contractPartitionSwap(ctx, statements)
-	}, 60, 10*time.Second, logf); err != nil {
+	var timing contractSwapTiming
+	if err := contractPartitionRetryWhen(ctx, scope, func() error {
+		return contractPartitionSwap(ctx, statements, &timing)
+	}, settings.SwapAttempts, settings.SwapRetryInterval, logf); err != nil {
 		return fmt.Errorf("swap: %w", err)
 	}
-	logf("swapped the contract tables in %s; contracts from %s go to weekly partitions", time.Since(swapStart).Round(time.Millisecond), cutoverWeek.Format(time.DateOnly))
+	logf(
+		"swapped the contract tables in %s: the swap waited %s for its locks and held them %s (catalog work and commit); contracts from %s go to weekly partitions",
+		time.Since(swapStart).Round(time.Millisecond),
+		timing.lockWait.Round(time.Millisecond),
+		timing.held.Round(time.Millisecond),
+		cutoverWeek.Format(time.DateOnly),
+	)
 
 	external, _ := contractExternalForeignKeys(shapes)
 	return analyzeAndValidateContractParents(ctx, external, logf)
@@ -1125,7 +1221,9 @@ func preparedContractCutoverWeek(ctx context.Context) (cutoverWeek time.Time, pr
 	return
 }
 
-func abortContractPartitionCutover(ctx context.Context, dryRun bool, logf func(string, ...any)) error {
+// Drops each table's staged parent and legacy bound, one table at a time: each
+// table waits only for its own quiet moment (contractLockAdmission).
+func abortContractPartitionCutover(ctx context.Context, dryRun bool, logf func(string, ...any), settings *ContractPartitionCutoverSettings) error {
 	if IsContractPartitioned(ctx) {
 		return errors.New("the contract tables are partitioned; use rollback")
 	}
@@ -1138,7 +1236,12 @@ func abortContractPartitionCutover(ctx context.Context, dryRun bool, logf func(s
 			logf("would run:\n%s", strings.Join(statements, ";\n"))
 			continue
 		}
-		if err := contractPartitionExecQuietRetry(ctx, append([]string{`SET LOCAL lock_timeout = '5s'`}, statements...), 24, 5*time.Second, logf); err != nil {
+		scope := &contractLockScope{
+			relations: []string{"public." + table, "public." + contractStagedParentName(table)},
+			request:   contractLockAccessExclusive,
+			settings:  settings.LockSettings,
+		}
+		if err := contractPartitionExecQuietRetry(ctx, scope, append([]string{contractLockTimeoutSql(settings.LockTimeout)}, statements...), settings.AbortAttempts, settings.AbortRetryInterval, logf); err != nil {
 			return fmt.Errorf("abort %s: %w", table, err)
 		}
 		logf("aborted the cutover of %s", table)
@@ -1165,6 +1268,6 @@ func Testing_PartitionContracts(ctx context.Context) {
 		return
 	}
 	cutoverWeek := ContractPartitionWeekStart(NowUtc())
-	Raise(prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, false, func(string, ...any) {}))
-	Raise(finalizeContractPartitionCutoverWithDeadline(ctx, false, false, func(string, ...any) {}))
+	Raise(prepareContractPartitionCutoverForWeek(ctx, cutoverWeek, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
+	Raise(finalizeContractPartitionCutoverWithDeadline(ctx, false, false, func(string, ...any) {}, DefaultContractPartitionCutoverSettings()))
 }
