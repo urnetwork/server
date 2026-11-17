@@ -348,6 +348,10 @@ func auditDeviceEventCutoverProblems(shape *contractTableShape) (problems []stri
 // The days before today, from RollupDays back, that the device day rollup
 // lacks a complete row for. The export needs them all once the raw events are
 // partitioned away.
+//
+// The window's day has a name of its own: inside the NOT EXISTS an
+// unqualified day is audit_device_day.day, which would compare the rollup's
+// column with itself and hide every lacking day behind any complete row.
 func auditDeviceEventRollupLacking(ctx context.Context, conn PgQuerier, settings *AuditDeviceEventPartitionSettings) (lacking []string, err error) {
 	var migrated bool
 	Raise(conn.QueryRow(ctx, `SELECT to_regclass('public.audit_device_day') IS NOT NULL`).Scan(&migrated))
@@ -357,14 +361,14 @@ func auditDeviceEventRollupLacking(ctx context.Context, conn PgQuerier, settings
 	result, queryErr := conn.Query(
 		ctx,
 		`
-		SELECT to_char(day, 'YYYY-MM-DD')
-		FROM generate_series(
-			(now() AT TIME ZONE 'UTC')::date - $1::integer,
-			(now() AT TIME ZONE 'UTC')::date - 1,
-			interval '1 day'
-		) day
+		SELECT to_char(window_days.window_day, 'YYYY-MM-DD')
+		FROM (
+			SELECT (now() AT TIME ZONE 'UTC')::date - days_back AS window_day
+			FROM generate_series(1, $1::integer) AS days_back
+		) window_days
 		WHERE NOT EXISTS (
-			SELECT 1 FROM audit_device_day WHERE audit_device_day.day = day::date AND audit_device_day.complete
+			SELECT 1 FROM audit_device_day
+			WHERE audit_device_day.day = window_days.window_day AND audit_device_day.complete
 		)
 		ORDER BY 1
 		`,
