@@ -69,6 +69,10 @@ type LagDriftTest struct {
 	ClientIpHash []byte
 	// 4 or 6, client_ip's family
 	ClientIpFamily int
+	// client_ip's country, looked up at allocation, which every run is judged
+	// against (K3); "" when GeoLite2 places it nowhere
+	ClientIpCountryCode string
+	ClientIpCountryName string
 	// the origins the token narrows the network's list to; nil for none
 	ParentOrigins []string
 	Confidence    float64
@@ -139,6 +143,8 @@ const lagDriftTestColumns = `
 	token_hash,
 	client_ip_hash,
 	client_ip_family,
+	client_ip_country_code,
+	client_ip_country_name,
 	parent_origins,
 	confidence,
 	reference,
@@ -156,13 +162,15 @@ const lagDriftTestColumns = `
 
 func scanLagDriftTest(result server.PgResult) *LagDriftTest {
 	test := &LagDriftTest{}
-	var reference *string
+	var reference, clientIpCountryCode, clientIpCountryName *string
 	server.Raise(result.Scan(
 		&test.DriftTestId,
 		&test.NetworkId,
 		&test.TokenHash,
 		&test.ClientIpHash,
 		&test.ClientIpFamily,
+		&clientIpCountryCode,
+		&clientIpCountryName,
 		&test.ParentOrigins,
 		&test.Confidence,
 		&reference,
@@ -179,6 +187,12 @@ func scanLagDriftTest(result server.PgResult) *LagDriftTest {
 	))
 	if reference != nil {
 		test.Reference = *reference
+	}
+	if clientIpCountryCode != nil {
+		test.ClientIpCountryCode = *clientIpCountryCode
+	}
+	if clientIpCountryName != nil {
+		test.ClientIpCountryName = *clientIpCountryName
 	}
 	return test
 }
@@ -243,9 +257,12 @@ func scanLagDriftRun(result server.PgResult) *LagDriftRun {
 			*field.target = *field.value
 		}
 	}
-	run.Extenders = []*LagDriftRunExtender{}
 	if 0 < len(extendersJson) {
 		server.Raise(json.Unmarshal(extendersJson, &run.Extenders))
+	}
+	// json null reads as a nil slice: empty, as for no json
+	if run.Extenders == nil {
+		run.Extenders = []*LagDriftRunExtender{}
 	}
 	return run
 }
@@ -267,9 +284,11 @@ func CreateLagDriftTest(ctx context.Context, test *LagDriftTest) {
 				reference,
 				created_at,
 				expires_at,
-				updated_at
+				updated_at,
+				client_ip_country_code,
+				client_ip_country_name
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9, $11, $12)
 			`,
 			test.DriftTestId,
 			test.NetworkId,
@@ -281,6 +300,8 @@ func CreateLagDriftTest(ctx context.Context, test *LagDriftTest) {
 			nullString(test.Reference),
 			test.CreatedAt.UTC(),
 			test.ExpiresAt.UTC(),
+			nullString(test.ClientIpCountryCode),
+			nullString(test.ClientIpCountryName),
 		))
 	})
 }
@@ -798,6 +819,60 @@ func GetLagDriftReportsInTx(ctx context.Context, tx server.PgTx, trackId server.
 		}
 	})
 	return reports
+}
+
+// A drift run's ticket as a prompt report's admission reads it
+// (lag.dev/DRIFTTEST.md E4, review F-08): the ticket, and whether its one
+// report (A7) is stored already.
+type LagDriftReportTicket struct {
+	Ticket   *LagTicket
+	Reported bool
+}
+
+// The ticket when the server issued it for a drift run, nil for a ticket of
+// lag.dev's own tracks or none.
+func GetLagDriftReportTicket(ctx context.Context, ticketId server.Id) *LagDriftReportTicket {
+	var driftTicket *LagDriftReportTicket
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				lag_ticket.track_id,
+				lag_ticket.position,
+				lag_ticket.client_id,
+				lag_ticket.network_id,
+				lag_ticket.extender_id,
+				lag_ticket.issued_at,
+				lag_ticket.expires_at,
+				EXISTS (
+					SELECT 1 FROM lag_result
+					WHERE lag_result.ticket_id = lag_ticket.ticket_id
+				)
+			FROM lag_ticket
+			INNER JOIN lag_track ON lag_track.track_id = lag_ticket.track_id
+			WHERE lag_ticket.ticket_id = $1 AND lag_track.kind = 'drift'
+			`,
+			ticketId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				ticket := &LagTicket{TicketId: ticketId}
+				driftTicket = &LagDriftReportTicket{Ticket: ticket}
+				server.Raise(result.Scan(
+					&ticket.TrackId,
+					&ticket.Position,
+					&ticket.ClientId,
+					&ticket.NetworkId,
+					&ticket.ExtenderId,
+					&ticket.IssuedAt,
+					&ticket.ExpiresAt,
+					&driftTicket.Reported,
+				))
+			}
+		})
+	})
+	return driftTicket
 }
 
 // The positions a track's reports cover, and how many reports it has.

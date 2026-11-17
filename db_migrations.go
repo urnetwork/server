@@ -11857,4 +11857,18 @@ var migrations = []any{
 		ON lag_drift_calibration (calibrated_at, calibration_id)
 		WHERE withdrawn_at IS NULL;
 	`),
+
+	// The country of a drift test's client_ip (lag.dev/DRIFTTEST.md K3, review
+	// F-10), looked up in GeoLite2 at allocation and kept with the token, the
+	// country every run is judged against, never a start address's. A
+	// country is no address: the visitor's address stays only as the peppered
+	// hash of its /29 (/56). Two nullable columns on a small table, added only
+	// when absent under a five-second lock bound: nothing is rewritten, and a
+	// test allocated before it has none, which judges as an unknown country.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_drift_test
+			ADD COLUMN IF NOT EXISTS client_ip_country_code varchar(2) NULL,
+			ADD COLUMN IF NOT EXISTS client_ip_country_name varchar(256) NULL;
+	`),
 }
