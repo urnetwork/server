@@ -1080,6 +1080,12 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the redundant unique event id of the device events, dropped by the
 	// owner-run prepare and recorded, versioned by its position
 	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},
+	// the record of deleted accounts, the App Store subscriptions moved from
+	// them, and the backfill of the accounts deleted before the record, each
+	// versioned by its position
+	[]snMainnetMigrationContract{deletedNetworkMigrationContract},
+	[]snMainnetMigrationContract{appleSubscriptionMoveMigrationContract},
+	[]snMainnetMigrationContract{deletedNetworkBackfillMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
