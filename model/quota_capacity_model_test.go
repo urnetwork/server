@@ -199,3 +199,30 @@ func TestNetworkQuotaLimitsBody(t *testing.T) {
 		connect.AssertEqual(t, limits.Limits["directory_requests_per_day"], int64(50))
 	})
 }
+
+// The body's enforced follows enforce_sidecar_limits while its tier and limits report the plan
+// either way, so a daemon's local pre-checks go dark with api's and ur status still shows the
+// limits (owner decision 520).
+func TestNetworkQuotaLimitsEnforcedFollowsTheSwitch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer Testing_SetSidecarLimits(NetworkTierFree, map[string]int64{
+			"directory_requests_pending": 20,
+			"config_admissions":          50,
+		})()
+		networkId := server.NewId()
+
+		defer Testing_SetEnforceSidecarLimits(false)()
+		dark := NetworkQuotaLimits(ctx, networkId)
+		connect.AssertEqual(t, dark.Enforced, false)
+		connect.AssertEqual(t, dark.Tier, "free")
+		connect.AssertEqual(t, dark.Limits["directory_requests_pending"], int64(20))
+		connect.AssertEqual(t, dark.Limits["config_admissions"], int64(50))
+
+		Testing_SetEnforceSidecarLimits(true)
+		enforced := NetworkQuotaLimits(ctx, networkId)
+		connect.AssertEqual(t, enforced.Enforced, true)
+		connect.AssertEqual(t, enforced.Tier, dark.Tier)
+		connect.AssertEqual(t, enforced.Limits, dark.Limits)
+	})
+}
