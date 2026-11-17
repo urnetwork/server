@@ -370,6 +370,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sidecar/sync/versions":                    routeAccessClient,   // the bearer's own client's versions (§6.8)
 	"GET /sidecar/sync/([^/]+)":                     routeAccessClient,   // core: the bearer's own client's state (§6.8)
 	"GET /sidecar/limits":                           routeAccessClient,   // the caller's network's limits (§20.7)
+	"GET /sidecar/label":                            routeAccessClient,   // the bearer's own network's label, allocated on first need, and alias (§12.5; QD-935)
 	"GET /sidecar/scim-changes":                     routeAccessClient,   // SCIM's removals outside the AdminSet, to the indexer scim_signer names alone, by the model (§7.6; QD-829)
 	"GET /internal/gate/limits/([^/]+)":             routeAccessPublic,   // a host's internal bearer, verified by hash, is its credential (QD-055)
 	"GET /internal/gate/over-limit":                 routeAccessPublic,   // a host's internal bearer (QD-055)
@@ -508,6 +509,9 @@ var strictExpRoutes = map[string]bool{
 	"GET /sidecar/sync/([^/]+)":  true,
 	// §20.7's limits (QUOTA-M1-03)
 	"GET /sidecar/limits": true,
+	// §12.5's label and alias of the bearer's own network (owner decision 421, QD-935); off forwardOnlyRoutes, so a
+	// forwarding client's token is refused there
+	"GET /sidecar/label": true,
 	// §7.6's SCIM queue for the indexer ServiceSettings.scim_signer names; every other client token is refused 403 by
 	// the model (QD-829)
 	"GET /sidecar/scim-changes": true,

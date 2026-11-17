@@ -83,7 +83,7 @@ are closed, and the sign-in routes stay open until decision 1 is made.
    | Class | Meaning | Routes |
    |---|---|---|
    | Public | No credential, or one of its own kind (operator secret, webhook signature, signed objects, competition or admin token, OAuth protocol). A by_jwt grants nothing more | 113 |
-   | Client | Any credential: acts for the caller's own client, reads what every installation shows, or buys or credits something the caller pays for | 43 |
+   | Client | Any credential: acts for the caller's own client, reads what every installation shows, or buys or credits something the caller pays for | 44 |
    | Own client | A client token is accepted; the model limits it to its own client and the clients it created | 5 |
    | Own client payout | Its own client's provider payout: the subnet wallet mapping, the mapping's consent, the wallet read and the fleet binding. A client token is accepted and the model limits its writes to its own client, except a client token of an Embed network, which is refused | 4 |
    | App admin | Administration the URnetwork apps call with their client token today. Refused for a client token of an Embed network | 27 |
@@ -633,6 +633,7 @@ shipped client that calls it with a client token (call sites); the verdict.
 | `GET /my-ip-info` | `handlers.MyIPInfo` → `controller.GetMyIpInfo` | WrapNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /updates/brevo` | `handlers.BrevoWebhook` → `controller.BrevoWebhook` | WrapWithInputNoAuth | — (no by_jwt) | Public | — | unchanged |
 | `POST /log/([^/]+)/upload` | `handlers.LogUpload` | WrapRequireAuth | yes | Client | — | unchanged |
+| `GET /sidecar/label` | `handlers.GetSidecarLabel` → `controller.GetSidecarLabel` | WrapRequireAuth | — (new route) | Client | sidecar `NetworkLabelTable.Refresh` (sidecar api_routes_dns.go), with the sidecar's token | new (DESIGN.md §12.5, owner decision 421): answers the bearer's own network alone, allocating its label on first need; on the strict_exp allowlist, refused to a forwarding client |
 | `GET /\.well-known/oauth-authorization-server` | `oauth.ServerMetadataHandler` | custom (OAuth) | — (no by_jwt) | Public | — | unchanged |
 | `GET /\.well-known/openid-configuration` | `oauth.ServerMetadataHandler` | custom (OAuth) | — (no by_jwt) | Public | — | unchanged |
 | `GET /\.well-known/jwks\.json` | `oauth.JwksHandler` | custom (OAuth) | — (no by_jwt) | Public | — | unchanged |

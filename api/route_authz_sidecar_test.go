@@ -222,6 +222,8 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/sync/([^/]+)",
 	// §20.7's limits (QUOTA-M1-03)
 	"GET /sidecar/limits",
+	// §12.5's label and alias (owner decision 421, QD-935)
+	"GET /sidecar/label",
 	// §7.6's SCIM queue for the indexer ServiceSettings.scim_signer names (QD-829)
 	"GET /sidecar/scim-changes",
 	// §18.7's wake token (SDK-M8-09)

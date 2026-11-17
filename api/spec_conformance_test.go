@@ -113,6 +113,7 @@ func registry() []specEndpoint {
 		{"POST", "/auth/sso-discover", rt(controller.NetworkSsoDiscoverArgs{}), rt(controller.NetworkSsoDiscoverResult{})},
 		{"GET", "/network/admin-events", nil, rt(model.GetNetworkAdminEventsResult{})},
 		{"GET", "/network/dns", nil, rt(sidecar.NetworkDns{})},
+		{"GET", "/sidecar/label", nil, rt(sidecar.SidecarLabel{})},
 		{"POST", "/network/dns/records", rt(sidecar.DnsRecordsRequest{}), rt(sidecar.DnsRecordsAnswer{})},
 		{"POST", "/network/dns/label-reclaim", rt(sidecar.DnsLabelReclaimRequest{}), rt(sidecar.DnsLabelReclaimAnswer{})},
 		{"POST", "/network/dns/alias-claim", rt(sidecar.DnsAliasClaimRequest{}), rt(sidecar.DnsAliasAnswer{})},
