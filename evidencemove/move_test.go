@@ -731,8 +731,8 @@ func TestMoveBacksOffAndRetries(t *testing.T) {
 	if err != nil || report.Counts.Moved != 3 || failures != 2 {
 		t.Fatalf("report %+v, %v after %d failures", report, err, failures)
 	}
-	if report.Paused <= 0 {
-		t.Fatal("the gates never closed for the backoff")
+	if report.Paused <= 0 || report.Failures["throttled"] != 2 {
+		t.Fatalf("the gates never closed for the backoff, or the failures %v are miscounted", report.Failures)
 	}
 	requireAllMoved(t, store, evidence)
 

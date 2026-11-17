@@ -248,6 +248,9 @@ type Report struct {
 	// time with the gates closed
 	Paused  time.Duration
 	Latency map[string]LatencySummary
+	// failed storage attempts, each retried after a backoff unless refused:
+	// transient, throttled and refused
+	Failures map[string]int64
 }
 
 type Mover struct {
@@ -266,6 +269,28 @@ type Mover struct {
 	Logf     func(format string, args ...any)
 	// request latencies by operation; the health gate may share it
 	Latency *Latencies
+
+	failureLock sync.Mutex
+	failures    map[string]int64
+}
+
+func (self *Mover) countFailure(class string) {
+	self.failureLock.Lock()
+	defer self.failureLock.Unlock()
+	if self.failures == nil {
+		self.failures = map[string]int64{}
+	}
+	self.failures[class] += 1
+}
+
+func (self *Mover) failureCounts() map[string]int64 {
+	self.failureLock.Lock()
+	defer self.failureLock.Unlock()
+	counts := map[string]int64{}
+	for class, count := range self.failures {
+		counts[class] = count
+	}
+	return counts
 }
 
 // A failure that more attempts will not cure: a refused request (credentials,
@@ -320,6 +345,7 @@ func (self *Mover) Run(ctx context.Context) (*Report, error) {
 		report.Elapsed = time.Since(start)
 		report.Paused = self.Gates.Paused() - pausedAtStart
 		report.Latency = self.Latency.Summaries()
+		report.Failures = self.failureCounts()
 		return report, err
 	}
 	for {
@@ -488,10 +514,13 @@ func (self *Mover) process(ctx context.Context, item Item) (Result, error) {
 		}
 		switch classifyStoreError(err) {
 		case storeErrorRefused:
+			self.countFailure("refused")
 			return Result{}, &fatalError{fmt.Errorf("storage refused a request for %s: %w", item.Hash, err)}
 		case storeErrorThrottled:
+			self.countFailure("throttled")
 			self.Gates.Failed(err, true)
 		default:
+			self.countFailure("transient")
 			self.Gates.Failed(err, false)
 		}
 		if self.Settings.MaxAttempts <= attempt {
