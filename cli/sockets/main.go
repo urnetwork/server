@@ -4,17 +4,19 @@
 // 65532 and no Postgres: everything the engine keeps is soft state in Redis Cluster (§9.8), and api is reached only
 // off the request paths, for the projection and the over-limit list (I-12). The block's secret_files hold
 // redis.yml, its internal gate bearer (internal-gate-sockets.yml), the ticket key file (socket-ticket-keys.yml),
-// the by jwt keyring's public keys (jwt-jwks.json), auth.yml for revocation_record_enabled, and grafana-push.yml.
+// the svc- key set's public jwks (oauth-jwks-svc.json, as evs.yml, gkm.yml and dns.yml mount it), its reader of
+// the first metadata cluster (file-clusters-sockets.yml, for rev/ alone), and grafana-push.yml.
 //
 // What the block builds around socketsservice:
 //
 //   - ServiceHost: sidecarhost's, with Quota over api's internal gate at -api_url (quotahost.NewBlockQuota, whose
 //     OverLimit is Find's spent list) and Push, pushservice's hint writer, which carries SOCKET_HINT on topic sock.
-//   - The Authenticator: sidecarhost's, verifying the callers' Client-class tokens under SocketsAudience with
-//     session's ClientTokenVerifier (plan-SOCK-client-auth, QD-040): offline against jwt-jwks.json, then against
-//     each token's revocation record alone, never SQL, with the 120 s {sc_<client_id>}ok grace. A refused token
-//     answers 401; a check that cannot answer, a record miss, a Redis failure, a record not enabled or a keyring
-//     with no key, answers unavailable, never an unauthenticated allow.
+//   - The Authenticator: sidecarhost's NewRevocationAuthenticator, verifying the callers' 15-minute service tokens
+//     of audience sockets (QD-1029) offline against oauth-jwks-svc.json, their ur_sidecar_id the caller's sidecar,
+//     then §7.8's rev/ objects for each token's client, sidecar and member, read by sidecar.RevocationChecker from
+//     the first metadata cluster and kept at most 5 s, never SQL. A token that does not verify, or that a rev/
+//     object voids, answers 401; a block with no jwks, no cluster or a rev/ read that fails answers unavailable,
+//     never an unauthenticated allow.
 //   - The store: model.NewSocketStore on the block's Redis Cluster.
 //   - The gate: socketsservice.NewSocketProjectionGate over api's internal projection route (QD-055,
 //     AclGateApiSource) on the same bearer. With no bearer or no api the block has no source and stays not ready.
@@ -23,16 +25,16 @@
 //   - One key-event subscriber per process (sidecarhost's), never one per client (server/model/peer_model.go:32-37):
 //     {*}c_removed reaches ClientRemoved, {acl_*}v ProjectionChanged and {tes_*}n KillChanged; after a
 //     resubscription ProjectionsResync and KillsResync run, since events in the gap are gone. A removal lost in a gap
-//     has nothing to resync from, as nothing lists removed clients: the client's token fails at the revocation
-//     record (QD-040) and its leases lapse within one lease.
+//     has nothing to resync from, as nothing lists removed clients: the client's token fails at its rev/ object, a
+//     later one at the exchange, and its leases lapse within one lease.
 //   - config/<env>/sidecar.yml through sidecarhost's Gates: the sockets gate and urnetwork_edge, which the engine
 //     reads per call (a closed gate answers 503 with Retry-After and the block stays ready), and sockets_control_qps,
 //     which the block lays over the engine's bound each ControlQpsInterval.
 //
 // Readiness is §19.4's sockets column: Redis answering the engine's probe, a ticket key that signs, the gate ready
-// (a source and one over-limit answer) and the key-event families subscribed. A Client-class verifier that cannot
-// answer yet, no jwt-jwks.json or the record not enabled, is said once at start and leaves readiness as §19.4 has
-// it: each authenticated route answers unavailable until it can. What server has no implementation of yet fails
+// (a source and one over-limit answer) and the key-event families subscribed. A block with no rev/ reader, its
+// file-clusters-sockets.yml missing or unreadable, is said once at start and leaves readiness as §19.4 has it: each
+// authenticated route answers unavailable until it has one. What server has no implementation of yet fails
 // closed, each said once at start: tls/'s ValidateListen (TLS-M5-22) opens only over a listen facts source, which
 // the block reads from api's GET /internal/gate/listen-facts/<network_id> (plan-SOCK-gate-data), a route not built
 // yet, so with no source in hostDeps tls/ is not registered; smtp/'s (MAIL-M7-22) does not exist. The engine refuses
@@ -66,8 +68,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/quotahost"
-	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -77,14 +79,19 @@ const hostService = "sockets"
 // The ticket key file among the block's secret_files.
 const hostTicketKeyFileName = "socket-ticket-keys.yml"
 
+// vault's file-clusters-<service>.yml the block reads: the first metadata cluster alone, whose rev/ objects it reads
+// and nothing else (QD-1029).
+const hostFileClustersService = "sockets"
+
 // The block's tunables beyond the engine's.
 type hostSettings struct {
 	// The engine's. nil: socketsservice.DefaultSocketsSettings.
 	Sockets *socketsservice.SocketsSettings
 	// The ticket key set's.
 	TicketKeys *socketsservice.SocketTicketKeySettings
-	// The Client-class verifier's: QD-040's grace and waits, on the mounted jwt-jwks.json.
-	ClientTokens *session.ClientTokenVerifierSettings
+	// The rev/ reader's (§7.8's check row: each subject's answer kept at most 5 s). nil:
+	// sidecar.DefaultRevocationSettings.
+	Revocation *sidecar.RevocationSettings
 	// How often sockets_control_qps is laid over the engine's bound: 60 s, §19.11's reread.
 	ControlQpsInterval time.Duration
 	// How long the block waits before it subscribes a key-event family again after a subscription failed: 5 s.
@@ -98,7 +105,7 @@ func defaultHostSettings() *hostSettings {
 	return &hostSettings{
 		Sockets:                socketsservice.DefaultSocketsSettings(),
 		TicketKeys:             socketsservice.DefaultSocketTicketKeySettings(),
-		ClientTokens:           session.DefaultClientTokenVerifierSettings(),
+		Revocation:             sidecar.DefaultRevocationSettings(),
 		ControlQpsInterval:     60 * time.Second,
 		KeyEventsRetryInterval: 5 * time.Second,
 		Tls:                    socketsservice.DefaultTlsNamespaceSettings(),
@@ -113,7 +120,13 @@ type hostDeps struct {
 	Source sidecar.AclGateSource
 	// Reads the ticket key file: vault's socket-ticket-keys.yml.
 	KeyFile func() ([]byte, error)
-	// Each replaces the block's: a test's token issuer in place of the Client-class Authenticator, a test's gates
+	// The first metadata cluster's reader, whose rev/ objects the Authenticator reads: vault's
+	// file-clusters-sockets.yml. nil leaves the block no rev/ reader, so every authenticated route answers
+	// unavailable.
+	Blobs sidecar.BlobStore
+	// The rev/ reader: sidecar.RevocationChecker over Blobs. A test's in its place.
+	Revocations sidecarhost.RevocationChecker
+	// Each replaces the block's: a test's token issuer in place of the service token Authenticator, a test's gates
 	// file, a test's Redis.
 	Authenticator sidecar.Authenticator
 	Gates         sidecar.ServiceGates
@@ -185,15 +198,28 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
 		Quota: deps.Quota,
 		Push:  deps.Push,
+		Blobs: deps.Blobs,
 		Clock: deps.Clock,
 	})
-	// the callers' Client-class tokens (QD-040), unless a test issues its own
-	var clientTokens *session.ClientTokenVerifier
+	// the callers' service tokens and their rev/ objects (QD-1029), unless a test issues its own
+	noRevocations := false
 	if deps.Authenticator != nil {
 		host.Authenticator = deps.Authenticator
 	} else {
-		clientTokens = session.NewClientTokenVerifier(settings.ClientTokens)
-		host.Authenticator = sidecarhost.NewClientTokenAuthenticator(socketsservice.SocketsAudience, clientTokens)
+		revocations := deps.Revocations
+		if revocations == nil && host.Blobs != nil {
+			revocationSettings := sidecar.DefaultRevocationSettings()
+			if settings.Revocation != nil {
+				revocationSettingsCopy := *settings.Revocation
+				revocationSettings = &revocationSettingsCopy
+			}
+			if revocationSettings.Clock == nil {
+				revocationSettings.Clock = host.Clock
+			}
+			revocations = sidecar.NewRevocationChecker(host.Blobs, oauth.VerifyRevocation, revocationSettings)
+		}
+		noRevocations = revocations == nil
+		host.Authenticator = sidecarhost.NewRevocationAuthenticator(socketsservice.SocketsAudience, revocations)
 	}
 	if deps.Gates != nil {
 		host.Gates = deps.Gates
@@ -281,11 +307,8 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	if 0 < len(self.missing) {
 		log.Errorf("[%s]not ready without %s", hostService, strings.Join(self.missing, "; "))
 	}
-	if clientTokens != nil {
-		if err := clientTokens.Check(); err != nil {
-			// what the check names is a file or a setting, never a token or a client
-			log.Errorf("[%s]Client-class tokens answer unavailable until their verifier can answer: %v", hostService, err)
-		}
+	if noRevocations {
+		log.Errorf("[%s]every authenticated route answers unavailable: no rev/ reader, since the block has no first metadata cluster (file-clusters-sockets.yml)", hostService)
 	}
 	if self.tlsHooks == nil {
 		log.Infof("[%s]tls/ refuses every entry until the block has a listen facts source (plan-SOCK-gate-data)", hostService)
@@ -491,16 +514,29 @@ func (notReadyEngine) Drain()      {}
 func (notReadyEngine) Close()      {}
 
 // The block's own deps: Quota and the projection source over api's internal gate at apiUrl on the block's bearer,
-// each left out, and said, when either is missing. quotaCtx outlives the drain, so the open usage window is sent.
+// and the first metadata cluster's reader for rev/ (vault's file-clusters-sockets.yml), each left out, and said,
+// when it is missing. quotaCtx outlives the drain, so the open usage window is sent; the clusters close with it.
 func blockDeps(quotaCtx context.Context, apiUrl string) (*hostDeps, func()) {
 	deps := &hostDeps{}
-	drain := func() {}
+	ends := []func(){}
+	drain := func() {
+		for _, end := range ends {
+			end()
+		}
+	}
 	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerSockets, apiUrl, nil); err != nil {
 		// the error names what is missing, never the bearer
 		glog.Errorf("[%s]no ServiceHost.Quota: %v\n", hostService, err)
 	} else {
 		deps.Quota = quota
-		drain = func() { quota.Drain(context.Background()) }
+		ends = append(ends, func() { quota.Drain(context.Background()) })
+	}
+	if clusters, err := server.LoadFileClusters(quotaCtx, hostFileClustersService, nil); err != nil {
+		// the error names the file, never a credential
+		glog.Errorf("[%s]no rev/ reader: file-clusters-%s.yml: %v\n", hostService, hostFileClustersService, err)
+	} else {
+		deps.Blobs = clusters
+		ends = append(ends, clusters.Close)
 	}
 	bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerSockets)
 	if err != nil {

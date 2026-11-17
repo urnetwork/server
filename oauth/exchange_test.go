@@ -164,6 +164,31 @@ func TestExchangeIssuesAServiceToken(t *testing.T) {
 	})
 }
 
+// sockets is a service audience (QD-1029): the exchange issues a sockets token
+// naming the client's sidecar, which verifies at sockets and at no other
+// audience, and no evs token verifies at sockets.
+func TestExchangeIssuesASocketsToken(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		self := newExchangeFixture(t)
+
+		result, err := Exchange(t.Context(), self.args("sockets", ""))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "sockets")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.NetworkId, self.networkId)
+		connect.AssertEqual(t, claims.ClientId, self.clientId)
+		connect.AssertEqual(t, *claims.SidecarId, self.sidecarId)
+		connect.AssertEqual(t, len(claims.Scopes()), 0)
+		_, err = newTestServiceTokenVerifier(t).Verify(result.AccessToken, "evs")
+		connect.AssertEqual(t, errors.Is(err, ErrInvalidServiceToken), true)
+
+		evsResult, err := Exchange(t.Context(), self.args("evs", ""))
+		connect.AssertEqual(t, err, nil)
+		_, err = newTestServiceTokenVerifier(t).Verify(evsResult.AccessToken, "sockets")
+		connect.AssertEqual(t, errors.Is(err, ErrInvalidServiceToken), true)
+	})
+}
+
 // §22.5's §7 row: a copied client token buys nothing, a proof by another key is
 // refused, and a replayed proof is refused, each as invalid_dpop_proof.
 func TestExchangeRefusesACopiedTokenAndAReplayedProof(t *testing.T) {
@@ -298,7 +323,7 @@ func TestExchangeNeverIssuesTheApiAudience(t *testing.T) {
 		_, err := Exchange(t.Context(), args)
 		requireExchangeRefused(t, name, err, ErrInvalidTarget)
 	}
-	for _, audience := range []string{"evs", "gkm", "dns", "certs", "mail"} {
+	for _, audience := range []string{"evs", "gkm", "dns", "certs", "mail", "sockets"} {
 		got, err := serviceAudienceForResource(self.resource(audience))
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, got, audience)

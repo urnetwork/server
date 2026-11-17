@@ -1,7 +1,9 @@
 package oauth
 
 // Service tokens (§7.8): what the token exchange mints for a sidecar to call
-// evs, gkm, dns, certs or mail, and what those services verify offline.
+// evs, gkm, dns, certs, mail or sockets, and what those services verify
+// offline. sockets is one of them since QD-1029, in place of QD-040's
+// Client-class tokens: it reads the caller's sidecar from ur_sidecar_id.
 //
 // A service token is an ES256 JWT under the svc- key set, never the mcp set, the
 // admin set or the ByJwt keys, so it is no credential anywhere else. It lives 15
@@ -43,13 +45,15 @@ const (
 	ServiceTokenRecoveryScopePrefix = "recovery:"
 )
 
-// The audiences a service token may name (§7.8). The api's is never one.
+// The audiences a service token may name (§7.8; sockets', QD-1029). The api's
+// is never one.
 var serviceTokenAudiences = map[string]bool{
-	"evs":   true,
-	"gkm":   true,
-	"dns":   true,
-	"certs": true,
-	"mail":  true,
+	"evs":     true,
+	"gkm":     true,
+	"dns":     true,
+	"certs":   true,
+	"mail":    true,
+	"sockets": true,
 }
 
 // Whether audience is one a service token may name.
@@ -321,8 +325,8 @@ var defaultServiceTokenVerifier = sync.OnceValues(func() (*ServiceTokenVerifier,
 var serviceTokenVerifierOverride atomic.Pointer[ServiceTokenVerifier]
 
 // The claims of token, a service token for audience, by the process's verifier
-// (§7.8). This is what server's ServiceHost.Authenticator wraps for evs and gkm
-// (OPS-M1-04). A process with no usable verifier refuses every token, with an
+// (§7.8). This is what server's ServiceHost.Authenticator wraps for evs, gkm
+// and sockets (OPS-M1-04, QD-1029). A process with no usable verifier refuses every token, with an
 // error that is not ErrInvalidServiceToken, so the engine answers unavailable.
 func VerifyServiceToken(token string, audience string) (*ServiceTokenClaims, error) {
 	verifier, err := currentServiceTokenVerifier()

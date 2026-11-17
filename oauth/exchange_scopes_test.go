@@ -484,6 +484,42 @@ func TestExchangeScopesRefuseALapsedAdmission(t *testing.T) {
 	requireExchangeRefused(t, "an ephemeral sidecar at its not_after", err, ErrInvalidGrant)
 }
 
+// sockets is a service audience (QD-1029): an admitted sidecar's client gets a
+// sockets token that grants no scope and names the sidecar's member from the
+// state, a revoked sidecar's and an unadmitted client's are refused, and a
+// scope asked at sockets is refused, since sockets takes none.
+func TestExchangeScopesGrantSocketsToAnAdmittedSidecar(t *testing.T) {
+	self := newExchangeScopesWorld(t)
+	setExchangeScopeClientTaggedOrEphemeral(t, untaggedExchangeClient)
+	secondSidecarId, revokedSidecarId := server.NewId(), server.NewId()
+	self.admitOwnerDevice(secondSidecarId, false, 0, 0)
+	self.admitOwnerDevice(revokedSidecarId, false, 0, 0)
+	self.revoke(revokedSidecarId)
+	repoId := self.createGeneralRepo()
+	snapshot := self.load()
+	source := self.source()
+
+	for _, sidecarId := range []server.Id{self.ownerSidecarId, secondSidecarId} {
+		grant, err := source.Grant(self.ctx, self.request(&sidecarId, self.ownerMemberId, "sockets"))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(grant.Scopes), 0)
+		connect.AssertEqual(t, grant.ProjVersion, snapshot.Pin.GetVersion())
+		if grant.MemberId == nil || *grant.MemberId != self.ownerMemberId || grant.SidecarId != nil {
+			t.Fatalf("sidecar %s: member %v, sidecar %v", sidecarId, grant.MemberId, grant.SidecarId)
+		}
+	}
+
+	_, err := source.Grant(self.ctx, self.request(&revokedSidecarId, self.ownerMemberId, "sockets"))
+	requireExchangeRefused(t, "a revoked sidecar", err, ErrInvalidGrant)
+	unboundSidecarId := server.NewId()
+	for name, sidecarId := range map[string]*server.Id{"no sidecar": nil, "a sidecar the state does not hold": &unboundSidecarId} {
+		_, err := source.Grant(self.ctx, self.request(sidecarId, self.ownerMemberId, "sockets"))
+		requireExchangeRefused(t, name, err, ErrInvalidGrant)
+	}
+	_, err = source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, "sockets", repoScope(repoId, "r")))
+	requireExchangeRefused(t, "a repo scope at sockets", err, ErrInvalidScope)
+}
+
 // The exchange with the projection's source installed: an unadmitted client's
 // credential names its member, so its recovery scope reaches the token with
 // that member and the state's position; a config writer's config admin does

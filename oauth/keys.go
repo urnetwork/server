@@ -45,7 +45,7 @@ const (
 	SignerKeySetMcp SignerKeySet = ""
 	// admin tokens, aud api, for ur admin and the console (§7.8)
 	SignerKeySetAdmin SignerKeySet = "adm"
-	// service tokens, aud evs, gkm, dns, certs or mail, and the rev/ objects
+	// service tokens, aud evs, gkm, dns, certs, mail or sockets, and the rev/ objects
 	SignerKeySetService SignerKeySet = "svc"
 	// edge login's id tokens, the members audience (§7.8's edge login)
 	SignerKeySetId SignerKeySet = "id"

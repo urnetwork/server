@@ -6,17 +6,16 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/oauth"
-	"github.com/urnetwork/server/session"
 )
 
 // The test's issuer and svc- key, installed in place of auth.yml's, and a verifier of that key, as a
@@ -136,103 +135,185 @@ func TestAuthenticatorRefusesTokensThatWillNotAuthenticate(t *testing.T) {
 	}
 }
 
-// A scripted Client-class verifier: what a test sets, and what it was asked.
-type testClientTokens struct {
-	byJwt *session.ByJwt
-	err   error
-	asked []string
+// A test's rev/ objects on fake blobs, signed with the test's svc- key as api signs them, and a checker of
+// them that reads on every check.
+type testRevocations struct {
+	t       *testing.T
+	cluster sidecar.BlobCluster
+	checker *sidecar.RevocationChecker
 }
 
-func (self *testClientTokens) Verify(ctx context.Context, jwtSigned string) (*session.ByJwt, error) {
-	self.asked = append(self.asked, jwtSigned)
-	return self.byJwt, self.err
-}
-
-// A by client jwt's claims as a verifier answers them.
-func testClientByJwt(sidecarId *server.Id) *session.ByJwt {
-	clientId, deviceId := server.NewId(), server.NewId()
-	byJwt := session.NewByJwt(server.NewId(), server.NewId(), "synthetic", false, false).Client(deviceId, clientId)
-	byJwt.SidecarId = sidecarId
-	return byJwt
-}
-
-// A verified Client-class token reaches Principal: its network and client, its sidecar_id claim as SidecarId,
-// the engine's audience, its times, and no scopes; and ServiceHost.Authenticate holds the host's answer.
-func TestClientTokenAuthenticatorMapsAClientToken(t *testing.T) {
-	sidecarId := server.NewId()
-	byJwt := testClientByJwt(&sidecarId)
-	clientTokens := &testClientTokens{byJwt: byJwt}
-	authenticator := NewClientTokenAuthenticator("sockets", clientTokens)
-	principal, err := authenticator.Authenticate(t.Context(), "sockets", "client-token")
+func newTestRevocations(t *testing.T) *testRevocations {
+	t.Helper()
+	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
+	cluster, err := blobs.FirstCluster()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if principal.NetworkId != connect.Id(byJwt.NetworkId) || principal.ClientId != connect.Id(*byJwt.ClientId) ||
-		principal.SidecarId == nil || *principal.SidecarId != connect.Id(sidecarId) ||
-		principal.SubjectClientId != nil || principal.MemberId != nil {
-		t.Fatalf("ids %+v", principal)
+	settings := sidecar.DefaultRevocationSettings()
+	settings.CacheTimeout = 0
+	return &testRevocations{t: t, cluster: cluster, checker: sidecar.NewRevocationChecker(blobs, oauth.VerifyRevocation, settings)}
+}
+
+// Writes the rev/ object that voids kind's subject in networkId for tokens issued before notBefore.
+func (self *testRevocations) revoke(networkId server.Id, kind sidecar.RevocationKind, subjectId server.Id, notBefore time.Time) {
+	self.t.Helper()
+	record := &sidecar.RevocationRecord{
+		NetworkId: sidecar.Id(networkId),
+		Kind:      kind,
+		SubjectId: sidecar.Id(subjectId),
+		NotBefore: notBefore.Truncate(time.Second),
+		Reason:    sidecar.RevocationReasonRemoved,
+		Time:      server.NowUtc().Truncate(time.Second),
 	}
-	if principal.Audience != "sockets" || 0 < len(principal.Scopes) || principal.ProjVersion != 0 {
-		t.Fatalf("claims %+v", principal)
+	payload, err := sidecar.EncodeRevocationPayload(record)
+	if err != nil {
+		self.t.Fatal(err)
 	}
-	if !principal.IssuedAt.Equal(byJwt.IssuedAt.Time) || !principal.ExpiresAt.Equal(byJwt.ExpiresAt.Time) {
-		t.Fatalf("times %v %v", principal.IssuedAt, principal.ExpiresAt)
+	object, err := oauth.SignRevocation(payload)
+	if err != nil {
+		self.t.Fatal(err)
 	}
-	host := &sidecar.ServiceHost{Authenticator: authenticator}
-	if _, err := host.Authenticate(t.Context(), "sockets", "client-token"); err != nil {
+	if _, err := self.cluster.PutIfNoneMatch(context.Background(), record.Key(), object, nil); err != nil {
+		self.t.Fatal(err)
+	}
+}
+
+// A sockets token of a fresh network's client, bound to a sidecar of a member.
+type testSocketsToken struct {
+	token     string
+	networkId server.Id
+	clientId  server.Id
+	sidecarId server.Id
+	memberId  server.Id
+	expiry    time.Time
+}
+
+func mintTestSocketsToken(t *testing.T) *testSocketsToken {
+	t.Helper()
+	self := &testSocketsToken{networkId: server.NewId(), clientId: server.NewId(), sidecarId: server.NewId(), memberId: server.NewId()}
+	token, expiry, err := oauth.MintServiceToken(&oauth.MintServiceTokenArgs{
+		NetworkId: self.networkId,
+		ClientId:  self.clientId,
+		SidecarId: &self.sidecarId,
+		MemberId:  &self.memberId,
+		Audience:  "sockets",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	// an edge platform client binds no sidecar: the engine decides what that may do
-	clientTokens.byJwt = testClientByJwt(nil)
-	if principal, err := authenticator.Authenticate(t.Context(), "sockets", "edge-token"); err != nil || principal.SidecarId != nil {
-		t.Fatalf("no sidecar: %+v %v", principal, err)
+	self.token, self.expiry = token, expiry
+	return self
+}
+
+// sockets' callers hold service tokens (QD-1029): a sockets token maps onto Principal with its sidecar and member,
+// passes the block's rev/ check while nothing voids it, and ServiceHost.Authenticate holds the host's answer; an
+// object that voids only tokens issued before this one was leaves it standing.
+func TestRevocationAuthenticatorTakesASocketsToken(t *testing.T) {
+	installTestServiceTokenKeys(t)
+	revocations := newTestRevocations(t)
+	authenticator := NewRevocationAuthenticator("sockets", revocations.checker)
+	minted := mintTestSocketsToken(t)
+
+	principal, err := authenticator.Authenticate(t.Context(), "sockets", minted.token)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !slices.Equal(clientTokens.asked, []string{"client-token", "client-token", "edge-token"}) {
-		t.Fatalf("asked %v", clientTokens.asked)
+	if principal.NetworkId != connect.Id(minted.networkId) || principal.ClientId != connect.Id(minted.clientId) ||
+		principal.SidecarId == nil || *principal.SidecarId != connect.Id(minted.sidecarId) ||
+		principal.MemberId == nil || *principal.MemberId != connect.Id(minted.memberId) ||
+		principal.SubjectClientId != nil || principal.Audience != "sockets" || 0 < len(principal.Scopes) {
+		t.Fatalf("principal %+v", principal)
+	}
+	host := &sidecar.ServiceHost{Authenticator: authenticator}
+	if _, err := host.Authenticate(t.Context(), "sockets", minted.token); err != nil {
+		t.Fatal(err)
+	}
+
+	// a removal before this token was issued, whose object an earlier token's would void
+	revocations.revoke(minted.networkId, sidecar.RevocationKindClient, minted.clientId, principal.IssuedAt.Add(-time.Hour))
+	if _, err := authenticator.Authenticate(t.Context(), "sockets", minted.token); err != nil {
+		t.Fatalf("a token issued after its client's not_before: %v", err)
 	}
 }
 
-// The verifier's refusal is a refusal (401); its unavailable answer carries its wait and is none; anything else
-// is unavailable with no wait. An empty token refuses without asking, and a service audience never reaches the
-// Client-class verifier.
-func TestClientTokenAuthenticatorKeepsRefusedAndUnavailableApart(t *testing.T) {
-	clientTokens := &testClientTokens{}
-	authenticator := NewClientTokenAuthenticator("sockets", clientTokens)
+// sockets refuses an evs token, an expired sockets token, and a sockets token whose client, sidecar or member a
+// rev/ object voids, each as ErrAuthenticationRefused, so the engine answers 401.
+func TestRevocationAuthenticatorRefusesTokensSocketsMustNotTake(t *testing.T) {
+	verifier := installTestServiceTokenKeys(t)
 	ctx := t.Context()
 
-	clientTokens.err = fmt.Errorf("%w: %w", session.ErrClientTokenRefused, session.ErrByJwtInactive)
-	if _, err := authenticator.Authenticate(ctx, "sockets", "removed-client-token"); !errors.Is(err, sidecar.ErrAuthenticationRefused) {
-		t.Errorf("a refused token: %v", err)
+	evsToken, _, err := oauth.MintServiceToken(&oauth.MintServiceTokenArgs{NetworkId: server.NewId(), ClientId: server.NewId(), Audience: "evs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticator := NewRevocationAuthenticator("sockets", newTestRevocations(t).checker)
+	if _, err := authenticator.Authenticate(ctx, "sockets", evsToken); !errors.Is(err, sidecar.ErrAuthenticationRefused) {
+		t.Errorf("an evs token: %v", err)
 	}
 
-	clientTokens.err = &session.ClientTokenUnavailableError{RetryAfter: 5 * time.Second, Err: errors.New("the revocation record cannot answer")}
-	_, err := authenticator.Authenticate(ctx, "sockets", "missed-client-token")
-	unavailable := &sidecar.AuthenticationUnavailableError{}
-	if !errors.As(err, &unavailable) || unavailable.RetryAfter != 5*time.Second || errors.Is(err, sidecar.ErrAuthenticationRefused) {
-		t.Errorf("a record miss: %v", err)
+	minted := mintTestSocketsToken(t)
+	verifier.Testing_SetNow(func() time.Time { return minted.expiry.Add(time.Second) })
+	if _, err := authenticator.Authenticate(ctx, "sockets", minted.token); !errors.Is(err, sidecar.ErrAuthenticationRefused) {
+		t.Errorf("an expired token: %v", err)
 	}
+	verifier.Testing_SetNow(server.NowUtc)
 
-	clientTokens.err = errors.New("a verifier fault")
-	if _, err := authenticator.Authenticate(ctx, "sockets", "client-token"); err == nil || errors.Is(err, sidecar.ErrAuthenticationRefused) || errors.As(err, &unavailable) {
-		t.Errorf("another error: %v", err)
-	}
-
-	asked := len(clientTokens.asked)
-	if _, err := authenticator.Authenticate(ctx, "sockets", ""); !errors.Is(err, sidecar.ErrAuthenticationRefused) {
-		t.Errorf("no token: %v", err)
-	}
-	installTestServiceTokenKeys(t)
-	if _, err := authenticator.Authenticate(ctx, "evs", "eyJhbGciOiJFUzI1NiJ9.e30.c2lnbmF0dXJl"); !errors.Is(err, sidecar.ErrAuthenticationRefused) {
-		t.Errorf("a wrong service token: %v", err)
-	}
-	if len(clientTokens.asked) != asked {
-		t.Errorf("the verifier was asked %v", clientTokens.asked[asked:])
+	for _, kind := range []sidecar.RevocationKind{sidecar.RevocationKindClient, sidecar.RevocationKindSidecar, sidecar.RevocationKindMember} {
+		revocations := newTestRevocations(t)
+		authenticator := NewRevocationAuthenticator("sockets", revocations.checker)
+		minted := mintTestSocketsToken(t)
+		if _, err := authenticator.Authenticate(ctx, "sockets", minted.token); err != nil {
+			t.Fatalf("%s: before its object: %v", kind, err)
+		}
+		subjectId := map[sidecar.RevocationKind]server.Id{
+			sidecar.RevocationKindClient:  minted.clientId,
+			sidecar.RevocationKindSidecar: minted.sidecarId,
+			sidecar.RevocationKindMember:  minted.memberId,
+		}[kind]
+		revocations.revoke(minted.networkId, kind, subjectId, server.NowUtc().Add(time.Minute))
+		_, err := authenticator.Authenticate(ctx, "sockets", minted.token)
+		if !errors.Is(err, sidecar.ErrAuthenticationRefused) || !errors.Is(err, sidecar.ErrRevocationVoidsToken) {
+			t.Errorf("a token whose %s a rev/ object voids: %v", kind, err)
+		}
 	}
 }
 
-// A process with no verifier, and an audience no verifier here serves (sockets' Client-class tokens on a host
-// given no Client-class verifier, plan-SOCK-client-auth), answer unavailable, not refused: nothing is known
-// about the token, so the caller retries rather than sign out, and nothing is allowed.
+// A block made to read rev/ that cannot read it answers its audience's tokens unavailable, never refused and never
+// allowed: with no reader, and with a reader whose read fails. Another audience's tokens take no rev/ check here.
+func TestRevocationAuthenticatorUnavailableWithoutRev(t *testing.T) {
+	installTestServiceTokenKeys(t)
+	ctx := t.Context()
+	minted := mintTestSocketsToken(t)
+
+	for name, authenticator := range map[string]*Authenticator{
+		"no reader":     NewRevocationAuthenticator("sockets", nil),
+		"a failed read": NewRevocationAuthenticator("sockets", failingRevocations{}),
+	} {
+		principal, err := authenticator.Authenticate(ctx, "sockets", minted.token)
+		if err == nil || principal != nil || errors.Is(err, sidecar.ErrAuthenticationRefused) {
+			t.Errorf("%s: %v, %v", name, principal, err)
+		}
+	}
+
+	gkmToken, _, err := oauth.MintServiceToken(&oauth.MintServiceTokenArgs{NetworkId: server.NewId(), ClientId: server.NewId(), Audience: "gkm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRevocationAuthenticator("sockets", nil).Authenticate(ctx, "gkm", gkmToken); err != nil {
+		t.Errorf("another audience: %v", err)
+	}
+}
+
+// A rev/ reader whose every read fails.
+type failingRevocations struct{}
+
+func (self failingRevocations) Check(ctx context.Context, principal *sidecar.Principal) error {
+	return errors.New("the first metadata cluster cannot be read")
+}
+
+// A process with no verifier, and an audience that is no service audience, answer unavailable, not refused:
+// nothing is known about the token, so the caller retries rather than sign out, and nothing is allowed.
 func TestAuthenticatorUnavailableIsNotARefusal(t *testing.T) {
 	broken := &Authenticator{verify: func(token string, audience string) (*oauth.ServiceTokenClaims, error) {
 		return nil, errors.New("no service token verifier: oauth-jwks-svc.json is unreadable")
@@ -243,7 +324,7 @@ func TestAuthenticatorUnavailableIsNotARefusal(t *testing.T) {
 	}
 
 	installTestServiceTokenKeys(t)
-	for _, audience := range []string{"sockets", "api", "tlsedge"} {
+	for _, audience := range []string{"api", "tlsedge"} {
 		principal, err := NewAuthenticator().Authenticate(t.Context(), audience, "token")
 		if err == nil || principal != nil || errors.Is(err, sidecar.ErrAuthenticationRefused) {
 			t.Errorf("%s: %v, %v", audience, principal, err)

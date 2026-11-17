@@ -1,7 +1,7 @@
 package oauth
 
 // The token exchange (§7.8, RFC 8693): a sidecar trades its client token for a
-// 15-minute service token for evs, gkm, dns, certs or mail.
+// 15-minute service token for evs, gkm, dns, certs, mail or sockets (QD-1029).
 //
 //	POST /oauth/token  grant_type=urn:ietf:params:oauth:grant-type:token-exchange
 //	     subject_token=<by_client_jwt>  subject_token_type=urn:ur:params:oauth:token-type:client-jwt

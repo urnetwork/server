@@ -238,7 +238,7 @@ func (self *t3World) await(what string, counts func() (int, chan struct{})) {
 	}
 }
 
-// A device's sockets token, as plan-SOCK-client-auth's Client-class token names its sidecar.
+// A device's sockets token, as a service token of audience sockets names its sidecar (QD-1029).
 func (self *t3World) sidecarOf(device *sidecartest.AdmissionDevice) *t3Sidecar {
 	sidecarId := connect.Id(device.SidecarId)
 	clientId := connect.NewId()
