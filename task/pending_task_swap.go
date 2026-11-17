@@ -29,6 +29,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/urnetwork/server"
 )
 
@@ -42,20 +44,23 @@ var pendingTaskSwapProfile = server.RegisterTableSwapProfile(&server.TableSwapPr
 	LockedCheckSql: pendingTaskSwapLockedCheckSql,
 })
 
-// One row per leased task: its id and function, its heartbeat's age and its
-// lease's time left in seconds, whether a live session holds its advisory
-// lock (taskAdvisoryLockKey, computed by the database), and whether it
-// heartbeat within ReleaseTimeout. A lease ahead puts the row's
-// available_block ahead too, so the poll order index bounds the read to rows
-// not yet available.
-func pendingTaskSwapLeasesSql() string {
+// One row per leased task of relation (pending_task, or under the swap's lock
+// its target, which then holds exactly pending_task's rows): its id and
+// function, its heartbeat's age and its lease's time left in seconds, whether
+// a live session holds its advisory lock (taskAdvisoryLockKey, computed by the
+// database), and whether it heartbeat within ReleaseTimeout. A lease ahead
+// puts the row's available_block ahead too, so the poll order index bounds
+// the read to rows not yet available. On Main that is nearly every row (11-17:
+// every available_block histogram bound was ahead), read through the bloated
+// heap, which is why the swap's lock reads its compact target instead.
+func pendingTaskSwapLeasesSql(relation string) string {
 	return fmt.Sprintf(`
 	WITH leased AS (
 		SELECT task_id, function_name, claim_time, release_time,
 			('x' || substr(replace(task_id::text, '-', ''), 1, 16))::bit(64)::bigint
 				# ('x' || substr(replace(task_id::text, '-', ''), 17, 16))::bit(64)::bigint
 				# (%d)::bigint AS lock_key
-		FROM pending_task
+		FROM public.%s
 		WHERE available_block > extract(epoch FROM now() AT TIME ZONE 'UTC')::bigint
 			AND release_time > now() AT TIME ZONE 'UTC'
 	), held AS (
@@ -74,14 +79,16 @@ func pendingTaskSwapLeasesSql() string {
 	FROM leased LEFT JOIN held ON held.lock_key = leased.lock_key
 	ORDER BY leased.task_id`,
 		int64(taskAdvisoryLockNamespace),
+		pgx.Identifier{relation}.Sanitize(),
 		int64(ReleaseTimeout/time.Second),
 	)
 }
 
 // The check the swap script runs under pending_task's lock, where no claim,
 // heartbeat or completion can change a row: it raises while a task has a live
-// owner or a fresh heartbeat.
-func pendingTaskSwapLockedCheckSql() string {
+// owner or a fresh heartbeat. It reads relation, the swap's target once the
+// captured changes are applied to it.
+func pendingTaskSwapLockedCheckSql(relation string) string {
 	return fmt.Sprintf(`DO $table_swap$
 DECLARE
 	owned_count bigint;
@@ -101,7 +108,7 @@ BEGIN
 		RAISE EXCEPTION 'a taskworker ran moments ago: %% task(s) heartbeat within %ds: %%', fresh_count, sample_text;
 	END IF;
 END
-$table_swap$`, pendingTaskSwapLeasesSql(), int64(ReleaseTimeout/time.Second))
+$table_swap$`, pendingTaskSwapLeasesSql(relation), int64(ReleaseTimeout/time.Second))
 }
 
 // The live owners and recent heartbeats among the leased rows, before the
@@ -125,7 +132,7 @@ func pendingTaskSwapPreflight(ctx context.Context, conn server.PgQuerier) (findi
 		fresh        bool
 	}
 	leases := []*lease{}
-	result, queryErr := conn.Query(ctx, pendingTaskSwapLeasesSql())
+	result, queryErr := conn.Query(ctx, pendingTaskSwapLeasesSql(pendingTaskSwapTable))
 	server.WithPgResult(result, queryErr, func() {
 		for result.Next() {
 			l := &lease{}

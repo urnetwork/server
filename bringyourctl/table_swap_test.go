@@ -7,13 +7,14 @@ import (
 )
 
 // Each step of the table swap parses to its option; the table is required and
-// rollback and drop old exclude each other.
+// rollback, drop old and abort exclude each other.
 func TestTableSwapCommandParses(t *testing.T) {
 	for _, test := range []struct {
 		args     []string
 		dryRun   bool
 		rollback bool
 		dropOld  bool
+		abort    bool
 	}{
 		{args: []string{"--table=pending_task"}},
 		{args: []string{"--table=pending_task", "--dry-run"}, dryRun: true},
@@ -21,6 +22,8 @@ func TestTableSwapCommandParses(t *testing.T) {
 		{args: []string{"--table=pending_task", "--rollback", "--dry-run"}, rollback: true, dryRun: true},
 		{args: []string{"--table=pending_task", "--drop-old"}, dropOld: true},
 		{args: []string{"--table=pending_task", "--drop-old", "--dry-run"}, dropOld: true, dryRun: true},
+		{args: []string{"--table=pending_task", "--abort"}, abort: true},
+		{args: []string{"--table=pending_task", "--abort", "--dry-run"}, abort: true, dryRun: true},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"model", "migrate", "table-swap"}, test.args...), "synthetic")
 		if err != nil {
@@ -33,16 +36,18 @@ func TestTableSwapCommandParses(t *testing.T) {
 		if err != nil {
 			t.Fatal(test.args, err)
 		}
-		if options.Table != "pending_task" || options.DryRun != test.dryRun || options.Rollback != test.rollback || options.DropOld != test.dropOld {
+		if options.Table != "pending_task" || options.DryRun != test.dryRun || options.Rollback != test.rollback || options.DropOld != test.dropOld || options.Abort != test.abort {
 			t.Fatal(test.args, options)
 		}
 	}
-	opts, err := docopt.ParseArgs(bringyourctlUsage, []string{"model", "migrate", "table-swap", "--table=pending_task", "--rollback", "--drop-old"}, "synthetic")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tableSwapOptions(opts); err == nil {
-		t.Fatal("rollback and drop old together parsed")
+	for _, steps := range [][]string{{"--rollback", "--drop-old"}, {"--rollback", "--abort"}, {"--drop-old", "--abort"}} {
+		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"model", "migrate", "table-swap", "--table=pending_task"}, steps...), "synthetic")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tableSwapOptions(opts); err == nil {
+			t.Fatal(steps, "parsed together")
+		}
 	}
 	parser := &docopt.Parser{HelpHandler: docopt.NoHelpHandler}
 	if opts, err := parser.ParseArgs(bringyourctlUsage, []string{"model", "migrate", "table-swap"}, "synthetic"); err == nil {

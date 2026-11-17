@@ -198,6 +198,26 @@ func testTableSwapAge(t testing.TB, ctx context.Context, oldTable string, age ti
 	return aged
 }
 
+// What a change capture of the synthetic queue left (its triggers, function,
+// log and twin), and any other trigger on the queue, or empty.
+func testTableSwapCaptureLeft(t testing.TB, ctx context.Context) string {
+	t.Helper()
+	var state *tableSwapCaptureState
+	var triggers int64
+	MaintenanceDb(ctx, func(conn PgConn) {
+		state = readTableSwapCaptureState(ctx, conn, newTableSwapCapture(testTableSwapTable, nil))
+		Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pg_trigger WHERE tgrelid = to_regclass('public.test_table_swap_queue') AND NOT tgisinternal`).Scan(&triggers))
+	})
+	left := []string{}
+	if state.left() {
+		left = append(left, state.String())
+	}
+	if 0 < triggers {
+		left = append(left, fmt.Sprintf("%d trigger(s) on the queue", triggers))
+	}
+	return strings.Join(left, "; ")
+}
+
 func testTableSwap(t testing.TB, ctx context.Context, options TableSwapOptions) error {
 	t.Helper()
 	options.Table = testTableSwapTable
@@ -232,12 +252,18 @@ func TestTableSwapCopiesEveryRowAndKeepsEveryPublishedName(t *testing.T) {
 		if testTableSwapOid(t, ctx, testTableSwapTable) != oid || 0 < len(testTableSwapOldTables(t, ctx)) || testTableSwapOid(t, ctx, testTableSwapTable+"_next") != 0 {
 			t.Fatal("the dry run changed the table")
 		}
+		if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+			t.Fatal("the dry run left a change capture:", left)
+		}
 
 		if err := testTableSwap(t, ctx, TableSwapOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		if swapped := testTableSwapOid(t, ctx, testTableSwapTable); swapped == oid || swapped == 0 {
 			t.Fatal("the table is not a new relation")
+		}
+		if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+			t.Fatal("the swap left its change capture:", left)
 		}
 		if after := testTableSwapRows(t, ctx, testTableSwapTable); len(after) != len(rows) {
 			t.Fatalf("%d rows after the swap of %d", len(after), len(rows))
@@ -379,29 +405,31 @@ func TestTableSwapChecksItsStateUnderTheLock(t *testing.T) {
 			t.Fatal("the refused swap changed the table")
 		}
 
+		if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+			t.Fatal("the refused swap left its change capture:", left)
+		}
+
 		// the table changed after the rehearsal read its fingerprint: a column
-		// added between them refuses the swap under its lock
+		// added during the pre-copy refuses the swap under its lock, and the
+		// capture and the twin go
 		testTableSwapPreflight.reset(map[int]error{})
 		changed := testTableSwapSettings()
 		changed.LockAttempts = 1
-		swap := &tableSwap{profile: tableSwapProfile(testTableSwapTable), settings: changed, logf: t.Logf}
-		var source *tableSwapShape
-		MaintenanceDb(ctx, func(conn PgConn) {
-			source = readTableSwapShape(ctx, conn, testTableSwapTable)
-		})
-		_, fingerprint, err := swap.rehearse(ctx, source)
-		if err != nil {
-			t.Fatal(err)
-		}
-		MaintenanceTx(ctx, func(tx PgTx) {
-			RaisePgResult(tx.Exec(ctx, `ALTER TABLE test_table_swap_queue ADD COLUMN added_later integer`))
-		})
-		beforeHook, afterHook := swap.swapScript(source, testTableSwapTable+"_next", "20261118120000", fingerprint, nil)
-		if _, err := swap.runScript(ctx, beforeHook, afterHook); err == nil || !strings.Contains(err.Error(), "changed since the rehearsal") {
+		err = testTableSwap(t, ctx, TableSwapOptions{Settings: changed, Hooks: &TableSwapHooks{
+			BeforeLock: func(ctx context.Context, attempt int) {
+				MaintenanceTx(ctx, func(tx PgTx) {
+					RaisePgResult(tx.Exec(ctx, `ALTER TABLE test_table_swap_queue ADD COLUMN added_later integer`))
+				})
+			},
+		}})
+		if err == nil || !strings.Contains(err.Error(), "changed since the rehearsal") {
 			t.Fatal("the swap ran on a table that changed since its rehearsal", err)
 		}
-		if testTableSwapOid(t, ctx, testTableSwapTable) != oid || 0 < len(testTableSwapOldTables(t, ctx)) {
+		if testTableSwapOid(t, ctx, testTableSwapTable) != oid || 0 < len(testTableSwapOldTables(t, ctx)) || testTableSwapOid(t, ctx, testTableSwapTable+"_next") != 0 {
 			t.Fatal("the refused swap changed the table")
+		}
+		if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+			t.Fatal("the refused swap left its change capture:", left)
 		}
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, `ALTER TABLE test_table_swap_queue DROP COLUMN added_later`))
@@ -459,6 +487,9 @@ func TestTableSwapInterruptedBeforeItsCommitChangesNothing(t *testing.T) {
 			if after := testTableSwapRows(t, ctx, testTableSwapTable); len(after) != len(rows) {
 				t.Fatal("the interrupted swap lost rows")
 			}
+			if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+				t.Fatal("the interrupted swap left its change capture:", left)
+			}
 		}
 		if err := testTableSwap(t, ctx, TableSwapOptions{}); err != nil {
 			t.Fatal(err)
@@ -501,8 +532,11 @@ func TestTableSwapWaitsABoundedTimeForItsLock(t *testing.T) {
 		if elapsed := time.Since(start); time.Minute < elapsed {
 			t.Fatalf("the swap waited %s", elapsed)
 		}
-		if 0 < len(testTableSwapOldTables(t, ctx)) {
+		if 0 < len(testTableSwapOldTables(t, ctx)) || testTableSwapOid(t, ctx, testTableSwapTable+"_next") != 0 {
 			t.Fatal("the swap that gave up changed the table")
+		}
+		if left := testTableSwapCaptureLeft(t, ctx); left != "" {
+			t.Fatal("the swap that gave up left its change capture:", left)
 		}
 
 		busy := testTableSwapSettings()
