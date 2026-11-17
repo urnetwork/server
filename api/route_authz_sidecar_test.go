@@ -295,6 +295,11 @@ func TestSidecarTokenRoutes(t *testing.T) {
 		setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 			return false
 		})
+		// the bearer is no forwarding client, whose shorter list TestForwardOnlyTokenRoutes holds; with MG8 linked
+		// the mark's lookup would find no row for this synthetic client and refuse as a mark would
+		setClientForwardOnly(t, func(ctx context.Context, networkId server.Id, clientId server.Id) (bool, error) {
+			return false, nil
+		})
 
 		listed := []string{}
 		for key := range strictExpRoutes {
