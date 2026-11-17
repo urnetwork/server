@@ -5,9 +5,10 @@ package handlers
 // §21.16's customer routes over the router (abuse_handlers.go; ABUSE-M5-11) on a private database and Redis: the
 // report route's one answer whether or not a report joined, its limit on a fake clock with infrastructure
 // uncounted, the limit shared in Redis by two api instances with no address kept there and a count not kept
-// refusing (owner decision 536, QD-895), its refusals, the appeal route's answers for an unknown, a barred and
-// another network's case alike, and the cases and status bodies. The router's class gates are api's
-// (route_authz_test.go); the handlers' own refusal of a client token on cases and appeal is here.
+// refusing (owner decision 536, QD-895), each URL and each header block counted as a report and a request that
+// would pass the limit refused whole (owner decision 582, QD-1024), its refusals, the appeal route's answers for an
+// unknown, a barred and another network's case alike, and the cases and status bodies. The router's class gates
+// are api's (route_authz_test.go); the handlers' own refusal of a client token on cases and appeal is here.
 
 import (
 	"bytes"
@@ -87,6 +88,39 @@ func (self *testAbuseReportSink) count() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return len(self.reports)
+}
+
+// What each report taken names, its URL or its header block, in the order taken.
+func (self *testAbuseReportSink) names() []string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	names := []string{}
+	for _, report := range self.reports {
+		if report.Url != "" {
+			names = append(names, report.Url)
+		} else {
+			names = append(names, string(report.HeaderBlock))
+		}
+	}
+	return names
+}
+
+// count URLs, each naming a host of its own under prefix.
+func testAbuseReportUrls(prefix string, count int) []string {
+	urls := []string{}
+	for i := range count {
+		urls = append(urls, fmt.Sprintf("https://%s%d.elsewhere.example/", prefix, i))
+	}
+	return urls
+}
+
+// count header blocks, each from a sender of its own under prefix.
+func testAbuseReportHeaderBlocks(prefix string, count int) []string {
+	headerBlocks := []string{}
+	for i := range count {
+		headerBlocks = append(headerBlocks, fmt.Sprintf("From: %s%d@elsewhere.example\nSubject: hello\n\n", prefix, i))
+	}
+	return headerBlocks
 }
 
 // The number of abuse_case rows.
@@ -379,18 +413,10 @@ func TestAbuseReportLimitCountsEachReport(t *testing.T) {
 		})
 		caller := netip.MustParseAddr("192.0.2.10")
 		urls := func(count int) []string {
-			urls := []string{}
-			for i := range count {
-				urls = append(urls, fmt.Sprintf("https://h%d.elsewhere.example/", i))
-			}
-			return urls
+			return testAbuseReportUrls("h", count)
 		}
 		headerBlocks := func(count int) []string {
-			headerBlocks := []string{}
-			for i := range count {
-				headerBlocks = append(headerBlocks, fmt.Sprintf("From: s%d@elsewhere.example\nSubject: hello\n\n", i))
-			}
-			return headerBlocks
+			return testAbuseReportHeaderBlocks("s", count)
 		}
 		report := func(body string) *testAbuseRouteAnswer {
 			return testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body)
@@ -433,6 +459,173 @@ func TestAbuseReportLimitCountsEachReport(t *testing.T) {
 		}
 		if count := testAbuseReportLimitCount(t, ctx, caller); count != 20 {
 			t.Fatalf("past the window, %d counted, want 20", count)
+		}
+	})
+}
+
+// A request of 16 URLs spends 16 of the hour's 30 (owner decision 582, QD-1024). A second request of 16 from the
+// same address would pass the limit at its 15th report, so it is refused whole with Retry-After and takes none of
+// its reports, and the attempts it made stand. Another address is unaffected: its request of 16 is taken and
+// spends 16 of its own 30, and the first caller's count does not move.
+func TestAbuseReportLimitRefusesASecondRequestOf16Whole(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			Now:               clock.Now,
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		if settings.ReportAddressLimit != 30 || settings.ReportUrlMaxCount != 16 {
+			t.Fatalf("the defaults take %d reports an hour and %d URLs a request, want 30 and 16", settings.ReportAddressLimit, settings.ReportUrlMaxCount)
+		}
+		caller := netip.MustParseAddr("192.0.2.10")
+		// in another /29
+		other := netip.MustParseAddr("192.0.2.20")
+
+		first := testAbuseReportUrls("first", 16)
+		if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", testAbuseReportBody(t, "phishing", first, nil)); answer.status != http.StatusOK {
+			t.Fatalf("the first 16 URLs: %d %q", answer.status, answer.body)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != 16 {
+			t.Fatalf("16 URLs spent %d of the hour's 30, want 16", count)
+		}
+		if names := sink.names(); !slices.Equal(names, first) {
+			t.Fatalf("taken %v, want the first request's 16", names)
+		}
+
+		second := testAbuseReportUrls("second", 16)
+		refused := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41001", testAbuseReportBody(t, "phishing", second, nil))
+		if refused.status != http.StatusTooManyRequests || refused.header.Get("Retry-After") != "3600" {
+			t.Fatalf("the second 16 URLs: %d %q, Retry-After %q", refused.status, refused.body, refused.header.Get("Retry-After"))
+		}
+		if names := sink.names(); !slices.Equal(names, first) {
+			t.Fatalf("after the refusal, taken %v, want only the first request's 16", names)
+		}
+		// its 14 attempts inside the limit and the one past it stand
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit+1) {
+			t.Fatalf("after the refusal, %d counted, want %d", count, settings.ReportAddressLimit+1)
+		}
+
+		otherUrls := testAbuseReportUrls("other", 16)
+		if answer := testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.20:41000", testAbuseReportBody(t, "phishing", otherUrls, nil)); answer.status != http.StatusOK {
+			t.Fatalf("another address's 16 URLs: %d %q", answer.status, answer.body)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, other); count != 16 {
+			t.Fatalf("another address's 16 URLs spent %d, want 16", count)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit+1) {
+			t.Fatalf("another address's request moved the first caller's count to %d", count)
+		}
+		if names := sink.names(); !slices.Equal(names, slices.Concat(first, otherUrls)) {
+			t.Fatalf("taken %v, want the first request's 16 and the other address's 16", names)
+		}
+	})
+}
+
+// A request of 14 after one of 16 brings the caller to the hour's 30 exactly and is taken whole, its header blocks
+// counting as its URLs do; the next single report would pass the limit and is refused with Retry-After, taking
+// nothing (owner decision 582, QD-1024).
+func TestAbuseReportLimitTakesARequestThatReachesTheLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			Now:               clock.Now,
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		caller := netip.MustParseAddr("192.0.2.10")
+		report := func(urls []string, headerBlocks []string) *testAbuseRouteAnswer {
+			return testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", testAbuseReportBody(t, "spam", urls, headerBlocks))
+		}
+
+		first := testAbuseReportUrls("first", 16)
+		if answer := report(first, nil); answer.status != http.StatusOK {
+			t.Fatalf("16 URLs: %d %q", answer.status, answer.body)
+		}
+		secondUrls := testAbuseReportUrls("second", 10)
+		secondHeaderBlocks := testAbuseReportHeaderBlocks("second", 4)
+		if answer := report(secondUrls, secondHeaderBlocks); answer.status != http.StatusOK {
+			t.Fatalf("14 reports after 16: %d %q", answer.status, answer.body)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit) {
+			t.Fatalf("after 16 and 14 reports, %d counted, want %d", count, settings.ReportAddressLimit)
+		}
+		taken := slices.Concat(first, secondUrls, secondHeaderBlocks)
+		if names := sink.names(); !slices.Equal(names, taken) {
+			t.Fatalf("taken %v, want both requests' 30", names)
+		}
+
+		refused := report(testAbuseReportUrls("third", 1), nil)
+		if refused.status != http.StatusTooManyRequests || refused.header.Get("Retry-After") != "3600" {
+			t.Fatalf("one report at the limit: %d %q, Retry-After %q", refused.status, refused.body, refused.header.Get("Retry-After"))
+		}
+		if names := sink.names(); !slices.Equal(names, taken) {
+			t.Fatalf("after the refusal, taken %v, want both requests' 30", names)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(settings.ReportAddressLimit+1) {
+			t.Fatalf("after the refusal, %d counted, want %d", count, settings.ReportAddressLimit+1)
+		}
+	})
+}
+
+// A body refused for its content counts once, before its reports are read, however many it holds (owner decision
+// 582, QD-1024): a category the form does not offer over 16 URLs and 4 header blocks, 17 URLs, 5 header blocks, 16
+// URLs one of them too long, and 4 header blocks one of them empty each spend one of the hour's 30 and take nothing,
+// and a request of 16 after them spends 16.
+func TestAbuseReportLimitCountsABodyRefusedForItsContentOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clock := &testAbuseRouteClock{now: time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)}
+		sink := &testAbuseReportSink{}
+		settings := DefaultAbuseRouteSettings()
+		handlers := NewAbuseHandlers(&AbuseHandlersDeps{
+			Now:               clock.Now,
+			RateLimitExcluded: func(addr netip.Addr) bool { return false },
+			AcceptReport:      sink.accept,
+			Settings:          settings,
+		})
+		caller := netip.MustParseAddr("192.0.2.10")
+		report := func(body string) *testAbuseRouteAnswer {
+			return testAbuseRouteCall(t, handlers, "POST", "/abuse/report", "", "192.0.2.10:41000", body)
+		}
+
+		longUrl := "https://long.elsewhere.example/" + strings.Repeat("p", settings.ReportUrlMaxByteCount)
+		refusedBodies := []string{
+			testAbuseReportBody(t, "nonsense", testAbuseReportUrls("a", 16), testAbuseReportHeaderBlocks("a", 4)),
+			testAbuseReportBody(t, "phishing", testAbuseReportUrls("b", settings.ReportUrlMaxCount+1), nil),
+			testAbuseReportBody(t, "spam", nil, testAbuseReportHeaderBlocks("c", settings.ReportHeaderBlockMaxCount+1)),
+			testAbuseReportBody(t, "phishing", append(testAbuseReportUrls("d", 15), longUrl), nil),
+			testAbuseReportBody(t, "spam", nil, append(testAbuseReportHeaderBlocks("e", 3), "")),
+		}
+		for i, body := range refusedBodies {
+			if answer := report(body); answer.status != http.StatusBadRequest {
+				t.Fatalf("refused body %d: %d %q", i+1, answer.status, answer.body)
+			}
+			if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(i+1) {
+				t.Fatalf("after %d bodies refused for their content, %d counted, want %d", i+1, count, i+1)
+			}
+		}
+		if sink.count() != 0 {
+			t.Fatalf("bodies refused for their content took %d reports", sink.count())
+		}
+
+		taken := testAbuseReportUrls("f", 16)
+		if answer := report(testAbuseReportBody(t, "phishing", taken, nil)); answer.status != http.StatusOK {
+			t.Fatalf("16 URLs after the refused bodies: %d %q", answer.status, answer.body)
+		}
+		if count := testAbuseReportLimitCount(t, ctx, caller); count != int64(len(refusedBodies)+16) {
+			t.Fatalf("16 URLs after %d refused bodies: %d counted, want %d", len(refusedBodies), count, len(refusedBodies)+16)
+		}
+		if names := sink.names(); !slices.Equal(names, taken) {
+			t.Fatalf("taken %v, want the 16 URLs", names)
 		}
 	})
 }
