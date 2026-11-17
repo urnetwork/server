@@ -1129,7 +1129,7 @@ func Testing_RevocationSessionField(sessionId server.Id) string {
 func Testing_RevocationMemberField(memberId server.Id) string { return revocationMemberField(memberId) }
 func Testing_RevocationUserField(userId server.Id) string     { return revocationUserField(userId) }
 
-// Testing_RevocationMembershipValue is a projected membership's m: value.
+// A projected membership's m: value, for tests outside the package.
 func Testing_RevocationMembershipValue(userId server.Id, reauthDeadline *time.Time) string {
 	return revocationMembershipValue(userId, reauthDeadline)
 }
