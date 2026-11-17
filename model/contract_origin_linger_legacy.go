@@ -17,7 +17,7 @@ var legacyCompanionOriginExistsSql = `
 			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 			-- ids lead with their creation millisecond: an unexpired
 			-- contract's id is at least this bound
-			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+			` + unexpiredContractIdBoundSql("contract_id") + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -28,7 +28,7 @@ var legacyCompanionOriginExistsSql = `
 			$3 <= close_time AND
 			-- ids lead with their creation millisecond: an unexpired
 			-- contract's id is at least this bound
-			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+			` + unexpiredContractIdBoundSql("contract_id") + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -47,14 +47,14 @@ var legacyCompanionPlainOriginSql = `
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE open = false AND $3 <= close_time AND
-                                contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
@@ -70,7 +70,7 @@ var legacyCompanionPlainOriginSql = `
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                             -- ids lead with their creation millisecond: an
                             -- unexpired contract's id is at least this bound
-                            contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                            ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                             COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
@@ -91,7 +91,7 @@ var legacyCompanionPlainOriginSql = `
                                 $3 <= close_time AND
                                 -- ids lead with their creation millisecond: an
                                 -- unexpired contract's id is at least this bound
-                                contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -129,7 +129,7 @@ var legacyCompanionChainedOriginSql = `
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                    contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                    ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -138,7 +138,7 @@ var legacyCompanionChainedOriginSql = `
                                     source_network_id, destination_network_id
                                 FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
-                                    contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                    ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -164,7 +164,7 @@ var legacyCompanionChainedOriginSql = `
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                                 -- ids lead with their creation millisecond: an
                                 -- unexpired contract's id is at least this bound
-                                contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -185,7 +185,7 @@ var legacyCompanionChainedOriginSql = `
                                 WHERE
                                     open = false AND
                                     $3 <= close_time AND
-                                    contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+                                    ` + unexpiredContractIdBoundSql("contract_id") + ` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND
                                     destination_id = $2 AND
@@ -214,7 +214,7 @@ var legacyZeroEscrowPlainOriginSql = `
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 				-- ids lead with their creation millisecond: an unexpired
 				-- contract's id is at least this bound
-				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+				` + unexpiredContractIdBoundSql("contract_id") + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND
@@ -233,7 +233,7 @@ var legacyZeroEscrowPlainOriginSql = `
 				WHERE
 					open = false AND
 					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+					` + unexpiredContractIdBoundSql("contract_id") + ` AND
 					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 					source_id = $1 AND
 					destination_id = $2 AND
@@ -268,7 +268,7 @@ var legacyZeroEscrowChainedOriginSql = `
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 				-- ids lead with their creation millisecond: an unexpired
 				-- contract's id is at least this bound
-				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+				` + unexpiredContractIdBoundSql("contract_id") + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND
@@ -287,7 +287,7 @@ var legacyZeroEscrowChainedOriginSql = `
 				WHERE
 					open = false AND
 					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+					` + unexpiredContractIdBoundSql("contract_id") + ` AND
 					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 					source_id = $1 AND
 					destination_id = $2 AND

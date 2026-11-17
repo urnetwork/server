@@ -372,10 +372,13 @@ func TestCompanionCoveredRequestNegativeAmountsRemainInert(t *testing.T) {
 
 // Resolve only tx.Query calls beneath the public returned owner. Accept the
 // old arity too, so reverting just the optimization produces a causal work
-// failure instead of a parameter-count or source-harness failure.
+// failure instead of a parameter-count or source-harness failure. sql is
+// rendered with the unexpired contract weeks at now, and template keeps their
+// placeholders.
 func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
-	sql   string
-	binds int
+	sql      string
+	template string
+	binds    int
 } {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
@@ -387,8 +390,9 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 		t.Fatal(err)
 	}
 	queries := map[string]struct {
-		sql   string
-		binds int
+		sql      string
+		template string
+		binds    int
 	}{}
 	ast.Inspect(owner.Body, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
@@ -400,10 +404,11 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 			return true
 		}
 		receiver, ok := method.X.(*ast.Ident)
-		sql, sqlOk := modelSqlExpressionValue(call.Args[1])
+		template, sqlOk := modelSqlExpressionTemplate(call.Args[1])
 		if !ok || receiver.Name != "conn" || !sqlOk {
 			return true
 		}
+		sql := unexpiredContractWeeksAt(server.NowUtc()).render(template)
 		for _, branch := range []string{"earliest_origin", "earliest_companion_origin"} {
 			if !strings.Contains(sql, "AS "+branch) {
 				continue
@@ -426,9 +431,10 @@ func coveredCompanionRuntimeQueries(t testing.TB) map[string]struct {
 				}
 			}
 			queries[branch] = struct {
-				sql   string
-				binds int
-			}{sql: sql, binds: binds}
+				sql      string
+				template string
+				binds    int
+			}{sql: sql, template: template, binds: binds}
 		}
 		return true
 	})

@@ -104,7 +104,7 @@ var zeroEscrowPlainOriginSql = `
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 				-- ids lead with their creation millisecond: an unexpired
 				-- contract's id is at least this bound
-				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+				` + unexpiredContractIdBoundSql("contract_id") + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND
@@ -155,7 +155,7 @@ var zeroEscrowChainedOriginSql = `
 				(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 				-- ids lead with their creation millisecond: an unexpired
 				-- contract's id is at least this bound
-				contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+				` + unexpiredContractIdBoundSql("contract_id") + ` AND
 				COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 				source_id = $1 AND
 				destination_id = $2 AND
@@ -466,11 +466,12 @@ func zeroEscrowCompanionOriginInTx(
 	if !lingerReads {
 		plainOriginSql, chainedOriginSql = legacyZeroEscrowPlainOriginSql, legacyZeroEscrowChainedOriginSql
 	}
+	weeks := unexpiredContractWeeksAt(server.NowUtc())
 	func() {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leaveRead()
 		// the origin direction is reversed
-		result, err := tx.Query(ctx, plainOriginSql, destinationId, sourceId, lingerCloseTime)
+		result, err := tx.Query(ctx, weeks.render(plainOriginSql), destinationId, sourceId, lingerCloseTime)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&originContractId))
@@ -485,7 +486,7 @@ func zeroEscrowCompanionOriginInTx(
 		defer leaveRead()
 		result, err := tx.Query(
 			ctx,
-			chainedOriginSql,
+			weeks.render(chainedOriginSql),
 			destinationId,
 			sourceId,
 			lingerCloseTime,

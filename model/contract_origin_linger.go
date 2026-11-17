@@ -131,7 +131,7 @@ var contractOriginLingerClosedSql = `(
 				transfer_contract.contract_id = linger.contract_id AND
 				-- ids lead with their creation millisecond: an unexpired
 				-- contract's id is at least this bound
-				transfer_contract.contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+				` + unexpiredContractIdBoundSql("transfer_contract.contract_id") + ` AND
 				(
 					transfer_contract.open = false AND
 					$3 <= transfer_contract.close_time AND

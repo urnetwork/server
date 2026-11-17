@@ -302,6 +302,7 @@ func TestClosedCompanionOriginReadIsBoundedByContractId(t *testing.T) {
 			closedBranchOnly bool
 		}
 		pair := fmt.Sprintf("'%s'::uuid,'%s'::uuid,now()-interval '1 hour'", f.clients.payerId, f.clients.providerId)
+		weeks := unexpiredContractWeeksAt(server.NowUtc())
 		plainArgs := fmt.Sprintf("%s,'%s'::uuid", pair, f.clients.payerNetworkId)
 		if queries["earliest_origin"].binds == 5 {
 			plainArgs += ",17::bigint"
@@ -316,9 +317,9 @@ func TestClosedCompanionOriginReadIsBoundedByContractId(t *testing.T) {
 				args: fmt.Sprintf("%s,'%s'::uuid,%d::bigint", pair, f.clients.payerNetworkId, f.grown.TransferByteCount+1), columns: 2, result: "anchor",
 				maximum: int64(f.grown.TransferByteCount)},
 			{name: "escrow chained origin", sql: queries["earliest_companion_origin"].sql, args: chainedArgs, columns: 3, result: "none"},
-			{name: "zero escrow plain origin", sql: zeroEscrowPlainOriginSql, args: pair, columns: 1, result: "anchor"},
-			{name: "zero escrow chained origin", sql: zeroEscrowChainedOriginSql, args: fmt.Sprintf("%s,'%s'::uuid,'%s'::uuid", pair, f.clients.providerNetworkId, f.clients.payerNetworkId), columns: 2, result: "none"},
-			{name: "origin existence", sql: companionOriginExistsSql, args: pair, columns: 1, result: "exists", closedBranchOnly: true},
+			{name: "zero escrow plain origin", sql: weeks.render(zeroEscrowPlainOriginSql), args: pair, columns: 1, result: "anchor"},
+			{name: "zero escrow chained origin", sql: weeks.render(zeroEscrowChainedOriginSql), args: fmt.Sprintf("%s,'%s'::uuid,'%s'::uuid", pair, f.clients.providerNetworkId, f.clients.payerNetworkId), columns: 2, result: "none"},
+			{name: "origin existence", sql: weeks.render(companionOriginExistsSql), args: pair, columns: 1, result: "exists", closedBranchOnly: true},
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			defer conn.Exec(t.Context(), `RESET plan_cache_mode`)
