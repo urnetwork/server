@@ -99,7 +99,11 @@ func roundBaselinePreparationDependencyDigests() map[string]string {
 func roundBaselineWorkCoverageDependencyDigests() map[string]string {
 	dependencies := roundBaselinePreparationDependencyDigests()
 	delete(dependencies, "evaluator.sh")
-	dependencies["evaluator-work-coverage.sh"] = "484a9e2eb107b0d5a812db4f0c2a9cd30a30e3615604def4eeea1d000a0b8b4e"
+	// The qualified release is the tree's file, the bytes
+	// prepare-round-baseline-work-coverage.sh checks. This entry had been left
+	// at 484a9e2e when the file and that check moved; the owner corrected it
+	// (QD-875, owner decision 267), and no other historical pin changed.
+	dependencies["evaluator-work-coverage.sh"] = "d2ad9dc8d6fcbb41f74ea5b1fb3746bb45447ffb25d4030c925516f7b46a8c72"
 	return dependencies
 }
 
