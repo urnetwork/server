@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "kind": "epoch2-private-engine-resource-pressure-proof/v1",
+  "host_id": "goofe",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "observed_at": "2026-11-10T06:14:09Z",
+  "unit": "urnetwork-resource-bomb-goofe-20261110-v2.service",
+  "unit_sha256": "d3c1ca311717a4888579869b78385127e971f51c7a10b595d746b8877215e37d",
+  "terminal": {"active_state":"inactive","main_pid":0,"result":"success","exit_status":0},
+  "execution_boundary": {
+    "private_mount_namespace": true,
+    "socket_binding": "/home/by/sim-latency/control/docker.sock:/run/docker.sock",
+    "primary_fixture_image_absent_after_test": true,
+    "private_fixture_image": "sha256:6ee25475abe13dc79226f2ef0737842c818cf094d9bfab11d24ccbe511f9ae21",
+    "management_cpuset": "20,22",
+    "management_memory_limit_bytes": 2147483648,
+    "management_swap_limit_bytes": 0,
+    "fixture_parent_memory_limit_bytes": 103079215104,
+    "fixture_parent_memory_peak_bytes": 77312049152,
+    "fixture_parent_populated_after_test": false,
+    "runtime_max_seconds": 600,
+    "independent_pid1_stop_cleanup": "Two bounded exact-name Docker cleanup commands; primary daemon socket binding is confined to this unit namespace."
+  },
+  "observed_result": {
+    "evaluation_cpuset": "0,2,4,6,8,10,12,14,16,18",
+    "cpu_bomb_saturated_evaluation_set": true,
+    "memory_limit_bytes": 77309411328,
+    "production_memory_limit": true,
+    "memory_exit_code": 137,
+    "memory_oom_killed": true,
+    "cleanup_elapsed_ms": 430,
+    "cleanup_limit_ms": 10000,
+    "residual_containers": 0,
+    "residual_networks": 0
+  },
+  "source": {
+    "go_version": "go1.27.3 linux/amd64",
+    "original_test_script_sha256": "cdae36c49a226c84c72e0061e35e364ad0fb0f9ddfeb14884f180cb2a19f537a",
+    "resource_policy_sha256": "2d8fee49fff639f7c44d0e865d299cf020e062f6c1fa35933e30d5fb6710db5a",
+    "source_archive_sha256": "ed075c51e7f3522200d67981eaad1989ccaf5a9be23be45dcdd7d46222611b6a",
+    "offline_dependency": "golang.org/x/sys v0.49.0, copied with matching committed checksums; go mod verify passed before execution",
+    "previous_attempt": "v1 stopped before bomb containers at standalone module compilation because x/sys was omitted. Its failed unit and logs remain preserved; v2 is a separate fully observed attempt."
+  },
+  "retention": {
+    "report_sha256": "f45e9ade657164215c962198b6333fd17b4ca30e70c1d0f3d493842c783ef7c0",
+    "bucket": "competition",
+    "key": "blob/competition/qualification/01a1c110-585b-ce38-4f29-ca4860a1c058/goofe/f45e9ade657164215c962198b6333fd17b4ca30e70c1d0f3d493842c783ef7c0-resource-bomb.json",
+    "version_id": "30266518-ae86-47ba-bf0f-665724246a94",
+    "mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "exact_version_readback_verified": true,
+    "receipt_sha256": "f0e44cf61c2c3f7344cb56efe11d29730ecf94d626cd78c36dfe2dc74c9e3429"
+  },
+  "authority_limits": {
+    "proves_private_engine_resource_bomb_cleanup": true,
+    "proves_product_workload_or_all_containment_gates": false,
+    "epoch2_baseline_ready": false,
+    "host_comparison_ready": false,
+    "grading_activated": false,
+    "submission_evaluation_clock_started": false,
+    "production_secret_or_main_vault_copied_to_goofe": false
+  }
+}

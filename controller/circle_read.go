@@ -192,28 +192,6 @@ func validCircleReadId(value string) bool {
 	return value != "" && len(value) <= 256 && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "/\\?#\x00\r\n")
 }
 
-func (self *CoreCircleApiClient) getPublicKey(ctx context.Context) (*string, error) {
-	ctx, cancel, err := self.beginReads(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	return paymentHttpGet(ctx, self.readSettings, self.readHooks, "https://api.circle.com/v1/w3s/config/entity/publicKey", self.readHeaders(""), func(_ *http.Response, body []byte) (*string, error) {
-		value, err := circleReadData(body, "publicKey")
-		if err != nil {
-			return nil, err
-		}
-		var key string
-		if err := json.Unmarshal(value, &key); err != nil || len(key) == 0 || len(key) > 16*1024 {
-			return nil, fmt.Errorf("Circle GET has an invalid entity public key")
-		}
-		if _, err := parseRsaPublicKeyFromPem([]byte(key)); err != nil {
-			return nil, err
-		}
-		return &key, nil
-	})
-}
-
 func (self *CoreCircleApiClient) verifyCircleAuth(ctx context.Context, keyId, signature string, body []byte) error {
 	ctx, cancel, err := self.beginReads(ctx)
 	if err != nil {

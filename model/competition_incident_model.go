@@ -63,7 +63,7 @@ type CompetitionAutomationIncident struct {
 
 // Exact bounded identities keep idempotency and public explanations meaningful.
 func ValidateCompetitionAutomationHold(args CompetitionAutomationHoldArgs) error {
-	if args.Kind != "admission" && args.Kind != "evaluation" && args.Kind != "source_activation" && args.Kind != "reward_delivery" {
+	if args.Kind != "admission" && args.Kind != "evaluation" && args.Kind != "source_activation" && args.Kind != "reward_delivery" && args.Kind != "finalization" {
 		return errors.New("unknown automation hold capability")
 	}
 	if args.ExpectedRevision < 0 || args.IdempotencyKey == "" || len(args.IdempotencyKey) > 128 ||

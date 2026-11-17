@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
@@ -32,6 +34,18 @@ type ProviderUrlProbeDue struct {
 	// share an operator and often one failure, so the prober's URL common-mode
 	// guard counts one turn per network.
 	NetworkId *server.Id `json:"network_id,omitempty"`
+	// The IP families the provider advertises (ProviderIpFamilyOfProven over
+	// its reliability row's proven families), the category find-providers2
+	// serves for it: dualstack, v4-only, or v6-only, which the claim never
+	// issues. The prober makes its URL loads over each family it names
+	// (qualityprobe/egresshealth url_family.go); a prober that predates it
+	// ignores it and probes IPv4.
+	IpFamily connect.IpFamily `json:"ip_family,omitempty"`
+	// The turn measures post-quantum: its tunnel opens an opportunistic
+	// end-to-end session with the provider and reports its outcome as e2e
+	// evidence (provider_url_probe_post_quantum.go). A prober that predates
+	// it ignores it and opens none.
+	PostQuantum bool `json:"post_quantum,omitempty"`
 }
 
 // A stable provider slot belongs to one logical shard, independently of the
@@ -39,9 +53,11 @@ type ProviderUrlProbeDue struct {
 const ProviderUrlProbeSlotCount = 1024
 
 // Replace measurements before they leave the four-hour window. This covers
-// the default 220-second URL turn plus 90 seconds for control/publication and
-// 50 seconds of scheduling margin. It is not extra quota credit or a promise
-// that a stalled worker finishes. Admission still owns one 15-minute claim.
+// the default 259-second URL turn (a dual-stack provider's, its HTTP/3 and
+// IPv6 legs included, measuring post-quantum, its seal waits included) plus
+// 90 seconds for control/publication and 11 seconds of scheduling margin. It
+// is not extra quota credit or a promise that a stalled worker finishes.
+// Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
 // Owner decision 2026-10-15 (task #57, option A): a quota-full renewal is due
@@ -138,6 +154,23 @@ func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSucces
 	return fmt.Sprintf(`CASE WHEN (%s) AND %s > 0 AND %s::timestamp < (%s)
 		THEN LEAST((%s), (%s)) ELSE (%s) END`, measuredDeficit[0], acceptedSuccessesParam,
 		measuredAtParam, maturity, paced, maturity, paced)
+}
+
+// The pace of a provider with a finding still pending or judged its own
+// (providerHasUrlSecurityRecheckSql): never faster than a fully measured
+// provider is renewed, ProviderUrlProbeRenewalSpacing (24 minutes) after its
+// receipt, with the same stable per-provider jitter as every paced attempt.
+// Such a provider is claimable past its quota and half of its turns are
+// rechecks, so without this cap a failed recheck re-paced it at the failure
+// interval (one minute): a site fault that left one finding on every provider
+// probing a site multiplied fleet probe load and aimed the rechecks at the
+// broken site. At this pace a finding never makes a provider cost more turns
+// than a fully measured one, so no TLS fault, however wide, raises probe load.
+func providerUrlProbeSecurityPacedAttemptSql(cycleAlias, measuredAtParam, pacedExpression string) string {
+	return fmt.Sprintf(`GREATEST((%s), %s::timestamp + (%d
+		* (0.9 + (((hashtext(%s.client_id::text) %% 2001) + 2001) %% 2001)::double precision / 10000)
+		* interval '1 second'))`,
+		pacedExpression, measuredAtParam, int(ProviderUrlProbeRenewalSpacing/time.Second), cycleAlias)
 }
 
 // This success-only projection remains diagnostic. It cannot satisfy the
@@ -249,11 +282,14 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 								var provider ProviderUrlProbeDue
 								var securityDestinations []byte
 								var networkId server.Id
+								var ipv4Proven, ipv6Proven bool
 								server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
 									&provider.CountryCode, &provider.Region, &securityDestinations,
-									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount, &networkId))
+									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount, &networkId,
+									&ipv4Proven, &ipv6Proven))
 								server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
 								provider.NetworkId = &networkId
+								provider.IpFamily = ProviderIpFamilyOfProven(ipv4Proven, ipv6Proven)
 								provider.SuccessesNeeded = provider.RunsNeeded
 								result.Providers = append(result.Providers, provider)
 							}
@@ -271,6 +307,9 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 	if ordinaryExpiryComplete {
 		_ = writeProviderUrlProbeOrdinaryExpiry(ctx, providerUrlProbeOrdinaryExpiryKey(shardIndex, shardCount), now)
 	}
+	// which issued turns measure post-quantum, decided after the claim's
+	// transaction so its row locks are not held for the reads
+	markProviderUrlProbePostQuantumTurns(ctx, now, result.Providers, DefaultProviderUrlProbePostQuantumSettings())
 	// Two-day receipt storage cleanup has a durable Taskworker owner. Current
 	// completion expiry above and measured-history clock predicates retain all
 	// admission authority even when that independent cleanup is delayed;
@@ -333,10 +372,12 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 	// Keep admission lookups parameterized by each head row, and give UPDATE
 	// targets explicit bounded key arrays as well as their exact identity joins.
 	return fmt.Sprintf(head+`, candidates AS MATERIALIZED (
-				SELECT head.*, provider.country_location_id, provider.region_location_id, provider.network_id
+				SELECT head.*, provider.country_location_id, provider.region_location_id, provider.network_id,
+					provider.ipv4_proven, provider.ipv6_proven
 				FROM head
 				CROSS JOIN LATERAL (
-					SELECT provider.country_location_id, provider.region_location_id, client.network_id
+					SELECT provider.country_location_id, provider.region_location_id, client.network_id,
+						provider.ipv4_proven, provider.ipv6_proven
 					FROM network_client_location_reliability AS provider
 					JOIN network_client AS client USING (client_id)
 					WHERE provider.client_id=head.client_id
@@ -383,8 +424,9 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				COALESCE(country.country_code, ''), COALESCE(region.location_name, ''),
 				COALESCE((SELECT jsonb_agg(security.destination ORDER BY security.url_key)
 					FROM provider_egress_url_security AS security
-					WHERE security.client_id=claimed.client_id AND security.tls_failure), '[]'::jsonb),
-				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id
+					WHERE security.client_id=claimed.client_id AND `+providerUrlSecurityRechecksSql("security")+`), '[]'::jsonb),
+				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id,
+				candidates.ipv4_proven, candidates.ipv6_proven
 			FROM claimed JOIN issued USING(client_id,claim_ordinal)
 			JOIN candidates USING (client_id)
 			LEFT JOIN LATERAL (SELECT country_code FROM location
@@ -395,6 +437,6 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 			ORDER BY %s
 		`, providerUrlProbeAdmissionSql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
-		providerHasUrlSecurityExceptionSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.oldest_run_at", "measured.latest_result_at"),
+		providerHasUrlSecurityRecheckSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.oldest_run_at", "measured.latest_result_at"),
 		countProjection, resultOrder)
 }

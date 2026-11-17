@@ -33,7 +33,27 @@ const (
 	proberRetentionBacklogPanel     = 79
 	proberRetentionStepPanel        = 80
 	proberRetentionRunsPanel        = 81
+	proberRetentionWalkedPanel      = 140
+	proberRetentionWalkPanel        = 141
 )
+
+// Every panel of the row, in order.
+var proberRetentionPanels = []int{
+	proberRetentionModePanel,
+	proberRetentionGenerationsPanel,
+	proberRetentionCutoffPanel,
+	proberRetentionDuePanel,
+	proberRetentionLagPanel,
+	proberRetentionNewestRunPanel,
+	proberRetentionPassesPanel,
+	proberRetentionContractsPanel,
+	proberRetentionDeletedPanel,
+	proberRetentionBacklogPanel,
+	proberRetentionStepPanel,
+	proberRetentionRunsPanel,
+	proberRetentionWalkedPanel,
+	proberRetentionWalkPanel,
+}
 
 // The label matchers every retention selector starts with.
 const proberRetentionTaskworkerFilter = `env="$env",service="taskworker",block=~"$block",host=~"$host",instance!=""`
@@ -60,14 +80,22 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 	counters := regexp.MustCompile(`(\w*\()?(urnetwork_prober_retention_\w*(?:_total|_bucket|_count))\{`)
 	groupings := regexp.MustCompile(`\b(by|on) \(([^)]*)\)`)
 	fixedLabels := []string{"outcome", "reason", "table", "step", "stop", "le"}
+	// the next row starts below every panel of this one
+	nextRow := dashboardPanelById(dashboard, 82)
+	if nextRow == nil || nextRow.Type != "row" {
+		t.Fatalf("taskworker dashboard lacks the orphan contract sweep row after the retention row: %+v", nextRow)
+	}
 	var queries strings.Builder
-	for id := proberRetentionModePanel; id <= proberRetentionRunsPanel; id++ {
+	for _, id := range proberRetentionPanels {
 		panel := dashboardPanelById(dashboard, id)
 		if panel == nil {
 			t.Fatalf("prober retention panel %d is missing", id)
 		}
 		if panel.GridPos.Y <= row.GridPos.Y {
 			t.Errorf("panel %q sits above its row", panel.Title)
+		}
+		if nextRow.GridPos.Y < panel.GridPos.Y+panel.GridPos.H {
+			t.Errorf("panel %q runs into the next row", panel.Title)
 		}
 		if len(panel.Targets) == 0 {
 			t.Errorf("panel %q has no query", panel.Title)
@@ -149,6 +177,9 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 			"sum by (stop) (increase(urnetwork_prober_retention_runs_total{" + proberRetentionTaskworkerFilter + "}[1h]))",
 			"sum by (step) (increase(urnetwork_prober_retention_batch_duration_seconds_count{" + proberRetentionTaskworkerFilter + `,outcome="error"}[1h]))`,
 		}},
+		{proberRetentionWalkedPanel, "contract walk: contracts read / s", []string{
+			rate("sum", "urnetwork_prober_retention_walked_contracts_total"),
+		}},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
 		if panel.Title != c.title || panel.Type != "timeseries" || !slices.Equal(expressions(c.id), c.want) {
@@ -184,7 +215,8 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 			"network_client_location_reliability", "provide_key", "network_client", "device",
 			"transfer_balance", "network", "network_user_auth_seedphrase", "network_user", "prober_shard_run",
 		}},
-		{proberRetentionModePanel, []string{"{prober_retention}control", "off", "dry run", "on"}},
+		{proberRetentionModePanel, []string{"{prober_retention}control", "off", "dry run", "on", "maxWalkRowsPerSecond"}},
+		{proberRetentionWalkedPanel, []string{"maxWalkRowsPerSecond", "maxContractsPerSecond", "5000", "transfer_contract_open_source_id"}},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
 		for _, value := range c.values {
@@ -205,6 +237,7 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 		{proberRetentionDuePanel, "none"},
 		{proberRetentionLagPanel, "s"},
 		{proberRetentionBacklogPanel, "short"},
+		{proberRetentionWalkPanel, "dateTimeAsIso"},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
 		if panel.FieldConfig.Defaults.Unit != c.unit {
@@ -218,6 +251,11 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 				t.Errorf("panel %q does not read the newest run: %s", panel.Title, target.Expr)
 			}
 		}
+	}
+	walk := dashboardPanelById(dashboard, proberRetentionWalkPanel)
+	if walk.Title != "contract walk position (creation time read up to)" || walk.Type != "timeseries" || len(walk.Targets) != 1 ||
+		walk.Targets[0].Expr != "max(urnetwork_prober_retention_walk_cursor_timestamp_seconds{"+proberRetentionTaskworkerFilter+"} > 0 and on (env, service, block, host, instance) "+proberRetentionNewestRun+") * 1000" {
+		t.Errorf("walk position panel must read the newest run's cursor time in milliseconds: %q %+v", walk.Title, walk.Targets)
 	}
 	newestRun := dashboardPanelById(dashboard, proberRetentionNewestRunPanel)
 	if newestRun.FieldConfig.Defaults.Unit != "dateTimeAsIso" || len(newestRun.Targets) != 1 ||
@@ -288,10 +326,11 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 // Each taskworker keeps the gauges of the last retention run it made, so the
 // stats read the taskworker whose run started last, by the clock it published
 // with its backlog. That holds when an older run reports a higher mode, more
-// generations, a later cutoff, a longer backlog and a longer lag; a 0 mode
-// still reads; nothing reads once the newest run is 30 minutes old, but the
-// newest start does; a run whose oldest pass is after its cutoff reads no lag;
-// and other services are ignored.
+// generations, a later cutoff, a longer backlog, a longer lag and a later walk
+// position; a 0 mode still reads; nothing reads once the newest run is 30
+// minutes old, but the newest start does; a run whose oldest pass is after its
+// cutoff reads no lag; a newest run whose process never walked reads no walk
+// position; and other services are ignored.
 func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 	promtool := os.Getenv("URNETWORK_PROMTOOL")
 	if promtool == "" {
@@ -335,6 +374,7 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 		cutoff      float64
 		oldest      float64
 		due         float64
+		walkCursor  float64
 	}
 	inputs := func(runs ...retentionRun) []map[string]string {
 		series := []map[string]string{}
@@ -352,14 +392,15 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 				gauge("cutoff_timestamp_seconds", run.cutoff),
 				gauge("oldest_shard_timestamp_seconds", run.oldest),
 				gauge("due_shards", run.due),
+				gauge("walk_cursor_timestamp_seconds", run.walkCursor),
 			)
 		}
 		return series
 	}
 	const day = 86400
 	// evaluated at 3000 s: a run is current when it started after 1200 s
-	older := retentionRun{service: "taskworker", instance: "older", start: 1500, mode: 2, generations: 30, cutoff: 9 * day, oldest: 2 * day, due: 900}
-	newest := retentionRun{service: "taskworker", instance: "newest", start: 2400, mode: 1, generations: 8, cutoff: 8 * day, oldest: 8*day - 7200, due: 12}
+	older := retentionRun{service: "taskworker", instance: "older", start: 1500, mode: 2, generations: 30, cutoff: 9 * day, oldest: 2 * day, due: 900, walkCursor: 3 * day}
+	newest := retentionRun{service: "taskworker", instance: "newest", start: 2400, mode: 1, generations: 8, cutoff: 8 * day, oldest: 8*day - 7200, due: 12, walkCursor: day + 3600}
 	idle := retentionRun{service: "taskworker", instance: "idle"}
 	api := retentionRun{service: "api", instance: "api", start: 2900, mode: 2, generations: 30, cutoff: 20 * day, oldest: day, due: 5000}
 	newestOff := newest
@@ -372,6 +413,9 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 	caughtUp := newest
 	caughtUp.due = 0
 	caughtUp.oldest = 8*day + 3*3600
+	// the newest run's process never walked
+	newestUnwalked := newest
+	newestUnwalked.walkCursor = 0
 
 	value := func(v float64) []map[string]any {
 		return []map[string]any{{"labels": "{}", "value": v}}
@@ -396,11 +440,16 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 			{proberRetentionNewestRunPanel, "A", value(2400 * 1000)},
 			{proberRetentionBacklogPanel, "A", value(12)},
 			{proberRetentionBacklogPanel, "B", value(7200)},
+			{proberRetentionWalkPanel, "A", value((day + 3600) * 1000)},
 		}},
 		{name: "an off mode still reads", runs: []retentionRun{older, newestOff}, evaluations: []evaluation{
 			{proberRetentionModePanel, "A", value(0)},
 		}},
+		{name: "a newest run that never walked reads no walk position over an older walk", runs: []retentionRun{older, newestUnwalked}, evaluations: []evaluation{
+			{proberRetentionWalkPanel, "A", none},
+		}},
 		{name: "a run 30 minutes old reads nothing", runs: []retentionRun{staleOlder, staleNewest}, evaluations: []evaluation{
+			{proberRetentionWalkPanel, "A", none},
 			{proberRetentionModePanel, "A", none},
 			{proberRetentionGenerationsPanel, "A", none},
 			{proberRetentionCutoffPanel, "A", none},

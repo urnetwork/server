@@ -34,11 +34,16 @@ func TestContractExpirationNullClosesRecentPartialReports(t *testing.T) {
 			id, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
 			server.Raise(err)
 			// The receiver reports first: its checkpoint after the sender's
-			// final would settle in that report (owner decision B).
+			// final would settle in that report (owner decision B). Since
+			// 2026-10-28 a sender's final after the receiver's checkpoint
+			// settles in its own report too, so that final is applied without
+			// settling, as expiry finds one whose settlement never ran.
 			if sample.destination {
 				server.Raise(CloseContract(ctx, id, f.destinationId, 0, sample.destinationCheckpoint))
 			}
-			if sample.source {
+			if sample.source && sample.destinationCheckpoint && !sample.sourceCheckpoint {
+				testingApplyContractCloseReport(ctx, id, f.sourceId, 0, false)
+			} else if sample.source {
 				server.Raise(CloseContract(ctx, id, f.sourceId, 0, sample.sourceCheckpoint))
 			}
 			server.Tx(ctx, func(tx server.PgTx) {

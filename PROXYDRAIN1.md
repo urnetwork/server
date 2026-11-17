@@ -223,7 +223,9 @@ client (per-id single-flight only, no global bound).
   bounded concurrency + jitter, waiting for egress windows
   (`WaitForReady`). Optionally fold "prewarm complete OR budget elapsed"
   into readiness.
-- Retire the create-time special case once this lands.
+- Retire the create-time special case once this lands. Retired 2026-11-13
+  (owner): the proxy client notification only registers WireGuard clients,
+  and a proxy's device opens on its first use (`wgServer.WatchProxyClients`).
 
 By handover, active clients hit warm devices: first packet egresses
 immediately.

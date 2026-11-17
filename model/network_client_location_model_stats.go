@@ -17,7 +17,7 @@ package model
 
 import (
 	"container/heap"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"strconv"
 	"strings"

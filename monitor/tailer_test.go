@@ -1272,271 +1272,6 @@ func TestRedisNetEscrowTTLAlertRedactsEntityIDs(t *testing.T) {
 	}
 }
 
-func payoutAttemptLogLines(second string, attempt int) (string, string) {
-	id := fmt.Sprintf("019f77ae-de17-db98-b22d-%012x", attempt)
-	processorLine := fmt.Sprintf(
-		`[edge-3][taskworker][g2][cid:test][I][%s.100000Z][circle_client_controller.go:142][circlec]error sending payment: wallet %s: asset amount owned by the wallet is insufficient`,
-		second,
-		id,
-	)
-	evaluatorLine := fmt.Sprintf(
-		`[edge-3][taskworker][g2][cid:test][I][%s.200000Z][task.go:1930][%s]eval error = asset amount owned by the wallet is insufficient`,
-		second,
-		id,
-	)
-	return processorLine, evaluatorLine
-}
-
-func payoutAdmissionLogLine(second string, admission int) string {
-	admittedAt, err := time.Parse(time.RFC3339, second+"Z")
-	if err != nil {
-		panic(err)
-	}
-	return fmt.Sprintf(
-		`[worker-a.invalid][taskworker][generation-a][cid:synthetic][I][%s.%06dZ][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
-		second,
-		admission+1,
-		admittedAt.Unix(),
-		admission+1,
-	)
-}
-
-// Response and evaluator timestamps occur after POST and can coalesce even
-// when Redis admitted each request in a different rolling second. They retain
-// the separate liquidity finding and 429 correlation state, but must never
-// drive the admission-ceiling finding.
-func TestPayoutRetryMicroburstIgnoresIndependentResponseCompletions(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	for attempt := 0; attempt < 4; attempt++ {
-		processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", attempt)
-		tailer.classify(processorLine)
-		tailer.classify(evaluatorLine)
-	}
-	processorLine, evaluatorLine := payoutAttemptLogLines("2026-08-31T15:46:23", 0)
-	tailer.classify(processorLine)
-	tailer.classify(evaluatorLine)
-
-	findings := tailer.drainWindow()
-	if liquidity := findingByClass(t, findings, "payout-wallet-insufficient"); liquidity.healthy {
-		t.Fatal("wallet response controls lost the liquidity finding")
-	}
-	if burst := findingByClass(t, findings, "payout-retry-microburst"); !burst.healthy {
-		t.Fatalf("response completions manufactured an admission burst: %+v", burst)
-	}
-}
-
-// Four exact admission markers in one normalized source second cannot fit
-// under the three-per-rolling-second gate. A replayed marker must not
-// manufacture a fifth admission.
-func TestPayoutRetryMicroburstCountsPrePostAdmissionsPerSecond(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	lines := make([]string, 0, 4)
-	for admission := 0; admission < 4; admission++ {
-		line := payoutAdmissionLogLine("2026-09-12T19:10:23", admission)
-		lines = append(lines, line)
-		tailer.classify(line)
-	}
-	tailer.classify(lines[0])
-
-	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
-	if finding.healthy {
-		t.Fatal("four same-second admissions did not create a microburst finding")
-	}
-	for _, want := range []string{
-		"peak_admitted_submissions_per_second=4",
-		"threshold=4/s",
-		"admitted_submissions=4",
-		"diagnostic_lines=5",
-		"exact-replay-deduplicated pre-POST admission markers",
-		"authoritative Redis TIME second from the atomic admission decision and is emitted before the processor POST",
-		"cannot fit under a three-admission rolling-second ceiling",
-		"mixed rollout or telemetry loss",
-		"absent markers are unknown rather than zero",
-		"Payout-wallet-insufficient remains a separate finance/operations condition",
-		"complete §2.14 admission-observable coverage",
-		"An uninstrumented Circle caller is instead a 429-source investigation",
-		"peak_admitted_submissions_per_second stays below 4",
-		"[circlec][transfer-admission] admitted observable=v1 redis_second=1789240223 sequence=4 deferrals=0 wait_ms=0",
-	} {
-		if combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism + "\n" + finding.context + "\n" + finding.action + "\n" + finding.verify; !strings.Contains(combined, want) {
-			t.Fatalf("microburst finding missing %q: %+v", want, finding)
-		}
-	}
-	for _, forbidden := range []string{"worker-a.invalid", "cid:synthetic"} {
-		if strings.Contains(finding.evidence, forbidden) {
-			t.Fatalf("microburst evidence leaked %q: %q", forbidden, finding.evidence)
-		}
-	}
-	if logIDRe.MatchString(finding.evidence) {
-		t.Fatalf("microburst evidence retained an identifier: %q", finding.evidence)
-	}
-}
-
-// A minute can begin with a sparse attempt and peak later. The alert must
-// retain a representative line from the actual peak second, not the first
-// canonical line seen in the window (the live 16:31 window peaked at five at
-// 16:31:47 but previously rendered a 16:31:33 sample).
-func TestPayoutRetryMicroburstSampleComesFromPeakSecond(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	first := payoutAdmissionLogLine("2026-09-12T19:11:33", 1)
-	tailer.classify(first)
-	for admission := 10; admission < 15; admission++ {
-		peak := payoutAdmissionLogLine("2026-09-12T19:11:47", admission)
-		tailer.classify(peak)
-	}
-
-	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
-	for _, want := range []string{
-		"peak_admitted_submissions_per_second=5",
-		"peak_source_second=2026-09-12T19:11:47Z",
-		"peak source second: 2026-09-12T19:11:47Z",
-		"sample from peak second: [circlec][transfer-admission] admitted observable=v1 redis_second=1789240307 sequence=15",
-	} {
-		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
-			t.Fatalf("peak finding missing %q: %+v", want, finding)
-		}
-	}
-	if strings.Contains(finding.evidence, "2026-09-12T19:11:33") {
-		t.Fatalf("peak evidence retained the first sparse second: %q", finding.evidence)
-	}
-}
-
-// Host clocks, logger scheduling, and delivery order cannot own the invariant.
-// Four markers with deliberately skewed, out-of-order envelopes must group on
-// the authoritative Redis TIME second returned by the atomic admission script.
-func TestPayoutRetryMicroburstUsesRedisSecondDespiteSkewedOutOfOrderHostTimestamps(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	redisSecond := time.Date(2026, 9, 12, 19, 12, 16, 0, time.UTC).Unix()
-	timestamps := []string{
-		"2031-01-02T03:04:59.000001Z",
-		"2024-02-03T04:05:01.000002Z",
-		"2029-04-05T01:06:42.000003-05:00",
-		"2025-06-07T08:09:03.000004Z",
-	}
-	for admission, timestamp := range timestamps {
-		line := fmt.Sprintf(
-			`[worker-b.invalid][taskworker][generation-b][cid:synthetic][I][%s][circle_transfer_limiter.go:317][circlec][transfer-admission] admitted observable=v1 redis_second=%d sequence=%d deferrals=0 wait_ms=0`,
-			timestamp,
-			redisSecond,
-			admission+1,
-		)
-		tailer.classify(line)
-	}
-
-	finding := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst")
-	combined := finding.observed + "\n" + finding.evidence + "\n" + finding.mechanism
-	for _, want := range []string{
-		"peak_source_second=2026-09-12T19:12:16Z",
-		"peak source second: 2026-09-12T19:12:16Z",
-		"authoritative Redis TIME second",
-		"rather than an inference from host clocks",
-		"sample from peak second: [circlec][transfer-admission] admitted observable=v1",
-	} {
-		if !strings.Contains(combined, want) {
-			t.Fatalf("UTC-normalized peak finding missing %q: %+v", want, finding)
-		}
-	}
-	for _, timestamp := range timestamps {
-		if strings.Contains(combined, timestamp) {
-			t.Fatalf("peak finding retained skewed host time %q: %+v", timestamp, finding)
-		}
-	}
-}
-
-func TestPaymentProcessorRateLimitCountsOneLogicalEventPerDiagnosticPair(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	for attempt := 100; attempt < 105; attempt++ {
-		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
-		tailer.classify(evaluatorLine)
-	}
-	id := "019f77ae-de17-db98-b22d-2642f6f67594"
-	providerLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578203Z][circle_client_controller.go:142][circlec]error sending payment: Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\",\"payment_id\":\"" + id + "\"}"
-	evaluatorLine := "[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.578638Z][task.go:1930][" + id + "]eval error = Bad status: 429 Too Many Requests {\"code\":5,\"message\":\"API rate limit error\"}"
-	tailer.classify(providerLine)
-	tailer.classify(evaluatorLine)
-	tailer.classify(evaluatorLine)
-
-	finding := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
-	for _, want := range []string{
-		"rate=3/min",
-		"processor_rate_limit_events=1",
-		"diagnostic_lines=3",
-		"canonical_source=exact-replay-deduplicated-task-evaluator",
-		"logical event count: 1 exact-replay-deduplicated task evaluator line(s) from 3 diagnostic line(s)",
-		"correlated_source_seconds=1",
-		"correlated_cohort_seconds=1",
-		"coincident_wallet_attempts=5",
-		"peak_coincident_wallet_attempts_per_second=5",
-		"correlation_threshold=4/s",
-		"1/1 payment-processor-rate-limit source second(s) shared at least 4 canonical payout-wallet-insufficient attempt(s)",
-		"5 attempt(s) shared those seconds, peaking at 5/s",
-	} {
-		if combined := finding.observed + "\n" + finding.evidence; !strings.Contains(combined, want) {
-			t.Fatalf("processor rate-limit finding missing %q: %+v", want, finding)
-		}
-	}
-	if logIDRe.MatchString(finding.evidence) {
-		t.Fatalf("processor rate-limit evidence leaked an entity id: %q", finding.evidence)
-	}
-
-	// A reconnect can replay the final evaluator line after the cadence drain.
-	// Preserve its diagnostic visibility but do not manufacture another logical
-	// provider event in the next window.
-	tailer.classify(evaluatorLine)
-	replay := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
-	if !strings.Contains(replay.observed, "processor_rate_limit_events=0") ||
-		!strings.Contains(replay.observed, "diagnostic_lines=1") ||
-		!strings.Contains(replay.observed, "correlated_source_seconds=0") ||
-		!strings.Contains(replay.evidence, "diagnostic replay is not a new provider event") {
-		t.Fatalf("cross-window replay manufactured a logical event: %+v", replay)
-	}
-}
-
-// A late evaluator line can arrive after the minute containing its triggering
-// wallet cohort was drained. Retain source-second attempt counts only for the
-// bounded reconciliation horizon, join an exact second across that boundary,
-// and never join the adjacent second.
-func TestPaymentProcessorRateLimitCorrelatesAcrossDrainByExactSourceSecond(t *testing.T) {
-	now := time.Date(2026, 8, 31, 16, 32, 0, 0, time.UTC)
-	tailer := newLogTailer("taskworker", nil)
-	tailer.clock = func() time.Time { return now }
-	for attempt := 200; attempt < 205; attempt++ {
-		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T16:31:47", attempt)
-		tailer.classify(evaluatorLine)
-	}
-	_ = tailer.drainWindow()
-
-	now = now.Add(time.Minute)
-	rateLine := `[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:47.900000Z][task.go:1930][019f77ae-de17-db98-b22d-aaaaaaaaaaaa]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
-	tailer.classify(rateLine)
-	correlated := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
-	for _, want := range []string{
-		"correlated_source_seconds=1",
-		"correlated_cohort_seconds=1",
-		"coincident_wallet_attempts=5",
-		"peak_coincident_wallet_attempts_per_second=5",
-	} {
-		if combined := correlated.observed + "\n" + correlated.evidence; !strings.Contains(combined, want) {
-			t.Fatalf("cross-drain correlation missing %q: %+v", want, correlated)
-		}
-	}
-
-	adjacentLine := `[edge-1][taskworker][g2][cid:test][I][2026-08-31T16:31:48.100000Z][task.go:1930][019f77ae-de17-db98-b22d-bbbbbbbbbbbb]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
-	tailer.classify(adjacentLine)
-	adjacent := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
-	if !strings.Contains(adjacent.observed, "correlated_source_seconds=1") ||
-		!strings.Contains(adjacent.observed, "correlated_cohort_seconds=0") ||
-		!strings.Contains(adjacent.observed, "coincident_wallet_attempts=0") {
-		t.Fatalf("adjacent source second falsely inherited the wallet cohort: %+v", adjacent)
-	}
-
-	now = now.Add(logReconcileRetention + time.Second)
-	_ = tailer.drainWindow()
-	if len(tailer.burstRecentSecondCounts) != 0 || len(tailer.burstRecentSecondSeen) != 0 {
-		t.Fatalf("expired correlation state was not pruned: counts=%v seen=%v", tailer.burstRecentSecondCounts, tailer.burstRecentSecondSeen)
-	}
-}
-
 func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
 	var got string
@@ -1557,10 +1292,19 @@ func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 	}
 }
 
+// A window_failed line of the window and its distinct second.
+func reconciliationWindowFailedLine(second string, window string) string {
+	return fmt.Sprintf(
+		`[edge-0][taskworker][g1][cid:test][I][%s.100000Z][synthetic.go:1][rel] event=window_failed window=%s reason=providers-unresponsive after=45000`,
+		second,
+		window,
+	)
+}
+
 // A connected Loki tail can miss a record ingested behind its source-time
-// cursor. The bounded overlap must add only the absent records, including the
-// canonical 429 and the two missing members of a same-second admission burst;
-// replaying the same overlap on the next cadence must add nothing.
+// cursor. The bounded overlap must add only the absent records, counting
+// each logical event once; replaying the same overlap on the next cadence
+// must add nothing.
 func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	fixedNow := time.Date(2026, 8, 31, 18, 54, 0, 0, time.UTC)
 	tailer := newLogTailer("taskworker", nil)
@@ -1568,58 +1312,33 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	tailer.startedAt = fixedNow.Add(-time.Minute)
 	tailer.lastLineTime = tailer.startedAt
 
-	walletLines := make([]string, 0, 4)
-	admissionLines := make([]string, 0, 4)
-	for attempt := 0; attempt < 4; attempt++ {
-		_, evaluatorLine := payoutAttemptLogLines("2026-08-31T18:53:30", attempt)
-		walletLines = append(walletLines, evaluatorLine)
-		admissionLines = append(admissionLines, payoutAdmissionLogLine("2026-08-31T18:53:30", attempt))
+	lines := []string{}
+	for _, window := range []string{"quality", "speed", "egress", "relay"} {
+		lines = append(lines, reconciliationWindowFailedLine("2026-08-31T18:53:30", window))
 	}
-	rateLimitLine := `[edge-0][taskworker][g1][cid:test][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-2642f6f67594]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
 
-	// The stable stream delivered newer traffic but omitted admissions one and
-	// three plus all response evidence and the 429.
-	tailer.ingestStanding(admissionLines[0], true, true)
-	tailer.ingestStanding(admissionLines[2], true, true)
-	tailer.ingestStanding(walletLines[0], true, true)
-	tailer.ingestStanding(walletLines[2], true, true)
-	reconciledLines := append([]string{}, admissionLines...)
-	reconciledLines = append(reconciledLines, walletLines...)
-	reconciledLines = append(reconciledLines, rateLimitLine)
-	reconciled := strings.Join(reconciledLines, "\n")
+	// The stable stream delivered newer traffic but omitted two events.
+	tailer.ingestStanding(lines[0], true, true)
+	tailer.ingestStanding(lines[2], true, true)
+	reconciled := strings.Join(lines, "\n")
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return reconciled, nil }
 	tailer.reconcileOnce(context.Background())
 
-	findings := tailer.drainWindow()
-	burst := findingByClass(t, findings, "payout-retry-microburst")
+	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
 	for _, want := range []string{
-		"peak_admitted_submissions_per_second=4",
-		"admitted_submissions=4",
+		"rate=4/min",
+		"failed_window_events=4",
 		"diagnostic_lines=4",
 	} {
-		if !strings.Contains(burst.observed, want) {
-			t.Fatalf("reconciled burst missing %q: %+v", want, burst)
-		}
-	}
-	rateLimit := findingByClass(t, findings, "payment-processor-rate-limit")
-	for _, want := range []string{
-		"rate=1/min",
-		"processor_rate_limit_events=1",
-		"diagnostic_lines=1",
-	} {
-		if !strings.Contains(rateLimit.observed, want) {
-			t.Fatalf("reconciled rate limit missing %q: %+v", want, rateLimit)
+		if !strings.Contains(terminal.observed, want) {
+			t.Fatalf("reconciled window failures missing %q: %+v", want, terminal)
 		}
 	}
 
 	// The next overlapping query necessarily contains the same records.
 	tailer.reconcileOnce(context.Background())
-	replayed := tailer.drainWindow()
-	if finding := findingByClass(t, replayed, "payout-retry-microburst"); !finding.healthy {
-		t.Fatalf("overlap replay manufactured a second burst: %+v", finding)
-	}
-	if finding := findingByClass(t, replayed, "payment-processor-rate-limit"); !finding.healthy {
-		t.Fatalf("overlap replay manufactured a second 429: %+v", finding)
+	if finding := findingByClass(t, tailer.drainWindow(), "window-stall-terminal"); !finding.healthy {
+		t.Fatalf("overlap replay manufactured another window failure: %+v", finding)
 	}
 }
 
@@ -1629,23 +1348,23 @@ func TestFirstStandingReconciliationDoesNotCountPreStartHistory(t *testing.T) {
 	tailer.clock = func() time.Time { return fixedNow }
 	tailer.startedAt = fixedNow.Add(-time.Minute)
 	tailer.lastLineTime = tailer.startedAt
-	oldLine := `[edge-0][taskworker][g1][cid:old][I][2026-08-31T18:52:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-111111111111]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
-	currentLine := `[edge-0][taskworker][g1][cid:new][I][2026-08-31T18:53:30.100000Z][task.go:1930][019f77ae-de17-db98-b22d-222222222222]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	oldLine := reconciliationWindowFailedLine("2026-08-31T18:52:30", "quality")
+	currentLine := reconciliationWindowFailedLine("2026-08-31T18:53:30", "quality")
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
 		return oldLine + "\n" + currentLine, nil
 	}
 	tailer.reconcileOnce(context.Background())
 
-	finding := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit")
+	finding := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
 	if !strings.Contains(finding.observed, "rate=1/min") ||
-		!strings.Contains(finding.observed, "processor_rate_limit_events=1") {
+		!strings.Contains(finding.observed, "failed_window_events=1") {
 		t.Fatalf("first reconciliation counted pre-start history: %+v", finding)
 	}
 
 	// Remembering the old line is also important: the next overlap must not
 	// introduce it after the startup boundary has passed.
 	tailer.reconcileOnce(context.Background())
-	if replay := findingByClass(t, tailer.drainWindow(), "payment-processor-rate-limit"); !replay.healthy {
+	if replay := findingByClass(t, tailer.drainWindow(), "window-stall-terminal"); !replay.healthy {
 		t.Fatalf("pre-start history entered a later window: %+v", replay)
 	}
 }
@@ -1656,7 +1375,7 @@ func TestStandingReconciliationFailurePreservesStreamAndRaisesVisibility(t *test
 	tailer.clock = func() time.Time { return fixedNow }
 	tailer.startedAt = fixedNow.Add(time.Minute * -2)
 	tailer.lastLineTime = tailer.startedAt
-	streamLine := `[edge-0][taskworker][g1][cid:live][I][2026-08-31T18:53:31.100000Z][task.go:1930][019f77ae-de17-db98-b22d-333333333333]eval error = Bad status: 429 Too Many Requests {"code":5,"message":"API rate limit error"}`
+	streamLine := reconciliationWindowFailedLine("2026-08-31T18:53:31", "quality")
 	tailer.ingestStanding(streamLine, true, true)
 	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
 		return "", fmt.Errorf("Loki query error (502): Bad Gateway")
@@ -1668,7 +1387,7 @@ func TestStandingReconciliationFailurePreservesStreamAndRaisesVisibility(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if live := findingByClass(t, findings, "payment-processor-rate-limit"); live.healthy {
+	if live := findingByClass(t, findings, "window-stall-terminal"); live.healthy {
 		t.Fatalf("failed reconciliation discarded the live-stream finding: %+v", live)
 	}
 	visibility := findingByClass(t, findings, "tailer-reconcile")
@@ -1960,53 +1679,6 @@ func TestStandingTailDroppedEntrySummaryRequiresExactPrivateSchema(t *testing.T)
 				}
 			}
 		})
-	}
-}
-
-// Minute volume is the liquidity/retry-amplification signal, but admissions
-// spread across distinct seconds do not violate the short-window invariant.
-// The subsequent empty window must also resolve a prior burst identity.
-func TestPayoutRetryMicroburstRejectsSpreadMinuteAndResets(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	for attempt := 0; attempt < 8; attempt++ {
-		second := fmt.Sprintf("2026-08-31T15:47:%02d", attempt)
-		processorLine, evaluatorLine := payoutAttemptLogLines(second, attempt)
-		tailer.classify(processorLine)
-		tailer.classify(evaluatorLine)
-		tailer.classify(payoutAdmissionLogLine(second, attempt))
-	}
-	findings := tailer.drainWindow()
-	if payout := findingByClass(t, findings, "payout-wallet-insufficient"); payout.healthy {
-		t.Fatal("spread minute lost the parent liquidity finding")
-	}
-	if burst := findingByClass(t, findings, "payout-retry-microburst"); !burst.healthy {
-		t.Fatalf("spread minute became a synchronized burst: %+v", burst)
-	}
-	if burst := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); !burst.healthy {
-		t.Fatalf("empty window did not resolve burst identity: %+v", burst)
-	}
-}
-
-// A tail reconnect uses --since=1s and can replay the final source second of
-// the prior drain window. Preserve exactly one prior fingerprint window so a
-// cadence-boundary reconnect cannot open the same burst twice.
-func TestPayoutRetryMicroburstDeduplicatesReplayAcrossDrainBoundary(t *testing.T) {
-	tailer := newLogTailer("taskworker", nil)
-	lines := make([]string, 0, 4)
-	for admission := 0; admission < 4; admission++ {
-		line := payoutAdmissionLogLine("2026-08-31T15:46:33", admission)
-		lines = append(lines, line)
-		tailer.classify(line)
-	}
-	if first := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); first.healthy {
-		t.Fatal("initial same-second burst was not detected")
-	}
-
-	for _, line := range lines {
-		tailer.classify(line)
-	}
-	if replay := findingByClass(t, tailer.drainWindow(), "payout-retry-microburst"); !replay.healthy {
-		t.Fatalf("cross-window exact replay manufactured another burst: %+v", replay)
 	}
 }
 

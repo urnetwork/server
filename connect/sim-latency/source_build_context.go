@@ -351,18 +351,26 @@ func prepareSourceBuildContext(ctx context.Context, request reviewedSourceBuildR
 	if err := verifyFrozenSourceGraphForMode(ctx, filepath.Join(result.SourceDirectory, "server"), request.Proposal.Commits["server"], request.Proposal.Staging); err != nil {
 		return nil, err
 	}
-	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := writePrivateReviewFile(result.ManifestPath, request.SourceManifest); err != nil {
-		return nil, err
-	}
-	if err := writePrivateReviewFile(result.LockPath, append(lockBytes, '\n')); err != nil {
+	if err := writeSourceBuildContextMetadata(result, request); err != nil {
 		return nil, err
 	}
 	if err := sealSourceBuildTree(ctx, result.SourceDirectory, request.Proposal.Commits, settings); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// Context metadata must match the immutable image planner before compilation.
+func writeSourceBuildContextMetadata(result *sourceBuildContext, request reviewedSourceBuildRequest) error {
+	lockBytes, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits, WorkCoveragePolicy: sourceBuildRequestWorkCoverage(request).Clone()}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writePrivateReviewFile(result.ManifestPath, request.SourceManifest); err != nil {
+		return err
+	}
+	if err := writePrivateReviewFile(result.LockPath, append(lockBytes, '\n')); err != nil {
+		return err
+	}
+	return nil
 }

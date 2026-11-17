@@ -106,7 +106,7 @@ func TestX402PaymentRequiredQuotesEveryNetwork(t *testing.T) {
 
 	paymentRequired, err := x402PaymentRequiredForConfig(c, "/x402/purchase", X402SkuData1Tib, "")
 	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, paymentRequired.X402Version, X402Version)
+	connect.AssertEqual(t, paymentRequired.X402Version, X402VersionV1)
 	connect.AssertEqual(t, len(paymentRequired.Accepts), 2)
 
 	for _, accept := range paymentRequired.Accepts {

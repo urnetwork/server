@@ -433,7 +433,7 @@ func TestTaskCanariesSignalClassifiesTaskErrorsWithoutRenderingRawText(t *testin
 		case strings.Contains(query, "WITH completion_minutes AS"):
 			return []Row{{"pending", "1", "0", "0", "0", "", ""}}, nil
 		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "1", "1", "0", "2", "600", rawError, "120", "1", "other=1", "18.6", "32", "8MB"}}, nil
+			return []Row{{"PaymentReconcile", "1", "1", "0", "2", "600", rawError, "120", "1", "other=1"}}, nil
 		default:
 			return nil, nil
 		}
@@ -466,7 +466,7 @@ func TestTaskCanariesSignalExplainsOptionalPostRecipientWithoutLeakingTask(t *te
 		case strings.Contains(query, "WITH history AS"):
 			return nil, nil
 		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"(*TaskWorker)", "1", "1", "0", "53", "3600", "Missing user auth. private task " + privateId, "120", "1", "post-missing-recipient=1", "18.6", "32", "8MB"}}, nil
+			return []Row{{"(*TaskWorker)", "1", "1", "0", "53", "3600", "Missing user auth. private task " + privateId, "120", "1", "post-missing-recipient=1"}}, nil
 		default:
 			return nil, nil
 		}
@@ -529,7 +529,7 @@ func TestTaskCanariesSignalSyntheticOverdueAndParkedTasks(t *testing.T) {
 		case strings.Contains(query, "WITH history AS"):
 			return []Row{{"UpdateClientScores", "7200", "900", "t", "14400"}}, nil
 		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "10", "10", "0", "23", "3600", "synthetic OOM", "120"}}, nil
+			return []Row{{"PaymentReconcile", "10", "10", "0", "23", "3600", "synthetic OOM", "120"}}, nil
 		default:
 			return nil, nil
 		}
@@ -652,51 +652,6 @@ func TestTaskCanariesSignalDiagnosesLiveNetEscrowOverrun(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("live net-escrow diagnosis missing %q:\n%s", want, markdown)
-		}
-	}
-}
-
-func TestTaskCanariesSignalDiagnosesLivePayoutOverrun(t *testing.T) {
-	taskID := "01a0088a-327f-ed06-0c69-9b994a1e70fe"
-	source := &syntheticSource{
-		postgresFn: func(query string) ([]Row, error) {
-			switch {
-			case strings.Contains(query, "UpdateClientLocations"):
-				return []Row{{"12"}}, nil
-			case strings.Contains(query, "WITH history AS"):
-				return []Row{{"Payout", "4538", "1800", "f", "21600", "0", taskID}}, nil
-			case strings.Contains(query, "WITH failures AS"):
-				return nil, nil
-			default:
-				return nil, nil
-			}
-		},
-		localFn: func(name string, args ...string) (string, error) {
-			joined := strings.Join(args, " ")
-			if name != "warpctl" || !strings.Contains(joined, "--query=Payout") ||
-				strings.Contains(joined, taskID) {
-				t.Fatal("task heartbeat lookup did not use the identifier-free task-family query")
-			}
-			return "[by-us-fmt-5-edge-4][taskworker][g1][cid:52c4c3be3b3f][I][2026-08-30T22:30:00Z][task.go:1938][" + taskID + "]eval active(4500.00s) github.com/urnetwork/server/taskworker/work.Payout({})", nil
-		},
-	}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	markdown := requireAlertClass(t, alerts, "task-overdue").Markdown()
-	for _, want := range []string{
-		"Payout",
-		"temp_account_payment and subsidy windows",
-		"global five-minute idle-in-transaction guard",
-		"explicit oldest PostgreSQL transaction",
-		"SET LOCAL idle_in_transaction_session_timeout=0",
-		"do not disable the database-wide timeout",
-		"SIGNALS.md §5.6 and §5.7",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("live Payout diagnosis missing %q:\n%s", want, markdown)
 		}
 	}
 }
@@ -1211,7 +1166,7 @@ func TestTaskCanariesSignalDoesNotLetNoisyFamilyHideAnother(t *testing.T) {
 			// The payment family has ten rows; UpdateClientScores has only one.
 			// Both are already grouped by SQL and must become separate alerts.
 			return []Row{
-				{"AdvancePayment", "10", "10", "0", "1051", "3500", "wallet insufficient", "1800"},
+				{"PaymentReconcile", "10", "10", "0", "1051", "3500", "synthetic processor refusal", "1800"},
 				{"UpdateClientScores", "1", "0", "1", "1", "-2000", "write tcp -> redis:6402: i/o timeout", "7200"},
 			}, nil
 		default:
@@ -1232,7 +1187,7 @@ func TestTaskCanariesSignalDoesNotLetNoisyFamilyHideAnother(t *testing.T) {
 			seen[alert.Frame] = alert
 		}
 	}
-	for _, task := range []string{"AdvancePayment", "UpdateClientScores"} {
+	for _, task := range []string{"PaymentReconcile", "UpdateClientScores"} {
 		alert, ok := seen[task]
 		if !ok {
 			t.Fatalf("missing independent alert for %s: %+v", task, alerts)
@@ -1243,6 +1198,8 @@ func TestTaskCanariesSignalDoesNotLetNoisyFamilyHideAnother(t *testing.T) {
 	}
 }
 
+// A mixed family's representative row is its dominant sample: the family gets
+// the per-class guidance, never the sample's single-cause diagnosis.
 func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
@@ -1252,9 +1209,9 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 			return nil, nil
 		case strings.Contains(query, "WITH failures AS"):
 			return []Row{{
-				"AdvancePayment", "384", "384", "0", "1062", "3600",
-				"asset amount owned by the wallet is insufficient", "120", "4",
-				"wallet-insufficient=368,connection-cleanup-deadline=10,processor-invalid-destination=5,processor-rate-limit=1",
+				"ReconcileNetEscrow", "384", "384", "0", "1062", "3600",
+				"Interrupted: context canceled", "1800", "3",
+				"context-canceled=368,connection-cleanup-deadline=10,processor-bad-request=6",
 			}}, nil
 		default:
 			return nil, nil
@@ -1267,206 +1224,19 @@ func TestTaskCanariesSignalDoesNotLetDominantCauseMisdescribeFamily(t *testing.T
 	}
 	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
 	for _, want := range []string{
-		"4 error classes",
+		"3 error classes",
 		"cannot describe every failing row",
-		"cause_breakdown=wallet-insufficient=368,connection-cleanup-deadline=10,processor-invalid-destination=5,processor-rate-limit=1",
-		"queued, cursor-batched CompletePayment retention path",
-		"verify typed-reset commit b8af229f in every active taskworker artifact",
-		"deploy it only to blocks whose artifact predates it",
-		"confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection",
-		"every active taskworker contains typed-reset commit b8af229f",
-		"never clear payment rows or keys manually",
-		"do not accelerate processor-rate-limit rows",
-		"verify current-main marker-capable server commit 928abfca in every active taskworker artifact",
-		"66525afc alone proves fail-closed activity/error telemetry but not the capability gauge or exact pre-POST marker",
-		"keep the transfer-admission gate fail closed",
-		"exact pre-POST admission markers stay below four per second for a full 90-minute retry window",
-		"Do not delete or manually replay the mixed family",
+		"cause_breakdown=context-canceled=368,connection-cleanup-deadline=10,processor-bad-request=6",
+		"Investigate and remediate each listed cause class independently",
+		"no minority class remains hidden behind the former dominant sample",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("mixed-family alert missing %q:\n%s", want, markdown)
 		}
 	}
-	if strings.Contains(markdown, "The external payout wallet does not own enough") {
-		t.Fatalf("dominant wallet sample misdescribed the mixed family:\n%s", markdown)
+	if strings.Contains(markdown, "ReconcileNetEscrow reached its configured safety boundary") {
+		t.Fatalf("dominant cancellation sample misdescribed the mixed family:\n%s", markdown)
 	}
-	if strings.Contains(markdown, "processor-bad-request rows") {
-		t.Fatalf("mixed-family alert rendered guidance for an absent class:\n%s", markdown)
-	}
-	if strings.Contains(markdown, "b8718420") {
-		t.Fatalf("mixed-family alert retained former non-ancestor deployment guidance:\n%s", markdown)
-	}
-	for _, staleRuntimeClaim := range []string{
-		"2026.8.31-outerwerld+1033655820",
-		"source 1d8f01e5 contains that reset",
-		"production taskworker",
-	} {
-		if strings.Contains(markdown, staleRuntimeClaim) {
-			t.Fatalf("mixed-family alert retained stale runtime claim %q:\n%s", staleRuntimeClaim, markdown)
-		}
-	}
-}
-
-func TestTaskCanariesSignalMixedGuidanceMatchesPresentMigrationCauses(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return nil, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{
-				"AdvancePayment", "384", "384", "0", "1071", "1864",
-				"the asset amount owned by the wallet is insufficient", "120", "3",
-				"wallet-insufficient=369,schema-object-missing=10,processor-invalid-destination=5",
-			}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
-	for _, want := range []string{
-		"Handle only the present AdvancePayment classes",
-		"restore migration coherence per §8.9",
-		"schema-object-missing clears",
-		"verify typed-reset commit b8af229f in every active taskworker artifact",
-		"deploy it only to blocks whose artifact predates it",
-		"SIGNALS.md §1.2, §5.7, and §8.9",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("migration mixed-family alert missing %q:\n%s", want, markdown)
-		}
-	}
-	for _, absent := range []string{
-		"CompletePayment retention path",
-		"processor-bad-request rows",
-		"processor-rate-limit rows",
-		"2026.8.31-outerwerld+1033655820",
-		"source 1d8f01e5 contains that reset",
-	} {
-		if strings.Contains(markdown, absent) {
-			t.Fatalf("migration mixed-family alert rendered absent cause %q:\n%s", absent, markdown)
-		}
-	}
-}
-
-func TestTaskCanariesSignalExplainsInvalidDestinationRecovery(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return nil, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{
-				"AdvancePayment", "5", "5", "0", "1059", "1800",
-				"400 Bad Request Invalid destination address.", "120", "1",
-				"processor-invalid-destination=5",
-			}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
-	for _, want := range []string{
-		"invalid for its declared chain",
-		"pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC",
-		"A typed definitive pre-chain rejection permits the guarded attempt reset",
-		"after a successful reset, an unchanged payout-wallet selection repeats the failure",
-		"This text class alone does not prove typed status, successful reset, or current wallet selection",
-		"one-hour-mean backoff",
-		"dispersed across 30–90 minutes",
-		"through the supported account API",
-		"Do not manually release the attempt",
-		"preserving keys for transport errors",
-		"at most 90 minutes plus ingestion delay",
-		"without a duplicate transfer",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("invalid-destination alert missing %q:\n%s", want, markdown)
-		}
-	}
-	if strings.Contains(markdown, "representative_error_class=invalid-destination-reset-failed") {
-		t.Fatalf("ordinary invalid destination was misclassified as a reset failure:\n%s", markdown)
-	}
-}
-
-func TestTaskCanariesSignalExplainsInvalidDestinationResetFailureFromFullClass(t *testing.T) {
-	const privateId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-	// The SQL-owned full-text class survives a representative truncated before
-	// the reset suffix; raw persistence details must never reach Markdown.
-	raw := "[" + privateId + "]Payment create transaction error = 400 Bad Request Invalid destination address. private.fixture.example 192.0.2.83"
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "2", "2", "0", "8", "1800", raw, "120", "1", "invalid-destination-reset-failed=2"}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	alert := requireAlertClass(t, alerts, "task-parked")
-	for _, want := range []string{
-		"representative_error_class=invalid-destination-reset-failed",
-		"failed guarded attempt reset",
-		"concurrent, terminal, or on-chain state from a persistence failure",
-		"Preserve the existing idempotency key",
-		"Do not infer unchanged wallet configuration",
-		"without duplicate transfers",
-	} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Errorf("reset-failure alert missing %q", want)
-		}
-	}
-	requireAlertOmits(t, alert, privateId, "private.fixture.example", "192.0.2.83", "Correct the network's payout wallet", "current taskworker already releases", "undersized task-specific MaxTime")
-	for _, private := range []string{privateId, "private.fixture.example", "192.0.2.83"} {
-		if strings.Contains(alerts.Markdown(), private) {
-			t.Errorf("complete alert set retained private detail %q", private)
-		}
-	}
-}
-
-func TestTaskCanariesSignalMixedResetFailureDoesNotInventWalletCorrection(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "9", "8", "1", "8", "1800", "insufficient token balance", "120", "2", "wallet-insufficient=7,invalid-destination-reset-failed=2"}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	alert := requireAlertClass(t, alerts, "task-parked")
-	for _, want := range []string{
-		"2 distinct error classes", "fund or pause the payout wallet for wallet-insufficient rows",
-		"investigate the guarded attempt reset", "preserve the existing idempotency key",
-		"invalid-destination-reset-failed clears",
-	} {
-		if !strings.Contains(alert.Markdown(), want) {
-			t.Errorf("mixed reset-failure alert missing %q", want)
-		}
-	}
-	requireAlertOmits(t, alert, "correct a proven chain-mismatched", "supported account API", "verify typed-reset commit", "unchanged wallet is still selected")
 }
 
 func TestTaskCanariesSignalExplainsNonDrainDeadlineCancellation(t *testing.T) {
@@ -1868,92 +1638,6 @@ func TestTaskCanariesCloseRejectionRemainsVisibleWithPromptRetry(t *testing.T) {
 	}
 }
 
-func TestTaskCanariesSignalExplainsPayoutIdleTransactionClosure(t *testing.T) {
-	var failureQuery string
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return nil, nil
-		case strings.Contains(query, "WITH failures AS"):
-			failureQuery = query
-			return []Row{{
-				"Payout", "1", "1", "0", "149", "3558",
-				"Unhandled: *pgconn.connLockError=conn closed", "21600", "1",
-				"idle-transaction-timeout=1",
-			}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(failureQuery, "THEN 'idle-transaction-timeout'") {
-		t.Fatalf("payout conn-closed signature is not classified in SQL: %s", failureQuery)
-	}
-	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
-	for _, want := range []string{
-		"cause_breakdown=idle-transaction-timeout=1",
-		"five-minute idle-in-transaction timeout",
-		"SET LOCAL",
-		"Do not disable the database-wide guard",
-		"new unrelated PostgreSQL session",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("payout diagnosis missing %q: %s", want, markdown)
-		}
-	}
-}
-
-func TestTaskCanariesSignalExplainsPostgresLocalBufferExhaustion(t *testing.T) {
-	var failureQuery string
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return nil, nil
-		case strings.Contains(query, "WITH failures AS"):
-			failureQuery = query
-			return []Row{{
-				"Payout", "1", "1", "0", "153", "3600",
-				"Unhandled: *pgconn.PgError=ERROR: no empty local buffer available (SQLSTATE 53000)",
-				"21600", "1", "postgres-local-buffer-exhaustion=1",
-				"18.4 (Ubuntu 18.4-1.pgdg22.04+1)", "200", "8MB",
-			}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(failureQuery, "THEN 'postgres-local-buffer-exhaustion'") {
-		t.Fatalf("PostgreSQL local-buffer signature is not classified in SQL: %s", failureQuery)
-	}
-	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
-	for _, want := range []string{
-		"cause_breakdown=postgres-local-buffer-exhaustion=1",
-		"pg_server_version=18.4",
-		"effective_io_concurrency=200",
-		"temp_buffers=8MB",
-		"PaymentPlanner.finalizePayments",
-		"SET LOCAL effective_io_concurrency = 32",
-		"PostgreSQL 18.6",
-		"fresh unrelated session retains the configured global value",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("PostgreSQL local-buffer diagnosis missing %q: %s", want, markdown)
-		}
-	}
-}
-
 func TestTaskCanariesSignalExplainsMissingMigrationArtifact(t *testing.T) {
 	var failureQuery string
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
@@ -1994,37 +1678,6 @@ func TestTaskCanariesSignalExplainsMissingMigrationArtifact(t *testing.T) {
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("missing-schema diagnosis missing %q: %s", want, markdown)
-		}
-	}
-}
-
-func TestTaskCanariesSignalExplainsUnfundedPayoutWallet(t *testing.T) {
-	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-		switch {
-		case strings.Contains(query, "UpdateClientLocations"):
-			return []Row{{"12"}}, nil
-		case strings.Contains(query, "WITH history AS"):
-			return nil, nil
-		case strings.Contains(query, "WITH failures AS"):
-			return []Row{{"AdvancePayment", "384", "384", "0", "1055", "3000", "the asset amount owned by the wallet is insufficient", "120"}}, nil
-		default:
-			return nil, nil
-		}
-	}}
-
-	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
-	if err != nil {
-		t.Fatal(err)
-	}
-	markdown := requireAlertClass(t, alerts, "task-parked").Markdown()
-	for _, want := range []string{
-		"external payout wallet",
-		"repeated HTTP 400",
-		"Finance/operations must fund",
-		"without manual row deletion",
-	} {
-		if !strings.Contains(markdown, want) {
-			t.Fatalf("wallet diagnosis missing %q: %s", want, markdown)
 		}
 	}
 }

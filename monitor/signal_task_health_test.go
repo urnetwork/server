@@ -30,12 +30,12 @@ func TestTaskHealthSignalExplainsBoundedRetentionCatchup(t *testing.T) {
 	for _, want := range []string{
 		"five-minute wall-clock budget",
 		"not by itself a stuck transaction",
-		"contract_retention_pending and cursor progress",
+		"due reap_time backlog",
 		"Retain the bounded retention implementation",
 		"deploy it only where version or code evidence says it is absent",
 		"Do not add concurrent reapers",
 		"Each run finishes before the task deadline",
-		"SIGNALS.md §2.5, §2.10, and §8.9",
+		"SIGNALS.md §2.4r, §2.5, and §8.9",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("bounded retention diagnosis lost %q:\n%s", want, markdown)

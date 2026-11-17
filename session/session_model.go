@@ -84,14 +84,18 @@ type SessionOperationResult struct {
 	RetainUntil      time.Time   `json:"-"`
 }
 
+// The scripts' extend keeps a key alive until at least deadline. Only a key
+// whose expiry falls short of deadline is refreshed, to target when given: a
+// target past deadline gives a moving deadline headroom, so the next refresh
+// waits until the deadline passes the target instead of following every call.
 const sessionLuaCommon = `
 local now=tonumber(ARGV[1])
 local incarnation=ARGV[2]
 local redisclock=redis.call('TIME')
 local redisnow=tonumber(redisclock[1])*1000+math.floor(tonumber(redisclock[2])/1000)
-local function extend(key,deadline)
+local function extend(key,deadline,target)
  local ttl=redis.call('PTTL',key)
- if ttl==-1 or (ttl>=0 and redisnow+ttl<deadline) then redis.call('PEXPIREAT',key,deadline) end
+ if ttl==-1 or (ttl>=0 and redisnow+ttl<deadline) then redis.call('PEXPIREAT',key,target or deadline) end
 end
 local function revision()
  if redis.call('EXISTS',KEYS[3])==0 or redis.call('EXISTS',KEYS[4])==0 then
@@ -105,8 +109,8 @@ local function prune()
  redis.call('ZREMRANGEBYSCORE',KEYS[2],'-inf',now)
  if count>0 then changed() end
 end
-local function shared(deadline)
- for i=1,4 do extend(KEYS[i],deadline) end
+local function shared(deadline,target)
+ for i=1,4 do extend(KEYS[i],deadline,target) end
 end
 local function fail(code) return cjson.encode({error=code}) end
 `
@@ -205,11 +209,14 @@ func RegisterNetworkSession(ctx context.Context, credential *ByJwt, kind string,
 	return &result, err
 }
 
+// ARGV[3] is the retention and ARGV[4] the headroom, in milliseconds
+// (sessionInventorySettings).
 const sessionInventoryLua = sessionLuaCommon + `
 prune();local generation,eid=revision()
 local members=redis.call('ZRANGEBYSCORE',KEYS[1],'('..now,'+inf','WITHSCORES')
 local maxretain=redis.call('ZREVRANGE',KEYS[2],0,0,'WITHSCORES')
-shared(math.max(now+86400000,tonumber(maxretain[2]) or 0))
+local horizon=math.max(now+tonumber(ARGV[3]),tonumber(maxretain[2]) or 0)
+shared(horizon,horizon+tonumber(ARGV[4]))
 local encoded=cjson.encode(members);if #members==0 then encoded='[]' end
 return '{"members":'..encoded..',"generation":'..cjson.encode(generation)..',"event_id":'..eid..'}'
 `
@@ -220,9 +227,38 @@ type sessionInventory struct {
 	EventId    int64    `json:"event_id"`
 }
 
+// How an inventory read keeps the network's shared session keys alive.
+// Every read leaves them alive until at least its horizon: the later of the
+// read plus the retention, and the network's latest retained session.
+type sessionInventorySettings struct {
+	// How long the shared keys outlive each read, at least, so the revision a
+	// hint carries (generation, event id) survives its readers. 24h.
+	retention time.Duration
+	// How far past the horizon a read sets the shared keys' expiry when it
+	// finds that expiry short of the horizon. A read that finds it at or past
+	// the horizon leaves it, so the keys of a network that is read steadily
+	// are refreshed once per headroom, not on every read. Each refresh is a
+	// PEXPIREAT whose keyspace expire event reaches every connect process: on
+	// 2026-11-15 the connect hint reads, about 24k a second, each moved the
+	// horizon and refreshed, and their expire events overflowed connect's
+	// key-event merge (CPUOPT6). 1h: about one refresh an hour per network
+	// read, and an idle network's keys outlive its last read by at most an
+	// hour more than the retention. Non-positive refreshes on every read that
+	// moves the horizon.
+	retentionHeadroom time.Duration
+}
+
+func defaultSessionInventorySettings() *sessionInventorySettings {
+	return &sessionInventorySettings{
+		retention:         24 * time.Hour,
+		retentionHeadroom: time.Hour,
+	}
+}
+
 func readSessionInventory(ctx context.Context, networkId server.Id, now time.Time) (sessionInventory, error) {
+	settings := defaultSessionInventorySettings()
 	var inv sessionInventory
-	err := sessionEval(ctx, sessionInventoryLua, sessionSharedKeys(networkId), []any{now.UnixMilli(), server.NewId().String()}, &inv)
+	err := sessionEval(ctx, sessionInventoryLua, sessionSharedKeys(networkId), []any{now.UnixMilli(), server.NewId().String(), settings.retention.Milliseconds(), max(0, settings.retentionHeadroom.Milliseconds())}, &inv)
 	return inv, err
 }
 
@@ -461,7 +497,9 @@ func readSessionReceipt(ctx context.Context, networkId, operationId server.Id) (
 }
 
 // Notifications share the authoritative list incarnation. Missing paired keys
-// are initialized together, never interpreted as ordered zero.
+// are initialized together, never interpreted as ordered zero. A read that
+// finds the shared keys alive past its horizon writes no ttl, so it publishes
+// no keyspace event (sessionInventorySettings).
 func NetworkSessionRevision(ctx context.Context, networkId server.Id) (string, int64, error) {
 	inventory, err := readSessionInventory(ctx, networkId, server.NowUtc())
 	return inventory.Generation, inventory.EventId, err

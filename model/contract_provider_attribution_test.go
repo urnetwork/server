@@ -62,7 +62,7 @@ func TestContractPayoutPreservesSharedNetworkProviderUsage(t *testing.T) {
 		if gotAccounts := contractPayoutTestAmounts(t, ctx, escrow.ContractId); !maps.Equal(gotAccounts, wantAccounts) {
 			t.Fatalf("network settlement = %v, want %v", gotAccounts, wantAccounts)
 		}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId}, wantAccounts)
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{originNetworkId, providerNetworkId})
 		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, 121)
 		// A retry cannot duplicate the provider shares or account payment.
 		if err := CloseContract(ctx, escrow.ContractId, secondId, 121, false); err == nil ||
@@ -74,7 +74,7 @@ func TestContractPayoutPreservesSharedNetworkProviderUsage(t *testing.T) {
 			t.Fatalf("idempotent settlement retry: %v", err)
 		}
 		assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, map[server.Id]int64{firstId: 61, secondId: 60})
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId}, wantAccounts)
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{originNetworkId, providerNetworkId})
 		// Membership is mutable after settlement; the saved shares and original
 		// account network remain the immutable evidence for this epoch.
 		server.Tx(ctx, func(tx server.PgTx) {

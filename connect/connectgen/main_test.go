@@ -2,13 +2,14 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 // The generated matrix must be what this generator produces right now.
 //
-// It is the only thing keeping the two in step: the file is 174 ordinary tests
+// It is the only thing keeping the two in step: the file is ordinary tests
 // that a reader can grep and -run, and nothing stops someone editing one by
 // hand. This turns that into a failure instead of a divergence nobody notices.
 func TestGeneratedMatrixIsCurrent(t *testing.T) {
@@ -45,8 +46,8 @@ func TestMatrixSizeIsTheCrossProduct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if count != direct+withExtender {
-		t.Fatalf("generated %d cases, want %d direct + %d extender", count, direct, withExtender)
+	if count != (direct+withExtender)*len(deliveryModes) {
+		t.Fatalf("generated %d cases, want (%d direct + %d extender) x %d delivery paths", count, direct, withExtender, len(deliveryModes))
 	}
 	if direct != 93 {
 		t.Errorf("the direct matrix is %d cases, want the 93 it replaced", direct)
@@ -79,5 +80,38 @@ func TestBaseNamesAreUniqueAndConnectPrefixed(t *testing.T) {
 	}
 	if len(seen) != 31 {
 		t.Errorf("%d base variants, want the 31 the matrix had", len(seen))
+	}
+}
+
+// Every case runs once over the exchange socket and once in process, under
+// the same name with the InProcess suffix, so a case cannot pass on one
+// delivery path while the other goes untested.
+func TestEveryCaseHasAnInProcessTwin(t *testing.T) {
+	formatted, _, err := generate()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	source := string(formatted)
+	tcpCount := 0
+	for _, line := range strings.Split(source, "\n") {
+		name, ok := strings.CutPrefix(line, "func Test")
+		if !ok {
+			continue
+		}
+		name, _, _ = strings.Cut(name, "(")
+		if strings.HasSuffix(name, "InProcess") {
+			continue
+		}
+		tcpCount += 1
+		if !strings.Contains(source, "func Test"+name+"InProcess(") {
+			t.Errorf("Test%s has no InProcess twin", name)
+		}
+	}
+	if tcpCount == 0 {
+		t.Fatal("the matrix has no socket path cases")
+	}
+	// gofmt aligns the field's value, so match any run of spaces
+	if got := len(regexp.MustCompile(`localDelivery: +localDeliveryTestInProcess,`).FindAllString(source, -1)); got != tcpCount {
+		t.Errorf("%d cases select in-process delivery, want one per socket path case (%d)", got, tcpCount)
 	}
 }

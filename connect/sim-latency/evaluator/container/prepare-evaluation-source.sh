@@ -8,6 +8,8 @@
 set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 base_image=""
 staging=false
@@ -52,7 +54,7 @@ for command in git install jq mktemp realpath sha256sum sudo; do
         exit 1
     }
 done
-sudo -n docker info >/dev/null
+evaluation_docker info >/dev/null
 
 [[ "$destination" = /* ]] || {
     printf 'evaluation source destination must be absolute\n' >&2
@@ -73,21 +75,26 @@ destination="$destination_parent/$destination_name"
 cleanup() {
     local rc=$?
     if [ -n "${source_container:-}" ]; then
-        sudo -n docker rm -f "$source_container" >/dev/null 2>&1 || true
+        evaluation_docker rm -f "$source_container" >/dev/null 2>&1 || true
     fi
     if [ -n "${source_lock_path:-}" ]; then
         rm -f -- "$source_lock_path"
     fi
     if [ "$rc" -ne 0 ] && [ -n "${destination:-}" ] && [ -d "$destination" ]; then
-        sudo -n chmod -R u+rwX "$destination" >/dev/null 2>&1 || true
-        sudo -n rm -rf -- "$destination"
+        if [[ "$subevaluation_scoped" = true ]]; then
+            chmod -R u+rwX "$destination" >/dev/null 2>&1 || true
+            rm -rf -- "$destination"
+        else
+            sudo -n chmod -R u+rwX "$destination" >/dev/null 2>&1 || true
+            sudo -n rm -rf -- "$destination"
+        fi
     fi
     exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
-base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
-image_staging="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
+base_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$base_image")"
+image_staging="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
 source_branch=sim-latency
 if [ "$staging" = true ]; then
     [ "$image_staging" = true ] || { printf 'staging source requires an explicitly staging evaluator image\n' >&2; exit 1; }
@@ -101,10 +108,10 @@ fi
 REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
-image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image_id")"
-base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image_id")"
-source_epoch="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-epoch"}}' "$base_image_id")"
-expected_source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image_id")"
+image_kind="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image_id")"
+base_sha="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image_id")"
+source_epoch="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-epoch"}}' "$base_image_id")"
+expected_source_lock_sha256="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image_id")"
 [ "$image_kind" = evaluator-base ] && [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] &&
     [[ "$source_epoch" =~ ^[0-6]$ ]] && [[ "$expected_source_lock_sha256" =~ ^[0-9a-f]{64}$ ]] || {
         printf 'base image is missing its evaluator source identity\n' >&2
@@ -113,14 +120,16 @@ expected_source_lock_sha256="$(sudo -n docker image inspect --format '{{index .C
 
 install -d -m 0700 "$destination"
 source_lock_path="$(mktemp "$destination_parent/.evaluation-source-lock.XXXXXXXX.json")"
-source_container="$(sudo -n docker create "$base_image_id")"
-sudo -n docker cp "$source_container:/opt/urnetwork/source-lock.json" "$source_lock_path"
+source_container="$(evaluation_docker create "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id")"
+evaluation_docker cp "$source_container:/opt/urnetwork/source-lock.json" "$source_lock_path"
 for repository in "${REPOSITORIES[@]}"; do
-    sudo -n docker cp "$source_container:/workspace/$repository" "$destination/"
+    evaluation_docker_copy_tree "$source_container:/workspace/$repository" "$destination/"
 done
-sudo -n docker rm "$source_container" >/dev/null
+evaluation_docker rm "$source_container" >/dev/null
 source_container=""
-sudo -n chown -R "$(id -u):$(id -g)" "$destination" "$source_lock_path"
+if [[ "$subevaluation_scoped" != true ]]; then
+    sudo -n chown -R "$(id -u):$(id -g)" "$destination" "$source_lock_path"
+fi
 
 source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
 [ "$source_lock_sha256" = "$expected_source_lock_sha256" ] || {
@@ -130,6 +139,12 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
 jq -e --argjson repositories "$repository_names_json" '
     type == "object" and .schema == 1 and
     ((.candidate_path_base // "") == "" or .candidate_path_base == "mono_root_v1") and
+    (([keys[] | select(ascii_downcase == "work_coverage_policy")] | length) == (if has("work_coverage_policy") then 1 else 0 end)) and
+    ((has("work_coverage_policy") | not) or
+      (.work_coverage_policy | type == "object" and
+       (keys | sort) == ["kind","minimum_byte_coverage_ratio","minimum_page_coverage_ratio"] and
+       .kind == "seeded-crawl-coverage/v1" and
+       .minimum_page_coverage_ratio == 0.95 and .minimum_byte_coverage_ratio == 0.95)) and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and
     ((.repositories | keys) == ($repositories | sort)) and
@@ -148,8 +163,8 @@ for repository in "${REPOSITORIES[@]}"; do
         exit 1
     }
     expected_commit="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$source_lock_path")"
-    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
-    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
     [ "$actual_commit" = "$expected_commit" ] || {
         printf 'evaluation repository %s does not match the source lock\n' "$repository" >&2
         exit 1
@@ -158,10 +173,10 @@ for repository in "${REPOSITORIES[@]}"; do
         printf 'evaluation repository is not clean: %s\n' "$repository" >&2
         exit 1
     }
-    git -C "$repository_root" checkout --quiet -B "$source_branch" "$expected_commit"
-    actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
-    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
-    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    evaluation_git -C "$repository_root" checkout --quiet -B "$source_branch" "$expected_commit"
+    actual_branch="$(evaluation_git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
+    actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
     [ "$actual_branch" = "$source_branch" ]
     [ "$actual_commit" = "$expected_commit" ]
     [ -z "$source_status" ]
@@ -180,13 +195,16 @@ jq -nS \
     --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --arg candidate_path_base "$candidate_path_base" \
+    --argjson coverage_present "$(jq -r 'has("work_coverage_policy")' "$source_lock_path")" \
+    --argjson coverage "$(jq -c '.work_coverage_policy // null' "$source_lock_path")" \
     --argjson repositories "$source_repositories" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
       staging:$staging,branch:$branch,source_lock_sha256:$source_lock_sha256,
       repositories:$repositories,
       candidate_patch_sha256:null} +
-      (if $candidate_path_base == "" then {} else {candidate_path_base:$candidate_path_base} end)' > "$identity_path"
+      (if $candidate_path_base == "" then {} else {candidate_path_base:$candidate_path_base} end) +
+      (if $coverage_present then {work_coverage_policy:$coverage} else {} end)' > "$identity_path"
 chmod 0400 "$identity_path"
 rm -f -- "$source_lock_path"
 source_lock_path=""

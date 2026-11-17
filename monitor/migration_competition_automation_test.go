@@ -135,9 +135,9 @@ func TestMigrationsAutomationSchemaFaultsReachSignal(t *testing.T) {
 				if err != nil {
 					t.Fatalf("inspect %s: %v", fault.name, err)
 				}
-				artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+				artifact := migrationAutomationFaultOwner(t, fault.version, server.MigrationCount())
 				observed = append(observed, snMainnetMigrationAlertObservation{
-					alerts: alerts, want: fmt.Sprintf("%s@v%d", artifact.name, fault.version),
+					alerts: alerts, want: fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion),
 				})
 			})
 		}
@@ -153,4 +153,157 @@ func TestMigrationsAutomationSchemaFaultsReachSignal(t *testing.T) {
 			t.Fatalf("%s lost its owning migration: %s", faults[index].name, alert.Markdown())
 		}
 	}
+}
+
+// Only v846 transfers these predicates to intake-first. Unexpected retirements
+// remain failures instead of silently following any future contract chain.
+func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArtifact {
+	t.Helper()
+	artifact := migrationCurrentSuffixTestContract(t, version).artifact
+	if version != 846 {
+		if artifact.removedVersion != 0 {
+			t.Fatalf("automation owner %d has an unreviewed successor", version)
+		}
+		return artifact
+	}
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	if successor <= version || artifact.removedVersion != successor {
+		t.Fatal("v846 does not transfer custody at the registered intake-first boundary")
+	}
+	next := migrationCurrentSuffixTestContract(t, successor).artifact
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	if handoff <= successor || next.removedVersion != handoff {
+		t.Fatal("intake-first custody does not transfer at the registered review handoff boundary")
+	}
+	handoffArtifact := migrationCurrentSuffixTestContract(t, handoff).artifact
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	if official <= handoff || handoffArtifact.removedVersion != official {
+		t.Fatal("review handoff custody does not transfer at the registered official review boundary")
+	}
+	officialArtifact := migrationCurrentSuffixTestContract(t, official).artifact
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	if control <= official || officialArtifact.removedVersion != control {
+		t.Fatal("official review custody does not transfer at the registered executor control boundary")
+	}
+	controlArtifact := migrationCurrentSuffixTestContract(t, control).artifact
+	recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+	if recovery <= control || controlArtifact.removedVersion != recovery {
+		t.Fatal("executor control custody does not transfer at the registered qualification recovery boundary")
+	}
+	recoveryArtifact := migrationCurrentSuffixTestContract(t, recovery).artifact
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	if exception <= recovery || recoveryArtifact.removedVersion != exception {
+		t.Fatal("qualification recovery custody does not transfer at the registered admission exception boundary")
+	}
+	last := migrationCurrentSuffixTestContract(t, exception).artifact
+	claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+	if claim <= exception || last.removedVersion != claim {
+		t.Fatal("admission exception custody does not transfer at the registered claim boundary")
+	}
+	claimOwner := migrationDistributedRecoveryTestOwner(t, claim, head)
+	switch {
+	case head >= claim:
+		return claimOwner
+	case head >= exception:
+		return last
+	case head >= recovery:
+		return recoveryArtifact
+	case head >= control:
+		return controlArtifact
+	case head >= official:
+		return officialArtifact
+	case head >= handoff:
+		return handoffArtifact
+	case head >= successor:
+		return next
+	}
+	return artifact
+}
+
+func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+	distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+	patchRetry := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
+	secondRecovery := server.CompetitionSecondRecoveryMigrationVersion()
+	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff, official - 1, official, control - 1, control, recovery - 1, recovery, exception - 1, exception, claim - 1, claim, distributed - 1, distributed, distributed + 1, server.MigrationCount()} {
+		want := 846
+		switch {
+		case head >= secondRecovery:
+			want = secondRecovery
+		case head >= patchRetry:
+			want = patchRetry
+		case head >= distributed:
+			want = distributed
+		case head >= claim:
+			want = claim
+		case head >= exception:
+			want = exception
+		case head >= recovery:
+			want = recovery
+		case head >= control:
+			want = control
+		case head >= official:
+			want = official
+		case head >= handoff:
+			want = handoff
+		case head >= successor:
+			want = successor
+		}
+		if got := migrationAutomationFaultOwner(t, 846, head).requiredVersion; got != want {
+			t.Fatalf("head %d owner=%d want=%d", head, got, want)
+		}
+	}
+}
+
+// The same two physical faults must retain v846 custody before intake-first,
+// move to its exact successor afterward, and roll back to a healthy catalog.
+func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+	distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+	faults := []string{
+		`DROP INDEX competition_source_reserved_round`,
+		`CREATE OR REPLACE FUNCTION competition_v2_source_target_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
+	}
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		for _, head := range []int{846, successor - 1, successor, handoff, official, control, recovery, exception, claim, distributed - 1, distributed, server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), server.CompetitionSecondRecoveryMigrationVersion()} {
+			tb.Logf("automation846_owner head=%d start", head)
+			server.ApplyDbMigrationsUpTo(tb.Context(), head)
+			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
+				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)
+			}
+			artifact := migrationAutomationFaultOwner(tb, 846, head)
+			want := fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)
+			for index, statement := range faults {
+				snMainnetMigrationFaultTx(tb, func(ctx context.Context, tx server.PgTx) {
+					if _, err := tx.Exec(ctx, statement); err != nil {
+						tb.Fatalf("apply owner fault %d at %d: %v", index, head, err)
+					}
+					alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+					if err != nil {
+						tb.Fatalf("inspect owner fault %d at %d: %v", index, head, err)
+					}
+					alert := requireAlertClass(tb, alerts, "migration-schema-drift")
+					if !strings.Contains(alert.Markdown(), want) {
+						tb.Fatalf("fault %d at %d lost exact owner %s", index, head, want)
+					}
+				})
+				if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
+					tb.Fatalf("restored owner prefix %d fault %d drift: %s", head, index, drift)
+				}
+			}
+			tb.Logf("automation846_owner head=%d complete", head)
+		}
+	})
 }

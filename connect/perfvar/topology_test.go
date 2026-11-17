@@ -3202,6 +3202,65 @@ func (self *fixedMultiHopApiGenerator) NextDestinationsWithIpFamilyContext(
 	return self.NextDestinationsWithIpFamily(count, excludeDestinations, rankMode, ipFamily)
 }
 
+// Capability-aware window discovery retains the same fixed path and legacy
+// family evidence; the fixture makes no selector-mode platform request.
+func (self *fixedMultiHopApiGenerator) NextDestinationsWithCapabilities(
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	ipFamily clientconnect.IpFamilyFilter,
+	providerSelect clientconnect.FindProvidersSelect,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, bool, error) {
+	_ = providerSelect
+	destinations, err := self.NextDestinationsWithIpFamily(count, excludeDestinations, rankMode, ipFamily)
+	return destinations, false, err
+}
+
+// Cooperative demand discovery observes caller cancellation before fixed enumeration.
+func (self *fixedMultiHopApiGenerator) NextDestinationsWithCapabilitiesContext(
+	ctx context.Context,
+	count int,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	ipFamily clientconnect.IpFamilyFilter,
+	providerSelect clientconnect.FindProvidersSelect,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	return self.NextDestinationsWithCapabilities(count, excludeDestinations, rankMode, ipFamily, providerSelect)
+}
+
+// A sticky lookup may redial only this topology's provider through its full path.
+func (self *fixedMultiHopApiGenerator) NextDestinationsForClientId(
+	clientId clientconnect.Id,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, error) {
+	_, destinationId := self.destination.SplitTail()
+	if clientId != destinationId {
+		return map[clientconnect.MultiHopId]clientconnect.DestinationStats{}, nil
+	}
+	return self.NextDestinations(1, excludeDestinations, rankMode)
+}
+
+// Named capability lookup cannot fall through to the embedded direct-provider API.
+func (self *fixedMultiHopApiGenerator) NextDestinationsForClientIdWithCapabilities(
+	clientId clientconnect.Id,
+	excludeDestinations []clientconnect.MultiHopId,
+	rankMode string,
+	providerSelect clientconnect.FindProvidersSelect,
+) (map[clientconnect.MultiHopId]clientconnect.DestinationStats, bool, error) {
+	_ = providerSelect
+	destinations, err := self.NextDestinationsForClientId(clientId, excludeDestinations, rankMode)
+	return destinations, false, err
+}
+
+// Fixed enumeration has no platform selector answer or capability labels to advertise.
+func (self *fixedMultiHopApiGenerator) SelectorMode() (bool, bool) {
+	return false, false
+}
+
 // One explicit path uses the same single quality window as a fixed provider.
 func (self *fixedMultiHopApiGenerator) FixedDestinationSize() (int, bool) {
 	return 1, true

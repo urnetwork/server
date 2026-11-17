@@ -11,15 +11,16 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Complete the real local payment lifecycle and reap its contracts. The epoch
-// must retain exactly the same usage alongside an unreaped neighboring row.
+// Pay the real settled contracts with a completed payment and reap them. The
+// epoch must retain exactly the same usage alongside an unreaped neighboring
+// row.
 func TestStContractUsageArchiveSurvivesRealPaidContractReaper(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		start := server.NowUtc()
-		_, _, _, _, paidContractIds := testingSettledPayoutContracts(ctx, t)
+		_, _, destinationNetworkId, _, paidContractIds := testingSettledPayoutContracts(ctx, t)
 		addStContractUsageSnapshotTestRow(t, ctx, start, &contractUsageSnapshot{Version: 1, ByteCount: 73,
 			Providers: []contractProviderUsage{{ClientId: server.NewId(), NetworkId: server.NewId(), ByteCount: 73}}})
 		before, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour))
@@ -28,16 +29,7 @@ func TestStContractUsageArchiveSurvivesRealPaidContractReaper(t *testing.T) {
 		}
 		beforeWire, err := json.Marshal(before)
 		server.Raise(err)
-		plan, err := PlanPayments(ctx)
-		server.Raise(err)
-		if len(plan.NetworkPayments) == 0 {
-			t.Fatal("paid fixture did not create a payment plan")
-		}
-		for _, payment := range plan.NetworkPayments {
-			SetPaymentRecord(ctx, payment.PaymentId, "usdc", NanoCentsToUsd(payment.Payout), "")
-			CompletePayment(ctx, payment.PaymentId, "", "synthetic-settlement")
-		}
-		RemoveCompletedContracts(ctx, server.NowUtc().Add(time.Hour))
+		testingAssignSweepPayment(ctx, destinationNetworkId, paidContractIds, &start)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET reap_time=$2 WHERE contract_id=ANY($1::uuid[])`, paidContractIds, start.Add(-time.Hour)))
 		})

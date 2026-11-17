@@ -53,6 +53,19 @@ func settingsForAutomationRound(ctx context.Context, settings *Settings, store S
 		}
 		frozen.runtimeIntentSha256 = intent.IntentSha256
 	}
+	if competitionIntakeFirstApplies(settings, intent) {
+		reader, ok := store.(competitionSourceIntakeReader)
+		if !ok {
+			return nil, ErrReviewNotReady
+		}
+		grant, err := reader.SourceIntakeActivation(ctx, settings, intent.Generation)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		if grant != nil {
+			return settingsForCompetitionApiRound(ctx, settings, store, round)
+		}
+	}
 	return frozen, nil
 }
 
@@ -67,7 +80,7 @@ func requireCompetitionRoundRuntime(ctx context.Context, settings *Settings, sto
 		return err
 	}
 	if policy.AutomationPolicy.RequiredApiCapability == model.CompetitionRuntimeBlobCapability {
-		_, err = settingsForAutomationRound(ctx, settings, store, round)
+		_, err = settingsForCompetitionApiRound(ctx, settings, store, round)
 	}
 	return err
 }
@@ -85,5 +98,8 @@ func requireConfiguredCompetitionRuntime(ctx context.Context, settings *Settings
 	if round == nil {
 		return ErrReviewNotReady
 	}
-	return requireCompetitionRoundRuntime(ctx, settings, store, round)
+	// This entrypoint is used by workers. API discovery uses the separate
+	// purpose-aware helper and must never relax this activated-source check.
+	_, err = settingsForAutomationRound(ctx, settings, store, round)
+	return err
 }

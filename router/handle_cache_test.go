@@ -3,7 +3,7 @@ package router
 import (
 	"context"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,7 +54,7 @@ func TestCache(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, r.Message, "hello!")
 
-			timeout := time.Duration(16+mathrand.Intn(64)) * time.Millisecond
+			timeout := time.Duration(16+mathrand.IntN(64)) * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return
@@ -265,7 +265,7 @@ func TestCacheWithAuth(t *testing.T) {
 				connect.AssertEqual(t, err, nil)
 				connect.AssertEqual(t, r.Message, fmt.Sprintf("hello u%s c%s!", clientSession.ByJwt.UserId, *clientSession.ByJwt.ClientId))
 			}
-			timeout := time.Duration(16+mathrand.Intn(64)) * time.Millisecond
+			timeout := time.Duration(16+mathrand.IntN(64)) * time.Millisecond
 			select {
 			case <-ctx.Done():
 				return

@@ -47,8 +47,8 @@ import (
 // the outer tls under the identity key, admission and a signed challenge, which
 // is not the path a measurement uses. The probe was left out because on 1
 // November it failed for extenders whose measurement api answered, in 157 of
-// 199 checks, and why is not known yet. An outage is left to the probes'
-// revocation, as before, and the page's spares.
+// 199 checks, and why is not known yet. An outage is left to the probes of the
+// measurement api itself (lag_extender_reach.go), and the page's spares.
 var lagExtenderRestartLoopRule = model.LagExtenderRestartLoopRule{
 	PassGap:          30 * time.Second,
 	BurstPasses:      4,

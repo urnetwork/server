@@ -1,12 +1,78 @@
 package model
 
 import (
+	"encoding/json"
+	"maps"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
+
+// Pure: a pass reads a contract only once a contract that lives as long as
+// the longest normal contract has closed before the horizon, with margin for
+// an expiry close that runs late.
+func TestContractHorizonCloseSettleTimeCoversContractLife(t *testing.T) {
+	settings := DefaultContractHorizonSettings()
+	if settings.CloseSettleTime != 2*DefaultContractExpiration || settings.CloseSettleTime < CompanionOriginCloseLinger+30*time.Minute {
+		t.Fatalf("the close settle time %s does not cover the contract life %s with margin", settings.CloseSettleTime, DefaultContractExpiration)
+	}
+}
+
+// Pure: a pass that reached the horizon starts over weekly (owner,
+// 2026-11-16), no sooner than a recent payment stops keeping a contract, so
+// the next pass deletes what this one kept as payment_recent. The thirty days
+// before left those contracts three weeks past their payments' discharge.
+func TestContractHorizonRescansWeekly(t *testing.T) {
+	settings := DefaultContractHorizonSettings()
+	if settings.RescanInterval != 7*24*time.Hour || settings.RescanInterval < CompletedContractExpiration {
+		t.Fatalf("the rescan interval %s is not a week, or is shorter than a recent payment keeps a contract (%s)", settings.RescanInterval, CompletedContractExpiration)
+	}
+}
+
+// Pure: the cursor round trips through the task args with its skipped counts,
+// and a cursor a build from before 2026-11-15 stored, with only its id, pass
+// start and batch size, reads with no counts and keeps its pass start, which
+// decides whether it starts over.
+func TestContractHorizonCursorRoundTrips(t *testing.T) {
+	contractId := server.ContractIdFloor(time.Date(2026, time.October, 11, 20, 40, 23, 0, time.UTC))
+	stored, err := json.Marshal(map[string]any{
+		"contract_id":     contractId,
+		"pass_start_time": "2026-11-01T15:30:51Z",
+		"batch_size":      2000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var earlier ContractHorizonCursor
+	if err := json.Unmarshal(stored, &earlier); err != nil {
+		t.Fatal(err)
+	}
+	if earlier.ContractId != contractId || earlier.BatchSize != 2000 || earlier.SkippedReasonCounts != nil ||
+		!earlier.PassStartTime.Equal(time.Date(2026, time.November, 1, 15, 30, 51, 0, time.UTC)) ||
+		!earlier.PassStartTime.Before(contractHorizonSettledPassTime) {
+		t.Fatalf("a cursor from before does not read as a pass that began before reads were settled: %+v", earlier)
+	}
+
+	cursor := newContractHorizonPass(time.Date(2026, time.November, 15, 22, 0, 0, 0, time.UTC), 1500)
+	cursor.ContractId = contractId
+	cursor.addSkipped(map[string]int64{contractHorizonProtectedRecentClose: 2, contractHorizonProtectedOpen: 0})
+	cursor.addSkipped(map[string]int64{contractHorizonProtectedRecentClose: 1, contractHorizonProtectedPaymentHold: 4})
+	args, err := json.Marshal(cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read ContractHorizonCursor
+	if err := json.Unmarshal(args, &read); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{contractHorizonProtectedRecentClose: 3, contractHorizonProtectedPaymentHold: 4}
+	if read.ContractId != contractId || read.BatchSize != 1500 || !read.PassStartTime.Equal(cursor.PassStartTime) ||
+		!maps.Equal(read.SkippedReasonCounts, want) || read.PassStartTime.Before(contractHorizonSettledPassTime) {
+		t.Fatalf("the cursor did not round trip: %s read as %+v", args, read)
+	}
+}
 
 // Pure: the control turns the reaper on, off or to a dry run and slows it,
 // but never past the code settings, and a field that does not parse narrows

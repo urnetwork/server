@@ -34,11 +34,72 @@ import (
 // activates or is revoked is therefore attributed within a minute.
 const extenderAddressCacheStaleAfter = 60 * time.Second
 
+// The prefix an ipv6 caller is matched by when its exact address is no
+// extender's: the /64, as the camouflage report decides a relay
+// (controller/extender_camouflage_report.go) and the activation budget keys an
+// address. An extender relays on the family its client arrived on (A7), but
+// within that family the host picks the source of its onward dial, and an ipv6
+// host's outbound source is commonly a temporary address of its /64 (RFC
+// 8981), not the one it activated from, so a relay from it went untagged and
+// earned nothing (research extender-health-2026-11-11 §2.3). A v4 caller is
+// matched by its exact address, as before.
+const extenderAddressCacheIpv6PrefixBitCount = 64
+
 // Addresses are keyed unmapped, so a v4 caller seen through a v4-mapped v6
 // socket matches the v4 address row that was activated.
 type extenderAddressCacheSnapshot struct {
 	addrExtenderIds map[netip.Addr]server.Id
-	loadTime        time.Time
+	// the /64 of each active ipv6 address, by the extender whose addresses it
+	// holds. A /64 holding the addresses of more than one extender is not
+	// here: a caller in it that is none of their exact addresses could be any
+	// of them, so it is tagged by none (extenderAddressCacheIpv6Prefixes)
+	ipv6PrefixExtenderIds map[netip.Prefix]server.Id
+	loadTime              time.Time
+}
+
+// The /64 of each ipv6 address of the snapshot by the one extender whose
+// addresses are in it, leaving out a /64 that holds the addresses of more than
+// one.
+func extenderAddressCacheIpv6Prefixes(addrExtenderIds map[netip.Addr]server.Id) map[netip.Prefix]server.Id {
+	prefixExtenderIds := map[netip.Prefix]server.Id{}
+	ambiguousPrefixes := map[netip.Prefix]bool{}
+	for addr, extenderId := range addrExtenderIds {
+		addr = addr.Unmap()
+		if !addr.Is6() {
+			continue
+		}
+		prefix := netip.PrefixFrom(addr.WithZone(""), extenderAddressCacheIpv6PrefixBitCount).Masked()
+		if ambiguousPrefixes[prefix] {
+			continue
+		}
+		if prefixExtenderId, ok := prefixExtenderIds[prefix]; ok && prefixExtenderId != extenderId {
+			delete(prefixExtenderIds, prefix)
+			ambiguousPrefixes[prefix] = true
+			continue
+		}
+		prefixExtenderIds[prefix] = extenderId
+	}
+	return prefixExtenderIds
+}
+
+// The active extender a caller address arrived through: the extender whose
+// active address it is, and else, for an ipv6 address, the one extender whose
+// active addresses share its /64. An address is the one it names, unmapped and
+// without a zone. A nil snapshot, the first load in flight or failing, finds
+// none.
+func (self *extenderAddressCacheSnapshot) extenderIdForAddress(ip netip.Addr) (server.Id, bool) {
+	if self == nil {
+		return server.Id{}, false
+	}
+	ip = ip.Unmap().WithZone("")
+	if extenderId, found := self.addrExtenderIds[ip]; found {
+		return extenderId, true
+	}
+	if !ip.Is6() {
+		return server.Id{}, false
+	}
+	extenderId, found := self.ipv6PrefixExtenderIds[netip.PrefixFrom(ip, extenderAddressCacheIpv6PrefixBitCount).Masked()]
+	return extenderId, found
 }
 
 type extenderAddressCacheGeneration struct {
@@ -114,8 +175,9 @@ func (self *extenderAddressCacheState) publish(
 		return false
 	}
 	self.snapshot.Store(&extenderAddressCacheSnapshot{
-		addrExtenderIds: addrExtenderIds,
-		loadTime:        server.NowUtc(),
+		addrExtenderIds:       addrExtenderIds,
+		ipv6PrefixExtenderIds: extenderAddressCacheIpv6Prefixes(addrExtenderIds),
+		loadTime:              server.NowUtc(),
 	})
 	return true
 }
@@ -128,32 +190,30 @@ func init() {
 	})
 }
 
-// ActiveExtenderIdForAddress is the active extender whose active address is ip,
-// and false when the address belongs to no extender, which is the common case
-// for a client dialing the platform directly.
+// ActiveExtenderIdForAddress is the active extender ip arrived through: the one
+// whose active address it is, or for an ipv6 address the one whose active
+// addresses share its /64 (extenderAddressCacheIpv6PrefixBitCount). False when
+// it belongs to no extender, which is the common case for a client dialing the
+// platform directly.
 func ActiveExtenderIdForAddress(ip netip.Addr) (server.Id, bool) {
-	extenderId, found := activeExtenderAddrExtenderIds()[ip.Unmap()]
-	return extenderId, found
+	return activeExtenderAddressCacheSnapshot().extenderIdForAddress(ip)
 }
 
 // The cached address set, loading it on first use and starting one background
 // refresh once it is stale. Nil only while the very first load is in flight or
 // failing.
-func activeExtenderAddrExtenderIds() map[netip.Addr]server.Id {
+func activeExtenderAddressCacheSnapshot() *extenderAddressCacheSnapshot {
 	state := currentExtenderAddressCache
 	snapshot := state.snapshot.Load()
 	if snapshot != nil && time.Since(snapshot.loadTime) < extenderAddressCacheStaleAfter {
-		return snapshot.addrExtenderIds
+		return snapshot
 	}
 
 	generation, started := state.startLoad()
 	if !started {
 		// another caller holds the load; serve whatever is published now,
 		// which on a first use may already be that caller's result
-		if snapshot = state.snapshot.Load(); snapshot != nil {
-			return snapshot.addrExtenderIds
-		}
-		return nil
+		return state.snapshot.Load()
 	}
 	if snapshot != nil {
 		// stale: refresh behind the caller, which keeps serving the snapshot
@@ -161,7 +221,7 @@ func activeExtenderAddrExtenderIds() map[netip.Addr]server.Id {
 			defer state.finishLoad(generation)
 			loadExtenderAddressCache(state, generation)
 		})
-		return snapshot.addrExtenderIds
+		return snapshot
 	}
 
 	// first use: pay the read here rather than leave the first connections of
@@ -170,10 +230,7 @@ func activeExtenderAddrExtenderIds() map[netip.Addr]server.Id {
 		defer state.finishLoad(generation)
 		loadExtenderAddressCache(state, generation)
 	})
-	if snapshot = state.snapshot.Load(); snapshot != nil {
-		return snapshot.addrExtenderIds
-	}
-	return nil
+	return state.snapshot.Load()
 }
 
 func loadExtenderAddressCache(

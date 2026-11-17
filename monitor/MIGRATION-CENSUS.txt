@@ -1,0 +1,60 @@
+Migration census planning and completion
+
+The logical migration query and its positional artifact protocol are unchanged.
+Every source-known column is still observed, including future/retired artifacts
+needed by the original version-aware reducer. No migration, predicate, body
+identity, drift fault or unknown-head rule is removed by physical batching.
+
+The former single 4,362,508-byte / 373-column statement exhausted the isolated
+PostgreSQL fixture: the original execution at 1 GiB and then EXPLAIN with JIT
+disabled in the explicitly bounded 2-GiB diagnostic both lost the backend to OOM.
+That establishes a fixture planner-pressure incident, not an observed production
+monitor outage. The offline source regression also records the exact predecessor
+query's bytes/hash; it does not send either giant query to production.
+
+Each native observation owns independent MigrationCensusSettings. Defaults admit
+at most 16 columns and 512 KiB INCLUDING the full catalog WITH prefix and frame
+wrapper per physical statement. Total input/program/response, frame count/size,
+SQL nesting and complete identity history have separate finite bounds. An
+oversized individual predicate or history refuses the observation, never skips a
+column or converts partial work into health. Settings default values live only in
+their constructor. PostgreSQLSettings owns the unchanged 30-second statement
+budget for BOTH ordinary SQL and census SQL; existing command lifetime is not
+extended to compensate for batching.
+
+The default SSH carrier feeds one psql -X -q --csv -t -v ON_ERROR_STOP=1 -f -
+process. The file reader submits one closed SQL command at a time. It must not be
+replaced by psql -c or a multi-command PostgreSQL simple-query buffer: parsing the
+whole buffer at once would reintroduce the same retained parse-tree pressure.
+All batches and migration_catalog identities use one physical read-only
+REPEATABLE READ transaction. A closed psql conditional handles an early schema
+without migration_catalog; no untrusted catalog value becomes client source.
+
+Indexed JSON-in-CSV frames bind the complete logical-query digest, exact column
+and batch counts, each batch index/offset, bounded identity ordinals, and a
+post-COMMIT trailer. Duplicate/unknown/missing keys, null authority, wrong order,
+wrong scalar shape, truncation, child failure or ended caller refuse publication.
+Neither an artifact row nor identity rows escape before the complete child has
+successfully joined and the owner remains live. No retry is added.
+
+SignalSource keeps its existing logical-query interface. Custom sources retain
+responsibility for their own execution/snapshot semantics. The native real-PG
+test adapters detect the private observation marker and execute every production
+batch on their already-owned repeatable-read transaction, without reacquiring or
+nesting transactions. Fault transactions stay read-write only because the test
+owner must retain uncommitted fixture DDL; production stays read-only.
+
+Qualification includes pure lexer/frame/budget/transport controls, the original
+published-prefix and schema-fault cases, and explicit real psql file-reader
+proof. The native proof is opt-in and binds URNETWORK_MIGRATION_TEST_PG_CONTAINER
+to the exact harness-owned container, with URNETWORK_MIGRATION_CENSUS_NATIVE_PSQL=1.
+It runs complete incident/current schemas at the original PostgreSQL 1-GiB cap.
+A second native test positively commits an independent writer between batch
+responses and verifies that all later values AND identity rows retain the original
+snapshot and physical PID. External harness receipts retain container memory,
+OOM and server-log evidence; passing a source-only structural test is not claimed
+to prove native resource sufficiency.
+Native child cancellation physically joins the bounded docker-exec carrier, but
+does not claim that killing that client alone proves remote psql termination.
+The harness must still stop/join only its exact owned fixture container and
+preserve its terminal resource evidence before removal, including on failure.

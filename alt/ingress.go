@@ -2,70 +2,49 @@ package alt
 
 import (
 	"net/http"
-	"net/netip"
 
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
 
 // The ingress headers of the alt fronts (EXTENDER.md L1).
 //
-// Behind the load balancer, nginx sets the lb-to-service contract headers on
-// every proxied request over any value the client sent (warpctl
-// addProxyRequestHeaders): X-UR-Forwarded-For is the address and port it
-// accepted the client's connection from, X-Forwarded-For and
-// X-Forwarded-Source-Port are cleared, and X-UR-Request-Buffering marks only a
-// body the lb streams through. The session takes the client's address from
-// X-UR-Forwarded-For whenever it holds one ip:port value
-// (session.ResolveClientAddress), on the contract that the ingress overwrote
-// it. Alt has no load balancer in front of it, so alt is the ingress: it sets
-// the same headers from the connection before any handler reads them.
-// Otherwise a client of alt names its own address to every per-address limit
-// and address-based decision behind the api, the extender activation probe
-// among them.
-
-const (
-	urForwardedForHeader      = "X-UR-Forwarded-For"
-	forwardedForHeader        = "X-Forwarded-For"
-	forwardedSourcePortHeader = "X-Forwarded-Source-Port"
-)
+// Alt has no load balancer in front of it, so alt is the ingress: it sets the
+// headers nginx sets for a service behind the lb from the connection, before
+// any handler reads them (router/ingress.go). Otherwise a client of alt names
+// its own address to every per-address limit and address-based decision
+// behind the api, the extender activation probe among them.
+//
+// The api front takes them inside its limits (NewLimitedHandler), so no front
+// built on the limits can serve a client's own value; the status listener,
+// which has no limits, takes them from NewIngressHandler.
 
 // Wraps a handler so every request reaches it with the ingress headers set
 // from its connection rather than from its client.
 func NewIngressHandler(handler http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setIngressHeaders(r)
-		handler.ServeHTTP(w, r)
-	})
+	return router.NewIngressHandler(handler)
 }
 
-// Sets X-UR-Forwarded-For to the peer the request arrived from, in the form
-// nginx renders it (an ipv6 address bracketed, an ipv4-mapped one as ipv4),
-// and clears the headers nginx clears. The streaming mark is the lb's: alt
-// reads every body from the client itself, so on alt a route's own body
-// policy is what applies (router.StreamingBody), never one a client claims.
-//
-// A peer alt cannot read leaves no X-UR-Forwarded-For at all, so the session
-// falls back to that same peer and refuses it, rather than acting for the
-// address the client named.
-func setIngressHeaders(r *http.Request) {
-	r.Header.Del(forwardedForHeader)
-	r.Header.Del(forwardedSourcePortHeader)
-	r.Header.Del(router.RequestBufferingHeader)
-	addrPort, err := server.ParseClientAddress(r.RemoteAddr)
-	if err != nil {
-		r.Header.Del(urForwardedForHeader)
-		return
-	}
-	r.Header.Set(
-		urForwardedForHeader,
-		netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String(),
-	)
-}
-
-// The handler the api front serves, as NewAlt mounts it: the ingress headers
-// first, so nothing behind them ever reads a client's own value, then the
-// limits, then the api router.
+// The handler the api front serves, as NewAlt mounts it: the limits, which
+// set the ingress headers first, so nothing behind them ever reads a client's
+// own value, then the api router, without its status route.
 func newApiFrontHandler(apiHandler http.Handler, limits *Limits) http.Handler {
-	return NewIngressHandler(NewLimitedHandler(apiHandler, limits))
+	return NewLimitedHandler(newPublicApiHandler(apiHandler), limits)
+}
+
+const statusPath = "/status"
+
+// The api router as the public front serves it: a request for /status, by
+// any method, is answered as the router answers a path it has no route for.
+// Behind the lb, /status names the api process that answered, for the deploy
+// poll and fleet sampling. On alt the deploy poll reads the status listener,
+// and over the public udp sockets the route would name the proxy host, the
+// alt service, its block and its version to anyone who asks.
+func newPublicApiHandler(apiHandler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == statusPath {
+			http.NotFound(w, r)
+			return
+		}
+		apiHandler.ServeHTTP(w, r)
+	})
 }

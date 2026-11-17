@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-completed-checkout-baseline-exclusion",
+  "approval": "Existing approval permits excluding clean Git-versioned baseline copies from completed temporary test checkouts while preserving canonical data, Git objects, logs, patches and other source files.",
+  "trigger": {
+    "qualification_source_commit": "04316e2a58c982716465bc8cffe339ecb71abc1c",
+    "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.ZwTZyTvU",
+    "guard_stopped_before_tests": true,
+    "observed_free_bytes_at_guard_stop": 35394908160,
+    "unchanged_reserve_floor_bytes": 35433480192,
+    "ordinary_race_and_negative_tests_executed": 0,
+    "guard_stop_is_not_qualification_success": true
+  },
+  "method": "git sparse-checkout set --no-cone --no-sparse-index '/*' '!/connect/sim-latency/baseline/'",
+  "scope": "Only connect/sim-latency/baseline in the three resolved temporary checkouts below; never the workspace root or canonical baseline.",
+  "checkouts": [
+    {
+      "path": "/home/by/urnetwork/temp/calibration-metadata-main-worktree-20261031.Yz3M1Fha/server-main-integration",
+      "commit": "766b48358d492eb9444177c13f8164e9adb3f085",
+      "baseline_apparent_bytes_before": 1498227116,
+      "tracked_baseline_files": 3705,
+      "whole_checkout_clean_before_and_after": true,
+      "baseline_index_flags_before": "H",
+      "baseline_index_flags_after": "S",
+      "no_process_cwd_in_checkout_observed_before": true
+    },
+    {
+      "path": "/home/by/urnetwork/temp/native-f866-fixed-qualification-20261108.R2haWgbc/server-null-metadata",
+      "commit": "4ac7ea6f3b008238a466d41948ead57cc4531861",
+      "baseline_apparent_bytes_before": 1500760036,
+      "tracked_baseline_files": 3710,
+      "whole_checkout_clean_before_and_after": true,
+      "baseline_index_flags_before": "H",
+      "baseline_index_flags_after": "S",
+      "no_process_cwd_in_checkout_observed_before": true
+    },
+    {
+      "path": "/home/by/urnetwork/temp/sn-fixture-module-fix-20261031.a1NjkcOd/postfix/server",
+      "commit": "8b84ba73e009d08c9e4bee674fa54dad68d5a8dd",
+      "baseline_apparent_bytes_before": 1500760036,
+      "tracked_baseline_files": 3710,
+      "whole_checkout_clean_before_and_after": true,
+      "baseline_index_flags_before": "H",
+      "baseline_index_flags_after": "S",
+      "no_process_cwd_in_checkout_observed_before": true
+    }
+  ],
+  "total_baseline_apparent_bytes_excluded": 4499747188,
+  "observed_root_available_bytes_after": 39911497728,
+  "observed_headroom_above_unchanged_reserve_bytes": 4478017536,
+  "recovery": "For each listed checkout, git -C <exact-path> sparse-checkout disable restores the versioned files from its recorded unchanged commit.",
+  "preserved": {
+    "canonical_baseline": true,
+    "git_objects_and_commits": true,
+    "all_logs_patches_and_other_source": true,
+    "active_test_checkouts": true,
+    "build_caches": true,
+    "frozen_evaluation_source_policy_baseline_and_attempt_deadlines": true
+  },
+  "test_guard_weakened": false,
+  "live_worker_restarted": false
+}

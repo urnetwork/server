@@ -438,6 +438,11 @@ func TestStV1SweepPlanAfterCommit(t *testing.T) {
 	chain.AssignSelector = true
 	action = sweepNext(chain, chain.HeadBlock)
 	requireSweepAction(t, "absorbed", action, stV1SweepActAwaitAssign, "Safe assigns: assignSurplus(1, 5, 7629732373749)")
+	// Under a timelock owner the Safe schedules the assign, which must run before the epoch closes.
+	chain.Owner, chain.OwnerMinDelay = sweepTestTimelock, 259200
+	requireSweepAction(t, "absorbed, timelock owner", sweepNext(chain, chain.HeadBlock), stV1SweepActAwaitAssign,
+		"Safe schedules assignSurplus(1, 5, 7629732373749) on STSettlement2 through the timelock 0x5529dfe070f73a96c14b5afcf4fb3ddea6122fac; anyone executes it 72h0m0s later, before epoch 5 closes")
+	chain.Owner, chain.OwnerMinDelay = common.Address{}, 0
 	// Surplus beyond the sweep (escrow emission) is capped at the total.
 	chain.V2LiveEscrow = sweepRao(500_000_000_000 + sweepTestTotal + 777)
 	if action = sweepNext(chain, chain.HeadBlock); action.amount.Cmp(sweepRao(sweepTestTotal)) != 0 {
@@ -688,6 +693,60 @@ func TestStV1SweepSafeCalls(t *testing.T) {
 	chain.Absorbable = sweepRao(stV1SweepMinimumAbsorbRao)
 	if calls := stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, sweepRao(sweepTestTotal-1)); len(calls) != 0 {
 		t.Fatalf("unabsorbed: %+v", calls)
+	}
+}
+
+// The mainnet TimelockController that has owned STSettlement2 since 2026-11-06.
+var sweepTestTimelock = common.HexToAddress("0x5529dfe070f73a96c14b5afcf4fb3ddea6122fac")
+
+// Under a timelock owner each owner call is the Safe's schedule of it on the
+// timelock (OpenZeppelin schedule 0x01d5062a, zero predecessor and salt, the
+// least delay), with the execute (0x134008d3) anyone sends after the delay.
+// A Safe owner keeps the direct calls.
+func TestStV1SweepSafeCallsScheduleThroughATimelockOwner(t *testing.T) {
+	cfg := sweepTestConfig()
+	chain := sweepFundedChain()
+	chain.Sweep.Root, chain.Sweep.RootArtifact = StV1SweepRoot(sweepTestVault2Coldkey), [32]byte{0xaa}
+	chain.AssignSelector = true
+	direct := stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, new(big.Int))
+	chain.Owner, chain.OwnerMinDelay = sweepTestTimelock, 259200
+	calls := stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, new(big.Int))
+	if len(direct) != 1 || len(calls) != 1 || calls[0].Name != "schedule recordV1Sweep" || calls[0].To != "0x5529dfe070f73a96c14b5afcf4fb3ddea6122fac" {
+		t.Fatalf("direct %+v, scheduled %+v", direct, calls)
+	}
+	inner := common.FromHex(direct[0].Calldata)
+	unpack := func(name, calldata, selector string) []any {
+		t.Helper()
+		if !strings.HasPrefix(calldata, selector) {
+			t.Fatalf("%s calldata %s, want selector %s", name, calldata, selector)
+		}
+		values, err := stV1SweepTimelockAbi.Methods[name].Inputs.Unpack(common.FromHex(calldata)[4:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if values[0].(common.Address) != cfg.SettlementV2 || values[1].(*big.Int).Sign() != 0 || !bytes.Equal(values[2].([]byte), inner) ||
+			values[3].([32]byte) != ([32]byte{}) || values[4].([32]byte) != ([32]byte{}) {
+			t.Fatalf("%s arguments %v", name, values)
+		}
+		return values
+	}
+	if scheduled := unpack("schedule", calls[0].Calldata, "0x01d5062a"); scheduled[5].(*big.Int).Uint64() != 259200 {
+		t.Fatalf("schedule delay %v", scheduled[5])
+	}
+	unpack("execute", calls[0].ExecuteCalldata, "0x134008d3")
+	if !strings.Contains(calls[0].Note, "72h0m0s later anyone sends execute_calldata to the timelock") {
+		t.Fatalf("note %q", calls[0].Note)
+	}
+
+	chain.RecordedArtifact = chain.Sweep.RootArtifact
+	chain.Sweep.Status, chain.Sweep.Total, chain.LeafClaimed, chain.V2NextEpoch = stV1SweepFinalized, sweepRao(sweepTestTotal), true, 5
+	calls = stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, sweepRao(sweepTestTotal-1))
+	if len(calls) != 1 || calls[0].Name != "schedule assignSurplus" || !strings.Contains(calls[0].Note, "schedule it at least 72h0m0s before epoch 5 closes") {
+		t.Fatalf("assign %+v", calls)
+	}
+	chain.OwnerMinDelay = 0
+	if calls := stV1SweepSafeCalls(cfg, sweepTestEpoch, chain, sweepRao(sweepTestTotal-1)); len(calls) != 1 || calls[0].Name != "assignSurplus" || calls[0].ExecuteCalldata != "" {
+		t.Fatalf("Safe owner %+v", calls)
 	}
 }
 

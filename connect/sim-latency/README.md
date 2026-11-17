@@ -1,5 +1,11 @@
 # sim-latency
 
+Epoch 1's operator-authorized official review is Astra max; it approved the
+elected submission on 2026-11-08. See the
+[review and remaining control-plane status](launch/EPOCH1-ASTRA-OFFICIAL-REVIEW-2026-11-08.md).
+This one-epoch reviewer amendment does not change scoring, declare Snow
+qualified, or change the next epoch's configured reviewer policy.
+
 `sim-latency` is the fixed measuring instrument for the URnetwork latency
 competition. It runs the real API, exchange, matchmaking, client, provider,
 reliability, and accounting paths against a deterministic provider fleet and
@@ -16,10 +22,54 @@ make
 `make` writes `build/<goos>/<goarch>/sim-latency`. The package test gate is
 Go-only and runs under the race detector against the local PostgreSQL and Redis
 services, like the other server packages.
-The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
+The actual compiler must be **Go 1.27.4**. Select that installed toolchain on
 `PATH` and use `GOTOOLCHAIN=local`; build/test launchers reject other versions.
 
 ## Current competition contract
+
+### Evaluator-caused failure recovery
+
+A terminal infrastructure code alone is not permission to resample a patch.
+When retained evidence proves an evaluator defect, a privileged operator can
+authorize one audited recovery cycle after deploying and qualifying the fix.
+Genuine submission failures and already scored submissions are not eligible.
+The original failure, admission identity, patch, source, shared epoch baseline
+and fee remain unchanged. The additional execution cycle has one three-hour
+budget starting at its first claim; retries do not reset that budget. Global
+attempt numbers continue increasing, and stale workers cannot write the new
+cycle. An evaluation hold must be active and no evaluation may be running when
+authorization is granted.
+
+The root-only control command is built with
+`go build -o competitionreevaluate ./cli/competitionreevaluate` from the server
+repository. Once the additive migration and compatible API/worker release are
+deployed, invoke it in the main control environment:
+
+```bash
+sudo competitionreevaluate \
+  --authorization /etc/urnetwork/recovery/authorization.json \
+  --authorization-file-sha256 AUTHORIZATION_FILE_SHA256 \
+  --runtime /etc/urnetwork/recovery/runtime-qualification.json \
+  --runtime-file-sha256 RUNTIME_FILE_SHA256 \
+  --token-file /etc/urnetwork/recovery/scoped-control-token \
+  --idempotency-key OPERATOR_RECOVERY_REQUEST_ID
+```
+
+All files must be private, single-link, root-owned regular files beneath
+protected root-owned directories, without symlinks. The raw file SHA-256 pins
+are distinct from canonical document digests. The authorization must bind the
+exact terminal snapshot, immutable incident event, rejected inventory
+declaration, frozen policy/baseline and fixed-runtime qualification. The token
+must have the exact competition/environment/season scheduler or operator scope;
+legacy unscoped credentials are insufficient. Standard output contains only the
+receipt. This command does not clear the maintenance hold or start evaluation.
+An exact replay returns the original receipt; it cannot grant another cycle.
+
+Owner polling exposes optional `reevaluation` metadata so an authenticated
+recovery can supersede a cached infrastructure failure without erasing its
+history. Integrations must retain that history and reject stale or conflicting
+cycle receipts. This recovery capability is not a claim that a particular
+runtime has been deployed or qualified.
 
 The original **2026-10-28 00:00 UTC** opening was missed, not backdated.
 The approved replacement production season, R2 epoch 1, opened submission intake
@@ -74,7 +124,7 @@ See:
 
 - [`evaluator/PATCH-SURFACE.md`](evaluator/PATCH-SURFACE.md) for the current
   ten-repository mono-root patch format and protected instrument boundary;
-- [`EPOCH-1-SOURCE.md`](EPOCH-1-SOURCE.md) for exact production epoch-1 commits
+- [`EPOCH-SOURCE.md`](EPOCH-SOURCE.md) for exact branches and commits by epoch
   and the distinction between canonical and raw source-lock hashes;
 - [`OFFICIAL-RUN.md`](OFFICIAL-RUN.md) for the evaluator and artifact contract;
 - [`PLAYBOOK.md`](PLAYBOOK.md) for live deployment and epoch operation;
@@ -254,6 +304,15 @@ therefore staging `settlement_status` is limited to `pending`, `received`, or
 explicit v2 rounds; v2 review/source authority uses the separately scoped
 automation contract described in [`RUN-MAIN.md`](RUN-MAIN.md).
 
+The scheduler's independent `finalization` hold is prospective and scoped to
+the exact environment, competition and season. It pauses new seals and first
+elections without pausing intake, FIFO grading, lease renewal or credential-owner
+private score feedback. It does not change frozen policy or the publication time
+of an already committed seal, and it does not hide historical results, integrity
+notices or later append-only reward revisions. `runtime_status.finalization_held`
+is optional when inactive; intake/grading/publication readiness remain separate.
+Like the other holds, release requires an exact revision and `RECOVERY_APPROVED`.
+
 ### Explicit intake-preserving calibration maintenance
 
 The [October 30 owner approval](launch/CALIBRATION-MAINTENANCE-INTAKE-OWNER-APPROVAL-2026-10-30.json)
@@ -279,7 +338,10 @@ return 503 with the real host checks false, while `/competition/info` reports
 `runtime_status.intake_ready: true`, `grading_ready: false` and
 `publication_held: true`, and authenticated v2 submissions queue normally.
 Existing separately approved private completed-score feedback is unchanged;
-public results, rankings and winner remain held.
+new public results, rankings and winner decisions remain held. A claim or
+grading pause does not retract results, scores or round secrets whose immutable
+publication boundary already passed. Published integrity invalidations remain
+visible; unpublished results and election/replay writes keep their hold checks.
 
 All non-host readiness checks, live protected archive checks and authentic
 runtime-envelope/frozen-policy validation remain mandatory. Both durable enqueue
@@ -349,7 +411,7 @@ source commits and percentage carry forward unchanged.
 
 ### Current and next-epoch G2 work-volume policy
 
-Production R2 epoch 1 retains its frozen rule: the median completed-request
+Production R2 epoch 1 retains its frozen rule: the median attempted-request
 count and median received bytes must each be within **95–105%**, inclusive, of
 the shared epoch baseline. A genuine speedup receives no exception to the
 current upper bounds. Its existing jobs, evaluator and results are not rejudged.
@@ -357,7 +419,7 @@ current upper bounds. Its existing jobs, evaluator and results are not rejudged.
 The owner approved a prospective change starting in epoch 2: both medians must
 remain **at least 95%** of baseline, inclusive, with **no upper bounds**.
 This is `g2_volume_policy: minimum-work/1` and scorer `sim-latency-score/2`;
-absence of that policy identifies the historical two-sided rule. More completed
+absence of that policy identifies the historical two-sided rule. More attempted
 work alone will no longer fail G2. All other gates, nine-run replication,
 latency ranking, practical margin, Welch significance and three-hour submission
 budget remain unchanged. Faster raw latency is not permission to fake traffic,
@@ -370,6 +432,58 @@ image advertised for their accepted round, not infer an upgrade from this
 announcement or reuse another round's control sample. See the
 [owner approval](launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json)
 and [current checkpoint](launch/current-state.json) for rollout status.
+
+### Traffic preservation and honesty review
+
+In epoch 1 and later epochs, passing numerical gates is not permission to
+deliberately sacrifice useful traffic to improve latency or fit a volume gate.
+Failure tolerances accommodate ordinary variation and incidental regressions;
+they are not a budget for dropping large/slow transfers, expiring otherwise
+healthy work early, or suppressing descendants. This applies even without
+benchmark detection or fabricated telemetry. Legitimate cancellation, security
+refusals and bounded overload handling remain distinct from benchmark-serving
+work suppression. There is no new zero-loss rule or automatic disqualification
+based on a success-rate decrease.
+
+Epoch 1 counts attempted request rows, including failed attempts and partial
+received bytes. Failed rows receive the frozen configured timeout penalty.
+However, its discovery-gated crawler does not attempt descendants of an
+incomplete parent. A large latency gain accompanied by reduced success or work
+therefore warrants investigation, but does not prove misconduct. Removing the
+G2 upper bounds removes that particular incentive; it does not alone eliminate
+selective-failure or subtree-suppression risks.
+
+The `traffic-preservation/1` review clarification adds an explicit per-model
+check under the existing honesty/safety criteria, using exact patch/score
+evidence and authenticated activated-instrument context. It does not change
+epoch 1's gates, re-score submissions, or revoke old approvals automatically.
+The changed broker and both Snow members require independent tests and genuine
+provider qualification before operational activation. Implementation or mocked
+tests alone are not proof that a model detects every abuse. See the
+[review contract and qualification requirements](evaluator/review/README.md#traffic-preservation-addendum).
+
+### Production-client benefit eligibility
+
+Every new review, including pending epoch-1 candidates and future epochs, also
+requires a supported explanation of how the changed production path can improve
+real clients. Provider/server improvements count when they benefit client
+service. A source-level causal argument can suffice; live production A/B testing
+is not required for every patch. Correctness, useful traffic, resource bounds,
+recovery and lifecycle semantics must remain sound.
+
+A score gain alone, a benign no-op/comment-only change without a production
+effect, or a benchmark-only improvement does not establish eligibility. Proven
+lack of production benefit uses `NO_PRODUCTION_BENEFIT` under
+`workload_generalization`; it rejects reward/source eligibility without alleging
+fraud. Missing callers, helpers or causal evidence instead hold review as
+uncertain. Both the production-benefit and traffic-preservation checks must pass
+for approval. See the version/hash-bound
+[`production-benefit/1` addendum](evaluator/review/PRODUCTION-BENEFIT.md).
+
+This source contract does not change numerical gates or reopen immutable old
+approvals. New requests and receipts carry its explicit identity; exact old
+idempotent replays remain unchanged. Independent tests and real Qwen/Gemma
+qualification of the new contract are required before operational activation.
 
 ## Epoch source identity and promotion
 

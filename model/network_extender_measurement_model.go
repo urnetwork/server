@@ -987,7 +987,9 @@ func fillNetworkExtenderMeasurementTargetsInConn(
 			ip,
 			carriers,
 			dns_ports,
-			activate_time
+			activate_time,
+			COALESCE(tcp_port, 0),
+			COALESCE(udp_port, 0)
 		FROM network_extender_address
 		WHERE extender_id = ANY($1) AND active
 		ORDER BY extender_id, ip_version
@@ -1006,6 +1008,8 @@ func fillNetworkExtenderMeasurementTargetsInConn(
 				&carriers,
 				&dnsPorts,
 				&address.ActivateTime,
+				&address.TcpPort,
+				&address.UdpPort,
 			))
 			address.Carriers = splitExtenderCarriers(carriers)
 			address.DnsPorts = splitExtenderDnsPorts(dnsPorts)

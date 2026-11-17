@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -352,11 +354,36 @@ func TestNetworkRefreshFollowsCredentialRotation(t *testing.T) {
 	})
 }
 
-// requireRefreshExpiresWithAResetInTheMintGap lands a password reset between
-// the router's state check and the mint, stamped after the presented token's
-// create time and no later than the mint. The reset's transaction started
-// before the mint although it committed after the check: the refreshed token
-// must expire with it. A refresh that stamps a fresh create time outlives it.
+// withRefreshMintHook runs f with hook between the router's state check and
+// the mint of /auth/refresh and /auth/network-refresh, and restores the
+// previous hook however f exits. A failed assertion in f exits with
+// runtime.Goexit, so a hook restored only after f returned stayed installed,
+// and every later refresh in the package ran the failed test's reset with its
+// canceled context: a 503 for TestRealClientTokenActsOnlyForItsOwnClients.
+func withRefreshMintHook(hook func(*session.ClientSession), f func()) {
+	defer controller.Testing_SetRefreshMintHook(hook)()
+	f()
+}
+
+// resetTimeInTheMintGap is a password reset's cutoff read in the mint gap,
+// after the presented token's create time and before the mint.
+func resetTimeInTheMintGap(presented *session.ByJwt) time.Time {
+	resetTime := server.NowUtc()
+	if !presented.CreateTime.Before(resetTime) {
+		resetTime = presented.CreateTime.Add(time.Microsecond)
+	}
+	return resetTime
+}
+
+// requireRefreshExpiresWithAResetInTheMintGap lands a password reset whose
+// cutoff is read between the router's state check and the mint, after the
+// presented token's create time, and which commits after the refresh. The
+// renewal's own check cannot see it. That is a reset on a host whose clock is
+// behind the minting host's: the reset takes the session lifecycle lock and
+// reads its cutoff after the renewal released the lock, and that clock still
+// reads a time before the mint. The refreshed token must expire with it, and
+// does because it keeps the presented create time. A refresh that stamps a
+// fresh create time at the mint outlives it.
 func requireRefreshExpiresWithAResetInTheMintGap(
 	t testing.TB,
 	self *routeAccessDbFixture,
@@ -366,26 +393,26 @@ func requireRefreshExpiresWithAResetInTheMintGap(
 ) *session.ByJwt {
 	t.Helper()
 	hooked := false
-	popHook := controller.Testing_SetRefreshMintHook(func(*session.ClientSession) {
-		resetTime := server.NowUtc()
-		if !presented.CreateTime.Before(resetTime) {
-			resetTime = presented.CreateTime.Add(time.Microsecond)
-		}
-		self.setCredentialChangeTime(t, resetTime)
-		hooked = true
-	})
+	var resetTime time.Time
 	since := server.NowUtc()
-	refreshed := refresh()
-	popHook()
+	var refreshed *session.ByJwt
+	withRefreshMintHook(func(*session.ClientSession) {
+		resetTime = resetTimeInTheMintGap(presented)
+		hooked = true
+	}, func() {
+		refreshed = refresh()
+	})
 	if !hooked {
 		t.Fatal("the refresh never reached its mint")
 	}
+	// the reset commits after the renewal
+	self.setCredentialChangeTime(t, resetTime)
 
 	if err := session.ValidateByJwtState(self.ctx, refreshed, requireClient); err == nil {
-		t.Fatalf("the token refreshed while the reset committed outlived the reset (create time %v, presented %v)", refreshed.CreateTime, presented.CreateTime)
+		t.Fatalf("the token refreshed in the mint gap outlived the reset (create time %v, presented %v, reset %v)", refreshed.CreateTime, presented.CreateTime, resetTime)
 	}
 	if w := self.serve(http.MethodGet, "/network/clients", "Bearer "+refreshed.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
-		t.Fatalf("the token refreshed while the reset committed = %d: %s", w.Code, w.Body.String())
+		t.Fatalf("the token refreshed in the mint gap, after the reset = %d: %s", w.Code, w.Body.String())
 	}
 	if !refreshed.CreateTime.Equal(presented.CreateTime) {
 		t.Fatalf("refreshed create time = %v, want the presented %v", refreshed.CreateTime, presented.CreateTime)
@@ -394,8 +421,61 @@ func requireRefreshExpiresWithAResetInTheMintGap(
 	return refreshed
 }
 
-// The network token renewed while a password reset commits expires with the
-// reset.
+// requireRefreshRefusedForAResetCommittedInTheMintGap commits a password reset
+// between the router's state check and the mint. The renewal checks the
+// presented token again, under the session lifecycle lock that every reset
+// holds exclusively (16675a430), so it refuses the token with the 401
+// authentication gives it, and mints nothing that could outlive the reset.
+func requireRefreshRefusedForAResetCommittedInTheMintGap(
+	t testing.TB,
+	self *routeAccessDbFixture,
+	presented *session.ByJwt,
+	method string,
+	path string,
+) {
+	t.Helper()
+	hooked := false
+	var w *httptest.ResponseRecorder
+	withRefreshMintHook(func(*session.ClientSession) {
+		self.setCredentialChangeTime(t, resetTimeInTheMintGap(presented))
+		hooked = true
+	}, func() {
+		w = self.serve(method, path, "Bearer "+presented.Testing_Sign(), nil)
+	})
+	if !hooked {
+		t.Fatal("the refresh never reached its mint")
+	}
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "by_jwt") {
+		t.Fatalf("%s %s with a reset committed in the mint gap = %d: %s, want 401 and no token", method, path, w.Code, w.Body.String())
+	}
+	if w := self.serve(method, path, "Bearer "+presented.Testing_Sign(), nil); w.Code != http.StatusUnauthorized {
+		t.Fatalf("%s %s after the reset = %d: %s, want the same 401", method, path, w.Code, w.Body.String())
+	}
+}
+
+// agedClientToken mints a client and returns its client token as it is after
+// some refreshes: the root's create time, an older lifetime.
+func (self *routeAccessDbFixture) agedClientToken(t testing.TB) (clientId server.Id, minted *session.ByJwt, presented *session.ByJwt) {
+	t.Helper()
+	clientId, clientToken := self.mintClient(t, self.root(), nil)
+	minted, err := session.ParseByJwt(self.ctx, clientToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	presented = session.NewByJwtWithCreateTime(
+		self.networkId,
+		self.userId,
+		self.networkName,
+		minted.CreateTime,
+		false,
+		false,
+	).Client(*minted.DeviceId, clientId)
+	ageClaims(presented)
+	return clientId, minted, presented
+}
+
+// The network token renewed in the mint gap of a password reset that commits
+// after the renewal expires with the reset.
 func TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -409,30 +489,110 @@ func TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) 
 	})
 }
 
-// The client token refreshed while a password reset commits expires with the
-// reset, and keeps its client.
+// A network token whose password reset commits in the mint gap is refused with
+// 401, counted as a stale state, not a 500.
+func TestNetworkRefreshRefusesAResetCommittedInTheMintGap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		presented := self.agedNetworkToken()
+		requireNetworkRefreshCounted(t, "state_invalid", func() {
+			requireRefreshRefusedForAResetCommittedInTheMintGap(t, self, presented, http.MethodPost, "/auth/network-refresh")
+		})
+	})
+}
+
+// A client token whose password reset commits in the mint gap is refused with
+// 401, not a 500.
+func TestClientRefreshRefusesAResetCommittedInTheMintGap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		_, _, presented := self.agedClientToken(t)
+		requireRefreshRefusedForAResetCommittedInTheMintGap(t, self, presented, http.MethodGet, "/auth/refresh")
+	})
+}
+
+// A network token whose session is revoked in the mint gap is refused with the
+// structured 401 session_revoked authentication gives a revoked session, which
+// the apps read as a sign-out from another device, not a 500.
+func TestNetworkRefreshRefusesASessionRevokedInTheMintGap(t *testing.T) {
+	defer session.Testing_SetSessionCreationEnabled(true)()
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		// a tracked sign-in: the renewal registers the root token's session
+		tracked := self.networkRefresh(t, self.rootToken)
+		if tracked.SessionId == nil {
+			t.Fatal("the renewed network token carries no session")
+		}
+		hooked := false
+		var w *httptest.ResponseRecorder
+		requireNetworkRefreshCounted(t, "state_invalid", func() {
+			withRefreshMintHook(func(*session.ClientSession) {
+				// the network's backend revokes the sign-in
+				self.call(t, http.MethodPost, "/network/revoke-session", self.key(), map[string]any{"session_id": *tracked.SessionId, "operation_id": server.NewId()}, http.StatusOK, nil)
+				hooked = true
+			}, func() {
+				w = self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+tracked.Testing_Sign(), nil)
+			})
+		})
+		if !hooked {
+			t.Fatal("the refresh never reached its mint")
+		}
+		var refusal struct {
+			Code string `json:"code"`
+		}
+		if w.Code != http.StatusUnauthorized || json.Unmarshal(w.Body.Bytes(), &refusal) != nil || refusal.Code != "session_revoked" {
+			t.Fatalf("network refresh of a session revoked in the mint gap = %d: %s, want 401 session_revoked", w.Code, w.Body.String())
+		}
+	})
+}
+
+// The mint hook of a refresh that fails does not run in a later refresh: a
+// failed assertion exits its goroutine with runtime.Goexit, past any restore
+// that waits for the refresh to return.
+func TestTheRefreshMintHookDoesNotOutliveAFailedRefresh(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		ran := false
+		exited := make(chan struct{})
+		go func() {
+			defer close(exited)
+			withRefreshMintHook(func(*session.ClientSession) {
+				ran = true
+			}, func() {
+				// how t.Fatalf leaves a failed refresh
+				runtime.Goexit()
+			})
+		}()
+		<-exited
+
+		self.networkRefresh(t, self.rootToken)
+		if ran {
+			t.Fatal("the mint hook of a failed refresh ran in a later refresh")
+		}
+	})
+}
+
+// The client token refreshed in the mint gap of a password reset that commits
+// after the refresh expires with the reset, and keeps its client.
 func TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(t, ctx)
 
-		clientId, clientToken := self.mintClient(t, self.root(), nil)
-		minted, err := session.ParseByJwt(ctx, clientToken)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// the client token as it is after some refreshes: the root's create
-		// time, an older lifetime
-		presented := session.NewByJwtWithCreateTime(
-			self.networkId,
-			self.userId,
-			self.networkName,
-			minted.CreateTime,
-			false,
-			false,
-		).Client(*minted.DeviceId, clientId)
-		ageClaims(presented)
+		clientId, minted, presented := self.agedClientToken(t)
 
 		refreshed := requireRefreshExpiresWithAResetInTheMintGap(t, self, presented, func() *session.ByJwt {
 			var result controller.RefreshTokenResult

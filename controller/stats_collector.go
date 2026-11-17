@@ -56,6 +56,12 @@ package controller
 //	urnetwork_stats_derive_residual_km               the last derivation's RMS ping residual {at} (redis, written by the derivation)
 //	urnetwork_stats_derive_last_run_seconds          unix time of the last derivation (redis, written by the derivation)
 //
+// the extender restart gauges are internal (connect/EXTENDER.md G3) and are
+// read only by grafana/dashboards/extenders.json:
+//
+//	urnetwork_stats_extenders_restarting_24h         extenders with 5 or more process runs started in the trailing 24 hours (db)
+//	urnetwork_stats_extenders_reporting_runs_24h     extenders with any run id in the trailing 24 hours, what the first is drawn from (db)
+//
 // the lag.dev gauges are internal (lag.dev/PLAN.md X9), listed in
 // stats_collector_lag.go and read only by grafana/dashboards/lag-dev.json.
 //
@@ -77,6 +83,8 @@ package controller
 //	urnetwork_stats_provider_excluded                of those, the ones the egress rules leave out of a bucket {reason} (db)
 //	urnetwork_stats_provider_online_success_exempt   per country the URL-success rule exempts, the providers the exemption keeps online {country_code} (redis, written by the score export)
 //	urnetwork_stats_provider_modern_gate_shadow      of the providers the other rules admit to quality and speed, those the modern provider gate keeps and each reason it would take one out {bucket, outcome} (db)
+//	urnetwork_stats_provider_egress_capability       of those, each bucket's providers by the capability labels of the classified decision (FP2-PROTOCOL.md §8.1) {bucket, ip, protocol} (db)
+//	urnetwork_stats_provider_post_quantum            of those, each bucket's providers by the classified decision and their post-quantum signal in the window (FP2-PROTOCOL.md §8.1, §12.4) {bucket, signal} (db)
 //
 // the ARIN database canary gauges are internal (arindbctl/ARINDB.md,
 // "Dual-database canary"), listed in stats_arindb_canary.go and read by
@@ -147,6 +155,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -435,6 +444,34 @@ var statsProviderModernGateShadowGauge = newStatsGaugeVec(
 	"outcome",
 )
 
+// The classified decision's supply (FP2-PROTOCOL.md §3.4, §8.1): the
+// providers of each bucket by their IP label (dualstack, ipv4) and protocol
+// label (dualproto, tcp). A provider whose URL checks took no capability
+// away counts by its strict decision, so the dualproto rows of quality and
+// speed are today's hard-gate supply and the tcp rows what selector-mode
+// requests add. Three buckets and four label pairs, every series published
+// every refresh, zero included.
+var statsProviderEgressCapabilityGauge = newStatsGaugeVec(
+	"provider_egress_capability",
+	"Connected valid public providers of each bucket of the classified egress decision, by capability labels",
+	"bucket",
+	"ip",
+	"protocol",
+)
+
+// The classified decision's supply by post-quantum signal (FP2-PROTOCOL.md
+// §8.1, §12.4): positive when the newest post-quantum outcome of the URL
+// probe in the window is positive, the only providers a strict post-quantum
+// request matches once the marker is set; negative when the newest is
+// negative; none without an outcome. Three buckets and three signals, every
+// series published every refresh, zero included.
+var statsProviderPostQuantumGauge = newStatsGaugeVec(
+	"provider_post_quantum",
+	"Connected valid public providers of each bucket of the classified egress decision, by post-quantum signal",
+	"bucket",
+	"signal",
+)
+
 // The modern provider gate under this process's provider.yml at the last
 // refresh (FP2FIX.md; FP2-MODERN.md): one while it holds quality and speed to
 // modern providers, which only quality_speed_requires_modern_provider: true
@@ -489,6 +526,32 @@ var statsExtenderGossipExtenders24hGauge = newStatsGaugeVec(
 	"kind",
 )
 
+// The restarts of the extender processes (connect/EXTENDER.md G3), read only
+// by the extenders dashboard. Two plain counts with no label, so the series
+// count does not grow with the population; which extenders they are, and how
+// their runs ended, is the query of connect/EXTENDER-ACTIVATION.md §7.
+//
+// The second is the population the first is drawn from: run ids arrive with a
+// connect release, so a zero restarting reads as no restarts only beside a
+// population of extenders that report them.
+var statsExtendersRestarting24hGauge = newStatsGauge(
+	"extenders_restarting_24h",
+	"Extenders whose activations in the last 24 hours carried 5 or more distinct process runs that started in those 24 hours",
+)
+var statsExtendersReportingRuns24hGauge = newStatsGauge(
+	"extenders_reporting_runs_24h",
+	"Extenders whose activations in the last 24 hours carried a process run id",
+)
+
+// The runs started in a window that make an extender restarting. A process that
+// runs through the window started none and a restart every half hour is about
+// 48 a day, so five stands well clear of a host that was only updated or
+// rebooted a few times.
+const statsExtenderRestartingMinRuns = 5
+
+// The window of the extender restart gauges.
+const statsExtenderRunsWindow = 24 * time.Hour
+
 // statsExtenderContractsCounter is the one metric that names extenders, and it
 // is a COUNTER rather than a windowed gauge on purpose.
 //
@@ -519,17 +582,27 @@ var statsExtenderContractsCounter = newStatsCounterVec(
 // the extenders dashboard. A ping is a ping here: providers and extenders both
 // ping, every verdict counts, a ping relayed through an NLayer chain counts
 // (§2.9), and the labels say which. The window gauges carry only bounded
-// labels -- two pinger kinds, three verdicts, relayed or not -- and the
-// per-extender counters have the same shape, cost and reset behaviour as the
-// contracts counter above, fed from the same closed hour buckets. The pings
-// counter also carries the pinger kind, which at most doubles its series and
-// is what shows the extender to extender traffic per hour.
+// labels -- two pinger kinds, three verdicts, relayed or not, and the reason
+// of a refusal, one of eight -- and the per-extender counters have the same
+// shape, cost and reset behaviour as the contracts counter above, fed from
+// the same closed hour buckets. The pings counter also carries the pinger
+// kind, which at most doubles its series and is what shows the extender to
+// extender traffic per hour.
+//
+// The reason is what says whom a refusal speaks against: without it, a stale
+// directory refusing every pinger it does not know (unknown_pinger) reads as
+// targets refusing honest claims, as it did from 2026-11-07, a day after
+// gossip publishing stopped. The window gauge is 36 series, and at most 4
+// more when a pinger reports a reason no target sends (other).
 var statsExtenderPings24hGauge = newStatsGaugeVec(
 	"extender_pings_24h",
-	"Pings stored in the 24 clock hours up to and including the current one, per pinger kind, verdict and whether an NLayer chain relayed them, from the ingest's hour tally",
+	"Pings stored in the 24 clock hours up to and including the current one, per pinger kind, verdict, refusal reason and whether an NLayer chain relayed them, from the ingest's hour tally. "+
+		"The reason is the target's (connect ExtenderProbeVerdictReason*): none for a co-signed or unknown verdict and for a refusal that named none; "+
+		"rtt_below_observed, nonce, wrong_extender, unknown_pinger, bad_signature, rate_limited; other for a reason no target sends",
 	"pinger_kind",
 	"outcome",
 	"relayed",
+	"reason",
 )
 var statsExtenderPingSources24hGauge = newStatsGaugeVec(
 	"extender_ping_sources_24h",
@@ -549,6 +622,28 @@ var statsExtenderPingsCounter = newStatsCounterVec(
 var statsExtenderPingRejectionsCounter = newStatsCounterVec(
 	"extender_ping_rejections_total",
 	"Refused pings stored for each target extender, accumulated from closed hour buckets",
+	"extender_id",
+)
+
+// The refusals that are evidence against each target, and the pings they are a
+// share of, for the ranking of refusing targets. The rejections counter above
+// counts every reason: from 2026-11-07 stale directories refused most extender
+// pingers as unknown, and a ranking by it listed extenders whose only fault was
+// that. These read the per-target tally's evidence count
+// (model.NetworkPingRefusalCountsAgainstTarget), which leaves out unknown
+// pingers and rate limits. A closed hour whose tally row a release from before
+// the count stored has no evidence count, and adds to neither: the share over a
+// range is then over the hours that count it, never an unknown hour read as no
+// refusals.
+var statsExtenderPingEvidenceRejectionsCounter = newStatsCounterVec(
+	"extender_ping_evidence_rejections_total",
+	"Refused pings stored for each target extender that are evidence against it: every refusal reason but unknown_pinger and rate_limited, a refusal with no reason (an acceptance whose co-signature did not verify) included. "+
+		"Accumulated from the closed hour buckets that count them; a bucket stored before the count adds nothing",
+	"extender_id",
+)
+var statsExtenderPingEvidencePingsCounter = newStatsCounterVec(
+	"extender_ping_evidence_pings_total",
+	"Pings stored for each target extender in the closed hour buckets that count its evidence refusals, the denominator of extender_ping_evidence_rejections_total: a bucket stored before the count adds to neither",
 	"extender_id",
 )
 
@@ -621,6 +716,23 @@ var statsPingOutcomeNames = map[int]string{
 	model.NetworkPingCosignRejected: "rejected",
 	model.NetworkPingCosignUnknown:  "unknown",
 }
+
+// The reason label values of the ping window gauge, connect's names for the
+// target's refusal reasons (ExtenderProbeVerdictReason*). A co-signed or
+// unknown verdict carries none, and so does a refusal that named none. The
+// pinger reports the reason, so any value no target sends is other, and the
+// label stays bounded whatever a pinger sends.
+var statsPingReasonNames = map[int]string{
+	int(connect.ExtenderProbeVerdictReasonOk):               "none",
+	int(connect.ExtenderProbeVerdictReasonRttBelowObserved): "rtt_below_observed",
+	int(connect.ExtenderProbeVerdictReasonNonce):            "nonce",
+	int(connect.ExtenderProbeVerdictReasonWrongExtender):    "wrong_extender",
+	int(connect.ExtenderProbeVerdictReasonUnknownPinger):    "unknown_pinger",
+	int(connect.ExtenderProbeVerdictReasonBadSignature):     "bad_signature",
+	int(connect.ExtenderProbeVerdictReasonRateLimited):      "rate_limited",
+}
+
+const statsPingReasonOther = "other"
 
 // statsCounterVec is a labeled monotonic counter with the same lazy
 // registration as the gauges. Unlike a gauge vec it is never replaced: a
@@ -830,9 +942,7 @@ func StartStatsCollector(ctx context.Context) <-chan struct{} {
 				server.HandleError(func() {
 					statsRefreshProviderCapabilities(ctx)
 				})
-				server.HandleError(func() {
-					statsRefreshDb(ctx, window)
-				})
+				statsRefreshDbIsolated(ctx, window)
 			} else {
 				if !statsEpochUsersState.attempted || statsEpochUsersState.epoch != window.Epoch {
 					// a new epoch publishes its users, and the finished epoch's
@@ -983,6 +1093,16 @@ func statsPublishEpochAlpha(ctx context.Context, deploymentKey model.StDeploymen
 	statsPrevEpochMinersClaimedGauge.set(float64(prevMinersClaimed))
 }
 
+// One db refresh of the collector, whose failure never stops it. The first read
+// that fails ends the refresh, so in a database incident the extender run
+// gauges' own read is never reached: they are withdrawn here too, rather than
+// held at their last values for as long as it lasts.
+func statsRefreshDbIsolated(ctx context.Context, window statsEpochWindow) {
+	server.HandleError(func() {
+		statsRefreshDb(ctx, window)
+	}, statsWithdrawExtenderRuns)
+}
+
 func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 	now := time.Now()
 
@@ -1067,6 +1187,12 @@ func statsRefreshDb(ctx context.Context, window statsEpochWindow) {
 	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
 	statsRefreshExtenders(ctx, now)
 
+	// the extender supply gauges (stats_extender_supply.go); isolated, so a
+	// read that fails costs only its own gauges
+	server.HandleError(func() {
+		statsRefreshExtenderSupply(ctx, now)
+	})
+
 	// the lag.dev gauges (grafana/dashboards/lag-dev.json, stats_collector_lag.go);
 	// isolated, so a lag read that fails costs only its own gauges
 	server.HandleError(func() {
@@ -1148,6 +1274,27 @@ func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 		})
 	}
 	statsProviderModernGateShadowGauge.replace(shadowValues)
+
+	capabilityValues := []statsLabeledValue{}
+	postQuantumValues := []statsLabeledValue{}
+	for _, bucket := range model.ProviderEgressBuckets {
+		for _, ip := range model.ProviderEgressCapabilityIps {
+			for _, protocol := range model.ProviderEgressCapabilityProtocols {
+				capabilityValues = append(capabilityValues, statsLabeledValue{
+					labelValues: []string{bucket, ip, protocol},
+					value:       float64(counts.CapabilityCounts[bucket][ip][protocol]),
+				})
+			}
+		}
+		for _, signal := range model.ProviderPostQuantumSignals {
+			postQuantumValues = append(postQuantumValues, statsLabeledValue{
+				labelValues: []string{bucket, signal},
+				value:       float64(counts.PostQuantumCounts[bucket][signal]),
+			})
+		}
+	}
+	statsProviderEgressCapabilityGauge.replace(capabilityValues)
+	statsProviderPostQuantumGauge.replace(postQuantumValues)
 }
 
 // Publishes the countries the URL-success rule exempts under the guard the
@@ -1237,25 +1384,10 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	statsExtenderGossipReleased24hGauge.replace(released)
 	statsExtenderGossipExtenders24hGauge.replace(releasedExtenders)
 
-	// every kind, verdict and relay is published, zero included, so a verdict
-	// that has gone quiet is a zero rather than an absent series (M4)
+	// every kind, verdict, reason and relay is published, zero included, so a
+	// verdict that has gone quiet is a zero rather than an absent series (M4)
 	pings := model.CountExtenderPings(ctx, now)
-	pingOutcomes := []statsLabeledValue{}
-	for _, count := range pings.Outcomes24h {
-		pingerKind, kindOk := statsPingerKindNames[count.PingerKind]
-		outcome, outcomeOk := statsPingOutcomeNames[count.Cosign]
-		if !kindOk || !outcomeOk {
-			continue
-		}
-		relayed := "no"
-		if count.Relayed {
-			relayed = "yes"
-		}
-		pingOutcomes = append(pingOutcomes, statsLabeledValue{
-			labelValues: []string{pingerKind, outcome, relayed},
-			value:       float64(count.Pings),
-		})
-	}
+	pingOutcomes := statsExtenderPingOutcomeValues(pings.Outcomes24h)
 	pingSources := []statsLabeledValue{}
 	for _, count := range pings.Sources24h {
 		pingerKind, ok := statsPingerKindNames[count.PingerKind]
@@ -1279,6 +1411,64 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	server.HandleError(func() {
 		statsRefreshDerivedLocations(ctx)
 	})
+	statsRefreshExtenderRuns(ctx, now)
+}
+
+// The ping window gauge's series from the window's outcome counts, in their
+// order: each count under its kind, verdict, relay and reason, a reason no
+// target sends added into other, and a kind or verdict with no label value
+// left out, as the other ping gauges leave it. Pure.
+func statsExtenderPingOutcomeValues(outcomes []model.ExtenderPingOutcomeCount) []statsLabeledValue {
+	values := []statsLabeledValue{}
+	keyIndexes := map[string]int{}
+	for _, count := range outcomes {
+		pingerKind, kindOk := statsPingerKindNames[count.PingerKind]
+		outcome, outcomeOk := statsPingOutcomeNames[count.Cosign]
+		if !kindOk || !outcomeOk {
+			continue
+		}
+		relayed := "no"
+		if count.Relayed {
+			relayed = "yes"
+		}
+		reason, ok := statsPingReasonNames[count.Reason]
+		if !ok {
+			reason = statsPingReasonOther
+		}
+		labelValues := []string{pingerKind, outcome, relayed, reason}
+		key := statsLabelKey(labelValues)
+		if index, ok := keyIndexes[key]; ok {
+			values[index].value += float64(count.Pings)
+			continue
+		}
+		keyIndexes[key] = len(values)
+		values = append(values, statsLabeledValue{
+			labelValues: labelValues,
+			value:       float64(count.Pings),
+		})
+	}
+	return values
+}
+
+// Publishes how many extenders restarted often in the trailing window, beside
+// how many report their runs at all (connect/EXTENDER.md G3). Both are
+// published when zero: a zero is the count, and it is what they read until a
+// connect release with run ids reaches the extenders. A read that fails costs
+// these two gauges alone, and withdraws them.
+func statsRefreshExtenderRuns(ctx context.Context, now time.Time) {
+	server.HandleError(func() {
+		counts := model.CountExtenderRuns(ctx, now.Add(-statsExtenderRunsWindow), statsExtenderRestartingMinRuns)
+		statsExtendersRestarting24hGauge.set(float64(counts.Restarting))
+		statsExtendersReportingRuns24hGauge.set(float64(counts.Reporting))
+	}, statsWithdrawExtenderRuns)
+}
+
+// The count of a read that failed is not known, which a 0 or the last value
+// would claim, and a flat line through a database incident would read as a
+// fleet that stopped restarting.
+func statsWithdrawExtenderRuns() {
+	statsExtendersRestarting24hGauge.unset()
+	statsExtendersReportingRuns24hGauge.unset()
 }
 
 // Publishes the published rows and the last derivation. Every kind and
@@ -1360,43 +1550,50 @@ func statsRefreshExtenderContracts(ctx context.Context, now time.Time) {
 
 // statsExtenderPingsHour is the counter cursor of the pings, kept separately
 // from the contracts cursor so the two counters seed and resume independently.
-// The pings and rejections counters share it: both are fed from the one
-// grouped query per hour.
+// The pings, rejections and evidence counters share it: all are fed from the
+// one grouped query per hour.
 var statsExtenderPingsHour time.Time
 
 // statsRefreshExtenderPings adds every hour that closed since the last refresh
-// to the per-extender pings and rejections counters, on the same rules as the
-// contracts.
-//
-// A target's rejections series is written in every hour the target was
-// pinged, zero included. A counter series that first appears at a nonzero
-// value hides that value from increase(), so a rejections series that only
-// appeared with a target's first refusal would lose it. Written from the
-// target's first pinged hour, it has exactly the first-hour blind spot its
-// pings series has, and the refusal rate on the dashboard compares like with
-// like.
+// to the per-extender ping counters (statsAddExtenderHourPings), on the same
+// rules as the contracts.
 func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
 	if statsExtenderPingsHour.IsZero() {
 		statsExtenderPingsHour = statsClosedHour(now)
 		return
 	}
 	for _, hour := range statsClosedHoursSince(statsExtenderPingsHour, now) {
-		for _, count := range model.CountExtenderPingsByHour(ctx, hour) {
-			pingerKind, ok := statsPingerKindNames[count.PingerKind]
-			if !ok {
-				continue
-			}
-			statsExtenderPingsCounter.add(
-				float64(count.Pings),
-				count.ExtenderId.String(),
-				pingerKind,
-			)
-			statsExtenderPingRejectionsCounter.add(
-				float64(count.Rejections),
-				count.ExtenderId.String(),
-			)
-		}
+		statsAddExtenderHourPings(model.CountExtenderPingsByHour(ctx, hour))
 		statsExtenderPingsHour = hour
+	}
+}
+
+// Adds one closed hour's per-target counts to the per-extender ping counters:
+// the pings per pinger kind, the refusals of every reason, and, when the hour's
+// tally row counts them, the refusals that are evidence against the target
+// with the pings they are a share of. A row a release from before the evidence
+// count stored adds to neither evidence counter, so the hour drops out of the
+// evidence share instead of reading as one with no refusals.
+//
+// A target's rejections and evidence series are written in every hour they
+// count, zero included. A counter series that first appears at a nonzero value
+// hides that value from increase(), so a series that only appeared with a
+// target's first refusal would lose it. Written from the target's first
+// counted hour, each has exactly the first-hour blind spot of the pings it is
+// a share of, and the refusal rates on the dashboard compare like with like.
+func statsAddExtenderHourPings(counts []model.ExtenderHourPingCount) {
+	for _, count := range counts {
+		pingerKind, ok := statsPingerKindNames[count.PingerKind]
+		if !ok {
+			continue
+		}
+		extenderId := count.ExtenderId.String()
+		statsExtenderPingsCounter.add(float64(count.Pings), extenderId, pingerKind)
+		statsExtenderPingRejectionsCounter.add(float64(count.Rejections), extenderId)
+		if count.EvidenceKnown {
+			statsExtenderPingEvidenceRejectionsCounter.add(float64(count.EvidenceRejections), extenderId)
+			statsExtenderPingEvidencePingsCounter.add(float64(count.Pings), extenderId)
+		}
 	}
 }
 

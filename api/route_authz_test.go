@@ -333,14 +333,24 @@ func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 // The provider payout of a client's own client, its subnet wallet mapping, the
 // mapping's consent, the wallet read and its fleet binding, is refused to the
 // client token of an Embed network and served to an ordinary network's, which
-// the provider apps send (AUTHZ1.md, decision 3). The network-wide payout
-// routes stay network only, and the network credential reaches every one.
+// the provider apps send (AUTHZ1.md, decision 3). So are a device's own part of
+// a Top 200 claim (its pending binding, its signature on it, its binding on
+// chain and its leave) and the claim relay, whose claims only ever pay the
+// network's own consented coldkeys: the apps show its status and tap Claim now
+// on a device (apple BTEASY.md, Claim relay). The network-wide payout routes
+// stay network only, and the network credential reaches every one.
 func TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken(t *testing.T) {
 	payoutRoutes := []string{
 		"POST /sn/wallet",
 		"POST /sn/wallet/consent",
 		"GET /sn/wallet",
 		"POST /sn/head/binding",
+		"GET /sn/fleet/device",
+		"POST /sn/fleet/device/signature",
+		"GET /sn/fleet/device/binding",
+		"POST /sn/fleet/device/leave",
+		"GET /sn/claim-relay",
+		"POST /sn/claim-relay/claim-now",
 	}
 	for key, access := range routeAccessByRoute {
 		if (access == routeAccessOwnClientPayout) != slices.Contains(payoutRoutes, key) {
@@ -352,6 +362,11 @@ func TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken(t *testing.T)
 		"POST /sn/wallet/hotkey-consent",
 		"POST /sn/wallet/hotkey-delegation",
 		"POST /account/payout-wallet",
+		// the network's own part of a Top 200 claim
+		"GET /sn/fleet/claim",
+		"POST /sn/fleet/authorization",
+		"POST /sn/fleet/hotkey-signatures",
+		"POST /sn/fleet/top-up",
 	} {
 		if access := routeAccessByRoute[key]; access != routeAccessNetwork && access != routeAccessAppAdmin {
 			t.Fatalf("%s access = %d, want an admin class", key, access)

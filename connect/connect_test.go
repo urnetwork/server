@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"fmt"
 	"net"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	"encoding/hex"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"runtime"
 
 	"maps"
@@ -106,6 +107,14 @@ type testConnectConfig struct {
 	// so a case that wedges somewhere they do not cover runs until the
 	// package deadline and takes every case after it with it.
 	caseTimeout time.Duration
+	// localDelivery is how every exchange delivers to a resident of its own
+	// (resident_local_delivery_mode_test.go). The zero value is the exchange
+	// socket path; connectgen's InProcess cases attach transports and
+	// forwards whose resident shares their exchange in memory. Clients pick
+	// among ten exchanges at random, so a case exercises in-process links
+	// only when a pair lands on one exchange; the log line says whether it
+	// did.
+	localDelivery localDeliveryTestMode
 }
 
 // Cancel every carrier first, then join the whole group so H3 reservations and
@@ -269,7 +278,7 @@ func testConnect(
 	// send and forward idle timeouts can be arbirary values
 
 	randPauseTimeout := func() time.Duration {
-		return pauseTimeout/4 + time.Duration(mathrand.Int63n(int64(pauseTimeout)))
+		return pauseTimeout/4 + time.Duration(mathrand.Int64N(int64(pauseTimeout)))
 	}
 
 	caseTimeout := config.caseTimeout
@@ -425,6 +434,7 @@ func testConnect(
 		default:
 			settings.ForwardEnforceActiveContracts = false
 		}
+		config.localDelivery.apply(settings)
 
 		exchange := NewExchangeWithListeners(
 			ctx,
@@ -448,6 +458,12 @@ func testConnect(
 		defer server.Close()
 		go server.Serve(listener)
 	}
+	// The delivery mode reached every exchange before any client connects, so
+	// an InProcess case cannot run the socket path unnoticed, or the reverse.
+	for _, exchange := range exchanges {
+		config.localDelivery.requireExchange(t, exchange)
+	}
+	localLinksBefore := snapshotLocalLinkCounts()
 
 	defer func() {
 		for _, connectHandler := range connectHandlers {
@@ -465,7 +481,7 @@ func testConnect(
 
 	randServer := func() (string, testServerEndpoint) {
 		endpoints := slices.Collect(maps.Values(hostEndpoints))
-		endpoint := endpoints[mathrand.Intn(len(endpoints))]
+		endpoint := endpoints[mathrand.IntN(len(endpoints))]
 		return fmt.Sprintf("ws://127.0.0.1:%d", endpoint.h1Port), endpoint
 	}
 	// Every carrier generation uses the same hermetic endpoint policy. The DNS
@@ -873,6 +889,21 @@ func testConnect(
 		}
 	}
 	defer cleanup()
+	// Before cleanup closes the exchanges: the mode held for the whole case,
+	// the socket path attached nothing in process, and the log says whether
+	// an in-process case carried any transport or forward in process.
+	defer func() {
+		for _, exchange := range exchanges {
+			config.localDelivery.requireExchange(t, exchange)
+		}
+		localLinks := snapshotLocalLinkCounts()
+		transportLinks := localLinks.attachesSince(localLinksBefore, exchangeIOOpTransport)
+		forwardLinks := localLinks.attachesSince(localLinksBefore, exchangeIOOpForward)
+		t.Logf("[local delivery]mode=%s in_process_transport_links=%v in_process_forward_links=%v", config.localDelivery.label(), transportLinks, forwardLinks)
+		if !config.localDelivery.local && (transportLinks != 0 || forwardLinks != 0) {
+			t.Errorf("the socket path attached %v transports and %v forwards in process", transportLinks, forwardLinks)
+		}
+	}()
 
 	// Capture protocol state before cleanup cancels the client and turns an
 	// establishment or delivery stall into an uninformative shutdown error.
@@ -1046,7 +1077,7 @@ func testConnect(
 	for _, messageContentSize := range messageContentSizes {
 		// the message bytes are hex encoded which doubles the size
 		messageContentBytes := make([]byte, messageContentSize/2)
-		mathrand.Read(messageContentBytes)
+		cryptorand.Read(messageContentBytes)
 		messageContent := hex.EncodeToString(messageContentBytes)
 		connect.AssertEqual(t, int(messageContentSize), len(messageContent))
 
@@ -1077,7 +1108,7 @@ func testConnect(
 					case <-time.After(randPauseTimeout()):
 					}
 					fmt.Printf("unpause\n")
-					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+					if 0 < newInstanceM && 0 == mathrand.IntN(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientAInstanceId = server.NewId()
 					}
@@ -1251,7 +1282,7 @@ func testConnect(
 					case <-time.After(randPauseTimeout()):
 					}
 					fmt.Printf("unpause\n")
-					if 0 < newInstanceM && 0 == mathrand.Intn(newInstanceM) {
+					if 0 < newInstanceM && 0 == mathrand.IntN(newInstanceM) {
 						fmt.Printf("new instance\n")
 						clientBInstanceId = server.NewId()
 					}

@@ -94,7 +94,7 @@ func CryptoPaymentScanPost(
 	tx server.PgTx,
 ) error {
 	next := &CryptoPaymentScanArgs{Asset: args.Asset}
-	delay := controller.CryptoPaymentScanInterval()
+	delay := controller.CryptoPaymentScanIntervalFor(args.Asset)
 	if result == nil || !result.Configured {
 		next.Idle = args.Idle + 1
 		delay = cryptoPayIdleDelay(delay, next.Idle)
@@ -169,7 +169,9 @@ func ScheduleCryptoPaymentUnlink(clientSession *session.ClientSession, tx server
 
 // CryptoPaymentUnlink drops the link between invoices paid more than
 // unlink_after ago and their networks (decision 9), and between the old
-// Solana Pay endpoints' payments and theirs.
+// Solana Pay endpoints' payments and theirs. An invoice never credited goes
+// unlink_after past its creation, except a gift order's invoice whose payment
+// is still unresolved (controller.RunCryptoPaymentUnlink).
 func CryptoPaymentUnlink(
 	args *CryptoPaymentUnlinkArgs,
 	clientSession *session.ClientSession,

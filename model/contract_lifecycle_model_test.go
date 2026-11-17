@@ -215,6 +215,17 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 		strings.Index(deactivation, "deactivateLockedNetworkClientsInTx(") <= marked {
 		t.Errorf("deactivateNetworkClientsInTx: want its marked lock before the locked write")
 	}
+	// The proxy trim's deactivation (af97b471c) is deactivateNetworkClientsInTx
+	// restricted to active rows: the same marked FOR UPDATE of every target row
+	// in client_id order, then one locked write of exactly the rows it locked.
+	activeDeactivation := functionSource("network_client_proxy_trim.go", "deactivateActiveNetworkClientsInTx")
+	activeMarked := strings.Index(activeDeactivation, "/* network_client_deactivation_write_boundary */")
+	activeOrdered := strings.Index(activeDeactivation, "ORDER BY client_id")
+	activeLocked := strings.Index(activeDeactivation, "FOR UPDATE")
+	activeWrite := strings.Index(activeDeactivation, "deactivateLockedNetworkClientsInTx(ctx, tx, lockedClientIds, networkId)")
+	if activeMarked < 0 || activeOrdered <= activeMarked || activeLocked <= activeOrdered || activeWrite <= activeLocked {
+		t.Errorf("deactivateActiveNetworkClientsInTx: want its marked lock of every target row, in client_id order, before the locked write of the rows it locked")
+	}
 	lockedCallers := []string{}
 	for _, source := range sources {
 		for _, declaration := range source.file.Decls {
@@ -239,6 +250,8 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 	slices.Sort(lockedCallers)
 	reviewedCallers := []string{
 		"CleanupSessionOperation",
+		// reviewed 2026-11-06: the proxy trim's active-only deactivateNetworkClientsInTx
+		"deactivateActiveNetworkClientsInTx",
 		"deactivateNetworkClientsInTx",
 		"deactivateOwnedNetworkClientInTx",
 		"drainProberShardInTx",

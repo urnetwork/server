@@ -22,7 +22,7 @@
       "id": 2,
       "type": "stat",
       "title": "overall archive status",
-      "description": "ERROR when any of the five expected archive signals is missing or its newest complete archive is more than 5 days (432000 seconds) old.",
+      "description": "ERROR when any of the five expected archive signals is missing or its newest complete archive is older than its objective: 7 days (604800 seconds) for PostgreSQL, since edge-6's Sun/Thu runs of 40 to 75 hours (owner, 2026-11-15), and 5 days (432000 seconds) for the others.",
       "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {
@@ -39,7 +39,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "clamp_max(max((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) > bool 432000) + (count(max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) < bool 5), 1) or on() vector(1)",
+          "expr": "clamp_max(max(((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"})) > bool 604800) or ((time() - max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"redis|github-urnetwork|github-urfoundation|router-config\"})) > bool 432000)) + (count(max by (archive) (urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=~\"pg|redis|github-urnetwork|github-urfoundation|router-config\"})) < bool 5), 1) or on() vector(1)",
           "instant": true,
           "range": false,
           "datasource": {"type": "prometheus", "uid": "warp-mimir"}
@@ -113,12 +113,12 @@
       "id": 5,
       "type": "stat",
       "title": "PostgreSQL freshness",
-      "description": "Fail-closed: missing telemetry and archives older than five days are ERROR.",
+      "description": "Fail-closed: missing telemetry and archives older than seven days are ERROR (owner, 2026-11-15: edge-6's Sun/Thu runs take 40 to 75 hours and each pull 20 to 25).",
       "gridPos": {"h": 4, "w": 6, "x": 0, "y": 7},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "noValue": "ERROR", "mappings": [{"type": "value", "options": {"0": {"text": "OK", "color": "green"}, "1": {"text": "ERROR", "color": "red"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "colorMode": "background", "graphMode": "none", "justifyMode": "center", "textMode": "value"},
-      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"})) > bool 432000) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+      "targets": [{"refId": "A", "expr": "((time() - max(urnetwork_backup_archive_latest_timestamp_seconds{env=\"main\",host=\"planetoid\",archive=\"pg\"})) > bool 604800) or on() vector(1)", "instant": true, "range": false, "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     },
     {
       "id": 6,

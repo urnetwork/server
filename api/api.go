@@ -36,7 +36,7 @@ type routeOwners struct {
 
 // Only the API lifecycle supplies this authenticated cache; the route never
 // starts a background owner or dials a provider on an upload request.
-func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, owners routeOwners) []*router.Route {
+func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLane, owners routeOwners) []*router.Route {
 	providerWork := handlers.NewProviderWorkHandlers()
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
@@ -89,6 +89,9 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/competition/v2/receipts", handlers.CompetitionV2Receipt),
 		router.NewRoute("POST", "/competition/v2/source/([^/]+)/readiness", handlers.CompetitionV2SourceReadiness),
 		router.NewRoute("POST", "/competition/v2/holds", handlers.CompetitionV2Hold),
+		router.NewRoute("POST", "/competition/v2/source-handoffs", handlers.CompetitionV2SourceHandoff),
+		router.NewRoute("POST", "/competition/v2/review-handoff-imports", handlers.CompetitionV2ReviewHandoffImport),
+		router.NewRoute("POST", "/competition/v2/official-review-imports", handlers.CompetitionV2OfficialReviewImport),
 		router.NewRoute("POST", "/competition/v2/rounds/([^/]+)/incidents", handlers.CompetitionV2Incident),
 		// /stats/last-90 stays up: it serves a redis-exported blob and does not
 		// touch the db.
@@ -214,6 +217,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/network/revoke-other-sessions", handlers.RevokeOtherNetworkSessions),
 		router.NewRoute("GET", "/network/session-operations/([^/]+)", handlers.NetworkSessionOperation),
 		router.NewRoute("GET", "/network/proxies", handlers.NetworkProxies),
+		router.NewRoute("POST", "/network/proxy/rotate-exit", handlers.NetworkProxyRotateExit),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),
@@ -269,6 +273,11 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
 		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
+		// the Alchemy webhook (ETH Address Activity; Bitcoin has none, its
+		// scanner reads every block), routed by its webhook id: a fast path
+		// that only brings ETH's chain read forward
+		// (controller/crypto_pay_alchemy.go)
+		router.NewRoute("POST", "/pay/alchemy", handlers.AlchemyWebhook),
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("POST", "/solana/payment-transaction", handlers.CreateSolanaPaymentTransaction),
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
@@ -278,13 +287,34 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/pay/data/network-lookup", handlers.PayDataNetworkLookup),
 		router.NewRoute("POST", "/pay/data/solana-intent", handlers.PayDataSolanaIntent),
 		router.NewRoute("POST", "/pay/data/solana-status", handlers.PayDataSolanaStatus),
-		// crypto payments (docs/CRYPTO-PAY-API.md): Zcash, Monero and USDC on
-		// one invoice API; the Solana routes above stay for shipped clients
+		// crypto payments (docs/CRYPTO-PAY-API.md): USDC on Solana, Zcash,
+		// Monero, TAO, Bitcoin, ETH and SOL on one invoice API; the Solana
+		// routes above stay for shipped clients
 		router.NewRoute("GET", "/pay/crypto/assets", handlers.CryptoPaymentAssets),
+		router.NewRoute("POST", "/pay/crypto/quote", handlers.CryptoPaymentQuote),
 		router.NewRoute("POST", "/pay/crypto/intent", handlers.CryptoPaymentIntent),
 		router.NewRoute("POST", "/pay/data/crypto-intent", handlers.PayDataCryptoIntent),
 		router.NewRoute("POST", "/pay/crypto/status", handlers.CryptoPaymentStatus),
 		router.NewRoute("POST", "/pay/crypto/requote", handlers.CryptoPaymentRequote),
+		// gift codes, a year of Pro each (controller/gift_checkout_controller.go,
+		// mmm/GIFTOFPRIVACY.md §10.2): by card or with a coin, without signing
+		// in, or with Gamma, from the signed-in network's deposit
+		router.NewRoute("GET", "/pay/gift/config", handlers.GiftConfig),
+		router.NewRoute("POST", "/pay/gift/checkout", handlers.GiftCheckout),
+		router.NewRoute("POST", "/pay/gift/crypto-intent", handlers.GiftCryptoIntent),
+		router.NewRoute("POST", "/pay/gift/gamma-intent", handlers.GiftGammaIntent),
+		router.NewRoute("POST", "/pay/gift/gamma-cancel", handlers.GiftGammaCancel),
+		router.NewRoute("POST", "/pay/gift/order", handlers.GiftOrder),
+		router.NewRoute("POST", "/pay/gift/cards\\.pdf", handlers.GiftCardsPdf),
+		router.NewRoute("POST", "/pay/gift/check-code", handlers.GiftCheckCode),
+		// Pay with Gamma (controller/gamma_controller.go, mmm/BTCPAY.md §18):
+		// SN25 gamma deposits, charged by our spender; all by API
+		router.NewRoute("GET", "/pay/gamma/services.json", handlers.GammaServices),
+		router.NewRoute("GET", "/pay/gamma/terms", handlers.GammaTerms),
+		router.NewRoute("POST", "/pay/gamma/intent", handlers.GammaPaymentIntent),
+		router.NewRoute("POST", "/pay/gamma/status", handlers.GammaPaymentStatus),
+		router.NewRoute("GET", "/pay/gamma/settings", handlers.GammaSettings),
+		router.NewRoute("POST", "/pay/gamma/settings", handlers.GammaSetSettings),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
@@ -325,8 +355,13 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// gates as the webhooks and the payment reconciler
 		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
 		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
-		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
-		// not configured/enabled -- see vault/<env>/x402.yml.
+		// a card payment, reported when the checkout or the payment sheet
+		// finishes: read back from Stripe and credited through the webhooks'
+		// own code, so a late webhook no longer delays Pro
+		router.NewRoute("POST", "/subscription/verify-stripe-checkout", handlers.SubscriptionVerifyStripeCheckout),
+		// x402: agents pay inline (HTTP 402 + PAYMENT-SIGNATURE in v2, X-PAYMENT in
+		// v1). Both 404 while x402 is not configured/enabled -- see
+		// vault/<env>/x402.yml.
 		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),
 		router.NewRoute("POST", "/x402/purchase", handlers.X402Purchase),
 		router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
@@ -376,12 +411,33 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/sn/top", handlers.SnTop),
 		router.NewRoute("GET", "/sn/top/me", handlers.SnTopMe),
 		router.NewRoute("POST", "/sn/head/binding", handlers.SnHeadBinding),
+		router.NewRoute("GET", "/sn/fleet/device", handlers.SnFleetDevice),
+		router.NewRoute("POST", "/sn/fleet/device/signature", handlers.SnFleetDeviceSignature),
+		router.NewRoute("GET", "/sn/fleet/device/binding", handlers.SnFleetDeviceBinding),
+		router.NewRoute("POST", "/sn/fleet/device/leave", handlers.SnFleetDeviceLeave),
+		router.NewRoute("GET", "/sn/fleet/claim", handlers.SnFleetClaim),
+		router.NewRoute("POST", "/sn/fleet/authorization", handlers.SnFleetAuthorize),
+		router.NewRoute("POST", "/sn/fleet/hotkey-signatures", handlers.SnFleetHotkeySignatures),
+		router.NewRoute("POST", "/sn/fleet/top-up", handlers.SnFleetTopUp),
 		router.NewRoute("GET", "/sn/pool/claim", handlers.SnPoolClaim),
 		router.NewRoute("GET", "/sn/epoch", handlers.SnEpoch),
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
 		router.NewRoute("GET", "/sn/ledger/object", handlers.SnLedgerObject),
 		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
+		// capture the flag (sn CAPTURETHEFLAG.md §9.1) and the document of
+		// these routes, sn/api/operator.yml
+		router.NewRoute("GET", "/sn/ctf", handlers.SnCtf),
+		router.NewRoute("GET", "/sn/ctf/here", handlers.SnCtfHere),
+		router.NewRoute("GET", "/sn/ctf/client", handlers.SnCtfClient),
+		router.NewRoute("GET", "/sn/ctf/top", handlers.SnCtfTop),
+		router.NewRoute("GET", "/sn/ctf/country/([^/]+)", handlers.SnCtfCountry),
+		router.NewRoute("GET", "/sn/ctf/epoch/([^/]+)", handlers.SnCtfEpoch),
+		router.NewRoute("GET", "/sn/openapi\\.yml", handlers.SnOpenApi),
+		// the claim relay (apple BTEASY.md): what is pending and why, and Claim now
+		router.NewRoute("GET", "/sn/claim-relay", handlers.SnClaimRelay),
+		router.NewRoute("POST", "/sn/claim-relay/claim-now", handlers.SnClaimRelayClaimNow),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
+		router.NewRoute("HEAD", "/sn/attempt-artifact", handlers.SnAttemptArtifactHead),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("POST", "/sn/head-summary", handlers.SnUploadHeadSummary),
 		router.NewRoute("GET", "/sn/artifacts", handlers.SnArtifactHistory),

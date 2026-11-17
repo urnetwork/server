@@ -111,8 +111,13 @@ func TestHandlerCacheFenceNativeRedis(t *testing.T) {
 		if remaining := pttl(leaseKeys.fill); remaining <= 0 || fence < remaining {
 			t.Errorf("fenced lease expires in %v, want within (0, %v]", remaining, fence)
 		}
-		if token, exists, err := store.get(ctx, leaseKeys.fill); err != nil || !exists || token != "owner" {
-			t.Errorf("fence changed the lease to (%q, %v, %v)", token, exists, err)
+		// the fence marks the lease, so misses answer at once instead of
+		// waiting for a fill that ended
+		if token, exists, err := store.get(ctx, leaseKeys.fill); err != nil || !exists || token != handlerCacheFenceToken("owner") || !isHandlerCacheFence(token) {
+			t.Errorf("fenced lease = (%q, %v, %v), want the owner's fence marker", token, exists, err)
+		}
+		if ok, err := store.fence(ctx, leaseKeys.fill, "owner", fence); err != nil || ok {
+			t.Errorf("second fence of a fenced lease = (%v, %v), want refused", ok, err)
 		}
 
 		lease("replacement", 2*time.Minute)
@@ -122,6 +127,9 @@ func TestHandlerCacheFenceNativeRedis(t *testing.T) {
 		if remaining := pttl(leaseKeys.fill); remaining <= time.Minute {
 			t.Errorf("stale owner cut the replacement's lease to %v", remaining)
 		}
+		if token, _, err := store.get(ctx, leaseKeys.fill); err != nil || token != "replacement" {
+			t.Errorf("stale owner fence changed the replacement's lease to (%q, %v)", token, err)
+		}
 
 		lease("owner", time.Second)
 		if ok, err := store.fence(ctx, leaseKeys.fill, "owner", fence); err != nil || !ok {
@@ -129,6 +137,22 @@ func TestHandlerCacheFenceNativeRedis(t *testing.T) {
 		}
 		if remaining := pttl(leaseKeys.fill); remaining <= 0 || time.Second < remaining {
 			t.Errorf("fence extended a 1s lease to %v", remaining)
+		}
+		if token, _, err := store.get(ctx, leaseKeys.fill); err != nil || token != handlerCacheFenceToken("owner") {
+			t.Errorf("short fenced lease = (%q, %v), want the owner's fence marker", token, err)
+		}
+
+		// a lease set without an expiry gets the fence's
+		if err := handlerCacheRedisOperation(ctx, func(client server.RedisClient) error {
+			return client.Set(ctx, leaseKeys.fill, "owner", 0).Err()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := store.fence(ctx, leaseKeys.fill, "owner", fence); err != nil || !ok {
+			t.Errorf("unexpiring lease fence = (%v, %v), want applied", ok, err)
+		}
+		if remaining := pttl(leaseKeys.fill); remaining <= 0 || fence < remaining {
+			t.Errorf("fenced unexpiring lease expires in %v, want within (0, %v]", remaining, fence)
 		}
 
 		if err := handlerCacheRedisOperation(ctx, func(client server.RedisClient) error {
@@ -141,6 +165,92 @@ func TestHandlerCacheFenceNativeRedis(t *testing.T) {
 		}
 		if _, exists, err := store.get(ctx, leaseKeys.fill); err != nil || exists {
 			t.Errorf("fence recreated an expired lease: (%v, %v)", exists, err)
+		}
+	})
+}
+
+// On real Redis, a miss that overlaps a fill in progress waits for it and
+// answers with the owner's value, with no fill of its own, and a miss of a
+// fenced key answers 503 at once.
+func TestHandlerCacheOverlappingMissNativeRedis(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		store := redisHandlerCacheStore{}
+		id := server.NewId().String()
+		waitedKey := "overlap-native-waited-" + id
+		fencedKey := "overlap-native-fenced-" + id
+		defer func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+			defer cleanupCancel()
+			_ = handlerCacheRedisOperation(cleanupCtx, func(client server.RedisClient) error {
+				for _, key := range []string{waitedKey, fencedKey} {
+					keys := newHandlerCacheKeys(key)
+					if err := client.Del(cleanupCtx, keys.value, keys.fill).Err(); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+		}()
+
+		started, finish := make(chan struct{}), make(chan struct{})
+		owner := make(chan handlerCacheTestCallResult, 1)
+		go func() {
+			value, err := cacheJson(ctx, store, waitedKey, 10*time.Second, func() (*handlerCacheTestResult, error) {
+				close(started)
+				select {
+				case <-finish:
+				case <-ctx.Done():
+				}
+				return &handlerCacheTestResult{Message: "owner"}, nil
+			})
+			owner <- handlerCacheTestCallResult{value, err}
+		}()
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		overlapping := make(chan handlerCacheTestCallResult, 1)
+		duplicates := 0
+		go func() {
+			value, err := cacheJson(ctx, store, waitedKey, 10*time.Second, func() (*handlerCacheTestResult, error) {
+				duplicates += 1
+				return &handlerCacheTestResult{Message: "duplicate"}, nil
+			})
+			overlapping <- handlerCacheTestCallResult{value, err}
+		}()
+		select {
+		case result := <-overlapping:
+			t.Fatalf("overlapping miss answered (%v, %v) while the owner's fill ran, want it waiting", result.value, result.err)
+		case <-time.After(300 * time.Millisecond):
+		}
+		close(finish)
+		if result := <-owner; result.err != nil || result.value == nil || result.value.Message != "owner" {
+			t.Fatalf("native owner = (%v, %v)", result.value, result.err)
+		}
+		if result := <-overlapping; result.err != nil || result.value == nil || result.value.Message != "owner" || duplicates != 0 {
+			t.Fatalf("native overlapping miss = (%v, %v) with %d fills, want the owner's value", result.value, result.err, duplicates)
+		}
+
+		if _, err := cacheJson(ctx, store, fencedKey, 10*time.Second, func() (*handlerCacheTestResult, error) {
+			return nil, errors.New("synthetic fill failure")
+		}); err == nil {
+			t.Fatal("failed fill returned no error")
+		}
+		asked := time.Now()
+		if value, err := cacheJson(ctx, store, fencedKey, 10*time.Second, func() (*handlerCacheTestResult, error) {
+			t.Error("a miss filled under a fence")
+			return nil, nil
+		}); value != nil || !isHandlerCacheUnavailable(err) {
+			t.Fatalf("miss of a fenced key = (%v, %v), want 503", value, err)
+		}
+		// at once, not after the wait limit (generous for a loaded machine)
+		if waited := time.Since(asked); handlerCacheFillWaitLimit/5 <= waited {
+			t.Errorf("miss of a fenced key answered after %v, want at once", waited)
 		}
 	})
 }

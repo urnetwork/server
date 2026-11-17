@@ -287,11 +287,20 @@ func (self *proxyClientNotification) watch(host string, block string) {
 				// the same range is retried on the next poll
 				glog.Infof("[proxy]proxy clients callback err=%s (will retry)\n", err)
 			}
-		} else if !initialSyncDone {
-			// an empty successful read IS a complete initial sync: this
-			// host/block has no proxy clients to restore
-			initialSyncDone = true
-			self.initialSyncWatchDone()
+		} else {
+			// nothing to deliver: any change read belongs to a proxy that can
+			// never be delivered (its client is deactivated, or its row is
+			// removed), so the next poll starts at the newest of them instead
+			// of re-reading the range
+			if nextChangeId < maxChangeId {
+				nextChangeId = maxChangeId
+			}
+			if !initialSyncDone {
+				// an empty successful read IS a complete initial sync: this
+				// host/block has no proxy clients to restore
+				initialSyncDone = true
+				self.initialSyncWatchDone()
+			}
 		}
 		select {
 		case <-self.ctx.Done():

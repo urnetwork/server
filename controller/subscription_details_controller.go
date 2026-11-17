@@ -49,7 +49,7 @@ const SubscriptionCadenceYearly = "yearly"
 const SubscriptionCadenceMonthly = "monthly"
 
 type SubscriptionDetail struct {
-	// the market: stripe | apple | google | solana | monero | zcash | manual | x402 | "" (unknown)
+	// the market: stripe | apple | google | solana | monero | zcash | bittensor | bitcoin | ethereum | manual | x402 | "" (unknown)
 	Store string `json:"store"`
 	// the wire plan value ("supporter"); the ui names it Pro
 	Plan string `json:"plan"`
@@ -69,8 +69,12 @@ type SubscriptionDetail struct {
 	ManageUrl string `json:"manage_url"`
 	// the store handle, for support: invoice id (stripe), original transaction
 	// id (apple), purchase token (google), payment reference (solana), invoice
-	// id (monero, zcash)
+	// id (monero, zcash, bittensor, bitcoin, ethereum, and solana paid in SOL)
 	TransactionId string `json:"transaction_id,omitempty"`
+	// a one-time crypto year's coin: usdc_solana | sol | xmr | zec | tao |
+	// btc | eth. USDC and native SOL share the solana store; this tells them
+	// apart for the whole term. Left out for the other stores
+	CryptoAsset string `json:"crypto_asset,omitempty"`
 	// the store is retrying a renewal whose payment did not go through (Stripe
 	// past_due or unpaid): the customer should update the payment method
 	// (POST /stripe/customer-portal with flow payment_method_update) or pay
@@ -117,6 +121,8 @@ type subscriptionStoreLookupSet struct {
 	apple  func(ctx context.Context, originalTransactionId string) (*subscriptionStoreState, error)
 	google func(ctx context.Context, purchaseToken string) (*subscriptionStoreState, error)
 	solana func(ctx context.Context, reference string) (*subscriptionStoreState, error)
+	// intentId is the renewal's transaction id (gamma_credit.go)
+	gamma func(ctx context.Context, intentId string) (*subscriptionStoreState, error)
 }
 
 var subscriptionStoreLookups = subscriptionStoreLookupSet{
@@ -124,6 +130,7 @@ var subscriptionStoreLookups = subscriptionStoreLookupSet{
 	apple:  appleLookupSubscriptionState,
 	google: playLookupSubscriptionState,
 	solana: solanaLookupSubscriptionState,
+	gamma:  gammaLookupSubscriptionState,
 }
 
 func subscriptionDetailsCacheKey(networkId server.Id) string {
@@ -316,7 +323,13 @@ func buildSubscriptionDetails(
 		case model.SubscriptionMarketGoogle:
 			detail.ManageUrl = googleManageSubscriptionsUrl
 			detail.TransactionId = renewal.PurchaseToken
-		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
+			detail.TransactionId = renewal.TransactionId
+			detail.CryptoAsset = model.CryptoRenewalAsset(ctx, store, renewal.TransactionId)
+		case model.SubscriptionMarketGamma:
+			// renewal is switched with POST /pay/gamma/settings
+			detail.ManageUrl = gammaManageUrl
 			detail.TransactionId = renewal.TransactionId
 		}
 
@@ -379,6 +392,12 @@ func lookupSubscriptionStoreState(
 		}
 		state.AutoRenew = boolPtr(false)
 		return state, nil
+	case model.SubscriptionMarketGamma:
+		// renews from the deposit unless the account turned it off
+		if lookups.gamma == nil {
+			return nil, errors.New("no gamma lookup")
+		}
+		return lookups.gamma(lookupCtx, renewal.TransactionId)
 	default:
 		return &subscriptionStoreState{AutoRenew: boolPtr(false)}, nil
 	}
@@ -497,6 +516,9 @@ func (self *stripeCustomerSubscription) cadence() string {
 	}
 	return ""
 }
+
+// Stripe's status for a subscription whose renewal failed and is being retried.
+const stripeSubscriptionStatusPastDue = "past_due"
 
 // stripeSubscriptionBilling reports whether Stripe still bills this
 // subscription: the statuses with a live period. past_due is still a
@@ -676,6 +698,25 @@ func stripeSetCancelAtPeriodEnd(ctx context.Context, subscriptionId string, canc
 	return sub, nil
 }
 
+// Ends the subscription at once and returns Stripe's view of it afterwards. Stripe stops collecting its open invoices.
+func stripeCancelSubscriptionNow(ctx context.Context, subscriptionId string) (*stripeCustomerSubscription, error) {
+	sub, err := server.HttpDelete[*stripeCustomerSubscription](
+		ctx,
+		fmt.Sprintf("%s/v1/subscriptions/%s", stripeApiBaseUrl, url.PathEscape(subscriptionId)),
+		stripeAuthHeader,
+		server.HttpResponseRequireStatusOk[*stripeCustomerSubscription](
+			server.ResponseJsonObject[*stripeCustomerSubscription],
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cancel subscription %s: %w", subscriptionId, err)
+	}
+	if sub == nil || sub.Id != subscriptionId || sub.Status != "canceled" {
+		return nil, fmt.Errorf("cancel subscription %s: Stripe did not confirm it", subscriptionId)
+	}
+	return sub, nil
+}
+
 // ----- apple -----
 
 // appleLookupSubscriptionState asks production first. Where apple.yml accepts
@@ -734,8 +775,16 @@ func appleSubscriptionState(statuses *appleSubscriptionStatusesResponse) *subscr
 		Active: transaction.entitled(),
 	}
 	autoRenewSwitch := -1
+	// in billing grace the customer is entitled to the grace period's end, past
+	// the lapsed expiry
+	var graceExpires *time.Time
 	if transaction.SignedRenewalInfo != "" {
 		if claims, err := appleDecodeJwsPayload(transaction.SignedRenewalInfo); err == nil {
+			if transaction.Status == appleStatusBillingGrace {
+				if t, ok := appleGracePeriodExpires(claims); ok {
+					graceExpires = &t
+				}
+			}
 			if v, ok := claims["autoRenewStatus"].(float64); ok {
 				autoRenewSwitch = int(v)
 			}
@@ -756,6 +805,9 @@ func appleSubscriptionState(statuses *appleSubscriptionStatusesResponse) *subscr
 				}
 			}
 		}
+	}
+	if graceExpires != nil && (state.EndTime == nil || state.EndTime.Before(*graceExpires)) {
+		state.EndTime = graceExpires
 	}
 	switch {
 	case !transaction.entitled():
@@ -927,6 +979,8 @@ func subscriptionCancelError(code string, message string, manageUrl string) *Sub
 
 // SubscriptionCancel answers POST /subscription/cancel: the Stripe
 // subscription runs out at the end of the paid period and is not billed again.
+// One whose renewal is failing has no paid period left, and ends now, so its
+// retries stop.
 func SubscriptionCancel(args *SubscriptionCancelArgs, clientSession *session.ClientSession) (*SubscriptionCancelResult, error) {
 	return stripeSetSubscriptionCancelAtPeriodEnd(args, clientSession, true)
 }
@@ -958,14 +1012,21 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 	case model.SubscriptionMarketSolana:
 		return subscriptionCancelError(
 			SubscriptionErrorCodeDoesNotRenew,
-			"A USDC payment covers one period and does not renew. There is nothing to cancel.",
+			"A USDC or SOL payment covers one period and does not renew. There is nothing to cancel.",
 			"",
 		)
-	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 		return subscriptionCancelError(
 			SubscriptionErrorCodeDoesNotRenew,
 			"A crypto payment covers one period and does not renew. There is nothing to cancel.",
 			"",
+		)
+	case model.SubscriptionMarketGamma:
+		return subscriptionCancelError(
+			SubscriptionErrorCodeNotCancelable,
+			"A plan paid with Gamma renews from your deposit. Turn renewal off with POST /pay/gamma/settings and auto_renew false.",
+			gammaManageUrl,
 		)
 	default:
 		return subscriptionCancelError(SubscriptionErrorCodeNotCancelable, "This subscription cannot be cancelled here.", "")
@@ -1020,6 +1081,30 @@ func stripeSetSubscriptionCancelAtPeriodEnd(
 	}
 	if !stripeSubscriptionBilling(sub.Status) {
 		return subscriptionCancelError(SubscriptionErrorCodeNoSubscription, "No Stripe subscription is billing this network.", ""), nil
+	}
+	if cancelAtPeriodEnd && sub.Status == stripeSubscriptionStatusPastDue {
+		// Cancelling at the period's end leaves the open renewal invoice on Stripe's
+		// retry schedule, so a card could be charged after the customer cancelled.
+		// The period being billed was never paid, so cancelling now loses nothing,
+		// and it stops collection of the subscription's open invoices. Pro from the
+		// last window's grace ends at the next hourly reconcile.
+		canceled, err := stripeCancelSubscriptionNow(lookupCtx, sub.Id)
+		if err != nil {
+			glog.Infof("[sub]cancel: cancel past due stripe subscription %s: %v\n", sub.Id, err)
+			return subscriptionCancelError(
+				SubscriptionErrorCodeStoreUnavailable,
+				"Could not update the subscription with Stripe. Please try again.",
+				"",
+			), nil
+		}
+		clearSubscriptionDetailsCached(ctx, networkId)
+		now := server.NowUtc()
+		glog.Infof("[sub]stripe subscription %s for %s: past due, cancelled now (%s)\n", canceled.Id, networkId, canceled.Status)
+		return &SubscriptionCancelResult{
+			Store:     model.SubscriptionMarketStripe,
+			EndTime:   &now,
+			AutoRenew: boolPtr(false),
+		}, nil
 	}
 	if sub.CancelAtPeriodEnd != cancelAtPeriodEnd {
 		updated, err := stripeSetCancelAtPeriodEnd(lookupCtx, sub.Id, cancelAtPeriodEnd)

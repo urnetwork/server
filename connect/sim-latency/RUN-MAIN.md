@@ -12,19 +12,165 @@ manifest. Both modes omit the deleted `operator-proxy`; no clone, placeholder,
 branch, or pin for it is required. All historical records remain unchanged.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
-Before production activation, start with
+### Public epoch source index
+
+On every epoch activation, update [`EPOCH-SOURCE.md`](EPOCH-SOURCE.md) with a
+new section for that production season and epoch, plus its index link. Publish
+the exact round ID, source/activation generations, branch, full GitHub URLs and
+commits for every repository, canonical source-lock digest, evaluator image,
+compiler, initial margin, and versioned public-safe checkpoint evidence. Verify
+the repository map against the activated ledger and live API, not current branch
+heads. Add a section even on unchanged incumbent carry-forward; preserve prior
+entries and never label an unactivated checkpoint as active. Commit and push
+the documentation update as part of the epoch handoff, without editing frozen
+evaluation source or exposing operational config, credentials, or hidden seeds.
+
+The prepared native read-only exporter produces a Markdown preview by default,
+or a compact machine-readable public checkpoint with `--json`:
+
+```sh
+sim-latency source-index --activation-generation=N
+sim-latency source-index --activation-generation=N --json
+```
+
+It requires the authenticated `competition.source.lifecycle.v1` read capability;
+older installed code without that capability fails closed. It never fetches a
+moving origin, writes `EPOCH-SOURCE.md`, publishes refs or activates anything.
+The owner appends/commits the actual public index after checking the live scope
+and opening. A complete ten-repository map and immutable source-manifest bytes
+must reproduce the selected lock/mapping. Public repository URLs come from a
+fixed allowlist, not credential-bearing origin configuration. Instrumented
+evaluation commits and separately selected product parents remain distinct.
+
+Use the exported purpose labels literally:
+
+- `PREPARED`: authenticated prepared source, not an intake opening or grading
+  assertion.
+- `INTAKE_OPEN-evaluator_pending`: the real source-purpose intake grant, actual
+  round schedule and API acknowledgment exist; this is not a worker-ready or
+  fresh-baseline claim.
+- `GRADING_READY`: actual runtime activation, API/worker quorum, host admission
+  and immutable same-round scoring baseline are authenticated together.
+
+`ActivatedAt` alone never establishes these purposes. The exporter lists Go
+`1.27.4` as the compiler requirement; `compiler_verified` remains false unless
+independently authenticated compiler evidence exists. An absent baseline is
+printed as not established, never copied from an old or planned control. These
+new capability/command paths remain prepared release work until qualified and
+deployed; they do not assert that current production already supports them.
+
+When assuming operational control, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
-checkpoint, then verify its live process/session and linked evidence. It is a
-dated operator snapshot, not score/runtime authority or permission to restart an
+checkpoint. On the coordinator, read its referenced root-private operator record,
+then verify the live process/session and linked evidence. The repository checkpoint
+must not disclose per-job eligibility, scores, review findings or candidate progress
+before authorized finalization; those belong in protected operational storage.
+These are dated operator snapshots, not score/runtime authority or permission to restart an
 active qualification. Live season state remains authoritative in the API,
 database and the supervisor's state directory described below.
 
+Keep that file limited to public-safe control status, verified release, pending
+deployments, next actions and the protected record's path/digest. Public-safe
+superseded preparation/incident snapshots belong in the linked
+`old/CURRENT-STATE-HISTORY-*` files, with their original bytes and digest retained.
+Do not copy private per-job snapshots into repository history.
+Open history only for a specific investigation; its readiness, hold and next-action
+fields are not current instructions.
+
+### Prepared epoch-one to epoch-two operator handoff
+
+Status: `PREPARED / NOT LIVE` for the optional intake-first release. This is
+the current operator handoff plan, not evidence that a new mode, grant, source,
+baseline, qualification, migration or deployment has run. The historical default
+full-readiness flow below retains its meaning. Do not enable an automatic
+supervisor that can publish source before the required manual handoff stop.
+
+1. Finish epoch one unchanged on its existing evaluation host, frozen product
+   source/evaluator, rules, shared baseline and nine-replicate (`R=9`) scoring.
+   Drain every accepted job, including separately approved and audited recovery
+   attempts. Do not reset its baseline, change its workload, import next-epoch
+   numerical rules or re-evaluate it under a new instrument to speed the handoff.
+2. After the final seal and current reward election, materialize the elected
+   candidate with `source-review-packet` below. Earlier code inspection and
+   ranking notes remain provisional: they never select or approve a winner.
+   Preserve `packet-manifest.json` and its returned exact byte digest,
+   `candidate.json`, original `score.json`, canonical patch, archive key/version
+   metadata and the incomplete `manual-handoff-template.json` worksheet. The
+   packet contains one candidate projection, not the other submissions' code.
+3. Review honesty, safety, intentional useful-traffic suppression and credible
+   production-client benefit against the actual frozen source/instrument and
+   authenticated dataflow. Use the qualified `traffic-preservation/1` check and
+   [production-benefit addendum](evaluator/review/PRODUCTION-BENEFIT.md), including
+   concrete production reachability, changed code, causal mechanism and preserved
+   useful-work semantics. A faster score is insufficient. Missing transitive
+   context, uncertainty or provider unavailability holds review; it is not an
+   approval or a dishonest-submission verdict. A demonstrated
+   `NO_PRODUCTION_BENEFIT` result is eligibility rejection, not an allegation of
+   fraud. Record a substantiated rejection through the scoped v2 review API,
+   then reload the newly elected decision and review the next ranked candidate.
+   Never choose a replacement locally or carry an old approval to a new decision.
+4. The frozen `elected_winner_snow_union_v2` policy still requires genuine Qwen
+   and Gemma evidence and all twelve attributed findings. Expected provider names
+   in a blank template do not prove either model ran. An additional explicit,
+   persisted operator handoff disposition must stop publication until manual
+   approval binds the current elected decision, job/patch/review and exact
+   selected product source lock. A no-winner carry-forward needs its own explicit
+   disposition. The worksheet is not that persisted approval. Replacing the
+   frozen provider requirement with human-only judgment would require separate
+   policy authority and a qualified release; do not fake model provenance or
+   change a live season's provider field.
+5. After genuine approval, use native source staging/publication, not an ad-hoc
+   shell promotion. Stage fresh mode-0700 clones of `server`, `connect`, `sdk`,
+   `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `warp` and `gvisor` at
+   the exact locked commits. Apply only the accepted canonical patch and preserve
+   protected evaluator/dependency surfaces. Record the accepted patch and complete
+   selected product commit map; keep any separately approved trusted-instrument
+   child distinct from its selected product parent. For exhausted/no-winner
+   rankings, retain the incumbent product commits and margin; do not invent a
+   promotion or borrow an unshipped candidate's significance floor.
+6. Persist the immutable publication intent before any push. Recheck durable
+   authority and exact expected/new refs, publish source first and config last,
+   and resume the same commits after lost replies or partial pushes. Ref drift
+   blocks progress; do not fetch a moving source head, rebase a recorded intent,
+   force-push or change product checkouts. A newly staged config parent is chosen
+   only for a fresh intent as documented below. Update the public source-index
+   preview from authenticated records, never branch heads. Mark prepared source
+   `PREPARED`, not active, qualified or scored. The native fast-forward guard
+   assumes protected, non-rewritable branches; it is not strict frozen-old-value
+   compare-and-swap against an external force-rewind. Any observed source-ref
+   drift requires manual resolution before full activation; preserve ordinary
+   no-force publication rather than weakening that guard.
+7. Only the separately implemented, independently qualified and deployed
+   intake-first path may open epoch-two submission intake before new evaluator
+   qualification/baseline completion. It must have the real manual handoff and
+   exact source-purpose intake grant. Open a full seven-day admission window
+   from the actual opening after handoff; do not backdate it to an older reserved
+   preparation time. Publish `INTAKE_OPEN-evaluator_pending`, not runtime-ready.
+   Grade accepted submissions only after the actual exact-source/image runtime
+   quorum, grading activation and immutable fresh same-round scoring baseline
+   are authenticated. A source pin, API intake acknowledgment, prepared image or
+   planned baseline is not worker readiness or a scoring control. Until this
+   path is qualified/deployed, its absence remains an explicit blocker rather
+   than permission to bypass the default gates.
+
+The owner-approved next-epoch G2 choice is floors-only at 95%; it is prospective,
+not an epoch-one change or proof of deployed enforcement. The owner-approved
+epoch-two-and-later G7 rule is separately at least 95% of the same-round baseline
+page coverage and byte coverage. A baseline coverage of 80% therefore requires
+at least 76%, not 75% or 79%. The prospective public fields are
+`expected.minimum_page_coverage_ratio` and
+`expected.minimum_byte_coverage_ratio`. Implementation, deterministic tests and
+release qualification must establish those semantics before grading; do not
+publish the old provisional one-percentage-point or five-percentage-point rule
+as the new policy. Intentional useful-traffic suppression remains prohibited
+regardless of numerical floor headroom.
+
 ## Agent model roles
 
-Go 1.27.3 is mandatory for competition builds and tests. Select the actual
-installed 1.27.3 toolchain before invoking launchers and set `GOTOOLCHAIN=local`;
+Go 1.27.4 is mandatory for competition builds and tests. Select the actual
+installed 1.27.4 toolchain before invoking launchers and set `GOTOOLCHAIN=local`;
 do not rely on a newer toolchain being downloaded or automatically selected.
-Evaluator images and promoted binary metadata must bind exactly Go 1.27.3.
+Evaluator images and promoted binary metadata must bind exactly Go 1.27.4.
 
 Use Sol 6.1 (`gpt-6.1-sol`) with low reasoning for all test execution,
 including preflight, submission validation, post-promotion smoke tests, and
@@ -294,6 +440,43 @@ Do not leave a reviewer agent acting as the scheduler. The supervisor's default
 choice is safe carry-forward; separately prepared promotion intents require the
 real source-review, exact-base, patch and deadline interlocks before selection.
 
+### Fast control-plane fixes
+
+The main API, supervisor, runner and recovery CLI are trusted control programs,
+not the submitted product or scoring instrument. Ship their correctness fixes
+with a normal cached Go build, one run of the affected regression tests, focused
+race checks for changed concurrent ownership, and a deployment smoke test. Use
+isolated PostgreSQL/Redis when the change touches durable state. Additive
+migrations must still work with the currently serving release.
+Normal trusted builds may download their required modules through the approved
+Go proxy/checksum service. Repair missing dependency declarations or checksums
+when required by the imports, without unrelated version upgrades. The offline
+build restriction remains for untrusted submission builds, not this control-plane
+development step.
+
+Do not require two builds to produce identical bytes, repeatedly rebuild
+unchanged dependencies, replay the entire historical qualification suite, or
+restart validation for documentation-only changes. Record the artifact actually
+deployed and retain its test results; a digest identifies that artifact, not a
+requirement to recreate it byte-for-byte. Reuse valid earlier evidence for
+unchanged code. Extra repetitions are for a demonstrated intermittent failure,
+not a universal release prerequisite.
+
+Deploy worker changes at a verified idle boundary, smoke-test readiness and
+heartbeats, authorize recoveries, then release the claim hold and verify the
+first recovery. Keep
+original submission order, failure history and evaluation deadlines. This fast
+path does not change the frozen evaluated source, scorer, shared epoch baseline,
+R9 measurements, significance rules, artifact authentication or sandbox limits.
+Changes to those competition inputs still need an explicit epoch policy decision.
+
+On evaluation hosts, install `evaluator/needrestart-competition.conf` as
+`/etc/needrestart/conf.d/urnetwork-competition.conf`. Security updates still
+install, but competition-owned services are excluded from automatic
+package-triggered restarts. Apply their pending restarts under a claim hold at
+a verified idle boundary; do not leave patched runtime libraries indefinitely
+pending. Installing this configuration does not itself restart any service.
+
 #### Preparation-only qualification boundary — installed inactive
 
 The new native CLI adds `supervise --once --prepare-only` for one explicit
@@ -349,7 +532,7 @@ checkpoint/image remains historical evidence, not qualification for new staging.
 
 After those distinct review/publication steps, these commands verify the frozen
 record and build its new evaluator. `source-record` verifies existing refs; it
-does not freeze, publish, or approve them. The new builder pins Go 1.27.3 and
+does not freeze, publish, or approve them. The new builder pins Go 1.27.4 and
 marks the image explicitly as staging. Sol 6.1 low executes all build/test and
 qualification steps; a successful image build alone is not runtime readiness.
 
@@ -535,12 +718,19 @@ sim-latency source-review-packet --round-id=ROUND_ID --job-id=JOB_ID \
 
 This read-only command requires existing trusted database/archive access. It
 creates a new mode-0700 directory with read-only evidence, verifies archive
-identities, exports no seed/request secrets, and never records approval. Inspect
-the code and all six criteria. Copy the packet's `review-template.json` into a
+identities, exports no seed/request secrets, and never records approval. Its
+`packet-manifest.json` hashes the exact exported files, and the command returns
+that manifest's byte digest as `packet_manifest_sha256`. Candidate metadata
+preserves the frozen reviewer policy, current elected-decision digest and exact
+score archive object version/length. The archive manifest is bound by its sealed
+content digest; no unavailable manifest-object version is invented. A local
+packet digest identifies prepared bytes, not a new signature or authorization.
+Inspect the code and all six criteria per required provider. Copy the packet's `review-template.json` into a
 new private `review.json`; do not edit the read-only evidence packet. Fill every
 actual finding, explicit dispositions, public reasons and private-evidence
 digest before submitting with `review-v2`. The template includes exact evidence
-identities and expected revision but is deliberately invalid until real review
+identities, expected revision/decision and policy-specific blank finding census
+(twelve for current Snow, eighteen for historical three-member Snow), but is deliberately invalid until real review
 is complete; it never supplies passing findings. After a
 genuine separate source approval, Sol 6.1 max may prepare a proposal ahead of the deadline:
 

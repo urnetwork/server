@@ -39,7 +39,7 @@ func requireCompetitionV2ControlPrincipal(w http.ResponseWriter, r *http.Request
 // Each pause maps to exactly one capability; no broad operator or submitter fallback exists.
 func competitionHoldRole(kind string) string {
 	switch kind {
-	case "admission", "evaluation":
+	case "admission", "evaluation", "finalization":
 		return competitionSchedulerRole
 	case "source_activation":
 		return competitionSourcePromoterRole

@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-11T20:57:55Z",
+  "kind": "competition-operational-recovery-snapshot/v1",
+  "epoch": 2,
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "control_source_commit": "68817f6d3ea96b7a8179c7af63808d504560af32",
+  "api": {
+    "release": "2026.11.11-outerwerld+1096286830",
+    "all_replica_rollout_completed_at_ops": "2026-11-11T20:38:51Z",
+    "info_status": 200,
+    "intake_ready": true,
+    "grading_ready": true,
+    "publication_held": false,
+    "authenticated_readyz_checks_passed": 11,
+    "root_cause": "CPU-dependent math.Exp results differed by up to four representable steps in interior diagnostic p-values. Exact comparison rejected genuine retained admission evidence on the serving CPUs.",
+    "fix": "Permit at most four representable steps only for interior diagnostic p-values, preserving the significance classification. Endpoints, all other statistics, samples, identities, canonical hashes and original admission verdicts remain exact."
+  },
+  "coordinator": {
+    "native_sha256": "b5f01cc255ebae20608ea1ec3a2705eeb87f7880c83ebce6284b2eeda61ffd91",
+    "distribution_image_id": "sha256:bcc739199966dd69c150bb5eb50d56e28838c4bceddce6a1a96ce47bf15e7f6d",
+    "installed_at": "2026-11-11T20:40:57Z",
+    "restart_observed_minute_utc": "2026-11-11T20:41Z",
+    "root_cause": "Complete attempted INSERT ON CONFLICT for an already frozen baseline; PostgreSQL correctly ran the protective BEFORE INSERT trigger before conflict handling.",
+    "fix": "Read and authenticate the exact existing baseline under a shared row lock. Insert only when genuinely absent, retaining every original trigger and provenance check.",
+    "original_measurements_rerun": false,
+    "original_deadlines_extended": false
+  },
+  "hosts": {
+    "evaluator_image_unchanged": "sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702",
+    "baseline_unchanged": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+    "both_original_execution_qualifications_passed_fresh_signed_checks": true,
+    "management_memory_limit_unchanged_bytes": 8589934592,
+    "bounded_memory_cache_companion_enabled_on_both": true,
+    "companion_sha256": "1e953bf8b4b9b19c8d27933da31902be31fe9d52194df24474b559a29c73e5d4",
+    "companion_first_passes_issued_reclaim": false,
+    "companion_receipts_private": [
+      "/mnt/data/competition-management-cache-deploy-20261111.ViedKmRz/deployment-enabled.private.json",
+      "/home/by/sim-latency/competition-management-cache-deploy-20261111.AG3ytmYi/deployment-enabled.private.json"
+    ],
+    "disk_incident": "Sille fell below its unchanged 32 GiB backing-filesystem reserve. Only regenerable host Docker build cache and Go build cache were cleared; no submission evidence, baseline, images or volumes were deleted.",
+    "sille_backing_available_bytes_at_205553": 44153614336,
+    "disk_cleanup_is_not_part_of_memory_cache_companion": true
+  },
+  "queue": {
+    "succeeded": 1,
+    "failed": 1,
+    "running": 2,
+    "queued": 11,
+    "first_goofe_job": "01a1c3d3-33b2-748e-0a41-13865c601352",
+    "first_goofe_outcome": "succeeded before its original deadline",
+    "first_sille_job": "01a1c402-9ca1-79d8-e114-5af7c2ef343d",
+    "first_sille_outcome": "failed after its original deadline; completed native measurements do not authorize a late score",
+    "first_sille_slot_released": true,
+    "next_goofe_job": "01a1c4af-c928-3e6a-d183-6c9f319cc119",
+    "next_goofe_started_at": "2026-11-11T20:52:17.050115Z",
+    "next_sille_job": "01a1c4f7-aedc-bdbc-1562-5c0ad5d3bb89",
+    "next_sille_started_at": "2026-11-11T20:57:19.556777Z",
+    "failed_job_recovery_authorized": false,
+    "recovery_constraint": "Existing typed recovery classes do not cover this exact first-attempt retention-over-deadline incident. Prepare a narrow reviewed amendment; authorization requires an evaluation hold and no running evaluation. Preserve the original failure, submission order, patch, source, baseline and fee."
+  },
+  "verification": {
+    "controller_ordinary_passes": 48,
+    "controller_race_passes": 48,
+    "companion_ordinary_passes": 48,
+    "companion_race_passes": 48,
+    "failures": 0,
+    "controller_ordinary_log_sha256": "695f842d9d7fce3eeda4acc02f3114be25d1ded15660284fa8378b66939f4c71",
+    "controller_race_log_sha256": "92d05feedc831ea3c6000229d1594f69cccd51fb662d223e9b6385b98bed9bc8",
+    "companion_ordinary_log_sha256": "c48ddc4ef65ff8ddb8047ed99466bceb4979db17b1ec412551a619485442405d",
+    "companion_race_log_sha256": "7490ec30895c0277548e3dc1a90f471efec9ffdf7013c1318d974ab618a5ca20",
+    "actual_first_candidate_completion_proves_existing_baseline_path": true,
+    "broader_adjacent_suite_not_claimed": true
+  }
+}

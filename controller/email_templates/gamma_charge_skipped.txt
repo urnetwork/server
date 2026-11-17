@@ -1,0 +1,12 @@
+{{define "headline"}}A GAMMA CHARGE DID NOT GO THROUGH{{end}}
+{{define "why"}}You received this because your URnetwork account pays with SN25 Gamma automatically.{{end}}
+{{define "content"}}
+We tried to charge {{.AmountGamma}} gamma for {{.Description}} ({{.PurposeText}}) from your deposit, and the chain skipped it: {{.ReasonText}}
+
+{{.FixText}} We try again only after your deposit changes.
+
+Deposit hotkey: {{.DepositHotkey}}
+Subnet: {{.Netuid}}
+
+Open your account: https://ur.io/app/account
+{{end}}

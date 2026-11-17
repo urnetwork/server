@@ -25,7 +25,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-const competitionHostQualificationProfile = "sim-latency-host-readiness/v1"
+const competitionHostQualificationProfile = "sim-latency-host-readiness/v2"
 const competitionHostQualificationTimeout = 15 * time.Minute
 const competitionHostQualificationComment = "// competitionHostReadinessProbe exercises the authenticated evaluator without changing behavior."
 
@@ -149,11 +149,15 @@ func LoadCompetitionHostQualificationConfig(path string) (*CompetitionHostQualif
 // the entire operation a separate fifteen-minute cancellation boundary.
 func competitionHostQualificationSettings(settings *Settings) *Settings {
 	copy := *settings
+	copy.EvaluationPolicy = settings.EvaluationPolicy.Clone()
 	policy := &copy.EvaluationPolicy
 	policy.ProviderCount, policy.ClientPoolSize, policy.ArrivalsPerMinute, policy.QualityWindowSize = 32, 8, 16, 8
 	policy.ExchangeHosts, policy.FleetShards = 1, 0
 	policy.RampMs, policy.PrewarmMs, policy.SettleMs = 0, 5000, 0
-	policy.ClientWarmupTimeoutMs, policy.DurationMs, policy.RequestTimeoutMs = 60000, 30000, 30000
+	// The frozen scheduler's short-window probes span exactly90%, leaving no
+	// allowance for the first observation's latency. Above100s its10s cadence
+	// gives this readiness-only fixture positive headroom without relaxing G4.
+	policy.ClientWarmupTimeoutMs, policy.DurationMs, policy.RequestTimeoutMs = 60000, 120000, 30000
 	policy.PipelineIntervalMs, policy.TestTimeoutMs, policy.AnnounceTimeoutMs = 100, 3000, 2000
 	policy.ImpairmentEnabled, policy.Replicates = false, 1
 	return &copy
@@ -519,13 +523,14 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 	}
 	if result.Schema != 1 || result.JobId != request.JobId || result.EvalError != nil || validateScore(result.Score) != nil || !result.Score.Placeable ||
 		!scoreMatchesFrozenMargin(result.Score, request.EvaluationPolicy.TakeoverMargin) ||
-		!scoreMatchesFrozenG2Policy(result.Score, request.EvaluationPolicy.G2VolumePolicy) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
+		!scoreMatchesFrozenG2Policy(result.Score, request.EvaluationPolicy.G2VolumePolicy, request.EvaluationPolicy.WorkCoveragePolicy) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
 		return errors.New("host-readiness evaluation did not pass its score and security gates")
 	}
-	if len(result.Score.Gates) != 6 {
-		return errors.New("host-readiness score does not contain exactly the six required gates")
+	names, err := model.CompetitionScoreRequiredGateNames(result.Score)
+	if err != nil || len(result.Score.Gates) != len(names) {
+		return errors.New("host-readiness score does not contain exactly its versioned required gates")
 	}
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	for _, name := range names {
 		if gate, ok := result.Score.Gates[name]; !ok || !gate.Passed {
 			return errors.New("host-readiness score has a missing or failed required gate")
 		}
@@ -570,15 +575,11 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 	if err != nil {
 		return err
 	}
-	var scoreDocument struct {
-		ScoreResult
-		EvalError json.RawMessage `json:"eval_error"`
-	}
-	if json.Unmarshal(scoreBytes, &scoreDocument) != nil || len(scoreDocument.EvalError) != 0 && !bytes.Equal(bytes.TrimSpace(scoreDocument.EvalError), []byte("null")) {
+	projectedScore, err := model.ProjectCompetitionScorerDocument(scoreBytes)
+	if err != nil {
 		return errors.New("host-readiness scorer document contains an evaluation error")
 	}
-	scoreDocument.TakeoverEligible, _ = scoreDocument.Diagnostics["baseline_takeover_eligible"].(bool)
-	expectedScore, err := json.Marshal(&scoreDocument.ScoreResult)
+	expectedScore, err := json.Marshal(projectedScore)
 	if err != nil {
 		return err
 	}
@@ -849,7 +850,9 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 			case <-time.After(5 * time.Second):
 			}
 			probeCtx, cancel := context.WithTimeout(operationCtx, 5*time.Second)
-			_, err := CheckCompetitionPreparationFence(probeCtx, settings, request)
+			// Observe authority without contending with the synchronous source
+			// fence or repeatedly transporting its immutable manifest.
+			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
 			if err == nil {
 				err = checkCompetitionQualificationSlot(probeCtx, owner)
 			}

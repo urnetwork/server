@@ -1,11 +1,38 @@
-{{define "headline"}}YOUR PAYMENT DIDN'T GO THROUGH{{end}}
-{{define "why"}}Sent to the address on your URnetwork account when a UR Pro
+{{define "headline"}}{{if .ActionRequired}}CONFIRM YOUR PAYMENT{{else}}YOUR PAYMENT DIDN'T GO THROUGH{{end}}{{end}}
+{{define "why"}}{{if .ActionRequired}}Sent to the address on your URnetwork account when your bank needs
+you to confirm a UR Pro payment billed through Stripe. You get at most
+two of these for each payment: one when it first needs confirming, and
+one before the subscription ends.{{else}}Sent to the address on your URnetwork account when a UR Pro
 renewal billed through Stripe doesn't go through. You get at most two of
 these for each payment: one when it first fails, and one before the
-subscription ends.{{end}}
+subscription ends.{{end}}{{end}}
 {{define "content"}}
 {{.Amount}} due
-{{if .Final}}
+{{if .ActionRequired}}{{if .Final}}
+Your bank still needs you to confirm the payment of {{.Amount}} for your
+UR Pro subscription. This is our last reminder: if the payment isn't
+confirmed, your UR Pro subscription will end.
+{{else}}
+Your bank needs you to confirm the payment of {{.Amount}} for your UR Pro
+subscription before it can go through. Confirm the payment to keep
+UR Pro.
+{{end}}{{if .HostedInvoiceUrl}}
+Confirm the payment: {{.HostedInvoiceUrl}}
+
+To pay with another card instead, update your payment method:
+{{.UpdatePaymentUrl}}
+
+The invoice opens on Stripe, our payment processor, where your bank
+asks you to confirm the payment.
+{{else}}
+Confirm the payment: {{.UpdatePaymentUrl}}
+
+Sign in at ur.io and open Manage Subscription to confirm the payment
+or update your payment method.
+{{end}}
+If you already confirmed the payment, you can ignore this email.
+Questions? Contact support@ur.io.
+{{else}}{{if .Final}}
 We still couldn't collect {{.Amount}} for your UR Pro renewal. This is
 our last reminder: if the payment doesn't go through, your UR Pro
 subscription will end.{{if .NextAttemptDate}} The next automatic attempt is on
@@ -28,4 +55,4 @@ Update your payment method: {{.UpdatePaymentUrl}}
 To update your payment method, sign in at ur.io, open Manage
 Subscription and choose "Update payment method". If you already paid,
 you can ignore this email. Questions? Contact support@ur.io.
-{{end}}
+{{end}}{{end}}

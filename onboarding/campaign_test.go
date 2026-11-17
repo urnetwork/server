@@ -71,6 +71,10 @@ func TestE2(t *testing.T) {
 	if d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != VariantNotActivated || d.NextStep != StepE3 {
 		t.Errorf("e2 not activated: %+v", d)
 	}
+	// the widget email goes to a phone whose app has the widget
+	// (TestE2WidgetEmailOnlyWhereThereIsAWidget)
+	f.Platform = "android"
+	f.WidgetBuild = true
 	f.HasConnected = true
 	d = Decide(StepE2, f)
 	if d.Action != ActionSend || d.Variant != VariantActivated {
@@ -84,9 +88,11 @@ func TestE2(t *testing.T) {
 }
 
 func TestPathA(t *testing.T) {
-	// E3a: the in-app offer's last day
+	// E3a: the in-app offer's last day (it ends within LastChanceWindow;
+	// TestE3aOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d := Decide(StepE3, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningJoined || d.NextStep != StepE4 {
 		t.Errorf("e3a active: %+v", d)
@@ -143,9 +149,11 @@ func TestPathB(t *testing.T) {
 			t.Errorf("e4b with offer %q: %+v", state, d)
 		}
 	}
-	// E5b: the emailed offer's last day
+	// E5b: the emailed offer's last day (it ends within LastChanceWindow;
+	// TestE5bOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f = healthy(PathB)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d = Decide(StepE5, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningLastNote || d.NextStep != "" {
 		t.Errorf("e5b: %+v", d)
@@ -175,6 +183,7 @@ func TestPathB(t *testing.T) {
 func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	f.NoOfferEmail = true
 	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
 		t.Errorf("e3a without an email offer: %+v", d)
@@ -185,6 +194,7 @@ func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 		t.Errorf("e4b without an email offer: %+v", d)
 	}
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	if d := Decide(StepE5, f); d.Action != ActionSkip {
 		t.Errorf("e5b without an email offer: %+v", d)
 	}
@@ -255,6 +265,73 @@ func TestSendAt(t *testing.T) {
 	}
 }
 
+func TestSendWindowNextOpen(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := DefaultSendWindow
+	for _, c := range []struct {
+		name     string
+		at, want time.Time
+	}{
+		{"before the start", time.Date(2026, 11, 4, 6, 15, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		{"the start", time.Date(2026, 11, 4, 8, 0, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		{"inside", time.Date(2026, 11, 4, 14, 5, 9, 0, ny), time.Date(2026, 11, 4, 14, 5, 9, 0, ny)},
+		{"the end", time.Date(2026, 11, 4, 21, 0, 59, 0, ny), time.Date(2026, 11, 4, 21, 0, 59, 0, ny)},
+		{"past the end", time.Date(2026, 11, 4, 21, 1, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"before midnight", time.Date(2026, 11, 4, 23, 59, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"after midnight", time.Date(2026, 11, 5, 0, 30, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		// DST ends 2026-11-01 02:00 in New York: still 08:00 wall clock
+		{"across DST", time.Date(2026, 10, 31, 22, 0, 0, 0, ny), time.Date(2026, 11, 1, 8, 0, 0, 0, ny)},
+	} {
+		if got := w.NextOpen(c.at, ny); !got.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.name, got.In(ny), c.want)
+		}
+	}
+	custom := SendWindow{StartHour: 9, StartMinute: 30, EndHour: 20}
+	if got, want := custom.NextOpen(time.Date(2026, 11, 4, 20, 5, 0, 0, ny), ny), time.Date(2026, 11, 5, 9, 30, 0, 0, ny); !got.Equal(want) {
+		t.Errorf("custom window: %s, want %s", got.In(ny), want)
+	}
+	if got, want := w.NextOpen(time.Date(2026, 11, 4, 22, 0, 0, 0, time.UTC), nil), time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("nil location = UTC: %s, want %s", got, want)
+	}
+}
+
+// A step that is already due goes out inside the window: right away while it
+// is open, else at the next window start, never tonight past the window's end
+// (SendAt's same-day clamp is already in the past there).
+func TestDueSendAt(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := DefaultSendWindow
+	for _, c := range []struct {
+		name      string
+		now, want time.Time
+	}{
+		{"past the end", time.Date(2026, 11, 4, 21, 30, 20, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"a minute on passes the end", time.Date(2026, 11, 4, 21, 0, 30, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"open", time.Date(2026, 11, 4, 14, 5, 20, 0, ny), time.Date(2026, 11, 4, 14, 6, 20, 0, ny)},
+		{"open, on the minute", time.Date(2026, 11, 4, 14, 5, 0, 0, ny), time.Date(2026, 11, 4, 14, 5, 0, 0, ny)},
+		{"before the start", time.Date(2026, 11, 4, 6, 15, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		// DST ends 2026-11-01 in New York: the next morning is 08:00 EST
+		{"past the end before DST ends", time.Date(2026, 10, 31, 22, 0, 0, 0, ny), time.Date(2026, 11, 1, 8, 0, 0, 0, ny)},
+	} {
+		got := DueSendAt(c.now, ny, w)
+		if !got.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.name, got.In(ny), c.want)
+		}
+		if got.Before(c.now) {
+			t.Errorf("%s: %s is in the past", c.name, got.In(ny))
+		}
+	}
+	if got, want := DueSendAt(time.Date(2026, 11, 4, 22, 0, 0, 0, time.UTC), nil, w), time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("nil location = UTC: %s, want %s", got, want)
+	}
+}
+
 func TestParseSendWindow(t *testing.T) {
 	w, err := ParseSendWindow("")
 	if err != nil || w != DefaultSendWindow {
@@ -291,11 +368,17 @@ func TestFormatting(t *testing.T) {
 	if FormatUsd(29.99) != "$29.99" || FormatUsd(4) != "$4" || FormatUsd(39.999) != "$40" || FormatUsd(0.5) != "$0.50" {
 		t.Errorf("usd: %s %s %s %s", FormatUsd(29.99), FormatUsd(4), FormatUsd(39.999), FormatUsd(0.5))
 	}
-	if FormatCount(4812) != "4,812" || FormatCount(999) != "999" || FormatCount(1234567) != "1,234,567" || FormatCount(0) != "0" {
+	// counts group as the template's locale does (TestCountGroupingFollowsTheLocale);
+	// these are English, and "" is English
+	if FormatCount(4812, "en") != "4,812" || FormatCount(999, "en") != "999" || FormatCount(1234567, "en") != "1,234,567" || FormatCount(0, "en") != "0" || FormatCount(4812, "") != "4,812" {
 		t.Error("count grouping")
 	}
-	if FormatGb(30) != "30 GB" || FormatGb(2.5) != "2.5 GB" {
-		t.Error("gb")
+	if FormatCount(4812, "de") != "4.812" || FormatCount(4812, "fr") != "4\u00a0812" || FormatCount(4812, "ar") != "4,812" || FormatCount(4812, "!!") != "4,812" {
+		t.Errorf("count grouping by locale: %q %q %q %q", FormatCount(4812, "de"), FormatCount(4812, "fr"), FormatCount(4812, "ar"), FormatCount(4812, "!!"))
+	}
+	// the free grant is 30 GiB (pro.yml free.data: 30gib), not 30 GB
+	if FormatGb(30) != "30 GiB" || FormatGb(2.5) != "2.5 GiB" {
+		t.Error("gib")
 	}
 	la, _ := time.LoadLocation("America/Los_Angeles")
 	at := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
@@ -319,11 +402,14 @@ func TestParamsMatchManifests(t *testing.T) {
 	base := ParamsInput{
 		// an iPhone: the App Store bills it (the direct branch is TestOfferParamsStoreBilled's)
 		Platform: "iPhone", StoreBilled: true, DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
-		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99, TrialDays: 14,
-		Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
+		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99,
+		Location: time.UTC, Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
+		// the desktop email's browser branch (TestE2DesktopParams has the app's)
+		Browser: true,
 	}
 	for _, tv := range [][2]string{
 		{TemplateE1Connect, VariantDefault}, {TemplateE2Widget, VariantActivated}, {TemplateE2Widget, VariantNotActivated},
+		{TemplateE2Widget, VariantDesktop},
 		{TemplateE3LastChance, VariantDefault}, {TemplateE4Feedback, VariantEngaged}, {TemplateE4Feedback, VariantNotActivated},
 		{TemplateE4bOffer, VariantDefault},
 	} {
@@ -353,7 +439,9 @@ func TestParamsMatchManifests(t *testing.T) {
 			t.Errorf("%s/%s params %v, manifest %v", tv[0], tv[1], gotKeys, wantKeys)
 		}
 		for k, v := range got {
-			if v == "" && k != "offer_expires_at" {
+			// crypto_line is a flag that is always "" in the store branch this
+			// base input takes (TestOfferParamsCryptoLine has its values)
+			if v == "" && k != "offer_expires_at" && k != "crypto_line" {
 				t.Errorf("%s/%s %s is empty", tv[0], tv[1], k)
 			}
 		}
@@ -368,7 +456,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		t.Errorf("reason url / floor: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateE1Connect, Token: "T", SiteUrl: "https://ur.io", DailyDataGb: 30})
-	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GB" || p["offer_expires_at"] != "" {
+	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GiB" || p["offer_expires_at"] != "" {
 		t.Errorf("e1 params: %v", p)
 	}
 	if StepLandingSlug(TemplateE3LastChance) != "offer" || StepLandingSlug(TemplateE2Widget) != "widgets" {
@@ -421,19 +509,20 @@ func TestConnectDaysNeverExceedDaysActive(t *testing.T) {
 // direct (Stripe) platforms keep the amount.
 func TestOfferParamsStoreBilled(t *testing.T) {
 	expires := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
+	// an app of unknown distribution, as every app was before it reported one
 	for _, platform := range []string{"ios", "macos", "android"} {
-		if !StoreBilledPlatform(platform) {
+		if !StoreBilledPlatform(platform, "") {
 			t.Fatalf("%s is store billed", platform)
 		}
 	}
 	for _, platform := range []string{"web", "windows", "linux", ""} {
-		if StoreBilledPlatform(platform) {
+		if StoreBilledPlatform(platform, "") {
 			t.Fatalf("%s is billed directly", platform)
 		}
 	}
 	for _, template := range []string{TemplateE3LastChance, TemplateE4bOffer} {
-		in := ParamsInput{Template: template, Variant: VariantDefault, OfferExpiresAt: &expires, OfferPriceUsd: 30, RegularYearUsd: 40, TrialDays: 14,
-			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io"}
+		in := ParamsInput{Template: template, Variant: VariantDefault, OfferExpiresAt: &expires, OfferPriceUsd: 30, RegularYearUsd: 40,
+			Location: time.UTC, Token: "tok", SiteUrl: "https://ur.io"}
 		if got := BuildParams(in)["store_billed"]; got != "" {
 			t.Fatalf("%s: direct billing has store_billed %q", template, got)
 		}

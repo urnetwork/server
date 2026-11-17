@@ -384,10 +384,10 @@ func TestLocalTransportDialsNoExchangeSocket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newLocalTransportComposedFixture(t, true, nil)
 		defer f.close()
-		attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachmentsGauge)
+		attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport])
 		f.run()
 		synctest.Wait()
-		if f.exchange.localTransport.linkCount() != 1 || testutil.ToFloat64(exchangeLocalAttachmentsGauge) != attachmentsBefore+1 {
+		if f.exchange.localTransport.linkCount() != 1 || testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]) != attachmentsBefore+1 {
 			t.Fatal("the transport did not attach in process")
 		}
 		const messageCount = 300

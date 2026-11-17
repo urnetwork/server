@@ -454,7 +454,7 @@ func TestExtenderReleaseRemovalAndBlockingNeverRefund(t *testing.T) {
 		}{
 			{name: "blocked in the country", remove: func(extenderId server.Id) {
 				for range connect.DefaultExtenderBlockedStateSettings().ReportThreshold {
-					if !RecordNetworkExtenderBlockReport(ctx, extenderId, server.NewId(), "aa", server.NowUtc()) {
+					if !RecordNetworkExtenderBlockReport(ctx, extenderId, Testing_CreateBlockReportClient(ctx, server.NewId()), "aa", server.NowUtc()) {
 						t.Fatal("a report against a probed extender was not recorded")
 					}
 				}

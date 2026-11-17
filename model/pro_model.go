@@ -16,17 +16,19 @@ import (
 // else should infer Pro from balances, subscriptions, or payments.
 //
 // Source of truth (postgres): a network is Pro iff it has an IN-WINDOW
-// transfer_balance with pro = true. The monthly Pro grant and subscription
-// activation both write pro = true; the data-only grants (data codes, the daily
-// free grant, referral bonuses) write pro = false, so buying data never makes a
-// network Pro.
+// transfer_balance with pro = true. Each paid subscription period's own balance
+// (zero bytes, the period's window with its market's grace) and the Pro grant of
+// each of the network's subscription cycles (pro_grant_cycle_model.go) both
+// write pro = true; the data-only grants (data codes, the daily free grant,
+// referral bonuses) write pro = false, so buying data never makes a network Pro.
 //
 // Entitlement is TIME-based, not byte-based: a subscriber who spends their whole
 // 10 TiB is still Pro until the balance window ends. (The `active` column on
 // transfer_balance is GENERATED AS (0 < balance_byte_count) -- bytes remaining --
-// and must not be used for this.) The monthly grant's window runs one day past the
-// end of the month, so a renewing subscriber never has a gap, and a lapsed one
-// drops to free a day after their last period.
+// and must not be used for this; a period's own balance has no bytes.) A cycle
+// grant's window runs one day past the end of its cycle, so a renewing subscriber
+// never has a gap, and a lapsed one drops to free when the period's own balance
+// ends, its market's grace after the paid end.
 //
 // The lookup sits on hot paths (client auth, connect nomination, proxy config), so
 // it is cached in redis per network. Writers call UpdateProNetwork so an upgrade is

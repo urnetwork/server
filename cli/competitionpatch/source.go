@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,6 +53,10 @@ func (self *repositoryGitExitError) Error() string {
 
 // The message contains no command output, original identity bytes or secrets.
 func (self *repositoryApplicationError) Error() string {
+	var diagnostic *repositoryGitOperationError
+	if errors.As(self.cause, &diagnostic) {
+		return "trusted source application failed: " + diagnostic.Error()
+	}
 	return "trusted source application failed: " + self.cause.Error()
 }
 
@@ -67,29 +72,32 @@ func defaultRepositoryApplySettings() repositoryApplySettings {
 
 // Exactly the trusted preparer's schema; no candidate-derived source paths.
 type repositorySourceIdentity struct {
-	Schema               int               `json:"schema"`
-	Kind                 string            `json:"kind"`
-	Temporary            bool              `json:"temporary"`
-	BaseImageId          string            `json:"base_image_id"`
-	BaseSha              string            `json:"base_sha"`
-	SourceEpoch          int               `json:"source_epoch"`
-	Staging              bool              `json:"staging"`
-	Branch               string            `json:"branch"`
-	SourceLockSha256     string            `json:"source_lock_sha256"`
-	CandidatePathBase    string            `json:"candidate_path_base,omitempty"`
-	Repositories         map[string]string `json:"repositories"`
-	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
+	Schema               int                                  `json:"schema"`
+	Kind                 string                               `json:"kind"`
+	Temporary            bool                                 `json:"temporary"`
+	BaseImageId          string                               `json:"base_image_id"`
+	BaseSha              string                               `json:"base_sha"`
+	SourceEpoch          int                                  `json:"source_epoch"`
+	Staging              bool                                 `json:"staging"`
+	Branch               string                               `json:"branch"`
+	SourceLockSha256     string                               `json:"source_lock_sha256"`
+	CandidatePathBase    string                               `json:"candidate_path_base,omitempty"`
+	Repositories         map[string]string                    `json:"repositories"`
+	CandidatePatchSha256 *string                              `json:"candidate_patch_sha256"`
+	WorkCoveragePolicy   *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 }
 
 // Keeps even unexpected Git output within the operation's memory bound.
 type repositoryGitOutput struct {
-	content bytes.Buffer
-	limit   int
+	content  bytes.Buffer
+	limit    int
+	overflow bool
 }
 
 // Refuses overflow without retaining a partial over-limit write.
 func (self *repositoryGitOutput) Write(content []byte) (int, error) {
 	if len(content) > self.limit-self.content.Len() {
+		self.overflow = true
 		return 0, errors.New("Git output exceeds source operation bound")
 	}
 	return self.content.Write(content)
@@ -151,6 +159,10 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 			operationErr = errors.Join(err, operationErr)
 		}
 	}()
+	coverage, err := authenticateRepositoryWorkCoverage(ctx, root, identityBytes, identity, policy)
+	if err != nil {
+		return nil, err
+	}
 	runGitRaw := func(repository string, args ...string) (string, error) {
 		repositoryRoot := filepath.Join(root, repository)
 		commandArgs := []string{"-C", repositoryRoot, "-c", "safe.directory=" + repositoryRoot, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
@@ -173,19 +185,14 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 		output := &repositoryGitOutput{limit: settings.MaximumOutputBytes}
 		command.Stdout, command.Stderr = output, output
 		if err := command.Run(); err != nil {
-			var exitError *exec.ExitError
-			if errors.As(err, &exitError) {
-				return output.content.String(), errors.Join(ctx.Err(), &repositoryGitExitError{exitCode: exitError.ExitCode()})
-			}
-			return "", errors.Join(ctx.Err(), errors.New("bounded trusted source Git operation failed"))
+			return output.content.String(), repositoryGitFailure(ctx, args, command, output, err)
 		}
 		return strings.TrimSpace(output.content.String()), nil
 	}
 	runGit := func(repository string, args ...string) (string, error) {
 		configured, err := runGitRaw(repository, "config", "--local", "--includes", "--name-only", "--get-regexp", `^filter\.`)
-		var exitError *repositoryGitExitError
-		if !errors.As(err, &exitError) || exitError.exitCode != 1 || configured != "" {
-			return "", errors.Join(ctx.Err(), errors.New("trusted source Git filter configuration is present or unreadable"))
+		if !repositoryGitFilterAbsent(configured, err) {
+			return "", repositorySourceFailure("trusted source Git filter configuration is present or unreadable", ctx.Err(), err)
 		}
 		return runGitRaw(repository, args...)
 	}
@@ -206,12 +213,16 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 		actualBranch, branchErr := runGit(repository, "symbolic-ref", "--quiet", "--short", "HEAD")
 		status, statusErr := runGit(repository, "status", "--porcelain=v1", "--untracked-files=all")
 		if headErr != nil || branchErr != nil || statusErr != nil || head != identity.Repositories[repository] || actualBranch != branch || status != "" {
-			return nil, errors.New("source repository differs from its pristine frozen identity")
+			return nil, repositorySourceFailure("source repository differs from its pristine frozen identity", headErr, branchErr, statusErr)
 		}
 	}
 	protectedTree, err := runGit("server", "rev-parse", "HEAD:connect/sim-latency")
 	if err != nil || !gitShaPattern.MatchString(protectedTree) {
-		return nil, errors.New("protected evaluator tree is unavailable")
+		return nil, repositorySourceFailure("protected evaluator tree is unavailable", err)
+	}
+	protectedHelpers, err := repositoryWorkCoverageSnapshot(root, coverage, runGit)
+	if err != nil {
+		return nil, err
 	}
 	patchDirectory, err := os.MkdirTemp("", "competition-routed-patches-")
 	if err != nil {
@@ -251,16 +262,20 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 		}
 		commits[repository], err = runGit(repository, "rev-parse", "HEAD")
 		if err != nil || !gitShaPattern.MatchString(commits[repository]) {
-			return nil, errors.New("candidate commit identity is unavailable")
+			return nil, repositorySourceFailure("candidate commit identity is unavailable", err)
 		}
 		status, err := runGit(repository, "status", "--porcelain=v1", "--untracked-files=all")
 		if err != nil || status != "" {
-			return nil, errors.New("candidate checkout is not clean after source application")
+			return nil, repositorySourceFailure("candidate checkout is not clean after source application", err)
 		}
 	}
 	actualTree, err := runGit("server", "rev-parse", "HEAD:connect/sim-latency")
 	if err != nil || actualTree != protectedTree {
-		return nil, errors.New("candidate changed protected evaluator source")
+		return nil, repositorySourceFailure("candidate changed protected evaluator source", err)
+	}
+	actualHelpers, err := repositoryWorkCoverageSnapshot(root, coverage, runGit)
+	if err != nil || !maps.Equal(protectedHelpers, actualHelpers) {
+		return nil, repositorySourceFailure("candidate changed protected coverage helper source", err)
 	}
 	return commits, nil
 }

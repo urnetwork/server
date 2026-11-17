@@ -197,6 +197,13 @@ func TestExtenderCamouflageReporterIsCountedOnceByTheRoute(t *testing.T) {
 	if outcome := step(); outcome != ExtenderCamouflageReportDuplicate {
 		t.Errorf("the retry = %q", outcome)
 	}
+	// The sender counts the delivery in settle, after Post returns: it has
+	// counted once it parks for its next look.
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the sender did not park after the retry")
+	}
 	series := "urnetwork_extender_camouflage_status_reports_total{country=fr,family=ipv4,verdict=camouflage_off}"
 	if count := harness.counted()[series]; count != 1 {
 		t.Errorf("%s = %v after a retry", series, count)

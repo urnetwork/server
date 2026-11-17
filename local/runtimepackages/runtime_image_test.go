@@ -24,6 +24,10 @@ func captureRuntimeImageBuild(t *testing.T, directory, epoch string) ([]string, 
 	if err := os.WriteFile(filepath.Join(root, "docker"), []byte(stub), 0700); err != nil {
 		t.Fatal(err)
 	}
+	prepare := "#!/bin/sh\nset -eu\n[ \"$1\" = -B ] && [ \"$2\" = ../prepare-runtime-packages.py ] && [ \"$3\" = \"${PWD##*/}\" ] && [ \"$4\" = build/runtime-packages ]\nif [ \"${RUNTIME_PREPARE_FAIL:-}\" = 1 ]; then exit 37; fi\n"
+	if err := os.WriteFile(filepath.Join(root, "python3"), []byte(prepare), 0700); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "make", "--no-print-directory", "warp_build_image",
@@ -46,6 +50,16 @@ func captureRuntimeImageBuild(t *testing.T, directory, epoch string) ([]string, 
 		t.Fatal(readErr)
 	}
 	return strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"), nil
+}
+
+func TestRuntimeImagePayloadFailureNeverReachesBuilder(t *testing.T) {
+	cli, lock := loadRuntimePackageLock(t)
+	t.Setenv("RUNTIME_PREPARE_FAIL", "1")
+	for role := range lock.Services {
+		if _, err := captureRuntimeImageBuild(t, filepath.Join(cli, role), "1700000000"); err == nil {
+			t.Fatalf("%s published after payload verification failed", role)
+		}
+	}
 }
 
 // File timestamp normalization and config timestamp pinning are both required.
@@ -129,6 +143,9 @@ func TestRuntimeImageBuildPinsEpochAndRewritesLayers(t *testing.T) {
 		}
 		if err := checkRuntimeImageArguments(args, epoch); err != nil {
 			t.Fatalf("%s: %v: %q", role, err, args)
+		}
+		if !strings.Contains(strings.Join(args, "\n"), "--build-context\nverified-runtime-packages=build/runtime-packages") {
+			t.Fatal("image build omitted verified local payload context")
 		}
 		if role == "api" && (!slices.Contains(args, "--provenance=mode=max") || !slices.Contains(args, "--sbom=true")) {
 			t.Fatal("determinism must not drop API publication attestations")

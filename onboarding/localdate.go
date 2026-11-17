@@ -59,8 +59,8 @@ var localeStyles = map[string]localeStyle{
 }
 
 // EmailLocale resolves a recorded locale ("de-AT", "zh-TW", "pt-BR") to one of
-// the email locales' styles: the exact tag, then Traditional Chinese regions to
-// zh-HK, then the language, then English.
+// the email locales' styles: the exact tag, then Traditional Chinese to zh-HK
+// (TraditionalChinese), then the language, then English.
 func EmailLocale(locale string) string {
 	l := strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
 	if l == "" {
@@ -72,11 +72,8 @@ func EmailLocale(locale string) string {
 	parts := strings.Split(l, "-")
 	lang := strings.ToLower(parts[0])
 	if lang == "zh" {
-		for _, p := range parts[1:] {
-			switch strings.ToUpper(p) {
-			case "HK", "TW", "MO", "HANT":
-				return "zh-HK"
-			}
+		if TraditionalChinese(l) {
+			return "zh-HK"
 		}
 		return "zh"
 	}
@@ -84,6 +81,75 @@ func EmailLocale(locale string) string {
 		return lang
 	}
 	return "en"
+}
+
+// TraditionalChinese reports whether a Chinese locale reads Traditional
+// characters: the Hant script, or without a script a region that writes them
+// (Hong Kong, Macau, Taiwan). Hans and every other region read Simplified.
+func TraditionalChinese(locale string) bool {
+	parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(locale), "_", "-"), "-")
+	if strings.ToLower(parts[0]) != "zh" {
+		return false
+	}
+	traditionalRegion := false
+	for _, p := range parts[1:] {
+		switch strings.ToUpper(p) {
+		case "HANT":
+			return true
+		case "HANS":
+			return false
+		case "HK", "MO", "TW":
+			traditionalRegion = true
+		}
+	}
+	return traditionalRegion
+}
+
+// The regions whose Spanish and Portuguese derive from es-419 and pt-PT in
+// CLDR's parent locales (CLDR 32, as golang.org/x/text ships it): Latin
+// America and the United States, and Portuguese-speaking Africa and Asia with
+// Europe outside Portugal.
+var (
+	latinAmericanSpanishRegions = map[string]bool{
+		"AR": true, "BO": true, "BR": true, "BZ": true, "CL": true, "CO": true, "CR": true, "CU": true,
+		"DO": true, "EC": true, "GT": true, "HN": true, "MX": true, "NI": true, "PA": true, "PE": true,
+		"PR": true, "PY": true, "SV": true, "US": true, "UY": true, "VE": true,
+	}
+	europeanPortugueseRegions = map[string]bool{
+		"AO": true, "CH": true, "CV": true, "GQ": true, "GW": true, "LU": true, "MO": true, "MZ": true,
+		"ST": true, "TL": true,
+	}
+)
+
+// RegionalStoreLocale is the store locale a regional tag reads when the store
+// has no template in the tag itself, before its bare language: Traditional
+// Chinese (zh-TW, zh-MO, zh-Hant, zh-Hant-*) reads zh-HK, the store's
+// Traditional locale, rather than the Simplified zh; Latin American and US
+// Spanish reads es-419 rather than es (Spain); African and Asian Portuguese
+// reads pt-PT rather than pt (Brazil). "" when the bare language serves.
+func RegionalStoreLocale(locale string) string {
+	parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(locale), "_", "-"), "-")
+	region := ""
+	if 1 < len(parts) {
+		if last := strings.ToUpper(parts[len(parts)-1]); len(last) == 2 {
+			region = last
+		}
+	}
+	switch strings.ToLower(parts[0]) {
+	case "zh":
+		if TraditionalChinese(locale) {
+			return "zh-HK"
+		}
+	case "es":
+		if latinAmericanSpanishRegions[region] {
+			return "es-419"
+		}
+	case "pt":
+		if europeanPortugueseRegions[region] {
+			return "pt-PT"
+		}
+	}
+	return ""
 }
 
 func styleFor(locale string) localeStyle {

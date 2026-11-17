@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -167,6 +168,58 @@ func TestBrevo(t *testing.T) {
 		}
 		if err := BrevoRemoveContact(ctx, userEmail); err != nil {
 			t.Fatalf("remove duplicate contact %s: %v", userEmail, err)
+		}
+	}
+}
+
+// RemoveProductUpdates deletes the contact named by its address in the path.
+// Brevo reads that segment URL-encoded and a raw "+" as a space, so before the
+// fix a "+" address named no contact: the delete answered document_not_found,
+// which reads as already removed, and the contact stayed. The fake decodes the
+// segment as Brevo does.
+func TestBrevoRemoveContactEncodesTheAddress(t *testing.T) {
+	contacts := map[string]bool{"first+tag@example.invalid": true, "plain.name@example.invalid": true}
+	escapedPaths := []string{}
+	newBrevoProtocolTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		escapedPath := r.URL.EscapedPath()
+		if r.Method != http.MethodDelete || !strings.HasPrefix(escapedPath, "/v3/contacts/") || r.URL.Query().Get("identifierType") != "email_id" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		escapedPaths = append(escapedPaths, escapedPath)
+		userEmail, err := url.QueryUnescape(strings.TrimPrefix(escapedPath, "/v3/contacts/"))
+		if err != nil || !contacts[userEmail] {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			if err := json.NewEncoder(w).Encode(BrevoContactResult{Code: "document_not_found"}); err != nil {
+				t.Errorf("encode response: %v", err)
+			}
+			return
+		}
+		delete(contacts, userEmail)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	ctx := context.Background()
+	for _, userEmail := range []string{"first+tag@example.invalid", "plain.name@example.invalid"} {
+		if err := BrevoRemoveContact(ctx, userEmail); err != nil {
+			t.Fatalf("remove contact: %v", err)
+		}
+	}
+	if len(contacts) != 0 {
+		t.Fatalf("%d contact(s) left after their removal", len(contacts))
+	}
+	want := []string{"/v3/contacts/first%2Btag%40example.invalid", "/v3/contacts/plain.name%40example.invalid"}
+	if strings.Join(escapedPaths, " ") != strings.Join(want, " ") {
+		t.Fatalf("request paths = %v, want %v", escapedPaths, want)
+	}
+	for value, want := range map[string]string{
+		"a+b@example.invalid":  "a%2Bb%40example.invalid",
+		"A-Z.0_9~@x.invalid":   "A-Z.0_9~%40x.invalid",
+		"slash/semi;q?e=1&s m": "slash%2Fsemi%3Bq%3Fe%3D1%26s%20m",
+	} {
+		if got := brevoPathSegment(value); got != want {
+			t.Errorf("brevoPathSegment(%q) = %q, want %q", value, got, want)
 		}
 	}
 }

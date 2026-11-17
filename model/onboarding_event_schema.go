@@ -65,6 +65,16 @@ const (
 	// the answer counts even if the reader never finishes the in-app form
 	// (REVIEW.md finding 14).
 	EventFeedbackTapped = "feedback.tapped"
+	// The sign-up cohort the readouts are stratified by (onboarding/cohort.go;
+	// owner, 2026-11-15), recorded at enrollment from the sign-up request: one
+	// of the two per email sign-up. The rollup reads them by name.
+	EventSignupLikelyBot   = "signup.likely_bot"
+	EventSignupLikelyHuman = "signup.likely_human"
+	// EventOfferEmailExposed is a network's exposure to the offer email
+	// experiment (surface offer.email): an offer email sent in the card
+	// branch, the only one either arm differs in, carrying the experiment and
+	// the arm. The rollup counts a network exposed from its first.
+	EventOfferEmailExposed = "offer.email.exposed"
 )
 
 // The re-engagement program's events (mmm/reengagement/PLAN.md
@@ -174,7 +184,7 @@ func propText(maxLen int) *EventPropSpec {
 // Shared prop vocabularies.
 var (
 	EventPlans          = []string{PlanYearly, PlanMonthly}
-	EventStores         = []string{OnboardingStoreApple, OnboardingStorePlay, OnboardingStoreStripe, OnboardingStoreSolana, OnboardingStoreZcash, OnboardingStoreMonero}
+	EventStores         = []string{OnboardingStoreApple, OnboardingStorePlay, OnboardingStoreStripe, OnboardingStoreSolana, OnboardingStoreZcash, OnboardingStoreMonero, OnboardingStoreBittensor, OnboardingStoreBitcoin, OnboardingStoreEthereum}
 	EventOfferSurfaces  = []string{OnboardingOfferSurfaceIntroStep, OnboardingOfferSurfaceFinalScreen, OnboardingOfferSurfaceEmailLink, OnboardingOfferSurfaceAccount}
 	EventDeclineControl = []string{"free_plan_link", "back", "system_dismiss"}
 	EventTiers          = []string{"standard", "regional"}
@@ -301,6 +311,15 @@ var eventSpecs = func() map[string]*EventSpec {
 			"rating":    propInt(false, 1, 5),
 			"reason":    propEnum(false, "not_needed", "not_working", "trust", "other"),
 			"flow_step": propEnum(false, "e1", "e2", "e3", "e4", "e5"),
+		}},
+		{Name: EventSignupLikelyBot, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"reason": propEnum(true, "farm_user_agent", "no_accept_language"),
+		}},
+		{Name: EventSignupLikelyHuman, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{}},
+		{Name: EventOfferEmailExposed, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
+			"experiment": propToken(true),
+			"variant":    propToken(true),
+			"flow_step":  propEnum(true, "e3", "e4", "e5"),
 		}},
 		{Name: EventReengageEpisodeStarted, ServerOnly: true, Owner: EventOwnerS2, Props: map[string]*EventPropSpec{
 			"stream":     propEnum(true, ReengagementStreamValues...),

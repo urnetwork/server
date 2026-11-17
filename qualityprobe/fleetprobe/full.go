@@ -101,6 +101,22 @@ type FullOptions struct {
 	// Optional same-call wall timing after ProbeOne returns, including cleanup.
 	// Called concurrently; it must not block or perform I/O.
 	ObserveTiming func(prober.ProbeTiming)
+	// A URL turn the claim marks for post-quantum (prober.Provider.PostQuantum)
+	// opens an end-to-end session with these timings (url_e2e.go). Nil uses
+	// DefaultUrlProbePostQuantumSettings.
+	PostQuantum *UrlProbePostQuantumSettings
+	// Resolves a peer's published identity key for a post-quantum turn's
+	// session when no contract carried one, as the platform's own store
+	// answers it. Nil leaves a contract-carried key the only source.
+	NewPeerClientPublicKeyFetcher func(peerId connect.Id) func(context.Context) ([]byte, error)
+}
+
+// Returns PostQuantum, or the default settings when unset.
+func (self FullOptions) postQuantum() *UrlProbePostQuantumSettings {
+	if self.PostQuantum != nil {
+		return self.PostQuantum
+	}
+	return DefaultUrlProbePostQuantumSettings()
 }
 
 // Returns Concurrency, or DefaultFullConcurrency when unset.
@@ -158,6 +174,11 @@ type probeState struct {
 	pool                 *egresshealth.Pool
 	outcomeCount         int
 	securityDestinations []egresshealth.Destination
+	// the IP families the provider advertises, from its claim
+	ipFamily egresshealth.IpFamily
+	// the end-to-end session of a turn the claim marked for post-quantum,
+	// nil for every other
+	e2e *urlProbeE2eObservation
 }
 
 // Finds a probe's state from the client the prober hands its
@@ -220,13 +241,37 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			tunnelConfig.Pins = options.Pins.pins()
 			tunnelConfig.RedirectPins = tunnelConfig.Pins
 			tunnelConfig.ProviderCountry = provider.Place.Country
+			// a provider that advertises IPv6 gets a tunnel that carries it,
+			// for the URL loads' IPv6 legs (egresshealth url_family.go)
+			tunnelConfig.ProviderIpFamily = connect.IpFamily(provider.IpFamily.Normalize())
+			// a turn the claim marked for post-quantum opens an end-to-end
+			// session in every tunnel it opens, recorded in the turn's own
+			// recorder (url_e2e.go)
+			var recorder *connect.PeerCapabilityRecorder
+			if options.UrlProbe && provider.PostQuantum {
+				recorder = connect.NewPeerCapabilityRecorder(urlProbeE2eMaxObservedPeerCount)
+				tunnelConfig.CapabilityObservation = urlProbeE2eCapabilityObservation(recorder, options.postQuantum(), options.NewPeerClientPublicKeyFetcher)
+			}
 			path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, options.ProbeTimeout)
 			if err != nil {
 				return nil, nil, err
 			}
 			client, _ := path.Current()
-			probes.put(client, &probeState{path: path, pool: pool, outcomeCount: provider.OutcomeCount,
-				securityDestinations: provider.SecurityDestinations})
+			state := &probeState{path: path, pool: pool, outcomeCount: provider.OutcomeCount,
+				securityDestinations: provider.SecurityDestinations, ipFamily: provider.IpFamily.Normalize()}
+			if recorder != nil {
+				state.e2e = &urlProbeE2eObservation{
+					read: func() (connect.PeerCapabilityObservation, bool) {
+						return recorder.Get(clientId)
+					},
+					settings: options.postQuantum(),
+					unmeasurable: func() bool {
+						return 0 < path.reopens() || path.clientReplaced()
+					},
+					now: time.Now,
+				}
+			}
+			probes.put(client, state)
 			return client, func() error {
 				probes.remove(client)
 				if reopens := path.reopens(); 0 < reopens {
@@ -236,26 +281,10 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			}, nil
 		},
 		Health: func(ctx context.Context, client *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
-			opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
-			opts.UrlProbe = options.UrlProbe
-			opts.LoadAttempts = options.LoadAttempts
-			opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
-			opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
-			opts.ProviderPlace = place
-			pool := options.Pool.pool()
-			if state := probes.get(client); state != nil {
-				pool = state.pool
-				opts.Path = state.path
-				opts.OutcomeCount = state.outcomeCount
-				opts.SecurityDestinations = state.securityDestinations
+			opts, err := fullHealthOptions(options, probes.get(client), place)
+			if err != nil {
+				return nil, err
 			}
-			if pool == nil || len(pool.Destinations) == 0 {
-				return nil, egresshealth.ErrNoDestinations
-			}
-			opts.Destinations = pool.Destinations
-			opts.UrlProbePolicy = pool.UrlProbePolicy
-			opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
-			opts.Profile = profileOf(pool)
 			return egresshealth.Check(ctx, client, opts)
 		},
 		Submit:        options.Submit,
@@ -269,6 +298,40 @@ func NewFullProber(options FullOptions) *prober.Prober {
 	}
 
 	return providerProber
+}
+
+// The options of one probe's health run: the pass's geometry, the pool its
+// tunnel was opened against with the provider's claim (state, nil for a client
+// no probe opened), and the place it is published under.
+func fullHealthOptions(options FullOptions, state *probeState, place egresshealth.Place) (egresshealth.Options, error) {
+	opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
+	opts.UrlProbe = options.UrlProbe
+	opts.LoadAttempts = options.LoadAttempts
+	opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
+	opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
+	opts.ProviderPlace = place
+	pool := options.Pool.pool()
+	if state != nil {
+		pool = state.pool
+		opts.Path = state.path
+		opts.OutcomeCount = state.outcomeCount
+		opts.SecurityDestinations = state.securityDestinations
+		opts.ProviderIpFamily = state.ipFamily
+		if state.e2e != nil {
+			opts.E2e = state.e2e
+		}
+	}
+	if pool == nil || len(pool.Destinations) == 0 {
+		return egresshealth.Options{}, egresshealth.ErrNoDestinations
+	}
+	opts.Destinations = pool.Destinations
+	opts.UrlProbePolicy = pool.UrlProbePolicy
+	opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
+	// a country whose national firewall drops QUIC runs no UDP leg
+	// (qualityprobe.yml country_settings udp_probes: false)
+	opts.UdpProbesDisabled = pool.UdpProbesDisabled(place.Country)
+	opts.Profile = profileOf(pool)
+	return opts, nil
 }
 
 // Executes one bounded batch. It owns no timer and schedules nothing;

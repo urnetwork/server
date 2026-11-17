@@ -32,7 +32,6 @@ const (
 	AuditEventTypeDeviceAdded                 AuditEventType = "device_added"
 	AuditEventTypeDeviceRemoved               AuditEventType = "device_removed"
 	AuditEventTypeContractClosedSuccess       AuditEventType = "contract_closed_success"
-	AuditEventTypeCirclePayoutFailed          AuditEventType = "circle_payout_failed"
 )
 
 // Removed series (2026-08, see STATS3.md): packets (all_packets_*), extenders
@@ -529,7 +528,9 @@ type computeStatsDeviceSpan struct {
 	endDay string
 }
 
-func computeStatsDevice(ctx context.Context, stats *Stats) {
+// The devices series from the raw events (computeStatsDevice uses the device
+// day rollup when it covers the window).
+func computeStatsDeviceFromEvents(ctx context.Context, stats *Stats) {
 	startDay, endDay := dayRange(stats.Lookback)
 	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
 	query := func(run func(server.PgCanQuery)) {
@@ -1026,10 +1027,6 @@ func AddAuditEvent(ctx context.Context, event interface{}) {
 		AddAuditDeviceEvent(ctx, v)
 	case *AuditContractEvent:
 		AddAuditContractEvent(ctx, v)
-	case *AuditAccountPaymentEvent:
-		// processor submit failures (controller.auditAccountPayment) were
-		// dropped by the default case until this case existed
-		AddAuditAccountPaymentEvent(ctx, v)
 	default:
 		// panic(fmt.Sprintf("Event type not recognized: %T", v))
 		glog.V(2).Infof("[audit]event type not recognized: %T", v)
@@ -1189,49 +1186,6 @@ func AddAuditContractEvent(ctx context.Context, event *AuditContractEvent) {
 	})
 }
 
-type AuditAccountPaymentEvent struct {
-	AuditEvent
-
-	AccountPaymentId server.Id
-}
-
-func NewAuditAccountPaymentEvent(eventType AuditEventType) *AuditAccountPaymentEvent {
-	eventId := server.NewId()
-	eventTime := server.NowUtc()
-	return &AuditAccountPaymentEvent{
-		AuditEvent: AuditEvent{
-			EventId:   eventId,
-			EventTime: eventTime,
-			EventType: eventType,
-		},
-	}
-}
-
-func AddAuditAccountPaymentEvent(ctx context.Context, event *AuditAccountPaymentEvent) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		_, err := tx.Exec(
-			ctx,
-			`
-			INSERT INTO audit_account_payment
-			(
-				event_id,
-				event_time,
-				payment_id,
-				event_type,
-				event_details
-			)
-			VALUES ($1, $2, $3, $4, $5)
-			`,
-			event.EventId,
-			event.EventTime,
-			event.AccountPaymentId,
-			event.EventType,
-			event.EventDetails,
-		)
-		server.Raise(err)
-	})
-}
-
 // audit_network_event retention. The event feed is append-only and its widest
 // reader is the 90-day stats lookback (`ComputeStats90`), so events older
 // than `AuditNetworkEventExpiration` are unread and removed.
@@ -1335,9 +1289,19 @@ func RemoveOldAuditContractEvents(ctx context.Context, maxTime time.Time, limit 
 }
 
 // audit_device_event's PK is (event_time, device_id, event_id), so event_id is
-// not unique alone -- match the full PK.
+// not unique alone -- match the full PK. Once the table is partitioned its
+// days drop whole by the partition registry's retention, and deleting rows
+// from a leaf that takes no inserts would return no disk, so nothing is
+// deleted.
 func RemoveOldAuditDeviceEvents(ctx context.Context, maxTime time.Time, limit int) (removedCount int64) {
 	minTime := maxTime.Add(-AuditEventExpiration)
+	partitioned := false
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		partitioned = auditDeviceEventPartitionedInConn(ctx, conn)
+	})
+	if partitioned {
+		return 0
+	}
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
 			ctx,

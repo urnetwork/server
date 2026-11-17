@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "kind": "epoch2-baseline-producer-readiness-attempt/v1",
+  "observed_at": "2026-11-10T06:59:09Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "unit": "urnetwork-epoch2-baseline-host-qualification-20261110-v1.service",
+  "invocation_id": "ac7b29b6e4f04ab5b93a59c2720c9c29",
+  "terminal": {"active_state":"failed","main_pid":0,"result":"exit-code","exit_status":1},
+  "profile": "sim-latency-host-readiness/v1",
+  "official_r9_baseline": false,
+  "candidate_submission_claimed": false,
+  "supervision": "Bounded root main-environment launcher, seventeen-minute owner deadline, eighteen-minute systemd maximum, live scoped two-minute supervisor lease renewed every twenty seconds; existing qualification broker owns its separate singleton slot and process cleanup.",
+  "qualification_config_sha256": "20c8ee76319f3c50d4120076776feb0be9b487bb8288aec95e4b092cb2d1c225",
+  "pressure_proof": {
+    "scope": "Original baseline producer, not either new private executor",
+    "same_boot": true,
+    "report_sha256": "f59fb790fb918130c86a72dabfe605c6a32635e20b75a06fd01b0478020bcbf8",
+    "production_memory_limit_bytes": 77309411328,
+    "cleanup_elapsed_ms": 775
+  },
+  "result": {
+    "reviewed_source_host_installation": "Passed: genuine recorded reviewed-build identity installed by the existing fenced broker; hardware/source fingerprint rechecked, no positive readiness marker manufactured.",
+    "scorer_error": "baseline replicate 1 fails matchmaking integrity",
+    "failed_evidence_manifest_sha256": "7967579b27d022bd007fb34e5348161d7555ba3b87b1cc832fdba2d490e976e0",
+    "failed_probe_directory": "/var/lib/urnetwork/competition-epoch2-baseline-host-qualification-20261110-v1/probe-e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f-2194993784",
+    "root_cause": "Not established. The scorer groups sample count, empty pools, load/pool validity and sample-span checks under this error. Sanitized retained evidence lacks the raw run/sample corpus, so no specific subcondition is claimed.",
+    "automatically_retried": false
+  },
+  "independent_read_only_recheck": {
+    "image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
+    "qualification_sha256": "254caad08799e9928098ea489fc98b4f86cd8fcd76a8c7c7e0c33df799143274",
+    "seven_basic_host_checks_passed": true,
+    "same_round_rebaseline": false,
+    "eligible": false
+  },
+  "admission_clock_fix": {
+    "source_commit": "98a1469f9",
+    "change": "Authenticate executor readiness and exact-round rebaseline before publishing a first no-op clock; preserve the original store clock on reconnect.",
+    "ordinary_runs": 3,
+    "race_runs": 3,
+    "result": "passed",
+    "worker_installed": "/usr/local/libexec/urnetwork/competition-worker-98a1469f9-20261110-v1/competitionworker",
+    "worker_sha256": "d1ab2520d647e302d962c292e4b90307a52ba49e4473a5dfe2b02b78a30042f6",
+    "worker_started": false
+  },
+  "grading_ready": false,
+  "official_baseline_started": false,
+  "private_host_admission_started": false
+}

@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	clientconnect "github.com/urnetwork/connect"
 )
 
 const (
@@ -821,7 +823,7 @@ func TestMeasurePerfvarUnderlayReplaysLiveProfileSchedule(t *testing.T) {
 	profile := networkProfile{
 		Name:       "short-live-underlay",
 		Seed:       9251,
-		InnerMtu:   1320,
+		InnerMtu:   clientconnect.DefaultMtu,
 		Forward:    initialDirection,
 		Reverse:    initialDirection,
 		SourceNote: "deterministic short live schedule test",

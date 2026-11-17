@@ -1,0 +1,18 @@
+{{define "headline"}}RECEIPT{{end}}
+{{define "why"}}You received this because your URnetwork account paid with SN25 Gamma.{{end}}
+{{define "content"}}
+Receipt for {{.Description}}, paid from your SN25 Gamma deposit{{if .Automatic}} automatically ({{.PurposeText}}){{end}}.
+
+Paid: {{.AmountGamma}} gamma
+Network: Bittensor SN25
+Reference: {{.Reference}}
+{{if .Block}}Block: {{.Block}}
+{{end}}
+{{if .Balance}}Data added: {{.Balance}}
+{{end}}
+{{if .Pro}}UR Pro: UR Pro is active on your network
+{{end}}
+Gamma can't be refunded or transferred. We charge only the price of what you buy. Unspent Gamma stays in your deposit and works only on SN25.
+
+See your balance: https://ur.io/app/account
+{{end}}

@@ -10,7 +10,7 @@ earlier humanoid-olympics URL was inaccessible and was not used for this review.
 
 UR's stale single-file document is corrected in
 [PATCH-SURFACE.md](../evaluator/PATCH-SURFACE.md). The shareable
-[epoch-1 checkpoint](../EPOCH-1-SOURCE.md) lists every commit and explains why
+[epoch-1 checkpoint](../EPOCH-SOURCE.md#production-epoch-1--initial-baseline) lists every commit and explains why
 the canonical API digest differs from a preserved JSON file's raw hash.
 
 This review checks UR's API and source contract, not Apex's private adapter,
@@ -56,7 +56,7 @@ does not prove that future automatic closing has already passed live testing.
 
 ### 3. Link the complete source checkpoint
 
-Link [EPOCH-1-SOURCE.md](../EPOCH-1-SOURCE.md), not only the server's `base_sha`.
+Link [EPOCH-SOURCE.md](../EPOCH-SOURCE.md), not only the server's `base_sha`.
 Epoch 1 uses source generation 0, activation generation 1, and canonical digest
 `ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf`.
 Connect is `e90d59eb404f973dba6e9d0689ecd94e2718c10e`.

@@ -42,11 +42,14 @@ func testProviderWorkSessionMigrate(t testing.TB, ctx context.Context, options P
 	return MigrateProviderWorkSessionEventsToPartitions(ctx, options)
 }
 
-// A client with a network, so its admits carry the network.
+// A public provider with a network, so its connections are journaled (the
+// journal holds provider clients only, db_provider_work_session_providers.go)
+// and its admits carry the network.
 func testProviderWorkSessionClient(t testing.TB, ctx context.Context) (clientId Id, networkId Id) {
 	clientId, networkId = NewId(), NewId()
 	Tx(ctx, func(tx PgTx) {
 		RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, active) VALUES ($1, $2, true)`, clientId, networkId))
+		RaisePgResult(tx.Exec(ctx, `INSERT INTO provide_key (client_id, provide_mode, secret_key) VALUES ($1, 3, $2)`, clientId, make([]byte, 32)))
 	})
 	return
 }

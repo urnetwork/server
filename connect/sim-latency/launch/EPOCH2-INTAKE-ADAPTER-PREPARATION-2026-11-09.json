@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "status": "INSTALLED_NOT_YET_INVOKED",
+  "purpose": "propagate_intake: publish authenticated source transport and obtain actual API acknowledgment without a worker, fresh baseline, or grading readiness assertion",
+  "release": "/usr/local/libexec/urnetwork/competition-epoch2-intake-20261109-v1",
+  "binary_sha256": "52f6dcd6c89bdaf60b3064dc3b2d96d034e78e6b13353a5c5964424342d288ea",
+  "launcher_sha256": "1b30eb1277bb037401a511ed484546ef746e4dd22f9afd6468628f6f7864c584",
+  "tests": {"passed": 13, "failed": 0, "skipped": 0, "selection": "^TestCompetition(IntakeFirstPreparation|PreparationRuntimeIdentity)", "log_sha256": "e085427908d9022aebaf463bceea05353eeb5b4686e9f567c7c69cc3d47a8bc0"},
+  "credential": {"role": "source_handoff", "scope": "main/sim-latency-season-1/sim-latency-production-20261028-r2", "vault_commit": "c0f9893", "existing_tokens_and_seed_preserved_by_native_rotation": true, "serving_api_deployment_confirmed": false},
+  "config_commit": "2350c7610f1351cdef670413aa9a409941423f6d",
+  "remaining": ["Finish instrument child build", "Freeze actual distributed host identities before round creation", "Confirm config and vault deployment", "Record explicit approved product handoff", "Publish source branches/config and authenticate API intake acknowledgment", "Open and verify a fresh full-week epoch 2"],
+  "epoch2_open": false,
+  "grading_enabled": false,
+  "historical_epoch1_results_remain_public": true
+}

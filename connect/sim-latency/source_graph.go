@@ -33,32 +33,56 @@ type sourceModuleGraph struct {
 	Replace []sourceModuleReplacement
 }
 
+// In-tree replacements belong to the enclosing frozen repository, rather than
+// adding a separately versioned sibling. Their module files need Git custody.
+type sourceModuleLayout struct {
+	repositoryNames []string
+	inTreePaths     []string
+}
+
 // Reads only effective required local replacements. A moving main checkout
 // can neither add dependencies to an old lock nor shrink its historical set.
 func requiredLocalSourceRepositories(moduleBytes []byte) ([]string, error) {
+	layout, err := requiredLocalSourceLayout(moduleBytes)
+	return layout.repositoryNames, err
+}
+
+// Canonical relative paths distinguish committed in-tree modules from siblings;
+// cleaning an escape or alias into an acceptable path would change its owner.
+func requiredLocalSourceLayout(moduleBytes []byte) (sourceModuleLayout, error) {
 	var module sourceModuleGraph
 	if err := json.Unmarshal(moduleBytes, &module); err != nil {
-		return nil, err
+		return sourceModuleLayout{}, err
 	}
 	requiredVersions := map[string]string{}
 	for _, requirement := range module.Require {
 		requiredVersions[requirement.Path] = requirement.Version
 	}
 	repositoryNames := []string{filepath.Base(module.Module.Path)}
+	inTreePaths := []string{}
 	for _, replacement := range module.Replace {
 		requiredVersion, required := requiredVersions[replacement.Old.Path]
 		if !required || replacement.New.Version != "" || (replacement.Old.Version != "" && replacement.Old.Version != requiredVersion) {
 			continue
 		}
 		repositoryPath, sibling := strings.CutPrefix(replacement.New.Path, "../")
-		components := strings.Split(repositoryPath, "/")
-		if !sibling || strings.Contains(replacement.New.Path, "\\") || slices.Contains(components, "") || slices.Contains(components, ".") || slices.Contains(components, "..") {
-			return nil, fmt.Errorf("required local module %s is outside the sibling-repository layout: %s", replacement.Old.Path, replacement.New.Path)
+		inTreePath, inTree := strings.CutPrefix(replacement.New.Path, "./")
+		if inTree {
+			repositoryPath = inTreePath
 		}
-		repositoryNames = append(repositoryNames, components[0])
+		components := strings.Split(repositoryPath, "/")
+		if (!sibling && !inTree) || strings.ContainsAny(replacement.New.Path, "\\\x00\r\n\t") || slices.Contains(components, "") || slices.Contains(components, ".") || slices.Contains(components, "..") {
+			return sourceModuleLayout{}, fmt.Errorf("required local module %s is outside the sibling-repository layout or canonical in-tree layout: %s", replacement.Old.Path, replacement.New.Path)
+		}
+		if inTree {
+			inTreePaths = append(inTreePaths, inTreePath)
+		} else {
+			repositoryNames = append(repositoryNames, components[0])
+		}
 	}
 	slices.Sort(repositoryNames)
-	return slices.Compact(repositoryNames), nil
+	slices.Sort(inTreePaths)
+	return sourceModuleLayout{repositoryNames: slices.Compact(repositoryNames), inTreePaths: slices.Compact(inTreePaths)}, nil
 }
 
 // Any additional measured local repository requires a separately reviewed
@@ -86,6 +110,12 @@ func sourceModuleGraphAtCommit(ctx context.Context, repositoryRoot, commit strin
 	if err != nil {
 		return nil, err
 	}
+	return parseSourceModuleGraph(ctx, content)
+}
+
+// Parsing local replacement files follows the same offline syntax-only path;
+// it does not execute packages or resolve their dependencies.
+func parseSourceModuleGraph(ctx context.Context, content []byte) ([]byte, error) {
 	root, err := os.MkdirTemp("", "sim-latency-module-audit-")
 	if err != nil {
 		return nil, err
@@ -118,5 +148,36 @@ func verifyFrozenSourceGraphForMode(ctx context.Context, repositoryRoot, commit 
 	if err != nil {
 		return err
 	}
-	return requireLocalSourceRepositoryCoverage(module, sourceRepositoryNamesForMode(staging))
+	if err := requireLocalSourceRepositoryCoverage(module, sourceRepositoryNamesForMode(staging)); err != nil {
+		return err
+	}
+	layout, err := requiredLocalSourceLayout(module)
+	if err != nil || len(layout.inTreePaths) == 0 {
+		return err
+	}
+	// One bounded Git-read owner covers all nested paths, including a missing
+	// local commit's disposable fetch. No moving worktree can supply a file.
+	_, err = sourceGitReadAtCommit(ctx, repositoryRoot, commit, defaultSourceGitReadSettings(), func(readCtx context.Context, root string) ([]byte, error) {
+		for _, relative := range layout.inTreePaths {
+			modulePath := relative + "/go.mod"
+			entry, err := sourceGitBytes(readCtx, root, maximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", modulePath)
+			if err != nil {
+				return nil, err
+			}
+			metadata, name, found := strings.Cut(strings.TrimSuffix(string(entry), "\x00"), "\t")
+			fields := strings.Fields(metadata)
+			if !found || name != modulePath || len(fields) != 3 || (fields[0] != "100644" && fields[0] != "100755") || fields[1] != "blob" || !sourceGitShaPattern.MatchString(fields[2]) {
+				return nil, fmt.Errorf("in-tree local module %s has no regular go.mod in frozen source", relative)
+			}
+			content, err := sourceGitBytes(readCtx, root, maximumSourceConfigBytes, "cat-file", "blob", fields[2])
+			if err != nil {
+				return nil, err
+			}
+			if _, err := parseSourceModuleGraph(readCtx, content); err != nil {
+				return nil, fmt.Errorf("parse frozen in-tree module %s: %w", relative, err)
+			}
+		}
+		return nil, nil
+	})
+	return err
 }

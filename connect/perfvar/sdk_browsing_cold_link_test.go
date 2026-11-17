@@ -3,6 +3,7 @@
 package perfvar
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -49,7 +50,15 @@ func sdkBrowsingColdLinkCapture(fixture *sdkBrowsingSetupFixture, page int) sdkB
 	return result
 }
 
-func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
+// Carrier selection and provider recovery are independent explicit choices.
+// Omitted options retain ordinary construction, including recovery count1.
+type sdkBrowsingColdLinkOptions struct {
+	autoH1Only                           bool
+	providerReturnRecoveryMaxPacketCount int
+}
+
+// Apply explicit choices before constructing any initial or late provider.
+func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool, options ...sdkBrowsingColdLinkOptions) {
 	if testing.Short() {
 		t.Skip("actual SDK32/H1/public-provider topology needs shared PERFVAR services")
 	}
@@ -58,6 +67,13 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 		plan, err := newSdkBrowsingColdLinkPlan(profileName)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if len(options) > 1 {
+			t.Fatal("one optional cold-link configuration is supported")
+		}
+		if len(options) == 1 {
+			plan.autoH1OnlyForTest = options[0].autoH1Only
+			plan.providerReturnRecoveryMaxPacketCountForTest = options[0].providerReturnRecoveryMaxPacketCount
 		}
 		scenario := newSdkBrowsingScenario(plan)
 		scenario.coldLinkForTest = true
@@ -99,6 +115,7 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 				pressure.Navigations[page].Phases[phase] = -1
 			}
 		}
+		performance := newC48ReturnFlightPerformance(plan.autoH1OnlyForTest)
 		witness := newNativeBrowsingColdLinkWitness(scenario, pressure, http2)
 		defer witness.close()
 		settings := plan.runSettings(pressure)
@@ -107,7 +124,10 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 		settings.originListenerForTest, settings.originDestinationForTest = native.addOrigin, native.destination
 		settings.afterOriginsClosedForTest = native.clearOrigins
 		settings.applicationDeadlineForTest = plan.deadline
-		settings.beforePageNavigationForTest = witness.beforeNavigation
+		settings.beforePageNavigationForTest = func(ctx context.Context, page int, closeIdle func()) error {
+			performance.beforeNavigation(page)
+			return witness.beforeNavigation(ctx, page, closeIdle)
+		}
 		settings.requestTraceForTest = witness.requestTraceWithContext
 		settings.wrapResponseReaderContextForTest = witness.wrapReader
 		settings.wrapOriginHandlerForTest = witness.wrapHandler
@@ -118,6 +138,7 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 			if parseErr != nil || slot != nativeBrowsingAssetCount {
 				return
 			}
+			performance.afterHtml(page, result.err)
 			row := sdkBrowsingColdLinkCapture(fixture, page)
 			cold, _ := witness.snapshot()
 			if result.err != nil || cold.CombinedFirstByteNs[page] >= int64(sdk.DefaultDeviceLocalSettings().SendTimeout) {
@@ -130,26 +151,71 @@ func runSdkBrowsingColdLink100(t *testing.T, profileName string, http2 bool) {
 		}
 		observation := &nativeBrowsingObservation{NativeCapability: true, Baseline: nativeBrowsingMemoryNow(), Pressure: pressure}
 		observation.Peak = observation.Baseline
+		if plan.autoH1OnlyForTest {
+			if err := nativeBrowsingAutoH1OnlyPolicyError(fixture.device); err != nil {
+				t.Fatal(err)
+			}
+		}
+		performance.BeforeWork = c48ReturnFlightCaptureBoundary(fixture, false)
 		start := time.Now()
+		performance.start = start
+		performance.WorkloadStartUnixNs = start.UnixNano()
 		workloadErr := measureNativeBrowsing100WithSettings(fixture.ctx, native.path, observation, settings)
+		performance.WorkloadEndOffsetNs = int64(time.Since(start))
 		pressure.finish(start)
-		var verdictErr error
+		performance.AfterWork = c48ReturnFlightCaptureBoundary(fixture, false)
+		var verdictErr, lateErr, witnessVerdictErr, latencyErr, bodyErr, autoPolicyErr error
+		var witnessLatencyFailed bool
+		if plan.autoH1OnlyForTest {
+			autoPolicyErr = nativeBrowsingAutoH1OnlyPolicyError(fixture.device)
+		}
 		if workloadErr == nil {
 			// Join an actually started constructor after measurement, within its
 			// original absolute app deadline. Visibility never gates navigation.
-			verdictErr = errors.Join(witness.joinLateConstructor(), witness.verdict(), nativeBrowsingPressureLatencyError(observation), nativeBrowsingAssetBodyOwnershipError(pressure))
+			lateErr = witness.joinLateConstructor()
+			witnessVerdictErr, witnessLatencyFailed = witness.verdictWithLatencyForTest()
+			latencyErr = nativeBrowsingPressureLatencyError(observation)
+			bodyErr = nativeBrowsingAssetBodyOwnershipError(pressure)
+			verdictErr = errors.Join(lateErr, witnessVerdictErr, latencyErr, bodyErr)
 		}
+		verdictErr = errors.Join(verdictErr, autoPolicyErr)
 		closeErr := fixture.close()
 		observation.Drain = nativeBrowsingMemoryNow()
 		cold, witnessErr := witness.snapshot()
+		if closeErr == nil {
+			performance.AfterJoin = c48ReturnFlightCaptureBoundary(fixture, true)
+		}
+		performance.Outcome = c48ReturnFlightOutcome{
+			ClassificationVersion:      2,
+			GoalGatePassed:             workloadErr == nil && verdictErr == nil && witnessErr == nil && closeErr == nil,
+			WorkloadErrorClass:         c48ReturnFlightWorkloadErrorClass(workloadErr),
+			WorkloadDeadlineOnly:       c48ReturnFlightDeadlineOnly(workloadErr),
+			WorkloadOwnershipFailed:    c48ReturnFlightWorkloadOwnershipFailed(workloadErr),
+			WorkloadAdditionalFailure:  errors.Is(workloadErr, context.DeadlineExceeded) && !c48ReturnFlightDeadlineOnly(workloadErr),
+			VerdictEvaluated:           workloadErr == nil,
+			LatencyGateFailed:          latencyErr != nil || witnessLatencyFailed,
+			ColdChainLatencyGateFailed: witnessLatencyFailed,
+			PayloadMismatch:            errors.Is(workloadErr, errNativeBrowsingResponseMismatch) || bodyErr != nil,
+			LateConstructorFailed:      lateErr != nil,
+			WitnessVerdictFailed:       witnessVerdictErr != nil && !witnessLatencyFailed,
+			WitnessSnapshotFailed:      witnessErr != nil,
+			CleanupFailed:              closeErr != nil,
+			AutoPolicyFailed:           autoPolicyErr != nil,
+		}
+		performance.Outcome.LatencyDataValid = c48ReturnFlightLatencyDataValid(observation, cold,
+			performance.Outcome, performance.AfterJoin)
+		if plan.autoH1OnlyForTest {
+			performance.AutoPolicyBeforeCloseValid = performance.AfterWork.AutoPolicyValid
+		}
 		report := struct {
 			Topology    string                            `json:"topology"`
+			Performance *c48ReturnFlightPerformance       `json:"return_flight_performance"`
 			Browsing    *nativeBrowsingObservation        `json:"browsing"`
 			ColdLink    nativeBrowsingColdLinkObservation `json:"cold_link"`
 			LastHealthy *sdkBrowsingHttp2Boundary         `json:"last_healthy,omitempty"`
 			FirstSlow   *sdkBrowsingHttp2Boundary         `json:"first_slow_or_error,omitempty"`
 			AfterJoin   *sdk.DeviceLocalMemoryUsage       `json:"after_join"`
-		}{Topology: sdkBrowsingTopology, Browsing: observation, ColdLink: cold, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
+		}{Topology: sdkBrowsingTopology, Performance: performance, Browsing: observation, ColdLink: cold, LastHealthy: lastHealthy, FirstSlow: firstSlow, AfterJoin: fixture.afterJoin}
 		encoded, encodeErr := json.Marshal(report)
 		if encodeErr != nil || nativeBrowsingPressureReportByteLimit < len(encoded) {
 			t.Error("bounded matched cold-link report: ", encodeErr, " bytes=", len(encoded))

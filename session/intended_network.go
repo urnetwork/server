@@ -183,8 +183,13 @@ func requestCredentialNetworkId(ctx context.Context, req *http.Request, intended
 
 // byJwtNetworkIdUnverified returns the network a token's claims name, read
 // without verifying the token and without any lookup. ok is false for claims
-// that do not parse or name no network.
+// that do not parse or name no network. The process keyring's verified claims
+// of the token, when it holds them, are the claims the token decodes to
+// (by_jwt_verified_cache.go).
 func byJwtNetworkIdUnverified(jwtStr string) (server.Id, bool) {
+	if byJwt := defaultByJwtKeyring.verifiedClaims(jwtStr); byJwt != nil {
+		return byJwt.NetworkId, byJwt.NetworkId != (server.Id{})
+	}
 	byJwt := &ByJwt{}
 	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
 		return server.Id{}, false

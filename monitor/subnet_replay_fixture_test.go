@@ -215,9 +215,10 @@ func (self *subnetReplayTestNode) answer(method string, params []json.RawMessage
 		return hexutil.EncodeBig(balance), nil
 	case "eth_getLogs":
 		var filter struct {
-			Address   common.Address `json:"address"`
-			FromBlock string         `json:"fromBlock"`
-			ToBlock   string         `json:"toBlock"`
+			Address   common.Address  `json:"address"`
+			FromBlock string          `json:"fromBlock"`
+			ToBlock   string          `json:"toBlock"`
+			Topics    [][]common.Hash `json:"topics"`
 		}
 		if len(params) != 1 || json.Unmarshal(params[0], &filter) != nil {
 			self.t.Fatalf("eth_getLogs params are invalid")
@@ -229,7 +230,14 @@ func (self *subnetReplayTestNode) answer(method string, params []json.RawMessage
 		}
 		selected := []types.Log{}
 		for _, log := range self.logs[filter.Address] {
-			if from <= log.BlockNumber && log.BlockNumber <= to {
+			matched := len(filter.Topics) == 0 || len(filter.Topics[0]) == 0
+			for _, topic := range filter.Topics {
+				for _, candidate := range topic {
+					matched = matched || log.Topics[0] == candidate
+				}
+				break
+			}
+			if from <= log.BlockNumber && log.BlockNumber <= to && matched {
 				selected = append(selected, log)
 			}
 		}

@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "kind": "executor-control-cli-compatibility-qualification/v1",
+  "observed_at": "2026-11-10T11:03:04Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "source_commit": "51ccb31e976e3a4108635f156cef285ff15c0ff0",
+  "followup_to": "EPOCH2-NAMESPACE-PROBE-MEMORY-2026-11-10.json",
+  "diagnosis": "Composing the actual namespace helper, installed Docker CLI and real closed worker proxy against fake daemons reproduced an earlier rejection: Docker serializes unset MemorySwappiness as-1. After narrowly accepting that inherited/default sentinel, the32 MiB probe's implicit64 MiB shared memory reproduces the second refusal; the explicit8 MiB helper correction makes the complete create admissible. No real container is started by these tests.",
+  "unchanged_guards": "MemorySwap must still equal Memory, so inherited swappiness does not authorize swap. Caller-selected swappiness, unrelated negative/unlimited resource sentinels, privilege, namespaces, core/seccomp, source binding, labels, mounts and CPU/memory/PID caps remain enforced.",
+  "cli": {
+    "version": "Docker29.9.0, buildf415da8",
+    "sha256": "adbc67ecdc2cd2d350c01a5964a205bd81470b485aba1fb90c2f559de9e4584f",
+    "matches_sille_protected_role_pin": true,
+    "installed_client_and_private_daemon_api": "1.56",
+    "composed_test_api_versions": ["1.44", "1.56"],
+    "live_daemon_use_by_tests": false
+  },
+  "validation": {
+    "counterfactual": "Both composed tests failed at the closed namespace/privilege boundary before the inherited-default correction. After it, removing only the8 MiB helper argument is rejected specifically by shared-memory accounting, while the corrected helper reaches only the deliberately refusing fake daemon.",
+    "ordinary": {
+      "command": "go test -json -p=1 ./competitionagent ./cli/competitionsubeval -count=1",
+      "exit_status": 0,
+      "passed_test_invocations": 473,
+      "skipped_test_invocations": 1,
+      "skip_reason": "TestManagementSshInheritedPipeHelper is an intentionally private inherited-descriptor subprocess entrypoint",
+      "agent_duration_seconds": 39.895,
+      "cli_duration_seconds": 0.005,
+      "log": "/mnt/data/competition-control-tests-by/epoch2-docker-cli-20261110.6NGYRQJo/ordinary.jsonl",
+      "log_sha256": "c05fbdaaef941bac5831791471936e9456b15bd78a745f1eaacc04578188be64"
+    },
+    "race": {
+      "command": "go test -json -race -p=1 ./competitionagent ./cli/competitionsubeval -run '^Test(DockerPolicy|NamespaceProbeCli|.*Argument)' -count=3",
+      "exit_status": 0,
+      "passed_test_invocations": 84,
+      "skipped_test_invocations": 0,
+      "agent_duration_seconds": 32.109,
+      "cli_duration_seconds": 1.03,
+      "log": "/mnt/data/competition-control-tests-by/epoch2-docker-cli-20261110.6NGYRQJo/race.jsonl",
+      "log_sha256": "06046a2431a3e31f439012a780d97cadfec7dbe22c206517fd4f723f0d8e2e7f"
+    }
+  },
+  "staged_release": {
+    "path": "/usr/local/libexec/urnetwork/competition-subeval-control-51ccb31e9-20261110-v6",
+    "agent_sha256": "c524449db298c8f87055643395b49d992a5939ec5d69ebf3a323f42327b6035b",
+    "namespace_helper_sha256": "aa65c93074a1694e4c5c84d238cf75f00adef68deb8ba9a343cd5b14c7288658",
+    "builder_sha256": "654d53c5bf62367be202105375184c78101d6ff13a4eef5e290d6a41d2488af7",
+    "agent_build": "Go1.27.3, CGO0, clean source51ccb31e9",
+    "both_hosts_exact_hashes_verified": true,
+    "activated": false,
+    "actual_replacement_host_fingerprints": "Not yet measured; do not reuse role-v4 fingerprints for this release",
+    "supersedes_staged_role_v5": true,
+    "combined_operational_extension_approval": "Requested for8 MiB helper plus inherited-swappiness compatibility; not inferred from original three-fix approval"
+  },
+  "replacement_operator_probe_prepared": {
+    "path": "/usr/local/libexec/urnetwork/competition-private-native-readiness-20261110-v6/probe",
+    "sha256": "e11e79a90ae53cf9936ee2b1b2bf96234e66aa08cb0e91b51c92f8cc3306f4a4",
+    "distribution_image_digest": "sha256:fc5e3bc9f08b40fe876b947c4c56f1a3c6dcff8f3eee62ea351a3112219aa450",
+    "image_payload_extraction_matches_native_binary": true,
+    "executed": false,
+    "purpose": "Fresh operator-only bounded R1 check after approved role activation; preserves failed attempts and clocks. Not the official R9 baseline, host admission or a paid submission."
+  },
+  "remaining_external_dependencies": {
+    "main_schema_head": 949,
+    "main_schema_observed_at": "2026-11-10T11:02:58.373381883Z",
+    "required_migration": 950,
+    "required_api_checkpoint": "e7a71255a or later; no further migration required by the CLI compatibility fix",
+    "sille_pressure_available_bytes": 68940951552,
+    "sille_pressure_required_available_bytes": 103079215104,
+    "ram_cache_cleanup_approval": "pending; no RAM cache deleted",
+    "pressure_test_started": false
+  },
+  "epoch2_intake_open": true,
+  "grading_ready": false,
+  "live_amendment_registered": false,
+  "official_baseline_or_host_admission_started": false,
+  "qualification_limit": "Synthetic/composed CLI tests and staged binaries do not prove native containment or R9 measurement admission. All remain required."
+}

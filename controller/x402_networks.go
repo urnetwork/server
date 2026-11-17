@@ -7,19 +7,22 @@ import (
 
 // The networks x402 can quote, and the token each one settles in.
 //
-// x402 v1 quotes `asset` as the token's on-chain address, never a symbol: the
-// EVM exact scheme signs an EIP-3009 authorization whose EIP-712 domain names
-// the token contract, and the SVM exact scheme transfers to the associated
-// token account of `payTo` for that mint (coinbase/x402
-// specs/x402-specification-v1.md 5.1.2, specs/schemes/exact/scheme_exact_evm.md,
-// specs/schemes/exact/scheme_exact_svm.md). x402.yml names the asset by symbol
-// ("usdc"); this table is the only place a symbol becomes an address.
+// x402 v1 and v2 quote `asset` as the token's on-chain address, never a symbol:
+// the EVM exact scheme signs an EIP-3009 authorization whose EIP-712 domain
+// names the token contract, and the SVM exact scheme transfers to the
+// associated token account of `payTo` for that mint (x402-foundation/x402
+// specs/x402-specification-v1.md 5.1.2, specs/x402-specification-v2.md 5.1.2,
+// specs/schemes/exact/scheme_exact_evm.md, specs/schemes/exact/scheme_exact_svm.md).
+// x402.yml names the asset by symbol ("usdc"); this table is the only place a
+// symbol becomes an address.
 //
 // A network is here only if all three legs carry it: the CDP facilitator
-// settles it for x402 v1 (its X402V1Network enum is base, base-sepolia, solana
-// and solana-devnet), Stripe's crypto transaction_verification records USDC on
-// it (docs.stripe.com/payments/machine/x402, "Token and network support"),
-// and Stripe issues a crypto deposit address on it. Testnets are left out on
+// settles it in both protocol versions (its X402V1Network enum is base,
+// base-sepolia, solana and solana-devnet; its X402V2Network enum has
+// eip155:8453 and solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp among others),
+// Stripe's crypto transaction_verification records USDC on it
+// (docs.stripe.com/payments/machine/x402, "Token and network support"), and
+// Stripe issues a crypto deposit address on it. Testnets are left out on
 // purpose: a production config that listed one would sell real goods for test
 // tokens.
 //
@@ -28,10 +31,49 @@ import (
 // guessed address.
 
 // x402 v1 network names, as the v1 transport and the CDP facilitator spell them.
+// They are also our own names for the networks: x402.yml lists them, and the
+// grants, receipts, sales notices and Stripe records name the network this way
+// whichever protocol version the payment used.
 const (
 	X402NetworkBase   = "base"
 	X402NetworkSolana = "solana"
 )
+
+// x402 v2 names a network by its CAIP-2 chain id, `namespace:reference`
+// (specs/x402-specification-v2.md 11.1; docs.x402.org migration guide, "Network
+// Identifier Mapping"): Base mainnet is chain 8453, and Solana mainnet is named
+// by its genesis hash. The CDP facilitator's X402V2Network enum spells them the
+// same way. Every network in x402Tokens has one, and testnets stay out here too.
+var x402Caip2Networks = map[string]string{
+	X402NetworkBase:   "eip155:8453",
+	X402NetworkSolana: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+}
+
+// x402Caip2Network is the v2 id of one of our networks.
+func x402Caip2Network(network string) (string, bool) {
+	caip2, ok := x402Caip2Networks[network]
+	return caip2, ok
+}
+
+// x402NetworkForCaip2 is our name for a v2 network id, when it is one we quote.
+func x402NetworkForCaip2(caip2 string) (string, bool) {
+	for network, id := range x402Caip2Networks {
+		if id == caip2 {
+			return network, true
+		}
+	}
+	return "", false
+}
+
+// x402NetworkName is our name for a network as either protocol version spells
+// it: a v2 CAIP-2 id of a network we know becomes its name, and anything else
+// (a v1 name, or a network we do not know) is returned as it is.
+func x402NetworkName(network string) string {
+	if name, ok := x402NetworkForCaip2(network); ok {
+		return name
+	}
+	return network
+}
 
 // X402AssetUsdc is the one asset symbol x402.yml can name.
 const X402AssetUsdc = "usdc"
@@ -103,6 +145,11 @@ func x402TokenFor(network string, asset string) (x402Token, error) {
 	token, ok := assets[asset]
 	if !ok {
 		return x402Token{}, fmt.Errorf("asset %q has no token address on network %s (usdc)", asset, network)
+	}
+	if _, ok := x402Caip2Network(network); !ok {
+		// every network is quoted in both protocol versions, so one with no
+		// v2 id is a table that was edited halfway
+		return x402Token{}, fmt.Errorf("network %s has no x402 v2 (CAIP-2) id", network)
 	}
 	return token, nil
 }

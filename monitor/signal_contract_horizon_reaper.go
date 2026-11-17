@@ -337,7 +337,7 @@ func contractHorizonReaperFindings(frame contractHorizonReaperFrame, settings *C
 	raise(behind, behindKnown, "contract-horizon-reaper-behind", finding{
 		probeId: contractHorizonReaperProbeId, tier: tierWarn, class: "contract-horizon-reaper-behind", target: target, sustain: 2,
 		symptom:   fmt.Sprintf("The contract horizon reaper's pass fell %.1f hours further behind its horizon in %s while on", growth/3600, stormDuration(settings.LagWindow)),
-		mechanism: "The lag is the time between the horizon and the mint time of the last contract the pass committed past. It grows when the pass deletes contracts more slowly than they cross the horizon, so the contract tables grow by the difference; a pass that keeps up holds it near zero, and one catching up shrinks it.",
+		mechanism: "The lag is the time between the horizon and the mint time of the last contract the pass committed past. It grows when the pass deletes contracts more slowly than they cross the horizon, so the contract tables grow by the difference; a pass that keeps up holds it near the close settle time (2 hours: it reads a contract only once its mint time is that far past the horizon), and one catching up shrinks it.",
 		baseline:  fmt.Sprintf("Inside one pass the lag grows by less than %s in %s while the mode is on.", stormDuration(settings.LagGrowth), stormDuration(settings.LagWindow)),
 		observed:  counts + " lag_before_hours=" + contractHorizonReaperHours(lagBefore),
 		evidence:  "max(urnetwork_contract_horizon_lag_seconds) of the processes that ran the reaper, now and a lag window ago, with an unchanged urnetwork_contract_horizon_pass_start_timestamp_seconds.",

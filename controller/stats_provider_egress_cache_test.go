@@ -147,6 +147,21 @@ func statsProviderEgressTestCounts() *model.ProviderEgressCounts {
 	for _, outcome := range model.ProviderModernOutcomes {
 		counts.ModernOnlineCounts[outcome] = 0
 	}
+	counts.CapabilityCounts = map[string]map[string]map[string]int64{}
+	counts.PostQuantumCounts = map[string]map[string]int64{}
+	for _, bucket := range model.ProviderEgressBuckets {
+		counts.CapabilityCounts[bucket] = map[string]map[string]int64{}
+		for _, ip := range model.ProviderEgressCapabilityIps {
+			counts.CapabilityCounts[bucket][ip] = map[string]int64{}
+			for _, protocol := range model.ProviderEgressCapabilityProtocols {
+				counts.CapabilityCounts[bucket][ip][protocol] = 0
+			}
+		}
+		counts.PostQuantumCounts[bucket] = map[string]int64{}
+		for _, signal := range model.ProviderPostQuantumSignals {
+			counts.PostQuantumCounts[bucket][signal] = 0
+		}
+	}
 	return counts
 }
 
@@ -464,7 +479,7 @@ func TestStatsProviderEgressCacheCanceledReadAndEmptyPolicy(t *testing.T) {
 func TestStatsProviderEgressCacheWireValidation(t *testing.T) {
 	store := newStatsProviderEgressTestStore()
 	valid := statsProviderEgressTestWire(t, statsProviderEgressTestCounts(), store.now(), store.now())
-	for _, scenario := range []string{"extra", "version", "null_counts", "null_index", "unknown_bucket", "unknown_reason", "negative", "leading_zero", "index_bound", "max_index", "future", "reversed", "long_fill", "null_shadow", "online_shadow", "missing_shadow_bucket", "unknown_outcome", "missing_outcome", "negative_shadow"} {
+	for _, scenario := range []string{"extra", "version", "null_counts", "null_index", "unknown_bucket", "unknown_reason", "negative", "leading_zero", "index_bound", "max_index", "future", "reversed", "long_fill", "null_shadow", "online_shadow", "missing_shadow_bucket", "unknown_outcome", "missing_outcome", "negative_shadow", "null_capability", "missing_capability_bucket", "unknown_capability_ip", "missing_capability_protocol", "negative_capability", "null_post_quantum", "missing_post_quantum_bucket", "unknown_signal", "missing_signal", "negative_post_quantum"} {
 		t.Run(scenario, func(t *testing.T) {
 			var wire map[string]any
 			if err := json.Unmarshal([]byte(valid), &wire); err != nil {
@@ -512,6 +527,26 @@ func TestStatsProviderEgressCacheWireValidation(t *testing.T) {
 				delete(shadow[model.RankModeSpeed].(map[string]any), model.ProviderModernOutcomeStaleEvidence)
 			case "negative_shadow":
 				shadow[model.RankModeQuality].(map[string]any)[model.ProviderModernOutcomeModern] = -1
+			case "null_capability":
+				counts["k"] = nil
+			case "missing_capability_bucket":
+				delete(counts["k"].(map[string]any), model.ProviderEgressBucketOnline)
+			case "unknown_capability_ip":
+				counts["k"].(map[string]any)[model.RankModeQuality].(map[string]any)["ipv6"] = map[string]any{}
+			case "missing_capability_protocol":
+				delete(counts["k"].(map[string]any)[model.RankModeSpeed].(map[string]any)[model.ProviderCapabilityIpIpv4].(map[string]any), model.ProviderCapabilityProtocolTcp)
+			case "negative_capability":
+				counts["k"].(map[string]any)[model.RankModeQuality].(map[string]any)[model.ProviderCapabilityIpDualstack].(map[string]any)[model.ProviderCapabilityProtocolDualproto] = -1
+			case "null_post_quantum":
+				counts["q"] = nil
+			case "missing_post_quantum_bucket":
+				delete(counts["q"].(map[string]any), model.RankModeSpeed)
+			case "unknown_signal":
+				counts["q"].(map[string]any)[model.RankModeQuality].(map[string]any)["untrusted"] = 0
+			case "missing_signal":
+				delete(counts["q"].(map[string]any)[model.ProviderEgressBucketOnline].(map[string]any), model.ProviderPostQuantumSignalNone)
+			case "negative_post_quantum":
+				counts["q"].(map[string]any)[model.RankModeQuality].(map[string]any)[model.ProviderPostQuantumSignalPositive] = -1
 			}
 			encoded, err := json.Marshal(wire)
 			if err != nil {
@@ -640,5 +675,37 @@ func TestStatsProviderEgressCacheCarriesTheModernOnlineCounts(t *testing.T) {
 	counts.ModernOnlineCounts = nil
 	if validStatsProviderEgressCounts(counts) {
 		t.Fatal("a snapshot without the online modern counts is valid")
+	}
+}
+
+// The classified decision's capability and post-quantum counts are part of a
+// complete schema 8 snapshot (FP2-PROTOCOL.md §8.1): every bucket, label pair
+// and signal round-trips, zero included, and a snapshot without them, as a
+// schema 7 one is, is incomplete.
+func TestStatsProviderEgressCacheCarriesTheCapabilityAndPostQuantumCounts(t *testing.T) {
+	store := newStatsProviderEgressTestStore()
+	counts := statsProviderEgressTestCounts()
+	counts.CapabilityCounts[model.RankModeSpeed][model.ProviderCapabilityIpIpv4][model.ProviderCapabilityProtocolTcp] = 20657
+	counts.CapabilityCounts[model.ProviderEgressBucketOnline][model.ProviderCapabilityIpDualstack][model.ProviderCapabilityProtocolTcp] = 14
+	counts.PostQuantumCounts[model.RankModeQuality][model.ProviderPostQuantumSignalPositive] = 84
+	counts.PostQuantumCounts[model.ProviderEgressBucketOnline][model.ProviderPostQuantumSignalNone] = 5714
+	if !validStatsProviderEgressCounts(counts) {
+		t.Fatal("a snapshot with the capability and post-quantum counts is not valid")
+	}
+	value := statsProviderEgressTestWire(t, counts, store.now(), store.now())
+	decoded, fresh, err := decodeStatsProviderEgressSnapshot(value, store.now())
+	if err != nil || !fresh || !reflect.DeepEqual(decoded.Counts, counts) {
+		t.Fatalf("the capability and post-quantum counts did not round-trip: %v", err)
+	}
+
+	withoutCapability := statsProviderEgressTestCounts()
+	withoutCapability.CapabilityCounts = nil
+	if validStatsProviderEgressCounts(withoutCapability) {
+		t.Fatal("a snapshot without the capability counts is valid")
+	}
+	withoutPostQuantum := statsProviderEgressTestCounts()
+	withoutPostQuantum.PostQuantumCounts = nil
+	if validStatsProviderEgressCounts(withoutPostQuantum) {
+		t.Fatal("a snapshot without the post-quantum counts is valid")
 	}
 }

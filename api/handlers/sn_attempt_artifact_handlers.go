@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -39,6 +40,81 @@ func SnAttemptArtifact(w http.ResponseWriter, r *http.Request) {
 		RecordBytes:   maximumSnAttemptRecordBytes,
 		ProofBytes:    maximumSnAttemptProofBytes,
 	}, snAttemptReaderSlots)
+}
+
+// The same route's head: the stored object's typed content and exact length
+// at its content address, with no body, and the upload encodings this api
+// takes. An uploader asks for it before repeating an upload whose
+// acknowledgement it lost, instead of reading the whole object.
+func SnAttemptArtifactHead(w http.ResponseWriter, r *http.Request) {
+	serveSnAttemptArtifactHead(w, r, server.LoadBlobStore, startifact.AttemptObjectBounds{
+		MetadataBytes: maximumSnAttemptMetadataBytes,
+		RecordBytes:   maximumSnAttemptRecordBytes,
+		ProofBytes:    maximumSnAttemptProofBytes,
+	}, snAttemptReaderSlots)
+}
+
+// Shares the readers' slots, and their refusal when every slot is busy.
+func serveSnAttemptArtifactHead(w http.ResponseWriter, r *http.Request, loadStore func() (server.BlobStore, bool), bounds startifact.AttemptObjectBounds, slots chan struct{}) {
+	if r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodHead)
+		http.Error(w, "Method not allowed.", http.StatusMethodNotAllowed)
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil || len(query) != 2 || len(query["kind"]) != 1 || len(query["hash"]) != 1 ||
+		startifact.ValidateAttemptObject(query.Get("kind"), query.Get("hash")) != nil || len(r.Header.Values("Range")) != 0 {
+		http.Error(w, "Invalid typed artifact request.", http.StatusBadRequest)
+		return
+	}
+	if loadStore == nil || bounds.Validate() != nil || slots == nil || cap(slots) == 0 {
+		http.Error(w, "Artifact reader unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "Artifact reader busy.", http.StatusTooManyRequests)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), defaultSnAttemptEncodingSettings().HeadDuration)
+	defer cancel()
+	store, ok := loadStore()
+	if !ok || store == nil {
+		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	kind, contentHash := query.Get("kind"), query.Get("hash")
+	size, found, err := startifact.StatAttemptObject(ctx, store, bounds, kind, contentHash)
+	w.Header().Set("Accept-Encoding", snAttemptUploadEncodingZstd)
+	if err != nil {
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Context().Err() != nil {
+			http.Error(w, "Request canceled.", http.StatusRequestTimeout)
+			return
+		}
+		glog.Warningf("[sn-attempt] artifact head failed: kind=%s hash=%s error=%.1024q", kind, contentHash, err.Error())
+		http.Error(w, "Artifact head unavailable.", http.StatusBadGateway)
+		return
+	}
+	if !found {
+		// an object may land later at this address; nothing may cache its absence
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "Artifact not found.", http.StatusNotFound)
+		return
+	}
+	contentType := "application/x-ndjson"
+	if kind == "metadata" {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("ETag", `"`+contentHash+`"`)
+	w.Header().Set("Cache-Control", "public, immutable, max-age=31536000, no-transform")
+	w.Header().Set("Content-Length", strconv.FormatUint(size, 10))
+	w.WriteHeader(http.StatusOK)
 }
 
 // Dependency injection is call-local; tests do not replace process-global

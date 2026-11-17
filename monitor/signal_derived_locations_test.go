@@ -87,10 +87,16 @@ func healthyDerivedLocationsFixture() *derivedLocationsFixture {
 			cosigned:         900,
 			rejected:         30,
 			rateLimited:      5,
+			unknownPinger:    10,
 			unknown:          50,
 			relayed:          10,
 			zeroRtt:          0,
 			beyondHalfPlanet: 5,
+			// a third of the verdicts are extender pingers', and a target
+			// that does not know its pinger is rare
+			extenderCosigned:      300,
+			extenderRejected:      15,
+			extenderUnknownPinger: 10,
 		},
 		otherHours: []derivedLocationsPingHour{
 			{cosigned: 880, rejected: 25, rateLimited: 4, unknown: 40, relayed: 9, beyondHalfPlanet: 4},
@@ -131,6 +137,10 @@ func derivedLocationsHourRow(hour derivedLocationsPingHour, label string, lastCo
 		strconv.FormatInt(hour.relayed, 10),
 		strconv.FormatInt(hour.zeroRtt, 10),
 		strconv.FormatInt(hour.beyondHalfPlanet, 10),
+		strconv.FormatInt(hour.unknownPinger, 10),
+		strconv.FormatInt(hour.extenderCosigned, 10),
+		strconv.FormatInt(hour.extenderRejected, 10),
+		strconv.FormatInt(hour.extenderUnknownPinger, 10),
 	}
 }
 
@@ -299,6 +309,7 @@ func TestDerivedLocationsSignalHealthyBaseline(t *testing.T) {
 		"derive-not-running",
 		"derive-supply-gone",
 		"derive-refusals",
+		"extender-directories-stale",
 		"derive-no-verdicts",
 		"derive-published-collapse",
 		"derive-residual-not-improving",
@@ -314,8 +325,8 @@ func TestDerivedLocationsSignalHealthyBaseline(t *testing.T) {
 			t.Errorf("class %s has %d healthy findings, want 1", class, classes[class])
 		}
 	}
-	if len(classes) != 15 {
-		t.Errorf("healthy classes %v, want the thirteen conditions, history and schema readiness", classes)
+	if len(classes) != 16 {
+		t.Errorf("healthy classes %v, want the fourteen conditions, history and schema readiness", classes)
 	}
 
 	// the history is read three runs deep, the deepest comparison
@@ -369,6 +380,17 @@ func TestDerivedLocationsSignalConditions(t *testing.T) {
 				fixture.lastHour.rateLimited = 60
 			},
 			want: []string{"derive-refusals/rate-limited"},
+		},
+		{
+			name: "stale directories",
+			edit: func(fixture *derivedLocationsFixture) {
+				// 180 more extender pingers refused as unknown: 190 of 495
+				fixture.lastHour.rejected += 180
+				fixture.lastHour.unknownPinger += 180
+				fixture.lastHour.extenderRejected += 180
+				fixture.lastHour.extenderUnknownPinger += 180
+			},
+			want: []string{"extender-directories-stale/"},
 		},
 		{
 			name: "no verdicts",
@@ -477,6 +499,20 @@ func TestDerivedLocationsSignalThresholdBoundaries(t *testing.T) {
 	fixture.lastHour = derivedLocationsPingHour{cosigned: 899, rejected: 101}
 	requireDerivedLocationsAlerts(t, fixture.run(t, nil), "derive-refusals/rejected")
 
+	// the same line with unknown pingers and rate limits on top: neither is
+	// counted, as a refusal or as a verdict
+	fixture.lastHour = derivedLocationsPingHour{cosigned: 900, rejected: 100 + 400 + 20, unknownPinger: 400, rateLimited: 20}
+	requireDerivedLocationsAlerts(t, fixture.run(t, nil))
+	fixture.lastHour = derivedLocationsPingHour{cosigned: 899, rejected: 101 + 400 + 20, unknownPinger: 400, rateLimited: 20}
+	requireDerivedLocationsAlerts(t, fixture.run(t, nil), "derive-refusals/rejected")
+
+	// 30 % of 1000 extender-pinger verdicts refused as unknown exactly, then
+	// one more
+	fixture.lastHour = derivedLocationsPingHour{cosigned: 2000, rejected: 300, unknownPinger: 300, extenderCosigned: 700, extenderRejected: 300, extenderUnknownPinger: 300}
+	requireDerivedLocationsAlerts(t, fixture.run(t, nil))
+	fixture.lastHour = derivedLocationsPingHour{cosigned: 1999, rejected: 301, unknownPinger: 301, extenderCosigned: 699, extenderRejected: 301, extenderUnknownPinger: 301}
+	requireDerivedLocationsAlerts(t, fixture.run(t, nil), "extender-directories-stale/")
+
 	// sixteen hours old exactly, then one second more
 	fixture = healthyDerivedLocationsFixture()
 	fixture.runs = []*model.DeriveLocationsRun{derivedLocationsRun(16*time.Hour, 400)}
@@ -569,6 +605,12 @@ func TestDerivedLocationsSignalSmallPopulations(t *testing.T) {
 	fixture := healthyDerivedLocationsFixture()
 	fixture.lastHour = derivedLocationsPingHour{cosigned: 20, rejected: 20, unknown: 20, zeroRtt: 10, beyondHalfPlanet: 10}
 	fixture.state.activeExtenders = 0
+	requireDerivedLocationsAlerts(t, fixture.run(t, nil))
+
+	// ninety-nine extender-pinger verdicts, every one refused as unknown:
+	// under DeriveMinPingSamples
+	fixture = healthyDerivedLocationsFixture()
+	fixture.lastHour = derivedLocationsPingHour{cosigned: 900, rejected: 99, unknownPinger: 99, extenderRejected: 99, extenderUnknownPinger: 99}
 	requireDerivedLocationsAlerts(t, fixture.run(t, nil))
 
 	// no connected provider: the supply is not expected
@@ -815,6 +857,7 @@ func TestDerivedLocationsSettingsDefaults(t *testing.T) {
 		DeriveMinPingSamples:           100,
 		DeriveMaxRefusalShare:          0.10,
 		DeriveMaxRateLimitedShare:      0.05,
+		DeriveMaxUnknownPingerShare:    0.30,
 		DeriveMaxUnknownShare:          0.30,
 		DeriveMinNodeSamples:           20,
 		DerivePublishedCollapseShare:   0.5,
@@ -877,6 +920,13 @@ func TestDerivedLocationsQueriesSelectOnlyAggregates(t *testing.T) {
 		"COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed",
 		"sum(zero_rtt_count)::bigint AS zero_rtt",
 		"sum(beyond_half_planet_count)::bigint AS beyond_half_planet",
+		// the refusals that are evidence against no one, and the extender
+		// pingers' verdicts, counted apart (the extender ping review of
+		// 2026-11-11)
+		"COALESCE(sum(ping_count) FILTER (WHERE cosign = 2 AND cosign_reason = 4), 0)::bigint AS unknown_pinger",
+		"COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 1), 0)::bigint AS extender_cosigned",
+		"COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2), 0)::bigint AS extender_rejected",
+		"COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2 AND cosign_reason = 4), 0)::bigint AS extender_unknown_pinger",
 		"FROM network_ping_hour_tally",
 		"WHERE date_trunc('hour', now() AT TIME ZONE 'utc') - interval '23 hours' <= hour GROUP BY hour ORDER BY hour",
 	} {

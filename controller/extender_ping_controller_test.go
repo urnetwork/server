@@ -703,7 +703,17 @@ func TestExtenderPingReportFeedsTheDashboardCounts(t *testing.T) {
 		counts := model.CountExtenderPings(ctx, server.NowUtc())
 		connect.AssertEqual(t, counts.Pings24h, int64(3))
 		connect.AssertEqual(t, counts.Targets24h, int64(1))
-		connect.AssertEqual(t, len(counts.Outcomes24h), len(model.NetworkPingPingerKinds)*len(model.NetworkPingCosigns)*2)
+		// every kind, relayed or not, by verdict: co-signed and unknown once
+		// each, a refusal once per reason
+		connect.AssertEqual(t, len(counts.Outcomes24h), len(model.NetworkPingPingerKinds)*2*(len(model.NetworkPingCosigns)-1+len(model.NetworkPingRefusalReasons)))
+		for _, outcome := range counts.Outcomes24h {
+			if outcome.Cosign == model.NetworkPingCosignRejected && 0 < outcome.Pings {
+				// the refusal is counted under the reason the target gave
+				connect.AssertEqual(t, outcome.PingerKind, model.NetworkPingPingerKindProvider)
+				connect.AssertEqual(t, outcome.Reason, int(connect.ExtenderProbeVerdictReasonRttBelowObserved))
+				connect.AssertEqual(t, outcome.Pings, int64(1))
+			}
+		}
 		kindSources := map[int]int64{}
 		for _, source := range counts.Sources24h {
 			kindSources[source.PingerKind] = source.Sources
@@ -721,18 +731,25 @@ func TestExtenderPingReportFeedsTheDashboardCounts(t *testing.T) {
 		for hour := range storedHours {
 			for _, count := range model.CountExtenderPingsByHour(ctx, hour) {
 				connect.AssertEqual(t, count.ExtenderId, target.extender.ExtenderId)
+				// the report stores the evidence count with every row
+				connect.AssertEqual(t, count.EvidenceKnown, true)
 				summed := kindHourCounts[count.PingerKind]
 				summed.ExtenderId = count.ExtenderId
 				summed.PingerKind = count.PingerKind
 				summed.Pings += count.Pings
 				summed.Rejections += count.Rejections
+				summed.EvidenceRejections += count.EvidenceRejections
 				kindHourCounts[count.PingerKind] = summed
 			}
 		}
 		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindProvider].Pings, int64(2))
 		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindProvider].Rejections, int64(1))
+		// the refusal was for a round trip below the observed one, evidence
+		// against the target
+		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindProvider].EvidenceRejections, int64(1))
 		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindExtender].Pings, int64(1))
 		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindExtender].Rejections, int64(0))
+		connect.AssertEqual(t, kindHourCounts[model.NetworkPingPingerKindExtender].EvidenceRejections, int64(0))
 		if counts := model.CountExtenderPingsByHour(ctx, server.NowUtc().Add(-3*time.Hour)); len(counts) != 0 {
 			t.Fatalf("an empty hour counted %v", counts)
 		}

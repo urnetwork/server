@@ -253,7 +253,10 @@ func TestExtenderActivateAddsTheSecondFamilyToOneRecord(t *testing.T) {
 		firstBody := verifyTestExtenderRecord(t, rootPublicKey, first.Record)
 		connect.AssertEqual(t, len(firstBody.Addresses), 1)
 
-		secondSession := newTestExtenderSession(t, ctx, fixture.clientAddress("::1"))
+		// the same client on its other family: a key stays in the network
+		// that first activated it
+		secondSession := session.Testing_CreateClientSession(ctx, firstSession.ByJwt)
+		secondSession.ClientAddress = fixture.clientAddress("::1")
 		second, err := ExtenderActivate(fixture.activateArgs(), secondSession)
 		if err != nil {
 			t.Fatal(err)

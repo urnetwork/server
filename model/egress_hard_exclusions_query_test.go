@@ -17,21 +17,29 @@ func hardExclusionUnscopedSqlForTest() string {
 		WHERE client_id = ANY($1) AND NOT (` + providerEgressEligibilitySql("provider_location") + `)
 		UNION SELECT client_id FROM provider_egress_health
 		WHERE client_id = ANY($1) AND tls_authentication_failure = true
-		UNION SELECT client_id FROM provider_egress_url_security
-		WHERE client_id = ANY($1) AND tls_failure`
+		UNION SELECT client_id FROM provider_egress_url_security AS url_security
+		WHERE client_id = ANY($1) AND ` + providerUrlSecurityExcludesSql("url_security") + `
+		UNION SELECT client_id FROM provider_zero_carry
+		WHERE client_id = ANY($1) AND expire_time > (now() AT TIME ZONE 'UTC')`
 }
 
-// The indexed keys and nullability match the four durable input relations.
+// The indexed keys and nullability match the five durable input relations. A
+// URL finding's verdict defaults to the provider's own, the one that excludes
+// (provider_egress_tls_verdict.go), so a fixture that names only tls_failure
+// is a judged finding.
 func testingHardExclusionQueryTables(t testing.TB, tx server.PgTx, temporary bool) {
 	t.Helper()
 	for _, query := range []string{
 		`SET LOCAL statement_timeout='30s'`, `SET LOCAL lock_timeout='2s'`,
 		`CREATE TEMP TABLE network_client_location_reliability(client_id uuid PRIMARY KEY, arin_risk bool NOT NULL) ON COMMIT DROP`,
 		`CREATE TEMP TABLE client_connection_reliability_score(client_id uuid, lookback_index int, independent_reliability_weight double precision NOT NULL, PRIMARY KEY(client_id,lookback_index)) ON COMMIT DROP`,
-		`CREATE TEMP TABLE provider_egress_health(client_id uuid PRIMARY KEY, tls_authentication_failure bool NOT NULL, legacy_tls_authentication_failure bool NOT NULL) ON COMMIT DROP`,
-		`CREATE TEMP TABLE provider_egress_url_security(client_id uuid, url_key text, tls_failure bool NOT NULL, PRIMARY KEY(client_id,url_key)) ON COMMIT DROP`,
+		`CREATE TEMP TABLE provider_egress_health(client_id uuid PRIMARY KEY, tls_authentication_failure bool NOT NULL, legacy_tls_authentication_failure bool NOT NULL, legacy_tls_cleared_at timestamp) ON COMMIT DROP`,
+		`CREATE TEMP TABLE provider_egress_url_security(client_id uuid, url_key text, tls_failure bool NOT NULL, tls_verdict smallint NOT NULL DEFAULT 1, PRIMARY KEY(client_id,url_key)) ON COMMIT DROP`,
 		`CREATE INDEX ON provider_egress_health(client_id) WHERE tls_authentication_failure`,
 		`CREATE INDEX ON provider_egress_url_security(client_id,url_key) WHERE tls_failure`,
+		// the zero-carry verdicts (provider_zero_carry.go): one row per
+		// provider, excluding until its expiry
+		`CREATE TEMP TABLE provider_zero_carry(client_id uuid PRIMARY KEY, expire_time timestamp NOT NULL) ON COMMIT DROP`,
 	} {
 		if !temporary {
 			query = strings.ReplaceAll(query, "CREATE TEMP TABLE", "CREATE TABLE")
@@ -59,7 +67,16 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				legacyTls bool
 				weights   map[int]float64
 				urls      []bool
+				// the verdict of every URL finding; nil is the judged
+				// provider verdict the table defaults to
+				urlVerdict *ProviderEgressTlsVerdict
+				// a zero-carry verdict, expiring this far from now: positive
+				// in force, negative expired, zero none
+				zeroCarry time.Duration
 				excluded  bool
+			}
+			verdictOf := func(verdict ProviderEgressTlsVerdict) *ProviderEgressTlsVerdict {
+				return &verdict
 			}
 			minimums := providerReliabilityMinimums()
 			providers := []provider{
@@ -79,6 +96,16 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				{name: "no_rollup_legacy", health: true, legacyTls: true},
 				{name: "no_rollup_tls", health: true, tls: true, excluded: true},
 				{name: "no_rollup_url", urls: []bool{true}, excluded: true},
+				// a finding excludes only once judged the provider's own
+				{name: "pending_url_finding", rollup: true, urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictPending)},
+				{name: "site_url_finding", rollup: true, urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictSite)},
+				{name: "no_rollup_place_url_finding", urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictPlace)},
+				{name: "no_rollup_retired_url_finding", urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictRetired)},
+				// a zero-carry verdict excludes while it is in force, with
+				// or without a rollup, and never once it has expired
+				{name: "zero_carry", rollup: true, zeroCarry: time.Hour, excluded: true},
+				{name: "no_rollup_zero_carry", zeroCarry: time.Hour, excluded: true},
+				{name: "expired_zero_carry", rollup: true, zeroCarry: -time.Hour},
 				{name: "unknown"},
 				{name: "overlapping_failures", rollup: true, risk: true, health: true, tls: true, legacyTls: true, weights: map[int]float64{1: 0, 2: 0, 3: 0}, urls: []bool{true, true}, excluded: true},
 			}
@@ -94,14 +121,22 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				for lookback, weight := range fixture.weights {
 					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score VALUES($1,$2,$3)`, ids[i], lookback, weight))
 				}
+				verdict := ProviderEgressTlsVerdictProvider
+				if fixture.urlVerdict != nil {
+					verdict = *fixture.urlVerdict
+				}
 				for url, failure := range fixture.urls {
-					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security VALUES($1,$2,$3)`, ids[i], fmt.Sprint(url), failure))
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security VALUES($1,$2,$3,$4)`, ids[i], fmt.Sprint(url), failure, int16(verdict)))
+				}
+				if fixture.zeroCarry != 0 {
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_zero_carry VALUES($1,$2)`, ids[i], server.NowUtc().Add(fixture.zeroCarry)))
 				}
 			}
 			outside := server.NewId()
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location_reliability VALUES($1,true)`, outside))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health VALUES($1,true,true)`, outside))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security VALUES($1,'outside',true)`, outside))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_zero_carry VALUES($1,$2)`, outside, server.NowUtc().Add(time.Hour)))
 			requested := append(append([]server.Id{}, ids...), ids[0], ids[len(ids)-1])
 			for _, query := range []string{hardExclusionUnscopedSqlForTest(), providerHardExclusionsSql()} {
 				for _, candidates := range [][]server.Id{requested, ids[:1], nil} {
@@ -166,8 +201,9 @@ func TestProviderHardExclusionsQueryPlanIsCandidateBounded(t *testing.T) {
 				`INSERT INTO client_connection_reliability_score SELECT lpad(to_hex(n),32,'0')::uuid,lookback,CASE WHEN n%101=0 THEN 0.5 ELSE 1.0 END FROM generate_series(1,125000) AS n CROSS JOIN generate_series(1,3) AS lookback`,
 				`INSERT INTO provider_egress_health SELECT lpad(to_hex(n),32,'0')::uuid,n%103=0,n%107=0 FROM generate_series(1,125000) AS n`,
 				`INSERT INTO provider_egress_url_security SELECT lpad(to_hex(n),32,'0')::uuid,url::text,n%109=0 FROM generate_series(1,125000) AS n CROSS JOIN generate_series(1,3) AS url`,
+				`INSERT INTO provider_zero_carry SELECT lpad(to_hex(n),32,'0')::uuid,(now() AT TIME ZONE 'UTC') + CASE WHEN n%2=0 THEN interval '1 hour' ELSE interval '-1 hour' END FROM generate_series(1,125000,113) AS n`,
 				`ANALYZE network_client_location_reliability`, `ANALYZE client_connection_reliability_score`,
-				`ANALYZE provider_egress_health`, `ANALYZE provider_egress_url_security`,
+				`ANALYZE provider_egress_health`, `ANALYZE provider_egress_url_security`, `ANALYZE provider_zero_carry`,
 				`PREPARE hard_exclusion_original(uuid[]) AS ` + hardExclusionUnscopedSqlForTest(),
 				`PREPARE hard_exclusion_bounded(uuid[]) AS ` + providerHardExclusionsSql(),
 			} {

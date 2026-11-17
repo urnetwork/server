@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "kind": "competition-controlled-recovery-grant-checkpoint/v1",
+  "observed_at": "2026-11-06T23:17:42Z",
+  "approval_record": "FAILED-RECOVERY-APPROVAL-2026-11-06.json",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "grants_issued": 6,
+  "cycle": 1,
+  "maximum_execution_seconds_per_cycle": 10800,
+  "additional_submission_fee": false,
+  "verified_readbacks": {
+    "jobs": 6,
+    "state": "queued",
+    "cycle_clocks_unstarted": true,
+    "one_immutable_receipt_per_job": true,
+    "database_receipt_hash_matches_cli": true,
+    "original_submitted_at_and_first_started_at_preserved": true,
+    "original_patch_bytes_hash_cache_key_and_round_preserved": true,
+    "original_terminal_hash_bound_in_receipt": true,
+    "native_transaction_rechecked_idle_holds_source_baseline_and_policy": true
+  },
+  "receipts": [
+    {"job_id":"01a189ac-2c92-4acb-204f-d37a1a24838b","attempt_offset":1,"authorized_at":"2026-11-06T23:15:09.630155Z","receipt_sha256":"644a30cf9f37d2a5226ec22b459600d9266a7c57bcebd3331bfee5fbd7a3d204"},
+    {"job_id":"01a1a3c4-6a91-74a6-e0d6-1caa1f832af2","attempt_offset":5,"authorized_at":"2026-11-06T23:15:34.410208Z","receipt_sha256":"d01f08825406727f984d66470458ac4b205f6f9885ba1d7191dd056e3a784e27"},
+    {"job_id":"01a1a512-cbb1-f62d-6fc5-6f4d23faa3cf","attempt_offset":6,"authorized_at":"2026-11-06T23:15:38.630492Z","receipt_sha256":"9854a38dd7d1f0072b9974596e9ce18bb21442990f7ee01cc126cd3713814abb"},
+    {"job_id":"01a1a672-824d-c2a3-330c-db4244a8972a","attempt_offset":8,"authorized_at":"2026-11-06T23:15:42.445188Z","receipt_sha256":"9b5c4f999e0e478afd06de45e13991bcaae31bf455774c54bd3fb6bae800b4b2"},
+    {"job_id":"01a1a9e1-ca26-ab2a-d712-45f54ff04a7b","attempt_offset":4,"authorized_at":"2026-11-06T23:15:45.762448Z","receipt_sha256":"fbc16c4bdad4706786e73f4fef6cca85dfb3dca82c61f41bd3ad12707094740f"},
+    {"job_id":"01a1aad5-5827-a79a-ed06-52df34194821","attempt_offset":4,"authorized_at":"2026-11-06T23:15:49.183506Z","receipt_sha256":"6e1ed6fdd3ded63ac918724e826608c913b4d4b995fd13b989e5a38bad55e7fb"}
+  ],
+  "runtime": {
+    "private_evidence_directory": "/var/lib/urnetwork/competition-six-recovery-preparation-20261106.mxsY9Qvf",
+    "runtime_evidence_sha256": "ecd1b78c325864226bc08b9acc692448f1cd316279b363b1dd1448c2bbf353c4",
+    "native_runtime_typed_sha256": "cf74330c23b463f31a16f5e1f7ac30c86acf7fd98a3126cb207acf8a4c3d3825",
+    "native_runtime_file_sha256": "7bfa76334b8f3a29f2aa91cea8fff0a7182c474a5aded9ec9bae84d143fd4ca5",
+    "worker_source": "e7a69d2ec81a17933f16766763b72b1896f1fbdf",
+    "worker_sha256": "7ded82b8bf80721ce5f6a67352849102dc7fae1bb33589fb750605614376aa92",
+    "worker_image_config_id": "sha256:cbcfec2643052c745d4bda2cff176bad974bef6fcd7805f31a669b0fa23b8507",
+    "api_image_config_id": "sha256:2be7628d9a57dd3e2fc9776bcec734bf5ec65a0bd383129490f503c4a6b0b685",
+    "recovery_cli_sha256": "0b9f8ec819e8f9af98afc4504bb257eb40d232346005041a67e25428eee7db5a",
+    "native_worker_not_a_container_execution_claim": true
+  },
+  "idle_maintenance": {
+    "preceding_job": "01a1aad9-5007-d991-0ccb-63f51ec0a5e9",
+    "preceding_job_succeeded_at": "2026-11-06T23:07:22.360660Z",
+    "candidate_replicates": 9,
+    "authenticated_owner_poll_http_status": 200,
+    "owner_score_present": true,
+    "execution_slot_empty_and_kernel_evaluation_cgroup_unpopulated": true,
+    "cleared_only_regenerable_go_build_cache": "/var/cache/urnetwork/competition-go-build",
+    "root_available_after_cleanup_approx_gib": 16,
+    "retained_evidence_journals_images_and_sources_deleted": false
+  },
+  "claim_hold_revision": 22,
+  "claim_hold_active": true,
+  "claims_release_pending": true,
+  "finalization_and_reward_delivery_holds_unchanged": true,
+  "seventh_operator_interrupted_job": {
+    "job_id": "01a1a481-0968-ff57-1ca8-1a48fc2a35ea",
+    "operator_approved": true,
+    "grant_issued": false,
+    "reason": "Needs separately qualified operator-interruption protocol and successor worker. Do not queue a mismatched image-pinned earlier job while CBC recovery cycles remain runnable."
+  },
+  "authority_scope": "Proves six controlled cycles were granted and verified queued, not that any retry has completed. No scoring gate, frozen epoch-one input, calibration, winner review or source promotion is waived. Private authorization/snapshot files contain patch bytes and must not be published or copied to Goofe."
+}

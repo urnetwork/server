@@ -8,6 +8,7 @@
 package reengagement
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,16 +29,17 @@ const (
 	StreamWinback = "winback"
 )
 
-// Steps: the flow steps the tokens and events carry (onboarding/token.go), and
-// StepEnd, the sunset check that sends nothing.
+// Steps: the flow steps the tokens and events carry (onboarding/token.go). R3
+// is the last step of an episode. There is no sunset check after it: nobody is
+// removed from marketing for not answering R3 (owner, 2026-11-15). A task left
+// from before that, for the old "end" step, is an unknown step and exits done.
 const (
-	StepR1  = onboarding.StepR1
-	StepR2  = onboarding.StepR2
-	StepR3  = onboarding.StepR3
-	StepN1  = onboarding.StepN1
-	StepF1  = onboarding.StepF1
-	StepW1  = onboarding.StepW1
-	StepEnd = "end"
+	StepR1 = onboarding.StepR1
+	StepR2 = onboarding.StepR2
+	StepR3 = onboarding.StepR3
+	StepN1 = onboarding.StepN1
+	StepF1 = onboarding.StepF1
+	StepW1 = onboarding.StepW1
 )
 
 // Templates (mmm/reengagement/templates/<template>/<variant>), uploaded to
@@ -119,26 +121,46 @@ const (
 	// the reader answered and the answer routed it elsewhere (fix list,
 	// quiet, suppressed)
 	ExitAnswered = "answered"
-	// clicked or answered without reconnecting: the address is live, no
-	// keep-or-go needed
+	// clicked or answered without reconnecting before R3
 	ExitEngaged = "engaged"
-	ExitKept    = "kept"
-	ExitSunset  = "sunset"
 	ExitCapped  = "capped"
 	ExitDone    = "done"
 )
 
-// Suppression reasons this program applies (account_preferences.marketing_suppressed_reason).
+// Suppression reasons this program applies (account_preferences.marketing_suppressed_reason):
+// only the reader's own "I switched to another VPN" answer. Silence never
+// suppresses: the day-60 sunset after R3 was dropped (owner, 2026-11-15).
 const (
-	SuppressSunset   = "sunset"
 	SuppressSwitched = "switched"
 )
 
-// LiftableSuppression reports whether a connection lifts the suppression: the
-// program's own (silence, "switched"); never a bounce, complaint or
-// unsubscribe.
+// Suppression reasons an operator records with `bringyourctl reengagement
+// suppress`. No connection lifts them.
+const (
+	// the account holder said they are in a sanctioned country (factury
+	// support/RUN-MAIN.md §9; owner, 2026-11-13)
+	SuppressSanctions = "sanctions"
+	// the network belongs to a sign-up cohort that automation made
+	SuppressAutomatedSignup = "automated_signup"
+)
+
+// OperatorSuppressions are the reasons `bringyourctl reengagement suppress`
+// accepts.
+func OperatorSuppressions() []string {
+	return []string{SuppressSanctions, SuppressAutomatedSignup}
+}
+
+// LiftableSuppressions are the reasons a connection lifts: the program's own
+// ("switched"); never a bounce, complaint, unsubscribe or an operator's
+// suppression.
+func LiftableSuppressions() []string {
+	return []string{SuppressSwitched}
+}
+
+// LiftableSuppression reports whether a connection lifts the suppression
+// (LiftableSuppressions).
 func LiftableSuppression(reason string) bool {
-	return reason == SuppressSunset || reason == SuppressSwitched
+	return slices.Contains(LiftableSuppressions(), reason)
 }
 
 // Schedule holds the day offsets and limits (reengagement.yml `schedule`).
@@ -146,7 +168,6 @@ type Schedule struct {
 	DormantDays      int
 	R2AfterR1Days    int
 	R3Day            int
-	EndAfterR3Days   int
 	NeverActiveDay   int
 	NKeepAfterN1Days int
 	CooldownDays     int
@@ -158,15 +179,17 @@ type Schedule struct {
 	// at least this long on those stores (PLAN.md "Billing failures are not
 	// churn")
 	StoreRetryDays int
-	KeepDays       int
-	MinGapDays     int
-	MaxPerYear     int
-	SendHour       int
-	SendWindow     string
+	// how long a "Keep me posted" click is recorded as the reader's choice
+	// (network_reengagement.keep_until); no step decides on it
+	KeepDays   int
+	MinGapDays int
+	MaxPerYear int
+	SendHour   int
+	SendWindow string
 }
 
 // DefaultSchedule is PLAN.md's: lapse at 30 days, R2 a week after R1, R3 at
-// day 30, the sunset check 30 days later; never-activated at day 30 after
+// day 30 as the episode's last email; never-activated at day 30 after
 // sign-up; 180 days between episodes; W1 30 days after Pro ended (60 on the
 // stores, which retry failed renewals that long); a week between marketing
 // emails; six re-engagement emails a year at most.
@@ -174,7 +197,6 @@ var DefaultSchedule = Schedule{
 	DormantDays:      30,
 	R2AfterR1Days:    7,
 	R3Day:            30,
-	EndAfterR3Days:   30,
 	NeverActiveDay:   30,
 	NKeepAfterN1Days: 30,
 	CooldownDays:     180,
@@ -201,7 +223,6 @@ func (s Schedule) WithDefaults() Schedule {
 	s.DormantDays = pick(s.DormantDays, d.DormantDays)
 	s.R2AfterR1Days = pick(s.R2AfterR1Days, d.R2AfterR1Days)
 	s.R3Day = pick(s.R3Day, d.R3Day)
-	s.EndAfterR3Days = pick(s.EndAfterR3Days, d.EndAfterR3Days)
 	s.NeverActiveDay = pick(s.NeverActiveDay, d.NeverActiveDay)
 	s.NKeepAfterN1Days = pick(s.NKeepAfterN1Days, d.NKeepAfterN1Days)
 	s.CooldownDays = pick(s.CooldownDays, d.CooldownDays)
@@ -261,8 +282,6 @@ type Facts struct {
 	Reason string
 	// the onboarding feedback email's answer (onboarding.Reason*), for N1
 	OnboardingReason string
-	// a keep click inside the keep window
-	Kept bool
 	// the "what changed" items that apply to the network now
 	Highlights []string
 	// W1: the comeback offer may be issued for this network (store, country,
@@ -279,7 +298,8 @@ type Decision struct {
 	NextStep   string
 	// days after the episode start
 	NextDay int
-	// apply this marketing suppression with the exit
+	// apply this marketing suppression with the exit (only an answer does:
+	// RouteAnswer's "switched")
 	Suppress string
 	// the network joins the fix list with this reason
 	JoinFix string
@@ -318,7 +338,7 @@ func Decide(step string, f Facts, s Schedule) Decision {
 	if reason := GlobalExit(f); reason != "" {
 		return Decision{Action: ActionExit, ExitReason: reason}
 	}
-	if step != StepEnd && 0 < s.MaxPerYear && s.MaxPerYear <= f.SentLastYear {
+	if 0 < s.MaxPerYear && s.MaxPerYear <= f.SentLastYear {
 		return Decision{Action: ActionExit, ExitReason: ExitCapped}
 	}
 	mail := func(template string, variant string, next string, nextDay int) Decision {
@@ -353,9 +373,8 @@ func Decide(step string, f Facts, s Schedule) Decision {
 			if f.Reason != "" || f.Clicked {
 				return exit(ExitEngaged)
 			}
-			return mail(TemplateR3Keep, VariantDefault, StepEnd, s.R3Day+s.EndAfterR3Days)
-		case StepEnd:
-			return sunset(f)
+			// the last email of the episode, which ends with it
+			return mail(TemplateR3Keep, VariantDefault, "", 0)
 		}
 	case StreamNeverActivated:
 		if f.Reactivated {
@@ -371,15 +390,14 @@ func Decide(step string, f Facts, s Schedule) Decision {
 			case onboarding.ReasonNotWorking:
 				return Decision{Action: ActionExit, ExitReason: ExitAnswered, JoinFix: onboarding.ReasonNotWorking}
 			default:
-				return mail(TemplateR3Keep, VariantDefault, StepEnd, s.EndAfterR3Days)
+				// R3 is the episode's only and last email
+				return mail(TemplateR3Keep, VariantDefault, "", 0)
 			}
 		case StepR3:
 			if f.Clicked {
 				return exit(ExitEngaged)
 			}
-			return mail(TemplateR3Keep, VariantDefault, StepEnd, s.NKeepAfterN1Days+s.EndAfterR3Days)
-		case StepEnd:
-			return sunset(f)
+			return mail(TemplateR3Keep, VariantDefault, "", 0)
 		}
 	case StreamFix:
 		if step == StepF1 {
@@ -401,17 +419,6 @@ func Decide(step string, f Facts, s Schedule) Decision {
 		}
 	}
 	return exit(ExitDone)
-}
-
-// sunset is the end of an episode that asked "should I keep writing?".
-func sunset(f Facts) Decision {
-	switch {
-	case f.Kept:
-		return Decision{Action: ActionExit, ExitReason: ExitKept}
-	case f.Clicked || f.Reason != "":
-		return Decision{Action: ActionExit, ExitReason: ExitEngaged}
-	}
-	return Decision{Action: ActionExit, ExitReason: ExitSunset, Suppress: SuppressSunset}
 }
 
 // Answer is what an R2 reason does to the network (recorded when it is
@@ -550,27 +557,29 @@ func FixHighlights(highlights []*Highlight, platform string, country string, rea
 
 // ----- send time -----
 
-// SendAt places a step: `day` days after the episode start, at the schedule's
-// hour in the network's zone, clamped into the send window, and never in the
-// past.
+// SendAt places a step in a reader's own zone (SendAtZone).
 func SendAt(startedAt time.Time, day int, loc *time.Location, s Schedule, now time.Time) time.Time {
+	return SendAtZone(startedAt, day, onboarding.ZoneSendZone(loc), s, now)
+}
+
+// SendAtZone places a step: `day` days after the episode start, at the
+// schedule's hour in the zone's location, clamped into the send window as the
+// zone narrows it (a country's zone keeps the window inside every populated
+// zone of the country), and never in the past.
+func SendAtZone(startedAt time.Time, day int, zone onboarding.SendZone, s Schedule, now time.Time) time.Time {
 	s = s.WithDefaults()
-	if loc == nil {
-		loc = time.UTC
-	}
+	loc := zone.Loc()
 	w, err := onboarding.ParseSendWindow(s.SendWindow)
 	if err != nil {
 		w = onboarding.DefaultSendWindow
 	}
+	w = zone.Window(w)
 	local := startedAt.In(loc)
 	anchor := time.Date(local.Year(), local.Month(), local.Day(), s.SendHour, 0, 0, 0, loc)
 	at := onboarding.SendAt(anchor, day, loc, w)
 	if at.Before(now) {
 		// due already (a late scan, a retry): the next window edge
-		at = onboarding.SendAt(now, 0, loc, w)
-		if at.Before(now) {
-			at = now.Add(time.Minute)
-		}
+		at = onboarding.DueSendAt(now, loc, w)
 	}
 	return at
 }

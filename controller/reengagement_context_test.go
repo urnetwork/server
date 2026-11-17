@@ -16,29 +16,41 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The onboarding row decides every part it has, whatever else is on record.
+// The onboarding row decides every part it has, whatever else is on record,
+// but the time zone: the sign-up IP's zone stands only where no purchase
+// names another country, and the purchase country's zone places the mail.
 func TestResolveReengagementContextOnboardingRowFirst(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
-	c := resolveReengagementContext(reengagementContextSources{
-		Onboarding:      &model.NetworkOnboarding{Locale: "de-DE", TimeZone: "Europe/Berlin", Platform: "android", Country: "DE"},
-		AppStoreCountry: "USA",
-		PlayCountry:     "BR",
-		StripeCountry:   "CA",
-		Client: &model.NetworkClientContext{
-			EventPlatform: "ios", EventPlatformAt: &now,
-			EventLocale: "fr-FR", EventLocaleAt: &now,
-			DeviceSpec: "macOS 26.0 arm64", DeviceSpecAt: &now,
-		},
-	})
+	client := &model.NetworkClientContext{
+		EventPlatform: "ios", EventPlatformAt: &now,
+		EventLocale: "fr-FR", EventLocaleAt: &now,
+		DeviceSpec: "macOS 26.0 arm64", DeviceSpecAt: &now,
+	}
 	onb := reengagement.ContextSourceOnboarding
+	c := resolveReengagementContext(reengagementContextSources{
+		Onboarding: &model.NetworkOnboarding{Locale: "de-DE", TimeZone: "Europe/Berlin", Platform: "android", Country: "DE"},
+		Client:     client,
+	})
 	want := ReengagementContext{
-		Locale: "de-DE", LocaleSource: onb,
+		Locale: "de", LocaleSource: onb,
 		TimeZone: "Europe/Berlin", TimeZoneSource: onb,
 		Platform: "android", PlatformSource: onb,
 		Country: "DE", CountrySource: onb,
 	}
 	if c != want {
 		t.Fatalf("context = %+v, want %+v", c, want)
+	}
+
+	c = resolveReengagementContext(reengagementContextSources{
+		Onboarding:      &model.NetworkOnboarding{Locale: "de-DE", TimeZone: "Europe/Berlin", Platform: "android", Country: "DE"},
+		AppStoreCountry: "USA",
+		PlayCountry:     "BR",
+		StripeCountry:   "CA",
+		Client:          client,
+	})
+	want.TimeZone, want.TimeZoneSource = "America/New_York", reengagement.ContextSourceCountry
+	if c != want {
+		t.Fatalf("a purchase in another country: context = %+v, want %+v", c, want)
 	}
 }
 
@@ -71,7 +83,7 @@ func TestResolveReengagementContextCountryOrder(t *testing.T) {
 }
 
 // The locale and the platform fall back to the clients' own reports, part by
-// part; the time zone has no source but the onboarding row.
+// part; a client event carries no time zone.
 func TestResolveReengagementContextClientReports(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	older := now.Add(-48 * time.Hour)
@@ -127,7 +139,12 @@ func TestResolveReengagementContextPlatformRecency(t *testing.T) {
 		{"the device's report is newer", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "macOS 26.0 arm64", DeviceSpecAt: &now}, "macos", reengagement.ContextSourceDevice},
 		{"the event is newer", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &now, DeviceSpec: "17.1 iPhone", DeviceSpecAt: &older}, "android", reengagement.ContextSourceClientEvent},
 		{"a tie goes to the event", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &now, DeviceSpec: "17.1 iPhone", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
-		{"a spec that names no platform is no report", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "16 Samsung Galaxy S24 Ultra", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
+		{"a spec that names no platform is no report", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "socks5", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
+		// the macOS app's "<os version> <model>" names macos
+		// (mmm/ONBOARDING-RETENTION.md P6)
+		{"the macOS app's spec is a report", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "15.7.9 MacBook Air (M1, 2020)", DeviceSpecAt: &now}, "macos", reengagement.ContextSourceDevice},
+		// the Android app's "<os version> <make model>" names Android
+		{"the Android app's spec is a report", model.NetworkClientContext{EventPlatform: "ios", EventPlatformAt: &older, DeviceSpec: "16 Samsung Galaxy S24 Ultra", DeviceSpecAt: &now}, "android", reengagement.ContextSourceDevice},
 		{"an event platform outside the vocabulary is no report", model.NetworkClientContext{EventPlatform: "toaster", EventPlatformAt: &now}, "", ""},
 		{"no report", model.NetworkClientContext{}, "", ""},
 	}
@@ -272,14 +289,16 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 			})
 		}
 		expect := func(name string, networkId server.Id, want ReengagementContext) {
-			if got := reengagementContext(ctx, networkId); got != want {
+			if got := reengagementContext(ctx, networkId, nil); got != want {
 				t.Errorf("%s: context %+v, want %+v", name, got, want)
 			}
 		}
 		onb := reengagement.ContextSourceOnboarding
+		country := reengagement.ContextSourceCountry
 
 		// enrolled in onboarding: the row decides, though an App Store row
-		// names another country
+		// names another country, but for the time zone: the store's
+		// country outranks the sign-up IP's
 		enrolledId, _ := newNetwork("enrolled")
 		if !model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{
 			NetworkId: enrolledId, CreatedAt: now, Email: true,
@@ -289,8 +308,8 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		}
 		addApple(enrolledId, "enrolled-1", now.Add(-10*day), "USA")
 		expect("enrolled", enrolledId, ReengagementContext{
-			Locale: "de-DE", LocaleSource: onb,
-			TimeZone: "Europe/Berlin", TimeZoneSource: onb,
+			Locale: "de", LocaleSource: onb,
+			TimeZone: "America/New_York", TimeZoneSource: country,
 			Platform: "android", PlatformSource: onb,
 			Country: "DE", CountrySource: onb,
 		})
@@ -316,17 +335,30 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		if appStore, play := model.NetworkStoreCountries(ctx, storesId); appStore != "US" || play != "BR" {
 			t.Errorf("store countries %q, %q", appStore, play)
 		}
-		expect("stores", storesId, ReengagementContext{Country: "US", CountrySource: reengagement.ContextSourceAppStore})
+		// the purchase country places and writes the mail too
+		expect("stores", storesId, ReengagementContext{
+			Locale: "en", LocaleSource: country,
+			TimeZone: "America/New_York", TimeZoneSource: country,
+			Country: "US", CountrySource: reengagement.ContextSourceAppStore,
+		})
 
 		// Play, then the Stripe card
 		playId, playSession := newNetwork("play")
 		addPlay(playId, playSession, "play-1", now.Add(-40*day), "br")
 		addStripe(playId, playSession, "CA")
-		expect("play", playId, ReengagementContext{Country: "BR", CountrySource: reengagement.ContextSourcePlay})
+		expect("play", playId, ReengagementContext{
+			Locale: "pt-BR", LocaleSource: country,
+			TimeZone: "America/Sao_Paulo", TimeZoneSource: country,
+			Country: "BR", CountrySource: reengagement.ContextSourcePlay,
+		})
 
 		stripeId, stripeSession := newNetwork("stripe")
 		addStripe(stripeId, stripeSession, "ca")
-		expect("stripe", stripeId, ReengagementContext{Country: "CA", CountrySource: reengagement.ContextSourceStripe})
+		expect("stripe", stripeId, ReengagementContext{
+			Locale: "en", LocaleSource: country,
+			TimeZone: "America/Toronto", TimeZoneSource: country,
+			Country: "CA", CountrySource: reengagement.ContextSourceStripe,
+		})
 
 		// the App Store webhook's credit records the signed transaction's
 		// storefront (alpha-3) on the renewal row it writes
@@ -339,7 +371,11 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		if err != nil || !processed {
 			t.Fatalf("the App Store purchase was not credited: processed=%t err=%v", processed, err)
 		}
-		expect("webhook", webhookId, ReengagementContext{Country: "DE", CountrySource: reengagement.ContextSourceAppStore})
+		expect("webhook", webhookId, ReengagementContext{
+			Locale: "de", LocaleSource: country,
+			TimeZone: "Europe/Berlin", TimeZoneSource: country,
+			Country: "DE", CountrySource: reengagement.ContextSourceAppStore,
+		})
 
 		// nothing on record: every part unknown
 		unknownId, _ := newNetwork("unknown")
@@ -372,7 +408,7 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		// does not stand in for it
 		newestId, _ := newNetwork("newest")
 		addDevice(newestId, "17.1 iPhone", now.Add(-40*day), now.Add(-1*day))
-		addDevice(newestId, "16 Samsung Galaxy S24 Ultra", now.Add(-3*day), now.Add(-3*day))
+		addDevice(newestId, "socks5", now.Add(-3*day), now.Add(-3*day))
 		expect("newest", newestId, ReengagementContext{})
 
 		// an onboarding row with only a time zone keeps it; the rest falls back
@@ -394,10 +430,10 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		// the mail policy: a pre-program network without consent evidence may
 		// be mailed once a purchase names a country outside the evidence
 		// regions; with no country it is refused
-		if exit := reengagementPolicyExit(ctx, storesId, reengagement.StreamLapsed, reengagementContext(ctx, storesId).Country, now); exit != "" {
+		if exit := reengagementPolicyExit(ctx, storesId, reengagement.StreamLapsed, reengagementContext(ctx, storesId, nil).Country, now); exit != "" {
 			t.Errorf("a store country outside the evidence regions refused: %s", exit)
 		}
-		if exit := reengagementPolicyExit(ctx, unknownId, reengagement.StreamLapsed, reengagementContext(ctx, unknownId).Country, now); exit != onboarding.ExitConsentEvidence {
+		if exit := reengagementPolicyExit(ctx, unknownId, reengagement.StreamLapsed, reengagementContext(ctx, unknownId, nil).Country, now); exit != onboarding.ExitConsentEvidence {
 			t.Errorf("an unknown country: exit %q, want %q", exit, onboarding.ExitConsentEvidence)
 		}
 	})

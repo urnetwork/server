@@ -214,6 +214,9 @@ func OnboardingOfferIssue(
 
 	if existing := model.GetOnboardingOffer(clientSession.Ctx, networkId); existing != nil {
 		tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
+		// an offer issued by email or on another platform takes its App Store
+		// code when an App Store build first reads it
+		existing = ensureOnboardingOfferAppleCode(clientSession, existing, now)
 		return &OnboardingOfferIssueResult{Offer: onboardingOfferResult(existing, tier.Tier, now)}, nil
 	}
 
@@ -224,7 +227,15 @@ func OnboardingOfferIssue(
 	}
 
 	tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
-	ensureAppleOfferCodePoolLoaded(clientSession)
+	// a one-time App Store code only for a reader who can redeem it: every
+	// other reader gets the same offer through its own store's handle (the
+	// Play offer tag, the Stripe coupon) and no App Store code
+	appStore := appStoreReader(clientSession)
+	appleOfferCode := ""
+	if appStore {
+		ensureAppleOfferCodePoolLoaded(clientSession)
+		appleOfferCode = cfg.Offer.AppleCustomOfferCode
+	}
 
 	offer, created, err := model.IssueOnboardingOffer(clientSession.Ctx, &model.IssueOnboardingOfferArgs{
 		NetworkId:          networkId,
@@ -236,12 +247,21 @@ func OnboardingOfferIssue(
 		Validity:           cfg.OfferValidity(),
 		StripeCouponId:     cfg.Offer.StripeCouponId,
 		PlayOfferTag:       cfg.Offer.PlayOfferTag,
-		AppleOfferCode:     cfg.Offer.AppleCustomOfferCode,
-		AppleOfferCodePool: true,
+		AppleOfferCode:     appleOfferCode,
+		AppleOfferCodePool: appStore,
 	})
 	if err != nil {
 		glog.Errorf("[onboarding]could not issue offer for network %s: %s\n", networkId, err)
 		return onboardingOfferError("Could not issue the offer. Please try again."), nil
+	}
+	switch {
+	case !created:
+		// a concurrent call issued it: an App Store reader takes its code now
+		offer = ensureOnboardingOfferAppleCode(clientSession, offer, now)
+	case appStore:
+		onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerInApp, appleOfferCodeResult(offer, appleOfferCode)).Inc()
+	default:
+		onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerInApp, appleOfferCodeResultNotAppStore).Inc()
 	}
 	return &OnboardingOfferIssueResult{
 		Offer:   onboardingOfferResult(offer, tier.Tier, now),
@@ -250,26 +270,31 @@ func OnboardingOfferIssue(
 }
 
 // IssueOnboardingOfferByEmail is the campaign engine's (S2) issue path for step
-// E4b: same terms, issued_by email. Returns the offer (existing or new).
+// E4b: same terms, issued_by email. Returns the offer (existing or new). No
+// App Store code is drawn at the send: whether the reader will open an App
+// Store build is unknown until one reads the offer, and most readers of the
+// email offer redeem through Google Play or Stripe. An App Store build that
+// reads the offer draws its code then (ensureOnboardingOfferAppleCode).
 func IssueOnboardingOfferByEmail(clientSession *session.ClientSession, networkId server.Id, tierName string) (*model.OnboardingOffer, bool, error) {
 	cfg := model.Onboarding()
 	if !cfg.OfferEnabled() {
 		return nil, false, fmt.Errorf("the welcome offer is not enabled")
 	}
-	ensureAppleOfferCodePoolLoaded(clientSession)
-	return model.IssueOnboardingOffer(clientSession.Ctx, &model.IssueOnboardingOfferArgs{
-		NetworkId:          networkId,
-		IssuedBy:           model.OnboardingOfferIssuedByEmail,
-		Surface:            model.OnboardingOfferSurfaceEmailLink,
-		Tier:               tierName,
-		PercentOff:         cfg.Offer.PercentOff,
-		MonthsFree:         cfg.Offer.MonthsFree,
-		Validity:           cfg.OfferValidity(),
-		StripeCouponId:     cfg.Offer.StripeCouponId,
-		PlayOfferTag:       cfg.Offer.PlayOfferTag,
-		AppleOfferCode:     cfg.Offer.AppleCustomOfferCode,
-		AppleOfferCodePool: true,
+	offer, created, err := model.IssueOnboardingOffer(clientSession.Ctx, &model.IssueOnboardingOfferArgs{
+		NetworkId:      networkId,
+		IssuedBy:       model.OnboardingOfferIssuedByEmail,
+		Surface:        model.OnboardingOfferSurfaceEmailLink,
+		Tier:           tierName,
+		PercentOff:     cfg.Offer.PercentOff,
+		MonthsFree:     cfg.Offer.MonthsFree,
+		Validity:       cfg.OfferValidity(),
+		StripeCouponId: cfg.Offer.StripeCouponId,
+		PlayOfferTag:   cfg.Offer.PlayOfferTag,
 	})
+	if err == nil && created {
+		onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerEmail, appleOfferCodeResultDeferred).Inc()
+	}
+	return offer, created, err
 }
 
 // EligibleOnboardingOffer is the network's offer when it can be redeemed now,
@@ -344,7 +369,10 @@ func DecoratePlan(result *SubscriptionBalanceResult, storefrontCountry string, c
 	networkId := clientSession.ByJwt.NetworkId
 	tier := ResolvePriceTier(clientSession, storefrontCountry)
 	result.PriceTier = tier.Result()
-	result.OnboardingOffer = onboardingOfferResult(model.GetOnboardingOffer(clientSession.Ctx, networkId), tier.Tier, now)
+	// the plan is what an App Store build reads when the email offer's link
+	// opens it: an offer without an App Store code takes one here
+	offer := ensureOnboardingOfferAppleCode(clientSession, model.GetOnboardingOffer(clientSession.Ctx, networkId), now)
+	result.OnboardingOffer = onboardingOfferResult(offer, tier.Tier, now)
 	result.WinbackOffer = winbackPlanOfferResult(model.GetActiveWinbackOffer(clientSession.Ctx, networkId, now), tier.Tier, now)
 	result.Experiments = model.Onboarding().AssignExperiments(networkId, now)
 	// the crypto methods ride on the plan response every app already reads
@@ -656,7 +684,11 @@ type OnboardingClickResult struct {
 	Destination string `json:"destination,omitempty"`
 	// OpenUrl, when set, is where the landing page opens instead of the app: a
 	// W1 click by a network whose win-back offer is the App Store's opens
-	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>).
+	// Apple's direct link to it (https://apps.apple.com/win-back/<Apple ID>),
+	// and an offer click by a network the App Store bills, while its welcome
+	// offer can be redeemed, opens Apple's redeem sheet with its code filled
+	// in (https://apps.apple.com/redeem?ctx=offercodes&id=<Apple ID>&code=<code>;
+	// welcomeOfferLandingOpenUrl).
 	OpenUrl string `json:"open_url,omitempty"`
 	// invalid | expired
 	Error string `json:"error,omitempty"`
@@ -665,7 +697,10 @@ type OnboardingClickResult struct {
 // OnboardingClick records a landing-page click (the campaign's attribution event)
 // and tells the page where in the app to send the user. No auth: the token is the
 // credential, and the response carries nothing about the network beyond where
-// its email's button leads (Apple's win-back link, for a W1 that named it).
+// its email's button leads (Apple's win-back link, for a W1 that named it;
+// Apple's redeem link with the network's welcome offer code, for an offer
+// email to an App Store reader: the code is the offer the email itself
+// presents).
 func OnboardingClick(
 	args *OnboardingClickArgs,
 	clientSession *session.ClientSession,
@@ -708,6 +743,10 @@ func OnboardingClick(
 			props["flow_step"] = claims.FlowStep
 		}
 		WriteServerEvent(clientSession, claims.NetworkId, model.EventLandingClicked, props, "")
+		if slug == onboarding.SlugOffer {
+			// an App Store reader's welcome offer: Apple's redeem sheet
+			result.OpenUrl = welcomeOfferLandingOpenUrl(clientSession, claims.NetworkId, now)
+		}
 	}
 	return result, nil
 }

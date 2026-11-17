@@ -118,9 +118,9 @@ func (self *handlerCacheExpiringTestStore) release(_ context.Context, key string
 	return nil
 }
 
-// Like the script, it changes only the token's own lease and only toward
-// expiry. A canceled context fails the call without applying it, as a Redis
-// command on a canceled context would.
+// Like the script, it changes only the token's own lease, only toward expiry,
+// and marks it fenced. A canceled context fails the call without applying it,
+// as a Redis command on a canceled context would.
 func (self *handlerCacheExpiringTestStore) fence(ctx context.Context, key string, token string, ttl time.Duration) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
@@ -131,9 +131,11 @@ func (self *handlerCacheExpiringTestStore) fence(ctx context.Context, key string
 	if !ok || entry.value != token {
 		return false, nil
 	}
-	if expires := time.Now().Add(ttl); expires.Before(entry.expires) {
-		self.entries[key] = handlerCacheExpiringTestEntry{token, expires}
+	expires := entry.expires
+	if fenced := time.Now().Add(ttl); fenced.Before(expires) {
+		expires = fenced
 	}
+	self.entries[key] = handlerCacheExpiringTestEntry{handlerCacheFenceToken(token), expires}
 	return true, nil
 }
 
@@ -282,8 +284,13 @@ func TestHandlerCacheFailedFillFencesOnlyBriefly(t *testing.T) {
 					start := time.Now()
 					for _, at := range []time.Duration{0, fence - time.Millisecond} {
 						time.Sleep(at - time.Since(start))
+						asked := time.Now()
 						if value, err, _ := call(context.Background(), retry); value != nil || !isHandlerCacheUnavailable(err) || fills != failedFills {
 							t.Fatalf("retry %v after the failure = (%v, %v) with %d new fills, want 503 and none", at, value, err, fills-failedFills)
+						}
+						// a fenced lease is a fill that ended: nothing to wait for
+						if waited := time.Since(asked); waited != 0 {
+							t.Fatalf("retry %v after the failure waited %v for a fenced lease, want an answer at once", at, waited)
 						}
 					}
 					time.Sleep(fence - time.Since(start))
@@ -348,13 +355,27 @@ func TestHandlerCacheFenceNeverExtendsOrTakesALease(t *testing.T) {
 				t.Fatalf("expired owner = (%v, %v), want its fill failure", result.value, result.err)
 			}
 
+			// A miss now waits for the replacement's fill, and gets its value,
+			// only while the replacement's lease is whole: a cut lease would
+			// have been fenced or gone, answered at once or filled anew.
 			time.Sleep(fence)
-			if value, err, fills := probe(store); value != nil || !isHandlerCacheUnavailable(err) || fills != 0 {
-				t.Fatalf("%v after the expired owner failed = (%v, %v) with %d fills; its fence cut the replacement's lease", fence, value, err, fills)
+			type probeResult struct {
+				value *handlerCacheTestResult
+				err   error
+				fills int
 			}
+			probed := make(chan probeResult, 1)
+			go func() {
+				value, err, fills := probe(store)
+				probed <- probeResult{value, err, fills}
+			}()
+			time.Sleep(time.Second)
 			close(replacementFinish)
 			if result := <-replacement; result.err != nil || result.value == nil || result.value.Message != "replacement" {
 				t.Fatalf("replacement owner = (%v, %v), want its published value", result.value, result.err)
+			}
+			if result := <-probed; result.err != nil || result.value == nil || result.value.Message != "replacement" || result.fills != 0 {
+				t.Fatalf("a miss %v after the expired owner failed = (%v, %v) with %d fills, want the replacement's value; its fence cut the replacement's lease", fence, result.value, result.err, result.fills)
 			}
 		})
 	})
@@ -383,10 +404,12 @@ func TestHandlerCacheFenceNeverExtendsOrTakesALease(t *testing.T) {
 	})
 }
 
-// A fill in progress keeps its whole lease of min(ttl, 2m): overlapping misses
-// across the fleet still get the retryable 503 rather than a duplicate fill,
-// also once a failure fence would have passed. A successful fill still
-// publishes, drops its lease and serves later requests from the cache.
+// A fill in progress keeps its whole lease of min(ttl, 2m): a miss that
+// overlaps it waits for its value and, when the fill outlasts the wait,
+// answers the retryable 503 rather than starting a duplicate fill, also once
+// a failure fence would have passed. A miss waiting when the fill publishes
+// answers with its value. A successful fill still publishes, drops its lease
+// and serves later requests from the cache.
 func TestHandlerCacheFillInProgressKeepsWholeLease(t *testing.T) {
 	for _, ttl := range []time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 5 * time.Minute} {
 		t.Run(ttl.String(), func(t *testing.T) {
@@ -414,20 +437,41 @@ func TestHandlerCacheFillInProgressKeepsWholeLease(t *testing.T) {
 				}()
 				<-started
 				start := time.Now()
-				for _, at := range []time.Duration{0, handlerCacheFailureFenceTtl(ttl) + time.Second, lease - time.Millisecond} {
+				// Each of these misses waits its whole limit and ends two
+				// seconds or more before the lease does, so the owner can still
+				// publish into its own lease below.
+				waitedUntil := time.Duration(0)
+				for _, at := range []time.Duration{0, handlerCacheFailureFenceTtl(ttl) + time.Second, lease - handlerCacheFillWaitLimit - 2*time.Second} {
+					if at < waitedUntil || lease-2*time.Second < at+handlerCacheFillWaitLimit {
+						continue
+					}
 					time.Sleep(at - time.Since(start))
+					asked := time.Now()
 					if value, err := overlapping(); value != nil || !isHandlerCacheUnavailable(err) || duplicates.Load() != 0 {
 						t.Fatalf("overlapping miss %v into the fill = (%v, %v) with %d duplicate fills, want 503 and none", at, value, err, duplicates.Load())
 					}
+					if waited := time.Since(asked); waited != handlerCacheFillWaitLimit {
+						t.Fatalf("overlapping miss %v into the fill answered after %v, want after the %v wait limit", at, waited, handlerCacheFillWaitLimit)
+					}
+					waitedUntil = time.Since(start)
 				}
 				for _, acquired := range store.acquired() {
 					if acquired != lease {
 						t.Fatalf("fill leases = %v, want each %v", store.acquired(), lease)
 					}
 				}
+				waiting := make(chan handlerCacheTestCallResult, 1)
+				go func() {
+					value, err := overlapping()
+					waiting <- handlerCacheTestCallResult{value, err}
+				}()
+				time.Sleep(time.Second)
 				close(finish)
 				if result := <-owner; result.err != nil || result.value == nil || result.value.Message != "owner" {
 					t.Fatalf("owner = (%v, %v), want its published value", result.value, result.err)
+				}
+				if result := <-waiting; result.err != nil || result.value == nil || result.value.Message != "owner" || duplicates.Load() != 0 {
+					t.Fatalf("miss waiting when the fill published = (%v, %v) with %d duplicate fills, want the owner's value", result.value, result.err, duplicates.Load())
 				}
 				if _, leased := store.expiry(newHandlerCacheKeys(key).fill); leased {
 					t.Fatal("a published fill kept its lease")

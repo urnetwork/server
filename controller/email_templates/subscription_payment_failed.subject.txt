@@ -1,1 +1,1 @@
-{{if .Final}}Final notice: your URnetwork payment didn't go through{{else}}Your URnetwork payment didn't go through{{end}}
+{{if .ActionRequired}}{{if .Final}}Final notice: confirm your URnetwork payment{{else}}Confirm your URnetwork payment{{end}}{{else}}{{if .Final}}Final notice: your URnetwork payment didn't go through{{else}}Your URnetwork payment didn't go through{{end}}{{end}}

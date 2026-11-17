@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"strings"
@@ -199,6 +199,11 @@ type ProxyDeviceConfig struct {
 	HttpRequireAuth bool            `json:"http_require_auth"`
 
 	InitialDeviceState *ProxyDeviceState `json:"initial_device_state"`
+
+	// UniqueExit marks a proxy pinned to one unique exit
+	// (proxy_unique_exit_model.go): its device follows the proxy's exit
+	// assignment and confirms it through its own tunnel.
+	UniqueExit bool `json:"unique_exit,omitempty"`
 }
 
 type ProxyDeviceState struct {
@@ -714,12 +719,12 @@ func createProxyClientInTx(
 		returnErr = errNoProxyHosts
 		return
 	}
-	proxyHost := hosts[mathrand.Intn(len(hosts))]
+	proxyHost := hosts[mathrand.IntN(len(hosts))]
 
 	blockServicePorts := serverProxyConfig.Hosts[proxyHost]
 
 	blocks := slices.Collect(maps.Keys(blockServicePorts))
-	block := blocks[mathrand.Intn(len(blocks))]
+	block := blocks[mathrand.IntN(len(blocks))]
 
 	servicePorts := blockServicePorts[block]
 
@@ -807,7 +812,7 @@ func createProxyClientInTx(
 			`,
 			proxyHost,
 			block,
-			mathrand.Intn((31*ProxyClientIpv4Count)/32),
+			mathrand.IntN((31*ProxyClientIpv4Count)/32),
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -936,6 +941,19 @@ func publishProxyClient(ctx context.Context, proxyClient *ProxyClient) {
 	})
 }
 
+// GetProxyClientsSince reads the proxy clients of a (host, block) from its
+// change rows at or after `changeId`: the set every proxy instance restores as
+// WireGuard clients at startup (changeId 0), re-reads on every reconcile, and
+// polls for new clients. Only proxies whose client is active are returned. A
+// deactivated client is never reactivated (nothing sets network_client.active
+// back to true, and auth requires it), so its proxy is dead for good, yet its
+// proxy_client row stays until the hosted proxy reap deletes it; on Main on
+// 2026-11-05 about 760k of the 823k configured WireGuard clients were such
+// proxies. maxChangeId is the newest change read, delivered or not, so a
+// caller moves past changes it can never deliver.
+//
+// Each change row is a primary-key range read of (proxy_host, block,
+// change_id), joined by primary key to proxy_client and network_client.
 func GetProxyClientsSince(
 	ctx context.Context,
 	proxyHost string,
@@ -955,9 +973,14 @@ func GetProxyClientsSince(
 			SELECT
 				proxy_client_change.change_id,
 				proxy_client_change.proxy_id,
-				proxy_client.proxy_client_json
+				proxy_client.proxy_client_json,
+				network_client.client_id IS NOT NULL AS active
 			FROM proxy_client_change
-			INNER JOIN proxy_client ON proxy_client.proxy_id = proxy_client_change.proxy_id
+			LEFT JOIN proxy_client ON
+				proxy_client.proxy_id = proxy_client_change.proxy_id
+			LEFT JOIN network_client ON
+				network_client.client_id = proxy_client.client_id AND
+				network_client.active
 			WHERE
 				proxy_client_change.proxy_host = $1 AND
 				proxy_client_change.block = $2 AND
@@ -971,12 +994,17 @@ func GetProxyClientsSince(
 			for result.Next() {
 				var changeId int64
 				var proxyId server.Id
-				var proxyClientJson string
-				server.Raise(result.Scan(&changeId, &proxyId, &proxyClientJson))
+				var proxyClientJson *string
+				var active bool
+				server.Raise(result.Scan(&changeId, &proxyId, &proxyClientJson, &active))
 				maxChangeId = max(maxChangeId, changeId)
+				if proxyClientJson == nil || !active {
+					// removed, or its client is deactivated: never deliverable
+					continue
+				}
 
 				var proxyClient ProxyClient
-				err := json.Unmarshal([]byte(proxyClientJson), &proxyClient)
+				err := json.Unmarshal([]byte(*proxyClientJson), &proxyClient)
 				if err == nil {
 					proxyClients[proxyId] = &proxyClient
 				} else {

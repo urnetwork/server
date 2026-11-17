@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -621,6 +621,28 @@ func RaiseRunOnceMaxTimeInTx(ctx context.Context, tx server.PgTx, runOnce *RunOn
 		int(maxTime/time.Second),
 	))
 	return 0 < tag.RowsAffected()
+}
+
+// PendingRunOnceKeys reports which of `keys` (RunOnceOption.String()) name a
+// pending task, claimed or not: a sweep that re-schedules lost work asks it
+// before scheduling, so it never adds a successor to a task still queued or
+// running. One read on pending_task's unique run_once_key.
+func PendingRunOnceKeys(ctx context.Context, keys []string) map[string]bool {
+	pending := map[string]bool{}
+	if len(keys) == 0 {
+		return pending
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT run_once_key FROM pending_task WHERE run_once_key = ANY($1)`, keys)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var key string
+				server.Raise(result.Scan(&key))
+				pending[key] = true
+			}
+		})
+	})
+	return pending
 }
 
 func GetTasks(ctx context.Context, taskIds ...server.Id) map[server.Id]*Task {

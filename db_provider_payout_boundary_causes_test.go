@@ -21,7 +21,7 @@ func providerBoundaryCauseTestHas(err, target error) bool {
 	return false
 }
 
-// Failed cause observation never becomes missing schema or permission to retry.
+// Failed cause observation never becomes missing schema.
 func TestProviderBoundaryIncompleteCauseCensusStaysUnavailable(t *testing.T) {
 	cycle := &errorCauseTestOne{}
 	cycle.cause = cycle
@@ -33,15 +33,14 @@ func TestProviderBoundaryIncompleteCauseCensusStaysUnavailable(t *testing.T) {
 		&errorCauseTestMany{causes: wide}, &errorCauseTestMany{causes: []error{nil, nil}}, &errorCauseTestOne{}} {
 		present, err := requireProviderPayoutBoundarySchema(t.Context(), providerBoundaryErrorQuery{err: cause}, true)
 		if present || !providerBoundaryCauseTestHas(err, ErrProviderEarningBoundaryUnavailable) ||
-			!providerBoundaryCauseTestHas(err, cause) || providerBoundaryCauseTestHas(err, ErrProviderEarningBoundarySchema) ||
-			ProviderEarningBoundaryRetryable(t.Context(), err) {
-			t.Fatal("unknown payout-boundary cause became authority or retry", index)
+			!providerBoundaryCauseTestHas(err, cause) || providerBoundaryCauseTestHas(err, ErrProviderEarningBoundarySchema) {
+			t.Fatal("unknown payout-boundary cause became authority", index)
 		}
 	}
 	matcher := &errorCauseTestMatch{}
 	err := providerBoundaryObservationError(matcher)
-	if !providerBoundaryCauseTestHas(err, ErrProviderEarningBoundaryUnavailable) || !ProviderEarningBoundaryRetryable(t.Context(), err) {
-		t.Fatal("complete unknown observation lost existing unavailable retry policy")
+	if !providerBoundaryCauseTestHas(err, ErrProviderEarningBoundaryUnavailable) || providerBoundaryCauseTestHas(err, ErrProviderEarningBoundarySchema) {
+		t.Fatal("complete unknown observation was not unavailable")
 	}
 }
 
@@ -59,7 +58,7 @@ func TestProviderBoundaryObservedHardCauseSurvivesCyclicSibling(t *testing.T) {
 		_, err := readProviderPayoutBoundary(t.Context(), providerBoundaryErrorQuery{err: original})
 		joined, ok := err.(interface{ Unwrap() []error })
 		if !ok || len(joined.Unwrap()) != 2 || joined.Unwrap()[0] != item.sentinel || joined.Unwrap()[1] != original ||
-			ProviderEarningBoundaryRetryable(t.Context(), err) {
+			providerBoundaryCauseTestHas(err, ErrProviderEarningBoundaryUnavailable) {
 			t.Fatal("observed hard cause lost sentinel or original error custody")
 		}
 	}

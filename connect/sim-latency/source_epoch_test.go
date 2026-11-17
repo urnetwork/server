@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Fixture commands retain the explicitly configured global Git identity.
+// Disposable repositories retain the explicitly configured global Git identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", repositoryRoot}, args...)
@@ -55,6 +56,53 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 	sourceTestGit(t, repositoryRoot, "add", "--all")
 	sourceTestGit(t, repositoryRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "source base")
 	return sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD")
+}
+
+// A private explicit global fixture supplies identity without ambient author
+// overrides, including when a later fixture appends a commit.
+func TestSourceTestRepositoryCommitsWithoutAmbientIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	// Refuse Git's guessed actor even on hosts with a usable default hostname.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "")
+	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output, err := exec.Command("git", "config", "--global", "--get-regexp", `^user\.(name|email)$`).CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 || len(output) != 0 {
+		t.Fatal("cold fixture retained a configured global identity", err)
+	}
+	// Each real affected root must supply its own global fixture. A configured
+	// test runner must not conceal a missing setup call in any of these roots.
+	t.Run("host_unavailability", TestSourceBuildQualifierReplaysTestsAfterHostUnavailability)
+	t.Run("legacy_correctness", TestSourceMinimumWorkCorrectnessPreservesLegacySuiteIdentity)
+	t.Run("contained_correctness", TestSourceCorrectnessSuiteUsesContainedImageAndRetainsExactLogs)
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
+	root := t.TempDir()
+	commit := sourceTestRepository(t, root, "synthetic")
+	repository := filepath.Join(root, "synthetic")
+	expectedIdentity := "Synthetic Source Fixture|source@fixture.example|Synthetic Source Fixture|source@fixture.example"
+	if sourceTestGit(t, repository, "show", "-s", "--format=%an|%ae|%cn|%ce", commit) != expectedIdentity {
+		t.Fatal("initial fixture commit depended on an ambient identity")
+	}
+	sourceTestGit(t, repository, "commit", "--quiet", "--allow-empty", "--no-gpg-sign", "-m", "synthetic follow-up")
+	if sourceTestGit(t, repository, "rev-parse", "HEAD") == commit {
+		t.Fatal("follow-up fixture commit was not created")
+	}
+	identity := sourceTestGit(t, repository, "log", "-1", "--format=%an|%ae|%cn|%ce")
+	if identity != expectedIdentity {
+		t.Fatal("fixture commit depended on an ambient identity")
+	}
 }
 
 // sourceTestManifest builds the complete baseline ledger required by validation.

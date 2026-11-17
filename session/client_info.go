@@ -9,6 +9,25 @@ import (
 const ClientInfoHeader = connect.ClientInfoHeader
 const ClientInfoMaxBytes = connect.ClientInfoMaxBytes
 
+// The distributions an app's build reports in ClientInfo.Distribution
+// (connect.ClientDistribution*, which the apps' sdk exports too). The parser
+// keeps a value only with the device type it pairs with; "" is unknown.
+const (
+	ClientDistributionAppStore         = connect.ClientDistributionAppStore
+	ClientDistributionMacDirect        = connect.ClientDistributionMacDirect
+	ClientDistributionPlay             = connect.ClientDistributionPlay
+	ClientDistributionAndroidDirect    = connect.ClientDistributionAndroidDirect
+	ClientDistributionSolanaDapp       = connect.ClientDistributionSolanaDapp
+	ClientDistributionEthosDapp        = connect.ClientDistributionEthosDapp
+	ClientDistributionWindows          = connect.ClientDistributionWindows
+	ClientDistributionLinux            = connect.ClientDistributionLinux
+	ClientDistributionLinuxAppimage    = connect.ClientDistributionLinuxAppimage
+	ClientDistributionLinuxFlatpak     = connect.ClientDistributionLinuxFlatpak
+	ClientDistributionWeb              = connect.ClientDistributionWeb
+	ClientDistributionExtensionChrome  = connect.ClientDistributionExtensionChrome
+	ClientDistributionExtensionFirefox = connect.ClientDistributionExtensionFirefox
+)
+
 type ClientInfo = connect.ClientInfo
 type SessionLastUsed struct {
 	UnixTime    int64  `json:"unix_time"`

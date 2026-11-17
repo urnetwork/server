@@ -1,0 +1,42 @@
+Request-local authenticated executor I/O
+=======================================
+
+The local agent command and SSH client share one Exchange implementation. A
+request is bounded by the existing coordinator RequestTimeout and its parent's
+original deadline. Transport cancellation is not native execution cancellation:
+it kills only the exact local command and closes only that request's local ends.
+It never sends a process-group signal, systemd operation or extra agent request.
+
+All three standard streams use explicit os.Pipe files. The parent closes its
+copies of the child ends immediately after Start, and os/exec owns no stream
+copier. An immediate exact-child Wait can therefore reap independently of a
+descendant's retained streams without closing unread response buffers. A joined
+context watcher closes the parent ends on cancellation, unblocking the manual
+request writer, response reader and bounded private diagnostic drainer. Every
+owned goroutine is joined before Exchange returns. No short post-exit timer
+reduces a healthy caller's full request budget, and no additional scoring time
+or native execution authority is created during cleanup.
+
+The existing request/response signatures, exact host/run/fence, artifact hashes,
+single-frame EOF trailer and successful process exit remain mandatory. Context
+cancellation is also checked after all joins; a canceled closed pipe or a late
+complete response cannot produce success. Definitive integrity errors remain
+discoverable through errors.Is. Diagnostic overflow still fails with bounded,
+message-free errors; captured private stderr is not emitted.
+
+Linux regression fixtures compile a standalone synthetic Go agent from the
+source-owned testdata directory, using production framing and signing. A real
+descendant retains selected standard streams after the exact command exits.
+Separate control barriers and generation-pinned pidfds prove inheritance and
+exit; real kernel EAGAIN witnesses prove blocked read/write ownership. The test
+then cancels and joins Exchange, checks exact-child reaping and positively pings
+the surviving holder before explicitly releasing and observing its exit.
+Additional cases cover partial length/header/body/artifact/trailer phases,
+inherited stderr, unread buffered frames after native reap, cancellation after
+complete framing, independent healthy siblings, integrity/exit failures,
+diagnostic limits, pre-start cancellation and failed Start.
+
+This fixes the proven source-level manual-pipe cancellation gap. A zombie PID
+snapshot alone does not prove which live request was blocked, and this change
+does not claim to resolve unrelated database admission, transaction or lease
+timeouts. Uninterruptible filesystem/kernel work is not given a new hard bound.

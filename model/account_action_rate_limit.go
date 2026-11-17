@@ -44,6 +44,10 @@ const (
 	AccountActionExtenderPingReport              = "ping_report"
 	AccountActionExtenderLatencyReport           = "extender_latency_report"
 	AccountActionExtenderBlockReport             = "extender_block_report"
+	// a network's card purchase starts, a Stripe Checkout session or the
+	// payment sheet's subscription, budgeted by the network's id
+	// (controller/subscription_stripe_purchase_limit.go)
+	AccountActionStripePurchaseStart = "stripe_purchase_start"
 )
 
 const (
@@ -89,6 +93,7 @@ var actionDisplayNames = map[string]string{
 	AccountActionExtenderPingReport:              "reporting extender pings",
 	AccountActionExtenderLatencyReport:           "reporting extender latency",
 	AccountActionExtenderBlockReport:             "reporting a blocked extender",
+	AccountActionStripePurchaseStart:             "starting a card purchase",
 }
 
 // The display name of an action, "this action" for one that has none.
@@ -188,6 +193,45 @@ func countRecentAccountActionAttempts(
 		if result.Next() {
 			server.Raise(result.Scan(&count))
 		}
+	})
+	return count
+}
+
+// CountAccountActionAttempts counts the attempts of `action` recorded for `id`
+// at or after `minTime`, reading at most `maxCount` of them: a caller that only
+// needs to know whether there are that many reads no further (an account's
+// extender activations over the last day, controller
+// unprovenAccountRetryAfter). Non-positive `maxCount` reads nothing.
+func CountAccountActionAttempts(
+	ctx context.Context,
+	id server.Id,
+	action string,
+	minTime time.Time,
+	maxCount int,
+) int {
+	if maxCount <= 0 {
+		return 0
+	}
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		// a utc cutoff from the caller, as in countRecentAccountActionAttempts,
+		// and the range of the (user_id, action, create_time) index, cut at
+		// maxCount
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_action_attempt
+				WHERE user_id = $1 AND action = $2
+				  AND $3 <= create_time
+				LIMIT $4
+			) AS attempt
+			`,
+			id,
+			action,
+			minTime.UTC(),
+			maxCount,
+		).Scan(&count))
 	})
 	return count
 }

@@ -1275,13 +1275,18 @@ func TestTestEnvironmentChildOwnerQueryDialsThroughProcessGuard(t *testing.T) {
 	}
 }
 
-// Pushes a synthetic PostgreSQL resource whose pool opens no connection.
+// Pushes a synthetic PostgreSQL resource whose pool opens no connection, for
+// the maintenance pool too. A private portable root carries pg_maintenance.yml
+// (test-env.sh requires it there), which would otherwise leave that pool on the
+// environment's real endpoint and sizes.
 func pushTestEnvGuardPgResources(t *testing.T) {
 	t.Helper()
-	t.Cleanup(Vault.PushSimpleResource(DefaultPgVaultResourceName, []byte(
-		"authority: 192.0.2.10:5432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n",
-	)))
-	t.Cleanup(Config.PushSimpleResource(DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n")))
+	pg := []byte("authority: 192.0.2.10:5432\nuser: synthetic\npassword: synthetic\ndb: synthetic\n")
+	pool := []byte("min_connections: 0\nmax_connections: 1\n")
+	t.Cleanup(Vault.PushSimpleResource(DefaultPgVaultResourceName, pg))
+	t.Cleanup(Vault.PushSimpleResource(MaintenancePgVaultResourceName, pg))
+	t.Cleanup(Config.PushSimpleResource(DefaultPgConfigResourceName, pool))
+	t.Cleanup(Config.PushSimpleResource(MaintenancePgConfigResourceName, pool))
 }
 
 // The environment test-env.sh exports for the private portable root, whose

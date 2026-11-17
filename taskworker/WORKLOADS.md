@@ -28,6 +28,7 @@ the original claim query and unknown-target retry behavior.
 
 | Task family | Why the operator profile keeps it |
 | --- | --- |
+| `SnClaimRelay` | The settlement v2 claim relay: one chain, at most one pass at a time. With no relayer key a pass only says so. |
 | `StSyncChain`, `StEpochClose`, `StCommitRoot`, `StDeposit`, `StFinalizePoke` | Contract epoch/event mirror, payout root, operator commit/deposit and finalization. Every parent/child and post retry remains available. |
 | `SweepVerifyTrails`, `RollupVerifyProviderStats`, `RemoveOldVerifyProviderStats`, `RefreshVerifyProxyEgress` | Full `/verify` trail lifecycle, provider statistics, and proxy egress index refresh. |
 | `RollupSearchProviderStats`, `RemoveOldSearchProviderStats` | Provider search evidence and retention. |
@@ -55,11 +56,12 @@ these obligations have drained during rollback.
 
 ## Excluded workloads
 
-Retail payout/advancement, subscription renewal, store reconciliation, payment
-intent cleanup, wallet population, pro/referral grants, product-update and
-onboarding/email campaigns are separate customer workloads. The ST task family
-above performs subnet settlement independently of retail `Payout` and
-`controller.AdvancePayment`; excluding the latter does not disable ST payments.
+The retired USDC payout targets, subscription renewal, store reconciliation,
+payment intent cleanup, wallet population, pro/referral grants, product-update
+and onboarding/email campaigns are separate customer workloads. The ST task
+family above performs subnet settlement independently of the retired retail
+`Payout`, which USDC provider payouts ended with (owner decisions 2026-11-12
+and 2026-11-13).
 
 Public geolocation pin refresh, `ProberBootstrap`, `ProviderEgressProbe`,
 `CapabilityProbe`, `ExtenderProbe`, `ExtenderPublish`, and web analytics are

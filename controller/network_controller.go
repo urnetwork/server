@@ -47,17 +47,16 @@ func NetworkCreate(
 		// duplicate-account refusals as unhandled HTTP 500 failures.
 		return nil, result.Error
 	}
+	// what the sign-up reported, before the enrollment that places E1 from it
+	recordNetworkCreateMailContextPostPrimary(result, &networkCreate, clientSession)
 	enrollNetworkCreateOnboardingPostPrimary(result, clientSession)
 
-	/**
-	 * we only add transfer balance if the user is not pro (no balance code redeemed)
-	 *
-	 * redeeming a balance code successfully automatically adds paid transfer balance for the network
-	 */
-	if !result.IsPro {
-		// add regular balance
-		AddRefreshTransferBalance(clientSession.Ctx, result.Network.NetworkId)
-	}
+	// Every new network gets the day's free data (pro.yml free.data), and a
+	// balance code redeemed at sign-up does not change that: the code adds its
+	// own data-only balance beside it. The owner, 2026-11-11: "sign up codes
+	// should still get daily free data. all accounts should get the daily free
+	// data." The daily run (RefreshFreeTransferBalances) grants it again.
+	AddRefreshTransferBalance(clientSession.Ctx, result.Network.NetworkId)
 
 	if networkCreate.ReferralCode != nil {
 		model.CreateNetworkReferral(
@@ -76,6 +75,13 @@ func NetworkCreate(
 		// }
 
 	}
+
+	// A Pro gift code redeemed at sign-up (`balance_code`): its Pro is
+	// refreshed, and the new network becomes its giver's referral unless the
+	// sign-up's own referral code linked one above (mmm/GIFTOFPRIVACY.md §6).
+	// The refresh above granted its first cycle's data: a gift year is a
+	// supporter renewal.
+	model.FinishGiftRedemption(clientSession.Ctx, result.GiftRedemption)
 
 	verifyUseNumeric := false
 
@@ -133,6 +139,24 @@ func NetworkCreate(
 	}
 
 	return result, nil
+}
+
+// recordNetworkCreateMailContextPostPrimary keeps what a committed sign-up
+// reported for its network (controller/mail_context.go): the zone and
+// languages the app or the web app sent, a browser's Accept-Language, and the
+// app build. A sign-up still waiting for its verification has its network
+// too, and keeps them.
+func recordNetworkCreateMailContextPostPrimary(
+	result *model.NetworkCreateResult,
+	networkCreate *model.NetworkCreateArgs,
+	clientSession *session.ClientSession,
+) {
+	if result == nil || result.Network == nil || result.Network.NetworkId == (server.Id{}) {
+		return
+	}
+	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
+		RecordNetworkMailContext(postSession, result.Network.NetworkId, networkCreate.TimeZone, networkCreate.Locales, "", "")
+	})
 }
 
 func enrollNetworkCreateOnboardingPostPrimary(

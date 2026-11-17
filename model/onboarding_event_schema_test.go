@@ -98,8 +98,9 @@ func TestEventSchemaLists(t *testing.T) {
 		connect.AssertEqual(t, EventOwnerClient, spec.Owner)
 	}
 	serverNames := ServerEventNames()
-	// 15 onboarding events, feedback.tapped and the 12 reengage.* events
-	connect.AssertEqual(t, 28, len(serverNames))
+	// 15 onboarding events, feedback.tapped, the 12 reengage.* events, the
+	// two sign-up cohort events and the offer email exposure
+	connect.AssertEqual(t, 31, len(serverNames))
 	for _, name := range serverNames {
 		spec := EventSpecFor(name)
 		connect.AssertEqual(t, true, spec.ServerOnly)
@@ -139,4 +140,31 @@ func TestIsEventToken(t *testing.T) {
 	connect.AssertEqual(t, false, IsEventToken("a b", 64))
 	connect.AssertEqual(t, false, IsEventToken("é", 64))
 	connect.AssertEqual(t, false, IsEventToken("abc", 2))
+}
+
+// Every store the sdk names for a purchase is one the schema takes (sdk
+// client_events.go: a crypto purchase names its coin's market). Before the
+// TAO, Bitcoin and ETH coins, purchase and offer events naming bittensor,
+// bitcoin or ethereum were refused one at a time, and the rest of each batch
+// was kept. Every one-time crypto market and solana (USDC and native SOL)
+// must stay an event store.
+func TestEventStoresTakeEveryCryptoCoinsMarket(t *testing.T) {
+	stores := []string{"apple", "play", "stripe", "solana", "zcash", "monero", "bittensor", "bitcoin", "ethereum"}
+	stores = append(stores, SubscriptionMarketSolana)
+	stores = append(stores, SubscriptionOneTimeCryptoMarkets...)
+	for _, store := range stores {
+		for _, name := range []string{EventPurchaseStarted, EventPurchaseCompleted} {
+			_, err := ValidateClientEvent(name, map[string]any{"store": store})
+			connect.AssertEqual(t, err, nil)
+		}
+		_, err := ValidateClientEvent(EventOfferCtaTapped, map[string]any{"plan": "yearly", "store": store})
+		connect.AssertEqual(t, err, nil)
+		for _, name := range []string{EventTrialConverted, EventTrialCancelled, EventRefund} {
+			_, err := ValidateServerEvent(name, map[string]any{"store": store})
+			connect.AssertEqual(t, err, nil)
+		}
+	}
+	// a store no app sends is still refused
+	_, err := ValidateClientEvent(EventPurchaseStarted, map[string]any{"store": "litecoin"})
+	connect.AssertEqual(t, err != nil, true)
 }

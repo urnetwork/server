@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "kind": "targeted-evaluation-deadline-correctness-qualification",
+  "production_commit": "29e8bbd5fa3ce855081ba877b2078a1087e21a6f",
+  "test_successor_commit": "55668d7a18f22536c49a200a026159cd9ad671b8",
+  "test_successor_production_byte_identical": true,
+  "toolchain": "go1.27.3",
+  "sn_commit": "6e44c9892ead8b66d24c873571c46f6e1cc8c3f2",
+  "dependencies": "Unchanged frozen eight-library closure; offline with vet enabled",
+  "change": {
+    "scoring_deadline_unchanged": true,
+    "metadata_owned_by_live_parent": true,
+    "metadata_budgets_caps_and_fences_unchanged": true,
+    "same_evaluator_cleanup_joined": true,
+    "existing_archive_bound_seconds": 120,
+    "ready_results_checked_before_each_cleanup_dispatch": true,
+    "authenticated_evidence_preserved_on_budget_and_invalid_score": true,
+    "late_worker_scores_rejected": true,
+    "no_new_retry_predicate_or_verification_authority": true
+  },
+  "positive_executions": {
+    "focused_control_ordinary": 3,
+    "focused_control_race": 3,
+    "new_and_primary_ordinary": 20,
+    "new_and_primary_race": 20,
+    "adjacent_ordinary": 40,
+    "adjacent_race": 40,
+    "postgresql_ordinary": 1,
+    "postgresql_race": 1,
+    "total": 128,
+    "failures": 0,
+    "skips": 0,
+    "race_reports": 0,
+    "actual_postgresql_head": 943,
+    "head_attested_callbacks": 2,
+    "all_private_fixture_parents_joined_and_retired": true
+  },
+  "prior_controls_retained": {
+    "pre_fix_causal_red_commit": "39bd3149d599571fb9847fb21430eeabcc84ee72",
+    "pre_fix_compile_passed_and_intended_assertion_failed": true,
+    "pre_fix_receipt_sha256": "3e27333316ac6ffca4a6c768f85d7dc2e10ee24c623436fa257f2254971092af",
+    "initial_29e_result": "11 positive tests passed, then cleanup-fencing fixture failed; remaining tests withheld",
+    "initial_29e_receipt_sha256": "069454744c0d9fbfb2c7e1b3db64229a7eae0ed819072c830511b5687fa0ef4d",
+    "initial_race_build": "Explicitly interrupted after first ordinary failure; zero race tests, not a compiler or race-detector failure",
+    "test_fix": "Actual public-store entry and synctest quiescence precede evaluator release; original fencing assertions retained"
+  },
+  "evidence": {
+    "private_directory": "/mnt/data/low-merged-d49-plan.b9EKrHyZ/prefix-1ef-raw.cQM5Yemu",
+    "receipt": "budget556-qualification.json",
+    "receipt_sha256": "852f49fad170cdbcc5c9779acd0d1b4113ffba581b374caf6ab6ac7a8d37958a",
+    "raw_logs": "budget556-{control,new,adjacent,pg}-{ordinary,race}.log",
+    "raw_format": "Native test text, not JSON",
+    "original_manifest_count": 8,
+    "root_inspected_pass_counts_and_both_actual_head_logs": true,
+    "physical_graph": "Preserved 58aa graph plus exact seven-file 29e delta and one test-file 556 overlay; not a full 556 Git checkout",
+    "overlay_file_sha256": "4bb1e0c2227035871750b1ec7364db87a97eb49189fb9e1c64f3afb3e34f7210"
+  },
+  "limitations": [
+    "Not a full repository suite or production runtime qualification",
+    "Does not establish the cause of historical pre-deadline heartbeat or supervisor renewal failures",
+    "Does not impose a new legacy database commit-time cutoff; bounded terminal bookkeeping may finish after scoring stops",
+    "Does not prove physical remote-agent cleanup beyond the existing authenticated evaluator contract"
+  ],
+  "deployment": {
+    "new_native_or_image_built": false,
+    "activated": false,
+    "staged_58aa_release_contains_this_fix": false,
+    "migration_or_scoring_policy_change": false,
+    "maintenance_approval_received": false,
+    "original_job_clocks_reset": false,
+    "recovery_grants_issued": false
+  }
+}

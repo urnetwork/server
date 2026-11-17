@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "kind": "authorized-official-review-api-delivery/v1",
+  "status_at_observation": "LIVE_WAITING_FOR_EXACT_CONFIG_GRANT",
+  "observed_at": "2026-11-09T04:41:19Z",
+  "main_schema_head_verified": 949,
+  "new_official_import_endpoint_present": true,
+  "approved_request_http_status_before_config_restart": 403,
+  "existing_scoped_operator_endpoint_probe_status": 400,
+  "existing_scoped_operator_probe_code": "invalid_review_handoff_import",
+  "operator_confirmed_config_rollout_and_api_restart_will_be_performed": true,
+  "official_import_sha256": "a33d62757c9cf3d31c0ff72dd04f7885b20067b00581ba77d0a1414d85b5b4be",
+  "service": "urnetwork-epoch1-official-approval-delivery-20261109-v1.service",
+  "main_pid_at_observation": 4047115,
+  "started_at": "2026-11-09T04:38:15Z",
+  "maximum_delivery_duration": "20m",
+  "restart_policy": "no",
+  "request": "/var/lib/urnetwork/competition-epoch1-official-astra-20261108-v1/official-import.json",
+  "output": "/var/lib/urnetwork/competition-epoch1-official-astra-20261108-v1/delivery-20261109-v1",
+  "behavior": [
+    "Require the exact root-owned approved request hash before any request.",
+    "Recheck the public non-invalidated elected round, job, reward revision and decision digest before each attempt.",
+    "Post only the original idempotent import, using the existing scoped review_operator credential; never follow redirects.",
+    "Retain original import responses; respect Retry-After and the fixed delivery deadline.",
+    "Stop on a changed election, unexpected refusal, successful import, verified existing exact approval, or deadline."
+  ],
+  "model_calls": 0,
+  "new_honesty_review": false,
+  "direct_database_writes": false,
+  "source_operations": false,
+  "hold_release_capability": false,
+  "after_completion": "Inspect the real completion record and independently verify public integrity/source approval and immutable evidence identities before any reward/source hold release. If uncertain or terminal, reconcile exact existing request state; do not create another review or reset an owner."
+}

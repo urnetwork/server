@@ -635,7 +635,9 @@ func TestWinbackRedemptionFailureNeverFailsTheCredit(t *testing.T) {
 // A Play Store "Resubscribe" delivered by RTDN, with no account identifiers
 // of its own, is credited to the network its expired subscription named, and
 // bound, so the renewal Google delivers after the acknowledgement removed the
-// context is credited to the same network.
+// context is credited to the same network. Pro data comes once per cycle
+// (PRO-GRANT-CYCLE.md): the second period's credit is its renewal, and the
+// network holds one cycle grant, not a balance per period.
 func TestPlayWebhookResubscribeBindsThroughExpiredAccountId(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -671,7 +673,11 @@ func TestPlayWebhookResubscribeBindsThroughExpiredAccountId(t *testing.T) {
 		sub.LineItems[0].ExpiryTime = server.NowUtc().Add(60 * 24 * time.Hour).UTC().Format(time.RFC3339)
 		_, err = PlayWebhook(env.webhookArgs(t, "supporter_monthly", purchaseToken), webhookSession)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 2)
+		// both periods are credited to the bound network
+		connect.AssertEqual(t, countActivePlayRenewals(t, ctx, networkId, purchaseToken), 2)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
+		// one cycle grant: the next period adds no second grant in this cycle
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 	})
 }
 

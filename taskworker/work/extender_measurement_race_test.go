@@ -33,7 +33,7 @@ func activateTestMeasurementRaceExtender(
 	hold func(),
 ) *model.NetworkExtenderWithAddresses {
 	return model.ActivateNetworkExtender(ctx, &model.NetworkExtenderActivation{
-		NetworkId:   server.NewId(),
+		NetworkId:   testMeasurementExtenderNetworkId(index),
 		ClientId:    server.NewId(),
 		PublicKey:   testMeasurementExtenderPublicKey(index),
 		TcpPort:     controller.ExtenderMeasurementPort,

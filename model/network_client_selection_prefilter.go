@@ -2,6 +2,9 @@ package model
 
 import (
 	"slices"
+	"time"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 )
@@ -18,16 +21,30 @@ type clientScoreRequestFilter struct {
 	// a request that requires modern providers refuses every other
 	// (FP2-MODERN.md)
 	requireModern bool
+	// Selector mode (FP2-PROTOCOL.md §6.3): the classes of the pool the
+	// request draws, which replace the family facets as the family filter;
+	// zero for a legacy request.
+	capabilityClasses providerCapabilityClassSet
+	// once the post-quantum marker is set, a strict post-quantum request
+	// refuses every provider without a positive signal (§12.4), in the
+	// same capability cell
+	requirePostQuantumPositive bool
+	// One instant shared by every draw and named-provider check of the request.
+	now time.Time
 }
 
 // The nonzero values match the existing request-filter observation cells;
 // hard exclusions keep cell zero and are evaluated separately. Cell 4 is a
-// capability refusal, which the declared post-quantum refusals also count in.
+// capability refusal, which the post-quantum evidence refusals also count in.
 func (self clientScoreRequestFilter) rejection(clientId server.Id, score *ClientScore) int {
 	if score.NetworkOnly && score.NetworkId != self.callerNetworkId {
 		return 1
 	}
-	if !slices.Contains(self.facets, score.ipFamilyFacet()) {
+	if self.capabilityClasses != 0 {
+		if !self.capabilityClasses.has(score.capabilityClass()) || score.IpFamily() == connect.IpFamilyV6Only {
+			return 2
+		}
+	} else if !slices.Contains(self.facets, score.ipFamilyFacet()) {
 		return 2
 	}
 	if self.excludedClientIds[clientId] != 0 {
@@ -35,6 +52,12 @@ func (self clientScoreRequestFilter) rejection(clientId server.Id, score *Client
 	}
 	if self.requireModern && !score.Modern {
 		return 4
+	}
+	if self.requirePostQuantumPositive {
+		if !score.postQuantumCurrent(self.now) ||
+			(self.requireModern && !self.now.Before(score.PostQuantumModernValidUntil)) {
+			return 4
+		}
 	}
 	return 0
 }

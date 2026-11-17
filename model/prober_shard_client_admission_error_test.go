@@ -54,8 +54,8 @@ func TestProberShardClientCanceledAdmissionQueryRollsBack(t *testing.T) {
 		cancel()
 		select {
 		case got := <-finished:
-			if !server.IsDoneError(got.panicValue) || got.returnedErr != nil || got.calls != 1 {
-				t.Fatalf("canceled admission panic=%v returned=%v calls=%d; want original cancellation and one model call",
+			if !isCanceledShardRegistryWait(got.panicValue) || got.returnedErr != nil || got.calls != 1 {
+				t.Fatalf("canceled admission panic=%v returned=%v calls=%d; want the canceled registry wait's own outcome and one model call",
 					got.panicValue, got.returnedErr, got.calls)
 			}
 		case <-ctx.Done():

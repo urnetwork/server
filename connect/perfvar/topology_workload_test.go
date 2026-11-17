@@ -1299,9 +1299,10 @@ func measureFullTunQUICWithStartHook(
 		HandshakeIdleTimeout: max(15*time.Second, 12*roundTrip),
 		MaxIdleTimeout:       max(30*time.Second, 20*roundTrip),
 		// QUIC requires a client Initial UDP datagram of at least 1,200
-		// bytes. The product VPN MTU is intentionally smaller, so the IPv4
-		// application stack must fragment this datagram into legal tunnel
-		// packets and the provider side must reassemble it before UDP egress.
+		// bytes. The product VPN MTU carries it in one IPv4 packet. Where a
+		// path's smaller application MTU cannot, the IPv4 application stack
+		// fragments it into legal tunnel packets and the provider side
+		// reassembles it before UDP egress.
 		InitialPacketSize: fullTunQUICInitialPacketSize,
 	}
 	serverTransport := &quic.Transport{Conn: serverPacketConn}

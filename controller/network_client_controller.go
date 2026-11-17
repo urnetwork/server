@@ -55,6 +55,11 @@ func authNetworkClient(
 	if err == nil && result != nil && result.ClientId != nil && clientSession.ByJwt != nil {
 		recordAuthNetworkClientOnboarding(authClient, clientSession)
 	}
+	if err == nil && result != nil && result.Error != nil && result.Error.UpgradeRequired && clientSession.ByJwt != nil {
+		// a free account that pays with gamma is upgraded to Pro at its
+		// client limit (gamma_auto.go); the refusal itself is unchanged
+		go gammaNoteSeatDemand(clientSession.ByJwt.NetworkId)
+	}
 	if err != nil || result == nil || verifySettings == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil {
 		return result, err
 	}
@@ -79,6 +84,17 @@ func recordAuthNetworkClientOnboarding(
 		// onboarding attribution: an app open that follows a campaign landing
 		// click within 48h (one cheap query, never fails the caller)
 		AttributeAppOpen(postSession, networkId)
+		// the device's zone, languages and app build, kept for every campaign
+		// email whatever the onboarding state (one row read, and a write only
+		// when something changed or a day has passed)
+		RecordNetworkMailContext(
+			postSession,
+			networkId,
+			authClient.TimeZone,
+			authClient.Locales,
+			authClient.Locale,
+			authClient.DeviceSpec,
+		)
 		// the device path of campaign enrollment: a network without an email
 		// login enters on its first device (one row lookup per auth-client)
 		EnrollNetworkOnboarding(postSession, networkId, "", true)

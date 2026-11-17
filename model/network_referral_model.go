@@ -271,10 +271,18 @@ func AddReferralBonusesToAllNetworks(
 			return
 		}
 		// a lag.dev guest gets no referral data and counts toward no
-		// referrer's bonus (lag.dev/PLAN.md A1)
-		lagGuests := lagGuestNetworkIdsInTx(ctx, tx, referralNetworkIdsOf(referrals))
+		// referrer's bonus (lag.dev/PLAN.md A1), and neither does a deleted
+		// network: its referral links outlive it (a referee keeps its link to
+		// a deleted referrer), and until 2026-11-16 each run granted the
+		// deleted networks of those links a balance nothing could spend
+		referralNetworkIds := referralNetworkIdsOf(referrals)
+		lagGuests := lagGuestNetworkIdsInTx(ctx, tx, referralNetworkIds)
+		goneNetworks := goneNetworkIdsInTx(ctx, tx, referralNetworkIds)
+		excluded := func(networkId server.Id) bool {
+			return lagGuests[networkId] || goneNetworks[networkId]
+		}
 		grant := func(networkId server.Id, byteCount ByteCount) {
-			if lagGuests[networkId] {
+			if excluded(networkId) {
 				return
 			}
 			if seekerMultiplier != 1.0 && seekers[networkId] {
@@ -288,9 +296,7 @@ func AddReferralBonusesToAllNetworks(
 		}
 
 		for referralNetworkId, referredNetworkIds := range referrals {
-			referredNetworkIds = slices.DeleteFunc(slices.Clone(referredNetworkIds), func(networkId server.Id) bool {
-				return lagGuests[networkId]
-			})
+			referredNetworkIds = slices.DeleteFunc(slices.Clone(referredNetworkIds), excluded)
 			// referrer: paid for up to max_referrals of its referrals
 			if 0 < bonusPerReferral {
 				if bonusCount := ReferralBonusCount(len(referredNetworkIds)); 0 < bonusCount {

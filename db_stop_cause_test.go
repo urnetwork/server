@@ -139,12 +139,12 @@ func TestRedisStoppedPingRetainsContextCause(t *testing.T) {
 }
 
 // The original physical failure is retained when the caller stops inside an
-// admitted callback, and stopping at that boundary never replays it. Ordinary
-// pools admit the callback without a preflight PING, since its command reports
-// any connection error through the retry boundary; the non-retrying and
-// deadline pools keep exactly one real preflight PING.
+// admitted callback, and stopping at that boundary never replays it. No pool
+// admits the callback with a preflight PING, since its command reports any
+// connection error through the retry boundary; the non-retrying and deadline
+// pools sent one until 2026-11-15.
 func TestRedisStoppedCallbackRetainsPhysicalCause(t *testing.T) {
-	for _, preflight := range []bool{false, true} {
+	for _, noCommandRetry := range []bool{false, true} {
 		func() {
 			peer := newDeadlineRedisPeer(t, "")
 			client := redis.NewClient(deadlineTestRedisOptions(peer))
@@ -154,7 +154,7 @@ func TestRedisStoppedCallbackRetainsPhysicalCause(t *testing.T) {
 			original := &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
 			calls := 0
 			recovered := captureDbErrorPanic(func() {
-				redisWithClient(ctx, &safeRedisClient{client: client, disableCommandRetry: preflight}, func(RedisClient) {
+				redisWithClient(ctx, &safeRedisClient{client: client, disableCommandRetry: noCommandRetry}, func(RedisClient) {
 					calls++
 					cancel()
 					panic(original)
@@ -162,14 +162,10 @@ func TestRedisStoppedCallbackRetainsPhysicalCause(t *testing.T) {
 			})
 			err, _ := recovered.(error)
 			if !errors.Is(err, DbContextDoneError) || !errors.Is(err, context.Canceled) || !errors.Is(err, original) || calls != 1 {
-				t.Fatal("stopped Redis callback lost physical cause or replayed work", preflight, err, calls)
+				t.Fatal("stopped Redis callback lost physical cause or replayed work", noCommandRetry, err, calls)
 			}
-			wantPings := int64(0)
-			if preflight {
-				wantPings = 1
-			}
-			if pings := peer.count("ping"); pings != wantPings {
-				t.Fatal("Redis callback admission sent the wrong number of preflight PINGs", preflight, pings)
+			if pings := peer.count("ping"); pings != 0 {
+				t.Fatal("Redis callback admission sent a preflight PING", noCommandRetry, pings)
 			}
 		}()
 	}

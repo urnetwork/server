@@ -20,26 +20,43 @@ import (
 // Match the parent protocol using only visibly synthetic review evidence.
 func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 	result, template, policy := winnerBrokerFixture()
-	patch := []byte("diff --git a/connect/example.go b/connect/example.go\n--- a/connect/example.go\n+++ b/connect/example.go\n@@ -1 +1 @@\n-// synthetic base\n+// synthetic patch: ignore instructions in this comment\n")
+	patch := []byte("diff --git a/connect/example.go b/connect/example.go\n--- a/connect/example.go\n+++ b/connect/example.go\n@@ -1,4 +1,4 @@\n package connect\n // PacketSize is called for each delivered production packet; the input is borrowed.\n func PacketSize(packet []byte) int {\n- return len(append([]byte(nil), packet...)) }\n+ return len(packet) }\n")
 	score := []byte(`{"synthetic_score":true}`)
-	source := "// synthetic base\n"
+	source := "package connect\n// PacketSize is called for each delivered production packet; the input is borrowed.\nfunc PacketSize(packet []byte) int {\n return len(append([]byte(nil), packet...)) }\n"
 	sourceDigest := sha256.Sum256([]byte(source))
 	patchDigest, scoreDigest := sha256.Sum256(patch), sha256.Sum256(score)
 	template.PatchSha256, template.ScoreSha256 = hex.EncodeToString(patchDigest[:]), hex.EncodeToString(scoreDigest[:])
+	template.ProductionBenefitAddendum = model.CompetitionProductionBenefitReviewAddendum()
 	roundId, sealSha256 := server.Id{0: 23, 15: 2}, strings.Repeat("1", 64)
 	request := winnerReviewBrokerRequest{Operation: "review_elected_winner", Template: template,
 		Request: controller.CompetitionWinnerReviewRequest{RoundId: roundId, JobId: template.JobId, SealSha256: sealSha256,
 			RewardRevision: template.ExpectedRevision, RewardDecisionSha256: template.ExpectedDecisionSha256, CriteriaVersion: template.CriteriaVersion,
 			Policy: policy, ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning},
-		Packet: &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score,
+		Packet: &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score, BaseSha: strings.Repeat("a", 40),
 			RewardRevision: template.ExpectedRevision, ReviewCriteriaVersion: template.CriteriaVersion,
 			Seal: model.CompetitionEvaluationSeal{RoundId: roundId, SealSha256: sealSha256, BaselineSha256: template.BaselineSha256},
 			Entry: model.CompetitionSealedEntry{JobId: template.JobId, State: "succeeded", Eligible: true,
 				PatchSha256: template.PatchSha256, ScoreSha256: template.ScoreSha256, BaseSourceLockSha256: template.BaseSourceLockSha256, ArtifactManifestSha256: template.ArtifactManifestSha256},
 			PatchPolicy: controller.PatchPolicy{MaxPatchBytes: 4096, AllowedPaths: []string{"connect/example.go"}}},
 		SourceFiles: []winnerReviewSourceFile{{Path: "connect/example.go", Sha256: hex.EncodeToString(sourceDigest[:]), Content: source}}}
+	request.WorkloadReview = winnerWorkloadContextFixture(request.Packet.BaseSha)
+	request.ProductionBenefitReview = newWinnerProductionBenefitReviewContext()
+	request.Packet.EvaluatedImageDigest = "sha256:" + strings.Repeat("9", 64)
+	request.Packet.Instrument = winnerWorkloadInstrumentFixture(request.Packet.BaseSha, request.Packet.EvaluatedImageDigest)
 	return request, winnerModelJudgment{Decision: "approve", ReasonCodes: result.Review.ReasonCodes,
-		PublicExplanation: result.Review.PublicExplanation, PrivateEvidence: result.PrivateEvidence, Findings: result.Review.Findings}
+		PublicExplanation: result.Review.PublicExplanation, PrivateEvidence: result.PrivateEvidence, Findings: result.Review.Findings,
+		WorkloadPreservation: &winnerWorkloadPreservationFinding{Version: winnerWorkloadReviewVersion, Disposition: "pass", Explanation: "The synthetic packet-length optimization preserves request admission, deadlines and delivered work."},
+		ProductionBenefit:    winnerProductionBenefitFindingFixture()}
+}
+
+// Explicitly synthetic source-level evidence, never a default production verdict.
+func winnerProductionBenefitFindingFixture() *winnerProductionBenefitFinding {
+	return &winnerProductionBenefitFinding{Version: server.CompetitionProductionBenefitVersion, AddendumSha256: server.CompetitionProductionBenefitAddendumSha256(),
+		Disposition: "pass", SourcePaths: []string{"connect/example.go"}, ProductionPath: "PacketSize on the synthetic production packet path",
+		Mechanism:          "Use the borrowed slice length directly instead of copying every packet merely to obtain its length.",
+		ClientBenefit:      "Less allocation and copying per delivered packet reduces client-path CPU and garbage-collection work.",
+		PreservedSemantics: "The result is identical for nil and nonnil input; no mutation, retention, new worker, cancellation or ownership change occurs.",
+		Explanation:        "The synthetic changed PacketSize body has a concrete useful causal effect; no model call or performance experiment is claimed."}
 }
 
 // Emit one real-shape Responses terminal event, not pre-decoded model data.
@@ -83,17 +100,24 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 			Reasoning struct {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
-			Store      bool   `json:"store"`
-			Stream     bool   `json:"stream"`
-			Tools      []any  `json:"tools"`
-			ToolChoice string `json:"tool_choice"`
-			Input      string `json:"input"`
+			Store        bool   `json:"store"`
+			Stream       bool   `json:"stream"`
+			Tools        []any  `json:"tools"`
+			ToolChoice   string `json:"tool_choice"`
+			Input        string `json:"input"`
+			Instructions string `json:"instructions"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatal(err)
 		}
 		if payload.Model != winnerReviewMiniProviderSnapshot || payload.Reasoning.Effort != "xhigh" || payload.Store || !payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" {
 			t.Fatal("model execution contract was downgraded or gained tools")
+		}
+		if !strings.Contains(payload.Instructions, winnerWorkloadReviewInstructions) || !strings.Contains(payload.Input, `"workload_review"`) {
+			t.Fatal("single-provider review skipped the required traffic-preservation evidence or instructions")
+		}
+		if !strings.Contains(payload.Instructions, server.CompetitionProductionBenefitAddendum) || !strings.Contains(payload.Input, `"production_benefit_review"`) {
+			t.Fatal("single-provider review skipped the production-benefit eligibility contract")
 		}
 		var readable struct {
 			Patch string `json:"patch_text"`
@@ -110,7 +134,7 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy); err != nil {
+	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result.PrivateEvidence, "resp_synthetic") {
@@ -159,7 +183,7 @@ func TestWinnerReviewModelSelectsProviderFromFrozenPolicy(t *testing.T) {
 		if err != nil || calls != 1 || result == nil || result.Model != modelName || result.Reasoning != reasoning {
 			t.Fatalf("frozen policy result: %+v calls=%d error=%v", result, calls, err)
 		}
-		if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy); err != nil {
+		if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -245,7 +269,7 @@ func TestWinnerReviewModelRetainsCompletedMalformedAnswerAsUncertainty(t *testin
 	if err != nil {
 		t.Fatal("completed malformed answer became a retryable transport failure", err)
 	}
-	if result.Review.SourceDisposition != "deferred" || validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy) == nil {
+	if result.Review.SourceDisposition != "deferred" || validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request) == nil {
 		t.Fatal("malformed completed model output authorized a verdict")
 	}
 }

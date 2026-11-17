@@ -13,6 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"golang.org/x/text/number"
+
+	"github.com/urnetwork/server/session"
 )
 
 // ParamsInput is the data a send renders from.
@@ -27,7 +33,7 @@ type ParamsInput struct {
 	// the template's locale (the store locale the Brevo template was rendered
 	// in); dates and times are formatted for it (localdate.go). "" = en
 	Locale string
-	// free daily data in GB (pro.yml free.data)
+	// free daily data in GiB (pro.yml free.data / model.Gib)
 	DailyDataGb float64
 	// days since sign-up
 	DaysActive int
@@ -38,17 +44,24 @@ type ParamsInput struct {
 
 	// the welcome offer, when one exists
 	OfferExpiresAt *time.Time
+	// the offer may not be emailed to the network (Decision.NoOfferEmail):
+	// E1 leaves out its offer line
+	NoOfferEmail   bool
 	OfferPriceUsd  float64
 	RegularYearUsd float64
-	TrialDays      int
 	// the App Store or Google Play bills the network: the offer emails carry
 	// no price (the store charges its own local price; REVIEW.md finding 7)
 	StoreBilled bool
+	// E2's desktop email (VariantDesktop) went to the web
+	// (Decision.Browser): it asks to pin the extension, not to start the app
+	// with the computer
+	Browser bool
+	// the offer email's crypto arm (OfferEmailVariantCrypto): the card branch
+	// adds that checkout also takes a one-time crypto payment for the year
+	CryptoLine bool
 
 	// the network's zone for the local date/time strings
 	Location *time.Location
-	// now, for the trial end
-	Now time.Time
 
 	// landing token (cta_url) and feedback token (rating/reason urls)
 	Token string
@@ -170,32 +183,43 @@ func FormatUsd(usd float64) string {
 	return fmt.Sprintf("$%.2f", cents/100)
 }
 
-// FormatCount renders an integer with thousands grouping ("4,812").
-func FormatCount(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 || n < 0 {
-		return s
-	}
-	var b strings.Builder
-	head := len(s) % 3
-	if head > 0 {
-		b.WriteString(s[:head])
-	}
-	for i := head; i < len(s); i += 3 {
-		if b.Len() > 0 {
-			b.WriteByte(',')
+// FormatCount renders an integer with the thousands grouping of `locale`, the
+// template's locale: "4,812" (en, zh, ja, es-419), "4.812" (de, es, it, pt),
+// "4 812" with a no-break space (fr, ru, cs, pl, sv, uk, pt-PT). The symbols
+// are CLDR's, as golang.org/x/text has them, always in Latin digits as the
+// rest of the copy writes numbers (the Arabic copy too). "" or a malformed
+// locale is English.
+func FormatCount(n int, locale string) string {
+	tag := language.English
+	if l := strings.ReplaceAll(strings.TrimSpace(locale), "_", "-"); l != "" {
+		if parsed, err := language.Parse(l); err == nil {
+			tag = parsed
 		}
-		b.WriteString(s[i : i+3])
 	}
-	return b.String()
+	if latin, err := tag.SetTypeForKey("nu", "latn"); err == nil {
+		tag = latin
+	}
+	return message.NewPrinter(tag).Sprint(number.Decimal(n))
 }
 
-// FormatGb renders "30 GB" (whole) or "2.5 GB".
+// formatKnownCount is FormatCount for a live count, "" when it is not known
+// (0): the templates hide a line whose count is empty.
+func formatKnownCount(n int, locale string) string {
+	if n <= 0 {
+		return ""
+	}
+	return FormatCount(n, locale)
+}
+
+// FormatGb renders an amount of data in GiB, "30 GiB" (whole) or "2.5 GiB":
+// the callers pass bytes / model.Gib, the free grant is 30 GiB a day
+// (config/all/pro.yml free.data: 30gib), and the apps, ur.io and the Pro line
+// ("10 TiB a month") all use the binary units.
 func FormatGb(gb float64) string {
 	if gb == math.Trunc(gb) {
-		return fmt.Sprintf("%d GB", int64(gb))
+		return fmt.Sprintf("%d GiB", int64(gb))
 	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GB"
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GiB"
 }
 
 // FormatLocalDateTime renders a deadline in the network's zone in English, e.g.
@@ -226,7 +250,6 @@ func BuildParams(in ParamsInput) map[string]string {
 	if in.OfferExpiresAt != nil {
 		offerExpires = FormatDateTimeLocale(*in.OfferExpiresAt, in.Location, in.Locale)
 	}
-	trialEnd := FormatDateLocale(in.Now.Add(time.Duration(in.TrialDays)*24*time.Hour), in.Location, in.Locale)
 	daysActive := in.DaysActive
 	if daysActive < 1 {
 		daysActive = 1
@@ -237,44 +260,62 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["platform"] = in.Platform
-		// path A only: the deadline of the in-app offer; empty hides the line
+		// path A only: the deadline of the in-app offer; empty hides the line.
+		// Never where the offer may not be emailed (no-offer countries, an
+		// unknown country): the offer steps stand down there too
 		p["offer_expires_at"] = offerExpires
+		if in.NoOfferEmail {
+			p["offer_expires_at"] = ""
+		}
 	case TemplateE2Widget:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		p["providers_online"] = FormatCount(in.ProvidersOnline)
-		if in.Variant == VariantActivated {
+		// the live counts, or "" while they are unknown (the count query has
+		// not succeeded yet): the template drops the line on an empty
+		// providers_online rather than say "0 providers are online". The
+		// activated and desktop line quotes both counts, so it needs both.
+		connected := in.Variant == VariantActivated || in.Variant == VariantDesktop
+		providers, countries := in.ProvidersOnline, in.CountriesOnline
+		if providers <= 0 || (connected && countries <= 0) {
+			providers, countries = 0, 0
+		}
+		p["providers_online"] = formatKnownCount(providers, in.Locale)
+		if connected {
 			if daysActive < 2 {
 				daysActive = 2
 			}
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
-			p["platform"] = in.Platform
-			p["countries_online"] = FormatCount(in.CountriesOnline)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
+			p["countries_online"] = formatKnownCount(countries, in.Locale)
+		}
+		if in.Variant == VariantDesktop {
+			// the browser's branch (pin the extension) or the app's (start it
+			// with the computer)
+			p["browser"] = flagParam(in.Browser)
 		}
 	case TemplateE3LastChance:
 		p["opening"] = in.Opening
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["store_billed"] = storeBilledFlag(in.StoreBilled)
+		p["crypto_line"] = flagParam(in.CryptoLine && !in.StoreBilled)
 		// the Pro value line, as in E4b (REVIEW.md finding 11)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)
 		p["regular_price"] = FormatUsd(in.RegularYearUsd)
 		p["offer_expires_at"] = offerExpires
-		p["trial_end_at"] = trialEnd
 	case TemplateE4bOffer:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		// the Pro value line (email_pro_value: "10 TiB a month instead of
-		// {daily_data_gb} a day"; REVIEW.md finding 11)
+		p["crypto_line"] = flagParam(in.CryptoLine && !in.StoreBilled)
+		// the Pro value line (email_pro_value: "Pro gives you 10 TiB of data
+		// a month, plus {daily_data_gb} a day."; REVIEW.md finding 11)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["store_billed"] = storeBilledFlag(in.StoreBilled)
 		p["offer_price"] = FormatUsd(in.OfferPriceUsd)
 		p["regular_price"] = FormatUsd(in.RegularYearUsd)
 		p["offer_expires_at"] = offerExpires
-		p["trial_end_at"] = trialEnd
 	case TemplateE4Feedback:
 		if in.Variant == VariantEngaged {
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for r := 1; r <= 5; r++ {
 				p["rating_url_"+strconv.Itoa(r)] = FeedbackUrl(in.SiteUrl, in.Token, "r="+strconv.Itoa(r))
 			}
@@ -282,7 +323,7 @@ func BuildParams(in ParamsInput) map[string]string {
 			if daysActive < 5 {
 				daysActive = 5
 			}
-			p["days_active"] = FormatCount(daysActive)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for i, code := range onboardingReasonCodes {
 				p["reason_url_"+strconv.Itoa(i+1)] = FeedbackUrl(in.SiteUrl, in.Token, "why="+code)
 			}
@@ -301,20 +342,70 @@ func connectDaysOfFirst(connectDays int, daysActive int) int {
 	return min(connectDays, daysActive)
 }
 
+// The offer email experiment's arms (surface email.offer): control is the
+// current copy; crypto adds, in the card branch only, that checkout also
+// takes a one-time crypto payment for the year (owner, 2026-11-15).
+const (
+	OfferEmailVariantControl = "control"
+	OfferEmailVariantCrypto  = "crypto"
+)
+
 // storeBilledFlag is the templates' `{% if params.store_billed %}` value.
 func storeBilledFlag(on bool) string {
+	return flagParam(on)
+}
+
+// flagParam is a flag the templates test with `{% if params.<name> %}`: "1"
+// or "".
+func flagParam(on bool) string {
 	if on {
 		return "1"
 	}
 	return ""
 }
 
-// StoreBilledPlatform reports whether a store bills the platform's purchases:
-// the App Store on ios and macos, Google Play on android.
-func StoreBilledPlatform(platform string) bool {
+// StoreBilledPlatform reports whether a store bills the purchases of the
+// platform's app, as its distribution (session.ClientDistribution*) says: the
+// App Store (AppStorePlatform), and Google Play on android but for the
+// flavors outside Play (android_direct, the GitHub APK and the F-Droid build;
+// solana_dapp; ethos_dapp), which bill through Stripe as the web, Windows,
+// Linux and the direct-download Mac do (mmm/onboarding/PLAN.md, the 2026-09-09
+// billing decision). An Android app of unknown distribution ("", every app
+// from before the apps reported it) is taken for the Play build, the one most
+// installs come from.
+func StoreBilledPlatform(platform string, distribution string) bool {
 	switch platform {
-	case "ios", "macos", "android":
-		return true
+	case "ios", "macos":
+		return AppStorePlatform(platform, distribution)
+	case "android":
+		return distribution == "" || distribution == session.ClientDistributionPlay
 	}
 	return false
+}
+
+// AppStorePlatform reports whether the App Store bills the purchases of the
+// platform's app: ios, and macos but for the direct-download build
+// (mac_direct, a Developer ID DMG that bills through Stripe). The two Mac
+// builds send the same device type, spec and version, so only the
+// distribution tells them apart; a Mac app of unknown distribution is taken
+// for the App Store build, the one with a stable release.
+func AppStorePlatform(platform string, distribution string) bool {
+	switch platform {
+	case "ios":
+		return true
+	case "macos":
+		return distribution != session.ClientDistributionMacDirect
+	}
+	return false
+}
+
+// OfferEmailWithheld is Facts.NoOfferEmail: the offer steps may not go when
+// the network's country gets no offers by email (offerByCountry false), or when
+// the App Store bills the network's app (AppStorePlatform) and the network is
+// not on path A: it could not redeem the emailed offer while no App Store code
+// reaches it (REVIEW.md finding 2), until offer.apple_email_enabled
+// (appleEmailEnabled) says the codes flow. The direct-download Mac bills
+// through Stripe and gets the path B offers as the web does (P6).
+func OfferEmailWithheld(offerByCountry bool, platform string, distribution string, path string, appleEmailEnabled bool) bool {
+	return !offerByCountry || (AppStorePlatform(platform, distribution) && path != PathA && !appleEmailEnabled)
 }

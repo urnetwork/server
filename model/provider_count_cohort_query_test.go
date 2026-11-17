@@ -33,12 +33,14 @@ CREATE TABLE provide_key(client_id uuid, provide_mode int, PRIMARY KEY(client_id
 CREATE TABLE network_client_location_reliability(client_id uuid PRIMARY KEY, network_id uuid NOT NULL DEFAULT '00000000-0000-0000-0000-000000000042', connected bool NOT NULL DEFAULT false, valid bool NOT NULL DEFAULT false, city_location_id uuid, region_location_id uuid, country_location_id uuid, max_net_type_score int NOT NULL DEFAULT 1, max_net_type_score_speed int NOT NULL DEFAULT 1, min_relative_latency_ms int NOT NULL DEFAULT 5, max_bytes_per_second bigint NOT NULL DEFAULT 104857600, has_latency_test bool NOT NULL DEFAULT true, has_speed_test bool NOT NULL DEFAULT true, egress_index smallint, egress_quality bool, arin_risk bool NOT NULL DEFAULT false, arin_non_quality bool NOT NULL DEFAULT false, ipv4_proven bool NOT NULL DEFAULT true, ipv6_proven bool NOT NULL DEFAULT false, payload text NOT NULL DEFAULT '');
 CREATE INDEX network_client_location_reliability_arin_exceptions ON network_client_location_reliability(client_id) INCLUDE(arin_risk,arin_non_quality) WHERE arin_risk OR arin_non_quality;
 CREATE TABLE client_connection_reliability_score(client_id uuid NOT NULL,lookback_index int NOT NULL,reliability_weight float8 NOT NULL DEFAULT 1,independent_reliability_weight float8 NOT NULL,PRIMARY KEY(client_id,lookback_index));
-CREATE TABLE provider_egress_health(client_id uuid PRIMARY KEY,measured_at timestamp NOT NULL DEFAULT now(),reputation_failed_names text NOT NULL DEFAULT '',tls_authentication_failure bool NOT NULL DEFAULT false,legacy_tls_authentication_failure bool NOT NULL DEFAULT false);
-CREATE TABLE provider_egress_url_security(client_id uuid NOT NULL,url_key text NOT NULL,tls_failure bool NOT NULL,PRIMARY KEY(client_id,url_key));
+CREATE TABLE provider_egress_health(client_id uuid PRIMARY KEY,measured_at timestamp NOT NULL DEFAULT now(),reputation_failed_names text NOT NULL DEFAULT '',tls_authentication_failure bool NOT NULL DEFAULT false,legacy_tls_authentication_failure bool NOT NULL DEFAULT false,legacy_tls_cleared_at timestamp);
+CREATE TABLE provider_egress_url_security(client_id uuid NOT NULL,url_key text NOT NULL,tls_failure bool NOT NULL,tls_verdict smallint NOT NULL DEFAULT 1,PRIMARY KEY(client_id,url_key));
 CREATE TABLE provider_egress_location(client_id uuid PRIMARY KEY,country_code text,observed_at timestamp NOT NULL);
-CREATE TABLE provider_egress_health_history(client_id uuid NOT NULL,measured_at timestamp NOT NULL,ok_count int NOT NULL,total_count int NOT NULL,class_results jsonb NOT NULL,url_probe_policy_version int NOT NULL,PRIMARY KEY(client_id,measured_at));
+CREATE TABLE provider_egress_health_history(client_id uuid NOT NULL,measured_at timestamp NOT NULL,ok_count int NOT NULL,total_count int NOT NULL,class_results jsonb NOT NULL,url_probe_policy_version int NOT NULL,url_source smallint NOT NULL DEFAULT 0,url_probation boolean NOT NULL DEFAULT false,failed_later_legs smallint NOT NULL DEFAULT 0,pq_outcome smallint NOT NULL DEFAULT 0,PRIMARY KEY(client_id,measured_at));
 CREATE TABLE exclude_network_client_location(network_id uuid,client_location_id uuid);
 CREATE TABLE provider_modern_evidence(client_id uuid PRIMARY KEY,post_quantum bool NOT NULL,key_exchange varchar(64) NOT NULL DEFAULT '',window_resizable bool NOT NULL,max_receive_window_byte_count bigint NOT NULL DEFAULT 0,measured_at timestamp NOT NULL,first_measured_at timestamp NOT NULL,run_count int NOT NULL DEFAULT 1);
+CREATE TABLE provide_capability(client_id uuid PRIMARY KEY,post_quantum_encryption bool NOT NULL,change_time timestamp NOT NULL);
+CREATE TABLE provider_zero_carry(client_id uuid PRIMARY KEY,create_time timestamp NOT NULL,expire_time timestamp NOT NULL,client_version varchar(64),contract_count int NOT NULL,network_count int NOT NULL,carried_byte_count bigint NOT NULL);
 INSERT INTO network_client_location_reliability(client_id,arin_risk,arin_non_quality,payload)
 SELECT lpad(to_hex(n),32,'0')::uuid,n%5=0,n%97=0,repeat('x',128) FROM generate_series(10000,259999)n;
 INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_weight) SELECT lpad(to_hex(n),32,'0')::uuid,l,.2 FROM generate_series(10000,11599)n CROSS JOIN generate_series(1,3)l;
@@ -49,6 +51,7 @@ ANALYZE network_client_location_reliability; ANALYZE client_connection_reliabili
 // A two-client live cohort cannot justify returning the fixture's more than
 // 50,000 historical failures from each of the three unchanged export callers.
 func TestProviderCountCohortExportQueriesBounded(t *testing.T) {
+	useSingleArindbCanaryForCohortTest(t)
 	env := server.DefaultTestEnv()
 	env.ApplyDbMigrations = false
 	env.Run(t, func(t testing.TB) {

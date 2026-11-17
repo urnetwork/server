@@ -2,8 +2,11 @@ package monitor
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func TestPaymentFailuresHealthy(t *testing.T) {
@@ -26,6 +29,7 @@ func TestPaymentFailuresHealthy(t *testing.T) {
 func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return []Row{
+			{"credit_unfulfillable", "gift", "1", "600", "600"},
 			{"credit_unfulfillable", "stripe", "2", "900", "300"},
 			{"entitlement_missing", "apple", "1", "7200", "7200"},
 			{"orphan_renewal", "google", "2", "5400", "1200"},
@@ -44,6 +48,7 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 		"payment-refund-unmatched",
 		"payment-solana-unfulfilled",
 		"payment-credit-unfulfillable",
+		"payment-gift-mismatch",
 	} {
 		alert := requireAlertClass(t, alerts, class)
 		for _, forbidden := range []string{
@@ -55,6 +60,9 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 	if unfulfillable := requireAlertClass(t, alerts, "payment-credit-unfulfillable"); unfulfillable.Severity != SeverityWarn {
 		t.Fatalf("unfulfillable credit severity = %s, want warn", unfulfillable.Severity)
 	}
+	if mismatch := requireAlertClass(t, alerts, "payment-gift-mismatch"); mismatch.Severity != SeverityWarn {
+		t.Fatalf("gift mismatch severity = %s, want warn", mismatch.Severity)
+	}
 	if entitlement := requireAlertClass(t, alerts, "payment-entitlement-missing"); entitlement.Severity != SeverityPage {
 		t.Fatalf("entitlement severity = %s, want page", entitlement.Severity)
 	}
@@ -63,11 +71,57 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 	}
 }
 
+// The crypto rail's held payments and stalled scanners page (a sanctions
+// match, an unreadable screen, a scanner that stopped) or warn (a payment an
+// operator must check in Coinbase), without identifiers.
+func TestPaymentFailuresClassifiesTheCryptoRail(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{
+			{"crypto_payment_held", "tao", "1", "3600", "3600"},
+			{"crypto_sanctions_hold", "btc", "1", "600", "600"},
+			{"crypto_scanner_stalled", "tao", "1", "1200", "1200"},
+			{"crypto_screening_unavailable", "eth", "2", "900", "300"},
+		}, nil
+	}}
+	alerts, err := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for class, severity := range map[string]Severity{
+		"crypto-sanctions-hold":        SeverityPage,
+		"crypto-screening-unavailable": SeverityPage,
+		"crypto-scanner-stalled":       SeverityPage,
+		"crypto-payment-held":          SeverityWarn,
+	} {
+		alert := requireAlertClass(t, alerts, class)
+		if alert.Severity != severity {
+			t.Fatalf("%s severity = %s, want %s", class, alert.Severity, severity)
+		}
+	}
+	// an asset the rail does not have is refused, not reported
+	_, err = NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(&syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"crypto_sanctions_hold", "ltc", "1", "600", "600"}}, nil
+	}}))
+	if err == nil {
+		alerts, _ := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(&syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return []Row{{"crypto_sanctions_hold", "ltc", "1", "600", "600"}}, nil
+		}}))
+		for _, alert := range alerts {
+			if alert.Class == "crypto-sanctions-hold" {
+				t.Fatalf("an unknown crypto asset was reported")
+			}
+		}
+	}
+	if !strings.Contains(paymentFailuresQuery, "FROM crypto_payment_receipt receipt") || !strings.Contains(paymentFailuresQuery, "FROM crypto_scan_cursor scan") {
+		t.Fatalf("payment failures query reads no crypto rail state")
+	}
+}
+
 func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'gamma', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
 		t.Fatal("payment failures query does not limit entitlement checks to authoritative provider markets")
 	}
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'stripe')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'gamma', 'google', 'stripe')") != 1 {
 		t.Fatal("payment failures query does not limit orphan-renewal checks to recurring provider markets")
 	}
 	if !strings.Contains(paymentFailuresQuery, "AND EXISTS (\n          SELECT 1 FROM network") {
@@ -113,6 +167,45 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	}
 	if strings.Contains(rendered, "retain an active stripe renewal") {
 		t.Fatalf("orphan renewal alert overclaims provider state:\n%s", rendered)
+	}
+}
+
+// The markets and coins the signal accepts come from the model's one list of
+// each, so the next market the dashboard counts or the next coin the rail
+// sells is watched here without an edit, and a row for it is never refused as
+// unknown (which fails the whole probe).
+func TestPaymentFailuresMarketsAreTheModelMarkets(t *testing.T) {
+	if want := slices.Sorted(slices.Values(model.SubscriptionMarkets)); !slices.Equal(paymentFailuresEntitlementMarkets, want) {
+		t.Errorf("entitlement markets = %v, want every subscription market %v", paymentFailuresEntitlementMarkets, want)
+	}
+	recurring := slices.DeleteFunc(slices.Clone(model.SubscriptionMarkets), func(market string) bool {
+		return slices.Contains(model.SubscriptionOneTimeCryptoMarkets, market)
+	})
+	if want := slices.Sorted(slices.Values(recurring)); !slices.Equal(paymentFailuresOrphanMarkets, want) {
+		t.Errorf("orphan-renewal markets = %v, want the recurring markets %v; give a new one its own disposition in paymentFailureFinding", paymentFailuresOrphanMarkets, want)
+	}
+	for _, market := range paymentFailuresRepairedEntitlementMarkets {
+		if !slices.Contains(paymentFailuresEntitlementMarkets, market) {
+			t.Errorf("repaired market %s is not an entitlement market", market)
+		}
+	}
+	if len(paymentFailuresCryptoAssets) != len(model.CryptoAssets) {
+		t.Errorf("crypto coins = %v, want the rail's %v", paymentFailuresCryptoAssets, model.CryptoAssets)
+	}
+	for _, asset := range model.CryptoAssets {
+		if !paymentFailuresCryptoAssets[asset] {
+			t.Errorf("the rail's coin %s is refused as unknown", asset)
+		}
+	}
+	for _, unsafe := range []string{"", "o'brien", "Apple", "apple', 'x"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("market name %q was rendered into SQL", unsafe)
+				}
+			}()
+			paymentFailuresSqlList([]string{unsafe})
+		}()
 	}
 }
 
@@ -236,5 +329,82 @@ func TestPaymentCreditUnfulfillableCoversStorePurchases(t *testing.T) {
 		if strings.Contains(markdown, "set network_id metadata on the Stripe subscription") {
 			t.Fatalf("%s credit-unfulfillable alert carries Stripe-only guidance:\n%s", target, markdown)
 		}
+	}
+}
+
+// A gift order's Checkout payment that did not match its order (store gift,
+// action credit_unfulfillable, reason gift_payment_mismatch) is a known
+// record: a WARN saying the payment did not match its order's amount or
+// currency and needs an operator, with none of the Stripe invoice guidance and
+// nothing of an invalid record. The query counts no other gift record.
+func TestPaymentFailuresGiftMismatchIsAKnownRecord(t *testing.T) {
+	for _, want := range []string{
+		"event.store IN ('apple', 'google', 'stripe')",
+		"AND event.store = 'gift'",
+		"AND COALESCE(event.details::jsonb ->> 'reason', '') = 'gift_payment_mismatch'",
+	} {
+		if !strings.Contains(paymentFailuresQuery, want) {
+			t.Fatalf("payment failures query missing %q", want)
+		}
+	}
+
+	alerts, err := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(&syntheticSource{
+		postgresFn: func(string) ([]Row, error) {
+			return []Row{{"credit_unfulfillable", "gift", "2", "900", "300"}}, nil
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := requireAlertClassCount(alerts, "payment-gift-mismatch"); count != 1 || len(alerts) != 1 {
+		t.Fatalf("gift mismatch alerts = %+v", alerts)
+	}
+	alert := requireAlertClass(t, alerts, "payment-gift-mismatch")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("gift mismatch severity = %s, want warn", alert.Severity)
+	}
+	requireAlertOmits(t, alert, "synthetic-network-id", "synthetic-provider-token")
+
+	mismatch, err := paymentFailureFinding("credit_unfulfillable", "gift", 1, 1800, 1800)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := alertFromFinding(
+		syntheticSettings(&syntheticSource{}),
+		"2.22",
+		"payment-failures",
+		"Durable payment and entitlement failures",
+		mismatch,
+	).Markdown()
+	for _, want := range []string{
+		"gift order payment(s) did not match their order's amount or currency and were not fulfilled",
+		"reason gift_payment_mismatch",
+		"An operator settles each payment with its buyer",
+		"refund the payment in Stripe",
+		"Never fulfil an order from this record alone",
+		"aging out does not prove disposition",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("gift mismatch alert missing %q:\n%s", want, markdown)
+		}
+	}
+	for _, unwanted := range []string{
+		"set network_id metadata on the Stripe subscription",
+		"resend the invoice.paid event",
+		"writer-contract regression",
+		"malformed records remain a separate §2.21 PAGE",
+	} {
+		if strings.Contains(markdown, unwanted) {
+			t.Fatalf("gift mismatch alert carries %q:\n%s", unwanted, markdown)
+		}
+	}
+	// the other unfulfillable stores keep their guidance, and a store with no
+	// writer is still refused
+	stripe, err := paymentFailureFinding("credit_unfulfillable", "stripe", 1, 1800, 1800)
+	if err != nil || stripe.class != "payment-credit-unfulfillable" {
+		t.Fatalf("stripe unfulfillable credit = %+v, %v", stripe, err)
+	}
+	if _, err := paymentFailureFinding("credit_unfulfillable", "solana", 1, 1800, 1800); err == nil {
+		t.Fatal("unfulfillable credit accepted a store with no unfulfillable-credit writer")
 	}
 }

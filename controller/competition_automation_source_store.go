@@ -72,22 +72,63 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 	if ttl < 10*time.Second || ttl > 5*time.Minute {
 		return nil, ErrConflict
 	}
-	err = captureDatabaseError(func() {
+	if lease.Environment != settings.AutomationPolicy.Environment || lease.CompetitionId != settings.CompetitionId || lease.SeasonId != settings.AutomationPolicy.SeasonId {
+		return nil, ErrLeaseLost
+	}
+	observation := newCompetitionSupervisorRenewObservation()
+	err = observation.captureContext(ctx, lease.LeaseExpiresAt, func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			observation.callbackEntered = true
+			observation.callbacks++
+			tx = observation.observeLeaseRenewalPrefix(tx)
 			result = nil
-			automationScopeLockInTx(ctx, tx, settings)
-			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, lease))
-			now := self.nowUtc()
-			lease.LeaseExpiresAt = now.Add(ttl)
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE competition_supervisor_lease SET lease_expires_at=$4,heartbeat_at=$5 WHERE environment=$1 AND competition_id=$2 AND season_id=$3`, lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now))
-			copyLease := lease
-			result = &copyLease
-		})
+			result = self.renewAutomationLeaseInTx(ctx, tx, settings, lease, ttl, observation)
+		}, &observation.phase, &observation.timing, &observation.acquire, observation.read, &observation.transaction)
 	})
 	return result, err
 }
 
-// Called with the scope transaction lock; no other connection is acquired.
+// A lease-only row lock cannot queue behind source validation's season lock.
+// Acquirers still serialize season then lease row; renewal never takes season
+// after the row, so it adds no inversion or new authority for an expired owner.
+func (self PostgresStore) renewAutomationLeaseInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease, ttl time.Duration, observation *competitionSupervisorRenewObservation) *model.CompetitionSupervisorLease {
+	observation.readPrefix.scopeIndependent = true
+	var previousExpiry time.Time
+	observation.step = competitionSupervisorRenewalLeaseRowLock
+	if self.beforeLeaseRowLockForTest != nil {
+		self.beforeLeaseRowLockForTest("supervisor")
+	}
+	loadError := tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_supervisor_lease
+	 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$4 AND fencing_token=$5 FOR UPDATE`,
+		lease.Environment, lease.CompetitionId, lease.SeasonId, lease.OwnerId, lease.FencingToken).Scan(&previousExpiry)
+	if errors.Is(loadError, pgx.ErrNoRows) {
+		panic(ErrLeaseLost)
+	}
+	server.Raise(loadError)
+	observation.step = competitionSupervisorRenewalAuthority
+	if self.beforeAutomationLeaseAuthorityForTest != nil {
+		self.beforeAutomationLeaseAuthorityForTest()
+	}
+	server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, lease))
+	now := self.nowUtc()
+	if !now.Before(previousExpiry) {
+		panic(ErrLeaseLost)
+	}
+	lease.LeaseExpiresAt = now.Add(ttl)
+	observation.step = competitionSupervisorRenewalLeaseUpdate
+	updated, updateError := tx.Exec(ctx, competitionSupervisorLeaseRenewalUpdateSql,
+		lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now, lease.OwnerId, lease.FencingToken)
+	server.Raise(updateError)
+	if updated.RowsAffected() != 1 {
+		panic(ErrLeaseLost)
+	}
+	copyLease := lease
+	observation.step = competitionSupervisorRenewalCallbackReturn
+	return &copyLease
+}
+
+// Source writers hold season scope; renewers hold the exact lease row instead.
+// Neither path acquires another connection or revives an expired owner.
 func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease) error {
 	if !settings.AutomationPolicy.Enabled {
 		return ErrAutomationDisabled
@@ -103,6 +144,12 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 	if !valid {
 		return ErrLeaseLost
 	}
+	return setAutomationLeaseGuardsInTx(ctx, tx, settings, lease)
+}
+
+// Both the fenced writer and read-only worker observer install the same
+// transaction-local guards without reacquiring a connection or authority row.
+func setAutomationLeaseGuardsInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease) error {
 	approvalDigest, approvalJson := "", ""
 	if settings.FutureEpochPolicy != nil && settings.FutureEpochPolicy.TrustedInstrument != nil {
 		approval := settings.FutureEpochPolicy.TrustedInstrument
@@ -119,7 +166,7 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 		return err
 	}
 	// Database triggers independently fence stale and legacy source writers.
-	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
+	_, err := tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
 	 set_config('urnetwork.competition_v2_bootstrap_lock',$3,true),set_config('urnetwork.competition_v2_bootstrap_base',$4,true),
 	 set_config('urnetwork.competition_v2_bootstrap_margin',$5,true),set_config('urnetwork.competition_v2_policy_approval',$6,true),
 	 set_config('urnetwork.competition_v2_staging',$7,true),set_config('urnetwork.competition_v2_staging_window',$8,true),set_config('urnetwork.competition_v2_staging_preparation',$9,true)`, lease.OwnerId, strconv.FormatInt(lease.FencingToken, 10), settings.AutomationPolicy.SourceLockSha256, settings.BaseSha, strconv.FormatFloat(settings.EvaluationPolicy.TakeoverMargin, 'g', -1, 64), settings.AutomationPolicy.PolicyApprovalSha256,
@@ -174,7 +221,7 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		return ErrConflict
 	}
 	if current == nil {
-		if intent.TrustedInstrument != nil || intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+		if intent.TrustedInstrument != nil || intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy || intent.WorkCoveragePolicy != nil {
 			return errors.New("baseline cannot import a prospective instrument transition")
 		}
 		if intent.Kind != "baseline" || intent.ExpectedGeneration != 0 || intent.TargetEpoch != 1 || intent.SourceGeneration != 0 || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || !sha256Pattern.MatchString(settings.AutomationPolicy.PolicyApprovalSha256) {
@@ -491,6 +538,7 @@ func (self PostgresStore) ActivateSource(ctx context.Context, settings *Settings
 				panic(ErrConflict)
 			}
 			server.Raise(validateSourceAuthorizationInTx(ctx, tx, settings, intent, current))
+			server.Raise(requireSourceOperatorHandoffInTx(ctx, tx, settings, intent))
 			var ready int
 			server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4 AND (receipt_json->>'ready')::boolean AND receipt_json->>'manifest_sha256'=$5 AND receipt_json->>'source_lock_sha256'=$6 AND (receipt_json->>'target_round_id')::uuid=$7`, intent.Environment, intent.CompetitionId, intent.SeasonId, generation, intent.ManifestSha256, intent.SourceLockSha256, intent.TargetRoundId).Scan(&ready))
 			if ready != 2 {
@@ -509,27 +557,43 @@ func (self PostgresStore) ActivateSource(ctx context.Context, settings *Settings
 
 // Reads an immutable staged or active generation for crash recovery.
 func (self PostgresStore) SourceActivation(ctx context.Context, settings *Settings, generation int64) (result *model.CompetitionSourceActivation, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			result, stateErr = nil, nil
 			var loadErr error
 			result, loadErr = sourceActivationInTx(ctx, tx, settings, generation)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 
 // Returns only the active authority selected by the database pointer.
 func (self PostgresStore) CurrentSourceActivation(ctx context.Context, settings *Settings) (result *model.CompetitionSourceActivation, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			result, stateErr = nil, nil
 			var loadErr error
 			result, loadErr = currentSourceActivationInTx(ctx, tx, settings)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 
@@ -565,18 +629,23 @@ func (self PostgresStore) RecordSupervisorTransition(ctx context.Context, settin
 
 // Reads the durable desired state so a restarted reconciler resumes the same transition.
 func (self PostgresStore) SupervisorTransition(ctx context.Context, settings *Settings, targetEpoch int) (result *model.CompetitionSupervisorTransition, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			result = nil
+			result, stateErr = nil, nil
 			var content []byte
 			loadErr := conn.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, targetEpoch).Scan(&content)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
-				panic(ErrNotFound)
+				stateErr = ErrNotFound
+				return
 			}
 			server.Raise(loadErr)
 			result = &model.CompetitionSupervisorTransition{}
 			server.Raise(json.Unmarshal(content, result))
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }

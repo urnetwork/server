@@ -3,9 +3,11 @@
 // every open contract keeps the escrow it reserved from its payer's balance,
 // and a payer whose balance is held that way is refused new contracts.
 // Contract creation always tries escrow first, so a payer is charged,
-// shrink-to-fit included, while anything is left. Only when escrow admission
-// refuses with ErrContractBalanceExhausted and the valve is open is the
-// contract created here instead, the way network contracts are
+// shrink-to-fit included, while anything is left. That holds for public,
+// companion, network and friends-and-family contracts alike
+// (subscription_network_escrow.go). Only when escrow admission refuses with
+// ErrContractBalanceExhausted and the valve is open is the contract created
+// here instead, the way the no-escrow path creates contracts
 // (createContractNoEscrowInTx): no transfer_escrow row, no payer_network_id and
 // no change to any transfer_balance. These contracts settle through the
 // existing no-escrow path, which claims a terminal outcome with no sweep,
@@ -70,13 +72,13 @@ var ErrContractBalanceExhausted = errRedisReservationInsufficient
 
 var zeroEscrowContractsCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_zero_escrow_contracts_total",
-	Help: "Free contracts created without escrow for a payer whose balance was exhausted while the contract degradation valve was open, by kind.",
+	Help: "Free contracts created without escrow for a payer whose balance was exhausted while the contract degradation valve was open, by kind: public (a plain contract between two networks), network (a plain contract between two clients of one network) or companion.",
 }, []string{"kind"})
 
-// Materializes both kinds, so an explicit zero is visible before the first
+// Materializes every kind, so an explicit zero is visible before the first
 // free contract.
 func init() {
-	for _, kind := range []string{"public", "companion"} {
+	for _, kind := range []string{"public", "network", "companion"} {
 		zeroEscrowContractsCreated.WithLabelValues(kind)
 	}
 	prometheus.MustRegister(zeroEscrowContractsCreated)
@@ -84,11 +86,12 @@ func init() {
 
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
-// earliest is the earlier of each branch's earliest, and each branch is a
-// bounded index range; both branches are bounded by the contract id (see
-// unexpiredContractIdAge). $1 and $2 are the origin's source and destination,
-// the companion's reverse; $3 is the earliest close time of a lingering
-// origin.
+// earliest is the earlier of each branch's earliest, and each branch is
+// bounded: the open branch by the contract id (see unexpiredContractIdAge),
+// the closed branch by the side table's pair range with each contract's
+// primary key (contractOriginLingerClosedSql). $1 and $2
+// are the origin's source and destination, the companion's reverse; $3 is the
+// earliest close time of a lingering origin.
 var zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
@@ -116,15 +119,8 @@ var zeroEscrowPlainOriginSql = `
 			SELECT contract_id, create_time
 			FROM (
 				SELECT contract_id, create_time
-				FROM transfer_contract
-				WHERE
-					open = false AND
-					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
-					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-					source_id = $1 AND
-					destination_id = $2 AND
-					companion_contract_id IS NULL
+				FROM ` + contractOriginLingerClosedSql + ` AS lingering_origin
+				WHERE companion_contract_id IS NULL
 				OFFSET 0
 			) AS closed_origin
 			ORDER BY create_time ASC
@@ -174,15 +170,8 @@ var zeroEscrowChainedOriginSql = `
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
 			FROM (
 				SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
-				FROM transfer_contract
-				WHERE
-					open = false AND
-					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
-					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-					source_id = $1 AND
-					destination_id = $2 AND
-					companion_contract_id IS NOT NULL
+				FROM ` + contractOriginLingerClosedSql + ` AS lingering_companion_origin
+				WHERE companion_contract_id IS NOT NULL
 				OFFSET 0
 			) AS closed_companion_origin
 			ORDER BY create_time ASC
@@ -197,8 +186,10 @@ var zeroEscrowChainedOriginSql = `
 // The escrow insert of createTransferEscrowInTx without a payer. A null
 // payer_network_id and no transfer_escrow row are what settle the contract on
 // the no-escrow path (validateContractFreeSettlementOwnerInTx). $7 is the
-// companion origin, which also decides the usage origin. $10 is the stream id
-// bound at insert (see contract_stream_binding.go), or null.
+// companion origin, which also decides the usage origin unless $11, a
+// normalized same-network companion's explicit usage origin, is set
+// (subscription_network_escrow.go). $10 is the stream id bound at insert (see
+// contract_stream_binding.go), or null.
 const zeroEscrowContractInsertSql = `
 	WITH creation_clock AS MATERIALIZED (
 		SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
@@ -218,7 +209,7 @@ const zeroEscrowContractInsertSql = `
 		stream_id
 	)
 	SELECT
-		$1, $2, $3, $4, $5, $6, $7, ($7::uuid IS NULL),
+		$1, $2, $3, $4, $5, $6, $7, COALESCE($11::boolean, $7::uuid IS NULL),
 		create_time, $8,
 		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond',
 		$10
@@ -226,8 +217,10 @@ const zeroEscrowContractInsertSql = `
 	RETURNING expiration_time
 `
 
-// Creates a public contract that escrow would have charged to the source
-// network. The result has no balances; its size is the request.
+// Creates a plain contract that escrow would have charged to the source
+// network: a public or friends-and-family contract, or a network contract
+// between two clients of one network. The result has no balances; its size is
+// the request.
 func CreateZeroEscrowContract(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -236,12 +229,14 @@ func CreateZeroEscrowContract(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
+	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr = createZeroEscrowContractInTx(
 			ctx,
@@ -263,11 +258,20 @@ func CreateZeroEscrowContract(
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
-	zeroEscrowContractsCreated.WithLabelValues("public").Inc()
+	zeroEscrowContractsCreated.WithLabelValues(zeroEscrowPlainContractKind(sourceNetworkId, destinationNetworkId)).Inc()
 	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	// the identity escrow would have charged, as createTransferEscrow stamps it
 	StampTopLevelClientContractTime(ctx, sourceId)
 	return
+}
+
+// The metric kind of a plain zero escrow contract: network between two clients
+// of one network, else public.
+func zeroEscrowPlainContractKind(sourceNetworkId server.Id, destinationNetworkId server.Id) string {
+	if sourceNetworkId == destinationNetworkId {
+		return "network"
+	}
+	return "public"
 }
 
 // Creates a companion contract answering the earliest reverse origin, which
@@ -284,13 +288,18 @@ func CreateZeroEscrowCompanionContract(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	defer recoverContractPublicationDeadline(&transferEscrow, &returnErr)
 	// Pin before acquisition, as the other creation paths do.
 	ctx = providerWorkSessionContext(ctx)
 	stampClientId := destinationId
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
+	// the closed origin arms' statements, decided before the transaction
+	// (contract_origin_linger.go)
+	lingerReads := contractOriginLingerReads.ready(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
+	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
 		transferEscrow, returnErr, stampClientId = nil, nil, destinationId
 		originOutcome := server.ContractCompanionOriginError
@@ -303,6 +312,7 @@ func CreateZeroEscrowCompanionContract(
 			destinationNetworkId,
 			destinationId,
 			originContractTimeout,
+			lingerReads,
 		)
 		if companionContractId == nil {
 			originOutcome = server.ContractCompanionOriginMissing
@@ -395,13 +405,14 @@ func createZeroEscrowContractInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, err
 	}
-	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId); err != nil {
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId, shardDeadline); err != nil {
 		return nil, err
 	}
 
 	contractId := server.NewId()
 	streamId := bindContractStreamAtInsert(ctx, contractId)
 	var expirationTime time.Time
+	var completedAt *time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		batch.Queue(
 			zeroEscrowContractInsertSql,
@@ -415,16 +426,11 @@ func createZeroEscrowContractInTx(
 			priority,
 			DefaultContractExpiration.Milliseconds(),
 			streamId,
+			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
-		batch.Queue(
-			contractExtenderInsertSql,
-			contractId,
-			sourceId,
-			destinationId,
-			ContractPartySource,
-			ContractPartyDestination,
-		)
+		completedAt = queueContractExtenderPublication(batch, contractId, sourceId, destinationId, shardDeadline)
 	})
+	requireContractPublicationDeadline(shardDeadline, completedAt)
 	server.AddTxCommitCount(tx, &contractOpenedCounter, 1)
 	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "create", expirationTime)
@@ -443,6 +449,8 @@ func createZeroEscrowContractInTx(
 // the earliest such companion, which chains an asymmetric reply carrier (see
 // createCompanionTransferEscrow). Both are nil when there is neither. The
 // inherited payer is set only for a probe shard's chained reply carrier.
+// lingerReads selects the closed arms' statements: the side table once it is
+// complete, the previous statements before (contract_origin_linger.go).
 func zeroEscrowCompanionOriginInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -451,13 +459,18 @@ func zeroEscrowCompanionOriginInTx(
 	destinationNetworkId server.Id,
 	destinationId server.Id,
 	originContractTimeout time.Duration,
+	lingerReads bool,
 ) (originContractId *server.Id, inheritedPayerNetworkId *server.Id) {
 	lingerCloseTime := server.NowUtc().Add(-originContractTimeout)
+	plainOriginSql, chainedOriginSql := zeroEscrowPlainOriginSql, zeroEscrowChainedOriginSql
+	if !lingerReads {
+		plainOriginSql, chainedOriginSql = legacyZeroEscrowPlainOriginSql, legacyZeroEscrowChainedOriginSql
+	}
 	func() {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leaveRead()
 		// the origin direction is reversed
-		result, err := tx.Query(ctx, zeroEscrowPlainOriginSql, destinationId, sourceId, lingerCloseTime)
+		result, err := tx.Query(ctx, plainOriginSql, destinationId, sourceId, lingerCloseTime)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&originContractId))
@@ -472,7 +485,7 @@ func zeroEscrowCompanionOriginInTx(
 		defer leaveRead()
 		result, err := tx.Query(
 			ctx,
-			zeroEscrowChainedOriginSql,
+			chainedOriginSql,
 			destinationId,
 			sourceId,
 			lingerCloseTime,
@@ -490,12 +503,14 @@ func zeroEscrowCompanionOriginInTx(
 
 // The priority escrow admission would give the would-be payer, without
 // reserving or locking a grant: the blend of paid and unpaid grants it would
-// fund the request from, in its funding order (earliest expiry first). Nothing
+// fund the request from, in its funding order (paid Pro grants first, then
+// the earliest expiry; transfer_balance_funding_order.go). Nothing
 // is reserved, so each active grant counts its whole balance. A zero-byte
 // request takes the first grant, as a zero-byte anchor does, and a payer with
-// no active grant is unpaid. It is never the trusted priority of network and
-// friends-and-family contracts. One page of grants bounds the read; a request
-// that page does not cover blends the page.
+// no active grant is unpaid. It is never the trusted priority, which no
+// escrowed contract carries, network and friends-and-family contracts included.
+// One page of grants bounds the read; a request that page does not cover blends
+// the page.
 func zeroEscrowContractPriorityInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -511,7 +526,7 @@ func zeroEscrowContractPriorityInTx(
 	grants := []grant{}
 	result, err := tx.Query(
 		ctx,
-		escrowTransferBalanceSql+` ORDER BY end_time, start_time, balance_id LIMIT $3`,
+		transferBalanceFundingPageSql("$3"),
 		payerNetworkId,
 		now,
 		redisGrantPageRows,
@@ -522,7 +537,8 @@ func zeroEscrowContractPriorityInTx(
 			var g grant
 			var startTime time.Time
 			var endTime time.Time
-			server.Raise(result.Scan(&balanceId, &g.paid, &g.balanceByteCount, &startTime, &endTime))
+			var fundsFirst bool
+			server.Raise(result.Scan(&balanceId, &g.paid, &g.balanceByteCount, &startTime, &endTime, &fundsFirst))
 			grants = append(grants, g)
 		}
 	})

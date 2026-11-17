@@ -25,46 +25,35 @@ func TestSecurityNoticeFailureRollsBackTheNoticeAlone(t *testing.T) {
 		ctx := context.Background()
 		_, userAuth, clientSession := authParityAccount(t, ctx, "security-guard")
 		networkId := clientSession.ByJwt.NetworkId
-		addressA, addressB := testSolanaAddress(t), testSolanaAddress(t)
-		walletA := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
-			NetworkId: networkId, Blockchain: SOL.String(), WalletAddress: addressA, DefaultTokenType: "USDC",
-		})
-		walletB := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
-			NetworkId: networkId, Blockchain: SOL.String(), WalletAddress: addressB, DefaultTokenType: "USDC",
-		})
+		_, addressA, pubkeyA := testBittensorKey(t, 231)
+		_, addressB, pubkeyB := testBittensorKey(t, 232)
 
-		failedBefore := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeFailed)
+		failedBefore := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeFailed)
 		faultCtx := context.WithValue(ctx, securityNoticeFaultKey{}, func(notice string, result string) {
 			// fail after the notice wrote its message
-			if notice == SecurityNoticePayoutWallet && result == securityNoticeQueued {
+			if notice == SecurityNoticeSubnetWallet && result == securityNoticeQueued {
 				panic(errors.New("synthetic notice failure after its writes"))
 			}
 		})
-		if err := SetPayoutWallet(faultCtx, networkId, *walletA); err != nil {
-			t.Fatal(err)
-		}
-		if payoutWalletId := GetPayoutWalletId(ctx, networkId); payoutWalletId == nil || *payoutWalletId != *walletA {
-			t.Fatalf("the payout wallet is %v after a failed notice, want the selected one", payoutWalletId)
+		SetStWalletOriginal(faultCtx, networkId, nil, addressA, pubkeyA, nil, nil)
+		if wallet := GetStWallet(ctx, networkId); wallet == nil || wallet.ColdkeySs58 != addressA {
+			t.Fatalf("the subnet wallet is %+v after a failed notice, want the one set", wallet)
 		}
 		if count := allTestSecurityNotices(ctx, networkId); count != 0 {
 			t.Fatalf("the failed notice left %d messages", count)
 		}
-		if delta := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeFailed) - failedBefore; delta != 1 {
+		if delta := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeFailed) - failedBefore; delta != 1 {
 			t.Fatalf("counted %v failed notices, want 1", delta)
 		}
 
-		queuedBefore := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeQueued)
-		coalescedBefore := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeCoalesced)
-		if err := SetPayoutWallet(ctx, networkId, *walletB); err != nil {
-			t.Fatal(err)
-		}
-		if err := SetPayoutWallet(ctx, networkId, *walletA); err != nil {
-			t.Fatal(err)
-		}
-		if delta := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeQueued) - queuedBefore; delta != 1 {
+		queuedBefore := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeQueued)
+		coalescedBefore := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeCoalesced)
+		SetStWalletOriginal(ctx, networkId, nil, addressB, pubkeyB, nil, nil)
+		SetStWalletOriginal(ctx, networkId, nil, addressA, pubkeyA, nil, nil)
+		if delta := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeQueued) - queuedBefore; delta != 1 {
 			t.Fatalf("counted %v queued notices, want 1", delta)
 		}
-		if delta := securityNoticeCount(SecurityNoticePayoutWallet, securityNoticeCoalesced) - coalescedBefore; delta != 1 {
+		if delta := securityNoticeCount(SecurityNoticeSubnetWallet, securityNoticeCoalesced) - coalescedBefore; delta != 1 {
 			t.Fatalf("counted %v coalesced notices, want 1", delta)
 		}
 		notices := unsentTestNotices(t, ctx, networkId, SecurityPayoutWalletTemplateName)

@@ -380,6 +380,16 @@ binary's `vcs.modified` bit: Go reports that bit for the main module, while code
 from a dirty local replacement can still be compiled into the service. This is
 coordination and evidence for the existing local-checkout workflow, not a
 Warpctl clean-worktree gate or a replacement build design.
+
+For a release epoch governed by `local/source-graph/lock.yml`, compare every
+recorded sibling revision with that exact checked-in lock before admitting the
+source graph or launching Go. A clean, stable checkout and matching `go.mod`
+prove identity, not agreement with the lock or compatibility of exported APIs.
+Retain the complete comparison and stop on a missing or different revision;
+review intentional lock changes explicitly. A lock-matching graph still needs
+actual compilation of the selected service packages before release tests can
+qualify it. Do not replace missing dependency APIs with guessed server constants.
+
 The exact local `warpctl` resolved for the build and every installed
 managed-host copy must expose a parseable full Go VCS base revision and Boolean
 modified bit; `modified=true` is context, not a fault. A desired version label,
@@ -796,6 +806,16 @@ decoder cursor, sequence, open calls and pending bytes. Physical capture offsets
 and placeholder pending values (including zero or null) do not establish that
 state. Bind the generation, selected-key specifications, original file/receipt
 custody and each declared metadata reference before adopting a checkpoint.
+At the preparer boundary, decode a validated checkpoint's `Pending: null` as
+empty bytes only when the independently accepted pending length is the exact
+integer zero. Every other value must be a strict Base64 string whose decoded
+bytes match the exact accepted length, contain no LF and have fewer than 4,096
+bytes; an empty string therefore also requires an accepted zero length. Refuse
+missing fields, unknown or boolean lengths, null with a nonzero length, and
+malformed encodings. This rule never turns a physical metadata placeholder into
+checkpoint authority. Test serialized null and string cases at the actual
+preparer assignment and frame boundary; retain the failed attempt and use a
+fresh, separately admitted request.
 When original capture metadata does not satisfy a legacy schema, retain the
 refusal and originals; do not add invented adoption fields or rewrite receipts.
 Use a separately qualified original-metadata path, and require each declared
@@ -1194,6 +1214,16 @@ the source-qualified writer/relay framing bound. The current fixed schema-2
 receipt remains unchanged by the address scrubber; arbitrary diagnostics can
 expand, and one writer call is not an atomicity or complete-delivery proof.
 
+Verify retained evidence by its declared schema role. A snapshot descriptor's
+`path`, `bytes`, and `sha256` may describe a captured prefix or window of a
+mutable source, not an immutable backing file. Verify the saved container and
+explicitly named immutable capture/guard receipts, then check embedded captured
+bytes, length, hash and recorded identity against their serialized metadata.
+Never recursively follow provenance paths or compare a captured prefix with
+the live source's current whole-file size or hash. Reacquiring live evidence is
+a separate bounded read, not snapshot verification. Byte integrity alone does
+not prove full-file coverage, loaded settings, inventory or trust selection.
+
 A skipped prefix, cut first line, unfinished last line, unsupported or malformed
 receipt, source failure, or missing/stale scope leaves that authority unknown.
 Never infer full collection coverage or healthy absence from a tail, reuse old
@@ -1520,6 +1550,14 @@ Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
 retain the exported variable in the actual child environment.
 
+A qualified extracted helper body does not qualify a new caller. Preserve
+its bootstrap and referenced globals, including receipt hashers and output
+context. When adapting that caller, audit the consumed helpers' global
+bindings and exercise the actual first PRE/POST receipt and save-return
+boundary before command dispatch. A partial receipt from a failed save is
+not a completed preflight. Preserve it and qualify the repair in a fresh,
+separately admitted namespace.
+
 Before launch, inventory the selected tests' complete runtime filesystem
 dependencies as well as Go source and module inputs. Include files opened by
 helpers, documentation assertions, embedded or generated fixture inputs and
@@ -1683,6 +1721,30 @@ than synthesizing readiness. A direct test that happened to pass without this
 preflight remains diagnostic evidence, not a formal gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
+Capacity and source preflight failure must prevent the native controller from
+starting. A newline after a failed command is not a gate. Use an explicit
+conditional or `monitor/gate_capacity/guard.sh --preflight <argv...> --launch
+<unchanged-controller-argv...>`; retain the actual preflight exit and launch
+only once on success. Keep every existing source/input/fixture guard in the
+authoritative preflight, with failures propagated. Preserve failed owners and
+outputs; a new admission uses new owner/output names and cannot qualify an old
+attempt retrospectively.
+
+Capture accounting requires an explicit qualified capture ledger. Files named
+stdout.log or stderr.log inside checked-out source fixtures are source/work
+inputs, not capture authority. Prove roles from owned capture receipts or
+pinned source materialization; retain every byte in owned-work accounting.
+When global owned work G already includes current phase work P exactly once,
+reserve only max(0,L-P) for a proposed phase ceiling L, and separately refuse
+P>L. Unknown overlap/scope remains a STOP. Root must approve changed profiles
+prospectively from measured allocations and a fresh global/free/capture fit.
+
+The standalone `monitor/gate_capacity` command accepts bounded typed JSON and
+known explicit old-5gib/new-red-6gib phase profiles, retaining the 20GiB global
+and 80MiB capture ceilings of this selected profile. Its green result is only
+arithmetic admission: SHA bindings still require external source validation,
+and all native status, complete output, EOF, reader and exact cleanup gates
+remain required. Missing/ambiguous input or an unwritable result refuses launch.
 
 A separately compiled test binary runs from its package directory, matching
 Go's `runTestActor` (`cmd.Dir = a.Package.Dir`), even when compilation starts in
@@ -1722,6 +1784,17 @@ automatic retry, or grounds to split, skip or weaken the race gate.
 
 Size stdout and stderr capture limits separately. A declared 32 MiB combined
 allowance of 16 MiB per stream does not let stdout borrow unused stderr space.
+
+For resource capacity only, a bounded population of contained regular files
+with unknown capture roles may be conservatively charged in full as a capture
+debit upper bound and as owned work. Retain each path/stat byte debit, the whole
+ledger hash, and explicit UNKNOWN role count/bytes. Never drop unknown bytes or
+invent missing sidecars. Aliases, out-of-scope files or unbounded populations
+remain STOP conditions. A qualified resource ledger, including the legacy
+`qualified-capture-ledger` scope label, establishes byte-debit authority only;
+it does not establish event provenance, complete capture, source signal health
+or a passing failed attempt. Existing semantic evidence qualifications remain
+unknown until independently established.
 On 2026-10-31, a prior complete full-suite capture had 16,596,015 stdout bytes,
 near that stdout cap. A later attempt observed 16,777,387 bytes (16 MiB + 171),
 retained only 16 MiB and overflowed; the capture killed its known native group.

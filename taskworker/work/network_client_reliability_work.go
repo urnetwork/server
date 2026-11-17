@@ -318,20 +318,97 @@ func RemoveOldNetworkReliabilityWindowPost(
 	return nil
 }
 
+type RefreshCountryReliabilityMultipliersArgs struct {
+}
+
+type RefreshCountryReliabilityMultipliersResult struct {
+}
+
+// Seeds the weekly chain only when it has no task, so a deploy never moves a
+// queued refresh: a new chain's first run starts after FirstRunDelay, and
+// every later run is queued by its predecessor.
+func ScheduleRefreshCountryReliabilityMultipliers(clientSession *session.ClientSession, tx server.PgTx) {
+	settings := model.DefaultCountryReliabilityMultiplierSettings()
+	task.ScheduleTaskInTxIfAbsent(
+		tx,
+		RefreshCountryReliabilityMultipliers,
+		&RefreshCountryReliabilityMultipliersArgs{},
+		clientSession,
+		task.RunOnce("refresh_country_reliability_multipliers"),
+		task.RunAt(server.NowUtc().Add(settings.FirstRunDelay)),
+		task.MaxTime(settings.MaxTime),
+	)
+}
+
+// The country reliability multipliers' owner since USDC payouts ended
+// (model.RefreshCountryReliabilityMultipliers).
+func RefreshCountryReliabilityMultipliers(
+	refreshCountryReliabilityMultipliers *RefreshCountryReliabilityMultipliersArgs,
+	clientSession *session.ClientSession,
+) (*RefreshCountryReliabilityMultipliersResult, error) {
+	if _, err := model.RefreshCountryReliabilityMultipliers(clientSession.Ctx, server.NowUtc(), model.DefaultCountryReliabilityMultiplierSettings()); err != nil {
+		return nil, err
+	}
+	return &RefreshCountryReliabilityMultipliersResult{}, nil
+}
+
+// Queues the next refresh a period later.
+func RefreshCountryReliabilityMultipliersPost(
+	refreshCountryReliabilityMultipliers *RefreshCountryReliabilityMultipliersArgs,
+	refreshCountryReliabilityMultipliersResult *RefreshCountryReliabilityMultipliersResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	settings := model.DefaultCountryReliabilityMultiplierSettings()
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshCountryReliabilityMultipliers,
+		&RefreshCountryReliabilityMultipliersArgs{},
+		clientSession,
+		task.RunOnce("refresh_country_reliability_multipliers"),
+		task.RunAt(server.NowUtc().Add(settings.Period)),
+		task.MaxTime(settings.MaxTime),
+	)
+	return nil
+}
+
+// The rows of network_client_location_reliability past their windows go
+// (model.RemoveOldClientLocationReliabilities; owner 2026-11-16, "11 days
+// except top-level"): every row 31 days after its last refresh, and the rows
+// of children and gone clients after 11 days, the latter at the pace and under
+// the off switch of the brake `{client_location_reliability_retention}control`.
+// Each run continues the walk from where the last stopped, with the cursor in
+// its args; a pending run keeps its args when a taskworker start schedules the
+// chain again. The schedule is the model settings'.
 type RemoveOldClientLocationReliabilitiesArgs struct {
+	Cursor model.ClientLocationReliabilityRetentionCursor `json:"cursor"`
 }
 
 type RemoveOldClientLocationReliabilitiesResult struct {
+	Cursor model.ClientLocationReliabilityRetentionCursor `json:"cursor"`
+	More   bool                                           `json:"more"`
 }
 
 func ScheduleRemoveOldClientLocationReliabilities(clientSession *session.ClientSession, tx server.PgTx) {
+	settings := model.DefaultClientLocationReliabilityRetentionSettings()
+	scheduleRemoveOldClientLocationReliabilities(clientSession, tx, &RemoveOldClientLocationReliabilitiesArgs{}, settings, server.NowUtc().Add(settings.StartDelay))
+}
+
+func scheduleRemoveOldClientLocationReliabilities(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	args *RemoveOldClientLocationReliabilitiesArgs,
+	settings *model.ClientLocationReliabilityRetentionSettings,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		RemoveOldClientLocationReliabilities,
-		&RemoveOldClientLocationReliabilitiesArgs{},
+		args,
 		clientSession,
 		task.RunOnce("remove_old_client_location_reliabilities"),
-		task.RunAt(server.NowUtc().Add(15*time.Minute)),
+		task.RunAt(runAt),
+		task.MaxTime(settings.TaskMaxTime),
 	)
 }
 
@@ -339,16 +416,45 @@ func RemoveOldClientLocationReliabilities(
 	removeOldClientLocationReliabilities *RemoveOldClientLocationReliabilitiesArgs,
 	clientSession *session.ClientSession,
 ) (*RemoveOldClientLocationReliabilitiesResult, error) {
-	model.RemoveOldClientLocationReliabilities(clientSession.Ctx, server.NowUtc())
-	return &RemoveOldClientLocationReliabilitiesResult{}, nil
+	report, cursor := model.RemoveOldClientLocationReliabilities(
+		clientSession.Ctx,
+		server.NowUtc(),
+		removeOldClientLocationReliabilities.Cursor,
+		model.DefaultClientLocationReliabilityRetentionSettings(),
+	)
+	if 0 < report.TrimmedCount || 0 < report.RemovedCount {
+		glog.Infof(
+			"[nclr]trimmed %d rows past 31 days; removed %d of %d rows examined past 11 days (ended %s)\n",
+			report.TrimmedCount,
+			report.RemovedCount,
+			report.ExaminedCount,
+			report.Stop,
+		)
+	}
+	return &RemoveOldClientLocationReliabilitiesResult{
+		Cursor: cursor,
+		More:   report.More,
+	}, nil
 }
 
+// A run that left work behind continues after the settings' MoreInterval.
 func RemoveOldClientLocationReliabilitiesPost(
 	removeOldClientLocationReliabilities *RemoveOldClientLocationReliabilitiesArgs,
 	removeOldClientLocationReliabilitiesResult *RemoveOldClientLocationReliabilitiesResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRemoveOldClientLocationReliabilities(clientSession, tx)
+	settings := model.DefaultClientLocationReliabilityRetentionSettings()
+	runAt := server.NowUtc().Add(settings.RunInterval)
+	if removeOldClientLocationReliabilitiesResult.More {
+		runAt = server.NowUtc().Add(settings.MoreInterval)
+	}
+	scheduleRemoveOldClientLocationReliabilities(
+		clientSession,
+		tx,
+		&RemoveOldClientLocationReliabilitiesArgs{Cursor: removeOldClientLocationReliabilitiesResult.Cursor},
+		settings,
+		runAt,
+	)
 	return nil
 }

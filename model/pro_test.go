@@ -50,11 +50,53 @@ func TestProConfig(t *testing.T) {
 
 	// data codes
 	connect.AssertEqual(t, c.DataCodeDuration, 8760*time.Hour)
-	connect.AssertEqual(t, len(c.DataCodeSkus), 2)
+	connect.AssertEqual(t, c.DataCodeSkus, []ProDataCodeSku{
+		{Sku: "data_1tib", Data: 1 * tib, PriceUsd: 3, Rails: []string{DataRailCard, DataRailCrypto, DataRailX402, DataRailGamma}},
+		{Sku: "data_10tib", Data: 10 * tib, PriceUsd: 20, Rails: []string{DataRailCard, DataRailCrypto, DataRailX402, DataRailGamma}},
+		// the pack for clients with a $1 per-payment cap (the owner, 2026-11-11):
+		// x402 and Gamma only, never by card or the other crypto coins
+		{Sku: "data_256gib", Data: 256 * gib, PriceUsd: 0.75, Rails: []string{DataRailX402, DataRailGamma}},
+	})
 
 	// unknown feature -> false
 	connect.AssertEqual(t, c.FeatureEnabled(true, "unknown_feature"), false)
 
+}
+
+// TestProDataCodeSkusByRail pins where pro.yml sells each data pack: the
+// 256 GiB pack over x402 and with Gamma, and nowhere else.
+func TestProDataCodeSkusByRail(t *testing.T) {
+	c := Pro()
+	if c.MaxConcurrentClients(false) == 0 {
+		t.Skip("pro.yml is not present in this environment; see TestProAbsent")
+	}
+
+	ids := func(rail string) []string {
+		ids := []string{}
+		for _, sku := range c.DataCodeSkusOn(rail) {
+			ids = append(ids, sku.Sku)
+		}
+		return ids
+	}
+	connect.AssertEqual(t, ids(DataRailCard), []string{"data_1tib", "data_10tib"})
+	connect.AssertEqual(t, ids(DataRailCrypto), []string{"data_1tib", "data_10tib"})
+	connect.AssertEqual(t, ids(DataRailX402), []string{"data_1tib", "data_10tib", "data_256gib"})
+	connect.AssertEqual(t, ids(DataRailGamma), []string{"data_1tib", "data_10tib", "data_256gib"})
+
+	pack := c.DataCodeSku("data_256gib")
+	connect.AssertEqual(t, pack.Data, 256*Gib)
+	connect.AssertEqual(t, pack.PriceUsd, 0.75)
+	for _, rail := range []string{DataRailCard, DataRailCrypto} {
+		connect.AssertEqual(t, pack.SoldOn(rail), false)
+	}
+	for _, rail := range []string{DataRailX402, DataRailGamma} {
+		connect.AssertEqual(t, pack.SoldOn(rail), true)
+	}
+	// it is under the $1 an x402 client pays without raising its cap
+	connect.AssertEqual(t, pack.PriceUsd <= 1, true)
+	// at the 1 TiB pack's rate
+	connect.AssertEqual(t, pack.PriceUsd, c.DataCodeSku("data_1tib").PriceUsd*float64(pack.Data)/float64(Tib))
+	connect.AssertEqual(t, c.DataCodeSku("data_2tib") == nil, true)
 }
 
 // TestConcurrentClientsEnforcementIsDark pins the staged rollout: the connected

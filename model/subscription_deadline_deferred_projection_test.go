@@ -118,14 +118,15 @@ func holdDeadlineDeferredOwner(t testing.TB, ctx context.Context, keys []server.
 	return finish
 }
 
-// No projection worker runs before these assertions. Both the direct legacy
-// debit and the native journal are exact even while the provider is held.
+// Both the direct legacy debit and the native journal are exact even while the
+// provider is held. The sweep holds the exact earnings, and the close queues
+// no provider total (BILLING-SPLIT.md).
 func requireDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, redis bool) {
 	t.Helper()
 	projection := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
 	if projection.sweptBytes != 17 || projection.sweptRevenue != 17 || projection.accountBytes != 0 || projection.accountRevenue != 0 ||
-		projection.pendingBytes != 17 || projection.pendingRevenue != 17 || projection.owners != 1 {
-		t.Fatal("deadline did not commit exact earnings and immutable provider debt", projection.sweptBytes, projection.sweptRevenue, projection.pendingBytes, projection.pendingRevenue, projection.owners)
+		projection.pendingBytes != 0 || projection.pendingRevenue != 0 || projection.owners != 0 {
+		t.Fatal("deadline did not commit exact earnings alone", projection.sweptBytes, projection.sweptRevenue, projection.pendingBytes, projection.pendingRevenue, projection.owners)
 	}
 	server.Db(ctx, func(conn server.PgConn) {
 		var terminal, settled bool
@@ -153,31 +154,12 @@ func requireDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscro
 	}
 }
 
+// The close left no provider owner to run, so only the debit worker remains.
 func drainDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, redis bool) {
 	t.Helper()
 	state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-	stored := task.GetTasks(ctx, state.ownerId)[state.ownerId]
-	if stored == nil {
-		t.Fatal("deadline projection lost durable owner")
-	}
-	target := task.NewTaskTarget(ApplyLegacyProviderTotals)
-	for range 2 {
-		_, _, err := target.RunSpecific(ctx, stored)
-		server.Raise(err)
-	}
-	state = readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-	if state.accountBytes != 17 || state.accountRevenue != 17 || state.pendingBytes != 0 || state.pendingRevenue != 0 || state.owners != 1 {
-		t.Fatal("provider application or stale replay changed exact earnings")
-	}
-	providerTotalsBatchDue(ctx, []server.Id{state.ownerId})
-	settings := task.DefaultTaskWorkerSettings()
-	settings.ClaimRegisteredTargetsOnly = true
-	worker := task.NewTaskWorker(ctx, settings)
-	defer worker.Close()
-	worker.AddTargets(NewLegacyProviderTotalsTaskTarget())
-	finished, retried, posts, err := worker.EvalTasks(1)
-	if err != nil || len(finished) != 1 || finished[0] != state.ownerId || len(retried)+len(posts) != 0 {
-		t.Fatal("provider owner did not finalize exactly", err)
+	if state.owners != 0 || state.pendingBytes != 0 || state.pendingRevenue != 0 || state.accountBytes != 0 || state.accountRevenue != 0 {
+		t.Fatal("deadline close published provider totals", state.owners, state.pendingBytes, state.accountBytes)
 	}
 	applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 	want := 0
@@ -192,8 +174,8 @@ func drainDeadlineDeferredCommit(t testing.TB, ctx context.Context, f netEscrowO
 	}
 	requireLegacySettlementTestState(t, ctx, f, id, true, 983, 0)
 	state = readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-	if state.accountBytes != 17 || state.accountRevenue != 17 || state.sweptBytes != 17 || state.sweptRevenue != 17 || state.owners != 0 {
-		t.Fatal("projection completion lost funded earnings")
+	if state.accountBytes != 0 || state.accountRevenue != 0 || state.sweptBytes != 17 || state.sweptRevenue != 17 || state.owners != 0 {
+		t.Fatal("debit completion lost funded earnings")
 	}
 	before := readRedisExpiryRepairTestState(ctx, id)
 	result, err := ReconcileContractAtDeadline(ctx, id, server.NowUtc())
@@ -306,35 +288,37 @@ func TestDeadlineDeferredGrantAdmissionPrecedesBusinessRows(t *testing.T) {
 	})
 }
 
-// A failed immutable publication rolls back the outcome, journal, metadata and
-// sweeps. A preexisting task never gets silently merged or replaced.
-func TestDeadlineDeferredPublicationFailureRollsBackAllAccounting(t *testing.T) {
+// The deadline close publishes no provider totals (BILLING-SPLIT.md). A
+// provider totals row already queued under the contract's key, as a binary
+// built before 2026-11-11 queues them, neither refuses the close (it used to
+// roll the whole close back, as a publication collision) nor is merged,
+// replaced or applied by it.
+func TestDeadlineDeferredQueuedProviderTotalsDoNotBlockOrChange(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
 		f, id := newDeadlineDeferredFixture(t, ctx, true)
-		collision := providerTotalsTestTask(ctx, id, f.destinationNetworkId)
-		priorTask := task.GetTasks(ctx, collision)[collision]
-		prior, err := json.Marshal(priorTask)
+		queued := providerTotalsTestTask(ctx, id, f.destinationNetworkId)
+		prior, err := json.Marshal(task.GetTasks(ctx, queued)[queued])
 		server.Raise(err)
-		before := readRedisExpiryRepairTestState(ctx, id)
 		result, err := ReconcileContractAtDeadline(ctx, id, server.NowUtc())
-		if err == nil || result != nil || !bytes.Equal(before, readRedisExpiryRepairTestState(ctx, id)) {
-			t.Fatal("publication refusal committed deadline prefix", err)
+		if err != nil || result == nil || result.Charged != 17 || result.Outcome != ContractOutcomeSettled {
+			t.Fatal("a queued provider totals row refused the deadline close", err)
 		}
-		after, err := json.Marshal(task.GetTasks(ctx, collision)[collision])
+		after, err := json.Marshal(task.GetTasks(ctx, queued)[queued])
 		server.Raise(err)
 		if !bytes.Equal(prior, after) {
-			t.Fatal("deadline replaced immutable provider allocation")
+			t.Fatal("deadline close changed a queued provider allocation")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var untouched bool
-			server.Raise(conn.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
-				AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
-				AND (SELECT balance_byte_count=1000 FROM transfer_balance WHERE balance_id=$2)`, id, f.balanceId).Scan(&untouched))
-			if !untouched {
-				t.Fatal("failed publication lost debit or earnings rollback")
+			var exact bool
+			server.Raise(conn.QueryRow(ctx, `SELECT
+				(SELECT count(*)=1 FROM transfer_debit_journal WHERE contract_id=$1) AND
+				(SELECT sum(payout_byte_count)=17 FROM transfer_escrow_sweep WHERE contract_id=$1) AND
+				NOT EXISTS(SELECT 1 FROM account_balance WHERE network_id=$2)`, id, f.destinationNetworkId).Scan(&exact))
+			if !exact {
+				t.Fatal("deadline close lost its debit or earnings, or credited provider totals")
 			}
 		})
 	})
@@ -357,7 +341,7 @@ func TestDeadlineDeferredLostPostsKeepExactDebitAndEarnings(t *testing.T) {
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		projection := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-		if projection.sweptBytes != 17 || projection.sweptRevenue != 17 || projection.accountBytes != 0 || projection.pendingBytes != 17 || projection.pendingRevenue != 17 || projection.owners != 1 {
+		if projection.sweptBytes != 17 || projection.sweptRevenue != 17 || projection.accountBytes != 0 || projection.pendingBytes != 0 || projection.pendingRevenue != 0 || projection.owners != 0 {
 			t.Fatal("lost posts lost durable earnings")
 		}
 		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 100 {

@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func TestPaymentReconciliationHealthy(t *testing.T) {
@@ -18,6 +21,9 @@ func TestPaymentReconciliationHealthy(t *testing.T) {
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -52,6 +58,9 @@ func TestPaymentReconciliationFindsPerStoreSkipErrorAndStaleWatermark(t *testing
 			{"x402", "1800", "1800", "0", "0", "1800", "1", "0", "0"},
 			{"monero", "1800", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "1800", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "1800", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "1800", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "1800", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -112,6 +121,9 @@ func TestPaymentReconciliationStalledStripeCreditPreservesStageUncertainty(t *te
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 	)
@@ -201,6 +213,9 @@ func TestPaymentReconciliationFindsDeadTaskAndHeartbeat(t *testing.T) {
 			{"x402", "10801", "600", "0", "0", "600", "0", "0", "0"},
 			{"monero", "10801", "600", "0", "0", "600", "0", "0", "0"},
 			{"zcash", "10801", "600", "0", "0", "600", "0", "0", "0"},
+			{"bitcoin", "10801", "600", "0", "0", "600", "0", "0", "0"},
+			{"bittensor", "10801", "600", "0", "0", "600", "0", "0", "0"},
+			{"ethereum", "10801", "600", "0", "0", "600", "0", "0", "0"},
 		},
 		nil,
 	)
@@ -222,6 +237,9 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		[]Row{
 			{"apple", "credited", "1", "120"},
@@ -252,6 +270,89 @@ func TestPaymentReconciliationSurfacesSafetyNetRepairs(t *testing.T) {
 	}
 }
 
+// A Stripe credited repair has two writers, the missed invoice.paid credit and
+// the gift leg's missed Checkout fulfilment (controller/payment_reconcile_gift.go),
+// and the alert names both, so an operator reads the audit row's leg.
+func TestPaymentReconciliationStripeCreditedNamesInvoicesAndGiftCheckouts(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		[]Row{{"stripe", "credited", "1", "60"}},
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("Stripe credited alerts = %d, want 1: %+v", len(alerts), alerts)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-repair")
+	if alert.Target != "stripe" || alert.Frame != "action=credited" || alert.Severity != SeverityWarn {
+		t.Fatalf("Stripe credited alert identity changed: %+v", alert)
+	}
+	rendered := alert.Markdown()
+	for _, expected := range []string{
+		"applied 1 Stripe payment(s) the webhook missed",
+		"invoice.paid",
+		"checkout.session.completed",
+		"gift_checkout",
+		"safety net",
+		"ordinary",
+		"exactly once",
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("Stripe credited alert omits %q:\n%s", expected, rendered)
+		}
+	}
+	requireAlertOmits(t, alert, "synthetic-run-id", "synthetic-account-id", "synthetic-transaction-id")
+}
+
+// A card gift order's failure is a stripe error row that never holds the
+// watermark (controller/payment_reconcile_gift.go): the store-error alert
+// says so, so a fresh watermark beside the errors is not read as the order
+// checked.
+func TestPaymentReconciliationStripeStoreErrorNamesGiftCheckoutRows(t *testing.T) {
+	source := paymentReconciliationSource(
+		[]Row{
+			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"google", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"solana", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"stripe", "600", "600", "0", "1", "600", "1", "0", "0"},
+			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
+		},
+		nil,
+	)
+	alerts, err := NewPaymentReconciliationSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "payment-reconciliation-store-error")
+	if alert.Target != "stripe" || alert.Severity != SeverityWarn {
+		t.Fatalf("Stripe store-error alert identity changed: %+v", alert)
+	}
+	rendered := alert.Markdown()
+	for _, expected := range []string{"leg gift_checkout", "never hold the stripe watermark"} {
+		if !strings.Contains(rendered, expected) {
+			t.Fatalf("Stripe store-error alert omits %q:\n%s", expected, rendered)
+		}
+	}
+}
+
 func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
 	source := paymentReconciliationSource(
 		[]Row{
@@ -262,6 +363,9 @@ func TestPaymentReconciliationSpecializesStripeEndedLifecycleGap(t *testing.T) {
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		[]Row{{"stripe", "ended", "2", "240"}},
 	)
@@ -313,6 +417,9 @@ func TestPaymentReconciliationSurfacesUnfulfillableStripeDestinationOncePerEvide
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 		[]Row{{"1", "3", "3", "0", "120"}},
@@ -373,6 +480,9 @@ func TestPaymentReconciliationKeepsInvalidUnfulfillableDispositionObservable(t *
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		},
 		nil,
 		[]Row{{"1", "3", "3", "1", "120"}},
@@ -435,6 +545,9 @@ func TestPaymentReconciliationRejectsIncompleteOrUnknownAggregate(t *testing.T) 
 			{"stripe", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		}},
 		{name: "missing store", rows: []Row{
 			{"apple", "600", "600", "0", "0", "600", "1", "0", "0"},
@@ -455,6 +568,9 @@ func TestPaymentReconciliationRejectsIncompleteOrUnknownAggregate(t *testing.T) 
 			{"x402", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"monero", "600", "600", "0", "0", "600", "1", "0", "0"},
 			{"zcash", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bitcoin", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"bittensor", "600", "600", "0", "0", "600", "1", "0", "0"},
+			{"ethereum", "600", "600", "0", "0", "600", "1", "0", "0"},
 		}},
 	}
 	for _, test := range tests {
@@ -489,4 +605,29 @@ func paymentReconciliationSourceWithUnfulfillable(health []Row, repairs []Row, u
 			return nil, nil
 		}
 	}}
+}
+
+// The health and repair readers expect exactly the reconciler's stores
+// (model.PaymentReconcileStores, which a controller test holds the
+// reconciler's legs to), so a store with a new leg is watched without an edit.
+// Pay with Gamma has no leg, so no watermark is expected from it.
+func TestPaymentReconciliationStoresAreTheReconcilerStores(t *testing.T) {
+	want := slices.Sorted(slices.Values(model.PaymentReconcileStores))
+	if !slices.Equal(paymentReconciliationStores, want) {
+		t.Fatalf("expected stores = %v, want %v", paymentReconciliationStores, want)
+	}
+	if !strings.Contains(paymentReconciliationHealthQuery, "VALUES ('apple'), ('bitcoin'), ('bittensor'), ('ethereum'), ('google'), ('monero'), ('solana'), ('stripe'), ('x402'), ('zcash')\n") {
+		t.Errorf("health query does not expect every reconciled store:\n%s", paymentReconciliationHealthQuery)
+	}
+	if strings.Contains(paymentReconciliationHealthQuery, "'gamma'") {
+		t.Errorf("health query expects a watermark from gamma, which has no reconciliation leg")
+	}
+	for _, store := range want {
+		if _, err := paymentReconciliationRepairFindings([]pgRow{{store, "credited", "1", "60"}}); err != nil {
+			t.Errorf("a %s repair was refused: %v", store, err)
+		}
+	}
+	if _, err := paymentReconciliationRepairFindings([]pgRow{{"gamma", "credited", "1", "60"}}); err == nil {
+		t.Errorf("a gamma repair was accepted, but gamma has no reconciliation leg")
+	}
 }

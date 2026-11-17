@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "competition-review-storage-recovery-operator-approval/v1",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "operator_response": "Approve controlled replacement qualification: yes",
+  "approved_scope": "One controlled replacement runtime qualification for the same audited release, followed by all 19 controls under a fresh fixed owner of at most 24 hours. Preserve the expired infrastructure-failed owner and all evidence; retain every criterion and resource limit unchanged.",
+  "source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "failed_owner_preserved": "8ed34d765736e83febd7147b8b6751e783aef1131665edd31e6d9ccc760399aa",
+  "failed_attempt_model_calls": 0,
+  "storage_recovery_proof": {
+    "path": "/var/lib/urnetwork/competition-review-multipass/archive-staging/storage-canary-3400897558/receipt.private.json",
+    "sha256": "f84dcc4987a55afbf1107f1feee2e289f06dfd5650b73e526f9030a1b991ccde",
+    "version_id": "eb69acde-f8e8-467a-b898-f6450e623b8c",
+    "exact_version_readback_matches": true,
+    "retain_until": "2028-01-01T00:00:00Z",
+    "replica_delivery_verified": false
+  },
+  "winner_approved": false,
+  "reward_release_authorized": false,
+  "source_promotion_authorized": false,
+  "calibration_accepted": false
+}

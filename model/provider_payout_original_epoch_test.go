@@ -1,5 +1,5 @@
 // Original epoch evidence and asset selection have different intervals. These
-// fixtures exercise the actual SQL census, archive custody and legacy planner.
+// fixtures exercise the actual SQL census and archive custody.
 package model
 
 import (
@@ -63,13 +63,6 @@ func TestProviderTransitionWholeCensusRetainsOriginalEpochAndSelectsNewEarnings(
 		var reports payoutartifact.ClosedWorkReports
 		if err := json.Unmarshal(census.Records[0].OriginalReports, &reports); err != nil || reports.Window == nil || payoutartifact.SnapshotHash(reports.Window) != payoutartifact.SnapshotHash(window) {
 			t.Fatal("report companion lost full same-statement window", err)
-		}
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil || len(plan.NetworkPayments) != 1 || plan.NetworkPayments[paid.network] == nil || plan.NetworkPayments[paid.network].PayoutByteCount != 11 {
-			t.Fatal("original pre-cutoff USDC debt changed asset", plan, err)
-		}
-		if err := RequireProviderUsdcPayment(ctx, plan.NetworkPayments[paid.network].PaymentId); err != nil {
-			t.Fatal("retained pre-cutoff USDC debt became unpayable", err)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id=$1`, freeContract))

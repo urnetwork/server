@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -33,6 +34,15 @@ type competitionReviewVersionedFixture struct {
 	server.RetainedBlobStore
 }
 
+// A successful export must not substitute the latest score for its version.
+func (self competitionReviewVersionedFixture) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == "synthetic/score.json" {
+		return nil, errors.New("synthetic score requires an exact version")
+	}
+	return self.RetainedBlobStore.Get(ctx, key)
+}
+
+// Only the declared version can resolve the fixture's immutable score bytes.
 func (self competitionReviewVersionedFixture) GetVersion(ctx context.Context, key, version string) (io.ReadCloser, error) {
 	if version != "synthetic-version" {
 		return nil, errors.New("unexpected synthetic object version")
@@ -42,9 +52,21 @@ func (self competitionReviewVersionedFixture) GetVersion(ctx context.Context, ke
 
 // A reviewer can inspect evidence before approving anything. Archived bytes,
 // scope and seal identities remain mandatory even though approval is absent.
+// The scorer omits the eligibility flag that the worker projects from diagnostics.
 func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// Observe this exact fixture while it is alive; an external poll can
+		// miss the short interval between migration completion and cleanup.
+		var schemaHead int
+		server.Db(t.Context(), func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(t.Context(), `SELECT COALESCE(MAX(end_version_number),0)
+			 FROM migration_audit WHERE status='success'`).Scan(&schemaHead))
+		}, server.OptReadOnly(), server.OptNoRetry())
+		if schemaHead != server.MigrationCount() {
+			t.Fatalf("review packet fixture schema head %d differs from source head %d", schemaHead, server.MigrationCount())
+		}
+		t.Logf("review_packet_fixture_schema_head=%d", schemaHead)
 		fixture := newCompetitionAutomationFixture(t)
 		root := t.TempDir()
 		store := competitionReviewVersionedFixture{RetainedBlobStore: server.NewLocalBlobStore(filepath.Join(root, "blobs"), "synthetic").(server.RetainedBlobStore)}
@@ -54,7 +76,12 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 		var scoreBytes []byte
 		job := addCompetitionAutomationJobWithManifest(t, fixture, 70, func(job *queuedJob, score *ScoreResult) (json.RawMessage, error) {
 			var err error
-			scoreBytes, err = json.MarshalIndent(score, "", "  ")
+			score.Diagnostics["baseline_takeover_eligible"] = score.TakeoverEligible
+			scoreBytes, err = json.MarshalIndent(map[string]any{
+				"score_schema": score.ScoreSchema, "raw_score": score.RawScore, "normalized_score": score.NormalizedScore,
+				"placeable": score.Placeable, "gates": score.Gates, "significance": score.Significance,
+				"diagnostics": score.Diagnostics, "eval_error": nil,
+			}, "", "  ")
 			if err != nil {
 				return nil, err
 			}
@@ -83,6 +110,9 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 			return manifestBytes, nil
 		})
 		fixture.now = fixture.round.RevealAt
+		if _, err := fixture.store.SourceReviewPacket(ctx, fixture.settings, job.RoundId, job.JobId); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unsealed candidate became final review evidence: %v", err)
+		}
 		if _, err := fixture.store.SealAndElect(ctx, fixture.settings, job.RoundId); err != nil {
 			t.Fatal(err)
 		}
@@ -90,13 +120,33 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 		if err != nil || packet == nil || !bytes.Equal(packet.Score, scoreBytes) || !bytes.Equal(packet.Patch, job.Patch) {
 			t.Fatalf("pre-approval packet lost authenticated bytes: %+v, %v", packet, err)
 		}
+		var unprojected ScoreResult
+		if json.Unmarshal(scoreBytes, &unprojected) != nil || unprojected.TakeoverEligible || !packet.Entry.Score.TakeoverEligible ||
+			bytes.Contains(scoreBytes, []byte(`"takeover_eligible"`)) {
+			t.Fatal("fixture did not preserve the distinct scorer document and worker projection")
+		}
 		lock, err := model.CompetitionSourceLockDigest(packet.SourceCommits)
 		if err != nil || lock != packet.Entry.BaseSourceLockSha256 || packet.SourceCommits["server"] != packet.BaseSha || packet.ActivationGeneration != 1 {
 			t.Fatalf("review packet lost its authenticated complete source base: %+v, %v", packet.SourceCommits, err)
 		}
+		if packet.RewardDecision == nil || packet.RewardDecision.SelectedJobId == nil || *packet.RewardDecision.SelectedJobId != job.JobId ||
+			packet.RewardRevision != packet.RewardDecision.Revision || packet.WinnerReviewPolicy != fixture.settings.AutomationPolicy.WinnerReviewPolicy ||
+			validateCompetitionReviewDecision(packet.RewardDecision, &packet.Seal) != nil {
+			t.Fatal("review packet lost the exact current elected decision or frozen reviewer policy")
+		}
+		if packet.ScoreArtifact == nil || packet.ScoreArtifact.Path != "score.json" || packet.ScoreArtifact.Key != "synthetic/score.json" ||
+			packet.ScoreArtifact.VersionId != "synthetic-version" || packet.ScoreArtifact.Sha256 != packet.Entry.ScoreSha256 || packet.ScoreArtifact.Bytes != int64(len(scoreBytes)) ||
+			packet.ManifestArtifact == nil || packet.ManifestArtifact.Key != "synthetic/manifest.json" || packet.ManifestArtifact.Sha256 != packet.Entry.ArtifactManifestSha256 ||
+			packet.ManifestArtifact.Bytes <= 0 || packet.ManifestArtifact.VersionId != "" {
+			t.Fatal("packet omitted exact score version/manifest content identity or invented a manifest object version")
+		}
+		if err := ValidateCompetitionReviewInstrument(packet); err != nil || packet.Instrument.EvaluationPolicy != fixture.settings.EvaluationPolicy {
+			t.Fatal("review packet lost activated instrument or frozen evaluation policy", err)
+		}
 		paused := *fixture.settings
 		paused.AutomationPolicy.Enabled = false
-		if packet, err := fixture.store.SourceReviewPacket(ctx, &paused, job.RoundId, job.JobId); err != nil || packet == nil || !bytes.Equal(packet.Score, scoreBytes) {
+		paused.AutomationPolicy.WinnerReviewPolicy = "synthetic-not-the-frozen-policy"
+		if packet, err := fixture.store.SourceReviewPacket(ctx, &paused, job.RoundId, job.JobId); err != nil || packet == nil || !bytes.Equal(packet.Score, scoreBytes) || packet.WinnerReviewPolicy != fixture.settings.AutomationPolicy.WinnerReviewPolicy {
 			t.Fatalf("disabling new automation stranded an existing review: %v", err)
 		}
 		otherScope := *fixture.settings
@@ -114,6 +164,40 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 			t.Fatal("tampered manifest was accepted for private review")
 		}
 	})
+}
+
+// A valid digest of another scope is still not the selected round's decision;
+// a same-scope changed payload cannot retain an older digest either.
+func TestCompetitionReviewDecisionRejectsCrossScopeAndChangedPayload(t *testing.T) {
+	seal := model.CompetitionEvaluationSeal{RoundId: server.NewId(), Environment: "synthetic-environment", CompetitionId: "synthetic-competition", SeasonId: "synthetic-season", SealSha256: strings.Repeat("a", 64)}
+	decision := model.CompetitionRewardDecision{RoundId: seal.RoundId, Environment: seal.Environment, CompetitionId: seal.CompetitionId,
+		SeasonId: seal.SeasonId, SealSha256: seal.SealSha256, Revision: 2, Action: "elect"}
+	var err error
+	decision.DecisionSha256, err = model.CompetitionAutomationDigest(decision)
+	if err != nil || validateCompetitionReviewDecision(&decision, &seal) != nil {
+		t.Fatalf("valid synthetic decision refused: %v", err)
+	}
+	for _, mutate := range []func(*model.CompetitionRewardDecision){
+		func(value *model.CompetitionRewardDecision) { value.RoundId = server.NewId() },
+		func(value *model.CompetitionRewardDecision) { value.Environment = "synthetic-other-environment" },
+		func(value *model.CompetitionRewardDecision) { value.CompetitionId = "synthetic-other-competition" },
+		func(value *model.CompetitionRewardDecision) { value.SeasonId = "synthetic-other-season" },
+		func(value *model.CompetitionRewardDecision) { value.Staging = true },
+		func(value *model.CompetitionRewardDecision) { value.SealSha256 = strings.Repeat("b", 64) },
+		func(value *model.CompetitionRewardDecision) { value.Revision = 0 },
+	} {
+		changed := decision
+		mutate(&changed)
+		changed.DecisionSha256 = ""
+		changed.DecisionSha256, err = model.CompetitionAutomationDigest(changed)
+		if err != nil || !errors.Is(validateCompetitionReviewDecision(&changed, &seal), ErrConflict) {
+			t.Fatalf("cross-scope or invalid decision accepted: %+v, %v", changed, err)
+		}
+	}
+	decision.Action = "changed-synthetic-action"
+	if !errors.Is(validateCompetitionReviewDecision(&decision, &seal), ErrConflict) || !errors.Is(validateCompetitionReviewDecision(&decision, nil), ErrConflict) {
+		t.Fatal("changed or unscoped decision reused a sealed identity")
+	}
 }
 
 // Neither same-length tampering nor a truncated/extended object can reuse an

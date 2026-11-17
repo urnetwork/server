@@ -392,7 +392,9 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 }
 
 // Quota-complete providers remain active while any exact-URL or unidentified
-// legacy TLS exception is unresolved. Local failure still uses the short pace.
+// legacy TLS exception is unresolved, a legacy one until clean rechecks of
+// ten catalog sites clear it; it never gains a target the aggregate did not
+// name. Local failure still uses the short pace.
 func TestUrlProbeSecurityRechecksContinueAfterRollingQuota(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()

@@ -81,6 +81,7 @@ func TestSourceCorrectnessSuiteRequiresEveryObservedMandatoryTest(t *testing.T) 
 }
 
 func TestSourceCorrectnessSuiteUsesContainedImageAndRetainsExactLogs(t *testing.T) {
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
 	request := sourceBuildContextFixture(t)
 	settings := sourceSandboxTestSettings()
 	settings.StateDirectory = t.TempDir()

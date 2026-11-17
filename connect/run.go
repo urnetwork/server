@@ -62,6 +62,10 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	// keeps it off until it does). alt's embedded exchange keeps the ceiling
 	// off.
 	settings.EnableLocalTransport = true
+	// The same for forwards to its own residents, under the control's
+	// `localForward` (LocalForwardDefault keeps them off until it names a
+	// block).
+	settings.EnableLocalForward = true
 	// The same for recycles of the stuck providers the api reports
 	// (client_recycle.go): StuckProviderRecycleDefault keeps them off until
 	// the control names a block, and alt's exchange keeps the ceiling off.

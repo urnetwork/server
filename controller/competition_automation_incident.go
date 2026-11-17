@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -17,13 +18,18 @@ import (
 var (
 	ErrAutomationHeld        = errors.New("competition capability is paused by an authorized hold")
 	ErrEvaluationInvalidated = errors.New("competition evaluation is invalidated by an integrity incident")
+	ErrFinalizationHeld      = fmt.Errorf("competition finalization is paused: %w", ErrAutomationHeld)
 )
 
 // Reads the latest revision for one capability on the caller's resource.
 func ensureAutomationNotHeldInTx(ctx context.Context, tx server.PgTx, settings *Settings, kind string) error {
 	var active bool
+	table := "competition_automation_hold"
+	if kind == "finalization" {
+		table = "competition_finalization_hold"
+	}
 	err := tx.QueryRow(ctx, `
-		SELECT active FROM competition_automation_hold
+		SELECT active FROM `+table+`
 		WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND kind=$4
 		ORDER BY revision DESC LIMIT 1
 	`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, kind).Scan(&active)
@@ -86,8 +92,11 @@ func recordAutomationHoldInTx(ctx context.Context, tx server.PgTx, settings *Set
 	}
 	var existingDigest string
 	var content []byte
-	err = tx.QueryRow(ctx, `SELECT request_sha256,hold_json FROM competition_automation_hold
-		WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND actor_id=$4 AND idempotency_key=$5`,
+	err = tx.QueryRow(ctx, `SELECT request_sha256,hold_json FROM (
+		 SELECT environment,competition_id,season_id,actor_id,idempotency_key,request_sha256,hold_json FROM competition_automation_hold
+		 UNION ALL
+		 SELECT environment,competition_id,season_id,actor_id,idempotency_key,request_sha256,hold_json FROM competition_finalization_hold
+		) AS holds WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND actor_id=$4 AND idempotency_key=$5`,
 		settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, actorId, args.IdempotencyKey).Scan(&existingDigest, &content)
 	if err == nil {
 		if existingDigest != digest {
@@ -103,7 +112,12 @@ func recordAutomationHoldInTx(ctx context.Context, tx server.PgTx, settings *Set
 		return nil, err
 	}
 	var revision int
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(revision),0) FROM competition_automation_hold
+	table := "competition_automation_hold"
+	if args.Kind == "finalization" {
+		table = "competition_finalization_hold"
+	}
+	// The physical table is selected only from these two fixed trusted names.
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(max(revision),0) FROM `+table+`
 		WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND kind=$4`,
 		settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, args.Kind).Scan(&revision); err != nil {
 		return nil, err
@@ -120,7 +134,7 @@ func recordAutomationHoldInTx(ctx context.Context, tx server.PgTx, settings *Set
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO competition_automation_hold (
+	_, err = tx.Exec(ctx, `INSERT INTO `+table+` (
 		hold_id,environment,competition_id,season_id,kind,revision,active,actor_id,idempotency_key,request_sha256,hold_json,created_at
 	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)`,
 		result.HoldId, result.Environment, result.CompetitionId, result.SeasonId, args.Kind,

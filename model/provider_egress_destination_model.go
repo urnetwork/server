@@ -78,8 +78,21 @@ type ProviderEgressDestination struct {
 	Expect   string
 	Status   int
 	MaxBytes int
-	Headers  map[string]string
-	Verify   ProviderEgressDestinationVerify
+	// H3 is whether the URL serves the same probe over HTTP/3, so a provider
+	// passes it only over both TCP and UDP (egresshealth.Destination.H3). It
+	// is configuration alone and has no column: the pool route serves every
+	// contract from qualityprobe.yml (ProviderEgressSites.configuredRows), and
+	// a stored row lends only its pool state, so a stored row reads false and
+	// the configured value is what the prober is served.
+	H3 bool
+	// Ipv6 is whether the URL serves the probe over IPv6 (ipv6: true), and
+	// NoIpv4 whether it does not over IPv4 (ipv4: false), so a provider that
+	// advertises a family is probed over it (egresshealth url_family.go). Like
+	// H3, they are configuration alone and have no column.
+	Ipv6    bool
+	NoIpv4  bool
+	Headers map[string]string
+	Verify  ProviderEgressDestinationVerify
 	// Category and Region say what the site is representative of (search,
 	// news, ... ; global, europe, ...). The refresh promotes a candidate of
 	// the category a retired site leaves.
@@ -780,6 +793,11 @@ func RemoveExpiredProviderEgressTallies(ctx context.Context, minDay time.Time) {
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_site_tally WHERE tally_day < $1`, day))
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_place_tally WHERE tally_day < $1`, day))
 	})
+	// the HTTP/3 and IPv6 place judgements read a day and the day before it
+	// (provider_egress_h3_place.go, provider_egress_ipv6_place.go); keep one
+	// more for an outcome that arrives late
+	RemoveExpiredProviderEgressH3Places(ctx, server.NowUtc().Add(-2*24*time.Hour))
+	RemoveExpiredProviderEgressIpv6Places(ctx, server.NowUtc().Add(-2*24*time.Hour))
 }
 
 // Ok/total of one class over a set of runs.
@@ -845,7 +863,12 @@ type ProviderEgressContactedTotal struct {
 // hour's runs, and is no evidence of a prober fault; it is counted apart. Each
 // accepted run counts once, from the history. A run without URL evidence (a
 // legacy batch) keeps every load, since nothing says which of its failures
-// reached the provider.
+// reached the provider. An outcome on probation is not a scored load
+// (provider_egress_url_source.go): a failing country site or a new candidate
+// must not read as a prober fault. A load is judged by its IPv4 HTTPS leg, as
+// the site tallies judge it: an outcome that carries an HTTP/3 or IPv6 leg had
+// its IPv4 HTTPS leg pass (egresshealth.UrlProbeEvidence.HttpsOk), so providers
+// that do not carry UDP or IPv6 cannot hold the refresh.
 func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt time.Time) ProviderEgressContactedTotal {
 	contacted := ProviderEgressContactedTotal{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -856,7 +879,7 @@ func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt ti
 			ctx,
 			`
 			SELECT
-				COALESCE(sum(ok_count), 0)::bigint,
+				COALESCE(sum(CASE WHEN (url_probe_evidence -> 'h3') IS NOT NULL OR (url_probe_evidence -> 'ipv6') IS NOT NULL THEN total_count ELSE ok_count END), 0)::bigint,
 				COALESCE(sum(total_count), 0)::bigint,
 				COALESCE(sum(total_count) FILTER (WHERE
 					total_count = 1 AND ok_count = 0 AND NOT tls_authentication_failure
@@ -867,7 +890,7 @@ func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt ti
 					AND COALESCE(url_probe_evidence -> 'security', 'null'::jsonb) IN ('null'::jsonb, '[]'::jsonb)
 				), 0)::bigint
 			FROM provider_egress_health_history
-			WHERE $1 <= measured_at
+			WHERE $1 <= measured_at AND NOT url_probation
 			`,
 			minMeasuredAt.UTC(),
 			egresshealth.NoContactFailureStages(),

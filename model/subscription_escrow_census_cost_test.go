@@ -125,7 +125,14 @@ func TestZeroByteEscrowRetainsClientLifecycleFence(t *testing.T) {
 		held, err := conn.Begin(ctx)
 		server.Raise(err)
 		defer held.Rollback(context.Background())
-		server.RaisePgResult(held.Exec(ctx, `UPDATE network_client SET active=false,deactivate_time=now() WHERE client_id=$1`, f.destinationId))
+		// The deactivation as production writes it, held open: the marked
+		// FOR UPDATE and then the locked write. Contract creation locks the
+		// row FOR KEY SHARE (fb9ae9621), which only that FOR UPDATE can make
+		// it wait for; a plain UPDATE takes FOR NO KEY UPDATE and never does.
+		if rowCount, err := deactivateNetworkClientsInTx(ctx, held,
+			[]server.Id{f.destinationId}, f.destinationNetworkId); err != nil || rowCount != 1 {
+			t.Fatalf("held deactivation rows = %d, err = %v", rowCount, err)
+		}
 		pid := contractLifecycleTestBackendPid(t, ctx, held)
 		finished := make(chan contractLifecycleTestResult, 1)
 		go func() {

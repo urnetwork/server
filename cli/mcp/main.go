@@ -38,6 +38,9 @@ func main() {
 		}
 		logs.Exit(2)
 	}
+	// the PgBouncer instances directly on the blocks the rollout lists, nginx's
+	// single port on the rest (server db_pgbouncer_path_rollout.go)
+	server.SetServicePgBouncerPath("mcp")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 	if err := mcp.Run(ctx, mcp.RunOptions{Port: *port}); err != nil {

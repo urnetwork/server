@@ -234,24 +234,20 @@ func TestCryptoCreditRenewalBalanceRevenueAndOffer(t *testing.T) {
 		connect.AssertEqual(t, renewal.endTime.Sub(renewal.startTime), solanaPlanDuration(model.SolanaPlanYearlyOnboarding)+manualPaymentGracePeriod)
 		connect.AssertEqual(t, !renewal.startTime.Before(before.Add(-time.Second)), true)
 
-		var pro *model.TransferBalance
-		for _, balance := range model.GetActiveTransferBalances(ctx, networkId) {
-			if balance.Pro {
-				pro = balance
-			}
-		}
-		connect.AssertEqual(t, pro != nil, true)
-		connect.AssertEqual(t, pro.StartBalanceByteCount, RefreshSupporterTransferBalance)
-		connect.AssertEqual(t, pro.EndTime.Equal(renewal.endTime), true)
-		var subsidyRevenue model.NanoCents
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT subsidy_net_revenue_nano_cents FROM transfer_balance WHERE balance_id = $1`, pro.BalanceId).Scan(&subsidyRevenue))
-		})
-		connect.AssertEqual(t, subsidyRevenue, model.UsdToNanoCents(3))
+		// the term's own balance carries its window and revenue and no data;
+		// the term's first monthly cycle carries the full Pro grant
+		periods, grants := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].startByteCount, SupporterPeriodTransferBalance)
+		connect.AssertEqual(t, periods[0].endTime.Equal(renewal.endTime), true)
+		connect.AssertEqual(t, periods[0].subsidy, model.UsdToNanoCents(3))
+		connect.AssertEqual(t, len(grants), 1)
+		connect.AssertEqual(t, grants[0].startByteCount, model.Pro().DataAmount(true))
+		connect.AssertEqual(t, grants[0].startTime.Equal(renewal.startTime), true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
 		after := model.GetCryptoPaymentIntent(ctx, intent.IntentId)
-		connect.AssertEqual(t, *after.BalanceId, pro.BalanceId)
+		connect.AssertEqual(t, *after.BalanceId, periods[0].balanceId)
 		connect.AssertEqual(t, *after.CreditedUsdNanoCents, model.UsdToNanoCents(3))
 
 		offer := model.GetOnboardingOffer(ctx, networkId)
@@ -265,7 +261,7 @@ func TestCryptoCreditRenewalBalanceRevenueAndOffer(t *testing.T) {
 		connect.AssertEqual(t, term.GraceEndTime.Sub(term.TermEndTime), manualPaymentGracePeriod)
 
 		// a crypto year blocks no new card purchase
-		connect.AssertEqual(t, subscriptionMarketsBlockNewPurchase(model.GetActiveSubscriptionRenewalMarkets(ctx, networkId, model.SubscriptionTypeSupporter)), false)
+		connect.AssertEqual(t, subscriptionMarketsBlockNewPurchase(model.GetActiveSubscriptionRenewalMarkets(ctx, networkId, model.SubscriptionTypeSupporter), false), false)
 	})
 }
 
@@ -1028,7 +1024,7 @@ func TestCryptoReconcileLegs(t *testing.T) {
 		// grants it again through the one credit (mmm/ZCASH-CONTRACT.md §3.13.2)
 		connect.AssertEqual(t, planIntent.CreditedAt, (*time.Time)(nil))
 		connect.AssertEqual(t, planIntent.BalanceId, (*server.Id)(nil))
-		credited, err = CryptoOperatorCredit(clientSession, plan.IntentId)
+		credited, err = CryptoOperatorCredit(clientSession, plan.IntentId, false)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
@@ -1040,7 +1036,7 @@ func TestCryptoReconcileLegs(t *testing.T) {
 			connect.AssertEqual(t, receipt.State, model.CryptoReceiptStateCredited)
 		}
 		// once
-		_, err = CryptoOperatorCredit(clientSession, plan.IntentId)
+		_, err = CryptoOperatorCredit(clientSession, plan.IntentId, false)
 		connect.AssertEqual(t, err != nil, true)
 	})
 }
@@ -1066,7 +1062,7 @@ func TestCryptoOperatorTools(t *testing.T) {
 		shortReceipt := cryptoDbReceipt(t, ctx, reviewed, "tx-operator", reviewed.AmountAtomic*98/100, 4)
 		reviewedId := reviewed.IntentId
 		model.SetCryptoPaymentReceiptsStateInConn(nil, ctx, &reviewedId, []model.CryptoPaymentReceiptKey{shortReceipt.Key()}, model.CryptoReceiptStateReview, model.CryptoReviewReasonUnderpaid)
-		credited, err := CryptoOperatorCredit(clientSession, reviewed.IntentId)
+		credited, err := CryptoOperatorCredit(clientSession, reviewed.IntentId, false)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
@@ -1108,7 +1104,7 @@ func TestCryptoOperatorTools(t *testing.T) {
 		connect.AssertEqual(t, err != nil, true)
 
 		// a voided invoice is never credited
-		_, err = CryptoOperatorCredit(clientSession, open.IntentId)
+		_, err = CryptoOperatorCredit(clientSession, open.IntentId, false)
 		connect.AssertEqual(t, err != nil, true)
 
 		listed := CryptoOperatorListInvoices(ctx, model.CryptoAssetXmr, "", 10)
@@ -1576,5 +1572,84 @@ func TestCryptoVoidHoldsPaymentsAndKeepsLinkedIntents(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, legacy.Status, PayDataSolanaStatusUnknown)
 		connect.AssertEqual(t, legacy.NetworkName, "")
+	})
+}
+
+// A coin whose scanner lags is neither offered nor quoted, on any path, and
+// every path says why the same way (2026-11-10: zec was listed while every zec
+// quote was refused with scanner_lagging). GET /pay/crypto/assets names it
+// only in unavailable_assets, the balance leaves it out, and a new invoice, a
+// buy-data invoice for a named network or a code, and a re-quote are each
+// refused asset_unavailable. An invoice handed out before still reads as it
+// was, and once the scanner catches up the coin is offered and quoted again.
+func TestCryptoLaggingCoinIsNeitherOfferedNorQuoted(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		cryptoTestResetLimiters()
+		cryptoTestStandardRates(t)
+		wallet := newFakeCryptoWallet(model.CryptoAssetXmr)
+		config := cryptoTestConfig()
+		config.Assets[model.CryptoAssetZec].Enabled = false
+		cryptoTestEnable(t, config, map[string]*fakeCryptoWallet{model.CryptoAssetXmr: wallet})
+		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "cryptolagging")
+		pageSession := session.Testing_CreateClientSession(ctx, nil)
+		taskSession := session.Testing_CreateClientSession(ctx, nil)
+		_, err := RunCryptoAddressRefill(taskSession, model.CryptoAssetXmr)
+		connect.AssertEqual(t, err, nil)
+		_, err = RunCryptoPaymentScan(taskSession, model.CryptoAssetXmr)
+		connect.AssertEqual(t, err, nil)
+		resetCryptoAvailability()
+
+		// caught up: offered and quoted
+		listed, err := CryptoPaymentAssets(pageSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, cryptoTestAssetNames(listed.Assets), []string{model.CryptoAssetUsdcSolana, model.CryptoAssetXmr})
+		connect.AssertEqual(t, cryptoTestAssetNames(listed.UnavailableAssets), []string{})
+		open, err := CreateCryptoPaymentIntent(&CreateCryptoPaymentIntentArgs{Asset: model.CryptoAssetXmr, ItemId: StripeItemData1Tib}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, open.Error, (*CryptoPaymentError)(nil))
+
+		// the wallet 100 blocks behind the network (max_lag_blocks.xmr is 5)
+		model.SetCryptoScanCursorSuccessInConn(nil, ctx, model.CryptoAssetXmr, 1000, 1000, 1100, 1100, server.NowUtc())
+		resetCryptoAvailability()
+
+		listed, err = CryptoPaymentAssets(pageSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, cryptoTestAssetNames(listed.Assets), []string{model.CryptoAssetUsdcSolana})
+		connect.AssertEqual(t, cryptoTestAssetNames(listed.UnavailableAssets), []string{model.CryptoAssetXmr})
+		connect.AssertEqual(t, listed.UnavailableAssets[0].Available, false)
+		connect.AssertEqual(t, listed.UnavailableAssets[0].UnavailableReason, cryptoQuoteRefusedLagging)
+		balance := &SubscriptionBalanceResult{}
+		decorateCryptoPay(balance, clientSession)
+		connect.AssertEqual(t, cryptoTestAssetNames(balance.CryptoAssets), []string{model.CryptoAssetUsdcSolana})
+
+		refused := func(result *CryptoPaymentIntentResult, err error) {
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error != nil, true)
+			connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeAssetUnavailable)
+			connect.AssertEqual(t, result.Error.Message, cryptoAssetUnavailableMessage)
+			connect.AssertEqual(t, result.IntentId, "")
+			connect.AssertEqual(t, result.Status, (*CryptoPaymentStatusResult)(nil))
+		}
+		refused(CreateCryptoPaymentIntent(&CreateCryptoPaymentIntentArgs{Asset: model.CryptoAssetXmr, Plan: model.SolanaPlanYearly}, clientSession))
+		refused(CreateDataCryptoPaymentIntent(&CreateDataCryptoPaymentIntentArgs{Asset: model.CryptoAssetXmr, ItemId: StripeItemData10Tib, NetworkName: "cryptolagging"}, pageSession))
+		refused(CreateDataCryptoPaymentIntent(&CreateDataCryptoPaymentIntentArgs{Asset: model.CryptoAssetXmr, ItemId: StripeItemData1Tib}, pageSession))
+		refused(CryptoPaymentRequote(&CryptoPaymentStatusArgs{IntentId: open.IntentId, StatusToken: open.StatusToken}, clientSession))
+		// the invoice handed out before still reads as it was
+		status, err := CryptoPaymentStatus(&CryptoPaymentStatusArgs{IntentId: open.IntentId, StatusToken: open.StatusToken}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, status.Status, CryptoPaymentStatusPending)
+
+		// caught up again: offered and re-quoted
+		model.SetCryptoScanCursorSuccessInConn(nil, ctx, model.CryptoAssetXmr, 1100, 1100, 1100, 1100, server.NowUtc())
+		resetCryptoAvailability()
+		listed, err = CryptoPaymentAssets(pageSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, cryptoTestAssetNames(listed.Assets), []string{model.CryptoAssetUsdcSolana, model.CryptoAssetXmr})
+		requoted, err := CryptoPaymentRequote(&CryptoPaymentStatusArgs{IntentId: open.IntentId, StatusToken: open.StatusToken}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, requoted.Error, (*CryptoPaymentError)(nil))
+		connect.AssertEqual(t, requoted.Address, open.Address)
 	})
 }

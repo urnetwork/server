@@ -204,13 +204,28 @@ acquired, so a request that will be refused never provisions a billed client.
 
 ### x402 payment, in band
 
-A tool call has no HTTP status, so a `402` cannot be returned. When
-`AuthNetworkClient` reports `UpgradeRequired`, the tool returns an error result
-whose `structuredContent` carries the terms from
-`controller.X402PaymentRequiredFor`, and accepts an optional `payment`
-argument. The agent signs the payment and repeats the identical call; the
-upgrade settles inline via `controller.X402Purchase` and the fetch proceeds.
-The whole round trip stays inside MCP.
+A tool call has no HTTP status, so a `402` cannot be returned. The tool speaks
+the x402 MCP transport instead (x402-foundation/x402
+`specs/transports-v2/mcp.md`). When `AuthNetworkClient` reports
+`UpgradeRequired`, the tool returns an error result that is the transport's
+PaymentRequired: the x402 v2 terms from `controller.X402TermsFor` sit at the
+top level of `structuredContent` (`x402Version`, `error`, `resource`,
+`accepts`, beside the fetch fields), and their JSON is `content[0].text`. The
+v1 terms stay in `payment_required` for callers that read them there. The
+resource is `mcp://tool/fetch`.
+
+The agent signs the payment and repeats the identical call. An x402 MCP client
+sends the PaymentPayload in `_meta["x402/payment"]`; a caller following the
+tool's schema puts it in the `payment` argument instead, base64 as for the
+`PAYMENT-SIGNATURE` header (or as JSON text), in v2 or v1. The upgrade settles
+inline via `controller.X402Purchase` and the fetch proceeds; the result carries
+the SettlementResponse in `_meta["x402/payment-response"]`. A payment the terms
+or the facilitator refuse is answered as payment required again, with the
+reason as the terms' error. The whole round trip stays inside MCP.
+
+The terms' error and the result's `next_step` say the price and that x402
+clients refuse a payment over $1 by default, so the agent raises its client's
+cap before it signs.
 
 ## 8. Authorization
 
@@ -261,4 +276,5 @@ the provider evaluates the reversed client policy.
 - **`McpResource` is a package var**, not config. A second environment would
   need it from config, and it must match what the load balancer serves.
 - **The x402 path has never executed end to end** — x402 is disabled in the
-  local vault, so the `payment_required` → `payment` retry is unverified.
+  local vault, so the payment required → `_meta["x402/payment"]` retry is
+  pinned by unit tests (`fetch_x402_test.go`), not by a live payment.

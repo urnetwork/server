@@ -13,17 +13,30 @@ package model
 // cutoff received points.
 //
 // Each completed operator block (SubnetBlock: seven days from Sunday 00:00
-// UTC) now gets the points of its traffic past the cutoff, once, by the rules
-// a plan applied before the cutoff:
-//   - the plan's computation for the block's traffic: each paying network's
-//     subsidy share split over its providers by bytes, the subscription
-//     revenue, the net revenue and the reliability subsidy by reliability
-//     weight, over the block's window. It only weighs the points: no USDC is
-//     planned, sent or recorded, and the sweeps stay unassigned.
-//   - the plan's points rule (planPayoutPoints): payout points, which are
-//     account_points_per_payout scaled to the window, in proportion to that
-//     computed payout; reliability points; the seeker multiplier; and the
-//     referral parent and child bonuses.
+// UTC) now gets the points of its traffic past the cutoff, once. Since schema
+// v2 (owner decision 2026-11-13: "please make points proportional to traffic
+// served and not revenue/paid traffic. After this change revenue should not
+// have an affect on any payout."):
+//   - payout points: account_points_per_payout scaled to the window, shared
+//     exactly among the provider networks in proportion to the bytes each
+//     served in the window (operatorBlockPayoutPointShares). A network's bytes
+//     are the payout bytes of its sweeps, whatever balance funded them: a
+//     purchase, a Pro grant or a free grant, paid or unpaid, and whatever the
+//     payer. No revenue, net revenue, subscription revenue or revenue-sized
+//     subsidy enters an award, and no payer weighs more than another.
+//   - reliability points by reliability weight, the seeker multiplier, and the
+//     referral parent and child bonuses (planPayoutPoints), whose inputs are
+//     reliability evidence, seeker holdings and referrals, not revenue.
+// The blocks awarded before v2 keep what the payout plan's rule gave them,
+// which weighed the payout points by a computed payout of net revenue and a
+// revenue-sized subsidy: each block is awarded once. No USDC is planned, sent
+// or recorded, and the sweeps stay unassigned.
+//
+// A sweep is a provider network's share of one funding balance's debited bytes
+// of a settled contract (allocateContractParticipantPayouts). A participant on
+// the contract's paying network takes no share, and a contract the degradation
+// valve let settle without escrow has no sweep, so neither earns points here;
+// the SN pool's usage (GetStEpochProviderUsage) counts both.
 //
 // An award is its own ledger: a payment plan id derived from the block (the
 // award happens once whoever writes it), the plan's payment_report, and one
@@ -38,6 +51,25 @@ package model
 // The daily task (controller.AwardOperatorBlockPoints) awards each block once
 // it completes; the backfill (bringyourctl account-points backfill-blocks)
 // awards the blocks that completed before the task ran, with an explicit go.
+//
+// An award must run before its window's reliability evidence passes
+// client_reliability retention, ClientReliabilityRetention after the window
+// opens, about three days after the block is due: past that some evidence
+// may be gone, and the award fails closed
+// (ErrOperatorBlockPointsReliabilityExpired). The daily task awards its blocks
+// oldest first and stops at the first error, since it owns only the blocks
+// after its last award, and a block it passed over on a transient error would
+// never be tried again. A block past its deadline is no transient error, as
+// retention only moves forward: the task records it expired, once
+// (operator_block_points_expired), and goes on to the later blocks. An
+// expired block never gets its points, by the task or by a backfill
+// (OperatorBlockPointsExpiry). Until 2026-11-14 the task stopped at such a
+// block on every run, so no later block was ever awarded again. The points
+// leaderboard excuses an expired block's week: a network without points in it
+// keeps its Streak through it (pointsStreaks, owner decision 2026-11-14). The
+// latest completed block is pending there until its award commits or it is
+// recorded expired: meanwhile it neither breaks nor extends a Streak
+// (loadPointsPendingEpochs, owner decision 2026-11-14).
 
 import (
 	"context"
@@ -48,17 +80,27 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 )
 
-const OperatorBlockPointsSchema = "urnetwork-operator-block-points-v1"
+// The schema of an award, which its dry run's file and digest carry. v2
+// (2026-11-13) shares the payout points by bytes served; v1 weighed them by a
+// computed revenue-based payout. A commit refuses an award of another schema,
+// so a v1 dry run cannot commit a block under the old rule.
+const OperatorBlockPointsSchema = "urnetwork-operator-block-points-v2"
+
+// The namespace of the blocks' payment plan ids: v1's, for every schema. A
+// block keeps one plan id, so an award of any schema finds an earlier award of
+// the block, and the leaderboard and the epoch history find either.
+const operatorBlockPointsPlanIdNamespace = "urnetwork-operator-block-points-v1"
 
 // The journal event that marks a payment row as an operator block points row
 // (audit_account_payment).
@@ -92,13 +134,28 @@ var (
 	ErrOperatorBlockPointsReliabilityExpired = errors.New("operator block reliability evidence is past client_reliability retention")
 	// The client_reliability drain has not reached the end of the block.
 	ErrOperatorBlockPointsReliabilityPending = errors.New("operator block reliability evidence is not drained yet")
+	// The daily task recorded the block expired (OperatorBlockPointsExpiry):
+	// it is never awarded.
+	ErrOperatorBlockPointsExpired = errors.New("operator block expired: its reliability evidence passed client_reliability retention before any award, so it is never awarded")
 )
+
+// Operator blocks the daily task recorded expired, counted once each, when it
+// wrote the record. Every process registers it at zero; the taskworker that
+// ran the award counts.
+var operatorBlockPointsExpiredBlocksCounter = prometheus.NewCounter(prometheus.CounterOpts{
+	Namespace: "urnetwork", Subsystem: "operator_block_points", Name: "expired_blocks_total",
+	Help: "Operator blocks the daily award recorded expired, once each: their reliability evidence passed client_reliability retention before any award, so they never get their points (operator_block_points_expired)",
+})
+
+func init() {
+	prometheus.MustRegister(operatorBlockPointsExpiredBlocksCounter)
+}
 
 // OperatorBlockPointsPlanId is the payment plan id of an operator block's
 // points. It derives from the block, so every writer finds an earlier award by
 // its payment_report primary key.
 func OperatorBlockPointsPlanId(block int64) server.Id {
-	sum := md5.Sum([]byte(OperatorBlockPointsSchema + "/" + strconv.FormatInt(block, 10)))
+	sum := md5.Sum([]byte(operatorBlockPointsPlanIdNamespace + "/" + strconv.FormatInt(block, 10)))
 	return server.RequireIdFromBytes(sum[:])
 }
 
@@ -136,7 +193,22 @@ func OperatorBlockPointsDueBlocks(cutoff time.Time, now time.Time) []int64 {
 }
 
 // GetOperatorBlockPointsAwarded reports which of the blocks have their points.
-func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) map[int64]bool {
+func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) (awarded map[int64]bool) {
+	awarded = map[int64]bool{}
+	if len(blocks) == 0 {
+		return
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		awarded = getOperatorBlockPointsAwardedInConn(ctx, conn, blocks)
+	})
+	return
+}
+
+// Which of the blocks have their points, read on the caller's connection: an
+// award commits its payment_report row, keyed by the block's plan id
+// (OperatorBlockPointsPlanId), in the transaction that writes its payments and
+// points (CommitOperatorBlockPoints).
+func getOperatorBlockPointsAwardedInConn(ctx context.Context, conn server.PgConn, blocks []int64) map[int64]bool {
 	awarded := map[int64]bool{}
 	if len(blocks) == 0 {
 		return awarded
@@ -148,32 +220,34 @@ func GetOperatorBlockPointsAwarded(ctx context.Context, blocks []int64) map[int6
 		planBlocks[planId] = block
 		planIds = append(planIds, planId)
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`SELECT payment_plan_id FROM payment_report WHERE payment_plan_id = ANY($1::uuid[])`,
-			planIds,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var planId server.Id
-				server.Raise(result.Scan(&planId))
-				awarded[planBlocks[planId]] = true
-			}
-		})
+	result, err := conn.Query(
+		ctx,
+		`SELECT payment_plan_id FROM payment_report WHERE payment_plan_id = ANY($1::uuid[])`,
+		planIds,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var planId server.Id
+			server.Raise(result.Scan(&planId))
+			awarded[planBlocks[planId]] = true
+		}
 	})
 	return awarded
 }
 
 // operatorBlockPointsAutomaticBlocks is what one run of the daily task
-// awards, ascending:
+// awards, ascending, of the due blocks that have neither an award nor an
+// expiry record:
 //   - after any award, every later due block without one, so a missed run
 //     catches up
 //   - before the first award, the due blocks from fromBlock, the block that
 //     was open when the task was first scheduled: the blocks that completed
 //     before this code ran are the backfill's, which needs an explicit go
 //   - without either, only the latest due block
-func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, fromBlock int64) []int64 {
+//
+// An expiry record leaves the last award where it was: it only drops its
+// block from the list.
+func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, expired map[int64]bool, fromBlock int64) []int64 {
 	blocks := []int64{}
 	lastAwarded := int64(0)
 	for block := range awarded {
@@ -182,7 +256,7 @@ func operatorBlockPointsAutomaticBlocks(due []int64, awarded map[int64]bool, fro
 		}
 	}
 	for _, block := range due {
-		if awarded[block] {
+		if awarded[block] || expired[block] {
 			continue
 		}
 		switch {
@@ -217,16 +291,13 @@ type OperatorBlockPoints struct {
 	WindowStart time.Time `json:"window_start"`
 	WindowEnd   time.Time `json:"window_end"`
 
-	// the plan's computation for the window (planSubsidyPayments)
-	SubsidyScale             float64   `json:"subsidy_scale"`
-	SubsidyNetPayoutUsd      float64   `json:"subsidy_net_payout_usd"`
-	ActiveUserCount          int       `json:"active_user_count"`
-	PaidUserCount            int       `json:"paid_user_count"`
-	TrafficUserCount         int       `json:"traffic_user_count"`
-	NetPayoutByteCountPaid   ByteCount `json:"net_payout_byte_count_paid"`
-	NetPayoutByteCountUnpaid ByteCount `json:"net_payout_byte_count_unpaid"`
-	NetRevenue               NanoCents `json:"net_revenue_nano_cents"`
-	SweepCount               int64     `json:"sweep_count"`
+	// the window's share of a subsidy period (subsidy.yml days), at most 1,
+	// which scales the points per period to the window
+	TimeScale float64 `json:"time_scale"`
+	// the bytes the provider networks served in the window, which share the
+	// payout points, and the sweeps that carry them
+	ByteCount  ByteCount `json:"byte_count"`
+	SweepCount int64     `json:"sweep_count"`
 
 	// the reliability window, in reliability blocks [min, max)
 	ReliabilityMinBlockNumber      int64 `json:"reliability_min_block_number"`
@@ -234,28 +305,23 @@ type OperatorBlockPoints struct {
 	ReliabilityEffectiveBlockCount int64 `json:"reliability_effective_block_count"`
 	ReliabilityNetworkCount        int   `json:"reliability_network_count"`
 
-	// account_points_per_payout scaled to the window
+	// account_points_per_payout scaled to the window: the payout points the
+	// networks share by bytes
 	PayoutNanoPoints NanoPoints `json:"payout_nano_points"`
 	PointsPerPayout  int        `json:"points_per_payout"`
-	// the payout the plan computed, which weighs the points; none is paid
-	TotalComputedPayout NanoCents `json:"total_computed_payout_nano_cents"`
 
 	Payments []*OperatorBlockPayment `json:"payments"`
 	Points   []*OperatorBlockPoint   `json:"points"`
 }
 
-// OperatorBlockPayment is one provider network's computed payment: what a
-// plan would have paid it for the window. The row it commits carries no USDC.
+// OperatorBlockPayment is one provider network's traffic in the window, which
+// its payment row records. The row carries no USDC.
 type OperatorBlockPayment struct {
-	NetworkId          server.Id `json:"network_id"`
-	PayoutByteCount    ByteCount `json:"payout_byte_count"`
-	MinSweepTime       time.Time `json:"min_sweep_time"`
-	NetRevenue         NanoCents `json:"net_revenue_nano_cents"`
-	SubsidyPayout      NanoCents `json:"subsidy_payout_nano_cents"`
-	ReliabilitySubsidy NanoCents `json:"reliability_subsidy_nano_cents"`
-	ComputedPayout     NanoCents `json:"computed_payout_nano_cents"`
-	// the earliest sweep with payout bytes: the operator block it earns in
-	MinPaidSweepTime *time.Time `json:"min_paid_sweep_time,omitempty"`
+	NetworkId server.Id `json:"network_id"`
+	// the bytes it served, always positive
+	PayoutByteCount ByteCount `json:"payout_byte_count"`
+	// its earliest sweep in the window: the operator block it earns in
+	MinSweepTime time.Time `json:"min_sweep_time"`
 }
 
 // OperatorBlockPoint is one account_point row, linked to the payment of
@@ -310,56 +376,33 @@ func OperatorBlockPointsDigest(awards []*OperatorBlockPoints) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// The block's traffic past the cutoff, as the plan aggregates its selection:
-// per provider (payee) and per paying network and provider.
+// The block's traffic past the cutoff: each provider network's bytes.
 type operatorBlockTraffic struct {
-	payees map[server.Id]*operatorBlockPayee
-	// payer -> payee
-	pairs map[server.Id]map[server.Id]*operatorBlockPair
-	// the balances that carry subscription revenue
-	revenueBalances map[server.Id]*subsidyRevenueBalance
-	sweepCount      int64
+	payees     map[server.Id]*operatorBlockPayee
+	sweepCount int64
 }
 
+// One provider network's bytes in the window, and its earliest sweep.
 type operatorBlockPayee struct {
-	payoutByteCount  ByteCount
-	netRevenue       NanoCents
-	minSweepTime     time.Time
-	minPaidSweepTime *time.Time
-}
-
-type operatorBlockPair struct {
-	paidByteCount   ByteCount
-	unpaidByteCount ByteCount
+	payoutByteCount ByteCount
+	minSweepTime    time.Time
 }
 
 func newOperatorBlockTraffic() *operatorBlockTraffic {
 	return &operatorBlockTraffic{
-		payees:          map[server.Id]*operatorBlockPayee{},
-		pairs:           map[server.Id]map[server.Id]*operatorBlockPair{},
-		revenueBalances: map[server.Id]*subsidyRevenueBalance{},
+		payees: map[server.Id]*operatorBlockPayee{},
 	}
 }
 
-// One read row: a provider's sweeps funded by one balance.
+// One read row: a provider network's sweeps in one read's sweep time.
 type operatorBlockSweepRow struct {
-	payeeNetworkId    server.Id
-	balanceId         server.Id
-	payerNetworkId    *server.Id
-	paid              bool
-	balanceStartTime  *time.Time
-	balanceEndTime    *time.Time
-	subsidyNetRevenue NanoCents
-	payoutByteCount   ByteCount
-	netRevenue        NanoCents
-	minSweepTime      time.Time
-	minPaidSweepTime  *time.Time
-	sweepCount        int64
+	payeeNetworkId  server.Id
+	payoutByteCount ByteCount
+	minSweepTime    time.Time
+	sweepCount      int64
 }
 
-// Adds a row as the plan aggregates it: every sweep counts toward its
-// provider's bytes and net revenue, and a sweep with a balance row counts
-// toward the subsidy (planSubsidyPayments joins the balance).
+// Adds a row to its provider network's bytes.
 func (self *operatorBlockTraffic) add(row *operatorBlockSweepRow) {
 	self.sweepCount += row.sweepCount
 	payee, ok := self.payees[row.payeeNetworkId]
@@ -368,76 +411,31 @@ func (self *operatorBlockTraffic) add(row *operatorBlockSweepRow) {
 		self.payees[row.payeeNetworkId] = payee
 	}
 	payee.payoutByteCount += row.payoutByteCount
-	payee.netRevenue += row.netRevenue
 	payee.minSweepTime = server.MinTime(payee.minSweepTime, row.minSweepTime)
-	if row.minPaidSweepTime != nil && (payee.minPaidSweepTime == nil || row.minPaidSweepTime.Before(*payee.minPaidSweepTime)) {
-		minPaidSweepTime := *row.minPaidSweepTime
-		payee.minPaidSweepTime = &minPaidSweepTime
-	}
-	if row.payerNetworkId == nil {
-		return
-	}
-	payees, ok := self.pairs[*row.payerNetworkId]
-	if !ok {
-		payees = map[server.Id]*operatorBlockPair{}
-		self.pairs[*row.payerNetworkId] = payees
-	}
-	pair, ok := payees[row.payeeNetworkId]
-	if !ok {
-		pair = &operatorBlockPair{}
-		payees[row.payeeNetworkId] = pair
-	}
-	if row.paid {
-		pair.paidByteCount += row.payoutByteCount
-	} else {
-		pair.unpaidByteCount += row.payoutByteCount
-	}
-	if 0 < row.subsidyNetRevenue && row.balanceStartTime != nil && row.balanceEndTime != nil {
-		self.revenueBalances[row.balanceId] = &subsidyRevenueBalance{
-			startTime:         *row.balanceStartTime,
-			endTime:           *row.balanceEndTime,
-			subsidyNetRevenue: row.subsidyNetRevenue,
-		}
-	}
 }
 
-// The unpaid sweeps of contracts that settled at or after the cutoff, with a
-// sweep time in [$1, $2), per provider and funding balance: the plan's
-// selection (planPayments) past the boundary. A sweep's paid traffic is
-// pointsPaidSweepSql, the definition of the operator blocks.
+// The sweeps no USDC payment owns (payment_id), with payout bytes
+// (pointsPaidSweepSql, the definition of the operator blocks), of contracts
+// that settled at or after the cutoff, with a sweep time in [$1, $2), per
+// provider network. Neither the funding balance, whether it was paid, nor the
+// sweep's revenue is read: the bytes alone weigh the points.
 var operatorBlockPointsSweepSql = `
 	SELECT
 		sweep.network_id,
-		sweep.balance_id,
-		balance.network_id,
-		COALESCE(balance.paid, false),
-		balance.start_time,
-		balance.end_time,
-		COALESCE(balance.subsidy_net_revenue_nano_cents, 0)::bigint,
 		SUM(sweep.payout_byte_count)::bigint,
-		SUM(sweep.payout_net_revenue_nano_cents)::bigint,
 		MIN(sweep.sweep_time),
-		MIN(sweep.sweep_time) FILTER (WHERE ` + pointsPaidSweepSql("sweep") + `),
 		COUNT(*)
 	FROM transfer_escrow_sweep AS sweep
 	INNER JOIN transfer_contract AS contract ON
 		contract.contract_id = sweep.contract_id
-	LEFT JOIN transfer_balance AS balance ON
-		balance.balance_id = sweep.balance_id
 	WHERE
 		$1 <= sweep.sweep_time AND
 		sweep.sweep_time < $2 AND
 		sweep.payment_id IS NULL AND
+		` + pointsPaidSweepSql("sweep") + ` AND
 		$3 <= contract.close_time AND
 		contract.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
-	GROUP BY
-		sweep.network_id,
-		sweep.balance_id,
-		balance.network_id,
-		balance.paid,
-		balance.start_time,
-		balance.end_time,
-		balance.subsidy_net_revenue_nano_cents
+	GROUP BY sweep.network_id
 `
 
 // Reads the window's traffic in bounded read-only statements. Like every read
@@ -460,16 +458,8 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 					row := &operatorBlockSweepRow{}
 					server.Raise(result.Scan(
 						&row.payeeNetworkId,
-						&row.balanceId,
-						&row.payerNetworkId,
-						&row.paid,
-						&row.balanceStartTime,
-						&row.balanceEndTime,
-						&row.subsidyNetRevenue,
 						&row.payoutByteCount,
-						&row.netRevenue,
 						&row.minSweepTime,
-						&row.minPaidSweepTime,
 						&row.sweepCount,
 					))
 					rows = append(rows, row)
@@ -490,10 +480,9 @@ func readOperatorBlockTraffic(ctx context.Context, start time.Time, end time.Tim
 }
 
 // The reliability of the window: each network's multiplied reliability
-// weight, as a plan reads it from network_connection_reliability_score
-// (GetAllMultipliedNetworkReliabilityScoresInTx) after folding the window
-// (paymentPlanReliabilityFoldSql). It is computed here from read-only reads,
-// so neither a dry run nor an award writes the scores a payout plan owns.
+// weight, as the payout plan read it after folding the window
+// (readReliabilityWindowWeights). It is computed from read-only reads, so
+// neither a dry run nor an award writes anything for it.
 type operatorBlockReliability struct {
 	minBlockNumber      int64
 	maxBlockNumber      int64
@@ -509,10 +498,122 @@ func operatorBlockReliabilityBlockWindow(start time.Time, end time.Time) (minBlo
 // The reliability window that starts at minBlockNumber is still inside
 // client_reliability retention at now, so an award of it can still be
 // computed. One predicate for the award (readOperatorBlockReliability), which
-// fails closed past it, and for the blocks whose sweeps the contract horizon
-// reaper keeps (OperatorBlockPointsPendingWindows).
+// fails closed past it, for a block's expiry (OperatorBlockPointsExpiryAt),
+// and for the blocks whose sweeps the contract horizon reaper keeps
+// (OperatorBlockPointsPendingWindows).
 func operatorBlockReliabilityRetained(minBlockNumber int64, now time.Time) bool {
 	return clientReliabilityRetentionCutoffBlock(now) <= minBlockNumber
+}
+
+// A completed block past its deadline: its window's first reliability block
+// is older than the first one client_reliability retention keeps at the
+// award clock, so no award of it can read all its evidence, and one fails
+// closed (ErrOperatorBlockPointsReliabilityExpired). The deadline is the
+// window's start plus ClientReliabilityRetention, at reliability block
+// granularity: about three days after a whole block is due. Retention only
+// moves forward, so an expiry is permanent. The daily task records it
+// (operator_block_points_expired) and never awards the block; a commit of any
+// award of a recorded block is refused, and no backfill can compute one.
+type OperatorBlockPointsExpiry struct {
+	Block       int64
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// the window's first reliability block, where an award reads from
+	ReliabilityMinBlockNumber int64
+	// the first reliability block retention keeps at ExpireTime, after the
+	// window's first
+	RetentionMinBlockNumber int64
+	// the award clock that found the block past its deadline
+	ExpireTime time.Time
+}
+
+// The block's expiry at the award clock now, or false while an award of it can
+// still read its whole window, and for a block with no traffic past the
+// cutoff. Pure.
+func OperatorBlockPointsExpiryAt(block int64, cutoff time.Time, now time.Time) (*OperatorBlockPointsExpiry, bool) {
+	start, end, ok := OperatorBlockPointsWindow(block, cutoff)
+	if !ok {
+		return nil, false
+	}
+	minBlockNumber, _ := operatorBlockReliabilityBlockWindow(start, end)
+	if operatorBlockReliabilityRetained(minBlockNumber, now) {
+		return nil, false
+	}
+	return &OperatorBlockPointsExpiry{
+		Block:                     block,
+		WindowStart:               start,
+		WindowEnd:                 end,
+		ReliabilityMinBlockNumber: minBlockNumber,
+		RetentionMinBlockNumber:   clientReliabilityRetentionCutoffBlock(now),
+		ExpireTime:                now,
+	}, true
+}
+
+// Which of the blocks the daily task recorded expired.
+func GetOperatorBlockPointsExpired(ctx context.Context, blocks []int64) map[int64]bool {
+	expired := map[int64]bool{}
+	if len(blocks) == 0 {
+		return expired
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT block_number FROM operator_block_points_expired WHERE block_number = ANY($1::bigint[])`,
+			blocks,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var block int64
+				server.Raise(result.Scan(&block))
+				expired[block] = true
+			}
+		})
+	})
+	return expired
+}
+
+// Records the block expired, once: under the awards' lock, and only while it
+// has no award, so no block is both awarded and expired
+// (CommitOperatorBlockPoints takes the same lock). recorded is true when this
+// call wrote the record, and false when the block was recorded already or has
+// an award.
+func recordOperatorBlockPointsExpiry(ctx context.Context, expiry *OperatorBlockPointsExpiry) (recorded bool, returnErr error) {
+	defer recoverOperatorBlockPointsError(&returnErr)
+	planId := OperatorBlockPointsPlanId(expiry.Block)
+	server.Tx(ctx, func(tx server.PgTx) {
+		recorded = false
+		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, operatorBlockPointsLockKey))
+		tag, err := tx.Exec(
+			ctx,
+			`
+			INSERT INTO operator_block_points_expired (
+				block_number,
+				window_start,
+				window_end,
+				reliability_min_block_number,
+				retention_min_block_number,
+				expire_time,
+				create_time
+			)
+			SELECT $1, $2, $3, $4, $5, $6, $7
+			WHERE
+				NOT EXISTS (SELECT 1 FROM payment_report WHERE payment_plan_id = $8) AND
+				NOT EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $8)
+			ON CONFLICT (block_number) DO NOTHING
+			`,
+			expiry.Block,
+			expiry.WindowStart,
+			expiry.WindowEnd,
+			expiry.ReliabilityMinBlockNumber,
+			expiry.RetentionMinBlockNumber,
+			expiry.ExpireTime,
+			server.NowUtc(),
+			planId,
+		)
+		server.Raise(err)
+		recorded = tag.RowsAffected() == 1
+	}, server.TxReadCommitted)
+	return recorded, nil
 }
 
 // The blocks with traffic past the cutoff that an award can still read,
@@ -563,19 +664,9 @@ func OperatorBlockPointsPendingWindows(ctx context.Context, cutoff time.Time, no
 	return starts, ends, nil
 }
 
-// A network's clients in one country; hasCountry is false for a valid client
-// location without a country.
-type operatorBlockReliabilityKey struct {
-	networkId         server.Id
-	countryLocationId server.Id
-	hasCountry        bool
-}
-
-// Reads the window's reliability with the plan's fold, in bounded read-only
-// statements, none in a transaction: the plan's chunk reads
-// (readPaymentPlanReliabilityPartials), the valid client locations, the exact
-// numeric sums per network and country, the division in SQL as the fold does
-// it, and the country multipliers.
+// Reads the window's reliability with the plan's fold
+// (readReliabilityWindowWeights), and multiplies each network's weight in a
+// country by the country's multiplier.
 func readOperatorBlockReliability(ctx context.Context, start time.Time, end time.Time, now time.Time) (*operatorBlockReliability, error) {
 	minBlockNumber, maxBlockNumber := operatorBlockReliabilityBlockWindow(start, end)
 	reliability := &operatorBlockReliability{
@@ -615,117 +706,22 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		return reliability, nil
 	}
 
-	sums := map[operatorBlockReliabilityKey]*reliabilityExactSum{}
-	// client -> its valid location's country; absent for an invalid location
-	clientCountries := map[server.Id]*server.Id{}
-	clientRead := map[server.Id]bool{}
-	for chunkMin := minBlockNumber; chunkMin < maxBlockNumber; chunkMin += paymentPlanReliabilityChunkBlockCount {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		chunkMax := min(chunkMin+paymentPlanReliabilityChunkBlockCount, maxBlockNumber)
-		partials := readPaymentPlanReliabilityPartials(ctx, chunkMin, chunkMax, degradedBlockNumbers)
-
-		unread := []server.Id{}
-		for key := range partials {
-			if !clientRead[key.clientId] {
-				clientRead[key.clientId] = true
-				unread = append(unread, key.clientId)
-			}
-		}
-		slices.SortFunc(unread, server.Id.Cmp)
-		for batch := range slices.Chunk(unread, operatorBlockPointsLocationBatchSize) {
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(
-					ctx,
-					`
-					SELECT client_id, country_location_id
-					FROM network_client_location_reliability
-					WHERE client_id = ANY($1::uuid[]) AND valid = true
-					`,
-					batch,
-				)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var clientId server.Id
-						var countryLocationId *server.Id
-						server.Raise(result.Scan(&clientId, &countryLocationId))
-						clientCountries[clientId] = countryLocationId
-					}
-				})
-				boundedReadDone("client_locations")
-			})
-		}
-
-		for partialKey, partial := range partials {
-			countryLocationId, valid := clientCountries[partialKey.clientId]
-			if !valid {
-				continue
-			}
-			key := operatorBlockReliabilityKey{networkId: partialKey.networkId}
-			if countryLocationId != nil {
-				key.countryLocationId = *countryLocationId
-				key.hasCountry = true
-			}
-			sum, ok := sums[key]
-			if !ok {
-				sum = &reliabilityExactSum{}
-				sums[key] = sum
-			}
-			sum.add(partial.reliabilitySum.numeric())
-		}
-		// progress: a block's reads take hours on Main
-		glog.Infof("[obp]reliability blocks [%d, %d) read to %d: %d clients\n", minBlockNumber, maxBlockNumber, chunkMax, len(clientRead))
+	weights, err := readReliabilityWindowWeights(ctx, minBlockNumber, maxBlockNumber, degradedBlockNumbers, reliability.effectiveBlockCount)
+	if err != nil {
+		return nil, err
 	}
 	// the reads take hours, so retention is checked again on the clock, as
 	// the contract horizon reaper judges the block (operatorBlockPointsAwardableBlocks)
 	if err := checkRetention(server.NowUtc()); err != nil {
 		return nil, err
 	}
-	if len(sums) == 0 {
+	if len(weights) == 0 {
 		return reliability, nil
 	}
 
-	keys := slices.SortedFunc(maps.Keys(sums), func(a operatorBlockReliabilityKey, b operatorBlockReliabilityKey) int {
-		if c := a.networkId.Cmp(b.networkId); c != 0 {
-			return c
-		}
-		if a.hasCountry != b.hasCountry {
-			if a.hasCountry {
-				return 1
-			}
-			return -1
-		}
-		return a.countryLocationId.Cmp(b.countryLocationId)
-	})
-	numerics := make([]pgtype.Numeric, len(keys))
-	for i, key := range keys {
-		numerics[i] = sums[key].numeric()
-	}
-	weights := make([]float64, len(keys))
 	multipliers := map[server.Id]float64{}
 	server.Db(ctx, func(conn server.PgConn) {
-		// the fold's division and its float8 store, exactly
 		result, err := conn.Query(
-			ctx,
-			`
-			SELECT t.i, (t.s / $1::bigint)::float8
-			FROM unnest($2::numeric[]) WITH ORDINALITY AS t(s, i)
-			ORDER BY t.i
-			`,
-			reliability.effectiveBlockCount,
-			numerics,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var i int64
-				var weight float64
-				server.Raise(result.Scan(&i, &weight))
-				weights[i-1] = weight
-			}
-		})
-		boundedReadDone("reliability_weights")
-		result, err = conn.Query(
 			ctx,
 			`SELECT country_location_id, reliability_multiplier FROM network_client_location_reliability_multiplier`,
 		)
@@ -739,28 +735,29 @@ func readOperatorBlockReliability(ctx context.Context, start time.Time, end time
 		})
 		boundedReadDone("reliability_multipliers")
 	})
-	for i, key := range keys {
+	for _, weight := range weights {
 		multiplier := 1.0
-		if key.hasCountry {
-			if m, ok := multipliers[key.countryLocationId]; ok {
+		if weight.key.hasCountry {
+			if m, ok := multipliers[weight.key.countryLocationId]; ok {
 				multiplier = m
 			}
 		}
 		// the explicit conversion rounds the product, as SQL does, before the sum
-		reliability.networkWeights[key.networkId] += float64(weights[i] * multiplier)
+		reliability.networkWeights[weight.key.networkId] += float64(weight.weight * multiplier)
 	}
 	return reliability, nil
 }
 
-// The reliability subsidy of a plan (calculateReliabilityPayoutInTx) from the
-// networks' multiplied weights: reliability points and the reliability USDC
-// subsidy per subsidy period, scaled to the window, in proportion to weight.
-func operatorBlockReliabilitySubsidies(
+// The reliability points of the window from the networks' multiplied weights,
+// as a plan computed them (calculateReliabilityPayoutInTx):
+// reliability_points_per_payout scaled to the window, in proportion to weight.
+// A network of no weight, or whose share truncates to nothing, is absent.
+func operatorBlockReliabilityPoints(
 	networkWeights map[server.Id]float64,
-	subsidyScale float64,
+	timeScale float64,
 	subsidyConfig *SubsidyConfig,
-) map[server.Id]NetworkReliabilitySubsidy {
-	networkReliabilitySubsidies := map[server.Id]NetworkReliabilitySubsidy{}
+) map[server.Id]NanoPoints {
+	networkPoints := map[server.Id]NanoPoints{}
 
 	networkIds := slices.SortedFunc(maps.Keys(networkWeights), server.Id.Cmp)
 	totalReliabilityWeight := 0.0
@@ -768,28 +765,17 @@ func operatorBlockReliabilitySubsidies(
 		totalReliabilityWeight += networkWeights[networkId]
 	}
 	if totalReliabilityWeight == 0 {
-		return networkReliabilitySubsidies
+		return networkPoints
 	}
 
-	reliabilityPointsPerPayout := PointsToNanoPoints(float64(subsidyConfig.ReliabilityPointsPerPayout) * subsidyScale)
-	reliabilitySubsidyPerPayout := NanoCents(float64(UsdToNanoCents(float64(subsidyConfig.ReliabilitySubsidyPerPayoutUsd))) * subsidyScale)
-
+	reliabilityPointsPerPayout := PointsToNanoPoints(float64(subsidyConfig.ReliabilityPointsPerPayout) * timeScale)
 	for _, networkId := range networkIds {
-		subsidy := NetworkReliabilitySubsidy{}
 		weight := networkWeights[networkId]
-
-		if reliabilityPoints := float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight); reliabilityPoints > 0 {
-			subsidy.Points = NanoPoints(reliabilityPoints)
+		if points := NanoPoints(float64(reliabilityPointsPerPayout) * float64(weight/totalReliabilityWeight)); 0 < points {
+			networkPoints[networkId] = points
 		}
-		if reliabilitySubsidyPerPayout > 0 {
-			reliabilitySubsidy := NanoCents(float64(reliabilitySubsidyPerPayout) * (weight / totalReliabilityWeight))
-			if reliabilitySubsidy >= 0 {
-				subsidy.Usdc = reliabilitySubsidy
-			}
-		}
-		networkReliabilitySubsidies[networkId] = subsidy
 	}
-	return networkReliabilitySubsidies
+	return networkPoints
 }
 
 // The referring network of each network, from the referral map. A network
@@ -823,10 +809,12 @@ type operatorBlockPointsInputs struct {
 }
 
 // planOperatorBlockPoints computes the award from its reads, writing
-// nothing. The payout is planSubsidyPayments' computation over the window, and
-// the points are planPayoutPoints. A plan's withholding of small payments, its
-// minimum epoch duration and its carried USDC bonuses are USDC rules: with no
-// USDC, every provider with traffic in the block earns in the block.
+// nothing: one payment per provider network with bytes in the window, and the
+// points of planPayoutPoints. The traffic it is given carries no revenue and
+// no payer, so neither can weigh the points. A plan's withholding of small
+// payments, its minimum epoch duration and its carried USDC bonuses were USDC
+// rules: with no USDC, every provider with traffic in the block earns in the
+// block.
 func planOperatorBlockPoints(
 	inputs *operatorBlockPointsInputs,
 	traffic *operatorBlockTraffic,
@@ -835,13 +823,15 @@ func planOperatorBlockPoints(
 	subsidyConfig := inputs.subsidyConfig
 	planId := OperatorBlockPointsPlanId(inputs.block)
 	award := &OperatorBlockPoints{
-		Schema:                         OperatorBlockPointsSchema,
-		Block:                          inputs.block,
-		PaymentPlanId:                  planId,
-		PolicySha256:                   inputs.policySha256,
-		Cutoff:                         inputs.cutoff,
-		WindowStart:                    inputs.windowStart,
-		WindowEnd:                      inputs.windowEnd,
+		Schema:        OperatorBlockPointsSchema,
+		Block:         inputs.block,
+		PaymentPlanId: planId,
+		PolicySha256:  inputs.policySha256,
+		Cutoff:        inputs.cutoff,
+		WindowStart:   inputs.windowStart,
+		WindowEnd:     inputs.windowEnd,
+		// as a plan scaled its points to its epoch
+		TimeScale:                      min(float64(inputs.windowEnd.Sub(inputs.windowStart))/float64(subsidyConfig.Duration()), 1.0),
 		SweepCount:                     traffic.sweepCount,
 		ReliabilityMinBlockNumber:      reliability.minBlockNumber,
 		ReliabilityMaxBlockNumber:      reliability.maxBlockNumber,
@@ -852,140 +842,36 @@ func planOperatorBlockPoints(
 		Points:                         []*OperatorBlockPoint{},
 	}
 
-	// the computed payments, keyed by network; each placeholder payment id is
-	// its network until a commit assigns the row's id
-	payments := map[server.Id]*AccountPayment{}
-	for networkId, payee := range traffic.payees {
-		payments[networkId] = &AccountPayment{
-			PaymentId:       networkId,
-			PaymentPlanId:   planId,
+	networkByteCounts := map[server.Id]ByteCount{}
+	for _, networkId := range slices.SortedFunc(maps.Keys(traffic.payees), server.Id.Cmp) {
+		payee := traffic.payees[networkId]
+		if payee.payoutByteCount <= 0 {
+			continue
+		}
+		if math.MaxInt64-award.ByteCount < payee.payoutByteCount {
+			return nil, fmt.Errorf("operator block %d bytes overflow", inputs.block)
+		}
+		award.ByteCount += payee.payoutByteCount
+		networkByteCounts[networkId] = payee.payoutByteCount
+		award.Payments = append(award.Payments, &OperatorBlockPayment{
 			NetworkId:       networkId,
 			PayoutByteCount: payee.payoutByteCount,
-			Payout:          payee.netRevenue,
 			MinSweepTime:    payee.minSweepTime,
-		}
-	}
-
-	/**
-	 * The subsidy, as planSubsidyPayments computes it
-	 */
-	payerNetworkIds := slices.SortedFunc(maps.Keys(traffic.pairs), server.Id.Cmp)
-	for _, payerNetworkId := range payerNetworkIds {
-		payerPaid := ByteCount(0)
-		payerUnpaid := ByteCount(0)
-		for _, pair := range traffic.pairs[payerNetworkId] {
-			payerPaid += pair.paidByteCount
-			payerUnpaid += pair.unpaidByteCount
-		}
-		award.NetPayoutByteCountPaid += payerPaid
-		award.NetPayoutByteCountUnpaid += payerUnpaid
-		if subsidyConfig.ActiveUserByteCountThreshold() <= payerPaid+payerUnpaid {
-			award.ActiveUserCount += 1
-		}
-		if 0 < payerPaid {
-			award.PaidUserCount += 1
-		}
-		if 0 < payerPaid+payerUnpaid {
-			award.TrafficUserCount += 1
-		}
-	}
-
-	revenueBalances := []*subsidyRevenueBalance{}
-	for _, balanceId := range slices.SortedFunc(maps.Keys(traffic.revenueBalances), server.Id.Cmp) {
-		revenueBalances = append(revenueBalances, traffic.revenueBalances[balanceId])
-	}
-	award.NetRevenue = subsidyNetRevenuePerPeriod(
-		revenueBalances,
-		inputs.windowStart,
-		inputs.windowEnd,
-		subsidyConfig.Duration(),
-	)
-	subsidyPayoutUsd := max(
-		subsidyConfig.MinPayoutUsd,
-		subsidyConfig.UsdPerActiveUser*float64(award.ActiveUserCount),
-		subsidyConfig.SubscriptionNetRevenueFraction*NanoCentsToUsd(award.NetRevenue),
-	)
-	award.SubsidyScale = min(float64(inputs.windowEnd.Sub(inputs.windowStart))/float64(subsidyConfig.Duration()), 1.0)
-	award.SubsidyNetPayoutUsd = award.SubsidyScale * subsidyPayoutUsd
-
-	subsidyPayouts := map[server.Id]NanoCents{}
-	netPayout := NanoCents(0)
-	if 0 < award.TrafficUserCount {
-		for _, payerNetworkId := range payerNetworkIds {
-			payees := traffic.pairs[payerNetworkId]
-			netPayerPayoutByteCount := ByteCount(0)
-			for _, pair := range payees {
-				netPayerPayoutByteCount += pair.paidByteCount + pair.unpaidByteCount
-			}
-			if netPayerPayoutByteCount <= 0 {
-				continue
-			}
-			for _, payeeNetworkId := range slices.SortedFunc(maps.Keys(payees), server.Id.Cmp) {
-				pair := payees[payeeNetworkId]
-				// each user is weighted equally, relative to their own traffic
-				weight := float64(pair.paidByteCount+pair.unpaidByteCount) / float64(netPayerPayoutByteCount)
-				payout := UsdToNanoCents(weight * award.SubsidyNetPayoutUsd / float64(award.TrafficUserCount))
-				netPayout += payout
-				if 0 < payout {
-					subsidyPayouts[payeeNetworkId] += payout
-				}
-			}
-		}
-	}
-	// +1 for rounding errors
-	if UsdToNanoCents(award.SubsidyNetPayoutUsd+1) < netPayout {
-		return nil, fmt.Errorf("operator block %d subsidy exceeds the allowed amount: %d <> %d", inputs.block, UsdToNanoCents(award.SubsidyNetPayoutUsd), netPayout)
-	}
-	for networkId, payout := range subsidyPayouts {
-		payment := payments[networkId]
-		payment.Payout += payout
-		payment.SubsidyPayout += payout
-	}
-
-	/**
-	 * The reliability subsidy, as calculateReliabilityPayoutInTx computes it
-	 */
-	reliabilitySubsidies := operatorBlockReliabilitySubsidies(reliability.networkWeights, award.SubsidyScale, subsidyConfig)
-	for networkId, reliabilitySubsidy := range reliabilitySubsidies {
-		if payment, ok := payments[networkId]; ok {
-			payment.Payout += reliabilitySubsidy.Usdc
-			payment.ReliabilitySubsidy = reliabilitySubsidy.Usdc
-		}
-	}
-
-	for _, networkId := range slices.SortedFunc(maps.Keys(payments), server.Id.Cmp) {
-		payment := payments[networkId]
-		payee := traffic.payees[networkId]
-		award.TotalComputedPayout += payment.Payout - payment.BonusPayout
-		award.Payments = append(award.Payments, &OperatorBlockPayment{
-			NetworkId:          networkId,
-			PayoutByteCount:    payment.PayoutByteCount,
-			MinSweepTime:       payment.MinSweepTime,
-			NetRevenue:         payee.netRevenue,
-			SubsidyPayout:      payment.SubsidyPayout,
-			ReliabilitySubsidy: payment.ReliabilitySubsidy,
-			ComputedPayout:     payment.Payout,
-			MinPaidSweepTime:   payee.minPaidSweepTime,
 		})
 	}
 
-	/**
-	 * The points, by the plan's rule
-	 */
-	if 0 < award.SubsidyScale && 0 < award.TotalComputedPayout {
-		totalPoints := float64(subsidyConfig.AccountPointsPerPayout) * award.SubsidyScale
-		award.PayoutNanoPoints = PointsToNanoPoints(totalPoints)
+	if 0 < award.TimeScale && 0 < award.ByteCount {
+		award.PayoutNanoPoints = PointsToNanoPoints(float64(subsidyConfig.AccountPointsPerPayout) * award.TimeScale)
 		rows := planPayoutPoints(&payoutPointsPlan{
-			ctx:                  context.Background(),
-			subsidyConfig:        subsidyConfig,
-			paymentPlanId:        planId,
-			totalPoints:          totalPoints,
-			totalPayout:          award.TotalComputedPayout,
-			payments:             payments,
-			reliabilitySubsidies: reliabilitySubsidies,
-			seekerHolders:        inputs.seekerHolders,
-			referralParents:      operatorBlockReferralParents(inputs.networkReferrals),
-			networkReferrals:     inputs.networkReferrals,
+			ctx:               context.Background(),
+			subsidyConfig:     subsidyConfig,
+			paymentPlanId:     planId,
+			payoutNanoPoints:  award.PayoutNanoPoints,
+			networkByteCounts: networkByteCounts,
+			reliabilityPoints: operatorBlockReliabilityPoints(reliability.networkWeights, award.TimeScale, subsidyConfig),
+			seekerHolders:     inputs.seekerHolders,
+			referralParents:   operatorBlockReferralParents(inputs.networkReferrals),
+			networkReferrals:  inputs.networkReferrals,
 		})
 		for _, row := range rows {
 			point := &OperatorBlockPoint{
@@ -1091,13 +977,13 @@ func ComputeOperatorBlockPoints(
 		return nil, err
 	}
 	glog.Infof(
-		"[obp]block %d [%s, %s): %d sweeps, %d providers, %d paying networks, %d reliability networks, %d point rows, %d nano points, read in %s\n",
+		"[obp]block %d [%s, %s): %d sweeps, %d providers, %d bytes, %d reliability networks, %d point rows, %d nano points, read in %s\n",
 		block,
 		start.Format(time.RFC3339),
 		end.Format(time.RFC3339),
 		award.SweepCount,
 		len(award.Payments),
-		award.TrafficUserCount,
+		award.ByteCount,
 		award.ReliabilityNetworkCount,
 		len(award.Points),
 		award.TotalNanoPoints(),
@@ -1145,7 +1031,10 @@ func validateOperatorBlockPoints(award *OperatorBlockPoints, transition *server.
 			return fmt.Errorf("operator block %d lists network %s twice", award.Block, payment.NetworkId)
 		}
 		networks[payment.NetworkId] = true
-		if payment.MinPaidSweepTime != nil && (payment.MinPaidSweepTime.Before(start) || !payment.MinPaidSweepTime.Before(end)) {
+		if payment.PayoutByteCount <= 0 {
+			return fmt.Errorf("operator block %d payment of %s carries no bytes", award.Block, payment.NetworkId)
+		}
+		if payment.MinSweepTime.Before(start) || !payment.MinSweepTime.Before(end) {
 			return fmt.Errorf("operator block %d payment of %s is outside the block", award.Block, payment.NetworkId)
 		}
 	}
@@ -1159,7 +1048,9 @@ func validateOperatorBlockPoints(award *OperatorBlockPoints, transition *server.
 
 // CommitOperatorBlockPoints writes a computed award in one transaction,
 // unless the block already has its points: committed is false then and
-// nothing is written.
+// nothing is written. A block the daily task recorded expired is refused
+// (ErrOperatorBlockPointsExpired), even with an award computed before its
+// deadline: an expired block is never awarded.
 func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) (committed bool, returnErr error) {
 	defer recoverOperatorBlockPointsError(&returnErr)
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
@@ -1170,8 +1061,10 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		return false, err
 	}
 
+	expired := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		committed = false
+		expired = false
 		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, operatorBlockPointsLockKey))
 		var awarded bool
 		server.Raise(tx.QueryRow(
@@ -1179,11 +1072,18 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 			`
 			SELECT
 				EXISTS (SELECT 1 FROM payment_report WHERE payment_plan_id = $1) OR
-				EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $1)
+				EXISTS (SELECT 1 FROM account_payment WHERE payment_plan_id = $1),
+				EXISTS (SELECT 1 FROM operator_block_points_expired WHERE block_number = $2)
 			`,
 			award.PaymentPlanId,
-		).Scan(&awarded))
+			award.Block,
+		).Scan(&awarded, &expired))
 		if awarded {
+			// a block is never both (recordOperatorBlockPointsExpiry)
+			expired = false
+			return
+		}
+		if expired {
 			return
 		}
 
@@ -1202,10 +1102,11 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 			VALUES ($1, $2, $3, $4, $5, $6)
 			`,
 			award.PaymentPlanId,
-			award.TotalComputedPayout,
+			// no payout weighs the points since v2: they follow bytes
+			0,
 			award.PayoutNanoPoints,
-			float64(award.PointsPerPayout)*award.SubsidyScale,
-			award.SubsidyScale,
+			float64(award.PointsPerPayout)*award.TimeScale,
+			award.TimeScale,
 			award.PointsPerPayout,
 		))
 
@@ -1213,10 +1114,12 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		for _, payment := range award.Payments {
 			paymentIds[payment.NetworkId] = server.NewId()
 		}
+		// the schema records which rule awarded the block
 		eventDetails, err := json.Marshal(map[string]any{
 			"block":           award.Block,
 			"payment_plan_id": award.PaymentPlanId,
 			"policy_sha256":   award.PolicySha256,
+			"schema":          award.Schema,
 		})
 		server.Raise(err)
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
@@ -1262,8 +1165,8 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		})
 
 		// the payments' operator blocks, by the plan's statement: the award's
-		// selection is one row per provider, its paid bytes at its earliest
-		// paid sweep, and the window is inside one block
+		// selection is one row per provider, its bytes at its earliest sweep,
+		// and the window is inside one block
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -1277,14 +1180,11 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		))
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for _, payment := range award.Payments {
-				if payment.MinPaidSweepTime == nil {
-					continue
-				}
 				batch.Queue(
 					`INSERT INTO temp_account_payment (network_id, payout_byte_count, sweep_time) VALUES ($1, $2, $3)`,
 					payment.NetworkId,
 					payment.PayoutByteCount,
-					*payment.MinPaidSweepTime,
+					payment.MinSweepTime,
 				)
 			}
 		})
@@ -1335,6 +1235,9 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 		committed = true
 	}, server.TxReadCommitted)
 
+	if expired {
+		return false, fmt.Errorf("%w: block %d", ErrOperatorBlockPointsExpired, award.Block)
+	}
 	if committed {
 		glog.Infof(
 			"[obp]block %d awarded: plan %s, %d payments, %d point rows, %d nano points\n",
@@ -1350,8 +1253,13 @@ func CommitOperatorBlockPoints(ctx context.Context, award *OperatorBlockPoints) 
 
 // AwardDueOperatorBlockPoints awards the blocks one run of the daily task owns
 // (operatorBlockPointsAutomaticBlocks), oldest first, and returns the awards
-// it committed. Without an earning boundary it does nothing: payout plans
-// award points.
+// it committed. A block past its deadline at now is recorded expired, once,
+// and passed over, so the later blocks are awarded as usual. Any other error
+// stops the run at its block, and the task's retry starts again there: the
+// task owns only the blocks after its last award, so a block passed over on a
+// transient error would never be tried again. An award whose reads outlast
+// its deadline fails closed on the clock; the retry finds it expired. Without
+// an earning boundary it does nothing: payout plans award points.
 func AwardDueOperatorBlockPoints(
 	ctx context.Context,
 	subsidyConfig *SubsidyConfig,
@@ -1368,9 +1276,29 @@ func AwardDueOperatorBlockPoints(
 	}
 	due := OperatorBlockPointsDueBlocks(transition.Cutoff, now)
 	awarded := GetOperatorBlockPointsAwarded(ctx, due)
-	blocks := operatorBlockPointsAutomaticBlocks(due, awarded, fromBlock)
-	glog.Infof("[obp]due blocks %v, awarded %v, from block %d: awarding %v\n", due, slices.Sorted(maps.Keys(awarded)), fromBlock, blocks)
+	expired := GetOperatorBlockPointsExpired(ctx, due)
+	blocks := operatorBlockPointsAutomaticBlocks(due, awarded, expired, fromBlock)
+	glog.Infof("[obp]due blocks %v, awarded %v, expired %v, from block %d: awarding %v\n", due, slices.Sorted(maps.Keys(awarded)), slices.Sorted(maps.Keys(expired)), fromBlock, blocks)
 	for _, block := range blocks {
+		if expiry, ok := OperatorBlockPointsExpiryAt(block, transition.Cutoff, now); ok {
+			recorded, err := recordOperatorBlockPointsExpiry(ctx, expiry)
+			if err != nil {
+				return awards, err
+			}
+			if recorded {
+				operatorBlockPointsExpiredBlocksCounter.Inc()
+				glog.Errorf(
+					"[obp]block %d expired without its points: its window [%s, %s) reads from reliability block %d, and client_reliability retention keeps from %d at %s; recorded, never awarded\n",
+					block,
+					expiry.WindowStart.Format(time.RFC3339),
+					expiry.WindowEnd.Format(time.RFC3339),
+					expiry.ReliabilityMinBlockNumber,
+					expiry.RetentionMinBlockNumber,
+					now.Format(time.RFC3339),
+				)
+			}
+			continue
+		}
 		award, err := ComputeOperatorBlockPoints(ctx, subsidyConfig, block, now)
 		if err != nil {
 			return awards, err

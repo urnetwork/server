@@ -27,8 +27,10 @@ type runtimePackageLock struct {
 	ArchiveSigningKey string                `json:"archive_signing_key"`
 	Indexes           []runtimePackageIndex `json:"indexes"`
 	Packages          []runtimePackage      `json:"packages"`
+	Archives          []runtimeArchive      `json:"archives"`
 	Sets              map[string][]string   `json:"sets"`
 	Services          map[string]string     `json:"services"`
+	ServiceArchives   map[string][]string   `json:"service_archives"`
 }
 
 // Package tables are authenticated by the retained signed parent indexes.
@@ -49,6 +51,22 @@ type runtimePackage struct {
 	Sha256       string   `json:"sha256"`
 	Size         int64    `json:"size"`
 	IndexIds     []string `json:"index_ids"`
+}
+
+// A non-Debian payload has its own URL, digest and size, and is unpacked by the
+// offline install step on its one target. Only Chrome for Testing headless shell
+// zips are admitted, one version for every target.
+type runtimeArchive struct {
+	Id           string `json:"id"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	Architecture string `json:"architecture"`
+	Url          string `json:"url"`
+	Sha256       string `json:"sha256"`
+	Size         int64  `json:"size"`
+	Root         string `json:"root"`
+	InstallPath  string `json:"install_path"`
 }
 
 // Resolve checked-in inputs independently of the command's current directory.
@@ -125,6 +143,24 @@ func checkRuntimePackageLock(lock runtimePackageLock) error {
 		}
 		packages[pkg.Id] = pkg
 	}
+	archives := map[string]runtimeArchive{}
+	platforms := map[string]string{"amd64": "linux64", "arm64": "linux-arm64"}
+	for _, archive := range lock.Archives {
+		_, duplicate := archives[archive.Id]
+		platform := platforms[archive.Architecture]
+		parts := strings.Split(archive.Version, ".")
+		numeric := len(parts) == 4
+		for _, part := range parts {
+			numeric = numeric && part != "" && strings.Trim(part, "0123456789") == ""
+		}
+		if duplicate || !numeric || platform == "" || archive.Version != lock.Archives[0].Version || archive.Type != "zip" || archive.Name != "chrome-headless-shell" ||
+			archive.Id != archive.Name+"_"+archive.Architecture || !hexWidth(archive.Sha256, 32) || archive.Size <= 0 || archive.Size > 512*1024*1024 ||
+			archive.Url != "https://storage.googleapis.com/chrome-for-testing-public/"+archive.Version+"/"+platform+"/"+archive.Name+"-"+platform+".zip" ||
+			archive.Root != archive.Name+"-"+platform || archive.InstallPath != "/opt/"+archive.Name {
+			return fmt.Errorf("invalid archive identity %q", archive.Id)
+		}
+		archives[archive.Id] = archive
+	}
 	for name, ids := range lock.Sets {
 		if name == "" || len(ids) == 0 {
 			return errors.New("empty package set")
@@ -148,37 +184,90 @@ func checkRuntimePackageLock(lock runtimePackageLock) error {
 			}
 		}
 	}
-	wantServices := map[string]string{"alt": "certificates", "api": "certificates", "connect": "certificates", "gossip": "certificates", "mcp": "certificates", "taskworker": "certificates", "proxy": "proxy"}
+	wantServices := map[string]string{"alt": "certificates", "api": "certificates", "connect": "certificates", "gossip": "certificates", "mcp": "certificates", "taskworker": "taskworker", "proxy": "proxy"}
 	if !reflect.DeepEqual(lock.Services, wantServices) {
 		return errors.New("service package coverage changed")
 	}
 	wantCertificates := []string{"ca-certificates_all", "libssl3t64_amd64", "libssl3t64_arm64", "openssl_amd64", "openssl_arm64"}
-	if !slices.Equal(lock.Sets["certificates"], wantCertificates) || len(lock.Sets) != 2 {
+	if !slices.Equal(lock.Sets["certificates"], wantCertificates) || len(lock.Sets) != 3 {
 		return errors.New("certificate installation lost its complete target inputs")
 	}
 	if !slices.Contains(lock.Sets["proxy"], "curl_amd64") || !slices.Contains(lock.Sets["proxy"], "curl_arm64") {
 		return errors.New("proxy lost curl")
 	}
-	for _, id := range lock.Sets["certificates"] {
-		if !slices.Contains(lock.Sets["proxy"], id) {
-			return errors.New("proxy lost certificate dependency")
+	for name, ids := range lock.Sets {
+		for _, id := range lock.Sets["certificates"] {
+			if !slices.Contains(ids, id) {
+				return fmt.Errorf("%s lost certificate dependency", name)
+			}
 		}
+	}
+	// The headless shell's NEEDED libraries, the font configuration that gives
+	// Blink a last-resort font while web fonts load, and the offline extractor.
+	for _, name := range []string{"fontconfig-config", "libasound2t64", "libatk-bridge2.0-0t64", "libatk1.0-0t64", "libatspi2.0-0t64", "libdbus-1-3", "libexpat1", "libgbm1", "libglib2.0-0t64",
+		"libnspr4", "libnss3", "libx11-6", "libxcb1", "libxcomposite1", "libxdamage1", "libxext6", "libxfixes3", "libxkbcommon0", "libxrandr2", "unzip"} {
+		if !slices.Contains(lock.Sets["taskworker"], name+"_amd64") || !slices.Contains(lock.Sets["taskworker"], name+"_arm64") {
+			return fmt.Errorf("taskworker lost %s", name)
+		}
+	}
+	wantServiceArchives := map[string][]string{"taskworker": {"chrome-headless-shell_amd64", "chrome-headless-shell_arm64"}}
+	if !reflect.DeepEqual(lock.ServiceArchives, wantServiceArchives) {
+		return errors.New("service archive coverage changed")
+	}
+	used := map[string]bool{}
+	for role, ids := range lock.ServiceArchives {
+		for _, id := range ids {
+			archive, exists := archives[id]
+			if !exists || !slices.Contains(lock.Sets[lock.Services[role]], "unzip_"+archive.Architecture) {
+				return fmt.Errorf("%s archive %s is unknown or cannot be unpacked offline", role, id)
+			}
+			used[id] = true
+		}
+	}
+	if len(used) != len(archives) {
+		return errors.New("unused archive input")
 	}
 	return nil
 }
 
+// The taskworker's gift card printer runs Chromium as this unprivileged user
+// (controller/gift_cards_pdf.go): fixed passwd, group, shadow and gshadow lines
+// written by the offline install step, so the image stays reproducible.
+const taskworkerPrinterUser = " && echo 'giftcard:x:10001:10001:gift card printer:/nonexistent:/usr/sbin/nologin' >> /etc/passwd" +
+	" && echo 'giftcard:x:10001:' >> /etc/group" +
+	" && echo 'giftcard:!:::::::' >> /etc/shadow" +
+	" && echo 'giftcard:!::' >> /etc/gshadow"
+
 // Check the executable instructions rather than matching comments or whitespace.
 // This intentionally covers the simple service recipes, not arbitrary Dockerfiles.
 func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) error {
-	wanted := map[string]bool{}
+	checks := []string{}
 	for _, id := range lock.Sets[lock.Services[role]] {
 		for _, pkg := range lock.Packages {
 			if pkg.Id == id {
-				wanted["ADD --checksum=sha256:"+pkg.Sha256+" "+lock.Snapshot+pkg.Filename+" /runtime-packages/"+pkg.Architecture+"/"+pkg.Name+".deb"] = true
+				checks = append(checks, "'"+pkg.Sha256+"  /runtime-packages/"+pkg.Architecture+"/"+pkg.Name+".deb'")
 			}
 		}
 	}
-	stage, installs := 0, 0
+	// An archive is fetched beside the packages and unpacked by the same offline
+	// step, after dpkg installs unzip, only on its own target.
+	install := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro CHECKSUMS dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates"
+	for _, id := range lock.ServiceArchives[role] {
+		for _, archive := range lock.Archives {
+			if archive.Id == id {
+				payload := "/runtime-packages/" + archive.Architecture + "/" + archive.Name + ".zip"
+				checks = append(checks, "'"+archive.Sha256+"  "+payload+"'")
+				parent := path.Dir(archive.InstallPath)
+				install += " && if [ \"$(dpkg --print-architecture)\" = " + archive.Architecture + " ]; then unzip -q " + payload + " -d " + parent + " && mv " + path.Join(parent, archive.Root) + " " + archive.InstallPath + "; fi"
+			}
+		}
+	}
+	if role == "taskworker" {
+		install += taskworkerPrinterUser
+	}
+	install += " && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log"
+	install = strings.Replace(install, "CHECKSUMS", "printf '%s\\n' "+strings.Join(checks, " ")+" | sha256sum -c - &&", 1)
+	stage, installs, copies := 0, 0, 0
 	pending := ""
 	for _, line := range strings.Split(recipe, "\n") {
 		line = strings.TrimSpace(line)
@@ -198,14 +287,14 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			if stage == 1 {
 				want += " AS runtime-packages"
 			}
-			if stage > 2 || instruction != want || stage == 2 && len(wanted) != 0 {
+			if stage > 2 || instruction != want || stage == 2 && copies != 1 {
 				return errors.New("unlocked or incomplete package base stage")
 			}
-		case strings.HasPrefix(instruction, "ADD "):
-			if stage != 1 || !wanted[instruction] {
-				return errors.New("unlocked, changed or repeated remote package input")
+		case instruction == "COPY --from=verified-runtime-packages / /runtime-packages/":
+			if stage != 1 {
+				return errors.New("runtime context copied into final stage")
 			}
-			delete(wanted, instruction)
+			copies++
 		case strings.HasPrefix(instruction, "RUN "):
 			if stage != 2 {
 				return errors.New("package download stage gained execution")
@@ -213,8 +302,7 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			if instruction == "RUN ln -s /srv/warp/vault/.aws /root/.aws" {
 				continue
 			}
-			want := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log"
-			if instruction != want {
+			if instruction != install {
 				return errors.New("package installation gained an unreviewed command, resolver or network")
 			}
 			installs++
@@ -228,7 +316,7 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			}
 		}
 	}
-	if pending != "" || stage != 2 || installs != 1 || len(wanted) != 0 {
+	if pending != "" || stage != 2 || installs != 1 || copies != 1 {
 		return errors.New("incomplete package install")
 	}
 	return nil
@@ -276,7 +364,7 @@ func TestRuntimePackagesRejectMovingAndIncompleteInputs(t *testing.T) {
 	if err := checkRuntimePackageRecipe(lock, "proxy", good); err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(good, "ADD ")
+	start := strings.Index(good, "COPY --from=verified-runtime-packages")
 	end := start + strings.IndexByte(good[start:], '\n') + 1
 	for _, fault := range []string{"moving-repository", "missing-payload", "wrong-hash", "override", "online-install", "tag-only", "duplicate-payload", "deferred-resolver"} {
 		changed := good
@@ -286,9 +374,9 @@ func TestRuntimePackagesRejectMovingAndIncompleteInputs(t *testing.T) {
 		case "missing-payload":
 			changed = changed[:start] + changed[end:]
 		case "wrong-hash":
-			changed = strings.Replace(changed, "--checksum=sha256:", "--checksum=sha256:0", 1)
+			changed = strings.Replace(changed, lock.Packages[1].Sha256, strings.Repeat("0", 64), 1)
 		case "override":
-			changed = strings.Replace(changed, lock.Snapshot, "${PACKAGE_MIRROR}/", 1)
+			changed = strings.Replace(changed, "verified-runtime-packages", "unchecked-runtime-packages", 1)
 		case "online-install":
 			changed = strings.Replace(changed, "--network=none", "--network=default", 1)
 		case "tag-only":
@@ -330,6 +418,134 @@ func TestRuntimePackagesRejectCrossTargetAndCurlGaps(t *testing.T) {
 		}
 		if err := checkRuntimePackageLock(changed); err == nil {
 			t.Fatalf("%s lost package coverage", fault)
+		}
+	}
+}
+
+// Each headless shell archive keeps the package boundary: one literal URL and
+// digest, fetched only by the download stage, unpacked only offline on its own
+// target.
+func TestRuntimePackagesRejectUnpinnedChromiumArchive(t *testing.T) {
+	cli, lock := loadRuntimePackageLock(t)
+	raw, err := os.ReadFile(filepath.Join(cli, "taskworker", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := string(raw)
+	if err := checkRuntimePackageRecipe(lock, "taskworker", good); err != nil {
+		t.Fatal(err)
+	}
+	for _, archive := range lock.Archives {
+		check := "'" + archive.Sha256 + "  /runtime-packages/" + archive.Architecture + "/chrome-headless-shell.zip'"
+		for _, replacement := range []string{"", check + " " + check, strings.Replace(check, archive.Sha256, strings.Repeat("0", 64), 1), strings.Replace(check, "/"+archive.Architecture+"/", "/wrong-target/", 1)} {
+			changed := strings.Replace(good, check, replacement, 1)
+			if changed == good || checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
+				t.Fatal("missing, duplicate, changed or cross-target archive checksum escaped admission")
+			}
+		}
+	}
+	for _, replacement := range []string{"--network=default", "--network=host"} {
+		if checkRuntimePackageRecipe(lock, "taskworker", strings.Replace(good, "--network=none", replacement, 1)) == nil {
+			t.Fatal("online extraction escaped admission")
+		}
+	}
+	changed := strings.Replace(good, "unzip -q", "curl https://example.invalid/file && unzip -q", 1)
+	if checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
+		t.Fatal("install-time fetching escaped admission")
+	}
+}
+
+// The printer's user stays unprivileged and literal: not root, not a login,
+// not the image's other users, and not a resolver's choice at build time.
+func TestRuntimePackagesTaskworkerPrinterUser(t *testing.T) {
+	cli, lock := loadRuntimePackageLock(t)
+	raw, err := os.ReadFile(filepath.Join(cli, "taskworker", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := string(raw)
+	if err := checkRuntimePackageRecipe(lock, "taskworker", good); err != nil {
+		t.Fatal(err)
+	}
+	for _, fault := range []string{"root", "root-group", "login-shell", "password", "useradd", "missing"} {
+		changed := good
+		switch fault {
+		case "root":
+			changed = strings.Replace(changed, "giftcard:x:10001:10001:", "giftcard:x:0:10001:", 1)
+		case "root-group":
+			changed = strings.Replace(changed, "giftcard:x:10001:10001:", "giftcard:x:10001:0:", 1)
+		case "login-shell":
+			changed = strings.Replace(changed, ":/nonexistent:/usr/sbin/nologin", ":/home/giftcard:/bin/bash", 1)
+		case "password":
+			changed = strings.Replace(changed, "'giftcard:!:::::::'", "'giftcard::::::::'", 1)
+		case "useradd":
+			changed = strings.Replace(changed, "echo 'giftcard:x:10001:10001:gift card printer:/nonexistent:/usr/sbin/nologin' >> /etc/passwd", "useradd --system giftcard", 1)
+		case "missing":
+			for _, line := range []string{
+				"    && echo 'giftcard:x:10001:10001:gift card printer:/nonexistent:/usr/sbin/nologin' >> /etc/passwd \\\n",
+				"    && echo 'giftcard:x:10001:' >> /etc/group \\\n",
+				"    && echo 'giftcard:!:::::::' >> /etc/shadow \\\n",
+				"    && echo 'giftcard:!::' >> /etc/gshadow \\\n",
+			} {
+				changed = strings.Replace(changed, line, "", 1)
+			}
+		}
+		if changed == good || checkRuntimePackageRecipe(lock, "taskworker", changed) == nil {
+			t.Fatalf("%s escaped the printer user's admission", fault)
+		}
+	}
+	// the other services add no user
+	raw, err = os.ReadFile(filepath.Join(cli, "api", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "giftcard") {
+		t.Fatal("the api image has the printer's user")
+	}
+}
+
+// Archive identity, coverage and the headless shell's runtime packages are
+// lock properties, independent of recipe text.
+func TestRuntimePackagesRejectArchiveAndChromiumGaps(t *testing.T) {
+	_, lock := loadRuntimePackageLock(t)
+	for _, fault := range []string{"version-url", "split-version", "mirror", "checksum", "size", "target", "cross-root", "install-path", "coverage", "arm64-coverage", "unused",
+		"unzip", "library", "font-config"} {
+		raw, _ := json.Marshal(lock)
+		var changed runtimePackageLock
+		if err := json.Unmarshal(raw, &changed); err != nil {
+			t.Fatal(err)
+		}
+		switch fault {
+		case "version-url":
+			changed.Archives[0].Version = "150.0.7871.0"
+		case "split-version":
+			changed.Archives[1].Url = strings.Replace(changed.Archives[1].Url, changed.Archives[1].Version, "156.0.8000.1", 1)
+			changed.Archives[1].Version = "156.0.8000.1"
+		case "mirror":
+			changed.Archives[0].Url = strings.Replace(changed.Archives[0].Url, "storage.googleapis.com", "cdn.playwright.dev", 1)
+		case "checksum":
+			changed.Archives[0].Sha256 = ""
+		case "size":
+			changed.Archives[0].Size = 0
+		case "target":
+			changed.Archives[1].Architecture, changed.Archives[1].Id = "armhf", "chrome-headless-shell_armhf"
+			changed.ServiceArchives["taskworker"] = []string{"chrome-headless-shell_amd64", "chrome-headless-shell_armhf"}
+		case "cross-root":
+			changed.Archives[1].Root = changed.Archives[0].Root
+		case "arm64-coverage":
+			changed.ServiceArchives["taskworker"] = []string{"chrome-headless-shell_amd64"}
+		case "install-path":
+			changed.Archives[0].InstallPath = "/usr/local/bin"
+		case "coverage":
+			changed.ServiceArchives["api"] = []string{"chrome-headless-shell_amd64"}
+		case "unused":
+			changed.ServiceArchives = map[string][]string{}
+		case "unzip", "library", "font-config":
+			prefix := map[string]string{"unzip": "unzip_", "library": "libnss3_", "font-config": "fontconfig-config_"}[fault]
+			changed.Sets["taskworker"] = slices.DeleteFunc(changed.Sets["taskworker"], func(id string) bool { return strings.HasPrefix(id, prefix) })
+		}
+		if err := checkRuntimePackageLock(changed); err == nil {
+			t.Fatalf("%s escaped archive or Chromium admission", fault)
 		}
 	}
 }

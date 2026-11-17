@@ -529,8 +529,8 @@ func applyReliabilityTaskDiagnostic(alert *finding, diagnostic reliabilityTaskDi
 
 // taskFailureSummarySQL returns one representative row per failing task
 // function, plus whole-family counts.  Never cap raw pending_task rows before
-// grouping: a large family such as AdvancePayment can otherwise consume the
-// entire result and hide an unrelated control-plane failure.
+// grouping: a large family can otherwise consume the entire result and hide an
+// unrelated control-plane failure.
 const taskFailureSummarySQL = `
 	WITH failures AS (
 		SELECT split_part(function_name,'.',3) AS task,
@@ -540,31 +540,16 @@ const taskFailureSummarySQL = `
 		       left(coalesce(reschedule_error,''),160) AS last_error,
 		       run_max_time_seconds,
 		       CASE
-		         WHEN split_part(function_name,'.',3) = 'AdvancePayment'
-		           AND coalesce(reschedule_error,'') ~ '` + invalidDestinationResetErrorPattern + `'
-		           THEN 'invalid-destination-reset-failed'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%statement timeout%'
 		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 57014%'
 		           THEN 'postgres-statement-timeout'
 		         WHEN split_part(function_name,'.',3) = 'CloseExpiredContracts'
 		           AND coalesce(reschedule_error,'') ~* '^force close contract [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} at index [0-9]+: Contract already closed with outcome settled: [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12} [0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}->[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
 		           THEN 'concurrent-settled'
-		         WHEN split_part(function_name,'.',3) = 'Payout'
-		           AND lower(coalesce(reschedule_error,'')) LIKE '%no empty local buffer available%'
-		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 53000%'
-		           THEN 'postgres-local-buffer-exhaustion'
-		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%asset amount owned by the wal%'
-		           OR lower(coalesce(reschedule_error,'')) LIKE '%insufficient token balance%'
-		           THEN 'wallet-insufficient'
-		         WHEN split_part(function_name,'.',3) = 'Payout'
-		           AND lower(coalesce(reschedule_error,'')) LIKE '%pgconn.connlockerror=conn closed%'
-		           THEN 'idle-transaction-timeout'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%failed to deallocate cached statement(s): conn closed%'
 		           THEN 'connection-cleanup-deadline'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%429 too many requests%'
 		           THEN 'processor-rate-limit'
-		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%invalid destination address%'
-		           THEN 'processor-invalid-destination'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%400 bad request%'
 		           THEN 'processor-bad-request'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 42703%'
@@ -611,93 +596,12 @@ const taskFailureSummarySQL = `
 	)
 	SELECT ranked.task, family_count, parked_count, fresh_claim_count,
 	       reschedule_error_count, run_at_in_s, last_error,
-	       run_max_time_seconds, cause_class_count, cause_summary,
-	       current_setting('server_version'),
-	       current_setting('effective_io_concurrency'),
-	       current_setting('temp_buffers')
+	       run_max_time_seconds, cause_class_count, cause_summary
 	FROM ranked
 	JOIN cause_summaries USING (task)
 	WHERE sample_rank = 1
 	ORDER BY reschedule_error_count DESC, task;
 `
-
-func taskCauseClasses(summary string) map[string]struct{} {
-	classes := map[string]struct{}{}
-	for _, part := range strings.Split(summary, ",") {
-		class, _, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if ok && class != "" {
-			classes[class] = struct{}{}
-		}
-	}
-	return classes
-}
-
-func advancePaymentMixedGuidance(causeSummary string) (string, string, string) {
-	classes := taskCauseClasses(causeSummary)
-	actions := []string{}
-	verifications := []string{}
-	known := map[string]struct{}{}
-	add := func(class, action, verification string) {
-		known[class] = struct{}{}
-		if _, ok := classes[class]; !ok {
-			return
-		}
-		actions = append(actions, action)
-		verifications = append(verifications, verification)
-	}
-
-	add("wallet-insufficient",
-		"fund or pause the payout wallet for wallet-insufficient rows",
-		"funded wallet rows clear")
-	add("schema-object-missing",
-		"restore migration coherence per §8.9 for schema-object-missing rows before dependent services run; do not hand-create the artifact",
-		"the migration head and artifacts reach the binary requirement and schema-object-missing clears")
-	add("connection-cleanup-deadline",
-		"deploy the queued, cursor-batched CompletePayment retention path for connection-cleanup-deadline rows",
-		"the legacy retention query and new 120-second cleanup failures disappear")
-	add("invalid-destination-reset-failed",
-		"investigate the guarded attempt reset for invalid-destination-reset-failed rows: distinguish concurrent, terminal, or on-chain payment state from a persistence failure; preserve the existing idempotency key and reconcile the outcome before any new submission; do not infer unchanged wallet configuration or manually clear payment rows or keys",
-		"the guarded reset succeeds when eligible or the existing attempt reaches a reconciled terminal outcome, invalid-destination-reset-failed clears, and ambiguous submissions retain their keys without duplicate transfers")
-	add("processor-invalid-destination",
-		"verify typed-reset commit b8af229f in every active taskworker artifact and deploy it only to blocks whose artifact predates it; confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection before attributing recurrence to unchanged wallet configuration; correct a proven chain-mismatched payout wallet through the supported account API; never clear payment rows or keys manually",
-		"every active taskworker contains typed-reset commit b8af229f, a confirmed safe reset lets the next retry select the corrected wallet with a fresh key, it completes without a duplicate transfer, and processor-invalid-destination clears")
-	add("processor-bad-request",
-		"inspect processor-bad-request rows while preserving ambiguous-submit idempotency keys",
-		"processor-bad-request rows reach a definitive safe outcome")
-	add("processor-rate-limit",
-		"do not accelerate processor-rate-limit rows; verify current-main marker-capable server commit "+circleAdmissionMarkerBaselineCommit+" in every active taskworker artifact and deploy it only to blocks that lack it; "+circleAdmissionFailClosedBaselineCommit+" alone proves fail-closed activity/error telemetry but not the capability gauge or exact pre-POST marker; keep the transfer-admission gate fail closed and preserve every payment idempotency key",
-		"every active taskworker exposes the §2.14 admission-observable capability and all five activity families, admission errors and processor-rate-limit remain zero, and exact pre-POST admission markers stay below four per second for a full 90-minute retry window")
-	add("deadline-timeout",
-		"correlate deadline-timeout rows with their exact evaluator boundary before changing batch size or MaxTime",
-		"deadline-timeout rows finish inside their justified boundary")
-	add("context-canceled",
-		"separate context-canceled rows by deploy drain versus exact task deadline before changing their retry policy",
-		"context-canceled rows reach their documented drain or deadline outcome")
-
-	unknown := false
-	for class := range classes {
-		if _, ok := known[class]; !ok {
-			unknown = true
-			break
-		}
-	}
-	if unknown {
-		actions = append(actions, "inspect the original task error for every remaining cause class")
-		verifications = append(verifications, "every remaining cause class is diagnosed and clears")
-	}
-	if len(actions) == 0 {
-		actions = append(actions, "inspect and remediate each listed cause class independently")
-		verifications = append(verifications, "each listed cause class is diagnosed and clears")
-	}
-
-	playbook := "SIGNALS.md §1.2 and §5.7"
-	if _, ok := classes["schema-object-missing"]; ok {
-		playbook = "SIGNALS.md §1.2, §5.7, and §8.9"
-	}
-	return "Handle only the present AdvancePayment classes: " + strings.Join(actions, "; ") + ". Do not delete or manually replay the mixed family.",
-		"Verify each present cause independently: " + strings.Join(verifications, "; ") + ".",
-		playbook
-}
 
 // A live run preserves completed task observations when a later source fails.
 // An ended owner keeps the original cause for the adapter's context verdict.
@@ -938,13 +842,6 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alert.verify = "The migration artifact exists, every scheduled reconciliation finishes below 120s, aggregate drift converges, and taskworker, API, and Connect emit no new negative counters for a full interval."
 			alert.playbook = "SIGNALS.md §5.11 and §8.9"
 		}
-		if task == "Payout" {
-			alert.mechanism = "The bounded Payout planner can spend minutes actively building its temp_account_payment and subsidy windows, then leave its outer transaction intentionally idle while a separate reliability-maintenance transaction runs. In the deployed path, PostgreSQL's global five-minute idle-in-transaction guard closes that outer connection and the task reports pgconn conn closed only after the nested work returns."
-			alert.context += " Correlate this live claim with the explicit oldest PostgreSQL transaction and the Payout failed-row alert. An active planner can temporarily hold the oldest vacuum horizon; elapsed time alone does not justify canceling it or disabling the global guard."
-			alert.action = "Let the bounded attempt reach its task outcome and roll out SET LOCAL idle_in_transaction_session_timeout=0 on the payment-plan transaction only. Retain the task MaxTime and bounded plan slices; do not disable the database-wide timeout, cancel the active planner, or repeatedly kick its row."
-			alert.verify = "A bounded Payout slice commits and clears the row's error, the affected vacuum completes, and a fresh unrelated PostgreSQL session still reports the global five-minute idle-in-transaction timeout."
-			alert.playbook = "SIGNALS.md §5.6 and §5.7"
-		}
 		if task == "DbMaintenance" && len(dbMaintenanceEvidence) > 0 {
 			alert.evidence = fmt.Sprintf(
 				"relation=%s index=%s phase=%s query_age_s=%s wait=%s:%s blocker_count=%s blocker_class=%s blocker_state=%s blocker_xact_age_s=%s blocker_query_age_s=%s blocker_wait=%s:%s blocker_holds_snapshot=%s blocks_done=%s blocks_total=%s",
@@ -1015,15 +912,10 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		lastError, maxTimeSeconds := r.str(6), r.str(7)
 		causeClassCount, causeSummary := atoiRow(r, 8), r.str(9)
 		lastErrorClass := representativeTaskErrorClass(task, lastError, causeClassCount, causeSummary)
-		invalidDestinationResetFailed := task == "AdvancePayment" && lastErrorClass == taskErrorClassInvalidDestinationResetFailed
 		mixedCauses := 1 < causeClassCount
 		lowerError := strings.ToLower(lastError)
 		closeExpiredAlreadySettled := task == "CloseExpiredContracts" &&
 			causeClassCount == 1 && causeSummary == fmt.Sprintf("concurrent-settled=%d", familyCount)
-		localBufferExhaustion := task == "Payout" &&
-			(strings.Contains(causeSummary, "postgres-local-buffer-exhaustion=") ||
-				(strings.Contains(lowerError, "no empty local buffer available") &&
-					strings.Contains(lowerError, "sqlstate 53000")))
 		schemaObjectMissing := strings.Contains(causeSummary, "schema-object-missing=") ||
 			strings.Contains(lowerError, "sqlstate 42703") ||
 			strings.Contains(lowerError, "sqlstate 42p01") ||
@@ -1049,35 +941,20 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		if strings.EqualFold(strings.TrimSpace(lastError), "Timeout") {
 			alertContext += fmt.Sprintf(" This literal Timeout is the task evaluator's configured deadline of %ss. Compare the matching eval-error duration; an exact match means the task needs a smaller checkpointed batch or a justified task-specific MaxTime, not a database restart.", maxTimeSeconds)
-		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline && !clockBackfillDeadline && !invalidDestinationResetFailed {
+		} else if strings.Contains(lowerError, "context canceled") && !strings.Contains(lastError, "Drained:") && !disabledVerifyRetry && !reconcileNetEscrowDeadline && !clockBackfillDeadline {
 			alertContext += fmt.Sprintf(" This is a non-drain context cancellation with a configured task deadline of %ss; compare the taskworker eval-error duration with that deadline. An exact match identifies an undersized task-specific MaxTime, not a deploy drain.", maxTimeSeconds)
 		}
 		if mixedCauses {
 			alertMechanism = fmt.Sprintf("This task family contains %d distinct error classes. Its representative row is selected by error count for bounded evidence and cannot describe every failing row; use the complete cause breakdown instead of attributing the whole family to that sample.", causeClassCount)
 			alertContext += " The cause breakdown is computed across every failing row in this function before selecting the representative fixed error class."
-			if task == "AdvancePayment" {
-				alertAction, alertVerify, alertPlaybook = advancePaymentMixedGuidance(causeSummary)
-			} else {
-				alertAction = "Investigate and remediate each listed cause class independently; do not apply the private representative error's action to the entire mixed family or delete task rows to hide it."
-				alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
-			}
-		} else if invalidDestinationResetFailed {
-			alertMechanism = "AdvancePayment reported an invalid-destination rejection followed by a failed guarded attempt reset. The reset can fail because payment state became terminal or on-chain, because another attempt changed it, or because persistence failed. The original rejection does not prove that the configured wallet remains unchanged or that the idempotency key was released."
-			alertAction = "Inspect the guarded reset and current payment state privately: distinguish concurrent, terminal, or on-chain state from a persistence failure, and reconcile any existing processor attempt before a new submission. Preserve the existing idempotency key. Do not infer unchanged wallet configuration, change wallet data solely from this class, manually release an attempt, or clear payment/task rows."
-			alertVerify = "The guarded reset succeeds only for an eligible pre-chain attempt, or the existing attempt reaches a reconciled terminal outcome. The reset-failed cohort clears on natural retries without duplicate transfers; keys remain stable for ambiguous submissions. Observe the normal 30–90-minute retry window plus ingestion delay after the authorized correction."
-			alertPlaybook = "SIGNALS.md §1.2 and §5.7"
+			alertAction = "Investigate and remediate each listed cause class independently; do not apply the private representative error's action to the entire mixed family or delete task rows to hide it."
+			alertVerify = "Each cause-class count converges to zero or its explicitly documented background state, and no minority class remains hidden behind the former dominant sample."
 		} else if closeExpiredAlreadySettled {
 			alertMechanism = "CloseExpiredContracts selected an open snapshot immediately before a live or concurrent close settled the same contract. The sweep then observed the exact already-terminal settled outcome. That is successful convergence, not malformed escrow and not a conflicting terminal result."
 			alertContext += " Current source distinguishes this exact settled duplicate, skips quarantine, and clears it only after the existing terminal-row verification and Redis stream cleanup both succeed. Other close errors and other terminal outcomes remain failures."
 			alertAction = "Deploy Taskworker from source containing the typed concurrent-settlement convergence handling. Do not quarantine the settled contract, edit the task row, replay settlement, or suppress other force-close errors."
 			alertVerify = "Every Taskworker contains the exact settled-duplicate handling; a deterministic stale-open-snapshot regression preserves malformed and cleanup errors; a later live close race removes the stream entry without incrementing reschedule_error_count; and this task family returns to zero failing rows on the next cadence."
 			alertPlaybook = "SIGNALS.md §1.2"
-		} else if localBufferExhaustion {
-			alertMechanism = "PostgreSQL 18.4's read-stream lookahead can pin every local buffer while a high-I/O-concurrency transaction scans a temporary relation, then fail with SQLSTATE 53000 `no empty local buffer available`. This Payout stack reaches PaymentPlanner.finalizePayments while scanning its temporary planning tables, matching the upstream PostgreSQL 18 defect fixed in 18.6."
-			alertContext += fmt.Sprintf(" The connected server reports server_version=%s, effective_io_concurrency=%s, and temp_buffers=%s. The high I/O concurrency setting is valuable globally; the safe application containment is transaction-local to the affected payment plan.", r.str(10), r.str(11), r.str(12))
-			alertAction = "Upgrade to PostgreSQL 18.6 or newer for the server-side root fix. Until that upgrade is deployed, roll out the payment planner's `SET LOCAL effective_io_concurrency = 32` containment. Do not raise temp_buffers, delete the pending task, or blindly lower effective_io_concurrency for every session."
-			alertVerify = "Inside a Payout planning transaction, current_setting('effective_io_concurrency') reports 32; after commit, a fresh unrelated session retains the configured global value. The same pending Payout row must complete and clear its error. After PostgreSQL is upgraded to 18.6+, remove the containment only after a temporary-table regression proves the server fix under production-like concurrency."
-			alertPlaybook = "SIGNALS.md §5.7"
 		} else if schemaObjectMissing {
 			alertMechanism = "The running task references a PostgreSQL schema object that does not exist in its connected database. During a rollout this normally means schema-dependent code activated before its append-only migration and artifact check; if the successful migration head already claims that version, the database instead has migration-schema drift."
 			alertContext += " SQLSTATE 42703, 42P01, 42883, and 42704 identify undefined columns, tables, functions, and objects respectively; map the exact object from private task evidence to the versioned artifact table in §8.9."
@@ -1111,19 +988,6 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertContext += " A distinct successor attempt after the retry is evidence that per-contract work survived; it does not make that scheduler boundary safe under recurring write/vacuum pressure."
 			alertAction = "Read the matching `found <n> contracts to close` journal line, then verify the actual executor artifact and per-scan cap/count authority before prescribing a cap change. If the artifact still uses the older 100,000 per-scan limit, roll out the existing 25,000 per-scan cap while retaining the 92-worker inner pool; otherwise retain it and attribute the remaining overrun to the active retention, vacuum, storage, or executor phase before reducing the checkpoint further. Do not raise either scan to 50,000, the 30-minute deadline, or the number of task-level shards."
 			alertVerify = "Each independent scan stays at or below 25,000 and their deduplicated union at or below 50,000. Successful full cohorts acknowledge task success before the deadline and schedule their successor; independently verified accounting-rejected batches remain failed tasks with bounded retry. The older-than-five-minute open set falls on consecutive samples without another Timeout."
-		} else if task == "Payout" && strings.Contains(lowerError, "connlockerror=conn closed") {
-			alertMechanism = "The bounded payment-plan transaction remained intentionally idle while a separate reliability-maintenance transaction ran longer than PostgreSQL's five-minute idle-in-transaction timeout, so PostgreSQL closed the outer connection before it could commit."
-			alertContext += " Scope the exception to this payment-plan transaction with SET LOCAL; the task MaxTime and bounded plan slice remain the safety limits, while every unrelated session keeps the global timeout."
-			alertAction = "Roll out the transaction-local idle_in_transaction_session_timeout override for payment planning. Do not disable the database-wide guard or repeatedly kick the still-running row."
-			alertVerify = "One Payout slice commits and clears this row's error, and a new unrelated PostgreSQL session still reports the configured five-minute idle-in-transaction timeout."
-		} else if task == "AdvancePayment" && (strings.Contains(lowerError, "asset amount owned by the wal") || strings.Contains(lowerError, "insufficient token balance")) {
-			alertMechanism = "The external payout wallet does not own enough of the requested asset to fund pending payouts. Task retries cannot create that balance; repeated HTTP 400 responses only move the rows through backoff."
-			alertAction = "Finance/operations must fund the named payout wallet with the required asset, or explicitly pause payouts. Do not treat this as an API, PostgreSQL, or Redis availability incident."
-			alertVerify = "After funding, AdvancePayment retries succeed and the family count converges to zero without manual row deletion."
-		} else if task == "AdvancePayment" && lastErrorClass == taskErrorClassProcessorInvalidDestination {
-			alertMechanism = "The stored task error reports an invalid payout destination. Historically, a pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC, invalid for its declared chain. A typed definitive pre-chain rejection permits the guarded attempt reset; after a successful reset, an unchanged payout-wallet selection repeats the failure on its one-hour-mean backoff. Saturated retries are dispersed across 30–90 minutes after the proportional-jitter taskworker is deployed. This text class alone does not prove typed status, successful reset, or current wallet selection."
-			alertAction = "Verify typed-reset commit b8af229f in every active artifact, then confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection. Correct a proven chain-mismatched payout wallet through the supported account API. Do not manually release the attempt, edit payment rows, or rotate idempotency keys; retain the reset's safety guard while preserving keys for transport errors, rate limits, and ambiguous submits."
-			alertVerify = "After a confirmed safe reset and authorized wallet correction, the next retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero after at most 90 minutes plus ingestion delay."
 		} else if task == "(*TaskWorker)" && lastErrorClass == taskErrorClassPostMissingRecipient {
 			alertMechanism = "A wrapped task post hook could not resolve an account-notice recipient because the network admin has no email or phone auth. The fixed error class alone does not identify the wrapped task, establish that its notice is optional, or prove the underlying task failed."
 			alertAction = "Join the wrapper's validated task reference to its finished original task in a protected read-only diagnostic. If it is terminal PlaySubscriptionRenewal, deploy the typed missing-recipient skip while preserving real database errors; do not edit the subscription, task row, or payment state. For another wrapped task, inspect its notification contract before changing it."
@@ -1137,9 +1001,6 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		observed := fmt.Sprintf("task=%s failing_rows=%d parked_over_5m=%d fresh_claim_heartbeats=%d counts_may_overlap=true max_errors=%s sample_run_at_in_s=%s sample_max_time_s=%s cause_classes=%d cause_breakdown=%s",
 			task, familyCount, parkedCount, freshClaimCount, r.str(4), r.str(5), maxTimeSeconds, causeClassCount, causeSummary)
-		if localBufferExhaustion {
-			observed += fmt.Sprintf(" pg_server_version=%s effective_io_concurrency=%s temp_buffers=%s", r.str(10), r.str(11), r.str(12))
-		}
 		alert := finding{
 			probeId: "pg/task-parked", tier: tierWarn,
 			class: "task-parked", target: target, frame: task, sustain: 1,
@@ -1336,11 +1197,11 @@ func (self taskDurationProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		verify := ""
 		playbook := "SIGNALS.md 2.5"
 		if task == "RemoveCompletedContracts" {
-			mechanism = "The migration-gated retention worker is returning normally after consuming a bounded backlog phase. Current source gives each completed-payment assignment, straggler assignment, and due-delete phase a five-minute wall-clock budget; a run near 300 seconds is consistent with one phase using that budget, not by itself a stuck transaction or the former missing-column retry."
-			context = "Correlate contract_retention_pending and cursor progress with the retention-fanout signal before attributing the phase. Multiple consecutive budget-sized completions mean durable debt is still draining; a completed finished_task row distinguishes this from a deadline, process exit, or schema failure."
-			action = "Keep one recurring reaper and let its committed cursor advance. Retain the bounded retention implementation on versions that already have it and deploy it only where version or code evidence says it is absent. Investigate the active phase and PostgreSQL waits if the queue or duration does not fall. Do not add concurrent reapers, raise the 30-minute task deadline, or reset pending rows to make the metric disappear."
-			verify = "Each run finishes before the task deadline, contract_retention_pending and duration fall on consecutive 30-minute runs, the legacy multi-million-row payment update stays absent, and no RemoveCompletedContracts reschedule error returns."
-			playbook = "SIGNALS.md §2.5, §2.10, and §8.9"
+			mechanism = "The migration-gated retention worker is returning normally after consuming a bounded backlog phase. Current source gives the straggler assignment and due-delete phases a five-minute wall-clock budget each; a run near 300 seconds is consistent with one phase using that budget, not by itself a stuck transaction or the former missing-column retry."
+			context = "Correlate the due reap_time backlog and the straggler horizon's contract count before attributing the phase. Multiple consecutive budget-sized completions mean durable debt is still draining; a completed finished_task row distinguishes this from a deadline, process exit, or schema failure. Since USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), no payment completion queues contracts for this worker; the contract horizon reaper (§2.4r) deletes contracts past its horizon."
+			action = "Keep one recurring reaper. Retain the bounded retention implementation on versions that already have it and deploy it only where version or code evidence says it is absent. Investigate the active phase and PostgreSQL waits if the backlog or duration does not fall. Do not add concurrent reapers, raise the 30-minute task deadline, or reset pending rows to make the metric disappear."
+			verify = "Each run finishes before the task deadline, the due backlog and duration fall on consecutive 30-minute runs, and no RemoveCompletedContracts reschedule error returns."
+			playbook = "SIGNALS.md §2.4r, §2.5, and §8.9"
 		} else if task == "ExportStats" {
 			overlapEvidence, overlapErr := exportStatsOverlapEvidence(ctx, env)
 			if overlapErr != nil {

@@ -22,6 +22,15 @@ const (
 	RetentionTableStClientKeyHistory = "st_client_key_history"
 	RetentionTableStClientKeyHead    = "st_client_key_head"
 	RetentionTableStClientKeyGone    = "st_client_key_gone"
+	// the session state retention (session_state_retention.go)
+	RetentionTableProviderWorkSessionHead = "provider_work_session_head"
+	RetentionTableAuditDeviceState        = "audit_device_state"
+	// the location fold, by its retention and with its client
+	// (network_client_location_reliability_retention.go)
+	RetentionTableNetworkClientLocationReliability = "network_client_location_reliability"
+	// the lingering origins' side table, past its prune time
+	// (contract_origin_linger.go)
+	RetentionTableContractOriginLinger = "contract_origin_linger"
 )
 
 var retentionTables = []string{
@@ -38,6 +47,10 @@ var retentionTables = []string{
 	RetentionTableStClientKeyHistory,
 	RetentionTableStClientKeyHead,
 	RetentionTableStClientKeyGone,
+	RetentionTableProviderWorkSessionHead,
+	RetentionTableAuditDeviceState,
+	RetentionTableNetworkClientLocationReliability,
+	RetentionTableContractOriginLinger,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

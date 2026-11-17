@@ -125,13 +125,17 @@ func (redisStatsProviderEgressCacheStore) release(ctx context.Context, key, toke
 // The modern provider gate's shadow arrived with schema 3 of
 // model.ProviderEgressCountsPolicyKey, so a snapshot without it lives under
 // an older policy key and is never read here.
-// The Online members' modern outcomes arrived with schema 6 the same way.
+// The Online members' modern outcomes arrived with schema 6 the same way, and
+// the classified decision's capability and post-quantum counts with schema 8
+// (FP2-PROTOCOL.md §8.1).
 type statsProviderEgressWireCounts struct {
-	Buckets          map[string]map[string]int64 `json:"b"`
-	Reasons          map[string]int64            `json:"r"`
-	MaxIndex         *int                        `json:"m"`
-	ModernGateShadow map[string]map[string]int64 `json:"g"`
-	ModernOnline     map[string]int64            `json:"o"`
+	Buckets          map[string]map[string]int64            `json:"b"`
+	Reasons          map[string]int64                       `json:"r"`
+	MaxIndex         *int                                   `json:"m"`
+	ModernGateShadow map[string]map[string]int64            `json:"g"`
+	ModernOnline     map[string]int64                       `json:"o"`
+	Capability       map[string]map[string]map[string]int64 `json:"k"`
+	PostQuantum      map[string]map[string]int64            `json:"q"`
 }
 
 type statsProviderEgressWire struct {
@@ -196,6 +200,37 @@ func validStatsProviderEgressCounts(counts *model.ProviderEgressCounts) bool {
 			return false
 		}
 	}
+	// exactly every bucket, with exactly every capability label pair and
+	// every post-quantum signal
+	if len(counts.CapabilityCounts) != len(model.ProviderEgressBuckets) || len(counts.PostQuantumCounts) != len(model.ProviderEgressBuckets) {
+		return false
+	}
+	for _, bucket := range model.ProviderEgressBuckets {
+		ipProtocolCounts, ok := counts.CapabilityCounts[bucket]
+		if !ok || len(ipProtocolCounts) != len(model.ProviderEgressCapabilityIps) {
+			return false
+		}
+		for _, ip := range model.ProviderEgressCapabilityIps {
+			protocolCounts, ok := ipProtocolCounts[ip]
+			if !ok || len(protocolCounts) != len(model.ProviderEgressCapabilityProtocols) {
+				return false
+			}
+			for _, protocol := range model.ProviderEgressCapabilityProtocols {
+				if count, ok := protocolCounts[protocol]; !ok || count < 0 {
+					return false
+				}
+			}
+		}
+		signalCounts, ok := counts.PostQuantumCounts[bucket]
+		if !ok || len(signalCounts) != len(model.ProviderPostQuantumSignals) {
+			return false
+		}
+		for _, signal := range model.ProviderPostQuantumSignals {
+			if count, ok := signalCounts[signal]; !ok || count < 0 {
+				return false
+			}
+		}
+	}
 	return true
 }
 
@@ -217,6 +252,8 @@ func encodeStatsProviderEgressSnapshot(snapshot *statsProviderEgressSnapshot, no
 		MaxIndex:         &snapshot.Counts.MaxIndex,
 		ModernGateShadow: snapshot.Counts.ModernGateShadowCounts,
 		ModernOnline:     snapshot.Counts.ModernOnlineCounts,
+		Capability:       snapshot.Counts.CapabilityCounts,
+		PostQuantum:      snapshot.Counts.PostQuantumCounts,
 	}})
 	if err != nil || len(encoded) > statsProviderEgressWireBytes {
 		return "", errStatsProviderEgressInvalid
@@ -237,7 +274,15 @@ func decodeStatsProviderEgressSnapshot(value string, now time.Time) (*statsProvi
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, false, errStatsProviderEgressInvalid
 	}
-	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{BucketIndexCounts: wire.Counts.Buckets, ReasonCounts: wire.Counts.Reasons, MaxIndex: *wire.Counts.MaxIndex, ModernGateShadowCounts: wire.Counts.ModernGateShadow, ModernOnlineCounts: wire.Counts.ModernOnline}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
+	snapshot := &statsProviderEgressSnapshot{&model.ProviderEgressCounts{
+		BucketIndexCounts:      wire.Counts.Buckets,
+		ReasonCounts:           wire.Counts.Reasons,
+		MaxIndex:               *wire.Counts.MaxIndex,
+		ModernGateShadowCounts: wire.Counts.ModernGateShadow,
+		ModernOnlineCounts:     wire.Counts.ModernOnline,
+		CapabilityCounts:       wire.Counts.Capability,
+		PostQuantumCounts:      wire.Counts.PostQuantum,
+	}, time.UnixMilli(wire.Started), time.UnixMilli(wire.Completed)}
 	fresh, err := statsProviderEgressSnapshotFresh(snapshot, now)
 	return snapshot, fresh, err
 }

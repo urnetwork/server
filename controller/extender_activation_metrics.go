@@ -29,6 +29,9 @@ const (
 	extenderActivationStageRequest = "request"
 	// the operator's extender configuration is unusable
 	extenderActivationStageConfig = "config"
+	// the key is registered to another network, which no activation moves
+	// (model.ActivateNetworkExtender)
+	extenderActivationStageOwner = "owner"
 	// the api was too busy to take it, before any budget was spent
 	// (connect#230): it was probing MaxConcurrentProbes activations already,
 	// or other spends held one of its budgets past the lock bound
@@ -40,6 +43,13 @@ const (
 	// through it, which is also where a forward on the other family ends
 	extenderActivationStageTcp     = "tcp"
 	extenderActivationStageForward = "forward"
+	// the peer-to-peer webrtc test (C2a, connect/EXTENDER.md S8): the one
+	// dial over the carrier, whose challenge and forward are one step, run
+	// only where the tcp path failed or was not offered. An activation that
+	// offered both required paths and failed both ends here, the last of its
+	// required steps; the step histogram has both. So does one whose webrtc
+	// test the operator's cap refused untried (cap).
+	extenderActivationStageWebRtc = "webrtc"
 	// the required test passed, and the activation was stored, or storing or
 	// signing it failed
 	extenderActivationStageStore = "store"
@@ -56,17 +66,30 @@ const (
 	extenderActivationOutcomeTimeout = extenderProbeStepOutcomeTimeout
 	// the forward arrived on the other family (A7)
 	extenderActivationOutcomeOtherFamily = extenderProbeRefusalOtherFamily
+	// the webrtc stage: the webrtc test was not tried, since the operator had
+	// as many extenders on webrtc without tcp as it takes for now
+	// (ExtenderActivateSettings.MaxWebRtcOnlyExtenders, connect/EXTENDER.md
+	// S8). A cap that could not be read is counted as error.
+	extenderActivationOutcomeCap = "cap"
 	// the busy stage: the process's concurrent probes were all taken, or a
 	// budget's lock was held by other spends past its bound
 	extenderActivationOutcomeProbes     = "probes"
 	extenderActivationOutcomeBudgetLock = "budget_lock"
 	// the budget stage: the budget that refused it, the calling client's, the
 	// caller address's, a key's at the address its network proved it at, or
-	// the account's (ExtenderActivateSettings)
-	extenderActivationOutcomeClient        = "client"
-	extenderActivationOutcomeAddress       = "address"
-	extenderActivationOutcomeProvenAddress = "proven_address"
-	extenderActivationOutcomeAccount       = "account"
+	// the account's (ExtenderActivateSettings). The account's budget is counted
+	// as unproven_account when none of the account's hosts has passed
+	// activation on the family within ProvenHostMaxAge, which is the refusal
+	// that asks for the longer wait (unprovenAccountRetryAfter). A budget
+	// check that failed rather than refused, or a refusal by a budget that is
+	// none of these, is counted as error (extenderActivationOutcomeError):
+	// never as the account's, which is what every such failure was counted as
+	// before
+	extenderActivationOutcomeClient          = "client"
+	extenderActivationOutcomeAddress         = "address"
+	extenderActivationOutcomeProvenAddress   = "proven_address"
+	extenderActivationOutcomeAccount         = "account"
+	extenderActivationOutcomeUnprovenAccount = "unproven_account"
 )
 
 // The family of the caller's address. Unknown is a request refused because
@@ -81,6 +104,7 @@ const (
 var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageRequest: {extenderActivationOutcomeRefused},
 	extenderActivationStageConfig:  {extenderActivationOutcomeError},
+	extenderActivationStageOwner:   {extenderActivationOutcomeRefused},
 	extenderActivationStageBusy: {
 		extenderActivationOutcomeProbes,
 		extenderActivationOutcomeBudgetLock,
@@ -90,6 +114,8 @@ var extenderActivationStageOutcomes = map[string][]string{
 		extenderActivationOutcomeAddress,
 		extenderActivationOutcomeProvenAddress,
 		extenderActivationOutcomeAccount,
+		extenderActivationOutcomeUnprovenAccount,
+		extenderActivationOutcomeError,
 	},
 	extenderActivationStageTcp: {
 		extenderActivationOutcomeError,
@@ -99,6 +125,12 @@ var extenderActivationStageOutcomes = map[string][]string{
 		extenderActivationOutcomeError,
 		extenderActivationOutcomeTimeout,
 		extenderActivationOutcomeOtherFamily,
+	},
+	extenderActivationStageWebRtc: {
+		extenderActivationOutcomeError,
+		extenderActivationOutcomeTimeout,
+		extenderActivationOutcomeOtherFamily,
+		extenderActivationOutcomeCap,
 	},
 	extenderActivationStageStore: {
 		extenderActivationOutcomeActivated,
@@ -110,6 +142,7 @@ var extenderActivationStageOutcomes = map[string][]string{
 var extenderProbeStepNames = []string{
 	connect.ExtenderCarrierTcp,
 	extenderProbeStepForward,
+	connect.ExtenderCarrierWebRtc,
 	connect.ExtenderCarrierDns,
 	connect.ExtenderCarrierQuic,
 }
@@ -130,16 +163,16 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 		activations: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_extender_activations_total",
 			Help: "Extender activations (POST /network/extender-activate) by the stage that ended them, how, and the caller's address family. " +
-				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; " +
+				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
-				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- or account); " +
-				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
+				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- account, or unproven_account -- the account's, for an account none of whose hosts has passed on the family in 7 days, answered with a wait that grows to 6 hours), or error when the budget check failed rather than refused; " +
+				"tcp and forward, the required test over public tcp, and webrtc, the required test over the peer-to-peer webrtc carrier, run only where the tcp path failed or was not offered, each of which fails on its own (error), runs out of its probe budget (timeout), or forwards on the other family (other_family); an activation that failed both required paths ends at webrtc, as does one whose webrtc test the operator's cap on extenders without tcp refused untried (cap); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
 		stepSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "urnetwork_extender_activation_step_seconds",
-			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first). " +
-				"The steps share one 10 s probe budget and a dns port has 3 s of its own, so the buckets end at 10 s.",
+			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, the webrtc dial with its forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first). " +
+				"The steps share one 10 s probe budget, a webrtc test run in place of a failed tcp path has a 10 s budget of its own, and a dns port has 3 s of its own, so the buckets end at 10 s.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 10},
 		}, []string{"step", "outcome"}),
 	}
@@ -195,6 +228,7 @@ func extenderActivationRefusalOutcome(stage string, stageOutcome string) string 
 		return extenderActivationOutcomeError
 	case extenderActivationStageTcp,
 		extenderActivationStageForward,
+		extenderActivationStageWebRtc,
 		extenderActivationStageBusy,
 		extenderActivationStageBudget:
 		return stageOutcome
@@ -204,7 +238,10 @@ func extenderActivationRefusalOutcome(stage string, stageOutcome string) string 
 }
 
 // The budget outcome of a budget refusal (extenderActivationStageBudget): the
-// kind of the budget that refused, by its action.
+// kind of the budget that refused, by its action. Every action an activation
+// spends is named; any other is no budget the activation asked for, and is
+// counted as error rather than as the account's, which is what it was counted
+// as before.
 func extenderActivationBudgetOutcome(action string) string {
 	switch action {
 	case model.AccountActionExtenderActivateV4, model.AccountActionExtenderActivateV6:
@@ -213,8 +250,10 @@ func extenderActivationBudgetOutcome(action string) string {
 		return extenderActivationOutcomeAddress
 	case model.AccountActionExtenderActivateProvenAddressV4, model.AccountActionExtenderActivateProvenAddressV6:
 		return extenderActivationOutcomeProvenAddress
-	default:
+	case model.AccountActionExtenderActivateAccountV4, model.AccountActionExtenderActivateAccountV6:
 		return extenderActivationOutcomeAccount
+	default:
+		return extenderActivationOutcomeError
 	}
 }
 

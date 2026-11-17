@@ -2,7 +2,7 @@ package connect
 
 import (
 	"github.com/urnetwork/connect"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"testing"
 	"time"
 )
@@ -34,11 +34,11 @@ func TestPingTrackerChaos(t *testing.T) {
 	pingTracker := NewPingTracker(5)
 
 	for range 1024 {
-		if mathrand.Intn(2) == 0 {
+		if mathrand.IntN(2) == 0 {
 			pingTracker.Receive()
 		} else {
 			select {
-			case <-time.After(time.Duration(mathrand.Intn(32)) * time.Millisecond):
+			case <-time.After(time.Duration(mathrand.IntN(32)) * time.Millisecond):
 			}
 			pingTracker.ReceivePing()
 		}

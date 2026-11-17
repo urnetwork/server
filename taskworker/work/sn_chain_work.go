@@ -12,8 +12,10 @@ package work
 //   - SnReadIncentive (about every two minutes): reads the on-chain incentive
 //     census once per native tempo (controller/sn_incentive.go). Most runs
 //     make no RPC at all; the reader decides.
+//   - SnFleetAuto and SnFleetAutoRelay (every few minutes, only once binding is
+//     open): the Top 200 claim's server side (controller/sn_fleet_auto.go).
 //
-// Both no-op when st.yml is absent or disabled, and a chain from an earlier
+// Each no-ops when st.yml is absent or disabled, and a chain from an earlier
 // deployment ends itself.
 
 import (
@@ -30,7 +32,92 @@ import (
 const (
 	snSyncFleetBindingsInterval = 1 * time.Minute
 	snReadIncentiveInterval     = 2 * time.Minute
+	snFleetAutoInterval         = 5 * time.Minute
+	snFleetAutoRelayInterval    = 2 * time.Minute
 )
+
+// SnFleetAuto (periodic, only while binding is open: closed, nothing is scheduled)
+
+type SnFleetAutoArgs struct {
+	DeploymentKey string `json:"deployment_key"`
+}
+
+type SnFleetAutoResult struct {
+}
+
+func ScheduleSnFleetAuto(clientSession *session.ClientSession, tx server.PgTx) {
+	deploymentKey, ok := controller.StDeploymentKey()
+	if !ok || !controller.StEnabled() || !controller.SnFleetAutoOpen() {
+		return
+	}
+	task.ScheduleTaskInTx(
+		tx,
+		SnFleetAuto,
+		&SnFleetAutoArgs{DeploymentKey: string(deploymentKey)},
+		clientSession,
+		task.RunOnce("sn_fleet_auto", deploymentKey),
+		task.RunAt(server.NowUtc().Add(snFleetAutoInterval)),
+		task.MaxTime(15*time.Minute),
+	)
+}
+
+func SnFleetAuto(snFleetAuto *SnFleetAutoArgs, clientSession *session.ClientSession) (*SnFleetAutoResult, error) {
+	if _, current := stTaskDeploymentCurrent(snFleetAuto.DeploymentKey); !current {
+		return &SnFleetAutoResult{}, nil
+	}
+	controller.SnFleetAutoStep(clientSession.Ctx)
+	return &SnFleetAutoResult{}, nil
+}
+
+func SnFleetAutoPost(snFleetAuto *SnFleetAutoArgs, snFleetAutoResult *SnFleetAutoResult, clientSession *session.ClientSession, tx server.PgTx) error {
+	if _, current := stTaskDeploymentCurrent(snFleetAuto.DeploymentKey); !current {
+		return nil
+	}
+	ScheduleSnFleetAuto(clientSession, tx)
+	return nil
+}
+
+// SnFleetAutoRelay (periodic, only while binding is open)
+
+type SnFleetAutoRelayArgs struct {
+	DeploymentKey string `json:"deployment_key"`
+}
+
+type SnFleetAutoRelayResult struct {
+}
+
+func ScheduleSnFleetAutoRelay(clientSession *session.ClientSession, tx server.PgTx) {
+	deploymentKey, ok := controller.StDeploymentKey()
+	if !ok || !controller.StEnabled() || !controller.SnFleetAutoOpen() {
+		return
+	}
+	task.ScheduleTaskInTx(
+		tx,
+		SnFleetAutoRelay,
+		&SnFleetAutoRelayArgs{DeploymentKey: string(deploymentKey)},
+		clientSession,
+		task.RunOnce("sn_fleet_auto_relay", deploymentKey),
+		task.RunAt(server.NowUtc().Add(snFleetAutoRelayInterval)),
+		// each transaction waits for finality, one at a time
+		task.MaxTime(30*time.Minute),
+	)
+}
+
+func SnFleetAutoRelay(snFleetAutoRelay *SnFleetAutoRelayArgs, clientSession *session.ClientSession) (*SnFleetAutoRelayResult, error) {
+	if _, current := stTaskDeploymentCurrent(snFleetAutoRelay.DeploymentKey); !current {
+		return &SnFleetAutoRelayResult{}, nil
+	}
+	controller.SnFleetAutoRelayStep(clientSession.Ctx)
+	return &SnFleetAutoRelayResult{}, nil
+}
+
+func SnFleetAutoRelayPost(snFleetAutoRelay *SnFleetAutoRelayArgs, snFleetAutoRelayResult *SnFleetAutoRelayResult, clientSession *session.ClientSession, tx server.PgTx) error {
+	if _, current := stTaskDeploymentCurrent(snFleetAutoRelay.DeploymentKey); !current {
+		return nil
+	}
+	ScheduleSnFleetAutoRelay(clientSession, tx)
+	return nil
+}
 
 // SnSyncFleetBindings (periodic)
 

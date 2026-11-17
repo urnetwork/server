@@ -252,8 +252,15 @@ func drainPayoutDebitTestPending(t testing.TB, ctx context.Context, balanceId se
 		accounts[sweep.networkId] = contractPayoutTestAccountAmount(t, ctx, sweep.networkId)
 	}
 	state := before
+	// A page flushes the grant again after each full batch, up to
+	// transferDebitBatchesPerBalance batches while the page has time, so it may
+	// take every pending row at once. Every page but the last takes whole
+	// batches, so one batch per page bounds the page count.
 	pageLimit := (before.pending + transferDebitBatchSize - 1) / transferDebitBatchSize
-	for page := 0; page < pageLimit; page++ {
+	for page := 0; state.pending > 0; page++ {
+		if page >= pageLimit {
+			t.Fatalf("public debit pages did not drain the grant within %d pages: %+v", pageLimit, state)
+		}
 		result, err := FlushTransferDebits(ctx, shard, &previous, 1)
 		if err != nil || result.Failed != 0 || result.Busy != 0 || result.Balances != 1 || !result.More ||
 			result.LastBalanceId == nil || *result.LastBalanceId != balanceId {
@@ -265,7 +272,8 @@ func drainPayoutDebitTestPending(t testing.TB, ctx context.Context, balanceId se
 		releasedReservation := state.pendingReserved - next.pendingReserved
 		projected := state.unmaterializedEscrows - next.unmaterializedEscrows
 		projectedBytes := state.unmaterialized - next.unmaterialized
-		if removed <= 0 || removed > transferDebitBatchSize || result.Applied != removed || result.Released != removed ||
+		if removed <= 0 || removed > transferDebitBatchesPerBalance*transferDebitBatchSize ||
+			(0 < next.pending && removed%transferDebitBatchSize != 0) || result.Applied != removed || result.Released != removed ||
 			debit < 0 || releasedReservation < debit || projected < 0 || projected > removed || projectedBytes < 0 || projectedBytes > debit ||
 			next.applied != 0 || next.credit != state.credit-debit || next.reserved != state.reserved-releasedReservation ||
 			next.pendingReserved != next.reserved || next.invalidReservations != 0 || next.legacy != 0 ||

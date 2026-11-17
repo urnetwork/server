@@ -16,6 +16,22 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"SN top replica provenance", snTopReplicaSchemaSql, SnTopReplicaSchemaMigrationVersion},
 		{"verify cohort census", verifyCohortCensusSchemaSql, VerifyCohortCensusSchemaMigrationVersion},
 		{"subscription store country", subscriptionRenewalCountrySchemaSql, SubscriptionRenewalCountrySchemaMigrationVersion},
+		{"extender activation run", extenderActivationRunSchemaSql, ExtenderActivationRunSchemaMigrationVersion},
+		{"extender measurement api probes", networkExtenderMeasurementProbeSchemaSql, NetworkExtenderMeasurementProbeSchemaMigrationVersion},
+		{"onboarding platform distribution", networkOnboardingDistributionSql, NetworkOnboardingDistributionMigrationVersion},
+		{"per-cycle Pro grants", ProGrantCycleSql, ProGrantCycleVersion},
+		{"ping target evidence refusals", networkPingTargetEvidenceSchemaSql, NetworkPingTargetEvidenceSchemaMigrationVersion},
+		{"extender address ports", networkExtenderAddressPortsSchemaSql, NetworkExtenderAddressPortsSchemaMigrationVersion},
+		{"URL failed later legs and post-quantum outcome", ProviderEgressFp2EvidenceSql, ProviderEgressFp2EvidenceMigrationVersion},
+		{"gift orders and Pro gift codes", GiftSchemaSql, GiftSchemaVersion},
+		{"gift code voids and order refunds", GiftRefundSchemaSql, GiftRefundSchemaVersion},
+		{"gift orders paid with Gamma", GiftGammaSchemaSql, GiftGammaSchemaVersion},
+		{name: "provider session legacy drop guard", sql: providerWorkSessionEventLegacyDropGuardSql, version: ProviderWorkSessionEventLegacyDropGuardMigrationVersion},
+		{name: "provider session provider append", sql: providerWorkSessionProviderAppendSql, version: ProviderWorkSessionProviderAppendMigrationVersion},
+		{name: "provider session head retention guard", sql: providerWorkSessionHeadRetentionGuardSql, version: ProviderWorkSessionHeadRetentionGuardMigrationVersion},
+		{name: "client key history seven-day floor", sql: clientKeyHistoryRetentionSevenDayFloorSql, version: ClientKeyHistoryRetentionSevenDayFloorMigrationVersion},
+		{name: "exact-job second recovery", sql: CompetitionSecondRecoveryMigrationSql(), version: CompetitionSecondRecoveryMigrationVersion},
+		{name: "lingering origins' side table", sql: contractOriginLingerSchemaSql, version: ContractOriginLingerMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

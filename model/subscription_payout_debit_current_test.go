@@ -37,7 +37,7 @@ func TestPayoutDebitCurrentPartialSettlementKeepsOriginalReservation(t *testing.
 		if got := contractPayoutTestAmounts(t, ctx, escrow.ContractId); !maps.Equal(got, want) {
 			t.Fatal("partial settlement lost the exact provider earning", got)
 		}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId}, want)
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId})
 		assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000,
 			map[server.Id]currentPayoutDebitTestAmount{escrow.ContractId: {reserved: 64, consumed: 11}})
 		beforeReplay := readPayoutDebitTestState(t, ctx, f.balanceId)
@@ -52,7 +52,7 @@ func TestPayoutDebitCurrentPartialSettlementKeepsOriginalReservation(t *testing.
 		if got := contractPayoutTestAmounts(t, ctx, escrow.ContractId); !maps.Equal(got, want) {
 			t.Fatal("public close replay changed the provider earning", got)
 		}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId}, want)
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId})
 	})
 }
 

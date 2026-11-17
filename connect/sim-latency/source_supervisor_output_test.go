@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,7 +44,7 @@ func TestSourceSupervisorOutputHelperProcess(t *testing.T) {
 		t.Fatal("missing synthetic helper arguments")
 	}
 	mode, target := os.Args[start], os.Args[start+1]
-	if (mode == "worker" || mode == "cancel") && (len(os.Args) != start+3 || os.Args[start+2] != "--supervisor-request") {
+	if (mode == "worker" || mode == "cancel" || mode == "worker-failure") && (len(os.Args) != start+3 || os.Args[start+2] != "--supervisor-request") {
 		t.Fatal("launcher omitted its fixed worker selector")
 	}
 	if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
@@ -56,7 +57,7 @@ func TestSourceSupervisorOutputHelperProcess(t *testing.T) {
 		if _, err := os.Stderr.Write(chunk); err != nil {
 			t.Fatal(err)
 		}
-		if mode == "worker" || mode == "oversize" || mode == "cancel" {
+		if mode == "worker" || mode == "oversize" || mode == "cancel" || mode == "worker-failure" {
 			if _, err := os.Stdout.Write(chunk); err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +86,57 @@ func TestSourceSupervisorOutputHelperProcess(t *testing.T) {
 	if mode == "failure" {
 		os.Exit(23)
 	}
+	if mode == "worker-failure" {
+		content, err := controller.MarshalCompetitionWorkerFailureReport(fmt.Errorf("synthetic-private-worker-error: %w", context.DeadlineExceeded))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintln(os.Stderr, string(content)); err != nil {
+			t.Fatal(err)
+		}
+		os.Exit(2)
+	}
 	os.Exit(0)
+}
+
+// The document is emitted after the old stderr bound has overflowed. Keeping
+// only its prefix deterministically loses this actual child exit-two evidence.
+func TestSourceSupervisorWorkerFailureSurvivesExitTwoAndLogOverflow(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "completed")
+	path, digest := sourceSupervisorOutputProgram(t, "worker-failure", marker)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	err := runSourceSupervisorWorkerCommand(ctx, path, digest, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch"})
+	var status *exec.ExitError
+	if !errors.As(err, &status) || status.ExitCode() != 2 {
+		t.Fatal("worker status was lost", err)
+	}
+	content, marshalError := controller.MarshalCompetitionSupervisorReport("evaluation_blocked", err)
+	var report struct {
+		WorkerFailure *controller.CompetitionWorkerFailureReport `json:"worker_failure"`
+	}
+	if marshalError != nil || json.Unmarshal(content, &report) != nil || report.WorkerFailure == nil || report.WorkerFailure.Category != "deadline_exceeded" ||
+		strings.Contains(string(content), "synthetic-private-worker-error") || strings.Contains(string(content), "synthetic-private-log") || !strings.Contains(err.Error(), "stderr_sha256=") {
+		t.Fatal("exit-two diagnostics were discarded or raw stderr escaped", string(content), marshalError)
+	}
+}
+
+// Retaining a tail is still a complete draining writer; its digest covers all
+// bytes, not merely the retained diagnostic fragment.
+func TestSourceSupervisorOutputTailDrainsAndHashesAllBytes(t *testing.T) {
+	for _, limit := range []int{0, 4, 8} {
+		output := &sourceSupervisorOutput{limit: limit, tail: true, digest: sha256.New()}
+		for _, value := range []string{"ab", "cdefghijkl", "mn"} {
+			if count, err := output.Write([]byte(value)); count != len(value) || err != nil {
+				t.Fatal("tail writer stopped draining", count, err)
+			}
+		}
+		whole := "abcdefghijklmn"
+		digest := sha256.Sum256([]byte(whole))
+		if string(output.content) != whole[len(whole)-limit:] || output.totalBytes != uint64(len(whole)) || !output.exceeded || !bytes.Equal(output.digest.Sum(nil), digest[:]) {
+			t.Fatal("tail retention lost its complete count/hash or retained wrong bytes", limit)
+		}
+	}
 }
 
 // The small pinned script only execs this test binary; it is not the workload,

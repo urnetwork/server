@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "kind": "competition-review-operator-authentication-observation/v1",
+  "observed_at": "2026-11-08T07:43:42Z",
+  "api_host": "api.bringyour.com",
+  "route": "POST /competition/v2/review-handoff-imports",
+  "vault_commit": "009882e036024808a9a153f01d93d43fca18590b",
+  "actor_name": "review-operator-20261108-v1",
+  "role": "review_operator",
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "probe": {
+    "payload": {},
+    "http_statuses": [400, 400],
+    "response_code": "invalid_review_handoff_import",
+    "response_message": "operator import requires the exact pending proposal and completion evidence",
+    "authentication_and_route_validation_observed": true,
+    "no_review_imported": true,
+    "all_replica_convergence_proved": false,
+    "successful_ledger_write_proved": false
+  },
+  "winner_approved": false,
+  "source_promoted": false,
+  "rewards_released": false
+}

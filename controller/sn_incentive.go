@@ -61,10 +61,14 @@ const (
 	snIncentiveLowValidatorTrust = 58_982
 )
 
-// The stopgap fallback row: pool UID 169 at 1/10 and reserve UIDs 170 and
-// 250 at 9/20 each, max-normalized as the chain stores it. It ranks no head
-// fleet, so incentive read under it is stale.
-var snIncentiveFallbackRow = []model.SnWeightEntry{{Uid: 169, Value: 14563}, {Uid: 170, Value: 65535}, {Uid: 250, Value: 65535}}
+// The stopgap fallback rows: a pool UID at 1/10 and reserve UIDs 170 and 250
+// at 9/20 each, max-normalized as the chain stores them. The pool is settlement
+// vault 2's, UID 67, since November 2026, and was the v1 vault's, UID 169,
+// before. Neither ranks a head fleet, so incentive read under either is stale.
+var snIncentiveFallbackRows = [][]model.SnWeightEntry{
+	{{Uid: 67, Value: 14563}, {Uid: 170, Value: 65535}, {Uid: 250, Value: 65535}},
+	{{Uid: 169, Value: 14563}, {Uid: 170, Value: 65535}, {Uid: 250, Value: 65535}},
+}
 
 // The native reads of the reader. CoreStClient implements it; tests supply a
 // recorded chain.
@@ -302,7 +306,7 @@ func snIncentiveSnapshot(census *stmetagraph.Census, validatorHotkeys [][32]byte
 	snapshot.ReferenceUid = &referenceUid
 	snapshot.ReferenceLastUpdate = census.LastUpdate[referenceUid]
 	snapshot.ReferenceValidatorTrust = census.ValidatorTrust[referenceUid]
-	if row, read := rows[referenceUid]; read && slices.Equal(row, snIncentiveFallbackRow) {
+	if row, read := rows[referenceUid]; read && slices.ContainsFunc(snIncentiveFallbackRows, func(fallback []model.SnWeightEntry) bool { return slices.Equal(row, fallback) }) {
 		snapshot.FallbackRow = true
 		snapshot.StaleReasons = append(snapshot.StaleReasons, model.SnIncentiveStaleFallbackRow)
 	}

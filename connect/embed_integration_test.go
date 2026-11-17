@@ -152,6 +152,16 @@ func TestExchangeAclGroupIsolatesAPeer(t *testing.T) {
 // usage stops new contracts (a hard stop once the rollup has run), and raising
 // the cap resumes traffic.
 func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
+	testExchangeDataCapPausesStopsAndResumesTraffic(t, localDeliveryTestTcp)
+}
+
+// The same caps with the payer's traffic delivered in process to the
+// provider's resident in the one exchange.
+func TestExchangeDataCapPausesStopsAndResumesTrafficInProcess(t *testing.T) {
+	testExchangeDataCapPausesStopsAndResumesTraffic(t, localDeliveryTestInProcess)
+}
+
+func testExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -161,8 +171,12 @@ func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
 		model.Testing_ResetClientDataCapState()
 		defer model.Testing_ResetClientDataCapState()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t)
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.apply)
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		// the provider and the payer share the one exchange, so their
+		// transports and the payer's forwards to the provider attach in process
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 		model.Testing_EnableNetworkEmbed(ctx, env.networkId)
 
 		// a public provider in its own network
@@ -276,10 +290,10 @@ func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
 	})
 }
 
-// With enforcement on and a one-client tier, an ordinary client past the tier
-// is kicked at connection and creation answers upgrade_required. An Embed plan
-// allowance of three lifts both gates, and the allowance is itself enforced
-// once three clients are connected.
+// With enforcement on and a one-client free tier, an ordinary client past the
+// tier is kicked at connection and creation answers upgrade_required, since the
+// Pro tier (two) lifts it. An Embed plan allowance of three lifts both gates,
+// and the allowance is itself enforced once three clients are connected.
 func TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit(t *testing.T) {
 	if testing.Short() {
 		return
@@ -288,7 +302,7 @@ func TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		defer model.Testing_SetEnforceConcurrentClients(true)()
-		defer model.Testing_SetConcurrentClientsLimit(1, 1)()
+		defer model.Testing_SetConcurrentClientsLimit(1, 2)()
 		defer model.Testing_ClearNetworkClientLimitCache()
 		testServer := newProviderIntentTestServer(t, ctx)
 		userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(testServer.networkId, testServer.userId, testServer.networkName, false, false))

@@ -72,6 +72,16 @@ func watchPeerBlip(ctx context.Context, observer *connect.Client, watchedClientI
 // Requires the test DB env (WARP_ENV=local + postgres/redis/vault), like the
 // rest of this package; skipped under -short.
 func TestExchangeDrainExcuseE2e(t *testing.T) {
+	testExchangeDrainExcuseE2e(t, localDeliveryTestTcp)
+}
+
+// The same drain with each transport delivered in process to its resident in
+// the one exchange, and the forwards between them.
+func TestExchangeDrainExcuseE2eInProcess(t *testing.T) {
+	testExchangeDrainExcuseE2e(t, localDeliveryTestInProcess)
+}
+
+func testExchangeDrainExcuseE2e(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -86,7 +96,7 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 		drainAllTimeout := 3 * time.Second
 
 		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t,
-			func(exchangeSettings *ExchangeSettings) {
+			delivery.after(func(exchangeSettings *ExchangeSettings) {
 				exchangeSettings.EnableDrainExcuse = true
 				// the clients must be able to redial this same service
 				exchangeSettings.EnableDrainCoordination = false
@@ -94,7 +104,7 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 				exchangeSettings.DrainAllTimeout = drainAllTimeout
 				exchangeSettings.DrainStragglerSweepTimeout = 2 * time.Second
 				exchangeSettings.DrainOneTimeout = 50 * time.Millisecond
-			},
+			}),
 			func(handlerSettings *ConnectHandlerSettings) {
 				handlerSettings.ConnectionAnnounceTimeout = 100 * time.Millisecond
 				handlerSettings.ConnectionAnnounceSettings.SyncConnectionTimeout = 200 * time.Millisecond
@@ -112,6 +122,9 @@ func TestExchangeDrainExcuseE2e(t *testing.T) {
 				}
 			})
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		// both transports' residents are in the one exchange
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 0)
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
 			Description: "drain a",
@@ -399,6 +412,16 @@ func (self *migratingTransport) Close() {
 // Requires the test DB env (WARP_ENV=local + postgres/redis/vault), like the
 // rest of this package; skipped under -short.
 func TestExchangeDrainMigrateE2e(t *testing.T) {
+	testExchangeDrainMigrateE2e(t, localDeliveryTestTcp)
+}
+
+// The same migration with transports and forwards to a resident of their own
+// exchange delivered in process, and across the two exchanges over the socket.
+func TestExchangeDrainMigrateE2eInProcess(t *testing.T) {
+	testExchangeDrainMigrateE2e(t, localDeliveryTestInProcess)
+}
+
+func testExchangeDrainMigrateE2e(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -434,10 +457,14 @@ func TestExchangeDrainMigrateE2e(t *testing.T) {
 			}
 		}
 
-		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, mutateHandlerSettings)
+		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.after(mutateExchangeSettings), mutateHandlerSettings)
 		defer env1.Close()
-		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, mutateExchangeSettings, mutateHandlerSettings)
+		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.after(mutateExchangeSettings), mutateHandlerSettings)
 		defer env2.Close()
+		delivery.requireExchange(t, env1.exchange)
+		delivery.requireExchange(t, env2.exchange)
+		// the clients start on env1 with their residents there
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 0)
 
 		lb := newTestLb(t, 0, env1.port)
 		defer lb.Close()

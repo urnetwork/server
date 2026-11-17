@@ -283,8 +283,15 @@ var egressProbePoolFetchesTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "pool_fetches_total",
-	Help:      "Destination-pool fetches at the start of a pass by result: server (the served pool) or builtin (the fetch failed and the built-in table was probed instead)",
+	Help:      "Destination-pool fetches at the start of a pass, URL passes included, by result: server (the served pool) or unavailable (no usable pool was served, and the pass measured no destination; there is no built-in table to fall back to)",
 }, []string{"result"})
+
+// The results of a pool fetch, the result label of
+// urnetwork_egress_probe_pool_fetches_total.
+const (
+	egressProbePoolServed      = "server"
+	egressProbePoolUnavailable = "unavailable"
+)
 
 var egressProbePassErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
@@ -406,7 +413,7 @@ func preseedEgressProbePassMetrics() {
 		egressProbePassNotMeasuredTotal.WithLabelValues(schedule)
 		egressProbeBatchGuardTripsTotal.WithLabelValues(schedule)
 	}
-	for _, result := range []string{"server", "builtin"} {
+	for _, result := range []string{egressProbePoolServed, egressProbePoolUnavailable} {
 		egressProbePoolFetchesTotal.WithLabelValues(result)
 	}
 }
@@ -633,11 +640,20 @@ func (self *egressProbeMetricsReporter) submitEgressHealthScored(
 		if 0 < res.Total {
 			egressProbeHealthRatio.Observe(float64(res.OkCount) / float64(res.Total))
 		}
+		// a URL turn's own timing of its sampled request, by the same country
+		observeUrlProbePerformance(country, urlProbeEvidenceOf(measured, scored))
 	}
 	err := self.inner.SubmitEgressHealth(ctx, providerClientId, scored)
 	if err == nil && scored != nil && !scored.CycleStartedAt.IsZero() {
 		urlProbeOutcomes.WithLabelValues("success").Add(float64(scored.OkCount))
 		urlProbeOutcomes.WithLabelValues("error").Add(float64(scored.Total - scored.OkCount))
+		// every leg the acknowledged turn measured, probationary loads
+		// included: the transports are the provider's, whatever the site
+		observeUrlProbeTransportOutcomes(measured)
+		// and a post-quantum turn's end-to-end session
+		observeUrlProbeE2eOutcome(measured)
+		// and every HTTP/3 leg its provider's country turned off
+		observeUrlProbeUdpCountryDisabled(measured, func() string { return self.country(ctx, providerClientId) })
 	}
 	// A nil result is the ingest client's intentional no-request path.
 	if scored != nil {
@@ -674,6 +690,7 @@ func (self *egressProbeMetricsReporter) SubmitBandwidth(
 	sampleByteCount int64,
 ) error {
 	egressProbeBandwidthBytesPerSecond.WithLabelValues(source).Observe(bytesPerSecond)
+	egressProbeBandwidthCountryBytesPerSecond.WithLabelValues(source, self.country(ctx, providerClientId)).Observe(bytesPerSecond)
 	return self.inner.SubmitBandwidth(ctx, providerClientId, source, bytesPerSecond, sampleByteCount)
 }
 

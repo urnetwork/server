@@ -25,6 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		poolRoleSuperuser := migrationPoolRoleSuperuserForTest(t, ctx)
 		for head := 793; head <= server.MigrationCount(); head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
@@ -41,7 +42,7 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 					// what it keeps
 					continue
 				}
-				if present := migrationBool(row[artifact.rowColumn]); present != (artifact.requiredVersion <= head) {
+				if present := migrationBool(row[artifact.rowColumn]); present != migrationCurrentSuffixExpectedPresenceForTest(artifact, head, poolRoleSuperuser) {
 					t.Fatalf("prefix %d artifact %d=%t", head, artifact.requiredVersion, present)
 				}
 			}
@@ -50,6 +51,14 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 }
 
 func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
+	// The explicit distributed successor carries the admitted-claim chain's
+	// complete historical custody; no unrelated future retirement is accepted.
+	custodian := migrationDistributedRecoveryTestOwner(t, server.CompetitionExecutorAdmissionClaimMigrationVersion(), server.MigrationCount()).requiredVersion
+	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
+	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
+	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()
+	amendedEquivalenceGuard := server.CompetitionExecutorControlAmendmentBodiesSql().EquivalenceGuard
+	amendedHostsReady := server.CompetitionExecutorControlAmendmentBodiesSql().HostsReady
 	faults := []struct {
 		name    string
 		version int
@@ -149,22 +158,35 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{"missing App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction DROP COLUMN currency`},
 		{"invented App Store transaction currency", 823, `ALTER TABLE apple_subscription_transaction ALTER COLUMN currency SET DEFAULT 'USD'`},
 		// the journal's partition preparation republishes the 824 custody, and
-		// the horizon drop guard republishes it after
-		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
-		{"provider session head accepts a zero sequence", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
-		{"provider session retire lookup unbounded again", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+		// the horizon drop guard, the legacy drop guard, the append for
+		// provider clients only and the head retention guard republish it
+		// after
+		{"dropped provider session transaction index rebuilt", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE INDEX provider_work_session_event_transaction ON provider_work_session_event (transaction_id, client_id, sequence)`},
+		{"provider session head accepts a zero sequence", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
+		{"provider session retire lookup unbounded again", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
 			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderSessionAppendBody)},
-		{"provider session admit floor not immutable", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
-		{"provider session receipt reference dropped", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
-		{"provider session receipt reference disabled", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
-		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
-		{"provider session drop guard admits every drop", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
-		{"provider session drop guard back at 13 weeks", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), func() string {
+		{"provider session append journals every client again", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), func() string {
+			_, sessionAppend, _, _ := server.ProviderWorkSessionPartitionBodiesSql()
+			return `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(sessionAppend)
+		}()},
+		{"provider session head guard admits every delete", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN IF TG_OP=''DELETE'' THEN RETURN OLD; END IF; RETURN NEW; END'`},
+		{"provider session head guard without the head retention", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(snMainnetProviderHeadBody)},
+		{"provider session append journals network clients", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
+			RETURNS bigint LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(strings.ReplaceAll(server.ProviderWorkSessionProviderAppendBodySql(), "provide_mode IN (2,3)", "provide_mode IN (1,2,3)"))},
+		{"provider session admit floor not immutable", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER FUNCTION provider_work_session_admit_floor(uuid) STABLE`},
+		{"provider session receipt reference dropped", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `DROP TRIGGER provider_work_session_receipt_reference ON provider_work_session_receipt`},
+		{"provider session receipt reference disabled", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER provider_work_session_receipt_reference`},
+		{"provider session receipt depends on a mutable parent", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_receipt ADD CONSTRAINT synthetic_receipt_client FOREIGN KEY (client_id) REFERENCES network_client(client_id) NOT VALID`},
+		{"provider session drop guard admits every drop", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS 'BEGIN END'`},
+		{"provider session drop guard back at 13 weeks", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), func() string {
 			_, _, _, dropGuard := server.ProviderWorkSessionPartitionBodiesSql()
 			return `CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(dropGuard)
 		}()},
-		{"provider session journal row guard disabled", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
-		{"provider session journal partitioned by sequence", server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
+		{"provider session drop guard without the legacy partition's early drop", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(),
+			`CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(server.ProviderWorkSessionEventHorizonDropGuardBodySql())},
+		{"provider session journal row guard disabled", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_event DISABLE TRIGGER original_guard`},
+		{"provider session journal partitioned by sequence", server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), `ALTER TABLE provider_work_session_event RENAME TO synthetic_plain_journal;
 			CREATE TABLE provider_work_session_event (LIKE synthetic_plain_journal INCLUDING ALL) PARTITION BY RANGE (sequence)`},
 		// the horizon guard republishes the 825 custody, including the dropped
 		// index, after 857 and the move guard
@@ -234,8 +256,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
-		{name: "elected-winner review guard dropped", version: 900, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
-		{name: "elected-winner checkpoint guard dropped", version: 900, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		// the intake-first custody of these guards moved to the review handoff,
+		// which re-created their functions, and on with the handoff's custody
+		// to the official review, the executor control amendment, the
+		// qualification recovery and the admission exception
+		{name: "elected-winner review guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
 		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
 		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
@@ -244,10 +270,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''original contract close reports are immutable''; END'`},
 		{name: "close evidence guard back at its 91-day retention", version: contractCloseEvidenceHorizonGuardMigrationVersion, sql: `CREATE OR REPLACE FUNCTION contract_close_report_evidence_guard() RETURNS trigger
 			LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(server.ContractCloseEvidenceMoveGuardBodySql())},
-		{name: "key history guard back on its fixed 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION st_client_key_history_immutable_guard()
+		{name: "key history guard back on its fixed 91 days", version: server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION st_client_key_history_immutable_guard()
 			RETURNS trigger LANGUAGE plpgsql AS $guard$` + server.ClientKeyHistoryGuardBodySql() + `$guard$`},
-		{name: "key history floor rolled back to 91 days", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: server.ClientKeyHistoryRetentionFloorRollbackSql},
-		{name: "key history floor made immutable", version: server.ClientKeyHistoryRetentionFloorMigrationVersion(), sql: `ALTER FUNCTION st_client_key_history_retention_floor() IMMUTABLE`},
+		{name: "key history floor rolled back to 91 days", version: server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), sql: server.ClientKeyHistoryRetentionFloorRollbackSql},
+		{name: "key history floor back at 30 days", version: server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION st_client_key_history_retention_floor()
+			RETURNS interval LANGUAGE sql STABLE AS $floor$` + server.ClientKeyHistoryRetentionFloorBodySql() + `$floor$`},
+		{name: "key history floor made immutable", version: server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(), sql: `ALTER FUNCTION st_client_key_history_retention_floor() IMMUTABLE`},
 		{name: "task queue pages filled again", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task RESET (fillfactor)`},
 		{name: "task queue pages filled to 70", version: server.TaskHeartbeatFillfactorMigrationVersion(), sql: `ALTER TABLE pending_task SET (fillfactor = 70)`},
 		{name: "legacy auth attempt table recreated", version: server.WritePathMigrationVersion(server.WritePathUserAuthAttemptDrop), sql: `CREATE TABLE user_auth_attempt (user_auth_attempt_id uuid PRIMARY KEY)`},
@@ -255,11 +283,12 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "transfer balance pages filled", version: server.WritePathMigrationVersion(server.WritePathTransferBalanceFillfactor), sql: `ALTER TABLE transfer_balance RESET (fillfactor)`},
 		{name: "device pages filled", version: server.WritePathMigrationVersion(server.WritePathDeviceFillfactor), sql: `ALTER TABLE device SET (fillfactor = 100)`},
 		{name: "search provider stats pages filled", version: server.WritePathMigrationVersion(server.WritePathSearchProviderStatsFillfactor), sql: `ALTER TABLE search_provider_stats RESET (fillfactor)`},
-		{name: "missing debit journal age index", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
-		{name: "debit journal age index keys applied", version: server.WritePathMigrationVersion(server.WritePathDebitJournalShardTimeIndex), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "dropped debit journal applied age index rebuilt", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
-		{name: "debit journal shard index missing", version: server.WritePathMigrationVersion(server.WritePathDebitJournalAgeIndexDrop), sql: `DROP INDEX transfer_debit_journal_shard`},
-		{name: "debit journal pages filled", version: server.WritePathMigrationVersion(server.WritePathDebitJournalFillfactor), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "missing debit journal age index", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard_create_time`},
+		{name: "debit journal age index keys applied", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard_create_time; CREATE INDEX transfer_debit_journal_shard_create_time ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "dropped debit journal applied age index rebuilt", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `CREATE INDEX transfer_debit_journal_age ON transfer_debit_journal (shard, applied, create_time)`},
+		{name: "debit journal shard index missing", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `DROP INDEX transfer_debit_journal_shard`},
+		{name: "debit journal pages filled", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `ALTER TABLE transfer_debit_journal RESET (fillfactor)`},
+		{name: "debit journal drop guard admits every drop", version: server.TransferDebitJournalDropGuardMigrationVersion(), sql: `CREATE OR REPLACE FUNCTION transfer_debit_journal_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS $$BEGIN END$$`},
 		{name: "dropped full probe deadline index rebuilt", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `CREATE INDEX provider_egress_probe_cycle_next_attempt ON provider_egress_probe_cycle (next_attempt_at, client_id)`},
 		{name: "probe queue identity missing", version: server.WritePathMigrationVersion(server.WritePathProbeCycleNextAttemptIndexDrop), sql: `ALTER TABLE provider_egress_probe_cycle DROP CONSTRAINT provider_egress_probe_cycle_pkey`},
 		{name: "dropped client score window index rebuilt", version: server.WritePathMigrationVersion(server.WritePathClientScoreWindowIndexDrop), sql: `CREATE INDEX client_connection_reliability_score_lookback_max_block ON client_connection_reliability_score (lookback_index, max_block_number)`},
@@ -280,6 +309,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "dropped reap-pending contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), sql: `CREATE INDEX transfer_contract_reap_pending_create_time ON transfer_contract (create_time) WHERE reap_time IS NULL AND close_time IS NOT NULL`},
 		{name: "dropped stream index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), sql: `CREATE INDEX transfer_contract_stream_id ON transfer_contract (stream_id) WHERE stream_id IS NOT NULL`},
 		{name: "dropped sweep payment index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), sql: `CREATE INDEX transfer_escrow_sweep_payment_id ON transfer_escrow_sweep (payment_id)`},
+		{name: "dropped contract create-time index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), sql: `CREATE INDEX transfer_contract_create_time ON transfer_contract (create_time, open, contract_id)`},
+		{name: "dropped open payer contract index rebuilt", version: server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), sql: `CREATE INDEX transfer_contract_open_payer_network_id_transfer_byte_count ON transfer_contract (open, payer_network_id, transfer_byte_count)`},
 		// The retired queue's guard, function and key stay gone; its empty
 		// table keeps the published shape.
 		{name: "retired legacy settlement guard function restored", version: server.LegacySettlementIntentRetirementMigrationVersion(),
@@ -296,6 +327,228 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
 		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
 			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
+		// A new TLS finding is pending until judged; a provider default would
+		// exclude on arrival, and a missing column breaks every reader.
+		{name: "TLS finding verdict missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict`},
+		{name: "TLS finding verdict defaults to excluding", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security ALTER COLUMN tls_verdict SET DEFAULT 1`},
+		{name: "TLS finding decided failure missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict_measured_at`},
+		// Without the clearing column every legacy flag reader fails; a
+		// default would clear every flag at once.
+		{name: "legacy TLS flag clearing missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_cleared_at`},
+		{name: "legacy TLS flag cleared by default", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health ALTER COLUMN legacy_tls_cleared_at SET DEFAULT now()`},
+		{name: "legacy TLS recheck start missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
+		// The pending review handoff: an owner, call or completion row only
+		// through its guard, an append-only ledger, an operator-only import,
+		// and the exact winner-review bodies it re-created. The official review,
+		// the executor control amendment, the qualification recovery and the
+		// admission exception carry this custody on.
+		{name: "review handoff owner guard disabled", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff DISABLE TRIGGER competition_review_handoff_before_insert`},
+		{name: "review handoff calls made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_review_handoff_call_immutable ON competition_review_handoff_call`},
+		{name: "review handoff call kinds widened", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff_call DROP CONSTRAINT competition_review_handoff_call_kind_check`},
+		{name: "review handoff decision made repeatable", version: custodian,
+			sql: `ALTER TABLE competition_review_handoff DROP CONSTRAINT competition_review_handoff_round_id_decision_sha256_key`},
+		{name: "pending review import unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_review_handoff_import_before_insert ON competition_integrity_review`},
+		{name: "pending review observed at any time", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
+		{name: "winner source authorization accepts any handoff", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
+		// An older release's outcome must read as the scored general outcome
+		// it was counted as; a probation default would take every outcome an
+		// older release stores out of the eight-hour window, and a missing
+		// column breaks every window reader.
+		{name: "URL outcome source missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history DROP COLUMN url_source`},
+		{name: "URL outcome probation defaults to unscored", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation SET DEFAULT true`},
+		{name: "URL outcome probation nullable", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation DROP NOT NULL`},
+		// A country site scores only once the refresh graduates it: a scored
+		// default would score every new site on arrival, and without the
+		// state or the pair tally the ingest fails.
+		{name: "country site state missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site`},
+		{name: "country site scored by default", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site ALTER COLUMN scored SET DEFAULT true`},
+		{name: "country site pair tally missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site_tally`},
+		// The refresh sums the tally by the network each row carries, and a
+		// row is updated about six times a day: without the column the ingest
+		// fails, and full pages turn those updates into index writes.
+		{name: "country site pair tally without its networks", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally DROP COLUMN network_id`},
+		{name: "country site pair tally pages filled", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally RESET (fillfactor)`},
+		// A zero-carry verdict excludes only until its expiry, one row per
+		// provider: without the expiry every reader fails, and without the
+		// key a provider could hold two verdicts.
+		{name: "zero-carry verdict expiry missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN expire_time`},
+		{name: "zero-carry verdicts unkeyed", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
+		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
+		// The epoch-one official review: an authorization row only through its
+		// guard and never changed, bound to its round, and the exact review
+		// bodies it re-created with the official review exception, so the
+		// handoff's winner review body and the two-member identity body are
+		// drift from it on. The executor control amendment, the qualification
+		// recovery and the admission exception carry this custody on.
+		{name: "official review authorization unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_official_review_authorization_before_insert ON competition_official_review_authorization`},
+		{name: "official review authorization made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_official_review_immutable ON competition_official_review_authorization`},
+		{name: "official review authorization without its round", version: custodian,
+			sql: `ALTER TABLE competition_official_review_authorization DROP CONSTRAINT competition_official_review_authorization_round_id_fkey`},
+		{name: "official review findings accept anything", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_findings_valid(request jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT true'`},
+		{name: "official review authorized without its import", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_request_authorized(round_uuid uuid, request jsonb) RETURNS boolean LANGUAGE sql STABLE AS 'SELECT true'`},
+		{name: "winner review guard back on the handoff body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_review_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(handoffBodies.WinnerReviewGuard)},
+		{name: "review identity guard back on the two-member body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_review_identity_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(twoMemberIdentityGuard)},
+		// The executor control amendment: an amendment only through its guard,
+		// never changed or truncated, its canonical bytes bound to its JSON; a
+		// no-op receipt and a qualification clock bound to the current
+		// amendment; the amended host identity and its started-job lookup; and
+		// the exact equivalence guard it re-created, so the unamended host
+		// lookup is drift from it on. The qualification recovery and the
+		// admission exception carry this custody on.
+		{name: "executor control amendment unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_amendment_identity ON competition_executor_control_amendment`},
+		{name: "executor control amendment made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_amendment_append_only ON competition_executor_control_amendment`},
+		{name: "executor control amendment truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_control_amendment DISABLE TRIGGER competition_executor_control_amendment_no_truncate`},
+		{name: "executor control amendment canonical bytes unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_control_amendment DROP CONSTRAINT competition_executor_control_amendment_check`},
+		{name: "no-op receipt ignores the amendment", version: custodian,
+			sql: `DROP TRIGGER competition_executor_control_receipt_identity ON competition_executor_equivalence`},
+		{name: "stale coordinator starts a host-admission clock", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_run DISABLE TRIGGER competition_executor_control_qualification_identity`},
+		{name: "amended host identity ignored", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_host(target uuid, identity text) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb'`},
+		{name: "started job lookup missing", version: custodian,
+			sql: `DROP INDEX competition_executor_control_started_job`},
+		{name: "equivalence guard back on the unamended host lookup", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(unamendedEquivalenceGuard)},
+		// Pay with Gamma: the unique indexes carry the biller's invariants. A
+		// derivation index assigns one deposit hotkey, an automatic intent is
+		// made once per account, purpose and period, an intent's reference and
+		// its charge are unique, and at most one spend batch is live; an
+		// account renews unless it turns renewal off.
+		{name: "gamma deposit hotkey derivation reusable", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_deposit_hotkey_index_unique`},
+		{name: "gamma automatic intent repeatable per period", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_period`},
+		{name: "gamma intent reference shared", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_reference`},
+		{name: "gamma intent charged twice", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_charge_intent`},
+		{name: "two live gamma spend batches", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_spend_batch_live; CREATE INDEX gamma_spend_batch_live ON gamma_spend_batch ((true)) WHERE state IN ('signed', 'submitted')`},
+		{name: "gamma renewal off by default", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_account ALTER COLUMN auto_renew SET DEFAULT false`},
+		{name: "gamma chain state not a singleton", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_chain_state DROP CONSTRAINT gamma_chain_state_singleton_check`},
+		// The single-use qualification recovery: a replacement only through its
+		// guard, never changed or truncated, bound to its original run and its
+		// exact digest; one replacement job per host that never becomes a public
+		// submission; a clock that reads the replacement; and the exact
+		// equivalence guard it re-created, so the amendment's body is drift from
+		// it on. The admission exception carries this custody on.
+		{name: "qualification recovery unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_qualification_recovery_identity ON competition_executor_qualification_recovery`},
+		{name: "qualification recovery made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_qualification_recovery_append_only ON competition_executor_qualification_recovery`},
+		{name: "qualification recovery truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DISABLE TRIGGER competition_executor_qualification_recovery_no_truncate`},
+		{name: "qualification recovery without its original run", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recove_round_id_host_id_fkey`},
+		{name: "qualification recovery authorization digest unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recovery_check1`},
+		{name: "qualification recovery job reusable", version: custodian,
+			sql: `ALTER TABLE competition_executor_qualification_recovery DROP CONSTRAINT competition_executor_qualification_recovery_job_id_key`},
+		{name: "replacement qualification job becomes a submission", version: custodian,
+			sql: `DROP TRIGGER zz_competition_executor_recovery_job_identity ON competition_job`},
+		{name: "qualification clock ignores the replacement", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_qualification_clock(target uuid, identity text) RETURNS TABLE(job_id uuid, started_at timestamp, deadline_at timestamp, api_image_digest varchar, worker_image_digest varchar) LANGUAGE sql STABLE AS 'SELECT q.job_id, q.started_at, q.deadline_at, q.api_image_digest, q.worker_image_digest FROM competition_executor_qualification_run q WHERE q.round_id=target AND q.host_id=identity'`},
+		{name: "equivalence guard back on the amendment body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedEquivalenceGuard)},
+		// The retained host admission exception: an exception only through its
+		// guard, never changed or truncated, bound to its round and to its exact
+		// receipt digest; the admitted evidence view over both receipt sources;
+		// and the exact whole-host readiness it re-created, so the amendment's
+		// readiness body is drift from it on.
+		{name: "admission exception unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_identity ON competition_executor_admission_exception`},
+		{name: "admission exception made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_append_only ON competition_executor_admission_exception`},
+		{name: "admission exception truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DISABLE TRIGGER competition_executor_admission_exception_no_truncate`},
+		{name: "admission exception without its round", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_round_id_fkey`},
+		{name: "admission exception receipt digest unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_check3`},
+		{name: "admitted evidence omits the exceptions", version: custodian,
+			sql: `CREATE OR REPLACE VIEW competition_executor_admitted_evidence AS SELECT round_id, host_id, receipt_json, receipt_sha256, baseline_sha256, created_at FROM competition_executor_equivalence`},
+		{name: "whole-host readiness back on the amendment body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_hosts_ready(target uuid) RETURNS boolean LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedHostsReady)},
+		// The onboarding distribution is required with an empty default, so an
+		// older release's insert, which does not name it, stores the empty
+		// distribution; through the signal now that the catalog reaches it.
+		{name: "onboarding distribution nullable", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP NOT NULL`},
+		{name: "onboarding distribution without its default", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP DEFAULT`},
+		// The ping target evidence count is nullable with no default, so the
+		// rows a release from before it stores read unknown rather than none.
+		{name: "ping target evidence count defaults to none", version: server.NetworkPingTargetEvidenceSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_ping_target_hour_tally ALTER COLUMN evidence_rejection_count SET DEFAULT 0`},
+		// An extender address's ports are nullable with no default, so an
+		// address the running release stores reads null, the extender's ports
+		// (connect/EXTENDER.md S10), never a port of 0.
+		{name: "extender address tcp port defaults to zero", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `ALTER TABLE network_extender_address ALTER COLUMN tcp_port SET DEFAULT 0`},
+		{name: "extender address udp port required", version: server.NetworkExtenderAddressPortsSchemaMigrationVersion(),
+			sql: `UPDATE network_extender_address SET udp_port = 443; ALTER TABLE network_extender_address ALTER COLUMN udp_port SET NOT NULL`},
+		// A capture the flag award's network is read by its own index, so a
+		// network's wins outlive its clients' rows.
+		{name: "ctf award network index absent", version: server.CtfAwardNetworkMigrationVersion(),
+			sql: `DROP INDEX ctf_award_network`},
+		// A platform endpoint registration stays one of sidecar's three edges,
+		// the kinds the signed amendment entry covers, and an epoch row's
+		// extender component stays null for an epoch the amendment does not
+		// cover.
+		{name: "platform endpoint of any kind", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_platform_endpoint DROP CONSTRAINT st_platform_endpoint_kind_check`},
+		{name: "extender bytes default to zero", version: server.StLedgerV2ExtenderMigrationVersion(),
+			sql: `ALTER TABLE st_ledger_v2_epoch_rows ALTER COLUMN extender_bytes SET DEFAULT 0`},
+		// A URL outcome an older release stores reads no failed later leg and
+		// no post-quantum observation: a plain failure, never positive.
+		{name: "post-quantum outcome defaults to positive", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN pq_outcome SET DEFAULT 1`},
+		{name: "failed later legs nullable", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN failed_later_legs DROP NOT NULL`},
+	}
+	// Current-head fault expectations must name a custodian still active at
+	// that head; inherited guards transfer with the published contract.
+	for _, fault := range faults {
+		artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+		if artifact.requiredVersion > server.MigrationCount() ||
+			(artifact.removedVersion != 0 && artifact.removedVersion <= server.MigrationCount()) {
+			t.Fatalf("%s expects inactive migration owner %d at head %d", fault.name, fault.version, server.MigrationCount())
+		}
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
@@ -389,9 +642,10 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{817, "transfer_contract", "transfer_contract_pair_open_create_time"},
 				{818, "transfer_contract", "transfer_contract_open_destination_partial"},
 				{819, "pending_task", "pending_task_has_reschedule_error"},
-				// the horizon drop guard republishes the 824 custody after the
-				// journal's partition preparation
-				{server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
+				// the horizon drop guard, the legacy drop guard, the append for
+				// provider clients only and the head retention guard republish
+				// the 824 custody after the journal's partition preparation
+				{server.ProviderWorkSessionHeadRetentionGuardMigrationVersion(), "provider_work_session_event", "provider_work_session_event_transaction"},
 				// the horizon guard republishes the 825 custody after 857 and the
 				// move guard
 				{contractCloseEvidenceHorizonGuardMigrationVersion, "contract_close_report_evidence", "contract_close_report_evidence_contract"},
@@ -407,6 +661,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.IndexDietMigrationVersion(server.IndexDietReapPendingIndexDrop), "transfer_contract", "transfer_contract_reap_pending_create_time"},
 				{server.IndexDietMigrationVersion(server.IndexDietStreamIndexDrop), "transfer_contract", "transfer_contract_stream_id"},
 				{server.IndexDietMigrationVersion(server.IndexDietSweepPaymentIndexDrop), "transfer_escrow_sweep", "transfer_escrow_sweep_payment_id"},
+				{server.IndexDietMigrationVersion(server.IndexDietCreateTimeIndexDrop), "transfer_contract", "transfer_contract_create_time"},
+				{server.IndexDietMigrationVersion(server.IndexDietOpenPayerIndexDrop), "transfer_contract", "transfer_contract_open_payer_network_id_transfer_byte_count"},
 			} {
 				guard := migrationCurrentSuffixTestContract(t, index.version).query
 				var absent bool

@@ -107,7 +107,7 @@ func TestContractCreationSameNetworkLargeNContentionFree(t *testing.T) {
 					t.Fatal("independent processes did not overlap")
 				}
 				if left.Elapsed > 3*time.Second || right.Elapsed > 3*time.Second {
-					t.Fatal("contract admission throughput regression")
+					t.Fatalf("contract admission throughput regression: phase=create wave=%d count=%d local_completed=%d local_failed=%d remote_completed=%d remote_failed=%d local_classes=%v remote_classes=%v local_elapsed=%s remote_elapsed=%s", wave, count, left.Completed, left.Failed, right.Completed, right.Failed, left.Errors, right.Errors, left.Elapsed, right.Elapsed)
 				}
 				t.Logf("clients=%d processes=2 wave=%d completed=%d latency=%s/%s overlap=%s", count, wave, count, left.Elapsed, right.Elapsed, overlapEnd.Sub(overlapStart))
 			}()

@@ -41,6 +41,92 @@ func winnerModelIdentityScoreFixture(t *testing.T) winnerReviewBrokerRequest {
 	return request
 }
 
+// The immutable scorer document omits the derived worker eligibility field.
+// All values are synthetic identity evidence, not measured performance claims.
+func winnerModelProjectedScorerFixture(t *testing.T) winnerReviewBrokerRequest {
+	t.Helper()
+	request := winnerModelIdentityScoreFixture(t)
+	score := request.Packet.Entry.Score
+	normalized := 129.0
+	score.NormalizedScore, score.Placeable, score.TakeoverEligible = &normalized, true, true
+	score.Gates = map[string]model.CompetitionGate{"G1_success": {Passed: true, Details: map[string]any{"candidate": 0.99}}}
+	score.Significance = &model.CompetitionScoreSignificance{Method: "synthetic-method", ReplicateCount: 9}
+	score.Diagnostics["baseline_takeover_eligible"] = true
+	content, err := json.MarshalIndent(map[string]any{
+		"score_schema": score.ScoreSchema, "raw_score": score.RawScore, "normalized_score": score.NormalizedScore,
+		"placeable": score.Placeable, "gates": score.Gates, "significance": score.Significance,
+		"diagnostics": score.Diagnostics, "eval_error": nil,
+	}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Packet.Score = content
+	digest := sha256.Sum256(content)
+	request.Template.ScoreSha256 = hex.EncodeToString(digest[:])
+	request.Packet.Entry.ScoreSha256 = request.Template.ScoreSha256
+	return request
+}
+
+// Exported scorer bytes must reach every review provider unchanged while their
+// exact worker projection, not a raw typed decode, matches the sealed score.
+func TestWinnerReviewModelInputProjectsAuthenticatedScorerDocument(t *testing.T) {
+	request := winnerModelProjectedScorerFixture(t)
+	before := bytes.Clone(request.Packet.Score)
+	var unprojected model.CompetitionScoreResult
+	if json.Unmarshal(before, &unprojected) != nil || unprojected.TakeoverEligible || !request.Packet.Entry.Score.TakeoverEligible ||
+		bytes.Contains(before, []byte(`"takeover_eligible"`)) {
+		t.Fatal("fixture does not reproduce the scorer-to-worker projection")
+	}
+	if _, err := winnerModelInput(request); err != nil {
+		t.Fatal("authentic-shaped scorer document was refused", err)
+	}
+	if !bytes.Equal(before, request.Packet.Score) || !request.Packet.Entry.Score.TakeoverEligible {
+		t.Fatal("review input mutated original scorer bytes or sealed eligibility")
+	}
+}
+
+// Projecting the derived flag must not suppress disagreements in any score
+// facts, including the diagnostic used to derive that flag.
+func TestWinnerReviewModelInputRejectsProjectedScoreDisagreements(t *testing.T) {
+	for _, sample := range []struct {
+		name   string
+		mutate func(*model.CompetitionScoreResult)
+	}{
+		{name: "raw score", mutate: func(score *model.CompetitionScoreResult) { *score.RawScore += 1 }},
+		{name: "normalized score", mutate: func(score *model.CompetitionScoreResult) { *score.NormalizedScore += 1 }},
+		{name: "placeability", mutate: func(score *model.CompetitionScoreResult) { score.Placeable = false }},
+		{name: "eligibility", mutate: func(score *model.CompetitionScoreResult) { score.TakeoverEligible = false }},
+		{name: "gates", mutate: func(score *model.CompetitionScoreResult) {
+			score.Gates["G1_success"] = model.CompetitionGate{Passed: false}
+		}},
+		{name: "significance", mutate: func(score *model.CompetitionScoreResult) { score.Significance.ReplicateCount++ }},
+		{name: "diagnostics", mutate: func(score *model.CompetitionScoreResult) { score.Diagnostics["baseline_takeover_eligible"] = false }},
+	} {
+		request := winnerModelProjectedScorerFixture(t)
+		sample.mutate(request.Packet.Entry.Score)
+		if _, err := winnerModelInput(request); err == nil || !strings.Contains(err.Error(), "sealed score differs") {
+			t.Fatalf("projected %s disagreement was accepted or failed outside score comparison: %v", sample.name, err)
+		}
+	}
+}
+
+// Rehashing an error-bearing scorer document cannot turn it into a successful
+// worker result, even when its numeric score and selected identities agree.
+func TestWinnerReviewModelInputRejectsScorerEvaluationError(t *testing.T) {
+	request := winnerModelProjectedScorerFixture(t)
+	content := bytes.Replace(request.Packet.Score, []byte(`"eval_error": null`), []byte(`"eval_error": {"kind":"infrastructure","code":"synthetic-error"}`), 1)
+	if bytes.Equal(content, request.Packet.Score) {
+		t.Fatal("fixture did not add its synthetic evaluation error")
+	}
+	request.Packet.Score = content
+	digest := sha256.Sum256(content)
+	request.Template.ScoreSha256 = hex.EncodeToString(digest[:])
+	request.Packet.Entry.ScoreSha256 = request.Template.ScoreSha256
+	if _, err := winnerModelInput(request); err == nil || !strings.Contains(err.Error(), "sealed score differs") {
+		t.Fatalf("scorer evaluation error was accepted: %v", err)
+	}
+}
+
 // Every frozen provider policy consumes the same coherent authenticated input.
 func TestWinnerReviewModelInputIdentityPreservesFrozenPolicies(t *testing.T) {
 	for _, policyName := range []string{model.CompetitionWinnerReviewPolicy, model.CompetitionLegacyWinnerReviewPolicy, model.CompetitionSnowWinnerReviewPolicy} {
@@ -106,7 +192,7 @@ func TestWinnerReviewModelInputRejectsStalePatchBeforeProviders(t *testing.T) {
 		if snow {
 			request, _ = winnerSnowJudgmentFixture()
 		}
-		request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("synthetic patch:"), []byte("synthetic replacement:"), 1)
+		request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("return len(packet)"), []byte("return 0"), 1)
 		digest := sha256.Sum256(request.Packet.Patch)
 		request.Template.PatchSha256 = hex.EncodeToString(digest[:])
 		calls := 0
@@ -259,7 +345,7 @@ func TestWinnerReviewModelInputLabelsPristineBaseWithoutMutation(t *testing.T) {
 	}
 	if !strings.Contains(semantics, "authenticated pristine source") || !strings.Contains(semantics, "before patch_text") ||
 		!strings.Contains(semantics, "not post-patch candidate source") || patch != string(request.Packet.Patch) ||
-		!reflect.DeepEqual(context.SourceFiles, request.SourceFiles) || strings.Contains(context.SourceFiles[0].Content, "synthetic patch:") {
+		!reflect.DeepEqual(context.SourceFiles, request.SourceFiles) || strings.Contains(context.SourceFiles[0].Content, "return len(packet)") {
 		t.Fatal("base source was confused with the resulting patched candidate")
 	}
 	after, err := json.Marshal(request)

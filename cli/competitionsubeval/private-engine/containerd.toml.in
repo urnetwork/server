@@ -1,0 +1,12 @@
+version = 3
+root = "@BASE_DIRECTORY@/candidate/containerd"
+state = "@BASE_DIRECTORY@/candidate/exec/containerd"
+disabled_plugins = ["io.containerd.cri.v1.images", "io.containerd.cri.v1.runtime"]
+[grpc]
+  address = "@BASE_DIRECTORY@/control/containerd.sock"
+  uid = 0
+  gid = 0
+[debug]
+  level = "error"
+[metrics]
+  address = ""

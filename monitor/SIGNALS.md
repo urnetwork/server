@@ -273,8 +273,10 @@ active missing capability and must not be read as green.
 | 2.2b | Conditional reader | `pg-freeze` reduces qualified native PG18 JSON duration records; existing JSON/verbose source prerequisites and full-window coverage are required. Missing prerequisites or partial coverage remain unknown. |
 | 2.5b | Runbook | `migrations` pins the retired queue: its guards and contract key dropped, its empty table kept until a later release drops it. The legacy settlement probe retired with the queue on 2026-10-24 (PARTITION-MAINTENANCE-PLAN.md, Part B). |
 | 2.5c | Runbook | `contract-rate`, `transfer-debits`, `open-contracts`, `task-health`, `migrations`, `pg-cpu`, `active-queries`, `wait-events`; exact target visitation and complete post-commit projection remain separately qualified evidence, not automatic probe coverage. |
+| 2.10 | Runbook | Retired 2026-11-13 with USDC provider payouts: no payment completion stamps contract retention. `retention-liveness` and `contract-horizon-reaper` watch contract retention. |
 | 2.11b | Coverage gap | `pgbouncer-backlog` (§26.1) implements replacement backlog and oldest-wait bands without a server-count gate; the original server-gated saturation proposal is superseded, and an exported average-wait read remains missing |
 | 2.11c | Coverage gap | `pgbouncer-stalls` checks that 6432 accepts a connection; the listener-count, per-worker balance, overflow and hop-latency reads are missing |
+| 2.14 | Runbook | Retired 2026-11-13 with USDC provider payouts: no Taskworker submits a Circle transfer. `credentials` checks the Circle API token that customer wallets still use. |
 | 5.1 | Runbook | `contract-rate`, `provider-connections`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -283,7 +285,7 @@ active missing capability and must not be read as green.
 | 5.6 | Runbook | `pg-state`, `pg-capacity`, `pool-retention`, `wait-events` |
 | 5.7 | Runbook | `task-canaries`, `task-health`, `stuck-leases`, `task-convergence`, `log-errors` |
 | 5.8 | Runbook | `active-queries`, `planner-flips`, `wait-events` |
-| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `circle-admission`, `key-publication` |
+| 5.9 | Runbook | `selection-freshness`, `selection-population`, `egress-coverage`, `egress-outcomes`, `key-publication` |
 | 5.10 | Runbook | `rollout-guard`, `provenance`, `log-errors`, `contract-rate`, `connection-rate` |
 | 5.12 | Runbook | `pgbouncer-pool-starvation`, `provider-connections`, `pgbouncer-stalls`, `pg-capacity`, `wait-events`, `host-load`, `connection-rate`, `log-errors`; freeze clusters use the conditional observed-log authority of §2.2b |
 | 5.13 | Runbook | `connection-orphans`, `pgbouncer-stalls`, `rollout-guard`, `task-convergence`; the handler-age read and the pool drain are direct operator checks |
@@ -1351,7 +1353,7 @@ WHERE function_name LIKE '%UpdateClient%'
   subscription, or payment rows to quiet the alert.
 - GOTCHA — one task family can still contain several causes. On 2026-08-30,
   `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
-  connection-cleanup deadlines from §2.10 retention, five
+  connection-cleanup deadlines from the payment-retention writer, five
   `processor-invalid-destination` 400s, and one processor 429. The
   highest-error representative belonged to the wallet class and made a
   single-cause explanation falsely describe the other 16 rows. The probe now
@@ -1360,53 +1362,7 @@ WHERE function_name LIKE '%UpdateClient%'
   family alert says it is mixed and builds its action and verification from
   only the classes present in that snapshot; stale guidance for an absent
   class is itself an alerting defect. A sample is evidence, not permission to
-  apply its diagnosis to every row. Keep invalid-destination separate from
-  generic processor 400s because only that typed, definitive pre-chain result
-  is safe to unpin (§5.7).
-- GOTCHA — a destination rejection and its failed reset are different phases.
-  `AdvancePayment` currently composes `Payment create transaction error: ...;
-  invalid destination reset error: ...`; retained older errors use ` = ` at
-  both separators. One shared pattern requires the complete paired form and
-  nonempty reset detail in the SQL, fixed task taxonomy, and log classifier.
-  Task and SQL classification additionally require `AdvancePayment` ownership.
-  The complete SQL error is classified as `invalid-destination-reset-failed`
-  before processor or persistence text. A lone suffix, mixed separators, or
-  ordinary destination rejection does not establish a failed reset.
-  Single-cause guidance uses that full-text class even when the representative
-  160-byte sample ends before the suffix. Mixed-family guidance includes this
-  reset/persistence action only when its class is present. Inspect concurrent,
-  terminal, or on-chain payment state and the guarded persistence outcome;
-  preserve the existing key and reconcile before another submission. Neither
-  a matching destination phrase nor a current source base proves successful
-  reset or unchanged account configuration. Never clear rows or keys manually.
-  An equals-only watcher misses the current colon form, so absence of this
-  class there is not reset-health evidence. The source mismatch alone cannot
-  assign an observed `other` cohort to reset failures; retain the original
-  complete-error observation and its source before attribution. Missing or
-  failed SQL/log observations remain unknown, and relabeling a failure does
-  not prove that payment recovery occurred.
-- The 2026-09-18 Main `AdvancePayment` investigation established the current
-  operations/configuration split with a bounded read-only primary query. Of
-  1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
-  nonterminal with its existing idempotency key and without a processor record
-  or chain hash, so they are source-wallet liquidity work, not a stuck-worker
-  or retry-reset defect. Thirty-eight rows had fresh claims; changing parked
-  and claim counts therefore describe scheduler state, not recovery. The two
-  `processor-invalid-destination` rows were also nonterminal and unpinned, and
-  selected current active, owned MATIC wallets whose address shape was not a
-  valid EVM address. That independently establishes an account-wallet
-  configuration fault, not a generic processor outage. The current selected
-  wallet is not evidence of source liquidity, and a stored rejection alone is
-  not evidence that a reset succeeded; retain both checks. One logical
-  provider attempt can emit two diagnostic lines, so line rate is not a task
-  count. Finance must verify/fund the exact source network/token wallet (or
-  authorize a payout pause), and the account owner/operator must submit the
-  valid intended destination through the supported account API. Do not deploy,
-  restart, replay, clear idempotency, accelerate retries, or retarget a pinned
-  payout to address either class. After authorized corrections, require an
-  independent 90-minute natural-retry window plus ingestion delay, intended
-  successful transfers without duplicates, and no new admission failures or
-  rate limits before closing both cohorts.
+  apply its diagnosis to every row.
 - The 2026-09-12 `SyncProductUpdatesForUser` incident is the transient
   non-payment control for `processor-bad-request`. At `13:59:32Z`, one
   first-error row had a fresh claim, was due immediately, and was explicitly
@@ -1447,292 +1403,20 @@ WHERE function_name LIKE '%UpdateClient%'
   operation and retry lifecycle; do not copy the provider message, contact, or
   request into evidence. A self-healed first error closes after the same task
   finishes and stays absent for the five-minute parked boundary.
-- GOTCHA — wallet insufficiency is an operational liquidity boundary, but its
-  retry shape can still contain a software amplification. Consecutive task
-  errors have a one-hour nominal cap. The old scheduler added only 0–2 seconds
-  of jitter at that cap, so rows created by one outage retained their narrow
-  wave forever. On 2026-08-31, 824 failing `AdvancePayment` rows would have
-  averaged 13.7 retries/minute if dispersed; instead a live wave reached
-  79/minute (69 rows also had a fresh claim heartbeat), and the processor
-  returned one 429 amid 817 wallet-insufficient rows. Ordinary 400
-  wallet-insufficient responses continued immediately afterward, separating
-  the bounded burst from a fleet-wide processor outage. The pre-fix cohort
-  recurred later the same day: wallet-insufficient output reached 86/minute at
-  15:40Z, Circle returned a second 429 at 15:40:52Z, and the next durable
-  snapshot changed from 817 wallet-insufficient plus one rate-limit row to 816
-  plus two while the family total remained 824. The wave continued: five
-  distinct wallet-insufficient attempts landed at 15:46:23Z before another
-  request received 429 in that same second; four attempts at 15:46:33Z then
-  preceded a fourth 429. The durable snapshot shifted to 815 plus three before
-  the fourth result was ingested and stayed there afterward: the cause
-  breakdown is each row's current last error, not a cumulative event counter,
-  so one row changing class can hide another 429. The immediate
-  `payment-processor-rate-limit` log class is the event signal; use the durable
-  breakdown only for the current retry population. Both taskworker groups were
-  still entirely on `2026.8.31-outerwerld+1033655820`; its embedded source
-  revision `1d8f01e5` predates the proportional-jitter fix. This exact temporal
-  and row-class conversion is evidence of cohort amplification, not a claim
-  that every 429 has that cause. The scheduler now jitters saturated retries
-  across 30–90 minutes with the same one-hour mean; its deterministic 824-row
-  synthetic cohort covers all 60 minute buckets with at most 14 rows in one
-  bucket. Deploy taskworker commit `70b0d269` or later and verify the narrow
-  hourly wave disappears and no new rate-limit row is created during the next
-  recurrence. This containment cannot create liquidity:
-  finance/ops must still fund the exact network/token wallet or pause payouts.
-  Never accelerate retries, delete pending rows, or rotate idempotency keys to
-  silence this class.
-  One logical Circle rejection normally produces two diagnostic lines: the
-  provider-boundary client record and the task evaluator record. The standing
-  alert now reports both raw `diagnostic_lines` and
-  `processor_rate_limit_events`, counting only exact-replay-deduplicated task
-  evaluator records for the latter. A lone provider line still alerts
-  fail-safe, but it renders a zero canonical count instead of being silently
-  divided by two. This matters during the live stale-build drain, where a
-  4/min line rate represented two logical 429 events and the durable current
-  row class advanced independently.
-- The standing tail derives `payout-retry-microburst` only from the fixed
-  `[circlec][transfer-admission] admitted observable=v1 ...` marker emitted
-  synchronously after the shared Redis gate admits and before the processor
-  POST. A stable-member command replay returns the original Redis TIME
-  admission second only while that reservation remains in the active rolling
-  window. A replay after cutoff obtains one fresh current slot/bucket before
-  the caller can return and POST. The tailer groups that returned field rather
-  than the host/logger timestamp and de-duplicates exact records across the
-  current and immediately previous drain window. A peak of four markers is
-  a direct violation of the three-admission rolling-second ceiling: all four
-  events within one Redis second also fit inside the one-second window ending
-  at the latest event. The process-local sequence
-  makes distinct admissions distinguishable without carrying a payment,
-  wallet, account, network, destination, token, request, or provider response.
-  The retained alert sample strips the Warp host/generation/correlation prefix.
-
-  Response and task-evaluator timestamps are deliberately excluded from this
-  invariant. They occur after POST and independent submissions admitted in
-  different seconds can complete together. Wallet evaluator records remain a
-  bounded correlation input for an actual processor 429, and
-  `payout-wallet-insufficient` remains the separate **operations/finance**
-  alert. A quiet admission-marker window is interpretable only while §2.14
-  proves the marker capability on every newest Taskworker and standing-tail
-  visibility/reconciliation is healthy; mixed rollout or missing telemetry is
-  unobservable, never zero. Close the software branch only after complete
-  capability coverage and a 90-minute window below four markers/second with
-  zero gate errors and zero processor 429s.
-
-  On 2026-09-12, the legacy evaluator-derived rule warned on four independent
-  wallet-rejection completions in one source second. The same bounded window
-  had 66 admitted transfers across five minutes, all eight newest Taskworkers
-  exposed the existing gate metrics, and admission deferrals, admission
-  errors, and processor 429s were all zero. That proves the sample was a real
-  response-completion cohort but does not prove an admission burst. The
-  admission marker and capability gauge correct that counting boundary without
-  changing payment semantics, retry timing, idempotency, or the limiter.
-
-  The older incident chronology below remains useful as response-cohort and
-  429 correlation evidence. Its evaluator-derived “microburst” observations
-  predate the direct marker and must not be read as admission-time measurements.
-
-  The standing implementation then caught the next recurrence live at
-  16:30–16:38Z. A bounded independent pull found 164 canonical
-  wallet-insufficient task attempts across all eight active taskworker
-  host/generation allocations. The peak was five attempts in
-  `2026-08-31T16:31:47Z`; the one logical 429 occurred in that same second and
-  appeared as the expected Circle-client plus task-evaluator diagnostic pair.
-  The standing windows independently alerted at four, five, four, and four
-  attempts/second. Both taskworker generations were still uniformly on
-  `2026.8.31-outerwerld+1033655820`, so this is direct post-probe validation of
-  the old-jitter diagnosis, not inferred recurrence from durable row counts.
-  The live alert also found an evidence bug: its stored sample came from the
-  first canonical attempt in the minute (16:31:33), not the actual five-event
-  peak second (16:31:47). The tailer now updates both `peak_source_second` and
-  its redacted sample whenever a later second exceeds the prior peak; a
-  deterministic sparse-first/peak-later regression prevents the alert from
-  presenting unrelated evidence again.
-
-  The next old-build recurrence exposed a second timestamp-evidence defect.
-  As the parked subset fell from 801 to 691, the independent canonical audit
-  found 39 attempts in three minutes and a four-attempt peak at
-  `2026-08-31T18:31:16Z`; the standing monitor independently opened
-  `payout-retry-microburst` with 28 canonical attempts from 56 diagnostic
-  lines. Its peak field rendered `2026-08-31T13:31:16` with no offset because
-  the parser stripped `-05:00` before storing the grouping key. Interpreting
-  that wall clock as UTC would shift correlation with Circle, PostgreSQL, and
-  kernel evidence by five hours. Burst timestamps now parse the complete
-  RFC3339 offset, normalize the instant to a whole UTC second, and render the
-  trailing `Z`; the redacted sample retains the original envelope. A
-  deterministic non-UTC-offset regression requires
-  `13:31:16-05:00` to render and group as `18:31:16Z`.
-
-  Post-roll validation on the clean `5c91a3c4` monitor captured the same live
-  wave without an inference step. Three consecutive windows rendered peaks of
-  five attempts at `18:36:58Z`, four at `18:38:48Z`, and four at
-  `18:40:08Z`; each peak retained its original `-05:00` sample envelope. No
-  `payment-processor-rate-limit` event appeared through that last window. This
-  proves the UTC evidence fix is active while independently reaffirming that
-  the still-deployed pre-`70b0d269` taskworker preserves narrow retry cohorts.
-
-  The same recurrence then crossed the processor boundary. Four canonical
-  wallet failures landed at `18:45:38Z`; at `18:45:39Z`, two more wallet
-  failures and two canonical 429s landed together. Five wallet failures at
-  `18:46:41Z` were followed at `18:46:42Z` by two wallet failures and a third
-  canonical 429. The standing monitor independently reported the first pair as
-  two logical events from four diagnostic lines, then the third as one event
-  from two lines. At `18:46:57Z`, the durable family snapshot changed from
-  `wallet-insufficient=817,processor-invalid-destination=6,processor-rate-limit=1`
-  to `814,6,4` while the total stayed 824. Exactly three rows changing class
-  matches the three canonical events and rules out a growing payment backlog
-  or a duplicate-log illusion. A fourth canonical 429 followed at
-  `18:48:04.608126Z`, and a fifth followed five wallet-insufficient attempts
-  at `18:53:30Z` before landing at `18:53:30.571865Z`. The durable breakdown
-  remained `814,6,4`: it is the current last error of each row, not a
-  cumulative event counter, so a row returning to wallet-insufficient can
-  conceal a different row's new 429. The stale cohort caused real provider
-  throttling even though several earlier four/five-per-second peaks did not;
-  deploy `70b0d269` rather than treating the empirical burst threshold as a
-  deterministic provider quota.
-
-  The unchanged deployment produced another independently bounded recurrence
-  from `20:29:56Z` through `20:35:31Z`. Across the eight active
-  host/generation allocations, 143 exact-replay-deduplicated task-evaluator
-  records represented wallet-insufficient attempts. Seven source seconds held
-  at least four attempts; the peak was five at `20:31:57Z`, and one canonical
-  processor 429 landed in that same second. The standing monitor independently
-  rendered that exact five-attempt UTC peak, one logical rate-limit event from
-  its two diagnostic lines, and the surrounding wallet retry rate. The durable
-  family stayed at 824 rows while its latest-error breakdown became 810
-  wallet-insufficient, eight processor-rate-limit, and six invalid-destination
-  rows. This is further direct evidence that
-  `2026.8.31-outerwerld+1033655820` still preserves the pre-fix retry wave; it
-  does not justify a different retry algorithm or treating the 429 as a broad
-  processor outage. Deploy a Taskworker artifact containing `70b0d269`, then
-  use the complete 90-minute observation gate already specified above.
-
-  The UTC-rollover recurrence supplied the direct post-provenance control. At
-  `00:31:39Z`, the standing monitor reported 28 exact-replay-deduplicated task
-  attempts from 56 diagnostic lines. Six wallet-insufficient attempts landed
-  at `00:30:43Z`, and one canonical processor 429—two diagnostic lines—landed
-  in that exact second. The independently bounded query produced the same
-  source second and logical event count. Because the deployed image provenance
-  is `1d8f01e5`, this joins the runtime burst to the known pre-`70b0d269`
-  scheduler rather than inferring source age from its version string. It also
-  validates the monitor's peak-sample and canonical-event accounting through a
-  fresh live recurrence. Deploy the existing jitter fix; do not add a second
-  retry algorithm or confuse dispersion with the separate wallet-liquidity
-  operation.
-
-  The unchanged artifact then produced a broader causal control through
-  `00:50Z`. A bounded three-hour query found 15 canonical 429 evaluator events
-  across 12 exact source seconds and 12 task rows. Every one of those seconds
-  also held at least five canonical wallet-insufficient attempts; one held
-  six. In the latest event, five wallet results completed from
-  `00:49:53.240866Z` through `00:49:53.327394Z`, followed by the 429 evaluator
-  result at `00:49:53.339836Z`. The durable family remained exactly 824 rows
-  while its latest-error breakdown moved to 815 wallet-insufficient, six
-  invalid-destination, and three rate-limit rows. This proves another provider
-  throttle was amplification of the existing backlog rather than backlog
-  growth, while also proving the durable class count is not a cumulative 429
-  counter. The tailer now reports a privacy-safe source-second join directly:
-  canonical rate-limit seconds, how many crossed the four-attempt cohort
-  threshold, total/peak coincident wallet attempts, and the canonical logical
-  event count. It retains burst-second counts across the bounded drain overlap
-  so late reconciliation cannot sever the correlation; deterministic tests
-  require an exact-second cross-drain join, reject the adjacent second, expire
-  old state, and keep diagnostic replay at zero logical events. This stronger
-  evidence still does not establish Circle's account quota or justify a shared
-  limiter before `70b0d269` has completed its 90-minute deployment control.
-
-  At `03:22Z` on 2026-09-01, the standing invalid-destination alert exposed a
-  monitor provenance bug: every responding block sampled
-  `2026.8.31+1034210530`, and the investigation initially treated that mutable
-  WARP/config generation as proof that source `a52392db` was running. Exact
-  artifact validation later disproved that inference. Six directly observable
-  blocks on enabled edges 0, 1, and 3 executed image content identity
-  `sha256:042255119828a004024a4dc5e57d97373a8bf399aca6074ca98804dec2b3156a`;
-  edge-4's two blocks had no retained startup digest and unprivileged Docker
-  inspection was unavailable, so they remain provenance-unknown rather than
-  being counted as proven. The matching amd64 manifest's extracted executable
-  reported base revision `078d6c11` with `vcs.modified=true`, while its BuildKit
-  attestation described Docker context `a52392db`. The prebuilt binary was made
-  from a dirty earlier tree and the Docker context was published after HEAD
-  advanced. This is a release-provenance race, not evidence that config version
-  maps to source.
-
-  Direct binary discriminators nevertheless prove that the six-block artifact
-  contains the proportional-jitter fix: it exports the
-  `task.errorRescheduleDelay` symbol and the post-`70b0d269` direct `run_at=$3`
-  / `$5` error-count SQL rather than the old SQL `power()` backoff. The one
-  four-attempt source second at `06:14:26Z` produced no canonical processor 429
-  and the microburst finding cleared on the next complete cadences. That is not
-  a reason to redeploy the same Taskworker; retain the full observation gate
-  and investigate a repeated current-artifact wave or a coincident 429. The
-  taxonomy now makes no current-version claim and delegates software action to
-  the independently triggered `payout-retry-microburst` finding. Its
-  deterministic test rejects historical version/source assertions and a direct
-  jitter-deploy instruction. The operational wallet correction remains
-  unchanged.
-
-  The required post-jitter control then failed at `07:12:48Z` on 2026-09-01.
-  Five canonical wallet-insufficient transfer results completed in that source
-  second and a sixth transfer request received Circle 429; three results came
-  from edge-0/g1, one from edge-1/g1, and one from edge-4/g1, while the 429
-  came from edge-1/g2. Four of the five successful rejections therefore came
-  from blocks whose exact executable had already been proven to contain the
-  proportional-jitter implementation; edge-4's unknown artifact cannot explain
-  away the recurrence. At `07:12:49Z`, three more edge-1/g2 wallet rejections
-  and another canonical 429 followed. This rules out stale retry jitter as the
-  remaining root cause: independent 30–90-minute random choices lower average
-  synchronization but cannot enforce a fleet-wide instantaneous ceiling.
-  Circle's current [Wallets API rate-limit
-  documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
-  specifies five default POST requests/second and a 429 when exceeded, matching
-  the observed five completed rejections plus sixth refusal.
-
-  Current-main server commit `14928f69` (the patch-identical replay of former
-  commit `eb7e79b6`) is the root fix. Immediately before the developer
-  transfer POST, every process contends on one Redis-time rolling sorted set;
-  an atomic Lua decision admits at most three submits in any rolling second,
-  leaving two requests/second of documented headroom. A unique member makes a
-  lost-response command replay idempotent while its reservation remains in the
-  active rolling window. After cutoff, that reservation no longer accounts for
-  the current ceiling, so the same member atomically obtains one fresh slot and
-  bucket before the caller returns. Redis or context failure is fail closed
-  before HTTP, and the durable payment idempotency key remains unchanged. A
-  deterministic synthetic launches eight concurrent fleet callers at one
-  timestamp, requires exactly three admissions/five deferrals, and proves a
-  within-window replay preserves the original bucket without consuming a slot.
-  A second lost-response synthetic proves a same-member post-cutoff retry gets
-  exactly one fresh current slot/bucket and one synchronous observation before
-  caller return. §2.14 owns deployment and runtime verification; the existing
-  source-second log join remains the provider-outcome control.
-  Follow-up current-main commit `66525afc` converts the server Redis wrapper's
-  connection panic path into that same measured fail-closed error, so it is the
-  fail-closed activity/error baseline. It predates the capability gauge and
-  exact pre-POST marker and therefore is not the complete §2.14 observation
-  baseline. Surviving current-main commit `928abfca` adds that capability and
-  marker contract; use it as the minimum source when §2.14 marker visibility is
-  part of the recovery gate.
-
-  The first remediation added a fail-closed Warp release gate, but operator
-  policy later established that intentional local checkout state must remain
-  deployable; current Warp commit `8797d48` removes that gate. Generic service
-  telemetry still exports the Go base revision, Boolean modified bit, and
-  Warp-injected immutable digest so future probes can join the running process
-  without extracting images. A modified bit is descriptive rather than a
-  failure; preserve the participating local diff when exact replay matters.
-  None of this requires redeploying the current Taskworker solely to re-prove
-  the already-present jitter behavior.
-
-  The first `03:50Z` run of the replacement watcher found the same defect in
-  the independent `task-canaries` mixed-family guidance: its current
-  `AdvancePayment` alert still asserted that the old version/source was the
-  production Taskworker. The durable task rows do not contain runtime artifact
-  ancestry, so this PostgreSQL probe cannot make that claim. It now requires an
-  explicit per-block ancestry check for typed-reset `b8af229f`, deploys only to
-  older blocks, and requires typed rejection, successful guarded reset, and
-  current wallet-selection evidence before attributing persistence to invalid
-  configured-wallet selection. Synthetic mixed-family tests reject the old
-  version, source, and generic `production taskworker` claim. Historical
-  incident paragraphs retain their dated artifacts as evidence, not runtime
-  instructions.
+- Retired 2026-11-13: the USDC payout task classes. USDC provider payouts
+  ended (owner decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's
+  close out usdc entirely"). `AdvancePayment` is gone, and `Payout`,
+  `ProcessPendingPayouts` and `CancelHungAccountPayments` drain queued rows as
+  no-ops, so no task can fail with a payout-wallet, destination or
+  payment-planner error. The task error classes `wallet-insufficient`,
+  `processor-invalid-destination`, `invalid-destination-reset-failed`,
+  `postgres-local-buffer-exhaustion` and `idle-transaction-timeout`, their
+  `AdvancePayment` and `Payout` guidance, the live `Payout` overrun diagnosis
+  and the §4 payout log classes retired with them. The generic
+  `processor-rate-limit` and `processor-bad-request` classes stay for other
+  processor callers. Slack incident state is process-local: the watcher
+  restarted on this build holds none of the retired incidents, and one the
+  previous process raised gets no cleared message.
 - GOTCHA — `parked` and `fresh_claim` are independent snapshots, not disjoint
   buckets. During reschedule handoff, a row can already have `run_at` more than
   five minutes in the future while its prior attempt's claim heartbeat remains
@@ -3597,13 +3281,16 @@ ledger crosswalks deterministic:
   Grafana nginx-facing 429 and Taskworker page-budget saturation are separate
   visibility failures until the active proxy rule and producer are confirmed.
 
-- `connection-refused`, `clusterdown`, and `redis-loading` distinguish a TCP
-  refusal, Redis slot-coverage loss, and Redis load/failover state. The text
-  alone does not identify the restart or rollout cause.
+- `connection-refused`, `clusterdown`, and `redis-loading` distinguish log
+  diagnostic categories, not native socket results, Redis slot-coverage loss,
+  or Redis load/failover state. Quoted or relayed text can match without the
+  emitting service owning the original event. Bind the original event,
+  immutable emitter, intended target, source namespace and operation outcome
+  before assigning a service, listener, topology or lifecycle cause. For a
+  generic refusal, reproduce the intended operation from the same source path
+  and network namespace only after that binding; do not assume Redis.
 - `missing-origin-contract` is the metric-only raw log classifier feeding the
   independently bounded §2.17 missing-origin analysis.
-- `circle-transfer-admitted` is non-alerting admission evidence for §2.14;
-  `circle-transfer-admission-failed` is its fail-closed error class.
 - `signal-send-not-admitted`, `signal-send-encryption-not-ready`,
   `signal-send-canceled-or-closed`, and `signal-send-other` are the bounded
   reason-specific successors to the legacy sender class in §14.6. They keep
@@ -3818,6 +3505,25 @@ incomplete output remains unknown, not catalog absence. RUN-MAIN.md retains
 direct-file one-shot completion markers. Abrupt termination and other service
 entrypoints have separate lifecycle owners; this is not a blanket instruction
 to restore descriptors before those services have stopped their producers.
+
+The scrubber's retained original destination must remain usable in process,
+but must not escape to exec children. A plain descriptor duplicate is
+inheritable; duplicate atomically with close-on-exec rather than setting the
+flag after duplication. Native subprocess controls require the original
+regular-file destination to be absent in the child while parent forwarding
+and restoration still work; an explicit inherited-file control checks the
+oracle. A descendant holding the destination does not prove that it wrote,
+that the parent is the sole writer, or that the scrubber goroutine progressed.
+Bind any retained capture to its actual immutable observer artifact; changing
+source does not repair existing inherited handles or qualify the running
+watcher's capture.
+
+Descriptor tests must write the descriptor they redirect. Go's JSON test mode
+aliases `os.Stderr` to `os.Stdout`, so that object is not raw fd2. Use checked
+raw-descriptor writes, the scrubber's restoration/drain barrier, and release
+all capture writers before reading to EOF. An isolated subprocess control
+keeps the aliased-object and raw-descriptor destinations distinct; sleeps do
+not establish forwarding completion.
 
 An output destination failure can also stall an otherwise live watcher. On
 2026-10-10, the exact watcher generation retained 64,459 bytes in its 65,536-byte
@@ -5460,6 +5166,44 @@ are incomplete. Addresses, gateways and raw route output never enter alerts;
 inventory host names and plain interface names do. Every tunable (cadence,
 sustain, the route adapter and its output bound) is a field of
 `ObserverRouteSettings`.
+
+When `StateDir` is configured, the same existing invocation also publishes a
+private immutable `observer-route/receipt-<sha256>.json` using the sampler's
+content-addressed, mode-0600 publication convention in a mode-0700 directory.
+Healthy findings remain suppressed from ordinary Alerts. The existing invocation
+witness's `run_return` record adds `observer_route_receipt_sha256` and
+`observer_route_receipt_status`, so a healthy cycle has an exact retained locator
+without interpreting `returned_nil` or a quiet Alert stream as conformance.
+No new lookup, cadence, watcher or remote contact is added.
+
+The receipt contains its own unique cycle, start/end clocks, source/run/invocation
+association, exact effective route-policy digest, hashed inventory slots and
+each slot's conforming/diverted/absent/unknown/excluded/disabled/not-observed
+outcome. The digest covers only the route contract, address mode, probe settings,
+environment and desired inventory/exclusion scope; credentials and other service
+configuration are not hashed. Raw policy, names, addresses, gateways, interfaces
+and command output are not serialized. Association is checked against the exact
+settings passed into that invocation and against the probe's unchanged policy.
+An unbound direct library call retains explicitly incomplete source association.
+These are same-process observation declarations, not physical-writer or VPN
+packet-delivery proofs.
+
+`complete` describes an authoritative complete observation, not healthy routes:
+an observed diverted or absent route can be complete. Missing/invalid contract,
+LAN mode, malformed address, zero eligible scope, exclusions/disabled targets,
+cancellation, policy/source mismatch and omitted targets cannot certify complete
+conformance. Cancellation and early returns still publish their incomplete
+cycle. `MaxReceiptBytes` defaults to 64 KiB and `MaxReceiptTargets` to 256; zero
+selects these defaults, negative values refuse publication. No oversized prefix
+is accepted. A publication failure retains concrete route findings and adds
+visibility; a missing/disabled/unavailable receipt never gives absence credit.
+Receipts are append-only immutable evidence; retention/removal remains explicit
+operator policy, as for sampler receipts. A source-qualified rollout and Low's
+deterministic normal/race gates are required before relying on this new surface.
+Completeness is assessed at the receipt's finished boundary; publication cannot
+retract an immutable observation when cancellation arrives later. Consumers must
+also join its exact invocation's terminal result and must not grant conformance
+or recovery from a canceled/deadline/context-ended return or a receipt alone.
 
 False-positive qualifier: a conforming route does not prove the tunnel
 delivers packets or that a remote host is up. False-negative qualifiers: a
@@ -7745,10 +7489,11 @@ At 09:42Z the oldest useful horizon made that remaining writer explicit: a
 98s transaction was executing the legacy `UPDATE transfer_contract SET
 reap_time = ...` while dead tuples held at 21.66M. The autovacuum itself was
 active on `IO:WalSync`, had no blocker, and remained in index cleanup. The
-vacuum probe now recognizes this query shape and names the shared
+vacuum probe recognized this query shape and named the shared
 `retention-fanout` cause, the durable pending-queue/cursor-batch fix, and the
-payment retry-safety constraint. It must not suggest canceling the healthy
-vacuum or tuning around the unbounded writer.
+payment retry-safety constraint, until both retired with USDC provider payouts
+on 2026-11-13 (§2.10). It must not suggest canceling the healthy vacuum or
+tuning around the unbounded writer.
 
 The same live vacuum exposed a monitor compatibility blind spot at 09:47Z.
 PostgreSQL reported that it had processed 4 of 13 indexes while the legacy
@@ -8483,7 +8228,9 @@ only says how long is left, not why. Facts on 10-22:
   (completion + 7 days), and subsidy payouts stopped with the epoch that ended
   2026-10-05. Rows therefore wait for the 300-day straggler horizon
   (`StragglerContractExpiration`); the first reach it on 2027-03-28. See
-  `server/CONTRACT-PARTITION.md`.
+  `server/CONTRACT-PARTITION.md`. Since 2026-11-01 the contract horizon reaper
+  (§2.4r) deletes them past its horizon instead, and check 2 below retired on
+  2026-11-13.
 - **`client_reliability` retention was pinned to the last subsidy epoch.**
   `clientReliabilityRetentionCutoffBlock` kept blocks from that epoch's end
   minus one day (2026-10-05) for the next payout, so the nightly drops stopped
@@ -8504,35 +8251,40 @@ only says how long is left, not why. Facts on 10-22:
   stays on this append-only list until the first deletes. Those come when the
   30-day reap has recorded the children deactivated from 2026-10-09, at their
   deactivation times, and those times reach the horizon: about 2026-11-13 at a
-  35-day horizon, 2026-11-08 at a 30-day one.
+  35-day horizon, 2026-11-08 at a 30-day one. Since the 7-day floor migration
+  (owner, 2026-11-16) the retention deletes 7 days after the client went,
+  whatever the reaper says, and the brake's `horizonDays` can only narrow it.
 
 Checks, all cheap and read-only:
 1. Retired 2026-10-31: the subsidy frontier check (`retention-frontier-pinned`).
    The frontier no longer holds any retention, so its age is not a finding.
-2. Contract reap stamping: `TABLESAMPLE SYSTEM (0.0002)` on `transfer_contract`.
-   WARN `contract-reap-stalled` when fewer than 5% of sampled rows older than
-   14 days have `reap_time`.
+2. Retired 2026-11-13: contract reap stamping (`contract-reap-stalled`). Only
+   a completed USDC payout stamped `reap_time`, and USDC provider payouts
+   ended (owner decision 2026-11-13: "settle closed rows, let's close out usdc
+   entirely"), so the stamped share only falls. The contract horizon reaper
+   (§2.4r) reclaims contracts without `reap_time`, the payments the USDC
+   close-out closed included (`server.AccountPaymentRetentionSettledSql`), and
+   §2.4r watches it.
 3. Partition drop: WARN `partition-retention-stuck` when the oldest non-empty
    partition's upper bound is more than 2 days past its retention.
 4. Per relation over 100 GB: report net growth over 7 days with no deletes
    (`n_tup_del` unchanged) to the owners. This is a list, not an alert.
 
-Implementation (2026-10-22). Hourly, two bounded read-only queries run on
-the single enabled `pg-primary`, each behind a `hostname -s`, primary-role and
-30-second statement-clock guard. A catalog read returns the
-`client_reliability` parent's kind and every
+Implementation (2026-10-22; the reap sample retired 2026-11-13). Hourly, one
+bounded read-only query runs on the single enabled `pg-primary`, behind a
+`hostname -s`, primary-role and 30-second statement-clock guard. The catalog
+read returns the `client_reliability` parent's kind and every
 attached partition's name and heap size (at most 4,096), the statistics reset
 and postmaster start, and the public relations of at least 100 GB with their
 insert and delete counters, in fixed ten-cell frames bound by an end row. A
-second read counts `transfer_contract TABLESAMPLE SYSTEM (0.0002)` rows, rows
-older than 14 days, and those with `reap_time`. A failure in one read leaves
-only its own checks unknown. Targets are the primary's name plus a fixed
-check name; only counts, ages and fixed names leave SQL.
+failed read leaves the check unknown. The target is the primary's name plus a
+fixed check name; only counts, ages and fixed names leave SQL. The signal
+reports neither the retired `contract-reap-stalled` class nor an unknown state
+for its target, so a notifier holding that incident would clear it after two
+complete runs. Slack incident state is process-local, though: the watcher
+restarted on the retiring build holds none, and an incident the previous
+process raised gets no cleared message.
 
-- `contract-reap-stalled` (target `<primary>/contract-reap`, sustain 2,
-  because the page sample is random per run): fewer than 5% of at least 20
-  sampled rows older than 14 days have `reap_time`. A sample under 100 rows is
-  unknown; fewer than 20 old rows is a young table and healthy.
 - `partition-retention-stuck` (target
   `<primary>/client-reliability-partitions`, sustain 1): the oldest
   `client_reliability_pYYYYMMDD` partition whose heap holds a page has an
@@ -8550,34 +8302,34 @@ check name; only counts, ages and fixed names leave SQL.
   plain lowercase identifiers. A shorter window is
   `unqualified-stats-window`; old deletes outside the window can hide a
   relation, so the list is a lower bound.
-- `retention-liveness-unobservable` (per check target, sustain 2): no or
-  several primaries, a failed read, a wrong host or role, a skewed clock, an
+- `retention-liveness-unobservable` (target
+  `<primary>/client-reliability-partitions`, sustain 2): no or several
+  primaries, a failed read, a wrong host or role, a skewed clock, an
   incomplete or malformed frame.
 
 Every tunable, including the mirrored reliability horizon, is a field of
-`RetentionLivenessSettings`. Synthetic controls replay the 2026-10-22 state
-(0.75% stamped, the `st_client_key_history` append-only list, an old subsidy
-frontier that raises nothing), the 2026-10-31 state (27 days kept behind the
-frontier, judged stuck by the 21-day rule), every partition cutoff branch,
-reap share edges and sample sufficiency, malformed frames and failed reads,
-the list's window and name rules, inventory authority and cancellation.
+`RetentionLivenessSettings`. Synthetic controls replay the 2026-11-13 state
+(0.75% stamped, the `st_client_key_history` append-only list, nothing raised
+and the reap sample never read), a held `contract-reap-stalled` incident
+clearing after two complete runs, the 2026-10-31 state (27 days kept behind
+the frontier, judged stuck by the 21-day rule), every partition cutoff
+branch, malformed frames and failed reads, the list's window and name rules,
+inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
-`client_reliability` days inside the 21-day retention by hand: operator block
+`client_reliability` days inside the 10-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
-provider credit. VERIFY: a complete observation inside each line on the next
-runs (two for the sampled check).
+provider credit. VERIFY: a complete observation inside the line on the next
+run.
 
 Partitioned contract tables (2026-10-23, `server/CONTRACT-PARTITION.md`).
-`TABLESAMPLE SYSTEM` on the partitioned `transfer_contract` samples the same
-share of every partition's pages, so `contract-reap-stalled` keeps its meaning;
-its context then notes that weeks past the 13-week horizon leave by partition
-drops (§2.4i). Check 4 counts a contract partition toward its contract table
+Check 4 counts a contract partition toward its contract table
 (sizes, inserts and deletes summed, the 100 GB line on the sum) and marks it
 `partitioned=true reclaimed_by=partition-drops`: a dropped week's deletes leave
 with its partition's statistics, so a partitioned table reads as append-only
-by construction. The catalog frame's ninth cell carries `transfer_contract`'s
-kind. A native PostgreSQL 18 test runs both reads before and after a cutover.
+by construction. The catalog frame's ninth cell, once `transfer_contract`'s
+kind for the reap sample, stays empty. A native PostgreSQL 18 test runs the
+catalog read before and after a cutover.
 
 ### 2.4h Contract partition runway — inserts past the last partition fail
 Probe: `contract-partition-runway`
@@ -8880,7 +8632,7 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (21 days,
+(`RetentionSignal`): today `client_reliability` (10 days,
 `ClientReliabilityRetention`, the same cutoff §2.4g's
 `partition-retention-stuck` judges) and `provider_egress_health_history` (7
 days). The contract tables name §2.4i and
@@ -9003,6 +8755,93 @@ or slow the reaper's `maxRowsPerSecond`. Never delete archive rows: the
 subnet's epochs read them. VERIFY: twice the largest week back under the line,
 or one hash batch in the window's plan.
 
+### 2.4t Session state retention — runs that stop or fail
+Probe: `session-state-retention`
+
+The session state retention (`model.RemoveExpiredSessionState`, owner
+2026-11-16, DBDISK-STABILIZE.md S4) deletes the provider work session heads
+whose clients have no event left in the journal, no open connection and no
+receipt, and the device audit state (`audit_device_state`) of devices offline
+for a day. Online device state is never deleted. Both tables had no deletes
+before: about 4 GiB a day between them. It runs as one taskworker chain
+(`remove_expired_session_state`), each table's pass side by side from its own
+cursor, at most 2,000 rows a second each: every 15 seconds while a pass has
+work, every 15 minutes otherwise, also with its brake
+`{session_state_retention}control` off.
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates, over the last two hours across all taskworker processes, the
+runs by table and stop (`urnetwork_session_state_retention_runs_total`): all
+runs, and each table's error runs and the runs that made progress (stops
+`pass`, `budget` and `waiting`).
+
+- `session-state-retention-stalled` (sustain 2): no run ended in two hours.
+  The chain is lost or never claimed.
+- `session-state-retention-failing` (sustain 2): at least 3 of a table's runs
+  ended in an error and none of its runs made progress. A batch that fails
+  every time stops its pass at its cursor while the other table's pass runs
+  on.
+- `session-state-retention-unobservable` (sustain 2): a run count is missing,
+  stale, duplicate or invalid. A positive its own parts prove still raises.
+
+Every tunable is a field of `SessionStateRetentionSignalSettings`; the
+retention's own are `model.SessionStateRetentionSettings`. Synthetic controls
+cover progress, a brake that is off, errors among progress, each finding's
+edge, and each unobservable reason.
+
+ACTION: the windows are the owner's. The brake narrows or stops a table's pass
+(`mode off`, `maxHeadsPerSecond`, `maxDeviceStatesPerSecond`). Never delete
+heads by hand: the head guard refuses any delete outside the retention.
+VERIFY: a complete read inside every line for two cadences.
+
+### 2.4u Client location reliability retention — runs that stop or fail
+Probe: `location-reliability-retention`
+
+`network_client_location_reliability` holds one row per client, its location
+fold, about 475M rows and 190 GiB on 2026-11-16, most of them hosted window
+children's and gone clients'. The owner decided on 2026-11-16 ("11 days except
+top-level", PARTITION-CANDIDATES.md §9.1):
+- A reaped client's row goes with it, in the reaps' shared cascade
+  (`removeReapedNetworkClientDependents`).
+- A child's or a gone client's row goes 11 days after its last refresh.
+- A top-level client's row keeps 31 days: the provider status page reads every
+  active top-level client's row with no time bound.
+
+The retention (`model.RemoveOldClientLocationReliabilities`) is one taskworker
+chain (`remove_old_client_location_reliabilities`). Each run first trims every
+row past 31 days, as before. It then walks the rows past 11 days in
+`(update_block_number, client_id)` order from a cursor, deleting those of
+children and gone clients and passing over top-level ones, at most 1,000 rows
+a second by default (2,000 at most). It runs every 15 seconds while the walk
+has work and every 15 minutes otherwise, also with its brake
+`{client_location_reliability_retention}control` off.
+
+Every 5 minutes one instant Mimir read through a services host's loopback
+Mimir evaluates the walk's runs by stop
+(`urnetwork_client_location_reliability_retention_runs_total`) over the last
+two hours across all taskworker processes: all runs, the runs that ended in an
+error, and the runs that made progress (stops `caught_up` and `budget`).
+
+- `location-reliability-retention-stalled` (sustain 2): no run ended in two
+  hours. The chain is lost or never claimed.
+- `location-reliability-retention-failing` (sustain 2): at least 3 runs ended
+  in an error and none made progress. A batch that fails every time stops the
+  walk at its cursor; the trim still takes rows at 31 days.
+- `location-reliability-retention-unobservable` (sustain 2): a run count is
+  missing, stale, duplicate or invalid. A positive its own parts prove still
+  raises.
+
+Every tunable is a field of `ClientLocationReliabilityRetentionSignalSettings`;
+the retention's own are `model.ClientLocationReliabilityRetentionSettings`.
+Synthetic controls cover progress, a brake that is off, errors among progress,
+each finding's edge, and each unobservable reason.
+
+ACTION: the windows are the owner's. The brake narrows or stops the walk
+(`mode off`, `maxRowsPerSecond`); stopped, every row keeps 31 days as before.
+Keep heavy deletes out of the backup windows. The taskworker dashboard shows
+how far the walk has reached (its cursor's refresh time trails now by 11 days
+once caught up). VERIFY: a complete read inside every line for two cadences.
+
 ### 2.5 Task-system meta-health
 Probe: `task-health`
 
@@ -9017,14 +8856,17 @@ Probe: `task-health`
 The post-migration 2026-08-31 sample adds a bounded-backlog discriminator.
 The first two successful `RemoveCompletedContracts` runs averaged 306.2s
 against a 6.3s trailing p95 after migration 595 made the durable retention
-cursor available. Current source gives each completed-payment assignment,
-straggler assignment, and due-delete phase a five-minute wall-clock budget, so
-a normally completed run near 300s is consistent with one phase draining its
-budget; it is not by itself a stuck transaction or recurrence of the former
-missing-column failure. Keep one recurring reaper, correlate
-`contract_retention_pending` and cursor progress with §2.10, and require the
-queue plus durations to fall on consecutive 30-minute runs. Do not add
-concurrent reapers or raise the task deadline to hide durable backlog.
+cursor available. Current source gives the straggler assignment and due-delete
+phases a five-minute wall-clock budget each, so a normally completed run near
+300s is consistent with one phase draining its budget; it is not by itself a
+stuck transaction or recurrence of the former missing-column failure. Keep one
+recurring reaper, correlate the due `reap_time` backlog, and require the
+backlog plus durations to fall on consecutive 30-minute runs. Do not add
+concurrent reapers or raise the task deadline to hide durable backlog. Since
+USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13), no
+payment completion queues contracts for the reaper; the completed-payment
+assignment phase and the retention queue retired, and the contract horizon
+reaper (§2.4r) deletes contracts past its horizon.
 
 At 06:16Z, one `ExportStats` run completed in 187s versus its 87.6s trailing
 p95. The exact finished interval overlapped an 870-second
@@ -9279,6 +9121,13 @@ ledger and replay. Do not manufacture a Redis total to pass the assertion.
 Reproducing the same stale expectation on unchanged baseline and candidate
 separates an inherited test issue from a new regression; it does not make the
 broad suite green or excuse a distinct conservation/custody failure.
+
+Update 2026-11-11: settlement no longer queues the provider-total projection
+(server BILLING-SPLIT.md). Nothing in production read `account_balance.provided_*`
+or its Redis deltas. The drain and the per-task reader stay only to consume the
+rows already queued and those older binaries queue during a rollout, so the
+provider totals drain panels fall to zero once those are gone. Tests now assert
+that settlement produces no provider totals.
 
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
@@ -10318,10 +10167,9 @@ An unavailable summary or a nearby panic timestamp cannot establish that join.
 
 An above-threshold warmup or a rise alone does not identify a retention defect.
 Before changing code or deploying, correlate consecutive age buckets with the
-running closer's duration/outcomes, current retention-fanout evidence, and the
-transfer_contract autovacuum phase. Apply the bounded retention correction only
-if that attribution is confirmed; the historical episodes below are not proof
-of the current running path.
+running closer's duration/outcomes and the transfer_contract autovacuum phase.
+Act only if that attribution is confirmed; the historical episodes below are
+not proof of the current running path.
 
 The five- and thirty-minute creation-age buckets measure age, not expiry status.
 Current source uses a 12-minute quiet cutoff for `CloseExpiredContracts`. A
@@ -10984,7 +10832,7 @@ lead time: its taskworker heartbeat exceeded 900s before the existing
 open-contract probe's sustained trend opened at 536,761 contracts (474,389
 older than five minutes and 141,039 older than 30). The live probe therefore
 alerts at 120s, while the open-set buckets remain authoritative for impact and
-drain. Correlate the duration with §2.10 and vacuum state. Executor identity is
+drain. Correlate the duration with vacuum state. Executor identity is
 chronology, not causal proof: the same task remained slow after the overlapping
 net-escrow writer ended, while a legacy retention writer and
 `transfer_contract` vacuum debt were active.
@@ -11238,9 +11086,11 @@ an exhausted payer's new contract is funded.
   `resuming` (healthy, zero cost held for one more check) and `charging`; the
   failures `measurement_failed`, `state_read_failed`, `publish_failed` and
   `superseded` publish nothing, and the published state ages out within its TTL.
-- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
-  contract-creating service (api, connect, taskworker, proxy): the free
-  contracts actually created for exhausted payers.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"network"|"companion"}`
+  on every contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers. `network` counts plain
+  contracts between two clients of one network, which escrow from that
+  network's balance like public contracts since 2026-11-10.
 - `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
   second cache refreshes, read only after an exhausted refusal. Only
   `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
@@ -11988,7 +11838,7 @@ rank, location, sampled provider, or API release.
   provider IDs in the alert. The Go probe first checks `pg_attribute`; before
   the append-only column exists it omits both direct column references, so the
   current database remains observable without serializing every wide health row
-  through JSON. Until `tls_integrity_armed=true`, §2.10 owns the pending
+  through JSON. Until `tls_integrity_armed=true`, §8.9 owns the pending
   migration and this count is unarmed rather than proof of zero failures. Once
   armed, PostgreSQL can use the partial boolean index, a positive row remains
   excluded even after its 24-hour score sample ages out, and only a later clean
@@ -12284,6 +12134,13 @@ with the fleet totals `urnetwork_client_score_admitted_providers_fleet`
 dualstack and IPv4-only providers, `v4` IPv4-only and `v6` dualstack and
 IPv6-only: the facets each request family draws. Admitted means in the
 non-forced union pool, online or native, before per-caller network exclusions.
+Since the country floor (server FP2FIX.md, owner 2026-11-13) that includes
+the providers it admits to Online below the URL bar, so a country keeps up to
+three online whenever it has connected providers that only the bar keeps
+out; the same export publishes them as
+`urnetwork_client_score_country_floor_providers` (`country`, `decision`) and
+its `_fleet` totals, and a supply that rests on them is still supply to the
+probe.
 That is about 100 countries times three families, with no client, network,
 provider or location identity. A measurement is published for an hour after
 the export that made it, and only by the taskworker holding the newest one
@@ -13559,123 +13416,17 @@ feeding its matrices through the public adapter and synthetic native census.
 An engine skip leaves that qualification unmet. No test definition or source
 review establishes deployed behavior or current production health.
 
-### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
-Probe: `retention-fanout`
+### 2.10 Payment-completion retention fan-out — retired
 
-Observation authority: require at least one complete 12-column result row and
-nonnegative 64-bit integers for every count, age, time and block metric before
-health or attribution. Missing, short, extra-width, fractional, negative or
-out-of-range cells remain unavailable; they cannot become numeric zero.
-The query-id filter can return several statistics partitions across database,
-user and top-level status. Validate every partition, require its repeated
-activity/task aggregates to agree, retain all partition metrics, and test the
-100,000 rows/call corroboration against any partition. Never let arbitrary
-first-row order hide a qualifying partition or dilute it with another partition.
-The left join's complete zero row when no statement matches is valid; an empty
-result is unavailable. Retained cleanup text alone remains insufficient, and
-lifetime statement metrics do not establish a current execution or CPU share.
-
-
-`CompletePayment` stamps `transfer_contract.reap_time` for every contract in a
-payment's `transfer_escrow_sweep`. The lookup is indexed by `payment_id`, so an
-indexed plan can still be catastrophically expensive when one payment owns
-millions of contracts. Track the exact statement separately from the generic
-top-total-time list:
-```sql
-SELECT queryid, calls,
-       round(mean_exec_time::numeric, 1) AS mean_ms,
-       round(max_exec_time::numeric, 1) AS max_ms,
-       round(rows::numeric / NULLIF(calls, 0), 0) AS rows_per_call,
-       shared_blks_hit, shared_blks_read, shared_blks_dirtied,
-       shared_blks_written
-FROM pg_stat_statements
-WHERE queryid = -3312164664690273449;
-
-SELECT count(*) AS active,
-       max(clock_timestamp() - query_start) AS oldest
-FROM pg_stat_activity
-WHERE state = 'active' AND query_id = -3312164664690273449;
-```
-2026-08-27 signature since the pgss reset: 18 calls, 338,497ms mean,
-544,554ms max, 2,209,550 updated rows/call, 1.48B shared hits, and 54.7M
-dirtied blocks. One to three copies remained active for tens of seconds to
-minutes while the storage device ran in high-utilization write bursts.
-
-2026-08-30 live monitor confirmation: query id `-3312164664690273449` had
-reached 36 calls, 326,707ms mean, 544,554ms max, and 2,156,191 rows/call; one
-sample saw three active copies with the oldest at 72s and the next saw one at
-105s. The current source no longer issues that synchronous statement:
-`CompletePayment` sets the durable `contract_retention_pending` queue bit, and
-`RemoveCompletedContracts` advances `contract_retention_cursor` in bounded,
-committed batches. Seeing the legacy query id after that source change therefore
-identifies an older deployed generation; deploy the fixed generation and then
-require the exact query id to disappear rather than tuning PostgreSQL around it.
-The same live window supplied a cross-signal check: a 1,548s
-`CloseExpiredContracts` run accumulated 244k open contracts while this query
-remained active, then two comparable 100k close cohorts finished in 22–23s
-immediately after the retention executions cleared (§2.6). This is the
-retention fan-out delaying unrelated writers, not evidence that the closer
-needs a larger pool.
-It also pushed `transfer_contract` above the 10M dead-tuple warning while
-autovacuum was active; vacuum brought the estimate back below threshold, but
-cannot make an unbounded multi-million-row update cheap. Treat §2.4 bloat as a
-downstream symptom until the legacy query id disappears.
-
-A later read-only sample separated the payment backlog into causes instead of
-letting its largest class hide the retention failures. Of 384 failing
-`AdvancePayment` rows, 368 carried the known unfunded-wallet error, while ten
-different rows retained `Interrupted: failed to deallocate cached
-statement(s): conn closed` after their exact 120-second task boundary. Those
-ten rows spanned two payment plans and nine networks; each payment referenced
-1,184,684–3,356,615 sweep rows, or 21,875,448 in total. All ten had a processor
-record and idempotency key but no receipt/hash or terminal state. One selected
-retry supplied direct causal proof: taskworker began it at 13:49:03Z while
-PostgreSQL began query id `-3312164664690273449` for its 3,356,615-row payment.
-The same backend remained in that exact `UPDATE` from 0.5s through 118.5s,
-alternating ordinary execution with WAL/data-file waits and no blocker; at
-13:51:03Z taskworker reported `eval error(120.00s)` with the connection-cleanup
-text. The cleanup message is cancellation aftermath, not the slow operation.
-The probe therefore retains this durable correlation between retries when both
-the legacy statement averages at least 100,000 rows/call and an
-`AdvancePayment` row carries that deadline signature. The error alone is not
-enough to attribute retention.
-
-- WARN: one execution active >30s, or >=2 concurrent executions for two
-  samples; also warn between retries when the exact legacy query has at least
-  100,000 rows/call and an `AdvancePayment` row retains the 120-second cleanup
-  signature. Include rows/call and storage/WAL signals; backend count alone
-  understates this load.
-- This is not the rare-value planner landmine (§2.3):
-  `transfer_escrow_sweep_payment_contract` (payment_id, contract_id) exists
-  and is used to find the fan-out (`transfer_escrow_sweep_payment_id` was
-  dropped by the index diet).
-  `ANALYZE` and larger PgBouncer pools do not reduce millions of updates.
-- Action: make retention stamping bounded/chunked or decouple it from the
-  synchronous payment transaction. During an incident, correlate it with
-  §2.6 growth and §2.11 pool-path timeouts; do not kill a payment transaction
-  without first proving retry/idempotency safety.
-
-The 16:19–16:53 recurrence preserved the same durable writer signature while
-close, reliability, and vacuum work overlapped. Query id
-`-3312164664690273449` advanced from 39 to 40 calls and from 2,156,465 to
-2,162,072 rows/call; lifetime mean/max execution reached 324,803/544,554ms,
-with 3.234B shared-buffer hits, 30.93M reads, 115.45M dirtied blocks, and only
-164,194 written blocks. One to three copies were transiently active and one
-exceeded 410s. Ten durable `AdvancePayment` rows still carried the exact
-120-second connection-cleanup deadline signature. This is continued evidence
-of an unbounded row writer and delayed cancellation cleanup, not a reason to
-expand connection pools; keep the bounded retention implementation and use
-the retained task errors only as attribution between active executions.
-
-The next execution brought the lifetime total to 41 calls and then cleared
-from `pg_stat_activity`. At 18:02Z the statement averaged 2,170,158 rows and
-325,648ms per call, with a 544,554ms maximum, 3,329,316,398 shared-buffer hits,
-31,981,964 reads, 118,226,752 dirtied blocks, and only 173,741 written blocks.
-All ten cleanup-deadline task rows remained durable. The concurrent
-`transfer_contract` vacuum completed and cut its dead-tuple estimate below one
-million, but that cleanup result does not make the 2.17M-row payment
-transaction bounded. Require the query id and deadline-error cohort to
-disappear after the queued cursor path is deployed.
+Retired 2026-11-13 with its `retention-fanout` class. USDC provider payouts
+ended (owner decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's
+close out usdc entirely"): no payment completes, so neither the legacy
+`CompletePayment` reap stamping (query id `-3312164664690273449`) nor the
+`contract_retention_pending` queue that replaced it runs, and `AdvancePayment`,
+whose cleanup-deadline rows corroborated it, is gone. The contract horizon
+reaper (§2.4r) deletes contracts past its horizon. Slack incident state is
+process-local: the watcher restarted on this build holds no `retention-fanout`
+incident, and one the previous process raised gets no cleared message.
 
 ### 2.11 PgBouncer pool-path stalls — startup progress vs busy servers
 Probe: `pgbouncer-stalls`
@@ -15397,198 +15148,22 @@ synthetic scheduled-reboot case includes two long active heartbeats and makes
 one exact id complete before the previous-boot boundary; only the genuinely
 interrupted task may alert.
 
-### 2.14 Circle transfer admission — fleet ceiling vs random retry dispersion
-Probe: `circle-admission`
+### 2.14 Circle transfer admission — retired
 
-Circle's [Wallets API rate-limit
-documentation](https://developers.circle.com/api-reference/wallets/rate-limits)
-currently specifies 20 GET requests/second, five default POST requests/second,
-selected POST exceptions at ten/second, and HTTP 429 after a limit is exceeded.
-`POST /v1/w3s/developer/transactions/transfer` is not listed as an exception.
-The 2026-09-01 post-jitter control in §1.2 matched that default boundary: five
-wallet rejection responses and a sixth 429 landed in one source second even
-though four of the five responses came from executables already proven to
-contain proportional retry jitter. Random scheduling is useful load
-dispersion, but it is not admission control.
-
-Current-main server commit `14928f69` (the patch-identical replay of former
-commit `eb7e79b6`) puts one fail-closed, fleet-wide gate immediately
-before the transfer POST. Redis server time eliminates host-clock skew. One
-atomic sorted-set script admits no more than three unique transfer calls in a
-rolling second, leaving two requests/second of headroom for other callers. A
-stable per-call member makes Redis command replay idempotent only while its
-reservation remains in that active rolling window. A replay after cutoff
-atomically acquires one fresh current slot and bucket before the caller can
-return. A waiter retains the payment's durable Circle idempotency key, and a
-Redis/context error returns before HTTP rather than guessing that an ambiguous
-financial submit is safe.
-Current-main descendant `66525afc` converts the Redis wrapper's pre-command
-connection panic into the same error/counter/log path. `66525afc` is the
-fail-closed activity/error baseline, but it does **not** prove the capability gauge or exact
-pre-POST marker. Stable patch IDs prove it is patch-identical to the former
-`b8718420` hash after main was rewritten. Later commit `928abfca` is the
-surviving current-main marker-capable baseline: it registers the fixed gauge and
-emits one Redis-time marker synchronously before each admitted POST. Its
-patch-identical predecessors were rewritten and are not current ancestry, so
-deployment guidance uses `928abfca`.
-
-The Taskworker exports these process metrics:
-
-- `urnetwork_circle_transfer_admissions_total`
-- `urnetwork_circle_transfer_deferrals_total`
-- `urnetwork_circle_transfer_admission_errors_total`
-- `urnetwork_circle_transfer_admission_wait_seconds_count`
-- `urnetwork_circle_transfer_admission_wait_seconds_sum`
-- `urnetwork_circle_transfer_admission_observable_info` (fixed at one when the
-  process emits the bounded pre-POST marker)
-
-For every successful gate decision, the same executable emits exactly one
-fixed-shape marker before returning to the caller:
-
-`[circlec][transfer-admission] admitted observable=v1 redis_second=<unix-second> sequence=<count> deferrals=<count> wait_ms=<milliseconds>`
-
-`redis_second` is the authoritative bucket returned by the atomic gate. A
-stable-member replay returns the original sorted-set score rather than a later
-command time only while that score remains inside the active rolling window.
-After cutoff, the old score is removed and the replay obtains a fresh current
-slot and bucket before the single synchronous caller return. `sequence` is a
-process-local monotonic observation counter, not a payment or customer
-identifier. It lets the tailer distinguish simultaneous admissions while exact
-replay of one log record remains idempotent. The tailer retains only this
-suffix; malformed suffixes and arbitrary appended text cannot enter the count
-or alert evidence. The added return field is private to each binary's embedded
-Lua invocation and parser; old and new script SHAs can coexist during rollout
-because both retain the identical sorted-set key, members, scores, expiry,
-ceiling, and wait decisions.
-
-The probe selects the newest actual-scrape-fresh process for each host/block,
-so an old draining generation cannot supply a replacement's missing sample.
-It requires a fresh capability sample directly, establishes accepted activity
-sample presence independently with fresh five-minute sample counts, then
-evaluates five-minute counter increases per exact process.
-This distinction matters because PromQL `increase()` returns no vector when Mimir
-accepted only one sample; that is incomplete telemetry coverage, not evidence
-that the process lacks the registered gate collector.
-
-Observation authority is per exact `{env, job, host, block, instance}` and
-metric family. The producer registers scalar counters, histogram count/sum and
-a fixed-one capability gauge; extra labels cannot create an independent owner.
-Each returned start, capability, delta and range-count family must be unique.
-Equal duplicates, conflicting duplicates and a malformed/valid duplicate pair
-are all unknown, independently of vector order. Values must be finite and
-nonnegative, capability must equal one, and an activity increase requires an
-independently present positive integer range count of at least two. Missing,
-stale, future, null or malformed values cannot become zero. A positive wait
-sum with zero wait count, or a non-finite wait ratio/aggregate, is also unknown.
-
-`increase()` retains PromQL counter-reset semantics; the monitor consumes its
-five-minute result rather than subtracting raw counters. The publisher gives
-each process a new instance nonce, so a replacement's zero is independent of
-its draining predecessor's cumulative activity. Only a unique, valid newest
-start can select a host/block cohort. An observed runtime with a missing or
-ambiguous start prevents another instance in that cohort from standing in for
-it, and tied newest starts are unknown. A strictly older runtime with a unique
-start cannot supply or invalidate the selected replacement's activity families.
-
-False-positive qualifiers: duplicate or malformed observations establish a
-visibility defect, not a financial gate failure, a missing collector, or a
-Taskworker deployment requirement. Per-process completed waits need both the
-count and sum; zero/zero is healthy idle activity, not pressure. Unknown or
-partial fleet totals and means render as `unknown`; the probe never labels a
-partial subset as a complete fleet measurement.
-False-negative qualifiers: a complete error delta or complete wait pair on a
-selected current runtime can independently prove an error or pressure even
-when another family or another host/block cohort is unobservable. Preserve
-those findings alongside `circle-transfer-admission-unobservable`; ambiguity
-must neither erase confirmed failures nor establish fleet recovery. Missing
-whole runtimes outside the returned cohort remain outside this Mimir-only
-inventory, so source/digest and deployment convergence still require §8.12.
-These are source-confirmed parser controls, not evidence of a current Main
-duplicate or malformed-series incident.
-
-- HEALTHY: every newest Taskworker exposes the capability and all five activity
-  families; admission errors are zero; fleet and per-process mean completed
-  wait are at most five seconds. Deferrals may be non-zero—they prove the gate
-  prevented an unsafe burst.
-  `circle-transfer-admission` is the reducer's healthy-only fallback identity,
-  not an emitted problem class or an additional probe. Do not count it as an
-  admission failure in the implementation/catalog crosswalk.
-- WARN `circle-transfer-admission-unobservable`: a newest process either has no
-  fresh capability/activity sample or has fewer than two accepted activity
-  samples for a five-minute increase, or has malformed, duplicate or ambiguous
-  runtime/family authority as defined above. A missing capability can mean mixed
-  rollout, missing collection, or telemetry loss; admission-marker absence is
-  therefore unknown and must never be rendered as zero. An artifact containing
-  `66525afc` can expose every activity family while still lacking the gauge and
-  marker. Deploy a clean Taskworker containing `928abfca` only for a genuinely
-  pre-marker artifact proven by §8.12 source/digest provenance; otherwise
-  restore stats delivery/Mimir admission and do not prescribe an application
-  deployment.
-- WARN `circle-transfer-admission-error`: the gate failed closed. Correlate the
-  exact window with taskworker drain state, Redis liveness/latency, and the
-  privacy-safe admission failure line. Never bypass the gate or manually replay
-  a payment.
-- WARN `circle-transfer-admission-pressure`: fleet or one process averages more
-  than five seconds of completed admission wait across two probes. Keep the
-  safety ceiling. If `payout-wallet-insufficient` is active, this is partly an
-  **operations/finance** boundary: fund or pause that wallet because software
-  cannot create liquidity. For legitimate sustained payout growth, obtain the
-  account's authoritative Circle quota before changing code or thresholds.
-- VERIFY: §8.12 proves every newest Taskworker runs `928abfca` or a descendant;
-  the capability and all five activity families are present, counter families
-  have two scrapes, admission errors and Circle 429s stay zero, exact pre-POST
-  markers stay below four/second, and payment idempotency keys remain stable for
-  one full 90-minute retry window.
-
-The 2026-09-02 post-deployment control closed the software branch. All eight
-newest fresh Taskworker processes ran version
-`2026.9.1-outerwerld+1034926970` from one clean source revision
-`fe3fa8eea625a3935ec7fe6569ee83b8a2578143` and immutable image digest. Git
-ancestry proves that revision contains typed-reset `b8af229f`, proportional
-jitter `70b0d269`, and the complete `66525afc` fail-closed activity/error
-baseline. The dedicated probe then required only the five activity collectors;
-that historical control predates the capability/marker requirement. Across the full
-90-minute control, 1,244 exact task-evaluator wallet-insufficient responses
-occupied 1,037 source seconds, peaked at exactly three attempts in one second,
-and produced zero admission-failed lines and zero Circle 429s. That is positive
-provider-response and error-path evidence consistent with a working fleet
-ceiling, but those post-POST timestamps are not direct admission evidence.
-Continued wallet-insufficient or invalid-destination rows after this boundary
-are the separate finance and account-configuration actions in §1.2; do not
-prescribe another Taskworker deployment for them.
-
-The 2026-09-13 Main control exposed the ancestry distinction directly. All
-eight newest Taskworker identities had accepted samples for all five activity
-families but lacked only `urnetwork_circle_transfer_admission_observable_info`
-across sustained minute cadences. Their uniform runtime generation was
-established well before `928abfca`; the corresponding historical source tag
-`1b9cacba` contains `66525afc` but predates `928abfca` and has neither the gauge
-nor the `observable=v1` marker. The running executable reported a modified
-source identity, so the tag is a source-content negative control rather than a
-substitute for §8.12 runtime provenance. Six independent service-gateway reads
-agreed that every visible established process had the activity families and no
-capability sample. This selects an unpromoted marker-capable Taskworker artifact
-as the primary cause, not two-sample warmup or the known Mimir publisher-front
-skew. A separate transient whole-family gap remains owned by §11.20a and does
-not explain the fleet-wide, capability-only absence.
-
-Implementation convention: SIGNALS.md §2.14 (`circle-admission`) maps to
-`signal_circle_admission.go` and `signal_circle_admission_test.go`. Synthetic
-tests cover a healthy newest generation, mixed marker-capability rollout, an
-ambiguous replacement with no accepted samples for two activity families, a
-present collector with only one accepted range sample, fail-closed errors,
-excessive per-process wait hidden by a lower fleet mean, invalid counter
-data, all scalar-family duplicates in both vector orders, conflicting/equal
-and extra-label duplicates, malformed/partial runtime preservation of
-independent errors and pressure, integer range-count boundaries, ambiguous
-newest starts, idle zero and the strict five-second wait edge. Product-level synthetics cover the marker-before-POST boundary, bounded
-marker shape, the eight-caller Redis ceiling, original-bucket replay within the
-active window, and fresh-slot/bucket admission for a same-member lost-response
-retry after cutoff before one synchronous caller return. Tailer synthetics
-prove response completions cannot trigger the admission alert, four markers do
-trigger it, exact log replay is idempotent, skewed and out-of-order host
-timestamps cannot replace the Redis bucket, and retained Markdown contains no
-Warp or payment identity.
+Retired 2026-11-13 with the `circle-transfer-admission`,
+`circle-transfer-admission-error`, `circle-transfer-admission-pressure` and
+`circle-transfer-admission-unobservable` classes, and the §4 log classes
+`circle-transfer-admitted` (with its `payout-retry-microburst` burst) and
+`circle-transfer-admission-failed`. USDC provider payouts ended (owner
+decisions 2026-11-12 and 2026-11-13: "settle closed rows, let's close out usdc
+entirely"), so no Taskworker submits a Circle transfer: the fleet transfer
+gate, its `urnetwork_circle_transfer_*` metrics and its pre-POST marker are
+gone with `AdvancePayment`. Without the retirement, the first Taskworker
+without the gate would raise `circle-transfer-admission-unobservable`.
+Customer Circle wallet reads keep the shared payment-read retry bound. Slack
+incident state is process-local: the watcher restarted on this build holds
+none of these incidents, and one the previous process raised gets no cleared
+message.
 
 ### 2.15 Provider reliability running-sum integrity — immutable degraded blocks
 Probe: `reliability-drift`
@@ -17025,17 +16600,29 @@ running API **and** Taskworker artifacts before applying these semantics):
   Main's location-specific provider-list incident.
 - Each sampled hostname has an explicit IPv4 name-resolution phase using its
   own tunnel's private resolver, followed by target TCP/TLS and response work.
-  The tunnel takes Connect's existing provider-country regional recommendation
-  where available (as server/proxy does), an explicit safe custom resolver
-  first, and the existing in-tunnel DoH default otherwise. Never use the
-  operator host's DNS for provider targets or share resolver state across
-  providers. A regional plaintext DNS recommendation remains inside that
-  provider tunnel; it is not a new public bootstrap path. The source change
-  requires a new Taskworker artifact before it describes Main behavior. The
-  existing fixed failure stages do not expose resolver selection or join a
-  provider-country cohort, so they cannot prove a regional recommendation
-  caused improvement or failure. Unknown/stale country metadata can select the
-  default or an inapplicable recommendation; retain unknown attribution. Up to
+  An explicit safe custom resolver is used alone. Otherwise the tunnel resolves
+  with the existing in-tunnel DoH default, and where Connect has a
+  provider-country regional recommendation (the plaintext DNS server/proxy
+  uses) its servers race that DoH through the same tunnel: the first answer
+  wins, and one resolver's miss waits for the other. Plaintext DNS reaches a
+  provider over UDP only (the provider drops DNS over TCP), so the
+  recommendation alone made the URL probe a UDP test in the six countries that
+  have one. A Taskworker built from 2026-09-26 (ed4eee921) until the race used
+  it alone: an exit that carries TCP but not UDP, such as a provider identity
+  behind a proxy that only relays TCP, failed every URL there at a 5 s DNS
+  timeout and passed elsewhere.
+  On 2026-11-10 one provider network's exits passed 74% of their URL runs in
+  de, fr, br and gb and 0.1% in ru and 0% in kz, and 93.8% of all ru URL runs
+  ended at DNS. Never use the operator host's DNS for provider targets or
+  share resolver state across providers; each resolver of the race has its own
+  cache, owned and closed by its tunnel. A regional plaintext DNS
+  recommendation remains inside that provider tunnel; it is not a new public
+  bootstrap path. The source change requires a new Taskworker artifact before
+  it describes Main behavior. The existing fixed failure stages do not expose
+  resolver selection, so join the provider country (and the exit's client
+  version, for proxy-only identities) before attributing a country's DNS
+  failures. Unknown/stale country metadata can select the default or an
+  inapplicable recommendation; retain unknown attribution. Up to
   three transient DNS lookup attempts share the request's hard deadline, with
   bounded 50–200 ms jitter and time reserved for the connection. An authoritative
   negative is not immediately repeated; the existing spaced per-site retries
@@ -19427,6 +19014,27 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   is missing, retains a stored retry error, or its current `run_at` is more
   than a whole `SiteRefreshInterval` overdue; the schedule is not a measured
   last-completion time or evidence that no worker holds the task;
+- **country site tally stale** (`egress-country-site-tally-stale`, frame
+  `oldest-day`): the oldest day of `provider_egress_country_site_tally`, the
+  country sites' pair tally, began longer ago than the retention every
+  refresh deletes to (`ProviderEgressCountrySiteTallyRetention`, eight days),
+  plus a day for the tally's day boundary, one `SiteRefreshInterval` and one
+  `SiteRefreshMaxTime` (the next run starts an interval after the last one
+  ends, and deletes after its candidate checks), and 30 minutes of slack: ten
+  days two hours at the defaults, following the budget if it grows. The oldest
+  day normally reaches nine to ten and a half days just before a delete, so an
+  older one means the deletes stopped. Every `RefreshEgressDestinations` run
+  deletes the expired days in its country-site step, whether it judges the
+  sites or skips them for a prober fault, so this is a refresh that is not
+  running (which `egress-site-refresh-not-running` names first) or one that
+  returns before that step: an unusable `qualityprobe.yml`, a budget refusal,
+  a seed failure or a drain mid-check, none of which another condition
+  reports. The tally then grows by about 500,000 rows a day until a run
+  deletes the backlog in one statement. Migration 947 creates the table, so
+  the schema preflight does not require it: until it exists the condition
+  reads nothing and emits nothing, not even a healthy finding, and an open
+  finding stays open. It reads only the minimum `tally_day`, through the
+  primary key;
 - **pool thin** (`egress-site-pool-thin`, frames `<class>/below-pool-size`
   and `<class>/candidates-exhausted`): a class's active pool is below
   `SitePoolSize` for that class, or no candidate is left to promote, so the
@@ -19595,7 +19203,8 @@ thresholds are the refresh task's own (`model.ProviderEgressSiteSettings`,
 the `settings` block of `egress-sites.yml`) beside the signal's
 `EgressSitePoolSettings` (the 24-hour refresh age, the backfill share and
 window, the guard window, the fewest loads a class's share is judged on,
-the unreachable share), so the monitor judges by the numbers the task acts on.
+the unreachable share, the country site tally's slack), so the monitor judges
+by the numbers the task acts on.
 
 ### 2.19c Derived-location health — the ping geometry and its calibration
 Probe: `derived-locations`
@@ -19669,7 +19278,11 @@ SELECT hour,
        COALESCE(sum(ping_count) FILTER (WHERE cosign = 0), 0)::bigint AS unknown,
        COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed,
        sum(zero_rtt_count)::bigint AS zero_rtt,
-       sum(beyond_half_planet_count)::bigint AS beyond_half_planet
+       sum(beyond_half_planet_count)::bigint AS beyond_half_planet,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 2 AND cosign_reason = 4), 0)::bigint AS unknown_pinger,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 1), 0)::bigint AS extender_cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2), 0)::bigint AS extender_rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = 2 AND cosign = 2 AND cosign_reason = 4), 0)::bigint AS extender_unknown_pinger
 FROM network_ping_hour_tally
 WHERE date_trunc('hour', now() at time zone 'utc') - interval '23 hours' <= hour
 GROUP BY hour ORDER BY hour;
@@ -19678,9 +19291,12 @@ GROUP BY hour ORDER BY hour;
 The ingest adds every stored report to that tally in the report's own
 transaction, so the counts are exact; the day is the 24 clock hours up to the
 current one, and beyond half the planet is the ingest's threshold (200 ms at
-the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows.
+the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows. The tally
+keeps the refusal reason (connect `ExtenderProbeVerdictReason*`) and the
+pinger kind (2 is an extender), so the refusals that are evidence against no
+one, and the extender pingers' verdicts, are counted apart.
 
-Alert, WARN tier, fifteen-minute cadence, when any of these thirteen
+Alert, WARN tier, fifteen-minute cadence, when any of these fourteen
 conditions holds (every threshold a setting with the default given):
 
 - **not running** (`derive-not-running`, parts `stale-run`, `task-missing`,
@@ -19695,10 +19311,40 @@ conditions holds (every threshold a setting with the default given):
   ingest have stopped;
 - **refusals** (`derive-refusals`, parts `rejected`, `rate-limited`):
   rejected pings above `DeriveMaxRefusalShare` (10 %) of verdicts over the
-  last hour — targets refusing honest claims (gate tolerance, clock skew) or
-  pingers under-claiming; or rate-limited (reason 6) above 5 %, which is the
-  extenders' admission limits (connect/EXTENDER.md A12) set too tight for the
-  ping cadence;
+  last hour — targets refusing honest claims (gate tolerance, clock skew),
+  pingers under-claiming, the probe path, or a key mismatch. Both counts
+  leave out the two refusals that are evidence against no one, as the derive
+  leaves them out of every refusal rate
+  (`model.NetworkPingRefusalCountsAgainstTarget`): an unknown pinger
+  (reason 4), usually a directory that has not caught up, which the
+  stale-directories condition below judges, and a rate limit (reason 6). A
+  refusal with no reason, which a pinger records for an acceptance whose
+  co-signature did not verify, is a key mismatch and stays counted; the
+  derive counts it against the target's refusal rate only, since the target
+  accepted the claim. The other part is rate-limited (reason 6) above 5 % of
+  every verdict, which is the extenders' admission limits (connect/EXTENDER.md A12)
+  set too tight for the ping cadence. Until 2026-11-11 the share counted
+  unknown pingers: with the
+  directories stale after the 2026-11-06 gossip stall, it read 17–24 % of an
+  hour's verdicts refused, against 5.6–9.1 % without them (11-11, 15–20Z);
+- **stale directories** (`extender-directories-stale`): extender pingers
+  refused as unknown (reason 4) above `DeriveMaxUnknownPingerShare` (30 %) of
+  the last hour's extender-pinger verdicts. A target refuses an extender
+  pinger whose operator-signed record is not active in its directory;
+  directories are filled by gossip publishing, the DNS TXT records, extender
+  feeds and each activation's own record and bootstrap sample, and a record
+  lives 24 hours, so about a day after publishing stops a target knows only
+  the few peers its own activations returned. The finding reads "directories
+  are stale: check gossip and DNS publishing". It is the end-to-end sign that
+  record distribution failed: gossip publishing stopped on 2026-11-06 at
+  07:49Z, the records lapsed about 07:55Z the next day, and unknown pingers
+  became 87 % of the extender pingers' verdicts with nothing alerting; this
+  condition would have fired at about 07Z on 11-07. The refusals are evidence
+  against no one, and the targets refuse as designed, so the action is
+  publishing, never the probe gate. §27.2 watches the publishers themselves
+  (`extender-gossip-stalled`, `extender-dns-publish-failing`); this condition
+  is the end-to-end check that their records reach the directories, and with
+  both publishers healthy it is the delivery between them;
 - **no verdicts** (`derive-no-verdicts`): pings with no verdict above
   `DeriveMaxUnknownShare` (30 %) — extenders on the old binary, or the
   verdict frame lost on a carrier;
@@ -19780,8 +19426,9 @@ extender id or a coordinate. The job's own log line carries the per-run
 detail (nodes, terms, excluded, crossings, sweeps per round).
 
 Action: a supply or verdict finding is the ping path (connect, the
-extenders' binaries, the ingest); a residual, crossing or exclusion finding
-is calibration — change one setting at a time in `DeriveSettings`, wait
+extenders' binaries, the ingest); a stale-directories finding is record
+distribution (gossip and DNS publishing); a residual, crossing or exclusion
+finding is calibration — change one setting at a time in `DeriveSettings`, wait
 one run, and read the residual and crossing panels; a thin-evidence finding
 is ping coverage first and the peer gate second; a non-convergence finding
 is the sweep cap or the damping. Verify: the finding clears on the next run
@@ -19964,7 +19611,11 @@ codes and counts are rendered):
   compatible sites, or a global list under 100;
 - `egress-country-list-overlap`: country sites sharing a registrable domain
   with the global list, sites repeating a registrable domain within a list,
-  and country URLs that are not valid HTTPS sites;
+  and country URLs that are not valid HTTPS sites. The parser now refuses a
+  country site sharing a name or registrable domain with any destination or
+  candidate before the catalog reaches this signal, and §2.19h
+  (`egress-destination-catalog-refused`) reports those refusals, so here the
+  global part stays as a guard and repeats within a list are what remain;
 - `egress-country-draw-split`: at least 400 country-eligible normal draws
   (`general` plus `country`) whose country share is six or more standard
   deviations from an even split. Finite random imbalance stays quiet;
@@ -20944,8 +20595,9 @@ expiries allow only the number of replacements needed, with one live claim per
 provider. Coverage still uses actual policy-valid measurements in `(now-4h,
 now]`; setup completions, replay, other providers and future measurements add
 no credit. Success and measured failure count equally, and TLS rechecks remain
-independent. The six-minute headroom covers the default 220-second turn plus
-90-second control/publication reserve and 50-second scheduling margin, not
+independent. The six-minute headroom covers the default 250-second turn (a dual-stack
+provider's HTTP/3 and IPv6 legs included) plus 90-second control/publication reserve and
+20-second scheduling margin, not
 unbounded queueing or alternate longer configurations. Existing persisted
 expiry deadlines are refreshed when touched, so deployment is not instant
 full-cohort repair. A modeled latency-gap repair is not Main coverage proof;
@@ -21827,6 +21479,85 @@ complete. No runtime payload skew is established by these source controls.
 The other classes are dashboard reads of the series above, and a probe for
 them belongs in the same file with the class names here.
 
+### 2.19h Destination pool availability and catalog refusals
+Probe: `egress-destination-pool`
+
+Every URL pass, and every legacy full or blackhole pass, starts by fetching
+the destination pool (`GET /network/provider-egress-destinations` on api or
+alt, or the in-process operator with `operator_transport: local`). There is no
+built-in table: a pass without a pool measures no URL, and when the pool route
+fails for every shard URL measurement stops fleet-wide and every provider's
+evidence ages out of the eight-hour window, emptying Quality and Speed.
+
+The pool is built from `qualityprobe.yml`. The prober refuses a whole pool
+whose country lists repeat a general entry's name or host, so the server keeps
+the lists disjoint with one rule at every stage: a country site must not share
+a name or a registrable domain (Public Suffix List eTLD+1 of the host without
+`www.`, `controller.ProviderEgressSiteKey`, the same key §2.19d compares) with
+any destination or candidate, promoted or not, and a candidate must not take
+a destination's name. The registrable-domain key is a function of the
+prober's host key, so a pool disjoint by it is never refused by the prober.
+Each stage keeps a colliding entry out alone rather than refusing the pool:
+the parse refuses the entry and serves the rest of the file (a country entry
+the prober could not run, or a list under a key that is not a lower-case
+country code, is refused the same way, while an unrunnable destination or
+candidate still refuses the whole file); a served pool drops a country site
+that collides with a served general entry; and the daily refresh holds back a
+candidate whose general entry would collide with any country site the file
+lists. Measurement then continues, but what is measured is not the catalog
+that was written, which is what this signal reports.
+
+Implementation (5-minute cadence; `signal_egress_destination_pool.go` and
+`signal_egress_destination_pool_test.go`). The signal reads two sources:
+
+- the configured `qualityprobe.yml` through the API's own parser
+  (`controller.LoadProviderEgressSites`): the entries it refuses, by reason;
+- one loopback Mimir read evaluated two minutes behind now:
+  `sum by (result) (increase(urnetwork_egress_probe_pool_fetches_total{job="taskworker"}[15m]))`
+  (`server`, `unavailable`; `builtin` is the same unavailable result from a
+  Taskworker built before the rename) and
+  `sum by (stage, reason) (increase(urnetwork_egress_site_catalog_refusals_total{stage=~"serve|refresh"}[15m]))`,
+  with per-slot freshness of both counters on every desired Taskworker slot
+  and of the refusal counter on every desired api slot (alt when placed).
+
+Classes (all WARN, target `<env>/egress-destination-pool`; only entry names,
+country codes, reasons and counts are rendered, never a URL or website):
+
+- `egress-destination-pool-unavailable` (sustain 2, PAGE after six failing
+  cadences): half or more of the window's pool fetches unavailable (every
+  window without a served fetch qualifies), and at least two of them. Every
+  pass fetches the pool and each shard chains its passes back to back, so a
+  window holds a few hundred fetches: a pool the server cannot serve fails
+  nearly all of them, while transient failures, or one api or alt instance
+  of several failing, leave most passes measuring. A share under half is
+  read on the egress probes dashboard's destination pool fetches panel and
+  never warns or pages; three failed fetches of 243 resolve healthy;
+- `egress-destination-catalog-refused` (sustain 1): the configured catalog
+  refuses entries (`candidate_name`, `country_conflict`, `country_invalid`),
+  or the fleet counted serve or refresh refusals over the window. A serve or
+  refresh refusal with a clean catalog means the served rows and the parsed
+  catalog have come apart;
+- `egress-destination-pool-unobservable` (visibility, sustain 2): an
+  unreadable catalog, a failed or annotated Mimir read, an unrecognized fetch
+  result or refusal reason, no served fetch series, and a desired slot whose
+  counter is missing, stale (older than three minutes), duplicated or on an
+  excluded or disabled host. A process built before this signal exports no
+  refusal counter, so a fleet partly on an older build stays unobservable.
+
+The opt-in readbacks check a catalog before it is released: with
+`FP2_QUALITY_CATALOG_PATH` naming the file,
+`TestQualityProbeCatalogFromConfiguredPathServesWhatItParses` serves it with
+no candidate promoted and with every one promoted and holds the result to the
+prober's `ValidatePool`, and `TestQualityProbeCatalogFromConfiguredPathRefusesNothing`
+fails naming each entry the parse would refuse. False-positive qualifiers: a
+database failure under the pool route also counts unavailable fetches; the
+log lines (`[pegd]` on api and alt, the pass errors on the taskworker) tell a
+catalog fault from a datastore one. False-negative qualifiers: the parse-stage
+refusal counter follows the readers, so its rate says nothing of how many
+entries are refused; this signal's own parse does. A catalog the monitor's
+configuration checkout does not share with the hosts is judged as the monitor
+reads it.
+
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
 
@@ -22008,7 +21739,13 @@ and rejection of the prior false causal claim.
 Probe: `payment-reconciliation`
 
 The hourly `PaymentReconcile` task is the lost-notification safety net for
-Apple, Google Play, Stripe, Solana, and x402. A run-level heartbeat is necessary but
+every store in `model.PaymentReconcileStores`: Apple, Google Play, Stripe,
+Solana, x402, Monero, Zcash, TAO (`bittensor`), Bitcoin and ETH (`ethereum`).
+The health and repair readers take their expected stores from that list, and a
+controller test holds the reconciler's legs to it, so a store with a new leg is
+expected without an edit here. Pay with Gamma has no leg: no `gamma`
+watermark is expected, and a `gamma` repair row fails closed as an unsupported
+store. A run-level heartbeat is necessary but
 not sufficient: the controller deliberately continues after one store is
 skipped or errors, then still records its global heartbeat. Observe all layers:
 
@@ -22024,17 +21761,21 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
 - every non-dry-run `credit_unfulfillable` Stripe event in the last 24 hours,
   reduced to distinct provider evidence, observation/run counts, and age;
   the complete unresolved-webhook tuple belongs to the separate §2.22 WARN.
+  A gift order's Checkout payment that did not match its order is recorded
+  under store `gift` (reason `gift_payment_mismatch`), which this probe never
+  reads: it is §2.22's `payment-gift-mismatch` WARN, not an invalid Stripe
+  tuple.
 
-The default publisher and health/repair readers recognize all five stores,
-including `x402`. Its local leg is always enabled and needs no external store
-credentials: it retries retained `settled_not_granted` grants. An empty local
+The default publisher and health/repair readers recognize every reconciled
+store, including `x402`. Its local leg is always enabled and needs no external
+store credentials: it retries retained `settled_not_granted` grants. An empty local
 pass can complete and advance its watermark. A recorded x402 skip is unexpected
 under that default contract; compare the executing artifact, explicit store
 selection and audit writer before changing anything. Do not invent an external
 x402 credential requirement. Explicit manual store selection does not establish
 the deployed recurring task's configuration or completion.
 
-Fresh global heartbeat and four healthy siblings cannot establish x402 health.
+Fresh global heartbeat and healthy siblings cannot establish x402 health.
 Its non-dry-run local errors retain the existing one-event WARN/two-event PAGE
 policy; missing and stale watermarks retain the same strict age boundaries as
 other stores. Local validation/grant/persistence may fail while heartbeat stays
@@ -22062,7 +21803,7 @@ sustain. Complete sibling aggregates retain their own PAGE or WARN findings,
 including when the health query fails first. Queries remain sequential and
 bounded by the existing observation context; parent cancellation ends the run.
 
-The complete five-store health receipt also requires nonnegative skip, error,
+The complete every-store health receipt also requires nonnegative skip, error,
 and task counts. Ages must be nonnegative or exactly the existing `-1` absent
 sentinel. Claimed and errored task counts are each subsets of the total task
 count; they can overlap. Because one SQL snapshot cross-joins one heartbeat
@@ -22142,6 +21883,51 @@ local renewal by itself and never duplicates purchased data or revenue. The
 account is protected, but every generic repair proves the ordinary
 notification/verification/idempotency path missed authoritative provider
 state or its metadata. Trace and fix that earlier stage.
+
+Stripe `credited` has two writers since 2026-11-16. One is the invoice
+listing: a paid subscription invoice whose `invoice.paid` credit never landed.
+The other is the gift leg (`controller/payment_reconcile_gift.go`), which runs
+first in the Stripe store. It reads the Checkout session, with its charge, of
+every card gift order still pending that was made from 15 minutes to 21 days
+ago, at most 100 per run: the newest first, so a recent payment is reached at
+the next run even in a burst of open sessions, and 20 of the 100 for the oldest
+when more are pending. When Stripe reports a session paid and its charge kept
+whole (neither refunded nor disputed), the leg fulfils it through the
+webhook's own idempotent path (`stripeFulfillGiftCheckoutInConn`), so the
+order, its codes, its delivery and its sales notice are made once, whichever of
+the two reports the session first. Its `credited` row has evidence the session
+and details `leg=gift_checkout` with the gift order. Either kind of repair
+means a Stripe webhook delivery was lost, failed or rejected, or the endpoint
+is disabled: check the endpoint's deliveries for the same window. The gift
+leg's other records are not alarms. An expired session is a `checkout_expired`
+row, written once, after which the order is not read again; no probe reads
+those rows. A paid session whose charge was refunded or disputed before the
+order was fulfilled is a stripe `refunded` or `disputed` row (evidence the
+session, `leg=gift_checkout`, the charge), written once and never fulfilled:
+a dispute voids nothing of an order with no codes, so a fulfilment would make
+its codes live mid-dispute, and a refund the webhook missed would be given
+away. The order stays pending; a lost dispute still refunds it through its
+webhook, and an operator settles a won one. These rows also count on the
+subscriptions dashboard's provider-confirmed terminal events. A session paid in
+another amount or currency goes through the webhook's mismatch record (store
+`gift`, §2.22 `payment-gift-mismatch`, with `leg=gift_checkout`), and the order
+is not read again. A failed read, charge or fulfilment is a stripe `error` row
+with `leg=gift_checkout` and a reason (`read`, `session_not_found`,
+`other_order`, `unknown_status`, `charge`, `charge_not_settled`, `fulfil`,
+`not_fulfilled`, `raised`, `record`). It counts toward
+`payment-reconciliation-store-error` and the run's errors, but never as a
+store error that holds the stripe watermark: one order that keeps failing must
+not hold the invoice listing's watermark for its whole 21-day window, whose
+overlap would grow until the store's budget ran out before the renewal legs.
+So a fresh stripe watermark beside such errors does not mean the order was
+checked; the heartbeat's stripe details count them as `gift_checkout_errors`.
+Three failed reads in a row stop the leg until the next run. A session Stripe
+does not know gets the App Store leg's bounded retry: it is a
+`session_not_found` error until it has persisted through 24 runs within seven
+days, then `unknown_to_store` is recorded once and the answer is no longer an
+error. The session is still read every run. Every read is counted on
+`urnetwork_gift_checkout_reconcile_total{result}` (taskworker dashboard, payment
+reconciliation row).
 
 Stripe `ended` is a distinct source boundary. At the revision described here,
 the Stripe webhook handles invoice credits, refunds, and disputes but has no
@@ -22386,13 +22172,21 @@ This probe checks business outcomes that ordinary API/process liveness cannot
 establish:
 
 - `payment-entitlement-missing` (PAGE): an in-window supporter renewal exists
-  for Apple, Google, Stripe, or Solana on an existing network, but the same
-  network has no in-window `transfer_balance.pro=true`. This is the exact
-  “paying but shown as free” invariant. The check uses entitlement time, not
-  remaining bytes. Reconciliation may repair it only after that provider
-  independently confirms the renewal remains entitled.
-- `payment-renewal-orphan` (WARN): an in-window Apple, Google, or Stripe
-  supporter renewal belongs to a deleted network. The count is distinct
+  in a subscription market on an existing network, but the same network has
+  no in-window `transfer_balance.pro=true`. The markets are
+  `model.SubscriptionMarkets`, the list the subscription dashboard counts:
+  Apple, Google, Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin,
+  ETH (`ethereum`) and Pay with Gamma (`gamma`); manual and x402 renewals are
+  not checked. This is the exact “paying but shown as free” invariant. The
+  check uses entitlement time, not remaining bytes. For Apple, Google, Stripe
+  and Solana, reconciliation may repair it only after that provider
+  independently confirms the renewal remains entitled. The other markets'
+  credit writes the renewal and its Pro window in one transaction and
+  reconciliation never repairs their Pro window, so the alert says so: find
+  the later write that ended or removed the window, and restore it only through
+  an authorized repair with the owner's go.
+- `payment-renewal-orphan` (WARN): an in-window Apple, Google, Stripe, or
+  gamma supporter renewal belongs to a deleted network. The count is distinct
   deleted owners, not physical renewal rows; sequential windows for one owner
   remain one lifecycle boundary. It is deliberately excluded from
   paying-account and Pro-repair counts: recreating a deleted account from
@@ -22412,10 +22206,42 @@ establish:
   a failed cancellation or newly credited, unchecked renewal retains the
   network. Successful cancellation preserves paid local history, so this WARN
   alone cannot establish a Google billing failure. The Apple and Google store
-  workflows remain separate from Stripe cancellation.
+  workflows remain separate from Stripe cancellation. A gamma plan renews
+  through our own biller, not a store. Before server commit `57f98311f`,
+  account deletion neither refused nor cancelled it, the account's
+  `gamma_account` row (automatic renewal, plan, deposit hotkey) survived
+  switched on, and the biller renewed from that row near the end of the term
+  without reading the network, so it could charge the deposit for an account
+  the credit can no longer reach. From `57f98311f`, deletion turns the row's
+  renewal, top-up and seat upgrade off, voids the account's open intents and
+  waits for a gamma charge in flight to be credited, and the biller charges no
+  intent whose network is gone; a spend that still lands for one raises the
+  gamma alarm `credit_unfulfillable`. On a build older than that, stop the
+  deleted owner's automatic renewal with the owner's go before the term ends.
+  On any build, give a gamma payment charged and never credited an authorized
+  refund or support disposition (gamma itself cannot be refunded on chain). A
+  deleted owner's paid gamma term may then stay in this WARN until it expires,
+  as cancelled store history does. The
+  other one-time crypto markets (Monero, Zcash, TAO, Bitcoin, ETH) are
+  excluded like Solana: a prepaid year that never renews. The recurring set is
+  `model.SubscriptionMarkets` less `model.SubscriptionOneTimeCryptoMarkets`; a
+  test fails until a new recurring market gets its own disposition.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
+  Since 2026-11-13 a URnode order of our Shopify store paid with Solana Pay
+  into the same receiver is not one of these: when its Shopify order record
+  verifies it (one order paid through Solana Pay, a sale of exactly the
+  payment's total near its block), the webhook or the reconcile's receiver
+  leg records it in `solana_shopify_order_payment` instead, never credited.
+  A Solana Pay app payment no order verifies stays `no_intent`, its match
+  note saying why (no order, two, or an order another payment holds: a
+  second payment of one order); check it against the order in Shopify.
+  A row that names a gift order's USDC invoice (an underpayment of its
+  reference, or a payment without the reference whose match note names it)
+  keeps that invoice linked to its order past 30 days, so `bringyourctl
+  crypto credit-usdc` can still credit it; void the invoice once the payment
+  is returned or given up (`payment-received-held` below).
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.
@@ -22438,11 +22264,120 @@ establish:
   support disposition. Email alone is not safe write authority.
   The 24-hour audit count can persist after resolution, and aging out or a
   fresh reconciliation watermark is not proof of payment disposition.
+- `payment-gift-mismatch` (WARN): a gift order's Checkout payment did not
+  match its order. A gift session charges the order's total in usd, with
+  adaptive pricing off, and the Stripe webhook fulfils a gift order only when
+  the completed session paid exactly that amount in usd
+  (controller/gift_checkout_controller.go); one that paid another amount or
+  currency fulfilled nothing, so the buyer paid and has no codes, cards or
+  emails yet. The webhook records it once per session as a
+  `payment_reconciliation_event` with store `gift`, action
+  `credit_unfulfillable`, reason `gift_payment_mismatch` and the Checkout
+  session as evidence; its details carry the gift order, the amount and
+  currency paid and the order's total. It is the only `gift` record counted
+  here (the gift delivery's `error` records are not), and the count is
+  distinct sessions. The session never asks for another amount or currency,
+  so each one is a change in how Checkout priced it or a defect. An operator
+  settles each payment with its buyer: refund it in Stripe (the refund
+  webhook marks the unfulfilled order refunded) and let the buyer order
+  again, or record another disposition with the owner's go, and find why
+  Checkout charged another amount or currency before more gift sessions are
+  made. Never fulfil an order from the record alone, and never make or edit
+  codes by hand. §2.21 reads only Stripe's records and never pages it.
 - `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
   fulfillment durably created a balance code, automatic redemption failed,
   and no email recovery channel exists. Preserve the code and provider ledger;
   retry idempotently to a verified destination or record an authorized support
   or refund disposition. Do not infer this failure from balance-code rows.
+
+The crypto invoice rail (mmm/BTCPAY.md §17, server docs/CRYPTO-PAY-API.md) adds
+four classes, aggregated per coin of `model.CryptoAssets`, the rail's own list
+(`usdc_solana`, `zec`, `xmr`, `tao`, `btc`, `eth`, `sol`), from
+`crypto_payment_receipt` in review and `crypto_scan_cursor`.
+The count is distinct invoices; the ages are first-seen ages:
+
+- `crypto-sanctions-hold` (PAGE): before a TAO, Bitcoin, ETH or SOL credit the
+  scanner screened a sender against the newest `config/all/crypto/<release>/`
+  OFAC table and it matched (`sanctions_hold`). Nothing was credited and the
+  buyer sees only `screening`. Do not credit, refund or move the funds: the
+  owner and counsel decide each one, and only a hold they cleared is credited,
+  with `bringyourctl crypto credit --sanctions-cleared`.
+- `crypto-screening-unavailable` (PAGE): a payment's senders could not be
+  screened (no readable table, or a sender the table cannot read, such as a
+  Bitcoin input without an address); the scanner screens it again each scan
+  and never credits it unscreened. Restore the release's table (the cryptoctl
+  step of `build/all/run.sh`) rather than crediting by hand.
+- `crypto-payment-held` (WARN): a TAO transfer of a shape the rail does not
+  credit by itself (a batch, a proxy or multisig call, the EVM precompile, a
+  stake transfer: `transfer_shape`), or a payment to a shared deposit address
+  whose amount no open invoice was quoted (`amount_unmatched`). Confirm in the
+  Coinbase account that the coin arrived, then credit it with `bringyourctl
+  crypto credit`, or return it on the owner's go.
+- `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
+  and has not for 15 minutes (its chain source down or refusing the key, a vault file
+  gone, or the TAO reader paused on a runtime it cannot decode, gauge
+  `urnetwork_crypto_pay_tao_reader_paused`; for Bitcoin also a source behind the
+  scanner's kept chain, or a chain changed below all 24 blocks it keeps). The coin
+  is listed as unavailable and payments to its open invoices wait.
+  `crypto_scan_cursor.last_error` names the reason; never point a scanner at an
+  older block range to recover. After a Bitcoin reorg deeper than the kept chain,
+  check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
+  for `btc`: the scan reads its reorg window again from the cursor.
+
+Received but never credited (support inbox 6584, 6692, 6729: seven 40 USDC
+payments of 2025-09 to 2026-08 reached our Solana receivers, were never
+credited, and nothing told anyone). Every payment the rails receive and do
+not credit is counted per rail by the subscriptions snapshot as
+`urnetwork_subscription_payments_uncredited{rail}`, with
+`urnetwork_subscription_payments_uncredited_oldest_age_seconds{rail}`, once it is
+30 minutes old by default (`model.SubscriptionMetricsSettings.UncreditedMinAge`): `usdc_solana`
+(a `solana_unfulfilled_payment` row, written by the Helius webhook, the
+reconcile or its receiver leg), each crypto coin (a `crypto_payment_receipt`
+in `seen`, `confirmed` or `review`), and `gamma` (a spent `gamma_charge` whose
+intent is neither credited nor voided). The panel is "received payments not
+credited" on the subscriptions dashboard. The alerts read the same rows
+directly: a Solana row pages as `payment-solana-unfulfilled` above, a gamma
+charge as §2.22a, and the crypto receipts no class above names page or warn
+here, per coin, with first-seen ages:
+
+- `payment-received-uncredited` (PAGE): a receipt the scanner should have
+  credited by itself is still in the mempool or in a block two hours after it
+  was first seen (`PaymentFailuresSettings.ReceivedPendingAge`) (past the slowest coin's credit depth and past
+  `crypto-scanner-stalled`, so an outage pages as a stall first; a double spend
+  counts only once mined), or its credit failed five times in a row
+  (`credit_failed`). The customer paid and has nothing. Read the taskworker log
+  (`[cryptopay]`) and `bringyourctl crypto show`, fix the credit's cause, and
+  let the scanner credit it; a `credit_failed` receipt is credited with
+  `bringyourctl crypto credit` after review. Never credit twice.
+- `payment-received-held` (WARN): a receipt held for an operator or the
+  customer that no class above names, 30 minutes after it was first seen
+  (`PaymentFailuresSettings.ReceivedHeldAge`):
+  `underpaid`, `late_underpaid`, `extra`, `unknown_address`, `voided`,
+  `orphaned`, `unlinked`, or a sanctions or shape hold that names no invoice.
+  Since 2026-11-13 the BTC, ETH, SOL and TAO scanners record a payment to any
+  address an invoice was ever given, however old, so a payment to a long
+  closed invoice lands here when the late-payment rules do not credit it;
+  `unlinked` is one the rules would credit, to an invoice past the 30-day
+  retention unlink, whose network (or gift order) the unlink forgot. Match it to
+  its support thread; credit one that covers what was bought with
+  `bringyourctl crypto credit` after review, or keep it for the customer's
+  request with a documented disposition. Crypto returns wait for the
+  customer's request (owner, 2026-11-11): never return or offer one
+  unprompted, and never credit on an address or amount match alone.
+  A gift order's invoice is not unlinked while a payment it received is
+  unresolved (owner, 2026-11-16): a receipt not yet credited (`seen`,
+  `confirmed`) or held for review for any reason, or a USDC record of
+  `payment-solana-unfulfilled` that names its reference. It stays linked to
+  its order, so the scan or `bringyourctl crypto credit` (`credit-usdc` for
+  USDC) credits it at any age and delivers the order's cards; past 30 days
+  the order has lost its note, signature and friends' addresses to the gift
+  retention, so the buyer gets every card. Once it is credited, the usual
+  unlink follows 30 days after the credit; void it (`bringyourctl crypto
+  void`) once its coins are returned or the payment is given up, and the next
+  daily unlink forgets the order. A gift invoice therefore reads `unlinked`
+  only for a payment first seen after its unlink, which no tool credits.
+  Network invoices are unlinked at 30 days paid or not: one with a held
+  payment then reads `unlinked`, and is granted by hand.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
@@ -22618,6 +22553,43 @@ owns the three unresolved dispositions. Release owns attributable API and
 Taskworker artifacts, followed by two clean reconciliation/deletion windows;
 do not treat the stable count or its imminent expiry as deployment proof.
 
+Card testing (owner, 2026-11-13). In 2026-11 card testers ran 20 cards in 92
+seconds through two Checkout sessions made 2.5 minutes after their account,
+and 22 attempts over three sessions. The yearly plan's free trial checks a
+card for nothing (a $0 SetupIntent), the kind of check card testers prefer.
+Stripe's `setup_intent.setup_failed` and `charge.failed` reached the webhook
+and were ignored, so nothing showed it. The api now counts each failed card check, with no personal data, as
+`urnetwork_subscription_stripe_failures_total{kind,reason_class}` (kind
+`setup` or `charge`; the decline class `declined`, `insufficient_funds`,
+`invalid_card`, `lost_stolen`, `fraud`, `blocked`, `authentication`,
+`processing` or `other`), and in a sliding Redis window per owner: the network
+the check names, else its Stripe customer, else the intent every attempt of
+one Checkout session shares, keyed by the Stripe event id so a redelivery
+counts once. More than `BurstCount` (5) failures of one owner within
+`BurstWindow` (10 minutes, both in the api's card-failure settings,
+controller/subscription_stripe_card_failures.go) log one fixed line,
+`[stripe]card failure burst: <count> failed card checks within <minutes>
+minutes for <network|customer|intent> <id> (...)`, again at each further
+`BurstCount` failures while the window stays full, and count in
+`urnetwork_subscription_stripe_failure_bursts_total{owner}`. The api
+dashboard's "failed card checks" panel shows both.
+
+- `payment-card-failure-burst` (WARN at one line a minute, PAGE at three, from
+  the §1.5 log tail, framed by owner kind): one owner passed the burst count.
+  The alert omits the owner id and the count; the api log line has them. Look
+  the owner up in the Stripe dashboard (its sessions, attempts and Radar
+  outcomes) and, for a network, its account and age. For card testing, remove
+  the network or its sign-in and refund any payment that went through before
+  it becomes a dispute; make sure Radar runs on cards saved for later (Radar
+  settings, "Use Radar on payment methods saved for future use"). A customer
+  whose own card is declined a few times stays under the count; never refund
+  or block on the count alone.
+
+Each network may also start at most 10 card purchases (Checkout sessions and
+payment sheets together) an hour, on top of the address budget the payment
+sheet always spent (controller/subscription_stripe_purchase_limit.go); a start
+past it is refused with `rate_limited` and the wait.
+
 Implementation convention: SIGNALS.md §2.22 (`payment-failures`) maps to
 `signal_payment_failures.go` and `signal_payment_failures_test.go`. Synthetic
 tests cover every durable class, healthy zero rows, strict allowlists and
@@ -22625,6 +22597,312 @@ numeric validation, privacy boundaries, severity, and Markdown rendering.
 Google orphan controls also retain the warning for canceled paid history,
 require the implemented deletion capabilities, reject healthy inference from
 unavailable/partial evidence, and keep other markets' guidance separate.
+
+### 2.22a Pay with Gamma payments that cannot be credited
+Probe: `gamma-payment-failures`
+
+Pay with Gamma (mmm/BTCPAY.md §18) charges a customer's SN25 gamma deposit
+with our own `spend_gamma`, and credits the purchase only from our finalized
+`GammaSpent`. Gamma cannot be refunded on chain, so a spend that no credit
+reaches is a customer who paid and got nothing. The biller's alarms for it
+(`gamma_alarm`, `urnetwork_gamma_pay_alarms_total`) reached only the gamma
+dashboard's "alarms / s by kind" panel. This probe reads the gamma tables,
+aggregated to kind, count and oldest/newest age:
+
+- `gamma-credit-unfulfillable` (PAGE): a spent `gamma_charge` whose intent is
+  neither credited nor voided and whose network no longer exists (the biller's
+  alarm `credit_unfulfillable`, raised once per intent; it retries the credit
+  every run). Account deletion waits for a gamma charge in flight (server
+  `57f98311f`), so only a network removed another way, or an older build, gets
+  here. From the alarm (key `credit_unfulfillable/<intent id>`, whose detail
+  names the intent, network, deposit hotkey, block and reference), establish
+  who paid from support evidence and the deposit's coldkey on chain, and bring
+  each to the owner for an authorized disposition: a credit to the customer's
+  verified live account, or a refund in another asset. Never recreate the
+  deleted network, and never credit on an email or name match. Once the
+  disposition is done, record it by voiding the intent
+  (`gamma_payment_intent.voided_at`): the biller stops retrying and the count
+  drops it. There is no operator tool for it yet (`bringyourctl gamma`,
+  BTCPAY §18.9). A gift order's intent (item `gift_pro_year`, POST
+  /pay/gift/gamma-intent) is never counted here: it is credited to its order,
+  whose codes go to the buyer's email, so a network that is gone does not stop
+  its credit.
+- `gamma-credit-failed` (PAGE): a spent charge whose credit failed
+  `controller.GammaMaxCreditFailures` (10) times or more for a network that
+  still exists, or for a gift order's intent whatever its network; its status
+  says `review` (`credit_failed`). The biller retries ten such credits a run,
+  the least retried first, beside every other credit, the fewest failures
+  first, so they never hold a new credit back. Read the taskworker log line
+  `[gamma]credit of intent <id> failed (<n>): <error>` and fix the cause (the
+  Pro configuration such as the data code duration, the data pack catalog or
+  the gift block, a gift intent with no gift order or a price that is not its
+  order's total, or the database); the retry then credits the intent once,
+  through its one-shot. Do not credit by hand or edit balances or codes. A
+  gift order paid with Gamma is final sale and is never refunded. A cause that
+  cannot be fixed goes to the owner, and the intent is voided once its
+  disposition is done.
+- `gamma-batch-unfulfillable` (WARN): a `batch_unfulfillable` alarm in the last
+  24 hours. The biller found its live spend batch carrying a pending charge
+  whose intent was closed (voided or credited) or whose network is gone, and
+  stopped resubmitting it; no other batch is signed until its era ends (64
+  blocks, about 13 minutes), and the pool may still include it. Look the batch
+  up in `gamma_spend_batch`: expired, its other charges went out again with
+  their references unchanged; included, each of its charges spent for an
+  intent that is voided or credited or whose network is gone is a payment no
+  credit reaches (those of a deleted network are also
+  `gamma-credit-unfulfillable`) and needs the owner's authorized disposition.
+  Then find how the intent was closed or the network removed outside account
+  deletion. The 24-hour window is not a disposition.
+
+The other watcher alarms (`unknown_reference`, `duplicate_reference`,
+`spend_mismatch`, `spender_proxy_changed`, `unknown_billing_transaction`,
+`unexpected_nonce`, `runtime_unsupported`, `undecodable_block`,
+`service_changed`, `stray_tao`) and the biller's readiness are §2.22b's.
+
+The gamma tables exist from the Gamma migration
+(`server.GammaPaySchemaMigrationVersion()`) on. A metadata-only preflight
+reads the successful migration head and the tables' presence first: below the
+Gamma migration nothing can have been spent, so the probe reads nothing more
+and reports nothing; at or past it, missing tables fail the probe rather than
+hiding a payment. Only aggregate kind counts and ages leave PostgreSQL: no
+intent, network, hotkey, coldkey, reference, block or alarm detail enters an
+alert.
+
+Implementation convention: SIGNALS.md §2.22a (`gamma-payment-failures`) maps
+to `signal_gamma_payment_failures.go` and
+`signal_gamma_payment_failures_test.go`. Synthetic tests cover the migration
+gate, every class with its severity and guidance, privacy, and malformed
+aggregates; a SQL test runs the SELECT on tables shaped as the Gamma migration
+makes them.
+
+### 2.22b Pay with Gamma watcher alarms and billing readiness
+Probe: `gamma-watcher`
+
+The Gamma biller (mmm/BTCPAY.md §18.4) records an alarm in `gamma_alarm` for
+what its watcher must never see, and charges nothing while it is not ready;
+both reached only the gamma dashboard ("alarms / s by kind", the readiness
+gauge `urnetwork_gamma_pay_readiness`). This probe (`pg/gamma-watcher`, every
+five minutes) reads the alarms of the last 24 hours by kind, and the
+readiness the biller writes to `gamma_chain_state` each run, aggregated to
+kind, count, oldest/newest age and the readiness word. §2.22a covers the
+alarms of spends no credit reaches (`credit_unfulfillable`,
+`batch_unfulfillable`); every other alarm kind is here. An alarm is recorded
+once per key; the count ages out after 24 hours, and aging out is no
+disposition.
+
+- `gamma-unknown-reference` (PAGE): a spend from our spender with a reference
+  we never issued (`unknown_reference`), the first sign of a leaked billing
+  key. A leaked billing key can burn customers' SN25 gamma up to each
+  deposit's balance and daily cap, never move TAO or alpha. At once, the
+  spender removes the billing key's `GammaSpend` proxy (`Proxy.remove_proxy`,
+  the reverse of BTCPAY §18.7 step 3, on the owner's machine with the seed from
+  `vault/main/gamma_keys.yml`); billing pauses (`billing_proxy_missing`). Stop
+  all but one taskworker if two may run the `gamma_biller` chain. Then a new
+  billing key in `vault/main/gamma.yml` becomes the proxy (§18.7 step 3) and
+  `gamma.yml` goes to the taskworker hosts: rotate the billing key, never the
+  spender. Each customer whose deposit was spent goes to the owner for a
+  disposition; gamma cannot be refunded on chain.
+- `gamma-duplicate-reference` (PAGE): a spend event for the reference of a
+  charge already resolved (`duplicate_reference`). The chain does not
+  deduplicate references, so this is a customer charged twice for one
+  purchase. Find the batches that carried the reference (`gamma_charge`,
+  `gamma_spend_batch`), take the double charge to the owner for a
+  disposition, find how a second extrinsic carried it, and stop the
+  `gamma_biller` chain until the cause is known.
+- `gamma-spend-mismatch` (PAGE): a spend whose reference is a pending charge
+  of ours but whose amount, hotkey or netuid differ (`spend_mismatch`). The
+  biller signs only what it recorded, so the extrinsic was not built from our
+  records. The spend does not resolve the charge, which can fail with its own
+  batch and be re-armed: stop the `gamma_biller` chain, void the intent once
+  its disposition is decided (`gamma_payment_intent.voided_at`) so it is never
+  charged again, and find the extrinsic.
+- `gamma-spender-proxy-changed` (PAGE): a `Proxy.ProxyAdded` or
+  `ProxyRemoved` of our spender (`spender_proxy_changed`). Only the spender's
+  key, kept in the vault and never on a host, can do that: the owner's planned
+  rotation, or a compromised spender. If the owner did not, remove every proxy
+  that is not our billing key with the spender's key and bring it to the owner
+  at once; replacing the spender takes the ur-owner multisig's `set_service`
+  and every customer re-pointing their deposit.
+- `gamma-unknown-billing-transaction` (PAGE): an extrinsic paid for by our
+  billing key that is none of our batches (`unknown_billing_transaction`): a
+  second biller, or a leaked billing key. Check that one taskworker runs the
+  `gamma_biller` chain; otherwise act as for `gamma-unknown-reference`.
+- `gamma-unexpected-nonce` (PAGE): a batch's era ended unseen while the
+  billing key's nonce moved past it (`unexpected_nonce`); the batch is held
+  for review and nothing is signed (`batch_in_review`). Find what used the
+  nonce; if the held batch never landed, with the owner's go expire it as the
+  biller does (`gamma_spend_batch.state` `expired`, its pending charges'
+  `batch_id` cleared) so its charges go out again with their references; if
+  it landed, its spends must be read and credited before anything is signed.
+  There is no operator tool yet (`bringyourctl gamma`, BTCPAY §18.9).
+- `gamma-runtime-unsupported` (WARN): a runtime whose metadata fails the
+  reviewed shape check (`runtime_unsupported`, once per spec version); the
+  biller holds its cursor and pauses. Review the runtime against
+  `controller/gamma_chain.go`'s shape check, extend the reviewed shapes with
+  its metadata as a fixture, and deploy the taskworker.
+- `gamma-undecodable-block` (WARN): a block whose events the runtime that
+  executed it cannot decode (`undecodable_block`); the cursor holds there.
+  Fix the decoder or the shape, or point `gamma.yml`'s `rpc_urls` at another
+  archive node if the RPC answered bad data.
+- `gamma-service-changed` (WARN): SN25's published service names our spender
+  with another services url (`service_changed`). Only the ur-owner multisig
+  can `set_service`: ask the owners; update `services_url` in `gamma.yml`, or
+  publish §18.7 step 5's `set_service` again.
+- `gamma-stray-tao` (WARN): plain TAO sent to a deposit hotkey
+  (`stray_tao`), a customer's mistake that buys nothing. Find the customer
+  through support and point them at their intent's mint command; return the
+  TAO only when they ask, to the address in their request (the owner,
+  2026-11-11), with the hotkey's key from the deposit master seed on the
+  owner's machine.
+- `gamma-billing-paused` (PAGE once it holds for three five-minute ticks):
+  the biller's readiness is not `ready` while customers depend on billing: an
+  intent is open, a charge is pending or spent and not credited, or an
+  account that pays with gamma has an automatic charge on (a paused biller
+  makes no renewal, so a term ending meanwhile renews only if billing resumes
+  within its grace). The readiness word names the cause, and the alert the
+  remedy:
+  `not_configured` (deliver `gamma.yml` with `billing_key_seed` to the
+  taskworker hosts), `chain_unreachable` and `watcher_behind` (the RPC
+  endpoint), `runtime_unsupported`, `service_not_published` and
+  `service_spender_mismatch` (the owners' `set_service`),
+  `billing_proxy_missing` (the spender's proxy add, unless it was removed
+  after a leak), `fee_float_low` (the treasury funds the billing key, §18.7
+  step 2), `batch_in_review` (`gamma-unexpected-nonce`).
+- `gamma-biller-stalled` (PAGE): while customers depend on billing,
+  `gamma_chain_state` was not written for 20 minutes (the biller writes it
+  every run, every 12 seconds and at most 10 minutes apart while `gamma.yml`
+  is missing): the taskworker's `gamma_biller` chain is not running.
+
+Before the Gamma migration (`server.GammaPaySchemaMigrationVersion()`) the
+probe reads nothing more; at or past it, missing tables fail it. Before
+go-live nobody depends on billing, so a biller that is not yet ready raises
+nothing. Only kinds, counts, ages and the readiness word leave PostgreSQL: no
+reference, hotkey, coldkey, network, intent, block or alarm detail enters an
+alert. The alarm kinds and the readiness words come from the controller
+(`controller.GammaAlarmKinds`, `controller.GammaReadinessReasons`), and a test
+fails for an alarm kind neither §2.22a nor §2.22b reads.
+
+Implementation convention: SIGNALS.md §2.22b (`gamma-watcher`) maps to
+`signal_gamma_watcher.go` and `signal_gamma_watcher_test.go`. Synthetic tests
+cover the registration, the migration gate, every class with its severity,
+sustain and guidance, privacy, and malformed aggregates; a SQL test runs the
+SELECT on tables shaped as the Gamma migration makes them.
+
+### 2.22c Store notifications stopped while purchases continue
+Probe: `store-notifications`
+
+From 2026-10-19 to 10-27 Main refused every Google Play real-time developer
+notification (POST /pay/play answered 503: vault google.yml had no
+`webhook.audience`), about 74,000 refusals, and nothing noticed for eight
+days. Purchases went on being credited by the app's purchase report and the
+hourly reconcile, but a Play purchase cancelled before its first notification
+was processed was never acknowledged, and Google refunded it after three days
+(support inbox 8010, 8046, 8086, 8098). The App Store's notifications
+(POST /apple/notification) had the same blind spot.
+
+Every notification of either store now ends in one outcome
+(controller/store_notification_flow.go), counted on the api and alt as
+`urnetwork_store_notifications_total{store,outcome}` (`google`, `apple`):
+`accepted`; `refused_unavailable` (our verification config is missing: 503,
+with the `payment-webhook-refused` line); `refused_auth` (a Play push with no
+valid Google token of the configured publisher); `refused_audience` (the
+configured publisher's token for another audience: our google.yml and the
+Pub/Sub subscription disagree); `refused_signature` (an App Store JWS that does
+not verify against the pinned roots, or is too old); `refused_claims` (a
+verified App Store notification of another app, environment or version);
+`refused_malformed` (a body that is not a notification); `error` (verified,
+then processing failed; the store redelivers it). An accepted notification
+sets `urnetwork_store_notification_last_accepted_timestamp_seconds{store}` and,
+at most once a minute per process, the store's row of `store_notification_flow`,
+which the migration creates with its clock at the migration. The api
+dashboard's "store notifications" panels show both.
+
+- `store-notification-silent` (PAGE, this probe): a store accepted no
+  notification for 24 hours (`store_notification_flow.last_accepted_at`)
+  while `subscription_renewal` holds supporter purchases of it started inside
+  those 24 hours and at least an hour ago, which other paths credited. Every
+  purchase sends its store's notification within minutes, so the notifications
+  are refused, failing or no longer sent (a removed push subscription or
+  notification URL). Restore the verifier input or the store's endpoint
+  setting through their owners, let the stores redeliver, and reconcile the
+  purchases of the window, checking Play Console for any cancelled before
+  their first notification; never grant from this aggregate. An api older than
+  the flow writes nothing, so it reads as silent a day after the migration:
+  deploy the api and alt with the migration.
+- `store-notification-refused` (PAGE, from the §1.5 log tail at one line a
+  minute): the fixed line `[store-notification]<store> <outcome>` for
+  `refused_audience`, `refused_claims` or `error`, framed by store and
+  outcome: a notification that verified as the store's was refused or failed.
+  Our configuration and the store's disagree, or processing fails behind it.
+  Correct the configuration through the vault owner or fix the processing
+  error; never disable verification.
+- `store-notification-unverified` (WARN, from the log tail at five lines a
+  minute): the same line for `refused_auth`, `refused_signature` or
+  `refused_malformed`. Anyone can post to the routes, so these alone are not
+  an outage; a sustained rate while accepted notifications stop (the silent
+  page) is the store's own notifications failing to verify, a changed
+  publisher service account or Apple chain.
+
+Only stores, outcomes, counts and ages leave the api and PostgreSQL: no token,
+purchase token, transaction id, network or body.
+
+Implementation convention: SIGNALS.md §2.22c (`store-notifications`) maps to
+`signal_store_notifications.go` and `signal_store_notifications_test.go`. The
+log classes are in `tailer.go`. Synthetic tests cover the migration gate, the
+silent decision, privacy and malformed aggregates; a database test runs the
+query against the migrated schema.
+
+### 2.22d App Store offer code supply
+Probe: `apple-offer-codes`
+
+An App Store reader redeems the welcome offer only with a one-time App Store
+offer code from the pool `network_onboarding_apple_offer_code` (or the custom
+code `onboarding.yml` `offer.apple_custom_offer_code`, when one is set). A
+reader whose offer finds no code sees no discount in the App Store app. Every
+offer used to draw a code whatever its reader, and step E4b drew one at the
+send: on 2026-11-12, 451 of the 509 codes drawn went to Android and web
+networks, which redeem through Google Play or Stripe, and about 1,511 were
+left, about three days at that rate, with nothing watching the pool. A code is
+now drawn only for a reader on an App Store build (the iOS app or the Mac App
+Store build): when the App Store app issues the offer, or when an App Store
+build first reads an offer issued without one (the email offer, an offer
+issued on another platform).
+`urnetwork_onboarding_apple_offer_code_draws_total{trigger,result}` counts the
+outcomes.
+
+A code is handed only to an offer it outlives, so a batch serves new offers
+for `offer.apple.expiry_days` minus `offer.validity_days` days (7 - 5 = 2 on
+Main). The daily top-up (`controller.AppleOfferCodeTopUp`, while
+`onboarding.yml` `enabled` and `offer.apple.offer_code_id` are set) asks App
+Store Connect for one batch of `offer.apple.batch_size` (at least 500) whenever
+fewer than `offer.apple.min_available` codes would outlive an offer issued
+before its next run. It keeps up with at most a batch a day; when it stalls,
+the pool runs out within days whatever its count.
+
+- `apple-offer-code-supply-low` (WARN, this probe, hourly, two observations):
+  the supply covers fewer than seven days of draws. The draw rate is the codes
+  assigned in the last three days. The top-up is live when it is configured
+  and a batch arrived within two intervals (a code expires later than any
+  older batch's), or the pool is above the floor it refills at; a live top-up
+  that adds more codes a day than are drawn keeps the supply up. Otherwise the
+  supply is the codes a new offer can take over the draw rate, and, while no
+  top-up delivers, no longer than the last of them stays assignable. A pool
+  with no code a new offer can take warns when codes were drawn in the last 30
+  days. Healthy while the welcome offer is off. Restore a skipped or failed
+  top-up (the App Store Connect key in `vault/main/apple_app_store_connect.yml`,
+  `offer.apple.offer_code_id`) through their owners, raise
+  `offer.apple.batch_size` when App Store readers draw more than a batch a day,
+  and check the draws by trigger when they rise without more App Store readers;
+  never hand codes out by hand.
+
+Only counts, one age and one flag leave PostgreSQL: no code, network or offer.
+
+Implementation convention: SIGNALS.md §2.22d (`apple-offer-codes`) maps to
+`signal_apple_offer_codes.go` and `signal_apple_offer_codes_test.go`.
+Synthetic tests cover the supply decision (the 2026-11-12 pool, a live and a
+stalled top-up, demand above the daily batch, an empty pool in use and not in
+use, the offer switched off), the query contract and malformed aggregates; a
+database test runs the query against the migrated schema.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
@@ -23818,6 +24096,171 @@ pressure without selecting it. Preserve the existing PgBouncer/host owners. Do n
 fleet-wide: every restart recreates windows and contracts. Verify with a full
 10-minute hold at or under 250 ms on complete slot coverage, PgBouncer queued
 clients at 0 and the `/connect/control` mean back in single-digit milliseconds.
+
+### 2.31 TLS finding judge liveness and undecided findings
+Probe: `egress-tls-judge`
+
+A URL turn whose certificate fails verification stores an exact-URL TLS
+finding (`provider_egress_url_security`). The finding starts pending and
+excludes nobody until the Taskworker's TLS finding judge
+(`JudgeProviderEgressTlsFindings`, a RunOnce task every five minutes on one
+Taskworker at a time, `model/provider_egress_tls_verdict.go`) decides it:
+only a finding judged the provider's own (the URL verified directly from the
+server, and no site, prober or country fault explains it) excludes. The
+exclusion therefore fails open while the judge is not judging. A run past its
+ten-minute bound or a panic skips the Post that schedules the next run and
+retries on a backoff toward an hour, and a run that cannot build the served
+pool judges nothing (`judge_runs_total{result="pool_unavailable"}`). A run
+also cannot decide a fresh failure when its direct, verified TLS handshake
+to the URL's host is inconclusive (a dial error, a timeout, a reset, a host
+past the run's bound): the finding stays pending, and once its failure is
+older than the one-hour direct window no check can decide it.
+
+Every judged run sets, on the process that ran it,
+`urnetwork_egress_tls_judge_last_judged_timestamp_seconds` (0 on a process
+until it has judged), `urnetwork_egress_tls_findings{verdict}` (the unresolved
+findings by verdict after the run) and `urnetwork_egress_tls_undecided_findings`
+(the pending findings the run left undecided although their failure is inside
+the direct window, so a direct check could still decide them). It also sets
+`urnetwork_egress_tls_place_withheld_pairs{reason}`: the URL and country pairs
+whose place evidence the run could not read (`error`, a read failed;
+`budget`, its minute of place reads ran out; `limit`, past its 64 pairs). A
+run reads the pairs read longest ago first, carrying when each pair's read
+began to the next run, so no pair is cut on every run: each is read within
+ceil(pairs / 64) runs past the limit. A withheld pair's findings are
+decided nothing for the run: a failure the server's direct check verified
+within the hour still excludes its provider, undecided, until the pair is
+read, and any other stays as stored, a new one pending. A pair withheld run
+after run shows here, and its uncorroborated findings inside the direct
+window as undecided findings. The fleet's view is the process with the
+newest last-judged timestamp; the others keep what their own last run set.
+
+Implementation (5-minute cadence; `signal_egress_tls_judge.go` and
+`signal_egress_tls_judge_test.go`). One loopback Mimir read evaluated two
+minutes behind now:
+`topk(1, urnetwork_egress_tls_judge_last_judged_timestamp_seconds{job="taskworker"})`,
+`urnetwork_egress_tls_undecided_findings{job="taskworker"} and on(job,host,block,instance)`
+that same `topk(1, ...)`, the newest `process_start_time_seconds` of the
+Taskworker processes that export the last-judged gauge, and the gauge's
+per-slot freshness on every desired Taskworker slot.
+
+Classes (all WARN, target `<env>/egress-tls-judge`; only counts, ages and
+slot names are rendered, never a URL, a provider or a website):
+
+- `egress-tls-judge-stale` (sustain 2, PAGE after six failing cadences, or
+  from the second with a slot missing): the
+  fleet's newest judged run is more than 20 minutes old, or no process has
+  judged since it started, with every desired Taskworker slot exporting a
+  fresh last-judged gauge. With a desired slot not reporting, an unread slot
+  may hold the newest run, so it is raised only once the newest judged run on
+  the slots that report is more than 45 minutes old, when a fully read judge
+  would page, and then it pages from its second cadence. Slots that report
+  only zero have not run the judge since their processes started, as just
+  after a roll, which raises nothing. The judge is one fleet task, run every
+  five minutes by whichever process claims it, so the processes that report
+  stay at 0 for 45 minutes after the newest of them started only if none of
+  them has run it; then it is raised and pages from its second cadence too
+  (a judge that never succeeds, or one broken since a fleet restart while a
+  slot is down). Without a start time to read it stays unobservable.
+  Resolved healthy whenever a judged run is under 20 minutes old, however
+  many slots report;
+- `egress-tls-findings-undecided` (sustain 6, never pages): the newest judged
+  run, no more than 20 minutes old, left pending findings undecided inside the
+  direct window, on every cadence for half an hour. A provider that keeps
+  failing its recheck keeps its finding inside the window, so the count holds
+  while the host stays unreachable from the server; a stale count is the
+  stale class's, not this one's;
+- `egress-tls-judge-unobservable` (visibility, sustain 2, never pages): a
+  failed or annotated Mimir read, no last-judged series at all, no undecided
+  series beside it, an invalid sample (a judged time ahead of the clock), and
+  a desired slot whose gauge is missing, stale (older than three minutes),
+  duplicated or on an excluded or disabled host. A Taskworker built before
+  §2.31 exports none of the judge gauges, so before the roll, mid-roll and
+  after a rollback the signal is unobservable and pages nobody; stale pages
+  beside it only on the 45-minute bound above.
+
+The egress probes dashboard's "tls findings" row (panels 151 and 152) charts
+the same gauges from the newest judged process, and the judge's moved
+verdicts, direct checks by outcome and runs by result. False-positive
+qualifiers: the judge runs on one Taskworker at a time, so a run in flight
+for ten minutes plus the evaluation lag reads as an older newest run; the
+stale bound covers four intervals. Every process exports 0 until it has
+judged, so a fleet restarted all at once reads as never judged until its
+startup schedule's first run, which the sustain absorbs. False-negative
+qualifiers: an undecided finding whose provider goes quiet leaves the
+direct window after an hour and the count with it, though it stays pending
+until a fresh failure; the findings by verdict on panel 151 keep showing it.
+A judge that judges but stores nothing (every optimistic write lost) still
+reads as live; its log line reports changed= per run.
+
+ACTION: for a stale judge, read the Taskworker's `[egress]TLS judge` lines and
+the reschedule error on the `pending_task` row under run_once_key
+`judge_provider_egress_tls_findings`. For `pool_unavailable`, the served
+destination pool could not be built: its own errors on the api and the
+Taskworker name the cause. A run that times out is most often its direct checks (15 s
+each, eight at a time, at most 256 hosts). A Taskworker restart schedules a
+run at once. For undecided findings, check the hosts of the recent pending
+findings from a Taskworker host: an unreachable address family, a firewall or
+a host that refuses the server is the usual cause. Do not exclude a provider
+by hand on an undecided finding. Verify with a judged run under 20 minutes
+old, and no undecided finding, on two cadences.
+
+### 2.32 Zero-carry verdict spikes
+Probe: `zero-carry-verdicts`
+
+The Taskworker's zero-carry judge (`JudgeProviderZeroCarry`, a RunOnce task
+every two minutes on one Taskworker at a time, `model/provider_zero_carry.go`)
+takes a provider out of every bucket, FindProviders2 answer and
+provider-locations count when its contracts from at least three client
+networks carried nothing in a day, the sessions its clients reported idle left
+out, and every URL probe in eight hours failed. A verdict clears on a URL
+success the verdict did not see, a new app version on the device, or its
+expiry after 72 hours. In a country the URL-success rule exempts, honest
+providers fail the probe too, so nothing but the device's version or the
+expiry clears a verdict there. A burst of verdicts is therefore worth a look:
+either a release whose providers stopped carrying for current clients, or a
+platform fault that stopped acknowledgements and URL probes together.
+
+Every run counts what it made and cleared in
+`urnetwork_provider_zero_carry_changes_total{change}` (`created`, `expired`,
+`url_success`, `upgrade`, `gone`) and sets
+`urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds`.
+
+Implementation (5-minute cadence; `signal_zero_carry_verdicts.go` and
+`signal_zero_carry_verdicts_test.go`). One loopback Mimir read evaluated two
+minutes behind now:
+`sum(increase(urnetwork_provider_zero_carry_changes_total{job="taskworker",change="created"}[1h]))`
+and `max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{job="taskworker"})`.
+
+Classes (all WARN, target `<env>/zero-carry-verdicts`; only counts and ages
+are rendered, never a provider, a network or a country):
+
+- `zero-carry-verdict-spike` (sustain 2, never pages): at least 100 verdicts
+  made in the trailing hour, twice the whole standing population the judge's
+  first pass over Main made (52 on 2026-11-08). Resolved healthy below it;
+- `zero-carry-verdicts-unobservable` (visibility, sustain 2, never pages): a
+  failed or annotated Mimir read, no last-run series (a fleet built before
+  §2.32, as before the roll, mid-roll and after a rollback), no changes series
+  beside it, or an invalid sample (a run time ahead of the clock).
+
+The egress probes dashboard's zero-carry judge row (panels 159 to 161) charts
+the verdicts in force by country, the changes by why, the reads, and how the
+confirming reads ended. False-negative qualifiers: a process that ran the
+judge and is not scraped is not counted, so a missing Taskworker slot can hide
+part of a burst; a slow burst under 100 an hour never raises it, and the
+providers by country chart shows it.
+
+ACTION: read the Taskworker's `[zero-carry]` lines for the countries and the
+client versions of the new verdicts. A release of the provider app or of
+connect in the last day points to a build that stopped carrying: roll it back,
+and the verdicts clear as its devices report the old version. A platform fault
+clears outside exempt countries once URL probes succeed again. There is no
+runtime switch: inside exempt countries a wrong verdict holds until its expiry,
+and deleting `provider_zero_carry` rows alone does not help, because the judge
+re-creates them from the same day's contracts. To lift a wrong burst sooner,
+stop the judge first (roll the Taskworker back to a build without it), then
+delete the rows; ask the owner before either. Verify with fewer than 100
+verdicts made in the trailing hour on two cadences.
 
 ---
 
@@ -25408,7 +25851,7 @@ controls, then observe complete fresh coverage through the normal alert window.
 | Proxy exact `observable=v1 path=tun ... result=timeout` (`doh-tun-dial-timeout`) | A hosted device's remote DoH leg through its own tunnel timed out. The tunnel egresses through the provider the customer selected, so a device pinned to an offline or retired provider times out every leg it races. Lines are throttled per process and resolver target: one such device keeps a process above threshold, and the rate measures neither devices nor failed lookups. On Main on 2026-10-12 every Proxy process logged ~20/min of these while logical tun resolver calls had zero timeouts and zero failures (~66% answered, ~34% canceled by their callers), host-path calls answered 100%, and the ingress dial failure ratio was at its pre-incident baseline. | WARN at 10 lines/minute with the single `doh-tun-attempt` frame. Before treating it as a platform incident, compare fresh same-process `[doh]resolver owner_path=tun` deltas and the Proxy ingress dial outcome ratio with their baseline; a platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups (it would egress the customer's queries from the platform host) or lengthen resolver timeouts from this class. Platform-owned host/caller paths keep the `doh-dial-timeout` page. |
 | DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
 | otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
-| otherwise-unclassified `connect: connection refused` | TCP actively refused the attempt, proving no matching accepting listener at that address and instant. It does not identify the target service, namespace, exit cause, manual restart, or persistent outage. More-specific rows above take precedence. | Resolve the emitting process and exact target from current inventory and bounded same-generation evidence. Inspect that target's process, listener address/namespace, and start/exit boundary; reproduce from the same namespace. Do not assume Redis or restart an inferred service. Require the original source path to accept, its owning health signal to remain healthy, and this class to stay below threshold for 10 minutes through the relevant lifecycle. |
+| otherwise-unclassified `connect: connection refused` | Selected-service log text matched the fallback category; PAGE at >=10 matching diagnostic lines per service/class window. The text alone does not authenticate a socket attempt, listener state, target ownership or caller outcome. More-specific rows retain precedence. | Bind the original event, immutable emitter and source namespace, intended target, typed socket/context result and independently acknowledged operation before assigning listener or service cause. Only after binding the source and target, reproduce the intended operation from the same source path and network namespace. Do not assume Redis or restart an inferred service. Quiet or missing logs cannot establish recovery. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` (`port-exhaustion`) | The selected stream reported this text at rate. It does not identify a native emitter, error code, resource namespace, exhausted port range, unique attempts or one destination. A frame is only the first exemplar's textual address hint. | Preserve the WARN at >=100 matching lines/window. Bind the original event to its artifact/process/attempt/network namespace and compare same-window local-address and socket/tuple limit/usage evidence. Ephemeral-port pressure is a candidate, not a diagnosis; do not infer a target-node fault, restart clients, raise limits, change routes or promise a fixed self-drain timer. Complete comparable logs plus independent native controls are required for recovery. |
 | `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
@@ -25438,11 +25881,11 @@ controls, then observe complete fresh coverage through the normal alert window.
 | `[warpctl][loki-tail-dropped-entries] service=<service> count=<n>` | Loki returned a non-empty API `dropped_entries` list for the named standing tail. On Warp `5927527` or its `35453fd` descendant, this can contain bounded descriptors forwarded from the earlier ingester loss stage; the existing later querier-to-WebSocket overflow uses the same field. This is exact service attribution, but a same-window raw reset only corroborates ingester loss in that window and cannot assign that reset to this exact summary without a privacy-safe join. The alert rate is summary lines; `count` is one response's bounded descriptors, not unique lost records. | Deploy Grafana with Warp `35453fd`, run Warpctl with Warp `26089b2` or later, retain bounded reconciliation for the named service, and remove any residual producer/consumer stall. Never print dropped labels or timestamps or raise either queue. Require a connected tail, two advancing complete overlap reconciliations, and zero `loki-tail-dropped-entries`, raw resets, and backend EOFs for ten minutes through comparable load. See §1.5. |
 | `caller=bucket.go:<line> ... diff=-<seconds> msg="bucket index version (updated_at) is older than requested"` | Mimir 3.1 reports when a store-gateway's local bucket-index version is below the querier's requested version; zero can mean unloaded index metadata, not an observed index age. The live fleet's exact `diff=-873`/`-882` was one normal generation of independent 15-minute default phase skew, not a query failure, but it repeated on every query and contributed material self-log volume. Warp `13fcd05` changes the single-tenant gateway refresh to one minute. `mimir-bucket-index-lag` retains a conservative >=1,800-second threshold across rolling/older generations. | Verify the running Grafana artifact contains `13fcd05`. If absent, deploy it normally; if present, use `mimir-index` (§11.18) to check the framed gateway's last successful sync and tenant coverage plus the shared compactor index age. Require gateway convergence below two minutes. Restore sync/object-store/ring health if stale. Do not suppress every warning, increase `max_stale_period`, or upgrade solely to hide 3.1 log noise. |
 | `http: response.WriteHeader on hijacked connection` | A response header was attempted after ownership transferred through Hijack. The immediate frame may be a forwarding wrapper; it cannot prove the caller, panic branch, missing fix or failed transport. The historical 2026-08-31 control isolated expected-Done fallthrough using complete source coverage; it does not diagnose a current warning. | Bind the original event and emitting artifact, then compare ancestry with `02f4d29ae575ae68c2a5f0c8ba3207361b353170`; deploy that fix only when proved missing. Otherwise correlate the same-event caller stack and `[h]unhandled` evidence to identify the current writer or route panic. Missing or partial authority remains unknown. Require ten comparable minutes with zero canonical warnings, complete current observation coverage, and independent H1 success controls after the proven correction. Preserve net/http logging. See §1.5. |
-| `CLUSTERDOWN` | Slot coverage lost (node marked fail + no failover, or majority loss). | CLUSTER INFO/NODES; restart dead nodes; transient ≤ node-timeout during elections is expected and retried in-client. |
+| `CLUSTERDOWN` | Selected-service log text matched the category; PAGE at >=5 matching diagnostic lines per service/class window. Slot coverage, elections, retry policy and borrower outcome are not established by the match. | Bind the original event, immutable emitter/client settings, exact target and command, typed stage/result and independent operation acknowledgement. Separately qualify any topology observation before selecting a repair; do not restart nodes from this category alone. Quiet or missing logs do not prove recovery. |
 | `OOM command not allowed when used memory > 'maxmemory'` | Node at maxmemory and volatile-ttl has nothing evictable (no-TTL keys dominate). Writes fail, reads work. | Identify node (3.1); drain no-TTL piles (cleanup script) or raise ceiling temporarily; NEVER a client-side problem. |
 | `pubsub ... channel is full for 1m0s (message is dropped)` | IN-PROCESS consumer stall: the app isn't draining go-redis's channel (usually because its goroutine is blocked on another redis call). While blocked, the socket goes unread → server buffers grow (3.2). | Check what the consumers block on; server-side buffer alert 3.2 is the paired signal. |
 | `connection reset by peer` or WebSocket `close 1006 ... unexpected EOF` (`conn-reset`) | The receiver observed an abrupt transport termination, not an orderly close. `connection reset by peer` is peer-relative, and WebSocket 1006 means no close frame arrived; neither identifies which endpoint or network hop caused it. The peer can be a device or service depending on connection direction, while a NAT, load balancer, firewall, or other intermediary can also discard state or inject a reset. | Preserve the emitting host/block/protocol/process generation, identify connection direction, and correlate the exact minute with peer lifecycle, restarts, LB/NAT/conntrack, carrier, OOM/cgroup, socket, and service-specific resource controls. Do not call it a server close, restart a healthy process, increase buffers, or claim memory pressure from this line alone. Require the rate below 50/min for ten minutes under equivalent traffic and the independently identified causal control healthy. See §13. |
-| `LOADING` / `READONLY` | Node restarting (rdb load) / replica mid-failover. Transient; retried in-client. | Only alert if sustained > 2 min. |
+| `LOADING` / `READONLY` | Selected-service log text matched either alternative; WARN at >=50 matching diagnostic lines per service/class window. The reducer has no two-minute persistence gate. Restart, failover, target role, retry policy and operation result remain unknown. | Bind the original event to immutable emitter/client settings, intended target role, request and independently acknowledged operation. Treat repeated, relayed or quoted diagnostics as text counts; do not infer sustained node lifecycle or prescribe a retry/restart. Quiet or missing logs do not prove recovery. |
 | `[redis][ttl]` (server-side guard, server/redis_ttl_warn.go) | A redis write carried an effective ttl beyond its family limit, or a raw Go `time.Duration` command/eval arg. Raw Durations serialize as int64 NANOSECONDS, so an 8h ttl can become `EXPIRE <key> 28800000000000` (~913,000 years); alternatively, a correct `EXPIREAT` can expose an unbounded durable deadline. The 2026-07-20 signature was ~1.1M immortal legacy `s_sk_*` stream keys. | The warning names the command + redacted key family. For raw Duration, pass seconds/ms ints and clean the affected family. For a long `EXPIREAT`, preserve authoritative data and bound only the Redis mirror horizon; see §5.11. |
 | `providertunnel: tun read error: Done` (`provider-tunnel-read-done`) | `Tun.Read` returned terminal `Done`; the line alone proves neither outer context state nor active artifact ancestry. On an artifact proven to predate `20e289bd`, it is consistent with ordinary canceled teardown reaching the unconditional legacy logger. On a proven descendant, the fix would suppress only a canceled-context read error, so recurrence is an affirmative unexpected Tun/context close-order fault. The locally inspected `v2026.9.3-1036806790` tag lacks the fix, but tag ancestry is not runtime provenance. | Prove the active Taskworker artifact first. Deploy a containing Taskworker only if it predates `20e289bd`; otherwise diagnose the close-order/context fault. Require zero exact lines for 10 minutes through comparable ProviderEgress churn. Never suppress another TUN read error, infer cancellation from `Done`, or restart an unproven release. |
 | legacy `[signal]send failed -><destination>` from `transport_p2p_webrtc.go` (`signal-send-unclassified`) | The emitting service hosts Connect's signaling sender, but its legacy boolean-only call discarded the detailed result. The line cannot distinguish bounded admission refusal, required-encryption refusal, client/generation/sequence closure, or another send error. A Taskworker selector identifies the host process, not an owning task or a Taskworker implementation defect; the September 10 record cited as historical Taskworker ancestry was later corrected to Connect and must not be reused as ancestry for this event. The retained sample omits the destination. | At 20/min WARN, prove the embedded Connect input under §8.12 and deploy the structured, identity-free diagnostic before choosing a behavioral correction. Do not infer pressure, lifecycle, transport failure, or the effect of a later Connect commit from the legacy line. Require this class to disappear on every relevant artifact and the reason-specific class to remain below 20/min for ten minutes under comparable traffic. See §14.6. |
@@ -25458,35 +25901,24 @@ controls, then observe complete fresh coverage through the normal alert window.
 | `[onboarding]connect.day write failed ... inconsistent types deduced for parameter $3 (SQLSTATE 42P08)` (`onboarding-connect-day-write`) | The Connect session was already committed and remains usable, but the separate `RecordConnectDay` transaction was rejected before it wrote analytics. The same untyped parameter was used as INSERT output and a varchar comparison. Recovery deliberately forgets the process-local cache entry, so the next connection retries and amplifies the defect. The 2026-09-10 persistence manifest's outer identity said Taskworker, but every selected private record and the focused snapshot named Connect; a bounded current discriminator found the exact source/SQLSTATE intersection throughout sampled Connect generations and zero matching Taskworker lines. All sampled Connect endpoints ran `2026.9.10+1042581110`, containing first-bad server commit `821f8131`. | Deploy Connect from a server checkout whose real statement explicitly casts every reused UUID, varchar, and timestamp parameter. Do not restart Taskworker, replay raw connections, or fabricate missing historical events; backfill is a separate product/data-policy decision. The fixed alert sample omits the client identifier. Verify the PostgreSQL test records exactly one `connect.day` event per network per UTC day, every Connect block runs the corrected artifact, and neither this class nor its former `novel` shape recurs for ten minutes after ingestion delay while connections continue. |
 | `dohRouteForConn.func1` with `runtime error: invalid memory address or nil pointer dereference` | HTTP/2 reused or retired a live connection wrapper whose `LocalAddr()` or `RemoteAddr()` was nil. The optional route-observation callback dereferenced that endpoint, so `HandleError` recovered the resolver goroutine but the in-flight DNS result was lost; the proxy process and public listener remain healthy while a request can time out. This is not provider unresponsiveness. | Any occurrence identifies a pre-fix Connect module. Current code treats nil and typed-nil endpoints as absent diagnostic metadata and preserves the DoH response. Deploy the fixed proxy generation, then require zero new occurrences while sustained HTTP/SOCKS/WireGuard acceptance runs. See §14.6. |
 | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` (Mimir; `[contract][error] class=insufficient_balance` is a rate-limited exemplar only) | Payer network has no usable balance. Counts are failed/retried attempts, not unique users. Runs at a steady background rate (~1,000+/min measured 2026-07-17) from out-of-data free users — presence is NOT an incident. | The provisioned Grafana rule watches the lossless 5-minute counter rate; >4,000/min for 5 minutes is an elevated-denial trigger, not proof of Redis drift. Distinguish genuine depletion or grant regression, Redis mirror drift, and stale authoritative PostgreSQL escrow retained by a close backlog. Compare complete closer failures/cadence and exact private payer accounting with mirror-versus-source evidence before authorizing reconciliation. Require a same-generation temporal baseline and actual admission/delivery impact before assigning a new outage's cause. Do not calculate the rate from sampled logs. |
-| `asset amount owned by the wallet is insufficient` / `insufficient token balance ... in wallet` (taskworker, Circle payment path) | The payout wallet cannot cover pending payouts (USDC on Solana — mint EPjFWdd5...Dt1v in the protected source log). Each affected `AdvancePayment` remains pending on a one-hour-mean consecutive-error backoff, so N parked rows produce roughly N canonical attempts/hour on average. One attempt normally emits both a Circle-client and task-evaluator diagnostic; the alert therefore reports `wallet_insufficient_events` separately from raw line rate. Proportional 30–90-minute jitter disperses cohorts but cannot impose an instantaneous fleet ceiling; current-main `14928f69` (the patch-identical replay of former `eb7e79b6`) separately gates transfer POSTs at three per rolling second. Alert artifacts redact wallet/entity ids. | **Finance/ops action required:** fund the exact network/token wallet from protected logs or pause payouts with the supported operational control. Deploy a clean marker-capable `928abfca` Taskworker only where §8.12/§2.14 proves it absent; `66525afc` alone has the fail-closed activity/error path but not the capability gauge or exact pre-POST marker. Another software deploy cannot create liquidity. Allow 90 minutes plus ingestion delay for natural convergence; never delete/manual-replay task rows, rotate payment idempotency keys, or accelerate retries. |
-| `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
-| `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
-| `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
-| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
-| `payout-invalid-destination` — HTTP `400 Bad Request` plus `invalid destination address` text (taskworker, Circle payment path) | This text class does not prove the typed response, current chain compatibility, or guarded-reset outcome. In the inspected product source, only a typed HTTP 400 with parsed code `155219` or the exact normalized invalid-address message permits a guarded pre-chain reset. A code-only response need not match this text class. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; a current request/wallet join must establish whether that cause applies. A Circle-client diagnostic precedes the reset and can accompany its later failure. Without an evaluator line, logical event cardinality is unknown while the diagnostic WARN remains visible. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay using complete current observations. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`, or for a Stream fallback by its one origin lookup in `CreateContract`, before the provide secret, metadata and endpoint reads, and again with the recorded labels when a refusal kept by the route rejection ring (60 seconds, or until an origin edge) is replayed, including before the client state query. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
 | Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
 | `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
-For `payout-invalid-destination`, `invalid_destination_events` is the
-exact-replay-deduplicated task-evaluator event count, not an additional Alert
-class or a unique-payout count. If the window has destination diagnostics but
-no evaluator line, report `invalid_destination_events=unknown` and
-`canonical_source=absent`; retain the diagnostic line count, threshold, WARN,
-and alert identity. Missing canonical evidence cannot establish zero logical
-failures. The separate reset-failure class similarly
-reports `invalid_destination_reset_failed_events` for exact-replay-deduplicated
-evaluator lines; that is neither a unique-payment count nor a proof of a
-successful reset. The internal correlation-only state named
-`payout-wallet-completion-correlation` also emits no Alert: it retains bounded
-wallet-insufficient completion cohorts for the processor-429
-`coincident_wallet_attempts` observation. Neither completion timestamps nor
-these internal names satisfy the separate `payout-retry-microburst` admission
-invariant. Class-coverage audits must distinguish emitted class names from
-canonical metric and correlation-only names instead of declaring phantom
-missing probes.
+The payout log classes (`payout-wallet-insufficient`, `payout-retry-microburst`,
+`payment-processor-rate-limit`, `circle-transfer-admitted`,
+`circle-transfer-admission-failed`, `payout-invalid-destination` and
+`payout-invalid-destination-reset-failed`) retired on 2026-11-13: USDC provider
+payouts ended (owner decisions 2026-11-12 and 2026-11-13), and no Taskworker
+sends a Circle transfer or logs these lines (§1.2, §2.14). Slack incident state
+is process-local: the watcher restarted on this build holds none of their
+incidents, and one the previous process raised gets no cleared message. A
+canonical count such as `failed_window_events` is the
+exact-replay-deduplicated logical-event count of its class, not an additional
+Alert class; class-coverage audits must distinguish emitted class names from
+canonical metric names instead of declaring phantom missing probes.
 
 At `2026-09-03T09:56Z`–`09:59Z`, the authoritative watcher measured
 Fireside Proxy `device_rpc_transport` WebSocket close-1006 unexpected-EOF
@@ -25806,21 +26238,11 @@ row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
 
-For Payout, first establish the current SQL phase; the historical nested
-reliability/idle-timeout failure is not an explanation for an active final
-sweep-assignment UPDATE. At 2026-09-27 14:59:52Z the RunOnce Payout row had a
-fresh 6.4-second claim and a six-hour task limit, but its `run_at` was only
-779 seconds old while the sampled payment-plan transaction had begun around
-11:46Z. A reschedule can change `run_at`; this mismatch alone proves neither
-an orphan nor ownership by the current attempt. Join the exact task heartbeat,
-executor artifact and connection ownership before classifying the transaction
-as progressing, abandoned or retry-safe. The task-overdue fallback is one
-hour when fewer than ten seven-day completions establish history; a recent
-reschedule can therefore be below that task guard while the independent
-active-query and wait-event warnings already fire. Points readiness observes
-committed payment/rollup rows, so it does not attest this uncommitted plan's
-progress. Do not cancel the financial transaction, replay the Payout row,
-change its atomicity or enlarge its deadline from this chronology alone.
+USDC provider payouts ended (owner decisions 2026-11-12 and 2026-11-13: "settle
+closed rows, let's close out usdc entirely"). `AdvancePayment` is gone, and
+`Payout`, `ProcessPendingPayouts` and `CancelHungAccountPayments` drain queued
+rows as no-ops, so their phase, liquidity, destination and planner guidance
+retired (§1.2).
 
 `CloseExpiredContracts` can fail briefly on a correctly enforced escrow guard
 and retain the same singleton in ordinary long backoff; this is not an execution
@@ -25868,266 +26290,8 @@ backend. A redeploy solely for the already-present cadence/checkpoint changes,
 larger MaxTime, query cancel, or database restart is not the repair for this
 variant.
 
-The 2026-09-16 retained `AdvancePayment` family contained 1,119 failures:
-1,117 `wallet-insufficient` and two text-classified
-`processor-invalid-destination` rows. At 09:49Z, all eight scrape-fresh newest
-Taskworkers reported the same image and modified Build base `36a13c81`, whose
-Server gitlink `c2fa1d2b` contains typed reset `b8af229f`, retry dispersion
-`70b0d269`, and fail-closed admission `66525afc`. This establishes reported-base
-ancestry, not the exact modified executable or successful reset of those two
-rows. The earlier six-row incident below cannot be identified with today's
-two from counts alone. Finance must separately verify source-wallet liquidity;
-the destination cohort needs typed rejection, reset outcome, and current
-wallet-selection evidence before a configuration correction is attributed.
-No new payment-product defect or authority to replay/fund/change wallets
-follows from these aggregate counts.
+Task-family variants:
 
-The source review exposed a separate monitor attribution defect: the composed
-controller reset error was previously counted as an ordinary destination
-rejection. `task-canaries` now gives `invalid-destination-reset-failed` its own
-persistence/state action, and log-errors emits the distinct
-`payout-invalid-destination-reset-failed` class before ordinary destination or
-generic network matches. Neither class claims that the configured wallet is
-still invalid. These are source-correctness controls, not evidence that the
-current two-row cohort actually failed its reset. Deterministic controls cover
-the exact composed marker, SQL-class precedence, truncated representatives,
-mixed causes, ordinary rejection, healthy windows, replay deduplication, and
-private suffix/address/identifier redaction. Their Go execution remains a
-separate validation gate; alert absence alone does not close the payment
-boundary.
-
-The retained 2026-10-17 `payout-invalid-destination` WARN contained two
-Circle-client diagnostics and no canonical evaluator line. It displayed a
-logical count of zero and asserted a current declared-chain mismatch, although
-its source ran before the typed-error check and guarded reset. The monitor now
-uses its existing unknown-cardinality path for that missing evaluator evidence
-and preserves the two diagnostic lines and WARN. HTTP 400/code `155219` text
-does not establish a typed error object, a reset attempt or outcome, or the
-current wallet's compatibility. The smallest discriminator is an unambiguous
-private join to the exact failed-payment audit and retained attempt, with the
-emitting artifact, typed rejection eligibility, reset outcome, current wallet
-selection, and chain-compatibility result. Missing, stale, partial, or ambiguous
-evidence remains unknown; an older historical cohort or the separate payout
-planner's performance branch does not supply that join. Healthy controls keep
-a complete empty log window quiet, preserve one canonical event for an
-evaluator-plus-provider replay, and retain the distinct reset-failure class.
-No payout or account correction follows from this monitoring repair.
-
-Two 2026-08-29 task-family variants were formerly hidden behind the raw-row
-limit:
-
-- `AdvancePayment`, five `400 Bad Request` rows with Circle
-  `Invalid destination address.`: a complete read-only breakdown found two
-  active external wallets across two networks (three payment plans), all
-  declared `MATIC` but carrying 44-character Solana base58 public keys. Both
-  wallets were still selected for payout; the rows had retried 373–1,059
-  times. `WalletValidateAddress` ignored the declared chain and always called
-  the Solana base58 parser, so these addresses passed registration before
-  Circle rejected them as Polygon destinations. The payment path creates a
-  stable idempotency key before submission, and `UpdatePaymentWallet` correctly
-  refuses to change a wallet once that key exists; without distinguishing this
-  definitive rejection, a user correction cannot reach the parked payment.
-  Validate SOL with the Solana parser and MATIC with a nonzero, `0x`-prefixed
-  EVM address; reject Ethereum in this SOL/MATIC payout-wallet endpoint (TAO
-  remains a non-payout identity). After typed HTTP 400/code 155219, Circle has
-  created no transfer, so clear only that pre-chain attempt and let the next
-  retry select the corrected payout wallet. An arbitrary string match is not
-  enough: malformed responses, generic 400s, 429s, and transport errors retain
-  their stable key because submission may be ambiguous. Deterministic tests
-  cover both cross-chain address directions, zero/unknown destinations, typed
-  and wrapped error classification, corrected-wallet selection with a fresh
-  key, and key reuse after an ambiguous error.
-
-  Post-deployment validation on 2026-08-31 separated code convergence from
-  configuration convergence. All taskworker blocks reported
-  `2026.8.31-outerwerld+1033655820`. Its embedded source revision `1d8f01e5`
-  contains typed-reset commit `b8af229f0` but predates proportional-jitter
-  commit `70b0d269`; this ancestry distinction must come from the artifact,
-  not the current checkout. The same six invalid-destination payments retried
-  once in the 12:34–12:51Z hour and again in the 13:34–13:51Z hour. That exact
-  spacing matches the one-hour consecutive-error cap. Clearing the typed
-  attempt does not invent a replacement payout wallet: without an account-owner/operator
-  correction, `UpdatePaymentWallet` selects the same invalid configured wallet
-  and Circle rejects it again. Correct the wallet through the supported account
-  API and let the next retry converge. Do not manually clear payment rows,
-  processor keys, or sweeps; persistence after the reset release is an
-  operational configuration alert, not evidence that faster retries are
-  needed.
-
-  A later bounded canonical-log audit through 16:51:58Z made that conclusion
-  stronger. It found 58 task-evaluator invalid-destination attempts for the
-  same six logical payments across both taskworker blocks (22 on g1 and 36 on
-  g2), including exactly six attempts in every UTC hour from 11 through 16.
-  The deployed revision contains the typed pre-chain attempt release, so the
-  unchanged six-payment cardinality after each hourly retry proves the current
-  payout-wallet selection is still returning the invalid configuration. The
-  `payout-invalid-destination` log class now counts exact-replay-deduplicated
-  task-evaluator lines separately from the duplicate Circle-client diagnostic,
-  redacts entity ids, and warns as an operational wallet-correction alert on
-  the first current occurrence.
-
-  A subsequent bounded audit through 17:52:00Z extended the discriminator by
-  another complete recurrence. The two-hour source window contained 24
-  diagnostic lines but only 12 exact-replay-deduplicated task-evaluator
-  attempts: exactly six in 16:35–16:51Z and the same six payment IDs again in
-  17:35–17:52Z. Five attempts ran on g1 and seven on g2, ruling out one stale
-  taskworker generation as the owner. Combined with the embedded-revision
-  ancestry above, this is continued invalid wallet selection after the safe
-  typed reset, not evidence that the reset code is missing. At that point it
-  did not weaken the separate requirement to deploy `70b0d269` for retry
-  dispersion; the later current-main `66525afc` baseline contains that jitter,
-  the fleet admission gate, and complete fail-closed activity/error telemetry
-  required by that historical post-jitter control. It does not contain the
-  later capability gauge or exact pre-POST marker from `928abfca`.
-
-  An independent artifact/runtime control at the UTC day boundary removed the
-  remaining provenance assumption. The published OCI/SLSA build provenance for
-  taskworker `2026.8.31-outerwerld+1033655820` names source revision
-  `1d8f01e5` for both amd64 and arm64 and a build completion at 08:43Z. Git
-  ancestry proves that revision contains typed-reset `b8af229f0` and excludes
-  retry-dispersion `70b0d269`. A bounded three-hour taskworker query then found
-  36 diagnostic lines but only 18 exact-replay-deduplicated evaluator attempts:
-  the same six logical payments at the same minute in each of the 21Z, 22Z,
-  and 23Z hours. The deployed reset is therefore active and repeatedly exposes
-  the still-invalid selected wallet, while the hour-locked cadence separately
-  proves the old jitter. The incident therefore required both correcting the
-  wallet through the supported account API and deploying retry dispersion;
-  current software convergence for the gate and fail-closed activity/error path
-  used `66525afc`; complete marker observability now requires `928abfca` or a
-  descendant. Neither software fix can invent or authorize valid payout-wallet
-  data.
-
-  The 2026-09-02 control then proved that baseline live on all eight newest
-  Taskworker processes at source `fe3fa8ee`. The same 90-minute interval had
-  zero Circle 429s, zero admission failures, and a maximum of three canonical
-  wallet attempts per source second. Six invalid-destination rows still
-  remained and emitted a new exact task-evaluator event from that generation.
-  This is configuration persistence after both software fixes: the typed reset
-  safely releases each definitive attempt, but the unchanged account wallet is
-  selected again. Correct it through the supported account API; a new service
-  version cannot close this class.
-- `Payout`, `ERROR: no empty local buffer available (SQLSTATE 53000)`: the
-  2026-08-31 UTC production row reached 153 failures on PostgreSQL 18.4 while
-  `effective_io_concurrency=200` and `temp_buffers=8MB`. Its stack ended in
-  `PaymentPlanner.finalizePayments` while scanning the planner's temporary
-  tables. This exactly matches PostgreSQL 18's read-stream lookahead defect:
-  high effective I/O concurrency can pin every local buffer for a temporary
-  relation. The [upstream bug report](https://www.postgresql.org/message-id/CAFMO8-rYPSJbXsDdWDzDdpNi-fQ%2B6bKvgbXwE%2BR=sGko4epq0Q@mail.gmail.com)
-  identifies the temporary-buffer failure, and PostgreSQL's
-  [18.6 release announcement](https://www.postgresql.org/about/news/postgresql-186-1711-1615-1519-1424-and-19-beta-3-released-3365/)
-  includes the server fix.
-  Upgrade PostgreSQL to 18.6 or newer for the root fix. Until then, the
-  payment-plan transaction applies `SET LOCAL effective_io_concurrency = 32`;
-  this contains the affected read stream without reducing the production-wide
-  value for unrelated queries. Do not raise `temp_buffers`, delete the task
-  row, or blindly lower the global concurrency setting. Verify 32 inside the
-  Payout transaction, the original value on a fresh session after commit, and
-  completion of the same pending row. Remove the containment after the server
-  upgrade only with a production-shaped temporary-table regression. The
-  deterministic regression records both exact `SET LOCAL` statements and
-  verifies that both transaction settings return to their session baselines
-  after commit.
-  A later live retry supplied the deployment discriminator. Exact task
-  `<redacted-id>` began on edge-1/g2 at
-  05:51:51Z, kept authoritative ten-second heartbeats through planner work,
-  and failed at 06:10:31Z after 1,120.91s with the same SQLSTATE 53000 in
-  `PaymentPlanner.finalizePayments`, advancing the row from 157 to 158
-  failures. PostgreSQL still reported 18.4, while every sampled g1/g2 worker
-  reported `2026.8.30+1033129380`; that tag predates the transaction-local
-  containment. The row then returned to its normal backoff about 59 minutes
-  ahead. This is a pre-fix recurrence, not evidence against the containment:
-  do not pull the row forward, and require a post-rollout retry to observe 32
-  inside the transaction and reach a terminal success.
-  The next live attempt exposed an independent planner defect before it
-  reached `finalizePayments`: its active backend spent several minutes with no
-  wait event on the subsidy-range MIN/MAX over `transfer_escrow_sweep`. That
-  query rescanned paid historical rows even though `temp_account_payment`
-  already held the exact selected and close-time-bounded slice. The planner now
-  derives the range from that temporary relation, removing both the semantic
-  overreach and the lifetime-table scan. A deterministic query-shape
-  regression forbids `transfer_escrow_sweep`, a second close-time predicate,
-  or an extra bound argument in that stage. This fix ships in `taskworker`
-  alongside the transaction-local PostgreSQL containment; verify both
-  independently on the same retry.
-- `Payout`, `pgconn.connLockError=conn closed`, repeatedly after roughly
-  16 minutes: production's database-level
-  `idle_in_transaction_session_timeout=5min` closed the outer payment-plan
-  transaction while a deliberately separate, long reliability maintenance
-  transaction ran. The bounded payout task now applies `SET LOCAL
-  idle_in_transaction_session_timeout=0` to that transaction only. Its task
-  `MaxTime` and four-day plan slices remain the bounds; the global five-minute
-  guard still protects every unrelated session. Verify one payout slice
-  commits, the same pending row's error clears, and a fresh DB session still
-  reports the configured five-minute setting.
-  A live 2026-08-30 retry reproduced every boundary: Payout began at 07:58:25Z;
-  its outer transaction reached 726s total and 260s continuously idle on the
-  subsidy-overlap query, then disappeared after crossing the 300s database
-  cutoff while a separate `network_connection_reliability_score` INSERT kept
-  running. The task finally failed at 08:17:36Z after 1,150.90s with
-  `pgconn.connLockError=conn closed`, raising the same row to 143 failures.
-  This is affirmative validation for the transaction-local override, not a
-  reason to disable the global guard.
-  The next retry reproduced the separation even more precisely. It began at
-  09:17:37Z; outer PID 1554457 entered `idle in transaction` on the
-  subsidy-overlap query at approximately 09:24:33Z and disappeared as that
-  uninterrupted interval crossed 300s near 09:29:33Z. The task claim kept
-  heartbeating while its separate computation finished, then taskworker logged
-  `eval error(1011.80s)` at 09:34:28Z and advanced the same row from 143 to 144
-  failures. The roughly five-minute delay between connection death and error
-  observation explains why task duration alone cannot identify the timeout;
-  follow the outer backend state and the nested work together.
-  A third retry repeated the boundary under the later recovery load. Payout
-  began at 10:34:31Z; its outer transaction became continuously idle on the
-  same subsidy-window query near 10:42:41Z, was still present at 298s idle,
-  and disappeared before the next 12-second sample after crossing 300s. The
-  task claim continued for almost eight more minutes, then logged
-  `eval error(1264.30s)` with the same `pgconn.connLockError=conn closed` at
-  10:55:35Z and advanced the row to 145 failures. The next retry remained on
-  the normal hourly backoff at 11:55:35Z. Repeatedly observing the database
-  guard fire long before task error presentation is direct validation for
-  changing only the outer transaction's local setting.
-  That fourth retry began at 11:55:36Z. Outer PID 1846780 spent roughly seven
-  minutes actively building the subsidy window, then became idle in transaction
-  on the `subsidy_payment` overlap query near 12:03:03Z. It was still present at
-  291 seconds of uninterrupted idle and absent at the 12:08:10Z sample, while
-  taskworker continued heartbeating beyond 753 seconds. Total transaction age
-  had already exceeded 700 seconds, so the disappearance again follows the
-  continuous-idle guard, not a total-runtime limit. This fourth independent
-  boundary reproduction keeps the same scoped remediation and supplies a
-  post-vacuum-load control. Taskworker ultimately logged
-  `eval error(1068.46s)` with the same `pgconn.connLockError=conn closed` at
-  12:13:25Z and advanced the row to 146 failures, completing the expected
-  database-cutoff-to-late-task-error chain.
-  The fifth retry began at 13:13:26Z. During the attempt, a direct PostgreSQL
-  sample found its outer subsidy-window transaction 533s old and continuously
-  idle for 89s; a later sample found no matching outer backend while the task
-  heartbeat continued through 1,307s. Taskworker then logged
-  `eval error(1312.95s)` with the same `pgconn.connLockError=conn closed` at
-  13:35:19Z and advanced the row to 147 failures. This is the same
-  database-connection-loss chain under the longest observed tail so far, not a
-  reason to raise the task's 21,600s deadline.
-  Two more deployed attempts reproduced the identical terminal class. The
-  sixth ran on edge-3/g1 until `eval error(1346.46s)` at 14:57:48Z and raised
-  the row to 148 failures. The seventh ran on edge-3/g2 from approximately
-  15:57:49Z until `eval error(1278.54s)` at 16:19:09Z and raised it to 149;
-  both stacks ended in `createPaymentPlan` with
-  `pgconn.connLockError=conn closed`. The hourly recurrence across taskworker
-  generations rules out a one-process connection accident and continues to
-  validate the transaction-local timeout override. Do not pull the parked row
-  forward or disable the global five-minute policy; verify the same slice
-  commits only after the scoped source fix is rolled out.
-  The eighth retry ran independently on edge-4/g2 and ended at 17:35:44Z with
-  `eval error(994.66s)` and the same `*pgconn.connLockError=conn closed`,
-  advancing the row to 150 failures. Its fresh claim then expired and the row
-  returned to the normal hourly backoff. This independent executor recurrence
-  preserves the same classification and remediation; it is not score-worker
-  contention or a reason to disable the database-wide guard.
-  The deterministic regression first records the session baseline, installs a
-  25ms transaction-local timeout, applies the payment-plan override, idles for
-  100ms, and requires a successful commit; it then requires the same connection
-  to report its original baseline again. This proves survival and scope without
-  weakening the standing database policy. It passed three race-enabled runs
-  against real local PostgreSQL after the fourth production reproduction.
 - `RefreshVerifyProxyEgress`, `Interrupted: Done` / `Interrupted: context
   canceled`, 940 retries observed while
   `st.yml enabled:false`: this is disabled work, not a Redis incident. All four
@@ -27701,7 +27865,7 @@ losing up to 20 GB/h. Each production action needs the owner's go.
      (`client_reliability_p20261001`..`04`, 236 GB). Run each drop as its own
      guarded transaction with `lock_timeout = '5s'`; each took seconds.
 4. **Respect the reliability readers.** Since 2026-10-31 `client_reliability`
-   retention is a flat 21 days; the subsidy payout frontier no longer holds
+   retention is a flat 14 days since 2026-11-02 (21 before); the subsidy payout frontier no longer holds
    it. Operator block points read each completed block's window
    (`AwardDueOperatorBlockPoints`, daily at 12:00Z): before dropping a day
    inside the 21-day cutoff, check that the blocks covering it are awarded
@@ -27829,6 +27993,7 @@ Tier-1 (warn):
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
 | minio-read-errors / minio-write-rejected / minio-metrics-unobservable | Mimir MinIO v3 metrics + `minio` inventory | §11.6a non-write 5xx, write-API 4xx, complete <=180s drive family and bucket usage snapshot | read 5xx at least 5% and 10 per five minutes for 2 probes, page at 25%; write 4xx at least 10% and 20 per five minutes for 2 probes; drive family missing/stale/incomplete for 2 probes, page after 3; no bucket usage snapshot for 2 probes |
+| minio-inode-runway | Mimir node metrics + MinIO v3 drive count | §11.6b free inodes per MinIO drive (`node_filesystem_files_free` beside `node_filesystem_files`), the §2.4f max-of-windows decline counted down to zero; added 2026-11-07 | WARN under 30M free inodes on any drive or runway ≤ 7 d, PAGE under 15M or ≤ 3 d, each for 2 probes; an unknown inode layer pages after a decline over 1M inodes/h in the last 6 h | per-drive free and total inodes, used %, decline per window in inodes a day, runway days |
 | service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
 | egress-probe-config-drift / egress-probe-config-unobservable | active monitor Config resource + PostgreSQL durable task arguments | §2.19 complete desired execution settings compared in memory with one coherent shard snapshot | explicit mismatch, or a present desired resource that cannot be compared, for 2 probes; endpoints and raw configuration never leave the process |
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
@@ -27864,7 +28029,6 @@ Tier-1 (warn):
 | connects-rate | pg | 2.7 new-connection rate vs same window 1h ago | < 50% sustained 5 min |
 | connects-storm | pg+deploy | 2.7 new-connection rate and disconnected lifetime vs pre-event window | > 2.5x for 3 min; payload includes binary/config generations and same-tag restart times |
 | probe-child-retirement / probe-unused-args-retirement | pg | §2.25 mature active-disconnected egress-prober children with or without lifetime connection history | any residual in either independent branch for 2 probes |
-| retention-fanout | pg | 2.10 active query id `-3312164664690273449`, plus durable `AdvancePayment` deadline correlation | one execution > 30s or >= 2 concurrent for 2 probes; between retries, exact query >= 100k rows/call plus retained 120s cleanup signature |
 | grafana-plugin-unregistered | logs + Grafana `/api/ds/query` | 11.15 `[plugin.notRegistered]` scheduler/query failures | any |
 | grafana-datasource-query | Grafana `/api/ds/query` | 11.15 authenticated `warp-mimir` or `warp-loki` control does not return a successful result after plugin loading | 2 consecutive probes |
 | loki-tail-backend-eof | logs | §1.5 exact internal tail-querier `err=EOF` (client `context canceled` excluded) | >= 5/min/service |
@@ -28046,7 +28210,7 @@ Catalog rows from this incident, none implemented when it closed on 2026-10-22; 
 |---|---|---|---|
 | storage-runway | Mimir node metrics | §2.4f max-of-windows decline per stateful volume | WARN ≤ 72 h, PAGE ≤ 24 h, 2 probes |
 | minio-drive-runway / minio-accounting-divergence / minio-put-surge | Mimir node + MinIO v3 metrics | §11.6b | runway WARN ≤ 14 d, PAGE ≤ 3 d; divergence over 1 TB WARN; PutObject over 3× its 7-day median for 1 h WARN |
-| contract-reap-stalled / partition-retention-stuck | pg | §2.4g | WARN |
+| partition-retention-stuck (contract-reap-stalled retired 2026-11-13) | pg | §2.4g | WARN |
 | contract-horizon-reaper-stalled / contract-horizon-reaper-failing / contract-horizon-control-unavailable / contract-horizon-reaper-behind / contract-horizon-block-points-holding / contract-horizon-reaper-unobservable | Mimir taskworker metrics | §2.4r, added 2026-11-01 after the 35-day horizon review, implemented by `contract-horizon-reaper` | WARN: no run in 1 h; 3 error or control-unavailable runs without progress in 1 h; lag growth of 2 h in 6 h while on; any block points keep |
 | usage-archive-hash-budget / usage-archive-hash-budget-unobservable | pg catalog | §2.4s, implemented by `usage-archive-hash-budget` | WARN when twice the largest archive week passes half of work_mem * hash_mem_multiplier / 64 B |
 | contract-partition-runway / contract-partition-retention-blocked / contract-partition-cutover-pending | pg catalog | §2.4h–§2.4j, added 2026-10-23 for the contract partition cutover | runway PAGE under 2 covered future weeks; retention WARN past 13 + 2 weeks; cutover WARN within 24 h of its week |
@@ -28969,7 +29133,9 @@ The refusal itself was invisible to `log-errors`: the warning
 `[<webhook>]webhook refused, verification <secret|publisher|audience>
 unavailable: <detail>` can contain no error-shaped word. The
 `payment-webhook-refused` class pages on one matching line, framed only by
-play, stripe, coinbase or helius. Its fixed verification-input sample omits all
+play, stripe, coinbase, helius or apple (an App Store notification whose
+apple.yml cannot build the verifier is answered 503 the same way, no longer a
+panic). Its fixed verification-input sample omits all
 resource, field and loader-error details, without relabeling publisher/audience
 failures as missing secrets. The refusal header takes precedence over generic
 resource/transport signatures in its suffix; a plain unrelated resource or
@@ -29207,8 +29373,35 @@ x402. Connect's QUIC/H3 listeners read the peer from `conn.RemoteAddr()`
 without entering the resolver, so a "share on connect" is computed over
 websocket connections and probes only.
 
+The fronts clients reach with no lb in front are their own ingress
+(`router/ingress.go`): alt's api front (inside its limits) and status
+listener, and the proxy's api and status ports, which warp exposes by DNAT.
+Each sets `X-UR-Forwarded-For` from the connection's peer and clears
+`X-Forwarded-For`, `X-Forwarded-Source-Port` and `X-UR-Request-Buffering`
+before any handler reads the request, so the resolver counts `ur_header`
+with the peer there. Each of those headers a client sent anyway is counted in
+`urnetwork_ingress_overwritten_headers_total{header}` (`x_ur_forwarded_for`,
+`x_forwarded_for`, `x_forwarded_source_port`, `x_ur_request_buffering`), once
+per request, charted beside the resolutions. Nothing legitimate sends them to
+those fronts, so a sustained rate is a client trying to name an address of
+its own. Alt's api front answers `/status` as a path with no route; alt's
+deploy poll reads its status listener.
+
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
+
+Column predicates share one statement-local materialized projection of the seven
+fields they consume from `information_schema.columns`. The original
+permission-aware view and public-schema filter remain authority; each fresh
+statement observes its own schema, including a missing or altered column and
+its restoration. This reduces repeated view expansion without changing the
+artifact row, published-prefix checks, or versioned drift reduction. Planning
+can dominate this catalog query: a bounded local four-sample comparison showed
+about 10% lower mean query time, with baseline drift of about 9%. That is a local
+cost observation, not a production latency guarantee or evidence of network
+health. The owning controls compare every dynamically emitted column against
+the unshared query at prepublication, publication, faults, restoration and the
+current compiled head; they do not freeze a migration count or row width.
 
 Owning-parent completion: an already-ended `Run` enters no source. If a parent
 ends before successful artifact/catalog reduction returns, late valid rows
@@ -29277,6 +29470,42 @@ cannot select corruption over a legitimate unknown successor. Independent
 immutable identity/catalog faults still page. Synthetic public-path controls
 exercise complete older predicates, a replaced artifact, independent immutable
 fault and unchanged real numeric lag without changing global source catalogs.
+
+The unresolved-predicate statistics migration (currently version 926, resolved
+from its position in the server list) has an explicit artifact contract in this
+catalog. It requires `public.transfer_contract_unresolved_predicate` on
+`public.transfer_contract`, exactly the published unresolved CASE expression,
+expression statistics only, and no additional column keys or expressions. A
+same-name object in another schema, on another table, or with the legacy
+`outcome IS NULL` expression is drift once the migration is applied. Before
+publication a missing object remains migration lag. Native controls exercise
+both prefixes and rolled-back object/shape faults; synthetic controls preserve
+unknown authority above the source-known head.
+
+The native partition-cutover control exposed a preservation boundary: table
+renames keep extended statistics attached to the original table OID, while the
+staged parent was created without them. An object left only on
+`transfer_contract_legacy` does not satisfy version 926 on the published parent.
+The owning cutover repair captures definitions after acquiring the swap's table
+locks, keeps the original objects for rollback, and publishes parent copies
+with their original names, owners, targets and comments. Name collisions or
+identifier-length overflow refuse the atomic swap; rollback refuses an ambiguous
+parent/legacy counterpart. Controls cover statistics added after prepare,
+collision rollback, parent object shape and restoration of original object OIDs.
+Rollback compares statistics keys by their ordered column names: `LIKE` omits
+dropped attribute slots, so equivalent legacy and parent keys can have different
+physical attribute numbers. A native dropped-slot control accepts equivalent
+named columns and still rejects a different column under the published name.
+This is a cutover schema-preservation defect; the monitor's expression contract
+remains unchanged.
+
+False-positive qualifier: the migration deliberately creates no sample, so a
+correct but unsampled statistics object is healthy for this schema contract;
+this probe neither reads `pg_statistic_ext_data` nor requires ANALYZE. A missing
+or partial catalog result still cannot certify health. False-negative qualifier:
+object presence does not prove populated or fresh estimates, the payer's query
+plan, running service versions, or performance recovery. Those require separate
+qualified observations; the monitor does not sample the table to establish them.
 
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
@@ -30435,6 +30664,16 @@ strictness or configuration. The retention task deletes a gone client's
 history once the contract horizon reaper's horizon has passed since the
 client went while the reaper's mode is on, never below the floor; the catalog
 checks do not show where the retention task is.
+
+The 7-day floor migration (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.4;
+its version follows its position) replaces only the floor function's body,
+now `interval '7 days'`, so its contract supersedes the 904 contract and
+republishes the same custody with the new body. From its version the 30-day
+body is drift like any other floor body, and the rollback stays drift until
+the floor is restored. From that build on, the retention deletes a gone
+client's history 7 days after the client went, whatever the contract horizon
+reaper's control says; the brake's `horizonDays` can only narrow that, so
+the 30 set on Main on 2026-11-02 counts as 7.
 
 The onboarding results' purchase.started count
 (`onboarding_results_purchase_started_schema.go`) adds one column to
@@ -32007,12 +32246,33 @@ A transport whose resident is in its own process is attached in process
 instead of dialing a socket back into that process
 (connect/resident_local_transport.go, CPUOPT3 D1), so the established
 transport owners are the outbound transport sockets plus
-`urnetwork_connect_exchange_local_attachments`: one link per attached
-transport, with two pump goroutines and no socket. A block whose
+`urnetwork_connect_exchange_local_attachments{op="transport"}`: one link per
+attached transport, with two pump goroutines and no socket. A block whose
 `exchange_local_transport_enabled` is 1 moves most of its transport sockets
-into that gauge, which is a population change, not a loss of owners. Exchange
-frame and byte totals are `exchange_io` plus `exchange_local`, which counts
-each in-process frame as its socket counted it.
+into that gauge, which is a population change, not a loss of owners. A
+resident's forward whose destination's resident is in the same process is
+attached the same way (connect/resident_local_forward.go), so the established
+forward owners are the outbound forward sockets plus
+`exchange_local_attachments{op="forward"}`: one link per attached forward,
+with one pump on the forward's own goroutine and no socket. Its switch is
+separate: a block whose `exchange_local_forward_enabled` is 1 moves its
+same-process forward sockets into that gauge. Exchange frame and byte totals
+are `exchange_io` plus `exchange_local`, per `op` and in all; the local series
+count each in-process frame as its socket counted it. Messages a forward link
+took and did not deliver count at the `receive_queue_dropped` boundary
+`local_forward_send`, beside the transport links' `local_transport_send` and
+`local_transport_receive`. A forward link that ends with its forward detaches
+with reason `forward_done`, where a transport link's is `transport_done`.
+
+The release that adds forwards adds the same `op` label (`transport`,
+`forward`) to every `exchange_local` series: `frames_total`, `bytes_total`,
+`attachments`, `detaches_total` and `blocked_seconds`. As with `exchange_io`
+below, each process that starts on it reports series of a new identity, and
+every dashboard query on them (connect.json panels 87–93 and 106;
+public-traffic.json panels 3 and 25) sums, or groups by `op`, so totals stay
+continuous across the deploy. A query that selects one exact label set
+without an aggregation would split into one series per `op`; wrap it in
+`sum`.
 
 The same release adds an `op` label (`transport`, `forward`, `unknown`) to
 `urnetwork_connect_exchange_io_frames_total` and
@@ -32419,7 +32679,19 @@ Signals for the redis keyspace-notification transport for peers + stream hops
   Occasional drops during a mass reconnect are self-healing; a SUSTAINED
   nonzero rate = a key-event burst storm outrunning the merge buffer, forcing
   continuous resubscribe/resync churn — find the write storm generating the
-  events before tuning buffer sizes or intervals.
+  events before tuning buffer sizes or intervals. Only drops after the
+  subscription is handed to its caller count here.
+- `urnetwork_redis_key_event_startup_drops_total` (`server/redis.go`) — merge
+  overflows before the subscription is handed to its caller. Nothing drains
+  the merge until then, and the caller's recovery read after the handoff covers
+  every earlier event, so these end no epoch. Near zero normally.
+- `urnetwork_redis_key_event_ignored_total` (`server/redis.go`) — `expire`
+  events (ttl refreshes, which change no value) the node drains discard before
+  the merge. On 2026-11-15 the session hint reads refreshed `{ns_*}eid` on every
+  read, the refreshes were 87% of connect's stream, and the busy processes
+  resubscribed every 7–9 s (CPUOPT6). A high rate means something refreshes a
+  subscribed key's ttl on every call again; it no longer ends epochs, but every
+  connect process still receives each event.
 - `urnetwork_network_peer_listener_resets_total` — full-read deliveries. In
   poll mode this is normal change delivery. In key-event mode it should be
   ≈ registrations + resyncs; a SUSTAINED rate above that means the corrective
@@ -32875,6 +33147,14 @@ Classes, all targeted at the inventory host name (`<host>/<bucket>` for quota):
   exports no bucket usage snapshot (or a quota without its usage); warns after
   two.
 
+The three request-error classes above are incident findings, not visibility
+findings. A measured request violation keeps its own incident present through
+its two-observation sustain gate; it does not make otherwise complete MinIO
+observations unknown or block recovery of another class. Missing drive or
+write-tolerance authority still reports `minio-metrics-unobservable` and
+prevents recovery from that incomplete execution. A newly computed class with
+no classification retains the conservative visibility fallback.
+
 Root-cause fixtures. On 2026-10-11 edge-6's shared `/mnt/data` filled; MinIO
 reached its floor, every Loki, Mimir and blob write returned 507, and the Mimir
 bucket index went stale behind them (§11.18 detected only that downstream
@@ -32969,6 +33249,10 @@ stayed quiet. Raw free space meanwhile fell from 12.6 TB (10-15) to 12.3 TB
 drive is full, and client-key registration has no fallback when its evidence
 cannot be published, so new identities would stop working.
 
+Since 2026-10-24 the store is one 8-drive set at EC:2 (`/mnt/blob1`..`8`, 6
+data and 2 parity shards per object, about 23 TB usable; xops
+`main/ansible/MINIO-REBUILD-8.md`).
+
 What MinIO's own accounting cannot see:
 1. **Data beside MinIO on the same drives.** The PostgreSQL physical base
    backup (xops `main/ansible/playbook-pg-basebackup.yml`, written to
@@ -32995,9 +33279,16 @@ Checks:
   drive with the least free space, with the §2.4f estimator. WARN at ≤ 14
   days, PAGE at ≤ 3 days. These are longer than §2.4f's thresholds because
   adding drives takes days.
+- **Inode runway** (added 2026-11-07) from `node_filesystem_files_free` on
+  `/mnt/blob*`: XFS fails every new file once a drive reaches its `imaxpct`
+  inode ceiling, however many bytes are free. WARN under 30M free inodes on
+  any drive or at ≤ 7 days to zero, PAGE under 15M or at ≤ 3 days. See the
+  inode layer below.
 - **Accounting divergence:** raw used (`node_filesystem_size_bytes - avail`
-  over the blob drives) minus twice MinIO's logical bucket bytes (2+2 erasure
-  coding). WARN `minio-accounting-divergence` above 1 TB. It means foreign
+  over the blob drives) minus the erasure overhead times MinIO's logical
+  bucket bytes: the set's drives over its data shards, 2 for the 2+2 set of
+  10-22 and 8/6 for the 6+2 set since 10-24. WARN
+  `minio-accounting-divergence` above 1 TB. It means foreign
   data, scanner lag or small-object overhead; it was about 4.4 TB on 10-22
   against about 0.5 TB a week earlier. Report
   `minio_cluster_usage_buckets_since_last_update_seconds` beside it, and check
@@ -33013,9 +33304,11 @@ Checks:
 
 ```promql
 min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+min(node_filesystem_files_free{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+# 8 / 6 for the 6+2 set since 2026-10-24; 2 for the 2+2 set of 10-22
 sum(node_filesystem_size_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."}
   - node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
-  - 2 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
+  - 8 / 6 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
 sum(rate(minio_api_requests_total{job="minio",name="PutObject"}[1h]))
 ```
 
@@ -33049,8 +33342,9 @@ decline windows and a fresh size. Classes, targets `<host>/<layer>`:
   WARN at <= 14 days, PAGE at <= 3 days. The §2.4f pace floor does not apply
   here. A violation needs only a fresh drive; healthy needs the full census.
 - `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
-  used bytes over the drives minus twice the logical bucket bytes (2+2
-  erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+  used bytes over the drives minus `ErasureOverhead` times the logical bucket
+  bytes above 1 TB warns: 8/6 for the 6+2 set (it read 2, the 2+2 overhead,
+  until 2026-11-07). `usage_snapshot_age_s` rides beside it.
   MinIO's logical bytes are cluster-wide, so the per-host comparison holds
   for a single-node store like main's; a multi-node store needs each node's
   share before this layer can judge it.
@@ -33108,6 +33402,68 @@ risk-memory helper, thresholds, time windows and backup policy are unchanged.
 Cancellation after this checkpoint has no rollback guarantee. The source
 counterexample concerns future remembered-risk classification, not an observed
 outage or a canceled RunLoop notification/clear.
+
+Erasure overhead (2026-11-07). `ErasureOverhead` still read 2, the 2+2
+overhead, after the 10-24 rebuild. The 6+2 set writes 8/6 raw bytes per
+logical byte (`minio_cluster_erasure_set_read_quorum` 6 with
+`minio_system_drive_count` 8), so the divergence understated data beside
+MinIO by two thirds of the logical bytes. On 11-07 it read about 8.5 TB at 2
+and about 9.5 TB at 8/6 (11.48 TB raw used, 1.49 TB logical), above the 1 TB
+line either way. Main's inventory has the only `minio` host. A synthetic
+control puts 1.5 TB beside MinIO on the 6+2 store, which an overhead of 2
+hid; the 10-22 replay keeps its own 4-drive 2+2 store.
+
+Inode layer (2026-11-07). Each of the eight drives is XFS with `imaxpct=5`, a
+375.07M-inode ceiling. On 11-07 each had 332.2M inodes used and 42.85M free
+(89%) beside terabytes of free bytes, and lost about 8M inodes a day (17-20M a
+day over the previous one to two weeks, 35M on 11-01). Every object puts a
+shard on every drive, a directory and an `xl.meta`, so the drives move
+together. At zero XFS returns ENOSPC with terabytes free and every MinIO write
+fails: Loki, Mimir and blob (SN25 artifacts and evidence). The byte runway
+and §11.6a read only bytes, so no signal watched it.
+
+The same range query returns `drive_files_free` and `drive_files` partitions
+from `node_filesystem_files_free` and `node_filesystem_files{job="node"}` on
+the same mountpoints, with the same ownership labels. The inode census is a
+layer of its own: complete only when MinIO's fresh drive count equals the
+number of drive filesystems with inode series, and every drive has a fresh,
+unique, whole-number free-inode history with all decline windows and a fresh
+total no smaller than its free count. A gap in the byte layers never clears
+or masks the inode layer, nor the reverse.
+
+- `minio-inode-runway` (target `<host>/inodes`, sustain 2): the §2.4f
+  estimator per drive counting free inodes down to zero, and fixed floors on
+  the drive with the fewest free inodes. WARN under 30M free inodes or at <=
+  7 days, PAGE under 15M or at <= 3 days; `free_band` and `runway_band` say
+  which criterion set `band`. The floors are counts, so they hold at any
+  ceiling: after `xfs_growfs -m 15` (about 1.13B inodes per drive, about 793M
+  free) the layer is healthy at once, and for up to a day only the windows
+  after the raise measure the decline. A violation needs only a fresh drive;
+  healthy needs the full inode census.
+- `minio-runway-unobservable` (target `<host>/inodes`, sustain 2): the inode
+  census's gaps. Following emission rule 1 it pages when a drive lost more
+  than 1M inodes an hour over the last six hours, measured from the remaining
+  history or remembered by the signal instance; otherwise it warns. A
+  filesystem that reports no inodes at all (a zero total) is unknown, never a
+  wall.
+- Public data: inode counts, inodes a day and days. Tunables are the
+  `Inode*` fields of `MinioRunwaySettings`.
+
+Backtest on edge-5's least-free drive over the 15 days to 11-07 01:00Z, from
+Mimir: the layer would have warned on and off from 10-26 (20-40M inodes a
+day), paged on 11-01 from 13:00Z (126.7M free losing 43.5M a day over the last
+hour: 2.9 days) and through most of 11-02 and 11-03, and warned since (about
+5 days at 8M a day). Replayed through the signal, Mimir's own answer warns at
+11-06 23:41Z (`/mnt/blob2` 43.14M free, 4.3 days at 10.1M a day over 6 h).
+The ceiling went to 15% at about 01:15Z on 11-07 (1,125,221,472 inodes per
+drive, about 793M free), and the answer at 01:41Z is healthy.
+
+Synthetic controls add the inode wall beside terabytes of free bytes (PAGE,
+nothing else), the 11-07 shape (WARN at 5.4 days), floor and runway band
+edges, a raised ceiling (healthy), missing inode series, a byte-series gap
+beside a judged inode layer, a stale fast-declining inode layer (PAGE), a
+remembered decline across a failed read, and the dashboard's free-inode
+panel drawing the same floors.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
@@ -35618,14 +35974,14 @@ staging or retention promotion. `--revalidate-integrity` is the separate,
 explicit full-media-read mode. Scrape time, integrity check time, and artifact
 file time therefore remain independent evidence. A check older than 48 hours
 is stale even if Fluent Bit keeps scraping the report and the structural
-artifact remains inside its five-day recovery-point objective.
+artifact remains inside its recovery-point objective.
 
 A private source-completion read must retain three separate times: the
 generation start, the successful producer completion, and completion of the
 diagnostic observation. A 2026-10-02 23:24Z observation retained a generation
 started on October 1 at 00:00:15Z whose producer succeeded at 19:28:43Z that
 day. Calling the observation recent cannot make that producer completion less
-than 24 hours old. Keep the five-day archive objective separate from any
+than 24 hours old. Keep the archive objectives separate from any
 explicitly tighter migration prerequisite; qualify each against its owning
 timestamp. The private migration controls cover a fresh observation of an old
 producer, stale or future observations, missing producer evidence, and a
@@ -35786,8 +36142,9 @@ certificate of physical storage repair. Existing operations, forecast and
 migration ownership remain separate.
 
 HEALTHY: all four in-progress samples are scrape-fresh; all four archives have
-at least one structurally complete candidate; each newest candidate is no more
-than five days old; and every archive has one scrape-fresh integrity report
+at least one structurally complete candidate; each newest candidate is inside
+its objective, seven days for `pg` and five days for the others; and every
+archive has one scrape-fresh integrity report
 whose producer-owned check time is no more than 48 hours old, whose generation
 matches structural latest exactly, and whose result is `verified`. An explicit
 `invalid`, `missing`, stale, unobservable, generation-mismatched, or
@@ -35883,7 +36240,12 @@ BROKEN:
   pending; it does not create a recovery point. Never infer physical absence
   from metric absence or manufacture a timestamp.
 - `backup-archive-stale` is immediate once the newest structural candidate is
-  more than five days old. A current scrape of an old value proves the
+  older than its objective: seven days for `pg`, five days for the others.
+  The owner set `pg` to seven days on 2026-11-15, when edge-6's Sun/Thu
+  runs began to take 40 to 75 hours and each generation's pull 20 to 25 more,
+  which leaves the newest copy up to about 6.6 days old when the next lands;
+  Grafana's `backup-archive-pg-stale` uses the same boundary. A current scrape
+  of an old value proves the
   telemetry path while reporting an expired recovery-point objective; the
   separate integrity join decides whether those bytes are validated. When
   `in_progress=1`, preserve the single active writer and compare increasing
@@ -35978,7 +36340,7 @@ BROKEN:
   operator authorization for exactly one catch-up pull.
 - `backup-archive-writer-failed` is immediate when the GitHub oneshot is not in
   an execution transition and its terminal ActiveState, Result, or
-  ExecMainStatus is unsuccessful. It is independent of the five-day age gate:
+  ExecMainStatus is unsuccessful. It is independent of the age gate:
   a valid prior tarball can remain fresh while the latest attempt to produce a
   new code recovery point has failed. The alert joins the terminal state to the
   privacy-reduced exact-invocation journal result above. `complete` identifies
@@ -36167,7 +36529,7 @@ authorizing a catch-up run are operator work. A persistent mount may require an
 approved fstab/systemd-mount design; replacement media and additional free
 capacity are hardware work. Software cannot attach an absent disk or create
 archive capacity. Never fabricate a timestamp, rename a partial artifact,
-refresh a stale value, or raise the five-day threshold to clear these classes.
+refresh a stale value, or raise an objective to clear these classes.
 
 The September 2 VPN run measured only about 0.95 MiB/s against roughly 705 GiB
 of complete PostgreSQL source data. That is evidence about the prohibited VPN
@@ -36515,7 +36877,7 @@ at one and both producer heartbeat values no more than 90 seconds old, followed
 by final zeros and no heartbeat helper after exit. Verify archive recovery only
 after the real unit exits successfully, the completed artifact and manifest
 validate on mounted media, and two consecutive direct Mimir reads show the same
-new generation inside the five-day band. The Grafana dashboard must agree with
+new generation inside its objective. The Grafana dashboard must agree with
 those raw inputs, but it is never the proof source.
 
 On 2026-09-11 the dashboard exposed a distinct whole-exporter outage as blank
@@ -40767,6 +41129,9 @@ How it works:
   `st_client_key_history` row (about 4.7 KB on disk) and two MinIO evidence
   objects (§11.6b), as well as its contracts and close reports. Identity churn
   is therefore storage growth on edge-2 and on MinIO at the same time.
+- Hosted window clients keep their keys local from the proxy release with
+  `KeepWindowClientKeysLocal` (`FP2FIX.md`). From then on their churn adds no key
+  history or evidence, only network_client rows, contracts and close reports.
 
 | | 10-15 (baseline) | 10-21 01:00Z to 10-22 06:00Z |
 |---|---|---|
@@ -43324,6 +43689,64 @@ controls, actual owner cancellation and private-source rendering.
 These controls do not establish a production incidence or repair the external
 points product's writer, rollout, accounting or task boundaries.
 
+### 17.7 Operator blocks expired without their points
+
+Probe: `operator-block-points`
+
+The daily points award (`controller.AwardOperatorBlockPoints`, 12:00 UTC,
+retried within about an hour after an error) awards each completed operator
+block once (`model/operator_block_points.go`). Its award reads the block's
+window of `client_reliability` evidence, which retention keeps for 10 days
+from the window's start (`model.ClientReliabilityRetention`): about 3 days
+after the block is due, its Sunday 00:00 UTC close plus the 2-hour settle
+time. Past that deadline some evidence may be gone and an award fails closed.
+The award records such a block expired, once, in
+`operator_block_points_expired` (migration
+`OperatorBlockPointsExpiredVersion`), never awards it, and goes on to the
+later blocks. A commit of any award of a recorded block is refused, and the
+backfill's dry run lists expired blocks and refuses them: no backfill exists
+for an expired block. Before 2026-11-14 the award stopped at an expired block
+on every run, so no later block was ever awarded either.
+
+Every 15 minutes a catalog-only preflight reads the migration head from
+`migration_audit` and whether the table exists; below the migration nothing
+is recorded and no observation is issued. Then one bounded read-only statement
+reads the blocks recorded in the last 7 days: block number, window, the
+window's first reliability block, the first one retention kept, and the
+record's age.
+
+- `operator-block-points-expired` (WARN, sustain 1, target
+  `operator-block-<block>`): the block was recorded expired in the last 7
+  days. Providers get no points for its traffic, and GET /account/epochs
+  counts no bytes served for it (the served bytes rollup deletes its rows).
+  The points leaderboard excuses the block's week (owner decision
+  2026-11-14): a network without points in it keeps its Streak through it,
+  from the next hourly rebuild. It clears once the record is older than 7
+  days; the block stays unawarded.
+
+A missing table at or past the migration head, or a malformed record, is an
+observation failure. The taskworker counts each record in
+`urnetwork_operator_block_points_expired_blocks_total` (Taskworker dashboard).
+
+ACTION: nothing recovers an expired block. Find why the award did not run in
+time: the `award_operator_block_points` task in `pending_task` and
+`finished_task` (task health, §2.5, reports its repeated errors), and the
+taskworker's `[obp]` log lines; then fix that so the next block is awarded on
+time. If the next block is due and its award fails too, award it by hand
+before its own deadline with `bringyourctl account-points backfill-blocks
+--blocks=<block> --file=<file>`, a read-only dry run that prints a digest,
+then `--commit --expect=<digest> --file=<file>` with the owner's go. Never
+write points rows for the expired block, and never delete its record to award
+it without the owner's go. VERIFY: the next block has its award (a
+`payment_report` row with `model.OperatorBlockPointsPlanId`) and no other
+block is recorded expired.
+
+Implementation convention: SIGNALS.md §17.7 (`operator-block-points`) maps
+to `signal_operator_block_points.go` and `signal_operator_block_points_test.go`.
+Synthetic controls cover the migration gate, a warning per recorded block
+with its backfill guidance, no record, malformed records, and the query
+contract.
+
 ## 18. Edge IPv6 ingress — EDGEIPV61
 
 ### 18.1 Exact-address HTTPS and upstream identity
@@ -45551,7 +45974,7 @@ the coordinator proxy. Reuse §17 for gateway/sync diagnosis.
 |---|---|---|
 | `subnet-runtime-identity` | Chain/genesis/netuid and complete runtime/Wasm/metadata tuple match reviewed current signing authority; historical artifacts are read-only. A matching spec number alone is insufficient. | Page on a live writer using an unreviewed identity; warn on observer incompatibility. Preserve both endpoint responses and route to runtime compatibility review, not a blind pin update. |
 | `subnet-finality-divergence` | Independent endpoints agree on the same finalized native checkpoint and the same finalized EVM checkpoint, with their runtime-defined relationship verified; finalized cursor never rolls back or silently skips a gap. Syncing/stale private RPC is not a substitute for a synced operational endpoint. | Page on contradictory finalized history; unknown/warn on one unavailable endpoint. Retain both hashes and runtime identities; investigate provider routing/indexing before attributing a chain fault. |
-| `subnet-deployment-governance` | Coordinator implementation/ERC-1967 slot, immutable vault/sink bytecode, mapped coldkeys, recorder/coordinator links, owner/guardian/oracle and upgrade events match the approved deployment. Testnet uses its dedicated owner; mainnet uses the approved distinct 2-of-3 multisig. | Page on unauthorized drift, a mutable/replaced custody contract, role overlap outside policy, or testnet authority on mainnet. Capture exact code/slot/role evidence; request governance incident response. |
+| `subnet-deployment-governance` | Coordinator implementation/ERC-1967 slot, immutable vault/sink bytecode, mapped coldkeys, recorder/coordinator links, owner/guardian/oracle and upgrade events match the approved deployment. Testnet uses its dedicated owner; mainnet uses the approved distinct 2-of-3 multisig. A declared settlement v2 pair also matches its reviewed STSettlement2 implementation, initializer, timelock owner and auditor set, vault2 code, and the timelock's code, delay and roles; every timelock operation is reviewed, and the governance Safe changes nothing outside review. | Page on unauthorized drift, a mutable/replaced custody contract, role overlap outside policy, testnet authority on mainnet, an unreviewed timelock operation (named by operation id, target role and selector), or any governance Safe owner, threshold, guard, module or fallback handler change. Capture exact code/slot/role evidence; request governance incident response and follow the incident runbook (settlement v2 governance below). |
 | `subnet-policy-schedule` | Policy hashes/signers, future-effective versions, positive tier rates, theta, quality/weight caps, prefix granularity, epoch windows and expiration rules are exact and non-overlapping. Live native mechanism count, UID capacity, permits, CRv4, Liquid Alpha, immunity, stake thresholds and version key match the reviewed profile. | Page if a live writer uses a wrong/retroactive policy or disables a required defense; warn for an authorized upcoming change not yet adopted. Preserve effective epoch and every affected reader/writer version. |
 
 Mainnet's timelock hardening is a governance phase, not something to infer from
@@ -45626,9 +46049,17 @@ verified metadata. Every family reads at this one checkpoint.
 - `subnet-policy-schedule`: PAGE for a version failing the coordinator's own
   replayed `_validatePolicy`, a version not starting at its predecessor's epoch
   boundary, a wrong current-version selection, a current hash other than
-  sn.yml's, a 360-block epoch on mainnet, and a reviewed document whose windows
-  (settlement, or production cadence from its first epoch), claim expiry,
-  binding validity or caps differ from any version under its hash; WARN frame
+  sn.yml's, a 360-block epoch on mainnet, a reviewed document whose windows
+  (settlement, or production cadence from its first epoch), claim expiry or
+  binding validity differ from any version under its hash, and a version under
+  its hash that breaks the validators' deposit cap rule in an epoch it is in
+  force, from the current epoch on: its epoch cap at least the cap in force (the
+  signed price sheet entry's, or with none the document's), and its campaign cap
+  at least the larger of the document's campaign cap and its own epoch cap. The
+  reason `policy-deposit-caps-from-epoch-N` names the first epoch whose deposits
+  validators stop accepting. A published entry is judged against the version in
+  force at its own epoch, so a cap raise scheduled for that epoch covers it, and
+  the sheet is the last that verified at the published address; WARN frame
   `scheduled` for an unreviewed future hash or an invalid or unpinned document;
   unknown when no document is enrolled. The live native profile pages on a
   missing subnet or a changed commit-reveal, mechanism count or liquid-alpha
@@ -45647,6 +46078,263 @@ verified metadata. Every family reads at this one checkpoint.
   process-local. Governance events before the first frontier window are not
   replayed; the checkpoint state remains the authority.
 
+**Settlement v2 governance (2026-11-06, `subnet_chain_settlement_v2.go`).**
+Incident 2026-11-05 ("F2"), remediation R4b: before this, the reader watched
+only the v1 coordinator. Settlement v2's dispute game is optimistic, so a
+hostile root goes through unless someone acts within vault2's 14,400-block
+challenge window, and whoever controls the STSettlement2 proxy's owner or its
+auditor quorum can commit and finalize any root vault2 accepts. Since R1 the
+proxy's owner is a TimelockController with a 72-hour delay whose only
+proposer and canceller is the governance Safe, with open execution and itself
+as its only admin. Every finding below names its action as the incident
+runbook: [REMEDIATION-PLAN.md](../../factury/security/incident-20261105/REMEDIATION-PLAN.md),
+"Runbook: suspected restatement or governance compromise".
+
+The check runs whenever sn.yml declares `settlement_v2_address` and
+`vault_v2_address` (the deployment identity now carries both and accepts
+both or neither). There is no switch to turn it off. It needs the reviewed
+block `subnet_correctness.governance.settlement_v2`. While that block is
+absent, target `subnet-chain/settlement-v2` is unknown (WARN, Sustain 1,
+reason `settlement-v2-governance-not-enrolled`) and never healthy, and every
+v1 check still decides. A partial or malformed block, or one without a
+declared pair, makes the whole enrollment `expectations-invalid`. The block
+for mainnet as reviewed on 2026-11-06 18:40Z:
+
+```yaml
+subnet_correctness:
+  governance:
+    # ... the v1 values ...
+    settlement_v2:
+      implementation: "0x4abe1b9cc49338dbd5beacb85fc21b9e4e4cc369"
+      proxy_code_hash: "0x8b9a6be720b7bedae5f47f9505113a1340490930d4b7ea79966382ac12a4a9e2"
+      implementation_code_hash: "0x885cc06f47890f5396efce9c0e9102ddfed6fb51001b407b5d1e4dd2a93d4880"
+      vault_code_hash: "0xffe288108e5b56dcf2437129f364cfd546732f2bda256b8295d8a95fe81688dc"
+      initialized_version: 1
+      auditors: ["0xe49a35fe9b84f110d9537c9e32f3bf10c4ba513b"]
+      quorum: 1
+      auditor_set_version: 1
+      timelock: "0x5529dfe070f73a96c14b5afcf4fb3ddea6122fac"
+      timelock_code_hash: "0xe3a14af165a6b22bbe7e2c4259833eed0f02e64acb782992c0c4f50ab32eb880"
+      timelock_min_delay: 259200
+      proposers: ["0x56f4dad575576cc0b679fef52899630f9f605418"]
+      cancellers: ["0x56f4dad575576cc0b679fef52899630f9f605418"]
+      executors: ["0x0000000000000000000000000000000000000000"]
+      events_from_block: 9448589
+      reviewed_operations: []
+```
+
+Addresses and hashes are lowercase hex. `executors` may name the zero
+address, which is open execution; no other role may. `events_from_block` is
+the timelock's deployment block (or any earlier block). `reviewed_operations`
+lists the timelock operation ids (`hashOperation`/`hashOperationBatch`)
+governance reviewed. Enroll a planned call's id before the Safe schedules it,
+and an incident's id once its disposition is recorded. The proxy is the sn.yml
+`settlement_v2_address`; vault2 is `vault_v2_address`. Update this block only
+from a review, never from the response under observation. A reviewed change
+through the timelock (R2's `setAuditors`, say) is silent while it waits once
+its id is enrolled. From its execution, which anyone may send, its state and
+event page until the monitor runs with the new values. Settings are a startup
+snapshot (an edited monitor.yml reads as a stale generation until restart),
+and the restart also clears retained pages, so enroll the new values and
+restart right after it executes; that is the stopgap's "review, then clear".
+
+State at the agreed checkpoint (target `subnet-chain/settlement-v2`, PAGE,
+Sustain 1, invariant `reviewed-settlement-v2-governance`), each with its own
+reason:
+
+- the proxy's ERC-1967 implementation slot (`settlement-v2-implementation-slot`),
+  a nonzero admin or beacon slot (`settlement-v2-proxy-kind`), and its
+  OpenZeppelin 5 initializer word, version and not initializing
+  (`settlement-v2-initialized-version`);
+- the code hashes of the proxy, the implementation, vault2 and the timelock
+  (`settlement-v2-proxy-code`, `settlement-v2-implementation-code`,
+  `settlement-vault-v2-code`, `timelock-code`);
+- `owner()` is the reviewed timelock (`settlement-v2-owner`); `auditors()` as
+  a set with no duplicate, `quorum()` and `auditorSetVersion()`
+  (`settlement-v2-auditors`, `settlement-v2-quorum`,
+  `settlement-v2-auditor-set-version`); `v1Coordinator()` and `vault()` name
+  the sn.yml pair and `vault2.coordinator()` names the proxy
+  (`settlement-v2-links`). A view the reviewed code answers but the live
+  proxy refuses pages as `settlement-v2-views-unreadable`, so a hostile
+  implementation cannot turn a violation into an unknown;
+- `getMinDelay()` (`timelock-min-delay`) and `hasRole` true for the timelock
+  as its own admin and for every reviewed proposer, canceller and executor
+  (`timelock-roles`). AccessControl is not enumerable, so an extra holder is
+  found by its `RoleGranted` event instead;
+- a proposer other than the reviewed v1 owner gets its own Safe threshold and
+  signer census against `owner_threshold`/`owner_signers` (`proposer-...`). At
+  launch the proposer is the v1 owner Safe, whose census is already the v1
+  owner authority check, so it is not read twice.
+
+The **change-detector frontier** is bounded like the v1 governance frontier:
+its first run starts at the later of `events_from_block` and the initial
+window, and older changes rest on the state above. It reads:
+
+- the proxy: `Upgraded` other than the reviewed implementation
+  (`settlement-v2-upgrade-event`), `OwnershipTransferred` to anyone but the
+  timelock (`settlement-v2-ownership-event`), `AuditorsSet` other than the
+  reviewed version, set and quorum (`settlement-v2-auditors-event`) and
+  `Initialized` other than the reviewed version
+  (`settlement-v2-initialized-event`) page;
+- the timelock: `RoleGranted` to an account that is not a reviewed holder of
+  that role pages (`timelock-role-granted-event`), as does `RoleRevoked` of a
+  reviewed holder (`timelock-role-revoked-event`) and `MinDelayChange` to
+  another delay (`timelock-min-delay-event`). `RoleRevoked` of an account that
+  was never a reviewed holder (`timelock-unreviewed-holder-revoked-event`) and
+  `Cancelled` of a reviewed operation
+  (`timelock-reviewed-operation-cancelled-event`) warn on the same target,
+  frame `drift`. The R1 constructor grants, `MinDelayChange(0, 259200)` and
+  the Safe's transfer of the proxy to the timelock are the healthy control;
+- the governance Safe (each proposer, and the v1 owner when it is a reviewed
+  multisig): every `AddedOwner`, `RemovedOwner`, `ChangedThreshold`,
+  `ChangedGuard`, `EnabledModule`, `DisabledModule` and
+  `ChangedFallbackHandler` pages on its own target `subnet-chain/governance-safe`
+  (reasons `safe-added-owner-event`, ..., `safe-changed-threshold-event-to-N`).
+  Its executions and other events are silent.
+
+Tiers follow the v1 rule. An event that moves an active authority to an
+unreviewed value pages, as v1's `Upgraded`, `OwnershipTransferred`,
+`GuardianSet` and a retroactive `PolicyScheduled` do. An unreviewed
+`CallExecuted`, a grant to an unreviewed holder, a revoked reviewed holder
+(for example the Safe losing `CANCELLER_ROLE`, or execution closed) and a
+changed delay all change who can act or how fast, so they page. A change
+that moves nothing toward an attacker warns, as v1's unreviewed pending
+rotations and reinitialization do: a reviewed operation cancelled, or a role
+revoked from an account that never held it in review. The two exceptions to
+v1's tiers are deliberate. A scheduled call pages rather than warns, because
+the delay is the response window. `Initialized` pages, because after R1 the
+only legitimate reinitialization is part of a reviewed upgrade, and
+`initialized_version` names it. Safe events page because the Safe acts at
+once, outside the timelock.
+
+The **operation journal** is complete. It reads the timelock's
+`CallScheduled`, `CallExecuted` and `Cancelled` from `events_from_block`,
+proven to precede the timelock (the canonical block before it is served and
+holds no timelock code). It advances in bounded chunks and commits only with
+a published run. A scheduled call is visible only in its event and stays
+executable by anyone once ready, so it must survive a monitor restart and
+any outage, which a bounded first window cannot guarantee. Each operation
+whose id is not in `reviewed_operations` pages on target
+`subnet-chain/timelock-operations`, frame `operation-0x<operation id>`,
+invariant `every-timelock-operation-reviewed`, Sustain 1. Its observation
+names `operation_id`, `state` at the checkpoint (`waiting`, `ready`, `done` or
+`unset` after a cancellation), `ready_at` (UTC) while it is pending, and each
+call as `call_N=target:<reviewed role or unreviewed-target>,function:<name or
+unknown>,selector:0x<4 bytes>,value_wei:<n>,delay_seconds:<n>`. The roles are
+`settlement-v2-proxy`, `settlement-v2-implementation`, `settlement-vault-v2`,
+`timelock`, `governance-safe`, `v1-coordinator`, `settlement-vault-v1` and
+`reserve-sink`; addresses are never rendered. An unreviewed operation keeps
+paging after it executes (`state=done`) or is cancelled (`state=unset`):
+its schedule proves the proposer signed a call outside review. A reviewed
+operation is silent in every state.
+
+Unknown, never healthy (WARN, Sustain 2, frame `unobserved`): state reads
+that fail in transport (`subnet-chain/settlement-v2`, `state-<reason>`); a
+change-detector or journal frontier that is behind (`event-frontier-behind`),
+whose logs fail (`logs-<reason>`, `operation-logs-<reason>`) or whose first
+block the endpoint no longer serves (`logs-history-block-absent`); a journal
+start that is not proven (`operation-journal-start-after-deployment`,
+`operation-journal-start-<reason>`); an undecodable operation event
+(`operation-journal-decode`); or more than 4,096 operations
+(`operation-census-bound`).
+
+The enrolled EVM endpoints must serve the frontiers' history. An endpoint
+that pruned a block answers `eth_getLogs` over it with an empty list.
+`https://lite.chain.opentensor.ai` did this on 2026-11-06: the timelock's
+deployment block 9,448,589 was already gone about 400 blocks later, and
+`eth_getLogs` and `eth_getCode` answered it empty. The reader therefore reads
+the first block of every governance frontier window, the v1 one included, and
+an absent block is unknown (`logs-block-absent` on
+`subnet-chain/governance-events`). Enroll archive endpoints.
+
+Findings (each action follows the runbook above):
+
+- `subnet-chain/settlement-v2`, PAGE.
+  - Symptom: settlement v2 governance differs from the reviewed deployment.
+  - Mechanism: the proxy's implementation slot, owner, auditor set or
+    initializer, a v2 contract's code, the timelock's delay or roles, or a
+    finalized proxy or timelock governance event contradicts the reviewed
+    block. The proxy's owner or auditor quorum can finalize any root vault2
+    accepts, so an unreviewed change can redirect every unclaimed and newly
+    funded balance unless a dispute stops it within the challenge window.
+  - Baseline: a UUPS proxy to the reviewed implementation at the reviewed
+    initializer version, owned by the reviewed timelock with the reviewed
+    auditors and quorum; reviewed code everywhere; the timelock keeps the
+    reviewed delay, roles and only itself as admin.
+  - Action: treat as a suspected governance compromise. Cancel any pending
+    timelock call. If a hostile implementation or auditor set is live, pause
+    v1 with the guardian, demand and claim every account before the window
+    closes, and tell the owner. Never update the reviewed block from the
+    observed values.
+  - Verify: a fresh checkpoint matches every reviewed input, and the incident
+    record attributes each event.
+- `subnet-chain/settlement-v2`, frame `drift`, WARN.
+  - Symptom: timelock activity moved nothing toward an attacker but was not
+    reviewed.
+  - Mechanism: a canceller withdrew a reviewed operation, or a role was
+    revoked from an account that was never a reviewed holder.
+  - Baseline: reviewed operations execute as planned, and role changes touch
+    only reviewed holders.
+  - Action: confirm it with the owner and the reviewed plan. A revocation from
+    an unreviewed holder means an unreviewed grant happened first; find it.
+  - Verify: the owner attributes it, and the plan or block records it.
+- `subnet-chain/governance-safe`, PAGE.
+  - Symptom: the governance Safe changed its owners, threshold, guard, modules
+    or fallback handler.
+  - Mechanism: the Safe owns the v1 coordinator and alone schedules and
+    cancels timelock calls. Its changes take effect at once: a new owner or
+    lower threshold changes who can schedule, a module executes without
+    signatures, and a guard or handler changes every transaction.
+  - Baseline: no such event outside a reviewed Safe transaction; threshold and
+    signer count equal `owner_threshold`/`owner_signers` (v1 check).
+  - Action: confirm against the reviewed, signed Safe transaction. An
+    unreviewed change is a governance key compromise: cancel every pending
+    timelock call and tell the owner. Update `owner_threshold` and
+    `owner_signers` only from the review (R2 adds two owners and threshold 2).
+  - Verify: every Safe event is attributed to a reviewed transaction.
+- `subnet-chain/timelock-operations`, frame `operation-0x<id>`, PAGE.
+  - Symptom: the timelock holds an operation governance did not review.
+  - Mechanism: only the proposer can schedule, and anyone can execute once the
+    delay passes. Upgrading the proxy, changing its auditors or owner, and
+    changing the timelock's own roles or delay all go through such a call, so
+    this is the last warning before any of them takes effect.
+  - Baseline: every scheduled operation id is in `reviewed_operations` before
+    it is scheduled.
+  - Action: read the call by `operation_id` from the timelock's
+    `CallScheduled` event. If it is not a reviewed change, cancel it with
+    `cancel(operation_id)` from a canceller before `ready_at`, and follow the
+    runbook (step 4): a proposer that schedules unreviewed calls is
+    compromised. If governance reviews it, enroll the id. Never execute it to
+    clear the alert.
+  - Verify: the operation is cancelled before it is ready, or its review is
+    recorded and its id enrolled.
+
+Healthy controls: the R1 history; a reviewed auditor rotation scheduled,
+executed and followed by its `AuditorsSet`; a reviewed call still waiting;
+auditor approvals; and ordinary Safe executions are all silent.
+
+- **False-positive qualifier:** a planned schedule pages unless its id was
+  enrolled first, and a planned Safe change always pages. Both are by
+  design, as in the stopgap: review, enroll the id or record the change, and
+  restart to clear the retained page. A restart replays the change-detector
+  window, so a planned Safe change or reviewed cancellation newer than
+  `initial_log_window_blocks` pages or warns once more.
+- **False-negative qualifier:** the reviewed block is in the monitor's own
+  enrollment, so whoever controls it can mark a hostile operation reviewed;
+  keep it under the release owner's review. The operation journal is
+  process-local and replays from `events_from_block` after a restart; until
+  it reaches the checkpoint it is unknown. Safe and proxy events older than
+  the first change-detector window are not replayed; the state is the
+  authority for them, except for an extra role holder, which only its
+  `RoleGranted` reveals (and that grant needed a timelock operation, which the
+  journal sees). This check does not decide root contents, approvals or
+  disputes (§22.7).
+- **Missing today:** production `vault/main/monitor.yml` has no
+  `subnet_correctness` mapping, so neither this check nor the v1 governance
+  checks run until the release owner enrolls one with this block. Until then
+  the planetoid watcher's chain alarms (xops `SN-MAINNET-SETTLEMENT-V2-WATCHER.md`,
+  "Chain alarms") are the only paging on these events.
+
 ### 22.2 Pool registration, validator identity, and fleet ownership
 Probe: `subnet-identity`
 
@@ -45658,6 +46346,7 @@ do not prove historical UID ownership.
 | Alert class | Healthy requirement / trip condition | Severity and action |
 |---|---|---|
 | `subnet-pool-custody-identity` | Every active NO has exactly its registered pool hotkey/UID under the immutable vault coldkey; escrow is correctly registered and pool, deposit, reserve and participant roles remain distinct. | Page on foreign ownership, reused UID credited to the old NO, duplicate active roles or a custody mismatch. Reconstruct the registration/rotation boundary before any repair. |
+| `subnet-deposit-hotkey-owner` | Native `Owner` of every active operator's deposit hotkey is its deposit signer's EVM mirror coldkey. | Page on any other owner, at any price: a squat or swap. An unset owner warns while the price is zero and pages once a priced entry is in force or scheduled, because every priced deposit would then fail with `HotKeyAccountNotExists`. The deposit task's refusal `the deposit hotkey cannot take stake` points here. The operator sends the association outside the engine, so the signer's chain nonce may exceed its intent rows. |
 | `subnet-validator-eligibility` | Each expected active validator has its actual historical hotkey/coldkey, sufficient stake, permit and supported weight version at the scoring/application block; declared measurement key/activation is attributable to that identity. | Warn on permit/stake loss or a stopped eligible validator; page if ineligible/forged identity evidence is accepted. Retain stake ranking and native registration/permit changes. |
 | `subnet-fleet-binding-invalid` | Client Ed25519 consent and hotkey sr25519 authorization bind chain, netuid, coordinator, fleet, generation, epoch interval and finalized manifest commitment. Both directions of live UID mapping and membership/revocation history agree. | Page if an invalid, expired, revoked, stolen, overlapping or wrong-generation binding receives credit. Rejected hostile requests are counted, not themselves a custody breach. |
 | `subnet-commitment-mirror-lag` | Native commitment and finalized mirror match with the configured freshness; cleanup/version history cannot leave a deregistered or reassigned hotkey eligible. | Warn on stale/missing mirror; page on a false mirror being used or deadline-wide loss of valid membership. Preserve native inclusion plus EVM mirror receipt and effective versions. |
@@ -45733,6 +46422,10 @@ trustless revenue/usage oracle. Economic suspicion remains separately labeled.
 | `subnet-reserve-principal` | `liveStake() >= principal`; global/per-NO principal and cumulative conviction reconcile; reserve coldkey/hotkey stay immutable and separate from claims. No path sources a reserve withdrawal. | Page on any proved deficit, unauthorized outflow or custody drift. Check exact runtime share accounting; never fund an escrow discrepancy from the reserve. |
 | `subnet-reserve-credit-delta` | A deposit's reserve receipt covers its full principal, with only the pinned zero-to-two-rao surplus; principal is not reduced to conceal a runtime rounding loss. | Page on a receipt/state delta outside the exact allowed interval or a failed move recorded as funded. Retain both destination share-pool transitions. |
 | `subnet-reserve-yield` | Reserve delegate take is zero; observed dividends compound under the correct coldkey. Publish deposits, voluntary conviction, rounding donations and yield separately. | Page on unauthorized take/custody change; warn on unexplained yield loss across eligible completed tempos. A low demand ratio is an economic warning, not by itself a protocol invariant failure. |
+| `subnet-price-sheet` | The file at the published price sheet address parses, every entry verifies under the deployment's pinned signer, it keeps every entry already verified. Whether an entry's cap fits the coordinator's is `subnet-policy-schedule`'s deposit cap rule. | Page on a file that does not verify: readers keep the last verified sheet, so nothing is paid from it, but it may hide a real entry. Warn when the file stays unreadable past 6 hours; an unreadable file before that is unknown. A deployment with no pinned signer has no sheet. |
+| `subnet-usage-statement` | Each settlement v2 source epoch's signed usage statement is published by the epoch's commit deadline, verifying under the reviewed artifact signer. | Page while a price is in force, since the pool then has no weight. Warn ahead of a scheduled price, since the first priced deposit needs the same pipeline. Not read at zero price with nothing scheduled. Do not sign a statement by hand. |
+| `subnet-deposit-landing` | A priced deposit lands within 900 blocks, 3 hours, of its source totals existing. | Page when the epoch's deposit counter is still zero past that. Read the refusal in `bringyourctl st status`; never send a size other than the one owed. |
+| `subnet-campaign-headroom` | The coordinator's campaign deposit cap less `campaignReserved` covers at least 8 epochs at the latest required deposit, summed over the operators. The cap is a lifetime limit, and a deposit past it reverts. | Warn under 8 epochs and page under 2, each epoch under the cap of the version in force at it, so a raise scheduled in time counts. Each operator counts at this epoch's requirement once its source totals exist, and at its last known one before that. Nothing is read at zero price. The owner schedules a coordinator version with a higher campaign cap before it runs out. |
 
 Implementation (2026-10-23, `signal_subnet_deposits.go`), at the §22.1 agreed
 checkpoint. Observation state (the reserve as last seen, each operator's last
@@ -45778,6 +46471,18 @@ is read again.
   when every operator fails after the deadline. Unknown when the policy
   document is absent or unpinned, a signer is not reviewed or the artifact is
   unreadable.
+- `subnet-price-sheet`, `subnet-usage-statement`, `subnet-deposit-landing`: the
+  audit above runs at the rates the signed sheet puts in force for the epoch,
+  over the reviewed document as baseline. A source epoch at or after the
+  operator's vault2 `firstEpoch` is judged by its signed usage statement at both
+  origins (`/sn/evidence/history`, `/sn/evidence`), and never by whether a v1
+  root exists, because the phase C sweep commits one on a v2 epoch. The reader
+  checks the statement's signature, identity and boundaries and applies the same
+  formula; it does not re-sum the ledger's provider rows, which validators do. A
+  sheet never verified, as on a host that cannot reach the published address,
+  prices the audit under the reviewed document, as validators with no sheet do;
+  only `subnet-price-sheet` reports that the file cannot be read. A zero price with nothing scheduled
+  reads no sheet entry's statement and no vault2 pool.
 - `subnet-deposit-penalty-bypass`: for each decided noncompliant operator, any
   permitted validator's applied `Weights` row whose `LastUpdate` is at or after
   the artifact deadline plus `(RevealPeriodEpochs + 1) * Tempo` and gives the
@@ -45789,6 +46494,27 @@ is read again.
 - **False-negative qualifier:** events before the first frontier window are
   not replayed, so epoch counters are judged only once the published frontier
   covers the epoch; one operator's failure zeroing every pool is not judged.
+
+### 22.3a Demand deposit funder events — partial reader
+Probe: `subnet-demand-events`
+
+`signal_subnet_demand_events.go` reads what only the operator service can see and
+the chain cannot show: the newest row of each paging kind in `st_demand_event`,
+through the producer database's bounded constant query. It reads each row's kind,
+epoch and age, and never its data. This is a partial §22.3 component and does not
+count as a family in the registration sentinel.
+
+| Class | Invariant | Trip and response |
+| --- | --- | --- |
+| `subnet-demand-event` | The operator service has recorded no `swap_needs_person`, `funder_alert` or `hotkey_not_ready` event within its window. | Page while the newest `swap_needs_person` is under 7 days old, or the newest `funder_alert` or `hotkey_not_ready` is under an hour old. `swap_needs_person`: find the swap's USDC from the signature in the event's data. `funder_alert`, a swap's TAO short of its floor a minute after signing, paid below it, or never come: the same check, while the funder buys nothing more until 30 minutes after signing. `hotkey_not_ready`: compare `subnet-deposit-hotkey-owner` and the taskworker's refusal. |
+
+- **False-positive qualifier:** nothing acknowledges an event, so
+  `swap_needs_person` stays up for its 7 days after it is handled. `funder_alert`
+  can be a read of the TAO that lags by more than a minute. `hotkey_not_ready` can
+  be a read that failed during the funder's dry run.
+- **False-negative qualifier:** a database that refuses the event's write loses
+  the page, not the taskworker's `[st]v2 ALERT demand_<kind>` log line. The table
+  not existing yet is silence, because the migration's own signal covers it.
 
 ### 22.4 Real validation paths, attempt completeness, and pool quality
 Probe: `subnet-validation`
@@ -45994,7 +46720,7 @@ own root; do not invent a global claim root or pay providers from deposits.
 |---|---|---|
 | `subnet-epoch-progress` | Each due NO closes within close grace, commits its root within the root window, finalizes no earlier than permitted, and advances independently of a broken peer NO. | Warn on at-risk/missed operator publication; page on overdue required settlement or early/incorrect finalization. A missed close must record zero and defer stake to a later timely boundary, never assign a multi-epoch delta to the first missed epoch. |
 | `subnet-capture-delta` | Captured funding equals measured pool decrease and escrow increase. A sub-minimum TAO-equivalent move has explicit dust deferral; a failed price read/transfer cannot become success or manufactured zero funding. | Page on fabricated/misattributed capture or failed movement entered into accounting. Warn on persistent unexplained deferral after the threshold becomes feasible. Record immutable transfer floor and exact finalized price input. |
-| `subnet-payout-root` | Authorized NO root and artifact hash reproduce the canonical signed payout list, exact 10,000-bps allocation, deterministic remainder rule, claimant identity and historical head exclusion. | Page on accepted malformed/equivocating/wrong-domain root or artifact, or finalized entitlement rewrite. Warn on missing publication after its deadline; custody caps do not make an unfair or unavailable list correct. |
+| `subnet-payout-root` | Authorized NO root and artifact hash reproduce the canonical signed payout list, exact 10,000-bps allocation, deterministic remainder rule, claimant identity and historical head exclusion. A settlement v2 pending root is never disputed, deleted or replaced. | Page on accepted malformed/equivocating/wrong-domain root or artifact, or finalized entitlement rewrite, and on every vault2 `PathDemanded`, `DistributionDeleted` and replacing `DistributionCommitted`. Warn on missing publication after its deadline; custody caps do not make an unfair or unavailable list correct. |
 | `subnet-claim-correctness` | A valid same-NO/epoch Merkle proof creates exactly the leaf's integer entitlement once, for its fixed coldkey; invalid/replayed/cross-root/cross-epoch proofs cannot create credit. | Page on duplicate/redirected/excess credit or valid finalized claims blocked by coordinator pause/upgrade/deactivation. Investigate ordinary proof/request errors without auto-submitting claims. |
 | `subnet-claim-credit-payment` | `Claimed` means logical credit, `ClaimPaymentDeferred` means unpaid durable credit, and `ClaimPaid` requires measured escrow decrease/recipient increase. Credit aggregates across epochs/NOs only for the same coldkey, survives expiry and is permissionlessly retryable. | Page on credit loss, double payment, wrong destination or claimed-as-paid reporting. Warn when a configured claimant/keeper SLO is missed despite feasible transfer; sub-floor credit or a provider choosing not to withdraw is not a breach. |
 | `subnet-carry-isolation` | Missing-root and expired unclaimed remainder become only the same NO's carry; already-claimed credit is excluded. Expiry is after snapshotted TTL/grace and each remainder is consumed once. | Page on cross-NO movement, early expiry, lost durable credit, double carry or an old entitlement being reopened. Reconcile both adjacent epochs before closing the incident. |
@@ -46154,6 +46880,92 @@ names `subnet-epoch-progress` and `subnet-payout-root` as undecided.
   coverage gap keeps the run from reading healthy, and §22.7.1 still pages
   the root deadline.
 
+**Settlement v2 disputes (2026-11-06, `subnet_settlement_v2_disputes.go`).**
+Incident 2026-11-05 ("F2"), remediation R4b. vault2's dispute game is
+optimistic: a root that lowers, reassigns or hides a finalized account
+finalizes unless someone deletes it with the free `checkPath` or blocks it
+with a paid `demandPath` within `CHALLENGE_BLOCKS` (14,400 on mainnet) of its
+commit. A dispute is the watcher or validator stopping such a root, so every
+one is an incident, and so is a pending root replaced before it finalized.
+The check needs no enrollment and has no switch to turn it off. Once the
+cutover read above has proven the declared pair's links, the same checkpoint
+and relay read vault2's `DistributionCommitted`, `PathDemanded` and
+`DistributionDeleted` logs, topic-filtered, over a process-local frontier.
+Its first window is vault2's own `CHALLENGE_BLOCKS` back from the checkpoint,
+so a restarted monitor still sees every dispute of the last challenge
+window. Later runs read only new blocks, bounded like the event journal,
+and every log block is checked against the canonical block at its height. The
+frontier commits only after the closing checkpoint recheck. Each finding is
+PAGE, Sustain 1, class `subnet-payout-root`, retained, on target
+`subnet-settlement/no-N`. Its frame names the operator's pending root
+sequence, `v2-seq-S/<kind>`, so one sequence's many demands are one incident.
+The observation names the event count and the first and last event blocks;
+demanders and challengers are never rendered. Each action follows the
+runbook in [REMEDIATION-PLAN.md](../../factury/security/incident-20261105/REMEDIATION-PLAN.md),
+"Runbook: suspected restatement or governance compromise".
+
+- `v2-seq-S/path-demanded`, invariant `v2-pending-root-needs-no-demand`.
+  - Symptom: someone demanded an opening of an operator's pending v2 root.
+  - Mechanism: a demand blocks finalization until the root is opened at that
+    account. A watcher demands when it cannot verify the root from the
+    published ledger, so a demand means a withheld or unverifiable tree, or
+    someone probing for a lowered account.
+  - Baseline: every pending root's ledger is published and verifies, so no
+    watcher demands.
+  - Action: check that the root's ledger objects are served and verify, and
+    answer every demand before commit + `challenge_blocks`. If the tree is
+    withheld or a demand cannot be answered, follow runbook steps 1 and 3.
+    Keep the transaction hashes and the served objects.
+  - Verify: every demand is answered and the root finalizes, or it is deleted
+    or replaced, and the incident record attributes the demander.
+- `v2-seq-S/distribution-deleted`, invariant `v2-pending-root-has-no-fault`;
+  the observation names the `LedgerTree.Fault` (`inconsistent-node`,
+  `lower-value`, `wrong-leaf`), level, root index and account index.
+  - Symptom: a pending v2 root was deleted as faulty.
+  - Mechanism: `checkPath` proved that the root restates a finalized
+    account, or opened a demanded one with a fault: a stolen root-signer key,
+    a hostile coordinator or a ledger bug.
+  - Baseline: no pending root is ever deleted.
+  - Action: treat the root signer and v2 governance as suspect. Pause v1 with
+    the guardian if the coordinator path is hostile, rotate the root signer
+    and auditor, keep the challenge transaction and served objects, and tell
+    the owner. Never recommit the same tree.
+  - Verify: the record attributes the faulty root, and the operator's next
+    root verifies and finalizes.
+- `v2-seq-S/replacing-commit` (a `DistributionCommitted` with
+  `replacedSeq != 0`), invariant `v2-pending-root-finalizes-before-replacement`;
+  the observation names `replaced_seq`, the epoch, leaf count and total.
+  - Symptom: an operator's pending v2 root was replaced before it finalized.
+  - Mechanism: the coordinator allows a replacement only after the next epoch
+    has ended, so the replaced root never finalized: its auditor quorum did not
+    approve it, a demand stayed open, or nobody finalized it. An auditor that
+    refuses a root it cannot verify is the defense working.
+  - Baseline: each pending root is approved and finalized after its window,
+    so every commit has `replacedSeq` zero.
+  - Action: find why: the auditor's refusal and ledger audit, open demands and
+    the finalizer. If the auditor refused a root it could not verify, follow
+    runbook steps 1 and 3 and verify the replacement before its window closes.
+  - Verify: the record explains the replaced root, and the replacement
+    verifies and finalizes.
+
+A failed vault2 read, a zero `CHALLENGE_BLOCKS`, an undecodable dispute event
+(`dispute-event-malformed`) or a frontier behind the checkpoint
+(`frontier-behind-<bucket>`) is a `settlement-v2-disputes` coverage gap that
+names `subnet-payout-root` as undecided; it is never read as no dispute. An
+unproven cutover leaves the disputes unread under the `settlement-v2-cutover`
+gap, which already names `subnet-payout-root`. Healthy controls: ordinary
+captures, first commits, finalizations and claims are silent.
+
+- **False-negative qualifier:** a dispute that happened while the monitor was
+  down and is older than the first window is not replayed after a restart,
+  and a pending root still blocked by such an old open demand is not reported
+  here. The page is retained only for the watcher's lifetime. This check pages
+  on disputes that happen. It does not verify that a pending root's ledger
+  objects are served by commit + 7,200 blocks: the monitor has no ledger
+  object reader, and the planetoid watcher's `object missing` result is the
+  coverage for that until one is built. It does not replay v2 settlement (the
+  `settlement-v2` gap below).
+
 Bands: a proved identity, carry, claim, payment, root or clock contradiction is
 PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
 finalization due, persistent dust deferral and an unavailable artifact are WARN
@@ -46168,7 +46980,8 @@ addresses are never rendered. Missing today: the `subnet_replay` enrollment
 provisioned in vault/main monitor.yml, so the journal and root reproduction
 stay unknown until it is and a planned sweep epoch cannot warn; a declared
 settlement v2 deployment is not replayed and reports a coverage gap, although
-its cutover facts above are read; no claimant or keeper SLO is configured.
+its cutover facts above are read and its disputes page; no claimant or keeper
+SLO is configured.
 The independent deadline page in §22.7.1 covers root presence for both
 versions without this replay enrollment.
 
@@ -46448,7 +47261,9 @@ progress-file reader in this server monitor. `subnet-process` currently reads
 operator database/task/intent state and explicitly reports the missing
 validator/miner process exporters; `subnet-weights` reads the native chain.
 `subnet-settlement` replays v1 and reports
-`settlement-v2-reader-unimplemented` for a declared V2 pair. The independent
+`settlement-v2-reader-unimplemented` for a declared V2 pair, whose vault2
+disputes it pages (§22.7). `subnet-chain` reviews V2 governance: the
+STSettlement2 proxy, its timelock and the governance Safe (§22.1). The independent
 `subnet-root-deadline` (§22.7.1) reads v1/v2 root presence and funding for the
 current deadline; it does not implement full V2 settlement replay. Registering
 these probes does not establish enrollment, deployment, metric ingestion or delivered
@@ -47148,7 +47963,13 @@ A client reports a move it declined or whose replacement failed with one
 when its move id matches the client's intent in Redis (MOVE.md §5.1). Reports
 arrive wherever the client's control path runs: the connect resident, the api's
 `/connect/control` and the proxy's in-process authority, so these three
-counters carry no service filter. A failure counts against the failed target
+counters carry no service filter. Arrival cleanup is scoped to the move ID
+used for nomination and compares the exact stored value before deletion. A
+successor intent published during nomination must survive the older arrival;
+cleanup failure remains best effort with the existing TTL backstop. This source
+invariant does not attribute a recovered `residentMoveIntentRedis` wrapper
+panic, establish a same-operation mutation outcome or prove runtime recovery.
+A failure counts against the failed target
 address's breaker unless the move was a drain's. `moves_expired_total`
 counts moves whose arrival window (`MoveArrivalTimeout` past the migrate time)
 ended with the resident still at the source; the source keeps the resident and
@@ -47551,7 +48372,9 @@ each of the previous 7 days. Connect traffic is
 `urnetwork_connect_exchange_local_bytes_total`: a block with in-process
 transport delivery on (§8.15) carries most transport frames without a socket,
 and the socket counter alone would fall by that share, about 60% of exchange
-frames once every block is on.
+frames once every block is on. A block with in-process forward delivery on
+also carries its same-process forward frames there; the local counter sums
+both operations, as the socket counter does.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.
@@ -48497,6 +49320,82 @@ serving someone else's bundle; an older sequence at the mirror's sync. For the
 origin, read the publisher's outcomes (`store_error`, `sign_error`,
 `self_check_failed`: the signing key is not in `root_public_keys_hex`).
 
+### 27.2 Extender publishing
+
+Probe: `extender-publishing`
+
+Status: added 2026-11-11 with the fixes for two silent stops
+(factury/research/extender-health-2026-11-11.md §1.4, §5 items 1 and 2). The
+gossip drain had published nothing since 2026-11-06 07:49:44Z: a claim raised
+during that morning's Main brownout, the raise ended every replica's drain,
+and 10,919 records and revocations queued for five days. Route 53 had refused
+every dns tick since 2026-10-28 18:12Z ("RDATA character limit of 32000
+exceeded": all the sets went in one request, which Route 53 caps at 32,000
+value characters with each character of an UPSERT counted twice), while the
+dns gauges, drawn from the desired sets, read healthy.
+
+Source: two series the publishers export, labeled by fixed enums only:
+
+- `urnetwork_stats_extender_gossip_oldest_pending_seconds{kind}`: the age of
+  the oldest message written to `network_extender_publish` and not yet
+  released (`record`, `revocation`), from every taskworker's stats collector;
+  0 on an empty queue;
+- `urnetwork_taskworker_extender_dns_changes_total{record_type,outcome}`: every
+  set change the extender publish tick wanted (`A`, `AAAA`, `TXT`), `accepted`
+  by Route 53 or `failed`. Every combination exists from process start.
+
+```promql
+max by (kind) (urnetwork_stats_extender_gossip_oldest_pending_seconds{env="main"})
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="failed"}[15m]))
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="accepted"}[15m]))
+```
+
+Healthy: the gossip service drains the queue every 5 seconds, 64 rows a pass
+per replica, so the oldest unreleased message is seconds old. The publish tick
+runs every 10 minutes and writes every set in a request of its own, and no
+change fails.
+
+Thresholds (each judged at every one-minute evaluation of its hold; a gossip
+kind is the target `extender-gossip/<kind>`, a record type
+`extender-dns/<record_type>`):
+
+- WARN `extender-gossip-stalled`: the kind's oldest unreleased message older
+  than 10 minutes for 5 minutes. A failed drain pass retries after a backoff
+  of at most a minute, and an unready replica starts its drain once readiness
+  passes, so a stall this long is no replica draining at all.
+- WARN `extender-dns-publish-failing`: a failed change of the record type in
+  the trailing 15 minutes for 30 minutes, about three failed ticks in a row. A
+  change fails when Route 53 refused it, its request errored, or it was never
+  sent: the zone could not be resolved or listed, the publisher could not be
+  built, or a delete was held because an upsert of its type failed.
+- `extender-publishing-unobservable`: the read failed, a series is ambiguous
+  or missing at an evaluation, no stats collector exported the gossip queue
+  (`gossip_state_missing`), or no taskworker exported the changes counter
+  (`dns_state_missing`: a build that predates it).
+
+False-positive qualifiers: the gossip gauge is refreshed every 5 minutes with
+the stats collector's other database series, and the 10-minute threshold
+covers that cadence. The gossip queue also grows while every gossip replica is
+deliberately stopped. False-negative qualifiers: a dns block with no
+record name fails before any set is drawn and counts no change; the tick logs
+it and the dns gauges read zero. A set that keeps landing with stale content
+is not a failure here. Neither series says whether clients still reach the
+gossip mesh; that is the gossip service's own connection count.
+
+ACTION: for `extender-gossip-stalled`, read the gossip service's log for
+`[gossip]drain pass failed` (the database path of the replica) and
+`[gossip]not ready` (its readiness: Postgres, Redis and the migration head),
+and `process_start_time_seconds{service="gossip"}`. A replica that logs
+neither and still does not drain needs its unit restarted (stop the warp
+container itself and check `docker ps`). For `extender-dns-publish-failing`,
+read the taskworker log for `[extenderpublish]dns publish failed`, which names
+every failed set and Route 53's answer: `InvalidChangeBatch` points at a set's
+size or shape (the dns block's `sample_count`, record size), `AccessDenied` or
+a signature error at the dns block's credentials, `Throttling` or
+`PriorRequestNotComplete` at another writer of the hosted zone. The extenders
+dashboard (`urnetwork-extenders`) shows what Route 53 accepted and each
+outcome's rate.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress
@@ -48761,3 +49660,877 @@ The query uses the existing byte-bounded Mimir gateway adapter: one vector, maxi
 False positives: legitimate high turnover, uninstrumented synchronous work or a transient occupancy burst can exceed the band; two sampled observations do not establish an individual hung call. False negatives: per-process counts below the band can sum to a large fleet population; work in other instrumented stages, deferred async compensation or missing publishers is not measured as OTHER. Low OTHER does not prove compensation queues drained, healthy Redis/PG, low CPU or customer recovery. Correlate the same process generation and bounded owner/stage evidence before any repair. Do not raise pools or restart based on this gauge.
 
 Synthetic controls cover public constructor → bounded vector → source-clock reducer → actual cadence gate/in-memory notifier; strict count threshold and ingress sum; no completed calls; repeated/stale/missing/invalid source cells; equal/newer generation ambiguity; cancellation with no baseline commit; independent positive siblings; default/custom/invalid policy; fixed private-label omission; and unknown/replacement versus complete below-band recovery. No Main or network execution is required for those controls.
+
+## 28. Extender health — release to clients, supply and the gossip mesh
+
+On 2026-11-11 the owner asked for extender health signals: "We especially
+want to know if extenders aren't being released to clients or some other
+issue like those discovered here." The review that prompted it
+(factury/research/extender-health-2026-11-11.md, with its 22:20Z correction;
+gossip-drop-2026-11-11.md; extender-ping-rejections-2026-11-11.md) found
+every one of its issues days or weeks after it began. Nothing alerted on
+any of them.
+
+This section indexes every finding against the signal that catches it. It
+covers four sources:
+
+- §27.2 `extender-publishing`, from fix/extender-publish-1111;
+- §2.19c's stale-directories condition and refusal reasons, from
+  fix/extender-ping-metrics-1111;
+- the prober guard and the activation and attribution fixes of
+  fix/extender-churn-1111 and fix/extender-attribution-1111;
+- the five probes below (§28.1–§28.5).
+
+§28.6 adds a sixth probe, for S8's webrtc signaling relay
+(connect/EXTENDER.md S8), which carries the operator's acceptance and
+uptime probes to extenders on the webrtc carrier. It came after the review,
+so no finding below maps to it.
+
+Replayed times come from Main's Mimir history from 2026-10-28 to 11-11,
+unless a row says otherwise.
+
+| Finding | Ran for | Signal (class, section) | Would have warned |
+|---|---|---|---|
+| The gossip publish drain died in the 11-06 07:44Z Main brownout; nothing was published until the restart at 11-11 22:09–22:15Z | 5.6 days | `extender-gossip-stalled` (§27.2); the end state `extender-release-coverage-low` (§28.1) | §27.2 within about half an hour (from the queue's age); §28.1 at about 11-07 07:40Z |
+| Route 53 refused every DNS tick from 10-28 18:12Z (one batch over the 32,000-character RDATA limit), while the DNS gauges reported the sets the tick wanted, not what landed | 14 days | `extender-dns-publish-failing` (§27.2); the gauges now count only what Route 53 accepted | within about 45 minutes (the counter is new; not replayable) |
+| The public TXT records of `extender.bringyour.com` expired 10-29 18:12Z and were still served on 11-11 | 13 days | `extender-dns-records-stale` (§28.2) | about 10-28 19:30Z, an hour after the last accepted tick |
+| The resolvers the sdk gives China serve part of the TXT set or none: Alidns's DoH 3 of the 14 to 15 records, the answer not marked truncated and served long past the TTL; DNSPod's DoH an answer marked truncated with none (2026-11-12) | unknown; seen 11-12 | `extender-dns-country-partial`, `extender-dns-country-stale` (§28.2, per connection region) | on the second run after the monitor build is deployed |
+| The seed bundle is off by design | — | `extender-seed-off` (§27.1), a configured state | — |
+| Gated release has never been used: no requests, no gated fleet | — | `extender-gated-release-failing` (§28.1), dormant until clients ask | — |
+| The activation bootstrap was the only fresh source of extender records after 11-07 | — | `extender-activations-stopped` (§28.1) | never: at least 7 stored activations every hour from 11-03 |
+| 87% of extender-to-extender pings were refused as an unknown pinger (reason 4) because directories were stale. The ping gauge had no reason label, and `derive-refusals` blamed gate tolerance and clock skew | 4.5 days | `extender-directories-stale` (§2.19c); `derive-refusals` leaves out reasons 4 and 6; the `reason` label on `urnetwork_stats_extender_pings_24h`; route-refused claims in `urnetwork_extender_ping_report_refused_total` | §2.19c at about 11-07 07Z (the ping review's estimate) |
+| Revocations outnumbered creations about 2 to 1. Many were false: 157 of 199 checks failed from the prober's side on 11-01, with no prober-side guard | weeks | `extender-supply-falling`, `extender-churn-high` (§28.5); the prober's common-mode guard and false-revocation counters (fix/extender-churn-1111) | `extender-supply-falling` at about 11-02 01:48Z |
+| Only 12.9% of activation probes pass TCP 443. Two accounts that never pass pin the activation limit (about 96k refusals a day). A budget check that failed was counted as `account` | weeks | the `unproven_account` and `error` outcomes of `urnetwork_extender_activations_total`, and the longer wait for accounts that never pass (fix/extender-attribution-1111). No alert: reachability is the operators' | — |
+| 72% of `contract_extender` rows were an extender's own host, inflating the relay statistics about 10–15 times | weeks | self-tags no longer written (fix/extender-attribution-1111). No alert | — |
+| A 12.5k-device provider fleet (Vietnam, one custom build) went offline at 10:35Z, taking most of the gossip mesh with it. It was first read as a gossip outage | ongoing | `provider-fleet-departure` (§28.3); `gossip-mesh-links-dropped` (§28.4) | §28.4 at about 10:52Z, §28.3 at about 11:54Z (the stats lag 30–40 minutes); the same fleet's 11-02 departure at about 14:12Z and 14:54Z |
+| While that fleet was present, the gossip replicas' 512/1024 watermarks ran a 67-second trim-and-redial loop, about 10k link closures a minute | all 14 days of history | `gossip-mesh-saturated` (§28.4) | all four replicas held more than 1,024 open fds 95% of the time from 10-30 to 11-11 10:35Z; edge-3 again from about 22:20Z to 23:30Z after the restart, at 98–101% of 1,024 |
+| About 14 GB of gossip heap built up across the four replicas | 10 days | `gossip-heap-high` (§28.4) | edge-4 by about 11-01 22Z, edge-3 by about 11-02 02Z |
+
+How each channel reaches clients, and which signal judges its publisher
+and which its outcome:
+
+| Channel | What reaches clients | Publisher | Outcome |
+|---|---|---|---|
+| Gossip: each replica drains `network_extender_publish` every 5 s (gossip/publish.go) and floods it to its links | every member's and extender's directory, through its link to a replica | `extender-gossip-stalled` (§27.2) | `extender-release-coverage-low` (§28.1); `extender-directories-stale` (§2.19c); the links themselves, `gossip-mesh-links-dropped` and `gossip-mesh-saturated` (§28.4) |
+| DNS `extender.<network host>`: the taskworker's publish tick writes the geo A, AAAA and TXT sets to Route 53 every 10 minutes | a resolver's continent's addresses and signed records | `extender-dns-publish-failing` (§27.2) | `extender-dns-records-stale` (§28.2); through each connection region's resolvers, `extender-dns-country-stale` and `extender-dns-country-partial` (§28.2) |
+| Seed bundle: `/v1/seed.bin` and its mirrors | a signed cold-start bundle (no released client fetches it yet) | `extender-seed-mirror-stale`, `-expired`, `-rollback` (§27.1) | `extender-seed-off` while off (§27.1) |
+| Activation bootstrap: each stored `POST /network/extender-activate` | the activating extender's own fresh record and 8 random peers | — | `extender-activations-stopped` (§28.1) |
+| Gated release: `POST /network/extender-release` | gated records for a client that asks | — | `extender-gated-release-failing` (§28.1) |
+| Extender feeds: a client's feed request to an extender | samples of the extender's own directory | — | only as fresh as the channels above; §2.19c |
+
+Read together:
+
+- **A provider fleet left.** `provider-fleet-departure` beside
+  `gossip-mesh-links-dropped` (and connect and ping drops in the same window)
+  means the fleet's devices went offline. No server action applies.
+- **Gossip publishing stopped.** `extender-gossip-stalled` fires within
+  minutes. If it is not fixed, `extender-release-coverage-low` follows a day
+  later, and `extender-directories-stale` follows once the records lapse.
+  The stall alone can be missed (the stats collector stopped, or a drip
+  that queues nothing). The outcome signals still fire.
+- **DNS publishing stopped.** `extender-dns-publish-failing` comes first.
+  `extender-dns-records-stale` follows within the hour, and it also fires
+  when the publisher believes it succeeded. Each region's resolvers serving
+  the same staleness hold rather than warn.
+- **A region's resolver fails.** `extender-dns-country-stale` or
+  `extender-dns-country-partial` with a fresh whole zone is that resolver: a
+  client of the region whose lookup lands there gets no record or part of
+  the set. A resolver unreachable from here raises nothing.
+- **Supply fell.** `extender-supply-falling` with activations still stored
+  is revocation, by the prober or on the extenders' side. With
+  `extender-activations-stopped` too, it is the activation path.
+- **Webrtc tests failing.** `extender-webrtc-relay-no-answer-high` means
+  the operator's webrtc tests of extenders fail. Activations only webrtc
+  could pass are refused, and addresses accepted on webrtc alone are
+  deactivated after six failed uptime probes in a row, so
+  `extender-supply-falling` can follow.
+
+Deployment: the probes run in the monitor build that carries this section.
+Most read series Main already exports. Three parts need new exporters:
+`gossip-mesh` reads `urnetwork_gossip_peers` and
+`urnetwork_gossip_conn_manager_watermark` from a gossip build with
+gossip/mesh_metrics.go (until then, open file descriptors and the default
+watermark); `extender-churn-high` reads `urnetwork_stats_extenders_created_24h`
+and `urnetwork_stats_extenders_revoked_24h` from a taskworker build with
+controller/stats_extender_supply.go (until then,
+`extender-supply-unobservable` reports `churn_state_missing`); and
+`extender-webrtc-relay` reads `urnetwork_extender_webrtc_relay_offers_total`
+from a connect build with S8's connect/extender_webrtc_relay.go (until then,
+`extender-webrtc-relay-unobservable` reports `relay_state_missing`). The
+extender health dashboard (`urnetwork-extender-health`) shows every series
+these probes read but the relay's, which the extenders dashboard
+(`urnetwork-extenders`) shows in its "webrtc relay" row.
+
+### 28.1 Extender release to clients
+
+Probe: `extender-release`
+
+Status: added 2026-11-11. It judges the outcome of three channels from
+series Main already exports, at one-minute evaluations of one bounded Mimir
+range read (the §26 history read), every 5 minutes.
+
+Source:
+
+- the gossip channel: `urnetwork_stats_extender_gossip_extenders_24h{kind="record"}`
+  (distinct extenders behind the records released in the last 24 hours)
+  against `urnetwork_stats_online_extenders` (active extenders with an active
+  address), both from every taskworker's stats collector, merged by `max`;
+- the activation bootstrap: `urnetwork_extender_activations_total{stage="store",outcome="activated"}`,
+  beside all its stages as the posts that arrived;
+- gated release: `urnetwork_extender_releases_total` by outcome.
+
+```promql
+max(urnetwork_stats_extender_gossip_extenders_24h{env="main",kind="record"}) / max(urnetwork_stats_online_extenders{env="main"})
+sum(increase(urnetwork_extender_activations_total{env="main",stage="store",outcome="activated"}[1h]))
+sum(increase(urnetwork_extender_releases_total{env="main",outcome="ok"}[1h]))
+  / sum(increase(urnetwork_extender_releases_total{env="main",outcome!~"rate_limited|epoch_spent|probation"}[1h]))
+```
+
+Healthy:
+
+- **Gossip coverage about 1.** A record lives a day, and the drip re-releases
+  each online extender's record before it expires. Coverage was 1.0–1.15
+  from 10-30 to 11-06; extenders revoked during the day still count.
+- **Activations.** At least 7 stored in every trailing hour from 11-03 to
+  11-11, about 39 an hour.
+- **Gated releases.** No requests through 11-11.
+
+Thresholds (each judged at every one-minute evaluation of its hold, with at
+least 10 online extenders; a smaller pool is not judged):
+
+- WARN `extender-release-coverage-low`: gossip coverage under 0.5 for 60
+  minutes. It fell from 0.97 at 11-07 04Z to 0.33 at 07Z and 0 at 08Z, so it
+  would have fired at about 07:40Z, 24 hours after the drain died. This is
+  deliberately a day late: `extender-gossip-stalled` (§27.2) catches a dead
+  drain in minutes. This catches any cause of records not being released,
+  including a drip that queues nothing.
+- WARN `extender-activations-stopped`: no stored activation in the trailing
+  hour for 30 minutes, so 90 minutes without one.
+- WARN `extender-gated-release-failing`: at least 10 answers in the trailing
+  hour that could have released a record, under half of which did, for 30
+  minutes. Rate limits, spent epochs and probation refuse a requester by
+  design, so they are left out. An idle channel (fewer than 10 answers) is
+  healthy.
+- `extender-release-unobservable`: the read failed, a series was missing at
+  an evaluation, or no stats collector exported the online pool
+  (`extender_state_missing`).
+
+False-positive qualifiers: coverage counts each extender once per day
+whatever it released, so a pool that grew fast in one day (10-30: 30 to 158
+online) briefly reads lower. Activations stop in an environment whose
+extenders all left, so the pool floor applies.
+
+False-negative qualifiers: released is not delivered. A record published to
+a mesh nobody is linked to counts as released; §28.4 judges the links and
+§2.19c whether extenders recognise each other. DNS-delivered records are
+§28.2's. `urnetwork_taskworker_extender_dns_extenders` appears in the alert
+as context. It counts what Route 53 accepted only on a taskworker carrying
+§27.2's fix.
+
+ACTION: for coverage, read §27.2 first: `extender-gossip-stalled` means the
+replicas are not draining (their log for `[gossip]drain pass failed` and
+`[gossip]not ready`). An empty queue with nothing released is a drip that
+does not queue: read the taskworker's extender publish chain. For
+activations, read the extenders dashboard's activation outcomes by stage:
+
+- `config` error: the operator's extender configuration;
+- `tcp` or `forward` failures from every account at once: the api's
+  outbound probe path;
+- `store` errors: Main;
+- no posts at all: the api route and the lb.
+
+For gated release, read the outcomes:
+
+- `empty`: the gated tier has no eligible member;
+- `country_capacity`: the per-country limit;
+- `incompatible`: declared capabilities;
+- `unavailable`: the api's extender configuration and the release ledger.
+
+### 28.2 Extender records in public DNS
+
+Probe: `extender-dns-records`
+
+Status: added 2026-11-11. On 11-11 it read every record served as issued
+10-28 18:12Z and expired 10-29 18:12Z, and fired on the monitor's second run
+until §27.2's DNS fix was deployed and its first tick landed. Extended
+2026-11-12, when the owner asked for each target country's resolvers: "use
+the dns resolver settings for the target country. The sdk gives a dns per
+country." The probe has two halves: the whole zone, below, and each
+connection region's resolvers, judged resolver by resolver. Changed
+2026-11-12, after the owner chose to give China its own small TXT set that its
+resolvers deliver whole: the publisher answers China with sets of its own
+(below, "China's own set"), and the per-country half asks a region's resolvers
+with the resolver's own /24 as the client subnet, without which Alidns and
+DNSPod are never answered with China's set.
+
+#### The whole zone
+
+Source: the TXT records of the extender record name, `extender.bringyour.com`
+on Main (a client derives `extender.<network host>`). Every 10 minutes (15
+under the watcher's cadence floor) the probe asks three public resolvers
+(1.1.1.1, 8.8.8.8 and 9.9.9.9) over the DNS wire protocol, with recursion
+desired, UDP and then TCP when truncated, as a client asks public resolvers
+over DoH. At 11-12 00:40Z all three served the same 13 records, issued
+10-28 18:12:41Z. Each value is the base64 of one operator-signed extender
+record. The probe decodes it as a client does
+(`connect.DecodeExtenderDnsRecord`) and reads the record body's signed issue
+and expiry times. It judges the freshest answer, so one resolver's stale
+cache or failure does not decide. Counts and times only reach the alert,
+never an address or key.
+
+The platform resolver is not used. On 11-11 the monitor host's home router
+answered the name's A query but dropped its 4 KB TXT answer over both UDP
+and TCP.
+
+```sh
+dig +tcp +short TXT extender.bringyour.com @1.1.1.1
+```
+
+Healthy: the publish tick re-signs every record of the TXT sets every 10
+minutes, and the sets carry a 60-second TTL, so the newest record served is
+about 11 minutes old at most, and every record is valid (24 hours).
+
+Thresholds:
+
+- WARN `extender-dns-records-stale`, on 2 consecutive runs, when the
+  freshest answer shows any of:
+  - the newest record served was issued more than an hour ago
+    (`newest_too_old`);
+  - every record served has expired (`all_expired`);
+  - the name serves no TXT record, or does not exist (`none_served`);
+  - no served value decodes as a record (`none_decoded`).
+- `extender-dns-records-unobservable`: no resolver answered (a timeout, a
+  server failure, or the monitor host's outbound DNS), or the policy is
+  invalid. An open stale finding stays open.
+
+False-positive qualifiers: a resolver that caches past the TTL serves
+records up to its cache life older; an hour covers that.
+
+False-negative qualifiers: the name is geo-routed, so the probe sees only
+the TXT sets of the resolvers' locations (or the default set). A set that
+fails only for another continent is §27.2's `extender-dns-publish-failing`.
+China's own set is seen only by the per-country half, which asks China's
+resolvers with a Chinese client subnet.
+A client behind a resolver that drops large answers, like the router above,
+gets no records at all, and this half does not see it; the per-country half
+below asks the resolvers the sdk gives each connection region. The
+signature is not verified: the monitor holds no root key, and the hosted
+zone has no other writer. The A and AAAA sets are not judged here; their
+changes are §27.2's.
+
+ACTION: read §27.2's `extender-dns-publish-failing` and the taskworker log
+for `[extenderpublish]dns publish failed`, which names each refused set and
+Route 53's answer:
+
+- `InvalidChangeBatch`: a set's size or shape;
+- `AccessDenied` or a signature error: the dns block's credentials;
+- `Throttling` or `PriorRequestNotComplete`: another writer of the zone.
+
+If the publisher reports every change accepted, compare its TXT sets with
+the hosted zone's record sets for the name.
+
+#### Each connection region's resolvers
+
+Source: the sdk's per-country DNS settings, read from the sdk build the
+monitor compiles (`monitor/extender_dns_countries.go`,
+`ExtenderDnsCountriesFromSdk`; connect `net_http_doh_regional.go` is the
+table behind them). Nothing is copied into the monitor:
+
+- the connection regions, `sdk.IngressCountryCodes()`: cn, ir, kz and ru on
+  11-12;
+- each region's DoH presets, `sdk.IngressDohUrls(cc)`: cn's Alidns
+  (223.5.5.5, 223.6.6.6) and DNSPod (1.12.12.12, 120.53.53.53), labelled
+  `DoH <ip>` because the sdk names them by url;
+- each region's plain resolvers, named and in the sdk's order,
+  `sdk.GetRegionalDnsServers()`: ru Yandex.DNS (77.88.8.8) and National DNS
+  (NSDI) at 195.208.4.1 and 195.208.5.1 (each label carries its address); ir
+  Shecan (178.22.122.100), then Electro (78.157.42.100); cn Alidns
+  (223.5.5.5) and DNSPod/Tencent (119.29.29.29); kz Cloudflare (1.1.1.1) and
+  Quad9 (9.9.9.10);
+- the undisclosed path, `default`: the default DoH servers of
+  `sdk.GetDefaultDnsResolverSettings()`, which are the ones a client's control
+  names ask (Cloudflare 1.1.1.1 and 1.0.0.1, Quad9 9.9.9.10, DNS.SB
+  185.222.222.222 and 45.11.45.11).
+
+IPv4 endpoints only: the monitor host has no IPv6 route. The sdk names no
+DoT endpoint for the platform's names (DoT appears only in the egress
+presets' personal ids), so none is asked.
+
+Each resolver is asked the way a client asks it (connect
+`net_extender_network.go` `resolveDnsTxt`, `net_http_doh.go`):
+
+- DoH first: an RFC 8484 GET of a question with id 0, recursion desired and
+  an EDNS(0) OPT record of 1232 bytes. A client reads 16 KiB of the body
+  (`maxDohResponseBytes`, a `LimitReader`), keeps the TXT records it parsed
+  before a record the cut broke (`parseDohWire`), and keeps nothing of an
+  answer that carries a policy extended DNS error (every DoH server the sdk
+  names is a built-in endpoint, so that guard applies). The probe reads the
+  body on to 64 KiB to count what the cut cost. A test runs connect's own
+  `DohQueryTxt` against the same server and requires the same records, under
+  16 KiB and over it.
+- Plain DNS only when the client would fall back: when no DoH server of the
+  region yields a TXT value. UDP, then TCP when truncated.
+- A region's resolvers are asked with the resolver's own /24 as the EDNS
+  client subnet (RFC 7871), in the DoH question's OPT record and in the plain
+  question's, standing in for the region's clients. Alidns and DNSPod forward
+  the asker's subnet to the name's nameservers: on 11-12, asked from here
+  without one, both were answered North America's set, and asked with any
+  Chinese /24, Asia's. Without the subnet the probe would judge China's
+  resolvers on a set no client in China is answered with, and never see
+  China's own set. A resolver that does not forward a subnet answers for its
+  own location, as before. The default path is asked with none, as a client
+  asks it.
+- A region's path here is its DoH presets, then its plain resolvers. A client
+  puts the default DoH servers behind a region's presets too, but a region is
+  in the sdk's table because those are known not to work there, and from here
+  they always answer, so they are judged once, as the `default` path. A
+  client's TXT fallback asks the device's own resolver, which no monitor can
+  ask; the region's plain resolvers, the recursive resolvers the sdk names
+  for it, stand in for it.
+- Each value is decoded as a client decodes it
+  (`connect.DecodeExtenderDnsRecord`).
+
+The operator's set to compare with comes from the name's authoritative
+nameservers (`extender.bringyour.com` is a hosted zone of its own; its NS
+set is read through the platform resolver), asked over TCP from here and
+with a resolver's /24 as the EDNS client subnet (RFC 7871). Route 53 answers
+a client subnet by its location, as it answers a resolver that forwards its
+client's subnet. On 11-12 it answered 15 records (5.2 KB) from here and for
+Russian /24s, and 13 for Iranian and Chinese ones; the sets shared no
+record. From 11-12 it answers a Chinese /24 with China's own set, one record
+by default. An answer is matched to a set by extender key (each record's
+signed public key), so a resolver one tick behind still matches.
+
+Each (country, resolver) is judged on its own:
+
+- fresh: the location's whole set, the newest record issued within the hour;
+- no fresh records: none served (`none_served`), a name error
+  (`name_error`), a policy-filtered answer (`filtered`), an answer marked
+  truncated with no record or a truncated UDP answer whose TCP retry failed
+  (`truncated_empty`), a plain resolver that answers the name's A question
+  but not its TXT question, as the monitor host's router did on 11-11
+  (`txt_dropped`), nothing that decodes (`none_decoded`), or only stale or
+  expired records (`newest_too_old`, `all_expired`);
+- a partial set: the client's 16 KiB read cut records off (`client_cap`), or
+  the answer is a strict subset of its location's set
+  (`fewer_than_authoritative`). The second is judged only when the set for
+  the resolver's own /24 was read, since that set can be the smaller one. A
+  resolver known to cut an answer it cannot carry to a run of its whole
+  records (`TrimmingResolvers`: DNSPod, by the endpoints the sdk gives cn,
+  which delivers 481 bytes whole) is not judged partial for a run of whole
+  records that each decode, of a set larger than it delivers whole: that is
+  its trim, which China's own set is sized for (below). An empty answer from
+  it, or one with a value that does not decode, is judged as any other;
+- unreachable from here: no answer (to the TXT question nor, from a plain
+  resolver, to the A question asked after it), a refusal, a server failure,
+  an HTTP or TLS failure. Some regional resolvers refuse foreign questions
+  (Electro on 11-12), so this is visibility only, never a fault. The resolver's
+  identities hold their state (a clear hold), it is listed as
+  `path_unreachable` in its region's alerts, and a region none of whose
+  resolvers answers is listed as `blind` in every alert of the half. Neither
+  raises an alert of its own: a visibility alert would keep every other
+  incident of the signal from clearing for as long as a region refuses
+  foreign questions.
+
+Thresholds (target `<env>/extender-dns-records/<country>/<resolver>`, the
+country code and the resolver's label from the sdk's table, nothing else):
+
+- WARN `extender-dns-country-stale`, on 2 consecutive runs: the resolver, on
+  the path a client of the region takes, gives a client no fresh record.
+  While the whole zone is stale (`extender-dns-records-stale`), a resolver
+  stale for the same reasons holds instead; the zone's alert speaks for it.
+- WARN `extender-dns-country-partial`, on 2 consecutive runs: the resolver
+  gives a client fewer records than its location's set.
+- `extender-dns-country-unobservable` (`<env>/extender-dns-records/countries`):
+  no resolver of any path answered (`none_answered`), an answer could not be
+  judged because the authoritative set could not be read
+  (`authority_unavailable`), or the budget ended before every question was
+  answered (`budget_exhausted`).
+
+Bounds: one run of the half has a 60-second budget, at most 4 questions in
+flight and 100 ms between launches. Each question is bounded at 8 seconds (4
+per exchange), a DoH body is read to 64 KiB, and each resolver is asked once
+a run, a plain resolver that leaves the TXT question unanswered once more
+for the A record: about 20 questions, plus one authoritative question from
+here and one for each /24 whose answer is not the set from here. A question
+the budget cuts holds its identities. The monitor exports no metric of its
+own, so no dashboard panel is added; the alerts carry the country and the
+resolver.
+
+Live, 2026-11-12, from the monitor host: two paced passes of the probe's own
+code (07:04Z and 07:30Z, about 30 questions each, 5 s). Route 53 answered 14
+records from here, 13 for the Chinese and Iranian /24s and 14 to 15 for the
+Russian and DNS.SB ones.
+
+| Path | Resolver | Answer | Judgment |
+|---|---|---|---|
+| default | DoH 1.1.1.1, 1.0.0.1 (Cloudflare), 9.9.9.10 (Quad9) | 14 records, 4.7 KB: the set from here | fresh |
+| default | DoH 185.222.222.222, 45.11.45.11 (DNS.SB) | 14 to 15 records, 5.1 to 5.4 KB: its /24's set | fresh |
+| cn | DoH 223.5.5.5 (Alidns) | 3 records, not marked truncated; at 07:30Z the same 3 as at 07:04Z, the newest issued 99 minutes before | `extender-dns-country-partial` (3 of 14, `fewer_than_authoritative`) while they match a set, and `extender-dns-country-stale` (`newest_too_old`) |
+| cn | DoH 223.6.6.6 (Alidns) | 3 records, not marked truncated | `extender-dns-country-partial` (3 of 14) |
+| cn | DoH 1.12.12.12, 120.53.53.53 (DNSPod) | marked truncated, no record (468 bytes) | `extender-dns-country-stale` (`truncated_empty`) |
+| cn | Alidns, DNSPod/Tencent (plain) | not asked: Alidns's DoH yields records | — |
+| ir | Shecan | 14 to 15 records | fresh |
+| ir | Electro | REFUSED | unreachable from here: held, no alert |
+| kz | Cloudflare, Quad9 (plain) | 14 records | fresh |
+| ru | Yandex.DNS, NSDI at both addresses | 14 to 15 records: their /24's set | fresh |
+
+So the watcher's second run after deploy raises four or five WARNs, all
+China's: a client in cn whose lookup lands on Alidns gets 3 of its
+location's records (and Alidns serves them long past the 60-second TTL), and
+on DNSPod none. By hand the same day, Alidns's plain resolver trims the set
+to 3 records (about 1 KB) without marking it truncated, over UDP and TCP
+alike, and DNSPod's answers UDP marked truncated with none and closes TCP
+unanswered.
+
+False-positive qualifiers: a resolver can be one tick behind; extender keys
+stay the same across ticks within an epoch, so it still matches. At an epoch
+turn an answer can match no set for one run and is then not judged partial.
+A resolver whose location Route 53 places differently from its /24 (an
+anycast resolver without a client subnet) is compared with both the set
+from here and its /24's set, and a set that equals either is whole.
+
+False-negative qualifiers: from here, an anycast resolver (Cloudflare,
+Quad9, DNS.SB, Alidns, DNSPod) answers from its nearest site, not from the
+region. Alidns and DNSPod are answered by Route 53 for the client subnet the
+probe sends, but a site in China may cache or trim differently. A region's
+blocking of DoH or of the name, and anything only an in-country network does
+to the answer, is not seen. The device's own
+resolver, which a client's TXT fallback asks, is not asked. IPv6 endpoints
+are not asked. A region's plain resolvers are asked only in a run whose DoH
+presets yield nothing, as a client asks them.
+
+ACTION: if `extender-dns-records-stale` fires too, the publisher is the
+cause; follow the whole zone's ACTION above. Otherwise the resolver is; its
+alert names the country, the resolver and its endpoint:
+
+- `none_served`, `name_error` or `filtered` from a region's resolver: the
+  region's resolver refuses the name; compare
+  `dig +tcp +subnet=<resolver ip>/24 TXT extender.bringyour.com @<resolver ip>`
+  (the subnet stands in for the region's clients, as the probe asks) with
+  `@1.1.1.1`;
+- `truncated_empty` or `txt_dropped`: the resolver cannot carry the answer
+  (a DoH answer marked truncated with none, a truncated UDP answer whose TCP
+  retry failed, or a TXT question left unanswered while the A question is
+  answered);
+- `newest_too_old` or `all_expired` alone, with a fresh whole zone: the
+  resolver's cache;
+- `client_cap`: the location's set is larger than a client reads in one DoH
+  answer; read the publisher's TXT budget (`extenderDnsTxtMaxAnswerBytes`,
+  taskworker/work/extender_dns_publish.go) against the answer's
+  `response_bytes`;
+- `fewer_than_authoritative`: the resolver trims the set; compare its answer
+  with `dig +tcp +norec +subnet=<resolver ip>/24 TXT extender.bringyour.com
+  @<a nameserver from dig NS extender.bringyour.com>`. For cn, China's own
+  set is held to what Alidns delivered whole on 11-12, and DNSPod's run of
+  one whole record of it is not reported (below); a partial cn answer from
+  Alidns means its ceiling moved. Measure again as below before moving
+  `extenderDnsCnDnspodMaxMessageBytes` or
+  `extenderDnsCnAlidnsMaxMessageBytes`.
+
+A resolver that keeps failing its region belongs out of the sdk's
+per-country table (connect `net_http_doh_regional.go`), or the location's
+TXT set must shrink to what it carries, as China's did on 11-12.
+
+#### China's own set
+
+What China's resolvers deliver, measured by hand on 11-12 from this side:
+read-only lookups of public TXT names of known size hosted on Route 53, as the
+extender name is, paced 3 s apart, through both providers by DoH (a client's
+question, an OPT record of 1,232 bytes) and by plain DNS, each answer compared
+with the name's whole set over TCP. Sizes are the whole DNS message.
+
+| Resolver | Delivered whole | Larger answers |
+|---|---|---|
+| DNSPod: DoH 1.12.12.12 and 120.53.53.53, plain 119.29.29.29 over UDP | up to 481 bytes (one 410-character record) | 948 to 2,297 bytes cut at record boundaries, not marked truncated: all ten such answers parsed, every value a whole record of the set, 4 to 6 of them in 433 to 462 bytes, never a partial record and never none; 4,511 bytes marked truncated with none. The EDNS size asked (none, 1,232 or 4,096) changes nothing |
+| DNSPod: plain 119.29.29.29 over TCP | 948 bytes once | a 481-byte answer came back empty; a client never retries over TCP an answer that arrived unmarked |
+| Alidns: DoH 223.5.5.5 and 223.6.6.6, plain 223.5.5.5 over UDP and TCP | up to 1,144 bytes (16 records) | trimmed to 1,151 to 1,204 bytes, not marked truncated |
+
+A Main record is 264 to 368 characters, so Alidns delivers three of them
+whole (two near the longest, four of the shortest), and DNSPod cuts such an
+answer to one whole record. Both forward the asker's subnet, and a Chinese /24
+is answered
+Asia's set: 13 records, 4.6 KB, of which Alidns served 3 (1,200 bytes) and
+DNSPod none. A client takes the answer of whichever DoH server answers first,
+so a client in China learned three extenders from DNS, or none.
+
+From 11-12 the publisher answers China with sets of its own
+(`taskworker/work/extender_dns_publish.go`, `extenderDnsCnSet`; set
+identifiers `extender-country-CN-<type>`, Route 53's CN country, which answers
+China in place of Asia's sets):
+
+- a TXT set of as many records as Alidns delivers whole, all of them within
+  its 1,204 bytes, and each alone within the 462 bytes DNSPod's trimmed
+  answers ran to, so DNSPod's cut keeps one whole record of it, counting the
+  question, the OPT record and a /24 client subnet. `cn_record_count` (the
+  dns block) caps it, at 4 unset, which Alidns's ceiling reaches first for
+  every record Main signs: the best for users (owner, 2026-11-12);
+- A and AAAA sets of exactly the addresses those records name; a family none
+  of them has is not answered by China's sets, and Route 53 answers China's
+  question for it from Asia's set, whose addresses no record of China's
+  vouches for, so a client never dials them;
+- a window that moves one place along the extenders China's own vantage of
+  the dns channel is dealt each epoch every tick (R2: its partition of Asia's
+  open addresses, then the fill), canaries first while a slot is left to
+  rotate, so every extender heads a window once a cycle and a day's lookups in
+  China cover that vantage's partition and never more.
+
+A client whose lookup lands on Alidns gets about three records, and one on
+DNSPod one whole record, unmarked; this half takes DNSPod's run of whole
+records as its trim and reports it neither stale nor partial (above), while an
+empty or broken answer from DNSPod still alerts. Setting `cn_record_count` to
+1 gives every client in China the one record both deliver whole. The
+extenders dashboard's "China's own set" panel shows what Route 53 accepted
+each tick (`urnetwork_taskworker_extender_dns_country_records`).
+
+Expected once the taskworker carrying it and this monitor are deployed: every
+cn resolver fresh, Alidns whole (about three records, about 1.1 KB) and
+DNSPod one whole record of the set Route 53 gives the resolver's /24. Until
+the monitor carries the client subnet, its cn identities keep judging the set
+Route 53 gives the monitor's own location.
+
+### 28.3 Provider fleet departure
+
+Probe: `provider-fleet-departure`
+
+Status: added 2026-11-11 from the gossip drop of that day. It reports a
+departing provider fleet as what it is, beside the drops that fleet causes
+elsewhere. One finding covers the whole environment (target
+`<env>/provider-fleet`).
+
+Source: `urnetwork_stats_online_providers_by_country` against its peak over
+the trailing 3 hours. A country the gauge no longer exports reads as zero
+while the gauge exports any country. Beside it, each now against its
+3-hour peak:
+
+- `urnetwork_stats_online_providers`;
+- connect's `urnetwork_connect_connected_clients` summed over processes;
+- the gossip replicas' open fds;
+- the three provider builds (`urnetwork_stats_device_versions{population="provider"}`)
+  that lost the most.
+
+```promql
+max by (country_code) (max_over_time(urnetwork_stats_online_providers_by_country{env="main"}[3h]))
+  - (max by (country_code) (urnetwork_stats_online_providers_by_country{env="main"})
+     or 0 * max by (country_code) (max_over_time(urnetwork_stats_online_providers_by_country{env="main"}[3h])))
+```
+
+Healthy: no country loses more than half of its providers within 3 hours.
+From 10-28 to 11-11 only whole fleets did:
+
+- Vietnam on 11-02 at 13:52Z, from 11.6k to 3.8k;
+- Vietnam on 11-11 at 10:35Z, from 11,221 to 216.
+
+Thresholds:
+
+- WARN `provider-fleet-departure`: a country's online providers more than
+  half under their 3-hour peak, by at least 1,000, at every one-minute
+  evaluation for 45 minutes. 45 minutes spans two refreshes of the stats
+  collector, which refreshes the counts every 30–40 minutes. That skips
+  single-refresh blips: Spain and Thailand lost about 1.9k and 1.6k for one
+  refresh on 11-05 at 13:20Z and 11-06 at 12:00Z, and came straight back.
+  Replayed, it fires on the two Vietnam departures only, at about 11-02
+  14:54Z and 11-11 11:54Z.
+- `provider-fleet-departure-unobservable`: the read failed, a refresh
+  exported no country, or no stats collector exported the country gauge
+  (`provider_state_missing`).
+
+False-positive qualifiers: a stats collector that misplaces a country's
+providers for two refreshes reads as a departure. Connect and gossip in the
+alert tell the two apart: a real fleet takes its connections with it.
+
+False-negative qualifiers:
+
+- **A large country's fleet.** One under half of its country is not caught:
+  the US lost 5–20k providers within 3 hours several times a week (11-04
+  17:30Z: 19.8k of 65.9k, mostly on build `2026.7.2+982300760`, which carries
+  no gossip node).
+- **A fleet spread thinly.** One spread over many countries is not caught
+  either.
+- **Upgrades.** A build that lost providers while the total held is an
+  upgrade, not a departure.
+
+ACTION: treat connect, gossip and ping drops in the same window as the
+fleet's, not as a server fault, unless a server change lines up with them
+(process starts, a config release, a lb reload). The listed builds name the
+fleet. Then read §28.4: a fleet that returns brings its gossip links back,
+and more members than the replicas' watermarks restart the trim loop.
+
+### 28.4 Gossip mesh capacity, links and heap
+
+Probe: `gossip-mesh`
+
+Status: added 2026-11-11. On a gossip build that predates
+gossip/mesh_metrics.go, it reads the replicas' open file descriptors in
+place of their links. Those count every link plus a few tens of the
+process's own descriptors, and the probe uses gossip/run.go's 1,024 as the
+watermark.
+
+Source, per gossip host:
+
+- `urnetwork_gossip_peers`: the links the replica's node holds;
+- `urnetwork_gossip_mesh_peers`: its topic mesh;
+- `urnetwork_gossip_conn_manager_watermark{level}`: the watermarks its
+  connection manager trims at. These three are exported by every gossip
+  replica's stats push from gossip/mesh_metrics.go, and nothing at all
+  before the node exists or after its run ends;
+- `process_open_fds{service="gossip"}`;
+- `go_memstats_heap_inuse_bytes{service="gossip"}`.
+
+The replicas' links summed over hosts are also read against their 3-hour
+peak.
+
+```promql
+max by (host) (urnetwork_gossip_peers{env="main",service="gossip"})
+  / max by (host) (urnetwork_gossip_conn_manager_watermark{env="main",service="gossip",level="high"})
+sum(max by (host) (urnetwork_gossip_peers{env="main",service="gossip"}))
+  / max_over_time(sum(max by (host) (urnetwork_gossip_peers{env="main",service="gossip"}))[3h:1m])
+max by (host) (go_memstats_heap_inuse_bytes{env="main",service="gossip"})
+```
+
+Healthy:
+
+- **Links.** Each replica's connection manager keeps at most its high
+  watermark of links (1,024). Above it, every 10 seconds, it closes the
+  links older than their 60-second grace period down to the low watermark
+  (512), and the members it closed redial at once. A healthy replica stays
+  under the high watermark: after the fleet left on 11-11 they held 660–1,010
+  open fds each.
+- **Heap.** It was under 0.1 GB after the 22:15Z restart.
+
+Thresholds (each judged at every one-minute evaluation of its hold):
+
+- WARN `gossip-mesh-saturated`, per replica (target
+  `<env>/gossip-mesh/<host>`): links above 90% of the high watermark for 30
+  minutes, or above the watermark for 10 minutes (`trimming=yes`, the
+  loop). All four replicas held more than 1,024 open fds 95% of the time
+  from 10-30 until 11-11 10:35Z (1,000–8,000). After the restart, edge-3 held
+  1,000–1,030 (98–101%) from about 22:20Z to 23:30Z on 11-11, then about 780.
+- WARN `gossip-mesh-links-dropped` (target `<env>/gossip-mesh`): the
+  replicas' links together under half of their 3-hour peak for 15 minutes.
+  Replayed, it fires only on the two fleet departures: on 11-02 at 13:57Z the
+  links fell to 36%, and on 11-11 at 10:37Z to 20%. A replica restart
+  recovers in a minute or two, and the 11-11 22:09–22:15Z restarts of all
+  four did not trip it.
+- WARN `gossip-heap-high`, per replica (target `<env>/gossip-heap/<host>`):
+  heap in use above 4 GiB for 30 minutes. Edge-4 crossed it by about 11-01
+  22Z and edge-3 by about 11-02 02Z. Both held 4.3–6.4 GB until the restart.
+- `gossip-mesh-unobservable`: the read failed, a placed gossip host
+  exported nothing at an evaluation, or a series was ambiguous.
+
+False-positive qualifiers: open fds overcount links by the process's own
+descriptors, so a replica judged from them warns a few tens of links early.
+Restarts dip the links for a minute or two. The 15-minute hold covers that.
+
+False-negative qualifiers:
+
+- **Demand is not measured.** A member that cannot link at all (the lb's
+  per-address connection cap, a failed hello) is not counted as wanting a
+  link.
+- **The heap threshold is absolute.** A slow leak under 4 GiB is visible
+  only on the dashboard.
+
+ACTION:
+
+- **Saturated.** Raise the replicas' watermarks in gossip/run.go
+  (`connManagerLowWater`, `connManagerHighWater`), sized to the member
+  population, or add gossip replicas. Deploy gossip one host at a time. The
+  fleet's demand is the replicas' links summed; the capacity is the replicas
+  times the high watermark.
+- **Links dropped.** Read §28.3 first: `provider-fleet-departure` in the same
+  window means a fleet left. Otherwise check, in order:
+  `process_start_time_seconds{service="gossip"}`; the lb's gossip vhost
+  (429s from the per-address cap, 5xx); and that `GET /hello` still carries
+  `gossip_peer_id`.
+- **Heap.** Take a heap profile of the replica first (gossip-drop review,
+  follow-up 4). Then restart the gossip unit of one host at a time, and
+  confirm the container restarted (`docker ps`).
+
+### 28.5 Extender supply and churn
+
+Probe: `extender-supply`
+
+Status: added 2026-11-11. `extender-churn-high` needs a taskworker build
+with controller/stats_extender_supply.go. Until then the probe judges only
+the fall and reports `churn_state_missing`.
+
+Source:
+
+- `urnetwork_stats_online_extenders` against its maximum over the trailing
+  24 hours;
+- `urnetwork_stats_extenders_created_24h`: keys first activated in the
+  trailing day;
+- `urnetwork_stats_extenders_revoked_24h`: extenders that lost their last
+  active address in the trailing day and have not activated again since (a
+  re-activation reuses the key's row and clears its revocation).
+
+All three come from every taskworker's stats collector, merged by `max`.
+Stored activations of the day appear as context.
+
+```promql
+(max(max_over_time(urnetwork_stats_online_extenders{env="main"}[24h])) - max(urnetwork_stats_online_extenders{env="main"}))
+  / max(max_over_time(urnetwork_stats_online_extenders{env="main"}[24h]))
+max(urnetwork_stats_extenders_revoked_24h{env="main"}) - max(urnetwork_stats_extenders_created_24h{env="main"})
+```
+
+Healthy: 157–214 online from 11-02 to 11-11, moving a few a day. About 11
+created and 20 revoked a day in that period, an excess of about 9.
+
+Thresholds:
+
+- WARN `extender-supply-falling`: online extenders more than 25% under their
+  24-hour peak, and at least 20 under it, for 60 minutes. On 11-01 the
+  uptime prober's own failures took the fleet from 307 to 171 in half a day.
+  The fall crossed 25% at 11-02 00:48Z and would have fired at about 01:48Z.
+- WARN `extender-churn-high`: more than 30 more extenders revoked than
+  created in the trailing day, for 2 hours.
+- `extender-supply-unobservable`: the read failed, a series was missing at
+  an evaluation, no stats collector exported the online pool
+  (`extender_state_missing`), or none exported the supply counts
+  (`churn_state_missing`).
+
+False-positive qualifiers: an operator retiring a large fleet on purpose
+reads as a fall.
+
+False-negative qualifiers: a fleet that churns while it re-activates new
+keys holds its online count. The created and revoked counts show that,
+though a revocation that the same key's re-activation cleared is no longer
+counted. A slow decline under 25% a day is visible only on the dashboard.
+
+ACTION: read the taskworker's extender probe sweeps (the "N ok" lines of
+extender_probe_work.go). On a build with fix/extender-churn-1111, also read
+`urnetwork_taskworker_extender_probe_passes_total{verdict="common_mode"}`
+and the prober's control target. Failures spread over every network at
+once are the prober's; failures in a few networks are theirs.
+`urnetwork_taskworker_extender_probe_restores_total` counts revoked
+extenders that answered again, which were false revocations. Then read
+§28.1's activations for extenders coming back.
+
+### 28.6 Extender webrtc relay
+
+Probe: `extender-webrtc-relay`
+
+Status: added 2026-11-12 with S8, the webrtc acceptance of extenders
+(connect/EXTENDER.md S8, feat/extender-webrtc-s8-1111); the owner accepted
+the signal that day. It reads a counter only a connect build with S8's
+relay exports. Until that build runs, `extender-webrtc-relay-unobservable`
+reports `relay_state_missing`. The relay has never run in production, so
+there is no history: the thresholds below are first values, to revisit
+after the first week of data.
+
+The relay: the operator's prober (the api's activation probe and the
+taskworker's uptime probe) posts a webrtc offer to the extender client's
+Redis offer set. The connect process holding the client's resident takes
+it and relays it to the client as exchange signals. The client's extender
+answerer (connect net_extender_webrtc_signal.go) answers on the same
+exchange, and the resident posts the answer for the prober (server
+connect/extender_webrtc_relay.go). The prober offers only to extenders
+whose builds serve the carrier: an activation tests webrtc only for an
+extender that offers the carrier (under S8's rules, only when tcp failed or
+was not offered), and the uptime task probes webrtc only on addresses
+accepted on it.
+
+Source: `urnetwork_extender_webrtc_relay_offers_total`, the offers each
+connect process's residents took for their clients, by outcome. Every
+connect process exports each outcome at zero from its start. The probe
+reads its increase over the trailing hour, summed over the processes by
+outcome, at one-minute evaluations of one bounded Mimir range read (the §26
+history read), every 5 minutes. The total counts every outcome:
+
+- `answered`: the client answered, and the answer was posted for the
+  prober;
+- `no_answer`: the client sent no answer before the offer's deadline, or
+  its answer failed;
+- `expired`: the prober's deadline had passed when the offer was taken;
+- `rate_limited`: the client's offers came faster than its rate;
+- `busy`: the exchange was already relaying as many offers as it takes at
+  once (`MaxConcurrentRelays`, 64 per process);
+- `oversized` and `malformed`: the offer or the answer was past the size
+  bound, or the offer did not decode.
+
+```promql
+sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="no_answer"}[1h]))
+  / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="busy"}[1h]))
+  / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+```
+
+Healthy: no history yet. As designed, nearly every offer is answered,
+since the prober offers only to builds that serve the carrier, and `busy`
+is about zero: the prober holds far fewer offers open than the bound (the
+uptime pass probes 16 addresses at a time per taskworker, and a client may
+have at most two offers pending).
+
+Thresholds (each judged at every one-minute evaluation of its hold, with at
+least 20 offers in the trailing hour):
+
+- WARN `extender-webrtc-relay-no-answer-high`: more than half of the offers
+  `no_answer`, for 30 minutes. A broken answerer or relay path leaves
+  nearly every offer unanswered; half leaves room for extenders that answer
+  late or whose networks lose the exchange's signals.
+- WARN `extender-webrtc-relay-busy-high`: more than 5% of the offers
+  `busy`, for 30 minutes. `busy` should be about zero, so a lasting 5% is
+  the bound being hit, not a burst.
+- Fewer than 20 offers in the trailing hour are too few to judge, and read
+  as healthy, as §28.1's idle gated channel does: under 20, a handful of
+  slow extenders moves either share past its line. Until extenders on
+  builds that serve the carrier are tested, this is the relay's state.
+- `extender-webrtc-relay-unobservable`: the read failed, an outcome had no
+  value at an evaluation (`evaluation_missing`, naming the outcome), or no
+  connect process exported the counter (`relay_state_missing`).
+
+The 30-minute hold spans six uptime probes of each webrtc address (one
+every 5 minutes), long enough to ride out one connect process restarting
+while its clients reconnect.
+
+False-positive qualifiers: an extender whose build serves the carrier but
+whose network loses the exchange's signals reads as `no_answer`. So would
+an offer to a build without the answerer, which the prober's carrier rule
+keeps out.
+
+False-negative qualifiers:
+
+- **A relay that takes nothing.** The counter counts offers a resident
+  took. Offers that never reach a resident's relay (the offer set's Redis
+  key events, or the listener every resident registers) are counted
+  nowhere, so the relay reads as idle, under the minimum. The webrtc step
+  of the extenders dashboard's activation panels shows those probes
+  failing.
+- **A prober the failures quieted.** If deactivating the addresses accepted
+  on webrtc alone leaves the prober fewer than 20 offers an hour, the relay
+  reads as healthy again. `extender-supply-falling` (§28.5) and the
+  activation outcomes show it.
+- **One process.** The shares are fleet-wide, so one connect process
+  refusing every offer busy, among many, can stay under 5%.
+- **Refusals in the total.** `expired`, `rate_limited`, `busy`,
+  `oversized` and `malformed` count in the total, so a relay that refuses
+  most offers lowers the `no_answer` share. Read
+  `extender-webrtc-relay-busy-high` first.
+
+ACTION:
+
+- **No answer.** Read the extenders dashboard's "webrtc relay" row beside
+  the webrtc step of its activation panels, and when the share rose: with a
+  connect deploy, the relay; with an sdk release, the answerer. Then check,
+  in order:
+  - the sdk's extender answerer (connect net_extender_webrtc_signal.go) in
+    the builds the prober offers to;
+  - the resident relay (server connect/extender_webrtc_relay.go). At log
+    verbosity 1, its `[wr]<client> no answer` lines name each failed
+    exchange's error;
+  - the exchange-to-client control path the offer travels as exchange
+    signals: from the resident's internal client to the client's manager,
+    which hands flagged offers to the answerer.
+- **Busy.** Find what fills the relay before raising `MaxConcurrentRelays`,
+  which bounds how many exchanges one connect process holds open with its
+  clients. Find the process with the query below. Many offers there: a
+  prober sending more than it should (a burst of activations, or an uptime
+  pass grown with the fleet), which the relay is right to refuse; slow the
+  prober. Few offers with busy still high: slots held by exchanges that
+  outlive their offer's deadline, a relay fault. Raise the bound only for
+  load an exchange should carry.
+
+```promql
+sum by (host, block) (increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="busy"}[1h]))
+  / sum by (host, block) (increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
+```

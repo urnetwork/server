@@ -287,32 +287,6 @@ func TestWalletValidateAddressMatchesDeclaredChain(t *testing.T) {
 	}
 }
 
-func TestCircleInvalidDestinationErrorClassification(t *testing.T) {
-	invalidDestination := &server.HttpStatusError{
-		StatusCode:   http.StatusBadRequest,
-		Status:       "400 Bad Request",
-		ResponseBody: `{"code":155219,"message":"Invalid destination address."}`,
-	}
-	tests := []struct {
-		name  string
-		err   error
-		match bool
-	}{
-		{name: "exact", err: invalidDestination, match: true},
-		{name: "wrapped", err: fmt.Errorf("submit: %w", invalidDestination), match: true},
-		{name: "rate limit", err: &server.HttpStatusError{StatusCode: http.StatusTooManyRequests, ResponseBody: invalidDestination.ResponseBody}, match: false},
-		{name: "other bad request", err: &server.HttpStatusError{StatusCode: http.StatusBadRequest, ResponseBody: `{"code":123,"message":"bad amount"}`}, match: false},
-		{name: "matching text without typed status", err: errors.New("Invalid destination address."), match: false},
-		{name: "malformed body", err: &server.HttpStatusError{StatusCode: http.StatusBadRequest, ResponseBody: `not-json`}, match: false},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			connect.AssertEqual(t, isCircleInvalidDestinationError(test.err), test.match)
-		})
-	}
-}
-
 func TestWalletCircleInit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

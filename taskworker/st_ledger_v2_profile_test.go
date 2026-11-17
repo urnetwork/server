@@ -31,6 +31,22 @@ func TestWorkloadsRunLedgerV2Steps(t *testing.T) {
 	}
 }
 
+// sn CAPTURETHEFLAG.md §11.2 (wiring): both workloads run the capture the
+// flag driver's step task, which plans nothing until st.yml turns it on.
+func TestWorkloadsRunCtfDriverSteps(t *testing.T) {
+	target := task.NewTaskTarget(work.StCtfDriverStep).TargetFunctionName()
+	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
+		worker, err := InitTaskWorkerForProfile(context.Background(), task.DefaultTaskWorkerSettings(), profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !worker.HasTarget(target) {
+			t.Errorf("%s workload lacks %s", profile, target)
+		}
+		worker.Close()
+	}
+}
+
 // §8.2 (server start), SV-1 (wiring): a task worker installs the server's
 // settlement v2 ledger builder when v2 is configured, so the driver's steps
 // build and read ledgers with it: a read of a ledger missing from the store

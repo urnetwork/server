@@ -19,13 +19,9 @@ func TestClassifyTaskErrorUsesFixedAllowlist(t *testing.T) {
 	}{
 		{"statement timeout", "ReconcileNetEscrow", "wrapped: canceling statement due to statement timeout (SQLSTATE 57014)", taskErrorClassPostgresStatementTimeout},
 		{"concurrent settlement", "CloseExpiredContracts", "force close contract synthetic: Contract already closed with outcome settled: synthetic", taskErrorClassConcurrentSettled},
-		{"local buffer", "Payout", "no empty local buffer available (SQLSTATE 53000)", taskErrorClassPostgresLocalBufferExhaustion},
-		{"wallet", "AdvancePayment", "insufficient token balance", taskErrorClassWalletInsufficient},
-		{"idle transaction", "Payout", "pgconn.ConnLockError=conn closed", taskErrorClassIdleTransactionTimeout},
 		{"cleanup deadline", "UpdateReliabilities", "failed to deallocate cached statement(s): conn closed", taskErrorClassConnectionCleanupDeadline},
-		{"rate limit", "AdvancePayment", "429 Too Many Requests", taskErrorClassProcessorRateLimit},
-		{"invalid destination", "AdvancePayment", "invalid destination address", taskErrorClassProcessorInvalidDestination},
-		{"bad request", "AdvancePayment", "400 Bad Request", taskErrorClassProcessorBadRequest},
+		{"rate limit", "PaymentReconcile", "429 Too Many Requests", taskErrorClassProcessorRateLimit},
+		{"bad request", "PaymentReconcile", "400 Bad Request", taskErrorClassProcessorBadRequest},
 		{"missing schema", "SyntheticTask", "undefined relation (SQLSTATE 42P01)", taskErrorClassSchemaObjectMissing},
 		{"deadline", "SyntheticTask", "Timeout", taskErrorClassDeadlineTimeout},
 		{"deadline with synthetic id", "SyntheticTask", "Timeout [aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa]", taskErrorClassDeadlineTimeout},
@@ -52,14 +48,13 @@ func TestRepresentativeTaskErrorClassUsesBoundedDatabaseClass(t *testing.T) {
 	if got := representativeTaskErrorClass("CloseExpiredContracts", raw, 1, "other=1"); got != taskErrorClassUnclassified {
 		t.Fatalf("representative class = %q, want %q", got, taskErrorClassUnclassified)
 	}
-	if got := representativeTaskErrorClass("AdvancePayment", raw, 1, "wallet-insufficient=4"); got != taskErrorClassWalletInsufficient {
-		t.Fatalf("representative class = %q, want %q", got, taskErrorClassWalletInsufficient)
+	if got := representativeTaskErrorClass("PaymentReconcile", raw, 1, "processor-rate-limit=4"); got != taskErrorClassProcessorRateLimit {
+		t.Fatalf("representative class = %q, want %q", got, taskErrorClassProcessorRateLimit)
 	}
-	if got := representativeTaskErrorClass("AdvancePayment", raw, 1, "hostile-provider-class=1"); got != taskErrorClassUnclassified {
+	if got := representativeTaskErrorClass("PaymentReconcile", raw, 1, "hostile-provider-class=1"); got != taskErrorClassUnclassified {
 		t.Fatalf("unknown database class = %q, want %q", got, taskErrorClassUnclassified)
 	}
 	for _, class := range []string{
-		taskErrorClassInvalidDestinationResetFailed,
 		taskErrorClassPostgresStatementTimeout,
 		taskErrorClassDeadlineTimeout,
 		taskErrorClassDrained,
@@ -160,13 +155,8 @@ func TestTaskPostMissingRecipientSqlClassificationMatchesGo(t *testing.T) {
 func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 	for _, class := range []string{
 		taskErrorClassConcurrentSettled,
-		taskErrorClassPostgresLocalBufferExhaustion,
-		taskErrorClassWalletInsufficient,
-		taskErrorClassIdleTransactionTimeout,
 		taskErrorClassConnectionCleanupDeadline,
 		taskErrorClassProcessorRateLimit,
-		taskErrorClassInvalidDestinationResetFailed,
-		taskErrorClassProcessorInvalidDestination,
 		taskErrorClassProcessorBadRequest,
 		taskErrorClassSchemaObjectMissing,
 		taskErrorClassPostgresStatementTimeout,
@@ -197,41 +187,6 @@ func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 	canceledIndex := strings.Index(taskFailureSummarySQL, "THEN 'context-canceled'")
 	if drainedIndex < 0 || canceledIndex < 0 || canceledIndex < drainedIndex {
 		t.Fatal("task failure SQL must classify drained errors before their context-canceled suffix")
-	}
-}
-
-func TestInvalidDestinationResetFailurePrecedesProcessorAndPersistenceErrors(t *testing.T) {
-	for _, suffix := range []string{
-		"Invalid payment.",
-		"statement timeout (SQLSTATE 57014)",
-		"failed to deallocate cached statement(s): conn closed",
-		"context canceled",
-	} {
-		raw := "Payment create transaction error = 400 Bad Request Invalid destination address.; invalid destination reset error = " + suffix
-		if got := classifyTaskError("AdvancePayment", raw); got != taskErrorClassInvalidDestinationResetFailed {
-			t.Errorf("reset suffix %q classified as %q", suffix, got)
-		}
-	}
-	resetIndex := strings.Index(taskFailureSummarySQL, "THEN 'invalid-destination-reset-failed'")
-	for _, class := range []string{taskErrorClassProcessorInvalidDestination, taskErrorClassPostgresStatementTimeout, taskErrorClassConnectionCleanupDeadline} {
-		if index := strings.Index(taskFailureSummarySQL, "THEN '"+class+"'"); resetIndex < 0 || index < resetIndex {
-			t.Errorf("SQL reset classifier must precede %q", class)
-		}
-	}
-}
-
-func TestInvalidDestinationResetFailureRequiresExactOwnedMarker(t *testing.T) {
-	for _, raw := range []string{
-		"400 Bad Request Invalid destination address.",
-		"Invalid destination address.; invalid destination reset error",
-		"Invalid destination address.; invalid destination reset error: synthetic",
-	} {
-		if got := classifyTaskError("AdvancePayment", raw); got != taskErrorClassProcessorInvalidDestination {
-			t.Errorf("ordinary destination control classified as %q", got)
-		}
-	}
-	if got := classifyTaskError("SyntheticTask", "Invalid destination address.; invalid destination reset error = synthetic"); got != taskErrorClassProcessorInvalidDestination {
-		t.Fatalf("unrelated task's ordinary destination error was replaced by reset class: %q", got)
 	}
 }
 

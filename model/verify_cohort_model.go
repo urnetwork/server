@@ -44,6 +44,12 @@ package model
 // providers take it. A trail that cannot find an unused member may admit past
 // that gate, never past a cap.
 //
+// Every source skips a provider on dead-hop probation (verify_dead_hop.go):
+// one with no confirmation of at least 50 assignments in 24 h. Without that,
+// a carried member that never confirms is re-admitted every epoch, since
+// admission checks the member's identity, egress and provide mode but never
+// its outcomes, and each of its assignments ends a trail.
+//
 // Nothing here falls back to unbounded sampling: an unknown epoch, a refused
 // admission or no usable member yields no next hop, and a Redis error panics
 // like every other verify state read.
@@ -358,10 +364,12 @@ func verifyCohortEpoch(ctx context.Context, deploymentKey StDeploymentKey) (uint
 }
 
 // drawVerifyCohortCandidate draws up to count members of source and returns
-// one at random that is not excluded, is currently in the eligible set, and,
-// when notIn is set, is not a member of notIn. Cohort sets keep members that
-// disconnect, so the eligible-set check keeps such members from using up the
-// sampler's attempts. Returns "" when no member qualifies.
+// one at random that is not excluded, is currently in the eligible set, is
+// not on dead-hop probation unless its probe is due (verify_dead_hop.go),
+// and, when notIn is set, is not a member of notIn. Cohort sets keep members
+// that disconnect, or that stop confirming, so these checks keep such members
+// from using up the sampler's attempts. probe is true for a due probe, which
+// the caller claims before assigning it. Returns "" when no member qualifies.
 func drawVerifyCohortCandidate(
 	ctx context.Context,
 	r server.RedisClient,
@@ -369,7 +377,8 @@ func drawVerifyCohortCandidate(
 	count int,
 	notIn string,
 	excluded map[string]bool,
-) string {
+	settings *VerifySettings,
+) (candidate string, probe bool) {
 	members, err := r.SRandMemberN(ctx, source, int64(count)).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		server.Raise(err)
@@ -404,12 +413,14 @@ func drawVerifyCohortCandidate(
 	if notIn != "" {
 		keep(notIn, false)
 	}
+	candidates, probes := filterVerifyDeadHop(ctx, r, candidates, settings)
 	if len(candidates) == 0 {
-		return ""
+		return "", false
 	}
 	pickIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(candidates))))
 	server.Raise(err)
-	return candidates[pickIndex.Int64()]
+	candidate = candidates[pickIndex.Int64()]
+	return candidate, probes[candidate]
 }
 
 // sampleVerifyCohortNextHop is SampleVerifyNextHop restricted to the epoch
@@ -422,8 +433,9 @@ func drawVerifyCohortCandidate(
 //     the eligible set;
 //  3. otherwise an existing member of this epoch's cohort.
 //
-// The admission script then decides; a refused candidate is excluded and the
-// next attempt re-reads the cohort.
+// Each source leaves out providers on dead-hop probation whose probe is not
+// due. The admission script then decides; a refused candidate is excluded and
+// the next attempt re-reads the cohort.
 func sampleVerifyCohortNextHop(
 	ctx context.Context,
 	excludeClientIds []server.Id,
@@ -472,23 +484,24 @@ func sampleVerifyCohortNextHop(
 			draws, _ := drawsCmd.Int64()
 
 			candidate := ""
+			probe := false
 			skipGrowthGate := false
 			priority := false
 			if size < settings.CohortSize {
 				// a claimed fleet's member skips the growth gate, never a cap
-				candidate = drawVerifyCohortCandidate(ctx, r, keys.priority, verifyCohortPriorityDrawCount, keys.epoch, excluded)
+				candidate, probe = drawVerifyCohortCandidate(ctx, r, keys.priority, verifyCohortPriorityDrawCount, keys.epoch, excluded, settings)
 				skipGrowthGate, priority = candidate != "", candidate != ""
 			}
 			if candidate == "" && size < settings.CohortSize {
-				candidate = drawVerifyCohortCandidate(ctx, r, keys.lifetime, verifyCohortCarryDrawCount, keys.epoch, excluded)
+				candidate, probe = drawVerifyCohortCandidate(ctx, r, keys.lifetime, verifyCohortCarryDrawCount, keys.epoch, excluded, settings)
 				if candidate == "" && lifetime < settings.CohortLifetimeLimit &&
 					(starved || settings.ReliabilityAMin*int64(size) <= draws) {
-					candidate = drawVerifyCohortCandidate(ctx, r, verifyEligibleKey, settings.SampleCandidateCount, keys.epoch, excluded)
+					candidate, probe = drawVerifyCohortCandidate(ctx, r, verifyEligibleKey, settings.SampleCandidateCount, keys.epoch, excluded, settings)
 					skipGrowthGate = starved
 				}
 			}
 			if candidate == "" {
-				candidate = drawVerifyCohortCandidate(ctx, r, keys.epoch, settings.SampleCandidateCount, "", excluded)
+				candidate, probe = drawVerifyCohortCandidate(ctx, r, keys.epoch, settings.SampleCandidateCount, "", excluded, settings)
 			}
 			if candidate == "" {
 				// no usable member: a trail may need a new provider past the
@@ -513,6 +526,11 @@ func sampleVerifyCohortNextHop(
 			}
 			if !SpendVerifyEligibilityToken(ctx, candidateId, settings) {
 				// token exhausted: temporarily unassignable, try another
+				excluded[candidate] = true
+				continue
+			}
+			if probe && !claimVerifyDeadHopProbe(ctx, r, candidate, settings) {
+				// another draw took this probe first
 				excluded[candidate] = true
 				continue
 			}

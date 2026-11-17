@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "kind": "operator-approved-corrected-reviewer-replacement",
+  "observed_at": "2026-11-08T16:50:52Z",
+  "operator_message": "Approve corrected replacement qualification",
+  "source_commit": "7a7b2f8dda65f1342d336a6b13e3e99ed52dccd3",
+  "image_id": "sha256:034fd87ac140078d55129c776a99534106c5cabba01767702812a470cb1232ed",
+  "authorized": {
+    "fresh_non_inference_runtime_bootstrap": true,
+    "fresh_fixed_nineteen_control_qualification": true,
+    "maximum_qualification_owner_seconds": 86400,
+    "single_attempt": true,
+    "automatic_retries": false
+  },
+  "unchanged": ["Qwen/Gemma membership and reasoning settings", "nineteen controls and expectations", "complete source coverage", "review criteria", "resource and evidence limits", "frozen epoch-1 scoring and calibration status"],
+  "source_change": "Accept only known null context/mode reasoning configuration fields; actual private content remains rejected.",
+  "failed_owner_preserved": "2ae4f15c5c7c6b6a2b4a5aa204f79413cbc8cecb751353a100a471c7b1b5f30e",
+  "failed_attempt_relabeling_allowed": false,
+  "winner_approval": false,
+  "source_promotion": false,
+  "reward_release": false
+}

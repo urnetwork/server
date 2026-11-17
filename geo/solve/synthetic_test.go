@@ -6,7 +6,7 @@ package solve
 import (
 	"fmt"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 )
 
 // The geometry the acceptance tests of §5.6 share: true coordinates spread
@@ -54,7 +54,8 @@ func syntheticNodeId(i int) string {
 func newSyntheticNetwork(seed int64, settings *Settings, perturbed bool) *syntheticNetwork {
 	network := &syntheticNetwork{
 		settings: settings,
-		random:   mathrand.New(mathrand.NewSource(seed)),
+		// a fixed seed, so a run replays
+		random: mathrand.New(mathrand.NewPCG(uint64(seed), 0)),
 	}
 	for i := 0; i < syntheticNodeCount; i += 1 {
 		var truth LatLon

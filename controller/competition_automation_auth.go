@@ -5,23 +5,37 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
 const (
-	competitionSchedulerRole      = "scheduler"
-	competitionReviewerRole       = "reviewer"
-	competitionSettlementRole     = "settlement"
-	competitionSourcePromoterRole = "source_promoter"
+	competitionSchedulerRole          = "scheduler"
+	competitionReviewerRole           = "reviewer"
+	competitionSettlementRole         = "settlement"
+	competitionSourcePromoterRole     = "source_promoter"
+	competitionSourceHandoffRole      = "source_handoff"
+	competitionReviewOperatorRole     = "review_operator"
+	competitionOperatorPatchRetryRole = "operator_patch_retry"
 )
 
 // Legacy token shapes remain valid. New capabilities require an explicit scope
 // and never inherit the legacy operator's evaluator or hidden-evidence access.
 func validateCompetitionTokenRole(token Token) error {
+	if token.Role == competitionOperatorPatchRetryRole {
+		if token.Environment != "main" || !tokenNamePattern.MatchString(token.CompetitionId) || !tokenNamePattern.MatchString(token.SeasonId) ||
+			token.RoundId == (server.Id{}) || token.JobId == (server.Id{}) || token.ExpiresAt.IsZero() {
+			return fmt.Errorf("competition token %q requires exact main, competition, season, round, job and expiry scope", token.Name)
+		}
+		return nil
+	}
+	if token.RoundId != (server.Id{}) || token.JobId != (server.Id{}) || !token.ExpiresAt.IsZero() {
+		return fmt.Errorf("competition token %q has unsupported job-level scope", token.Name)
+	}
 	switch token.Role {
 	case "submitter", "operator":
 		return nil
-	case competitionSchedulerRole, competitionReviewerRole, competitionSettlementRole, competitionSourcePromoterRole:
+	case competitionSchedulerRole, competitionReviewerRole, competitionSettlementRole, competitionSourcePromoterRole, competitionSourceHandoffRole, competitionReviewOperatorRole:
 		if !tokenNamePattern.MatchString(token.Environment) ||
 			!tokenNamePattern.MatchString(token.CompetitionId) || !tokenNamePattern.MatchString(token.SeasonId) {
 			return fmt.Errorf("competition token %q requires an explicit environment, competition, and season scope", token.Name)

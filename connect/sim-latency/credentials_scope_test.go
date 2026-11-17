@@ -17,7 +17,7 @@ import (
 // creating a delivery file. Legacy tokens cannot acquire scope by implication.
 func TestCredentialCapabilitiesRequireExactScope(t *testing.T) {
 	scope := credentialScope{Environment: "synthetic-stage", CompetitionId: "synthetic-competition", SeasonId: "synthetic-season"}
-	for _, role := range []string{"scheduler", "reviewer", "settlement", "source_promoter"} {
+	for _, role := range []string{"scheduler", "reviewer", "settlement", "source_promoter", "source_handoff", "review_operator"} {
 		for _, incomplete := range []credentialScope{{}, {Environment: scope.Environment}, {Environment: scope.Environment, CompetitionId: scope.CompetitionId}} {
 			if _, err := generateScopedCredentialToken("synthetic-actor", role, incomplete, bytes.NewReader(nil)); err == nil {
 				t.Errorf("unscoped %s accepted", role)
@@ -43,9 +43,13 @@ func TestCredentialScopedRotationPreservesClaimsAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := credentialScope{Environment: "synthetic-stage", CompetitionId: "synthetic-competition", SeasonId: "synthetic-season"}
-	for index, role := range []string{"scheduler", "reviewer", "settlement", "source_promoter"} {
+	for index, role := range []string{"scheduler", "reviewer", "settlement", "source_promoter", "source_handoff", "review_operator"} {
 		name := "synthetic-" + role
 		deliveryPath := filepath.Join(root, name+".json")
+		previous, err := readCredentialVault(vaultPath)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if _, err := rotateScopedCredentialToken(vaultPath, deliveryPath, name, role, scope,
 			bytes.NewReader(bytes.Repeat([]byte{byte(index + 40)}, credentialRandomBytes)), now); err != nil {
 			t.Fatal(err)
@@ -54,6 +58,20 @@ func TestCredentialScopedRotationPreservesClaimsAndRevocation(t *testing.T) {
 		vault, err := readCredentialVault(vaultPath)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if vault.SeedKeyBase64 != previous.SeedKeyBase64 || len(vault.Tokens) != len(previous.Tokens)+1 {
+			t.Fatal("scoped rotation changed the seed or existing token census")
+		}
+		for _, original := range previous.Tokens {
+			found := false
+			for _, retained := range vault.Tokens {
+				if retained.Name == original.Name {
+					found = retained == original
+				}
+			}
+			if !found {
+				t.Fatal("scoped rotation changed an existing credential record")
+			}
 		}
 		if delivered.Environment != scope.Environment || delivered.CompetitionId != scope.CompetitionId || delivered.SeasonId != scope.SeasonId ||
 			!credentialAuthenticates(vault, delivered.Token, role) {

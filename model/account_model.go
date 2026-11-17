@@ -120,6 +120,10 @@ const (
 	// name is active: one credited after the deletion's store steps ran, or,
 	// with no snapshot, any active one. The store steps must run again.
 	RemoveNetworkStoreRenewalUnchecked RemoveNetworkOutcome = "store_renewal_unchecked"
+	// a gamma charge of the network is in a spend batch that can still land,
+	// or was spent and is not yet credited: the deletion waits until it is
+	// credited, minutes at most, and the customer retries
+	RemoveNetworkGammaChargeInFlight RemoveNetworkOutcome = "gamma_charge_in_flight"
 )
 
 // Names the App Store and Google Play renewals an account deletion checked with
@@ -212,7 +216,8 @@ func removeNetworkStoreRenewals(
 }
 
 // RemoveNetworkWithStoreSnapshot with no store snapshot: it refuses while any
-// Stripe, App Store or Google Play renewal is active.
+// Stripe, App Store or Google Play renewal is active, or a gamma charge is in
+// flight.
 func RemoveNetwork(
 	ctx context.Context,
 	networkId server.Id,
@@ -225,12 +230,38 @@ func RemoveNetwork(
 // Removes the network and its users. storeSnapshot names the App Store and
 // Google Play renewals the caller already checked with the stores; any other
 // active renewal from those stores refuses the removal. Pass nil when no store
-// steps ran.
+// steps ran. A gamma charge in flight refuses it too; otherwise the removal
+// ends the network's automatic gamma charges (endGammaAutomaticChargesInTx).
 func RemoveNetworkWithStoreSnapshot(
 	ctx context.Context,
 	networkId server.Id,
 	adminUserId *server.Id,
 	storeSnapshot *RemoveNetworkStoreSnapshot,
+) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
+	return RemoveNetworkWithRemovals(ctx, networkId, adminUserId, storeSnapshot, nil)
+}
+
+// Queues, in a deletion's own transaction, what must follow the deletion: the
+// cleanup of what the network leaves (DeletedNetwork, RemoveDeletedNetworkData)
+// and, for an account, the removal of its sign-in addresses (password and SSO
+// logins) from Brevo. It must use tx and acquire no other database connection.
+type ScheduleNetworkRemovalsInTx func(tx server.PgTx, deletedNetwork *DeletedNetwork, userAuths map[string]bool)
+
+// RemoveNetworkWithRemovals is RemoveNetworkWithStoreSnapshot that hands the
+// removed network, its users and their sign-in user auths (password and SSO
+// logins) to scheduleRemovalsInTx inside the removal's own transaction, before
+// they are deleted. What it queues there with tx, the cleanup of the network's
+// data and the removal of each address from Brevo
+// (controller.RemoveNetworkAndContacts), commits with the removal or not at
+// all: a refused or failed removal queues nothing, and a removed network
+// cannot leave its data or addresses behind unqueued. A nil
+// scheduleRemovalsInTx queues nothing.
+func RemoveNetworkWithRemovals(
+	ctx context.Context,
+	networkId server.Id,
+	adminUserId *server.Id,
+	storeSnapshot *RemoveNetworkStoreSnapshot,
+	scheduleRemovalsInTx ScheduleNetworkRemovalsInTx,
 ) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
 	var posts []server.PostFunction
 	retirementId := server.NewId()
@@ -292,6 +323,16 @@ func RemoveNetworkWithStoreSnapshot(
 			}
 		}
 
+		// Pay with Gamma renews, tops up and upgrades through our own biller,
+		// not a store. A gamma charge that can still land, or landed and is
+		// not yet credited, is credited to this network first: deleting now
+		// would leave the customer's spent gamma with nothing to credit, and
+		// gamma cannot be refunded. The retry deletes once it is credited.
+		if gammaChargeInFlightInTx(tx, ctx, networkId) {
+			outcome = RemoveNetworkGammaChargeInFlight
+			return
+		}
+
 		userIds := map[server.Id]bool{networkAdminUserId: true}
 		userAuths = map[string]bool{}
 
@@ -320,6 +361,15 @@ func RemoveNetworkWithStoreSnapshot(
 				userAuths[userAuth] = true
 			}
 		})
+
+		// queued while the addresses still exist, in the removal's transaction
+		if scheduleRemovalsInTx != nil {
+			deletedNetwork := &DeletedNetwork{
+				NetworkId: networkId,
+				UserIds:   slices.SortedFunc(maps.Keys(userIds), func(a server.Id, b server.Id) int { return a.Cmp(b) }),
+			}
+			scheduleRemovalsInTx(tx, deletedNetwork, userAuths)
+		}
 
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for userId, _ := range userIds {
@@ -369,10 +419,25 @@ func RemoveNetworkWithStoreSnapshot(
 			}
 		})
 
+		// the biller's automatic gamma charges end with the account, as the
+		// store steps cancel a store subscription; the on-chain deposit is the
+		// customer's and is not touched
+		endGammaAutomaticChargesInTx(tx, ctx, networkId, server.NowUtc())
+
 		server.Raise(session.JournalSessionRetirementInTx(ctx, tx, networkId, retirementId, "delete", server.NowUtc()))
 		// every revocation record of the network refuses it before the
 		// deletion commits
 		server.Raise(session.RetireNetworkRecords(ctx, networkId))
+		// what the network's apps reported for its campaign emails (zone,
+		// languages, app builds) goes with it
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				DELETE FROM network_mail_context
+				WHERE network_id = $1
+			`,
+			networkId,
+		))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

@@ -118,6 +118,8 @@ func securityNoticeDestinationName(destination string) string {
 		return "Bittensor wallet approved for your network's subnet earnings"
 	case model.SecurityWalletDestinationSubnetHotkey:
 		return "Bittensor hotkey for your network's subnet earnings"
+	case model.SecurityWalletDestinationFleetHotkey:
+		return "Bittensor hotkey for your network's Top 200 spot"
 	default:
 		return securityNoticeUnknownWalletName
 	}

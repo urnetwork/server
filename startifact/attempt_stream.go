@@ -167,6 +167,49 @@ func PublishAttemptObject(ctx context.Context, store server.BlobStore, bounds At
 	return nil
 }
 
+// The stored length of the object at its content address, and whether it is
+// stored. A paged store answers from the first listed key at that address,
+// which sorts before any longer key; another store lists the address as a
+// prefix, which names one object. No byte of the object is read: this is the
+// public head an uploader asks before repeating an upload whose
+// acknowledgement it lost, and its full read remains the only proof of the
+// bytes.
+func StatAttemptObject(ctx context.Context, store server.BlobStore, bounds AttemptObjectBounds, kind, contentHash string) (size uint64, found bool, resultErr error) {
+	if ctx == nil {
+		return 0, false, errors.New("attempt object head ownership is incomplete")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	maximum, _, err := bounds.limit(kind)
+	if err != nil {
+		return 0, false, err
+	}
+	key, err := AttemptObjectKey(store, kind, contentHash)
+	if err != nil {
+		return 0, false, err
+	}
+	var objects []server.BlobObject
+	if paged, ok := store.(server.PagedBlobStore); ok {
+		objects, _, err = paged.ListPage(ctx, key, "", 1)
+	} else {
+		objects, err = store.List(ctx, key)
+	}
+	if err := errors.Join(err, ctx.Err()); err != nil {
+		return 0, false, err
+	}
+	for _, object := range objects {
+		if object.Key != key {
+			continue
+		}
+		if object.Size <= 0 || maximum < uint64(object.Size) {
+			return 0, false, errors.New("attempt object exceeds its typed byte bound")
+		}
+		return uint64(object.Size), true, nil
+	}
+	return 0, false, nil
+}
+
 // Streams with fixed memory. An error invalidates every emitted byte; an HTTP
 // caller must abort an already-started response rather than finish a success.
 // Bare EOF, the complete hash, the typed size bound, Close and context all pass

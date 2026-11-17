@@ -15,6 +15,16 @@ package mcp
 //
 // Reuse guarantees the same LOCATION, not the same exit ip: the underlying
 // provider selection rebalances, so callers must not depend on ip stability.
+//
+// A call without a live handle first reuses the newest active proxy this tool
+// created for the network and location (model.FindReusableNetworkProxy), and
+// provisions only when there is none. The handle lasts fetchSealTtl and the
+// caller never sees the proxy's credential, so a proxy whose handle lapsed was
+// unreachable, yet stayed active until the idle reap: every new conversation
+// created another, each kept a device on a proxy host and counted against the
+// network's active proxy cap, where a free network's leftovers blocked the
+// proxies its people create themselves. Proxies are shared across a network's
+// calls for one location; cookies stay per call (newCookieJar).
 
 import (
 	"context"
@@ -34,8 +44,14 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// x402 resource identifier quoted in payment terms for this tool
-const fetchX402Resource = "mcp:fetch"
+// The x402 resource quoted in this tool's payment terms, named the way the
+// x402 MCP transport names a tool (x402-foundation/x402 go/mcp/server.go
+// buildToolResourceInfo: "mcp://tool/" + the tool's name).
+const fetchX402Resource = "mcp://tool/fetch"
+
+// The device spec of the proxies this tool provisions, which is also how it
+// finds them again; changing it orphans the proxies created under the old one.
+const fetchProxyDeviceSpec = "mcp"
 
 var errProxyGone = errors.New("the proxy for this signed_proxy_id no longer exists")
 
@@ -54,7 +70,7 @@ type acquiredProxy struct {
 // the terms are quoted so the caller can pay and retry in one round trip.
 type upgradeRequired struct {
 	message string
-	terms   *controller.X402PaymentRequired
+	terms   *controller.X402Terms
 }
 
 type sealedProxyHandle struct {
@@ -63,19 +79,25 @@ type sealedProxyHandle struct {
 
 // Settles an x402 payment presented on a fetch call, so the retry that carries
 // it finds the network already upgraded. Mirrors the inline settle the
-// /network/auth-client route performs on the X-PAYMENT header.
-func settleFetchPayment(clientSession *session.ClientSession, payment string) error {
+// /network/auth-client route performs on the PAYMENT-SIGNATURE (v2) or
+// X-PAYMENT (v1) header. payment is base64 of the PaymentPayload JSON, in
+// either protocol version.
+func settleFetchPayment(clientSession *session.ClientSession, payment string) (*controller.X402PurchaseResult, error) {
 	if !controller.X402Enabled() {
-		return fmt.Errorf("payments are not enabled")
+		return nil, fmt.Errorf("payments are not enabled")
+	}
+	// nothing is verified or settled for a guest network
+	if err := controller.X402RefuseGuest(clientSession); err != nil {
+		return nil, err
 	}
 
-	_, err := controller.X402Purchase(
+	return controller.X402Purchase(
 		clientSession.Ctx,
 		clientSession.ByJwt.NetworkId,
 		payment,
 		&controller.X402PurchaseArgs{SkuId: controller.X402SkuProMonth},
+		fetchX402Resource,
 	)
-	return err
 }
 
 // Reuses the proxy named by signedProxyId, or provisions one for
@@ -166,12 +188,16 @@ func createProxy(
 		return nil, nil, err
 	}
 
+	if proxy := reuseLocationProxy(clientSession, binding, connectLocation, locationName); proxy != nil {
+		return proxy, nil, nil
+	}
+
 	// no ip lock: the proxy is used from this service, and locking to the
 	// calling agent's ip would refuse our own egress connection
 	authClientResult, err := model.AuthNetworkClient(
 		&model.AuthNetworkClientArgs{
 			Description: "mcp fetch",
-			DeviceSpec:  "mcp",
+			DeviceSpec:  fetchProxyDeviceSpec,
 			ProxyConfig: &model.ProxyConfig{
 				InitialDeviceState: &model.ExtendedProxyDeviceState{
 					ProxyDeviceState: model.ProxyDeviceState{
@@ -192,7 +218,7 @@ func createProxy(
 				message: authClientResult.Error.Message,
 			}
 			if controller.X402Enabled() {
-				terms, err := controller.X402PaymentRequiredFor(
+				terms, err := controller.X402TermsFor(
 					fetchX402Resource,
 					controller.X402SkuProMonth,
 					authClientResult.Error.Message,
@@ -226,6 +252,46 @@ func createProxy(
 		location:      locationName,
 		created:       true,
 	}, nil, nil
+}
+
+// The newest active proxy this tool created for the network at the connect
+// location, sealed into a fresh handle, or nil when there is none (or its
+// credential cannot be read), in which case the caller provisions one.
+func reuseLocationProxy(
+	clientSession *session.ClientSession,
+	binding string,
+	connectLocation *sdk.ConnectLocation,
+	locationName string,
+) *acquiredProxy {
+	proxyId := model.FindReusableNetworkProxy(
+		clientSession.Ctx,
+		clientSession.ByJwt.NetworkId,
+		fetchProxyDeviceSpec,
+		connectLocation,
+		model.DefaultReusableNetworkProxySettings(),
+	)
+	if proxyId == nil {
+		return nil
+	}
+	proxyClient, err := model.GetProxyClient(clientSession.Ctx, *proxyId)
+	if err != nil || proxyClient == nil {
+		return nil
+	}
+	sealedProxyId, err := seal(
+		sealLabelProxy,
+		binding,
+		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+		fetchSealTtl,
+	)
+	if err != nil {
+		return nil
+	}
+	return &acquiredProxy{
+		signedProxyId: sealedProxyId,
+		proxyClient:   proxyClient,
+		location:      locationName,
+		created:       false,
+	}
 }
 
 // Maps a free-text location query to a connect location. An empty query means

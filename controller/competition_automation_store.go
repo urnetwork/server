@@ -130,7 +130,13 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			result, stateErr = nil, nil
 			round, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
-			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+			if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"); holdErr != nil {
+				if holdErr == ErrAutomationHeld {
+					stateErr = ErrAutomationHeld
+					return
+				}
+				server.Raise(holdErr)
+			}
 			var existing []byte
 			sealErr := tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&existing)
 			if sealErr == nil {
@@ -139,6 +145,13 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			}
 			if !errors.Is(sealErr, pgx.ErrNoRows) {
 				server.Raise(sealErr)
+			}
+			if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "finalization"); holdErr != nil {
+				if errors.Is(holdErr, ErrAutomationHeld) {
+					stateErr = ErrFinalizationHeld
+					return
+				}
+				server.Raise(holdErr)
 			}
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			now := self.nowUtc()
@@ -168,7 +181,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 				frozenSettings := *settings
 				frozenSettings.BaseSha = policy.BaseSha
 				frozenSettings.EvaluatorImageDigest = policy.EvaluatorImageDigest
-				frozenSettings.EvaluationPolicy = policy.EvaluationPolicy
+				frozenSettings.EvaluationPolicy = policy.EvaluationPolicy.Clone()
 				server.Raise(validateRoundBaselineRecord(&frozenSettings, round, baseline))
 				seal.BaselineSha256 = baseline.Sha256
 				var manifest roundBaselineManifest
@@ -340,11 +353,8 @@ func (self PostgresStore) AutomationResult(ctx context.Context, settings *Settin
 			}
 			server.Raise(loadErr)
 			observed := automationResultInTx(ctx, tx, roundId)
-			// Existing public integrity invalidations stay inspectable; their
-			// historical seal cannot acquire a newly elected valid winner.
-			if !observed.Invalidated {
-				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
-			}
+			// Claim/finalization holds cannot retract an already published result.
+			// New elections remain held; integrity invalidations remain visible.
 			result = observed
 		})
 	})
@@ -353,26 +363,45 @@ func (self PostgresStore) AutomationResult(ctx context.Context, settings *Settin
 
 // Private supervisor reconciliation can inspect a seal without publishing it.
 func (self PostgresStore) AutomationSeal(ctx context.Context, settings *Settings, roundId server.Id) (seal *model.CompetitionEvaluationSeal, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			seal = nil
+			// A supervisor may read before either the round or seal exists.
+			// Reset both outcomes if the read-only transaction is retried.
+			seal, stateErr = nil, nil
 			_, _, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 			var content []byte
 			loadErr = tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&content)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
-				panic(ErrNotFound)
+				stateErr = ErrNotFound
+				return
 			}
 			server.Raise(loadErr)
 			seal = &model.CompetitionEvaluationSeal{}
 			server.Raise(json.Unmarshal(content, seal))
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return seal, err
 }
 
 // A review replay returns the original response. A stale expected revision never creates a second replacement.
 func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest) (result *model.CompetitionIntegrityReviewResult, err error) {
+	if request.HandoffId != "" || request.OfficialReviewOverride != nil {
+		return nil, ErrConflict
+	}
+	return self.recordIntegrityReview(ctx, settings, roundId, actorId, request, nil, nil)
+}
+
+// Only the independent operator import may select the timely completion clock.
+func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest, handoff *model.CompetitionReviewHandoffImport, official *model.CompetitionOfficialReviewImport) (result *model.CompetitionIntegrityReviewResult, err error) {
 	if !tokenNamePattern.MatchString(actorId) {
 		return nil, errors.New("authenticated reviewer identity is required")
 	}
@@ -386,7 +415,22 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			_, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
 			server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_review_actor',$1,true)`, actorId))
-			server.Raise(model.ValidateCompetitionIntegrityReview(request, *policy.AutomationPolicy))
+			var modelCompletedAt *time.Time
+			if handoff != nil {
+				modelCompletedAt, loadErr = validateReviewHandoffImportInTx(ctx, tx, roundId, request, *handoff)
+				server.Raise(loadErr)
+				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_review_operator_actor',$1,true)`, actorId))
+			} else if request.HandoffId != "" {
+				panic(ErrConflict)
+			}
+			if official != nil {
+				if handoff != nil {
+					panic(ErrConflict)
+				}
+				server.Raise(self.authorizeOfficialReviewInTx(ctx, tx, settings, actorId, *official, *policy.AutomationPolicy))
+			} else {
+				server.Raise(model.ValidateCompetitionIntegrityReview(request, *policy.AutomationPolicy))
+			}
 			var storedDigest string
 			var content []byte
 			loadErr = tx.QueryRow(ctx, `SELECT request_sha256,review_json FROM competition_integrity_review WHERE round_id=$1 AND actor_id=$2 AND idempotency_key=$3`, roundId, actorId, request.IdempotencyKey).Scan(&storedDigest, &content)
@@ -401,13 +445,20 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			if !errors.Is(loadErr, pgx.ErrNoRows) {
 				server.Raise(loadErr)
 			}
+			// Old exact replays above retain their immutable request digest. Every
+			// newly inserted review, regardless of epoch, adopts the addendum.
+			server.Raise(model.ValidateCompetitionProductionBenefitReview(request, true))
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			current := automationResultInTx(ctx, tx, roundId)
 			if current.RewardRevision != request.ExpectedRevision {
 				panic(ErrConflict)
 			}
 			if model.IsCompetitionWinnerReviewPolicy(policy.AutomationPolicy.WinnerReviewPolicy) {
-				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, self.nowUtc()))
+				observedAt := self.nowUtc()
+				if modelCompletedAt != nil {
+					observedAt = *modelCompletedAt
+				}
+				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, observedAt))
 			}
 			var entry *model.CompetitionSealedEntry
 			for i := range current.Seal.Entries {
@@ -434,6 +485,12 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			}
 			now := self.nowUtc()
 			result = &model.CompetitionIntegrityReviewResult{ReviewId: server.NewId(), RoundId: roundId, ActorId: actorId, CreatedAt: now, Request: request, RequestSha256: requestDigest}
+			result.ModelCompletedAt = modelCompletedAt
+			if modelCompletedAt != nil {
+				now, loadErr = reviewHandoffDatabaseTime(ctx, tx)
+				server.Raise(loadErr)
+				result.CreatedAt = now
+			}
 			previous := current.Decisions[len(current.Decisions)-1]
 			next := automationDecision(&current.Seal, *policy.AutomationPolicy, &previous, append(current.IntegrityReviews, *result), now)
 			changed := (next.SelectedJobId == nil) != (previous.SelectedJobId == nil) || next.SelectedJobId != nil && *next.SelectedJobId != *previous.SelectedJobId

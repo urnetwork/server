@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	// "crypto/sha256"
 	"errors"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	// "net"
 	"net/netip"
 	// "regexp"
@@ -208,12 +208,15 @@ type AuthNetworkClientArgs struct {
 	// Ignored for a re-auth and for an ancillary client.
 	ProvideIntent bool `json:"provide_intent,omitempty"`
 
-	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"), used
-	// only to place the onboarding campaign's sends in the user's local day.
-	// Optional; never stored on the client.
-	TimeZone string `json:"time_zone,omitempty"`
-	// Locale is the device's BCP 47 locale ("de-DE"); same use, same rules.
-	Locale string `json:"locale,omitempty"`
+	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"),
+	// Locale its BCP 47 locale ("de-DE") and Locales its languages, most
+	// preferred first, of which Locale is the first: the campaign emails are
+	// placed in the reader's day and written in their language from them
+	// (controller/mail_context.go). Optional; kept only as the network's
+	// latest values (network_mail_context), never on the client.
+	TimeZone string   `json:"time_zone,omitempty"`
+	Locale   string   `json:"locale,omitempty"`
+	Locales  []string `json:"locales,omitempty"`
 }
 
 type ProxyConfig struct {
@@ -224,6 +227,15 @@ type ProxyConfig struct {
 	EnableWg         bool `json:"enable_wg"`
 
 	InitialDeviceState *ExtendedProxyDeviceState `json:"initial_device_state,omitempty"`
+
+	// UniqueExit pins the proxy to one provider whose exit IP no other
+	// unique-exit proxy of the network uses (HOSTED-PROXY-UNIQUE-EXIT.md). Pro
+	// only. The location constrains where the exit is drawn from and may not
+	// name one provider.
+	UniqueExit bool `json:"unique_exit,omitempty"`
+	// UniqueExitReplace is "auto" (the default: a failed exit is replaced by a
+	// new unique one) or "manual" (the exit is held until rotate-exit).
+	UniqueExitReplace string `json:"unique_exit_replace,omitempty"`
 }
 
 type ExtendedProxyDeviceState struct {
@@ -241,17 +253,27 @@ type AuthNetworkClientResult struct {
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
 	ClientLimitExceeded bool `json:"client_limit_exceeded"`
-	// the network is at its plan's limit for concurrent connected top-level
-	// clients (pro.yml concurrent_clients). Unlike ClientLimitExceeded, this is
-	// a plan limit rather than a hard cap: the client should surface an upgrade
-	// prompt. Corresponds to HTTP 402 semantics for the caller.
-	UpgradeRequired bool   `json:"upgrade_required,omitempty"`
-	Message         string `json:"message"`
+	// a plan limit refused the request and UR Pro lifts it: the network is on
+	// the free tier at its concurrent connected top-level client limit
+	// (pro.yml concurrent_clients), its hosted proxy cap or create rate, or a
+	// Pro-only feature. The client should surface an upgrade prompt.
+	// Corresponds to HTTP 402 semantics for an agent. A refusal with
+	// ClientLimitExceeded and without this is one no upgrade lifts: a Pro
+	// network at the Pro limit, an Embed plan's allowance, or the top-level
+	// client cap; the client should say how to free a slot instead.
+	UpgradeRequired bool `json:"upgrade_required,omitempty"`
+	// a unique-exit create found no exit the network could take in the
+	// location. Nothing was created, and neither the proxy cap nor the create
+	// rate was spent.
+	NoUniqueSupply bool   `json:"no_unique_supply,omitempty"`
+	Message        string `json:"message"`
 }
 
 type ProxyConfigResult struct {
 	KeepaliveSeconds int `json:"keepalive_seconds"`
 	ProxyClient
+	// the unique exit of a proxy created with unique_exit
+	Exit *ProxyExit `json:"exit,omitempty"`
 }
 
 type ProxyAuthResult struct {
@@ -491,6 +513,24 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			proxyInitialDeviceState = &proxyDeviceState
 		}
 
+		// A unique-exit proxy (proxy_unique_exit_model.go) is decided before the
+		// create is counted below: Pro only, a location that is not one provider,
+		// and an exit the network can take. A refusal here spends neither the
+		// network's proxy cap nor its create rate.
+		var uniqueExitPlan *uniqueExitCreatePlan
+		if authClient.ProxyConfig != nil && authClient.ProxyConfig.UniqueExit {
+			plan, refusal := planUniqueExitCreate(clientSession, authClient.ProxyConfig, proxyInitialDeviceState)
+			if refusal != nil {
+				authClientResult = &AuthNetworkClientResult{Error: refusal}
+				return
+			}
+			uniqueExitPlan = plan
+		}
+		// the device state the proxy is created with, and the exit it is pinned
+		// to; each try of the transaction below sets them again
+		var proxyCreateDeviceState *ProxyDeviceState
+		var uniqueExitAssignment *proxyExitAssignment
+
 		// Client-creation gate for the plan's concurrent connected-client limit:
 		// Do not provision a new top-level client while the network is already at its
 		// connected limit. Only top-level clients count and a client created with
@@ -498,15 +538,34 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// live rather than from the jwt's stale claim; and while the rollout is dark
 		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
 		// Checked before the tx so the lookup does not hold it open. Connection
-		// activation applies the same limit; see CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
-		if concurrentLimitExceeded && registration == nil {
+		// activation applies the same limit; see CanConnectNetworkPeer. The
+		// refusal asks for an upgrade only when one lifts the limit
+		// (concurrentClientLimitRefusal). A URnetwork app's sign-in skips this
+		// gate and is held off at connection instead, where the app shows what
+		// to do (concurrentLimitCreationExempt).
+		var concurrentLimitRefusal *AuthNetworkClientError
+		if authClient.SourceClientId == nil && !authClient.ProvideIntent && !concurrentLimitCreationExempt(authClient, clientSession) {
+			concurrentLimitRefusal = networkConcurrentClientLimitRefusal(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		}
+		// A hosted proxy is limited on its own, and always
+		// (network_client_proxy_limit.go): the network's active proxies are
+		// capped and its proxy creates are rated per minute. The Embed row and
+		// this create's count are read before the tx, like the concurrent limit;
+		// the active proxies are counted inside it. The create is counted once
+		// per call, so a retried tx does not count it again.
+		proxyLimitOverride, proxyLimitOverridden := 0, false
+		var proxyCreateCount int64
+		proxyCreateCounted := false
+		if authClient.ProxyConfig != nil {
+			proxyLimitOverride, proxyLimitOverridden = networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			proxyCreateCount, proxyCreateCounted = countProxyClientCreate(clientSession.Ctx, clientSession.ByJwt.NetworkId, proxyClientCreateNow())
+		}
+		proxyCreateRateExceeded := func(isPro bool) bool {
+			return proxyCreateCounted && proxyClientCreateRateExceeded(proxyClientCreatesPerMinute(isPro), proxyCreateCount)
+		}
+		if concurrentLimitRefusal != nil && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
-				Error: &AuthNetworkClientError{
-					ClientLimitExceeded: true,
-					UpgradeRequired:     true,
-					Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
-				},
+				Error: concurrentLimitRefusal,
 			}
 			return
 		}
@@ -578,6 +637,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// snapshot, but neither a separate pool borrower nor a TTL authority.
 		// Read on the transaction's owned connection before BEGIN, and keep
 		// cache publication outside the database connection's lifetime.
+		// the Embed allowance the token's client_limit_upgrade claim reads,
+		// through the process cache, before any connection is checked out
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		var isPro bool
 		var mintEntitlement proEntitlement
 		if validateParent {
@@ -588,6 +650,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			}))
 		} else {
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
+		}
+		// a proxy create over the network's rate is refused here, before any db
+		// work, once the plan is known; a registration is decided in the tx,
+		// where a retained one still answers
+		if !validateParent && registration == nil && proxyCreateRateExceeded(isPro) {
+			authClientResult = proxyClientCreateRateRefusal(isPro)
+			return
 		}
 		// one registration per network per process waits for the network's
 		// allocation lock; the rest wait here, holding no pooled connection
@@ -637,10 +706,62 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					}
 					return
 				}
-				if concurrentLimitExceeded {
-					authClientResult = &AuthNetworkClientResult{Error: &AuthNetworkClientError{ClientLimitExceeded: true, UpgradeRequired: true, Message: "Your plan's concurrent client limit is reached."}}
+				if concurrentLimitRefusal != nil {
+					authClientResult = &AuthNetworkClientResult{Error: concurrentLimitRefusal}
 					return
 				}
+			}
+			if proxyCreateRateExceeded(isPro) {
+				authClientResult = proxyClientCreateRateRefusal(isPro)
+				return
+			}
+			if authClient.ProxyConfig != nil {
+				proxyLimit := proxyClientLimitFor(isPro, proxyLimitOverride, proxyLimitOverridden)
+				if 0 < proxyLimit {
+					activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientCountBound(proxyLimit))
+					if proxyClientLimitReached(proxyLimit, activeProxyCount) {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								ClientLimitExceeded: true,
+								UpgradeRequired:     !isPro,
+								Message:             proxyClientLimitMessage(proxyLimit, isPro),
+							},
+						}
+						return
+					}
+				}
+			}
+			// pin a unique-exit proxy before any of its rows exist, so an exit the
+			// planned candidates lost to a concurrent create refuses with nothing
+			// written
+			proxyCreateDeviceState = proxyInitialDeviceState
+			uniqueExitAssignment = nil
+			if uniqueExitPlan != nil {
+				uniqueExitAssignment = insertProxyExitAssignmentInTx(
+					clientSession.Ctx,
+					tx,
+					clientSession.ByJwt.NetworkId,
+					clientId,
+					uniqueExitPlan.candidates,
+					uniqueExitPlan.settings,
+					server.NowUtc(),
+				)
+				if uniqueExitAssignment == nil {
+					authClientResult = &AuthNetworkClientResult{Error: uniqueExitNoSupplyError()}
+					return
+				}
+				insertProxyUniqueExitInTx(
+					clientSession.Ctx,
+					tx,
+					clientId,
+					clientSession.ByJwt.NetworkId,
+					uniqueExitPlan.replaceMode,
+					uniqueExitPlan.specs,
+					server.NowUtc(),
+				)
+				pinnedState := *proxyInitialDeviceState
+				pinnedState.Location = UniqueExitPinnedLocation(uniqueExitAssignment.ProviderClientId, uniqueExitAssignment.CountryCode)
+				proxyCreateDeviceState = &pinnedState
 			}
 			createTime := server.NowUtc()
 
@@ -653,13 +774,21 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				// is dark, this cap is not enforced and no count runs at all (see
 				// pro.yml). Provisioning must never be refused while dark. A
 				// provider install (provide intent) is exempt and is not counted:
-				// it never becomes a peer (NetworkPeerCategoryProvider). The limit
-				// is per network: an Embed plan raises it (see
+				// it never becomes a peer (NetworkPeerCategoryProvider). A hosted
+				// proxy is neither counted nor capped here: its own cap and create
+				// rate govern it (owner decision 2026-11-08). The limit is per
+				// network: an Embed plan raises it (see
 				// network_client_limit_model.go); the peer valve keeps the constant.
-				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
+				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent && authClient.ProxyConfig == nil {
 					topLevelClientLimit := networkTopLevelClientLimitInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId)
-					// the scan is bounded at the limit since only the threshold matters
-					topLevelClientCount := countNetworkActiveTopLevelClients(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, topLevelClientLimit+1)
+					// the count stops at the limit since only the threshold matters
+					topLevelClientCount := countNetworkActiveTopLevelClients(
+						clientSession.Ctx,
+						tx,
+						clientSession.ByJwt.NetworkId,
+						topLevelClientLimit+1,
+						topLevelClientCountExamineBudget,
+					)
 					if topLevelClientLimit <= topLevelClientCount {
 						authClientResult = &AuthNetworkClientResult{
 							Error: &AuthNetworkClientError{
@@ -693,11 +822,43 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				))
 			} else if validateParent {
 				// The same snapshot just verified this exact active client and
-				// claimed device; no second source-client read is needed.
+				// claimed device. The parent's row is held (FOR KEY SHARE) until
+				// the child commits, which orders the mint against the parent's
+				// deactivation: a deactivation that locked the parent first leaves
+				// it inactive here, and one that waits for this mint deactivates
+				// the child with it (deactivateLockedNetworkClientsInTx). The key
+				// share lock conflicts with that FOR UPDATE and not with the
+				// parent's auth time refresh.
+				parentActive := false
+				result, err := tx.Query(
+					clientSession.Ctx,
+					`
+						SELECT true
+						FROM network_client
+						WHERE
+							client_id = $1 AND
+							network_id = $2 AND
+							active = true
+						FOR KEY SHARE
+					`,
+					*authClient.SourceClientId,
+					clientSession.ByJwt.NetworkId,
+				)
+				server.WithPgResult(result, err, func() {
+					parentActive = result.Next()
+				})
+				if !parentActive {
+					authClientError = ErrClientParentInactive
+					return
+				}
 				deviceId = *clientSession.ByJwt.DeviceId
 			} else {
 				// copy the device id from the source
-				// important: validate the source client id is in the same network
+				// important: validate the source client id is in the same network,
+				// and active: an inactive source has no lifecycle left to retire
+				// the child (deactivateLockedNetworkClientsInTx). The source's row
+				// is held (FOR KEY SHARE) until the child commits, which orders
+				// this mint against the source's deactivation as above.
 				sourceFound := false
 				result, err := tx.Query(
 					clientSession.Ctx,
@@ -707,7 +868,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						FROM network_client
 						WHERE
 							client_id = $1 AND
-							network_id = $2
+							network_id = $2 AND
+							active = true
+						FOR KEY SHARE
 					`,
 					*authClient.SourceClientId,
 					clientSession.ByJwt.NetworkId,
@@ -835,7 +998,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						ClientId: clientId,
 					},
 					LockSubnets:        proxyLockSubnets,
-					InitialDeviceState: proxyInitialDeviceState,
+					InitialDeviceState: proxyCreateDeviceState,
+					UniqueExit:         uniqueExitAssignment != nil,
 				}
 				var err error
 				proxyDeviceConfigJson, err = createProxyDeviceConfigInTx(clientSession.Ctx, tx, proxyDeviceConfig)
@@ -864,6 +1028,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = &clientId
 			byJwtWithClientId.DeviceId = &deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
@@ -876,6 +1041,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			if proxyClient != nil {
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
 					ProxyClient: *proxyClient,
+				}
+				if uniqueExitAssignment != nil {
+					authClientResult.ProxyConfigResult.Exit = proxyExitFromAssignment(
+						clientSession.Ctx,
+						uniqueExitAssignment,
+						uniqueExitPlan.replaceMode,
+					)
 				}
 			}
 		}, registrationTxOptions...)
@@ -926,6 +1098,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
 		// may be nested under this transaction's checked-out connection.
 		isPro := IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 
 		// important: must check `network_id = session network_id`
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
@@ -1089,6 +1262,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = authClient.ClientId
 			byJwtWithClientId.DeviceId = deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
@@ -1176,6 +1350,25 @@ func RemoveNetworkClient(
 
 		removeClientResult = &RemoveNetworkClientResult{}
 	}, server.TxReadCommitted)
+
+	if removeClientResult != nil && removeClientResult.Error == nil {
+		if clientSession.ByJwt.ClientId == nil {
+			// another device removed with the network credential: a user
+			// freeing a slot (the apps' device list), the web manager or the
+			// api. Logged so support can tell who removed a device.
+			glog.Infof(
+				"[nc]network %s removed client %s with its network credential (%s)\n",
+				clientSession.ByJwt.NetworkId,
+				removeClient.ClientId,
+				clientSession.ClientInfo.DeviceType,
+			)
+		}
+		// the removal committed whatever this does: a failure leaves the slot
+		// to free when the registration expires, as before
+		server.HandleError(func() {
+			releaseRemovedClientSlot(clientSession.Ctx, clientSession.ByJwt.NetworkId, removeClient.ClientId)
+		})
+	}
 
 	return removeClientResult, removeClientErr
 }
@@ -1322,22 +1515,84 @@ func deactivateOwnedNetworkClientInTx(
 // The caller must hold FOR UPDATE on every client in this exact owned set.
 // The clients' provide keys go in the same transaction: an inactive client is
 // never a contract destination.
+//
+// The clients' active descendants are deactivated with them, and the count
+// returned is of the caller's clients only. A derived client is retired with
+// its parent's own credential (connect's ApiMultiClientGenerator, through
+// localclient.Authority or /network/remove-client), and this deactivation
+// revokes that credential, so nothing else retires a descendant it leaves
+// active: it would stay active until the child reap, a client window after its
+// own last auth. A removed hosted proxy left its windows that way, by the
+// hundreds of thousands in a network that churned proxies (2026-11-05), which
+// also kept them from the retired hosted reap, which reaps retired ones only.
 func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (int64, error) {
+	lockedCount, _, err := deactivateLockedNetworkClientsCountedInTx(ctx, tx, lockedClientIds, networkId)
+	return lockedCount, err
+}
+
+// deactivateLockedNetworkClientsInTx that also counts every client it
+// deactivated, the caller's and their active descendants.
+func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (lockedCount int64, deactivatedCount int64, returnErr error) {
 	if len(lockedClientIds) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
+
+	// Locks the clients' active descendants, one generation at a time, each in
+	// client id order after the generation above it. A descendant already among
+	// the caller's clients is not returned again. A generation is read from each
+	// parent's device, only the clients minted since the parent
+	// (readActiveChildClientIdsInTx), and then locked by primary key. A parent
+	// without a device has no descendants this finds, and those stay to the
+	// child reap. The walk stops at session.ClientAncestryDepthLimit
+	// generations.
+	lockActiveDescendants := func() ([]server.Id, error) {
+		seenClientIds := map[server.Id]bool{}
+		for _, clientId := range lockedClientIds {
+			seenClientIds[clientId] = true
+		}
+		descendantClientIds := []server.Id{}
+		parentClientIds := lockedClientIds
+		for depth := 0; depth < session.ClientAncestryDepthLimit && 0 < len(parentClientIds); depth += 1 {
+			childClientIds, err := readActiveChildClientIdsInTx(ctx, tx, parentClientIds, networkId)
+			if err != nil {
+				return nil, err
+			}
+			unseenClientIds := []server.Id{}
+			for _, clientId := range childClientIds {
+				if !seenClientIds[clientId] {
+					seenClientIds[clientId] = true
+					unseenClientIds = append(unseenClientIds, clientId)
+				}
+			}
+			if len(unseenClientIds) == 0 {
+				break
+			}
+			generationClientIds, err := lockActiveNetworkClientsInTx(ctx, tx, unseenClientIds, networkId)
+			if err != nil {
+				return nil, err
+			}
+			descendantClientIds = append(descendantClientIds, generationClientIds...)
+			parentClientIds = generationClientIds
+		}
+		return descendantClientIds, nil
+	}
+	descendantClientIds, err := lockActiveDescendants()
+	if err != nil {
+		return 0, 0, err
+	}
+	deactivatedClientIds := append(slices.Clone(lockedClientIds), descendantClientIds...)
 
 	// The revocation records refuse these clients before the deactivation can
 	// commit; a failed write fails the deactivation (revocation_record.go).
-	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, lockedClientIds); err != nil {
-		return 0, err
+	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, deactivatedClientIds); err != nil {
+		return 0, 0, err
 	}
 
 	// Read the primary database clock in the UPDATE only after every target row
 	// is locked. A concurrent contract holding FOR SHARE must remain ordered
 	// before this deactivation in both database state and recorded time, even
 	// when the two API calls run on hosts whose application clocks differ.
-	tag, err := tx.Exec(
+	result, err := tx.Query(
 		ctx,
 		`
 			WITH lifecycle_clock AS MATERIALIZED (
@@ -1351,20 +1606,215 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 			WHERE
 				network_client.client_id = ANY($1) AND
 				network_client.network_id = $2
+			RETURNING network_client.client_id
 		`,
-		lockedClientIds,
+		deactivatedClientIds,
 		networkId,
 	)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if err := removeDeactivatedProvideKeysInTx(ctx, tx, lockedClientIds); err != nil {
-		return 0, err
+	lockedClientIdSet := map[server.Id]bool{}
+	for _, clientId := range lockedClientIds {
+		lockedClientIdSet[clientId] = true
+	}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return 0, 0, err
+		}
+		deactivatedCount += 1
+		if lockedClientIdSet[clientId] {
+			lockedCount += 1
+		}
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return 0, 0, err
+	}
+	if err := removeDeactivatedProvideKeysInTx(ctx, tx, deactivatedClientIds); err != nil {
+		return 0, 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
 	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
-	addClientsRemovedPostCommit(ctx, tx, lockedClientIds)
-	return tag.RowsAffected(), nil
+	addClientsRemovedPostCommit(ctx, tx, deactivatedClientIds)
+	return lockedCount, deactivatedCount, nil
+}
+
+// A child is minted (AuthNetworkClient) by a request that names its parent's
+// committed id, and its client id is a server.NewId of that request, which
+// leads with the minting host's wall clock in milliseconds. So a child sorts at
+// or after its parent's create time and its parent's id, less how far the
+// child's host clock is behind the parent's. The descendant walk reads a
+// parent's device from there on, tolerating this much clock difference. A
+// child minted on a host further behind is not found, and stays active until
+// the child reap, as every child did before the walk.
+const descendantMintClockSkew = 10 * time.Minute
+
+// The millisecond prefix server.NewId writes into an id.
+func idMintMillis(id server.Id) int64 {
+	return int64(id[0])<<40 |
+		int64(id[1])<<32 |
+		int64(id[2])<<24 |
+		int64(id[3])<<16 |
+		int64(id[4])<<8 |
+		int64(id[5])
+}
+
+// The least client id a child of the parent can have: the earlier of the
+// parent's id time and create time, less descendantMintClockSkew, as an id
+// prefix with no entropy. The earlier of the two holds when either is not what
+// NewId and the mint wrote. The zero id bounds nothing.
+func descendantMinClientId(parentClientId server.Id, parentCreateTime time.Time) server.Id {
+	ms := min(idMintMillis(parentClientId), parentCreateTime.UnixMilli()) - descendantMintClockSkew.Milliseconds()
+	var minClientId server.Id
+	if ms <= 0 {
+		return minClientId
+	}
+	minClientId[0] = byte(ms >> 40)
+	minClientId[1] = byte(ms >> 32)
+	minClientId[2] = byte(ms >> 24)
+	minClientId[3] = byte(ms >> 16)
+	minClientId[4] = byte(ms >> 8)
+	minClientId[5] = byte(ms)
+	return minClientId
+}
+
+// The active children of the parents, unlocked. The caller holds the parents
+// FOR UPDATE, which conflicts with the FOR KEY SHARE a child mint holds on its
+// source until it commits, so every child of theirs committed before this
+// read's snapshot.
+//
+// A child copies its parent's device (AuthNetworkClient), and network_client
+// has no index on source_client_id, so each parent's children are read from
+// network_client_device_id: the parent's device, only from
+// descendantMinClientId on. Nearly every parent the walk sees is a retired
+// window with no children, and a hosted proxy's device holds every window it
+// minted, active or retired and kept for the reap; the whole device was read
+// on every window retirement (2026-11-06, edge-2 saturated). OFFSET 0 keeps
+// the other conditions out of the device read, so it can only be that range:
+// a hash join, or the network's active range, reads clients of every device
+// in the network.
+func readActiveChildClientIdsInTx(ctx context.Context, tx server.PgTx, parentClientIds []server.Id, networkId server.Id) ([]server.Id, error) {
+	boundParentClientIds := []server.Id{}
+	boundDeviceIds := []server.Id{}
+	minChildClientIds := []server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id, device_id, create_time
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				device_id IS NOT NULL
+		`,
+		parentClientIds,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var parentClientId server.Id
+		var deviceId server.Id
+		var createTime time.Time
+		if err := result.Scan(&parentClientId, &deviceId, &createTime); err != nil {
+			result.Close()
+			return nil, err
+		}
+		boundParentClientIds = append(boundParentClientIds, parentClientId)
+		boundDeviceIds = append(boundDeviceIds, deviceId)
+		minChildClientIds = append(minChildClientIds, descendantMinClientId(parentClientId, createTime))
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	if len(boundParentClientIds) == 0 {
+		return nil, nil
+	}
+
+	childClientIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+			SELECT device_client.client_id
+			FROM unnest($1::uuid[], $2::uuid[], $3::uuid[]) AS parent(client_id, device_id, min_child_client_id)
+			CROSS JOIN LATERAL (
+				SELECT
+					network_client.client_id,
+					network_client.source_client_id,
+					network_client.network_id,
+					network_client.active
+				FROM network_client
+				WHERE
+					network_client.device_id = parent.device_id AND
+					network_client.client_id >= parent.min_child_client_id
+				OFFSET 0
+			) AS device_client
+			WHERE
+				device_client.source_client_id = parent.client_id AND
+				device_client.network_id = $4 AND
+				device_client.active
+		`,
+		boundParentClientIds,
+		boundDeviceIds,
+		minChildClientIds,
+		networkId,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return nil, err
+		}
+		childClientIds = append(childClientIds, clientId)
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return childClientIds, nil
+}
+
+// Locks the clients of the network that are still active, in client id order,
+// and returns them. A client deactivated since it was read is passed over.
+func lockActiveNetworkClientsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) ([]server.Id, error) {
+	lockedClientIds := []server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				network_id = $2 AND
+				active = true
+			ORDER BY client_id
+			FOR UPDATE
+		`,
+		clientIds,
+		networkId,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return nil, err
+		}
+		lockedClientIds = append(lockedClientIds, clientId)
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return lockedClientIds, nil
 }
 
 // Deletes the provide keys of clients this transaction deactivates, and their
@@ -1631,7 +2081,7 @@ func RemoveNetworkClients(
 	// immediately as before -- only deferred requests get spread out.
 	runAt := bucketStart
 	if currentBucket.Before(bucketStart) {
-		runAt = bucketStart.Add(time.Duration(mathrand.Int63n(int64(BulkClientRemovalBucketDuration))))
+		runAt = bucketStart.Add(time.Duration(mathrand.Int64N(int64(BulkClientRemovalBucketDuration))))
 	}
 
 	// one background bulk-delete run per network at a time.
@@ -1780,6 +2230,25 @@ func RemoveNetworkClientsTaskPost(
 
 type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
+
+	// what the network's plan does with the Pro-only proxy features, in the
+	// proxies list only (GetNetworkProxies)
+	Plan *NetworkProxiesPlan `json:"plan,omitempty"`
+}
+
+// NetworkProxiesPlan is the plan beside the network's proxies, so an app can
+// say what a proxy's Pro-only features (NetworkClientInfo.ProFeatures) will do
+// on this plan: the apps' "Pro features in use" notice.
+type NetworkProxiesPlan struct {
+	// the network holds Pro now, read live (IsProNetwork), never from the
+	// jwt's pro claim, which is stale after an upgrade or a lapse
+	Pro bool `json:"pro"`
+	// pro.yml enforce_features: a network without Pro is refused the Pro-only
+	// features, at issuance (auth-client issues no SOCKS url and no WireGuard
+	// config) and at the proxy, for the credentials it already holds (a SOCKS
+	// sign-in is refused, a WireGuard peer is dropped). While false, every
+	// plan uses them.
+	ProFeaturesEnforced bool `json:"pro_features_enforced"`
 }
 
 // NetworkClientInfo is one row of the network's device list. The client's
@@ -1790,6 +2259,17 @@ type NetworkClientInfo struct {
 	NetworkClient
 
 	Connections []*NetworkClientConnection `json:"connections,omitempty"`
+
+	// the unique exit of a hosted proxy created with unique_exit, in the
+	// proxies list only
+	Exit *ProxyExit `json:"exit,omitempty"`
+
+	// the Pro-only features (FeatureSocksProxy, FeatureWireguardProxy) the
+	// hosted proxy used within ProxyFeatureUseWindow, in the proxies list
+	// only: what the proxy stops serving to a network without Pro once
+	// enforce_features is on, for a proxy that actually uses it
+	// (proxyClientProFeatures)
+	ProFeatures []string `json:"pro_features,omitempty"`
 }
 
 type NetworkClientConnection struct {
@@ -1837,9 +2317,99 @@ func GetNetworkClients(clientSession *session.ClientSession) (*NetworkClientsRes
 // GetNetworkProxies lists the network's hosted proxy devices (clients with a
 // `proxy_device_config` row) with their `proxy_client` credentials. Everything
 // else about a row (resident, connections, roles, provide mode) reads the same
-// as GetNetworkClients.
+// as GetNetworkClients. Each proxy also says which Pro-only features it used
+// recently, and the list carries the network's plan
+// (addProxyProFeaturesToClientList).
 func GetNetworkProxies(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
-	return getNetworkClientList(clientSession, networkClientListProxies)
+	result, err := getNetworkClientList(clientSession, networkClientListProxies)
+	if err != nil || result == nil {
+		return result, err
+	}
+	addProxyExitsToClientList(clientSession.Ctx, result)
+	addProxyProFeaturesToClientList(clientSession.Ctx, clientSession.ByJwt.NetworkId, result)
+	return result, nil
+}
+
+// addProxyProFeaturesToClientList marks each proxy with the Pro-only features
+// it used within ProxyFeatureUseWindow, as the proxies recorded them
+// (proxy_feature_use_model.go), and reports the network's plan beside them.
+// The plan's Pro is read live and does not depend on the rollout switch, so an
+// app can warn a network without Pro before enforce_features turns on
+// (pro.yml): the apps' "Pro features in use" notice, which shows for a network
+// without Pro whose proxies list any. The marks are read best effort: a list
+// that cannot reach them still lists the proxies, with no Pro features.
+func addProxyProFeaturesToClientList(ctx context.Context, networkId server.Id, result *NetworkClientsResult) {
+	c := Pro()
+	now := server.NowUtc()
+	var uses map[server.Id]map[string]time.Time
+	// with no Pro-only proxy feature (no pro.yml) no proxy lists one, and the
+	// marks are not read
+	if c.ProOnlyFeature(FeatureSocksProxy) || c.ProOnlyFeature(FeatureWireguardProxy) {
+		proxyIds := []server.Id{}
+		for _, client := range result.Clients {
+			if client.ProxyClient != nil {
+				proxyIds = append(proxyIds, client.ProxyClient.ProxyId)
+			}
+		}
+		var err error
+		uses, err = GetProxyFeatureUses(ctx, proxyIds)
+		if err != nil {
+			glog.Infof("[nc][%s]proxy feature uses unread, listed without Pro features: %s\n", networkId, err)
+			uses = nil
+		}
+	}
+	for _, client := range result.Clients {
+		var proxyUses map[string]time.Time
+		if client.ProxyClient != nil {
+			proxyUses = uses[client.ProxyClient.ProxyId]
+		}
+		client.ProFeatures = proxyClientProFeatures(c, client.ProxyClient, proxyUses, now)
+	}
+	result.Plan = &NetworkProxiesPlan{
+		Pro:                 IsProNetwork(ctx, networkId),
+		ProFeaturesEnforced: c.EnforceFeatures,
+	}
+}
+
+// proxyClientProFeatures lists the Pro-only features a proxy used within
+// ProxyFeatureUseWindow before now: FeatureSocksProxy for a SOCKS sign-in with
+// its credentials, FeatureWireguardProxy for a completed WireGuard handshake,
+// as the proxy recorded them (uses, from ProxyFeatureUses). These are what the
+// proxy gates per network once enforce_features is on (proxy/server.go
+// validUser, validWgClients), for a proxy that actually uses them. Holding the
+// credentials is not use: every proxy issued while enforcement was dark holds
+// a SOCKS url, and one that serves only HTTP or HTTPS loses nothing. A feature
+// the free plan also includes is no Pro feature, and neither is one no plan
+// includes (no pro.yml). Nil for a proxy that used neither.
+func proxyClientProFeatures(c *ProConfig, proxyClient *ProxyClient, uses map[string]time.Time, now time.Time) []string {
+	if proxyClient == nil {
+		return nil
+	}
+	since := now.Add(-ProxyFeatureUseWindow)
+	var features []string
+	for _, feature := range proxyFeatureUseFeatures {
+		if c.ProOnlyFeature(feature) && proxyFeatureUsedSince(uses, feature, since) {
+			features = append(features, feature)
+		}
+	}
+	return features
+}
+
+// addProxyExitsToClientList reports each unique-exit proxy's exit in the list.
+func addProxyExitsToClientList(ctx context.Context, result *NetworkClientsResult) {
+	clientIds := make([]server.Id, 0, len(result.Clients))
+	for _, client := range result.Clients {
+		clientIds = append(clientIds, client.ClientId)
+	}
+	if len(clientIds) == 0 {
+		return
+	}
+	exits := GetProxyExits(ctx, clientIds)
+	for _, client := range result.Clients {
+		if exit, ok := exits[client.ClientId]; ok {
+			client.Exit = exit
+		}
+	}
 }
 
 func getNetworkClientList(clientSession *session.ClientSession, kind networkClientListKind) (*NetworkClientsResult, error) {
@@ -3048,9 +3618,10 @@ func SetProvide(
 // provider for, touches the declaration: one that declares a capability writes
 // the client's row when it differs, and one that declares none deletes it. A
 // provide with neither key, as a window client's return-traffic provide,
-// writes nothing there, so most provides add no write. A row a deactivation
-// leaves behind is inert: discovery reads it only for active providers with
-// keys, and the provider's next provide with such a key replaces or deletes it.
+// writes nothing there, so most provides add no write. Discovery reads no
+// declaration (provide_capability_model.go): a provider counts as post-quantum
+// only with a probe's evidence. The provider's next provide with such a key
+// replaces or deletes its row.
 func SetProvideWithCapabilities(
 	ctx context.Context,
 	clientId server.Id,
@@ -3901,7 +4472,11 @@ func RetireNetworkClientHandlerConnection(
 // Keep the client window much larger than the connection window: provisioned
 // an inactive client is reaped this long after it was deactivated (user
 // removal or the idle top-level marker), giving a notice window before the
-// hard delete and its cascades
+// hard delete and its cascades. Hosted clients go sooner: retired windows a
+// day after deactivation (RemoveRetiredHostedNetworkClients) and removed or
+// expired proxies two days after (RemoveRetiredHostedProxyClients), since
+// nothing reactivates them and a dead proxy's proxy_client row would otherwise
+// stay in every proxy instance's WireGuard client set for this whole window.
 const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 
 // a top-level client (source_client_id IS NULL) that has not authed or
@@ -4273,6 +4848,7 @@ func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []
 	removeProvideKeysForClientIds(ctx, reapedClientIds)
 
 	for chunk := range slices.Chunk(reapedClientIds, removeCascadeChunkCount) {
+		var locationReliabilityCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// (cascade) remove TLS certificates of the reaped clients
 			server.RaisePgResult(tx.Exec(
@@ -4302,7 +4878,22 @@ func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []
 				`,
 				idStrings(chunk),
 			))
+			// (cascade) and their location folds, which outlived them by up to
+			// 31 days (network_client_location_reliability_retention.go). No
+			// reader needs one past its client, and the pass cannot write it
+			// again: both its reads join network_client.
+			tag := server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_location_reliability
+				WHERE client_id = ANY($1::uuid[])
+				`,
+				idStrings(chunk),
+			))
+			locationReliabilityCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
+		// counted once the chunk committed
+		countRetentionDeletedRows(RetentionTableNetworkClientLocationReliability, locationReliabilityCount)
 	}
 
 	for chunk := range slices.Chunk(reapedDeviceIds, removeCascadeChunkCount) {
@@ -4474,8 +5065,10 @@ func removeProxyDeviceConfigsForClientIds(ctx context.Context, clientIds []serve
 // removeProxyClientData deletes proxy_client and proxy_client_change rows for
 // the removed proxy ids.
 // proxy_client rows are otherwise never deleted, and each wg proxy instance
-// restores all rows for its (host, block) as wg device peers at startup, which
-// is bounded by the device max peer count - so stale rows must be reaped.
+// restores all rows for its (host, block) as wg clients at startup and reads
+// them all again on every reconcile, whether or not the proxy is still active
+// - so stale rows must be reaped. A deactivated proxy's rows go with its
+// client two days after the deactivation (RemoveRetiredHostedProxyClients).
 // change rows are reaped so the startup full sync (GetProxyClientsSince from 0)
 // stays bounded.
 func removeProxyClientData(ctx context.Context, proxyIds []server.Id) {

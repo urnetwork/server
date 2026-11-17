@@ -107,7 +107,10 @@ Both rules run in the sender's report, under the contract lock, and settle throu
 | A live receive sequence's earlier contract | Sends a final with that sequence's counts. The sequence continues. |
 | A live receive sequence's current contract | Ends the sequence. Its exit sends a final, not a checkpoint. |
 | Held by a live send sequence, or queued for one | Cancels that send sequence. Its exit sends the finals, and a queued contract closes with (0, 0). |
-| Not held by any sequence | Sends a final of (0, 0) after any in-flight counted reports finish. Repeated requests coalesce while those reports are pending; an existing final satisfies the request. The server turns an earlier checkpoint into a final with the same count. |
+| Not held by any sequence, with counted reports in flight or a checkpoint it reported and remembers | Sends a final of (0, 0) after any in-flight counted reports finish. Repeated requests coalesce while those reports are pending; an existing final satisfies the request. The server turns an earlier checkpoint into a final with the same count. |
+| Not held, and the client has no record of it | Sends `ContractsNoRecord` (connect message type 38, `{ repeated bytes contract_ids = 1; }`), never a count. |
+
+**No record (owner, 2026-11-11).** A provider that lost a contract's state before its first checkpoint (a hard kill, an OOM, a crash, a power loss) answered with a final of (0, 0) until connect 2026-11-11. That settled at the mean of the two counts, half the sender's, or disputed them past 16 MiB. `ContractsNoRecord` carries no count, and the server writes nothing for it (`controller/connect_control_no_record.go`): the client stays a silent party, and the sweep settles on the other party's count with the usage `expired_unconfirmed`, so SN25 credits none of the unconfirmed bytes. A server that predates the message refuses its unknown type, which is the same. The server reads the frame by its number, so it builds with a connect that does or does not know the message. A client remembers up to 1024 acknowledged checkpoints for an hour (`ContractManagerSettings.CloseRequestCheckpointRecordCount`); past that, a checkpointed contract is answered with no record too, and the sweep finalizes the checkpoint on its count.
 
 For each listed peer, the client ends every receive sequence from that peer (finalizing their current contracts too), cancels every send sequence to it, and closes the contracts queued for it.
 
@@ -164,6 +167,7 @@ The model follows the stream hop set (`{clientId}s2_c_hops`). Main enables the k
   - `urnetwork_contract_covered_checkpoint_total`: receiver checkpoints completed on the report path, under decision B or section 1.
   - `urnetwork_contract_zero_final_settled_total`: unused contracts settled at the sender's zero final.
   - `urnetwork_contract_closed_total` versus `urnetwork_contract_opened_total`, by service. The sweep's share, the taskworker's, should fall.
+- **No record:** `urnetwork_contract_close_no_record_total{party,report}`, each contract id a client answered with no record, by its party and what the server holds of its reports. `report="none"` is lost contract state; `checkpoint`, `final`, `closed` and `unknown` change nothing either. One log line per answer naming a lost contract: `[contract]no record client=… lost=… first_lost=…`.
 - **Close requests:**
   - `urnetwork_client_close_sequences_sent_total`
   - `urnetwork_client_close_requests_sent_total{kind="contract|peer"}`

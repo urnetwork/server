@@ -146,7 +146,7 @@ func newStagingHarnessFixture(t *testing.T, epoch int, winnerJobId string) *stag
 set -euo pipefail
 if [[ $# == 2 && $1 == env && $2 == GOVERSION ]]; then
     [[ ${GOTOOLCHAIN:-} == local ]]
-    printf 'go1.27.3\n'
+    printf 'go1.27.4\n'
     exit 0
 fi
 [[ $# == 6 && $1 == build && $2 == -trimpath && $3 == -buildvcs=true &&

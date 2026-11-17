@@ -17,6 +17,7 @@ import (
 // identity. The receipt is synthetic data for validation, never runtime proof.
 func trustedInstrumentAuthorizationFixture(t *testing.T) (*Settings, *model.CompetitionSourceActivation, *model.CompetitionSourceActivation) {
 	t.Helper()
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
 	commits := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		commits[repository] = strings.Repeat("a", 40)
@@ -28,7 +29,8 @@ func trustedInstrumentAuthorizationFixture(t *testing.T) (*Settings, *model.Comp
 	patch := []byte("diff --git a/connect/sim-latency/main.go b/connect/sim-latency/main.go\n--- a/connect/sim-latency/main.go\n+++ b/connect/sim-latency/main.go\n@@ -1 +1 @@\n-old\n+new\n")
 	patchHash := sha256.Sum256(patch)
 	approval := &model.CompetitionTrustedInstrumentApproval{Schema: 1, ApprovalId: "synthetic-instrument-approval", TargetEpoch: 2,
-		G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, InstrumentBaseCommits: commits, InstrumentBaseSourceLockSha256: lock,
+		WorkCoveragePolicy: &coverage,
+		G2VolumePolicy:     model.CompetitionG2VolumePolicyMinimumWork, InstrumentBaseCommits: commits, InstrumentBaseSourceLockSha256: lock,
 		InstrumentBaseImageDigest: "sha256:" + strings.Repeat("b", 64), PatchSha256: hex.EncodeToString(patchHash[:]), Patch: patch,
 		ProtectedPaths: []string{"connect/sim-latency/main.go"}}
 	approval.ApprovalSha256, err = model.CompetitionAutomationDigest(approval)
@@ -36,7 +38,8 @@ func trustedInstrumentAuthorizationFixture(t *testing.T) (*Settings, *model.Comp
 		t.Fatal(err)
 	}
 	settings := &Settings{FutureEpochPolicy: &CompetitionFutureEpochPolicy{FromEpoch: 2, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, TrustedInstrument: approval,
-		EvaluatorCommand: "/synthetic/minimum-work/evaluator.sh", EvaluatorCommandSha256: strings.Repeat("7", 64),
+		WorkCoveragePolicy: &coverage,
+		EvaluatorCommand:   "/synthetic/minimum-work/evaluator.sh", EvaluatorCommandSha256: strings.Repeat("7", 64),
 		SelfCheckCommand: "/synthetic/minimum-work/host-check.sh", SelfCheckCommandSha256: strings.Repeat("8", 64)}}
 	current := &model.CompetitionSourceActivation{TargetEpoch: 1, SourceGeneration: 0, SourceLockSha256: lock, Commits: commits,
 		Threshold: 0.161, ThresholdEvidenceSha256: strings.Repeat("c", 64), EvaluatorImageDigest: approval.InstrumentBaseImageDigest}
@@ -47,14 +50,16 @@ func trustedInstrumentAuthorizationFixture(t *testing.T) (*Settings, *model.Comp
 	childCommits["server"] = strings.Repeat("d", 40)
 	childLock, _ := model.CompetitionSourceLockDigest(childCommits)
 	receipt := &model.CompetitionReviewedSourceBuildReceipt{Schema: 2, Operation: "trusted_instrument_build", InstrumentApprovalSha256: approval.ApprovalSha256,
-		PatchSha256: approval.PatchSha256, SourceLockSha256: childLock, EvaluatorImageDigest: "sha256:" + strings.Repeat("e", 64),
+		WorkCoveragePolicy: &coverage,
+		PatchSha256:        approval.PatchSha256, SourceLockSha256: childLock, EvaluatorImageDigest: "sha256:" + strings.Repeat("e", 64),
 		SimulatorSha256: strings.Repeat("f", 64), G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork,
 		HostQualificationSha256: strings.Repeat("1", 64), ContainmentSha256: strings.Repeat("2", 64), TestEvidenceSha256: strings.Repeat("3", 64),
 		SandboxId: "synthetic-private-build-owner", Offline: true, NoMainCredentials: true, ReadOnlySource: true, Passed: true, TestModel: "gpt-6.1-sol", TestReasoning: "low"}
 	proof := &model.CompetitionTrustedInstrumentProof{Schema: 1, Approval: *approval, SelectedProductKind: "reviewed_source_carry_forward", SelectedProductCommits: commits,
 		SelectedProductSourceLockSha256: lock, InstrumentedServerCommit: childCommits["server"], BuildReceipt: receipt}
 	intent := &model.CompetitionSourceActivation{TargetEpoch: 2, SourceGeneration: 1, Kind: "trusted_instrument_transition", Reason: "no_reward_winner",
-		G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, Commits: childCommits, SourceLockSha256: childLock,
+		WorkCoveragePolicy: &coverage,
+		G2VolumePolicy:     model.CompetitionG2VolumePolicyMinimumWork, Commits: childCommits, SourceLockSha256: childLock,
 		Threshold: current.Threshold, ThresholdEvidenceSha256: current.ThresholdEvidenceSha256, TrustedInstrument: proof,
 		EvaluatorImageDigest: receipt.EvaluatorImageDigest, HostQualificationSha256: receipt.HostQualificationSha256, SimulatorSha256: receipt.SimulatorSha256, ScorerSha256: receipt.SimulatorSha256}
 	return settings, current, intent

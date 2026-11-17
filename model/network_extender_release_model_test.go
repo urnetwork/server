@@ -178,7 +178,7 @@ func TestExtenderReleaseReplicaRetainsEpochDisclosures(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, "UPDATE network_extender_address SET last_probe_success_time = $2 WHERE extender_id = $1", keyIds[keys[0]], probeTime))
 		})
 		for range connect.DefaultExtenderBlockedStateSettings().ReportThreshold {
-			RecordNetworkExtenderBlockReport(ctx, keyIds[keys[0]], server.NewId(), "us", probeTime)
+			RecordNetworkExtenderBlockReport(ctx, keyIds[keys[0]], Testing_CreateBlockReportClient(ctx, server.NewId()), "us", probeTime)
 		}
 		blocked := NewNetworkExtenderBlockedSource(ctx, keyIds, nil)
 		flags := blocked.BlockedKeys(keys, " US ")

@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "epoch2-baseline-host-qualification-and-worker-acknowledgment/v1",
+  "observed_at": "2026-11-10T07:51:34Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "host_id": "sille",
+  "scope": "Original baseline producer only; neither private executor's grading admission is inferred.",
+  "qualification": {
+    "unit": "urnetwork-epoch2-baseline-host-qualification-20261110-v3.service",
+    "invocation_id": "a327262eb83f4f12a26045b9d5d1f271",
+    "terminal": {"active_state":"inactive","main_pid":0,"result":"success","exit_status":0},
+    "completed_at": "2026-11-10T07:43:01Z",
+    "profile": "sim-latency-host-readiness/v2",
+    "profile_sha256": "8fb4a3ceca000cea6b580491e154044606d0fc15319b41f33405a44e5fabd493",
+    "intent_sha256": "e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f",
+    "readiness_only_duration_ms": 120000,
+    "readiness_only_replicates": 1,
+    "score_gates_passed": ["G1_success","G2_volume","G3_path_integrity","G4_matchmaking","G5_stability","G6_resources","G7_work_coverage"],
+    "all_fifteen_security_checks_passed": true,
+    "artifact_objects_retained": 77,
+    "artifact_bytes_retained": 14388974,
+    "retention_mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "artifact_manifest_key": "blob/competition/v2/host-readiness/main/sim-latency-season-1/sim-latency-production-20261028-r2/e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f/8fb4a3ceca000cea6b580491e154044606d0fc15319b41f33405a44e5fabd493/probe-e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f-81396111/host-readiness-retention.json",
+    "artifact_manifest_version": "0cb255df-caf4-455c-8d6f-4defec20f226",
+    "artifact_manifest_sha256": "b8ceb3b70c2f62cca7e9eaf8b37a155f9b0750c0a28ba72b1f683c0e4ee64080",
+    "promoted_host_config_sha256": "862594b10c7d01a8aa70eb83187966ee523f6818f5897764ec4147c6b8df5f77",
+    "promoted_rebaseline_marker_sha256": "d140bad47b9c6b3b682f157a5bab4c3549aba4fe4440e9149bb125ace52ca99b",
+    "independent_live_self_check": "Passed after promotion: exact image, frozen qualification254caad0, all seven basic checks, eligible=true and genuine same-round rebaseline=true. Read-only; no host registration or claim by that check."
+  },
+  "worker_acknowledgment": {
+    "unit": "urnetwork-epoch2-source-worker-readiness-20261110-v1.service",
+    "invocation_id": "cc19186fed7f4515b1349646f2680803",
+    "terminal": {"active_state":"inactive","main_pid":0,"result":"success","exit_status":0},
+    "generation": 2,
+    "recorded_at": "2026-11-10T07:49:26.974666Z",
+    "runtime_image_digest": "sha256:0c4508d4b7b44322851bfd6a21309ae33f758b299b0ef297a653a4101b081ab8",
+    "image_purpose": "trusted-host-control-release-provenance",
+    "execution_class": "host-native-from-verified-oci-payload",
+    "native_executable_sha256": "5ad65efa1c031259b74472e629ecc90ab8de45ef126760e306aa60f3627fbb85",
+    "oci_payload_independently_verified": "Extracted from a never-started temporary container and SHA-256 matched the protected installed executable byte-for-byte. Verification container removed. Not an evaluator image or a claim that the worker runs inside this container.",
+    "database_role_receipt_independently_rechecked": true,
+    "api_receipt_preserved": "2026-11-09T22:07:43.172783Z / sha256:cd9ef00c61fb7724ae582636b55029d3f7e408f3027bce5c48d5f93ed86f9e7e"
+  },
+  "lifecycle_readback": {
+    "purpose": "intake",
+    "api_acknowledged": true,
+    "worker_acknowledged": true,
+    "grading_runtime_activated": false,
+    "official_baseline_present": false,
+    "host_admission_ready": false,
+    "grading_ready": false
+  },
+  "authority_limits": {
+    "official_r9_baseline_measured": false,
+    "private_executor_r9_admission_passed": false,
+    "submission_claimed": false,
+    "frozen_source_or_image_changed": false,
+    "grading_activated": false
+  }
+}

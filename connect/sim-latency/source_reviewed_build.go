@@ -17,8 +17,9 @@ func reviewedGenerationForProposal(current *model.CompetitionSourceActivation, p
 		margin = 0
 	}
 	return reviewedSourceGeneration{
-		G2VolumePolicy: current.G2VolumePolicy,
-		Generation:     current.SourceGeneration + 1, Kind: "reviewed_source_promotion", SourceLockSha256: proposal.SourceLockSha256,
+		G2VolumePolicy:     current.G2VolumePolicy,
+		WorkCoveragePolicy: current.WorkCoveragePolicy.Clone(),
+		Generation:         current.SourceGeneration + 1, Kind: "reviewed_source_promotion", SourceLockSha256: proposal.SourceLockSha256,
 		SignificantImprovementPercent: margin, ThresholdEvidenceSha256: proposal.Significance.ScoreSha256,
 		SourceApprovalId: proposal.ReviewId.String(), SourceApprovalDigest: proposal.ReviewDecisionDigest,
 		EvaluatedBaseSourceLockSha256: current.SourceLockSha256, PatchSha256: proposal.PatchSha256,

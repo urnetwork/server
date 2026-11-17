@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "status": "BINARY_AND_INDEPENDENT_KEYS_INSTALLED_NOT_ACTIVATED",
+  "control_commit": "84fc2a3e90e805baede9bb297cc591bd7228877b",
+  "agent_sha256": "c59908cc788aa6ccc4088005fda300723fb1848cc1fac58980edf0fc4a2c7d7d",
+  "goofe_binary": "/home/by/sim-latency/releases/control-84fc2a3e9-20261109-v1/competitionsubeval",
+  "goofe_binary_remote_readback_sha256_verified": true,
+  "goofe_observed": {"toolchain": "go1.27.3 linux/amd64", "smt": "off", "governor": "performance", "available_disk_approx": "1020 GiB"},
+  "public_keys": {
+    "coordinator": "m/Fbl9eUZS//5KKwdcG2McxH/qiuc5cvS1Q88CILww4=",
+    "sille": "5TSr7kgY0jKT2B+0JtZXyxXinpc8oMRlKYqZfUZI3Uk=",
+    "goofe": "GjmAVLIVnS54GNMBvMwVVskKV6jJWu+vtImBYLbGG7U="
+  },
+  "key_provisioning": "Each seed was generated with crypto/rand into a fresh canonical root-only role directory using exclusive mode-0400 writes and fsync. Goofe's seed was generated on Goofe and never transferred to the coordinator. Only public identities are recorded here. No prior role was overwritten.",
+  "tests": {"packages": ["competitionagent", "cli/competitionsubeval"], "passed": 434, "failed": 0, "skipped": 1, "skip": "TestManagementSshInheritedPipeHelper is a subprocess-only fixture", "log_sha256": "4b27afbb00c3eb831aef04a96cac7d0409cb8af9cf37255ef50b0830441aaa24"},
+  "remaining": ["Exact G2/G7 child evaluator image", "Real host containment fingerprints", "Freeze both host identities in prospective round policy", "Restricted SSH and systemd role/recovery deployment", "Fresh shared round baseline and cross-host admission before grading activation"],
+  "agent_running": false,
+  "runtime_qualified": false,
+  "grading_activated": false,
+  "production_database_or_vault_main_copied_to_goofe": false
+}

@@ -1,0 +1,96 @@
+Distributed terminal-infrastructure recovery
+===========================================
+
+This local root-only command has separate schema-2 authority. Historical
+schema-1 incident classes and runtime receipts never authorize distributed work.
+There is no REST grant endpoint and API replicas must not receive native SSH
+credentials. API deployment is needed only to consume the schema-2 owner marker.
+
+Source/tests are not deployment or retry authority. The operator must first:
+
+1. Retain an explicit approval for each existing failed paid job, its full
+   canonical terminal snapshot, exact terminal event, reviewed incident and
+   original-host native closure evidence. Only the reviewed retention-budget
+   and independently closed legacy-prelaunch diagnoses are supported. Neither
+   an arbitrary timeout nor candidate-produced output grants another cycle.
+2. Qualify the additive migration against the still-running cycle-zero worker.
+   Apply through the approved direct administrative PostgreSQL path before code
+   deployment; never migrate over a transaction pool. Deploy the compatible
+   API consumer and separately qualified fixed worker before any new grant.
+   Existing staged workers without this capability cannot claim these cycles.
+3. Obtain separate maintenance authorization for the evaluation hold and worker
+   handoff. This command never changes holds, stops jobs, restarts services or
+   edits native state. Wait for every running job and legacy/distributed database
+   owner to finish, plus independently verified full native cleanup on all
+   frozen hosts. A stale lease alone is not a positive idle certificate.
+4. Seal a schema-2 authorization and matching distributed runtime qualification
+   as root-protected files. Bind the original job/run/attempt/host/fences/start/
+   deadline, complete old terminal, frozen source/policy/baseline/image, real
+   terminal event, reviewed closure evidence and exact current supervisor fence.
+   Bind every frozen empty host/slot/fence in increasing slot order. Pin the
+   actual existing old native fence; inspection must not advance it deliberately.
+5. Invoke the local CLI with the existing protected authorization/runtime/token
+   arguments plus --distributed-coordinator and
+   --distributed-coordinator-sha256 for the independently pinned fixed transport
+   profile. The command first checks held/global-idle SQL authority, then sends
+   signed status only for the exact original run and signed availability for
+   every frozen host. It never sends native start, cancel or artifact transfer.
+   A second SQL census must match all original fences. The database-clock proof
+   bracket defaults to one minute and is checked again at deferred commit.
+
+The CLI's separate two-minute control-operation deadline includes source
+preparation, sequential signed host observations and both database gates.
+It does not extend the one-minute native-proof bracket or allocate/extend an
+evaluation clock. Parent cancellation or an earlier parent deadline still wins.
+
+The grant atomically retains the complete original terminal/authorization and
+signed native observations in the immutable private recovery audit, queues one
+cycle of the same job, and advances every idle database host fence once. It does
+not create a submission, charge another fee, change submitted_at/id tie-breaking,
+or rewrite the original source, policy, baseline, admission image or old clocks.
+The original failure remains immutable history, even when native execution had
+finished before central retention exhausted its original deadline. Approved
+historical-control/security-toolchain derivation remains separate and exact.
+
+Authorization does not start a clock. After separately approved hold release,
+the normal qualified worker claims the queued job in original FIFO order. A
+fresh database clock allocates exactly three hours, including all transfer and
+retention work; global attempt count, cycle, host slot and fresh fencing identify
+the new native run. Reconciliation preserves that same attempt/run/new deadline.
+An old original-cycle callback, image or fence cannot complete the new cycle.
+
+Each authorization is single-use. Exact idempotent replay returns only its old
+receipt before mutable runtime/approval/native gates, without another observation
+or fence increment. A different idempotency key cannot grant another cycle.
+Because each grant advances every host fence, two jobs must not reuse the same
+sealed idle cut: explicitly observe and seal the second current census after
+the first grant commits, while both hosts remain held and idle.
+
+Private signed inventories remain only in the immutable audit. CLI stdout,
+general job events and owner polling expose the proof digest, not native file
+paths/signatures or original terminal bytes. The recovery marker grants neither
+publication, source promotion, winner selection, payment nor a second recovery.
+
+On unknown closure, active ownership, cancellation, changed fences, expired
+proof, missing runtime compatibility or ambiguous transaction acknowledgement,
+stop and inspect retained restricted evidence. Do not repair with direct job/
+slot SQL, forge a receipt, reset an old native marker or silently replay a grant.
+
+Qualification coverage
+----------------------
+
+Historical expired-cycle database fixtures use the existing announced-source
+opening path, genuine operator handoff, both runtime acknowledgments, guarded
+durable admission, shared control publication and distributed claim/completion.
+The original three-hour budget is actually expired relative to the fresh SQL
+recovery clock. Control publication uses only the unchanged, separate two-minute
+cleanup grace; an expired-grace negative control must refuse publication.
+
+Current ASAP intake fixtures independently exercise the real SQL-owned opening,
+API-only admission, exact grant derivation through API and worker loaders,
+grading claims and unchanged prepared-control completion. Those boundary tests
+do not claim to have run an entire three-hour ASAP evaluation in real time.
+Historical announced and current ASAP coverage must not be reported as a single
+fully composed expired-ASAP recovery lifecycle. The additive recovery transition
+must also retain the full predecessor intake guard and its independent source,
+baseline, qualification and grading gates.

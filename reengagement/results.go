@@ -71,7 +71,8 @@ type EpisodeFacts struct {
 	// connection, at its first connection that day) from the first step on
 	ConnectDays []time.Time
 	// PaidStarts are the starts of the network's supporter windows with
-	// positive net revenue from the first step on
+	// positive net revenue from the first step on that the network bought: a
+	// redeemed gift year carries its giver's payment and is not one
 	PaidStarts []time.Time
 }
 
@@ -102,7 +103,8 @@ type EpisodeOutcomes struct {
 //   - reactivation_7d, reactivation_30d: a connect.day in (step, step + 7d],
 //     (step, step + 30d]
 //   - retention_90d: a connect.day in (step + 60d, step + 90d], days 61-90
-//   - pro_restart_30d: a paid supporter window starting in (step, step + 30d]
+//   - pro_restart_30d: a paid supporter window starting in (step, step + 30d],
+//     one the network bought (never a redeemed gift year)
 //
 // A window that has not closed at `now` reports false; read matured_days to
 // tell "not yet" from "did not".

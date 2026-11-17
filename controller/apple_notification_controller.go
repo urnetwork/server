@@ -27,6 +27,13 @@ import (
 
 const appleMaximumSubscriptionDuration = 2 * 366 * 24 * time.Hour
 
+// The App Store's billing grace period: a renewal's charge failed, Apple retries
+// it, and the customer stays entitled until the renewal info's
+// gracePeriodExpiresDate. DID_FAIL_TO_RENEW with this subtype starts it, and the
+// subscription's status reads appleStatusBillingGrace until it ends.
+const appleGracePeriodSubtype = "GRACE_PERIOD"
+const appleStatusBillingGrace = 4
+
 // How far a transaction's purchaseDate may lie after the moment its claims are
 // judged (the notification's signedDate, or now for the verify endpoint and
 // the reconciler). A purchase the customer made is dated when it was made, so
@@ -77,8 +84,14 @@ const appleUsdCurrency = "USD"
 var appleLegacySupporterProductIds = []string{"supporter", "supporter_yearly"}
 
 // appleProductAllowed reports whether a verified transaction's product is a
-// Pro subscription this server credits.
+// Pro subscription this server credits. The App Store sells UR Pro only: a
+// product named like a data pack (data_*) is never credited, whatever apple.yml
+// lists. The packs are sold on the rails pro.yml names (data_pack_rails.go),
+// and the stores are not one, so the 256 GiB pack cannot be sold here.
 func appleProductAllowed(allowedProductIds []string, productId string) bool {
+	if isDataPackItem(productId) {
+		return false
+	}
 	return slices.Contains(allowedProductIds, productId) ||
 		slices.Contains(appleLegacySupporterProductIds, productId)
 }
@@ -106,6 +119,9 @@ type validatedAppleTransaction struct {
 	// originalTransactionId names the subscription across renewals; an
 	// offer-code binding (apple_offer_code_binding) is keyed on it
 	originalTransactionId string
+	// originalPurchaseTime is when the subscription's first transaction was
+	// bought, zero when the claims do not say; read for the sales notice
+	originalPurchaseTime time.Time
 	// transactionReason is PURCHASE (the customer bought) or RENEWAL (the
 	// store renewed), "" when the claims do not say; read for the sales notice
 	transactionReason string
@@ -126,6 +142,12 @@ type validatedAppleTransaction struct {
 func (self *validatedAppleTransaction) sandbox() bool {
 	return self.environment == appleEnvironmentSandbox
 }
+
+// The fraction of an App Store USD price the server keeps out of the net
+// revenue it records for a transaction. The subscriptions dashboard's revenue
+// takes the same fraction off an App Store price
+// (subscriptionMetricsStoreFeeFractions).
+const appleTransactionFeeFraction = 0.2
 
 // creditNetRevenue is the net revenue a credit records for the transaction:
 // zero for a sandbox purchase, which keeps its Pro entitlement but earned
@@ -158,6 +180,11 @@ func ProcessAppleNotification(
 	// need not carry.
 	revocation := notification.NotificationType == "REFUND" || notification.NotificationType == "REVOKE"
 	var transaction *validatedAppleTransaction
+	// DID_FAIL_TO_RENEW in the billing grace period holds Pro to its end
+	// (appleHoldGraceEntitlementInTx). The hold needs the transaction's paid
+	// window; a payload without one is still acknowledged, as before, and holds
+	// nothing.
+	var graceTransaction *validatedAppleTransaction
 	if notification.TransactionInfo != nil {
 		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable)
 		if err != nil {
@@ -166,15 +193,23 @@ func ProcessAppleNotification(
 			}
 			return false, err
 		}
+		if notification.NotificationType == "DID_FAIL_TO_RENEW" && notification.Subtype == appleGracePeriodSubtype {
+			if graceTransaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, true); err != nil {
+				glog.Infof("[sub]apple grace notification for transaction %s holds nothing: %v\n", transaction.transactionId, err)
+				graceTransaction = nil
+			}
+		}
 	} else if actionable || revocation || notification.NotificationType == "EXPIRED" {
 		return false, errors.New("missing verified transaction claims")
 	}
 
 	var revokedNetworkIds []server.Id
+	graceHeld := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		processed = false
 		returnErr = nil
 		revokedNetworkIds = nil
+		graceHeld = false
 
 		if transaction != nil {
 			if !appleNetworkExistsInTx(tx, ctx, transaction.networkId) {
@@ -198,9 +233,20 @@ func ProcessAppleNotification(
 			notificationId,
 			notification.NotificationType,
 			notification.Subtype,
-			time.UnixMilli(notification.SignedDate),
+			time.UnixMilli(notification.SignedDate).UTC(),
 		))
-		if notificationTag.RowsAffected() == 0 || !(actionable || revocation) {
+		if notificationTag.RowsAffected() == 0 || !(actionable || revocation || graceTransaction != nil) {
+			return
+		}
+
+		if graceTransaction != nil {
+			if graceExpires, ok := appleGracePeriodExpires(notification.RenewalInfo); ok {
+				held, holdErr := appleHoldGraceEntitlementInTx(tx, ctx, graceTransaction, graceExpires, server.NowUtc())
+				// the hold commits with the notification's ledger row or neither
+				// does; Apple retries the notification
+				server.Raise(holdErr)
+				graceHeld = held
+			}
 			return
 		}
 
@@ -243,6 +289,9 @@ func ProcessAppleNotification(
 
 	if processed {
 		model.UpdateProNetwork(ctx, transaction.networkId)
+	}
+	if graceHeld {
+		model.UpdateProNetwork(ctx, graceTransaction.networkId)
 	}
 	for _, networkId := range revokedNetworkIds {
 		// the entitlement ended under the network -- make the downgrade visible
@@ -358,7 +407,7 @@ func appleRecordOnboardingOutcome(ctx context.Context, notificationType string, 
 		}
 	}()
 	now := server.NowUtc()
-	plan := planForProductId(transaction.productId)
+	plan := applePlanForProductId(transaction.productId)
 	switch notificationType {
 	case "DID_RENEW":
 		if processed {
@@ -445,6 +494,7 @@ func appleCreditSubscriptionTransactionInTx(
 	}
 
 	endTime := transaction.expiresTime.Add(SubscriptionGracePeriod)
+	paidEndTime := transaction.expiresTime
 	renewal := &model.SubscriptionRenewal{
 		NetworkId:          transaction.networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -453,6 +503,7 @@ func appleCreditSubscriptionTransactionInTx(
 		NetRevenue:         transaction.creditNetRevenue(),
 		SubscriptionMarket: model.SubscriptionMarketApple,
 		TransactionId:      transaction.transactionId,
+		PaidEndTime:        &paidEndTime,
 	}
 	server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
 	// the regional price tier (from the storefront) and the welcome offer (an
@@ -462,15 +513,18 @@ func appleCreditSubscriptionTransactionInTx(
 	// under its own savepoint
 	appleRecordWinbackInTx(tx, ctx, transaction)
 
+	// the period's Pro marker holds no data (SupporterPeriodTransferBalance)
 	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
 		NetworkId:             transaction.networkId,
 		StartTime:             transaction.purchaseTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     transaction.creditNetRevenue(),
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	})
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, transaction.networkId)
 	if transaction.sandbox() {
 		// no payment was made, so there is no sale to post
 		return true
@@ -481,6 +535,75 @@ func appleCreditSubscriptionTransactionInTx(
 		return appleSalesNotice(transaction)
 	})
 	return true
+}
+
+// The end of the billing grace period the renewal info names; ok false when it
+// names none.
+func appleGracePeriodExpires(renewalClaims map[string]any) (time.Time, bool) {
+	millis, ok := appleControllerInt64Claim(renewalClaims, "gracePeriodExpiresDate")
+	if !ok || millis <= 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(millis).UTC(), true
+}
+
+// Keeps Pro through the App Store's billing grace period: the renewal's charge
+// failed, and Apple keeps the customer entitled until gracePeriodExpiresDate
+// while it retries. This is the Play grace hold's shape
+// (playHoldGraceEntitlementInTx): a renewal row with no revenue, carrying the
+// transaction's id, so the reconcile's end direction and a REFUND or REVOKE of
+// the transaction retire it with the purchase, and a zero-byte Pro marker with
+// its exact window. Nothing records the unpaid renewal as paid: no bytes, no
+// revenue, no sales notice. When the charge goes through, its DID_RENEW credits
+// the next period as usual. When Apple stops retrying, the reconcile ends the
+// hold, and otherwise it runs out a day after the grace period, like any App
+// Store window.
+//
+// held is false when the grace period has ended, adds nothing past the
+// transaction's own expiry, or already holds. The caller refreshes the pro cache
+// after the commit. The tx must be ReadCommitted, so the check after the lock
+// sees a concurrent hold.
+func appleHoldGraceEntitlementInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	transaction *validatedAppleTransaction,
+	graceExpires time.Time,
+	now time.Time,
+) (held bool, returnErr error) {
+	endTime := graceExpires.Add(SubscriptionGracePeriod)
+	if !now.Before(endTime) || !transaction.expiresTime.Before(graceExpires) {
+		return false, nil
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		fmt.Sprintf("apple-grace-hold:%s:%s", transaction.networkId, transaction.transactionId),
+	))
+	if model.HasAppleGraceHoldInTx(tx, ctx, transaction.networkId, transaction.purchaseTime, endTime) {
+		return false, nil
+	}
+	if err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
+		NetworkId:          transaction.networkId,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		StartTime:          transaction.purchaseTime,
+		EndTime:            endTime,
+		NetRevenue:         0,
+		SubscriptionMarket: model.SubscriptionMarketApple,
+		TransactionId:      transaction.transactionId,
+	}); err != nil {
+		return false, err
+	}
+	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+		NetworkId:             transaction.networkId,
+		StartTime:             transaction.purchaseTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: 0,
+		NetRevenue:            0,
+		SubsidyNetRevenue:     0,
+		BalanceByteCount:      0,
+		Pro:                   true,
+	})
+	return true, nil
 }
 
 // appleTransactionCreditedBeforeLedgerInTx reports whether the notification
@@ -600,8 +723,12 @@ func validateAppleTransactionAccount(
 		(currency == appleUsdCurrency && appleMaximumUsdPriceMilliunits < priceMilliunits) {
 		return nil, errors.New("invalid App Store purchase dates or price")
 	}
-	validated.purchaseTime = time.UnixMilli(purchaseMillis)
-	validated.expiresTime = time.UnixMilli(expiresMillis)
+	// in UTC, as the timestamp columns these reach hold it
+	validated.purchaseTime = time.UnixMilli(purchaseMillis).UTC()
+	validated.expiresTime = time.UnixMilli(expiresMillis).UTC()
+	if originalMillis, ok := appleControllerInt64Claim(transactionClaims, "originalPurchaseDate"); ok && 0 < originalMillis {
+		validated.originalPurchaseTime = time.UnixMilli(originalMillis).UTC()
+	}
 	if !validated.expiresTime.After(validated.purchaseTime) ||
 		validated.expiresTime.Sub(validated.purchaseTime) > appleMaximumSubscriptionDuration ||
 		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(appleTransactionPurchaseLead(validated))) {
@@ -618,7 +745,7 @@ func validateAppleTransactionAccount(
 	case validated.currency == appleUsdCurrency:
 		priceUsd := float64(priceMilliunits) / 1000
 		priceNanoCents := model.UsdToNanoCents(priceUsd)
-		validated.netRevenue = model.NanoCents(float64(priceNanoCents) * 0.8)
+		validated.netRevenue = model.NanoCents(float64(priceNanoCents) * (1 - appleTransactionFeeFraction))
 	default:
 		// A price in another currency, or with no currency, is not USD, and the
 		// server has no reliable rate to convert it. Record the same paid marker

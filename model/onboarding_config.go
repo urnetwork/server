@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -104,6 +106,29 @@ func (c OnboardingAppleOfferCodesConfig) ReferenceName() string {
 	return OnboardingAppleOfferReferenceNameDefault
 }
 
+// AppleOneTimeOfferCodeBatchMin is the smallest one-time offer code batch App
+// Store Connect generates.
+const AppleOneTimeOfferCodeBatchMin = 500
+
+// OnboardingAppleOfferCodeMinAvailableDefault is the top-up's floor when
+// offer.apple.min_available is not set.
+const OnboardingAppleOfferCodeMinAvailableDefault = 200
+
+// EffectiveBatchSize is the batch a top-up requests: batch_size, never below
+// Apple's minimum.
+func (c OnboardingAppleOfferCodesConfig) EffectiveBatchSize() int {
+	return max(c.BatchSize, AppleOneTimeOfferCodeBatchMin)
+}
+
+// EffectiveMinAvailable is the top-up's floor: min_available, or the default
+// when it is not positive.
+func (c OnboardingAppleOfferCodesConfig) EffectiveMinAvailable() int {
+	if c.MinAvailable <= 0 {
+		return OnboardingAppleOfferCodeMinAvailableDefault
+	}
+	return c.MinAvailable
+}
+
 // Template variant and locale fallbacks.
 const (
 	TemplateVariantDefault = "default"
@@ -140,21 +165,76 @@ func (c *OnboardingBrevoConfig) TemplateIdLocale(step string, variant string, lo
 	return 0, "", false
 }
 
+// TemplateIdForReader selects the template for a reader: the step's variant
+// (else `default`), in the locale onboarding.ChooseTemplateLocale picks from
+// the reader's languages among the locales the variant has templates in.
+// source is where that locale came from ("" for the English default). ok is
+// false when nothing usable is configured.
+func (c *OnboardingBrevoConfig) TemplateIdForReader(
+	step string,
+	variant string,
+	languages onboarding.MailLanguages,
+	settings *onboarding.MailLanguageSettings,
+) (id int, locale string, source string, ok bool) {
+	variants, ok := c.Templates[step]
+	if !ok {
+		return 0, "", "", false
+	}
+	locales, ok := variants[variant]
+	if !ok || len(locales) == 0 {
+		locales, ok = variants[TemplateVariantDefault]
+		if !ok || len(locales) == 0 {
+			return 0, "", "", false
+		}
+	}
+	templateLocales := []string{}
+	for candidate, id := range locales {
+		if 0 < id {
+			templateLocales = append(templateLocales, candidate)
+		}
+	}
+	// the map's order must not decide between equals
+	sort.Strings(templateLocales)
+	locale, source = onboarding.ChooseTemplateLocale(languages, templateLocales, settings)
+	if locale == "" {
+		return 0, "", "", false
+	}
+	return locales[locale], locale, source, true
+}
+
+// HasTemplateVariant reports whether the step's variant itself has an uploaded
+// template in some locale, without the `default` fallback: a new variant
+// (e2_widget/desktop) goes only once the release has uploaded it and written
+// its ids.
+func (c *OnboardingBrevoConfig) HasTemplateVariant(step string, variant string) bool {
+	for _, id := range c.Templates[step][variant] {
+		if 0 < id {
+			return true
+		}
+	}
+	return false
+}
+
 // TemplateLocaleCandidates orders the locales to try for a recipient: the exact
-// tag, its language alone, then `en`. Tags are matched as the store writes them
-// (es-419, pt-BR, zh-HK), case-insensitively on the language.
+// tag, the store locale its region reads (onboarding.RegionalStoreLocale:
+// zh-TW and zh-Hant read zh-HK, es-AR reads es-419, pt-AO reads pt-PT), its
+// language alone, then `en`, each once. Tags are matched as the store writes
+// them (es-419, pt-BR, zh-HK), case-insensitively on the language.
 func TemplateLocaleCandidates(locale string) []string {
 	locale = strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
 	candidates := []string{}
-	if locale != "" {
-		candidates = append(candidates, locale)
-		if language, _, ok := strings.Cut(locale, "-"); ok && language != "" {
-			candidates = append(candidates, strings.ToLower(language))
-		} else {
-			candidates = append(candidates, strings.ToLower(locale))
+	add := func(candidate string) {
+		if candidate != "" && !slices.Contains(candidates, candidate) {
+			candidates = append(candidates, candidate)
 		}
 	}
-	candidates = append(candidates, TemplateLocaleDefault)
+	if locale != "" {
+		add(locale)
+		add(onboarding.RegionalStoreLocale(locale))
+		language, _, _ := strings.Cut(locale, "-")
+		add(strings.ToLower(language))
+	}
+	add(TemplateLocaleDefault)
 	return candidates
 }
 
@@ -249,6 +329,74 @@ type OnboardingConfig struct {
 	Results     OnboardingResultsConfig  `yaml:"results"`
 	// who the campaign emails (onboarding and re-engagement) may go to
 	Policy OnboardingPolicyConfig `yaml:"policy"`
+	// which app builds have the home screen widget of E2's widget email
+	Widgets OnboardingWidgetsConfig `yaml:"widgets"`
+	// the language the campaign emails (onboarding and re-engagement) of a
+	// reader known only by country are written in
+	MailLanguage OnboardingMailLanguageConfig `yaml:"mail_language"`
+}
+
+// OnboardingMailLanguageConfig lays the owner's choices over
+// onboarding.DefaultMailLanguageSettings, so a country's language is a config
+// change, not a server release.
+type OnboardingMailLanguageConfig struct {
+	// CountryOverrides maps an alpha-2 country to the language its readers
+	// known only by country get, entry by entry over the rule
+	// (onboarding.CountryLanguage): `UA: uk`, `KZ: ru`; `en` pins English.
+	// Ukraine, Kazakhstan and Belarus get English until the owner sets them.
+	CountryOverrides map[string]string `yaml:"country_overrides"`
+	// CountryLanguageMinPercent and CountryOtherLanguageMaxPercent replace
+	// the rule's thresholds when positive (defaults 80 and 50).
+	CountryLanguageMinPercent      float64 `yaml:"country_language_min_percent"`
+	CountryOtherLanguageMaxPercent float64 `yaml:"country_other_language_max_percent"`
+}
+
+// EffectiveMailLanguageSettings are onboarding.DefaultMailLanguageSettings
+// with mail_language laid over them. An override whose country is not two
+// letters or whose language does not parse is ignored.
+func (c *OnboardingConfig) EffectiveMailLanguageSettings() *onboarding.MailLanguageSettings {
+	s := onboarding.DefaultMailLanguageSettings()
+	for country, language := range c.MailLanguage.CountryOverrides {
+		country = NormalizeCountryCode(country)
+		language = onboarding.NormalizeLanguageTag(language)
+		if country == "" || language == "" {
+			continue
+		}
+		s.CountryOverrides[country] = language
+	}
+	if 0 < c.MailLanguage.CountryLanguageMinPercent {
+		s.CountryLanguageMinPercent = c.MailLanguage.CountryLanguageMinPercent
+	}
+	if 0 < c.MailLanguage.CountryOtherLanguageMaxPercent {
+		s.CountryOtherLanguageMaxPercent = c.MailLanguage.CountryOtherLanguageMaxPercent
+	}
+	return s
+}
+
+// OnboardingWidgetsConfig lays release records over
+// onboarding.DefaultWidgetSettings, so a release that brings the home screen
+// widget to another build (the App Store's, first) is a config change, not a
+// server release.
+type OnboardingWidgetsConfig struct {
+	// MinVersions maps "<platform>/<distribution>" to the first app version
+	// whose build has the widget (onboarding.WidgetSettings.MinVersions),
+	// entry by entry over the defaults; an empty version removes a default.
+	MinVersions map[string]string `yaml:"min_versions"`
+}
+
+// EffectiveWidgetSettings are onboarding.DefaultWidgetSettings with
+// widgets.min_versions laid over them.
+func (c *OnboardingConfig) EffectiveWidgetSettings() *onboarding.WidgetSettings {
+	s := onboarding.DefaultWidgetSettings()
+	for key, version := range c.Widgets.MinVersions {
+		key = strings.TrimSpace(key)
+		if version = strings.TrimSpace(version); version == "" {
+			delete(s.MinVersions, key)
+		} else {
+			s.MinVersions[key] = version
+		}
+	}
+	return s
 }
 
 // OnboardingPolicyConfig is the mail policy (onboarding/policy.go): the
@@ -286,9 +434,12 @@ func (c *OnboardingConfig) MailPolicy() onboarding.MailPolicy {
 // OnboardingResultsConfig tunes the nightly results rollup and the admin
 // results endpoint (PLAN.md "OPTIMIZATION LOOP" §3-§5).
 type OnboardingResultsConfig struct {
-	// MinExposures is the volume floor of /admin/onboarding/results: a row with
-	// fewer exposures is not returned (it would identify a handful of networks
-	// by dimension alone). Default 10.
+	// MinExposures is the volume floor of /admin/onboarding/results and
+	// /admin/reengagement/results: an experiment's variant with fewer
+	// exposures in total over the request's cohort days and filters has none
+	// of its rows returned (a handful of networks would be identifiable by
+	// dimension alone). Held on the variant totals the readout sums, not per
+	// row, which would drop most of each arm. Default 10.
 	MinExposures int `yaml:"min_exposures"`
 	// RollupDays is how many cohort days back the nightly rollup recomputes so
 	// the fixed-window outcomes (up to 60 days) mature in place. Default 60.
@@ -417,7 +568,23 @@ func newOnboardingConfig(y *onboardingYaml) *OnboardingConfig {
 
 // Onboarding returns the parsed onboarding config (cached; parsed once).
 func Onboarding() *OnboardingConfig {
+	if c := onboardingConfigOverride.Load(); c != nil {
+		return c
+	}
 	return onboardingConfig()
+}
+
+var onboardingConfigOverride atomic.Pointer[OnboardingConfig]
+
+// Testing_SetOnboardingConfig makes Onboarding() answer c, checked the way the
+// loader checks a parsed file, until the returned function restores the
+// previous answer. For tests of the campaign's controllers, which no
+// onboarding.yml reaches.
+func Testing_SetOnboardingConfig(c *OnboardingConfig) func() {
+	previous := onboardingConfigOverride.Swap(newOnboardingConfig(&onboardingYaml{Onboarding: *c}))
+	return func() {
+		onboardingConfigOverride.Store(previous)
+	}
 }
 
 // validExperiments drops registry entries that cannot be assigned safely and logs

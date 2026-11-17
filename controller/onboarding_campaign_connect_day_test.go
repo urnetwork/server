@@ -30,10 +30,16 @@ func TestOnboardingCampaignCountsConnectDayAsConnected(t *testing.T) {
 		enroll := func(path string) server.Id {
 			networkId := server.NewId()
 			model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("synthetic-campaign-%s", networkId), server.NewId())
+			// a Play phone on a build with the widget: E2's activated
+			// email goes only there (onboarding.WidgetSettings)
 			if !model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{NetworkId: networkId, CreatedAt: createdAt,
-				Path: path, Email: true, TimeZone: "UTC", NextStep: onboarding.StepE1, NextSendAt: &now}) {
+				Path: path, Email: true, TimeZone: "UTC", Platform: "android", Distribution: session.ClientDistributionPlay,
+				NextStep: onboarding.StepE1, NextSendAt: &now}) {
 				t.Fatal("campaign fixture missing")
 			}
+			clientId := server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "synthetic phone", "17.1 Pixel 8 Pro")
+			model.SetDeviceClientVersion(ctx, clientId, "2026.10.15-1072765730")
 			return networkId
 		}
 		// what is left of connections on three days once their rows are pruned

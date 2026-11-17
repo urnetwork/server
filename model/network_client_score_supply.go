@@ -1,5 +1,7 @@
 // The admitted provider supply each score export measures per country target
-// and request IP family (SIGNALS.md §2.9a). Admission is decided here, in the
+// and request IP family (SIGNALS.md §2.9a), and how many of those providers
+// the country floor admitted to Online below the URL bar
+// (network_client_score_country_floor.go). Admission is decided here, in the
 // export UpdateClientScores runs on the taskworker. The export runs on
 // whichever taskworker claims it, so within an hour several processes each
 // hold a measurement; only the one holding the newest publishes it, by a
@@ -133,6 +135,12 @@ type clientScoreSupply struct {
 	measuredAt time.Time
 	countries  map[clientScoreSupplyKey]int
 	fleet      map[string]int
+	// The country floor's admissions to Online
+	// (network_client_score_country_floor.go), which countries and fleet
+	// count with the rest: by country and decision, a country without one
+	// absent, and by decision, zero included. Nil for none.
+	countryFloor      map[clientScoreCountryFloorKey]int
+	countryFloorFleet map[string]int
 }
 
 // Counts the admitted providers of every country target, and of every
@@ -217,6 +225,17 @@ var (
 		"Unix time of the score export that measured the admitted-provider supply",
 		nil, nil,
 	)
+	// a country the floor admitted nothing to has no series
+	clientScoreCountryFloorProvidersDesc = prometheus.NewDesc(
+		"urnetwork_client_score_country_floor_providers",
+		"Providers the country floor admitted to Online below the URL bar, by country target and decision (strict: the facets every request reads; classified: the capability facets of selector-mode requests), from the same export",
+		[]string{"country", "decision"}, nil,
+	)
+	clientScoreCountryFloorProvidersFleetDesc = prometheus.NewDesc(
+		"urnetwork_client_score_country_floor_providers_fleet",
+		"Providers the country floor admitted to Online below the URL bar in all country targets, by decision, from the same export",
+		[]string{"decision"}, nil,
+	)
 )
 
 // Publishes this process's latest measurement atomically, so a scrape sees
@@ -271,9 +290,11 @@ func (self *clientScoreSupplyCollector) publish(ctx context.Context, supply *cli
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.supply = &clientScoreSupply{
-			measuredAt: supply.measuredAt,
-			countries:  maps.Clone(supply.countries),
-			fleet:      maps.Clone(supply.fleet),
+			measuredAt:        supply.measuredAt,
+			countries:         maps.Clone(supply.countries),
+			fleet:             maps.Clone(supply.fleet),
+			countryFloor:      maps.Clone(supply.countryFloor),
+			countryFloorFleet: maps.Clone(supply.countryFloorFleet),
 		}
 	}()
 	self.publication(ctx)
@@ -366,6 +387,8 @@ func (self *clientScoreSupplyCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- clientScoreAdmittedProvidersDesc
 	ch <- clientScoreAdmittedProvidersFleetDesc
 	ch <- clientScoreSupplyMeasuredDesc
+	ch <- clientScoreCountryFloorProvidersDesc
+	ch <- clientScoreCountryFloorProvidersFleetDesc
 }
 
 func (self *clientScoreSupplyCollector) Collect(ch chan<- prometheus.Metric) {
@@ -382,6 +405,14 @@ func (self *clientScoreSupplyCollector) Collect(ch chan<- prometheus.Metric) {
 		if clientScoreSupplyFamily(family) {
 			ch <- prometheus.MustNewConstMetric(clientScoreAdmittedProvidersFleetDesc, prometheus.GaugeValue, float64(count), family)
 		}
+	}
+	for key, count := range supply.countryFloor {
+		if clientScoreSupplyCountry(key.country) && 0 < count {
+			ch <- prometheus.MustNewConstMetric(clientScoreCountryFloorProvidersDesc, prometheus.GaugeValue, float64(count), key.country, key.decision)
+		}
+	}
+	for decision, count := range supply.countryFloorFleet {
+		ch <- prometheus.MustNewConstMetric(clientScoreCountryFloorProvidersFleetDesc, prometheus.GaugeValue, float64(count), decision)
 	}
 	ch <- prometheus.MustNewConstMetric(clientScoreSupplyMeasuredDesc, prometheus.GaugeValue, float64(supply.measuredAt.Unix()))
 }

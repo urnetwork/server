@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-cleanup/v1",
+  "approval": "Existing approval for clean versioned baseline copies in completed temporary test checkouts.",
+  "temporary_checkout": "/home/by/urnetwork/temp/epoch2-g2-integration-20261104.2hZRNLC3/server",
+  "retained_commit": "1597737060344a25e4b1a352a9de1f7f3d8891b3",
+  "excluded_subtree": "connect/sim-latency/baseline",
+  "baseline_tracked_files_clean": true,
+  "no_untracked_or_ignored_files_in_excluded_subtree": true,
+  "no_active_process_cwd_reference": true,
+  "process_command_scan_only_matched_its_observer": true,
+  "sparse_checkout_previously_disabled": true,
+  "temporary_checkout_clean_after_operation": true,
+  "canonical_baseline_preserved": true,
+  "git_objects_logs_patches_preserved": true,
+  "active_checkouts_and_compiler_caches_untouched": true,
+  "restore_command": "git -C /home/by/urnetwork/temp/epoch2-g2-integration-20261104.2hZRNLC3/server sparse-checkout disable"
+}

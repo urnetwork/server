@@ -117,9 +117,12 @@ type testExtenderProbeCall struct {
 }
 
 // Replaces the probe dial with a stub that answers as told and records what it
-// was asked to probe.
+// was asked to probe. The prober's own control target answers.
 func stubExtenderProbe(t testing.TB, answer func() error) func() []testExtenderProbeCall {
 	t.Helper()
+	stubTestChurnControl(t, func(ipVersion int) string {
+		return extenderProbeControlOk
+	})
 	// the task probes up to sixteen addresses at once, so the record of what
 	// was probed is shared state
 	stateLock := sync.Mutex{}
@@ -237,13 +240,80 @@ func TestExtenderProbeDeactivatesAndRevokesAfterSixFailures(t *testing.T) {
 		connect.AssertEqual(t, string(body.PublicKey), string(stored.Extender.PublicKey))
 		connect.AssertEqual(t, body.NetworkHost, testExtenderWorkNetworkHost)
 
-		// a deactivated address leaves the probe set: only a new activation
-		// brings it back
+		// a deactivated address leaves the active probe set. It is probed only
+		// for its return, and while it does not answer nothing changes
 		probedBefore := len(calls())
 		result := runTestExtenderProbe(t, ctx)
 		connect.AssertEqual(t, result.Probed, 0)
-		connect.AssertEqual(t, len(calls()), probedBefore)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 0)
+		connect.AssertEqual(t, len(calls()), probedBefore+1)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 1)
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, false)
+		connect.AssertEqual(t, stored.Extender.Active, false)
+	})
+}
+
+// The way back (extender_probe_recovery.go): an extender the probes revoked is
+// probed for its return, and the first probe it answers restores it, with a
+// record queued that verifies under the root key and is issued after its
+// revocation, so a directory holding the revocation takes it back (B5).
+func TestExtenderProbeRestoresARevokedExtenderThatAnswersAgain(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		rootPublicKey := installTestExtenderWorkConfig(t)
+		extenderId := createTestExtender(ctx, 11, 4)
+
+		answering := false
+		stubExtenderProbe(t, func() error {
+			if answering {
+				return nil
+			}
+			return fmt.Errorf("the extender did not answer")
+		})
+		for range ExtenderMaxConsecutiveProbeFailures {
+			runTestExtenderProbe(t, ctx)
+		}
+		stored := model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Extender.Active, false)
+		revocationTime := *stored.Extender.RevokeTime
+
+		answering = true
+		result := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 1)
+		connect.AssertEqual(t, result.Unrevoked, 1)
+
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Extender.Active, true)
+		connect.AssertEqual(t, stored.Extender.RevokeTime == nil, true)
+		connect.AssertEqual(t, stored.Addresses[0].Active, true)
+		connect.AssertEqual(t, stored.Addresses[0].ConsecutiveProbeFailures, 0)
+		connect.AssertEqual(t, stored.Addresses[0].LastProbeSuccessTime != nil, true)
+
+		publishes := model.Testing_GetNetworkExtenderPublishes(ctx)
+		connect.AssertEqual(t, len(publishes), 2)
+		connect.AssertEqual(t, publishes[0].Kind, model.NetworkExtenderPublishKindRevocation)
+		connect.AssertEqual(t, publishes[1].Kind, model.NetworkExtenderPublishKindRecord)
+		message := &protocol.ExtenderGossipMessage{}
+		if err := proto.Unmarshal(publishes[1].Message, message); err != nil {
+			t.Fatalf("the publish row is not a gossip message: %v", err)
+		}
+		body, err := connect.NewExtenderRootKeySet(rootPublicKey).VerifyRecord(message.GetRecord())
+		if err != nil {
+			t.Fatalf("the restored record does not verify under the root key: %v", err)
+		}
+		if body.IssueTimeMs <= uint64(revocationTime.UnixMilli()) {
+			t.Fatalf("the restored record (%d) is not issued after the revocation (%d)", body.IssueTimeMs, revocationTime.UnixMilli())
+		}
+		connect.AssertEqual(t, len(body.Addresses), 1)
+
+		// it is an active address like any other from then on
+		result = runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.Probed, 1)
+		connect.AssertEqual(t, result.Succeeded, 1)
+		connect.AssertEqual(t, result.RecoveryProbed, 0)
 	})
 }
 
@@ -331,12 +401,19 @@ func TestExtenderProbeKeepsTheExtenderWhileAFamilyAnswers(t *testing.T) {
 		connect.AssertEqual(t, stored.Extender.Active, true)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 0)
 
-		// the next run probes the surviving family only
+		// the next run probes the surviving family as an active address, and
+		// the lost one only for its return, which it does not answer
 		before := len(calls())
-		runTestExtenderProbe(t, ctx)
+		result := runTestExtenderProbe(t, ctx)
+		connect.AssertEqual(t, result.Probed, 1)
+		connect.AssertEqual(t, result.Succeeded, 1)
+		connect.AssertEqual(t, result.RecoveryProbed, 1)
+		connect.AssertEqual(t, result.Restored, 0)
 		probed := calls()[before:]
-		connect.AssertEqual(t, len(probed), 1)
-		connect.AssertEqual(t, probed[0].ipVersion, 6)
+		connect.AssertEqual(t, len(probed), 2)
+		stored = model.Testing_GetNetworkExtender(ctx, extenderId)
+		connect.AssertEqual(t, stored.Addresses[0].Active, false)
+		connect.AssertEqual(t, stored.Addresses[1].Active, true)
 	})
 }
 
@@ -498,8 +575,9 @@ func TestExtenderTasksAreInertWithoutAnExtenderNetwork(t *testing.T) {
 // because nothing waits this long when the bound holds.
 const testExtenderProbeConcurrencyTimeout = 60 * time.Second
 
-// The pass is bounded at ExtenderProbeConcurrency addresses at once, so a large
-// directory does not open thousands of sockets from one process.
+// The pass is bounded at ExtenderProbeSettings.Concurrency tcp addresses at
+// once, so a large directory does not open thousands of sockets from one
+// process.
 //
 // The bound is made exact rather than sampled: every probe blocks until exactly
 // that many are in flight, so a lower bound never reaches the barrier and a
@@ -510,7 +588,8 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 		ctx := context.Background()
 		installTestExtenderWorkConfig(t)
 
-		const targetCount = 2 * ExtenderProbeConcurrency
+		concurrency := DefaultExtenderProbeSettings().Concurrency
+		targetCount := 2 * concurrency
 		for i := range targetCount {
 			createTestExtender(ctx, 200+i, 4)
 		}
@@ -527,7 +606,7 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 				defer stateLock.Unlock()
 				inFlight += 1
 				maxInFlight = max(maxInFlight, inFlight)
-				if inFlight == ExtenderProbeConcurrency {
+				if inFlight == concurrency {
 					reached.Do(func() { close(atConcurrency) })
 				}
 			}()
@@ -558,17 +637,17 @@ func TestExtenderProbeBoundsTheConcurrency(t *testing.T) {
 		if stalled {
 			t.Fatalf(
 				"the task never had %d probes in flight; the high-water mark was %d",
-				ExtenderProbeConcurrency,
+				concurrency,
 				maxInFlight,
 			)
 		}
 		connect.AssertEqual(t, result.Probed, targetCount)
 		connect.AssertEqual(t, result.Succeeded, targetCount)
-		if ExtenderProbeConcurrency < maxInFlight {
+		if concurrency < maxInFlight {
 			t.Fatalf(
 				"the task had %d probes in flight, above the bound of %d",
 				maxInFlight,
-				ExtenderProbeConcurrency,
+				concurrency,
 			)
 		}
 	})
@@ -590,6 +669,9 @@ func TestExtenderProbeReturnsWhenItsContextEndsDuringAProbe(t *testing.T) {
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
+		stubTestChurnControl(t, func(ipVersion int) string {
+			return extenderProbeControlOk
+		})
 		previous := probeExtenderAddress
 		probeExtenderAddress = func(
 			ctx context.Context,

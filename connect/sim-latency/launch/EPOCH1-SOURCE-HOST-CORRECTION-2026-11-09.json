@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "status": "V4_RUNNING_WITH_CORRECT_INCUMBENT_CHECKER_AND_MANAGEMENT_AFFINITY",
+  "failed_unit": "urnetwork-epoch1-approved-source-20261109-v3.service",
+  "retained_native_test_passes": 33,
+  "retained_native_test_failures": 0,
+  "retained_native_test_skips": 0,
+  "retained_native_test_log_sha256": "0adaf5e752d684c57088c36e981c296976812a1ba6a4a73abe80cfa56f7d15ab",
+  "retained_model_attestations": {"qwen": "passed", "gemma": "passed", "official_honesty_review_replaced": false},
+  "root_cause": "Source qualifier deployment selected the obsolete c5f checker release although the configured incumbent is the d72 release. Wrapper bytes have the same digest but different relative release contents. The source unit also omitted management-core affinity. No hardware drift or product defect is established.",
+  "correct_checker": "/usr/local/libexec/urnetwork/competition-c2-host-selfcheck-d72-20261027-v1/competition-host-self-check",
+  "correct_checker_script_sha256": "d72aa955467cab45aec007b0fc8eac540e6f75dcbf6214751bc94e94bd89eb03",
+  "actual_correctly_pinned_probe": {"qualification_sha256": "08ee3a5a4acf0f4b8fabf6279d4257bd9fdc3314ffb9f59e87f2981556cb300d", "qualification_match": true, "worker_affinity_pinned": true, "negative_boolean_flags": [], "rebaseline_passed": true, "active_host_config_modified": false},
+  "replacement": {"unit": "urnetwork-epoch1-approved-source-20261109-v4.service", "invocation_id": "907206d576854df0a6552a28fa4be545", "main_pid_at_observation": 540009, "active_at_observation": true, "started_at": "2026-11-09T14:28:48Z", "outer_deadline": "2026-11-09T15:28:48Z", "management_cpu_affinity": "20,22", "release_directory": "/usr/local/libexec/urnetwork/competition-source-host-a7b6f4a2d-20261109-v1", "binary_sha256": "0750a65e7655bda385c3087b60b82fea70a9113b01711152aa13e3c0e02d7e84", "build_wrapper_sha256": "564282e16f7707e26e522be48293eb57ae1f9cf3b313fc5e10972f3a98a202a6", "qualifier_wrapper_sha256": "ac06e69fade23a19907e8f40190517d476212494b922c3936c609fd513b64a8a", "build_settings_sha256": "292c44d9a69e8c40d86789f05160a52f1d91607b4fabd65a6223ea4f2fce0434", "qualification_settings_sha256": "589893403aa1e8351e1af3af94519a87592e7743e330e2ab4e2e3f05b308297f"},
+  "old_releases_and_journals_rewritten": false,
+  "source_qualification_pass_claim": false,
+  "winner_patch_or_official_approval_changed": false,
+  "scoring_replicate_or_baseline_redrawn": false
+}

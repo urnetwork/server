@@ -288,7 +288,7 @@ func requireCloseFunctionFairnessConservation(t testing.TB, ctx context.Context,
             NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=ANY($3)) AND
             NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=ANY($1)) AND
             (SELECT count(*)=64 AND bool_and(start_balance_byte_count=10000 AND balance_byte_count=9932) FROM transfer_balance WHERE balance_id=ANY($5)) AND
-            (SELECT provided_byte_count=4352 AND provided_net_revenue_nano_cents=0 FROM account_balance WHERE network_id=$4)`,
+            NOT EXISTS(SELECT 1 FROM account_balance WHERE network_id=$4)`,
 			f.ids, f.paid, f.free, f.provider, f.balances).Scan(&exact))
 		if !exact {
 			t.Fatal("completed task traffic did not conserve all real payer/provider obligations")
@@ -382,10 +382,10 @@ func TestCloseScheduledBacklogKeepsFinancialAndRecurringProgress(t *testing.T) {
 		release := func() { releaseOnce.Do(func() { close(closeTarget.release) }) }
 		defer func() { release(); worker.Close(); cancel(); <-done }()
 		go func() { defer close(done); server.HandleError(worker.Run, func(err error) { runErr = err }) }()
-		// Producers schedule provider totals for the drain
-		// (model/subscription_provider_totals_drain.go). This worker registers
-		// only the per-task reader, so the deferral elapses at once and totals
-		// are due as they were before the drain; a held row waits a tick.
+		// Settlement queues no provider totals since 2026-11-11
+		// (BILLING-SPLIT.md), so this finds no rows; it keeps any row an older
+		// producer would schedule for the drain due at once for the per-task
+		// reader this worker registers.
 		dueStop, dueDone := make(chan struct{}), make(chan struct{})
 		go func() {
 			defer close(dueDone)

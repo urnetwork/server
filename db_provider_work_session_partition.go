@@ -17,13 +17,16 @@
 //   - the append starts a client's head at 1, and only when the client has
 //     none (the head's primary key);
 //   - provider_work_session_head_guard refuses every update but +1 and every
-//     delete, and its truncate guard refuses truncate, so a head never
-//     repeats a value;
+//     delete but the head retention's, and its truncate guard refuses
+//     truncate, so a head never repeats a value while its client has an event
+//     in the journal: the retention deletes a head only once its client has
+//     no event and no receipt left (db_provider_work_session_head_retention.go),
+//     and a journal started again at 1 then meets none of its old sequences;
 //   - the cutover copies nothing: the old table attaches as the legacy
 //     partition with its rows as they are.
 //
-// So a client's sequences are 1, 2, 3, ... exactly once each, across every
-// partition, and no separate identity relation is kept.
+// So a client's retained sequences are 1, 2, 3, ... exactly once each, across
+// every partition, and no separate identity relation is kept.
 //
 // # The receipt's reference
 //
@@ -56,6 +59,12 @@
 // legacy partition's upper bound is the cutover week, so it becomes old enough
 // that long after it. The registry also retains any leaf whose admissions are
 // still needed by open connections.
+//
+// The legacy partition can also go early, by the owner-run drop
+// (providerWorkSessionCutover.dropLegacy, owner 2026-11-15): since the legacy
+// drop guard, the guard admits it an hour after its upper bound, and a
+// connection admitted before the cutover that retires after it is appended
+// without its network id.
 package server
 
 import (
@@ -199,6 +208,48 @@ BEGIN
  SELECT (regexp_match(pg_get_expr(c.relpartbound,c.oid),'TO \(''([^'']*)''\)$'))[1]::timestamp INTO upper_bound
  FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid
  WHERE i.inhparent=to_regclass('public.provider_work_session_event') AND c.oid=to_regclass('public.'||quote_ident(leaf));
+ IF upper_bound IS NULL OR (now() AT TIME ZONE 'UTC')-interval '35 days'<upper_bound THEN
+  RAISE EXCEPTION 'provider work session events are kept at least 35 days';
+ END IF;
+END
+$event_drop_guard$;
+`
+
+// What the legacy drop guard adds to the horizon drop guard, before its age
+// check: the legacy partition, every event before the cutover week (bounded
+// FROM MINVALUE), is admitted once its upper bound is an hour past
+// (ProviderWorkSessionEventLegacyDropMargin), when no event can land in it.
+const providerWorkSessionEventLegacyDropClauseSql = ` IF leaf='provider_work_session_event_legacy' AND (now() AT TIME ZONE 'UTC')-interval '1 hour'>=upper_bound AND EXISTS(
+  SELECT 1 FROM pg_class c WHERE c.oid=to_regclass('public.provider_work_session_event_legacy')
+  AND pg_get_expr(c.relpartbound,c.oid) LIKE 'FOR VALUES FROM (MINVALUE) TO %') THEN
+  RETURN;
+ END IF;
+`
+
+// The drop guard with the legacy partition's early drop (owner, 2026-11-15;
+// DBDISK-STABILIZE I4; providerWorkSessionCutover.dropLegacy): the horizon drop
+// guard with providerWorkSessionEventLegacyDropClauseSql. The legacy partition's
+// only reader is the append's retire lookup, and no event was ever signed, so a
+// connection admitted before the cutover that retires after the drop is
+// appended without its network id, which the owner accepted. Every drop the
+// horizon body admits, this body admits too, and it replaces the function's
+// body only, with no table lock, so it applies before or after any deploy.
+const providerWorkSessionEventLegacyDropGuardSql = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION provider_work_session_event_drop_guard(leaf text) RETURNS void LANGUAGE plpgsql AS $event_drop_guard$
+DECLARE upper_bound timestamp;
+BEGIN
+ IF current_setting('urnetwork.provider_work_session_retention',true) IS DISTINCT FROM 'on' THEN
+  RAISE EXCEPTION 'provider work session events are dropped only by their retention';
+ END IF;
+ SELECT (regexp_match(pg_get_expr(c.relpartbound,c.oid),'TO \(''([^'']*)''\)$'))[1]::timestamp INTO upper_bound
+ FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid
+ WHERE i.inhparent=to_regclass('public.provider_work_session_event') AND c.oid=to_regclass('public.'||quote_ident(leaf));
+ IF leaf='provider_work_session_event_legacy' AND (now() AT TIME ZONE 'UTC')-interval '1 hour'>=upper_bound AND EXISTS(
+  SELECT 1 FROM pg_class c WHERE c.oid=to_regclass('public.provider_work_session_event_legacy')
+  AND pg_get_expr(c.relpartbound,c.oid) LIKE 'FOR VALUES FROM (MINVALUE) TO %') THEN
+  RETURN;
+ END IF;
  IF upper_bound IS NULL OR (now() AT TIME ZONE 'UTC')-interval '35 days'<upper_bound THEN
   RAISE EXCEPTION 'provider work session events are kept at least 35 days';
  END IF;

@@ -93,7 +93,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	} else if tests.WinnerReviewPolicy != "" || len(tests.Members) != 0 || tests.Model != "gpt-6.1-sol" || tests.Reasoning != "low" || tests.ProviderResponseId == "" || tests.CompletionId == "" {
 		return nil, errors.New("legacy source qualification lacks its original independent test evidence")
 	}
-	input := sourceBuildSandboxInput{Owner: qualification.Owner, Phase: "correctness", ImageId: qualification.Artifacts.ImageId,
+	input := sourceBuildSandboxInput{Owner: qualification.Owner, Phase: "correctness", MinimumWork: sourceBuildRequestMinimumWork(qualification.Build), WorkCoveragePolicy: sourceBuildRequestWorkCoverage(qualification.Build).Clone(), ImageId: qualification.Artifacts.ImageId,
 		Commit: qualification.Build.Proposal.Commits["server"], SourceDirectory: filepath.Join(qualification.Artifacts.Directory, "source"),
 		MetadataDirectory: filepath.Join(qualification.Artifacts.Directory, "correctness", "metadata"), OutputDirectory: filepath.Join(qualification.Artifacts.Directory, "correctness", "output")}
 	containmentDigest, err := retainSourceCorrectnessContainment(input, settings.Sandbox, tests.Execution)
@@ -128,6 +128,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 		TestModel: tests.Model, TestReasoning: tests.Reasoning, WinnerReviewPolicy: tests.WinnerReviewPolicy}
 	if sourceBuildRequestMinimumWork(qualification.Build) {
 		receipt.SimulatorSha256, receipt.G2VolumePolicy = qualification.Artifacts.SimulatorSha256, model.CompetitionG2VolumePolicyMinimumWork
+		receipt.WorkCoveragePolicy = sourceBuildRequestWorkCoverage(qualification.Build).Clone()
 	}
 	if qualification.Build.TrustedInstrument != nil {
 		receipt.Schema, receipt.Operation = 2, "trusted_instrument_build"

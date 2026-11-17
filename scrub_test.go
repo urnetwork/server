@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -150,6 +151,7 @@ func TestScrubProcessLogsRedirectsTheDescriptor(t *testing.T) {
 		t.Fatalf("pipe: %s", err)
 	}
 	defer captureRead.Close()
+	defer captureWrite.Close()
 
 	// stand in for the terminal: point stderr at something we can read
 	realStderr := os.Stderr
@@ -170,15 +172,24 @@ func TestScrubProcessLogsRedirectsTheDescriptor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScrubProcessLogs: %s", err)
 	}
+	restore = sync.OnceFunc(restore)
+	defer restore()
 
-	os.Stderr.Write([]byte("http: TLS handshake error from 203.0.113.9:51423: EOF\n"))
-	time.Sleep(100 * time.Millisecond)
+	// JSON test mode aliases os.Stderr to stdout; this test owns raw fd 2.
+	if _, err := syscall.Write(2, []byte("http: TLS handshake error from 203.0.113.9:51423: EOF\n")); err != nil {
+		t.Fatal(err)
+	}
 	restore()
+	if err := dup2(savedFd, 2); err != nil {
+		t.Fatal(err)
+	}
 	captureWrite.Close()
 
-	got := make([]byte, 4096)
-	n, _ := captureRead.Read(got)
-	line := string(got[:n])
+	got, err := io.ReadAll(captureRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := string(got)
 	if strings.Contains(line, "203.0.113.9") {
 		t.Fatalf("the address reached the descriptor: %q", line)
 	}
@@ -198,6 +209,7 @@ func TestCommandLogsFlushForwardsWhatWasWritten(t *testing.T) {
 		t.Fatalf("pipe: %s", err)
 	}
 	defer captureRead.Close()
+	defer captureWrite.Close()
 
 	realStderr := os.Stderr
 	savedFd, err := dupFd(2)
@@ -214,12 +226,19 @@ func TestCommandLogsFlushForwardsWhatWasWritten(t *testing.T) {
 	}()
 
 	logs := ScrubCommandLogs()
-	os.Stderr.Write([]byte("all: dial 203.0.113.9:5432: connection refused\n"))
+	defer logs.Flush()
+	if _, err := syscall.Write(2, []byte("all: dial 203.0.113.9:5432: connection refused\n")); err != nil {
+		t.Fatal(err)
+	}
 	logs.Flush()
 	logs.Flush()
 	// after the flush the descriptor is the original: this goes straight there
-	os.Stderr.Write([]byte("after\n"))
-	dup2(savedFd, 2)
+	if _, err := syscall.Write(2, []byte("after\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := dup2(savedFd, 2); err != nil {
+		t.Fatal(err)
+	}
 	captureWrite.Close()
 
 	got, err := io.ReadAll(captureRead)

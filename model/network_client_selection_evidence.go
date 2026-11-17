@@ -26,7 +26,7 @@ import (
 	"cmp"
 	"maps"
 	"math"
-	mathrand "math/rand"
+	mathrand "math/rand/v2"
 	"slices"
 	"time"
 
@@ -148,11 +148,17 @@ func clientScoreEvidenceGroups(
 	})
 }
 
-// The candidates of one family facet.
+// The draw facet of a selector-mode pool (FP2-PROTOCOL.md §6.3): every
+// candidate in one group. A pool of several classes draws its classes'
+// candidates in one order, with no family preferred; its candidates are the
+// pool's classes already.
+const clientScorePoolFacet ipFamilyFacet = "*"
+
+// The candidates of one family facet, or every candidate for the pool facet.
 func clientScoreFacetClientIds(candidateClientScores map[server.Id]*ClientScore, facet ipFamilyFacet) []server.Id {
 	facetClientIds := []server.Id{}
 	for clientId, clientScore := range candidateClientScores {
-		if clientScore.ipFamilyFacet() == facet {
+		if facet == clientScorePoolFacet || clientScore.ipFamilyFacet() == facet {
 			facetClientIds = append(facetClientIds, clientId)
 		}
 	}

@@ -20,6 +20,7 @@ import (
 
 type winnerClosingFixture struct {
 	now                                                 time.Time
+	lease                                               *model.CompetitionSupervisorLease
 	snapshot                                            CompetitionSupervisorSnapshot
 	reviews, choices, builds, opens, fallbacks          int
 	rejectFirst, rejectAll, failReview, failPreparation bool
@@ -98,11 +99,20 @@ func newWinnerClosingFixture() *winnerClosingFixture {
 	}}
 }
 
-func (self *winnerClosingFixture) Acquire(context.Context, string, time.Duration) (*model.CompetitionSupervisorLease, error) {
-	return &model.CompetitionSupervisorLease{}, nil
+func (self *winnerClosingFixture) Acquire(_ context.Context, owner string, ttl time.Duration) (*model.CompetitionSupervisorLease, error) {
+	policy := self.snapshot.WinnerReview.Policy
+	lease := model.CompetitionSupervisorLease{Environment: policy.Environment, CompetitionId: "synthetic-winner-closing", SeasonId: policy.SeasonId,
+		OwnerId: owner, FencingToken: 1, LeaseExpiresAt: self.now.Add(ttl)}
+	self.lease = &lease
+	return &lease, nil
 }
-func (self *winnerClosingFixture) Renew(context.Context, model.CompetitionSupervisorLease, time.Duration) (*model.CompetitionSupervisorLease, error) {
-	return &model.CompetitionSupervisorLease{}, nil
+func (self *winnerClosingFixture) Renew(_ context.Context, previous model.CompetitionSupervisorLease, ttl time.Duration) (*model.CompetitionSupervisorLease, error) {
+	if self.lease == nil || previous != *self.lease || !self.now.Before(previous.LeaseExpiresAt) {
+		return nil, ErrLeaseLost
+	}
+	previous.LeaseExpiresAt = self.now.Add(ttl)
+	self.lease = &previous
+	return &previous, nil
 }
 func (self *winnerClosingFixture) Snapshot(context.Context, model.CompetitionSupervisorLease) (*CompetitionSupervisorSnapshot, error) {
 	snapshot := self.snapshot
@@ -226,6 +236,48 @@ func (self *winnerClosingFixture) CreateRound(_ context.Context, _ model.Competi
 func (self *winnerClosingFixture) FallbackSource(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation, string) (bool, error) {
 	self.fallbacks++
 	return true, nil
+}
+
+// The fake driver obeys the same authority contract as the real lease owner;
+// its synthetic clock does not excuse missing expiry, identity or renewal fence.
+func TestWinnerClosingFixturePreservesScopedLeaseAuthority(t *testing.T) {
+	fixture := newWinnerClosingFixture()
+	lease, err := fixture.Acquire(t.Context(), "synthetic-owner", time.Minute)
+	if err != nil || lease == nil || lease.OwnerId != "synthetic-owner" || lease.FencingToken <= 0 || lease.Environment == "" || lease.CompetitionId == "" || lease.SeasonId == "" || !lease.LeaseExpiresAt.Equal(fixture.now.Add(time.Minute)) {
+		t.Fatal("winner-closing fixture omitted current scoped authority", err)
+	}
+	fixture.now = fixture.now.Add(time.Second)
+	next, err := fixture.Renew(t.Context(), *lease, time.Minute)
+	if err != nil || next == nil || !next.LeaseExpiresAt.Equal(fixture.now.Add(time.Minute)) {
+		t.Fatal("winner-closing fixture failed to renew its own current authority", err)
+	}
+	wanted := *lease
+	wanted.LeaseExpiresAt = next.LeaseExpiresAt
+	if *next != wanted {
+		t.Fatal("winner-closing fixture renewal changed scoped identity or fence")
+	}
+	changed := *next
+	changed.FencingToken++
+	if _, err := fixture.Renew(t.Context(), changed, time.Minute); !errors.Is(err, ErrLeaseLost) {
+		t.Fatal("winner-closing fixture accepted a foreign fence", err)
+	}
+}
+
+type winnerClosingZeroLeaseFixture struct{ *winnerClosingFixture }
+
+func (self *winnerClosingZeroLeaseFixture) Acquire(context.Context, string, time.Duration) (*model.CompetitionSupervisorLease, error) {
+	return &model.CompetitionSupervisorLease{}, nil
+}
+
+// Regress the original zero-lease fixture at the real supervisor entry point.
+// Correcting the fixture must never make missing production authority usable.
+func TestWinnerClosingZeroLeaseRefusesBeforeReviewOrSource(t *testing.T) {
+	fixture := &winnerClosingZeroLeaseFixture{winnerClosingFixture: newWinnerClosingFixture()}
+	supervisor := CompetitionSupervisor{Enabled: true, OwnerId: "synthetic-owner", Driver: fixture, Now: func() time.Time { return fixture.now }}
+	state, err := supervisor.Reconcile(t.Context())
+	if state != "lease_lost" || !errors.Is(err, ErrLeaseLost) || fixture.reviews != 0 || fixture.choices != 0 || fixture.opens != 0 {
+		t.Fatal("zero-expiry authority reached winner review or source actions", state, err)
+	}
 }
 
 // A new supervisor is constructed at every step, so no in-memory continuation

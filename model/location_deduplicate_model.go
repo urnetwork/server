@@ -65,13 +65,16 @@ var (
 	anyPlaceLocationTypes = []LocationType{LocationTypeCity, LocationTypeRegion, LocationTypeCountry}
 )
 
-// Every column that holds a location id, inventoried from db_migrations.go:
-// every live uuid column named `location_id` or `*_location_id`, and
+// Every column that holds a location id, inventoried from the migrations
+// (db_migrations.go and the SQL constants it registers from other files): every
+// live uuid column named `location_id` or `*_location_id`, and
 // `location_group_member.location_id`. There are no foreign key constraints,
 // so nothing but this list repoints them.
 // TestLocationReferencesCoverTheMigrations re-reads the migrations and fails
-// on a column this list does not name, and DeduplicateLocations refuses to run
-// when the live schema has one, so a new table cannot silently orphan rows.
+// on a column this list does not name, TestLocationReferencesMatchTheMigratedSchema
+// compares it with the migrated test schema, and DeduplicateLocations refuses
+// to run when the live schema has one, so a new table cannot silently orphan
+// rows.
 var locationReferences = []locationReference{
 	// location: every row's own id, a city's own id, the region a city is
 	// filed under (a region names itself), and every row's country
@@ -120,6 +123,11 @@ var locationReferences = []locationReference{
 
 	// each provider's probed egress location (a city or a country), keyed by client_id
 	{table: "provider_egress_location", column: "location_id", kind: locationReferenceUpdate, locationTypes: anyPlaceLocationTypes},
+
+	// each unique-exit assignment's exit location, copied from the provider's
+	// provider_egress_location.location_id when the exit is pinned (a city or a
+	// country, nullable), keyed by assignment_id (db_proxy_unique_exit_schema.go)
+	{table: "proxy_exit_assignment", column: "location_id", kind: locationReferenceUpdate, locationTypes: anyPlaceLocationTypes},
 
 	// each extender's location at its last activation, keyed by extender_id
 	{table: "network_extender", column: "location_id", kind: locationReferenceUpdate, locationTypes: anyPlaceLocationTypes},

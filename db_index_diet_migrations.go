@@ -20,6 +20,8 @@ const (
 	IndexDietReapPendingIndexDrop IndexDietMigration = iota
 	IndexDietStreamIndexDrop
 	IndexDietSweepPaymentIndexDrop
+	IndexDietCreateTimeIndexDrop
+	IndexDietOpenPayerIndexDrop
 )
 
 // The drop of transfer_contract_reap_pending_create_time.
@@ -40,10 +42,24 @@ var sweepPaymentIndexDropMigration = newOnlineSqlMigration(
 	`DROP INDEX IF EXISTS transfer_escrow_sweep_payment_id`,
 )
 
+// The drop of transfer_contract_create_time.
+var createTimeIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_create_time`,
+	`DROP INDEX IF EXISTS transfer_contract_create_time`,
+)
+
+// The drop of transfer_contract_open_payer_network_id_transfer_byte_count.
+var openPayerIndexDropMigration = newOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_open_payer_network_id_transfer_byte_count`,
+	`DROP INDEX IF EXISTS transfer_contract_open_payer_network_id_transfer_byte_count`,
+)
+
 var indexDietMigrations = map[IndexDietMigration]*OnlineSqlMigration{
 	IndexDietReapPendingIndexDrop:  reapPendingIndexDropMigration,
 	IndexDietStreamIndexDrop:       streamIndexDropMigration,
 	IndexDietSweepPaymentIndexDrop: sweepPaymentIndexDropMigration,
+	IndexDietCreateTimeIndexDrop:   createTimeIndexDropMigration,
+	IndexDietOpenPayerIndexDrop:    openPayerIndexDropMigration,
 }
 
 // The index each index diet migration drops.
@@ -51,6 +67,8 @@ var indexDietDroppedIndexes = map[IndexDietMigration]string{
 	IndexDietReapPendingIndexDrop:  "transfer_contract_reap_pending_create_time",
 	IndexDietStreamIndexDrop:       "transfer_contract_stream_id",
 	IndexDietSweepPaymentIndexDrop: "transfer_escrow_sweep_payment_id",
+	IndexDietCreateTimeIndexDrop:   "transfer_contract_create_time",
+	IndexDietOpenPayerIndexDrop:    "transfer_contract_open_payer_network_id_transfer_byte_count",
 }
 
 // The version a database reaches once the migration has applied: its position

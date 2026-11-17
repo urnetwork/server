@@ -42,8 +42,9 @@ import (
 //     carries the requirement.
 //   - tcp-camouflage-v1 is required only of a record that carries the
 //     camouflage key (RealityPublicKey); without the key, no client can
-//     authenticate to the camouflaged carrier. The server does not sign the key
-//     yet (connect/EXTENDER.md phase 14b), so a cohort is inert until it does.
+//     authenticate to the camouflaged carrier. The server signs the key an
+//     extender's passing activation posts (connect/EXTENDER.md phase 14b), so a
+//     cohort member is inert until its extender turns camouflage on.
 //   - Capabilities are trimmed and compared in lower case, and signed that
 //     way. The server keeps a capability it does not know as a requirement
 //     that no client satisfies. A misspelled capability withholds the extender
@@ -139,11 +140,11 @@ func (self *ExtenderConfig) RecordRequiredCapabilities(
 const extenderRealityPublicKeySize = 32
 
 // The camouflage key a record of the extender carries (connect/EXTENDER.md
-// P6). The server does not store the key yet (phase 14b), so no record carries
-// one and no cohort requirement is set. 14b replaces this with the stored key,
-// and the requirement follows the signed body. Tests install a key here.
+// P6, phase 14b): the key its latest passing activation posted, while the
+// posting network holds the identity key. The requirement follows the signed
+// body. Tests install a key here.
 var extenderRecordRealityPublicKey = func(extender *model.NetworkExtender) []byte {
-	return nil
+	return extender.RecordRealityPublicKey()
 }
 
 // Whether a cohort lists the key. Entries are compared as lower case hex; one

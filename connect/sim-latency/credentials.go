@@ -51,6 +51,9 @@ type credentialScope struct {
 	Environment   string
 	CompetitionId string
 	SeasonId      string
+	RoundId       server.Id
+	JobId         server.Id
+	ExpiresAt     time.Time
 }
 
 type credentialVault struct {
@@ -82,6 +85,10 @@ type credentialReceipt struct {
 }
 
 func runCredentials(opts docopt.Opts) {
+	if optBool(opts, "issue-patch-retry") {
+		runPatchRetryCredentials(opts)
+		return
+	}
 	vaultPath := optString(opts, "--vault", "")
 	if vaultPath == "" {
 		fatalf("credentials: --vault is required")
@@ -222,6 +229,9 @@ func rotateScopedCredentialToken(
 	random io.Reader,
 	now time.Time,
 ) (*credentialReceipt, error) {
+	if role == operatorPatchRetryCredentialRole {
+		return nil, errors.New("patch-retry credentials require a local protected registration, never a shared vault")
+	}
 	if deliveryPath == "" || filepath.Clean(deliveryPath) == filepath.Clean(vaultPath) {
 		return nil, errors.New("--delivery must be a distinct new private file")
 	}
@@ -367,13 +377,23 @@ func generateScopedCredentialToken(name string, role string, scope credentialSco
 // Rejects partial scopes and prevents a legacy token from being advertised as
 // scope-restricted when its legacy transport does not enforce those claims.
 func validateCredentialCapability(role string, scope credentialScope) error {
+	if role == operatorPatchRetryCredentialRole {
+		if scope.Environment != "main" || !credentialNamePattern.MatchString(scope.CompetitionId) || !credentialNamePattern.MatchString(scope.SeasonId) ||
+			scope.RoundId == (server.Id{}) || scope.JobId == (server.Id{}) || scope.ExpiresAt.IsZero() {
+			return errors.New("patch-retry credentials require exact main, competition, season, round, job and expiry scope")
+		}
+		return nil
+	}
+	if scope.RoundId != (server.Id{}) || scope.JobId != (server.Id{}) || !scope.ExpiresAt.IsZero() {
+		return errors.New("this credential capability does not support job-level scope")
+	}
 	switch role {
 	case "submitter", "operator":
 		if scope != (credentialScope{}) {
 			return errors.New("legacy credentials do not use v2 capability scope")
 		}
 		return nil
-	case "scheduler", "reviewer", "settlement", "source_promoter":
+	case "scheduler", "reviewer", "settlement", "source_promoter", "source_handoff", "review_operator":
 		if !credentialNamePattern.MatchString(scope.Environment) ||
 			!credentialNamePattern.MatchString(scope.CompetitionId) || !credentialNamePattern.MatchString(scope.SeasonId) {
 			return errors.New("v2 credentials require exact --environment, --competition-id, and --season-id")

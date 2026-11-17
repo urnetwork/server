@@ -4,10 +4,18 @@ package controller
 
 // App Store one-time offer codes for the welcome offer (mmm/onboarding/PLAN.md
 // "THE OFFER", App Store). A daily task keeps the pool table topped up with
-// fresh one-time-use codes generated through the App Store Connect API; each
-// issued offer takes one code (model.IssueOnboardingOffer). Without credentials
-// the task logs a warning and does nothing, and the custom code
-// (onboarding.yml offer.apple_custom_offer_code) stays the App Store path.
+// fresh one-time-use codes generated through the App Store Connect API.
+// Without credentials the task logs a warning and does nothing, and the custom
+// code (onboarding.yml offer.apple_custom_offer_code) stays the App Store path.
+//
+// A code is drawn only for a reader on an App Store build (appStoreReader),
+// the only reader who can redeem it: when the App Store app issues the offer
+// (OnboardingOfferIssue), and when an App Store build first reads an offer
+// issued without one (ensureOnboardingOfferAppleCode): the email offer, which
+// draws nothing at the send, and an offer issued on another platform. Every
+// offer used to draw one whatever its reader: on 2026-11-12, 451 of the 509
+// codes drawn went to Android and web networks, which redeem through Google
+// Play or Stripe.
 
 import (
 	"context"
@@ -18,14 +26,196 @@ import (
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
+
+// The outcomes of the welcome offer's App Store code, by trigger: in_app (the
+// app issued the offer), email (step E4b issued it), read (an App Store
+// build read an active offer that had no code) and landing (an App Store
+// network's offer landing was clicked while its offer had no code).
+var onboardingAppleOfferCodeDrawsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "apple_offer_code_draws_total",
+	Help:      "Welcome offer App Store code outcomes, by trigger (in_app issue, email issue, read by an App Store build of an offer without a code, landing click by an App Store network of an offer without a code) and result: drawn (a one-time code from the pool), custom (the custom code), empty (no code to give), not_app_store (the reader is not on an App Store build, so nothing is drawn), deferred (issued by email; drawn when an App Store build reads it).",
+}, []string{"trigger", "result"})
+
+func init() {
+	prometheus.MustRegister(onboardingAppleOfferCodeDrawsTotal)
+}
+
+// Triggers and results of onboardingAppleOfferCodeDrawsTotal.
+const (
+	appleOfferCodeTriggerInApp = "in_app"
+	appleOfferCodeTriggerEmail = "email"
+	appleOfferCodeTriggerRead  = "read"
+	// the offer landing's click (welcomeOfferLandingOpenUrl)
+	appleOfferCodeTriggerLanding = "landing"
+
+	appleOfferCodeResultDrawn       = "drawn"
+	appleOfferCodeResultCustom      = "custom"
+	appleOfferCodeResultEmpty       = "empty"
+	appleOfferCodeResultNotAppStore = "not_app_store"
+	appleOfferCodeResultDeferred    = "deferred"
+)
+
+// appleOfferCodeResult is the result an offer's code shows: drawn for a
+// one-time code, custom for the custom code, empty for none.
+func appleOfferCodeResult(offer *model.OnboardingOffer, customCode string) string {
+	switch {
+	case !model.OnboardingOfferHasAppleCode(offer):
+		return appleOfferCodeResultEmpty
+	case strings.TrimSpace(customCode) != "" && strings.TrimSpace(*offer.AppleOfferCode) == strings.TrimSpace(customCode):
+		return appleOfferCodeResultCustom
+	default:
+		return appleOfferCodeResultDrawn
+	}
+}
+
+// appStoreReader reports whether the caller is on an App Store build, the
+// only reader that can redeem an App Store offer code: the iOS app, or the
+// macOS App Store build (onboarding.AppStorePlatform), never the
+// direct-download Mac, which bills through Stripe. The Mac App Store build
+// is the same App Store app as the iOS one, with the same subscriptions, and
+// redeems the same codes: Apple redeems them in the app on iOS 14, iPadOS 14
+// and macOS 15 or later, and the Mac app opens the code's redeem link on an
+// older macOS. The app's declared client info decides (clientInfoPlatform).
+// An app that declares none, its sdk older than X-UR-ClientInfo, is known by
+// the device spec of its client, of unknown distribution.
+func appStoreReader(clientSession *session.ClientSession) bool {
+	if clientSession == nil {
+		return false
+	}
+	platform, distribution := clientInfoPlatform(clientSession)
+	return appStoreReaderOf(platform, distribution, func() string {
+		byJwt := clientSession.ByJwt
+		if byJwt == nil || byJwt.ClientId == nil {
+			return ""
+		}
+		return model.GetNetworkClientDeviceSpec(clientSession.Ctx, byJwt.NetworkId, *byJwt.ClientId)
+	})
+}
+
+// appStoreReaderOf is appStoreReader's rule: the platform and distribution
+// the app declares, else the platform its device spec names, of unknown
+// distribution. deviceSpec is read only when the app declares no platform.
+func appStoreReaderOf(platform string, distribution string, deviceSpec func() string) bool {
+	if platform == "" {
+		platform, distribution = platformFromDeviceSpec(deviceSpec()), ""
+	}
+	return onboarding.AppStorePlatform(platform, distribution)
+}
+
+// ensureOnboardingOfferAppleCode is the offer as its reader sees it: an
+// active offer without an App Store code takes one when the reader is on an
+// App Store build (model.AssignOnboardingOfferAppleCode). The email offer
+// and an offer issued on another platform are issued without a code, so the
+// code is drawn the first time an App Store build reads the offer: the plan
+// response the app reads when the email's link opens it, or the app's own
+// offer call. A reader who never opens an App Store build while the offer
+// lasts never takes one. Never fails the caller: the offer is returned as it
+// was when no code can be given, and the next read tries again.
+func ensureOnboardingOfferAppleCode(clientSession *session.ClientSession, offer *model.OnboardingOffer, now time.Time) (readerOffer *model.OnboardingOffer) {
+	if offer == nil || !offer.Eligible(now) || model.OnboardingOfferHasAppleCode(offer) {
+		return offer
+	}
+	readerOffer = offer
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]apple offer code draw failed for network %s: %v\n", offer.NetworkId, r)
+			readerOffer = offer
+		}
+	}()
+	if !appStoreReader(clientSession) {
+		return offer
+	}
+	ensureAppleOfferCodePoolLoaded(clientSession)
+	customCode := model.Onboarding().Offer.AppleCustomOfferCode
+	assigned, stamped := model.AssignOnboardingOfferAppleCode(clientSession.Ctx, offer.NetworkId, customCode)
+	if assigned == nil {
+		return offer
+	}
+	switch {
+	case stamped:
+		onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerRead, appleOfferCodeResult(assigned, customCode)).Inc()
+	case assigned.Eligible(now) && !model.OnboardingOfferHasAppleCode(assigned):
+		onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerRead, appleOfferCodeResultEmpty).Inc()
+	}
+	return assigned
+}
+
+// welcomeOfferLandingOpenUrl is the open_url of an offer landing click
+// (owner, 2026-11-15): Apple's redeem link with the network's code filled in
+// (onboarding.AppleOfferCodeRedeemUrl), so an iPhone reader of the offer
+// email lands on the App Store's redeem sheet for the welcome offer. The App
+// Store build has no in-app route to the offer, and without this the button
+// opened the regular plans at full price (onboarding.yml
+// offer.apple_email_enabled). Only for a network the App Store bills (its
+// app as the campaign resolves it, onboarding.AppStorePlatform) on path B
+// (an emailed offer: path A saw the offer in an app that has the offer
+// screen, which the landing opens as before), and only while its offer can
+// be redeemed. An emailed offer gets its code here, as an App Store build's
+// read would give it: the browser is not that build, so the network's app
+// decides. The purchase is bound to the network when the app reports it
+// (apple_offer_code_binding_controller.go), and every App Store build
+// reports every transaction. "" otherwise, and on any failure: the page
+// then opens the app as before.
+func welcomeOfferLandingOpenUrl(clientSession *session.ClientSession, networkId server.Id, now time.Time) (openUrl string) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[onboarding]offer landing link failed for network %s: %v\n", networkId, r)
+			openUrl = ""
+		}
+	}()
+	ctx := clientSession.Ctx
+	row := model.GetNetworkOnboarding(ctx, networkId)
+	if row == nil {
+		return ""
+	}
+	cfg := model.Onboarding()
+	platform, distribution, _ := onboardingClientBuild(row, model.GetNetworkNewestClientBuild(ctx, networkId), cfg.EffectiveWidgetSettings())
+	if !onboarding.AppStorePlatform(platform, distribution) {
+		return ""
+	}
+	offer := model.GetOnboardingOffer(ctx, networkId)
+	if offer == nil || !offer.Eligible(now) {
+		return ""
+	}
+	path := row.Path
+	if p := model.OnboardingPathForNetwork(offer); p != "" {
+		path = p
+	}
+	if path == onboarding.PathA {
+		return ""
+	}
+	if !model.OnboardingOfferHasAppleCode(offer) {
+		ensureAppleOfferCodePoolLoaded(clientSession)
+		customCode := cfg.Offer.AppleCustomOfferCode
+		assigned, stamped := model.AssignOnboardingOfferAppleCode(ctx, networkId, customCode)
+		switch {
+		case stamped:
+			onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerLanding, appleOfferCodeResult(assigned, customCode)).Inc()
+		case assigned != nil && assigned.Eligible(now) && !model.OnboardingOfferHasAppleCode(assigned):
+			onboardingAppleOfferCodeDrawsTotal.WithLabelValues(appleOfferCodeTriggerLanding, appleOfferCodeResultEmpty).Inc()
+		}
+		if assigned == nil {
+			return ""
+		}
+		offer = assigned
+	}
+	if !offer.Eligible(now) || !model.OnboardingOfferHasAppleCode(offer) {
+		return ""
+	}
+	return onboarding.AppleOfferCodeRedeemUrl(strings.TrimSpace(*offer.AppleOfferCode))
+}
 
 // appStoreConnectCredentials is vault/main/apple_app_store_connect.yml:
 //
@@ -116,17 +306,11 @@ func DecideAppleOfferCodeTopUp(cfg model.OnboardingAppleOfferCodesConfig, hasCre
 	if !hasCredentials {
 		return AppleOfferCodeTopUpDecision{Reason: "vault/main/apple_app_store_connect.yml is absent or incomplete"}
 	}
-	minAvailable := cfg.MinAvailable
-	if minAvailable <= 0 {
-		minAvailable = 200
-	}
+	minAvailable := cfg.EffectiveMinAvailable()
 	if minAvailable <= available {
 		return AppleOfferCodeTopUpDecision{Reason: fmt.Sprintf("%d codes available, above the %d floor", available, minAvailable)}
 	}
-	batch := cfg.BatchSize
-	if batch < 500 {
-		batch = 500
-	}
+	batch := cfg.EffectiveBatchSize()
 	days := cfg.ExpiryDays
 	if days <= 0 {
 		days = model.OnboardingAppleOfferCodeExpiryDaysDefault

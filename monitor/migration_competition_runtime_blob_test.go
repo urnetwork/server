@@ -90,6 +90,7 @@ func TestMigrationsRuntimeBlobHistoricalGuardCustody(t *testing.T) {
 // Matching names, numeric migration heads and previous legitimate bodies do
 // not excuse an inoperative successor or any retained source/lifecycle fence.
 func TestMigrationsRuntimeBlobSchemaFaultsReachSignal(t *testing.T) {
+	currentOwner := competitionSourceGuardsCurrentOwner(t)
 	weakenedCapability := strings.Replace(competitionMigration851CompetitionV2RoundInsertGuardBody,
 		"'competition.reward.v2.runtime-blob.v1')", "'competition.reward.v2.runtime-blob.v1','synthetic.future-capability')", 1)
 	weakenedFee := strings.Replace(competitionMigration851CompetitionV2RoundInsertGuardBody,
@@ -102,13 +103,13 @@ func TestMigrationsRuntimeBlobSchemaFaultsReachSignal(t *testing.T) {
 		sql  string
 		want string
 	}{
-		{name: "previous runtime capability body restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2RoundInsertGuardBody + `$regression$`, want: competitionSourceGuardsHeadOwner},
-		{name: "unrecognized runtime capability admitted", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedCapability + `$regression$`, want: competitionSourceGuardsHeadOwner},
-		{name: "zero-fee stage condition removed", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedFee + `$regression$`, want: competitionSourceGuardsHeadOwner},
-		{name: "runtime guard privilege changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() SECURITY DEFINER`, want: competitionSourceGuardsHeadOwner},
-		{name: "runtime guard volatility changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() STABLE`, want: competitionSourceGuardsHeadOwner},
+		{name: "previous runtime capability body restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2RoundInsertGuardBody + `$regression$`, want: currentOwner},
+		{name: "unrecognized runtime capability admitted", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedCapability + `$regression$`, want: currentOwner},
+		{name: "zero-fee stage condition removed", sql: `CREATE OR REPLACE FUNCTION competition_v2_round_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $regression$` + weakenedFee + `$regression$`, want: currentOwner},
+		{name: "runtime guard privilege changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() SECURITY DEFINER`, want: currentOwner},
+		{name: "runtime guard volatility changed", sql: `ALTER FUNCTION competition_v2_round_insert_guard() STABLE`, want: currentOwner},
 		{name: "runtime guard trigger disabled", sql: `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_source`, want: "competition source authority and atomic outbox custody@v844"},
-		{name: "retained source graph guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: competitionSourceGuardsHeadOwner},
+		{name: "retained source graph guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: currentOwner},
 		{name: "retained seal guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_seal_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`, want: "isolated automation staging and current lifecycle guards@v847"},
 	}
 	var observations [][]Alert

@@ -109,6 +109,45 @@ func ProviderWorkSessionEventHorizonDropGuardMigrationVersion() int {
 	return sqlMigrationVersion(providerWorkSessionEventHorizonDropGuardSql)
 }
 
+// The journal's drop guard that also admits the legacy partition an hour after
+// the cutover week (owner, 2026-11-15).
+func ProviderWorkSessionEventLegacyDropGuardBodySql() string {
+	return strings.Split(providerWorkSessionEventLegacyDropGuardSql, "$event_drop_guard$")[1]
+}
+
+// The version of the migration that publishes the legacy drop guard, found by
+// its SQL. Zero when the list lacks it.
+func ProviderWorkSessionEventLegacyDropGuardMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionEventLegacyDropGuardSql)
+}
+
+// The journal's append for provider clients only (owner, 2026-11-16).
+func ProviderWorkSessionProviderAppendBodySql() string {
+	return strings.Split(providerWorkSessionProviderAppendSql, "$session_append$")[1]
+}
+
+// The version of the migration that publishes the append for provider clients
+// only, found by its SQL. Zero when the list lacks it.
+func ProviderWorkSessionProviderAppendMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionProviderAppendSql)
+}
+
+// The v776 head guard, which refuses every delete.
+func ProviderWorkSessionHeadGuardBodySql() string {
+	return strings.Split(providerWorkSessionSchemaSql, "$head_guard$")[1]
+}
+
+// The head guard that admits the head retention's deletes (owner, 2026-11-16).
+func ProviderWorkSessionHeadRetentionGuardBodySql() string {
+	return strings.Split(providerWorkSessionHeadRetentionGuardSql, "$head_guard$")[1]
+}
+
+// The version of the migration that publishes the head retention guard, found
+// by its SQL. Zero when the list lacks it.
+func ProviderWorkSessionHeadRetentionGuardMigrationVersion() int {
+	return sqlMigrationVersion(providerWorkSessionHeadRetentionGuardSql)
+}
+
 // Read-only consumers pin the provider successor's exact bodies without
 // changing any historical migration or reproducing its replacement logic.
 func CompetitionWinnerReviewProviderBodiesSql() (provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard string) {
@@ -156,4 +195,12 @@ func CompetitionTrustedInstrumentBodiesSql() (lockDigest, productIntent, sourceA
 	return strings.Split(migration, "$instrument_lock$")[1],
 		strings.Split(migration, "$instrument$")[1],
 		strings.Split(migration, "$source$")[1]
+}
+
+// The audited job recovery (db_competition_reevaluation.go): its audit's insert
+// and commit guards, the job guard it re-creates in place and the worker slot's
+// guard. This reads published source only; it does not apply a migration.
+func CompetitionJobReevaluationBodiesSql() (insertGuard, commitGuard, jobImmutableGuard, slotGuard string) {
+	guards := strings.Split(competitionJobReevaluationMigration.sql, "$guard$")
+	return guards[1], guards[3], guards[5], guards[7]
 }

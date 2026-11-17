@@ -4,14 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -36,11 +33,6 @@ import (
 var circleConfig = sync.OnceValue(func() map[string]any {
 	c := server.Vault.RequireSimpleResource("circle.yml").Parse()
 	return c["circle"].(map[string]any)
-})
-
-var walletSetId = sync.OnceValue(func() string {
-	c := server.Vault.RequireSimpleResource("circle.yml").Parse()
-	return c["wallet_set_id"].(string)
 })
 
 type WalletCircleInitResult struct {
@@ -176,39 +168,6 @@ func WalletCircleTransferOut(
 
 type GetPublicKeyResult struct {
 	PublicKey string `json:"publicKey"`
-}
-
-func getPublicKey(ctx context.Context) (*string, error) {
-	return (&CoreCircleApiClient{}).getPublicKey(ctx)
-}
-
-func parseRsaPublicKeyFromPem(pubPEM []byte) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode(pubPEM)
-	if block == nil {
-		return nil, fmt.Errorf("failed to parse PEM block containing the key")
-	}
-
-	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-
-	switch pub := pub.(type) {
-	case *rsa.PublicKey:
-		return pub, nil
-	default:
-	}
-	return nil, fmt.Errorf("key type is not rsa")
-}
-
-// EncryptOAEP rsa encrypt oaep.
-func encryptOAEP(pubKey *rsa.PublicKey, message []byte) (ciphertext []byte, err error) {
-	random := rand.Reader
-	ciphertext, err = rsa.EncryptOAEP(sha256.New(), random, pubKey, message, nil)
-	if err != nil {
-		return nil, err
-	}
-	return
 }
 
 func createCircleUser(clientSession *session.ClientSession) (
@@ -615,19 +574,8 @@ func CircleWalletWebhook(
 				// server.Logger().Println("CircleWalletWebhook: no wallet id found")
 				return nil, fmt.Errorf("error creating account wallet")
 			}
-
-			// check if a payout wallet is set for this network
-			payoutWallet := model.GetPayoutWalletId(clientSession.Ctx, userUC.NetworkId)
-
-			// if a payout wallet doesn't exist for the network
-			// set payout wallet
-			if payoutWallet == nil {
-				err := model.SetPayoutWallet(clientSession.Ctx, userUC.NetworkId, *walletId)
-				if err != nil {
-					return nil, err
-				}
-			}
-
+			// USDC provider payouts ended (owner decisions 2026-11-12 and
+			// 2026-11-13), so the wallet never becomes the payout wallet
 		}
 
 	}
@@ -722,7 +670,7 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 		return err
 	}
 
-	for i, circleWallet := range walletInfo {
+	for _, circleWallet := range walletInfo {
 
 		// check if account wallet exists
 		accountWallet := model.GetAccountWalletByCircleId(clientSession.Ctx, circleWallet.WalletId)
@@ -743,14 +691,8 @@ func handleUser(user model.CircleUC, clientSession *session.ClientSession) error
 		if walletId == nil {
 			return fmt.Errorf("Error creating Circle account wallet")
 		}
-
-		// set the payout wallet
-		if i == 0 {
-			err := model.SetPayoutWallet(clientSession.Ctx, user.NetworkId, *walletId)
-			if err != nil {
-				return err
-			}
-		}
+		// USDC provider payouts ended, so the wallet never becomes the payout
+		// wallet
 	}
 
 	return nil

@@ -16,22 +16,22 @@ import (
 // before every batch, so a change applies from the next batch. Its fields, all
 // optional:
 //   - `mode`: on or off. Off, or any other value, deletes nothing.
-//   - `maxClientsPerSecond`: gone clients deleted per second, at most the
-//     code's MaxDeleteClientsPerSecond; zero, or a value that does not parse,
-//     is off.
-//   - `horizonDays`: the retention's own horizon in whole days, in place of
-//     the contract horizon reaper's: history goes once this long has passed
-//     since its client went, whatever the reaper's mode. It is never below the
-//     guard's floor (server.ClientKeyHistoryRetentionFloor, 30 days), which a
-//     smaller value counts as, nor above the retention's longest horizon
-//     (91 days), which a value that does not parse keeps. It is read once a
-//     run, so a change applies from the next run, and removing it returns the
-//     retention to the reaper's horizon.
+//   - `maxClientsPerSecond`: gone records the deletes examine per second, and
+//     so the most gone clients they delete per second, at most the code's
+//     MaxDeleteClientsPerSecond; zero, or a value that does not parse, is off.
+//   - `horizonDays`: the retention's horizon in whole days: history goes once
+//     this long has passed since its client went. It only narrows: it is never
+//     below the guard's floor (server.ClientKeyHistoryRetentionFloor, 7 days),
+//     which a smaller value counts as, nor above the code's Retention (7
+//     days), which a larger value or one that does not parse counts as. While
+//     Retention is the floor, every value is 7 days, the 30 set on 2026-11-02
+//     included. It is read once a run, so a change applies from the next run,
+//     and removing it returns the retention to Retention.
 //
 // Without the hash the retention deletes at DefaultDeleteClientsPerSecond, at
-// the reaper's horizon. A run that cannot read the hash deletes nothing more
-// in that run. The weekly discovery of clients gone without a record only
-// records them, and runs either way.
+// Retention. A run that cannot read the hash deletes nothing more in that
+// run. The weekly discovery of clients gone without a record only records
+// them, and runs either way.
 const stClientKeyHistoryRetentionControlKey = "{client_key_history_retention}control"
 
 const (
@@ -46,10 +46,11 @@ type StClientKeyHistoryRetentionControl struct {
 	Present bool
 	// deletes run
 	On bool
-	// gone clients deleted per second at most, while On
+	// gone records examined, and so clients deleted, per second at most, while
+	// On
 	MaxClientsPerSecond float64
-	// the retention's own horizon, from `horizonDays`; nil follows the
-	// contract horizon reaper (StClientKeyHistoryRetentionSettings.horizon)
+	// the retention's own horizon, from `horizonDays`; nil keeps the code's
+	// Retention (StClientKeyHistoryRetentionSettings.horizon)
 	Horizon *time.Duration
 }
 
@@ -87,8 +88,8 @@ func NarrowStClientKeyHistoryRetentionControl(fields map[string]string, settings
 	return control
 }
 
-// days as a horizon between the guard's floor and ceiling, the retention's
-// longest. Clamped while still in days, so that no count of days overflows
+// days as a horizon between the guard's floor and ceiling, the code's
+// Retention. Clamped while still in days, so that no count of days overflows
 // into a short duration. Pure.
 func stClientKeyHistoryHorizonFromDays(days int64, ceiling time.Duration) time.Duration {
 	const day = 24 * time.Hour

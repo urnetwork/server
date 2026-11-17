@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-cleanup/v1",
+  "approval": "Existing explicit approval to make completed temporary test checkouts sparse, excluding only clean Git-versioned baseline copies.",
+  "temporary_checkout": "/home/by/urnetwork/temp/supervisor-absence-20261105.I0aNwYjQ/server",
+  "retained_commit": "9888969fb72bf0abfbcfe40a59ec5c3225b92d7b",
+  "excluded_subtree": "connect/sim-latency/baseline",
+  "preconditions_verified": {
+    "baseline_tracked_files_clean": true,
+    "no_untracked_or_ignored_files_in_excluded_subtree": true,
+    "no_active_process_cwd_reference": true,
+    "process_command_scan_only_matched_its_observer": true,
+    "sparse_checkout_previously_disabled": true
+  },
+  "sparse_patterns": ["/*", "!/connect/sim-latency/baseline/"],
+  "canonical_baseline_preserved": true,
+  "git_objects_preserved": true,
+  "main_worktree_clean_after_operation": true,
+  "root_free_bytes_before_observed": 34773790720,
+  "root_free_bytes_after_observed": 36569165824,
+  "space_note": "The duplicate subtree measured about 1.5 GiB. Concurrent build activity means the free-space delta is not an exact attributable deletion size.",
+  "restore_command": "git -C /home/by/urnetwork/temp/supervisor-absence-20261105.I0aNwYjQ/server sparse-checkout disable",
+  "not_modified": ["canonical baseline", "evaluation data", "Git objects", "logs", "patches", "active checkouts", "private evaluator engines", "active compiler caches"]
+}

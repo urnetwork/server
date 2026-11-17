@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,29 @@ const (
 	CryptoAssetUsdcSolana = "usdc_solana"
 	CryptoAssetZec        = "zec"
 	CryptoAssetXmr        = "xmr"
+	// received into our Coinbase account, one address per invoice
+	// (mmm/BTCPAY.md §17): TAO on Bittensor (Finney), Bitcoin, ETH on
+	// Ethereum mainnet and native SOL
+	CryptoAssetTao = "tao"
+	CryptoAssetBtc = "btc"
+	CryptoAssetEth = "eth"
+	CryptoAssetSol = "sol"
 )
+
+// CryptoAssets are the rail's coins, in the order every UI shows them: the main
+// selector's USDC, Zcash and Monero, then "More coins": TAO, Bitcoin, ETH, SOL
+// (mmm/BTCPAY.md §17.6). The rail sells these (controller/crypto_pay_config.go)
+// and the payment monitor accepts exactly these as a held or stalled coin
+// (monitor/signal_payment_failures.go).
+var CryptoAssets = []string{
+	CryptoAssetUsdcSolana,
+	CryptoAssetZec,
+	CryptoAssetXmr,
+	CryptoAssetTao,
+	CryptoAssetBtc,
+	CryptoAssetEth,
+	CryptoAssetSol,
+}
 
 // Where a paid invoice delivers: the signed-in caller's network, a network
 // named without signing in, or a balance code shown on the page (and emailed
@@ -83,6 +106,33 @@ const (
 	CryptoReviewReasonCreditFailed = "credit_failed"
 	// ignored: a transparent Zcash output (decision 4: shielded only)
 	CryptoReviewReasonTransparent = "transparent"
+	// a sender of the payment (a Bitcoin input, an ETH or SOL sender, the TAO
+	// transfer's origin) is on OFAC's list of sanctioned addresses
+	// (mmm/BTCPAY.md §17.3, §17.5): held for the owner and counsel, never
+	// credited by the scanner
+	CryptoReviewReasonSanctionsHold = "sanctions_hold"
+	// the payment's senders could not be screened (no list loaded, an address
+	// the list cannot read, a sender the chain does not name): held, never
+	// credited unscreened. The scanner screens it again each scan and lets it
+	// through once the screen is clean.
+	CryptoReviewReasonScreeningUnavailable = "screening_unavailable"
+	// a TAO transfer of a shape the rail does not credit by itself (a batch,
+	// a proxy or multisig call, an EVM precompile send, a stake transfer):
+	// Coinbase publishes nothing on which shapes it credits, so an operator
+	// checks the Coinbase account first (controller/crypto_pay_bittensor.go)
+	CryptoReviewReasonTransferShape = "transfer_shape"
+	// a payment to a coin's one shared deposit address (Coinbase gave no
+	// address per invoice) whose amount is no open invoice's unique amount
+	CryptoReviewReasonAmountUnmatched = "amount_unmatched"
+	// a payment the late-payment rules would credit to an invoice the
+	// retention unlink has passed: the unlink forgot the network (or the gift
+	// order) the invoice was for, so the rail cannot deliver it, and an
+	// operator matches it to its buyer (a data code invoice still credits: its
+	// buyer reads the code with the status token). A gift order's invoice that
+	// received a payment before the unlink stays linked until the payment is
+	// resolved (cryptoGiftInvoiceHeldSql), so on a gift invoice this is a
+	// payment first seen after the unlink
+	CryptoReviewReasonUnlinked = "unlinked"
 )
 
 // The most status tokens one invoice keeps: the first plus the ones handed to
@@ -327,16 +377,19 @@ func addCryptoPaymentQuoteInTx(
 
 // CreateCryptoPaymentIntentWithAddress allocates a pool address (when
 // allocateAddress) and inserts the invoice in one transaction. An empty pool
-// is ErrCryptoAddressPoolEmpty and writes nothing.
+// is ErrCryptoAddressPoolEmpty and writes nothing. A pool address made with
+// an invoice id reserved for it (a Coinbase deposit address, named with the
+// id it will serve) gives the invoice that id.
 func CreateCryptoPaymentIntentWithAddress(ctx context.Context, intent *CryptoPaymentIntent, allocateAddress bool) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		returnErr = nil
 		if allocateAddress {
-			address, addressIndex, ok := AllocateCryptoPaymentAddressInTx(tx, ctx, intent.Asset, intent.IntentId, server.NowUtc())
+			address, addressIndex, intentId, ok := AllocateCryptoPaymentAddressInTx(tx, ctx, intent.Asset, intent.IntentId, server.NowUtc())
 			if !ok {
 				returnErr = ErrCryptoAddressPoolEmpty
 				return
 			}
+			intent.IntentId = intentId
 			intent.Address = address
 			intent.AddressIndex = &addressIndex
 		}
@@ -1430,18 +1483,21 @@ func CountCryptoPaymentReceiptsByState(ctx context.Context, asset string) map[[2
 // AllocateCryptoPaymentAddressInTx takes the coin's lowest free pool address
 // for an invoice. SKIP LOCKED: two invoices made at once never draw the same
 // address, and neither waits on the other. ok = false when the pool is empty.
+// allocatedIntentId is the invoice id the address was made for, when the
+// pool row reserved one (a Coinbase deposit address is named with the id of
+// the invoice it serves), else intentId: the caller gives the invoice this id.
 func AllocateCryptoPaymentAddressInTx(
 	tx server.PgTx,
 	ctx context.Context,
 	asset string,
 	intentId server.Id,
 	now time.Time,
-) (address string, addressIndex int64, ok bool) {
+) (address string, addressIndex int64, allocatedIntentId server.Id, ok bool) {
 	err := tx.QueryRow(
 		ctx,
 		`
 			UPDATE crypto_payment_address
-			SET allocated_at = $3, intent_id = $2
+			SET allocated_at = $3, intent_id = COALESCE(crypto_payment_address.intent_id, $2)
 			WHERE (asset, address_index) = (
 				SELECT asset, address_index
 				FROM crypto_payment_address
@@ -1450,17 +1506,17 @@ func AllocateCryptoPaymentAddressInTx(
 				LIMIT 1
 				FOR UPDATE SKIP LOCKED
 			)
-			RETURNING address, address_index
+			RETURNING address, address_index, intent_id
 		`,
 		asset,
 		intentId,
 		now,
-	).Scan(&address, &addressIndex)
+	).Scan(&address, &addressIndex, &allocatedIntentId)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", 0, false
+		return "", 0, server.Id{}, false
 	}
 	server.Raise(err)
-	return address, addressIndex, true
+	return address, addressIndex, allocatedIntentId, true
 }
 
 // CryptoPaymentAddress is a pre-derived receive address.
@@ -1468,10 +1524,16 @@ type CryptoPaymentAddress struct {
 	Asset        string
 	AddressIndex int64
 	Address      string
+	// the id of the invoice the address will serve, when it was made for one:
+	// a Coinbase deposit address is created with that id as its name, so the
+	// invoice that draws it takes this id (AllocateCryptoPaymentAddressInTx).
+	// nil for a derived address (Monero, Zcash)
+	ReservedIntentId *server.Id
 }
 
 // AddCryptoPaymentAddresses adds freshly derived addresses to the pool. An
 // address or index already present is skipped. Returns how many were added.
+// A free row's intent_id holds its reserved invoice id until it is drawn.
 func AddCryptoPaymentAddresses(ctx context.Context, addresses []*CryptoPaymentAddress) (added int64) {
 	if len(addresses) == 0 {
 		return 0
@@ -1482,17 +1544,261 @@ func AddCryptoPaymentAddresses(ctx context.Context, addresses []*CryptoPaymentAd
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
-					INSERT INTO crypto_payment_address (asset, address_index, address)
-					VALUES ($1, $2, $3)
+					INSERT INTO crypto_payment_address (asset, address_index, address, intent_id)
+					VALUES ($1, $2, $3, $4)
 					ON CONFLICT DO NOTHING
 				`,
 				address.Asset,
 				address.AddressIndex,
 				address.Address,
+				address.ReservedIntentId,
 			))
 			added += tag.RowsAffected()
 		}
 	}, server.TxReadCommitted)
+	return
+}
+
+// GetCryptoPaymentAddressIndexesInConn maps each given address of a coin that
+// the pool holds (drawn by an invoice or still free) to its index. Addresses
+// the pool does not hold are absent. The per-address coins match a transfer to
+// the invoice by this index. Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
+func GetCryptoPaymentAddressIndexesInConn(connOwner server.PgConn, ctx context.Context, asset string, addresses []string) map[string]int64 {
+	indexes := map[string]int64{}
+	if len(addresses) == 0 {
+		return indexes
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT address, address_index FROM crypto_payment_address WHERE asset = $1 AND address = ANY($2)`,
+			asset,
+			addresses,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				var index int64
+				server.Raise(result.Scan(&address, &index))
+				indexes[address] = index
+			}
+		})
+	})
+	return indexes
+}
+
+// CryptoPaymentWatchedAddress is an invoice address a per-address coin's
+// scanner reads the chain for.
+type CryptoPaymentWatchedAddress struct {
+	Address      string
+	AddressIndex int64
+	IntentId     server.Id
+	// read every scan: the invoice is open, or a payment to it is not yet at
+	// its final depth. Otherwise it closed within the watch window (expired,
+	// credited or voided) and is read less often, for a late or extra payment.
+	Hot bool
+}
+
+// The invoice addresses of a per-address coin (ETH, SOL) its scanner reads
+// every scan or often: open invoices, invoices with a receipt still in the
+// mempool or not yet confirmed, and invoices that expired, were credited or
+// were voided after watchSince. Hot first, newest first, at most limit. Every
+// other address an invoice was given is read by the scan's sweep
+// (ListCryptoAddressesToSweepInConn). Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func ListCryptoPaymentWatchedAddressesInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	asset string,
+	now time.Time,
+	watchSince time.Time,
+	limit int,
+) (addresses []*CryptoPaymentWatchedAddress) {
+	addresses = []*CryptoPaymentWatchedAddress{}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT address, address_index, intent_id, hot
+				FROM (
+					SELECT
+						intent.address,
+						intent.address_index,
+						intent.intent_id,
+						intent.create_time,
+						(
+							(intent.credited_at IS NULL AND intent.voided_at IS NULL AND $2 < intent.expires_at)
+							OR EXISTS (
+								SELECT 1 FROM crypto_payment_receipt receipt
+								WHERE receipt.intent_id = intent.intent_id
+								  AND receipt.state IN ('seen', 'confirmed')
+							)
+						) AS hot
+					FROM crypto_payment_intent intent
+					WHERE intent.asset = $1
+					  AND intent.address_index IS NOT NULL
+					  AND intent.unlinked_at IS NULL
+					  AND (
+						(intent.credited_at IS NULL AND intent.voided_at IS NULL AND $3 < intent.expires_at)
+						OR $3 < intent.credited_at
+						OR $3 < intent.voided_at
+						OR EXISTS (
+							SELECT 1 FROM crypto_payment_receipt receipt
+							WHERE receipt.intent_id = intent.intent_id
+							  AND receipt.state IN ('seen', 'confirmed')
+						)
+					  )
+				) watched
+				ORDER BY hot DESC, create_time DESC
+				LIMIT $4
+			`,
+			asset,
+			now,
+			watchSince,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				address := &CryptoPaymentWatchedAddress{}
+				server.Raise(result.Scan(&address.Address, &address.AddressIndex, &address.IntentId, &address.Hot))
+				addresses = append(addresses, address)
+			}
+		})
+	})
+	return
+}
+
+// An address an invoice of a coin was given: the pool index the invoice drew
+// it at, and when the invoice was made (the day only, once the retention
+// unlink has passed it).
+type CryptoPaymentIssuedAddress struct {
+	AddressIndex int64
+	CreateTime   time.Time
+}
+
+// Whether an invoice of the coin was ever given an address of the pool: one
+// probe of the invoice address index. Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func CryptoPaymentAddressesIssuedInConn(connOwner server.PgConn, ctx context.Context, asset string) (issued bool) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1 FROM crypto_payment_intent
+					WHERE asset = $1 AND address_index IS NOT NULL AND solana_reference IS NULL
+				)
+			`,
+			asset,
+		).Scan(&issued))
+	})
+	return
+}
+
+// Maps each given address of a coin that an invoice was ever given to its
+// pool index and the invoice's time, in one lookup by the invoice address
+// index: every invoice, open or closed, credited, voided or past the
+// retention unlink, since a payment can reach any of them at any time. The
+// block readers ask it with every address their blocks pay (Bitcoin once a
+// block, TAO once a scan) and judge the invoice's time against the block's:
+// an invoice made after its block was mined was not paid in it. Addresses no
+// invoice was given are absent. Reuse the caller's PostgreSQL session; nil
+// selects the outer acquisition boundary.
+func GetCryptoPaymentIssuedAddressesInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	asset string,
+	addresses []string,
+) (issuedAddresses map[string]*CryptoPaymentIssuedAddress) {
+	issuedAddresses = map[string]*CryptoPaymentIssuedAddress{}
+	if len(addresses) == 0 {
+		return
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT address, address_index, create_time
+				FROM crypto_payment_intent
+				WHERE asset = $1
+				  AND address = ANY($2)
+				  AND solana_reference IS NULL
+				  AND address_index IS NOT NULL
+			`,
+			asset,
+			addresses,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				issuedAddress := &CryptoPaymentIssuedAddress{}
+				server.Raise(result.Scan(&address, &issuedAddress.AddressIndex, &issuedAddress.CreateTime))
+				issuedAddresses[address] = issuedAddress
+			}
+		})
+	})
+	return
+}
+
+// GetCryptoPaymentReceiptAddressesForTxInConn lists the addresses a coin's
+// stored receipts of one transaction were paid to, for a re-read of the
+// transaction by a per-address coin (a transfer by a contract does not name
+// its recipient in the transaction). Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func GetCryptoPaymentReceiptAddressesForTxInConn(connOwner server.PgConn, ctx context.Context, asset string, txId string) (addresses []string) {
+	addresses = []string{}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT DISTINCT address FROM crypto_payment_receipt
+				WHERE asset = $1 AND tx_id = $2 AND address IS NOT NULL
+				ORDER BY address
+			`,
+			asset,
+			txId,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				server.Raise(result.Scan(&address))
+				addresses = append(addresses, address)
+			}
+		})
+	})
+	return
+}
+
+// GetCryptoPaymentInvoiceAddressesInConn lists which of the given addresses
+// are invoice addresses of the coin (any invoice, open or closed).
+// The Helius and Alchemy webhooks use it to tell a payment to one of our
+// invoices from an unrelated transfer. Reuse the caller's PostgreSQL session;
+// nil selects the outer acquisition boundary.
+func GetCryptoPaymentInvoiceAddressesInConn(connOwner server.PgConn, ctx context.Context, asset string, addresses []string) (invoiceAddresses []string) {
+	invoiceAddresses = []string{}
+	if len(addresses) == 0 {
+		return
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT address FROM crypto_payment_intent
+				WHERE asset = $1 AND address = ANY($2) AND solana_reference IS NULL
+				ORDER BY address
+			`,
+			asset,
+			addresses,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				server.Raise(result.Scan(&address))
+				invoiceAddresses = append(invoiceAddresses, address)
+			}
+		})
+	})
 	return
 }
 
@@ -1662,6 +1968,93 @@ func SetCryptoScanCursorSuccessInConn(
 			`,
 			asset,
 			height,
+			walletHeight,
+			nodeHeight,
+			networkHeight,
+			now,
+		))
+	}, server.TxReadCommitted)
+}
+
+// CryptoScanChain is a block reader's view of the recent chain, kept with its
+// coin's cursor (the Bitcoin block scanner, controller/crypto_pay_bitcoin.go):
+// the cursor's height and block hash, and the recent blocks it read, in the
+// reader's own json (crypto_scan_cursor.recent_blocks).
+type CryptoScanChain struct {
+	Height       int64
+	BlockHash    string
+	RecentBlocks string
+}
+
+// GetCryptoScanChainInConn reads the coin's kept chain, or nil before its
+// first scan. Only a block reader reads it: the other coins' cursors are read
+// without recent_blocks. Reuse the caller's PostgreSQL session; nil selects
+// the outer acquisition boundary.
+func GetCryptoScanChainInConn(connOwner server.PgConn, ctx context.Context, asset string) (chain *CryptoScanChain) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT height, block_hash, recent_blocks::text
+				FROM crypto_scan_cursor
+				WHERE asset = $1
+			`,
+			asset,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				chain = &CryptoScanChain{}
+				var blockHash *string
+				var recentBlocks *string
+				server.Raise(result.Scan(&chain.Height, &blockHash, &recentBlocks))
+				if blockHash != nil {
+					chain.BlockHash = *blockHash
+				}
+				if recentBlocks != nil {
+					chain.RecentBlocks = *recentBlocks
+				}
+			}
+		})
+	})
+	return
+}
+
+// SetCryptoScanCursorChainSuccessInConn is SetCryptoScanCursorSuccessInConn
+// for a block reader: the cursor, the heights and the reader's kept chain in
+// one write, so the chain a reader starts from is always the one its last
+// complete scan left.
+func SetCryptoScanCursorChainSuccessInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	asset string,
+	walletHeight int64,
+	nodeHeight int64,
+	networkHeight int64,
+	now time.Time,
+	chain *CryptoScanChain,
+) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO crypto_scan_cursor
+				(asset, height, block_hash, recent_blocks, wallet_height, node_height, network_height, last_success_at, last_error, update_time)
+				VALUES ($1, $2, $3, $4::jsonb, $5, NULLIF($6, 0), NULLIF($7, 0), $8, NULL, $8)
+				ON CONFLICT (asset) DO UPDATE
+				SET height = EXCLUDED.height,
+					block_hash = EXCLUDED.block_hash,
+					recent_blocks = EXCLUDED.recent_blocks,
+					wallet_height = EXCLUDED.wallet_height,
+					node_height = EXCLUDED.node_height,
+					network_height = EXCLUDED.network_height,
+					last_success_at = EXCLUDED.last_success_at,
+					last_error = NULL,
+					update_time = EXCLUDED.update_time
+			`,
+			asset,
+			chain.Height,
+			nullIfEmptyString(chain.BlockHash),
+			nullIfEmptyString(chain.RecentBlocks),
 			walletHeight,
 			nodeHeight,
 			networkHeight,
@@ -1846,6 +2239,13 @@ func EndCryptoPaymentGrantInTx(
 		ended = 0 < len(endedNetworkIds)
 		return
 	}
+	// a gift order's invoice (the reconcile's orphan leg; an operator's refund
+	// of one is RefundCryptoGiftOrderInTx): every unredeemed code voided and
+	// every redeemed code's year ended, each recorded, so a credit again
+	// restores exactly them (gift_refund_model.go)
+	if giftOrderId := cryptoGiftOrderIdInTx(tx, ctx, intent.IntentId); giftOrderId != nil {
+		return endCryptoGiftOrderGrantInTx(tx, ctx, *giftOrderId, now)
+	}
 	if intent.BalanceCodeId != nil {
 		_, voidedCount, endedNetworks := ClawbackBalanceCodesForPurchaseEventInTx(tx, ctx, CryptoPaymentPurchaseEventId(intent.IntentId), now)
 		endedNetworkIds = append(endedNetworkIds, endedNetworks...)
@@ -1896,13 +2296,22 @@ type CryptoPaymentUnlinkResult struct {
 
 // UnlinkCryptoPaymentIntents drops the link between invoices and the networks
 // they were for (decision 9, mmm/ZCASH-CONTRACT.md §3.13.6): invoices credited before
-// cutoff, and invoices never credited that were created before it. For each,
-// in one transaction:
+// cutoff, and invoices never credited that were created before it, except a
+// gift order's invoice that has received a payment it was not credited for
+// yet, which stays linked until that payment is resolved
+// (cryptoGiftInvoiceHeldSql). For each, in one transaction:
 //   - the renewal's transaction id becomes a fresh random id;
 //   - a USDC invoice's Solana intent loses its network, and its times are
 //     truncated to the day;
 //   - a code's purchase event id stops naming the invoice, and its purchase
 //     record and email are cleared;
+//   - a gift order the invoice paid forgets it: its codes' purchase events
+//     (crypto/<id>/gift/<n>) move to a fresh base, the order's own, and lose
+//     their purchase record and email, and the order loses the invoice's id,
+//     its exact times (its day stays), its referrer (its codes keep theirs)
+//     and, once no friend's email is owed, the buyer's email
+//     (unlinkCryptoGiftOrderInTx). The order keeps its codes, so its cards
+//     still deliver and its codes still redeem;
 //   - the invoice forgets its network, email and grant handles, and its times
 //     are truncated to the day, as are its receipts' and its pool address's;
 //     its quote history is deleted (the invoice keeps the final quote);
@@ -1937,8 +2346,9 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 					)
 					UNION ALL
 					(
-						SELECT intent_id FROM crypto_payment_intent
+						SELECT intent_id FROM crypto_payment_intent intent
 						WHERE credited_at IS NULL AND unlinked_at IS NULL AND create_time < $1
+						  AND NOT `+cryptoGiftInvoiceHeldSql("intent")+`
 						ORDER BY create_time
 						LIMIT $2
 					)
@@ -1960,6 +2370,12 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 		for _, row := range rows {
 			if row.networkId != nil {
 				market, transactionId := cryptoPaymentRenewalHandle(row.asset, row.intentId, row.solanaReference)
+				// the renewal keeps no link to the invoice, but a SOL year
+				// keeps its coin: it shares USDC's market (CryptoRenewalAsset)
+				unlinkedTransactionId := server.NewId().String()
+				if row.asset == CryptoAssetSol {
+					unlinkedTransactionId = CryptoUnlinkedSolTransactionPrefix + unlinkedTransactionId
+				}
 				if market != "" && transactionId != "" {
 					server.RaisePgResult(tx.Exec(
 						ctx,
@@ -1971,7 +2387,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 						*row.networkId,
 						market,
 						transactionId,
-						server.NewId().String(),
+						unlinkedTransactionId,
 					))
 				}
 			}
@@ -1998,14 +2414,16 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 				CryptoPaymentPurchaseEventId(row.intentId),
 				"crypto/unlinked/"+server.NewId().String(),
 			))
+			unlinkCryptoGiftOrderInTx(tx, ctx, row.intentId)
 			// the events name the invoice, or one of its receipts' transactions
+			// (a USDC invoice has no receipts: only its operator refund names it)
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 					UPDATE payment_reconciliation_event
 					SET network_id = NULL
 					WHERE network_id IS NOT NULL
-					  AND (store IN ('monero', 'zcash') OR (store = 'solana' AND action = 'refunded'))
+					  AND store = ANY($3)
 					  AND (
 						evidence = $1
 						OR evidence IN (SELECT tx_id FROM crypto_payment_receipt WHERE intent_id = $2)
@@ -2013,6 +2431,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 				`,
 				row.intentId.String(),
 				row.intentId,
+				CryptoPaymentReconcileStores,
 			))
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -2069,29 +2488,214 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 			`
 				UPDATE payment_reconciliation_event
 				SET network_id = NULL
-				WHERE store IN ('monero', 'zcash') AND network_id IS NOT NULL AND event_time < $1
+				WHERE store = ANY($2) AND network_id IS NOT NULL AND event_time < $1
 			`,
 			cutoff,
+			cryptoPaymentUnlinkAllStores,
 		))
 	}, server.TxReadCommitted)
 	return
 }
 
+// cryptoGiftInvoiceHeldSql is whether the never-credited invoice of alias is
+// held from the retention unlink (owner, 2026-11-16: only unpaid gift invoices
+// unlink): a gift order's invoice (one a gift_order names) that is neither
+// voided nor refunded, and has received a payment the rail can still credit or
+// an operator holds:
+//   - a receipt in the mempool or a block and not credited yet (seen,
+//     confirmed), or one held for review for any reason (review): underpaid,
+//     late_underpaid, credit_failed, a sanctions or screening hold, a TAO
+//     transfer shape, a credited payment that left the chain (orphaned, its
+//     credit taken back), and the rest;
+//   - for USDC, a recorded unfulfilled Solana payment that names the
+//     invoice's Solana Pay reference: an underpayment of it, or a payment sent
+//     without the reference whose match note names it. A code invoice's, so a
+//     gift invoice's, is never matched by its amount alone: an operator
+//     credits it with `bringyourctl crypto credit-usdc`, which needs the
+//     Solana Pay intent that the sweep deletes once the invoice is unlinked.
+//
+// Unlinked, the invoice would forget its order (unlinkCryptoGiftOrderInTx)
+// and nothing could credit the payment or deliver the order's cards: the scan
+// holds a late credit as unlinked, and `bringyourctl crypto credit` finds no
+// order. Held, the scan or an operator still credits it, and the order's codes
+// are made and its cards delivered. Every payment that holds an invoice is on
+// a payment alert until it is resolved (monitor/SIGNALS.md §2.22: the crypto
+// hold classes, payment-received-uncredited, payment-received-held,
+// payment-solana-unfulfilled), so no invoice is held unseen.
+//
+// The hold ends with the payment's resolution, and the unlink then takes the
+// invoice at its first run past its due time:
+//   - credited: by the credited rule, as every credited invoice is, at the
+//     first run unlink_after past the credit;
+//   - voided (`bringyourctl crypto void`: the coins are returned by hand, or
+//     the payment is given up) or refunded (a refunded invoice whose payment
+//     then left the chain, uncredited again): by the never-credited rule,
+//     unlink_after past the invoice's creation, which an invoice the hold
+//     kept is already past, so at the next run;
+//   - no payment left that holds it (each receipt orphaned or ignored, each
+//     USDC record resolved): at the next run too.
+//
+// A receipt never counted (ignored: time-locked, or a transparent Zcash
+// output) or one that left the chain before any credit (orphaned) does not
+// hold an invoice: neither the scan nor `bringyourctl crypto credit` credits
+// one, and no alert names it. One that comes back on the chain is seen again
+// and holds the invoice from then on. A payment first recorded while an unlink
+// batch is running is not seen by that batch: at its invoice's due time to the
+// second, it is held as unlinked, as every payment after the unlink is.
+func cryptoGiftInvoiceHeldSql(alias string) string {
+	return `(
+		` + alias + `.voided_at IS NULL AND
+		` + alias + `.refunded_at IS NULL AND
+		EXISTS (
+			SELECT 1 FROM gift_order held_order
+			WHERE held_order.crypto_intent_id = ` + alias + `.intent_id
+		) AND
+		(
+			EXISTS (
+				SELECT 1 FROM crypto_payment_receipt held_receipt
+				WHERE held_receipt.intent_id = ` + alias + `.intent_id
+				  AND held_receipt.state IN ('` + CryptoReceiptStateSeen + `', '` + CryptoReceiptStateConfirmed + `', '` + CryptoReceiptStateReview + `')
+			) OR
+			(
+				` + alias + `.solana_reference IS NOT NULL AND
+				` + alias + `.solana_reference <> '' AND
+				EXISTS (
+					SELECT 1 FROM solana_unfulfilled_payment held_unfulfilled
+					WHERE held_unfulfilled.payment_reference = ` + alias + `.solana_reference
+					   OR strpos(held_unfulfilled.match_note, ` + alias + `.solana_reference) > 0
+				)
+			)
+		)
+	)`
+}
+
+// unlinkCryptoGiftOrderInTx is the 30-day unlink of the gift order an
+// invoice paid for, or was made for (UnlinkCryptoPaymentIntents), in its
+// transaction: the order forgets the invoice's id, and its codes' purchase
+// events, "crypto/<intent id>/gift/<n>", become "<base>/gift/<n>" under a
+// fresh random base, "crypto/unlinked/<id>", which the order takes as its own
+// purchase event base, so it still finds its codes (GetGiftOrderCodes); like
+// an invoice's data code, they lose their purchase record and email. The
+// codes are matched by their exact purchase event ids, the unique key. Nothing
+// for an invoice no gift order names. A Gamma intent's order is unlinked the
+// same way (unlinkGiftOrderPaymentInTx, UnlinkGammaGiftOrders).
+func unlinkCryptoGiftOrderInTx(tx server.PgTx, ctx context.Context, intentId server.Id) {
+	unlinkGiftOrderPaymentInTx(tx, ctx, giftOrderCryptoLink, intentId)
+}
+
+// CryptoUnlinkedSolTransactionPrefix starts the transaction id the 30-day
+// unlink gives a SOL year's renewal: a random id, with no link to the
+// invoice, that keeps the coin (USDC's renewals share the solana market).
+const CryptoUnlinkedSolTransactionPrefix = "sol/"
+
+// The coin of each one-time crypto market but solana, which USDC and native
+// SOL share.
+var cryptoRenewalMarketAssets = map[string]string{
+	SubscriptionMarketMonero:    CryptoAssetXmr,
+	SubscriptionMarketZcash:     CryptoAssetZec,
+	SubscriptionMarketBittensor: CryptoAssetTao,
+	SubscriptionMarketBitcoin:   CryptoAssetBtc,
+	SubscriptionMarketEthereum:  CryptoAssetEth,
+}
+
+// cryptoRenewalAssetOf is a one-time crypto renewal's coin, given whether a
+// solana renewal was paid in native SOL; "" for any other market.
+func cryptoRenewalAssetOf(market string, sol bool) string {
+	if market == SubscriptionMarketSolana {
+		if sol {
+			return CryptoAssetSol
+		}
+		return CryptoAssetUsdcSolana
+	}
+	return cryptoRenewalMarketAssets[market]
+}
+
+// cryptoRenewalSolSql is whether the renewal row of alias was paid in native
+// SOL: a solana renewal whose transaction id is a SOL invoice's id (while
+// linked) or an unlinked SOL renewal's (CryptoUnlinkedSolTransactionPrefix).
+// A USDC renewal's is a Solana Pay reference, never a uuid.
+func cryptoRenewalSolSql(alias string) string {
+	return `(` + alias + `.market = 'solana' AND (
+		` + alias + `.transaction_id LIKE '` + CryptoUnlinkedSolTransactionPrefix + `%' OR EXISTS (
+			SELECT 1 FROM crypto_payment_intent sol_intent
+			WHERE sol_intent.asset = '` + CryptoAssetSol + `'
+			  AND sol_intent.intent_id = (
+				CASE WHEN ` + alias + `.transaction_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+				THEN ` + alias + `.transaction_id::uuid END
+			  )
+		)
+	))`
+}
+
+// CryptoRenewalAsset is the coin a one-time crypto renewal was paid with
+// (usdc_solana, sol, xmr, zec, tao, btc, eth), read from its market and
+// transaction id; "" for a market that is not one-time crypto. Native SOL
+// and USDC share the solana market: a SOL year's transaction id is its
+// invoice's id, and after the 30-day unlink a random id with the SOL prefix.
+func CryptoRenewalAsset(ctx context.Context, market string, transactionId string) string {
+	if market != SubscriptionMarketSolana {
+		return cryptoRenewalMarketAssets[market]
+	}
+	if strings.HasPrefix(transactionId, CryptoUnlinkedSolTransactionPrefix) {
+		return CryptoAssetSol
+	}
+	if intentId, err := server.ParseId(transactionId); err == nil {
+		if intent := GetCryptoPaymentIntent(ctx, intentId); intent != nil && intent.Asset == CryptoAssetSol {
+			return CryptoAssetSol
+		}
+	}
+	return CryptoAssetUsdcSolana
+}
+
 // cryptoPaymentRenewalHandle is where a plan credit's renewal is found: its
-// market and transaction id (the invoice id for xmr and zec, the Solana
-// reference for USDC so the Solana reconcile leg still finds it).
+// market and transaction id (the invoice id for every coin but USDC, the
+// Solana reference for USDC so the Solana reconcile leg still finds it).
+// Native SOL credits under the solana market too, by its invoice id: the
+// Solana reconcile leg verifies only the renewals a Solana Pay intent names.
 func cryptoPaymentRenewalHandle(asset string, intentId server.Id, solanaReference *string) (SubscriptionMarket, string) {
 	switch asset {
 	case CryptoAssetXmr:
 		return SubscriptionMarketMonero, intentId.String()
 	case CryptoAssetZec:
 		return SubscriptionMarketZcash, intentId.String()
+	case CryptoAssetTao:
+		return SubscriptionMarketBittensor, intentId.String()
+	case CryptoAssetBtc:
+		return SubscriptionMarketBitcoin, intentId.String()
+	case CryptoAssetEth:
+		return SubscriptionMarketEthereum, intentId.String()
+	case CryptoAssetSol:
+		return SubscriptionMarketSolana, intentId.String()
 	case CryptoAssetUsdcSolana:
 		if solanaReference != nil {
 			return SubscriptionMarketSolana, *solanaReference
 		}
 	}
 	return "", ""
+}
+
+// CryptoPaymentReconcileStores are the reconcile stores of the crypto
+// invoice rail's own legs, whose events an invoice's unlink detaches from
+// their network: the one-time crypto markets (and solana, where the native
+// SOL legs and the operator refunds of every Solana invoice record).
+var CryptoPaymentReconcileStores = []string{
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
+	SubscriptionMarketSolana,
+}
+
+// The stores whose every event older than the cutoff loses its network at
+// the unlink, whatever it names: the rail's own markets. Not solana, whose
+// Solana Pay events of the old endpoints have rules of their own.
+var cryptoPaymentUnlinkAllStores = []string{
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
 }
 
 // CryptoPaymentRenewalHandle exports cryptoPaymentRenewalHandle for the
@@ -2120,12 +2724,12 @@ func GetLatestOneTimeSubscriptionRenewal(
 	networkId server.Id,
 	markets []string,
 	now time.Time,
-) (market string, endTime time.Time, ok bool) {
+) (market string, asset string, endTime time.Time, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT market, end_time
+				SELECT market, end_time, `+cryptoRenewalSolSql("subscription_renewal")+`
 				FROM subscription_renewal
 				WHERE network_id = $1
 				  AND subscription_type = $2
@@ -2141,7 +2745,9 @@ func GetLatestOneTimeSubscriptionRenewal(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&market, &endTime))
+				var sol bool
+				server.Raise(result.Scan(&market, &endTime, &sol))
+				asset = cryptoRenewalAssetOf(market, sol)
 				ok = true
 			}
 		})

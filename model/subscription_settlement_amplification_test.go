@@ -137,31 +137,28 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 				}
 			}
 		})
-		var settledRevenue NanoCents
+		var sweptBytes ByteCount
 		server.Db(ctx, func(conn server.PgConn) {
 			var terminal bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
 				(SELECT outcome='settled' AND NOT dispute FROM transfer_contract WHERE contract_id=$1),
-				COALESCE(sum(payout_net_revenue_nano_cents),0)
-				FROM transfer_escrow_sweep WHERE contract_id=$1`, fixture.contractId).Scan(&terminal, &settledRevenue))
+				COALESCE(sum(payout_byte_count) FILTER (WHERE network_id=$2),0)
+				FROM transfer_escrow_sweep WHERE contract_id=$1`, fixture.contractId, fixture.providerNetworkId).Scan(&terminal, &sweptBytes))
 			if !terminal {
 				t.Fatal("legacy settlement did not retire its terminal outcome")
 			}
 		})
-		// Since ac53dc21 the settlement commits the exact earnings with one
-		// durable provider-total owner instead of writing the provider's
-		// lifetime total while it holds the payer's grants. The public total
-		// catches up when that owner runs, and only then; its replay must not
-		// add it again.
-		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
-			t.Fatalf("provider total was published before its durable owner ran: got=%+v want=%+v", account, initialAccount)
+		// The settlement commits the exact earnings in the sweep alone: since
+		// 2026-11-11 it neither writes nor queues the provider's lifetime total
+		// (BILLING-SPLIT.md), so the account stays as it was through settlement
+		// and replay.
+		if sweptBytes != used {
+			t.Fatalf("legacy settlement swept %d bytes to the provider, want %d", sweptBytes, used)
 		}
-		asyncPayoutRecoveryProject(t, ctx, fixture.contractId)
+		asyncPayoutRecoveryRequireNoProjection(t, ctx, fixture.contractId, fixture.providerNetworkId)
 		wantAccount := initialAccount
-		wantAccount.ProvidedByteCount += used
-		wantAccount.ProvidedNetRevenue += settledRevenue
 		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != wantAccount {
-			t.Fatalf("public account did not expose exact durable payout: got=%+v want=%+v", account, wantAccount)
+			t.Fatalf("settlement changed the provider account: got=%+v want=%+v", account, wantAccount)
 		}
 		if err := SettleEscrow(ctx, fixture.contractId, ContractOutcomeSettled); err != nil {
 			t.Fatal(err)

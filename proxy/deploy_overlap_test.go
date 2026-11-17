@@ -3,9 +3,9 @@ package proxy
 // The two-container deploy overlap (REVIEW2-UPDATE1 §4.4, FIXPLAN1 decision
 // 3). During a deploy, instance A (old) keeps serving through its drain
 // grace with a live device whose window runs a persisted identity. Instance
-// B (new) becomes ready and — before the beacon gate — both notification
-// warmup and customer traffic can open a DeviceLocal. Restoring A's persisted
-// identities from either path runs one logical Connect client in two processes:
+// B (new) becomes ready and — before the beacon gate — customer traffic can
+// open a DeviceLocal. Restoring A's persisted identities from that open
+// runs one logical Connect client in two processes:
 // A's live-ctx window eviction can then api-remove the identity B is using.
 // The gated sequence (cli/proxy/main.go) lets those early opens form fresh
 // windows, buffers their snapshots, and releases restoration only after A's
@@ -115,7 +115,7 @@ func TestProxyDeployOverlapPrewarmGate(t *testing.T) {
 
 		// ---- 1. while A drains, B may accept a lazy open, but it must mint
 		// fresh identities and leave A's durable snapshot untouched. This is
-		// the path notification warmup and a first post-flip request both use. ----
+		// the path a first post-flip request uses. ----
 		pdB, err := freshManager.OpenProxyDevice(h.proxyId)
 		if err != nil {
 			t.Fatalf("open replacement device before drain completion: %v", err)

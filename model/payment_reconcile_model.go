@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -42,6 +43,14 @@ const (
 	// credit_unfulfillable: nothing is credited or ended from it, the store is
 	// still asked every run, and the object no longer counts as a store error.
 	PaymentReconcileActionUnknownToStore = "unknown_to_store"
+	// A card gift order's Stripe Checkout session expired unpaid
+	// (controller/payment_reconcile_gift.go). Nothing was paid, so nothing is
+	// fulfilled, and the session can never be paid: the reconciler stops
+	// reading it (ListPendingStripeGiftOrdersInConn). The order stays pending,
+	// as an abandoned order of every rail does. Evidence is the session;
+	// written once per session, under store stripe. Not an alarm: most are
+	// checkouts the buyer left.
+	PaymentReconcileActionCheckoutExpired = "checkout_expired"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the
@@ -54,6 +63,9 @@ const (
 	PaymentReconcileActionRefunded = "refunded"
 	// a dispute was opened -- the funds are withdrawn, treated like a refund
 	PaymentReconcileActionDisputed = "disputed"
+	// a dispute closed in our favor -- the funds are back. details say whether
+	// the window its clawback cut was restored, and if not, why
+	PaymentReconcileActionDisputeWon = "dispute_won"
 	// a store revoked an entitlement (Apple REFUND/REVOKE, Play
 	// SUBSCRIPTION_REVOKED) and the entitlement was ended
 	PaymentReconcileActionRevoked = "revoked"
@@ -69,10 +81,42 @@ const (
 	// the reconciler found a settled_not_granted transaction already granted
 	// (an agent retry got there first): resolved without a new credit
 	PaymentReconcileActionAlreadyCredited = "already_credited"
+	// X402Purchase's settlement came back settlement_pending twice: the
+	// facilitator broadcast the transaction and could not confirm it, so it
+	// may still move the money (x402 v2 spec §9). Nothing was granted.
+	// Evidence is the broadcast transaction; details carry what was bought.
+	// An operator disposition: the reconciler does not grant from it, since
+	// a broadcast transaction can still fail on chain.
+	PaymentReconcileActionSettlementPending = "settlement_pending"
+	// A Stripe checkout paid with a delayed method (a bank debit or transfer)
+	// completed, and its payment failed afterwards
+	// (checkout.session.async_payment_failed). Nothing was fulfilled: a
+	// checkout fulfils only once its payment clears. Evidence is the checkout
+	// session; written once per session, for support.
+	PaymentReconcileActionPaymentFailed = "payment_failed"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
 const PaymentReconcileStoreAll = "all"
+
+// PaymentReconcileStores are the stores the hourly payment reconciliation
+// passes over, in the order it does, each with its own leg and watermark
+// (controller/payment_reconcile_controller.go, which a test holds to this
+// list). The payment monitor expects a fresh watermark from each and accepts
+// a repair from each (monitor/signal_payment_reconciliation.go). gamma has no
+// leg.
+var PaymentReconcileStores = []string{
+	SubscriptionMarketStripe,
+	SubscriptionMarketApple,
+	SubscriptionMarketGoogle,
+	SubscriptionMarketSolana,
+	SubscriptionMarketX402,
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
+}
 
 type PaymentReconciliationEvent struct {
 	EventId   server.Id
@@ -479,6 +523,10 @@ type ReconcileSubscriptionRenewal struct {
 	EndTime       time.Time
 	PurchaseToken string
 	TransactionId string
+	// the end of the period the row's payment or trial covers, without its
+	// grace (SubscriptionRenewal.PaidEndTime); nil for a row written before the
+	// column and for a billing grace hold
+	PaidEndTime *time.Time
 }
 
 // RepairReconciledProEntitlement restores only the Pro metadata for an exact,
@@ -637,7 +685,8 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 			ctx,
 			`
 			SELECT renewal.network_id, renewal.start_time, renewal.end_time,
-			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, '')
+			       COALESCE(renewal.purchase_token, ''), COALESCE(renewal.transaction_id, ''),
+			       renewal.paid_end_time
 			FROM subscription_renewal renewal
 			INNER JOIN network ON network.network_id = renewal.network_id
 			WHERE renewal.market = $1
@@ -660,12 +709,217 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 					&renewal.EndTime,
 					&renewal.PurchaseToken,
 					&renewal.TransactionId,
+					&renewal.PaidEndTime,
 				))
 				renewals = append(renewals, renewal)
 			}
 		})
 	})
 	return renewals
+}
+
+// Whether the dispute's clawback ended a window: its disputed event in the
+// operator stream says so. A dispute that found
+// the window already over ended nothing, and has nothing to give back.
+func DisputeEndedEntitlementInTx(tx server.PgTx, ctx context.Context, disputeId string) (ended bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT details FROM payment_reconciliation_event
+		WHERE store = $1
+		  AND action = $2
+		  AND evidence = $3
+		  AND NOT dry_run
+		`,
+		SubscriptionMarketStripe,
+		PaymentReconcileActionDisputed,
+		disputeId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var details *string
+			server.Raise(result.Scan(&details))
+			if details == nil {
+				continue
+			}
+			var parsed struct {
+				Ended bool `json:"ended"`
+			}
+			if json.Unmarshal([]byte(*details), &parsed) == nil && parsed.Ended {
+				ended = true
+			}
+		}
+	})
+	return
+}
+
+// Gives back the paid window a dispute's clawback cut: the invoice's renewal on the network, starting at startTime, and
+// the Pro balance it granted, matched by its cut window, get endTime. It returns
+// the restored renewal, or nil when the renewal is gone or isn't cut (a
+// redelivery, or a window that never ended). The caller has established that the
+// dispute was won and that this window is the one its clawback ended, and refreshes
+// the pro cache after commit. A balance that retention already removed is not
+// recreated here; the caller's RepairReconciledProEntitlement adds its marker.
+// The outer transaction must use OptNoRetry: an ownership refusal aborts it with
+// its ledger receipt, so Stripe redelivers. ErrPaymentNetworkNotFound for a deleted
+// network, which writes nothing.
+func RestoreDisputedStripeEntitlementInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	invoiceId string,
+	startTime time.Time,
+	endTime time.Time,
+	now time.Time,
+) (*ReconcileSubscriptionRenewal, error) {
+	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return nil, err
+	}
+
+	var cutTime time.Time
+	found := false
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT end_time FROM subscription_renewal
+		WHERE network_id = $1
+		  AND subscription_type = $2
+		  AND market = $3
+		  AND transaction_id = $4
+		  AND start_time = $5
+		ORDER BY end_time DESC
+		LIMIT 1
+		FOR UPDATE
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketStripe,
+		invoiceId,
+		startTime,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&cutTime))
+			found = true
+		}
+	})
+	if !found || cutTime.After(now) || !cutTime.Before(endTime) {
+		return nil, nil
+	}
+
+	// the period's balance, matched by its cut window; a Pro cycle grant has
+	// its own window and comes back with its cycle, below
+	balanceIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+		SELECT balance_id FROM transfer_balance AS balance
+		WHERE network_id = $1
+		  AND pro
+		  AND start_time = $2
+		  AND end_time = $3
+		  AND NOT EXISTS (
+			SELECT 1 FROM pro_grant_cycle AS cycle
+			WHERE cycle.network_id = balance.network_id
+			  AND cycle.balance_id = balance.balance_id
+		  )
+		`,
+		networkId,
+		startTime,
+		cutTime,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			server.Raise(result.Scan(&balanceId))
+			balanceIds = append(balanceIds, balanceId)
+		}
+	})
+	// the Pro cycle the clawback ended with the period
+	// (endReconciledEntitlementInTx), whose grant comes back to its cycle's end
+	cycleBalanceIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+		SELECT cycle.balance_id
+		FROM pro_grant_cycle AS cycle
+		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+		WHERE cycle.network_id = $1
+		  AND cycle.ended_time IS NOT NULL
+		  AND balance.end_time = $2
+		`,
+		networkId,
+		cutTime,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			server.Raise(result.Scan(&balanceId))
+			cycleBalanceIds = append(cycleBalanceIds, balanceId)
+		}
+	})
+	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, append(slices.Clone(balanceIds), cycleBalanceIds...))
+	server.Raise(ownershipErr)
+	if !admitted {
+		server.Raise(errTransferBalanceOwnershipBusy)
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		UPDATE subscription_renewal SET end_time = $1
+		WHERE network_id = $2
+		  AND subscription_type = $3
+		  AND market = $4
+		  AND transaction_id = $5
+		  AND start_time = $6
+		  AND end_time = $7
+		`,
+		endTime,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketStripe,
+		invoiceId,
+		startTime,
+		cutTime,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		UPDATE transfer_balance SET end_time = $1
+		WHERE balance_id = ANY($2::uuid[])
+		  AND end_time = $3
+		`,
+		endTime,
+		balanceIds,
+		cutTime,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		WITH restored AS (
+			UPDATE pro_grant_cycle AS cycle SET ended_time = NULL
+			WHERE cycle.network_id = $1
+			  AND cycle.balance_id = ANY($2::uuid[])
+			  AND cycle.ended_time IS NOT NULL
+			RETURNING cycle.balance_id, cycle.cycle_end_time
+		)
+		UPDATE transfer_balance AS balance SET end_time = restored.cycle_end_time + $4::interval
+		FROM restored
+		WHERE balance.balance_id = restored.balance_id
+		  AND balance.end_time = $3
+		`,
+		networkId,
+		cycleBalanceIds,
+		cutTime,
+		fmt.Sprintf("%d seconds", int64(ProGrantGrace/time.Second)),
+	))
+	return &ReconcileSubscriptionRenewal{
+		NetworkId:     networkId,
+		StartTime:     startTime,
+		EndTime:       endTime,
+		TransactionId: invoiceId,
+	}, nil
 }
 
 // EndReconciledEntitlementForNetworkTransactions is the "store says it is
@@ -847,10 +1101,13 @@ func EndReconciledEntitlementForNetworkPurchaseTokenInConn(connOwner server.PgCo
 // retroactively -- the market's active supporter renewals matching the scope
 // (networkId nil-able; transactionIds nil = no transaction filter;
 // purchaseToken "" = no token filter) and the pro transfer balances those
-// renewals granted, matched per network by identical window end. Naturally
-// idempotent: every predicate requires end_time > now, so a second delivery
-// of the same refund/revocation finds nothing left to end. Returns the
-// distinct networks whose entitlement was ended.
+// renewals granted, matched per network by identical window end. A network the
+// ending leaves with no supporter renewal open also loses its Pro cycle grant,
+// ended now with its cycle (ended_time), so a refund takes back the cycle's data
+// as it took back the period's balance. Naturally idempotent:
+// every predicate requires end_time > now, so a second delivery of the same
+// refund/revocation finds nothing left to end. Returns the distinct networks
+// whose entitlement was ended.
 func endReconciledEntitlementInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -860,6 +1117,11 @@ func endReconciledEntitlementInTx(
 	purchaseToken string,
 	now time.Time,
 ) []server.Id {
+	// The period balances the ended renewals granted, matched by window end, and
+	// the running Pro cycle grant (pro_grant_cycle_model.go) of each network the
+	// ending leaves with no supporter renewal open. A cycle's grant has its own
+	// window, so it is never matched by end: a network still paying through
+	// another subscription keeps its cycle's grant.
 	balanceIds := []server.Id{}
 	result, queryErr := tx.Query(
 		ctx,
@@ -877,6 +1139,38 @@ func endReconciledEntitlementInTx(
 			  AND ($6::varchar = '' OR renewal.purchase_token = $6)
 			  AND renewal.network_id = balance.network_id
 			  AND renewal.end_time = balance.end_time
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM pro_grant_cycle AS cycle
+			WHERE cycle.network_id = balance.network_id
+			  AND cycle.balance_id = balance.balance_id
+		  )
+		UNION
+		SELECT cycle.balance_id
+		FROM pro_grant_cycle AS cycle
+		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+		WHERE cycle.ended_time IS NULL
+		  AND balance.end_time > $3
+		  AND EXISTS (
+			SELECT 1 FROM subscription_renewal AS renewal
+			WHERE renewal.subscription_type = $1
+			  AND renewal.market = $2
+			  AND renewal.end_time > $3
+			  AND ($4::uuid IS NULL OR renewal.network_id = $4)
+			  AND ($5::varchar[] IS NULL OR renewal.transaction_id = ANY($5))
+			  AND ($6::varchar = '' OR renewal.purchase_token = $6)
+			  AND renewal.network_id = cycle.network_id
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM subscription_renewal AS other
+			WHERE other.network_id = cycle.network_id
+			  AND other.subscription_type = $1
+			  AND other.start_time <= $3
+			  AND $3 < `+proRenewalOpenEndSql("other")+`
+			  AND (other.market = $2
+				AND other.end_time > $3
+				AND ($5::varchar[] IS NULL OR other.transaction_id = ANY($5))
+				AND ($6::varchar = '' OR other.purchase_token = $6)) IS NOT TRUE
 		  )
 		`,
 		SubscriptionTypeSupporter,
@@ -922,9 +1216,34 @@ func endReconciledEntitlementInTx(
 			  AND EXISTS (SELECT 1 FROM renewals
 				WHERE renewals.network_id = balance.network_id
 				  AND renewals.end_time = balance.end_time)
+			  AND NOT EXISTS (
+				SELECT 1 FROM pro_grant_cycle AS cycle
+				WHERE cycle.network_id = balance.network_id
+				  AND cycle.balance_id = balance.balance_id
+			  )
+		), cycle_grants AS MATERIALIZED (
+			SELECT cycle.network_id, cycle.cycle_start_time, cycle.balance_id
+			FROM pro_grant_cycle AS cycle
+			INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+			WHERE cycle.ended_time IS NULL
+			  AND balance.end_time > $3
+			  AND cycle.network_id IN (SELECT network_id FROM renewals)
+			  AND NOT EXISTS (
+				SELECT 1 FROM subscription_renewal AS other
+				WHERE other.network_id = cycle.network_id
+				  AND other.subscription_type = $1
+				  AND other.start_time <= $3
+				  AND $3 < `+proRenewalOpenEndSql("other")+`
+				  AND (other.market = $2
+					AND other.end_time > $3
+					AND ($5::varchar[] IS NULL OR other.transaction_id = ANY($5))
+					AND ($6::varchar = '' OR other.purchase_token = $6)) IS NOT TRUE
+			  )
 		), ownership AS MATERIALIZED (
 			SELECT NOT EXISTS (
 				SELECT 1 FROM grants WHERE NOT (balance_id = ANY($7::uuid[]))
+				UNION ALL
+				SELECT 1 FROM cycle_grants WHERE NOT (balance_id = ANY($7::uuid[]))
 			) AS admitted
 		), ended_renewals AS (
 			UPDATE subscription_renewal AS renewal SET end_time = $3
@@ -950,6 +1269,23 @@ func endReconciledEntitlementInTx(
 			  AND ($6::varchar = '' OR balance.purchase_token = $6)
 			  AND (SELECT admitted FROM ownership)
 			RETURNING balance.balance_id
+		), ended_cycle_balances AS (
+			UPDATE transfer_balance AS balance SET end_time = $3
+			FROM cycle_grants
+			WHERE balance.balance_id = cycle_grants.balance_id
+			  AND balance.balance_id = ANY($7::uuid[])
+			  AND balance.pro AND balance.end_time > $3
+			  AND (SELECT admitted FROM ownership)
+			RETURNING balance.balance_id
+		), ended_cycles AS (
+			-- a cycle already past its end, in its grant's grace, keeps its end
+			UPDATE pro_grant_cycle AS cycle SET ended_time = LEAST($3, cycle.cycle_end_time)
+			FROM cycle_grants
+			WHERE cycle.network_id = cycle_grants.network_id
+			  AND cycle.cycle_start_time = cycle_grants.cycle_start_time
+			  AND cycle.ended_time IS NULL
+			  AND (SELECT admitted FROM ownership)
+			RETURNING cycle.network_id
 		)
 		SELECT admitted, ARRAY(SELECT DISTINCT network_id FROM ended_renewals)
 		FROM ownership

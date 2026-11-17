@@ -62,6 +62,78 @@ func TestEgressHealthCompleteProducerRecordsRemainMeasurement(t *testing.T) {
 	}
 }
 
+// A URL that declares HTTP/3 adds its leg to the record (qualityprobe/prober):
+// failure_stages= counts h3 for a load whose HTTPS leg passed and whose HTTP/3
+// leg heard nothing, and h3= sums every leg. Each outcome the summary methods
+// can write stays a measurement, built here as the prober builds its line.
+func TestEgressHealthRecordsWithHttp3LegsRemainMeasurement(t *testing.T) {
+	timed := func(check egresshealth.CheckResult) egresshealth.CheckResult {
+		check.Name, check.Class, check.DnsMeasured, check.DnsLookupLatency = "synthetic-h3", egresshealth.ClassSite, true, time.Millisecond
+		check.H3Required = true
+		return check
+	}
+	for _, c := range []struct {
+		name  string
+		check egresshealth.CheckResult
+		h3    string
+	}{
+		{"silent", timed(egresshealth.CheckResult{FailureStage: egresshealth.FailureStageH3, H3: &egresshealth.CheckResult{FailureStage: egresshealth.FailureStageDialQuic}}), "silent:1"},
+		{"passed", timed(egresshealth.CheckResult{Ok: true, H3: &egresshealth.CheckResult{Ok: true}}), "ok:1"},
+		{"answered with a TLS alert", timed(egresshealth.CheckResult{Ok: true, H3: &egresshealth.CheckResult{FailureStage: "tls"}}), "tls:1"},
+		{"answered and reset", timed(egresshealth.CheckResult{Ok: true, H3: &egresshealth.CheckResult{FailureStage: egresshealth.FailureStageQuic}}), "quic:1"},
+		{"answered and stalled", timed(egresshealth.CheckResult{Ok: true, H3: &egresshealth.CheckResult{FailureStage: "request_tls_timeout"}}), "request_tls_timeout:1"},
+		{"skipped", timed(egresshealth.CheckResult{FailureStage: "request_timeout"}), "skipped:1"},
+		{"not measured", timed(egresshealth.CheckResult{NotMeasured: true, FailureStage: egresshealth.FailureStageH3, H3: &egresshealth.CheckResult{NotMeasured: true, FailureStage: egresshealth.FailureStageH3Unavailable}}), "not_measured:1"},
+	} {
+		result := &egresshealth.Result{TableTotal: 139, Checks: []egresshealth.CheckResult{c.check}}
+		if !c.check.NotMeasured {
+			result.Total = 1
+			summary := egresshealth.ClassSummary{Total: 1}
+			if c.check.Ok {
+				result.OkCount, summary.Ok = 1, 1
+			}
+			result.ByClass = map[egresshealth.Class]egresshealth.ClassSummary{egresshealth.ClassSite: summary}
+		} else {
+			result.NotMeasured = 1
+		}
+		if got := result.H3Summary(); got != c.h3 {
+			t.Fatalf("%s: h3 summary = %q, want %q", c.name, got, c.h3)
+		}
+		line := "egress-health: provider=synthetic-provider " + result.Summary()
+		if stages := result.FailureStageSummary(); stages != "" {
+			line += " failure_stages=" + stages
+		}
+		line += " h3=" + result.H3Summary() + " " + result.TimingSummary()
+		if failed := result.FailedNames(); 0 < len(failed) {
+			line += " failed=" + strings.Join(failed, ",")
+		}
+		if unmeasured := result.NotMeasuredNames(); 0 < len(unmeasured) {
+			line += " not-measured=" + strings.Join(unmeasured, ",")
+		}
+		if result.Total == 0 {
+			line += " -- nothing measured; not submitted"
+		}
+		for _, record := range []string{line, "[synthetic-host][taskworker][g1][cid:synthetic-correlation][2026-11-02T01:00:00Z]2026/11/02 01:00:00 " + line} {
+			tailer := newLogTailer("taskworker", nil)
+			for occurrence := 0; occurrence < novelRateThreshold; occurrence += 1 {
+				tailer.classify(record)
+			}
+			if novel := findingByClass(t, tailer.drainWindow(), "novel"); !novel.healthy {
+				t.Fatalf("%s: complete egress producer record with an HTTP/3 leg became novel: %s", c.name, record)
+			}
+		}
+	}
+	// an outcome the summary never writes stays eligible
+	const line = "egress-health: provider=synthetic-provider ok=0/1 site=0/1 failure_stages=h3:1 h3=unreviewed:1 failed=synthetic-h3"
+	tailer := newLogTailer("taskworker", nil)
+	for occurrence := 0; occurrence < novelRateThreshold; occurrence += 1 {
+		tailer.classify(line)
+	}
+	if novel := findingByClass(t, tailer.drainWindow(), "novel"); novel.healthy {
+		t.Fatal("an unreviewed HTTP/3 outcome was hidden")
+	}
+}
+
 // Unsupported or malformed records stay eligible rather than being accepted
 // because one prefix resembles a measurement.
 func TestEgressHealthUnknownProducerRecordsRemainNovel(t *testing.T) {

@@ -4,6 +4,8 @@
 // checkpoint of the reviewed deployment: the state census decides the exact
 // §6.1 identities, the retained event journal reconstructs counters and
 // claim attribution, and committed roots are reproduced from their artifacts.
+// A declared settlement v2 pair also pages on every vault2 dispute
+// (subnet_settlement_v2_disputes.go).
 package monitor
 
 import (
@@ -36,16 +38,17 @@ func NewSubnetSettlementSignal() Signal {
 	}
 }
 
-// One signal instance owns its retained frontier, verified artifacts and
+// One signal instance owns its retained frontiers, verified artifacts and
 // counterexample latch for the watcher's lifetime.
 type subnetSettlementProbe struct {
 	latch    *subnetReplayLatch
 	journal  *subnetSettlementJournal
 	verified *subnetSettlementVerified
+	disputes *subnetSettlementDisputeFrontier
 }
 
 func newSubnetSettlementProbe() *subnetSettlementProbe {
-	return &subnetSettlementProbe{latch: newSubnetReplayLatch(), journal: newSubnetSettlementJournal(), verified: newSubnetSettlementVerified()}
+	return &subnetSettlementProbe{latch: newSubnetReplayLatch(), journal: newSubnetSettlementJournal(), verified: newSubnetSettlementVerified(), disputes: newSubnetSettlementDisputeFrontier()}
 }
 
 func (self *subnetSettlementProbe) id() string { return subnetSettlementProbeId }
@@ -153,6 +156,28 @@ func (self *subnetSettlementProbe) check(ctx context.Context, env *probeEnv) (fi
 	}
 	verdicts := evaluateSubnetSettlementState(state, settings, scope)
 
+	// Settlement v2 disputes, read once the cutover proved the pinned pair's
+	// links. They need no enrollment; a gap leaves subnet-payout-root unknown.
+	var disputes *subnetSettlementDisputeRead
+	if pin.settlementV2Declared && state.cutover.known {
+		read, err := readSubnetSettlementV2Disputes(runCtx, rpc, pin, state.checkpoint, self.disputes, settings)
+		if err != nil {
+			reason := subnetReplayUnknownReason(err)
+			if reason == "" {
+				return sourceGap(err)
+			}
+			gaps = append(gaps, coverage("settlement-v2-disputes", reason, []string{"subnet-payout-root"}))
+		} else if found, reason := evaluateSubnetSettlementV2Disputes(read, scope); reason != "" {
+			gaps = append(gaps, coverage("settlement-v2-disputes", reason, []string{"subnet-payout-root"}))
+		} else {
+			disputes = read
+			verdicts = append(verdicts, found...)
+			if !read.complete {
+				gaps = append(gaps, coverage("settlement-v2-disputes", "frontier-behind-"+subnetReplayBlocksBucket(state.checkpoint.number+1-read.next), []string{"subnet-payout-root"}))
+			}
+		}
+	}
+
 	// The event journal: read toward the checkpoint, evaluate a snapshot,
 	// commit only after the closing recheck.
 	contracts, err := subnetSettlementAbis()
@@ -225,6 +250,9 @@ func (self *subnetSettlementProbe) check(ctx context.Context, env *probeEnv) (fi
 	}
 	if 0 < len(windows) {
 		self.journal.Apply(pin.settlementVault, settings.ReplayFromBlock, windows, decoder)
+	}
+	if disputes != nil {
+		self.disputes.commit(pin.settlementVaultV2, disputes)
 	}
 	return self.latch.Retain(env.now(), append(gaps, verdicts...)), nil
 }

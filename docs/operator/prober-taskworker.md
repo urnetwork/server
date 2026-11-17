@@ -166,24 +166,39 @@ before its generation drops. A settled shard waits with `next_cleanup_time`
 `'infinity'`.
 
 **The drop** (`model.RemoveProberShardGenerations`, task
-`remove_prober_shard_generations`) takes the passes of dropped generations
-oldest first and, for each:
+`remove_prober_shard_generations`) takes the dropped generations oldest first:
 
-1. deletes its zero-byte contracts: resolved and closed before the cutoff,
-   every escrow settled, no sweep and no destination close with bytes. Such a
-   contract adds nothing to any byte sum (the daily transfer rollup, the clock
-   backfill, the subnet usage weight, payouts, payment plans, operator block
-   awards). The capture trigger archives a credit-bearing contract's usage in
-   the same statement. The rows deleted are the contract horizon reaper's own.
-2. deletes its identity in `ReapProberShard`'s transaction, which refuses a pass
-   with an unresolved contract, an unsettled escrow, a pending debit, a
-   connected client or a balance that is not a plain grant. A refused pass is
-   retried after an hour, and a pass whose drop failed after a minute.
-3. deletes its registry row.
+1. It walks the generation's contracts once and deletes its passes' zero-byte
+   contracts: resolved and closed before the cutoff, every escrow settled, no
+   sweep and no destination close with bytes. Such a contract adds nothing to
+   any byte sum (the daily transfer rollup, the clock backfill, the subnet
+   usage weight, payouts, payment plans, operator block awards). The capture
+   trigger archives a credit-bearing contract's usage in the same statement.
+   The rows deleted are the contract horizon reaper's own. The walk reads the
+   primary key over the generation's contract id range, from 15 minutes before
+   its first pass's creation to 15 minutes past its last pass's deadline, in
+   batches of 5,000, and keeps the contracts whose payer is one of the
+   generation's pass networks, which every prober contract's payer is. It
+   reads each contract of the day once (about 116M on Main, at 3,000 a second
+   by default: about 11 hours) and needs no other index; it replaced the read
+   of each pass client's closed contracts from `transfer_contract_open_source_id`
+   (`OPEN-SOURCE-ID-RETIRE.md`, option A).
+2. Then, for each of its passes, it deletes the pass's identity in
+   `ReapProberShard`'s transaction, which refuses a pass with an unresolved
+   contract, an unsettled escrow, a pending debit, a connected client or a
+   balance that is not a plain grant. A refused pass is retried after an hour,
+   and a pass whose drop failed after a minute.
+3. And it deletes the pass's registry row.
 
-A run ends when its four-minute budget does; a pass whose contracts the budget
-interrupted keeps its identity until the next run finishes them, since a pass's
-contracts are found through its clients.
+A run ends when its four-minute budget does. The walk's cursor goes into the
+task's args, so the next run resumes where it stopped, and the retry of a
+failed run resumes after its last committed batch. A pass waits, untaken, until
+its generation's walk completes: the walk keeps contracts by the network its
+registry row names. The walk serves the oldest dropped generation that still
+has a pass to drop, so a refused pass never holds a newer generation's walk,
+and a refused pass retried after its generation's walk completed drops without
+a second walk; a contract the walk kept (for its bytes or an unsettled escrow)
+is the contract horizon reaper's.
 
 It keeps, for the retention that owns each: contracts that carry bytes (the
 contract horizon reaper, because the transfer rollup can re-sum their day until
@@ -196,24 +211,32 @@ drops only once its deadline is six hours past, and the identity transaction
 refuses anything still unresolved or connected.
 
 **The control.** The drop is off until an operator sets the Redis hash
-`{prober_retention}control` (read before every pass; a run that cannot read it
-stops):
+`{prober_retention}control` (read before every pass and every walk batch; a
+run that cannot read it stops):
 
 ```
 HSET {prober_retention}control mode dry_run          # count what a drop would delete
 HSET {prober_retention}control mode on               # drop
-HSET {prober_retention}control mode off              # stop within one pass
+HSET {prober_retention}control mode off              # stop within one pass or walk batch
 HSET {prober_retention}control retainedGenerations 8 # 2..30 UTC days kept
-HSET {prober_retention}control maxContractsPerSecond 200   # up to 2000; 0 is off
+HSET {prober_retention}control maxContractsPerSecond 200   # pass contracts the walk keeps a second, up to 2000; 0 is off
+HSET {prober_retention}control maxWalkRowsPerSecond 3000   # contracts of any payer the walk reads a second, up to 20000; 0 is off
 HSET {prober_retention}control maxShardsPerMinute 30        # passes dropped a minute, up to 600; 0 is off
-HSET {prober_retention}control contracts off         # drop identities only
+HSET {prober_retention}control contracts off         # drop identities only, without a walk
 DEL  {prober_retention}control                       # code defaults (off)
 ```
 
+A dry run reads one page of due passes and walks the next generation read
+only, from the walk's cursor when it is in progress, for one budget; it changes
+nothing, the walk included. With contracts off, a generation's passes drop
+without a walk, and that generation is never walked once contracts are on
+again.
+
 **Metrics.** `urnetwork_prober_retention_*`: the mode, the kept generations,
-the cutoff, the oldest registered pass, the due backlog and the run's clock
-(gauges); passes dropped, refused (by reason) and failed; contracts deleted,
-kept for bytes, kept unsettled or busy; archived contracts; deleted rows by
+the cutoff, the oldest registered pass, the due backlog, the run's clock and
+the creation time the walk has read up to (gauges); passes dropped, refused (by
+reason) and failed; contracts deleted, kept for bytes, kept unsettled or busy;
+contracts of any payer the walk read; archived contracts; deleted rows by
 table; step durations; runs by why they stopped. While the drop keeps up, the
 oldest registered pass is within a generation of the cutoff. Each taskworker
 keeps the gauges of the last run it made, and a run publishes its clock with
@@ -243,3 +266,57 @@ rows whose stored shard count is stale perform no network work. Their post-step
 replaces still-valid indices with current arguments and retires indices outside
 the new range. The new `RunOnce` rows cover every index in the new range, so a
 change converges without a permanent duplicate or gap.
+
+The URL probe's `shard_count` is at most 254: prober shard slot 254 is the
+active bandwidth probe's and slot 255 the capability probe's.
+
+## Active bandwidth samples
+
+URL probes are sampled-only (FP2FIX.md): a quality tunnel carries randomized
+destination-pool requests and never a fixed target, so a modified provider
+cannot recognize the prober and serve it better. Provider capacity is sampled
+by a separate task, `ProviderBandwidthProbe`
+(`taskworker/work/provider_bandwidth_probe_work.go`), which measures eight
+parallel 2 MiB streams through a provider's tunnel against Cloudflare's
+public speed test (`qualityprobe/bandwidth`).
+
+- **Apart from the quality probes.** Each pass runs in prober shard slot 254
+  with a private network, credential parent and balance minted for the pass;
+  every tunnel mints its own derived client. Its tunnels are ordinary
+  clients' tunnels: none of the URL probe's traits (data-only admission
+  without provider pings, unpublished client keys), and an allowlist of the
+  CDN host alone. Its providers are a random draw of the connected, valid
+  providers that are due (no CDN figure in seven days) and Online as the
+  score export judges it, never the URL probe's due claims.
+- **No credential in a tunnel.** The operator's own download endpoint
+  (`/network/provider-bandwidth-test`) is not sampled. It authorizes with
+  `X-UR-Operator-Secret`, the operator ingest secret, which authorizes every
+  operator ingest call; even inside TLS it does not belong on a
+  provider-controlled path. Sampling it would need a secret scoped to that
+  one route, which the route does not accept today, and the target wired
+  back (`bandwidth.OperatorTarget`) with that secret alone.
+  `public_api_url` is not read by this probe.
+- **Advisory.** Figures land in `provider_bandwidth` (one row per provider and
+  source). Nothing that ranks or selects providers reads that table;
+  `model/provider_bandwidth_readers_test.go` fails if anything but the probe's
+  own due draw does.
+- **Budget.** Every sample is reserved before it is measured, against the
+  deployment-wide hourly budget (`provider_bandwidth.yml` `probes_per_bucket`,
+  default 40, 16 MiB each). A pass every fifteen minutes takes its share
+  (default ten providers) and stops at the first refusal. Probe traffic is
+  paid from the pass's free shard credit; providers earn for it as for any
+  traffic.
+- **Settings.** The probe reads `provider_egress_probe.yml`: `full.bandwidth`
+  (default true) switches it on or off, `full.bandwidth_timeout_seconds` is
+  the per-target cap and `bandwidth_cdn_url` the target.
+- **Metrics.** `urnetwork_egress_probe_bandwidth_bytes_per_second{source}`
+  (histogram), `urnetwork_egress_probe_bandwidth_country_bytes_per_second{source,country}`
+  (sum and count), `urnetwork_egress_probe_bandwidth_samples_total{source,result}`,
+  `urnetwork_egress_probe_bandwidth_passes_total{result}`.
+
+The URL probe's own timing of its sampled request is exported with no new
+traffic: `urnetwork_url_probe_ttfb_seconds` and
+`urnetwork_url_probe_body_bits_per_second` are fleet histograms without
+labels, and `urnetwork_url_probe_country_ttfb_seconds{country}` and
+`urnetwork_url_probe_country_body_bits_per_second{country}` a sum and a count
+per country, two series per country rather than one per bucket.

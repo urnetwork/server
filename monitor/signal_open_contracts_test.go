@@ -151,7 +151,7 @@ func TestOpenContractsSignalSyntheticOpenSetBacklog(t *testing.T) {
 		!strings.Contains(rising.Observed, "older_5m=120000 older_30m=8000") ||
 		!strings.Contains(rising.Mechanism, "independent open and disputed scans capped at 25,000 each") ||
 		!strings.Contains(rising.Mechanism, "older deployments used 100,000") ||
-		!strings.Contains(rising.Context, "retention-fanout") ||
+		!strings.Contains(rising.Context, "transfer_contract autovacuum phase") ||
 		!strings.Contains(rising.Verify, "older-than-five-minute cohort falls") {
 		t.Fatalf("rising alert lacks adjacent-sample evidence: %+v", rising)
 	}
@@ -231,7 +231,6 @@ func TestOpenContractsSignalActionRequiresCausalAttribution(t *testing.T) {
 		for _, want := range []string{
 			"consecutive age buckets",
 			"CloseExpiredContracts duration/outcomes",
-			"retention-fanout evidence",
 			"transfer_contract autovacuum phase",
 			"before changing code or deploying",
 			"count alone does not establish a retention defect",
@@ -383,7 +382,6 @@ func TestOpenContractsCatalogRequiresCausalAttribution(t *testing.T) {
 		"Before changing code or deploying",
 		"consecutive age buckets",
 		"closer's duration/outcomes",
-		"retention-fanout evidence",
 		"transfer_contract autovacuum phase",
 		"only if that attribution is confirmed",
 		"historical episodes below are not proof of the current running path",

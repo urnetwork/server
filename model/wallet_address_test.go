@@ -5,10 +5,26 @@
 package model
 
 import (
+	"crypto/sha256"
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/gagliardetto/solana-go"
 )
+
+// A Solana public key derived from the seed.
+func payoutWalletTestSolana(seed string) string {
+	digest := sha256.Sum256([]byte("synthetic solana wallet/" + seed))
+	return solana.PublicKeyFromBytes(digest[:]).String()
+}
+
+// An EIP-55 checksummed EVM address derived from the seed.
+func payoutWalletTestPolygon(seed string) string {
+	digest := sha256.Sum256([]byte("synthetic polygon wallet/" + seed))
+	return common.BytesToAddress(digest[:20]).Hex()
+}
 
 func TestValidateWalletAddressByChain(t *testing.T) {
 	solanaAddress := payoutWalletTestSolana("rule")
@@ -75,28 +91,6 @@ func TestValidateWalletAddressByChain(t *testing.T) {
 		want := "400 invalid wallet address: " + c.reason
 		if err == nil || err.Error() != want || !errors.Is(err, ErrInvalidWalletAddress) {
 			t.Errorf("%s %q: %v, want %q", c.chain, c.address, err, want)
-		}
-	}
-}
-
-// Only a payout chain is judged by its address; the chain rule refuses a
-// Bittensor payout wallet, and a chain that does not parse is not judged.
-func TestPayoutWalletAddressValid(t *testing.T) {
-	for _, c := range []struct {
-		blockchain string
-		address    string
-		valid      bool
-	}{
-		{blockchain: "SOL", address: payoutWalletTestSolana("payout"), valid: true},
-		{blockchain: "solana", address: payoutWalletTestPolygon("payout"), valid: false},
-		{blockchain: "MATIC", address: payoutWalletTestPolygon("payout"), valid: true},
-		{blockchain: "polygon", address: payoutWalletTestSolana("payout"), valid: false},
-		{blockchain: "ETH", address: payoutWalletTestSolana("payout"), valid: false},
-		{blockchain: "TAO", address: "synthetic-tao-address", valid: true},
-		{blockchain: "DOGE", address: "synthetic-address", valid: true},
-	} {
-		if valid := PayoutWalletAddressValid(c.blockchain, c.address); valid != c.valid {
-			t.Errorf("%s %q: %v, want %v", c.blockchain, c.address, valid, c.valid)
 		}
 	}
 }

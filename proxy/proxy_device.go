@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
@@ -37,6 +39,8 @@ func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
 		CreationFailureSweepMinEntries: 1024,
 		WindowClientStats:              defaultWindowClientStats,
 		DisableStrictWindowHandover:    !proxyWindowStrictHandoverFromConfig(),
+		// the api's per-process budgets (see the field)
+		ContractOriginNotificationSettings: model.DefaultContractOriginNotificationSettings(),
 	}
 }
 
@@ -204,6 +208,28 @@ type ProxyDeviceManagerSettings struct {
 	// The default comes from proxy.yml `window_strict_handover`
 	// (window_strict_handover.go).
 	DisableStrictWindowHandover bool
+
+	// Notes each SOCKS sign-in and WireGuard handshake of a proxy for the Pro
+	// features notice (model ProxyFeatureUses). The process owns it; nil
+	// notes nothing.
+	FeatureUses *model.ProxyFeatureUses
+
+	// The budgets of the one contract origin notification owner the manager
+	// shares with every device's local authority (waiters, publish queue and
+	// workers, route refusal bounds and timeouts), in place of one owner per
+	// device with 16 bucket and 2 publisher goroutines and a 1024-entry queue
+	// each: 18 of a hosted device's 51 own goroutines, about 0.15-0.35 GB per
+	// process at sweep load (server CPUOPT6.md B #2). The default is the api's,
+	// which runs one owner per process too. On 2026-11-15 an api process
+	// enqueued 44 committed origins a second on average and 101 at its 24-hour
+	// peak, and a proxy process 16 and 34, with no queue_full drop in either.
+	// Watches are taken only inside a contract creation, which
+	// HostedContractConcurrency bounds for the whole manager (256), far below
+	// the 8192 waiters. The route refusal timeouts (60 s, and 6 h for
+	// terminal refusals) and their bounds are the same as per device. A
+	// nonpositive MaxWaiters (the zero value) shares no owner: each device's
+	// authority builds its own and closes it with itself.
+	ContractOriginNotificationSettings model.ContractOriginNotificationSettings
 }
 
 type ProxyDeviceManager struct {
@@ -235,7 +261,10 @@ type ProxyDeviceManager struct {
 	// manager context because its result is shared by independent callers.
 	proxyDeviceConfigReader func(context.Context, server.Id) *model.ProxyDeviceConfig
 	proxyFeatureReader      func(context.Context, server.Id, string) bool
-	windowIdentityGate      *windowIdentityRestoreGate
+	// Notes a Pro feature use, in process only: settings.FeatureUses, or nil
+	// for a manager without an owner.
+	featureUseNoter    func(proxyId server.Id, feature string, useTime time.Time)
+	windowIdentityGate *windowIdentityRestoreGate
 	// One registration bound shared by every device this manager opens.
 	mintAdmission *localclient.MintAdmission
 	// One contract creation bound shared by every device this manager opens.
@@ -244,6 +273,16 @@ type ProxyDeviceManager struct {
 	// this manager opens, instead of a detector goroutine and timer per
 	// client. Stops with the manager.
 	schedulerPauseDetector *connect.SchedulerPauseDetector
+	// The one contract origin notification owner every device's local
+	// authority borrows (settings.ContractOriginNotificationSettings). A
+	// device's watches are per request and closed by their requests before
+	// its authority closes, since a device joins every control owner first.
+	// Route refusals are keyed by route, so one recorded through a device is
+	// the right answer for an identical request through another device, or
+	// through a later generation of the same device that restores its window
+	// identities. Closed once every device worker has stopped. Nil when the
+	// settings share no owner.
+	contractOriginNotifications *model.ContractOriginNotifications
 
 	// stateLock guards the proxyDevices map. It is read-mostly: every
 	// OpenProxyDevice looks up an existing pdState (RLock, concurrent), and only
@@ -315,6 +354,10 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		contractAdmission:      localclient.NewContractAdmission(settings.HostedContractConcurrency),
 		schedulerPauseDetector: connect.NewSchedulerPauseDetector(cancelCtx),
 	}
+	if 0 < settings.ContractOriginNotificationSettings.MaxWaiters {
+		// its goroutines park without I/O until a request registers a watch
+		manager.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, settings.ContractOriginNotificationSettings)
+	}
 	manager.networkSpaceBuilder = newProxyDeviceManagerNetworkSpace
 	manager.networkSpaceCloser = func(networkSpace *sdk.NetworkSpace) {
 		networkSpace.Close()
@@ -322,11 +365,24 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 	manager.proxyDeviceBuilder = manager.newProxyDevice
 	manager.proxyDeviceConfigReader = model.GetProxyDeviceConfigForAdmission
 	manager.proxyFeatureReader = model.ProxyFeatureAllowedForAdmission
+	if settings.FeatureUses != nil {
+		manager.featureUseNoter = settings.FeatureUses.Note
+	}
 	proxyLockCacheCapacityGauge.Set(float64(manager.lockCache.maxEntries))
 	if settings.ClientRemoved != nil {
 		manager.clientRemoved = newClientRemovedSubscriber(cancelCtx, manager, settings.ClientRemoved)
 	}
 	return manager
+}
+
+// Notes one use of a Pro proxy feature by a proxy, in process only (the owner
+// writes it in the background), so it is safe on the sign-in path. A manager
+// without an owner notes nothing.
+func (self *ProxyDeviceManager) noteFeatureUse(proxyId server.Id, feature string, useTime time.Time) {
+	if self == nil || self.featureUseNoter == nil {
+		return
+	}
+	self.featureUseNoter(proxyId, feature, useTime)
 }
 
 // Opens restoration after the old instance's drain-complete handoff. The
@@ -390,6 +446,51 @@ func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, 
 	return self.openProxyDevice(ctx, proxyId, true)
 }
 
+// Starts opening the proxy's device and returns at once, for a session that
+// signed in and dials next: the device's construction and its window's first
+// exit overlap the client's request round trip, and the dial joins this
+// construction (openProxyDevice coalesces one per proxy id). A live device or
+// a construction in flight starts nothing. The caller has admitted the caller
+// and the plan. A failure holds the next construction back for its cooldown,
+// as for any open, and the dial reports it. Shutdown joins the worker.
+func (self *ProxyDeviceManager) startOpenProxyDevice(proxyId server.Id) {
+	if self.proxyDeviceOpenOrOpening(proxyId) {
+		return
+	}
+	self.lifecycleLock.Lock()
+	if self.closed || self.ctx.Err() != nil {
+		self.lifecycleLock.Unlock()
+		return
+	}
+	self.openWorkers.Add(1)
+	self.lifecycleLock.Unlock()
+	go server.HandleError(func() {
+		defer self.openWorkers.Done()
+		if _, err := self.openProxyDevice(self.ctx, proxyId, false); err != nil {
+			if glog.V(1) {
+				glog.Infof("[proxy][%s]open at sign-in err=%s\n", proxyId, err)
+			}
+		}
+	})
+}
+
+// Whether the proxy's device is installed and live, or being constructed.
+func (self *ProxyDeviceManager) proxyDeviceOpenOrOpening(proxyId server.Id) bool {
+	self.stateLock.RLock()
+	pdState, ok := self.proxyDevices[proxyId]
+	self.stateLock.RUnlock()
+	if !ok {
+		return false
+	}
+	pdState.StateLock.Lock()
+	defer pdState.StateLock.Unlock()
+	if pdState.creating != nil {
+		return true
+	}
+	pd := pdState.ProxyDevice
+	return pd != nil && pd.Active()
+}
+
 // Admits an opener and coalesces one construction per id. A cancellable creator
 // transfers its construction to a separately retained manager worker.
 func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId server.Id, cancellableCreator bool) (*ProxyDevice, error) {
@@ -444,9 +545,10 @@ func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId ser
 			return nil, err
 		}
 
-		// reuse a live device
+		// reuse a live device. The open holds it like traffic but is not
+		// traffic (noteOpen): a device opened and never used closes sooner.
 		if pd := pdState.ProxyDevice; pd != nil {
-			if pd.Active() && pd.UpdateActivity() {
+			if pd.Active() && pd.noteOpen() {
 				pdState.StateLock.Unlock()
 				return pd, nil
 			}
@@ -666,6 +768,7 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.windowIdentityGate = self.windowIdentityGate
 	settings.mintAdmission = self.mintAdmission
 	settings.contractAdmission = self.contractAdmission
+	settings.contractOriginNotifications = self.contractOriginNotifications
 	settings.schedulerPauseDetector = self.schedulerPauseDetector
 	settings.windowClientStats = self.settings.WindowClientStats
 	settings.DisableStrictWindowHandover = self.settings.DisableStrictWindowHandover
@@ -1015,6 +1118,10 @@ func (self *ProxyDeviceManager) Close() {
 			}
 			// every device's authority has stopped creating contracts
 			self.contractAdmission.Close()
+			// and holds no watch or route refusal lookup
+			if self.contractOriginNotifications != nil {
+				self.contractOriginNotifications.Close()
+			}
 			// Prevent a test-only direct lazy lookup from constructing an owned
 			// session after all admitted production opens have drained.
 			self.networkSpaceOnce.Do(func() {})
@@ -1069,12 +1176,27 @@ type deviceCreation struct {
 	err  error
 }
 
-// defaultProxyDeviceIdleTimeout is how long a device is held with no user
-// traffic. Activity is user traffic only: packets from a WireGuard peer and
-// back to it, bytes on an HTTP or SOCKS relay connection, an open, or an
-// attached device-rpc session. The device's own upkeep on its tun (DoH
-// keepalive pings, resolver refreshes) does not hold it.
-const defaultProxyDeviceIdleTimeout = 45 * time.Minute
+// defaultProxyDeviceIdleRefillHold is how long a device may go without user
+// traffic or an open (its activity, see ProxyDeviceSettings.
+// ProxyDeviceIdleTimeout) before its below-target windows stop refilling
+// (connect IdleRefillHold). A held window keeps one exit once the device has
+// been idle for the longer of the hold and its sequence idle timeouts, ten
+// minutes in the hosted low memory profile (connect's idle trim, owner
+// 2026-11-15), and the device's next user traffic refills it at once; until
+// then it lists, mints and dials nothing. Without the hold every below-target
+// window of an idle device refills until the device is reaped: on Main at
+// 17:20Z on 2026-11-05, 22,200 devices were live and 3,268 had moved user
+// traffic in the last ten minutes, while the quality windows built about 48
+// candidates a second. Ten minutes is the activity window the active-device
+// count uses, so a user pausing for less never sees the hold.
+const defaultProxyDeviceIdleRefillHold = 10 * time.Minute
+
+// The gap in user traffic after which the next activity signals the device's
+// windows (connect NoteUserActivity), so a busy relay costs one swap per
+// update. Any window held for idleness waits at least BalanceRestoreSpreadIdle
+// (1 minute) or IdleRefillHold of no activity, far longer than this, so the
+// first activity after such a wait always signals.
+const proxyDeviceActivityWakeGap = time.Second
 
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
 	return DefaultProxyDeviceSettingsWithBufferSize(32)
@@ -1085,7 +1207,9 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 		ProxyDeviceDescription:       "resident proxy",
 		ProxyDeviceSpec:              "resident proxy",
 		Mtu:                          connect.DefaultMtu,
-		ProxyDeviceIdleTimeout:       defaultProxyDeviceIdleTimeout,
+		ProxyDeviceIdleTimeout:       45 * time.Minute,
+		ProxyDeviceUnusedIdleTimeout: 10 * time.Minute,
+		IdleRefillHold:               defaultProxyDeviceIdleRefillHold,
 		SequenceBufferSize:           bufferSize,
 		MemoryTargetByteCount:        defaultProxyDeviceMemoryTargetByteCount,
 		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
@@ -1097,8 +1221,33 @@ type ProxyDeviceSettings struct {
 	ProxyDeviceSpec               string
 	ClientSecurityPolicyGenerator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	Mtu                           int
-	ProxyDeviceIdleTimeout        time.Duration
-	SequenceBufferSize            int
+	// How long a device that has carried user traffic is held past its last
+	// activity. User traffic is a packet from a WireGuard peer or back to it, a
+	// byte either way on an HTTP or SOCKS relay connection, or an attached
+	// device-rpc session (UpdateActivity). Activity is user traffic or an open
+	// of the live device (noteOpen). The device's own upkeep on its tun (DoH
+	// keepalive pings, resolver refreshes) is neither. 45 minutes is the
+	// owner's hold, kept on 2026-11-05 (CPUOPT5).
+	ProxyDeviceIdleTimeout time.Duration
+	// How long a device that has carried no user traffic since it opened is
+	// held past its last activity, when that is shorter than
+	// ProxyDeviceIdleTimeout. An open is activity, so a device opened again and
+	// again keeps its hold while the opens keep coming, and its first user
+	// traffic gives it the full hold at once. Ten minutes: on 2026-11-14 a
+	// script walked about 57k bot-made hosted proxies once an hour, and since
+	// devices open on first use each walk opened 17-20k devices that relayed
+	// nothing yet held their windows' consumer connections for the whole 45
+	// minutes (live devices 17k to 46k, connected clients 156k to 300k). Ten
+	// minutes is the activity window of the idle refill hold, and a client
+	// retrying a dial within it never sees its device closed and made again
+	// between tries. Nonpositive holds an unused device as long as a used one.
+	ProxyDeviceUnusedIdleTimeout time.Duration
+	// How long the device may go without user traffic before its
+	// below-target windows stop refilling until the next user traffic
+	// (connect IdleRefillHold; see defaultProxyDeviceIdleRefillHold).
+	// Nonpositive refills them whether or not the device is used.
+	IdleRefillHold     time.Duration
+	SequenceBufferSize int
 	// MemoryTargetByteCount sizes the shared SDK low profile's private DNS,
 	// mux, transfer, P2P, and carrier budgets. A positive override preserves
 	// the low profile; it is not a whole-device RSS or process-wide limit.
@@ -1120,6 +1269,9 @@ type ProxyDeviceSettings struct {
 	mintAdmission *localclient.MintAdmission
 	// the owning manager's contract creation bound; nil is unbounded
 	contractAdmission *localclient.ContractAdmission
+	// the owning manager's contract origin notifications; nil builds one per
+	// device, which its authority closes
+	contractOriginNotifications *model.ContractOriginNotifications
 	// the owning manager's shared scheduler-pause detector; nil runs one per
 	// multi client
 	schedulerPauseDetector *connect.SchedulerPauseDetector
@@ -1132,11 +1284,12 @@ type ProxyDeviceSettings struct {
 	DisableStrictWindowHandover bool
 }
 
-// The owner's bounds the device's local authority shares.
+// The owner's bounds and notifications the device's local authority shares.
 func (self *ProxyDeviceSettings) authoritySettings() *localclient.AuthoritySettings {
 	return &localclient.AuthoritySettings{
-		MintAdmission:     self.mintAdmission,
-		ContractAdmission: self.contractAdmission,
+		MintAdmission:               self.mintAdmission,
+		ContractAdmission:           self.contractAdmission,
+		ContractOriginNotifications: self.contractOriginNotifications,
 	}
 }
 
@@ -1176,6 +1329,9 @@ type ProxyDevice struct {
 	// per-device lock and — crucially — is never serialized under the wg proxy's
 	// single global state lock.
 	lastActivityNanos atomic.Int64
+	// Set by the device's first user traffic and never cleared. Until then the
+	// idle close waits only ProxyDeviceUnusedIdleTimeout.
+	carriedTraffic atomic.Bool
 	// stateLock guards only the receive-attachment fields below (swapped rarely),
 	// not the activity/liveness state above.
 	stateLock      sync.Mutex
@@ -1216,6 +1372,12 @@ type ProxyDevice struct {
 	// Replaces the packet loop of Run for a device with no DeviceLocal or
 	// Tun; Run returns when it does.
 	runForTest func()
+	// Replaces the dial through the private Tun for a device with no Tun.
+	dialForTest func(ctx context.Context, network string, addr string) (net.Conn, error)
+
+	// The throughput share of a unique-exit proxy (proxy_unique_exit.go); nil
+	// for every other device. Set once at construction.
+	uniqueExitShare *uniqueExitShare
 }
 
 func NewProxyDeviceWithDefaults(
@@ -1265,6 +1427,11 @@ func NewProxyDevice(
 	deviceLocalSettings.ClientControl = localControl
 	deviceLocalSettings.ProviderDiscovery = localControl
 	deviceLocalSettings.LocalApi = localControl
+	// the windows read the device's own record of user traffic, which the tun's
+	// upkeep (the DoH keepalive pings it sends through the device) never
+	// refreshes; until the device exists they read as active
+	var activityDevice atomic.Pointer[ProxyDevice]
+	deviceLocalSettings.UserActivitySince = proxyDeviceUserActivitySince(&activityDevice)
 	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,
@@ -1298,7 +1465,7 @@ func NewProxyDevice(
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
 		deviceLocal.SetPerformanceProfile(initialDeviceState.PerformanceProfile)
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
-		dnsResolverSettings = hostedDnsResolverSettings(initialDeviceState.DnsResolverSettings)
+		dnsResolverSettings = proxyDeviceDnsResolverSettings(initialDeviceState)
 	}
 
 	// The manager creates one ProxyDevice per client and closes it on disconnect.
@@ -1373,6 +1540,20 @@ func NewProxyDevice(
 		glog.Infof("[pd]no local nat address available; wg source is not rewritten\n")
 	}
 	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
+	activityDevice.Store(proxyDevice)
+	if proxyDeviceConfig.UniqueExit {
+		// the device was created pinned (its initial location); the loop
+		// follows the assignment from there
+		var initialProviderClientId *server.Id
+		if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil &&
+			initialDeviceState.Location != nil &&
+			initialDeviceState.Location.ConnectLocationId != nil &&
+			initialDeviceState.Location.ConnectLocationId.ClientId != nil {
+			providerClientId := server.RequireIdFromBytes(initialDeviceState.Location.ConnectLocationId.ClientId.Bytes())
+			initialProviderClientId = &providerClientId
+		}
+		proxyDevice.startUniqueExit(networkSpace.GetApiUrl(), initialProviderClientId)
+	}
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
@@ -1380,9 +1561,8 @@ func NewProxyDevice(
 	return proxyDevice, nil
 }
 
-// Preserve a caller's lower MTU but never enable the gVisor IPv6 address and
-// ::/0 route. The inner data-center path is IPv4-only even when a caller asks
-// for the dual-stack Connect default of 1280 bytes.
+// Caps the inner mtu at the shared packet default, preserving lower requests.
+// The data-center path explicitly disables ipv6 independently of that size.
 func proxyDeviceTunSettings(settings *ProxyDeviceSettings) *connect.TunSettings {
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu
@@ -1449,6 +1629,36 @@ func newProxyDeviceLocalSettings(
 	// hosted windows hand drained slots over (connect StrictWindowHandover,
 	// which apps leave off), unless proxy.yml window_strict_handover is false
 	deviceLocalSettings.StrictWindowHandover = !proxyDeviceSettings.DisableStrictWindowHandover
+	// while the payer's balance refuses the device's contracts, a hosted
+	// window sends one balance probe per expansion step instead of building
+	// window clients the balance refuses, and a granted contract resumes the
+	// refill at once (connect OutOfBalanceRefillProbe, which apps leave off;
+	// server CPUOPT4.md, Part B #1)
+	deviceLocalSettings.OutOfBalanceRefillProbe = true
+	// a device no one has used for IdleRefillHold refills nothing until its next
+	// user traffic, which refills it at once (connect IdleRefillHold, which apps
+	// leave off). NewProxyDevice hands the windows the device's own record of
+	// user traffic, since the tun's upkeep goes through the device too.
+	deviceLocalSettings.IdleRefillHold = proxyDeviceSettings.IdleRefillHold
+	// a hosted window client opens no per-peer session and signs no close
+	// report, so nothing reads its identity key, and each key it published would
+	// be one stored signed registration per window candidate. A post-quantum
+	// performance profile needs the key: connect publishes it anyway.
+	deviceLocalSettings.KeepWindowClientKeysLocal = true
+	// the normal windows take every provider, tcp ones included, ranked by
+	// their rank mode alone and with no ipv6 need, and there is no limited
+	// window, whatever connect's default fraction or the developer override
+	// says (owner, 2026-11-13: "hosted proxies should use main window as the
+	// limited window, so that dualproto and dualstack requirements are not
+	// applied on the main window for hosted proxies, and there is no need for
+	// a separate limited window"). Apps and iOS, which share the low-memory
+	// profile, keep connect's dualstack and dualproto windows. A flow still
+	// races only the exits whose labels carry it: udp never reaches a tcp exit.
+	deviceLocalSettings.NormalWindowSelectors = &connect.ProviderSelectors{
+		Ip:       connect.ProviderIpCapabilityIpv4,
+		Protocol: connect.ProviderProtocolCapabilityAny,
+	}
+	deviceLocalSettings.DisableLimitedWindow = true
 	return deviceLocalSettings
 }
 
@@ -1495,9 +1705,11 @@ func hostedDnsResolverSettings(dnsResolverSettings *connect.DnsResolverSettings)
 }
 
 // PushDeviceRpc serves a device-rpc websocket (relayed from the resident) to
-// this hosted device. An attached rpc session keeps the device alive: activity
-// is bumped for the session's duration so the idle reaper does not reap a
-// device a remote is actively controlling. Blocks until the session ends.
+// this hosted device. An attached rpc session keeps the device alive: it is
+// user traffic (UpdateActivity), so the device gets the full idle hold, and
+// activity is bumped for the session's duration so the idle reaper does not
+// reap a device a remote is actively controlling. Blocks until the session
+// ends.
 func (self *ProxyDevice) PushDeviceRpc(ws sdk.DeviceRpcWs) error {
 	if !self.UpdateActivity() {
 		return fmt.Errorf("proxy device closed")
@@ -1619,6 +1831,10 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 		if !proxyPacketMatchesReceiveAddress(packet, receiveAddr) {
 			continue
 		}
+		if !self.policeUniqueExitPacket("destination_to_client", len(packet)) {
+			observeWireGuardPacket("destination_to_client", "dropped", len(packet))
+			continue
+		}
 		// Restore the peer's own address before it reaches WireGuard. The
 		// packet is this batch's borrowed buffer and is about to be shared
 		// read-only, so the rewrite happens here, after the partition has
@@ -1688,6 +1904,10 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
 		return false
 	}
+	if !self.policeUniqueExitPacket("client_to_destination", len(packet)) {
+		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
+		return false
+	}
 	ownedPacket := connect.MessagePoolCopy(packet)
 	// Rewrite the owned copy, never the borrowed input. A refusal drops rather
 	// than forwards: emitting the peer's tunnel address to a provider is the
@@ -1726,6 +1946,19 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 	if !self.UpdateActivity() {
 		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
 		return 0
+	}
+	if self.uniqueExitShare != nil {
+		// a burst over the unique-exit share is dropped whole, and reported
+		// consumed so the caller does not re-offer it into the same empty
+		// bucket; whole keeps the returned count a prefix
+		byteCount := 0
+		for _, packet := range packets {
+			byteCount += max(0, len(packet)-offset)
+		}
+		if !self.policeUniqueExitPacket("client_to_destination", byteCount) {
+			observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
+			return len(packets)
+		}
 	}
 	// The owned copies stay 1:1 with the input, because the count returned
 	// below is a PREFIX of the caller's packets. A packet the rewrite cannot
@@ -1916,6 +2149,18 @@ func (self *ProxyDevice) Tun() *connect.Tun {
 // are independently selected by destination address in Run, so starting a Tun
 // connection must not detach or interrupt an active WireGuard peer.
 func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	conn, err := self.dialTun(ctx, network, addr)
+	if err != nil || self.uniqueExitShare == nil {
+		return conn, err
+	}
+	// a unique-exit proxy's connections are paced to its throughput share
+	return &uniqueExitShareConn{Conn: conn, ctx: self.ctx, share: self.uniqueExitShare}, nil
+}
+
+func (self *ProxyDevice) dialTun(ctx context.Context, network string, addr string) (net.Conn, error) {
+	if self.dialForTest != nil {
+		return self.dialForTest(ctx, network, addr)
+	}
 	return self.tun.DialContext(ctx, network, addr)
 }
 
@@ -2098,14 +2343,56 @@ func (self *ProxyDevice) Active() bool {
 }
 
 // UpdateActivity records user traffic, holding the device against the idle
-// reaper. False once the device is done.
+// reaper for ProxyDeviceIdleTimeout from now on. The first traffic after a gap
+// of proxyDeviceActivityWakeGap also wakes any window that waits for a user
+// (connect NoteUserActivity), so a window whose refill the idle hold kept
+// refills at once. False once the device is done.
 func (self *ProxyDevice) UpdateActivity() bool {
+	return self.recordActivity(true)
+}
+
+// Records an open of the live device. It is activity, as user traffic is: it
+// holds the device and wakes its windows for the dial that follows. It is not
+// traffic, so a device opened again and again that carries nothing keeps the
+// shorter ProxyDeviceUnusedIdleTimeout. False once the device is done.
+func (self *ProxyDevice) noteOpen() bool {
+	return self.recordActivity(false)
+}
+
+// Records activity now, and marks the device as having carried user traffic
+// when it is traffic. The mark is read before it is written, so the packet
+// path writes it once per device rather than once per packet.
+func (self *ProxyDevice) recordActivity(userTraffic bool) bool {
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
-		self.lastActivityNanos.Store(time.Now().UnixNano())
+		if userTraffic && !self.carriedTraffic.Load() {
+			self.carriedTraffic.Store(true)
+		}
+		nowNanos := time.Now().UnixNano()
+		previousNanos := self.lastActivityNanos.Swap(nowNanos)
+		if proxyDeviceActivityWakesWindows(previousNanos, nowNanos) && self.deviceLocal != nil {
+			self.deviceLocal.NoteUserActivity()
+		}
 		return true
+	}
+}
+
+// Whether activity at `nowNanos`, after the previous at `previousNanos`, ends a
+// gap long enough that a window may be waiting for it.
+func proxyDeviceActivityWakesWindows(previousNanos int64, nowNanos int64) bool {
+	return int64(proxyDeviceActivityWakeGap) <= nowNanos-previousNanos
+}
+
+// The windows' read of the device's record of user traffic: whether the
+// device in `activityDevice` moved user traffic at or after `since`. Before
+// the device is stored, while it is being created, it reads as active, so no
+// window holds its refill for a device still forming.
+func proxyDeviceUserActivitySince(activityDevice *atomic.Pointer[ProxyDevice]) func(since time.Time) bool {
+	return func(since time.Time) bool {
+		device := activityDevice.Load()
+		return device == nil || since.UnixNano() <= device.lastActivityNanos.Load()
 	}
 }
 
@@ -2118,6 +2405,30 @@ func (self *ProxyDevice) isDone() bool {
 	}
 }
 
+// Idle closes by whether the device had carried user traffic: "used" after
+// ProxyDeviceIdleTimeout, "unused" after ProxyDeviceUnusedIdleTimeout. Both
+// series exist from the start, so a fleet with no unused close shows a zero.
+var proxyDeviceIdleClosesCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "proxy",
+		Name:      "devices_closed_idle_total",
+		Help:      "Proxy devices closed for idleness, by whether they had carried user traffic since they opened (used, held the full idle hold past their last activity) or not (unused, held the shorter unused hold)",
+	},
+	[]string{"use"},
+)
+
+var proxyDeviceIdleClosesUsedCounter = proxyDeviceIdleClosesCounter.WithLabelValues("used")
+var proxyDeviceIdleClosesUnusedCounter = proxyDeviceIdleClosesCounter.WithLabelValues("unused")
+
+func init() {
+	prometheus.MustRegister(proxyDeviceIdleClosesCounter)
+}
+
+// Cancels the device once it has been idle for its hold: ProxyDeviceIdleTimeout
+// past its last activity, or ProxyDeviceUnusedIdleTimeout when that is shorter
+// and the device has carried no user traffic since it opened. True when the
+// device is done, by this call or before it.
 func (self *ProxyDevice) CancelIfIdle() bool {
 	select {
 	case <-self.ctx.Done():
@@ -2125,9 +2436,19 @@ func (self *ProxyDevice) CancelIfIdle() bool {
 	default:
 	}
 
-	idleTimeout := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
-	if self.settings.ProxyDeviceIdleTimeout <= idleTimeout {
+	idle := time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+	carriedTraffic := self.carriedTraffic.Load()
+	idleTimeout := self.settings.ProxyDeviceIdleTimeout
+	if !carriedTraffic && 0 < self.settings.ProxyDeviceUnusedIdleTimeout {
+		idleTimeout = min(idleTimeout, self.settings.ProxyDeviceUnusedIdleTimeout)
+	}
+	if idleTimeout <= idle {
 		self.cancel()
+		if carriedTraffic {
+			proxyDeviceIdleClosesUsedCounter.Inc()
+		} else {
+			proxyDeviceIdleClosesUnusedCounter.Inc()
+		}
 		return true
 	}
 	return false

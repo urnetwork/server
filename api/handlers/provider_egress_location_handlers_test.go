@@ -409,7 +409,10 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 				t.Fatal("fixture did not initialize every URL admission row")
 			}
 		})
+		// a destination the pool serves: the ingest places an outcome by its
+		// pool row, and one the pool does not hold is unrecognized
 		destination := egresshealth.Destination{Name: "synthetic-document", Class: egresshealth.ClassSite, Url: "https://document.example.invalid/"}
+		model.Testing_ServeProviderEgressDestinations(ctx, destination)
 		for _, clientId := range []server.Id{complete, expired} {
 			for index := range 10 {
 				measuredAt := now.Add(-time.Hour + time.Duration(index)*time.Minute)

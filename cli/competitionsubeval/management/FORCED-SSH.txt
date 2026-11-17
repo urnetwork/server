@@ -1,0 +1,45 @@
+Prospective source-only forced SSH control
+
+Render authorized_keys.in and sudoers.in with the locked control account,
+root-protected agent/config paths containing only ascii letters/digits and
+slash, dot, underscore or hyphen, and a separately reviewed
+coordinator public key. No runtime install, key, sudo grant, sshd change or
+native readiness is supplied by these templates. The control account gets no
+Docker group or general command capability. The existing recovery unit remains
+independent; ephemeral controls MUST NOT trigger RecoverActive on failure.
+
+Config must separately pin /usr/bin/systemd-run as systemd_run. The wrapper
+ignores SSH_ORIGINAL_COMMAND and passes only a fresh fixed environment. It reads
+no frame bytes: inherited pipe/socket descriptors go directly through --pipe
+into the private management control unit. Root admission verifies only pinned
+management/recovery authority, not healthy candidate engine/core admission.
+
+Each control is bounded at 256 MiB/128 tasks by default INSIDE the existing
+private 8 GiB aggregate and ordinary 16 GiB parent. These are prospective child
+settings, not another reserve or measured native peak. Trusted sshd, sudo,
+wrapper Go startup and launcher pre-exec remain ambient host work. Native
+ambient pressure, exact systemd/sudo/sshd behavior, fd inheritance, positive
+ordinary signed RPCs, concurrent control pressure and rollback are required.
+
+The declared trusted-root control class preserves all Linux 6.8 capabilities
+0 through 40, with exact effective/permitted/bounding sets, no inheritable or
+ambient capabilities and child no-new-privileges. This is not a least-privilege
+claim. A changed cap_last_cap or narrower existing wrapper refuses admission;
+the implementation never widens the host's actual capability environment.
+Candidate containers keep their separate cap-drop-all class. Exact successful
+START/status/cancel under this control class remains a native activation gate.
+
+A root-fsynced config-bound nonce receipt and live admission marker precede
+launch. ConditionPathExists plus the child's fresh marker/manager/kernel check
+close queued-start/exec races before framing. Withdrawal is not a process join.
+The owner observes the exact RemainAfterExit service generation, stops ONLY that
+control service while --wait is still pending, then requires a stop ack plus
+inactive/absent-after-known-generation and native empty proof. Unknown launch,
+stop or census retains its closed receipt, never replays it, and refuses new
+admission once the bounded registry is full. Expiry alone never proves cleanup.
+
+Healthy joined ephemeral receipts are removed. A hard-killed wrapper or unknown
+session may leave retained custody requiring exact reviewed reconciliation;
+there is no blanket metadata/prune action. A durable signed START already
+committed by the agent stays with the independent evaluator/Docker owner and
+original three-hour deadline. Connection cancellation never stops those units.

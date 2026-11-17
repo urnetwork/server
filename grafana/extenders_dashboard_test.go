@@ -1,6 +1,7 @@
 package grafana
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -37,15 +38,20 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"addresses in dns":      "urnetwork_taskworker_extender_dns_addresses",
 		"record sets in dns":    "urnetwork_taskworker_extender_dns_sets",
 		"signed records in dns": "urnetwork_taskworker_extender_dns_txt_records",
+		"dns set outcomes":      "urnetwork_taskworker_extender_dns_changes_total",
+		// China's own sets, which its resolvers deliver whole (owner, 2026-11-12)
+		"china's set in dns":    `urnetwork_taskworker_extender_dns_country_records{env="$env",country="CN"}`,
 		"gossip backlog":        "urnetwork_stats_extender_gossip_pending",
 		"gossip staleness":      "urnetwork_stats_extender_gossip_oldest_pending_seconds",
 		"released to gossip":    "urnetwork_stats_extender_gossip_released_24h",
 		"popularity":            "urnetwork_stats_extender_contracts_total",
 		"pings per extender":    "urnetwork_stats_extender_pings_total",
 		"pings by outcome":      "urnetwork_stats_extender_pings_24h",
+		"refusals by reason":    "sum by (pinger_kind, reason) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h",
 		"who is measuring":      "urnetwork_stats_extender_ping_sources_24h",
 		"extenders pinged":      "urnetwork_stats_extender_pinged_extenders_24h",
-		"refusing targets":      "urnetwork_stats_extender_ping_rejections_total",
+		"refusing targets":      "urnetwork_stats_extender_ping_evidence_rejections_total",
+		"refusals per hour":     "urnetwork_stats_extender_ping_rejections_total",
 		"derived locations":     "urnetwork_stats_derived_locations",
 		"derived crossings":     "urnetwork_stats_derived_location_crossings",
 		"excluded sources":      "urnetwork_stats_derive_excluded_sources",
@@ -55,7 +61,13 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"solve heap and budget": "urnetwork_stats_derive_solve_bytes",
 		"reading the day":       "urnetwork_stats_derive_ingest_seconds",
 		"how activations end":   "urnetwork_extender_activations_total",
-		"activation step times": "urnetwork_extender_activation_step_seconds",
+		// the residents' relay of the webrtc carrier's offers (connect/EXTENDER.md S8)
+		"webrtc relay outcomes": "urnetwork_extender_webrtc_relay_offers_total",
+		// the extenders on webrtc without tcp, which the activation caps, and
+		// the activations the cap refused (connect/EXTENDER.md S8)
+		"extenders on webrtc without tcp": "urnetwork_stats_webrtc_only_extenders",
+		"refused at the webrtc cap":       `urnetwork_extender_activations_total{env="$env",stage="webrtc",outcome="cap"}`,
+		"activation step times":           "urnetwork_extender_activation_step_seconds",
 		// the refusals for room, which the activator waits out rather than
 		// backing off (connect#230)
 		"busy and budget refusals": `urnetwork_extender_activations_total{env="$env",stage=~"busy|budget"}`,
@@ -63,6 +75,16 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"how releases end":               "urnetwork_extender_releases_total",
 		"release outcomes by country":    "urnetwork_extender_release_country_outcomes_total",
 		"capability requirements signed": "urnetwork_extender_record_capability_requirements_total",
+		// the restarts of the extender processes (connect/EXTENDER.md G3)
+		"extender restarts":    "urnetwork_stats_extenders_restarting_24h",
+		"who reports its runs": "urnetwork_stats_extenders_reporting_runs_24h",
+		// the claims the ping report route refuses before storing them
+		"claims the operator refused": "urnetwork_extender_ping_report_refused_total",
+		// how much of the pool the network holding the most holds, by the
+		// units the §8.6 pool pays per and by extenders (sn WHITEPAPER §8.6.3)
+		"top network's share of units":     `max(urnetwork_stats_extender_top_network_units{env="$env"}) / max(urnetwork_stats_extender_units{env="$env"})`,
+		"top network's share of extenders": `max(urnetwork_stats_extender_top_network_extenders{env="$env"}) / max(urnetwork_stats_online_extenders{env="$env"})`,
+		"networks holding the pool":        "urnetwork_stats_extender_networks",
 	} {
 		found := false
 		for _, expression := range expressions {
@@ -98,12 +120,12 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 	}
 }
 
-// The contracts, pings and ping rejections counters are the only metrics
-// that name extenders. Every panel reading one must cap with topk, so a
-// dashboard never renders one line per extender in an open population, and
-// must read it through increase(): all are counters fed from closed hour
-// buckets, and a raw value is the process-lifetime total, which a restart
-// resets.
+// The contracts, pings, ping rejections and ping evidence counters are the
+// only metrics that name extenders. Every panel reading one must cap with
+// topk, so a dashboard never renders one line per extender in an open
+// population, and must read it through increase(): all are counters fed from
+// closed hour buckets, and a raw value is the process-lifetime total, which a
+// restart resets.
 func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 	dashboard := readTestDashboard(t, "extenders.json")
 
@@ -111,6 +133,8 @@ func TestExtendersDashboardLeaderboardIsBounded(t *testing.T) {
 		"urnetwork_stats_extender_contracts_total",
 		"urnetwork_stats_extender_pings_total",
 		"urnetwork_stats_extender_ping_rejections_total",
+		"urnetwork_stats_extender_ping_evidence_rejections_total",
+		"urnetwork_stats_extender_ping_evidence_pings_total",
 	}
 	for _, panel := range dashboard.Panels {
 		for _, target := range panel.Targets {
@@ -182,9 +206,10 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		return testPanel{}
 	}
 
-	// the verdict window, split by kind, verdict and relay, over time
+	// the verdict window, split by kind, verdict and relay, over time, the
+	// reasons of each verdict added up
 	outcomes := panelWith(t, func(expr string) bool {
-		return strings.HasPrefix(expr, "max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h")
+		return strings.HasPrefix(expr, "sum by (pinger_kind, outcome, relayed) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h")
 	})
 	if outcomes.Type != "timeseries" {
 		t.Errorf("pings by kind and outcome is a %s, want a timeseries", outcomes.Type)
@@ -212,11 +237,12 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		})
 	}
 
-	// the refusing targets: rejections over pings per target, capped, as a
-	// rate, and explained as the evidence the co-signature exists for
+	// the refusing targets: the refusals that are evidence against each
+	// target over the pings they are a share of, capped, as a rate, and
+	// explained as the evidence the co-signature exists for
 	refusing := panelWith(t, func(expr string) bool {
-		return strings.Contains(expr, "urnetwork_stats_extender_ping_rejections_total") &&
-			strings.Contains(expr, "urnetwork_stats_extender_pings_total") &&
+		return strings.Contains(expr, "urnetwork_stats_extender_ping_evidence_rejections_total") &&
+			strings.Contains(expr, "urnetwork_stats_extender_ping_evidence_pings_total") &&
 			strings.Contains(expr, "/")
 	})
 	if refusing.Type != "table" {
@@ -236,6 +262,15 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		}
 	}
 
+	// the targets refusing the most say what is left out and why: a ranking of
+	// every refusal listed stale directories, and an hour without the
+	// evidence count is unknown, not zero
+	for _, want := range []string{"unknown_pinger", "rate_limited", "stale directories", "no reason", "never an unknown hour read as no refusals"} {
+		if !strings.Contains(refusing.Description, want) {
+			t.Errorf("targets refusing the most description lacks %q", want)
+		}
+	}
+
 	// the retired provider-only names are gone with the rows they counted
 	for _, expression := range dashboardExpressions(dashboard) {
 		for _, retired := range []string{
@@ -246,6 +281,173 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 			if strings.Contains(expression, retired) {
 				t.Errorf("query reads the retired %s: %q", retired, expression)
 			}
+		}
+	}
+}
+
+// The ping window gauge is published by every taskworker, one series per
+// kind, verdict, relay and reason (the extender ping review of 2026-11-11).
+// Every read of it takes the instances' max over all four labels before it
+// adds anything up: a max that leaves the reason out takes the largest reason
+// of a verdict for the whole verdict. And the refusals are read by reason:
+// the refused stat counts the refusals that judged the claim apart from the
+// unknown pingers, which are stale directories rather than refusing targets,
+// a panel splits the refusals by reason, and a panel shows the claims the
+// report route refused before storing.
+func TestExtendersDashboardReadsTheRefusalReason(t *testing.T) {
+	dashboard := readTestDashboard(t, "extenders.json")
+
+	const gauge = "urnetwork_stats_extender_pings_24h"
+	const dedupe = "max by (pinger_kind, outcome, relayed, reason) (" + gauge + "{"
+	reads := 0
+	for _, expression := range dashboardExpressions(dashboard) {
+		if !strings.Contains(expression, gauge) {
+			continue
+		}
+		reads += 1
+		if strings.Count(expression, gauge) != strings.Count(expression, dedupe) {
+			t.Errorf("a read of %s does not take the instances' max over every label, reason included: %q", gauge, expression)
+		}
+	}
+	if reads < 5 {
+		t.Fatalf("%d panels read %s", reads, gauge)
+	}
+
+	panelTitled := func(title string) testPanel {
+		t.Helper()
+		for _, panel := range dashboard.Panels {
+			if panel.Title == title {
+				return panel
+			}
+		}
+		t.Fatalf("no panel %q", title)
+		return testPanel{}
+	}
+
+	refused := panelTitled("refused (24h)")
+	if len(refused.Targets) != 2 {
+		t.Fatalf("refused (24h) has %d counts, want the refusals on the claim and the unknown pingers", len(refused.Targets))
+	}
+	if !strings.Contains(refused.Targets[0].Expr, `outcome="rejected",reason!~"unknown_pinger|rate_limited"`) {
+		t.Errorf("refused (24h) counts the refusals that are evidence against no one: %q", refused.Targets[0].Expr)
+	}
+	if !strings.Contains(refused.Targets[1].Expr, `outcome="rejected",reason="unknown_pinger"`) {
+		t.Errorf("refused (24h) does not count the unknown pingers apart: %q", refused.Targets[1].Expr)
+	}
+	for _, want := range []string{"stale directories", "gossip", "extender-directories-stale"} {
+		if !strings.Contains(refused.Description, want) {
+			t.Errorf("refused (24h) description lacks %q", want)
+		}
+	}
+
+	reasons := panelTitled("refusals by reason (24h)")
+	if reasons.Type != "timeseries" || len(reasons.Targets) != 1 ||
+		!strings.HasPrefix(reasons.Targets[0].Expr, "sum by (pinger_kind, reason) ("+dedupe+`env="$env",outcome="rejected"}`) {
+		t.Errorf("refusals by reason is not the refusals over time by kind and reason: %s %+v", reasons.Type, reasons.Targets)
+	}
+	for _, want := range []string{"unknown_pinger", "check gossip and DNS publishing", "rtt_below_observed", "rate_limited", "other", "§2.19c"} {
+		if !strings.Contains(reasons.Description, want) {
+			t.Errorf("refusals by reason description lacks %q", want)
+		}
+	}
+
+	route := panelTitled("claims the operator refused (per hour)")
+	if route.Type != "timeseries" || len(route.Targets) != 1 ||
+		route.Targets[0].Expr != `sum by (reason) (increase(urnetwork_extender_ping_report_refused_total{env="$env"}[1h]))` {
+		t.Errorf("claims the operator refused is not the route's refusals per hour by reason: %s %+v", route.Type, route.Targets)
+	}
+	for _, want := range []string{"POST /network/ping-report", "pinger_not_reporter", "replay", "rate_limited"} {
+		if !strings.Contains(route.Description, want) {
+			t.Errorf("claims the operator refused description lacks %q", want)
+		}
+	}
+}
+
+// The targets refusing the most and the refusals per hour read the refusals
+// that are evidence against the target (the extender ping review of
+// 2026-11-11). They read the per-target rejections counter, which counts every
+// reason: from 2026-11-07 stale directories refused most extender pingers as
+// unknown, and the ranking listed extenders whose only fault was that. The
+// ranking divides the evidence refusals by the pings of the same hours, so an
+// hour whose tally row predates the evidence count drops out of both rather
+// than reading as an hour with no refusals; the hourly evidence line leaves
+// such an hour a gap, and draws no line across it. Every reason stays beside
+// it for contrast.
+func TestExtendersDashboardRanksRefusingTargetsByEvidence(t *testing.T) {
+	dashboard := readTestDashboard(t, "extenders.json")
+	panelTitled := func(title string) testPanel {
+		t.Helper()
+		for _, panel := range dashboard.Panels {
+			if panel.Title == title {
+				return panel
+			}
+		}
+		t.Fatalf("no panel %q", title)
+		return testPanel{}
+	}
+	const evidenceRejections = `urnetwork_stats_extender_ping_evidence_rejections_total{env="$env"}`
+	const evidencePings = `urnetwork_stats_extender_ping_evidence_pings_total{env="$env"}`
+	const rejections = `urnetwork_stats_extender_ping_rejections_total{env="$env"}`
+
+	ranking := panelTitled("targets refusing the most")
+	wantRanking := "topk(20, sum by (extender_id) (increase(" + evidenceRejections + "[$__range])) / " +
+		"(sum by (extender_id) (increase(" + evidencePings + "[$__range])) >= 10))"
+	if len(ranking.Targets) != 1 || ranking.Targets[0].Expr != wantRanking {
+		t.Errorf("targets refusing the most does not rank the evidence refusals over the pings of their hours: %+v", ranking.Targets)
+	}
+
+	perHour := panelTitled("refusals per hour")
+	wantPerHour := []testTarget{
+		{
+			RefId:        "A",
+			Expr:         "sum(increase(" + evidenceRejections + "[1h])) and (sum(increase(" + evidencePings + "[1h])) > 0)",
+			LegendFormat: "evidence against the target",
+		},
+		{
+			RefId:        "B",
+			Expr:         "sum(increase(" + rejections + "[1h]))",
+			LegendFormat: "every reason",
+		},
+	}
+	if len(perHour.Targets) != len(wantPerHour) {
+		t.Fatalf("refusals per hour has %d queries, want the evidence refusals and every reason: %+v", len(perHour.Targets), perHour.Targets)
+	}
+	for i, want := range wantPerHour {
+		got := perHour.Targets[i]
+		if got.RefId != want.RefId || got.Expr != want.Expr || got.LegendFormat != want.LegendFormat {
+			t.Errorf("refusals per hour query %d is %+v, want %+v", i, got, want)
+		}
+	}
+	for _, want := range []string{"unknown_pinger", "rate_limited", "no reason", "a gap there, never a zero"} {
+		if !strings.Contains(perHour.Description, want) {
+			t.Errorf("refusals per hour description lacks %q", want)
+		}
+	}
+
+	// a line drawn across an hour without the evidence count would invent its
+	// refusals
+	body, err := dashboardsFs.ReadFile("dashboards/extenders.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Panels []struct {
+			Title       string `json:"title"`
+			FieldConfig struct {
+				Defaults struct {
+					Custom struct {
+						SpanNulls json.RawMessage `json:"spanNulls"`
+					} `json:"custom"`
+				} `json:"defaults"`
+			} `json:"fieldConfig"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, panel := range document.Panels {
+		if panel.Title == "refusals per hour" && string(panel.FieldConfig.Defaults.Custom.SpanNulls) != "false" {
+			t.Errorf("refusals per hour spans nulls (%s): an hour without the evidence count is drawn as counted", panel.FieldConfig.Defaults.Custom.SpanNulls)
 		}
 	}
 }

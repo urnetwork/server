@@ -25,6 +25,7 @@ func TestProviderCountCohortEmptyNeedsNoBackend(t *testing.T) {
 }
 
 func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
+	useSingleArindbCanaryForCohortTest(t)
 	env := server.DefaultTestEnv()
 	env.ApplyDbMigrations = false
 	env.Run(t, func(t testing.TB) {
@@ -59,6 +60,7 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 				cohortTestExec(ctx, `INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_weight) VALUES($1,0,1),($1,1,$2)`, id, weight)
 			}
 			if n == 4 {
+				// an uncleared legacy flag excludes, however old
 				cohortTestExec(ctx, `INSERT INTO provider_egress_health(client_id,legacy_tls_authentication_failure,measured_at) VALUES($1,true,now()-interval '30 days')`, id)
 			}
 			cohortTestExec(ctx, `INSERT INTO provider_egress_location VALUES($1,'US',now())`, id)
@@ -107,7 +109,13 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		observer, closeObservation := cohortObserveQueries(t, ctx)
 		defer closeObservation()
 		settings := egressIndexSettings()
-		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts()}
+		// ModernOnlineCounts joined the dashboard counts with 92a738f17
+		// (FP2-MODERN.md); every Online member counts under its modern outcome
+		// CapabilityCounts and PostQuantumCounts joined them with FP2-PROTOCOL.md
+		// §8.1: every provider here is v4-only with one run in the window, so it
+		// keeps its advertised labels, ipv4+dualproto, and has no
+		// post-quantum outcome
+		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts(), ModernOnlineCounts: newProviderModernOnlineCounts(), CapabilityCounts: newProviderEgressCapabilityCounts(), PostQuantumCounts: newProviderPostQuantumCounts()}
 		for _, bucket := range ProviderEgressBuckets {
 			wantCounts.BucketIndexCounts[bucket] = map[string]int64{}
 		}
@@ -120,15 +128,23 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 			code := "us"
 			index := 0
 			quality := true
-			d := decideProviderEgress(fleet.egressFacts(id, &code, &index, &quality, settings), providerEgressTestEnabled())
+			facts := fleet.egressFacts(id, &code, &index, &quality, settings)
+			d := decideProviderEgress(facts, providerEgressTestEnabled())
+			countProviderModernOnline(wantCounts.ModernOnlineCounts, facts, d)
 			if d.quality {
 				wantCounts.BucketIndexCounts[RankModeQuality]["0"]++
+				wantCounts.CapabilityCounts[RankModeQuality][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[RankModeQuality][ProviderPostQuantumSignalNone]++
 			}
 			if d.speed {
 				wantCounts.BucketIndexCounts[RankModeSpeed]["0"]++
+				wantCounts.CapabilityCounts[RankModeSpeed][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[RankModeSpeed][ProviderPostQuantumSignalNone]++
 			}
 			if d.online {
 				wantCounts.BucketIndexCounts[ProviderEgressBucketOnline]["0"]++
+				wantCounts.CapabilityCounts[ProviderEgressBucketOnline][ProviderCapabilityIpIpv4][ProviderCapabilityProtocolDualproto]++
+				wantCounts.PostQuantumCounts[ProviderEgressBucketOnline][ProviderPostQuantumSignalNone]++
 			}
 			if d.reason != "" {
 				wantCounts.ReasonCounts[d.reason]++

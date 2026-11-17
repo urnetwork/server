@@ -1253,6 +1253,11 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
   (migration 824; `providerWorkSignSessionEventsInTx`).
 - **Not chosen:** stopping events for non-provider clients while no signer
   runs.
+- **Reversed (owner, 2026-11-16; DBDISK-STABILIZE.md S4):** since migration 979
+  the append journals provider clients only, those with a friends and family or
+  public provide key, and a retire whose connection's admit is in the journal
+  (`db_provider_work_session_providers.go`). A client that does not provide
+  gets no event and no head.
 - **Design:**
   - weekly `RANGE (observed_at)`, with primary key
     `(client_id, sequence, observed_at)`;
@@ -1332,6 +1337,30 @@ as well (2026-10-24), so its retention is a drop that doesn't depend on vacuum.
     - **Effect:** the legacy partition (everything before the cutover week C)
       drops at C + H instead of C + 13 weeks, while no open connection still
       needs an admit in it; production connections reconnect within a day.
+  - **Early drop of the legacy partition (owner, 2026-11-15; DBDISK-STABILIZE
+    I4):** C was 2026-11-16 on Main, and the legacy partition held 366 GiB.
+    - **Accepted:** a connection admitted before C and still open at the drop
+      retires without its network id. The retire lookup reads the parent,
+      finds no admit, and the append writes `network_id` NULL, which the
+      journal allows. No event was ever signed, so no signed chain breaks.
+    - **Guard migration** (`providerWorkSessionEventLegacyDropGuardSql`): the
+      horizon drop guard plus one clause, which admits the legacy partition
+      (`FROM (MINVALUE)`) an hour after its upper bound, once no event can land
+      in it. It replaces the function body only. Its monitor contract
+      supersedes the horizon guard's.
+    - **Step:** `bringyourctl model migrate provider-work-session-partition
+      --drop-legacy [--dry-run]` (`db_provider_work_session_legacy_drop.go`).
+      It runs in two transactions:
+      - The detach transaction sets the opt-in, calls the guard, and runs
+        DETACH. It first waits for a quiet journal, then waits at most 1 s
+        for its locks, half a main-pool writer's `PgLockTimeout`, with
+        retries.
+      - The drop of the detached table runs under that table's own lock.
+      The registry's `DropRange` would do both in one transaction, holding
+      the parent's ACCESS EXCLUSIVE lock while the commit unlinks every file.
+      A rerun resumes after the detach.
+    - **Unchanged:** the registry's own retirement still keeps the legacy
+      partition until C + H and the open-admission check.
 
 ### C5. `contract_close_report_evidence` (170 GB): weekly partitions plus the row deletes (decided 2026-10-24)
 
@@ -1776,6 +1805,25 @@ Changes:
     - A chain starts at the horizon. Windows retired before its first run
       age out through the 30-day reap, so a deploy deletes no backlog at
       once.
+  - **Removed and expired proxies (2026-11-05).** Task
+    `remove_retired_hosted_proxy_clients` hard deletes an inactive client
+    with a `proxy_device_config` two days after its deactivation
+    (`model.RemoveRetiredHostedProxyClients`).
+    - **Why.** Nothing reactivates a client, so a removed or idle-expired
+      proxy is dead at its deactivation. Its `proxy_client` row stayed until
+      the 30-day reap, though, and every proxy instance restores and
+      reconciles all rows of its (host, block) as WireGuard clients. On Main,
+      92% of the 3.79M `proxy_device_config` rows were inactive, and about 93%
+      of the 823k configured WireGuard clients were theirs.
+    - **Order.** Two days is after the 1-day window reap, whose hosted test
+      reads the proxy's config, so a proxy's windows go first.
+    - **Walk.** `proxy_device_config` in `proxy_id` order with a cursor, pages
+      of 5,000, at most 5,000 deletions a run. A run with work left continues
+      a minute later, and a finished pass starts the next an hour later. A
+      deploy paces the existing backlog instead of deleting it at once.
+    - **Unchanged.** The idle window (`TopLevelClientIdleExpiration`, 30
+      days) is untouched: of the active proxies used again after their first
+      day, about 16% were last used 21 to 30 days ago.
   - **Provide keys at deactivation.** Every deactivation deletes the
     client's keys in its own transaction, and their mirror after the commit:
     `deactivateLockedNetworkClientsInTx`, which covers every removal path, the

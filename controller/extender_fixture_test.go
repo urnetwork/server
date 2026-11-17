@@ -153,8 +153,12 @@ type testExtenderFixture struct {
 	dnsPorts  []int
 	dnsPort   int
 	publicKey ed25519.PublicKey
-	errors    chan error
-	serveDone chan error
+	// the X25519 camouflage key the fixture derives from its identity seed
+	// (connect/EXTENDER.md P1, P6), which an activation posts when the test
+	// turns camouflage on
+	realityPublicKey []byte
+	errors           chan error
+	serveDone        chan error
 }
 
 // Binds the extender with an identity key it signs challenges with. An empty
@@ -172,6 +176,17 @@ func newTestExtenderFixture(t testing.TB) *testExtenderFixture {
 // it.
 func newTestExtenderFixtureWithDnsPorts(t testing.TB, dnsPortCount int) *testExtenderFixture {
 	t.Helper()
+	return newTestExtenderFixtureWithSettings(t, dnsPortCount, nil)
+}
+
+// The same fixture with configure applied to the extender's settings before it
+// is built, for a test that turns camouflage or the splice on.
+func newTestExtenderFixtureWithSettings(
+	t testing.TB,
+	dnsPortCount int,
+	configure func(settings *extender.ExtenderSettings),
+) *testExtenderFixture {
+	t.Helper()
 	api := newTestExtenderApi(t)
 
 	keySeed, err := connect.NewExtenderKeySeed()
@@ -179,6 +194,10 @@ func newTestExtenderFixtureWithDnsPorts(t testing.TB, dnsPortCount int) *testExt
 		t.Fatal(err)
 	}
 	publicKey, err := connect.ExtenderPublicKeyFromSeed(keySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realityPublicKey, err := connect.ExtenderRealityStaticPublicKey(keySeed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,13 +223,14 @@ func newTestExtenderFixtureWithDnsPorts(t testing.TB, dnsPortCount int) *testExt
 	}
 	slices.Sort(dnsPorts)
 	fixture := &testExtenderFixture{
-		api:       api,
-		tcpPort:   tcpListener.Addr().(*net.TCPAddr).Port,
-		quicPort:  quicPacketConn.LocalAddr().(*net.UDPAddr).Port,
-		dnsPorts:  dnsPorts,
-		dnsPort:   dnsPorts[0],
-		publicKey: publicKey,
-		errors:    make(chan error, 64),
+		api:              api,
+		tcpPort:          tcpListener.Addr().(*net.TCPAddr).Port,
+		quicPort:         quicPacketConn.LocalAddr().(*net.UDPAddr).Port,
+		dnsPorts:         dnsPorts,
+		dnsPort:          dnsPorts[0],
+		publicKey:        publicKey,
+		realityPublicKey: realityPublicKey,
+		errors:           make(chan error, 64),
 	}
 
 	settings := extender.DefaultExtenderSettings()
@@ -266,6 +286,10 @@ func newTestExtenderFixtureWithDnsPorts(t testing.TB, dnsPortCount int) *testExt
 	}
 	for _, dnsPort := range dnsPorts {
 		ports[dnsPort] = []connect.ExtenderConnectMode{connect.ExtenderConnectModeDns}
+	}
+
+	if configure != nil {
+		configure(settings)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

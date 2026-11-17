@@ -27,7 +27,7 @@ func walletRemovalPoolFixture(t testing.TB, ctx context.Context) (server.Id, ser
 	if walletId == nil {
 		t.Fatal("wallet fixture was not created")
 	}
-	server.Raise(SetPayoutWallet(ctx, networkId, *walletId))
+	testingSelectPayoutWallet(ctx, networkId, *walletId)
 	return networkId, *walletId
 }
 

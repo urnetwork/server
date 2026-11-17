@@ -152,6 +152,9 @@ func TestAuthNetworkClientRefusesInvalidProxyConfigBeforeCreate(t *testing.T) {
 func TestAuthNetworkClientCreatesValidProxyConfig(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// one network creates more proxies, and faster, than the free plan's
+		// proxy limits (network_client_proxy_limit.go, tested on their own) allow
+		defer Testing_LiftProxyClientLimits()()
 
 		networkId, userSession := authClientTestNetwork(ctx, "test")
 

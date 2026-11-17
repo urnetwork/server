@@ -12,15 +12,23 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// On by default, with batches of two contracts and two clients, so one pass
-// takes several batches, and passes paced at the code's fastest.
+// On by default, with walk batches of four contracts that keep at most two, so
+// one walk takes several batches, and passes and the walk paced at the code's
+// fastest.
 func proberRetentionTestSettings() *ProberShardRetentionSettings {
 	settings := DefaultProberShardRetentionSettings()
 	settings.DefaultMode = ProberShardRetentionModeOn
 	settings.ContractBatchSize = 2
-	settings.ClientChunkSize = 2
+	settings.WalkBatchSize = 4
 	settings.DefaultMaxShardsPerMinute = settings.MaxShardsPerMinute
+	settings.DefaultMaxWalkRowsPerSecond = settings.MaxWalkRowsPerSecond
 	return settings
+}
+
+// One run from no walk, as a chain's first.
+func proberRetentionTestRun(ctx context.Context, now time.Time, settings *ProberShardRetentionSettings) (*ProberShardRetentionReport, error) {
+	report, _, err := RemoveProberShardGenerations(ctx, now, ProberShardContractWalk{}, settings)
+	return report, err
 }
 
 // A run's clock once the generation of a pass created now has dropped.
@@ -137,7 +145,7 @@ func TestProberShardPassEndRetainsUntilItsGenerationDrops(t *testing.T) {
 		})
 
 		// its generation is kept
-		report, err := RemoveProberShardGenerations(ctx, server.NowUtc(), proberRetentionTestSettings())
+		report, err := proberRetentionTestRun(ctx, server.NowUtc(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 0 || !report.CaughtUp {
 			t.Fatalf("a kept generation's pass was taken up: %+v %v", report, err)
 		}
@@ -146,7 +154,7 @@ func TestProberShardPassEndRetainsUntilItsGenerationDrops(t *testing.T) {
 		}
 
 		// once its generation has dropped, it goes whole
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
 			t.Fatalf("the dropped generation's pass stayed: %+v %v", report, err)
 		}
@@ -215,7 +223,7 @@ func TestProberShardRetentionDropsZeroByteContractsAndKeepsBytes(t *testing.T) {
 		})
 		bytesBefore := proberRetentionTestContractRows(t, ctx, []server.Id{bytesId})
 
-		report, err := RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err := proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
 			t.Fatalf("the pass was not dropped: %+v %v", report, err)
 		}
@@ -260,7 +268,7 @@ func TestProberShardRetentionKeepsLiveAndUnsettledPasses(t *testing.T) {
 		}
 		guarded := proberRetentionTestSettings()
 		guarded.MinDeadlineAge = 10 * 24 * time.Hour
-		report, err := RemoveProberShardGenerations(ctx, proberRetentionTestLater(), guarded)
+		report, err := proberRetentionTestRun(ctx, proberRetentionTestLater(), guarded)
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 0 {
 			t.Fatalf("a pass inside its deadline guard was taken up: %+v %v", report, err)
 		}
@@ -270,7 +278,7 @@ func TestProberShardRetentionKeepsLiveAndUnsettledPasses(t *testing.T) {
 		if _, err := ProberShardIdentity(ctx, live); err != nil {
 			t.Fatalf("the live pass lost its identity: %v", err)
 		}
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
 			t.Fatalf("a crashed pass of a dropped generation stayed: %+v %v", report, err)
 		}
@@ -285,7 +293,7 @@ func TestProberShardRetentionKeepsLiveAndUnsettledPasses(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Raise(DrainProberShard(ctx, owner.Key))
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardBlocked] != 1 ||
 			report.Blocked[proberShardReapBlockedUnsettled]+report.Blocked[proberShardReapBlockedUnresolved] != 1 {
 			t.Fatalf("a pass with an open contract was not refused: %+v %v", report, err)
@@ -296,7 +304,7 @@ func TestProberShardRetentionKeepsLiveAndUnsettledPasses(t *testing.T) {
 		if rows := proberRetentionTestContractRows(t, ctx, []server.Id{open.ContractId}); rows["transfer_contract"] != 1 || rows["transfer_escrow"] != 1 {
 			t.Fatalf("the refused pass lost its open contract: %v", rows)
 		}
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardBlocked] != 0 {
 			t.Fatalf("the refused pass was taken up again before its retry interval: %+v %v", report, err)
 		}
@@ -320,13 +328,13 @@ func TestProberShardRetentionControlModes(t *testing.T) {
 		server.Raise(SettleProberShard(ctx, owner.Key))
 		settings := DefaultProberShardRetentionSettings()
 
-		report, err := RemoveProberShardGenerations(ctx, proberRetentionTestLater(), settings)
+		report, err := proberRetentionTestRun(ctx, proberRetentionTestLater(), settings)
 		if err != nil || report.Stop != proberShardRetentionStopOff || len(report.Shards) != 0 {
 			t.Fatalf("the code default dropped something: %+v %v", report, err)
 		}
 
 		server.Raise(SetProberShardRetentionControl(controlCtx, map[string]string{ProberShardRetentionControlFieldMode: "dry_run"}))
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), settings)
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), settings)
 		if err != nil || report.Stop != proberShardRetentionStopDryRun || report.Shards[proberShardRetentionShardDryRun] != 1 ||
 			report.Contracts[proberShardRetentionContractEligible] != 1 || len(report.Deleted) != 0 {
 			t.Fatalf("the dry run did not count the drop: %+v %v", report, err)
@@ -342,7 +350,7 @@ func TestProberShardRetentionControlModes(t *testing.T) {
 			ProberShardRetentionControlFieldMode:      "on",
 			ProberShardRetentionControlFieldContracts: "off",
 		}))
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), settings)
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), settings)
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 || report.Contracts[proberShardRetentionContractDeleted] != 0 {
 			t.Fatalf("contracts off did not drop the identity alone: %+v %v", report, err)
 		}
@@ -356,8 +364,12 @@ func TestProberShardRetentionControlModes(t *testing.T) {
 	})
 }
 
-// Two runs at once drop each pass once, without an error, and a contract
-// another transaction holds is skipped, not waited for.
+// Two runs at once drop each pass once and delete each contract once, without
+// an error, and a contract another transaction holds is skipped, not waited
+// for. Both runs start from no walk, so both walk the generation: each counts
+// the held contract busy when it reaches it, and a contract the other run
+// holds at that moment too, so busy is at least one rather than exactly one.
+// A chain hands one walk from run to run and never walks twice at once.
 func TestProberShardRetentionConcurrentRunsAndLockedContracts(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -399,7 +411,7 @@ func TestProberShardRetentionConcurrentRunsAndLockedContracts(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				reports[i], errs[i] = RemoveProberShardGenerations(ctx, later, settings)
+				reports[i], errs[i] = proberRetentionTestRun(ctx, later, settings)
 			}()
 		}
 		wg.Wait()
@@ -416,7 +428,9 @@ func TestProberShardRetentionConcurrentRunsAndLockedContracts(t *testing.T) {
 		}
 		connect.AssertEqual(t, dropped, int64(len(owners)))
 		connect.AssertEqual(t, deleted, int64(len(owners)-1))
-		connect.AssertEqual(t, busy, int64(1))
+		if busy < 1 {
+			t.Fatalf("no run counted the held contract busy: %d", busy)
+		}
 		for _, owner := range owners {
 			if n, c, b := shardTestRows(t, ctx, owner); n != 0 || c != 0 || b != 0 {
 				t.Fatalf("a pass kept network=%d clients=%d balances=%d", n, c, b)
@@ -447,7 +461,7 @@ func TestProberShardRetentionContinuesPastAFailedPass(t *testing.T) {
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.Set(ctx, verifyClientEgressKey(failed.ClientId), "wrong-type", 0).Err())
 		})
-		report, err := RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err := proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardError] != 1 || report.Shards[proberShardRetentionShardDropped] != 2 {
 			t.Fatalf("a failed pass held the others: %+v %v", report, err)
 		}
@@ -460,7 +474,7 @@ func TestProberShardRetentionContinuesPastAFailedPass(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_shard_run SET next_cleanup_time=now()-interval '1 second' WHERE task_id=$1 AND epoch=$2`, failed.Key.TaskId, failed.Key.Epoch))
 		})
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 {
 			t.Fatalf("the failed pass did not drop on retry: %+v %v", report, err)
 		}
@@ -488,19 +502,19 @@ func TestProberShardRetentionRemovesClosedRegistryRowsAndStopsAtItsBudget(t *tes
 
 		spent := proberRetentionTestSettings()
 		spent.RunBudget = 0
-		report, err := RemoveProberShardGenerations(ctx, proberRetentionTestLater(), spent)
+		report, err := proberRetentionTestRun(ctx, proberRetentionTestLater(), spent)
 		if err != nil || report.Stop != proberShardRetentionStopBudget || len(report.Shards) != 0 {
 			t.Fatalf("a spent budget still dropped: %+v %v", report, err)
 		}
 
-		report, err = RemoveProberShardGenerations(ctx, server.NowUtc(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, server.NowUtc(), proberRetentionTestSettings())
 		if err != nil || !report.CaughtUp {
 			t.Fatalf("a run with no due pass did not catch up: %+v %v", report, err)
 		}
 		if registered, state, _ := proberRetentionTestRegistered(t, ctx, closed.Key); !registered || state != "closed" {
 			t.Fatal("a kept generation's closed row was removed")
 		}
-		report, err = RemoveProberShardGenerations(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
+		report, err = proberRetentionTestRun(ctx, proberRetentionTestLater(), proberRetentionTestSettings())
 		if err != nil || report.Shards[proberShardRetentionShardDropped] != 1 || !report.CaughtUp {
 			t.Fatalf("the due pass was not dropped: %+v %v", report, err)
 		}
@@ -597,7 +611,8 @@ func TestProberShardRetentionCountsAVanishedPassAsGone(t *testing.T) {
 			report:   newProberShardRetentionReport(),
 		}
 		run.cutoff = ProberShardRetentionCutoff(run.now, settings.GenerationDuration, settings.RetainedGenerations)
-		run.dropShard(ctx, owner, NarrowProberShardRetentionControl(map[string]string{}, settings))
+		due := &proberShardRetentionDue{ProberShardOwner: owner, createTime: server.NowUtc()}
+		run.dropShard(ctx, due, NarrowProberShardRetentionControl(map[string]string{}, settings))
 		connect.AssertEqual(t, run.report.Shards[proberShardRetentionShardGone], int64(1))
 		connect.AssertEqual(t, run.report.Shards[proberShardRetentionShardError], int64(0))
 	})

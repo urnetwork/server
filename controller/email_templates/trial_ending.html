@@ -3,7 +3,7 @@
 {{define "eyebrow"}}Reminder{{end}}
 {{define "accent"}}#eff7bb{{end}}
 {{define "headline"}}Your UR Pro trial ends on {{.EndDate}}{{end}}
-{{define "why"}}Sent to the address on your URnetwork account two days before a UR Pro free trial ends, as the trial screen said we would.{{end}}
+{{define "why"}}Sent to the address on your URnetwork account {{.NoticeWhen}} before a UR Pro free trial ends, as the trial screen said we would.{{end}}
 {{define "content"}}
 <p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.ChargeLine}}</p>
 <p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.CancelLine}}</p>

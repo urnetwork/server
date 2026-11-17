@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // A legacy-escrow contract whose receiver checkpoints after the sender's
@@ -113,16 +112,20 @@ func TestCoveredCheckpointSettlesZeroEscrowWithoutPayout(t *testing.T) {
 }
 
 // The completed checkpoint commits only together with its settlement. A
-// settlement refused because another owner holds the contract's provider
-// totals publication leaves the receiver's checkpoint resumable and the
-// contract open; the receiver's next report after the sender's final settles.
+// settlement refused because another owner holds the payer's grant leaves
+// the receiver's checkpoint resumable and the contract open; the receiver's
+// next report after the sender's final settles. A Redis reservation's
+// settlement takes no ownership since it stopped publishing provider totals
+// (BILLING-SPLIT.md), so the refusal is a legacy reservation's, whose
+// settlement still owns its grant.
 func TestCoveredCheckpointSettlementFailureKeepsCheckpoint(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		contract := createRedisAdmissionTest(ctx, f, 100)
+		contract, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
+		server.RunPosts(ctx, posts...)
 		const byteCount = ByteCount(11)
 		if _, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId, AckedByteCount: byteCount}); err != nil {
 			t.Fatal(err)
@@ -137,9 +140,7 @@ func TestCoveredCheckpointSettlementFailureKeepsCheckpoint(t *testing.T) {
 			return
 		}
 
-		release := holdFinancialTestOwner(t, ctx, []server.PgOwnershipKey{
-			task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contract.ContractId)),
-		})
+		release := holdFinancialTestOwner(t, ctx, transferBalanceOwnershipKeys([]server.Id{f.balanceId}))
 		_, err := CloseContractWithReport(ctx, ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.destinationId, AckedByteCount: byteCount, Checkpoint: true})
 		release()
 		if !errors.Is(err, errTransferBalanceOwnershipBusy) {

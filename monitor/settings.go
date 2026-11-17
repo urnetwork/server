@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -151,6 +152,26 @@ type PostgreSQLSettings struct {
 	User          string
 	Password      string
 	Database      string
+	// Zero inherits the existing 30-second statement budget. Negative,
+	// fractional-millisecond or PostgreSQL-unrepresentable values refuse use.
+	StatementTimeout time.Duration
+}
+
+// Connection and statement defaults have one source for both SQL paths.
+func DefaultPostgreSQLSettings() PostgreSQLSettings {
+	return PostgreSQLSettings{Port: 5432, PgBouncerPort: 6432, StatementTimeout: 30 * time.Second}
+}
+
+// PostgreSQL's integer millisecond GUC must represent the exact owner budget.
+func pgStatementTimeoutMillis(timeout time.Duration) (int64, error) {
+	if timeout == 0 {
+		timeout = DefaultPostgreSQLSettings().StatementTimeout
+	}
+	milliseconds := int64(timeout / time.Millisecond)
+	if timeout <= 0 || timeout%time.Millisecond != 0 || milliseconds != int64(int32(milliseconds)) {
+		return 0, fmt.Errorf("monitor: PostgreSQL statement timeout must be positive whole representable milliseconds")
+	}
+	return milliseconds, nil
 }
 
 // Separate admin and query-role credentials stay in memory. QueryDomain is the
@@ -294,13 +315,16 @@ type TLSCertificateSignalSource interface {
 	TLSCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
 }
 
-// DNSRecordType is one address-family DNS record checked by SIGNALS.md
-// §18.3. Only DNSRecordA and DNSRecordAAAA are valid probe inputs.
+// DNSRecordType is one DNS record type a probe asks for. SIGNALS.md §18.3
+// checks only the address families, DNSRecordA and DNSRecordAAAA; §28.2 asks
+// public resolvers for the extender record name's DNSRecordTXT over the wire
+// query path.
 type DNSRecordType string
 
 const (
 	DNSRecordA    DNSRecordType = "A"
 	DNSRecordAAAA DNSRecordType = "AAAA"
+	DNSRecordTXT  DNSRecordType = "TXT"
 )
 
 // DNSResponseCode is the bounded response classification retained by the DNS
@@ -323,6 +347,9 @@ type DNSResponseObservation struct {
 	ResponseCode  DNSResponseCode
 	Authoritative bool
 	CNAMECount    int
+	// the values of a TXT question's answer, each record's character strings
+	// joined as a client joins them, in answer order
+	Texts []string
 }
 
 // DNSAuthoritativeObservation aggregates one direct response per discovered
@@ -339,6 +366,41 @@ type DNSAuthoritativeObservation struct {
 type DNSAliasSignalSource interface {
 	DNSAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
 	DNSRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
+}
+
+// DNSTxtSignalSource optionally supplies one resolver's answer to a name's TXT
+// question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2. Production asks the resolver over the DNS wire protocol
+// (UDP, then TCP when truncated).
+type DNSTxtSignalSource interface {
+	DNSTxt(ctx context.Context, resolver, hostname string, clientSubnet netip.Prefix) (DNSResponseObservation, error)
+}
+
+// DNSAddressSignalSource optionally supplies one resolver's answer to a name's
+// A question, for SIGNALS.md §28.2, which asks it of a plain resolver that
+// left the TXT question unanswered. Production asks over the DNS wire
+// protocol (UDP, then TCP when truncated).
+type DNSAddressSignalSource interface {
+	DNSAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+}
+
+// DNSDohSignalSource optionally supplies one DoH server's answer to a name's
+// TXT question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2: the HTTP status and the body, read to at most maxBytes+1
+// bytes. Production asks the server over https as a client asks it (an RFC
+// 8484 GET).
+type DNSDohSignalSource interface {
+	DNSDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int, clientSubnet netip.Prefix) (int, []byte, error)
+}
+
+// DNSAuthoritativeTxtSignalSource optionally supplies the authoritative
+// nameservers of the zone that holds a name, and their answer to its TXT
+// question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2. Production discovers the nameservers through the platform
+// resolver and asks them over TCP.
+type DNSAuthoritativeTxtSignalSource interface {
+	DNSNameservers(ctx context.Context, name string) ([]string, error)
+	DNSTxtAuthoritative(ctx context.Context, hostname string, servers []string, clientSubnet netip.Prefix) (DNSResponseObservation, error)
 }
 
 // SettingsGenerationCheck compares the immutable settings already owned by a
@@ -440,8 +502,11 @@ type SignalSettings struct {
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
 	// authoritative topology; exclusions never remove placements or capacity.
-	ExcludedHosts     []string
-	PostgreSQL        PostgreSQLSettings
+	ExcludedHosts []string
+	PostgreSQL    PostgreSQLSettings
+	// Nil selects fresh default census bounds; explicit nonpositive bounds
+	// refuse the observation rather than removing planner admission.
+	MigrationCensus   *MigrationCensusSettings
 	Grafana           GrafanaSettings
 	GooglePlay        GooglePlayReportingSettings
 	AppleReporting    AppleReportingSettings
@@ -516,6 +581,13 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 }
 
 func (s SignalSettings) withDefaults() SignalSettings {
+	if s.MigrationCensus == nil {
+		bounds := DefaultMigrationCensusSettings()
+		s.MigrationCensus = &bounds
+	} else {
+		bounds := *s.MigrationCensus
+		s.MigrationCensus = &bounds
+	}
 	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
 	s.SubnetCorrectness = cloneSubnetCorrectnessSettings(s.SubnetCorrectness)
 	s.SubnetArtifacts = cloneSubnetArtifactSettings(s.SubnetArtifacts)
@@ -529,10 +601,13 @@ func (s SignalSettings) withDefaults() SignalSettings {
 		s.AddressMode = AddressModeOverlay
 	}
 	if s.PostgreSQL.Port == 0 {
-		s.PostgreSQL.Port = 5432
+		s.PostgreSQL.Port = DefaultPostgreSQLSettings().Port
 	}
 	if s.PostgreSQL.PgBouncerPort == 0 {
-		s.PostgreSQL.PgBouncerPort = 6432
+		s.PostgreSQL.PgBouncerPort = DefaultPostgreSQLSettings().PgBouncerPort
+	}
+	if s.PostgreSQL.StatementTimeout == 0 {
+		s.PostgreSQL.StatementTimeout = DefaultPostgreSQLSettings().StatementTimeout
 	}
 	if s.SourceAttribution.IPv4URL == "" {
 		s.SourceAttribution.IPv4URL = "https://api-v4.bringyour.com/my-ip-info"
@@ -569,6 +644,15 @@ func (s SignalSettings) withRuntime() SignalSettings {
 func (s SignalSettings) Validate() error { return s.withDefaults().validate() }
 
 func (s SignalSettings) validate() error {
+	if _, err := pgStatementTimeoutMillis(s.PostgreSQL.StatementTimeout); err != nil {
+		return err
+	}
+	if s.MigrationCensus == nil {
+		return fmt.Errorf("monitor: migration census bounds are absent")
+	}
+	if err := s.MigrationCensus.validate(); err != nil {
+		return err
+	}
 	if !s.PGQuerySampleUntil.IsZero() && s.PGQuerySampleUntil.After(s.Now().Add(24*time.Hour)) {
 		return fmt.Errorf("monitor: bounded PG query sample expiry exceeds 24 hours")
 	}
@@ -734,6 +818,10 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 }
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
+	census := DefaultMigrationCensusSettings()
+	if settings.MigrationCensus != nil {
+		census = *settings.MigrationCensus
+	}
 	cfg := &monitorConfig{
 		env:                       settings.Environment,
 		publicDomain:              settings.PublicDomain,
@@ -760,6 +848,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgUser:                    settings.PostgreSQL.User,
 		pgPassword:                settings.PostgreSQL.Password,
 		pgDb:                      settings.PostgreSQL.Database,
+		pgStatementTimeout:        settings.PostgreSQL.StatementTimeout,
 		grafanaAdminPassword:      settings.Grafana.AdminPassword,
 		mimirQueryDomain:          settings.Grafana.QueryDomain,
 		mimirQueryUsername:        settings.Grafana.QueryUsername,
@@ -779,6 +868,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,
 		commandTimeout:            settings.CommandTimeout,
+		migrationCensus:           census,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands
@@ -1002,6 +1092,46 @@ func (r *sourceRunner) dnsRecursive(ctx context.Context, hostname string, record
 		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAliasSignalSource")
 	}
 	return source.DNSRecursive(ctx, hostname, recordType)
+}
+
+func (r *sourceRunner) dnsTxt(ctx context.Context, resolver, hostname string, clientSubnet netip.Prefix) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSTxtSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSTxtSignalSource")
+	}
+	return source.DNSTxt(ctx, resolver, hostname, clientSubnet)
+}
+
+func (r *sourceRunner) dnsAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSAddressSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAddressSignalSource")
+	}
+	return source.DNSAddress(ctx, resolver, hostname)
+}
+
+func (r *sourceRunner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int, clientSubnet netip.Prefix) (int, []byte, error) {
+	source, ok := r.source.(DNSDohSignalSource)
+	if !ok {
+		return 0, nil, fmt.Errorf("monitor: SignalSource does not implement DNSDohSignalSource")
+	}
+	return source.DNSDohTxt(ctx, dohUrl, hostname, maxBytes, clientSubnet)
+}
+
+func (r *sourceRunner) dnsNameservers(ctx context.Context, name string) ([]string, error) {
+	source, ok := r.source.(DNSAuthoritativeTxtSignalSource)
+	if !ok {
+		return nil, fmt.Errorf("monitor: SignalSource does not implement DNSAuthoritativeTxtSignalSource")
+	}
+	return source.DNSNameservers(ctx, name)
+}
+
+func (r *sourceRunner) dnsTxtAuthoritative(ctx context.Context, hostname string, servers []string, clientSubnet netip.Prefix) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSAuthoritativeTxtSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAuthoritativeTxtSignalSource")
+	}
+	return source.DNSTxtAuthoritative(ctx, hostname, servers, clientSubnet)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {

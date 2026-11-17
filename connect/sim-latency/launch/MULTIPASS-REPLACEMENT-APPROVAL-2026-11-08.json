@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "kind": "competition-multipass-replacement-operator-approval/v1",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "operator_response": "approved go ahead",
+  "approved": {
+    "fresh_bounded_qwen_gemma_runtime_and_all_19_control_qualification": true,
+    "deploy_review_import_api_and_migration_946_if_pending": true,
+    "create_separately_scoped_review_operator_credential": true
+  },
+  "qualification_source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "failed_owner_preserved_not_resumed": "836312ee21ec8af81af0d40f17a765cec42a165a4fc2d5dce8f0885bee2f1e3d",
+  "requirements": [
+    "New prospective owner and fixed deadline no greater than 24 hours; preserve failed owner, claims, results and exact-version originals unchanged.",
+    "Fresh runtime probes and all original 19 behavioral controls; unchanged Qwen/Gemma membership, revisions, efforts, schemas, criteria and limits.",
+    "Complete qualified source and authenticated evidence before candidate inference; no favorable resampling or omitted findings.",
+    "Deploy only already pushed API/migration changes through the normal main deployment boundary; no pooled main migration workaround."
+  ],
+  "winner_approved": false,
+  "reward_release_authorized": false,
+  "source_promotion_authorized": false,
+  "calibration_accepted": false
+}

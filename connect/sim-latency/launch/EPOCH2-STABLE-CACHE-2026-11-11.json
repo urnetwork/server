@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "competition-stable-cache-native-qualification/v1",
+  "observed_at": "2026-11-11T21:48:37Z",
+  "source_commit": "6710e586027371f3db498762284a487e350fca1b",
+  "binary_sha256": "efe7c8e8586bde8eeb2f84c3316cbbc063f39f342318eb33b39a576948db9c47",
+  "service_sha256": "5e9d2d070ffbbcf917158272fc07431d39fd4c72be9bba09beca96f1bf3d4834",
+  "toolchain": "go1.27.4",
+  "clean_build": true,
+  "design": "One persistent bounded service cgroup; sequential same-image child passes, positive joins, fixed pass/stop budgets, finite failure hold, no automatic service restart. Existing kernel checks and durable reclaim episode limits are unchanged.",
+  "independent_tests": {
+    "companion_ordinary": {"passes": 93, "failures": 0, "log_sha256": "c008a14ad701f6a91cb058718d5d821a52122dcee2c19b883d8a61d07f8afe05"},
+    "companion_race": {"passes": 93, "failures": 0, "log_sha256": "eebdc5f7bc5775f81475c49452bfbe3ecc843918fe3adcb8849c4aa0232d4a47"},
+    "inventory_fixtures_ordinary": {"top_level_passes": 6, "subtest_passes": 6, "failures": 0, "log_sha256": "a31bba76bbe0941a480303346d843487b1207a0e3444fd4b96c6425b826a94e0"},
+    "inventory_fixtures_race": {"top_level_passes": 6, "subtest_passes": 6, "failures": 0, "log_sha256": "4f65377d86ea2dd5ddf3ea0ebaf94590895ebeefe91c074ba2db2faf15ed03e7"},
+    "source_unchanged_during_tests": true
+  },
+  "goofe": {
+    "service_enabled": true,
+    "service_running": true,
+    "legacy_timer_masked": true,
+    "native_observation_seconds": 76.26,
+    "actual_child_passes_joined": 3,
+    "same_parent_and_service_invocation_preserved": true,
+    "same_cgroup_inode_preserved": 1004835,
+    "each_child_same_installed_image_and_cgroup": true,
+    "memory_limit_bytes": 33554432,
+    "tasks_limit": 32,
+    "swap_limit_bytes": 0,
+    "actual_combined_memory_peak_bytes": 5423104,
+    "management_cpu_set": "20,22",
+    "private_aggregate_limit_unchanged_bytes": 8589934592,
+    "all_three_passes_healthy_noop": true,
+    "reclaim_requested_bytes": 0,
+    "exact_runtime_binding_ordinary_and_recheck_passed": true,
+    "journal_preserved": true,
+    "native_receipt_private": "/home/by/sim-latency/competition-cache-stable-deploy-20261111.YDJYIQJF/deployment-native-enabled.private.json",
+    "native_receipt_sha256": "3193b4c4df047a7abf90d83d2376c8727ba1b72c1b327b4e888fc5e6aabf8fe2",
+    "full_host_ready": false,
+    "remaining_blocker": "The existing attempt remains in independent recovery before evaluator startup. Cache qualification is not proof that its failed launch or cleanup has been resolved."
+  },
+  "sille": {
+    "new_binary_and_installer_staged_only": true,
+    "live_service_or_binary_replaced": false,
+    "legacy_timer_disabled": true,
+    "legacy_bounded_oneshot_still_available": true,
+    "stage_private": "/mnt/data/competition-cache-stable-deploy-20261111.WeUOrzyY",
+    "stage_receipt_sha256": "a64b173d2801edaeba914aa6903dc1c7359297337dc9456d5e46975aaee153fe",
+    "activation_gate": "Current c591f88e run terminal, both native cleanup flags true, exact evaluator and owner inactive, no active product containers; central archival still retains the physical slot. Observe first, install inactive, separately start/qualify, enable only after passing."
+  },
+  "goofe_prelaunch_amendment": {
+    "user_approved": true,
+    "implemented_and_deployed": false,
+    "reboot_approved": false,
+    "original_deadline_at": "2026-11-11T23:52:17.050115Z",
+    "deadline_extension_authorized": false,
+    "attempted_owner_relaunch_authorized": false,
+    "required": "Positively close old launcher and PID1 start surfaces, retain original authority, use the existing full cleanup, and record an infrastructure failure. Do not fabricate unit-existence proof or reuse an inapplicable recovery class."
+  },
+  "queue_snapshot": {"succeeded": 1, "failed": 1, "database_running": 2, "actually_measuring_hosts": ["sille"], "sille_replicates_completed": 4, "queued": 12},
+  "baseline_scoring_rules_and_submission_clocks_unchanged": true
+}

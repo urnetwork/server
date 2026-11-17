@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "kind": "competition-failed-recovery-preparation/v1",
+  "observed_at": "2026-11-06T22:40:51Z",
+  "approval_record": "FAILED-RECOVERY-APPROVAL-2026-11-06.json",
+  "approval_record_sha256": "7a67a9604b7621c9c2487d4de06bc7f545b4060cfe14b0a8246b4cc2a811a24c",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "current_queue": {"succeeded": 59, "failed": 7, "running": 1, "queued": 2},
+  "queue_receipt": "/home/by/urnetwork/temp/competition-monitor-current.2b3YaSl2/audit.private.json",
+  "claim_hold": {
+    "revision": 22,
+    "active": true,
+    "created_at": "2026-11-06T22:38:51.066592Z",
+    "http_status": 200,
+    "response_sha256": "a299f88075f59087db6320ba31f725bf7212833dce95c9a6ef1a7b7df08c7de6",
+    "scope": "New claims only. Active evaluation is not interrupted. Finalization and reward-delivery holds remain unchanged."
+  },
+  "active_evaluation": {
+    "job_id": "01a1aad9-5007-d991-0ccb-63f51ec0a5e9",
+    "attempt": 1,
+    "candidate_completed": 6,
+    "replicates": 9,
+    "original_deadline": "2026-11-07T00:37:58.042967Z",
+    "supervisor_pid": 2350251,
+    "service_restarts": 0
+  },
+  "six_existing_path_dossiers": {
+    "prepared": 6,
+    "accepted": false,
+    "grants_issued": 0,
+    "private_directory": "/var/lib/urnetwork/competition-six-recovery-preparation-20261106.mxsY9Qvf",
+    "contains_private_terminal_patch_bytes": true,
+    "publication_or_remote_transfer_allowed": false,
+    "dossier_builder_sha256": "7c4b0045a0f419052dd9360c180276d6d711d8353441e795a54cee3237719574",
+    "independent_synthetic_qualification_sha256": "368abf4172fb94c2613e0664d193b7aef7af9716e6af6b73b3410b79ae0d8b62",
+    "normal_and_race_tests_each": {"top_level": 4, "subtests": 9, "failures": 0, "skips": 0},
+    "selected_original_incident_events": [251, 395, 449, 463, 483, 493],
+    "terminal_bytes": "Base64 of exact RawMessage, with separate raw SHA; no floating-point round trip. Reader canonical digest remains subject to native CLI validation."
+  },
+  "operator_interrupted_case": {
+    "job_id": "01a1a481-0968-ff57-1ca8-1a48fc2a35ea",
+    "operator_approved": true,
+    "existing_heartbeat_incident": false,
+    "real_stop_journal": "/mnt/data/competition-operator-stop-evidence-20261106.sN1OYudq/journal.private.jsonl",
+    "real_stop_journal_sha256": "a451cf1c85ba4cdcefbcaec77789c0780e73f0099709dd5b6564c921947cdc7e",
+    "stop_began_at": "2026-11-05T12:00:00.934030Z",
+    "stop_joined_at": "2026-11-05T12:00:30.947579Z",
+    "required": "Separate tested operator-interruption class and audited evidence. Do not invent a heartbeat event or reset the row directly."
+  },
+  "next_action": "Complete the active evaluation, verify idle/fencing and fresh terminal/runtime bindings, issue the six single-use post-close authorizations against E7/CBC, verify receipts and original ordering, then release the claim hold. Qualify the seventh case's separate recovery extension without replacing the exact-image-pinned worker while these cycles remain queued. This is preparation, not proof of any successful retry."
+}

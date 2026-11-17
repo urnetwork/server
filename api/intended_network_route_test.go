@@ -39,6 +39,7 @@ var intendedNetworkReportedRoutes = []string{
 	"POST /subscription/create-payment-id",
 	"POST /subscription/verify-play-purchase",
 	"POST /subscription/verify-apple-transaction",
+	"POST /subscription/verify-stripe-checkout",
 	"POST /x402/purchase",
 	"POST /wallet/circle-init",
 	"POST /wallet/circle-transfer-out",
@@ -53,6 +54,8 @@ var intendedNetworkReportedRoutes = []string{
 	"POST /sn/wallet/hotkey-consent",
 	"POST /sn/wallet/hotkey-delegation",
 	"POST /sn/head/binding",
+	"POST /sn/fleet/authorization",
+	"POST /sn/fleet/top-up",
 	// sign-in methods, auth codes, API keys, network and client tokens, sessions
 	"POST /auth/code-create",
 	"POST /auth/add-auth",

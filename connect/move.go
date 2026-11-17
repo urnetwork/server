@@ -46,11 +46,11 @@ package connect
 
 import (
 	"context"
-	mathrand "math/rand/v2"
 	"net/netip"
 	"sync"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
 
@@ -321,7 +321,9 @@ type Mover struct {
 
 // Starts the mover of the process identity in the exchange's settings. It
 // ticks until ctx ends or Close. With EnableMove off, or a non-positive
-// MoveTickInterval, it never ticks.
+// MoveTickInterval, it never ticks. The candidate sample, the target choice
+// and the migrate time jitter draw from its own connect.NewSecureRand
+// generator, which the tick goroutine alone reads.
 func NewMover(
 	ctx context.Context,
 	identity MoveProcessIdentity,
@@ -334,7 +336,7 @@ func NewMover(
 		settings,
 		dependencies,
 		moveModelStore{},
-		mathrand.New(mathrand.NewPCG(mathrand.Uint64(), mathrand.Uint64())),
+		connect.NewSecureRand(),
 		time.Now,
 	))
 }

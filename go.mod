@@ -1,6 +1,6 @@
 module github.com/urnetwork/server
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0
@@ -23,7 +23,7 @@ require (
 	github.com/holiman/uint256 v1.3.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/klauspost/compress v1.19.2
+	github.com/klauspost/compress v1.20.2
 	github.com/mailgun/proxyproto v1.0.0
 	github.com/maxmind/mmdbwriter v1.1.0
 	github.com/minio/minio-go/v7 v7.2.1
@@ -33,8 +33,10 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/nyaruka/phonenumbers v1.6.5
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1
+	github.com/pion/ice/v4 v4.4.1
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport/v4 v4.1.0
+	github.com/pion/webrtc/v4 v4.2.18
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
@@ -67,7 +69,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
-	github.com/andybalholm/brotli v1.0.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
@@ -144,11 +146,11 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oasisprotocol/curve25519-voi v0.0.0-20251114093237-2ab5a27a1729 // indirect
+	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/xxHash v0.1.5 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
-	github.com/pion/ice/v4 v4.4.1 // indirect
 	github.com/pion/interceptor v0.1.47 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
@@ -159,7 +161,6 @@ require (
 	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/stun/v3 v3.1.6 // indirect
 	github.com/pion/turn/v5 v5.0.12 // indirect
-	github.com/pion/webrtc/v4 v4.2.18 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
@@ -234,3 +235,12 @@ replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go
 // lock (local/source-graph/lock.yml) pins this sibling's full revision; the
 // release builder converts it to an immutable pin.
 replace gvisor.dev/gvisor => ../gvisor
+
+// The slow write timer arms a new timer per write instead of resetting the last
+// one while it is still in the runtime's timer heap (third_party/pgx/URNETWORK.md).
+replace github.com/jackc/pgx/v5 => ./third_party/pgx
+
+// The connection's run loop timer keeps a pending unchanged deadline and arms a
+// new timer for another, instead of resetting one still in the runtime's timer
+// heap (third_party/quic-go/URNETWORK.md).
+replace github.com/quic-go/quic-go => ./third_party/quic-go

@@ -39,7 +39,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			}
 		}
 
-		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, 720, 721, 841, 842, 843, 844, 845, 846, 847, server.MigrationCount()} {
+		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, 720, 721, 841, 842, 843, 844, 845, 846, 847, 921, 922, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {
 				check(tx, version, nil)
@@ -51,19 +51,54 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			baselineMissing := []int{676}
 			appendOnlyMissing := []int{676}
 			// Staging approvals, sealed evaluation custody, holds/incidents,
-			// and source abandonment share the baseline's append-only guard.
-			// Its rename must report every published dependent artifact, while
-			// historical heads must not report dependencies introduced later.
-			for _, dependencyVersion := range []int{721, 842, 843, 845} {
-				if version >= dependencyVersion {
-					appendOnlyMissing = append(appendOnlyMissing, dependencyVersion)
+			// source abandonment, job reevaluation, the finalization hold, the
+			// post-close recovery and the competition custody that the
+			// executor, intake-first, review handoff, official review, executor
+			// control amendment, qualification recovery and admission exception
+			// migrations carry in turn share the baseline's append-only guard.
+			// Its rename must report every published dependent artifact still
+			// active at the head, the successor that carries a retired one's
+			// custody in its place, while historical heads must not report
+			// dependencies introduced later.
+			type dependency struct{ version, retiredAt int }
+			active := func(dependencies []dependency) []int {
+				versions := []int{}
+				for _, dependency := range dependencies {
+					if dependency.version <= version && (dependency.retiredAt == 0 || version < dependency.retiredAt) {
+						versions = append(versions, dependency.version)
+					}
 				}
+				return versions
 			}
+			executor := server.CompetitionDistributedEvaluationMigrationVersion()
+			intake := server.CompetitionIntakeFirstMigrationVersion()
+			handoff := server.CompetitionReviewHandoffMigrationVersion()
+			official := server.CompetitionOfficialReviewMigrationVersion()
+			control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+			recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+			exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+			claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
+			distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+			patchRetry := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
+			postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
+			appendOnlyMissing = append(appendOnlyMissing, active([]dependency{
+				{721, 0}, {842, 0}, {843, 0}, {845, 0},
+				{server.CompetitionJobReevaluationMigrationVersion(), postClose},
+				{server.CompetitionFinalizationHoldMigrationVersion(), 0},
+				{executor, intake}, {postClose, distributed}, {intake, handoff}, {handoff, official},
+				{official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
+			})...)
 			var reviewMissing []int
 			if version == 677 {
 				reviewMissing = []int{677}
 			} else if version >= 678 {
+				// the executor, intake-first, review handoff, official review,
+				// executor control amendment, qualification recovery and admission
+				// exception custody carry the baseline guard in turn
 				baselineMissing = append(baselineMissing, 678)
+				baselineMissing = append(baselineMissing, active([]dependency{
+					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
+				})...)
 				reviewMissing = []int{678}
 			}
 			for _, fault := range []struct {

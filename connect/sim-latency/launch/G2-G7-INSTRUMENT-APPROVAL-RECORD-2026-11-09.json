@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "status": "EXACT_INSTRUMENT_APPROVAL_RECORDED_NOT_IMAGE_OR_RUNTIME_QUALIFICATION",
+  "authority": "Implements the operator's prospective epoch2 G2 floors-only and independent relative 95% page/byte coverage instructions; epoch1 scoring and its approved winner are unchanged.",
+  "approval_file": "G2-G7-INSTRUMENT-OPERATOR-APPROVAL-2026-11-09.json",
+  "approval_sha256": "c0f2462806f5deccb3e3fd210db7b0c3a11c606c5d20dfbb0de78ae435621c06",
+  "approval_file_sha256": "2e4563ced2dbf0eb9589361736fe83d25561b7ba097868df8d4295cc1a27a7da",
+  "patch_sha256": "a1314b1948afa7243727f30ddaa4dd1e137dfc8799c409083611baefafe457c9",
+  "patch_bytes": 624577,
+  "literal_protected_paths": 37,
+  "frozen_base_server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "original_source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "independent_reapplication_index_tree": "4283786c6049c33d20afa6c5bc34c2992463d85e",
+  "all_37_retained_postimage_sha256_verified": true,
+  "native_current_model_and_controller_approval_validation_passed": true,
+  "review_scope": {
+    "postimages_identical_to_control_main": 29,
+    "main_differences": ["main.go retains the frozen unrelated CLI surface", "source_epoch.go ports only raw optional policy decoding and generation binding", "source_epoch_v2.go preserves original review/significance guards while admitting genuine minimum-work successor product changes", "model/competition_model.go ports narrow prospective policy and required-gate contract hunks", "standalone work-coverage policy omits host-only helper protection functions, enforced separately by the trusted control validator", "coverage tests inline their standalone helper closure"],
+    "draft_only_test_files": 2,
+    "unchanged": "No product repository, module, epoch1 numeric rule, significance, R9 or raw objective is changed by instrument approval. The selected winner remains a separate product graph."
+  },
+  "retained_exact_frozen_overlay_qualification": {
+    "ordinary_record": "EPOCH2-FROZEN-OVERLAY-CORRECTNESS-2026-11-07.json",
+    "ordinary_mandatory_passes": 70,
+    "ordinary_supplemental_passes": 11,
+    "auxiliary_race_mandatory_passes": 70,
+    "auxiliary_race_supplemental_passes": 11,
+    "failures": 0,
+    "skips": 0,
+    "race_findings": 0,
+    "auxiliary_race_record_sha256": "3617a4d1189e874053a94b3ea1841bd0e12a5f772b299bc5a570b5b1eb5e8eab",
+    "combined_receipt_sha256": "15b5dadab52845cd692e2b6c1cd9a44793a431e17995948d62802264273ca6ab",
+    "fresh_executions_claimed_by_this_record": 0
+  },
+  "numeric_policy": {"g2_volume_policy": "minimum-work/1", "request_floor": 0.95, "byte_floor": 0.95, "upper_bounds": false, "work_coverage_policy": {"kind": "seeded-crawl-coverage/v1", "minimum_page_coverage_ratio": 0.95, "minimum_byte_coverage_ratio": 0.95}},
+  "intentional_useful_traffic_suppression_allowed": false,
+  "runtime_qualification_claim": false,
+  "new_baseline_claim": false,
+  "source_promotion_claim": false,
+  "epoch2_open_claim": false,
+  "remaining": "Install trusted host artifacts, configure the prospective policy, bind the approved selected product and deterministic instrument child, build its exact image and obtain source-only intake authority. Keep scoring paused for fresh baseline and Goofe/runtime grading qualification."
+}

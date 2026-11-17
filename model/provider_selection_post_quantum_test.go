@@ -1,7 +1,8 @@
 // A request that requires post-quantum encryption is answered only with
-// providers whose latest provide declared post-quantum encryption sessions, in
-// every draw of the request, named providers included. A capability-blind
-// request is answered as before (support inbox 7918, 7843,
+// providers a probe has measured post-quantum, in every draw of the request,
+// named providers included; a provider's declaration never qualifies it
+// (FP2-PROTOCOL.md §12.4, owner 2026-11-13). A capability-blind request is
+// answered as before (support inbox 7918, 7843,
 // https://github.com/urnetwork/connect/issues/220).
 package model
 
@@ -117,19 +118,25 @@ func assertPostQuantumTestAnswer(t testing.TB, label string, providers []*FindPr
 	}
 }
 
-// No provider of the location declared post-quantum encryption, as no
-// provider did before the declaration existed, so a request that requires it
-// is answered nothing in either mode, whichever bucket a provider is in, and a
-// provider it names by id is not answered either. Before this change the
-// request was capability-blind and got every provider of the location, and the
-// client then dialed and failed through each one, none of which can seal its
-// session. The capability-blind request still gets them all.
-func TestFindProviders2PostQuantumRequestLeavesOutUndeclaredProviders(t *testing.T) {
+// Every provider of the location declares post-quantum encryption, and no
+// probe has measured one of them, so before the post-quantum marker a request
+// that requires it is answered nothing in either mode, whichever bucket a
+// provider is in, and a provider it names by id is not answered either: no
+// provider counts on its own claim (owner, 2026-11-13). Before the evidence
+// rule the declarations alone answered them, and a client that requires
+// post-quantum encryption then dialed and failed through each one that
+// cannot seal its session. The capability-blind request still gets them all.
+func TestFindProviders2PostQuantumRequestLeavesOutProvidersWithoutEvidence(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
 		onlineTestFreshSubscriberCache(t)
 		ctx := t.Context()
-		fixture := newPostQuantumTestFixture(ctx, t, "Undeclared")
+		fixture := newPostQuantumTestFixture(ctx, t, "Unmeasured")
+		clientIds := append(append(append([]server.Id{}, fixture.natives...), fixture.speedOnly...), fixture.onlineOnly)
+		for _, clientId := range clientIds {
+			SetProvideWithCapabilities(ctx, clientId, egressTestPublicAndNetwork, ProvideCapabilities{PostQuantumEncryption: true})
+		}
+		egressTestForgetModernEvidence(ctx, clientIds...)
 		offlineTestForEachReader(t, func(nativeReader bool) {
 			for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 				label := fmt.Sprintf("reader=%t %s", nativeReader, rankMode)
@@ -138,7 +145,7 @@ func TestFindProviders2PostQuantumRequestLeavesOutUndeclaredProviders(t *testing
 
 				answered := postQuantumTestFind(ctx, t, fixture.args(rankMode, fixture.natives[0]), true)
 				if 0 < len(answered) {
-					t.Fatalf("%s: a post-quantum request was answered %d providers that never declared post-quantum encryption", label, len(answered))
+					t.Fatalf("%s: a post-quantum request was answered %d providers no probe measured post-quantum", label, len(answered))
 				}
 			}
 		})
@@ -155,7 +162,7 @@ func TestFindProviders2PostQuantumRequestLeavesOutUndeclaredProviders(t *testing
 			RankMode: RankModeQuality,
 		}
 		if answered := postQuantumTestFind(ctx, t, named, true); 0 < len(answered) {
-			t.Fatal("a post-quantum request was answered the named provider that never declared post-quantum encryption")
+			t.Fatal("a post-quantum request was answered the named provider on its declaration alone")
 		}
 	})
 }

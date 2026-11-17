@@ -36,8 +36,8 @@ func TestSubnetCorrectnessDocumentationCoversRequiredAlertClasses(t *testing.T) 
 	section := subnetCorrectnessDocumentation(t)
 	classes := []string{
 		"subnet-runtime-identity", "subnet-finality-divergence", "subnet-deployment-governance", "subnet-policy-schedule",
-		"subnet-pool-custody-identity", "subnet-validator-eligibility", "subnet-fleet-binding-invalid", "subnet-commitment-mirror-lag",
-		"subnet-deposit-attribution", "subnet-operator-deposit-mismatch", "subnet-deposit-penalty-bypass", "subnet-reserve-principal", "subnet-reserve-credit-delta", "subnet-reserve-yield",
+		"subnet-pool-custody-identity", "subnet-validator-eligibility", "subnet-fleet-binding-invalid", "subnet-commitment-mirror-lag", "subnet-deposit-hotkey-owner",
+		"subnet-demand-event", "subnet-campaign-headroom", "subnet-deposit-attribution", "subnet-operator-deposit-mismatch", "subnet-deposit-penalty-bypass", "subnet-reserve-principal", "subnet-reserve-credit-delta", "subnet-reserve-yield", "subnet-price-sheet", "subnet-usage-statement", "subnet-deposit-landing",
 		"subnet-path-proof-invalid", "subnet-verify-poisoning", "subnet-attempt-history-gap", "subnet-measurement-coverage", "subnet-pool-quality-mismatch", "subnet-egress-attribution", "subnet-measurement-bias",
 		"subnet-head-selection", "subnet-head-weight-bypass", "subnet-promotion-churn", "subnet-tier-double-pay", "subnet-head-native-payout", "subnet-promotion-economics",
 		"subnet-weight-vector", "subnet-crv4-lifecycle", "subnet-consensus-divergence", "subnet-validator-native-payout",

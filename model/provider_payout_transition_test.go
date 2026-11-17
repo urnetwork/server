@@ -12,8 +12,8 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// A historical synthetic boundary makes delayed planning exercise the actual
-// public path without changing process clocks. SQL uses microsecond precision.
+// A historical synthetic boundary exercises the actual public path without
+// changing process clocks. SQL uses microsecond precision.
 var payoutTestCutoff = time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
 
 func usePayoutTransition(t testing.TB) {
@@ -65,9 +65,7 @@ func newPayoutTransitionCohort(t testing.TB, ctx context.Context) *payoutTransit
 	if wallet == nil {
 		t.Fatal("missing fixture wallet")
 	}
-	if err := SetPayoutWallet(ctx, f.network, *wallet); err != nil {
-		t.Fatal(err)
-	}
+	testingSelectPayoutWallet(ctx, f.network, *wallet)
 	return f
 }
 
@@ -101,160 +99,6 @@ func (self *payoutTransitionCohort) insertWithId(t testing.TB, ctx context.Conte
 		VALUES($1,$2,$3,$4,$5,$6,$7)`, id, self.balance, self.network, self.client, bytes, revenue, swept))
 	})
 	return id
-}
-
-func payoutTransitionRevenueConfig() *SubsidyConfig {
-	config := *EnvSubsidyConfig()
-	config.MinPayoutUsd = 0
-	config.UsdPerActiveUser = 0
-	config.SubscriptionNetRevenueFraction = 0
-	config.MinWalletPayoutUsd = 0
-	return &config
-}
-
-func TestProviderTransitionPlannerPartitionAndDelayedSweep(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		usePayoutTransition(t)
-		f := newPayoutTransitionCohort(t, ctx)
-		before := payoutTestCutoff.Add(-time.Microsecond)
-		at := payoutTestCutoff
-		after := at.Add(time.Microsecond)
-		legacy := f.insertMinted(t, ctx, at.Add(-time.Hour), &before, at.Add(3*time.Hour), 11, UsdToNanoCents(1))
-		f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
-		f.insertMinted(t, ctx, at.Add(-time.Hour), &after, at.Add(time.Hour), 33, UsdToNanoCents(3))
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		payment := plan.NetworkPayments[f.network]
-		if payment == nil || payment.PayoutByteCount != 11 || payment.Payout != UsdToNanoCents(1) {
-			t.Fatalf("legacy plan included cutoff/new usage: %+v", payment)
-		}
-		if err := RequireProviderUsdcPayment(ctx, payment.PaymentId); err != nil {
-			t.Fatalf("late original debt refused: %v", err)
-		}
-		usages, err := GetStEpochProviderUsageAtEpoch(ctx, 7, at.Add(-time.Hour), at.Add(time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(usages) != 1 || usages[0].PayoutByteCount != 55 {
-			t.Fatalf("subnet duplicate or lost earning: %+v", usages)
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var retained int
-			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM transfer_escrow_sweep WHERE contract_id<>$1 AND payment_id IS NULL`, legacy).Scan(&retained))
-			if retained != 2 {
-				t.Fatal("new subnet earning was consumed by legacy plan")
-			}
-		})
-		if err := CancelPayment(ctx, payment.PaymentId); err != nil {
-			t.Fatal(err)
-		}
-		plan, err = CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if p := plan.NetworkPayments[f.network]; p == nil || p.PayoutByteCount != 11 || p.PaymentId == payment.PaymentId {
-			t.Fatalf("cancel/replan changed earning asset: %+v", p)
-		}
-	})
-}
-
-func TestProviderTransitionSubsidyOnlyFinalShortTail(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		usePayoutTransition(t)
-		f := newPayoutTransitionCohort(t, ctx)
-		closed := payoutTestCutoff.Add(-time.Microsecond)
-		f.insertMinted(t, ctx, closed.Add(-90*time.Second), &closed, payoutTestCutoff.Add(time.Hour), 1024, 0)
-		config := payoutTransitionRevenueConfig()
-		config.MinPayoutUsd = 100
-		config.MinWalletPayoutUsd = 1000
-		plan, err := CreatePaymentPlan(ctx, config, false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		payment := plan.NetworkPayments[f.network]
-		if plan.SubsidyPayment == nil || payment == nil || payment.SubsidyPayout <= 0 || payment.Payout != payment.SubsidyPayout {
-			t.Fatalf("final short subsidy-only entitlement stranded: %+v", payment)
-		}
-		if !plan.SubsidyPayment.EndTime.Before(payoutTestCutoff) {
-			t.Fatal("legacy subsidy crossed cutoff")
-		}
-		if err := RequireProviderUsdcPayment(ctx, payment.PaymentId); err != nil {
-			t.Fatalf("valid subsidy-only debt refused: %v", err)
-		}
-		second, err := CreatePaymentPlan(ctx, config, false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(second.NetworkPayments) != 0 {
-			t.Fatal("subsidy paid twice")
-		}
-	})
-}
-
-func TestProviderTransitionQuarantinesAmbiguousWithoutBlockingPeer(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		usePayoutTransition(t)
-		f := newPayoutTransitionCohort(t, ctx)
-		closed := payoutTestCutoff.Add(-time.Microsecond)
-		f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, payoutTestCutoff.Add(time.Hour), 11, UsdToNanoCents(1))
-		ambiguous := f.insertMinted(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, payoutTestCutoff.Add(time.Hour), 22, UsdToNanoCents(2))
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if p := plan.NetworkPayments[f.network]; p == nil || p.PayoutByteCount != 11 {
-			t.Fatalf("ambiguous source contaminated or stopped exact debt: %+v", p)
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var unpaid bool
-			server.Raise(conn.QueryRow(ctx, `SELECT payment_id IS NULL FROM transfer_escrow_sweep WHERE contract_id=$1`, ambiguous).Scan(&unpaid))
-			if !unpaid {
-				t.Fatal("ambiguous liability discarded")
-			}
-		})
-		if strings.Count(paymentTransitionUnresolvedSampleSql, "LIMIT 1024") != 2 || !strings.Contains(paymentTransitionUnresolvedSampleSql, "UNION ALL") {
-			t.Fatal("unresolved diagnostic lost bounded indexed drivers")
-		}
-	})
-}
-
-func TestProviderTransitionLegacyAdmissionRejectsUnboundAndMixed(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		f := newPayoutTransitionCohort(t, ctx)
-		before := payoutTestCutoff.Add(-time.Microsecond)
-		at := payoutTestCutoff
-		f.insertMinted(t, ctx, at.Add(-time.Hour), &before, at.Add(time.Hour), 11, UsdToNanoCents(1))
-		f.insertMinted(t, ctx, at.Add(-time.Hour), &at, at.Add(time.Hour), 22, UsdToNanoCents(2))
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		payment := plan.NetworkPayments[f.network]
-		if payment == nil {
-			t.Fatal("missing historical mixed fixture")
-		}
-		usePayoutTransition(t)
-		if err := RequireProviderUsdcPayment(ctx, payment.PaymentId); err == nil {
-			t.Fatal("mixed queued payment admitted")
-		}
-		unbound := server.NewId()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,payout_byte_count,payout_nano_cents,min_sweep_time) VALUES($1,$2,$3,0,100,$4)`, unbound, server.NewId(), f.network, before))
-		})
-		if err := RequireProviderUsdcPayment(ctx, unbound); err == nil {
-			t.Fatal("unbound invented payment admitted")
-		}
-		got, err := GetPayment(ctx, payment.PaymentId)
-		if err != nil || got.Canceled || got.Completed {
-			t.Fatal("refusal destroyed queued liability")
-		}
-	})
 }
 
 func TestProviderTransitionReliabilityBucketCrossingIsRetained(t *testing.T) {
@@ -336,10 +180,6 @@ func TestProviderTransitionFreeAndPaidUsageHaveEqualSubnetWeight(t *testing.T) {
 		}
 		if len(rows) != 2 || rows[0].PayoutByteCount != 1024 || rows[1].PayoutByteCount != 1024 {
 			t.Fatalf("subnet weights inherited USDC revenue: %+v", rows)
-		}
-		plan, err := CreatePaymentPlan(ctx, payoutTransitionRevenueConfig(), false, 0)
-		if err != nil || len(plan.NetworkPayments) != 0 {
-			t.Fatalf("post-cutoff paid/free traffic also became USDC: %+v %v", plan, err)
 		}
 	})
 }

@@ -356,10 +356,13 @@ func TestAdminReengagementResults(t *testing.T) {
 				row(day1, "reengage_lapsed_1", "holdout", reengagement.StreamLapsed, "android", 38),
 				row(day1, "reengage_lapsed_1", "control", reengagement.StreamLapsed, "ios", 3),
 				row(day1, "", "", reengagement.StreamWinback, "web", 12),
+				// an arm of 4 + 5 = 9 exposures, under the floor in total
+				row(day1, "reengage_winback_1", "offer", reengagement.StreamWinback, "android", 4),
 			},
 			day2: {
 				row(day2, "reengage_lapsed_1", "control", reengagement.StreamLapsed, "android", 41),
 				row(day2, "reengage_lapsed_1", "holdout", reengagement.StreamLapsed, "android", 39),
+				row(day2, "reengage_winback_1", "offer", reengagement.StreamWinback, "android", 5),
 			},
 		} {
 			if err := model.ReplaceReengagementResults(ctx, day, day, rows, computedAt); err != nil {
@@ -417,11 +420,12 @@ func TestAdminReengagementResults(t *testing.T) {
 			}
 		}
 
-		// one experiment, under the volume floor (the 3-exposure ios row is
-		// not returned), two rows a page
+		// one experiment, two rows a page. The volume floor holds on each
+		// variant's total over the window, so the 3-exposure ios row of the
+		// control arm (84 exposures in all) is returned with the rest
 		floor := model.Onboarding().EffectiveMinExposures()
-		if 3 >= floor || floor > 12 {
-			t.Fatalf("the fixture assumes a volume floor in (3, 12], got %d", floor)
+		if 9 >= floor || floor > 12 {
+			t.Fatalf("the fixture assumes a volume floor in (9, 12], got %d", floor)
 		}
 		seen := []string{}
 		args := *window
@@ -437,7 +441,7 @@ func TestAdminReengagementResults(t *testing.T) {
 			}
 			for _, r := range result.Rows {
 				seen = append(seen, r.CohortDayStr+"/"+r.Variant+"/"+r.Platform)
-				if r.Experiment != "reengage_lapsed_1" || r.Exposures < floor || !r.ComputedAt.Equal(computedAt) {
+				if r.Experiment != "reengage_lapsed_1" || !r.ComputedAt.Equal(computedAt) {
 					t.Fatalf("page %d: row %+v", page, r)
 				}
 			}
@@ -449,15 +453,25 @@ func TestAdminReengagementResults(t *testing.T) {
 			}
 			args.Cursor = *result.NextCursor
 		}
-		want := "2026-10-01/control/android 2026-10-01/holdout/android 2026-10-02/control/android 2026-10-02/holdout/android"
+		want := "2026-10-01/control/android 2026-10-01/control/ios 2026-10-01/holdout/android 2026-10-02/control/android 2026-10-02/holdout/android"
 		if got := strings.Join(seen, " "); got != want {
 			t.Fatalf("paged rows = %s, want %s", got, want)
 		}
 
-		// every experiment, the rows without one included; and the filters
+		// every experiment, the rows without one included, but not the
+		// winback offer arm (4 exposures on the day); and the filters
 		result, err := request(bearer, &AdminReengagementResultsArgs{From: "2026-10-01", To: "2026-10-01"})
-		if err != nil || len(result.Rows) != 3 || result.Rows[0].Experiment != "" || result.Rows[0].Stream != reengagement.StreamWinback || result.NextCursor != nil {
+		if err != nil || len(result.Rows) != 4 || result.Rows[0].Experiment != "" || result.Rows[0].Stream != reengagement.StreamWinback || result.NextCursor != nil {
 			t.Fatalf("every experiment = %+v, %v", result, err)
+		}
+		for _, r := range result.Rows {
+			if r.Experiment == "reengage_winback_1" {
+				t.Fatalf("an arm under the floor was returned: %+v", r)
+			}
+		}
+		result, err = request(bearer, &AdminReengagementResultsArgs{Experiment: "reengage_winback_1", From: "2026-10-01", To: "2026-10-02"})
+		if err != nil || len(result.Rows) != 0 {
+			t.Fatalf("an arm of 9 exposures = %+v, %v, want no rows", result, err)
 		}
 		result, err = request(bearer, &AdminReengagementResultsArgs{From: "2026-10-01", To: "2026-10-02", Stream: reengagement.StreamWinback, Platform: "web", Tier: "standard"})
 		if err != nil || len(result.Rows) != 1 || result.Rows[0].Exposures != 12 {

@@ -1,38 +1,25 @@
 package work
 
 import (
+	"encoding/json"
 	"testing"
-	"time"
 )
 
-func TestNextPayoutTimeAvoidsBackupAndMaintenanceWindows(t *testing.T) {
-	tests := []struct {
-		name string
-		now  time.Time
-		want time.Time
-	}{
-		{
-			name: "saturday",
-			now:  time.Date(2026, time.August, 15, 23, 30, 0, 0, time.UTC),
-			want: time.Date(2026, time.August, 16, payoutHourUtc, 0, 0, 0, time.UTC),
-		},
-		{
-			name: "sunday always advances one week",
-			now:  time.Date(2026, time.August, 16, 1, 0, 0, 0, time.UTC),
-			want: time.Date(2026, time.August, 23, payoutHourUtc, 0, 0, 0, time.UTC),
-		},
-		{
-			name: "normalizes to utc",
-			now:  time.Date(2026, time.August, 14, 23, 0, 0, 0, time.FixedZone("test", -5*60*60)),
-			want: time.Date(2026, time.August, 16, payoutHourUtc, 0, 0, 0, time.UTC),
-		},
+// USDC payouts ended (owner decision 2026-11-12). The payout target plans and
+// sends nothing, a retry row's arguments still decode, and its post schedules
+// no next run. Before, the run planned and sent through its session, and its
+// post scheduled the next Sunday's run, or a retry, in its transaction; here
+// there is neither.
+func TestPayoutIsANoOp(t *testing.T) {
+	var args SchedulePayoutArgs
+	if err := json.Unmarshal([]byte(`{"retry":true}`), &args); err != nil {
+		t.Fatal(err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := nextPayoutTime(tt.now); !got.Equal(tt.want) {
-				t.Fatalf("nextPayoutTime(%s) = %s, want %s", tt.now, got, tt.want)
-			}
-		})
+	result, err := Payout(&args, nil)
+	if err != nil || result == nil {
+		t.Fatalf("payout returned %v, %v", result, err)
+	}
+	if err := PayoutPost(&args, result, nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }

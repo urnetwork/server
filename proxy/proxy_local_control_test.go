@@ -120,9 +120,9 @@ func TestProxyCriticalControlUsesLocalAuthorityWithoutHttp(t *testing.T) {
 				t.Fatal("asynchronous payer debit", err)
 			}
 		}
-		payout := settledPayoutSum(ctx, h.pdNetworkId)
-		if payout < 16*testMib || pgActiveBalanceSum(ctx, h.pdNetworkId) != opts.pdInitialBalance-payout {
-			t.Fatal("actual transferred usage did not reconcile against the hosted payer")
+		evidence := readProxyPayerReconciliation(ctx, h.pdNetworkId, opts.pdInitialBalance)
+		if err := validateProxyPayerReconciliation(evidence); err != nil {
+			t.Fatal(err)
 		}
 		if n := requests.Load(); n != 0 {
 			t.Fatalf("hosted critical path made %d HTTP API requests", n)
@@ -252,6 +252,158 @@ func TestProxyLocalHooksHaveIndependentHttpRedControls(t *testing.T) {
 		}
 		if requests.Load() != before {
 			t.Fatal("retirement unexpectedly used the HTTP API")
+		}
+	})
+}
+
+// Retained report counts authorize payment; verified response bodies authorize delivery.
+type proxyPayerReconciliation struct {
+	initialByteCount               model.ByteCount
+	payoutByteCount                model.ByteCount
+	balanceByteCount               model.ByteCount
+	reportedPayoutByteCount        model.ByteCount
+	sourceReportedByteCount        model.ByteCount
+	receivedReportedByteCount      model.ByteCount
+	contractCount                  int
+	invalidContractCount           int
+	remainingDebitCount            int
+	reservedByteCount              model.ByteCount
+	nonzeroReservationBalanceCount int
+}
+
+// Read only completed fixture evidence after the original debit flush finishes.
+func readProxyPayerReconciliation(ctx context.Context, payerNetworkId server.Id, initial model.ByteCount) proxyPayerReconciliation {
+	evidence := proxyPayerReconciliation{initialByteCount: initial}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT contract.outcome,
+            source_close.used_transfer_byte_count,source_close.checkpoint,
+            destination_close.used_transfer_byte_count,destination_close.checkpoint,
+            COALESCE(sum(escrow.payout_byte_count),0),bool_and(escrow.settled)
+            FROM transfer_contract AS contract
+            INNER JOIN transfer_escrow AS escrow USING(contract_id)
+            LEFT JOIN contract_close AS source_close ON source_close.contract_id=contract.contract_id AND source_close.party='source'
+            LEFT JOIN contract_close AS destination_close ON destination_close.contract_id=contract.contract_id AND destination_close.party='destination'
+            WHERE contract.payer_network_id=$1
+            GROUP BY contract.contract_id,contract.outcome,
+                source_close.used_transfer_byte_count,source_close.checkpoint,
+                destination_close.used_transfer_byte_count,destination_close.checkpoint`, payerNetworkId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var outcome *model.ContractOutcome
+				var sourceBytes, receivedBytes *model.ByteCount
+				var sourceCheckpoint, destinationCheckpoint *bool
+				var payout model.ByteCount
+				var settled bool
+				server.Raise(rows.Scan(&outcome, &sourceBytes, &sourceCheckpoint, &receivedBytes, &destinationCheckpoint, &payout, &settled))
+				evidence.contractCount++
+				evidence.payoutByteCount += payout
+				if outcome == nil || *outcome != model.ContractOutcomeSettled || !settled ||
+					sourceBytes == nil || receivedBytes == nil || sourceCheckpoint == nil || destinationCheckpoint == nil ||
+					*sourceCheckpoint || *destinationCheckpoint || *sourceBytes < 0 || *receivedBytes < 0 {
+					evidence.invalidContractCount++
+					continue
+				}
+				// The published two-final payment policy is the floor mean. Compute
+				// it independently from retained reports, without a model helper.
+				lower, upper := min(*sourceBytes, *receivedBytes), max(*sourceBytes, *receivedBytes)
+				expected := lower + (upper-lower)/2
+				evidence.reportedPayoutByteCount += expected
+				evidence.sourceReportedByteCount += *sourceBytes
+				evidence.receivedReportedByteCount += *receivedBytes
+				if payout != expected {
+					evidence.invalidContractCount++
+				}
+			}
+		})
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_debit_journal AS journal
+            INNER JOIN transfer_balance AS balance USING(balance_id) WHERE balance.network_id=$1`, payerNetworkId).Scan(&evidence.remainingDebitCount))
+	})
+	evidence.balanceByteCount = pgActiveBalanceSum(ctx, payerNetworkId)
+	for _, balanceId := range activeBalanceIds(ctx, payerNetworkId) {
+		reserved := model.Testing_NetEscrowByteCount(ctx, balanceId)
+		evidence.reservedByteCount += reserved
+		if reserved != 0 {
+			evidence.nonzeroReservationBalanceCount++
+		}
+	}
+	return evidence
+}
+
+// A payload receipt is not the sender's acknowledgement. Reconcile the exact
+// payment authorized by both retained reports, including unused contracts.
+func validateProxyPayerReconciliation(evidence proxyPayerReconciliation) error {
+	if evidence.contractCount == 0 || evidence.invalidContractCount != 0 ||
+		evidence.payoutByteCount != evidence.reportedPayoutByteCount ||
+		evidence.balanceByteCount != evidence.initialByteCount-evidence.reportedPayoutByteCount ||
+		evidence.remainingDebitCount != 0 || evidence.reservedByteCount != 0 || evidence.nonzeroReservationBalanceCount != 0 {
+		return fmt.Errorf("reported transfer usage did not reconcile: %+v", evidence)
+	}
+	return nil
+}
+
+// Public identified receiver checkpoints precede sender finals. Four 4MiB
+// reported receipts authorize 14MiB payment when the senders acknowledged 12MiB.
+func TestProxyPayerReconciliationUsesAcknowledgedReportPolicy(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+		defer cancel()
+		payerNetworkId, payerClientId := server.NewId(), server.NewId()
+		providerNetworkId, providerClientId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, payerNetworkId, "payer-reconciliation-source", server.NewId())
+		model.Testing_CreateNetwork(ctx, providerNetworkId, "payer-reconciliation-provider", server.NewId())
+		model.Testing_CreateDevice(ctx, payerNetworkId, server.NewId(), payerClientId, "payer", "fixture")
+		model.Testing_CreateDevice(ctx, providerNetworkId, server.NewId(), providerClientId, "provider", "fixture")
+		redeemBalance(t, ctx, payerNetworkId, testInitialBalance)
+		for range 4 {
+			contractId, escrow, err := model.CreateContract(ctx, payerNetworkId, payerClientId, providerNetworkId, providerClientId, 4*testMib)
+			if err != nil || escrow == nil || escrow.TransferByteCount != 4*testMib {
+				t.Fatal("synthetic report contract did not open", err)
+			}
+			if applied, err := model.CloseContractReport(ctx, contractId, providerClientId, 4*testMib, true, server.NewId()); !applied || err != nil {
+				t.Fatal("receiver checkpoint did not commit", applied, err)
+			}
+			if applied, err := model.CloseContractReport(ctx, contractId, payerClientId, 3*testMib, false, server.NewId()); !applied || err != nil {
+				t.Fatal("sender final did not commit", applied, err)
+			}
+		}
+		for shard := range model.TransferDebitShardCount {
+			result, err := model.FlushTransferDebits(ctx, shard, nil, 64)
+			if err != nil || result.Failed != 0 || result.Busy != 0 {
+				t.Fatal("synthetic report debit did not finish", result, err)
+			}
+		}
+		evidence := readProxyPayerReconciliation(ctx, payerNetworkId, testInitialBalance)
+		// Fixed independent numbers pin the policy before invoking the oracle.
+		if evidence.contractCount != 4 || evidence.invalidContractCount != 0 ||
+			evidence.sourceReportedByteCount != 12*testMib || evidence.receivedReportedByteCount != 16*testMib ||
+			evidence.payoutByteCount != 14*testMib || evidence.reportedPayoutByteCount != 14*testMib ||
+			evidence.balanceByteCount != testInitialBalance-14*testMib || evidence.remainingDebitCount != 0 || evidence.reservedByteCount != 0 || evidence.nonzeroReservationBalanceCount != 0 {
+			t.Fatalf("published unequal-report payment changed: %+v", evidence)
+		}
+		if err := validateProxyPayerReconciliation(evidence); err != nil {
+			t.Fatal(err)
+		}
+		for _, control := range []struct {
+			name   string
+			change func(*proxyPayerReconciliation)
+		}{
+			{name: "payout", change: func(changed *proxyPayerReconciliation) { changed.payoutByteCount++ }},
+			{name: "balance", change: func(changed *proxyPayerReconciliation) { changed.balanceByteCount-- }},
+			{name: "journal", change: func(changed *proxyPayerReconciliation) { changed.remainingDebitCount = 1 }},
+			{name: "reservation", change: func(changed *proxyPayerReconciliation) {
+				changed.reservedByteCount = 1
+				changed.nonzeroReservationBalanceCount = 1
+			}},
+			{name: "offsetting_reservations", change: func(changed *proxyPayerReconciliation) { changed.nonzeroReservationBalanceCount = 2 }},
+			{name: "report", change: func(changed *proxyPayerReconciliation) { changed.invalidContractCount = 1 }},
+		} {
+			changed := evidence
+			control.change(&changed)
+			if err := validateProxyPayerReconciliation(changed); err == nil {
+				t.Fatal("accounting corruption was accepted", control.name)
+			}
 		}
 	})
 }

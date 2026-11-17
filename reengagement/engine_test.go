@@ -36,7 +36,7 @@ func TestGlobalExits(t *testing.T) {
 		for _, stream := range []string{StreamLapsed, StreamNeverActivated, StreamFix, StreamWinback} {
 			f := healthy(stream)
 			c.mutate(&f)
-			for _, step := range []string{StepR1, StepR2, StepR3, StepN1, StepF1, StepW1, StepEnd} {
+			for _, step := range []string{StepR1, StepR2, StepR3, StepN1, StepF1, StepW1} {
 				if d := Decide(step, f, DefaultSchedule); d.Action != ActionExit || d.ExitReason != c.want {
 					t.Errorf("%s/%s: got %+v, want exit %s", stream, step, d, c.want)
 				}
@@ -47,9 +47,6 @@ func TestGlobalExits(t *testing.T) {
 	f.SentLastYear = 6
 	if d := Decide(StepR2, f, DefaultSchedule); d.ExitReason != ExitCapped {
 		t.Errorf("yearly cap: %+v", d)
-	}
-	if d := Decide(StepEnd, f, DefaultSchedule); d.ExitReason == ExitCapped {
-		t.Errorf("the sunset check sends nothing and is never capped: %+v", d)
 	}
 }
 
@@ -67,19 +64,11 @@ func TestLapsedStream(t *testing.T) {
 	if d := Decide(StepR2, f, s); d.Action != ActionSend || d.Template != TemplateR2Reason || d.NextStep != StepR3 || d.NextDay != 30 {
 		t.Errorf("r2: %+v", d)
 	}
-	if d := Decide(StepR3, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 60 {
+	// R3 is the episode's last email: the episode ends with it
+	if d := Decide(StepR3, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != "" || d.Suppress != "" {
 		t.Errorf("r3: %+v", d)
 	}
-	// silence ends in a sunset suppression
-	if d := Decide(StepEnd, f, s); d.ExitReason != ExitSunset || d.Suppress != SuppressSunset {
-		t.Errorf("end silent: %+v", d)
-	}
-	kept := f
-	kept.Kept = true
-	if d := Decide(StepEnd, kept, s); d.ExitReason != ExitKept || d.Suppress != "" {
-		t.Errorf("end kept: %+v", d)
-	}
-	// a click or an answer means a live reader: no keep-or-go, no sunset
+	// a click or an answer means a live reader: no keep-or-go
 	clicked := f
 	clicked.Clicked = true
 	if d := Decide(StepR3, clicked, s); d.ExitReason != ExitEngaged {
@@ -93,7 +82,7 @@ func TestLapsedStream(t *testing.T) {
 	// a connection ends it at any step, without suppressing
 	back := f
 	back.Reactivated = true
-	for _, step := range []string{StepR1, StepR2, StepR3, StepEnd} {
+	for _, step := range []string{StepR1, StepR2, StepR3} {
 		if d := Decide(step, back, s); d.ExitReason != ExitReactivated || d.Suppress != "" {
 			t.Errorf("%s reactivated: %+v", step, d)
 		}
@@ -103,6 +92,36 @@ func TestLapsedStream(t *testing.T) {
 	hold.Holdout = true
 	if d := Decide(StepR2, hold, s); d.Action != ActionVirtual || d.Template != TemplateR2Reason || d.NextStep != StepR3 {
 		t.Errorf("holdout: %+v", d)
+	}
+}
+
+// Nobody is removed from marketing for not answering R3 ("Should I keep
+// writing to you?"; owner, 2026-11-15). Until then R3 scheduled a sunset check
+// 30 days later that suppressed every mailed network that hadn't tapped "Keep
+// me posted", clicked or answered. R3 is now the episode's last step, mailed or
+// virtual, and a task left for the old "end" step exits done without a
+// suppression.
+func TestR3SilenceSuppressesNobody(t *testing.T) {
+	s := DefaultSchedule
+	for _, stream := range []string{StreamLapsed, StreamNeverActivated} {
+		for _, holdout := range []bool{false, true} {
+			f := healthy(stream)
+			f.Holdout = holdout
+			r3 := Decide(StepR3, f, s)
+			want := ActionSend
+			if holdout {
+				want = ActionVirtual
+			}
+			if r3.Action != want || r3.Template != TemplateR3Keep || r3.NextStep != "" || r3.Suppress != "" {
+				t.Errorf("%s holdout=%t r3: %+v, want the last email of the episode", stream, holdout, r3)
+			}
+			if d := Decide("end", f, s); d.Action != ActionExit || d.ExitReason != ExitDone || d.Suppress != "" {
+				t.Errorf("%s holdout=%t legacy end step: %+v, want exit done without a suppression", stream, holdout, d)
+			}
+		}
+	}
+	if slices.Contains(LiftableSuppressions(), "sunset") {
+		t.Error("the program no longer applies a sunset suppression")
 	}
 }
 
@@ -121,12 +140,12 @@ func TestNeverActivatedStream(t *testing.T) {
 	}
 	for _, reason := range []string{"", "other", "4"} {
 		f.OnboardingReason = reason
-		if d := Decide(StepN1, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 30 {
-			t.Errorf("n1 %q goes straight to keep-or-go: %+v", reason, d)
+		if d := Decide(StepN1, f, s); d.Action != ActionSend || d.Template != TemplateR3Keep || d.NextStep != "" {
+			t.Errorf("n1 %q goes straight to keep-or-go, the episode's last email: %+v", reason, d)
 		}
 	}
 	f.OnboardingReason = "not_needed"
-	if d := Decide(StepR3, f, s); d.Template != TemplateR3Keep || d.NextStep != StepEnd || d.NextDay != 60 {
+	if d := Decide(StepR3, f, s); d.Template != TemplateR3Keep || d.NextStep != "" {
 		t.Errorf("n r3: %+v", d)
 	}
 	f.Reactivated = true
@@ -181,8 +200,26 @@ func TestRouteAnswer(t *testing.T) {
 	if AppReason(ReasonSlow) != onboarding.ReasonNotWorking || AppReason(ReasonSwitched) != onboarding.ReasonOther {
 		t.Error("app reasons")
 	}
-	if !LiftableSuppression(SuppressSunset) || LiftableSuppression("complained") {
+	if !LiftableSuppression(SuppressSwitched) || LiftableSuppression("complained") {
 		t.Error("liftable")
+	}
+}
+
+// A connection lifts only the program's own suppressions; an operator's
+// (sanctions, an automated sign-up cohort) stays for good.
+func TestOperatorSuppressionsAreNeverLiftable(t *testing.T) {
+	if !slices.Equal(OperatorSuppressions(), []string{SuppressSanctions, SuppressAutomatedSignup}) {
+		t.Fatal("operator suppressions", OperatorSuppressions())
+	}
+	for _, reason := range OperatorSuppressions() {
+		if LiftableSuppression(reason) || slices.Contains(LiftableSuppressions(), reason) {
+			t.Errorf("%s is liftable", reason)
+		}
+	}
+	for _, reason := range []string{SuppressSwitched} {
+		if !LiftableSuppression(reason) {
+			t.Errorf("%s is not liftable", reason)
+		}
 	}
 }
 
@@ -253,6 +290,40 @@ func TestSendAt(t *testing.T) {
 	}
 }
 
+// The daily scan runs at 02:30 UTC, after that day's 10:00 in the Americas and
+// East Asia, so those first steps are already due. Inside the window (09:00 to
+// 20:00) they go out a minute on; a network already past the window's end
+// waits for the next morning instead of getting mail at night.
+func TestSendAtLateScanKeepsTheWindow(t *testing.T) {
+	zone := func(name string) *time.Location {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Fatalf("%s: %s", name, err)
+		}
+		return loc
+	}
+	scan := time.Date(2026, 11, 4, 2, 30, 20, 0, time.UTC)
+	for _, c := range []struct {
+		zone string
+		want time.Time
+	}{
+		// 21:30, 20:30 and 23:30 local: past the window, so 09:00 the next morning
+		{"America/New_York", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/New_York"))},
+		{"America/Chicago", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/Chicago"))},
+		{"America/Sao_Paulo", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/Sao_Paulo"))},
+		// 18:30 and 11:30 local: inside the window, a minute on
+		{"America/Los_Angeles", scan.Add(time.Minute)},
+		{"Asia/Tokyo", scan.Add(time.Minute)},
+		// 06:00 local: before the send hour, so 10:00 that day
+		{"Asia/Tehran", time.Date(2026, 11, 4, 10, 0, 0, 0, zone("Asia/Tehran"))},
+		{"UTC", time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)},
+	} {
+		if at := SendAt(scan, 0, zone(c.zone), DefaultSchedule, scan); !at.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.zone, at.In(zone(c.zone)), c.want)
+		}
+	}
+}
+
 // Every template's params are exactly its manifest's keys.
 func TestParamsMatchManifests(t *testing.T) {
 	mmm := filepath.Join("..", "..", "mmm")
@@ -302,7 +373,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		}
 	}
 	p := BuildParams(ParamsInput{Template: TemplateR3Keep, Variant: VariantDefault, SiteUrl: "https://ur.io/", Token: "T", DailyDataGb: 30, Now: now})
-	if p["cta_url"] != "https://ur.io/o/keep?t=T" || p["daily_data_gb"] != "30 GB" {
+	if p["cta_url"] != "https://ur.io/o/keep?t=T" || p["daily_data_gb"] != "30 GiB" {
 		t.Errorf("keep params: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateR2Reason, Variant: VariantLapsed, SiteUrl: "https://ur.io", Token: "T", LastConnectAt: &last, Locale: "en", Now: now})

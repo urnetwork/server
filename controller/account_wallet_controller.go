@@ -39,10 +39,10 @@ func CreateAccountWalletExternal(
 	if err != nil {
 		return nil, ErrInvalidBlockchain
 	}
-	// This endpoint creates USDC payout wallets, for which the payment path
-	// supports Solana and Polygon. TAO is retained as a non-payout identity.
-	// ParseBlockchain also knows Ethereum for authentication elsewhere, but an
-	// Ethereum wallet here could be auto-selected and later fail formatBlockchain.
+	// The wallets of the network: Solana and Polygon wallets, which USDC
+	// payouts paid until they ended (owner decisions 2026-11-12 and
+	// 2026-11-13), and TAO as a non-payout identity. ParseBlockchain also knows
+	// Ethereum for authentication elsewhere.
 	if blockchain != model.SOL && blockchain != model.MATIC && blockchain != model.TAO {
 		return nil, ErrInvalidBlockchain
 	}
@@ -73,19 +73,8 @@ func CreateAccountWalletExternal(
 		// the network has the address on another chain
 		return nil, ErrWalletAddressOnAnotherChain
 	}
-
-	// check if a payout wallet is set for this network
-	payoutWallet := model.GetPayoutWalletId(session.Ctx, session.ByJwt.NetworkId)
-
-	// if a payout wallet doesn't exist for the network
-	// set payout wallet. bittensor wallets are recorded for future use only
-	// and are never the payout wallet (payouts are USDC on Solana/Polygon)
-	if payoutWallet == nil && blockchain != model.TAO {
-		err := model.SetPayoutWallet(session.Ctx, session.ByJwt.NetworkId, *walletId)
-		if err != nil {
-			return nil, payoutWalletAnswer(err)
-		}
-	}
+	// USDC provider payouts ended, so the wallet never becomes the payout
+	// wallet: an app built before then can no longer select one by adding it
 
 	return &model.CreateAccountWalletResult{WalletId: *walletId}, nil
 }

@@ -225,7 +225,10 @@ SELECT count(*),count(*) FILTER(WHERE client_id=ANY($1::uuid[])),
  (SELECT COALESCE(sum(admits),0)::bigint FROM admission_batches),(SELECT count(*) FROM admission_batches),
  (SELECT COALESCE(max(clients),0) FROM admission_batches),(SELECT COALESCE(max(admits),0) FROM admission_batches)
 FROM network_client_connection`, providers).Scan(&connections, &providerConnections, &heads, &admitted, &transactions, &maximumClients, &maximumAdmits))
-	if connections != statsPlanProviderN+statsPlanBackground || providerConnections != statsPlanProviderN || heads != int64(len(providers)+statsPlanBackground) || admitted != connections || transactions != 313 || maximumClients > 512 || maximumAdmits > 512 {
+	// the journal holds provider clients only: the providers' connections, in
+	// their batches; the background clients hold no provide key
+	providerBatches := int64((statsPlanProviderN + populationFixtureBatchSize - 1) / populationFixtureBatchSize)
+	if connections != statsPlanProviderN+statsPlanBackground || providerConnections != statsPlanProviderN || heads != int64(len(providers)) || admitted != providerConnections || transactions != providerBatches || maximumClients > 512 || maximumAdmits > 512 {
 		t.Fatalf("stats plan fixture lost complete bounded session population: connections=%d provider_connections=%d heads=%d admitted=%d transactions=%d maximum_clients=%d maximum_admits=%d", connections, providerConnections, heads, admitted, transactions, maximumClients, maximumAdmits)
 	}
 

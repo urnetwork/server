@@ -9,47 +9,40 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T) {
+// Settlement publishes no provider totals since 2026-11-11 (BILLING-SPLIT.md).
+// A provider totals row already queued under the contract's key, as binaries
+// built before then queued one per settled contract, neither refuses
+// settlement (a publication collision used to roll the whole financial
+// transition back) nor is merged, replaced or applied by it. The per-task
+// reader still applies the row, beside the settlement's own mirror owner.
+func TestLegacyProviderTotalsQueuedRowDoesNotBlockSettlement(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f, id := legacySettlementTestOpenFinals(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=2000 WHERE balance_id=$1`, f.balanceId))
 		})
-		collision := providerTotalsTestTask(ctx, id, f.destinationNetworkId)
-		before := task.GetTasks(ctx, collision)[collision].ArgsJson
-		var err error
-		server.HandleError(func() { err = SettleEscrow(ctx, id, ContractOutcomeSettled) }, func(recovered error) { err = recovered })
-		if err == nil {
-			t.Fatal("existing task payload was silently merged into financial settlement")
-		}
-		requireLegacySettlementTestState(t, ctx, f, id, false, 1000, 100)
-		if got := task.GetTasks(ctx, collision)[collision]; got == nil || got.ArgsJson != before {
-			t.Fatal("collision replaced the existing task allocation")
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var untouched bool
-			server.Raise(conn.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1) AND
-                NOT EXISTS(SELECT 1 FROM account_balance WHERE network_id=$2) AND
-                (SELECT count(*) FROM pending_task WHERE run_once_key=$3)=1`, id, f.destinationNetworkId, task.RunOnce("legacy_provider_totals", id).String()).Scan(&untouched))
-			if !untouched {
-				t.Fatal("queue collision committed part of the financial transition")
-			}
-		})
-		// Remove only this deliberately invalid synthetic owner; production
-		// must preserve all unapplied projection tasks instead of canceling them.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id=$1`, collision))
-		})
+		queued := providerTotalsTestTask(ctx, id, f.destinationNetworkId)
+		before := task.GetTasks(ctx, queued)[queued].ArgsJson
 		if err := SettleEscrow(ctx, id, ContractOutcomeSettled); err != nil {
-			t.Fatal("clean outcome did not enqueue its allocation", err)
+			t.Fatal("a queued provider totals row refused settlement", err)
 		}
-		var projectionId server.Id
+		requireLegacySettlementTestState(t, ctx, f, id, true, 989, 0)
+		if got := task.GetTasks(ctx, queued)[queued]; got == nil || got.ArgsJson != before {
+			t.Fatal("settlement changed the queued provider allocation")
+		}
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE run_once_key=$1`, task.RunOnce("legacy_provider_totals", id).String()).Scan(&projectionId))
+			var exact bool
+			server.Raise(conn.QueryRow(ctx, `SELECT
+				(SELECT sum(payout_byte_count)=11 AND sum(payout_net_revenue_nano_cents)=11 FROM transfer_escrow_sweep WHERE contract_id=$1 AND network_id=$2) AND
+				NOT EXISTS(SELECT 1 FROM account_balance WHERE network_id=$2) AND
+				(SELECT count(*) FROM pending_task WHERE run_once_key=$3)=1`, id, f.destinationNetworkId, task.RunOnce("legacy_provider_totals", id).String()).Scan(&exact))
+			if !exact {
+				t.Fatal("settlement lost its sweep, credited provider totals or queued another allocation")
+			}
 		})
 		mirrorOwner := legacyMirrorTestOwner(t, ctx, f.balanceId)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$1,release_time=$1 WHERE task_id=ANY($2)`, time.Time{}, []server.Id{projectionId, mirrorOwner.TaskId}))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$1,release_time=$1 WHERE task_id=ANY($2)`, time.Time{}, []server.Id{queued, mirrorOwner.TaskId}))
 		})
 		mirrorOwner = task.GetTasks(ctx, mirrorOwner.TaskId)[mirrorOwner.TaskId]
 		settings := task.DefaultTaskWorkerSettings()
@@ -58,26 +51,29 @@ func TestLegacyProviderTotalsQueueCollisionRollsBackFinancialPrefix(t *testing.T
 		defer worker.Close()
 		worker.AddTargets(task.NewTaskTarget(ApplyLegacyProviderTotals))
 		finished, retried, posts, err := worker.EvalTasks(1)
-		if err != nil || len(finished) != 1 || finished[0] != projectionId || len(retried) != 0 || len(posts) != 0 {
-			t.Fatal("exact provider projection did not finalize", err)
+		if err != nil || len(finished) != 1 || finished[0] != queued || len(retried) != 0 || len(posts) != 0 {
+			t.Fatal("the queued provider allocation did not finalize", err)
 		}
 		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
-		// RunOnce has been released by finalization. The terminal outcome,
-		// rather than the vanished queue key, still prevents another enqueue.
 		requireLegacyOwnedSettlementReplayInert(t, ctx, id)
 		requireProviderTotalsTestMirrorUntouched(t, ctx, mirrorOwner)
 		finalizeProviderTotalsTestMirror(t, ctx, mirrorOwner)
 		server.Db(ctx, func(conn server.PgConn) {
 			var exact bool
+			// the account holds the queued allocation (17/29) and nothing of the
+			// settlement's 11/11
 			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT count(*) FROM pending_task)=0 AND
-                (SELECT provided_byte_count=11 AND provided_net_revenue_nano_cents=11 FROM account_balance WHERE network_id=$1)`, f.destinationNetworkId).Scan(&exact))
+                (SELECT provided_byte_count=17 AND provided_net_revenue_nano_cents=29 FROM account_balance WHERE network_id=$1)`, f.destinationNetworkId).Scan(&exact))
 			if !exact {
-				t.Fatal("finalized-task deletion lost the lifetime outcome replay fence")
+				t.Fatal("the queued allocation was lost or settlement added to the provider totals")
 			}
 		})
 	})
 }
 
+// A row an older binary queued with its settlement keeps its exact payload
+// after contract and sweep retention removes everything it was computed from,
+// and the per-task reader applies it once.
 func TestLegacyProviderTotalsSurvivesContractAndSweepRetention(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f, id := legacySettlementTestOpenFinals(t, ctx)
@@ -92,10 +88,7 @@ func TestLegacyProviderTotalsSurvivesContractAndSweepRetention(t *testing.T) {
 				t.Fatal("retention control did not commit initial settlement")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		var taskId server.Id
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE run_once_key=$1`, task.RunOnce("legacy_provider_totals", id).String()).Scan(&taskId))
-		})
+		taskId := queueLegacyProviderTotalsFromSweepsForTest(t, ctx, id)
 		stale := task.GetTasks(ctx, taskId)[taskId]
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_escrow_sweep WHERE contract_id=$1`, id))

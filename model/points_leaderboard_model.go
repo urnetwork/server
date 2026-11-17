@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
@@ -14,7 +16,11 @@ import (
 // Every network with any points is ranked on three dimensions -- total points,
 // completed operator payout periods ("blocks") with points, and the current
 // streak of consecutive payout periods with points -- into a snapshot table that a
-// rebuild task rewrites whenever points can have changed. Reads page the
+// rebuild task rewrites whenever points can have changed. A period whose
+// operator block expired without its points is excused: a network without
+// points in it keeps its streak through it (pointsStreaks). The latest period
+// is pending until its block's award commits: a network without points in it
+// keeps its current streak meanwhile (loadPointsPendingEpochs). Reads page the
 // newest snapshot with a keyset cursor and join `network` for the name, the
 // emoji tag and the two public flags, so a toggle shows on the next request
 // rather than the next rebuild. Every ranked network is listed, so the list
@@ -95,7 +101,12 @@ type PointsNetworkInput struct {
 }
 
 // ComputePointsLeaderboard ranks the inputs. It is pure so the streak and
-// rank rules are testable without a database.
+// rank rules are testable without a database. `excusedEpochs` are the epochs
+// whose operator block the daily award recorded expired, and `pendingEpochs`
+// the epochs whose block's award has not committed yet (pointsStreaks). Only
+// the latest epoch can be pending: a pending epoch before it counts as any
+// epoch. nil excuses or pends none, and an epoch outside the windows is
+// ignored.
 //
 // The order per sort is the sdk's (ComparePointsLeaderboardKeys), the one
 // definition shared with the view controller: points = (points, streak,
@@ -107,6 +118,8 @@ type PointsNetworkInput struct {
 func ComputePointsLeaderboard(
 	inputs []PointsNetworkInput,
 	windows []PointsEpochWindow,
+	excusedEpochs map[uint64]bool,
+	pendingEpochs map[uint64]bool,
 ) (entries []PointsLeaderboardEntry, latestEpoch uint64) {
 	epochs := make([]uint64, 0, len(windows))
 	for _, window := range windows {
@@ -116,13 +129,14 @@ func ComputePointsLeaderboard(
 	if 0 < len(epochs) {
 		latestEpoch = epochs[len(epochs)-1]
 	}
+	latestPending := 0 < len(epochs) && pendingEpochs[latestEpoch]
 
 	entries = make([]PointsLeaderboardEntry, 0, len(inputs))
 	for _, input := range inputs {
 		if input.TotalNanoPoints <= 0 {
 			continue
 		}
-		blocks, streak, longest := pointsStreaks(input.EpochsWithPoints, epochs)
+		blocks, streak, longest := pointsStreaks(input.EpochsWithPoints, epochs, excusedEpochs, latestPending)
 		entries = append(entries, PointsLeaderboardEntry{
 			NetworkId:        input.NetworkId,
 			TotalNanoPoints:  input.TotalNanoPoints,
@@ -182,22 +196,47 @@ func ComputePointsLeaderboard(
 
 // pointsStreaks walks the finalized epochs in order. The current streak is
 // the run of consecutive epochs with points that ends at the latest finalized
-// epoch (0 when the latest epoch has none); the longest streak is the best
-// run anywhere.
-func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks int, streak int, longest int) {
+// epoch (0 when the latest epoch has none and is neither excused nor
+// pending); the longest streak is the best run anywhere.
+//
+// An excused epoch is one whose operator block the daily award recorded
+// expired (OperatorBlockPointsExpiry): the block never gets its points, by our
+// failure, not its providers' (owner decision 2026-11-14). A network without
+// points in an excused epoch keeps its run through it: the epoch neither
+// breaks the run nor adds to it, for the current streak and the longest alike.
+// A network with points in an excused epoch, from any other source, counts it
+// as any epoch with points, so no network gets a streak it did not earn.
+//
+// `latestPending` is set while the latest epoch's block waits for its award
+// (loadPointsPendingEpochs, owner decision 2026-11-14): the block completes at
+// its Sunday 00:00 UTC close, but its award commits about 12:00 UTC that day,
+// or up to its expiry about three days later while the award keeps failing. A
+// network without points in it, whose points there would come from the award,
+// keeps its current streak meanwhile: the epoch neither breaks the run nor
+// adds to it, and as the last epoch it joins no runs, so the longest streak is
+// unaffected. Points in it from any other source count as in any epoch. Once
+// the award commits the epoch counts as any; if it expires instead it is
+// excused. Without excused epochs or a pending one the rule is the one before.
+func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64, excusedEpochs map[uint64]bool, latestPending bool) (blocks int, streak int, longest int) {
 	run := 0
-	for _, epoch := range epochsAsc {
-		if epochsWithPoints[epoch] {
+	for i, epoch := range epochsAsc {
+		switch {
+		case epochsWithPoints[epoch]:
 			blocks += 1
 			run += 1
 			if longest < run {
 				longest = run
 			}
-		} else {
+		case excusedEpochs[epoch]:
+			// the run goes on through it, one shorter than if it had points
+		case latestPending && i == len(epochsAsc)-1:
+			// the run waits for the award
+		default:
 			run = 0
 		}
 	}
-	// run is the trailing run: non-zero only when the latest epoch has points
+	// run is the trailing run: non-zero only when the latest epoch has points,
+	// or is excused or pending after a run
 	streak = run
 	return
 }
@@ -215,7 +254,36 @@ func pointsStreaks(epochsWithPoints map[uint64]bool, epochsAsc []uint64) (blocks
 // points in a completed block publishes a false zero. The returned snapshot's
 // Approximation counts those inputs; stored rows replace them on later
 // rebuilds as the rollup advances.
+//
+// The blocks the daily award recorded expired (operator_block_points_expired)
+// excuse their epochs (pointsStreaks). The epochs are the operator blocks, so
+// an expired block excuses its own epoch, the one whose window ends at the
+// block's end and that its award's points would have counted in (an award's
+// payments store its block, CommitOperatorBlockPoints). A record written after
+// a rebuild changes the next one: the hourly rebuild reads it within the hour.
+// The latest block is pending while its award has not committed and it is not
+// recorded expired (loadPointsPendingEpochs); the award's commit triggers a
+// rebuild (controller.AwardOperatorBlockPoints), which counts its points. An
+// earning boundary that cannot be read, which stops the awards as well, leaves
+// nothing pending: it is logged, and the rebuild ranks by the rule before
+// rather than failing, as the served bytes rollup stops and not the rebuild.
 func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) (*PointsLeaderboardSnapshot, error) {
+	blocks := make([]int64, len(windows))
+	for i, window := range windows {
+		blocks[i] = int64(window.Epoch)
+	}
+	excusedEpochs := map[uint64]bool{}
+	for block, expired := range GetOperatorBlockPointsExpired(ctx, blocks) {
+		if expired {
+			excusedEpochs[uint64(block)] = true
+		}
+	}
+	// before the points (loadPointsPendingEpochs)
+	pendingEpochs, err := loadPointsPendingEpochs(ctx, windows, excusedEpochs)
+	if err != nil {
+		glog.Warningf("[points]no block is pending: the earning boundary cannot be read: %s\n", err)
+		pendingEpochs = map[uint64]bool{}
+	}
 	inputs, err := loadPointsNetworkInputs(ctx, windows)
 	if err != nil {
 		return nil, err
@@ -228,7 +296,7 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 			return nil, err
 		}
 	}
-	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows)
+	entries, latestEpoch := ComputePointsLeaderboard(inputs, windows, excusedEpochs, pendingEpochs)
 
 	snapshot := &PointsLeaderboardSnapshot{
 		SnapshotId:            server.NewId(),
@@ -385,6 +453,63 @@ func RebuildPointsLeaderboard(ctx context.Context, windows []PointsEpochWindow) 
 		))
 	})
 	return snapshot, nil
+}
+
+// The pending epochs: the latest completed block while it waits for its award
+// (pointsStreaks). The daily award owes it its points, as it has traffic past
+// the provider earning boundary, and has neither committed them nor recorded
+// the block expired. A block completes at its Sunday 00:00 UTC close;
+// the award commits about 12:00 UTC that day, or up to the block's expiry
+// about three days later while it keeps failing (AwardDueOperatorBlockPoints).
+// Only the latest completed block is ever pending: an older one without an
+// award or an expiry record is overdue, or was left to the backfill, and
+// counts as any block. Without an earning boundary there are no awards
+// (payout plans award the points), and nothing is pending; an error is the
+// boundary's, one that cannot be read. An expired block is excused instead
+// (`excusedEpochs`).
+//
+// The award's record is read on the pool the points are then read from
+// (loadPointsNetworkInputs). An award commits its record and its points in one
+// transaction, so a block found awarded here has its points in that later
+// read; an award that commits between the two reads leaves its block pending
+// with its points, which count as any.
+func loadPointsPendingEpochs(
+	ctx context.Context,
+	windows []PointsEpochWindow,
+	excusedEpochs map[uint64]bool,
+) (pendingEpochs map[uint64]bool, returnErr error) {
+	pendingEpochs = map[uint64]bool{}
+	if len(windows) == 0 {
+		return pendingEpochs, nil
+	}
+	latestEpoch := uint64(0)
+	for _, window := range windows {
+		latestEpoch = max(latestEpoch, window.Epoch)
+	}
+	if excusedEpochs[latestEpoch] {
+		return pendingEpochs, nil
+	}
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if transition == nil {
+		return pendingEpochs, nil
+	}
+	block := int64(latestEpoch)
+	if _, _, ok := OperatorBlockPointsWindow(block, transition.Cutoff); !ok {
+		// all its traffic is before the boundary: no award owes it points
+		return pendingEpochs, nil
+	}
+	awarded := map[int64]bool{}
+	// stats read: tolerates replica delay
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		awarded = getOperatorBlockPointsAwardedInConn(ctx, conn, []int64{block})
+	})
+	if !awarded[block] {
+		pendingEpochs[latestEpoch] = true
+	}
+	return pendingEpochs, nil
 }
 
 // loadPointsNetworkInputs reads every network's all-time total and, per

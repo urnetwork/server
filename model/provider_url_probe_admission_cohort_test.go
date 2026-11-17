@@ -65,6 +65,8 @@ func TestUrlProbeAdmissionCohortCountsFailuresAndSeparatesSecurity(t *testing.T)
 		testingAdmissionHealth(ctx, clients[2], started, at, 3)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET cycle_started_at=$2 WHERE client_id=$1`, clients[2], at.Add(-time.Hour)))
+			// an uncleared legacy flag is a security exception until its
+			// provider's clean rechecks clear it
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_health SET legacy_tls_authentication_failure=true WHERE client_id=$1`, clients[1]))
 		})
 		fleet := testingAdmissionCohort(t, ctx, at)

@@ -11,6 +11,12 @@ package controller
 // file and the digest the dry run printed, refuses any other content, and
 // commits exactly those awards. A block that already has its points, from
 // the task or an earlier commit, is skipped, so a commit can run again.
+//
+// An expired block (model.OperatorBlockPointsExpiry: its reliability evidence
+// passed client_reliability retention, or the daily task recorded it expired)
+// has no backfill: no award of it can be complete. The dry run lists the
+// expired blocks, leaves them out of its default selection, and refuses one
+// that is asked for; a commit refuses a block the task recorded expired.
 
 import (
 	"context"
@@ -39,8 +45,11 @@ type OperatorBlockPointsBackfill struct {
 	// has its points from the plans
 	LegacyEpochEnd *time.Time `json:"legacy_epoch_end,omitempty"`
 	// the completed blocks past the boundary, and those that have their points
-	DueBlocks     []int64                      `json:"due_blocks"`
-	AwardedBlocks []int64                      `json:"awarded_blocks"`
+	DueBlocks     []int64 `json:"due_blocks"`
+	AwardedBlocks []int64 `json:"awarded_blocks"`
+	// the due blocks without points that expired, at the dry run's clock or
+	// in the daily task's record: they are never awarded
+	ExpiredBlocks []int64                      `json:"expired_blocks"`
 	Awards        []*model.OperatorBlockPoints `json:"awards"`
 	// model.OperatorBlockPointsDigest of the awards
 	Digest string `json:"digest"`
@@ -66,7 +75,8 @@ func ParseOperatorBlocks(value string) ([]int64, error) {
 
 // PlanOperatorBlockPointsBackfill is the dry run: the awards of the selected
 // blocks that do not have their points yet, by default every completed block
-// past the boundary. It only reads.
+// past the boundary that has not expired. A selected block that expired is
+// refused (model.ErrOperatorBlockPointsExpired). It only reads.
 func PlanOperatorBlockPointsBackfill(ctx context.Context, blocks []int64, now time.Time) (*OperatorBlockPointsBackfill, error) {
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
@@ -76,7 +86,8 @@ func PlanOperatorBlockPointsBackfill(ctx context.Context, blocks []int64, now ti
 		return nil, model.ErrOperatorBlockPointsNoBoundary
 	}
 	due := model.OperatorBlockPointsDueBlocks(transition.Cutoff, now)
-	if len(blocks) == 0 {
+	selected := 0 < len(blocks)
+	if !selected {
 		blocks = due
 	}
 	for _, block := range blocks {
@@ -91,6 +102,7 @@ func PlanOperatorBlockPointsBackfill(ctx context.Context, blocks []int64, now ti
 		PolicySha256:  transition.ConfigSha256,
 		DueBlocks:     due,
 		AwardedBlocks: []int64{},
+		ExpiredBlocks: []int64{},
 		Awards:        []*model.OperatorBlockPoints{},
 	}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -98,8 +110,25 @@ func PlanOperatorBlockPointsBackfill(ctx context.Context, blocks []int64, now ti
 	})
 	awarded := model.GetOperatorBlockPointsAwarded(ctx, due)
 	backfill.AwardedBlocks = slices.Sorted(maps.Keys(awarded))
+	recorded := model.GetOperatorBlockPointsExpired(ctx, due)
+	expired := map[int64]bool{}
+	for _, block := range due {
+		if awarded[block] {
+			continue
+		}
+		if _, ok := model.OperatorBlockPointsExpiryAt(block, transition.Cutoff, now); ok || recorded[block] {
+			expired[block] = true
+		}
+	}
+	backfill.ExpiredBlocks = slices.Sorted(maps.Keys(expired))
 	for _, block := range blocks {
 		if awarded[block] {
+			continue
+		}
+		if expired[block] {
+			if selected {
+				return nil, fmt.Errorf("operator block %d: %w; no backfill can award it", block, model.ErrOperatorBlockPointsExpired)
+			}
 			continue
 		}
 		award, err := model.ComputeOperatorBlockPoints(ctx, model.EnvSubsidyConfig(), block, now)
@@ -208,8 +237,10 @@ func operatorBlockPointsText(nanoPoints model.NanoPoints) string {
 	return fmt.Sprintf("%.6f", float64(nanoPoints)/1_000_000)
 }
 
-// Text is the dry run's report: per block its window and computation, its
-// points by event, and every network's points.
+// Text is the dry run's report: per block its window and traffic, its points
+// by event, and every network's bytes, share of the block's bytes and points.
+// The payout points follow the bytes alone; no revenue is shown because none
+// is read (model.OperatorBlockPointsSchema v2).
 func (self *OperatorBlockPointsBackfill) Text() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "operator block points backfill (%s)\n", self.Schema)
@@ -218,29 +249,28 @@ func (self *OperatorBlockPointsBackfill) Text() string {
 		fmt.Fprintf(&b, "payout plans' last subsidy epoch ends %s: traffic before it has its points from the plans\n", self.LegacyEpochEnd.Format(time.RFC3339Nano))
 	}
 	fmt.Fprintf(&b, "completed blocks past the boundary: %v; with points already: %v\n", self.DueBlocks, self.AwardedBlocks)
+	if 0 < len(self.ExpiredBlocks) {
+		fmt.Fprintf(&b, "expired, never awarded (reliability evidence past client_reliability retention): %v\n", self.ExpiredBlocks)
+	}
 	totalNanoPoints := model.NanoPoints(0)
 	networks := map[server.Id]bool{}
 	for _, award := range self.Awards {
-		fmt.Fprintf(&b, "\nblock %d [%s, %s) plan %s\n",
+		fmt.Fprintf(&b, "\nblock %d [%s, %s) plan %s, %s\n",
 			award.Block,
 			award.WindowStart.Format(time.RFC3339),
 			award.WindowEnd.Format(time.RFC3339),
 			award.PaymentPlanId,
+			award.Schema,
 		)
-		fmt.Fprintf(&b, "  traffic: %d sweeps, %d providers, %d paying networks (%d active, %d paid), %s paid + %s unpaid\n",
+		fmt.Fprintf(&b, "  traffic: %d sweeps, %d providers, %s served, paid or unpaid\n",
 			award.SweepCount,
 			len(award.Payments),
-			award.TrafficUserCount,
-			award.ActiveUserCount,
-			award.PaidUserCount,
-			model.ByteCountHumanReadable(award.NetPayoutByteCountPaid),
-			model.ByteCountHumanReadable(award.NetPayoutByteCountUnpaid),
+			model.ByteCountHumanReadable(award.ByteCount),
 		)
-		fmt.Fprintf(&b, "  computed payout (weighs the points; no USDC): $%.6f, subsidy scale %.6f, subsidy $%.6f, subscription revenue $%.6f\n",
-			model.NanoCentsToUsd(award.TotalComputedPayout),
-			award.SubsidyScale,
-			award.SubsidyNetPayoutUsd,
-			model.NanoCentsToUsd(award.NetRevenue),
+		fmt.Fprintf(&b, "  payout points %s (%d points per payout, time scale %.6f), shared by bytes\n",
+			operatorBlockPointsText(award.PayoutNanoPoints),
+			award.PointsPerPayout,
+			award.TimeScale,
 		)
 		fmt.Fprintf(&b, "  reliability: blocks [%d, %d), %d effective, %d networks\n",
 			award.ReliabilityMinBlockNumber,
@@ -257,18 +287,20 @@ func (self *OperatorBlockPointsBackfill) Text() string {
 			operatorBlockPointsText(award.TotalNanoPoints()),
 			len(award.Points),
 		)
-		fmt.Fprintf(&b, "  network_id\tpayout_bytes\tcomputed_payout_usd\tpayout\treliability\tseeker\treferral\ttotal\n")
+		fmt.Fprintf(&b, "  network_id\tpayout_bytes\tbyte_share\tpayout\treliability\tseeker\treferral\ttotal\n")
 		for _, points := range operatorBlockNetworksPoints(award) {
 			bytes := model.ByteCount(0)
-			computedPayout := model.NanoCents(0)
 			if points.payment != nil {
 				bytes = points.payment.PayoutByteCount
-				computedPayout = points.payment.ComputedPayout
+			}
+			byteShare := 0.0
+			if 0 < award.ByteCount {
+				byteShare = float64(bytes) / float64(award.ByteCount)
 			}
 			fmt.Fprintf(&b, "  %s\t%d\t%.9f\t%s\t%s\t%s\t%s\t%s\n",
 				points.networkId,
 				bytes,
-				model.NanoCentsToUsd(computedPayout),
+				byteShare,
 				operatorBlockPointsText(points.payout),
 				operatorBlockPointsText(points.reliability),
 				operatorBlockPointsText(points.multiplier),

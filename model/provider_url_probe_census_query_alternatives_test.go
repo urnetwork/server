@@ -98,6 +98,8 @@ func TestUrlProbeCensusGroupedHistoryTruthAndQuota(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_probe_cycle WHERE client_id=$1`, ids[7]))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET cycle_started_at=$2::timestamp-interval '4 hours'+interval '1 microsecond' WHERE client_id=$1`, ids[8], now))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET cycle_started_at=$2::timestamp+interval '1 microsecond' WHERE client_id=$1`, ids[9], now))
+			// an uncleared legacy flag: an unknown security target until its
+			// provider's clean rechecks clear it
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health
 				(client_id,measured_at,ok_count,total_count,class_results,reputation_ok,reputation_total,legacy_tls_authentication_failure)
 				VALUES($1,$2,1,1,'{}',0,0,true)`, ids[10], now))

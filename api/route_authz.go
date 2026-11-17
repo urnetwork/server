@@ -95,6 +95,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /competition/v2/receipts":                 routeAccessPublic,
 	"POST /competition/v2/source/([^/]+)/readiness": routeAccessPublic,
 	"POST /competition/v2/holds":                    routeAccessPublic,
+	"POST /competition/v2/source-handoffs":          routeAccessPublic,
+	"POST /competition/v2/review-handoff-imports":   routeAccessPublic,
+	"POST /competition/v2/official-review-imports":  routeAccessPublic,
 	"POST /competition/v2/rounds/([^/]+)/incidents": routeAccessPublic,
 	"GET /stats/last-90":                            routeAccessPublic,
 	"GET /stats/providers-map":                      routeAccessPublic,
@@ -156,6 +159,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/provider-verdict":                routeAccessClient,
 	"GET /network/clients":                          routeAccessAppAdmin, // lists every client of the network
 	"GET /network/proxies":                          routeAccessNetwork,  // lists the network's proxy clients
+	"POST /network/proxy/rotate-exit":               routeAccessNetwork,  // moves a network's unique-exit proxy to a new exit
 	"GET /network/peers":                            routeAccessClient,
 	"GET /network/provider-locations":               routeAccessPublic,
 	"POST /network/find-provider-locations":         routeAccessPublic,
@@ -187,6 +191,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/circle":                              routeAccessPublic,
 	"POST /pay/play":                                routeAccessPublic,
 	"POST /pay/solana":                              routeAccessPublic,
+	"POST /pay/alchemy":                             routeAccessPublic, // each delivery verified by its webhook's signing key
 	"POST /solana/payment-intent":                   routeAccessClient,
 	"POST /solana/payment-transaction":              routeAccessClient,
 	"POST /stripe/payment-intent":                   routeAccessClient,
@@ -197,10 +202,25 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/data/solana-intent":                  routeAccessPublic,
 	"POST /pay/data/solana-status":                  routeAccessPublic,
 	"GET /pay/crypto/assets":                        routeAccessPublic,
+	"POST /pay/crypto/quote":                        routeAccessPublic, // optional bearer: the network's tier and welcome offer
 	"POST /pay/crypto/intent":                       routeAccessClient,
 	"POST /pay/data/crypto-intent":                  routeAccessPublic,
-	"POST /pay/crypto/status":                       routeAccessPublic,  // the invoice's status token is the credential
-	"POST /pay/crypto/requote":                      routeAccessPublic,  // the invoice's status token is the credential
+	"POST /pay/crypto/status":                       routeAccessPublic, // the invoice's status token is the credential
+	"POST /pay/crypto/requote":                      routeAccessPublic, // the invoice's status token is the credential
+	"GET /pay/gift/config":                          routeAccessPublic,
+	"POST /pay/gift/checkout":                       routeAccessPublic, // optional bearer: referral credit for the caller's network
+	"POST /pay/gift/crypto-intent":                  routeAccessPublic, // optional bearer: referral credit for the caller's network
+	"POST /pay/gift/gamma-intent":                   routeAccessClient, // as POST /pay/gamma/intent: paid from the caller's network's deposit
+	"POST /pay/gift/gamma-cancel":                   routeAccessPublic, // the order's token, in the body, is the credential
+	"POST /pay/gift/order":                          routeAccessPublic, // the order's token, in the body, is the credential
+	"POST /pay/gift/cards\\.pdf":                    routeAccessPublic, // the order's token, in the body, is the credential
+	"POST /pay/gift/check-code":                     routeAccessPublic,
+	"GET /pay/gamma/services.json":                  routeAccessPublic,
+	"GET /pay/gamma/terms":                          routeAccessPublic,
+	"POST /pay/gamma/intent":                        routeAccessClient,
+	"POST /pay/gamma/status":                        routeAccessPublic,  // the intent's status token is the credential
+	"GET /pay/gamma/settings":                       routeAccessNetwork, // the automatic charges' switches
+	"POST /pay/gamma/settings":                      routeAccessNetwork,
 	"GET /wallet/balance":                           routeAccessNetwork, // Circle wallet balance
 	"POST /wallet/validate-address":                 routeAccessClient,
 	"POST /wallet/circle-init":                      routeAccessNetwork, // creates the Circle wallet
@@ -226,6 +246,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /subscription/create-payment-id":          routeAccessClient,
 	"POST /subscription/verify-play-purchase":       routeAccessClient,
 	"POST /subscription/verify-apple-transaction":   routeAccessClient,
+	"POST /subscription/verify-stripe-checkout":     routeAccessClient,
 	"GET /x402/skus":                                routeAccessPublic,
 	"POST /x402/purchase":                           routeAccessClient,
 	"POST /device/add":                              routeAccessNetwork, // device sharing/adoption into the network
@@ -268,12 +289,30 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/top":                                   routeAccessPublic, // the public board; a token only adds the caller's own row
 	"GET /sn/top/me":                                routeAccessClient,
 	"POST /sn/head/binding":                         routeAccessOwnClientPayout, // binds the caller's head
+	"GET /sn/fleet/device":                          routeAccessOwnClientPayout, // the caller's own pending binding
+	"POST /sn/fleet/device/signature":               routeAccessOwnClientPayout, // its own signature on it
+	"GET /sn/fleet/device/binding":                  routeAccessOwnClientPayout, // its own binding, to leave
+	"POST /sn/fleet/device/leave":                   routeAccessOwnClientPayout, // leaves with its own key
+	"GET /sn/fleet/claim":                           routeAccessNetwork,         // the network's claim, for its card
+	"POST /sn/fleet/authorization":                  routeAccessNetwork,         // the coldkey's authorization of a hotkey
+	"POST /sn/fleet/hotkey-signatures":              routeAccessNetwork,         // the hotkey's signatures, from the key holder
+	"POST /sn/fleet/top-up":                         routeAccessNetwork,         // the network's one top-up
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
 	"GET /sn/artifact":                              routeAccessPublic,
 	"GET /sn/ledger/object":                         routeAccessPublic,
 	"GET /sn/ledger/account":                        routeAccessPublic,
+	"GET /sn/ctf":                                   routeAccessPublic,
+	"GET /sn/ctf/here":                              routeAccessPublic,
+	"GET /sn/ctf/client":                            routeAccessClient, // the bearer's own client's wins, or its network's clients
+	"GET /sn/ctf/top":                               routeAccessPublic,
+	"GET /sn/ctf/country/([^/]+)":                   routeAccessPublic,
+	"GET /sn/ctf/epoch/([^/]+)":                     routeAccessPublic,
+	"GET /sn/openapi\\.yml":                         routeAccessPublic,
+	"GET /sn/claim-relay":                           routeAccessOwnClientPayout, // the network's own claim status
+	"POST /sn/claim-relay/claim-now":                routeAccessOwnClientPayout, // queues a claim to the network's own coldkey
 	"GET /sn/attempt-artifact":                      routeAccessPublic,
+	"HEAD /sn/attempt-artifact":                     routeAccessPublic,
 	"POST /sn/attempt-artifact":                     routeAccessClient,
 	// the validator's client token; its hotkey signature is the authority
 	"POST /sn/head-summary":                         routeAccessClient,

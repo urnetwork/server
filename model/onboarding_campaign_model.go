@@ -29,7 +29,12 @@ type NetworkOnboarding struct {
 	Email    bool
 	TimeZone string
 	Platform string
-	Locale   string
+	// Distribution is the distribution the platform's app reported with it
+	// (X-UR-ClientInfo, session.ClientDistribution*): it tells the App Store
+	// Mac from the direct-download Mac. "" when unknown, as for a browser
+	// sign-up and every app from before the apps reported it.
+	Distribution string
+	Locale       string
 	// Country is the sign-up IP's country (upper-case alpha-2), the price tier
 	// the emailed offer is priced at
 	Country      string
@@ -77,44 +82,105 @@ type NetworkOnboardingEmail struct {
 // false.
 func CreateNetworkOnboarding(ctx context.Context, row *NetworkOnboarding) (created bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO network_onboarding (
-					network_id, created_at, path, email, time_zone, platform, locale, country,
-					experiment_id, email_variant, next_step, next_send_at, exit_reason, exited_at
-				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-				ON CONFLICT (network_id) DO NOTHING
-			`,
-			row.NetworkId,
-			row.CreatedAt,
-			row.Path,
-			row.Email,
-			row.TimeZone,
-			row.Platform,
-			row.Locale,
-			row.Country,
-			row.ExperimentId,
-			row.EmailVariant,
-			row.NextStep,
-			row.NextSendAt,
-			row.ExitReason,
-			row.ExitedAt,
-		))
-		created = 0 < tag.RowsAffected()
+		created = CreateNetworkOnboardingInTx(tx, ctx, row)
 	})
 	return
 }
 
-const networkOnboardingSelect = `
+// CreateNetworkOnboardingInTx is CreateNetworkOnboarding in the caller's
+// transaction, so the caller can commit the row's first step task with it.
+func CreateNetworkOnboardingInTx(tx server.PgTx, ctx context.Context, row *NetworkOnboarding) (created bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_onboarding (
+				network_id, created_at, path, email, time_zone, platform, locale, country,
+				experiment_id, email_variant, next_step, next_send_at, exit_reason, exited_at,
+				distribution
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+			ON CONFLICT (network_id) DO NOTHING
+		`,
+		row.NetworkId,
+		row.CreatedAt,
+		row.Path,
+		row.Email,
+		row.TimeZone,
+		row.Platform,
+		row.Locale,
+		row.Country,
+		row.ExperimentId,
+		row.EmailVariant,
+		row.NextStep,
+		row.NextSendAt,
+		row.ExitReason,
+		row.ExitedAt,
+		row.Distribution,
+	))
+	return 0 < tag.RowsAffected()
+}
+
+// ListOnboardingRowsDueBefore lists running campaign rows whose next step was
+// due before `before`, oldest first, at most `limit` (the sweep's candidates;
+// the network_onboarding_next_send_at index serves it).
+func ListOnboardingRowsDueBefore(ctx context.Context, before time.Time, limit int) (rows []*NetworkOnboarding) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			networkOnboardingFrom+`
+				WHERE next_send_at IS NOT NULL AND next_send_at < $1
+					AND exited_at IS NULL AND next_step <> ''
+				ORDER BY next_send_at
+				LIMIT $2
+			`,
+			before,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				rows = append(rows, scanNetworkOnboarding(result))
+			}
+		})
+	})
+	return
+}
+
+// ResumeNetworkOnboardingInTx moves a running row whose next step is still
+// `step` on to `nextStep` at `nextSendAt`, recording `lastStep` as the last one
+// (empty keeps it), in the caller's transaction. False when the row has moved
+// on or exited meanwhile, so the caller schedules nothing.
+func ResumeNetworkOnboardingInTx(tx server.PgTx, ctx context.Context, networkId server.Id, step string, lastStep string, nextStep string, nextSendAt time.Time) (resumed bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE network_onboarding
+			SET
+				last_step = CASE WHEN $3 = '' THEN last_step ELSE $3 END,
+				next_step = $4,
+				next_send_at = $5
+			WHERE network_id = $1 AND next_step = $2 AND exited_at IS NULL
+		`,
+		networkId,
+		step,
+		lastStep,
+		nextStep,
+		nextSendAt,
+	))
+	return 0 < tag.RowsAffected()
+}
+
+const networkOnboardingFrom = `
 	SELECT
 		network_id, created_at, path, email, time_zone, platform, locale, country,
 		experiment_id, email_variant,
 		e1_sent_at, e2_sent_at, e3_sent_at, e4_sent_at, e5_sent_at,
 		last_step, next_step, next_send_at, exit_reason, exited_at,
-		bounced, complained, complained_step, send_failures, last_send_error
+		bounced, complained, complained_step, send_failures, last_send_error,
+		distribution
 	FROM network_onboarding
+`
+
+const networkOnboardingSelect = networkOnboardingFrom + `
 	WHERE network_id = $1
 `
 
@@ -126,6 +192,7 @@ func scanNetworkOnboarding(result pgx.Rows) *NetworkOnboarding {
 		&o.E1SentAt, &o.E2SentAt, &o.E3SentAt, &o.E4SentAt, &o.E5SentAt,
 		&o.LastStep, &o.NextStep, &o.NextSendAt, &o.ExitReason, &o.ExitedAt,
 		&o.Bounced, &o.Complained, &o.ComplainedStep, &o.SendFailures, &o.LastSendError,
+		&o.Distribution,
 	))
 	return o
 }
@@ -179,17 +246,30 @@ func SetNetworkOnboardingTimeZone(ctx context.Context, networkId server.Id, time
 }
 
 // SetNetworkOnboardingPlatform stores the platform once it is known (the
-// auth-client device spec); only fills an empty value.
-func SetNetworkOnboardingPlatform(ctx context.Context, networkId server.Id, platform string) (updated bool) {
+// auth-client's client info or device spec), with the distribution its app
+// reported ("" when unknown). It only fills: a row without a platform takes
+// both, and a row of the same platform whose distribution is still unknown
+// (an app from before the apps reported it, then an updated one) takes the
+// distribution. A known platform or distribution is never replaced, and a
+// distribution never lands on another platform's row.
+func SetNetworkOnboardingPlatform(ctx context.Context, networkId server.Id, platform string, distribution string) (updated bool) {
 	if platform == "" {
 		return false
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
-			`UPDATE network_onboarding SET platform = $2 WHERE network_id = $1 AND platform = ''`,
+			`
+				UPDATE network_onboarding
+				SET platform = $2, distribution = $3
+				WHERE network_id = $1 AND (
+					platform = ''
+					OR (platform = $2 AND distribution = '' AND $3 != '')
+				)
+			`,
 			networkId,
 			platform,
+			distribution,
 		))
 		updated = 0 < tag.RowsAffected()
 	})
@@ -422,10 +502,20 @@ func NetworkExists(ctx context.Context, networkId server.Id) (exists bool) {
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func NetworkExistsInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (exists bool) {
 	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1`, networkId)
-		server.WithPgResult(result, err, func() {
-			exists = result.Next()
-		})
+		exists = networkExists(ctx, conn, networkId)
+	})
+	return
+}
+
+// NetworkExistsInTx is NetworkExists in the caller's transaction.
+func NetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId server.Id) bool {
+	return networkExists(ctx, tx, networkId)
+}
+
+func networkExists(ctx context.Context, query server.PgCanQuery, networkId server.Id) (exists bool) {
+	result, err := query.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1`, networkId)
+	server.WithPgResult(result, err, func() {
+		exists = result.Next()
 	})
 	return
 }

@@ -4,9 +4,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,17 +20,31 @@ import (
 )
 
 // A minimal Grafana for load-defaults: the folder exists, every dashboard
-// upsert succeeds, no dashboard is shared yet, and every request to the
-// alerting provisioning API is counted.
+// upsert succeeds, and every request to the alerting provisioning API is
+// counted. Public dashboard shares are kept by dashboard uid: none exists
+// until a test adds one or load-defaults publishes one. Dashboard upserts and
+// share changes are logged in order, as "upsert <uid>", "publish <uid>" and
+// "delete <uid> <share uid>".
 type grafanaLoadDefaultsFake struct {
 	stateLock            sync.Mutex
 	dashboardPosts       int
 	provisioningRequests int
 	provisioningWrites   int
+	shares               map[string]grafanaLoadDefaultsShare
+	events               []string
+}
+
+// A public dashboard share, in the fields of Grafana's public dashboard api.
+type grafanaLoadDefaultsShare struct {
+	Uid         string `json:"uid"`
+	AccessToken string `json:"accessToken"`
+	IsEnabled   bool   `json:"isEnabled"`
 }
 
 func newGrafanaLoadDefaultsFake(t *testing.T) (*grafanaLoadDefaultsFake, string) {
-	fake := &grafanaLoadDefaultsFake{}
+	fake := &grafanaLoadDefaultsFake{
+		shares: map[string]grafanaLoadDefaultsShare{},
+	}
 	server := httptest.NewServer(http.HandlerFunc(fake.serve))
 	t.Cleanup(server.Close)
 	return fake, server.URL
@@ -36,8 +53,11 @@ func newGrafanaLoadDefaultsFake(t *testing.T) (*grafanaLoadDefaultsFake, string)
 func (self *grafanaLoadDefaultsFake) serve(response http.ResponseWriter, request *http.Request) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	_, _ = io.ReadAll(request.Body)
+	body, _ := io.ReadAll(request.Body)
 	response.Header().Set("Content-Type", "application/json")
+	// /api/dashboards/uid/<uid>/public-dashboards/[<share uid>]
+	sharePath := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+	shareRequest := 5 <= len(sharePath) && sharePath[0] == "api" && sharePath[1] == "dashboards" && sharePath[2] == "uid" && sharePath[4] == "public-dashboards"
 	switch {
 	case strings.HasPrefix(request.URL.Path, "/api/v1/provisioning/"):
 		self.provisioningRequests += 1
@@ -56,14 +76,57 @@ func (self *grafanaLoadDefaultsFake) serve(response http.ResponseWriter, request
 		_, _ = io.WriteString(response, `{"uid":"`+grafana.FolderUid+`"}`)
 	case request.Method == http.MethodPost && request.URL.Path == "/api/dashboards/db":
 		self.dashboardPosts += 1
+		var upsert struct {
+			Dashboard struct {
+				Uid string `json:"uid"`
+			} `json:"dashboard"`
+		}
+		_ = json.Unmarshal(body, &upsert)
+		self.events = append(self.events, "upsert "+upsert.Dashboard.Uid)
 		_, _ = io.WriteString(response, `{"status":"success"}`)
-	case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/public-dashboards/"):
-		response.WriteHeader(http.StatusNotFound)
-	case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/public-dashboards/"):
-		_, _ = io.WriteString(response, `{"uid":"shared","accessToken":"token","isEnabled":true}`)
+	case shareRequest && request.Method == http.MethodGet:
+		share, ok := self.shares[sharePath[3]]
+		if !ok {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		shareJson, _ := json.Marshal(share)
+		_, _ = response.Write(shareJson)
+	case shareRequest && request.Method == http.MethodPost:
+		share := grafanaLoadDefaultsShare{
+			Uid:         "synthetic-share-" + sharePath[3],
+			AccessToken: fmt.Sprintf("syntheticToken%02d", len(self.events)),
+			IsEnabled:   true,
+		}
+		self.shares[sharePath[3]] = share
+		self.events = append(self.events, "publish "+sharePath[3])
+		shareJson, _ := json.Marshal(share)
+		_, _ = response.Write(shareJson)
+	case shareRequest && request.Method == http.MethodDelete && len(sharePath) == 6:
+		share, ok := self.shares[sharePath[3]]
+		if !ok || share.Uid != sharePath[5] {
+			response.WriteHeader(http.StatusNotFound)
+			return
+		}
+		delete(self.shares, sharePath[3])
+		self.events = append(self.events, "delete "+sharePath[3]+" "+sharePath[5])
+		_, _ = io.WriteString(response, `{}`)
 	default:
 		response.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func (self *grafanaLoadDefaultsFake) eventLog() []string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.events)
+}
+
+func (self *grafanaLoadDefaultsFake) share(dashboardUid string) (grafanaLoadDefaultsShare, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	share, ok := self.shares[dashboardUid]
+	return share, ok
 }
 
 func (self *grafanaLoadDefaultsFake) dashboardPostCount() int {
@@ -142,5 +205,63 @@ func TestGrafanaLoadDefaultsUsageAcceptsDashboardsOnly(t *testing.T) {
 	}
 	if dashboardsOnly, _ := opts.Bool("--dashboards_only"); !dashboardsOnly {
 		t.Fatal("--dashboards_only was not parsed")
+	}
+}
+
+// The case seen on main on 2026-11-09: the internal proxy test dashboard, which
+// has no public tag, had been shared outside load-defaults (in the Grafana ui),
+// so the public directory listed it. The next `load-defaults --dashboards_only`
+// deletes that share before it uploads the dashboard, publishes the shared
+// copy, and prints the copy's link as unlisted, apart from the listed public
+// dashboards and the directory.
+func TestGrafanaLoadDefaultsDashboardsOnlyUnpublishesAnUntaggedShareAndPrintsTheUnlistedLink(t *testing.T) {
+	fake, grafanaUrl := newGrafanaLoadDefaultsFake(t)
+	fake.shares["urnetwork-proxy-test"] = grafanaLoadDefaultsShare{Uid: "synthetic-ui-share", AccessToken: "syntheticUiShareToken01", IsEnabled: true}
+	var out bytes.Buffer
+	if err := grafanaLoadDefaultsTo(context.Background(), &out, grafanaUrl, "secret", false, grafana.AlertRoutingSettings{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.provisioningRequestCount(); got != 0 {
+		t.Fatalf("a dashboards-only load sent %d requests to the alerting provisioning API", got)
+	}
+
+	events := fake.eventLog()
+	deleted := slices.Index(events, "delete urnetwork-proxy-test synthetic-ui-share")
+	uploaded := slices.Index(events, "upsert urnetwork-proxy-test")
+	if deleted < 0 || uploaded < deleted {
+		t.Fatalf("the untagged dashboard's share was not deleted before its upload: %q", events)
+	}
+	if _, ok := fake.share("urnetwork-proxy-test"); ok {
+		t.Fatal("the untagged dashboard is still shared")
+	}
+	sharedUploaded := slices.Index(events, "upsert urnetwork-proxy-test-shared")
+	sharedPublished := slices.Index(events, "publish urnetwork-proxy-test-shared")
+	shared, ok := fake.share("urnetwork-proxy-test-shared")
+	if sharedUploaded < 0 || sharedPublished < sharedUploaded || !ok || !shared.IsEnabled {
+		t.Fatalf("the shared copy was not published after its upload: %q", events)
+	}
+	stats, ok := fake.share("urnetwork-public-traffic")
+	if !ok {
+		t.Fatal("the network stats dashboard was not published")
+	}
+
+	output := out.String()
+	unlistedAt := strings.Index(output, "\nUnlisted public dashboards (read-only, no login; not in "+grafanaUrl+"/stats or /stats.json")
+	if unlistedAt < 0 {
+		t.Fatalf("no unlisted section in the output:\n%s", output)
+	}
+	listedSection, unlistedSection := output[:unlistedAt], output[unlistedAt:]
+	if !strings.Contains(unlistedSection, "\n- urnetwork / proxy test (shared) (unlisted)\n    "+grafanaUrl+"/public-dashboards/"+shared.AccessToken+"\n") {
+		t.Errorf("the unlisted section does not give the shared copy's link:\n%s", output)
+	}
+	if !strings.Contains(listedSection, "\nPublic dashboards (read-only, no login):\n- urnetwork / network stats\n    "+grafanaUrl+"/public-dashboards/"+stats.AccessToken+"\n") ||
+		!strings.Contains(listedSection, "\nPublic directory: "+grafanaUrl+"/stats\n") {
+		t.Errorf("the listed section does not give the network stats link and the directory:\n%s", output)
+	}
+	if strings.Contains(listedSection, shared.AccessToken) || strings.Contains(unlistedSection, stats.AccessToken) {
+		t.Errorf("a link is printed in the other section:\n%s", output)
+	}
+	if strings.Contains(output, "syntheticUiShareToken01") {
+		t.Errorf("the deleted share's link is printed:\n%s", output)
 	}
 }

@@ -11262,4 +11262,464 @@ var migrations = []any{
 	// is rewritten, and older binaries never read it. Apply before deploying
 	// the api and taskworker that write it.
 	newSqlMigration(networkWinbackOfferSchemaSql),
+
+	// Which run of the extender process sent each activation
+	// (connect/EXTENDER.md G3, extender_activation_run_schema.go), so a
+	// restart shows as a new run among an extender's activations rather than
+	// being inferred from its platform connections. Three nullable columns on
+	// the activation history: a catalog change only, and the running release,
+	// which names its columns, writes and reads on. Apply before deploying the
+	// api and taskworker that write and count them.
+	newSqlMigration(extenderActivationRunSchemaSql),
+
+	// lag.dev's measurement api probes (lag.dev/PLAN.md A4,
+	// network_extender_measurement_probe_schema.go): the latest probe of each
+	// published family of each extender the sample serves, which the
+	// taskworker writes every two minutes and the sample reads to leave out an
+	// extender whose api its probes cannot reach. A new table; apply before
+	// deploying the taskworker that writes it and the api that reads it.
+	newSqlMigration(networkExtenderMeasurementProbeSchemaSql),
+
+	// The camouflage key an extender's activation posts, and the network that
+	// posted it (connect/EXTENDER.md P6, phase 14b): two nullable columns,
+	// db_extender_camouflage_key.go.
+	extenderCamouflageKeyMigration,
+
+	// Audited single-use evaluator recovery; legacy cycle-zero writers remain
+	// compatible. Deploy compatible API/worker before authorizing any cycle.
+	competitionJobReevaluationMigration,
+
+	// The usage archive's export ledger
+	// (db_provider_usage_archive_export.go): one row per verified copy of a
+	// week of st_provider_usage_archive stored off the primary, which the
+	// exporter writes and the week's early drop stamps. A new table: nothing
+	// is rewritten, and older binaries never read it. Apply before the
+	// exporter registers copies; the taskworker that drops weeks early reads
+	// it only while the export control is on.
+	providerUsageArchiveExportLedgerMigration,
+
+	// The demand deposit's durable state (sn/demand, st_demand_schema.go): the
+	// funder's state and events, the last verified price sheet and each settlement
+	// v2 epoch's usage statement. New tables, and the usage statement is written at
+	// zero price too. Apply before deploying the taskworker that writes them.
+	newSqlMigration(stDemandSchemaSql),
+
+	// Claiming a Top 200 spot from one tap (sn_fleet_auto_schema.go,
+	// model/sn_fleet_auto.go). New tables only: nothing is rewritten, and no
+	// earlier release reads them. Apply before deploying the api and taskworker
+	// that use them. They stay empty while binding is closed.
+	snFleetAutoSchemaMigration,
+
+	// The unresolved predicate's selectivity for the planner
+	// (db_transfer_contract_unresolved_statistics.go, CPUOPT4 Part D #1): an
+	// expression statistics object on transfer_contract's opaque unresolved
+	// CASE, so the payer open-sum and the payer-due read keep their partial
+	// index once the open set drains. A catalog change only: no rewrite, no
+	// sample. It takes SHARE UPDATE EXCLUSIVE for at most five seconds and runs
+	// as a no-op when the operator created the object first. Any release can
+	// run before or after it.
+	transferContractUnresolvedPredicateStatisticsMigration,
+
+	// Independent prospective finalization control. The original four-kind hold
+	// journal and old binaries remain compatible; no hold is activated by DDL.
+	newSqlMigration(competitionFinalizationHoldMigrationSql),
+
+	// Prospective epoch-two executor custody follows the complete published
+	// origin prefix; singleton execution is unchanged until future opt-in.
+	newSqlMigration(competitionDistributedEvaluationMigrationSql),
+
+	// Optional addendum encoding is compatible with the previous release; new
+	// code requires it only after checking historical exact review replay.
+	newSqlMigration(competitionProductionBenefitReviewMigration()),
+
+	// Explicitly approved post-close recovery leaves intake and sealed outcomes
+	// immutable; no new grant is possible without claim and finalization holds.
+	competitionReevaluationPostCloseMigration,
+	// Coverage custody is additive and follows every published migration.
+	// The integration owner keeps this unpublished suffix after origin's head.
+	newSqlMigration(competitionWorkCoverageMigration),
+
+	// Intake purpose never impersonates grading activation. Preserve legacy
+	// guard branches and append only after every published predecessor.
+	newSqlMigration(CompetitionIntakeFirstMigrationSql()),
+
+	// Unique-exit hosted proxies (HOSTED-PROXY-UNIQUE-EXIT.md,
+	// db_proxy_unique_exit_schema.go). All additive: three nullable or
+	// constant-default columns on provider_egress_location (a catalog change, no
+	// rewrite) and two new empty tables with their indexes. No earlier release
+	// reads or writes any of them. Apply before deploying the api, alt, proxy and
+	// taskworker that use them.
+	newSqlMigration(proxyUniqueExitEgressKeyColumnsSql),
+	newSqlMigration(proxyUniqueExitTableSql),
+	newSqlMigration(proxyUniqueExitNetworkIndexSql),
+	newSqlMigration(proxyExitAssignmentTableSql),
+	newSqlMigration(proxyExitAssignmentNetworkEgressKeyLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProxyLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProviderLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentAssignedAtLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProxyReleasedIndexSql),
+	newSqlMigration(proxyExitAssignmentNetworkReleasedIndexSql),
+	newSqlMigration(proxyExitAssignmentReleasedAtIndexSql),
+
+	// A prospective typed operator-stop exception adds an independent guard;
+	// previous recovery classes and published migration bytes stay unchanged.
+	competitionOperatorInterruptionMigration,
+
+	// The stored judgement of each exact-URL TLS finding (D1,
+	// db_provider_egress_tls_verdict.go). Two additive columns, a constant
+	// default and a NULL, under a five-second lock bound; every current
+	// exclusion is kept until the judge reads it. Apply before deploying the
+	// api, alt, taskworker and proxy that use it.
+	providerEgressTlsVerdictMigration,
+
+	// Prospective one-shot model findings remain pending until a separate human
+	// capability imports their exact timely completion. Existing rows stay intact.
+	newSqlMigration(competitionReviewHandoffMigration()),
+
+	// The catalog source and probation state of each URL outcome (D3), and
+	// the country sites' graduation state and pair tally
+	// (db_provider_egress_url_source.go). Two new tables, then two
+	// constant-default columns on the partitioned history under a
+	// five-second lock bound; every stored outcome reads as the scored general
+	// outcome it was counted as. Apply before deploying the api, alt,
+	// taskworker and proxy that use it.
+	providerEgressUrlSourceMigration,
+
+	// The zero-carry verdicts (db_provider_zero_carry.go,
+	// model/provider_zero_carry.go): one new empty table, under a five-second
+	// lock bound, created only when absent. Nothing existing is locked or
+	// rewritten. Apply before deploying the api, alt, proxy and taskworker
+	// that read it. The judge's URL condition reads the columns the migration
+	// before it adds (url_probation, url_source).
+	providerZeroCarryMigration,
+
+	// A separately pinned operator amendment records the epoch-one official
+	// review without rewriting frozen Snow policies, clocks or scoring evidence.
+	newSqlMigration(competitionOfficialReviewMigration()),
+
+	// Corrected executor identities are separately audited before any customer
+	// or R9 admission clock; frozen round/source policy bytes remain untouched.
+	newSqlMigration(CompetitionExecutorControlAmendmentMigrationSql()),
+
+	// Pay with Gamma (gamma_pay_schema.go, mmm/BTCPAY.md §18): seven new empty
+	// tables. Nothing existing is locked or rewritten. Apply before deploying
+	// the api and the taskworker that use them.
+	newSqlMigration(gammaPaySchemaSql),
+
+	// One approved host-admission replacement; original clocks stay append-only.
+	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
+
+	// Explicit operator admission over exact failed retained evidence; no resampling.
+	newSqlMigration(CompetitionExecutorAdmissionExceptionMigrationSql()),
+
+	// The distribution each network's onboarding platform came with
+	// (db_network_onboarding_distribution.go, mmm/ONBOARDING-RETENTION.md P6):
+	// what the app reported in X-UR-ClientInfo at sign-up or when its device
+	// authenticated, which tells the App Store Mac from the direct-download
+	// Mac. A constant default: a catalog change, no table rewrite, under a
+	// five-second lock bound. Old binaries name their columns, so they neither
+	// read nor write it. Apply before deploying the api, alt and taskworker
+	// that use it.
+	newSqlMigration(networkOnboardingDistributionSql),
+
+	// The Bitcoin block scanner's kept chain (db_crypto_scan_chain.go,
+	// mmm/BTCPAY.md §16.7): one nullable jsonb column on crypto_scan_cursor, a
+	// catalog change only, under a five-second lock bound. Only the Bitcoin
+	// reader uses it. Apply before deploying the taskworker that scans Bitcoin.
+	cryptoScanChainMigration,
+
+	// Per-cycle Pro grants (db_pro_grant_cycle.go, PRO-GRANT-CYCLE.md): a
+	// nullable column on subscription_renewal and one new empty table, under
+	// a five-second lock bound. Nothing existing is rewritten. Apply before
+	// deploying the api, alt and taskworker that write paid_end_time.
+	proGrantCycleMigration,
+
+	// Claims use the same authenticated whole-host admission projection as
+	// readiness, including separately approved exact retained exceptions.
+	newSqlMigration(CompetitionExecutorAdmissionClaimMigrationSql()),
+
+	// The HTTP/3 place evidence (db_provider_egress_h3_place.go,
+	// model/provider_egress_h3_place.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker, api and alt
+	// that use it.
+	providerEgressH3PlaceMigration,
+
+	// The IPv6 place evidence (db_provider_egress_ipv6_place.go,
+	// model/provider_egress_ipv6_place.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker, api and alt
+	// that use it.
+	providerEgressIpv6PlaceMigration,
+
+	// Capture the flag (ctf_schema.go, model/ctf_model.go, sn
+	// CAPTURETHEFLAG.md): the presence samples, the census and every later
+	// step's records, for the census, the driver and the api alike. Sixteen
+	// new empty tables and their indexes, each created only when absent under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker and api that use them; they stay empty
+	// while ctf.yml leaves capture the flag off.
+	ctfSchemaMigration,
+
+	// The refusals of each target's ping hour that are evidence against the
+	// target (network_ping_target_evidence_schema.go): one nullable bigint on
+	// network_ping_target_hour_tally and its day partitions, added only when
+	// absent, under a five-second lock bound. A catalog change only: nothing
+	// is rewritten or scanned, and every row stored before it reads null, its
+	// evidence unknown. The running release names its columns and writes on.
+	// Apply before deploying the api and alt that write it and the taskworker
+	// that reads it.
+	newSqlMigration(networkPingTargetEvidenceSchemaSql),
+
+	// The carrier ports of each extender address
+	// (network_extender_address_ports_schema.go, connect/EXTENDER.md S10): two
+	// nullable columns on network_extender_address with no default, a catalog
+	// change only, under a two-second lock bound. The running release names
+	// its columns and reads on, and an address written before or by it reads
+	// null, the extender's ports. Apply before deploying the api, alt and
+	// taskworker that use them.
+	newSqlMigration(networkExtenderAddressPortsSchemaSql),
+
+	// The network each capture the flag award was won for (ctf_schema.go,
+	// ctfAwardNetworkSql): one nullable uuid on ctf_award, backfilled where
+	// the census or network_client knows the network, and its index, under a
+	// five-second lock bound. ctf_award is empty until capture the flag is
+	// live. Apply before deploying the taskworker and api that use it.
+	ctfAwardNetworkMigration,
+
+	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
+	// §8.6): the verified amendments file, each epoch's extender census, the
+	// shadow reports of the epochs before E_x, the platform endpoint registry
+	// and six nullable columns on st_ledger_v2_epoch_rows, each created only
+	// when absent, under a five-second lock bound. Nothing existing is
+	// rewritten. Apply before deploying the taskworker and api that read them.
+	stLedgerV2ExtenderMigration,
+
+	// The Solana receiver sweep's cursor (solana_receiver_sweep_schema.go,
+	// controller/solana_receiver_sweep.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker that runs
+	// the payment reconcile.
+	solanaReceiverSweepCursorMigration,
+
+	// Capability-aware FindProviders2's URL evidence
+	// (db_provider_egress_fp2_evidence.go, FP2-PROTOCOL.md §4.1, §12.3): two
+	// constant-default smallint columns on the partitioned URL history, the
+	// failed later legs judged the provider's and the post-quantum outcome,
+	// added only when absent under a five-second lock bound. A catalog change
+	// only: nothing is rewritten or scanned, and every outcome stored before
+	// it reads 0. Apply before deploying the taskworker, api and alt that use
+	// them.
+	providerEgressFp2EvidenceMigration,
+
+	// The store notification flow (store_notification_flow_schema.go,
+	// controller/store_notification_flow.go): one new table with a row per
+	// store, under a five-second lock bound, created only when absent.
+	// Nothing existing is locked or rewritten. Apply with the api and alt
+	// that write it.
+	storeNotificationFlowMigration,
+
+	// The sweep of every address a per-address coin's invoices were ever
+	// given (crypto_address_sweep_schema.go, controller/crypto_pay_sweep.go):
+	// two new empty tables, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked or rewritten. Apply
+	// before deploying the taskworker that runs the scans.
+	cryptoAddressSweepMigration,
+
+	// The Shopify orders paid with Solana Pay (solana_shopify_order_schema.go,
+	// controller/solana_shopify_order.go): one new empty table, created only
+	// when absent, under a five-second lock bound. Nothing existing is locked
+	// or rewritten. Apply before deploying the api and alt (the Helius
+	// webhook) and the taskworker (the Solana reconcile) that use it.
+	solanaShopifyOrderPaymentMigration,
+
+	// The durable per-network mail context (network_mail_context_schema.go,
+	// controller/mail_context.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the api and alt that write it and the
+	// taskworker that reads it.
+	networkMailContextMigration,
+
+	// Explicit distributed terminal-infrastructure recovery preserves original
+	// admission/failure and requires all-host closure before a new cycle queues.
+	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
+
+	// The gift of privacy's Pro gift codes (gift_schema.go,
+	// mmm/GIFTOFPRIVACY.md §10.6): four columns on transfer_balance_code (kind
+	// with a constant default, three nullable), each added only when absent,
+	// and the gift_order, gift_order_recipient and gift_order_pdf tables,
+	// new and empty, under a five-second lock bound. A catalog change only:
+	// nothing is rewritten or scanned, and every code before it reads kind
+	// 'data'. Apply before deploying the api, alt and taskworker that use
+	// them.
+	giftSchemaMigration,
+
+	// What refunds, disputes and orphaned crypto payments did to a gift
+	// order's codes (gift_refund_schema.go, model/gift_refund_model.go): the
+	// gift_code_void and gift_order_refund tables, new and empty, each with
+	// its index, under a five-second lock bound. Nothing existing is touched.
+	// Apply before deploying the api, alt and taskworker that use them.
+	giftRefundSchemaMigration,
+
+	// A separately qualified operator may grant one unchanged-patch retry,
+	// preserving the original paid admission, source, terminal and full audit.
+	newSqlMigration(CompetitionOperatorRequestedPatchRetryMigrationSql()),
+
+	// The bytes served per operator block of GET /account/epochs
+	// (operator_block_traffic_schema.go, model/operator_block_traffic.go): the
+	// operator_block_traffic and operator_block_network_traffic tables, new
+	// and empty, each created only when absent, under a five-second lock
+	// bound. Nothing existing is locked, scanned or rewritten. Apply before
+	// deploying the taskworker that advances the rollup and the api and alt
+	// that read it.
+	operatorBlockTrafficMigration,
+
+	// The operator blocks the daily points award recorded expired
+	// (operator_block_points_expired_schema.go,
+	// model/operator_block_points.go): one new empty table, created only when
+	// absent, under a five-second lock bound. Nothing existing is locked or
+	// rewritten. Apply before deploying the taskworker and bringyourctl that
+	// write and read it, and the api and alt whose GET /account/epochs reads
+	// it.
+	operatorBlockPointsExpiredMigration,
+
+	// Gift orders paid with Gamma (gift_gamma_schema.go,
+	// controller/gift_gamma_controller.go): gift_order.gamma_intent_id,
+	// nullable with no default and unique, each added only when absent, under
+	// a five-second lock bound. A catalog change and an index over gift_order;
+	// nothing is rewritten. Deploy order: apply this on Main, deploy the
+	// taskworker (the Gamma biller's gift credit and the gift retention),
+	// then the api and alt (POST /pay/gift/gamma-intent): an older biller
+	// would charge a gift intent and fail its credit, a final-sale payment
+	// left uncredited until the new taskworker retries it from review. Never
+	// roll the taskworker back past that build once a Gamma gift is sold.
+	giftGammaSchemaMigration,
+
+	// The early drop of provider_work_session_event_legacy (owner, 2026-11-15;
+	// DBDISK-STABILIZE I4; db_provider_work_session_partition.go): the journal's
+	// drop guard also admits the legacy partition an hour after its upper bound,
+	// the cutover week, for the owner-run `bringyourctl model migrate
+	// provider-work-session-partition --drop-legacy`. It replaces the guard's
+	// function body only: no table lock, and every drop the running release
+	// makes stays admitted, so it applies before or after any deploy. No
+	// service reads it; the drop runs only after it is applied.
+	newSqlMigration(providerWorkSessionEventLegacyDropGuardSql),
+
+	// The provider work session journal for provider clients only (owner,
+	// 2026-11-16; DBDISK-STABILIZE S4; db_provider_work_session_providers.go):
+	// provider_work_session_append appends a client's admit only while it
+	// holds a friends and family or public provide key, and a retire when its
+	// connection's admit is in the journal, or as before for a provider. It
+	// replaces the function's body only, under a five-second lock bound: no
+	// table lock or rewrite. The running release's connection trigger performs
+	// the append and ignores its result, so it applies before or after any
+	// deploy; the saving starts when it is applied.
+	newSqlMigration(providerWorkSessionProviderAppendSql),
+
+	// The retention of the provider work session heads (owner, 2026-11-16;
+	// DBDISK-STABILIZE S4; db_provider_work_session_head_retention.go): the
+	// head guard also admits a delete from the retention's transaction, which
+	// opts in with urnetwork.provider_work_session_head_retention, of a head
+	// whose client has no event left in the journal and no receipt. It
+	// replaces the guard's function body only, under a five-second lock
+	// bound: no table lock, and every update the running release makes stays
+	// admitted, so it applies before or after any deploy. Apply it before
+	// deploying the taskworker that deletes heads; an older guard refuses
+	// them, and the retention's head pass then stops on its error.
+	newSqlMigration(providerWorkSessionHeadRetentionGuardSql),
+
+	// The key history guard's floor from 30 days to 7 (owner, 2026-11-16,
+	// PARTITION-CANDIDATES.md §8.4; db_identity_retention.go): it replaces the
+	// floor function's body only, under a five-second lock bound, so no table
+	// is locked, scanned or rewritten. It only widens what the guard admits:
+	// a running taskworker keeps deleting at its own, longer horizon, and the
+	// taskworker that deletes at 7 days needs it, since its batch repeats the
+	// floor on the database clock. Apply before or after any deploy. The
+	// monitor pins the new body from this version on.
+	newSqlMigration(clientKeyHistoryRetentionSevenDayFloorSql),
+
+	// The device day rollup (owner, 2026-11-16, PARTITION-CANDIDATES.md §7.3;
+	// audit_device_day_schema.go, model/audit_device_day.go): one new empty
+	// table, created only when absent, under a five-second lock bound. Nothing
+	// existing is locked, scanned or rewritten. Apply before deploying the
+	// taskworker whose device sweep keeps today's row and whose stats export
+	// reads the rows; an older taskworker never touches it.
+	auditDeviceDayMigration,
+
+	// The drop guard of transfer_debit_journal's daily partitions (owner,
+	// 2026-11-16, PARTITION-CANDIDATES.md §6.3;
+	// db_transfer_debit_journal_partition.go): a new function only, under a
+	// five-second lock bound, so no table is locked, scanned or rewritten.
+	// Nothing calls it before the owner-run cutover (bringyourctl model
+	// migrate debit-journal-partition), so it applies before or after any
+	// deploy; the cutover's prepare refuses without it. The monitor pins its
+	// body and the journal's custody in both layouts from this version on.
+	transferDebitJournalDropGuardMigration,
+
+	// The redundant UNIQUE (registration_hash) of st_client_key_history
+	// (owner, 2026-11-16, PARTITION-CANDIDATES.md §8.5;
+	// db_client_key_history_unique_drop.go): 20.6 GiB, never scanned, and
+	// redundant with the primary key, since the hashed registration bytes
+	// encode the key's client, domain and generation. No reader, writer, ON
+	// CONFLICT target or monitor contract uses it. The operator drops it first
+	// on Main with ALTER TABLE ... DROP CONSTRAINT in a vacuum gap under a
+	// short lock timeout; this records the drop, and is a catalog read once
+	// the constraint is gone, so db migrate takes no lock on the table. Merge
+	// it only after the operator's drop: merged first, the next db migrate
+	// would take the table's ACCESS EXCLUSIVE lock itself.
+	newSqlMigration(clientKeyHistoryRegistrationHashUniqueDropSql),
+
+	// One separately approved job may receive a second recovery without replacing
+	// its original immutable audit or changing any other job's one-cycle limit.
+	newSqlMigration(CompetitionSecondRecoveryMigrationSql()),
+
+	// transfer_contract_create_time (301.6 GB, v373) served the reads of
+	// a create_time window of contracts: the public contract stats' live
+	// bucket count and hour fill, the degradation check's count of new
+	// contracts, the monitor's per-minute count and stale contract probe, and
+	// the straggler stamp's fallback. Each now bounds contract_id by its
+	// window's id range (model.ContractIdCreateTimeRange) and reads a range
+	// of the primary key. Drop it only once every running build has those
+	// reads, and pg_stat_statements has shown no call of the old statements
+	// for 7 days that include a Sunday payout and an epoch close. Ad hoc reads
+	// of transfer_contract by create_time need the same contract_id bound;
+	// without it they read the whole heap. Without this index the planner
+	// estimates a create_time range from the column's histogram, which
+	// autoanalyze refreshes about every 17 minutes on Main, instead of
+	// probing the index for the newest value.
+	createTimeIndexDropMigration,
+
+	// transfer_contract_open_payer_network_id_transfer_byte_count (36.7
+	// GB, v377) served only the prober shard cleanup's payer scan
+	// (model/prober_shard_model.go), which walked both values of open for the
+	// shard payer: 177k scans since the reset, about 5.5M tuples a call. That
+	// scan now reads the unresolved-payer and dispute partial indexes
+	// (04d883882), which plan the same contracts without this index. Drop it
+	// only once every running build has that rewrite and the index's idx_scan
+	// has stopped growing.
+	openPayerIndexDropMigration,
+
+	// The lingering origins' side table (OPEN-SOURCE-ID-RETIRE.md §2, owner
+	// 2026-11-16; contract_origin_linger_schema.go): contract_origin_linger
+	// and its prune time index, the one-row contract_origin_linger_state and
+	// the capture function, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked, scanned or
+	// rewritten. The trigger on transfer_contract is created here only on a
+	// database with no contract; on Main the operator creates it after this
+	// migration, by hand in a vacuum gap (ContractOriginLingerOperatorSql),
+	// since CREATE TRIGGER queues every writer behind its table lock. The
+	// running release never reads either table, so it applies before or after
+	// any deploy; a release with the side table reads keeps its previous
+	// statements until the state row's complete time, 75 minutes after the
+	// trigger.
+	contractOriginLingerMigration,
+
+	// The relay chunks of an epoch's extender component
+	// (db_st_ledger_v2_extender_relay.go; owner 2026-11-16, half of the
+	// extender pool by relay bytes): one nullable text[] column on
+	// st_ledger_v2_epoch_rows, added only when absent under a five-second
+	// lock bound. Nothing existing is rewritten; a running release inserts
+	// its epoch rows without the column, which leaves it null, so it applies
+	// before or after any deploy.
+	stLedgerV2ExtenderRelayMigration,
 }

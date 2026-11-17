@@ -10,8 +10,8 @@ server_dir="${script_dir%/*}"
 server_dir="${server_dir%/*}"
 cd "$script_dir"
 export GOTOOLCHAIN=local
-if [[ "$(go env GOVERSION)" != go1.27.3 ]]; then
-    printf 'sim-latency tests require Go 1.27.3 on PATH\n' >&2
+if [[ "$(go env GOVERSION)" != go1.27.4 ]]; then
+    printf 'sim-latency tests require Go 1.27.4 on PATH\n' >&2
     exit 1
 fi
 source "$server_dir/test-env.sh" || exit $?

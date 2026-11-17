@@ -16,9 +16,11 @@ import (
 // the pool version, when it was generated, and the request profile to load
 // them with -- which the prober fetches at the start of every pass.
 //
-// A pool the server cannot build answers 500 with the reason. The prober then
-// probes its built-in table, which is always a well-defined measurement, and
-// logs why; nothing else about the pass changes.
+// A pool the server cannot build answers 500, and the reason is logged. There
+// is no built-in table on the prober: its pass then measures no destination,
+// counted under urnetwork_egress_probe_pool_fetches_total{result="unavailable"}
+// (SIGNALS.md §2.19h). A country site that collides with the general pool is
+// dropped from the pool rather than refusing it.
 func ProviderEgressDestinations(w http.ResponseWriter, r *http.Request) {
 	if !authorizeOperator(r) {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)

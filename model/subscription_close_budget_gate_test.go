@@ -11,18 +11,17 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Redis admission commits earned payouts and their independent projection
-// owner with the outcome. Its provider total is applied to PostgreSQL, so an
-// absent Redis increment is expected. Run the actual owner twice to prove the
-// completed subpage retained one exact contribution across replay.
+// Redis admission commits earned payouts with the outcome, in their sweep
+// alone: no provider total is queued or credited (BILLING-SPLIT.md), and no
+// Redis increment is added. The completed subpage retained one exact
+// contribution.
 func requireForceCloseBudgetProvider(t testing.TB, ctx context.Context, fixture *forceCloseDisputeFixture, bytes ByteCount) {
 	t.Helper()
-	terminal, journals, sweeps, owners, earned, revenue := asyncPayoutRecoveryState(t, ctx, fixture.contractId)
-	if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != bytes {
-		t.Fatal("completed budget subpage lost its exact payout and durable provider owner")
+	terminal, journals, sweeps, owners, earned, _ := asyncPayoutRecoveryState(t, ctx, fixture.contractId)
+	if !terminal || journals != 1 || sweeps != 1 || owners != 0 || earned != bytes {
+		t.Fatal("completed budget subpage lost its exact payout or queued a provider owner")
 	}
-	owner := asyncPayoutRecoveryProject(t, ctx, fixture.contractId)
-	requireProviderTotalsTestState(t, ctx, owner, fixture.providerNetworkId, true, int64(bytes), int64(revenue))
+	asyncPayoutRecoveryRequireNoProjection(t, ctx, fixture.contractId, fixture.providerNetworkId)
 	if fixture.state(t, ctx).providerPayoutByteCount != 0 {
 		t.Fatal("completed budget subpage duplicated the durable provider contribution in Redis")
 	}

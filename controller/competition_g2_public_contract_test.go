@@ -5,7 +5,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -15,7 +14,7 @@ import (
 
 // Real schema compilation, not a second hand-written contract approximation.
 func TestCompetitionG2PublicPolicyVersionConformance(t *testing.T) {
-	content, err := os.ReadFile("../../sn/api/competition.yml")
+	content, err := readCompetitionTestSnContract()
 	if err != nil {
 		t.Fatal(err)
 	}

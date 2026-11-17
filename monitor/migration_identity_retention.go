@@ -42,7 +42,36 @@ var clientKeyHistoryRetentionFloorArtifactQuery = `(` +
 	financialGuardArtifact("network_client", "st_client_key_retire_on_client_delete", "st_client_key_retire_deleted_client", server.ClientKeyRetireDeletedClientBodySql(), 9) + ` AND ` +
 	snMainnetMigrationFunction("st_client_key_history_retention_floor()", "interval", "sql", "s", false, server.ClientKeyHistoryRetentionFloorBodySql()) + `)`
 
+// The 7-day floor migration replaces the floor body this pins, so the 7-day
+// floor's contract republishes the rest from its version on.
 var clientKeyHistoryRetentionFloorMigrationContract = migrationCurrentSuffix(
 	server.ClientKeyHistoryRetentionFloorMigrationVersion(),
 	"client key history retention floor below the contract horizon",
-	clientKeyHistoryRetentionFloorArtifactQuery)
+	clientKeyHistoryRetentionFloorArtifactQuery).removedAt(server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion())
+
+// The 30-day floor contract's artifacts on the 7-day floor body: both history
+// triggers on the body that reads the floor, the record of when a client went,
+// and the floor function with its exact 7-day body. The 30-day body is drift
+// from here on, as is a floor with any other body.
+var clientKeyHistoryRetentionSevenDayFloorArtifactQuery = `(` +
+	clientKeyGoneArtifactQuery + ` AND ` +
+	financialGuardArtifact("st_client_key_history", "st_client_key_history_immutable", "st_client_key_history_immutable_guard", server.ClientKeyHistoryFloorGuardBodySql(), 27) + ` AND ` +
+	financialGuardArtifact("st_client_key_history", "st_client_key_history_truncate_guard", "st_client_key_history_immutable_guard", server.ClientKeyHistoryFloorGuardBodySql(), 34) + ` AND ` +
+	financialGuardArtifact("network_client", "st_client_key_retire_on_client_delete", "st_client_key_retire_deleted_client", server.ClientKeyRetireDeletedClientBodySql(), 9) + ` AND ` +
+	snMainnetMigrationFunction("st_client_key_history_retention_floor()", "interval", "sql", "s", false, server.ClientKeyHistoryRetentionSevenDayFloorBodySql()) + `)`
+
+var clientKeyHistoryRetentionSevenDayFloorMigrationContract = migrationCurrentSuffix(
+	server.ClientKeyHistoryRetentionSevenDayFloorMigrationVersion(),
+	"client key history retention floor at 7 days",
+	clientKeyHistoryRetentionSevenDayFloorArtifactQuery)
+
+// The redundant unique registration hash constraint of the key history stays
+// dropped: a constraint or an index rebuilt under its name is drift.
+var clientKeyHistoryRegistrationHashUniqueDropArtifactQuery = `(NOT EXISTS (SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_history' AND constraint_name = 'st_client_key_history_registration_hash_key') AND ` +
+	migrationIndexRemoved("st_client_key_history", "st_client_key_history_registration_hash_key") + `)`
+
+var clientKeyHistoryRegistrationHashUniqueDropMigrationContract = migrationCurrentSuffix(
+	server.ClientKeyHistoryRegistrationHashUniqueDropMigrationVersion(),
+	"redundant unique registration hash of the key history removed",
+	clientKeyHistoryRegistrationHashUniqueDropArtifactQuery)

@@ -1,0 +1,3 @@
+# Inert template. Render only protected whitespace-free authority paths and the
+# independently provisioned coordinator public key; this is not an SSH install.
+restrict,command="/usr/bin/sudo -n -- @AGENT_PATH@ --config @CONFIG_PATH@ --serve-managed" ssh-ed25519 @COORDINATOR_PUBLIC_KEY@ epoch2-control

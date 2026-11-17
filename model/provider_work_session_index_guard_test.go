@@ -53,6 +53,7 @@ func TestProviderWorkSessionDeployedSignerRequiresTransactionIndex(t *testing.T)
 		connectClient := func(address string) (eventCount int, receiptCount int) {
 			clientId, networkId := server.NewId(), server.NewId()
 			addContractPayoutTestClients(ctx, map[server.Id]server.Id{clientId: networkId})
+			addProviderWorkSessionTestProvideKeys(ctx, clientId)
 			waitConnectDayWrites(recordConnectDayForTest(ctx, networkId, clientId, now))
 			if _, _, _, _, err := ConnectNetworkClientWithIpFamily(ctx, clientId, address, handlerId, 4); err != nil {
 				t.Fatal(err)

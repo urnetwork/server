@@ -21,13 +21,30 @@ import (
 //
 // This reads the task's source rather than its log output: the lines are what is
 // pinned, including the ones behind a verbosity, which a run would not show, and
-// a line added later is held to the same rule.
+// a line added later is held to the same rule. The verdict, the control target
+// and the way back are the task's too.
 func TestExtenderProbeLogsNameNoAddress(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "extender_probe_work.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
 	logCallCount := 0
+	for _, path := range []string{
+		"extender_probe_work.go",
+		"extender_probe_common_mode.go",
+		"extender_probe_control.go",
+		"extender_probe_recovery.go",
+		"extender_probe_metrics.go",
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inspectExtenderProbeLogCalls(t, file, &logCallCount)
+	}
+	if logCallCount == 0 {
+		t.Fatal("no log line was read, so this pins nothing")
+	}
+}
+
+// Holds every glog call of one file to the rule above.
+func inspectExtenderProbeLogCalls(t *testing.T, file *ast.File, logCallCount *int) {
 	ast.Inspect(file, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
 		if !ok {
@@ -40,7 +57,7 @@ func TestExtenderProbeLogsNameNoAddress(t *testing.T) {
 		if receiver, ok := selector.X.(*ast.Ident); !ok || receiver.Name != "glog" || selector.Sel.Name == "V" {
 			return true
 		}
-		logCallCount += 1
+		*logCallCount += 1
 		for _, arg := range call.Args {
 			// the scrubbed text is the one way a probe's error reaches a line
 			if inner, ok := arg.(*ast.CallExpr); ok {
@@ -64,9 +81,6 @@ func TestExtenderProbeLogsNameNoAddress(t *testing.T) {
 		}
 		return true
 	})
-	if logCallCount == 0 {
-		t.Fatal("no log line was read, so this pins nothing")
-	}
 }
 
 // A failed dial names the address it dialed, in either family, and the text kept
