@@ -35,6 +35,9 @@ const (
 	proberRetentionRunsPanel        = 81
 	proberRetentionWalkedPanel      = 140
 	proberRetentionWalkPanel        = 141
+	// the window step (model/prober_shard_window_clients.go)
+	proberRetentionWindowPassesPanel   = 146
+	proberRetentionWindowPositionPanel = 147
 )
 
 // Every panel of the row, in order.
@@ -53,6 +56,8 @@ var proberRetentionPanels = []int{
 	proberRetentionRunsPanel,
 	proberRetentionWalkedPanel,
 	proberRetentionWalkPanel,
+	proberRetentionWindowPassesPanel,
+	proberRetentionWindowPositionPanel,
 }
 
 // The label matchers every retention selector starts with.
@@ -180,6 +185,10 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 		{proberRetentionWalkedPanel, "contract walk: contracts read / s", []string{
 			rate("sum", "urnetwork_prober_retention_walked_contracts_total"),
 		}},
+		{proberRetentionWindowPassesPanel, "window step: passes / s by outcome and window clients deleted / s", []string{
+			rate("sum by (outcome) ", "urnetwork_prober_retention_window_shards_total"),
+			rate("sum", "urnetwork_prober_retention_window_clients_total"),
+		}},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
 		if panel.Title != c.title || panel.Type != "timeseries" || !slices.Equal(expressions(c.id), c.want) {
@@ -207,7 +216,11 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 		}},
 		{proberRetentionContractsPanel, []string{"deleted", "kept_bytes", "kept_unsettled", "busy", "eligible_dry_run", "st_provider_usage_archive", "maxContractsPerSecond"}},
 		{proberRetentionRunsPanel, []string{"caught_up", "budget", "off", "dry_run", "control_unavailable", "canceled", "error"}},
-		{proberRetentionStepPanel, []string{"select", "contracts", "identity", "registry"}},
+		{proberRetentionStepPanel, []string{"select", "contracts", "identity", "registry", "windows"}},
+		{proberRetentionWindowPassesPanel, []string{
+			"removed", "waiting", "skipped", "busy", "gone", "error", "dry_run",
+			"windows", "maxWindowShardsPerMinute",
+		}},
 		{proberRetentionDeletedPanel, []string{
 			"contract_close_report", "contract_close", "transfer_escrow", "transfer_escrow_sweep",
 			"contract_extender", "transfer_contract", "client_tls_certificate", "network_client_role",
@@ -215,7 +228,7 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 			"network_client_location_reliability", "provide_key", "network_client", "device",
 			"transfer_balance", "network", "network_user_auth_seedphrase", "network_user", "prober_shard_run",
 		}},
-		{proberRetentionModePanel, []string{"{prober_retention}control", "off", "dry run", "on", "maxWalkRowsPerSecond"}},
+		{proberRetentionModePanel, []string{"{prober_retention}control", "off", "dry run", "on", "maxWalkRowsPerSecond", "windows", "maxWindowShardsPerMinute"}},
 		{proberRetentionWalkedPanel, []string{"maxWalkRowsPerSecond", "maxContractsPerSecond", "5000", "transfer_contract_open_source_id"}},
 	} {
 		panel := dashboardPanelById(dashboard, c.id)
@@ -256,6 +269,27 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 	if walk.Title != "contract walk position (creation time read up to)" || walk.Type != "timeseries" || len(walk.Targets) != 1 ||
 		walk.Targets[0].Expr != "max(urnetwork_prober_retention_walk_cursor_timestamp_seconds{"+proberRetentionTaskworkerFilter+"} > 0 and on (env, service, block, host, instance) "+proberRetentionNewestRun+") * 1000" {
 		t.Errorf("walk position panel must read the newest run's cursor time in milliseconds: %q %+v", walk.Title, walk.Targets)
+	}
+	// the window step runs in a chain of its own, on any taskworker, and its
+	// cursor only moves forward: the position reads the highest of any process
+	windowPosition := dashboardPanelById(dashboard, proberRetentionWindowPositionPanel)
+	if windowPosition.Title != "window step position (pass creation time cleared up to)" || windowPosition.Type != "timeseries" ||
+		windowPosition.FieldConfig.Defaults.Unit != "dateTimeAsIso" || len(windowPosition.Targets) != 1 ||
+		windowPosition.Targets[0].Expr != "max(urnetwork_prober_retention_window_cursor_timestamp_seconds{"+proberRetentionTaskworkerFilter+"} > 0) * 1000" {
+		t.Errorf("window position panel must read the highest window cursor time in milliseconds: %q %+v", windowPosition.Title, windowPosition.Targets)
+	}
+	windowPasses := dashboardPanelById(dashboard, proberRetentionWindowPassesPanel)
+	windowClientsAxis := map[string]string{}
+	for _, override := range windowPasses.FieldConfig.Overrides {
+		if override.Matcher.Options != "B" {
+			continue
+		}
+		for _, property := range override.Properties {
+			windowClientsAxis[property.Id] = strings.Trim(string(property.Value), `"`)
+		}
+	}
+	if windowClientsAxis["custom.axisPlacement"] != "right" || len(windowPasses.FieldConfig.Overrides) != 1 {
+		t.Errorf("the window clients deleted must take a right axis beside the passes: %+v", windowPasses.FieldConfig.Overrides)
 	}
 	newestRun := dashboardPanelById(dashboard, proberRetentionNewestRunPanel)
 	if newestRun.FieldConfig.Defaults.Unit != "dateTimeAsIso" || len(newestRun.Targets) != 1 ||
@@ -330,7 +364,9 @@ func TestProberRetentionDashboardPanels(t *testing.T) {
 // position; a 0 mode still reads; nothing reads once the newest run is 30
 // minutes old, but the newest start does; a run whose oldest pass is after its
 // cutoff reads no lag; a newest run whose process never walked reads no walk
-// position; and other services are ignored.
+// position; the window step's position, from a chain of its own, reads the
+// highest cursor of any taskworker, and nothing before one cleared a pass; and
+// other services are ignored.
 func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 	promtool := os.Getenv("URNETWORK_PROMTOOL")
 	if promtool == "" {
@@ -375,6 +411,8 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 		oldest      float64
 		due         float64
 		walkCursor  float64
+		// the window step's cursor, which its own chain publishes
+		windowCursor float64
 	}
 	inputs := func(runs ...retentionRun) []map[string]string {
 		series := []map[string]string{}
@@ -393,16 +431,17 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 				gauge("oldest_shard_timestamp_seconds", run.oldest),
 				gauge("due_shards", run.due),
 				gauge("walk_cursor_timestamp_seconds", run.walkCursor),
+				gauge("window_cursor_timestamp_seconds", run.windowCursor),
 			)
 		}
 		return series
 	}
 	const day = 86400
 	// evaluated at 3000 s: a run is current when it started after 1200 s
-	older := retentionRun{service: "taskworker", instance: "older", start: 1500, mode: 2, generations: 30, cutoff: 9 * day, oldest: 2 * day, due: 900, walkCursor: 3 * day}
-	newest := retentionRun{service: "taskworker", instance: "newest", start: 2400, mode: 1, generations: 8, cutoff: 8 * day, oldest: 8*day - 7200, due: 12, walkCursor: day + 3600}
+	older := retentionRun{service: "taskworker", instance: "older", start: 1500, mode: 2, generations: 30, cutoff: 9 * day, oldest: 2 * day, due: 900, walkCursor: 3 * day, windowCursor: 9*day + 7200}
+	newest := retentionRun{service: "taskworker", instance: "newest", start: 2400, mode: 1, generations: 8, cutoff: 8 * day, oldest: 8*day - 7200, due: 12, walkCursor: day + 3600, windowCursor: 9 * day}
 	idle := retentionRun{service: "taskworker", instance: "idle"}
-	api := retentionRun{service: "api", instance: "api", start: 2900, mode: 2, generations: 30, cutoff: 20 * day, oldest: day, due: 5000}
+	api := retentionRun{service: "api", instance: "api", start: 2900, mode: 2, generations: 30, cutoff: 20 * day, oldest: day, due: 5000, windowCursor: 20 * day}
 	newestOff := newest
 	newestOff.mode = 0
 	staleOlder := older
@@ -441,6 +480,9 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 			{proberRetentionBacklogPanel, "A", value(12)},
 			{proberRetentionBacklogPanel, "B", value(7200)},
 			{proberRetentionWalkPanel, "A", value((day + 3600) * 1000)},
+			// the window cursor only moves forward: the highest of any
+			// taskworker, whatever its drop run's clock
+			{proberRetentionWindowPositionPanel, "A", value((9*day + 7200) * 1000)},
 		}},
 		{name: "an off mode still reads", runs: []retentionRun{older, newestOff}, evaluations: []evaluation{
 			{proberRetentionModePanel, "A", value(0)},
@@ -467,6 +509,7 @@ func TestProberRetentionPromqlReadsTheNewestRun(t *testing.T) {
 		{name: "no run reads nothing", runs: []retentionRun{idle}, evaluations: []evaluation{
 			{proberRetentionModePanel, "A", none},
 			{proberRetentionNewestRunPanel, "A", none},
+			{proberRetentionWindowPositionPanel, "A", none},
 		}},
 	}
 	tests := []map[string]any{}

@@ -167,6 +167,9 @@ func initTaskSchedule(ctx context.Context) {
 		// the prober shard generations past their retention; idle until the
 		// runtime control `{prober_retention}control` sets a mode
 		work.ScheduleRemoveProberShardGenerations(clientSession, tx)
+		// a settled prober pass's window clients an hour past its deadline,
+		// in the same control's mode
+		work.ScheduleRemoveProberShardWindows(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -554,6 +557,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveProberShardGenerations,
 			work.RemoveProberShardGenerationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveProberShardWindows,
+			work.RemoveProberShardWindowsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(
