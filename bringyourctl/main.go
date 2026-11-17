@@ -1374,13 +1374,33 @@ func networkRemove(opts docopt.Opts) {
 	}
 	// No store steps run here, so this passes no store snapshot: any active
 	// Stripe, App Store or Google Play renewal refuses the removal. Cancel it
-	// at the store (or let it end) first.
-	outcome, _ := model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil)
-	if outcome != model.RemoveNetworkRemoved {
-		fmt.Printf("network %s was not removed: %s\n", networkId, outcome)
+	// at the store (or let it end) first. A user that is the last Owner of a
+	// team is refused as the route refuses it (§7.5's last Owner).
+	text, removed := networkRemoveText(networkId, model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil))
+	fmt.Print(text)
+	if !removed {
 		os.Exit(1)
 	}
-	fmt.Printf("network %s removed\n", networkId)
+}
+
+// What `network remove` prints for the removal, and whether it removed the
+// network. The last Owner's refusal names the team and what to do first.
+func networkRemoveText(networkId server.Id, removal *model.RemoveNetworkResult) (string, bool) {
+	switch removal.Outcome {
+	case model.RemoveNetworkRemoved:
+		return fmt.Sprintf("network %s removed\n", networkId), true
+	case model.RemoveNetworkLastTeamOwner:
+		if team := removal.LastOwnerTeam; team != nil {
+			return fmt.Sprintf(
+				"network %s was not removed: %s: the user is the last Owner of team %s (%s); make another member Owner, or delete the team, first\n",
+				networkId,
+				removal.Outcome,
+				team.NetworkId,
+				team.NetworkName,
+			), false
+		}
+	}
+	return fmt.Sprintf("network %s was not removed: %s\n", networkId, removal.Outcome), false
 }
 
 // networkClientLimit shows, sets or clears the Embed plan client allowance of a

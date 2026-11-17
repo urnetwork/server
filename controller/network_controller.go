@@ -198,12 +198,21 @@ func UpdateNetworkName(
 
 type NetworkRemoveResultError struct {
 	Message string `json:"message"`
+	// what the refusal asks of the caller, for a client to act on; omitted by
+	// the refusals that carry only their message, which answer as they did
+	Code string `json:"code,omitempty"`
+	// with last_team_owner, the team the caller is the last Owner of
+	TeamNetworkId   *server.Id `json:"team_network_id,omitempty"`
+	TeamNetworkName string     `json:"team_network_name,omitempty"`
 }
 
 type NetworkRemoveResult struct {
 	Error *NetworkRemoveResultError `json:"error,omitempty"`
 }
 
+// POST /auth/network-delete (handlers.RemoveNetwork). The caller's account is
+// refused while it is the last Owner of a team, before any store step
+// (network_remove_providers.go).
 func NetworkRemove(clientSession *session.ClientSession) (*NetworkRemoveResult, error) {
 	// Authorize before the provider call. RemoveNetwork repeats this check while
 	// holding the deletion row lock, but moving Stripe cancellation ahead of

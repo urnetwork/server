@@ -86,6 +86,35 @@ func awaitPaymentModelTest(done <-chan error) error {
 	}
 }
 
+// The operator's search (`bringyourctl network find`) finds a network by its
+// name and by a near spelling, within DefaultFindNetworkSettings' distance,
+// with its admin's sign-in, and finds nothing for a name far from every
+// network's.
+func TestFindNetworksByNameWithinItsDistance(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, restore := Testing_InMemoryNetworkNameSearch(ctx)
+		defer restore()
+		if distance := DefaultFindNetworkSettings().NameDistance; distance != 3 {
+			t.Fatalf("the default distance is %d, want 3", distance)
+		}
+		networkId := server.NewId()
+		userId := server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, networkId, "operatorsearchsynthetic", userId)
+		networkNameSearch().Add(ctx, "operatorsearchsynthetic", networkId, 0)
+
+		for _, query := range []string{"operatorsearchsynthetic", "operatorsearchsynthetc"} {
+			results, err := FindNetworksByName(ctx, query)
+			if err != nil || len(results) != 1 || results[0].NetworkId != networkId || !slices.Equal(results[0].UserAuths, []string{userAuth}) {
+				t.Fatalf("search %q found %+v %v, want the network with its admin's sign-in", query, results, err)
+			}
+		}
+		if results, err := FindNetworksByName(ctx, "unrelatedquerytext"); err != nil || len(results) != 0 {
+			t.Fatalf("a far query found %+v %v", results, err)
+		}
+	})
+}
+
 func TestRemoveNetwork(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 
@@ -426,7 +455,7 @@ func TestRemoveNetworkRechecksStoreRenewalsAfterWaitingForCredit(t *testing.T) {
 
 			var outcome RemoveNetworkOutcome
 			removeDone := runPaymentModelTest(func() error {
-				outcome, _ = RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot)
+				outcome = RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome
 				return nil
 			})
 
@@ -479,7 +508,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 			addRenewal("synthetic-store-checked", now.Add(-time.Minute), now.Add(time.Hour))
 
 			// no store steps ran: any active store renewal refuses
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil); outcome != RemoveNetworkStoreRenewalUnchecked {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil).Outcome; outcome != RemoveNetworkStoreRenewalUnchecked {
 				t.Fatalf("removal without a snapshot: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
 			}
 			if success, _ := RemoveNetwork(ctx, networkId, &userId); success {
@@ -490,7 +519,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 
 			// credited after the store steps
 			addRenewal("synthetic-store-credited-later", now.Add(-time.Minute), now.Add(2*time.Hour))
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkStoreRenewalUnchecked {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome; outcome != RemoveNetworkStoreRenewalUnchecked {
 				t.Fatalf("removal after a later credit: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
 			}
 			if !removeNetworkTestNetworkExists(ctx, networkId) {
@@ -510,7 +539,7 @@ func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
 				}
 			}
 
-			if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkRemoved {
+			if outcome := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot).Outcome; outcome != RemoveNetworkRemoved {
 				t.Fatalf("removal with a current snapshot: outcome %q, want %q", outcome, RemoveNetworkRemoved)
 			}
 			if removeNetworkTestNetworkExists(ctx, networkId) {

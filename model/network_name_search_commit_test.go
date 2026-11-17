@@ -133,7 +133,7 @@ func TestRemoveNetworkUnindexesNameInMemoryAfterCommit(t *testing.T) {
 			}
 			var outcome RemoveNetworkOutcome
 			panicValue := callWithForcedFailure(ctx, func(callCtx context.Context) {
-				outcome, _ = RemoveNetworkWithStoreSnapshot(callCtx, networkId, &userId, nil)
+				outcome = RemoveNetworkWithStoreSnapshot(callCtx, networkId, &userId, nil).Outcome
 			})
 			restore()
 

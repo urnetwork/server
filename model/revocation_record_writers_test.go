@@ -212,7 +212,7 @@ func TestNetworkRemovalsRetireEveryRevocationRecord(t *testing.T) {
 		if !errors.Is(raised, errTestingRevocationStoreDown) || !networkExists(account) {
 			t.Fatalf("an account removal without its record writes committed or was not refused: %v", raised)
 		}
-		if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, account, &user, nil); outcome != RemoveNetworkRemoved || networkExists(account) {
+		if outcome := RemoveNetworkWithStoreSnapshot(ctx, account, &user, nil).Outcome; outcome != RemoveNetworkRemoved || networkExists(account) {
 			t.Fatal("account removal failed", outcome)
 		}
 		assertNetworkRevocationField(t, ctx, account, session.Testing_RevocationDeletedField, deleted)
