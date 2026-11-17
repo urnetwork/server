@@ -79,6 +79,11 @@ func testAuditDeviceEventLeaves(t testing.TB, ctx context.Context) (names []stri
 func TestAuditDeviceEventCutoverKeepsEveryEventAndDropsTheUniqueIndex(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// the constraint as Main held it before its prepare; the record
+		// migration drops it from fresh databases
+		MaintenanceDb(ctx, func(conn PgConn) {
+			RaisePgResult(conn.Exec(ctx, `ALTER TABLE audit_device_event ADD CONSTRAINT audit_device_event_event_id_key UNIQUE (event_id)`))
+		})
 		cutoverDay := PartitionGranularityDaily.AddRanges(PartitionGranularityDaily.RangeStart(NowUtc()), 2)
 		before := []Id{}
 		for _, age := range []time.Duration{time.Hour, 3 * 24 * time.Hour, 200 * 24 * time.Hour} {
