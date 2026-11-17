@@ -207,21 +207,12 @@ type ByJwt struct {
 	// a team member's credential (§7.5, TEAM-M6-02): the member_id of
 	// UserId's membership in NetworkId, new per join, so a removal and a
 	// re-invite never revive a credential of the earlier membership. The state
-	// check reads the membership, never network.admin_user_id, which in a team
-	// is a synthetic owner of record (D-TEAM-2): a tagged credential from its
-	// revocation record's m:<member_id> and u:<user_id> fields (owner decision
-	// 561), which sockets reads with no SQL, and network_member's row where the
-	// record cannot answer. Nil in a personal network, whose one member is its
-	// owner's user. Set when the credential is minted for the membership;
-	// renewal and every credential derived from it keep it.
+	// check reads network_member's row for it, never network.admin_user_id,
+	// which in a team is a synthetic owner of record (D-TEAM-2). Nil in a
+	// personal network, whose one member is its owner's user. Set when the
+	// credential is minted for the membership; renewal and every credential
+	// derived from it keep it.
 	MemberId *server.Id `json:"member_id,omitempty"`
-	// the sidecar whose identity binding names this client (§5.5): sockets
-	// reads the caller's §8 subject here, with no Postgres (plan-SOCK-client-auth,
-	// QD-040). Set only by POST /sidecar/bind's re-mint (RemintSidecarCredential),
-	// from the binding api has just recorded, and kept by a refresh of the same
-	// client. It names this client's sidecar alone, so Renew, which a child's
-	// credential is derived from, drops it, and no derived credential carries it.
-	SidecarId *server.Id `json:"sidecar_id,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -499,35 +490,16 @@ func ParseByJwt(ctx context.Context, jwtSigned string) (*ByJwt, error) {
 // ByJwt struct (a gojwt.Claims via its embedded RegisteredClaims) to avoid a
 // MapClaims map plus a json marshal/unmarshal round-trip on every request.
 func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
-	reread := func(seenKeys *byJwtKeys) *byJwtKeys {
-		if keyring.reread(seenKeys) {
-			return keyring.heldKeys()
-		}
-		return nil
-	}
-	byJwt, _, err := parseByJwtSignedByKeys(keyring.heldKeys(), reread, jwtSigned)
-	return byJwt, err
-}
-
-// parseByJwtSigned's rule over any held keys, the issuer's keyring's or the
-// verify-only keyring's (by_jwt_verify_keyring.go), so both accept exactly the
-// same tokens. reread is asked once, after a token whose kid selected no key
-// fails every held key, and answers the keys a reread gained, or nil when it
-// gained none. unknownKid reports a token that named a kid the final keys do
-// not hold: a key this process was never given, which a verifier may tell from
-// a forgery under a key it holds.
-func parseByJwtSignedByKeys(keys *byJwtKeys, reread func(seenKeys *byJwtKeys) *byJwtKeys, jwtSigned string) (byJwt *ByJwt, unknownKid bool, err error) {
 	parserOptions := []gojwt.ParserOption{
 		gojwt.WithValidMethods([]string{"ES256", "ES384", "ES512", "RS512"}),
 		gojwt.WithoutClaimsValidation(),
 	}
-	parse := func(keys *byJwtKeys) (byJwt *ByJwt, kidMissed bool, kidUnknown bool, err error) {
+	parse := func(keys *byJwtKeys) (byJwt *ByJwt, kidMissed bool, err error) {
 		keyFunc := func(token *gojwt.Token) (any, error) {
 			if kid, ok := token.Header["kid"].(string); ok {
 				if matchedPublicKey, ok := keys.kidPublicKeys[kid]; ok {
 					return matchedPublicKey, nil
 				}
-				kidUnknown = true
 			}
 			kidMissed = true
 			return gojwt.VerificationKeySet{Keys: keys.verificationKeys}, nil
@@ -537,16 +509,15 @@ func parseByJwtSignedByKeys(keys *byJwtKeys, reread func(seenKeys *byJwtKeys) *b
 		return
 	}
 
-	byJwt, kidMissed, kidUnknown, err := parse(keys)
-	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) {
-		if rereadKeys := reread(keys); rereadKeys != nil {
-			byJwt, _, kidUnknown, err = parse(rereadKeys)
-		}
+	keys := keyring.heldKeys()
+	byJwt, kidMissed, err := parse(keys)
+	if err != nil && kidMissed && errors.Is(err, gojwt.ErrTokenSignatureInvalid) && keyring.reread(keys) {
+		byJwt, _, err = parse(keyring.heldKeys())
 	}
 	if err != nil {
-		return nil, kidUnknown, err
+		return nil, err
 	}
-	return byJwt, false, nil
+	return byJwt, nil
 }
 
 // ParseByJwtForAudience verifies the signature and the registered lifetime
@@ -1043,16 +1014,11 @@ func (self *ByJwt) clientRoot(clientId server.Id) *server.Id {
 	return &clientId
 }
 
-// Copies lineage and identity while refreshing only registered claims. The
-// sidecar_id claim is left out: it names this one client's sidecar, and the
-// copy is also what a child client's credential is built from
-// (AuthNetworkClient), which must not act as its parent's sidecar. A refresh of
-// the same client puts it back (RenewSessionCredential).
+// Copies lineage and identity while refreshing only registered claims.
 func (self *ByJwt) Renew() *ByJwt {
 	copy := *self
 	copy.RegisteredClaims = newRegisteredClaims(self.UserId, self.StrictExp)
 	copy.Roles = slices.Clone(self.Roles)
-	copy.SidecarId = nil
 	return &copy
 }
 

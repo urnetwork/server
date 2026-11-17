@@ -18,8 +18,8 @@ import (
 )
 
 // The by_jwt's admin_refused claim through api's own mint, bind and refresh (§7.4; owner decision 291, QD-907): a
-// child that an app mints under its device client with both marks carries the claim from its owner row, bind's
-// re-mint and a refresh keep it, and every one of those tokens passes the daemon's pairing check
+// child that an app mints under its device client with both marks carries the claim from its owner row, a refresh
+// once bound keeps it, and every one of those tokens passes the daemon's pairing check
 // (sidecar.DaemonPairNetwork, which Sidecar.Pair's check shares); a client whose owner row has no admin_refused mark
 // carries no claim, whatever its caller's token says, and fails that check.
 
@@ -98,7 +98,7 @@ func mintAdminRefusedClaimClient(t testing.TB, ctx context.Context, caller *sess
 
 // §5.8's pair on api's side: the app's device client D, admin_refused as §18.7 mints it, carries the claim and no
 // strict_exp, so its own token does not pair; the child C it mints with both marks carries both claims, and so do
-// bind's re-mint of C's token, the re-mint's refresh and a reissue of C, each of which pairs.
+// C's refresh once bound and a reissue of C, each of which pairs.
 func TestPairChildCarriesAdminRefusedThroughBindAndRefresh(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -128,13 +128,9 @@ func TestPairChildCarriesAdminRefusedThroughBindAndRefresh(t *testing.T) {
 		if err != nil || bound.Generation != 1 {
 			t.Fatalf("bind: %v %+v", err, bound)
 		}
-		reminted := requireAdminRefusedClaim(t, ctx, bound.ByClientJwt, true)
-		if reminted.SidecarId == nil || *reminted.SidecarId != keys.sidecarId || !reminted.StrictExp {
-			t.Fatalf("bind's re-mint: %+v", reminted)
-		}
-		requirePairable(t, bound.ByClientJwt, networkId, true)
+		childByJwt := requireAdminRefusedClaim(t, ctx, *child.ByClientJwt, true)
 
-		refreshed, err := RefreshToken(session.Testing_CreateClientSession(ctx, reminted))
+		refreshed, err := RefreshToken(session.Testing_CreateClientSession(ctx, childByJwt))
 		if err != nil || refreshed.Error != nil {
 			t.Fatalf("refresh: %v %+v", err, refreshed)
 		}

@@ -97,15 +97,12 @@ func (self *sidecarRouteClient) bind(binding []byte) (int, string, int64) {
 	return w.Code, code, int64(generation)
 }
 
-// POST /sidecar/bind as the sidecar reads its answer: the status, the generation and the re-minted
-// by_client_jwt, "" for none.
-func (self *sidecarRouteClient) bindReminted(binding []byte) (int, int64, string) {
+// POST /sidecar/bind's answer as JSON, whatever it holds.
+func (self *sidecarRouteClient) bindAnswer(binding []byte) (int, map[string]any) {
 	w := self.fixture.serve(http.MethodPost, "/sidecar/bind", self.authorization(), map[string]any{"binding": binding})
 	result := map[string]any{}
 	json.Unmarshal(w.Body.Bytes(), &result)
-	generation, _ := result["generation"].(float64)
-	byClientJwt, _ := result["by_client_jwt"].(string)
-	return w.Code, int64(generation), byClientJwt
+	return w.Code, result
 }
 
 // A fresh proof of a request by the client's key over the token it presents then.
@@ -311,79 +308,26 @@ func TestSidecarRefusedClientRebindsTheNextGeneration(t *testing.T) {
 	})
 }
 
-// T2's TestFakeApiBindRemintsTheBearer on server (QD-040, QD-797): POST /sidecar/bind answers by_client_jwt beside
-// generation, the bearer re-minted with the binding's sidecar as sidecar_id, every other claim as presented, its
-// lifetime included, and a new jti; a byte-identical retry re-mints again; GET /auth/refresh with the client's proof
-// keeps the claim of the token it presents and adds none to the enrollment's, the client bound; and a reissue and a
-// child minted with the re-mint carry none.
-func TestSidecarBindRemintsTheBearerOnTheRoutes(t *testing.T) {
+// POST /sidecar/bind answers the generation alone, a byte-identical retry the same: no token, since sockets
+// reads a sidecar from its service token's ur_sidecar_id, which the exchange names from the binding (QD-1029).
+func TestSidecarBindAnswersTheGenerationAlone(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(tb, ctx)
 		defer server.Testing_PushSidecarConfig(self.previewYaml())()
 
-		claims := func(token string) *session.ByJwt {
-			t.Helper()
-			byJwt, err := session.ParseByJwt(ctx, token)
-			if err != nil {
-				t.Fatal(err)
-			}
-			return byJwt
-		}
-		namesSidecar := func(token string, sidecarId server.Id) bool {
-			t.Helper()
-			byJwt := claims(token)
-			return byJwt.SidecarId != nil && *byJwt.SidecarId == sidecarId
-		}
-
 		laptop := newSidecarRouteClient(t, self, nil, nil)
-		enrolled := laptop.token
-		presented := claims(enrolled)
 		binding := laptop.binding(1)
-		status, generation, first := laptop.bindReminted(binding)
-		if status != http.StatusOK || generation != 1 || first == "" {
-			t.Fatalf("bind: %d %d %q", status, generation, first)
-		}
-		reminted := claims(first)
-		if presented.SidecarId != nil || !namesSidecar(first, laptop.sidecarId) {
-			t.Fatalf("the re-mint names %v, the enrollment's %v", reminted.SidecarId, presented.SidecarId)
-		}
-		if reminted.NetworkId != presented.NetworkId || reminted.UserId != presented.UserId ||
-			*reminted.ClientId != *presented.ClientId || *reminted.DeviceId != *presented.DeviceId ||
-			!reminted.CreateTime.Equal(presented.CreateTime) || !reminted.StrictExp ||
-			!reminted.IssuedAt.Equal(presented.IssuedAt.Time) || !reminted.ExpiresAt.Equal(presented.ExpiresAt.Time) {
-			t.Errorf("the re-mint %+v, presented %+v", reminted, presented)
-		}
-		if reminted.ID == presented.ID {
-			t.Error("the re-mint kept the presented jti")
-		}
-
-		// a byte-identical retry re-mints again
-		status, generation, again := laptop.bindReminted(binding)
-		if status != http.StatusOK || generation != 1 || again == "" || again == first || !namesSidecar(again, laptop.sidecarId) {
-			t.Errorf("a retry: %d %d", status, generation)
-		}
-
-		laptop.token = first
-		status, code, refreshed := laptop.refresh(true)
-		if status != http.StatusOK || refreshed == "" || !namesSidecar(refreshed, laptop.sidecarId) {
-			t.Errorf("a refresh of the re-mint: %d %s", status, code)
-		}
-		laptop.token = enrolled
-		status, code, refreshed = laptop.refresh(true)
-		if status != http.StatusOK || refreshed == "" || claims(refreshed).SidecarId != nil {
-			t.Errorf("a refresh of the enrollment's token, the client bound: %d %s", status, code)
-		}
-
-		laptop.token = first
-		reissue := self.mintMarked(t, laptop.authorization(), map[string]any{"client_id": laptop.clientId, "admin_refused": true, "strict_exp": true}, laptop.proof())
-		if *reissue.ClientId != laptop.clientId || claims(*reissue.ByClientJwt).SidecarId != nil {
-			t.Errorf("a reissue of client %s carries %v", reissue.ClientId, claims(*reissue.ByClientJwt).SidecarId)
-		}
-		child := self.mintMarked(t, laptop.authorization(), map[string]any{"source_client_id": laptop.clientId}, laptop.proof())
-		if *child.ClientId == laptop.clientId || claims(*child.ByClientJwt).SidecarId != nil {
-			t.Errorf("a child %s carries %v", child.ClientId, claims(*child.ByClientJwt).SidecarId)
+		for attempt := range 2 {
+			status, result := laptop.bindAnswer(binding)
+			generation, _ := result["generation"].(float64)
+			if status != http.StatusOK || generation != 1 {
+				t.Fatalf("bind %d: %d %v", attempt, status, result)
+			}
+			if _, ok := result["by_client_jwt"]; ok || len(result) != 1 {
+				t.Fatalf("bind %d answered more than its generation: %v", attempt, result)
+			}
 		}
 	})
 }

@@ -53,7 +53,7 @@ func requireAdminRefusedClaim(t testing.TB, signed string, adminRefused bool) {
 }
 
 // A marked credential keeps the claim through a refresh's Renew, a child's
-// Client, bind's re-mint, which copies the presented credential, and signing.
+// Client, and signing.
 // The mark sets no lifetime: an app device client is admin_refused and keeps
 // today's 30 days (owner decision 131), and a sidecar's has strict_exp beside
 // it, whose 7 days it keeps.
@@ -72,12 +72,6 @@ func TestAdminRefusedClaimIsKeptByEveryDerivation(t *testing.T) {
 	child := device.Client(server.NewId(), server.NewId())
 	connect.AssertEqual(t, child.AdminRefused, true)
 	requireAdminRefusedClaim(t, child.Testing_Sign(), true)
-
-	sidecarId := server.NewId()
-	reminted := *renewed
-	reminted.SidecarId = &sidecarId
-	reminted.ID = server.NewId().String()
-	requireAdminRefusedClaim(t, reminted.Testing_Sign(), true)
 
 	sidecarClient := network.Client(server.NewId(), server.NewId())
 	sidecarClient.SetStrictExp(true)
