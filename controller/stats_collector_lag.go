@@ -32,6 +32,7 @@ import (
 //	urnetwork_stats_lag_visitors_24h_by_country  visitors who started a track in the trailing day, the top 10 countries and "other" {country_code} (db)
 //	urnetwork_stats_lag_automated_results_1h     results stored in the trailing hour from automated tracks {reason} (db)
 //	urnetwork_stats_lag_results_1h_by_source     results stored in the trailing hour, by the client that ran their track: web, cli or mcp {source} (db)
+//	urnetwork_stats_lag_drift_calibration_age_seconds  age of the drift model's calibration in force; no value while the defaults apply (db)
 //
 // The results and tracks are read from the database, not counted by the
 // handlers, so the hourly figures are exact across restarts and replicas: the
@@ -134,6 +135,11 @@ var statsLagAutomatedResults1hGauge = newStatsGaugeVec(
 	"lag_automated_results_1h",
 	"lag.dev results stored in the trailing hour from automated tracks (agent browsers, hosting networks), which every other lag gauge leaves out, by reason",
 	"reason",
+)
+
+var statsLagDriftCalibrationAgeGauge = newStatsGauge(
+	"lag_drift_calibration_age_seconds",
+	"Age of the drift model's calibration in force, from when the weekly job that made it ran (lag.dev/DRIFTTEST.md V4). It stays under a week while each run applies; a run that does not apply, or a withdrawal, leaves an older one in force. No value while the defaults apply",
 )
 
 // How many countries the visitors gauge names before folding the rest into
@@ -255,6 +261,15 @@ func statsRefreshLag(ctx context.Context, now time.Time) {
 
 	statsLagAutomatedResults1hGauge.replace(statsLagAutomatedValues(model.CountLagAutomatedResultsSince(ctx, now.Add(-time.Hour))))
 	statsLagResults1hBySourceGauge.replace(statsLagSourceValues(model.CountLagResultsBySourceSince(ctx, now.Add(-time.Hour))))
+
+	// the drift model's calibration in force (lag.dev/DRIFTTEST.md V4). The
+	// defaults have no age, so they have no value rather than one an alert on
+	// a stale calibration would read
+	if calibration := model.GetLagDriftCalibration(ctx); calibration.CalibratedAt != nil {
+		statsLagDriftCalibrationAgeGauge.set(max(now.Sub(*calibration.CalibratedAt).Seconds(), 0))
+	} else {
+		statsLagDriftCalibrationAgeGauge.unset()
+	}
 }
 
 // Every source, zero included, so a source's series never goes stale between
