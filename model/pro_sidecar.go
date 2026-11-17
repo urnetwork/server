@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 	"gopkg.in/yaml.v3"
 )
 
@@ -85,10 +86,10 @@ type proSidecarLimitRow struct {
 	key   string
 	block proSidecarBlock
 	kind  proSidecarKind
-	// No network_sidecar_limit row may set it (owner decision 146).
+	// No network_sidecar_limit row may set it (owner decisions 146 and 524).
 	fixed bool
-	// When positive, the key reads at least this, whatever pro.yml says, since an
-	// unusable value here would stop erasure rather than creation.
+	// When positive, the key reads at least this, whatever pro.yml says, `none` included,
+	// since an unusable value here would stop or slow erasure rather than creation.
 	minValue int64
 	// When set, the key reads at least that key's reading, unless it reads `none`.
 	minValueKey string
@@ -156,6 +157,22 @@ var proSidecarLimitRows = [...]proSidecarLimitRow{
 		kind:     proSidecarKindRate,
 		fixed:    true,
 		minValue: proSidecarClosureUploadsMinPerS,
+	},
+	// The two erasure rates, fixed with a floor of 60 (owner decision 524): the floors are
+	// the rate key grammar's, which reads the same rows, so the two readings share one default.
+	{
+		key:      "evs_closure_uploads_per_min",
+		block:    proSidecarBlockAbuse,
+		kind:     proSidecarKindRate,
+		fixed:    true,
+		minValue: sidecar.DefaultQuotaRateKeySettings().ClosureUploadsMinPerMin,
+	},
+	{
+		key:      "evs_erasure_pushes_per_min",
+		block:    proSidecarBlockAbuse,
+		kind:     proSidecarKindRate,
+		fixed:    true,
+		minValue: sidecar.DefaultQuotaRateKeySettings().ErasurePushesMinPerMin,
 	},
 	{key: "evs_drop_previews_per_day", block: proSidecarBlockAbuse, kind: proSidecarKindRate},
 	{key: "evs_subscribers_per_repo", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
@@ -232,7 +249,8 @@ type ProSidecarLimits struct {
 }
 
 // A key's limit. Zero is "not included", and an unknown key reads zero. The closure floor,
-// allowance and pacing read their minimums, so an unusable value never stops erasure.
+// allowance and pacing and the two erasure rates read their minimums, so an unusable value
+// never stops or slows erasure.
 func (self *ProSidecarLimits) Limit(limitKey string) int64 {
 	return self.values.limit(limitKey)
 }

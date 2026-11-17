@@ -29,8 +29,9 @@ import (
 // network's rows. A write reloads its own process's snapshot after it commits, so this
 // process enforces a change at once and the others within the ttl.
 //
-// No row moves erasure's fixed numbers (owner decision 146): evs_closure_bytes_floor and
-// evs_closure_uploads_per_s take no row, and evs_closure_bytes_per_day none below the
+// No row moves erasure's fixed numbers (owner decisions 146 and 524):
+// evs_closure_bytes_floor, evs_closure_uploads_per_s, evs_closure_uploads_per_min and
+// evs_erasure_pushes_per_min take no row, and evs_closure_bytes_per_day none below the
 // floor. ValidateNetworkSidecarLimit refuses such a row, and §21's POST /abuse/action
 // calls it; a row written to the table directly is clamped to the floor or, for the
 // fixed keys, ignored. No key exists for forwarding or sockets (owner decision 66).

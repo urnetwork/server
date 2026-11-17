@@ -8,9 +8,9 @@ package model
 //	               mailed, reviewed and lifted through its case. Its effect writes the row, reason abuse:<case_id>;
 //	               a lift's effect clears it, so the row outlives no case. Only AbuseTightenableLimitKeys' keys,
 //	               none for forwarding or sockets (owner decision 66), and every row passes
-//	               ValidateNetworkSidecarLimit first, which refuses evs_closure_bytes_floor and
-//	               evs_closure_uploads_per_s, both fixed, and evs_closure_bytes_per_day below the 4 MiB floor (owner
-//	               decision 146); QUOTA's clamp stays the second line
+//	               ValidateNetworkSidecarLimit first, which refuses the fixed keys (evs_closure_bytes_floor,
+//	               evs_closure_uploads_per_s and the two erasure rates a minute) and evs_closure_bytes_per_day below
+//	               the 4 MiB floor (owner decisions 146 and 524); QUOTA's clamp stays the second line
 //	closure growth nightly: a network whose closure bytes taken today are above zero, whose storage_over is set and
 //	               whose stored count is past its storage limit gets one case, category other, joined by its
 //	               network, with no machine action (QD-328), and none while such a case is open

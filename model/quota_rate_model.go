@@ -21,12 +21,13 @@ import (
 // through ServiceHost.Quota, by the key grammar sidecar/host_quota_keys.go fixes, in one all-or-none
 // script a call (quota_rate_script.go):
 //
-//   - each eraser's ?closure=1 uploads, its own 60 a minute and its seat in the network's closure
-//     pacing (R = evs_closure_uploads_per_s, in equal turns), and its closure bytes against its own
-//     evs_closure_bytes_per_day a UTC day, never below evs_closure_bytes_floor (owner decision 146),
-//     so one eraser past any of these leaves another passing;
-//   - the network's ERASE, CUT and CLOSURE pushes against its 60 a minute, which only classes a push
-//     (P0 within it, P1 past it, committing either way);
+//   - each eraser's ?closure=1 uploads, its own evs_closure_uploads_per_min (60, never less; owner
+//     decision 524) and its seat in the network's closure pacing (R = evs_closure_uploads_per_s, in
+//     equal turns), and its closure bytes against its own evs_closure_bytes_per_day a UTC day, never
+//     below evs_closure_bytes_floor (owner decision 146), so one eraser past any of these leaves another
+//     passing;
+//   - the network's ERASE, CUT and CLOSURE pushes against its evs_erasure_pushes_per_min (60, never
+//     less), which only classes a push (P0 within it, P1 past it, committing either way);
 //   - drops, drop previews and read receipts against their daily limits.
 //
 // Windows are a minute and a UTC day turning at 00:00:00, on the caller's clock. A refusal counts

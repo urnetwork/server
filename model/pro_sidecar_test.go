@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/sidecar"
 )
 
 // §20.4's tier keys, Community / Pro / Team, typed from the design and not from pro.yml.
@@ -77,6 +79,8 @@ var proSidecarDesignAbuseLimits = []struct {
 	{limitKey: "evs_closure_bytes_per_day", value: 64 * Mib},
 	{limitKey: "evs_closure_bytes_floor", value: 4 * Mib},
 	{limitKey: "evs_closure_uploads_per_s", value: 4},
+	{limitKey: "evs_closure_uploads_per_min", value: 60},
+	{limitKey: "evs_erasure_pushes_per_min", value: 60},
 	{limitKey: "evs_drop_previews_per_day", value: 20},
 	{limitKey: "evs_subscribers_per_repo", value: 1000},
 	{limitKey: "evs_repos_per_client", value: 500},
@@ -110,6 +114,8 @@ func proSidecarUnusableReading(limitKey string) int64 {
 		return 1088 * Kib
 	case "evs_closure_uploads_per_s":
 		return 4
+	case "evs_closure_uploads_per_min", "evs_erasure_pushes_per_min":
+		return 60
 	default:
 		return 0
 	}
@@ -626,12 +632,88 @@ func TestProSidecarClosurePacing(t *testing.T) {
 	}
 }
 
-// The floor and the pacing are the only keys a network_sidecar_limit row may not set, and
-// the allowance is the one key held at the floor (owner decision 146).
-func TestProSidecarOnlyClosureKeysAreFixed(t *testing.T) {
+// Owner decision 524: the two erasure rates read their sidecar_abuse: rows, a row above 60
+// raising them, and read 60 for a configured 10, anything under 60, zero, none, garbage or no
+// value, on every tier and as the rate key grammar reads what GET /sidecar/limits serves. No
+// tier's block sets them, no row sets them, and a value set as a row sets one reads no lower.
+func TestProSidecarErasureRates(t *testing.T) {
+	sidecarId := connect.NewId()
+	for _, rate := range []struct {
+		limitKey string
+		rateKey  string
+	}{
+		{limitKey: "evs_closure_uploads_per_min", rateKey: sidecar.QuotaRateKeyClosureUpload(sidecarId)},
+		{limitKey: "evs_erasure_pushes_per_min", rateKey: sidecar.QuotaRateKeyErasurePush},
+	} {
+		rule, err := sidecar.ParseQuotaRateKey(rate.rateKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range []struct {
+			yamlValue string
+			value     int64
+		}{
+			{yamlValue: "60", value: 60},
+			{yamlValue: "61", value: 61},
+			{yamlValue: "120", value: 120},
+			{yamlValue: "59", value: 60},
+			{yamlValue: "10", value: 60},
+			{yamlValue: "0", value: 60},
+			{yamlValue: "none", value: 60},
+			{yamlValue: "garbage", value: 60},
+			{yamlValue: "~", value: 60},
+		} {
+			c := parseProSidecarYml(fmt.Sprintf("sidecar_abuse: {%s: %s}", rate.limitKey, l.yamlValue))
+			if value := c.SidecarAbuse.Limit(rate.limitKey); value != l.value {
+				t.Errorf("sidecar_abuse %s %s reads %d", rate.limitKey, l.yamlValue, value)
+			}
+			for _, tier := range proSidecarEveryTier {
+				limits := &c.TierFor(tier).Sidecar
+				if value := limits.Limit(rate.limitKey); value != l.value {
+					t.Errorf("%s %s %s reads %d", tier, rate.limitKey, l.yamlValue, value)
+				}
+				served := &sidecar.QuotaLimits{Tier: string(tier), Limits: limits.Limits()}
+				if value := rule.Limit(served); value != l.value {
+					t.Errorf("%s %s %s: the grammar reads %d", tier, rate.limitKey, l.yamlValue, value)
+				}
+			}
+		}
+
+		c := parseProSidecarYml("sidecar_abuse: {}")
+		connect.AssertEqual(t, int64(60), c.TierFor(NetworkTierFree).Sidecar.Limit(rate.limitKey))
+
+		// a tier's block sets neither (D-QUOTA-7)
+		c = parseProSidecarYml(fmt.Sprintf("free: {sidecar: {%s: 120}}\nsidecar_abuse: {%s: 90}", rate.limitKey, rate.limitKey))
+		connect.AssertEqual(t, int64(90), c.TierFor(NetworkTierFree).Sidecar.Limit(rate.limitKey))
+
+		// no row sets either, and one written to the table directly is ignored
+		for _, limitValue := range []int64{120, 10, -1} {
+			err := ValidateNetworkSidecarLimit(rate.limitKey, limitValue, "ops: change 1")
+			if !errors.Is(err, ErrNetworkSidecarLimitRefused) {
+				t.Errorf("a row setting %s to %d: %v", rate.limitKey, limitValue, err)
+			}
+			if usableNetworkSidecarLimitRow(rate.limitKey, limitValue) {
+				t.Errorf("a direct row setting %s to %d applies", rate.limitKey, limitValue)
+			}
+		}
+		tightened := c.TierFor(NetworkTierFree).Sidecar.withLimit(rate.limitKey, 1)
+		connect.AssertEqual(t, int64(60), tightened.Limit(rate.limitKey))
+	}
+}
+
+// The floor, the pacing and the two erasure rates are the only keys a network_sidecar_limit
+// row may not set, and the allowance is the one key held at the floor (owner decisions 146
+// and 524).
+func TestProSidecarOnlyErasureKeysAreFixed(t *testing.T) {
+	fixedLimitKeys := map[string]bool{
+		"evs_closure_bytes_floor":     true,
+		"evs_closure_uploads_per_s":   true,
+		"evs_closure_uploads_per_min": true,
+		"evs_erasure_pushes_per_min":  true,
+	}
 	for i := range proSidecarLimitRows {
 		row := &proSidecarLimitRows[i]
-		fixed := row.key == "evs_closure_bytes_floor" || row.key == "evs_closure_uploads_per_s"
+		fixed := fixedLimitKeys[row.key]
 		if row.fixed != fixed {
 			t.Errorf("%s fixed is %t", row.key, row.fixed)
 		}
