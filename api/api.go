@@ -478,6 +478,14 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/lag/extenders", handlers.LagExtenders),
 		router.NewRoute("POST", "/lag/track", handlers.LagTrack),
 		router.NewRoute("POST", "/network/extender-lag-report", handlers.ExtenderLagReport),
+		// lag.dev drift tests (lag.dev/DRIFTTEST.md P1): an Embed network
+		// allocates and reads them with its credential, and the widget starts,
+		// finishes and reads runs with the token alone
+		router.NewRoute("POST", "/lag/drift-test", handlers.LagDriftTestAllocate),
+		router.NewRoute("GET", "/lag/drift-test", handlers.LagDriftTestGet),
+		router.NewRoute("POST", "/lag/drift-test/start", handlers.LagDriftTestStart),
+		router.NewRoute("POST", "/lag/drift-test/finish", handlers.LagDriftTestFinish),
+		router.NewRoute("POST", "/lag/drift-test/result", handlers.LagDriftTestResult),
 		router.NewRoute("POST", "/updates/brevo", handlers.BrevoWebhook),
 		router.NewRoute("POST", "/log/([^/]+)/upload", handlers.LogUpload),
 	}
