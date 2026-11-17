@@ -2356,6 +2356,75 @@
     }
    ],
    "description": "Age of the drift model's calibration in force (V4): kappa, sigma0 and the relay thresholds, which size every ellipse (V3). The weekly job keeps it under 7 days while each run applies; a failed week leaves the last good one in force, up to 14 days (ops/drift-test.md 6), and LagDriftCalibrationStale warns past 15 days. No value while the defaults apply: before the first calibration, or after every one is withdrawn. The lines mark 7 and 15 days. The stats collector runs in every taskworker and each publishes the same database reading, so this reads the gauge with max across hosts rather than a bare series."
+  },
+  {
+   "id": 43,
+   "type": "bargauge",
+   "title": "drift calibration k overflows, last 30 days",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 8,
+    "x": 16,
+    "y": 136
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "min": 0,
+     "decimals": 0,
+     "noValue": "none",
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "sizing": "auto",
+    "minVizWidth": 8,
+    "minVizHeight": 16,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sort_desc(sum by (continent, confidence) ((last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d]) - last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d] offset 30d)) or last_over_time(urnetwork_lag_drift_calibration_k_overflow_total{env=\"$env\"}[30d])))",
+     "refId": "A",
+     "legendFormat": "{{continent}} at {{confidence}}",
+     "instant": true,
+     "range": false
+    }
+   ],
+   "description": "Weekly drift calibrations in the trailing 30 days whose region size k, for a continent with 10,000 tracks or more, came out beyond its histogram's last edge at a confidence (DRIFTTEST.md V11), by continent and confidence. That continent keeps the default k at that confidence until a calibration gives one. The weekly job logs each as [lag]drift calibration <id>: <continent>'s region size at <confidence> is beyond its histograms' last edge, and lists them in its task result as k_overflows. Such a tail is most likely visitors whose city points are wrong far beyond what light rules out, such as many on VPNs (ops/drift-test.md 6). None is normal, and LagDriftCalibrationKOverflow warns for 8 days after each. Counted per process, whose series are keyed by instance, and read as each process's count over the window, summed: its last value in the window less its last value before it, or its whole value when it began within the window. A drift counter's series starts at its first count in a process, which an increase cannot see, and a process that started and stopped within the window would be lost by reading only the current series; drift counts are small, so this counts every one."
   }
  ]
 }

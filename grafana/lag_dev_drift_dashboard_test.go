@@ -127,6 +127,7 @@ func TestLagDevDriftRowAnswersEachQuestion(t *testing.T) {
 		{"start refusals by a rate limit", []string{"urnetwork_lag_drift_starts_total{", `outcome="refused_limit"`}},
 		{"allocation refusals by a rate limit", []string{"urnetwork_lag_drift_allocations_total{", `outcome="refused_limit"`}},
 		{"calibration freshness", []string{`max(urnetwork_stats_lag_drift_calibration_age_seconds{env="$env"})`}},
+		{"calibration k overflows by continent and confidence, 30 days", []string{"sum by (continent, confidence) (", "urnetwork_lag_drift_calibration_k_overflow_total{", "[30d]"}},
 	} {
 		answered := slices.ContainsFunc(expressions, func(expression string) bool {
 			for _, part := range question.parts {
@@ -184,9 +185,9 @@ func TestLagDevDriftRowCoversTheDriftMetrics(t *testing.T) {
 // window less the last value before it, or the whole value of a series that
 // began within it. Groups: the three selectors and the four windows, which
 // must agree.
-var lagDevDriftCountPattern = regexp.MustCompile(`\(last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d)\]\)` +
-	` - last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d)\] offset (1h|1d)\)\)` +
-	` or last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d)\]\)`)
+var lagDevDriftCountPattern = regexp.MustCompile(`\(last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d|30d)\]\)` +
+	` - last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d|30d)\] offset (1h|1d|30d)\)\)` +
+	` or last_over_time\((urnetwork_lag_drift_[a-z0-9_]+\{[^{}\s]*\})\[(1h|1d|30d)\]\)`)
 
 var lagDevDriftSumPrefixPattern = regexp.MustCompile(`(?:sum\(|sum by \([a-z_, ]+\) \()$`)
 
@@ -235,17 +236,20 @@ func TestLagDevDriftRowCountsEveryCountOfEachProcess(t *testing.T) {
 }
 
 // The drift row groups by the bounded labels of the drift metrics: outcome,
-// verdict, reason, stop and le, and by network only for the 10 networks with
-// the most runs. A process's labels only match the sweep's two gauges under a
-// max, which keeps no process. Nothing names a visitor, an address, an
-// extender, a test or a token (DRIFTTEST.md R1, ops/drift-test.md §10).
+// verdict, reason, stop, le, and the calibration's continent code and
+// confidence, and by network only for the 10 networks with the most runs. A
+// process's labels only match the sweep's two gauges under a max, which keeps
+// no process. Nothing names a visitor, an address, an extender, a test or a
+// token (DRIFTTEST.md R1, ops/drift-test.md §10).
 func TestLagDevDriftRowGroupsOnlyByBoundedLabels(t *testing.T) {
 	bounded := map[string]bool{
-		"outcome": true,
-		"verdict": true,
-		"reason":  true,
-		"stop":    true,
-		"le":      true,
+		"outcome":    true,
+		"verdict":    true,
+		"reason":     true,
+		"stop":       true,
+		"le":         true,
+		"continent":  true,
+		"confidence": true,
 	}
 	byClause := regexp.MustCompile(`by \(([^)]*)\)`)
 	topNetworks := "topk(10, sum by (network_id) ((last_over_time(urnetwork_lag_drift_runs_total{"
