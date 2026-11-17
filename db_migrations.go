@@ -11726,4 +11726,10 @@ var migrations = []any{
 	// Epoch two substitutes a separately pinned official Astra reviewer only;
 	// genuine prereview timestamps and all normal downstream gates are retained.
 	newSqlMigration(competitionOfficialReviewEpochTwoMigration()),
+
+	// The record of UNIQUE (event_id)'s drop from audit_device_event
+	// (audit_device_event_unique_record.go): a no-op on Main, where the
+	// owner-run prepare of the partition cutover dropped it, and the drop
+	// under a five-second lock bound elsewhere. Merge only after that prepare.
+	auditDeviceEventUniqueRecordMigration,
 }
