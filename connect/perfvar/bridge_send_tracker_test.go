@@ -30,6 +30,12 @@ func sendFullTunBridgeBatch(
 		return 0
 	}
 	bridgeEntries := bridgeSends.startPacketBatch(packets)
+	var pureAckInputs [64]bool
+	if bridgeSends.observeAdmission {
+		for index, packet := range packets {
+			pureAckInputs[index] = clientconnect.IsTcpAckOnlyPacket(packet)
+		}
+	}
 	if 0 < appDelay {
 		delayStart := bridgeSends.now()
 		delay(appDelay)
@@ -41,6 +47,26 @@ func sendFullTunBridgeBatch(
 	var acceptedStorage [64]bool
 	accepted := acceptedStorage[:len(packets)]
 	sentPacketCount := send(packets, accepted)
+	acceptedPacketCount := 0
+	for index := range packets {
+		if !bridgeSends.observeAdmission {
+			break
+		}
+		class := 1
+		if pureAckInputs[index] {
+			class = 0
+		}
+		bridgeSends.admissionOffered[class].Add(1)
+		if accepted[index] {
+			acceptedPacketCount++
+			bridgeSends.admissionAccepted[class].Add(1)
+		} else {
+			bridgeSends.admissionRefused[class].Add(1)
+		}
+	}
+	if bridgeSends.observeAdmission && (sentPacketCount < 0 || len(packets) < sentPacketCount || acceptedPacketCount != sentPacketCount) {
+		bridgeSends.admissionInvalidCount.Add(1)
+	}
 	bridgeSends.sendDurationNanoseconds.Add(
 		uint64(bridgeSends.now().Sub(sendStart)),
 	)
@@ -108,9 +134,11 @@ type fullTunBridgeFlowState struct {
 // A fixed histogram makes interval subtraction exact, including the maximum
 // observed read batch, without resetting counters shared by route workers.
 type fullTunBridgeBatchSnapshot struct {
-	packetCountByBatchSize [65]uint64
-	delayDuration          time.Duration
-	sendDuration           time.Duration
+	packetCountByBatchSize                                [65]uint64
+	delayDuration                                         time.Duration
+	sendDuration                                          time.Duration
+	admissionOffered, admissionAccepted, admissionRefused [2]uint64
+	admissionInvalidCount                                 uint64
 }
 
 // Interval values describe the source read batches that crossed one exact
@@ -121,22 +149,30 @@ type fullTunBridgeBatchObservation struct {
 	MaximumBatchPacketCount int           `json:"maximum_batch_packet_count"`
 	DelayDuration           time.Duration `json:"delay_duration_nanoseconds"`
 	SendDuration            time.Duration `json:"send_duration_nanoseconds"`
+	AdmissionOffered        [2]uint64     `json:"admission_offered_pure_ack_other"`
+	AdmissionAccepted       [2]uint64     `json:"admission_accepted_pure_ack_other"`
+	AdmissionRefused        [2]uint64     `json:"admission_refused_pure_ack_other"`
+	AdmissionInvalid        bool          `json:"admission_invalid"`
 }
 
 // Concurrent bridge publication and workload boundaries share one short
 // state lock; terminal state is atomic so waits never hold that lock.
 type fullTunBridgeSendTracker struct {
-	stateLock                    sync.Mutex
-	active                       *fullTunBridgeFlowState
-	liveEntries                  map[*fullTunBridgeSendEntry]struct{}
-	nextWindowId                 uint64
-	activeWindowId               atomic.Uint64
-	startedCount                 atomic.Uint64
-	publishingCount              atomic.Int64
-	failureCount                 atomic.Uint64
-	batchCountByPacketCount      [65]atomic.Uint64
-	delayDurationNanoseconds     atomic.Uint64
-	sendDurationNanoseconds      atomic.Uint64
+	stateLock                                             sync.Mutex
+	active                                                *fullTunBridgeFlowState
+	liveEntries                                           map[*fullTunBridgeSendEntry]struct{}
+	nextWindowId                                          uint64
+	activeWindowId                                        atomic.Uint64
+	startedCount                                          atomic.Uint64
+	publishingCount                                       atomic.Int64
+	failureCount                                          atomic.Uint64
+	batchCountByPacketCount                               [65]atomic.Uint64
+	delayDurationNanoseconds                              atomic.Uint64
+	sendDurationNanoseconds                               atomic.Uint64
+	admissionOffered, admissionAccepted, admissionRefused [2]atomic.Uint64
+	// Set only during construction before the bridge goroutine starts.
+	observeAdmission             bool
+	admissionInvalidCount        atomic.Uint64
 	progress                     chan struct{}
 	beforeStartPublishForTest    atomic.Pointer[fullTunBridgeStartTestHook]
 	beforePublisherWaitForTest   atomic.Pointer[fullTunBridgeStartTestHook]
@@ -176,12 +212,18 @@ func newFullTunBridgeSendTracker() *fullTunBridgeSendTracker {
 // Point-in-time monotonic counters are safe to subtract at carrier boundaries.
 func (self *fullTunBridgeSendTracker) batchSnapshot() fullTunBridgeBatchSnapshot {
 	snapshot := fullTunBridgeBatchSnapshot{
-		delayDuration: time.Duration(self.delayDurationNanoseconds.Load()),
-		sendDuration:  time.Duration(self.sendDurationNanoseconds.Load()),
+		delayDuration:         time.Duration(self.delayDurationNanoseconds.Load()),
+		sendDuration:          time.Duration(self.sendDurationNanoseconds.Load()),
+		admissionInvalidCount: self.admissionInvalidCount.Load(),
 	}
 	for packetCount := range snapshot.packetCountByBatchSize {
 		snapshot.packetCountByBatchSize[packetCount] =
 			self.batchCountByPacketCount[packetCount].Load()
+	}
+	for class := range snapshot.admissionOffered {
+		snapshot.admissionOffered[class] = self.admissionOffered[class].Load()
+		snapshot.admissionAccepted[class] = self.admissionAccepted[class].Load()
+		snapshot.admissionRefused[class] = self.admissionRefused[class].Load()
 	}
 	return snapshot
 }
@@ -194,6 +236,22 @@ func observeFullTunBridgeBatches(
 	observation := fullTunBridgeBatchObservation{}
 	observation.DelayDuration = after.delayDuration - before.delayDuration
 	observation.SendDuration = after.sendDuration - before.sendDuration
+	observation.AdmissionInvalid = before.admissionInvalidCount != after.admissionInvalidCount
+	for class := range after.admissionOffered {
+		if after.admissionOffered[class] < before.admissionOffered[class] ||
+			after.admissionAccepted[class] < before.admissionAccepted[class] ||
+			after.admissionRefused[class] < before.admissionRefused[class] {
+			observation.AdmissionInvalid = true
+			continue
+		}
+		observation.AdmissionOffered[class] = after.admissionOffered[class] - before.admissionOffered[class]
+		observation.AdmissionAccepted[class] = after.admissionAccepted[class] - before.admissionAccepted[class]
+		observation.AdmissionRefused[class] = after.admissionRefused[class] - before.admissionRefused[class]
+		if observation.AdmissionAccepted[class] > observation.AdmissionOffered[class] ||
+			observation.AdmissionRefused[class] != observation.AdmissionOffered[class]-observation.AdmissionAccepted[class] {
+			observation.AdmissionInvalid = true
+		}
+	}
 	for packetCount := range after.packetCountByBatchSize {
 		batchCount := after.packetCountByBatchSize[packetCount] -
 			before.packetCountByBatchSize[packetCount]
@@ -210,6 +268,53 @@ func observeFullTunBridgeBatches(
 // A mobile read burst pays one modeled application wake and crosses one
 // consuming route call. This deterministically fails the former per-packet
 // loop without comparing scheduler-dependent elapsed time.
+// The exact receipt survives a consuming sender that overwrites every input.
+// Setup is excluded by the same monotonic snapshot subtraction as the carrier.
+func TestFullTunBridgeAdmissionPressurePreservesInputAndInterval(t *testing.T) {
+	tracker := newFullTunBridgeSendTracker()
+	tracker.observeAdmission = true
+	sendFullTunBridgeBatch(tracker, [][]byte{{0}}, 0, nil, func(_ [][]byte, accepted []bool) int {
+		accepted[0] = true
+		return 1
+	})
+	before := tracker.batchSnapshot()
+	ack := make([]byte, 40)
+	ack[0], ack[3], ack[8], ack[9], ack[32], ack[33] = 0x45, 40, 64, 6, 0x50, 0x10
+	copy(ack[12:16], net.IPv4(192, 0, 2, 1).To4())
+	copy(ack[16:20], net.IPv4(198, 51, 100, 1).To4())
+	if !clientconnect.IsTcpAckOnlyPacket(ack) {
+		t.Fatal("synthetic pure ACK fixture did not parse")
+	}
+	sendFullTunBridgeBatch(tracker, [][]byte{ack, {0}}, 0, nil, func(packets [][]byte, accepted []bool) int {
+		for _, packet := range packets {
+			clear(packet)
+		}
+		accepted[1] = true
+		return 1
+	})
+	observed := observeFullTunBridgeBatches(before, tracker.batchSnapshot())
+	if observed.AdmissionInvalid || observed.AdmissionOffered != [2]uint64{1, 1} ||
+		observed.AdmissionAccepted != [2]uint64{0, 1} || observed.AdmissionRefused != [2]uint64{1, 0} {
+		t.Fatalf("input reuse or setup changed exact pressure counts: %+v", observed)
+	}
+}
+
+// Balanced input totals cannot authorize a malformed batch return count.
+func TestFullTunBridgeAdmissionPressureRejectsInconsistentResults(t *testing.T) {
+	for _, sent := range []int{-1, 0, 2} {
+		tracker := newFullTunBridgeSendTracker()
+		tracker.observeAdmission = true
+		before := tracker.batchSnapshot()
+		sendFullTunBridgeBatch(tracker, [][]byte{{0}}, 0, nil, func(_ [][]byte, accepted []bool) int {
+			accepted[0] = true
+			return sent
+		})
+		if observed := observeFullTunBridgeBatches(before, tracker.batchSnapshot()); !observed.AdmissionInvalid {
+			t.Fatalf("malformed return count %d passed pressure accounting: %+v", sent, observed)
+		}
+	}
+}
+
 func TestFullTunBridgeBatchAppliesOneDelayAndOneSend(t *testing.T) {
 	tracker := newFullTunBridgeSendTracker()
 	var nowCount atomic.Uint64

@@ -11744,26 +11744,8 @@ var migrations = []any{
 	// network cleanup finds them (FindDeletedNetworkIds). Apply before
 	// deploying the api, alt and taskworker that read them; a running release
 	// reads neither table.
-	newSqlMigration(`
-		CREATE TABLE deleted_network (
-			network_id uuid NOT NULL,
-			delete_time timestamp NOT NULL,
-			source varchar(32) NOT NULL,
-
-			PRIMARY KEY (network_id)
-		)
-	`),
-	newSqlMigration(`
-		CREATE TABLE apple_subscription_move (
-			original_transaction_id varchar(128) NOT NULL,
-			from_network_id uuid NOT NULL,
-			to_network_id uuid NOT NULL,
-			transaction_id varchar(128) NOT NULL,
-			move_time timestamp NOT NULL,
-
-			PRIMARY KEY (original_transaction_id)
-		)
-	`),
+	newSqlMigration(deletedNetworkSchemaSql),
+	newSqlMigration(appleSubscriptionMoveSchemaSql),
 	newSqlMigration(DeletedNetworkBackfillSql),
 
 	// The verify cohort v2's rolling census (verify_cohort_rolling_schema.go,
