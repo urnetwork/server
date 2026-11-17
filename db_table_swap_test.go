@@ -8,11 +8,14 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The synthetic queue the swap tests rotate (db_table_swap_db_test.go). Its
@@ -44,13 +47,14 @@ func (self *testTableSwapPreflightState) refuseLocked(message string) {
 	self.lockedRefusal = message
 }
 
-func (self *testTableSwapPreflightState) lockedCheckSql() string {
+// The locked check reads the relation it is given, as pending_task's does.
+func (self *testTableSwapPreflightState) lockedCheckSql(relation string) string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.lockedRefusal == "" {
-		return "SELECT 1"
+		return fmt.Sprintf("SELECT count(*) FROM public.%s", quoteIdentifier(relation))
 	}
-	return tableSwapAssertSql("false", self.lockedRefusal)
+	return tableSwapAssertSql(fmt.Sprintf("NOT EXISTS (SELECT 1 FROM public.%s)", quoteIdentifier(relation)), self.lockedRefusal)
 }
 
 func (self *testTableSwapPreflightState) callCount() int {
@@ -76,8 +80,8 @@ var _ = RegisterTableSwapProfile(&TableSwapProfile{
 	LockedCheckSql: testTableSwapPreflight.lockedCheckSql,
 })
 
-// A swap's twin and kept old tables of a registered table are its own; look
-// alikes and other tables are not.
+// A swap's twin, its change capture's log and kept old tables of a registered
+// table are its own; look alikes and other tables are not.
 func TestTableSwapRelationRecognizesOnlyASwapsOwnTables(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -85,6 +89,8 @@ func TestTableSwapRelationRecognizesOnlyASwapsOwnTables(t *testing.T) {
 	}{
 		{name: testTableSwapTable + "_old_20261118120000", owned: true},
 		{name: testTableSwapTable + "_next", owned: true},
+		{name: testTableSwapTable + "_next_log", owned: true},
+		{name: testTableSwapTable + "_next_logs", owned: false},
 		{name: testTableSwapTable, owned: false},
 		{name: testTableSwapTable + "_old_2026111812000", owned: false},
 		{name: testTableSwapTable + "_old_202611181200000", owned: false},
@@ -152,6 +158,10 @@ func TestTableSwapSettingsValidate(t *testing.T) {
 		func(settings *TableSwapSettings) { settings.MaxCopyRows = 0 },
 		func(settings *TableSwapSettings) { settings.WorkMemBytes = 1024 },
 		func(settings *TableSwapSettings) { settings.DropOldMinAge = 0 },
+		func(settings *TableSwapSettings) { settings.MaxLockHold = 0 },
+		func(settings *TableSwapSettings) { settings.MaxLockedDeltaRows = 0 },
+		func(settings *TableSwapSettings) { settings.CatchUpRows = -1 },
+		func(settings *TableSwapSettings) { settings.MaxCatchUpPasses = 0 },
 	} {
 		settings := DefaultTableSwapSettings()
 		change(settings)
@@ -159,9 +169,144 @@ func TestTableSwapSettingsValidate(t *testing.T) {
 			t.Errorf("accepted %+v", settings)
 		}
 	}
-	// the lock wait stays below a main-pool writer's own bound
-	if PgLockTimeout <= DefaultTableSwapSettings().LockTimeout {
-		t.Fatalf("the swap's lock wait %s reaches a writer's %s", DefaultTableSwapSettings().LockTimeout, PgLockTimeout)
+	// the lock wait stays below a main-pool writer's own bound, and so does
+	// the wait and the hold together: transaction_timeout cuts the swap off at
+	// their sum, so no writer queues behind it past its own bound
+	defaults := DefaultTableSwapSettings()
+	if PgLockTimeout <= defaults.LockTimeout {
+		t.Fatalf("the swap's lock wait %s reaches a writer's %s", defaults.LockTimeout, PgLockTimeout)
+	}
+	if PgLockTimeout <= defaults.LockTimeout+defaults.MaxLockHold {
+		t.Fatalf("the swap's lock wait %s and hold %s reach a writer's %s", defaults.LockTimeout, defaults.MaxLockHold, PgLockTimeout)
+	}
+	// the owner's go rule: under 1.2 s of lock
+	if 1200*time.Millisecond < defaults.MaxLockHold {
+		t.Fatalf("the swap may hold its lock %s, past the go rule's 1.2 s", defaults.MaxLockHold)
+	}
+}
+
+// A synthetic queue's shape, keyed by item_id, with a unique key, a plain
+// and an expression index.
+func testTableSwapIndexedShape() *tableSwapShape {
+	shape := testTableSwapShapeOf("test_table_swap_queue", testTableSwapColumn("item_id"), testTableSwapColumn("queue_key"), testTableSwapColumn("run_at"))
+	shape.indexes = []tableSwapIndex{
+		{name: "test_table_swap_queue_pkey", unique: true, body: "btree (item_id)", usable: true, constraintKind: "p"},
+		{name: "test_table_swap_queue_queue_key_key", unique: true, body: "btree (queue_key)", usable: true, constraintKind: "u"},
+		{name: "test_table_swap_queue_poll", body: "btree (run_at)", usable: true},
+	}
+	return shape
+}
+
+// The root cause of the 11-17 STOP, in the script itself: what the swap sends
+// under its lock creates no table and builds no index, and copies only the
+// rows of the captured keys (the old script copied every row and built every
+// index there). The twin is locked before the table, whose lock wait is
+// bounded and whose hold is cut off by transaction_timeout at LockTimeout +
+// MaxLockHold; the capture triggers are checked and dropped under the lock,
+// before the checks, the changes and the renames.
+func TestTableSwapLockedScriptCopiesOnlyTheCapturedChanges(t *testing.T) {
+	settings := DefaultTableSwapSettings()
+	swap := &tableSwap{profile: tableSwapProfile(testTableSwapTable), settings: settings, logf: t.Logf}
+	source := testTableSwapIndexedShape()
+	capture := newTableSwapCapture(testTableSwapTable, source.primaryKey)
+	beforeHook, afterHook := swap.lockedSql(tableSwapLockedScript{
+		source:            source,
+		capture:           capture,
+		target:            testTableSwapTable + "_next",
+		stamp:             "20261118120000",
+		sourceFingerprint: "synthetic fingerprint",
+	})
+	script := append(slices.Clone(beforeHook), afterHook...)
+	position := func(prefix string) int {
+		return slices.IndexFunc(script, func(statement string) bool { return strings.HasPrefix(statement, prefix) })
+	}
+	for _, statement := range script {
+		for _, forbidden := range []string{"CREATE TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX", "ADD CONSTRAINT", "VACUUM", "ANALYZE"} {
+			if strings.Contains(statement, forbidden) {
+				t.Fatalf("the locked script runs %s:\n%s", forbidden, statement)
+			}
+		}
+		// the table is read one captured key at a time, through its key
+		if strings.Contains(statement, "INSERT INTO") && !(strings.Contains(statement, `FROM (SELECT DISTINCT "item_id" FROM public."test_table_swap_queue_next_log") captured
+		CROSS JOIN LATERAL (`) && strings.Contains(statement, `FROM public."test_table_swap_queue" source_table WHERE ("source_table"."item_id") = ("captured"."item_id"))`)) {
+			t.Fatalf("the locked script copies rows of keys it did not capture, or reads the table otherwise than by key:\n%s", statement)
+		}
+	}
+	if script[0] != "BEGIN ISOLATION LEVEL READ COMMITTED" {
+		t.Fatal("the script does not begin its own read committed transaction:", script[0])
+	}
+	targetLock := position(`LOCK TABLE public."test_table_swap_queue_next" IN ACCESS EXCLUSIVE MODE`)
+	// a timer a role default armed at BEGIN is disarmed before the cut-off's
+	disarm := position("SET LOCAL transaction_timeout = 0")
+	cutOff := position("SET LOCAL transaction_timeout = '1500ms'")
+	tableLock := position(`LOCK TABLE public."test_table_swap_queue" IN ACCESS EXCLUSIVE MODE`)
+	lockWait := position("SET LOCAL lock_timeout = '500ms'")
+	dropTrigger := position(`DROP TRIGGER table_swap_capture ON public."test_table_swap_queue"`)
+	apply := slices.IndexFunc(script, func(statement string) bool { return strings.Contains(statement, "captured_count") })
+	rename := position(`ALTER TABLE public."test_table_swap_queue" RENAME TO "test_table_swap_queue_old_20261118120000"`)
+	if !(0 < lockWait && lockWait < targetLock && targetLock < disarm && disarm+1 == cutOff && cutOff < tableLock && tableLock < dropTrigger && dropTrigger < apply && apply < rename) {
+		t.Fatalf("the script's order: lock wait %d, target lock %d, disarm %d, cut-off %d, table lock %d, trigger drop %d, changes %d, renames %d", lockWait, targetLock, disarm, cutOff, tableLock, dropTrigger, apply, rename)
+	}
+	if !strings.Contains(script[apply], fmt.Sprintf("IF %d < captured_count THEN", settings.MaxLockedDeltaRows)) || !strings.Contains(script[apply], tableSwapDeltaBusyCode) {
+		t.Fatal("the locked script applies captured changes without its bound:", script[apply])
+	}
+	if !slices.Contains(beforeHook, script[apply]) || slices.Contains(beforeHook, script[rename]) {
+		t.Fatal("the hook point is not between the changes and the renames")
+	}
+	// the profile's check reads the compact target once the changes are in,
+	// never the bloated table
+	profileCheck := position(`SELECT count(*) FROM public."test_table_swap_queue_next"`)
+	if !(apply < profileCheck && profileCheck < rename) {
+		t.Fatalf("the profile's check runs at %d, not on the target between the changes %d and the renames %d", profileCheck, apply, rename)
+	}
+}
+
+// The capture logs an update's old key and, when it changed, its new one, an
+// insert's new key and a delete's old key; it refuses a TRUNCATE; its
+// triggers fire always; the log's marker names the target; its busy code is
+// told from a failure.
+func TestTableSwapCaptureSql(t *testing.T) {
+	source := testTableSwapIndexedShape()
+	capture := newTableSwapCapture(testTableSwapTable, source.primaryKey)
+	function := capture.functionSql()
+	for _, expected := range []string{
+		`IF TG_OP = 'TRUNCATE' THEN`,
+		`IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE' THEN
+		INSERT INTO public."test_table_swap_queue_next_log" ("item_id") VALUES (OLD."item_id");`,
+		`IF TG_OP = 'INSERT' THEN
+		INSERT INTO public."test_table_swap_queue_next_log" ("item_id") VALUES (NEW."item_id");`,
+		`IF (NEW."item_id") IS DISTINCT FROM (OLD."item_id") THEN`,
+		`RETURN NULL;`,
+	} {
+		if !strings.Contains(function, expected) {
+			t.Fatalf("the capture function lacks %q:\n%s", expected, function)
+		}
+	}
+	triggers := strings.Join(capture.triggerSql(testTableSwapTable), ";\n")
+	for _, expected := range []string{
+		`CREATE TRIGGER table_swap_capture AFTER INSERT OR UPDATE OR DELETE ON public."test_table_swap_queue" FOR EACH ROW`,
+		`CREATE TRIGGER table_swap_capture_truncate BEFORE TRUNCATE ON public."test_table_swap_queue" FOR EACH STATEMENT`,
+		`ENABLE ALWAYS TRIGGER table_swap_capture`,
+		`ENABLE ALWAYS TRIGGER table_swap_capture_truncate`,
+	} {
+		if !strings.Contains(triggers, expected) {
+			t.Fatalf("the capture triggers lack %q:\n%s", expected, triggers)
+		}
+	}
+	match := tableSwapCaptureMarkerPattern.FindStringSubmatch(tableSwapCaptureMarker(testTableSwapTable, 4294967295, tableSwapRollback))
+	if match == nil || match[1] != testTableSwapTable || match[2] != "4294967295" || match[3] != tableSwapRollback {
+		t.Fatal("the marker does not parse back", match)
+	}
+	if !tableSwapDeltaBusy(&pgconn.PgError{Code: tableSwapDeltaBusyCode}) || tableSwapDeltaBusy(&pgconn.PgError{Code: "P0001"}) || tableSwapDeltaBusy(errors.New(tableSwapDeltaBusyCode)) {
+		t.Fatal("the delta's busy code is not told apart")
+	}
+	if !contractPartitionLockBusy(&pgconn.PgError{Code: "55P03"}) {
+		t.Fatal("a lock timeout is not busy")
+	}
+	// a capture of a two-column key compares the key as one row value
+	pair := newTableSwapCapture("synthetic_pair", []string{"a", "b"})
+	if pair.keyTuple("target_table") != `("target_table"."a", "target_table"."b")` || !strings.Contains(pair.functionSql(), `IF (NEW."a", NEW."b") IS DISTINCT FROM (OLD."a", OLD."b") THEN`) {
+		t.Fatal("a two-column key", pair.keyTuple("target_table"), pair.functionSql())
 	}
 }
 
@@ -222,7 +367,7 @@ func TestSchemaDiffAcceptsTableSwapTables(t *testing.T) {
 
 // The REINDEX rotation leaves a swap's tables alone and keeps the table.
 func TestDbMaintenanceSkipsTableSwapRelations(t *testing.T) {
-	for _, name := range []string{testTableSwapTable + "_old_20261118120000", testTableSwapTable + "_next"} {
+	for _, name := range []string{testTableSwapTable + "_old_20261118120000", testTableSwapTable + "_next", testTableSwapTable + "_next_log"} {
 		if dbMaintenanceShouldReindexTable(name) || dbMaintenanceShouldReindexRelation(name, false) {
 			t.Errorf("the rotation rebuilds %s", name)
 		}
