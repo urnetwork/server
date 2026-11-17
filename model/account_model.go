@@ -14,6 +14,21 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// Tunables of an operator's network search (`bringyourctl network find`).
+type FindNetworkSettings struct {
+	// The edit distance within which FindNetworksByName matches a network's
+	// name: 3, so an operator finds a network from a near spelling. Zero
+	// matches the name, normalized for search, alone.
+	NameDistance int
+}
+
+// The defaults, a fresh value each call.
+func DefaultFindNetworkSettings() *FindNetworkSettings {
+	return &FindNetworkSettings{
+		NameDistance: 3,
+	}
+}
+
 type FindNetworkResult struct {
 	NetworkId   server.Id
 	NetworkName string
@@ -23,7 +38,7 @@ type FindNetworkResult struct {
 func FindNetworksByName(ctx context.Context, networkName string) ([]*FindNetworkResult, error) {
 	findNetworkResults := []*FindNetworkResult{}
 
-	searchResults := networkNameSearch().Around(ctx, networkName, 3)
+	searchResults := networkNameSearch().Around(ctx, networkName, DefaultFindNetworkSettings().NameDistance)
 
 	if len(searchResults) == 0 {
 		return []*FindNetworkResult{}, nil
