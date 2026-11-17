@@ -115,6 +115,10 @@ var (
 		Namespace: "urnetwork", Subsystem: "sn_head_summary", Name: "entries",
 		Help: "Eligible head UIDs in the last stored head summary. Zero while the head is empty.",
 	})
+	snHeadSummaryBoundClientCoverage = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "sn_head_summary", Name: "bound_client_coverage_ratio",
+		Help: "Of the eligible bound clients in the last stored head summary that reported coverage, the share that served a verified trail hop that tempo (bound_clients_observed / bound_clients, sn VERIFY-COHORT-V2.md §2.6): a claimed fleet's prefixes count in a tempo only through members drawn in it. 1 while no client is bound.",
+	})
 )
 
 // Head summary upload results, as metric labels.
@@ -178,7 +182,28 @@ func init() {
 		snHeadSummaryUploads,
 		snHeadSummaryLastStored,
 		snHeadSummaryEntries,
+		snHeadSummaryBoundClientCoverage,
 	)
+}
+
+// Sets the coverage of claimed members from a stored summary that reports it.
+// A validator that predates the report leaves the gauge as it was.
+func observeSnHeadSummaryCoverage(summary *model.SnHeadSummary) {
+	if ratio, ok := snHeadSummaryCoverageRatio(summary); ok {
+		snHeadSummaryBoundClientCoverage.Set(ratio)
+	}
+}
+
+// The share of the summary's eligible bound clients that served a verified hop:
+// 1 with none bound, and nothing without a report.
+func snHeadSummaryCoverageRatio(summary *model.SnHeadSummary) (float64, bool) {
+	if summary == nil || summary.BoundClients == nil || summary.BoundClientsObserved == nil {
+		return 0, false
+	}
+	if *summary.BoundClients == 0 {
+		return 1, true
+	}
+	return float64(*summary.BoundClientsObserved) / float64(*summary.BoundClients), true
 }
 
 // Counts one upload by its result or refusal.

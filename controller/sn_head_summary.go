@@ -159,7 +159,26 @@ func snUploadHeadSummary(ctx context.Context, cfg *StConfig, clientSession *sess
 	}
 	snHeadSummaryEntries.Set(float64(len(summary.Entries)))
 	snHeadSummaryLastStored.Set(float64(now.Unix()))
+	observeSnHeadSummaryCoverage(stored)
 	return SnHeadSummaryStored, nil
+}
+
+// What the validator reported with a decoded summary (sn VERIFY-COHORT-V2.md
+// §2.1, docs/spec/head-summary-v2.md): its census for this operator, and with
+// coverage the recipient cut's eligible bindings and how many of them served a
+// verified hop that tempo. The decoder has checked that coverage comes only with
+// a census, on a v2 envelope with exactly the recipient's cut, and never
+// exceeds its bindings. A validator that predates them reports nil.
+func snHeadSummaryCensus(summary *SnHeadSummary) (census *uint64, bound *uint64, observed *uint64) {
+	if summary.CensusProviders != nil {
+		value := *summary.CensusProviders
+		census = &value
+	}
+	if summary.BoundClientsObserved != nil && len(summary.EvidenceCuts) == 1 {
+		bindings, value := uint64(len(summary.EvidenceCuts[0].Bindings)), *summary.BoundClientsObserved
+		bound, observed = &bindings, &value
+	}
+	return
 }
 
 // The stored form of a decoded summary: the envelope's identities, the body,
@@ -175,6 +194,7 @@ func snStoredHeadSummary(summary *SnHeadSummary, body []byte, receivedAt time.Ti
 		EntryCount:     len(summary.Entries), SelectedCount: len(summary.SelectedUIDs),
 		SigningHash: summary.SigningHash, ReceivedAt: receivedAt, Body: append([]byte(nil), body...),
 	}
+	stored.CensusProviders, stored.BoundClients, stored.BoundClientsObserved = snHeadSummaryCensus(summary)
 	var err error
 	parse := func(label string, value string) [32]byte {
 		parsed, parseErr := headsummary.ParseHex32(value)

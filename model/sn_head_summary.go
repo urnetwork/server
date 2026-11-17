@@ -46,9 +46,17 @@ type SnHeadSummary struct {
 	// the eligible head UIDs: a rank's "of"
 	EntryCount    int
 	SelectedCount int
-	SignedAt      time.Time
-	SigningHash   string
-	ReceivedAt    time.Time
+	// What the validator reported with the summary (sn VERIFY-COHORT-V2.md
+	// §2.1): its measurement census for this operator, the recipient cut's
+	// eligible bindings and how many of them served a verified hop that tempo.
+	// Nil from a validator that predates them, and for rows stored before the
+	// rolling census migration.
+	CensusProviders      *uint64
+	BoundClients         *uint64
+	BoundClientsObserved *uint64
+	SignedAt             time.Time
+	SigningHash          string
+	ReceivedAt           time.Time
 	// the exact canonical body, kept so the signature can be verified again
 	Body []byte
 	// by rank, then fleet id and generation
@@ -65,6 +73,26 @@ func (self *SnHeadSummary) FleetScore(key SnFleetKey) (*SnHeadSummaryFleetScore,
 	return nil, false
 }
 
+// A reported count as a nullable bigint: nil stays null. The decoder bounds a
+// census at 2^32 and coverage by the cut's bindings, so neither overflows.
+func snHeadSummaryCount(value *uint64) *int64 {
+	if value == nil {
+		return nil
+	}
+	count := int64(*value)
+	return &count
+}
+
+// A stored count back: null is nil, and a negative value can't have been
+// written, so it reads as unknown too.
+func snHeadSummaryReadCount(value *int64) *uint64 {
+	if value == nil || *value < 0 {
+		return nil
+	}
+	count := uint64(*value)
+	return &count
+}
+
 // PutSnHeadSummary stores a summary unless the same tempo's summary of the
 // same validator at an equal or later native snapshot block is stored; it
 // reports whether it stored.
@@ -79,9 +107,10 @@ func PutSnHeadSummary(ctx context.Context, summary *SnHeadSummary) bool {
 					netuid, validator_hotkey, native_epoch, native_snapshot_block, native_snapshot_hash,
 					evm_snapshot_block, evm_snapshot_hash, settlement_epoch, policy_id, policy_hash,
 					measurement_artifact_hash, validator_uid, maximum_head_fleets, entry_count, selected_count,
-					signed_at, signing_hash, received_at, body, replica_genesis
+					signed_at, signing_hash, received_at, body, replica_genesis,
+					census_providers, bound_clients, bound_clients_observed
 				)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 				ON CONFLICT (netuid, validator_hotkey, native_epoch) DO UPDATE
 				SET
 					native_snapshot_block = EXCLUDED.native_snapshot_block,
@@ -100,13 +129,17 @@ func PutSnHeadSummary(ctx context.Context, summary *SnHeadSummary) bool {
 					signing_hash = EXCLUDED.signing_hash,
 					received_at = EXCLUDED.received_at,
 					body = EXCLUDED.body,
-					replica_genesis = EXCLUDED.replica_genesis
+					replica_genesis = EXCLUDED.replica_genesis,
+					census_providers = EXCLUDED.census_providers,
+					bound_clients = EXCLUDED.bound_clients,
+					bound_clients_observed = EXCLUDED.bound_clients_observed
 				WHERE sn_head_summary.native_snapshot_block < EXCLUDED.native_snapshot_block
 			`,
 			int(summary.Netuid), summary.ValidatorHotkey[:], int64(summary.NativeEpoch), int64(summary.NativeSnapshotBlock), summary.NativeSnapshotHash[:],
 			int64(summary.EvmSnapshotBlock), summary.EvmSnapshotHash[:], int64(summary.SettlementEpoch), int64(summary.PolicyId), summary.PolicyHash[:],
 			summary.MeasurementArtifactHash, int(summary.ValidatorUid), int(summary.MaximumHeadFleets), summary.EntryCount, summary.SelectedCount,
 			summary.SignedAt.UTC(), summary.SigningHash, summary.ReceivedAt.UTC(), summary.Body, summary.ReplicaGenesis,
+			snHeadSummaryCount(summary.CensusProviders), snHeadSummaryCount(summary.BoundClients), snHeadSummaryCount(summary.BoundClientsObserved),
 		))
 		if tag.RowsAffected() != 1 {
 			return
@@ -185,7 +218,8 @@ func getSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey *[32]b
 					validator_hotkey, native_epoch, native_snapshot_block, native_snapshot_hash,
 					evm_snapshot_block, evm_snapshot_hash, settlement_epoch, policy_id, policy_hash,
 					measurement_artifact_hash, validator_uid, maximum_head_fleets, entry_count, selected_count,
-					signed_at, signing_hash, received_at, body, replica_genesis
+					signed_at, signing_hash, received_at, body, replica_genesis,
+					census_providers, bound_clients, bound_clients_observed
 				FROM sn_head_summary
 				WHERE netuid = $1 AND ($2::bytea IS NULL OR validator_hotkey = $2)
 					AND ($3::bigint IS NULL OR $3 < native_epoch)
@@ -201,12 +235,15 @@ func getSnHeadSummary(ctx context.Context, netuid uint16, validatorHotkey *[32]b
 			var hotkey, nativeHash, evmHash, policyHash []byte
 			var nativeEpoch, nativeBlock, evmBlock, settlementEpoch, policyId int64
 			var validatorUid, maximumHeadFleets int
+			var censusProviders, boundClients, boundClientsObserved *int64
 			server.Raise(rows.Scan(
 				&hotkey, &nativeEpoch, &nativeBlock, &nativeHash,
 				&evmBlock, &evmHash, &settlementEpoch, &policyId, &policyHash,
 				&summary.MeasurementArtifactHash, &validatorUid, &maximumHeadFleets, &summary.EntryCount, &summary.SelectedCount,
 				&summary.SignedAt, &summary.SigningHash, &summary.ReceivedAt, &summary.Body, &summary.ReplicaGenesis,
+				&censusProviders, &boundClients, &boundClientsObserved,
 			))
+			summary.CensusProviders, summary.BoundClients, summary.BoundClientsObserved = snHeadSummaryReadCount(censusProviders), snHeadSummaryReadCount(boundClients), snHeadSummaryReadCount(boundClientsObserved)
 			summary.ValidatorHotkey, summary.NativeSnapshotHash, summary.EvmSnapshotHash, summary.PolicyHash = [32]byte(hotkey), [32]byte(nativeHash), [32]byte(evmHash), [32]byte(policyHash)
 			summary.NativeEpoch, summary.NativeSnapshotBlock, summary.EvmSnapshotBlock = uint64(nativeEpoch), uint64(nativeBlock), uint64(evmBlock)
 			summary.SettlementEpoch, summary.PolicyId = uint64(settlementEpoch), uint64(policyId)
