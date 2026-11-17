@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"strings"
 	"testing"
@@ -68,6 +69,17 @@ func readThroughHost(t *testing.T, net *sidecartest.Net, clusterId string, hostI
 	}
 	defer object.Body.Close()
 	return io.ReadAll(object.Body)
+}
+
+// Whether err carries the store's own 503, as the fork answers a read whose drives reached make a quorum for neither
+// the object nor its absence (QD-962), and not a failure of the client's.
+func storeAnswered503(err error) bool {
+	var response minio.ErrorResponse
+	if errors.As(err, &response) {
+		return response.StatusCode == http.StatusServiceUnavailable
+	}
+	var pointer *minio.ErrorResponse
+	return errors.As(err, &pointer) && pointer != nil && pointer.StatusCode == http.StatusServiceUnavailable
 }
 
 // Whether the drive volume of a layout host holds key in the Net's bucket on clusterId: what MinIO's own reads do
@@ -210,9 +222,10 @@ func TestT3QuorumLossGives503AndAnUnknownOutcome(t *testing.T) {
 }
 
 // DriveMiss leaves the object readable until a second host goes down: a PUT that misses one drive of the second
-// host stands on the other drives, reads with the third host down, and is unreadable with the fourth down too,
-// though objects with every shard still read; a host returning ends the miss and the cluster heals the drive, so the
-// object then reads with those two hosts down again. On both layouts.
+// host stands on the other drives, reads with the third host down, and with the fourth down too answers the store's
+// 503, never 404 (QD-962), though objects with every shard still read; a host returning ends the miss, each host
+// answering 503 and never 404 until it serves the object again, and the cluster heals the drive, so the object then
+// reads with those two hosts down again. On both layouts.
 func TestT3DriveMissLeavesTheObjectReadableUntilASecondHostGoesDown(t *testing.T) {
 	layoutTestEnv().Run(t, func(tb testing.TB) {
 		net, ctx := newLayoutNet(t)
@@ -242,24 +255,32 @@ func TestT3DriveMissLeavesTheObjectReadableUntilASecondHostGoesDown(t *testing.T
 			if err := HostDown(ctx, net, clusterId, 3); err != nil {
 				t.Fatal(err)
 			}
-			if body, err := readThroughHost(t, net, clusterId, 0, missed); err == nil {
-				t.Errorf("%s: with a second host down the object one shard short reads %q", clusterId, body)
+			// the drives the first host reaches hold too few shards to read the object, and the one that lacks it is
+			// too few to say it is missing, so the store answers 503: a 404 would read to evs as the object gone
+			if body, err := readThroughHost(t, net, clusterId, 0, missed); !storeAnswered503(err) {
+				t.Errorf("%s: with a second host down the object one shard short reads %q, %v, want the store's 503", clusterId, body, err)
 			}
 			if body, err := readThroughHost(t, net, clusterId, 0, whole); err != nil || string(body) != "whole" {
 				t.Errorf("%s: an object with every shard reads %q, %v", clusterId, body, err)
 			}
 			// a host returning ends the miss: the PUT's own commit is refused past its deadline, and a heal fills the
 			// drive. MinIO's data path reconnects some seconds after its health answers, and until then a read through
-			// a host may answer 404 for the object (questions/test-m2-07-minio-404-under-lost-quorum.md), so each host
-			// is read until it serves the object, which is also what starts MinIO's heal of the drive that misses it
+			// a host reaches too few drives to read the object or to say it is missing, and answers 503, never 404
+			// (QD-962). So each host is read until it serves the object, which is also what starts MinIO's heal of the
+			// drive that misses it, and a 404 on the way fails the test
 			for _, hostIndex := range []int{3, 2} {
 				if err := HostUp(ctx, net, clusterId, hostIndex); err != nil {
 					t.Fatal(err)
 				}
 			}
 			for hostIndex := range 4 {
+				answeredNotFound := false
 				if err := faults.waitFor(ctx, fmt.Sprintf("host %d to serve the object again", hostIndex), func() (bool, error) {
 					body, err := readThroughHost(t, net, clusterId, hostIndex, missed)
+					if errors.Is(err, sidecar.ErrBlobNotFound) && !answeredNotFound {
+						answeredNotFound = true
+						t.Errorf("%s: host %d answered 404 for the object while it waited to serve it", clusterId, hostIndex)
+					}
 					return err == nil && string(body) == "missed", fmt.Errorf("it reads %q, %v", body, err)
 				}); err != nil {
 					t.Errorf("%s: %v", clusterId, err)
