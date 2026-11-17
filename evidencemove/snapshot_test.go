@@ -229,48 +229,110 @@ func TestPromGate(t *testing.T) {
 	}
 }
 
-// The export copies every row in key order from a read-only process, resumes
-// a file a crash cut short, and a sample of its records matches the table;
-// a tampered record is found.
+// Shuffled records sort into key order through several runs; a row read
+// twice is written once, and two different records for one key fail.
+func TestSortSnapshot(t *testing.T) {
+	records := testSnapshotRecords(1000, 4)
+	shuffled := slices.Clone(records)
+	shuffled = append(shuffled, records[10], records[500])
+	rand.New(rand.NewPCG(5, 5)).Shuffle(len(shuffled), func(a int, b int) { shuffled[a], shuffled[b] = shuffled[b], shuffled[a] })
+	directory := t.TempDir()
+	rawPath := filepath.Join(directory, "hashes.bin.raw")
+	raw := make([]byte, 0, len(shuffled)*SnapshotRecordBytes)
+	for _, record := range shuffled {
+		var encoded [SnapshotRecordBytes]byte
+		record.encode(encoded[:])
+		raw = append(raw, encoded[:]...)
+	}
+	if err := os.WriteFile(rawPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(directory, "hashes.bin")
+	report, err := SortSnapshot(rawPath, outPath, 97)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Rows != 1000 || report.Duplicates != 2 || report.Runs != 11 {
+		t.Fatalf("sort report %+v", report)
+	}
+	data, err := os.ReadFile(outPath)
+	if err != nil || len(data) != 1000*SnapshotRecordBytes {
+		t.Fatalf("sorted %d bytes, %v", len(data), err)
+	}
+	for index, record := range records {
+		if got := decodeSnapshotRecord(data[index*SnapshotRecordBytes:]); got != record {
+			t.Fatalf("record %d %+v, want %+v", index, got, record)
+		}
+	}
+	if matches, _ := filepath.Glob(outPath + ".run.*"); len(matches) != 0 {
+		t.Fatalf("runs left behind: %v", matches)
+	}
+	conflict := records[3]
+	conflict.Size += 1
+	var encoded [SnapshotRecordBytes]byte
+	conflict.encode(encoded[:])
+	if err := os.WriteFile(rawPath, append(raw, encoded[:]...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SortSnapshot(rawPath, outPath, 97); err == nil || !strings.Contains(err.Error(), "different evidence") {
+		t.Fatalf("a conflicting duplicate sorted: %v", err)
+	}
+}
+
+// The export reads the heap in page order from a read-only process, resumes
+// after a stop and a crash's unrecorded tail with no duplicate or gap, sorts
+// into key order, and a sample of its records matches the table; a tampered
+// record is found.
 func TestSnapshotExportMatchesTheTable(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		domain := sha256.Sum256([]byte("evidencemove-snapshot-test"))
 		want := []SnapshotRecord{}
-		for client := range 40 {
+		type row struct {
+			record   SnapshotRecord
+			evidence []byte
+		}
+		rows := []row{}
+		for client := range 60 {
 			clientId := server.NewId()
 			for generation := int64(1); generation <= int64(1+client%3); generation += 1 {
 				registration := sha256.Sum256(fmt.Appendf(nil, "%s/%d", clientId, generation))
-				evidence := fmt.Appendf(nil, `{"client":%d,"generation":%d,"padding":"%s"}`, client, generation, strings.Repeat("y", client))
-				server.MaintenanceTx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(
-						ctx,
-						`INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
-						VALUES ($1, $2, $3, $4, $5, $6)`,
-						clientId, generation, domain[:], registration[:], "sha256:"+hex.EncodeToString(registration[:]), evidence,
-					))
-				})
-				want = append(want, SnapshotRecord{ClientId: clientId, Generation: generation, Hash: registration, Size: uint32(len(evidence))})
+				evidence := fmt.Appendf(nil, `{"client":%d,"generation":%d,"padding":"%s"}`, client, generation, strings.Repeat("y", 200+client))
+				record := SnapshotRecord{ClientId: clientId, Generation: generation, Hash: registration, Size: uint32(len(evidence))}
+				rows = append(rows, row{record: record, evidence: evidence})
+				want = append(want, record)
 			}
+		}
+		// insert out of key order, so heap order is not key order
+		rand.New(rand.NewPCG(7, 7)).Shuffle(len(rows), func(a int, b int) { rows[a], rows[b] = rows[b], rows[a] })
+		for _, row := range rows {
+			server.MaintenanceTx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO st_client_key_history (client_id, generation, domain_hash, registration_hash, evidence_hash, evidence)
+					VALUES ($1, $2, $3, $4, $5, $6)`,
+					row.record.ClientId, row.record.Generation, domain[:], row.record.Hash[:], "sha256:"+hex.EncodeToString(row.record.Hash[:]), row.evidence,
+				))
+			})
 		}
 		slices.SortFunc(want, func(a SnapshotRecord, b SnapshotRecord) int { return compareCursors(a.Cursor(), b.Cursor()) })
 
 		server.RequirePgReadOnly()
 		// before the environment drops its database
 		defer server.Testing_ReleasePgReadOnly()
+		pages, err := snapshotTablePages(ctx)
+		if err != nil || pages < 4 {
+			t.Fatalf("the fixture fills %d pages, %v", pages, err)
+		}
 		keeper := NewGateKeeper(t.Logf, newTestGate(true), &PgLockWaitersGate{Max: 20})
 		keeper.CheckNow(ctx)
 		if open, reason := keeper.Open(); !open {
 			t.Fatalf("gates closed: %s", reason)
 		}
 		settings := DefaultSnapshotSettings()
-		settings.RowsPerSecond, settings.BatchRows = 100000, 7
-		path := filepath.Join(t.TempDir(), "hashes.bin")
-		writer, err := OpenSnapshotWriter(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// a first run stopped after three batches, then a crash's partial record
+		settings.PagesPerSecond, settings.BatchPages = 1000, 1
+		outPath := filepath.Join(t.TempDir(), "hashes.bin")
+		// a first run stopped after two batches
 		stopCtx, stop := context.WithCancel(ctx)
 		defer stop()
 		batches := 0
@@ -278,34 +340,33 @@ func TestSnapshotExportMatchesTheTable(t *testing.T) {
 			t.Logf(format, args...)
 			if strings.HasPrefix(format, "snapshot:") {
 				batches += 1
-				if batches == 3 {
+				if batches == 2 {
 					stop()
 				}
 			}
 		}
 		stoppingSettings := settings
 		stoppingSettings.ProgressInterval = time.Nanosecond
-		stopped, err := ExportSnapshot(stopCtx, writer, keeper, stoppingSettings, stopping)
-		if err != nil || stopped.Finished || writer.Rows() != 21 {
-			t.Fatalf("stopped export %+v, %v at %d rows", stopped, err, writer.Rows())
+		stopped, err := ExportSnapshotPages(stopCtx, outPath, keeper, stoppingSettings, stopping)
+		if err != nil || stopped.Finished || stopped.Pages != 2 {
+			t.Fatalf("stopped export %+v, %v", stopped, err)
 		}
-		writer.Close()
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		// a crash after writing a batch, before recording it
+		file, err := os.OpenFile(SnapshotRawPath(outPath), os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			t.Fatal(err)
 		}
-		file.Write(bytes.Repeat([]byte{0xff}, 23))
+		file.Write(bytes.Repeat([]byte{0xff}, 3*SnapshotRecordBytes+7))
 		file.Close()
-		writer, err = OpenSnapshotWriter(path)
-		if err != nil {
-			t.Fatal(err)
+		report, err := ExportSnapshotPages(ctx, outPath, keeper, settings, t.Logf)
+		if err != nil || !report.Finished || report.Rows != int64(len(want)) || report.Pages != pages {
+			t.Fatalf("resumed export %+v, %v; want %d rows on %d pages", report, err, len(want), pages)
 		}
-		report, err := ExportSnapshot(ctx, writer, keeper, settings, t.Logf)
-		if err != nil || !report.Finished {
-			t.Fatalf("resumed export %+v, %v", report, err)
+		sorted, err := SortSnapshot(SnapshotRawPath(outPath), outPath, 50)
+		if err != nil || sorted.Rows != int64(len(want)) || sorted.Duplicates != 0 {
+			t.Fatalf("sort %+v, %v", sorted, err)
 		}
-		writer.Close()
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(outPath)
 		if err != nil || len(data) != len(want)*SnapshotRecordBytes {
 			t.Fatalf("snapshot %d bytes, want %d rows: %v", len(data), len(want), err)
 		}
@@ -325,7 +386,7 @@ func TestSnapshotExportMatchesTheTable(t *testing.T) {
 		if err != nil || check.Matched != 1 || check.Differ != 1 || check.Missing != 1 {
 			t.Fatalf("tampered sample check %+v, %v", check, err)
 		}
-		sample, err := SampleSnapshot(path, 50, 9)
+		sample, err := SampleSnapshot(outPath, 50, 9)
 		if err != nil || len(sample) != 50 {
 			t.Fatalf("sampled %d, %v", len(sample), err)
 		}

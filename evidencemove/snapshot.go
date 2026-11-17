@@ -19,6 +19,8 @@ package evidencemove
 // row count, the file's sha256 and how the export ran.
 
 import (
+	"bufio"
+	"container/heap"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -160,20 +162,21 @@ func (self *SnapshotWriter) Close() error {
 	return self.file.Close()
 }
 
-// One batch of the export: at most limit rows after cursor in key order.
-const snapshotExportSql = `
-	SELECT client_id, generation, decode(substr(evidence_hash, 8), 'hex'), octet_length(evidence)
-	FROM st_client_key_history
-	WHERE (client_id, generation) > ($1, $2)
-	ORDER BY client_id, generation
-	LIMIT $3
-`
-
-func readSnapshotBatch(ctx context.Context, after Cursor, limit int, statementTimeout time.Duration) (records []SnapshotRecord, resultErr error) {
+// The rows on heap pages [first, end), by a TID range scan, which reads just
+// those pages in order. A client's rows sit wherever its registrations were
+// inserted, so a scan in key order reads the heap at random: 2-3 s for 5,000
+// cold rows on Main (2026-11-17). The export reads the heap in page order
+// instead and sorts the records afterwards (SortSnapshot).
+func readSnapshotPages(ctx context.Context, first int64, end int64, statementTimeout time.Duration) (records []SnapshotRecord, resultErr error) {
+	query := fmt.Sprintf(`
+		SELECT client_id, generation, decode(substr(evidence_hash, 8), 'hex'), octet_length(evidence)
+		FROM st_client_key_history
+		WHERE ctid >= '(%d,0)'::tid AND ctid < '(%d,0)'::tid
+	`, first, end)
 	err := server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", statementTimeout.Milliseconds())))
-			result, err := tx.Query(ctx, snapshotExportSql, after.ClientId, after.Generation, limit)
+			result, err := tx.Query(ctx, query)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var record SnapshotRecord
@@ -196,22 +199,44 @@ func readSnapshotBatch(ctx context.Context, after Cursor, limit int, statementTi
 	return records, nil
 }
 
+// The table's heap pages now.
+func snapshotTablePages(ctx context.Context) (pages int64, resultErr error) {
+	err := server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT pg_relation_size('public.st_client_key_history') / current_setting('block_size')::bigint
+			`)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&pages))
+				}
+			})
+		}, server.OptReadOnly())
+	})
+	if err != nil {
+		return 0, raisedError(err)
+	}
+	return pages, nil
+}
+
 type SnapshotSettings struct {
-	// rows read a second
-	RowsPerSecond float64
-	// rows a statement
-	BatchRows int
-	// bounds each statement; a slower statement backs the export off
+	// heap pages read a second
+	PagesPerSecond float64
+	// heap pages a statement
+	BatchPages int
+	// bounds each statement
 	StatementTimeout time.Duration
 	// a statement slower than this closes the gates for a backoff
 	SlowStatement    time.Duration
 	ProgressInterval time.Duration
 }
 
+// About ten rows a page on Main: 2,000 pages a second is about 20,000 rows
+// and 16 MB of sequential heap a second, and all 25.6M pages in 3.6 hours.
 func DefaultSnapshotSettings() SnapshotSettings {
 	return SnapshotSettings{
-		RowsPerSecond:    20000,
-		BatchRows:        5000,
+		PagesPerSecond:   2000,
+		BatchPages:       1000,
 		StatementTimeout: 30 * time.Second,
 		SlowStatement:    2 * time.Second,
 		ProgressInterval: 30 * time.Second,
@@ -220,10 +245,10 @@ func DefaultSnapshotSettings() SnapshotSettings {
 
 func (self SnapshotSettings) Validate() error {
 	switch {
-	case !(0 < self.RowsPerSecond && self.RowsPerSecond <= 200000):
-		return fmt.Errorf("rows a second must be in (0, 200000], not %v", self.RowsPerSecond)
-	case self.BatchRows < 1 || 50000 < self.BatchRows:
-		return fmt.Errorf("batch rows must be 1 to 50000, not %d", self.BatchRows)
+	case !(0 < self.PagesPerSecond && self.PagesPerSecond <= 50000):
+		return fmt.Errorf("pages a second must be in (0, 50000], not %v", self.PagesPerSecond)
+	case self.BatchPages < 1 || 20000 < self.BatchPages:
+		return fmt.Errorf("batch pages must be 1 to 20000, not %d", self.BatchPages)
 	case self.StatementTimeout <= 0 || self.SlowStatement <= 0 || self.ProgressInterval <= 0:
 		return errors.New("statement bounds and the progress interval must be positive")
 	}
@@ -231,9 +256,11 @@ func (self SnapshotSettings) Validate() error {
 }
 
 type SnapshotReport struct {
-	Rows           int64          `json:"rows"`
+	Rows int64 `json:"rows"`
+	// heap pages read, of the table's pages
+	Pages          int64          `json:"pages"`
+	TablePages     int64          `json:"table_pages"`
 	Written        int64          `json:"written"`
-	Cursor         Cursor         `json:"cursor"`
 	Finished       bool           `json:"finished"`
 	Stopped        string         `json:"stopped,omitempty"`
 	Elapsed        time.Duration  `json:"elapsed"`
@@ -242,20 +269,96 @@ type SnapshotReport struct {
 	SlowStatements int64          `json:"slow_statements"`
 }
 
+// The raw export's progress, beside it: the records it holds and the next page.
+type snapshotRawState struct {
+	NextPage int64     `json:"next_page"`
+	Rows     int64     `json:"rows"`
+	Started  time.Time `json:"started"`
+}
+
+func SnapshotRawPath(outPath string) string {
+	return outPath + ".raw"
+}
+
+// Removes the raw export and its state, once the sorted snapshot is verified.
+func RemoveSnapshotRaw(outPath string) error {
+	for _, path := range []string{SnapshotRawPath(outPath), snapshotRawStatePath(outPath)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func snapshotRawStatePath(outPath string) string {
+	return SnapshotRawPath(outPath) + ".state.json"
+}
+
+func saveSnapshotRawState(path string, state snapshotRawState) error {
+	data, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write(data)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
 // Copies every row's (client_id, generation, evidence hash, evidence size)
-// into writer, after the rows it already holds, in short keyset statements
-// at the paced rate while the gates are open. A slow statement or a failed one
-// closes the gates for the keeper's backoff. Ends at the table's end or ctx's.
-func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeeper, settings SnapshotSettings, logf func(format string, args ...any)) (*SnapshotReport, error) {
+// into <out>.raw in heap page order, one short TID range statement per batch
+// of pages, at the paced rate while the gates are open; a slow statement or a
+// failed one closes the gates for the keeper's backoff. Its progress is
+// durable in <out>.raw.state.json, written after each batch's records are
+// synced, so a rerun resumes at the next page without a duplicate or a gap.
+// Pages the table grows during the export are read before it ends; a row
+// inserted into a page already read is not, and every such row is new
+// evidence, written sharded. Ends when the table has no unread page, or with
+// ctx.
+func ExportSnapshotPages(ctx context.Context, outPath string, gates *GateKeeper, settings SnapshotSettings, logf func(format string, args ...any)) (*SnapshotReport, error) {
 	if err := settings.Validate(); err != nil {
 		return nil, err
 	}
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	pacer := NewPacer(settings.RowsPerSecond / float64(settings.BatchRows))
+	statePath := snapshotRawStatePath(outPath)
+	var state snapshotRawState
+	if data, err := os.ReadFile(statePath); err == nil {
+		if err := json.Unmarshal(data, &state); err != nil {
+			return nil, fmt.Errorf("%s: %w", statePath, err)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		state.Started = time.Now().UTC()
+	} else {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(outPath), 0o700); err != nil {
+		return nil, err
+	}
+	raw, err := os.OpenFile(SnapshotRawPath(outPath), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	// records past the state are an unrecorded batch: it is read again
+	if err := raw.Truncate(state.Rows * SnapshotRecordBytes); err != nil {
+		return nil, err
+	}
+	if _, err := raw.Seek(state.Rows*SnapshotRecordBytes, io.SeekStart); err != nil {
+		return nil, err
+	}
+	pacer := NewPacer(settings.PagesPerSecond / float64(settings.BatchPages))
 	latency := NewLatencies()
-	report := &SnapshotReport{Rows: writer.Rows(), Cursor: writer.Cursor()}
+	report := &SnapshotReport{Rows: state.Rows, Pages: state.NextPage}
 	start := time.Now()
 	pausedAtStart := gates.Paused()
 	lastLog, lastRows := start, report.Rows
@@ -265,8 +368,25 @@ func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeep
 		report.Statement = latency.Summaries()["statement"]
 		return report, err
 	}
+	pages, err := snapshotTablePages(ctx)
+	if err != nil {
+		return finish(err)
+	}
+	report.TablePages = pages
 	failures := 0
+	buffer := []byte{}
 	for {
+		if pages <= state.NextPage {
+			// the table may have grown since
+			if pages, err = snapshotTablePages(ctx); err != nil {
+				return finish(err)
+			}
+			report.TablePages = pages
+			if pages <= state.NextPage {
+				report.Finished = true
+				return finish(nil)
+			}
+		}
 		if err := gates.Wait(ctx); err != nil {
 			report.Stopped = "stopped: " + err.Error()
 			return finish(nil)
@@ -278,8 +398,9 @@ func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeep
 		if open, _ := gates.Open(); !open {
 			continue
 		}
+		end := min(state.NextPage+int64(settings.BatchPages), pages)
 		statementStart := time.Now()
-		records, err := readSnapshotBatch(ctx, report.Cursor, settings.BatchRows, settings.StatementTimeout)
+		records, err := readSnapshotPages(ctx, state.NextPage, end, settings.StatementTimeout)
 		elapsed := time.Since(statementStart)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -288,9 +409,9 @@ func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeep
 			}
 			failures += 1
 			if 10 <= failures {
-				return finish(fmt.Errorf("export after %s: %d failures in a row: %w", report.Cursor, failures, err))
+				return finish(fmt.Errorf("export at page %d: %d failures in a row: %w", state.NextPage, failures, err))
 			}
-			logf("export after %s failed: %v", report.Cursor, err)
+			logf("export at page %d failed: %v", state.NextPage, err)
 			gates.Failed(err, false)
 			continue
 		}
@@ -298,20 +419,29 @@ func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeep
 		latency.Observe("statement", elapsed)
 		if settings.SlowStatement < elapsed {
 			report.SlowStatements += 1
-			gates.Failed(fmt.Errorf("a %d-row statement took %s", settings.BatchRows, elapsed.Round(time.Millisecond)), false)
+			gates.Failed(fmt.Errorf("a %d-page statement took %s", end-state.NextPage, elapsed.Round(time.Millisecond)), false)
 		} else {
 			gates.Succeeded()
 		}
-		if len(records) == 0 {
-			report.Finished = true
-			return finish(nil)
+		buffer = buffer[:0]
+		for _, record := range records {
+			var encoded [SnapshotRecordBytes]byte
+			record.encode(encoded[:])
+			buffer = append(buffer, encoded[:]...)
 		}
-		if err := writer.Append(records); err != nil {
+		if _, err := raw.Write(buffer); err != nil {
 			return finish(fmt.Errorf("snapshot write: %w", err))
 		}
-		report.Rows = writer.Rows()
+		if err := raw.Sync(); err != nil {
+			return finish(fmt.Errorf("snapshot sync: %w", err))
+		}
+		state.NextPage = end
+		state.Rows += int64(len(records))
+		if err := saveSnapshotRawState(statePath, state); err != nil {
+			return finish(fmt.Errorf("snapshot state: %w", err))
+		}
+		report.Rows, report.Pages = state.Rows, state.NextPage
 		report.Written += int64(len(records))
-		report.Cursor = writer.Cursor()
 		if now := time.Now(); settings.ProgressInterval <= now.Sub(lastLog) {
 			open, reason := gates.Open()
 			gate := "open"
@@ -319,12 +449,201 @@ func ExportSnapshot(ctx context.Context, writer *SnapshotWriter, gates *GateKeep
 				gate = "closed: " + reason
 			}
 			logf(
-				"snapshot: %d rows (%.0f/s); cursor %s; statement %s; gates %s",
-				report.Rows, float64(report.Rows-lastRows)/now.Sub(lastLog).Seconds(), report.Cursor, latency.Line(), gate,
+				"snapshot: page %d of %d (%.1f%%), %d rows (%.0f/s); %s; gates %s",
+				state.NextPage, pages, 100*float64(state.NextPage)/float64(max(1, pages)), state.Rows,
+				float64(state.Rows-lastRows)/now.Sub(lastLog).Seconds(), latency.Line(), gate,
 			)
-			lastLog, lastRows = now, report.Rows
+			lastLog, lastRows = now, state.Rows
 		}
 	}
+}
+
+type SortReport struct {
+	Rows       int64         `json:"rows"`
+	Runs       int           `json:"runs"`
+	Duplicates int64         `json:"duplicates"`
+	Elapsed    time.Duration `json:"elapsed"`
+}
+
+// Sorts the raw export's records into key order at outPath, through sorted
+// runs of at most chunkRecords records and one merge. A row read twice is
+// written once; two different records for one key are an error.
+func SortSnapshot(rawPath string, outPath string, chunkRecords int) (*SortReport, error) {
+	start := time.Now()
+	if chunkRecords < 1 {
+		return nil, errors.New("a sort needs a positive chunk")
+	}
+	raw, err := os.Open(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	info, err := raw.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size()%SnapshotRecordBytes != 0 {
+		return nil, fmt.Errorf("%s holds %d bytes, not whole records", rawPath, info.Size())
+	}
+	report := &SortReport{}
+	runPaths := []string{}
+	defer func() {
+		for _, path := range runPaths {
+			os.Remove(path)
+		}
+	}()
+	chunk := make([]byte, chunkRecords*SnapshotRecordBytes)
+	for {
+		count, err := io.ReadFull(raw, chunk)
+		if count == 0 && (err == io.EOF || err == io.ErrUnexpectedEOF) {
+			break
+		}
+		if err != nil && err != io.ErrUnexpectedEOF {
+			return nil, err
+		}
+		records := make([]SnapshotRecord, count/SnapshotRecordBytes)
+		for index := range records {
+			records[index] = decodeSnapshotRecord(chunk[index*SnapshotRecordBytes:])
+		}
+		sort.Slice(records, func(a int, b int) bool { return compareCursors(records[a].Cursor(), records[b].Cursor()) < 0 })
+		runPath := fmt.Sprintf("%s.run.%d", outPath, len(runPaths))
+		runPaths = append(runPaths, runPath)
+		if err := writeSnapshotRun(runPath, records); err != nil {
+			return nil, err
+		}
+		if err == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+	report.Runs = len(runPaths)
+	if err := os.Remove(outPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	writer, err := OpenSnapshotWriter(outPath)
+	if err != nil {
+		return nil, err
+	}
+	defer writer.Close()
+	if err := mergeSnapshotRuns(runPaths, writer, report); err != nil {
+		return nil, err
+	}
+	report.Rows = writer.Rows()
+	report.Elapsed = time.Since(start)
+	return report, writer.Close()
+}
+
+func writeSnapshotRun(path string, records []SnapshotRecord) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	buffered := bufio.NewWriterSize(file, 4*1024*1024)
+	var encoded [SnapshotRecordBytes]byte
+	for _, record := range records {
+		record.encode(encoded[:])
+		if _, err := buffered.Write(encoded[:]); err != nil {
+			file.Close()
+			return err
+		}
+	}
+	if err := buffered.Flush(); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
+}
+
+// One run's reader and its current record.
+type snapshotRunReader struct {
+	reader  *bufio.Reader
+	file    *os.File
+	current SnapshotRecord
+}
+
+func (self *snapshotRunReader) next() (bool, error) {
+	var encoded [SnapshotRecordBytes]byte
+	if _, err := io.ReadFull(self.reader, encoded[:]); err != nil {
+		if err == io.EOF {
+			return false, nil
+		}
+		return false, err
+	}
+	self.current = decodeSnapshotRecord(encoded[:])
+	return true, nil
+}
+
+type snapshotRunHeap []*snapshotRunReader
+
+func (self snapshotRunHeap) Len() int { return len(self) }
+func (self snapshotRunHeap) Less(a int, b int) bool {
+	return compareCursors(self[a].current.Cursor(), self[b].current.Cursor()) < 0
+}
+func (self snapshotRunHeap) Swap(a int, b int) { self[a], self[b] = self[b], self[a] }
+func (self *snapshotRunHeap) Push(value any)   { *self = append(*self, value.(*snapshotRunReader)) }
+func (self *snapshotRunHeap) Pop() any {
+	old := *self
+	last := old[len(old)-1]
+	*self = old[:len(old)-1]
+	return last
+}
+
+func mergeSnapshotRuns(runPaths []string, writer *SnapshotWriter, report *SortReport) error {
+	runs := &snapshotRunHeap{}
+	for _, path := range runPaths {
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		run := &snapshotRunReader{reader: bufio.NewReaderSize(file, 1024*1024), file: file}
+		ok, err := run.next()
+		if err != nil {
+			return err
+		}
+		if ok {
+			*runs = append(*runs, run)
+		}
+	}
+	heap.Init(runs)
+	batch := make([]SnapshotRecord, 0, 65536)
+	var last *SnapshotRecord
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		err := writer.Append(batch)
+		batch = batch[:0]
+		return err
+	}
+	for 0 < runs.Len() {
+		run := (*runs)[0]
+		record := run.current
+		if last != nil && compareCursors(last.Cursor(), record.Cursor()) == 0 {
+			if *last != record {
+				return fmt.Errorf("row %s was read twice with different evidence", record.Cursor())
+			}
+			report.Duplicates += 1
+		} else {
+			batch = append(batch, record)
+			copied := record
+			last = &copied
+			if len(batch) == cap(batch) {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		ok, err := run.next()
+		if err != nil {
+			return err
+		}
+		if ok {
+			heap.Fix(runs, 0)
+		} else {
+			heap.Pop(runs)
+		}
+	}
+	return flush()
 }
 
 // Beside the snapshot: what it holds and how it was taken.
@@ -340,6 +659,7 @@ type SnapshotManifest struct {
 	Last        *Cursor        `json:"last,omitempty"`
 	Finished    time.Time      `json:"finished"`
 	Export      SnapshotReport `json:"export"`
+	Sort        *SortReport    `json:"sort,omitempty"`
 	Sample      *SampleCheck   `json:"sample,omitempty"`
 }
 
