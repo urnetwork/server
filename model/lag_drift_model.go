@@ -77,6 +77,8 @@ type LagDriftTest struct {
 	RunCount       int
 	UpdatedAt      time.Time
 	FailedAt       *time.Time
+	// an operator revoked the token: it starts no more runs
+	RevokeTime *time.Time
 	// the verdict over the window as json (P4), nil before any run completed
 	ResultJson []byte
 	ResultAt   *time.Time
@@ -143,6 +145,7 @@ const lagDriftTestColumns = `
 	run_count,
 	updated_at,
 	failed_at,
+	revoke_time,
 	result_json,
 	result_at
 `
@@ -166,6 +169,7 @@ func scanLagDriftTest(result server.PgResult) *LagDriftTest {
 		&test.RunCount,
 		&test.UpdatedAt,
 		&test.FailedAt,
+		&test.RevokeTime,
 		&test.ResultJson,
 		&test.ResultAt,
 	))
@@ -551,11 +555,14 @@ func AddLagDriftRun(ctx context.Context, args *AddLagDriftRunArgs) *AddLagDriftR
 }
 
 // Why a drift test can start no run at `now`, or "" when it can (P5, P6):
-// expired when it has no run and is past its expiry, closed when it has
-// failed, is out of runs or is past its retest window, and busy while a run
-// started less than processingAfter ago is still measuring.
+// expired when an operator revoked it or it has no run and is past its
+// expiry, as an unknown token is, closed when it has failed, is out of runs
+// or is past its retest window, and busy while a run started less than
+// processingAfter ago is still measuring.
 func lagDriftStartRefusal(test *LagDriftTest, runs []*LagDriftRun, now time.Time, maxRuns int, processingAfter time.Duration) string {
 	switch {
+	case test.RevokeTime != nil:
+		return LagDriftRefusalExpired
 	case test.FailedAt != nil:
 		return LagDriftRefusalClosed
 	case test.RunCount == 0 && !now.Before(test.ExpiresAt):
@@ -792,20 +799,50 @@ func GetLagDriftReportedPositions(ctx context.Context, trackId server.Id) map[in
 	return positions
 }
 
-// The city point a drift track keeps of its start address (A5), nil when the
-// place named no city the place list holds.
-func GetLagDriftTrackCityPointInTx(ctx context.Context, tx server.PgTx, trackId server.Id) (latitude *float64, longitude *float64) {
+// What a drift track keeps of its start address (A5) that processing reads:
+// the city point, nil when the place named no city the place list holds, and
+// the network, for its type (LagDriftNetworkType).
+type LagDriftTrackClient struct {
+	Latitude  *float64
+	Longitude *float64
+	Asn       *int64
+	AsnOrg    string
+}
+
+// The client fields of a drift track, in the caller's transaction; empty when
+// the track is gone.
+func GetLagDriftTrackClientInTx(ctx context.Context, tx server.PgTx, trackId server.Id) *LagDriftTrackClient {
+	client := &LagDriftTrackClient{}
 	result, err := tx.Query(
 		ctx,
-		`SELECT client_latitude, client_longitude FROM lag_track WHERE track_id = $1`,
+		`SELECT client_latitude, client_longitude, client_asn, client_asn_org FROM lag_track WHERE track_id = $1`,
 		trackId,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&latitude, &longitude))
+			var asnOrg *string
+			server.Raise(result.Scan(&client.Latitude, &client.Longitude, &client.Asn, &asnOrg))
+			if asnOrg != nil {
+				client.AsnOrg = *asnOrg
+			}
 		}
 	})
-	return
+	return client
+}
+
+// The drift runs still open, started or processing, that started before
+// startedBefore: runs a working sweep would have completed by now (E5).
+func CountStuckLagDriftRuns(ctx context.Context, startedBefore time.Time) int {
+	var count int
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`SELECT COUNT(*) FROM lag_drift_run WHERE state <> $1 AND started_at < $2`,
+			LagDriftRunStateComplete,
+			startedBefore.UTC(),
+		).Scan(&count))
+	})
+	return count
 }
 
 // The drift tests with a run that may be due (P6, E5): one started at or
@@ -849,7 +886,8 @@ func GetDueLagDriftTests(ctx context.Context, startedBefore time.Time, finishedB
 
 // Deletes the client_ip hash of every drift test that can start no run at
 // `now` (K3, R1): one with no run past its expiry, one past its retest
-// window, one out of runs, and one that failed. Answers how many it deleted.
+// window, one out of runs, one that failed, and one revoked. Answers how many
+// it deleted.
 func RemoveClosedLagDriftClientIpHashes(ctx context.Context, now time.Time, maxRuns int) int {
 	var count int
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -864,7 +902,8 @@ func RemoveClosedLagDriftClientIpHashes(ctx context.Context, now time.Time, maxR
 					(first_started_at IS NULL AND expires_at <= $1) OR
 					retest_until <= $1 OR
 					$2 <= run_count OR
-					failed_at IS NOT NULL
+					failed_at IS NOT NULL OR
+					revoke_time IS NOT NULL
 				)
 			`,
 			now.UTC(),
@@ -926,28 +965,86 @@ func RemoveExpiredLagDriftTests(ctx context.Context, minCreatedAt time.Time) Rem
 	}
 }
 
-// A network's allowed parent origins for its drift tests (P3), nil when it
-// has set none, which allows any https origin and an unknown one (Q5).
-func GetLagDriftNetworkOrigins(ctx context.Context, networkId server.Id) []string {
-	var origins []string
+// Marks a drift test revoked by an operator (`bringyourctl lag drift-test
+// --revoke`): it keeps its runs and its verdict, starts no more runs, and its
+// client_ip hash goes at once, since no run can start (K3). Revoking it again
+// keeps the first revoke time. False when there is no such test.
+func RevokeLagDriftTest(ctx context.Context, driftTestId server.Id, now time.Time) (revoked bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag, err := tx.Exec(
+			ctx,
+			`
+			UPDATE lag_drift_test
+			SET
+				revoke_time = COALESCE(revoke_time, $2),
+				client_ip_hash = NULL,
+				updated_at = $2
+			WHERE drift_test_id = $1
+			`,
+			driftTestId,
+			now.UTC(),
+		)
+		server.Raise(err)
+		revoked = tag.RowsAffected() == 1
+	})
+	return
+}
+
+// A network's drift test settings (P3): its allowed parent origins, nil when
+// it has set none, which allows any https origin, a local http one and an
+// unknown one (Q5, W5); and whether an operator switched its drift tests off.
+type LagDriftNetwork struct {
+	ParentOrigins []string
+	Disabled      bool
+}
+
+// A network's drift test settings; a network that never set them has none.
+func GetLagDriftNetwork(ctx context.Context, networkId server.Id) *LagDriftNetwork {
+	network := &LagDriftNetwork{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT parent_origins FROM lag_drift_network WHERE network_id = $1`,
+			`SELECT parent_origins, disable_time IS NOT NULL FROM lag_drift_network WHERE network_id = $1`,
 			networkId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&origins))
+				server.Raise(result.Scan(&network.ParentOrigins, &network.Disabled))
 			}
 		})
 	})
-	return origins
+	return network
+}
+
+// A network's allowed parent origins for its drift tests (P3), nil when it
+// has set none.
+func GetLagDriftNetworkOrigins(ctx context.Context, networkId server.Id) []string {
+	return GetLagDriftNetwork(ctx, networkId).ParentOrigins
 }
 
 // Sets a network's allowed parent origins (P3), or clears them with none.
 // The origins are stored as given; the caller normalizes them.
 func SetLagDriftNetworkOrigins(ctx context.Context, networkId server.Id, origins []string) error {
+	if len(origins) == 0 {
+		origins = nil
+	}
+	return upsertLagDriftNetwork(ctx, networkId, `parent_origins = $2`, origins)
+}
+
+// Switches a network's drift tests off or on again (P3): while off, the
+// network allocates none, and its tokens start no more runs.
+func SetLagDriftNetworkDisabled(ctx context.Context, networkId server.Id, disabled bool) error {
+	var disableTime *time.Time
+	if disabled {
+		now := server.NowUtc()
+		disableTime = &now
+	}
+	return upsertLagDriftNetwork(ctx, networkId, `disable_time = CASE WHEN $2::timestamp IS NULL THEN NULL ELSE COALESCE(lag_drift_network.disable_time, $2) END`, disableTime)
+}
+
+// Sets one of a network's drift settings, `assignment` to $2, in its row,
+// which it creates on first use. ErrNetworkNotFound for no such network.
+func upsertLagDriftNetwork(ctx context.Context, networkId server.Id, assignment string, value any) error {
 	var returnErr error
 	server.Tx(ctx, func(tx server.PgTx) {
 		returnErr = nil
@@ -955,25 +1052,23 @@ func SetLagDriftNetworkOrigins(ctx context.Context, networkId server.Id, origins
 			returnErr = ErrNetworkNotFound
 			return
 		}
-		if len(origins) == 0 {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`DELETE FROM lag_drift_network WHERE network_id = $1`,
-				networkId,
-			))
-			return
-		}
+		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
-			INSERT INTO lag_drift_network (network_id, parent_origins, update_time)
-			VALUES ($1, $2, $3)
-			ON CONFLICT (network_id) DO UPDATE
-			SET parent_origins = $2, update_time = $3
+			INSERT INTO lag_drift_network (network_id, update_time)
+			VALUES ($1, $2)
+			ON CONFLICT (network_id) DO NOTHING
 			`,
 			networkId,
-			origins,
-			server.NowUtc(),
+			now,
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE lag_drift_network SET `+assignment+`, update_time = $3 WHERE network_id = $1`,
+			networkId,
+			value,
+			now,
 		))
 	})
 	return returnErr
