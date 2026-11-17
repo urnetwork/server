@@ -211,6 +211,41 @@ low-reasoning test agent must not approve candidates, merge branches, or push
 source/config refs. These roles apply to all six epochs and must survive an
 agent handoff.
 
+### Epoch 2 official Astra amendment (2026-11-17)
+
+The operator-authorized Epoch 2 honesty reviewer is `gpt-6-astra` with `max`
+reasoning. Qwen/Gemma qualification remains work for Epoch 3, not an Epoch 2
+fallback. This substitutes only the reviewer; it does not accept calibration,
+release any hold, alter scoring or eligibility, or approve source/reward by
+default. All six genuine findings and the production-benefit addendum remain
+required. A substantiated rejection revokes reward and source together; an
+honesty approval with source deferred cannot authorize source promotion.
+
+Private prereviews may run before close. Preserve their actual completion time
+and bind the job, canonical patch, base source, score, baseline and artifact
+digests. Those score/artifact/baseline bytes must have existed before review.
+Public import remains embargoed until publication and is only for the current
+elected job/revision/decision. The import must fit the already recorded closing
+checkpoint; no missing, expired or native-owned checkpoint is reset or adopted.
+An earlier genuine prereview need not claim completion after checkpoint creation.
+
+Deploy the appended migration through the normal migration-before-code pipeline,
+then deploy the API, monitor and supervisor control CLI. The supervisor embeds
+the direct-store approval projection; an old Epoch 1-only control binary cannot
+recognize an Epoch 2 import. The import uses the existing
+`POST /competition/v2/official-review-imports` route and an existing scoped
+`review_operator`; it additionally needs `official_review_import_sha256` to equal
+`model.CompetitionAutomationDigest` of the **entire exact final import request**.
+An earlier Epoch 1 grant or raw JSON file hash is not a substitute for that
+canonical request identity. The final request uses an empty `handoff_id`, genuine
+Astra provenance, and `native_qualification_waived: false`; calibration
+acknowledgement is informational only. Never assign native `model_completed_at`
+or fabricate Snow member attribution. A new election after rejection needs its
+own exact bound final import/grant; prereview reports are not bulk API approvals.
+
+Epoch 1 retains its separately authorized legacy contract unchanged. Epoch 3
+does not inherit this amendment, a new time window, or qualification credit.
+
 Legacy v1 candidate honesty review and source promotion apply only to production.
 Legacy staging automatically names the highest-ranked placeable candidate passing
 every gate after close and drain, without a significance or takeover-margin

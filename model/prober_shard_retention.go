@@ -18,10 +18,26 @@
 // begins, the oldest kept generation falls out and is dropped as a unit. The
 // retention is a fixed number of shards: a pass is never cut short of its
 // generation. A pass ends by draining and settling its shard
-// (SettleProberShard), and nothing deletes it before its generation drops.
+// (SettleProberShard), and nothing but its window clients goes before its
+// generation drops.
 //
-// The drop. For each pass of a dropped generation, oldest first:
-//  1. its zero-byte contracts: resolved and closed before the cutoff, every
+// The window clients. Each tunnel of a pass mints a derived client of the
+// pass's own client and retires it when the tunnel closes: on Main about 5,500
+// a pass, 6.8M a day, each retired about 16 seconds after it was minted. Once
+// its pass settled, nothing reads a retired window again: its contracts carry
+// their own network ids, so close, expiry, settlement and payout never read
+// its row (as for a hosted proxy's windows, network_client_retired_hosted.go),
+// and the location fold cannot write its row again once its client is gone.
+// The window step (RemoveProberShardWindows, prober_shard_window_clients.go)
+// deletes a pass's window clients and the rows keyed by them an hour after its
+// deadline, once every contract it funded is resolved and every escrow of its
+// balances settled; the pass's own client, identity, contracts and registry
+// row stay for its generation. A window held by a connection or a hosted
+// resource stays for the drop.
+//
+// The drop. Oldest generation first:
+//  1. the generation's zero-byte contracts, by one walk of the primary key
+//     (ProberShardContractWalk): resolved and closed before the cutoff, every
 //     escrow settled, no sweep and no destination close with bytes. Such a
 //     contract adds nothing to any byte sum: not the daily transfer rollup or
 //     the clock backfill (each sums destination close bytes), the subnet usage
@@ -32,10 +48,30 @@
 //     credit-bearing contract's usage in the same statement. On Main 57% of
 //     prober contracts are zero-byte. Every contract dropped here is one the
 //     horizon reaper deletes at its horizon; this only deletes it sooner.
-//  2. its identity, in ReapProberShard's one transaction, which refuses a
-//     shard with an unresolved contract, an unsettled escrow, a pending debit,
-//     a connected client or a balance that is not a plain grant.
-//  3. its registry row.
+//     The walk reads the contract id range of the generation's passes, from
+//     the first pass's creation to the last pass's deadline, each widened by
+//     ContractIdCreateTimeMargin, once, in id order, and keeps the contracts
+//     whose payer is one of the generation's pass networks: the payer of every
+//     contract a pass funds, origin or reply companion
+//     (validateProberShardPayerInTx). It needs no index but the primary key and
+//     reads each contract of the day once, about as many rows a second as
+//     contracts are created (OPEN-SOURCE-ID-RETIRE.md, option A). It replaced
+//     a read of each client's closed contracts from
+//     transfer_contract_open_source_id. Its cursor round trips through the
+//     task args, so a walk that outlasts a run resumes where it stopped.
+//  2. then, for each pass of a generation whose walk completed, its identity,
+//     in ReapProberShard's one transaction, which refuses a shard with an
+//     unresolved contract, an unsettled escrow, a pending debit, a connected
+//     client or a balance that is not a plain grant.
+//  3. and its registry row.
+//
+// A pass of a generation the walk has not completed waits for it: its
+// contracts are found by its network, so its identity could go first, but
+// its registry row names the network the walk keeps contracts by. The walk
+// serves the oldest dropped generation that still has a pass to drop, so a
+// pass that is not due (refused, failed or inside its deadline guard) never
+// holds a newer generation's walk, and a generation whose passes all went
+// without a walk (the contract step off) is never walked.
 //
 // What a drop keeps, for the retention that owns it:
 //   - the contracts that carry bytes, which the transfer rollup can still read
@@ -59,11 +95,12 @@
 //
 // The runtime control, the Redis hash `{prober_retention}control`, turns the
 // drop on, off or to a dry run, shortens or lengthens the window within the
-// code's bounds, paces the contract deletes and turns the contract step off,
-// without a deploy. It is read before every pass, so setting the mode off stops
-// a running drop within one pass. A run that cannot read it stops, as if the
-// mode were off. The code's default mode is off: a deploy drops nothing until
-// an operator sets the control.
+// code's bounds, paces the walk and the contract deletes, turns the contract
+// step off, and paces or turns off the window step, without a deploy. It is
+// read before every pass and every walk batch, so setting the mode off stops a
+// running drop, and the window step, within one pass or batch. A run that
+// cannot read it stops, as if the mode were off. The code's default mode is
+// off: a deploy drops nothing until an operator sets the control.
 package model
 
 import (
@@ -71,7 +108,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -141,19 +177,43 @@ type ProberShardRetentionSettings struct {
 	MinDeadlineAge time.Duration
 	// The contract step runs while the control does not turn it off.
 	DropContracts bool
-	// Contracts read, classified and deleted per transaction, at most.
+	// Contracts of the generation's passes one walk batch classifies and
+	// deletes, at most; a batch that reaches it resumes after its last one.
+	// Non-positive turns the contract step off.
 	ContractBatchSize int
-	// Clients whose contracts one candidate read covers.
-	ClientChunkSize int
-	// Contracts read per second while the control sets no rate, and the most
-	// the control can set.
+	// Contracts one walk batch reads from the primary key, at most, of any
+	// payer: the bound on the work one transaction examines. Non-positive
+	// turns the contract step off.
+	WalkBatchSize int
+	// Contracts of the generation's passes the walk keeps per second while the
+	// control sets no rate, and the most the control can set.
 	DefaultMaxContractsPerSecond float64
 	MaxContractsPerSecond        float64
+	// Contracts the walk reads from the primary key per second, of any payer,
+	// while the control sets no rate, and the most the control can set.
+	DefaultMaxWalkRowsPerSecond float64
+	MaxWalkRowsPerSecond        float64
 	// Passes dropped per minute while the control sets no rate, and the most
 	// the control can set. A pass's identity transaction deletes its clients'
 	// rows at once, so this paces those deletes.
 	DefaultMaxShardsPerMinute float64
 	MaxShardsPerMinute        float64
+	// The window step runs while the control does not turn it off.
+	DropWindows bool
+	// The window step takes a pass once its deadline is this far in the past
+	// and every contract it funded is resolved.
+	WindowMinDeadlineAge time.Duration
+	// A pass still unresolved, or still live, this far past its deadline is
+	// passed over: its window clients wait for its generation's drop. Until
+	// then the window step waits at it.
+	WindowSkipAge time.Duration
+	// Window clients one transaction deletes, at most. Non-positive turns the
+	// window step off.
+	WindowBatchSize int
+	// Passes whose window clients the window step deletes per minute while the
+	// control sets no rate, and the most the control can set.
+	DefaultMaxWindowShardsPerMinute float64
+	MaxWindowShardsPerMinute        float64
 	// Passes selected and locked together.
 	ShardPageSize int
 	// Closed registry rows of dropped generations deleted per transaction.
@@ -194,26 +254,45 @@ func DefaultProberShardRetentionSettings() *ProberShardRetentionSettings {
 		MinDeadlineAge:    6 * time.Hour,
 		DropContracts:     true,
 		ContractBatchSize: 500,
-		ClientChunkSize:   256,
+		// about 10% of Main's contracts are a prober's: a batch keeps about 500
+		WalkBatchSize: 5000,
 		// about 5,500 zero-byte prober contracts a day per pass slot on Main:
 		// 200 a second keeps a day's drop to about 11 hours
 		DefaultMaxContractsPerSecond: 200,
 		MaxContractsPerSecond:        2000,
+		// a day's window on Main is about 116M contracts (1,350 created a
+		// second): 3,000 a second walks it in about 11 hours
+		DefaultMaxWalkRowsPerSecond: 3000,
+		MaxWalkRowsPerSecond:        20000,
 		// a day's 1,600 passes in under an hour; the first drop's backlog of
 		// about 49,000 passes (Main, 2026-11-01) in about 27 hours
 		DefaultMaxShardsPerMinute: 30,
 		MaxShardsPerMinute:        600,
-		ShardPageSize:             16,
-		RegistryBatchSize:         1000,
-		RunBudget:                 4 * time.Minute,
-		StatementTimeout:          30 * time.Second,
-		LockTimeout:               2 * time.Second,
-		ControlTimeout:            2 * time.Second,
-		BlockedRetryInterval:      time.Hour,
-		FailedRetryInterval:       time.Minute,
-		ResumeInterval:            15 * time.Second,
-		IdleInterval:              5 * time.Minute,
-		TaskMaxTime:               15 * time.Minute,
+		DropWindows:               true,
+		// a pass settles within about half an hour of its creation on Main,
+		// and a contract's lifespan and close linger are about 75 minutes
+		// (RetiredHostedNetworkClientReapSettings)
+		WindowMinDeadlineAge: time.Hour,
+		WindowSkipAge:        6 * time.Hour,
+		// a pass on Main has about 5,500 window clients: one transaction
+		WindowBatchSize: 10000,
+		// Main creates about 1,400 passes a day, one a minute: four keep up
+		// with room, at about 380 window deletes a second while behind, and
+		// clear the backlog of about 39,000 passes (2026-11-17) in about nine
+		// days
+		DefaultMaxWindowShardsPerMinute: 4,
+		MaxWindowShardsPerMinute:        120,
+		ShardPageSize:                   16,
+		RegistryBatchSize:               1000,
+		RunBudget:                       4 * time.Minute,
+		StatementTimeout:                30 * time.Second,
+		LockTimeout:                     2 * time.Second,
+		ControlTimeout:                  2 * time.Second,
+		BlockedRetryInterval:            time.Hour,
+		FailedRetryInterval:             time.Minute,
+		ResumeInterval:                  15 * time.Second,
+		IdleInterval:                    5 * time.Minute,
+		TaskMaxTime:                     15 * time.Minute,
 	}
 }
 
@@ -244,20 +323,30 @@ const proberShardRetentionControlKey = "{prober_retention}control"
 //   - `retainedGenerations`: generations kept, the current one included,
 //     between the code's fewest and most; a value past either end counts as
 //     that end;
-//   - `maxContractsPerSecond`: contracts read per second, at most the code's;
-//     zero is off;
+//   - `maxContractsPerSecond`: contracts of the generation's passes the walk
+//     keeps per second, at most the code's; zero is off;
+//   - `maxWalkRowsPerSecond`: contracts the walk reads from the primary key per
+//     second, of any payer, at most the code's; zero is off;
 //   - `maxShardsPerMinute`: passes dropped per minute, at most the code's;
 //     zero is off;
-//   - `contracts`: on or off, the zero-byte contract step.
+//   - `contracts`: on or off, the zero-byte contract step;
+//   - `windows`: on or off, the window step (RemoveProberShardWindows), which
+//     runs in the mode the other fields set;
+//   - `maxWindowShardsPerMinute`: passes whose window clients the window step
+//     deletes per minute, at most the code's; zero turns the window step off.
 //
 // A field that does not parse narrows as far as it can: mode off, the most
-// generations, rate zero (which is off), the contract step off.
+// generations, rate zero (which is off), the contract step off, the window
+// step off.
 const (
-	ProberShardRetentionControlFieldMode                  = "mode"
-	ProberShardRetentionControlFieldRetainedGenerations   = "retainedGenerations"
-	ProberShardRetentionControlFieldMaxContractsPerSecond = "maxContractsPerSecond"
-	ProberShardRetentionControlFieldMaxShardsPerMinute    = "maxShardsPerMinute"
-	ProberShardRetentionControlFieldContracts             = "contracts"
+	ProberShardRetentionControlFieldMode                     = "mode"
+	ProberShardRetentionControlFieldRetainedGenerations      = "retainedGenerations"
+	ProberShardRetentionControlFieldMaxContractsPerSecond    = "maxContractsPerSecond"
+	ProberShardRetentionControlFieldMaxWalkRowsPerSecond     = "maxWalkRowsPerSecond"
+	ProberShardRetentionControlFieldMaxShardsPerMinute       = "maxShardsPerMinute"
+	ProberShardRetentionControlFieldContracts                = "contracts"
+	ProberShardRetentionControlFieldWindows                  = "windows"
+	ProberShardRetentionControlFieldMaxWindowShardsPerMinute = "maxWindowShardsPerMinute"
 )
 
 // The effective control: the code settings as the Redis control narrowed them.
@@ -267,8 +356,13 @@ type ProberShardRetentionControl struct {
 	Mode                  ProberShardRetentionMode
 	RetainedGenerations   int
 	MaxContractsPerSecond float64
+	MaxWalkRowsPerSecond  float64
 	MaxShardsPerMinute    float64
 	DropContracts         bool
+	// The window step runs, in the control's mode, at most
+	// MaxWindowShardsPerMinute passes a minute.
+	DropWindows              bool
+	MaxWindowShardsPerMinute float64
 }
 
 // The control the fields narrow the settings to. Pure: fields is the control
@@ -279,8 +373,12 @@ func NarrowProberShardRetentionControl(fields map[string]string, settings *Probe
 		Mode:                  settings.DefaultMode,
 		RetainedGenerations:   settings.clampRetainedGenerations(settings.RetainedGenerations),
 		MaxContractsPerSecond: min(settings.DefaultMaxContractsPerSecond, settings.MaxContractsPerSecond),
+		MaxWalkRowsPerSecond:  min(settings.DefaultMaxWalkRowsPerSecond, settings.MaxWalkRowsPerSecond),
 		MaxShardsPerMinute:    min(settings.DefaultMaxShardsPerMinute, settings.MaxShardsPerMinute),
-		DropContracts:         settings.DropContracts,
+		// a batch with no room reads or keeps nothing
+		DropContracts:            settings.DropContracts && 0 < settings.ContractBatchSize && 0 < settings.WalkBatchSize,
+		DropWindows:              settings.DropWindows && 0 < settings.WindowBatchSize,
+		MaxWindowShardsPerMinute: min(settings.DefaultMaxWindowShardsPerMinute, settings.MaxWindowShardsPerMinute),
 	}
 	if value, ok := fields[ProberShardRetentionControlFieldMode]; ok {
 		// a value that does not parse is off
@@ -302,6 +400,14 @@ func NarrowProberShardRetentionControl(fields map[string]string, settings *Probe
 			control.MaxContractsPerSecond = 0
 		}
 	}
+	if value, ok := fields[ProberShardRetentionControlFieldMaxWalkRowsPerSecond]; ok {
+		rate, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err == nil && !math.IsNaN(rate) {
+			control.MaxWalkRowsPerSecond = min(settings.MaxWalkRowsPerSecond, rate)
+		} else {
+			control.MaxWalkRowsPerSecond = 0
+		}
+	}
 	if value, ok := fields[ProberShardRetentionControlFieldMaxShardsPerMinute]; ok {
 		rate, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 		if err == nil && !math.IsNaN(rate) {
@@ -311,9 +417,24 @@ func NarrowProberShardRetentionControl(fields map[string]string, settings *Probe
 		}
 	}
 	if value, ok := fields[ProberShardRetentionControlFieldContracts]; ok {
-		control.DropContracts = settings.DropContracts && strings.TrimSpace(value) == "on"
+		control.DropContracts = control.DropContracts && strings.TrimSpace(value) == "on"
 	}
-	if !settings.Enable || !(0 < control.MaxContractsPerSecond) || !(0 < control.MaxShardsPerMinute) {
+	if value, ok := fields[ProberShardRetentionControlFieldWindows]; ok {
+		control.DropWindows = control.DropWindows && strings.TrimSpace(value) == "on"
+	}
+	if value, ok := fields[ProberShardRetentionControlFieldMaxWindowShardsPerMinute]; ok {
+		rate, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err == nil && !math.IsNaN(rate) {
+			control.MaxWindowShardsPerMinute = min(settings.MaxWindowShardsPerMinute, rate)
+		} else {
+			control.MaxWindowShardsPerMinute = 0
+		}
+	}
+	// a rate of zero turns only the window step off: the drop does not read it
+	if !(0 < control.MaxWindowShardsPerMinute) {
+		control.DropWindows = false
+	}
+	if !settings.Enable || !(0 < control.MaxContractsPerSecond) || !(0 < control.MaxWalkRowsPerSecond) || !(0 < control.MaxShardsPerMinute) {
 		control.Mode = ProberShardRetentionModeOff
 	}
 	return control
@@ -368,9 +489,48 @@ func RemoveProberShardRetentionControl(ctx context.Context) error {
 	}, server.OptRedisNoPreflight())
 }
 
+// Where the walk of the dropped generations' contracts resumes. It round trips
+// through the task args, as the contract horizon reaper's cursor does; the
+// zero value walks the oldest dropped generation that has a pass to drop from
+// its start. A lost walk only reads again: it never skips a generation it did
+// not complete.
+type ProberShardContractWalk struct {
+	// The newest generation, by its UTC start, whose walk completed. Every
+	// older generation was walked or had no pass left to walk when this one
+	// began. Zero before the first walk completes.
+	CompleteThrough time.Time `json:"complete_through,omitzero"`
+	// The generation whose walk is in progress, by its UTC start. Zero when no
+	// walk is.
+	Generation time.Time `json:"generation,omitzero"`
+	// The contract id range [Lower, Upper) the walk reads, fixed when it
+	// starts: ContractIdCreateTimeRange of the first pass's creation and the
+	// last pass's deadline, which holds every contract the generation's passes
+	// funded.
+	Lower server.Id `json:"lower"`
+	Upper server.Id `json:"upper"`
+	// The last contract id the walk committed past. The zero id starts at
+	// Lower.
+	Cursor server.Id `json:"cursor"`
+}
+
+// The first pass create time whose generation is not walked: the end of the
+// newest generation whose walk completed, or the zero time before any did.
+// Pure.
+func (self ProberShardContractWalk) walkedEnd(generationDuration time.Duration) time.Time {
+	if self.CompleteThrough.IsZero() {
+		return time.Time{}
+	}
+	return self.CompleteThrough.Add(generationDuration)
+}
+
+// Whether the generation of the pass created at createTime was walked. Pure.
+func (self ProberShardContractWalk) walked(createTime time.Time, generationDuration time.Duration) bool {
+	return createTime.Before(self.walkedEnd(generationDuration))
+}
+
 // Why a run ended.
 const (
-	// no pass of a dropped generation is due
+	// no pass of a dropped generation is due, and no generation is due a walk
 	proberShardRetentionStopCaughtUp = "caught_up"
 	// the run spent its budget
 	proberShardRetentionStopBudget = "budget"
@@ -394,7 +554,7 @@ const (
 	proberShardRetentionShardBlocked = "blocked"
 	// a step failed; retried by the next run
 	proberShardRetentionShardError = "error"
-	// the run's budget ended inside its contract step; the next run resumes it
+	// its generation's contract walk has not completed; the pass waits for it
 	proberShardRetentionShardDeferred = "deferred"
 	// its registry row went before this run reached it: another run dropped it
 	proberShardRetentionShardGone = "gone"
@@ -402,7 +562,7 @@ const (
 	proberShardRetentionShardDryRun = "dry_run"
 )
 
-// What happened to a contract the contract step read.
+// What happened to a contract of the generation's passes the walk kept.
 const (
 	// deleted with its rows
 	proberShardRetentionContractDeleted = "deleted"
@@ -476,6 +636,14 @@ var (
 		Name: "urnetwork_prober_retention_contracts_total",
 		Help: "Resolved contracts of dropped prober shard passes the retention read, by outcome",
 	}, []string{"outcome"})
+	proberShardRetentionWalkedCounter = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_prober_retention_walked_contracts_total",
+		Help: "Contracts of any payer the prober shard retention's walk read from the primary key over a dropped generation's contract id range, dry runs included; it keeps those of the generation's passes",
+	})
+	proberShardRetentionWalkCursorGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "urnetwork_prober_retention_walk_cursor_timestamp_seconds",
+		Help: "Creation time the prober shard retention's contract walk has read up to: its cursor's id millisecond, the start of a generation's range when its walk begins and the end once it completes. Each taskworker keeps its own last walk's value",
+	})
 	proberShardRetentionArchivedCounter = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "urnetwork_prober_retention_archived_contracts_total",
 		Help: "Credit-bearing contracts the prober shard retention deleted, each archived to st_provider_usage_archive",
@@ -521,7 +689,7 @@ func init() {
 	for _, table := range proberShardRetentionTables {
 		proberShardRetentionDeletedRowsCounter.WithLabelValues(table)
 	}
-	for _, step := range []string{"select", "contracts", "identity", "registry"} {
+	for _, step := range []string{"select", "contracts", "identity", "registry", proberShardRetentionStepWindows} {
 		for _, outcome := range []string{"ok", "error"} {
 			proberShardRetentionBatchDuration.WithLabelValues(step, outcome)
 		}
@@ -547,6 +715,8 @@ func init() {
 		proberShardRetentionShardsCounter,
 		proberShardRetentionBlockedCounter,
 		proberShardRetentionContractsCounter,
+		proberShardRetentionWalkedCounter,
+		proberShardRetentionWalkCursorGauge,
 		proberShardRetentionArchivedCounter,
 		proberShardRetentionDeletedRowsCounter,
 		proberShardRetentionBatchDuration,
@@ -565,8 +735,10 @@ type ProberShardRetentionReport struct {
 	// Passes taken up, by outcome; refused passes by reason.
 	Shards  map[string]int64
 	Blocked map[string]int64
-	// Contracts read by the contract step, by outcome.
+	// Contracts of the generations' passes the walk kept, by outcome.
 	Contracts map[string]int64
+	// Contracts of any payer the walk read from the primary key.
+	Walked int64
 	// Credit-bearing contracts deleted, each archived by the capture trigger.
 	Archived int64
 	// Rows deleted, by table.
@@ -574,7 +746,8 @@ type ProberShardRetentionReport struct {
 	// Due passes and the oldest pass's create time at the run's start.
 	DueShards   int64
 	OldestShard *time.Time
-	// No pass of a dropped generation was due.
+	// No pass of a dropped generation was due, and no generation was due a
+	// walk.
 	CaughtUp bool
 	// Why the run ended.
 	Stop string
@@ -622,27 +795,43 @@ func (self *ProberShardRetentionReport) addDeleted(table string, count int64) {
 	proberShardRetentionDeletedRowsCounter.WithLabelValues(table).Add(float64(count))
 }
 
-// One run: drops the passes of dropped generations, oldest first, until none
-// is due, the budget ends, the mode turns off or ctx ends. A failed pass is
-// counted and left for the next run; the run goes on to the next pass. A run
-// whose control read fails stops before it reads anything.
+func (self *ProberShardRetentionReport) addWalked(count int64) {
+	if count == 0 {
+		return
+	}
+	self.Walked += count
+	proberShardRetentionWalkedCounter.Add(float64(count))
+}
+
+// One run: drops the due passes of dropped generations whose contract walk
+// completed, oldest first; once none is due, walks the next generation's
+// contracts from walk, and drops its passes when the walk completes; until
+// nothing is due, the budget ends, the mode turns off or ctx ends. With the
+// contract step off, every due pass drops and nothing is walked. A failed
+// pass is counted and left for the next run; the run goes on to the next
+// pass. A run whose control read fails stops before it reads anything. next
+// is where the next run's walk resumes: every batch before a failed one
+// committed, so it is also the retry's.
 func RemoveProberShardGenerations(
 	ctx context.Context,
 	now time.Time,
+	walk ProberShardContractWalk,
 	settings *ProberShardRetentionSettings,
-) (report *ProberShardRetentionReport, returnErr error) {
+) (report *ProberShardRetentionReport, next ProberShardContractWalk, returnErr error) {
 	run := &proberShardRetentionRun{
 		settings: settings,
 		now:      now.UTC(),
 		runEnd:   time.Now().Add(settings.RunBudget),
 		report:   newProberShardRetentionReport(),
+		walk:     walk,
 	}
 	report = run.report
 	defer func() {
+		next = run.walk
 		proberShardRetentionRunCounter.WithLabelValues(report.Stop).Inc()
 		if glog.V(1) {
 			glog.Infof(
-				"[prober_retention]run mode=%s stop=%s retained=%d cutoff=%s due=%d shards=%v blocked=%v contracts=%v archived=%d deleted=%v\n",
+				"[prober_retention]run mode=%s stop=%s retained=%d cutoff=%s due=%d shards=%v blocked=%v contracts=%v walked=%d walk=%s/%s archived=%d deleted=%v\n",
 				report.Mode,
 				report.Stop,
 				report.RetainedGenerations,
@@ -651,6 +840,9 @@ func RemoveProberShardGenerations(
 				report.Shards,
 				report.Blocked,
 				report.Contracts,
+				report.Walked,
+				run.walk.Generation.Format(time.RFC3339),
+				run.walk.Cursor,
 				report.Archived,
 				report.Deleted,
 			)
@@ -670,69 +862,85 @@ func RemoveProberShardGenerations(
 		report.Stop = proberShardRetentionStopOff
 		return
 	}
+	if control.Mode != ProberShardRetentionModeOn {
+		returnErr = run.dryRun(ctx, control)
+		return
+	}
 
+	// a run that stops on an error stops at the first failed read
+	fail := func(err error) {
+		if ctx.Err() != nil {
+			report.Stop = proberShardRetentionStopCanceled
+			return
+		}
+		report.Stop = proberShardRetentionStopError
+		returnErr = err
+	}
 	for {
 		if stop, ok := run.stopped(ctx); ok {
 			report.Stop = stop
 			return
 		}
-		dryRun := control.Mode != ProberShardRetentionModeOn
-		owners, err := run.selectDueShards(ctx, dryRun)
+		owners, err := run.selectDueShards(ctx, false, run.walkedEnd(control))
 		if err != nil {
-			if ctx.Err() != nil {
-				report.Stop = proberShardRetentionStopCanceled
-				return
-			}
-			report.Stop = proberShardRetentionStopError
-			returnErr = err
+			fail(err)
 			return
 		}
-		if len(owners) == 0 {
-			if !dryRun {
-				if err := run.removeClosedRegistryRows(ctx); err != nil {
-					if ctx.Err() != nil {
-						report.Stop = proberShardRetentionStopCanceled
-						return
-					}
-					report.Stop = proberShardRetentionStopError
-					returnErr = err
+		if 0 < len(owners) {
+			for _, owner := range owners {
+				if stop, ok := run.stopped(ctx); ok {
+					report.Stop = stop
+					return
+				}
+				control, ok = run.readControl(ctx)
+				if !ok {
+					return
+				}
+				switch control.Mode {
+				case ProberShardRetentionModeOff:
+					report.Stop = proberShardRetentionStopOff
+					return
+				case ProberShardRetentionModeDryRun:
+					// the next run reads the drop it would make
+					report.Stop = proberShardRetentionStopDryRun
+					return
+				}
+				shardStart := time.Now()
+				run.dropShard(ctx, owner, control)
+				paced := time.Duration(float64(time.Minute) / control.MaxShardsPerMinute)
+				if !run.pace(ctx, paced-time.Since(shardStart)) {
+					report.Stop = proberShardRetentionStopCanceled
 					return
 				}
 			}
-			report.CaughtUp = true
-			report.Stop = proberShardRetentionStopCaughtUp
-			return
+			continue
 		}
-		for _, owner := range owners {
-			if stop, ok := run.stopped(ctx); ok {
-				report.Stop = stop
+
+		// no pass of a walked generation is due: walk the next generation
+		if control.DropContracts {
+			walking, _, latest, err := run.walkNextGeneration(ctx, control)
+			if err != nil {
+				fail(err)
 				return
 			}
-			control, ok = run.readControl(ctx)
-			if !ok {
+			if latest == nil {
+				// the walk set the stop
 				return
 			}
-			if control.Mode == ProberShardRetentionModeOff {
-				report.Stop = proberShardRetentionStopOff
-				return
-			}
-			if control.Mode != ProberShardRetentionModeOn {
-				run.dryRunShard(ctx, owner, control)
+			control = latest
+			if walking {
+				// complete, its passes are due now; or the contract step
+				// turned off, and every due pass drops without a walk
 				continue
 			}
-			shardStart := time.Now()
-			run.dropShard(ctx, owner, control)
-			paced := time.Duration(float64(time.Minute) / control.MaxShardsPerMinute)
-			if !run.pace(ctx, paced-time.Since(shardStart)) {
-				report.Stop = proberShardRetentionStopCanceled
-				return
-			}
 		}
-		if dryRun {
-			// a dry run changes nothing, so its next page would be this one
-			report.Stop = proberShardRetentionStopDryRun
+		if err := run.removeClosedRegistryRows(ctx); err != nil {
+			fail(err)
 			return
 		}
+		report.CaughtUp = true
+		report.Stop = proberShardRetentionStopCaughtUp
+		return
 	}
 }
 
@@ -745,7 +953,7 @@ func proberShardRetentionRecover(do func()) (returnErr error) {
 	return
 }
 
-// One run's clock, cutoff, budget and report.
+// One run's clock, cutoff, budget, walk and report.
 type proberShardRetentionRun struct {
 	settings *ProberShardRetentionSettings
 	// The run's now, which the cutoff is measured back from.
@@ -753,6 +961,21 @@ type proberShardRetentionRun struct {
 	cutoff time.Time
 	runEnd time.Time
 	report *ProberShardRetentionReport
+	// Where the walk stands, as of its last committed batch.
+	walk ProberShardContractWalk
+	// The pass networks of walkPassesGeneration's walk, read once a run.
+	walkPassesGeneration time.Time
+	walkNetworkIds       []server.Id
+}
+
+// The first create time of the passes the contract step has not walked, or
+// nil when the step is off and every due pass drops without a walk.
+func (self *proberShardRetentionRun) walkedEnd(control *ProberShardRetentionControl) *time.Time {
+	if !control.DropContracts {
+		return nil
+	}
+	walkedEnd := self.walk.walkedEnd(self.settings.GenerationDuration)
+	return &walkedEnd
 }
 
 // Reads the control and applies it to the run. False when the run must stop.
@@ -833,16 +1056,20 @@ func (self *proberShardRetentionRun) publishBacklog(due int64, oldest *time.Time
 // holds, and their next cleanup moves FailedRetryInterval past the run's clock,
 // so neither this run nor a crashed one takes them up again at once. The run's
 // clock is the authority for every comparison and postponement here: in
-// production it is the database's within a second. $1 the cutoff, $2 the
-// deadline bound, $3 the run's clock, $4 the page size.
+// production it is the database's within a second. A pass whose generation's
+// contract walk has not completed is not due while the contract step runs: it
+// waits for the walk without being taken up. $1 the cutoff, $2 the deadline
+// bound, $3 the run's clock, $4 the page size, $5 the first create time not
+// walked, or null with the contract step off.
 const proberShardRetentionDueSqlFormat = `
-	SELECT ` + proberShardColumns + `
+	SELECT ` + proberShardColumns + `, create_time
 	FROM prober_shard_run
 	WHERE
 		state <> 'closed' AND
 		create_time < $1 AND
 		deadline < $2 AND
-		(next_cleanup_time <= $3 OR next_cleanup_time = 'infinity')
+		(next_cleanup_time <= $3 OR next_cleanup_time = 'infinity') AND
+		($5::timestamp IS NULL OR create_time < $5::timestamp)
 	ORDER BY create_time, task_id, epoch
 	LIMIT $4
 	%s
@@ -852,7 +1079,33 @@ var proberShardRetentionDueSql = fmt.Sprintf(proberShardRetentionDueSqlFormat, "
 
 var proberShardRetentionDueLockSql = fmt.Sprintf(proberShardRetentionDueSqlFormat, "FOR UPDATE SKIP LOCKED")
 
-func (self *proberShardRetentionRun) selectDueShards(ctx context.Context, dryRun bool) (owners []*ProberShardOwner, returnErr error) {
+// A due pass and its create time, which names its generation.
+type proberShardRetentionDue struct {
+	*ProberShardOwner
+	createTime time.Time
+}
+
+// One due row: the pass's columns, then its create time.
+func scanProberShardRetentionDue(row interface{ Scan(...any) error }) (*proberShardRetentionDue, error) {
+	due := &proberShardRetentionDue{}
+	owner, err := scanProberShard(proberShardRetentionDueRow{row: row, createTime: &due.createTime})
+	due.ProberShardOwner = owner
+	return due, err
+}
+
+// Scans the pass's columns and then its create time into createTime.
+type proberShardRetentionDueRow struct {
+	row        interface{ Scan(...any) error }
+	createTime *time.Time
+}
+
+func (self proberShardRetentionDueRow) Scan(dest ...any) error {
+	return self.row.Scan(append(dest, self.createTime)...)
+}
+
+// The due passes, the first page of them. walkedEnd bounds the create times
+// the contract step has walked; nil reads every due pass.
+func (self *proberShardRetentionRun) selectDueShards(ctx context.Context, dryRun bool, walkedEnd *time.Time) (owners []*proberShardRetentionDue, returnErr error) {
 	start := time.Now()
 	defer func() {
 		outcome := "ok"
@@ -866,10 +1119,10 @@ func (self *proberShardRetentionRun) selectDueShards(ctx context.Context, dryRun
 		if dryRun {
 			server.Db(ctx, func(conn server.PgConn) {
 				owners = nil
-				rows, err := conn.Query(ctx, proberShardRetentionDueSql, self.cutoff, deadlineBound, self.now, self.settings.ShardPageSize)
+				rows, err := conn.Query(ctx, proberShardRetentionDueSql, self.cutoff, deadlineBound, self.now, self.settings.ShardPageSize, walkedEnd)
 				server.WithPgResult(rows, err, func() {
 					for rows.Next() {
-						owner, err := scanProberShard(rows)
+						owner, err := scanProberShardRetentionDue(rows)
 						server.Raise(err)
 						owners = append(owners, owner)
 					}
@@ -879,10 +1132,10 @@ func (self *proberShardRetentionRun) selectDueShards(ctx context.Context, dryRun
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			owners = nil
-			rows, err := tx.Query(ctx, proberShardRetentionDueLockSql, self.cutoff, deadlineBound, self.now, self.settings.ShardPageSize)
+			rows, err := tx.Query(ctx, proberShardRetentionDueLockSql, self.cutoff, deadlineBound, self.now, self.settings.ShardPageSize, walkedEnd)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
-					owner, err := scanProberShard(rows)
+					owner, err := scanProberShardRetentionDue(rows)
 					server.Raise(err)
 					owners = append(owners, owner)
 				}
@@ -898,11 +1151,11 @@ func (self *proberShardRetentionRun) selectDueShards(ctx context.Context, dryRun
 	return
 }
 
-// Drops one pass: its zero-byte contracts, then its identity, then its
-// registry row. A refused identity drop leaves the pass for
+// Drops one pass whose generation's contract walk completed: its identity,
+// then its registry row. A refused identity drop leaves the pass for
 // BlockedRetryInterval and a failed step for FailedRetryInterval, both after
 // the run's clock.
-func (self *proberShardRetentionRun) dropShard(ctx context.Context, owner *ProberShardOwner, control *ProberShardRetentionControl) {
+func (self *proberShardRetentionRun) dropShard(ctx context.Context, owner *proberShardRetentionDue, control *ProberShardRetentionControl) {
 	outcome := proberShardRetentionShardError
 	defer func() {
 		self.report.addShard(outcome)
@@ -929,18 +1182,12 @@ func (self *proberShardRetentionRun) dropShard(ctx context.Context, owner *Probe
 		fail("settle", err)
 		return
 	}
-	if control.DropContracts {
-		complete, err := self.dropShardContracts(ctx, owner, control)
-		if err != nil {
-			fail("contracts", err)
-			return
-		}
-		if !complete {
-			// its identity waits for the rest of its contracts: once its clients
-			// are gone, they cannot be found
-			outcome = proberShardRetentionShardDeferred
-			return
-		}
+	if control.DropContracts && !self.walk.walked(owner.createTime, self.settings.GenerationDuration) {
+		// the contract step turned on after the page was read: its identity
+		// waits for its generation's walk, which keeps contracts by the
+		// network its registry row names
+		outcome = proberShardRetentionShardDeferred
+		return
 	}
 
 	start := time.Now()
@@ -1046,57 +1293,62 @@ func (self *proberShardRetentionRun) removeClosedRegistryRows(ctx context.Contex
 	}
 }
 
-// The clients whose contracts belong to the pass: every client of its network
-// and, once its identity transaction committed, the retired cohort it kept.
-const proberShardRetentionClientsSql = `
-	SELECT client_id FROM network_client WHERE network_id = $1
-	UNION
-	SELECT unnest($2::uuid[])
+// The oldest pass of the next generation due a walk: not closed, created
+// before the cutoff in a generation the walk has not completed, with its
+// deadline MinDeadlineAge past, as a due pass's. Null when there is none. The
+// registry holds about a week of passes. $1 the cutoff, $2 the deadline bound,
+// $3 the first create time not walked.
+const proberShardRetentionWalkNextSql = `
+	SELECT min(create_time)
+	FROM prober_shard_run
+	WHERE
+		state <> 'closed' AND
+		create_time < $1 AND
+		deadline < $2 AND
+		$3 <= create_time
 `
 
-// The next batch of the pass's resolved contracts after the cursor, closed
-// before the cutoff, in id order: the origins of its clients, from the closed
-// range of each client in transfer_contract_open_source_id, and the reply
-// companions to them, from the destination index. Each arm reads one client's
-// own contracts behind OFFSET 0 and tests the payer, outcome and close time
-// outside it: inside, the payer test would let the planner read the payer's
-// whole history from transfer_contract_open_payer_network_id_transfer_byte_count
-// once per client, the read and the index this retention replaces. The payer
-// test keeps the batch inside the pass's own contracts. $1 the clients, $2 the
-// pass's network, $3 the cutoff, $4 the cursor, $5 the batch size.
-const proberShardRetentionContractWindowSql = `
-	WITH client AS MATERIALIZED (
-		SELECT DISTINCT client_id FROM unnest($1::uuid[]) AS client(client_id)
-	), contract AS MATERIALIZED (
-		SELECT origin.contract_id
-		FROM client
-		CROSS JOIN LATERAL (
-			SELECT contract_id, payer_network_id, outcome, close_time
-			FROM transfer_contract
-			WHERE open = false AND source_id = client.client_id
-			OFFSET 0
-		) AS origin
-		WHERE
-			origin.payer_network_id = $2 AND
-			origin.outcome IS NOT NULL AND
-			origin.close_time < $3 AND
-			$4 < origin.contract_id
-		UNION
-		SELECT companion.contract_id
-		FROM client
-		CROSS JOIN LATERAL (
-			SELECT contract_id, payer_network_id, outcome, close_time
-			FROM transfer_contract
-			WHERE destination_id = client.client_id
-			OFFSET 0
-		) AS companion
-		WHERE
-			companion.payer_network_id = $2 AND
-			companion.outcome IS NOT NULL AND
-			companion.close_time < $3 AND
-			$4 < companion.contract_id
+// The passes a generation's walk keeps contracts of: every pass created in the
+// generation, in any state. Their networks are the payers, and their creation
+// and deadlines bound the contract ids. $1 and $2 the generation's start and
+// end.
+const proberShardRetentionWalkPassesSql = `
+	SELECT network_id, create_time, deadline, state
+	FROM prober_shard_run
+	WHERE
+		$1 <= create_time AND
+		create_time < $2
+`
+
+// The walk's next contracts in id order: a range of the primary key from the
+// cursor, its index entries only, of every payer. $1 the walk's lower bound,
+// $2 the cursor, $3 its upper bound, $4 the batch size.
+const proberShardRetentionWalkWindowSql = `
+	SELECT ARRAY(
+		SELECT contract_id
+		FROM transfer_contract
+		WHERE $1 <= contract_id AND $2 < contract_id AND contract_id < $3
+		ORDER BY contract_id
+		LIMIT $4
 	)
-	SELECT ARRAY(SELECT contract_id FROM contract ORDER BY contract_id LIMIT $5)
+`
+
+// The window's contracts of the generation's passes, resolved and closed
+// before the cutoff, in id order, at most a batch: read by the window's ids
+// under the bitmap settings, so each heap page is read once. $1 the window,
+// $2 the generation's pass networks, $3 the cutoff, $4 the batch size.
+const proberShardRetentionWalkMatchSql = `
+	SELECT ARRAY(
+		SELECT contract_id
+		FROM transfer_contract
+		WHERE
+			contract_id = ANY($1::uuid[]) AND
+			payer_network_id = ANY($2::uuid[]) AND
+			outcome IS NOT NULL AND
+			close_time < $3
+		ORDER BY contract_id
+		LIMIT $4
+	)
 `
 
 // The statements after the window name their rows by the window's ids; a
@@ -1104,20 +1356,20 @@ const proberShardRetentionContractWindowSql = `
 // (contractHorizonBitmapSettings).
 var proberShardRetentionBitmapSettings = contractHorizonBitmapSettings
 
-// Classifies the window's contracts after locking them, skipping any another
+// Classifies the batch's contracts after locking them, skipping any another
 // transaction holds and rereading each row's latest version. A contract is
-// deleted only when it still matches the window, carries no destination
+// deleted only when it still matches the batch, carries no destination
 // bytes, has no sweep and every escrow is settled. Closes and close reports are
 // written only under the contract lock, and sweeps only by the settlement that
-// set the outcome, so the classification holds until commit. $1 the window,
-// $2 the pass's network, $3 the cutoff, $4 the destination party.
+// set the outcome, so the classification holds until commit. $1 the batch,
+// $2 the generation's pass networks, $3 the cutoff, $4 the destination party.
 const proberShardRetentionClassifySqlFormat = `
 	WITH locked AS MATERIALIZED (
 		SELECT contract_id
 		FROM transfer_contract
 		WHERE
 			contract_id = ANY($1::uuid[]) AND
-			payer_network_id = $2 AND
+			payer_network_id = ANY($2::uuid[]) AND
 			outcome IS NOT NULL AND
 			close_time < $3
 		%s
@@ -1159,49 +1411,182 @@ var proberShardRetentionClassifyLockSql = fmt.Sprintf(proberShardRetentionClassi
 
 var errProberShardRetentionDeleteChanged = errors.New("prober shard retention deleted a different number of contracts than it locked")
 
-// The pass's zero-byte contracts, in batches paced to the control's rate. A
-// batch is one short transaction: the window read, the locked classification
-// and the deletes. The cursor moves past every contract a batch read, kept or
-// deleted, so a pass is read once. complete is false when the run's budget or
-// ctx ended first; the next run reads the pass again from its start.
-func (self *proberShardRetentionRun) dropShardContracts(ctx context.Context, owner *ProberShardOwner, control *ProberShardRetentionControl) (complete bool, returnErr error) {
-	clientIds, err := self.shardClients(ctx, owner)
-	if err != nil {
-		return false, err
+// The generation the next walk serves, by its UTC start: the generation of the
+// oldest pass due a walk (proberShardRetentionWalkNextSql). False when there is
+// none.
+func (self *proberShardRetentionRun) nextWalkGeneration(ctx context.Context) (generation time.Time, ok bool, returnErr error) {
+	var first *time.Time
+	returnErr = proberShardRetentionRecover(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			first = nil
+			server.Raise(conn.QueryRow(
+				ctx,
+				proberShardRetentionWalkNextSql,
+				self.cutoff,
+				self.now.Add(-self.settings.MinDeadlineAge),
+				self.walk.walkedEnd(self.settings.GenerationDuration),
+			).Scan(&first))
+		})
+	})
+	if returnErr != nil || first == nil {
+		return
 	}
-	for chunk := range slices.Chunk(clientIds, self.settings.ClientChunkSize) {
-		cursor := server.Id{}
-		for {
-			if _, ok := self.stopped(ctx); ok {
-				return false, ctx.Err()
+	return first.UTC().Truncate(self.settings.GenerationDuration), true, nil
+}
+
+// The pass networks of the generation's walk, read once a run, and the
+// contract id range of its passes (proberShardRetentionWalkPassesSql). guarded
+// is true while a pass of the generation, not closed, is inside its deadline
+// guard (MinDeadlineAge): it may still fund a contract, so the walk waits for
+// it, and so do the newer generations' walks. The range is empty when the
+// generation has no pass.
+func (self *proberShardRetentionRun) walkPasses(ctx context.Context, generation time.Time) (networkIds []server.Id, lower server.Id, upper server.Id, guarded bool, returnErr error) {
+	deadlineBound := self.now.Add(-self.settings.MinDeadlineAge)
+	var first, last time.Time
+	returnErr = proberShardRetentionRecover(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			networkIds, first, last, guarded = nil, time.Time{}, time.Time{}, false
+			rows, err := conn.Query(
+				ctx,
+				proberShardRetentionWalkPassesSql,
+				generation,
+				generation.Add(self.settings.GenerationDuration),
+			)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var networkId server.Id
+					var createTime, deadline time.Time
+					var state string
+					server.Raise(rows.Scan(&networkId, &createTime, &deadline, &state))
+					networkIds = append(networkIds, networkId)
+					if first.IsZero() || createTime.Before(first) {
+						first = createTime
+					}
+					if last.IsZero() || last.Before(deadline) {
+						last = deadline
+					}
+					if state != "closed" && !deadline.Before(deadlineBound) {
+						guarded = true
+					}
+				}
+			})
+		})
+	})
+	if returnErr != nil || guarded || len(networkIds) == 0 {
+		return nil, server.Id{}, server.Id{}, guarded, returnErr
+	}
+	self.walkPassesGeneration = generation
+	self.walkNetworkIds = networkIds
+	lower, upper = ContractIdCreateTimeRange(first, last)
+	return
+}
+
+// Walks the next generation due a walk from where the walk stands, in batches
+// paced to the control's rates, until its walk completes, the budget ends, the
+// mode or the contract step turns off, or ctx ends. walking is false when no
+// generation is due a walk. latest is the control the walk read last, and nil
+// when the walk stopped the run, whose stop it set. A walk the contract step
+// turned off returns walking and not complete, and resumes where it stopped
+// once the step is on again.
+func (self *proberShardRetentionRun) walkNextGeneration(
+	ctx context.Context,
+	control *ProberShardRetentionControl,
+) (walking bool, complete bool, latest *ProberShardRetentionControl, returnErr error) {
+	latest = control
+	generation, ok, err := self.nextWalkGeneration(ctx)
+	if err != nil || !ok {
+		return false, false, latest, err
+	}
+	networkIds := self.walkNetworkIds
+	if !self.walkPassesGeneration.Equal(generation) || !self.walk.Generation.Equal(generation) {
+		var lower, upper server.Id
+		var guarded bool
+		networkIds, lower, upper, guarded, err = self.walkPasses(ctx, generation)
+		if err != nil || guarded {
+			// a pass of the generation may still fund a contract
+			return false, false, latest, err
+		}
+		if !self.walk.Generation.Equal(generation) {
+			// a new walk, or the next generation is no longer the one in
+			// progress: its passes went, or an older generation's pass is due
+			self.walk = ProberShardContractWalk{
+				CompleteThrough: self.walk.CompleteThrough,
+				Generation:      generation,
+				Lower:           lower,
+				Upper:           upper,
 			}
-			start := time.Now()
-			batch, err := self.removeContractBatch(ctx, owner, chunk, cursor, false)
-			duration := time.Since(start)
-			if err != nil {
-				proberShardRetentionBatchDuration.WithLabelValues("contracts", "error").Observe(duration.Seconds())
-				return false, err
-			}
-			proberShardRetentionBatchDuration.WithLabelValues("contracts", "ok").Observe(duration.Seconds())
-			self.report.addContracts(proberShardRetentionContractDeleted, batch.deleted["transfer_contract"])
-			self.report.addContracts(proberShardRetentionContractKeptBytes, batch.keptBytes)
-			self.report.addContracts(proberShardRetentionContractKeptUnsettled, batch.keptUnsettled)
-			self.report.addContracts(proberShardRetentionContractBusy, batch.busy)
-			for _, table := range proberShardRetentionTables {
-				self.report.addDeleted(table, batch.deleted[table])
-			}
-			self.report.Archived += batch.archived
-			proberShardRetentionArchivedCounter.Add(float64(batch.archived))
-			if batch.read < int64(self.settings.ContractBatchSize) {
-				break
-			}
-			cursor = batch.lastId
-			if !self.pace(ctx, contractHorizonPaceDelay(batch.read, control.MaxContractsPerSecond, duration)) {
-				return false, ctx.Err()
-			}
+			proberShardRetentionWalkCursorGauge.Set(float64(server.ContractIdTime(lower).Unix()))
 		}
 	}
-	return true, nil
+	finish := func() {
+		completeThrough := generation
+		if completeThrough.Before(self.walk.CompleteThrough) {
+			completeThrough = self.walk.CompleteThrough
+		}
+		if self.walk.Upper != (server.Id{}) {
+			proberShardRetentionWalkCursorGauge.Set(float64(server.ContractIdTime(self.walk.Upper).Unix()))
+		}
+		self.walk = ProberShardContractWalk{CompleteThrough: completeThrough}
+	}
+	if len(networkIds) == 0 {
+		// its passes went between the reads: nothing is left to keep
+		finish()
+		return true, true, latest, nil
+	}
+	for {
+		if stop, ok := self.stopped(ctx); ok {
+			self.report.Stop = stop
+			return true, false, nil, nil
+		}
+		latest, ok = self.readControl(ctx)
+		if !ok {
+			return true, false, nil, nil
+		}
+		switch {
+		case latest.Mode == ProberShardRetentionModeOff:
+			self.report.Stop = proberShardRetentionStopOff
+			return true, false, nil, nil
+		case latest.Mode == ProberShardRetentionModeDryRun:
+			// the next run reads the drop it would make
+			self.report.Stop = proberShardRetentionStopDryRun
+			return true, false, nil, nil
+		case !latest.DropContracts:
+			return true, false, latest, nil
+		}
+		start := time.Now()
+		batch, err := self.removeWalkBatch(ctx, self.walk, networkIds, false)
+		duration := time.Since(start)
+		if err != nil {
+			proberShardRetentionBatchDuration.WithLabelValues("contracts", "error").Observe(duration.Seconds())
+			return true, false, latest, err
+		}
+		proberShardRetentionBatchDuration.WithLabelValues("contracts", "ok").Observe(duration.Seconds())
+		self.report.addWalked(batch.walked)
+		self.report.addContracts(proberShardRetentionContractDeleted, batch.deleted["transfer_contract"])
+		self.report.addContracts(proberShardRetentionContractKeptBytes, batch.keptBytes)
+		self.report.addContracts(proberShardRetentionContractKeptUnsettled, batch.keptUnsettled)
+		self.report.addContracts(proberShardRetentionContractBusy, batch.busy)
+		for _, table := range proberShardRetentionTables {
+			self.report.addDeleted(table, batch.deleted[table])
+		}
+		self.report.Archived += batch.archived
+		proberShardRetentionArchivedCounter.Add(float64(batch.archived))
+		// the batch committed: the walk moves past it
+		self.walk.Cursor = batch.cursor
+		if batch.complete {
+			finish()
+			return true, true, latest, nil
+		}
+		proberShardRetentionWalkCursorGauge.Set(float64(server.ContractIdTime(self.walk.Cursor).Unix()))
+		delay := max(
+			contractHorizonPaceDelay(batch.walked, latest.MaxWalkRowsPerSecond, duration),
+			contractHorizonPaceDelay(batch.read, latest.MaxContractsPerSecond, duration),
+		)
+		if !self.pace(ctx, delay) {
+			self.report.Stop = proberShardRetentionStopCanceled
+			return true, false, nil, nil
+		}
+	}
 }
 
 // Waits delay, or until the run budget ends. False when ctx ended first.
@@ -1220,30 +1605,17 @@ func (self *proberShardRetentionRun) pace(ctx context.Context, delay time.Durati
 	}
 }
 
-func (self *proberShardRetentionRun) shardClients(ctx context.Context, owner *ProberShardOwner) (clientIds []server.Id, returnErr error) {
-	returnErr = proberShardRetentionRecover(func() {
-		server.Db(ctx, func(conn server.PgConn) {
-			clientIds = []server.Id{}
-			retired := append([]server.Id{owner.ClientId}, owner.RetiredClientIds...)
-			rows, err := conn.Query(ctx, proberShardRetentionClientsSql, owner.NetworkId, retired)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					var clientId server.Id
-					server.Raise(rows.Scan(&clientId))
-					clientIds = append(clientIds, clientId)
-				}
-			})
-		})
-	})
-	slices.SortFunc(clientIds, func(a, b server.Id) int { return a.Cmp(b) })
-	return
-}
-
-// One contract batch's reads and deletes.
-type proberShardRetentionContractBatch struct {
-	// contracts the window read, and the last of them
-	read   int64
-	lastId server.Id
+// One walk batch's reads and deletes.
+type proberShardRetentionWalkBatch struct {
+	// contracts of any payer the window read from the primary key
+	walked int64
+	// where the next batch starts: the last contract read, or the last one
+	// kept when the batch kept a whole ContractBatchSize
+	cursor server.Id
+	// no contract of the walk's range is left past the cursor
+	complete bool
+	// contracts of the generation's passes the batch kept
+	read int64
 	// contracts that carry bytes or a sweep
 	keptBytes int64
 	// contracts with an unsettled escrow
@@ -1256,15 +1628,16 @@ type proberShardRetentionContractBatch struct {
 	archived    int64
 }
 
-// One batch transaction. A dry batch reads only, in a read only transaction,
-// and takes no lock.
-func (self *proberShardRetentionRun) removeContractBatch(
+// One walk batch transaction from the walk's cursor: the window of the
+// primary key, the contracts of the generation's passes in it, their locked
+// classification and the deletes. A dry batch reads only, in a read only
+// transaction, and takes no lock.
+func (self *proberShardRetentionRun) removeWalkBatch(
 	ctx context.Context,
-	owner *ProberShardOwner,
-	clientIds []server.Id,
-	cursor server.Id,
+	walk ProberShardContractWalk,
+	networkIds []server.Id,
 	dry bool,
-) (batch *proberShardRetentionContractBatch, returnErr error) {
+) (batch *proberShardRetentionWalkBatch, returnErr error) {
 	options := []any{server.TxReadCommitted, server.TxLockTimeout(self.settings.LockTimeout)}
 	if dry {
 		options = append(options, pgx.ReadOnly)
@@ -1272,7 +1645,7 @@ func (self *proberShardRetentionRun) removeContractBatch(
 	returnErr = proberShardRetentionRecover(func() {
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// a retried transaction starts over
-			batch = &proberShardRetentionContractBatch{deleted: map[string]int64{}}
+			batch = &proberShardRetentionWalkBatch{cursor: walk.Cursor, deleted: map[string]int64{}}
 			server.RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SET LOCAL statement_timeout = %d`, self.settings.StatementTimeout.Milliseconds())))
 			// plan each statement for its actual ids
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL plan_cache_mode = force_custom_plan`))
@@ -1280,20 +1653,40 @@ func (self *proberShardRetentionRun) removeContractBatch(
 			var windowIds []server.Id
 			server.Raise(tx.QueryRow(
 				ctx,
-				proberShardRetentionContractWindowSql,
-				clientIds,
-				owner.NetworkId,
-				self.cutoff,
-				cursor,
-				self.settings.ContractBatchSize,
+				proberShardRetentionWalkWindowSql,
+				walk.Lower,
+				walk.Cursor,
+				walk.Upper,
+				self.settings.WalkBatchSize,
 			).Scan(&windowIds))
-			batch.read = int64(len(windowIds))
-			if batch.read == 0 {
+			batch.walked = int64(len(windowIds))
+			if batch.walked == 0 {
+				batch.complete = true
 				return
 			}
-			batch.lastId = windowIds[len(windowIds)-1]
+			batch.cursor = windowIds[len(windowIds)-1]
 			for _, setting := range proberShardRetentionBitmapSettings {
 				server.RaisePgResult(tx.Exec(ctx, setting))
+			}
+
+			var matchedIds []server.Id
+			server.Raise(tx.QueryRow(
+				ctx,
+				proberShardRetentionWalkMatchSql,
+				windowIds,
+				networkIds,
+				self.cutoff,
+				self.settings.ContractBatchSize,
+			).Scan(&matchedIds))
+			batch.read = int64(len(matchedIds))
+			if 0 < batch.read && batch.read == int64(self.settings.ContractBatchSize) {
+				// more of the window may match past the batch's last
+				batch.cursor = matchedIds[len(matchedIds)-1]
+			} else {
+				batch.complete = batch.walked < int64(self.settings.WalkBatchSize)
+			}
+			if batch.read == 0 {
+				return
 			}
 
 			classifySql := proberShardRetentionClassifyLockSql
@@ -1304,8 +1697,8 @@ func (self *proberShardRetentionRun) removeContractBatch(
 			server.Raise(tx.QueryRow(
 				ctx,
 				classifySql,
-				windowIds,
-				owner.NetworkId,
+				matchedIds,
+				networkIds,
 				self.cutoff,
 				ContractPartyDestination,
 			).Scan(
@@ -1350,39 +1743,91 @@ func (self *proberShardRetentionRun) removeContractBatch(
 	return
 }
 
-// A dry run's read of one due pass: what its contract step would delete and
-// how many clients its identity drop would remove. Reads only.
-func (self *proberShardRetentionRun) dryRunShard(ctx context.Context, owner *ProberShardOwner, control *ProberShardRetentionControl) {
-	outcome := proberShardRetentionShardError
+// A dry run: the first page of due passes, of any generation, each counted as
+// taken up, and a read only walk of the next generation due one, from where
+// the walk stands, paced as a walk and bounded by the budget, counting what
+// the drop would delete and keep. It changes nothing, the walk included, so
+// the next dry run reads the same.
+func (self *proberShardRetentionRun) dryRun(ctx context.Context, control *ProberShardRetentionControl) (returnErr error) {
 	defer func() {
-		self.report.addShard(outcome)
+		if returnErr != nil && ctx.Err() != nil {
+			self.report.Stop = proberShardRetentionStopCanceled
+			returnErr = nil
+		}
 	}()
-	clientIds, err := self.shardClients(ctx, owner)
+	owners, err := self.selectDueShards(ctx, true, nil)
 	if err != nil {
-		glog.Infof("[prober_retention]dry run shard %s: %s\n", owner.Key.Epoch, err)
-		return
+		self.report.Stop = proberShardRetentionStopError
+		return err
 	}
+	for range owners {
+		self.report.addShard(proberShardRetentionShardDryRun)
+	}
+	walking := false
 	if control.DropContracts {
-		for chunk := range slices.Chunk(clientIds, self.settings.ClientChunkSize) {
-			cursor := server.Id{}
-			for {
-				if _, ok := self.stopped(ctx); ok {
-					return
-				}
-				batch, err := self.removeContractBatch(ctx, owner, chunk, cursor, true)
-				if err != nil {
-					glog.Infof("[prober_retention]dry run shard %s contracts: %s\n", owner.Key.Epoch, err)
-					return
-				}
-				self.report.addContracts(proberShardRetentionContractEligible, int64(len(batch.eligibleIds)))
-				self.report.addContracts(proberShardRetentionContractKeptBytes, batch.keptBytes)
-				self.report.addContracts(proberShardRetentionContractKeptUnsettled, batch.keptUnsettled)
-				if batch.read < int64(self.settings.ContractBatchSize) {
-					break
-				}
-				cursor = batch.lastId
-			}
+		walking, err = self.dryWalk(ctx, control)
+		if err != nil {
+			self.report.Stop = proberShardRetentionStopError
+			return err
 		}
 	}
-	outcome = proberShardRetentionShardDryRun
+	if len(owners) == 0 && !walking {
+		self.report.CaughtUp = true
+		self.report.Stop = proberShardRetentionStopCaughtUp
+		return nil
+	}
+	self.report.Stop = proberShardRetentionStopDryRun
+	return nil
+}
+
+// A read only walk of the next generation due one: from the walk's cursor
+// when the walk in progress is that generation's, else from its start. False
+// when no generation is due a walk.
+func (self *proberShardRetentionRun) dryWalk(ctx context.Context, control *ProberShardRetentionControl) (walking bool, returnErr error) {
+	generation, ok, err := self.nextWalkGeneration(ctx)
+	if err != nil || !ok {
+		return false, err
+	}
+	networkIds, lower, upper, guarded, err := self.walkPasses(ctx, generation)
+	if err != nil || guarded {
+		return false, err
+	}
+	if len(networkIds) == 0 {
+		return true, nil
+	}
+	walk := self.walk
+	if !walk.Generation.Equal(generation) {
+		walk = ProberShardContractWalk{
+			CompleteThrough: walk.CompleteThrough,
+			Generation:      generation,
+			Lower:           lower,
+			Upper:           upper,
+		}
+	}
+	for {
+		if _, ok := self.stopped(ctx); ok {
+			return true, nil
+		}
+		start := time.Now()
+		batch, err := self.removeWalkBatch(ctx, walk, networkIds, true)
+		duration := time.Since(start)
+		if err != nil {
+			return true, err
+		}
+		self.report.addWalked(batch.walked)
+		self.report.addContracts(proberShardRetentionContractEligible, int64(len(batch.eligibleIds)))
+		self.report.addContracts(proberShardRetentionContractKeptBytes, batch.keptBytes)
+		self.report.addContracts(proberShardRetentionContractKeptUnsettled, batch.keptUnsettled)
+		if batch.complete {
+			return true, nil
+		}
+		walk.Cursor = batch.cursor
+		delay := max(
+			contractHorizonPaceDelay(batch.walked, control.MaxWalkRowsPerSecond, duration),
+			contractHorizonPaceDelay(batch.read, control.MaxContractsPerSecond, duration),
+		)
+		if !self.pace(ctx, delay) {
+			return true, ctx.Err()
+		}
+	}
 }

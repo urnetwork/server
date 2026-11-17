@@ -11699,6 +11699,34 @@ var migrations = []any{
 	// has stopped growing.
 	openPayerIndexDropMigration,
 
+	// The lingering origins' side table (OPEN-SOURCE-ID-RETIRE.md §2, owner
+	// 2026-11-16; contract_origin_linger_schema.go): contract_origin_linger
+	// and its prune time index, the one-row contract_origin_linger_state and
+	// the capture function, each created only when absent, under a
+	// five-second lock bound. Nothing existing is locked, scanned or
+	// rewritten. The trigger on transfer_contract is created here only on a
+	// database with no contract; on Main the operator creates it after this
+	// migration, by hand in a vacuum gap (ContractOriginLingerOperatorSql),
+	// since CREATE TRIGGER queues every writer behind its table lock. The
+	// running release never reads either table, so it applies before or after
+	// any deploy; a release with the side table reads keeps its previous
+	// statements until the state row's complete time, 75 minutes after the
+	// trigger.
+	contractOriginLingerMigration,
+
+	// The relay chunks of an epoch's extender component
+	// (db_st_ledger_v2_extender_relay.go; owner 2026-11-16, half of the
+	// extender pool by relay bytes): one nullable text[] column on
+	// st_ledger_v2_epoch_rows, added only when absent under a five-second
+	// lock bound. Nothing existing is rewritten; a running release inserts
+	// its epoch rows without the column, which leaves it null, so it applies
+	// before or after any deploy.
+	stLedgerV2ExtenderRelayMigration,
+
+	// Epoch two substitutes a separately pinned official Astra reviewer only;
+	// genuine prereview timestamps and all normal downstream gates are retained.
+	newSqlMigration(competitionOfficialReviewEpochTwoMigration()),
+
 	// The record of UNIQUE (event_id)'s drop from audit_device_event
 	// (audit_device_event_unique_record.go): a no-op on Main, where the
 	// owner-run prepare of the partition cutover dropped it, and the drop

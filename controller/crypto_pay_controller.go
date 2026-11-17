@@ -1579,7 +1579,10 @@ var cryptoHeldReviewReasons = []string{
 // past the retention unlink, which forgot the network
 // (RunCryptoPaymentUnlink), and a gift order's, whose order the unlink forgot
 // in the same way. A code invoice still delivers: its buyer reads the code
-// with the status token.
+// with the status token. A gift order's invoice that received a payment
+// before its unlink was due is kept linked until the payment is resolved
+// (model.UnlinkCryptoPaymentIntents), so it reaches this only with a payment
+// first seen after the unlink.
 func cryptoIntentUndeliverable(intent *model.CryptoPaymentIntent) bool {
 	return intent.UnlinkedAt != nil && (intent.Delivery != model.CryptoDeliveryCode || cryptoGiftInvoice(intent))
 }
@@ -1621,7 +1624,9 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 //	short
 //	past the retention        what the rows above would credit is review/unlinked
 //	unlink, to a network      instead: the unlink forgot the network, so the credit
-//	                          has nowhere to go (a code invoice still credits)
+//	                          has nowhere to go (a code invoice still credits; a gift
+//	                          invoice with a payment is not unlinked until it is
+//	                          resolved, so only a payment after the unlink lands here)
 func cryptoEvaluateIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,

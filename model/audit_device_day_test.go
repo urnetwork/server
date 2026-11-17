@@ -23,7 +23,7 @@ func withAuditDeviceDayFixture(t *testing.T, rollup bool, run func(testing.TB, c
 		ctx := t.Context()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `
-				CREATE TABLE network_client (client_id uuid PRIMARY KEY, network_id uuid NOT NULL);
+				CREATE TABLE network_client (client_id uuid PRIMARY KEY, network_id uuid NOT NULL, source_client_id uuid);
 				CREATE TABLE network_client_connection (connection_id uuid PRIMARY KEY, client_id uuid NOT NULL, connected bool NOT NULL);
 				CREATE TABLE audit_device_state (device_id uuid PRIMARY KEY, network_id uuid NOT NULL, online bool NOT NULL, event_time timestamp NOT NULL);
 				CREATE TABLE audit_device_event (
@@ -60,6 +60,21 @@ func (self *auditDeviceDayWorld) device(name string) server.Id {
 			server.RaisePgResult(tx.Exec(self.ctx, `INSERT INTO network_client (client_id, network_id) VALUES ($1, $2)`, deviceId, self.networkId))
 		})
 	}
+	return deviceId
+}
+
+// A derived client of source's: a hosted proxy's window client, or an app's
+// per-stream window.
+func (self *auditDeviceDayWorld) derived(name string, source string) server.Id {
+	if _, ok := self.devices[name]; ok {
+		self.t.Fatalf("%s exists", name)
+	}
+	sourceId := self.device(source)
+	deviceId := server.NewId()
+	self.devices[name] = deviceId
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(self.ctx, `INSERT INTO network_client (client_id, network_id, source_client_id) VALUES ($1, $2, $3)`, deviceId, self.networkId, sourceId))
+	})
 	return deviceId
 }
 

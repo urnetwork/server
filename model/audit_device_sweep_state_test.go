@@ -19,7 +19,7 @@ func withDeviceSweepStateFixture(t *testing.T, run func(testing.TB, context.Cont
 		ctx := t.Context()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `
-				CREATE TABLE network_client (client_id uuid PRIMARY KEY, network_id uuid NOT NULL);
+				CREATE TABLE network_client (client_id uuid PRIMARY KEY, network_id uuid NOT NULL, source_client_id uuid);
 				CREATE TABLE network_client_connection (connection_id uuid PRIMARY KEY, client_id uuid NOT NULL, connected bool NOT NULL);
 				CREATE TABLE audit_device_state (device_id uuid PRIMARY KEY, network_id uuid NOT NULL, online bool NOT NULL, event_time timestamp NOT NULL);
 				CREATE TABLE audit_device_event (event_id uuid PRIMARY KEY, event_time timestamp NOT NULL, network_id uuid NOT NULL, device_id uuid NOT NULL, event_type text NOT NULL, event_details text NOT NULL)

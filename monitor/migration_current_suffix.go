@@ -1069,7 +1069,14 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// versioned by its position
 	[]snMainnetMigrationContract{clientKeyHistoryRegistrationHashUniqueDropMigrationContract},
 	// The exact-job successor inherits all old audit/source/slot custody.
-	[]snMainnetMigrationContract{competitionSecondRecoveryMigrationContract},
+	[]snMainnetMigrationContract{competitionSecondRecoveryMigrationContract.removedAt(server.CompetitionOfficialReviewEpochTwoMigrationVersion())},
+	// the lingering origins' side table, state and capture, with the
+	// operator's trigger absent or exact, versioned by its position
+	[]snMainnetMigrationContract{contractOriginLingerMigrationContract},
+	// the relay chunks of an epoch's extender component, versioned by its
+	// position
+	[]snMainnetMigrationContract{stLedgerV2ExtenderRelayMigrationContract},
+	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoMigrationContract},
 	// the redundant unique event id of the device events, dropped by the
 	// owner-run prepare and recorded, versioned by its position
 	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},

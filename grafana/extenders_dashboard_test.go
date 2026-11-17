@@ -80,6 +80,11 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"who reports its runs": "urnetwork_stats_extenders_reporting_runs_24h",
 		// the claims the ping report route refuses before storing them
 		"claims the operator refused": "urnetwork_extender_ping_report_refused_total",
+		// how much of the pool the network holding the most holds, by the
+		// units the §8.6 pool pays per and by extenders (sn WHITEPAPER §8.6.3)
+		"top network's share of units":     `max(urnetwork_stats_extender_top_network_units{env="$env"}) / max(urnetwork_stats_extender_units{env="$env"})`,
+		"top network's share of extenders": `max(urnetwork_stats_extender_top_network_extenders{env="$env"}) / max(urnetwork_stats_online_extenders{env="$env"})`,
+		"networks holding the pool":        "urnetwork_stats_extender_networks",
 	} {
 		found := false
 		for _, expression := range expressions {

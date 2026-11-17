@@ -6,7 +6,11 @@ package model
 // with Gamma intent (UnlinkGammaGiftOrders, which the gift retention runs
 // daily). The order keeps its codes, so its cards still deliver and its codes
 // still redeem; it forgets which payment it was, and the facts that would
-// tie it to one.
+// tie it to one. Neither unlinks an order whose payment arrived and may still
+// be credited: a coin's invoice that received a payment it was not credited
+// for stays linked until the payment is credited, the invoice is voided or
+// refunded, or nothing holds it (cryptoGiftInvoiceHeldSql), as a Gamma
+// intent with a charge that can still land does.
 
 import (
 	"context"

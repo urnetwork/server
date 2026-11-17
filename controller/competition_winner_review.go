@@ -115,7 +115,8 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 		}
 		if checkpoint == nil || checkpoint.JobId != *decision.SelectedJobId || checkpoint.RoundId != snapshot.Round.RoundId ||
 			state.ApprovedReview.Request.ExpectedDecisionSha256 != checkpoint.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != checkpoint.RewardRevision ||
-			!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, checkpoint) {
+			!model.CompetitionReviewWithinCheckpointForEpoch(state.ApprovedReview, checkpoint, snapshot.Round.Epoch) ||
+			(snapshot.Round.Epoch == 2 && state.ApprovedReview.Request.OfficialReviewOverride != nil && (snapshot.Seal == nil || !model.CompetitionOfficialReviewPrereviewMatchesSeal(model.CompetitionOfficialReviewImport{RoundId: snapshot.Round.RoundId, Review: state.ApprovedReview.Request}, *snapshot.Seal))) {
 			return block("winner_review_identity_conflict", ErrConflict)
 		}
 		if snapshot.Round.Epoch >= 6 {
@@ -202,7 +203,7 @@ func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.Comp
 	}
 	providerMatches := source != nil && source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning
 	if source != nil && source.Request.OfficialReviewOverride != nil {
-		providerMatches = model.ValidateCompetitionOfficialReviewImport(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: source.Request}, policy) == nil
+		providerMatches = model.ValidateCompetitionOfficialReviewImportForEpoch(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: source.Request}, policy, result.Seal.Epoch) == nil
 	}
 	if reward != nil && source != nil && reward.ReviewId == source.ReviewId &&
 		(reward.Request.RewardDisposition == "approved" || reward.Request.RewardDisposition == "restored") && source.Request.SourceDisposition == "approved" &&
@@ -276,7 +277,9 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 		return ErrConflict
 	}
 	if request.OfficialReviewOverride != nil {
-		if request.OfficialReviewOverride.CompletedAt.Before(result.Seal.PublicationAt) || request.OfficialReviewOverride.CompletedAt.After(now) {
+		if request.OfficialReviewOverride.CompletedAt.After(now) ||
+			(result.Seal.Epoch == 1 && request.OfficialReviewOverride.CompletedAt.Before(result.Seal.PublicationAt)) ||
+			(result.Seal.Epoch == 2 && !model.CompetitionOfficialReviewPrereviewMatchesSeal(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: request}, result.Seal)) {
 			return ErrConflict
 		}
 		content, err := json.Marshal(request)
@@ -290,7 +293,12 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 		if !authorized {
 			return ErrConflict
 		}
-		return nil
+		if result.Seal.Epoch == 1 {
+			return nil
+		}
+		if result.Seal.Epoch != 2 {
+			return ErrConflict
+		}
 	}
 	var content []byte
 	if err := tx.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, result.Seal.Environment, result.Seal.CompetitionId, result.Seal.SeasonId, result.Seal.Epoch+1).Scan(&content); err != nil {
@@ -354,7 +362,8 @@ func validateWinnerSourceInTx(ctx context.Context, tx server.PgTx, settings *Set
 		return err
 	}
 	if transition.WinnerReview == nil || *transition.WinnerReview != *intent.WinnerReview ||
-		!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, intent.WinnerReview) ||
+		!model.CompetitionReviewWithinCheckpointForEpoch(state.ApprovedReview, intent.WinnerReview, result.Seal.Epoch) ||
+		(result.Seal.Epoch == 2 && state.ApprovedReview.Request.OfficialReviewOverride != nil && !model.CompetitionOfficialReviewPrereviewMatchesSeal(model.CompetitionOfficialReviewImport{RoundId: predecessorId, Review: state.ApprovedReview.Request}, result.Seal)) ||
 		state.ApprovedReview.Request.ExpectedDecisionSha256 != intent.WinnerReview.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != intent.WinnerReview.RewardRevision ||
 		intent.BuildReadyAt.IsZero() || intent.BuildReadyAt.After(intent.PreparedAt) {
 		return ErrConflict

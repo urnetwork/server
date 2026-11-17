@@ -457,6 +457,9 @@ func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *S
 				observedAt := self.nowUtc()
 				if modelCompletedAt != nil {
 					observedAt = *modelCompletedAt
+				} else if official != nil && current.Seal.Epoch == 2 {
+					observedAt, loadErr = reviewHandoffDatabaseTime(ctx, tx)
+					server.Raise(loadErr)
 				}
 				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, observedAt))
 			}
@@ -486,7 +489,7 @@ func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *S
 			now := self.nowUtc()
 			result = &model.CompetitionIntegrityReviewResult{ReviewId: server.NewId(), RoundId: roundId, ActorId: actorId, CreatedAt: now, Request: request, RequestSha256: requestDigest}
 			result.ModelCompletedAt = modelCompletedAt
-			if modelCompletedAt != nil {
+			if modelCompletedAt != nil || official != nil && current.Seal.Epoch == 2 {
 				now, loadErr = reviewHandoffDatabaseTime(ctx, tx)
 				server.Raise(loadErr)
 				result.CreatedAt = now

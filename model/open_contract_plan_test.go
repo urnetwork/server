@@ -33,8 +33,9 @@ const (
 )
 
 // The runtime value of a statement argument in model source: string literals
-// joined by + with the rendered contract id bound (contract_id_bound.go). Any
-// other expression is not a statement this guard can bind to.
+// joined by + with the rendered contract id bound (contract_id_bound.go) and
+// the lingering origins' closed arm (contract_origin_linger.go). Any other
+// expression is not a statement this guard can bind to.
 func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 	switch value := expression.(type) {
 	case *ast.BasicLit:
@@ -56,8 +57,11 @@ func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 		y, ok := modelSqlExpressionValue(value.Y)
 		return x + y, ok
 	case *ast.Ident:
-		if value.Name == "unexpiredContractIdFloorSql" {
+		switch value.Name {
+		case "unexpiredContractIdFloorSql":
 			return unexpiredContractIdFloorSql, true
+		case "contractOriginLingerClosedSql":
+			return contractOriginLingerClosedSql, true
 		}
 	}
 	return "", false

@@ -373,12 +373,18 @@ const auditDeviceSweepStatesSql = `
 
 // SweepDeviceAuditEvents is the devices analog of SweepProviderAuditEvents:
 // it appends device_added / device_removed transitions to audit_device_event
-// for EVERY client with a connected connection — not just providers. The
-// public devices series measures reach (pure consumers and hosted-proxy child
-// clients included), with connected-per-day semantics: a device counts on day
-// D iff it had at least one connection that day (see computeStatsDevice's
+// for every top-level client with a connected connection — not just
+// providers. The public devices series measures reach (pure consumers
+// included), with connected-per-day semantics: a device counts on day D iff it
+// had at least one connection that day (see computeStatsDevice's
 // touched-union). A device with many simultaneous connections is one device;
 // it goes removed only when its LAST connection is gone.
+//
+// A derived client (source_client_id set: a hosted proxy's window client, an
+// app's per-stream window) is not a device (owner, 2026-11-16): its top-level
+// client is. The device and client limits count the same top-level clients.
+// A derived client still online in audit_device_state from before goes
+// removed at the next sweep, like any device whose last connection is gone.
 //
 // Route note: this rides the audit table (180-day retention) because
 // network_client_connection rows are reaped 8 HOURS after disconnect
@@ -413,7 +419,8 @@ func sweepDeviceAuditEventsAt(ctx context.Context, clock func() time.Time) (adde
 			FROM network_client_connection
 			INNER JOIN network_client ON
 				network_client.client_id = network_client_connection.client_id
-			WHERE network_client_connection.connected
+			WHERE network_client_connection.connected AND
+				network_client.source_client_id IS NULL
 			ORDER BY network_client_connection.client_id
 			`,
 		)

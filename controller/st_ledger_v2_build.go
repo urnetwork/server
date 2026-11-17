@@ -116,7 +116,10 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 		}
 		// an epoch first built here: its pool as the reader counted it
 		if pool := pools[i]; pool != nil && pool.read != nil {
-			stExtenderPoolMetrics("build", epoch.Epoch, pool.read, &epoch.Extenders.ExtenderSplit, ledger.EligibleUsage(in.Epochs[i].Rows), amendments.platformEndpoints.InForce(server.NowUtc()))
+			split := &epoch.Extenders.ExtenderSplit
+			stExtenderPoolMetrics("build", epoch.Epoch, pool.read, split, ledger.EligibleUsage(in.Epochs[i].Rows), amendments.platformEndpoints.InForce(server.NowUtc()))
+			glog.Infof("[st]v2 epoch %d extender component: Z = %d bytes (%d intra-platform, %d intra-network), Z' = %d: %d by unit over N = %d in M = %d units, %d by relay bytes over R = %d from %d relaying\n",
+				epoch.Epoch, pool.read.Bytes(), pool.read.IntraPlatform, pool.read.IntraNetwork, split.Weight, split.UnitWeight, split.Eligible, split.Units, split.RelayWeight, split.RelayBytes, split.Relaying)
 		}
 		providers := &StLedgerV2EpochProviders{Epoch: epoch.Epoch, Null: epoch.Null, Extenders: extenders}
 		if !epoch.Null {
@@ -127,7 +130,7 @@ func (self stLedgerV2Builder) Build(ctx context.Context, input *StLedgerV2BuildI
 			}
 		}
 		if extenders := epoch.Extenders; extenders != nil {
-			for _, ref := range append(slices.Clone(extenders.Census), extenders.Chunks...) {
+			for _, ref := range slices.Concat(extenders.Census, extenders.Relay, extenders.Chunks) {
 				published[ref] = published[ref] || input.Epochs[i].Rows != nil
 			}
 		}
@@ -165,8 +168,9 @@ type stLedgerV2EpochPool struct {
 // declaration, or its recorded rows read back from their published chunks,
 // or, when nothing is recorded, rows built from v1's inputs. For an epoch the
 // extender pool amendment covers it also holds the epoch's extender pool: the
-// recorded one, or Z from the new rows and the census captured at the
-// epoch's end, and returns the pool beside it; nil without a component.
+// recorded one, or Z from the new rows, the census captured at the epoch's end
+// and the census clients' relay bytes, and returns the pool beside it; nil
+// without a component.
 func stLedgerV2EpochInput(ctx context.Context, cfg *StConfig, covered *StLedgerV2CoveredEpoch, amendments *stLedgerV2Amendments) (ledger.EpochInput, *stLedgerV2EpochPool, error) {
 	input := ledger.EpochInput{Epoch: covered.Epoch}
 	amendment, err := amendments.extenders(ctx, covered.Epoch)
@@ -174,7 +178,7 @@ func stLedgerV2EpochInput(ctx context.Context, cfg *StConfig, covered *StLedgerV
 		return input, nil, err
 	}
 	if covered.Rows == nil {
-		rows, pool, err := stLedgerV2NewAmendedEpochRows(ctx, covered.Epoch, amendment, amendments.pool)
+		rows, pool, relay, err := stLedgerV2NewAmendedEpochRows(ctx, covered.Epoch, amendment, amendments.pool)
 		if err != nil {
 			return input, nil, err
 		}
@@ -186,7 +190,7 @@ func stLedgerV2EpochInput(ctx context.Context, cfg *StConfig, covered *StLedgerV
 		if err != nil {
 			return input, nil, err
 		}
-		input.Extenders = &ledger.ExtenderInput{Bytes: pool.Bytes(), Census: census}
+		input.Extenders = &ledger.ExtenderInput{Bytes: pool.Bytes(), Census: census, Relay: stLedgerV2RelayRows(relay, census)}
 		return input, &stLedgerV2EpochPool{parts: stLedgerV2ExtenderParts(pool), read: pool}, nil
 	}
 	if input.Extenders, err = stLedgerV2RecordedExtenders(ctx, covered, amendment); err != nil {

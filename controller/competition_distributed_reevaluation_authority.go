@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -153,7 +154,10 @@ func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settin
 		}
 		if host.HostId == d.OriginalHostId {
 			response, err := transport.Exchange(ctx, competitionagent.Request{Operation: "status", RunId: d.OriginalRunId, FencingToken: d.NativeFencingToken}, "", "")
-			if err != nil || validateCompetitionDistributedRecoveryEnvelope(response, host) != nil || response.RunId != d.OriginalRunId || response.FencingToken != d.NativeFencingToken ||
+			if err != nil {
+				return nil, errors.Join(ErrConflict, err)
+			}
+			if validateCompetitionDistributedRecoveryEnvelope(response, host) != nil || response.RunId != d.OriginalRunId || response.FencingToken != d.NativeFencingToken ||
 				response.Identity == nil || response.Identity.HostId != d.OriginalHostId || response.Identity.JobId != a.JobId.String() || response.Identity.RoundId != a.RoundId.String() ||
 				response.Identity.RunId != d.OriginalRunId || response.Identity.Cycle != a.ExpectedCycle || response.Identity.Attempt != a.ExpectedAttemptCount ||
 				response.Identity.RoundEpoch != round.Epoch || response.Identity.SourceEpoch != evaluationSourceEpoch(round) ||
@@ -169,7 +173,10 @@ func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settin
 			proof.OriginalStatus = response
 		}
 		response, err := transport.Exchange(ctx, competitionagent.Request{Operation: "availability"}, "", "")
-		if err != nil || validateCompetitionDistributedRecoveryEnvelope(response, host) != nil || response.State != "available" || response.RunId != "" || response.FencingToken != 0 ||
+		if err != nil {
+			return nil, errors.Join(ErrLeaseLost, err)
+		}
+		if validateCompetitionDistributedRecoveryEnvelope(response, host) != nil || response.State != "available" || response.RunId != "" || response.FencingToken != 0 ||
 			response.Identity != nil || response.ManifestSha256 != "" || response.RequestSha256 != "" || len(response.Files) != 0 || len(response.SelfCheck) != 0 || response.ExitCode != 0 || response.ErrorCode != "" {
 			return nil, ErrLeaseLost
 		}

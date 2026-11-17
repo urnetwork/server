@@ -86,11 +86,12 @@ func init() {
 
 // createCompanionTransferEscrow's plain origin read without its prober
 // reservation column. The two branches are disjoint on open, so the global
-// earliest is the earlier of each branch's earliest, and each branch is a
-// bounded index range; both branches are bounded by the contract id (see
-// unexpiredContractIdAge). $1 and $2 are the origin's source and destination,
-// the companion's reverse; $3 is the earliest close time of a lingering
-// origin.
+// earliest is the earlier of each branch's earliest, and each branch is
+// bounded: the open branch by the contract id (see unexpiredContractIdAge),
+// the closed branch by the side table's pair range with each contract's
+// primary key (contractOriginLingerClosedSql). $1 and $2
+// are the origin's source and destination, the companion's reverse; $3 is the
+// earliest close time of a lingering origin.
 var zeroEscrowPlainOriginSql = `
 	SELECT contract_id
 	FROM (
@@ -118,15 +119,8 @@ var zeroEscrowPlainOriginSql = `
 			SELECT contract_id, create_time
 			FROM (
 				SELECT contract_id, create_time
-				FROM transfer_contract
-				WHERE
-					open = false AND
-					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
-					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-					source_id = $1 AND
-					destination_id = $2 AND
-					companion_contract_id IS NULL
+				FROM ` + contractOriginLingerClosedSql + ` AS lingering_origin
+				WHERE companion_contract_id IS NULL
 				OFFSET 0
 			) AS closed_origin
 			ORDER BY create_time ASC
@@ -176,15 +170,8 @@ var zeroEscrowChainedOriginSql = `
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
 			FROM (
 				SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
-				FROM transfer_contract
-				WHERE
-					open = false AND
-					$3 <= close_time AND
-					contract_id >= ` + unexpiredContractIdFloorSql + ` AND
-					COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
-					source_id = $1 AND
-					destination_id = $2 AND
-					companion_contract_id IS NOT NULL
+				FROM ` + contractOriginLingerClosedSql + ` AS lingering_companion_origin
+				WHERE companion_contract_id IS NOT NULL
 				OFFSET 0
 			) AS closed_companion_origin
 			ORDER BY create_time ASC
@@ -308,6 +295,9 @@ func CreateZeroEscrowCompanionContract(
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
+	// the closed origin arms' statements, decided before the transaction
+	// (contract_origin_linger.go)
+	lingerReads := contractOriginLingerReads.ready(ctx)
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	defer leaveTransaction()
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -322,6 +312,7 @@ func CreateZeroEscrowCompanionContract(
 			destinationNetworkId,
 			destinationId,
 			originContractTimeout,
+			lingerReads,
 		)
 		if companionContractId == nil {
 			originOutcome = server.ContractCompanionOriginMissing
@@ -458,6 +449,8 @@ func createZeroEscrowContractInTx(
 // the earliest such companion, which chains an asymmetric reply carrier (see
 // createCompanionTransferEscrow). Both are nil when there is neither. The
 // inherited payer is set only for a probe shard's chained reply carrier.
+// lingerReads selects the closed arms' statements: the side table once it is
+// complete, the previous statements before (contract_origin_linger.go).
 func zeroEscrowCompanionOriginInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -466,13 +459,18 @@ func zeroEscrowCompanionOriginInTx(
 	destinationNetworkId server.Id,
 	destinationId server.Id,
 	originContractTimeout time.Duration,
+	lingerReads bool,
 ) (originContractId *server.Id, inheritedPayerNetworkId *server.Id) {
 	lingerCloseTime := server.NowUtc().Add(-originContractTimeout)
+	plainOriginSql, chainedOriginSql := zeroEscrowPlainOriginSql, zeroEscrowChainedOriginSql
+	if !lingerReads {
+		plainOriginSql, chainedOriginSql = legacyZeroEscrowPlainOriginSql, legacyZeroEscrowChainedOriginSql
+	}
 	func() {
 		leaveRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionPlainOrigin)
 		defer leaveRead()
 		// the origin direction is reversed
-		result, err := tx.Query(ctx, zeroEscrowPlainOriginSql, destinationId, sourceId, lingerCloseTime)
+		result, err := tx.Query(ctx, plainOriginSql, destinationId, sourceId, lingerCloseTime)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&originContractId))
@@ -487,7 +485,7 @@ func zeroEscrowCompanionOriginInTx(
 		defer leaveRead()
 		result, err := tx.Query(
 			ctx,
-			zeroEscrowChainedOriginSql,
+			chainedOriginSql,
 			destinationId,
 			sourceId,
 			lingerCloseTime,

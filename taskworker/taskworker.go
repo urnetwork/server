@@ -141,6 +141,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleSweepProxyExits(clientSession, tx)
 		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
 		work.ScheduleRemoveExpiredSessionState(clientSession, tx)
+		// the lingering origins' side table past its prune time
+		// (model/contract_origin_linger.go)
+		work.ScheduleRemoveExpiredContractOriginLinger(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
@@ -164,6 +167,9 @@ func initTaskSchedule(ctx context.Context) {
 		// the prober shard generations past their retention; idle until the
 		// runtime control `{prober_retention}control` sets a mode
 		work.ScheduleRemoveProberShardGenerations(clientSession, tx)
+		// a settled prober pass's window clients an hour past its deadline,
+		// in the same control's mode
+		work.ScheduleRemoveProberShardWindows(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		// seeded only when its chain has no task (PARTITION-MAINTENANCE-PLAN.md A4)
@@ -469,6 +475,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredSessionStatePost,
 		),
 		task.NewTaskTargetWithPost(
+			work.RemoveExpiredContractOriginLinger,
+			work.RemoveExpiredContractOriginLingerPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.SweepOrphanNetworkClientData,
 			work.SweepOrphanNetworkClientDataPost,
 		),
@@ -547,6 +557,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveProberShardGenerations,
 			work.RemoveProberShardGenerationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveProberShardWindows,
+			work.RemoveProberShardWindowsPost,
 		),
 		work.NewTransferDebitTaskTarget(),
 		task.NewTaskTargetWithPost(
@@ -738,6 +752,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			controller.RemoveProductUpdates,
 			controller.RemoveProductUpdatesPost,
+		),
+		// the cleanup after an account deletion, queued by every deletion in
+		// its own transaction (owner 2026-11-16)
+		task.NewTaskTargetWithPost(
+			controller.RemoveDeletedNetworkData,
+			controller.RemoveDeletedNetworkDataPost,
 		),
 		// the onboarding email campaign: one task per network and step, and the
 		// daily App Store one-time offer code top-up

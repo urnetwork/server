@@ -7,22 +7,15 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/urnetwork/server/competitionagent"
 )
 
 // Signal ownership remains live until contained evaluator cleanup has joined.
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer cancel()
-	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
-		// Errors never include a request, hidden seed, key, or evaluator output.
-		fmt.Fprintln(os.Stderr, "subevaluation operation failed")
+	if err := runSubevaluationCommand(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, run, defaultSubevaluationDiagnosticSettings()); err != nil {
 		os.Exit(competitionagent.DockerClientExitStatus(err))
 	}
 }
@@ -30,7 +23,18 @@ func main() {
 // No server.LoadSettings, production vault, database, or network listener exists
 // in this process. The protected config supplies only the independent role.
 func run(ctx context.Context, args []string, input io.Reader, output, diagnostic io.Writer) error {
-	parsed, err := parseArguments(args, diagnostic)
+	argumentDiagnostic := diagnostic
+	var argumentOwner *subevaluationDiagnostic
+	if file, ok := diagnostic.(*os.File); ok {
+		argumentOwner = newSubevaluationDiagnostic(file, defaultSubevaluationDiagnosticSettings())
+		argumentDiagnostic = argumentOwner
+	} else if argumentDiagnostic == nil {
+		argumentDiagnostic = io.Discard
+	}
+	parsed, err := parseArguments(args, argumentDiagnostic)
+	if argumentOwner != nil {
+		_ = argumentOwner.Close()
+	}
 	if err != nil {
 		return err
 	}

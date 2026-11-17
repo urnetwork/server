@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
@@ -8,6 +9,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server"
 )
 
 // The cutoff and a pass's drop time agree: a pass is in a dropped generation
@@ -90,6 +93,16 @@ func TestNarrowProberShardRetentionControl(t *testing.T) {
 	}
 	connect.AssertEqual(t, math.IsNaN(narrow(map[string]string{"maxContractsPerSecond": "NaN"}).MaxContractsPerSecond), false)
 
+	connect.AssertEqual(t, absent.MaxWalkRowsPerSecond, float64(3000))
+	connect.AssertEqual(t, narrow(map[string]string{"mode": "on", "maxWalkRowsPerSecond": "8000"}).MaxWalkRowsPerSecond, float64(8000))
+	connect.AssertEqual(t, narrow(map[string]string{"mode": "on", "maxWalkRowsPerSecond": "1e9"}).MaxWalkRowsPerSecond, float64(20000))
+	for _, value := range []string{"0", "-5", "quick", "NaN"} {
+		control := narrow(map[string]string{"mode": "on", "maxWalkRowsPerSecond": value})
+		if 0 < control.MaxWalkRowsPerSecond || control.Mode != ProberShardRetentionModeOff {
+			t.Fatalf("walk rate %q left the drop %s at %v", value, control.Mode, control.MaxWalkRowsPerSecond)
+		}
+	}
+
 	connect.AssertEqual(t, absent.MaxShardsPerMinute, float64(30))
 	connect.AssertEqual(t, narrow(map[string]string{"mode": "on", "maxShardsPerMinute": "120"}).MaxShardsPerMinute, float64(120))
 	connect.AssertEqual(t, narrow(map[string]string{"mode": "on", "maxShardsPerMinute": "100000"}).MaxShardsPerMinute, float64(600))
@@ -110,6 +123,70 @@ func TestNarrowProberShardRetentionControl(t *testing.T) {
 	noContracts := *settings
 	noContracts.DropContracts = false
 	connect.AssertEqual(t, NarrowProberShardRetentionControl(map[string]string{"contracts": "on"}, &noContracts).DropContracts, false)
+	// a batch with no room reads or keeps nothing: the contract step is off
+	for _, batch := range []struct{ contracts, walk int }{{contracts: 0, walk: 5000}, {contracts: 500, walk: 0}, {contracts: -1, walk: -1}} {
+		empty := *settings
+		empty.ContractBatchSize = batch.contracts
+		empty.WalkBatchSize = batch.walk
+		connect.AssertEqual(t, NarrowProberShardRetentionControl(map[string]string{"contracts": "on"}, &empty).DropContracts, false)
+	}
+}
+
+// Pure: a pass's generation is walked exactly when it is at or before the
+// newest completed walk's generation, and nothing is before the first one.
+func TestProberShardContractWalkWalked(t *testing.T) {
+	day := 24 * time.Hour
+	none := ProberShardContractWalk{}
+	connect.AssertEqual(t, none.walkedEnd(day), time.Time{})
+	connect.AssertEqual(t, none.walked(time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), day), false)
+
+	walk := ProberShardContractWalk{CompleteThrough: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)}
+	connect.AssertEqual(t, walk.walkedEnd(day), time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC))
+	for _, c := range []struct {
+		createTime time.Time
+		walked     bool
+	}{
+		{createTime: time.Date(2026, 11, 1, 3, 0, 0, 0, time.UTC), walked: true},
+		{createTime: time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC), walked: true},
+		{createTime: time.Date(2026, 11, 8, 23, 59, 59, 999000000, time.UTC), walked: true},
+		{createTime: time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC), walked: false},
+		{createTime: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC), walked: false},
+	} {
+		if walk.walked(c.createTime, day) != c.walked {
+			t.Errorf("a pass created %s walked %t, want %t", c.createTime, !c.walked, c.walked)
+		}
+	}
+}
+
+// Pure: the walk round trips through the task args with its window and
+// cursor, and the empty args of a build from before read as no walk.
+func TestProberShardContractWalkRoundTripsThroughTaskArgs(t *testing.T) {
+	walk := ProberShardContractWalk{
+		CompleteThrough: time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC),
+		Generation:      time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC),
+		Lower:           server.ContractIdFloor(time.Date(2026, 11, 7, 23, 45, 0, 0, time.UTC)),
+		Upper:           server.ContractIdFloor(time.Date(2026, 11, 9, 0, 30, 0, 0, time.UTC)),
+		Cursor:          server.NewId(),
+	}
+	encoded, err := json.Marshal(walk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded ProberShardContractWalk
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.CompleteThrough.Equal(walk.CompleteThrough) || !decoded.Generation.Equal(walk.Generation) ||
+		decoded.Lower != walk.Lower || decoded.Upper != walk.Upper || decoded.Cursor != walk.Cursor {
+		t.Fatalf("the walk did not round trip: %s read as %+v", encoded, decoded)
+	}
+	var before ProberShardContractWalk
+	if err := json.Unmarshal([]byte(`{}`), &before); err != nil {
+		t.Fatal(err)
+	}
+	if !before.CompleteThrough.IsZero() || !before.Generation.IsZero() || before.Cursor != (server.Id{}) {
+		t.Fatalf("empty args read as a walk: %+v", before)
+	}
 }
 
 // A run publishes its clock with the backlog it read, so a reader that takes

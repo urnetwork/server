@@ -93,7 +93,9 @@ contracts whose two final reports exist; it deletes nothing. `ProberBootstrap`
 runs that settle sweep (`SettleDueProberShards`) immediately at startup and
 every five minutes after a successful pass, fencing any live pass past its
 deadline; it no longer replenishes the legacy shared identity. The shard's rows
-stay until its generation drops (see "Retention by shard generation" below).
+stay until its generation drops (see "Retention by shard generation" below),
+except its window clients, which go an hour past its deadline (see "Window
+clients" below).
 The operator ingest secret remains in `vault/<env>/provider_egress.yml`; it is
 never serialized into task arguments.
 
@@ -161,29 +163,44 @@ funds, whose payer is that network and whose source (an origin) or destination
 **The window.** A generation is the passes created in one UTC day. The
 retention keeps the newest eight generations, today's included, and drops the
 oldest as a unit once a day begins. A pass ends by draining its shard and
-settling its reported contracts (`SettleProberShard`); nothing deletes it
-before its generation drops. A settled shard waits with `next_cleanup_time`
-`'infinity'`.
+settling its reported contracts (`SettleProberShard`); nothing but its window
+clients goes before its generation drops. A settled shard waits with
+`next_cleanup_time` `'infinity'`.
 
 **The drop** (`model.RemoveProberShardGenerations`, task
-`remove_prober_shard_generations`) takes the passes of dropped generations
-oldest first and, for each:
+`remove_prober_shard_generations`) takes the dropped generations oldest first:
 
-1. deletes its zero-byte contracts: resolved and closed before the cutoff,
-   every escrow settled, no sweep and no destination close with bytes. Such a
-   contract adds nothing to any byte sum (the daily transfer rollup, the clock
-   backfill, the subnet usage weight, payouts, payment plans, operator block
-   awards). The capture trigger archives a credit-bearing contract's usage in
-   the same statement. The rows deleted are the contract horizon reaper's own.
-2. deletes its identity in `ReapProberShard`'s transaction, which refuses a pass
-   with an unresolved contract, an unsettled escrow, a pending debit, a
-   connected client or a balance that is not a plain grant. A refused pass is
-   retried after an hour, and a pass whose drop failed after a minute.
-3. deletes its registry row.
+1. It walks the generation's contracts once and deletes its passes' zero-byte
+   contracts: resolved and closed before the cutoff, every escrow settled, no
+   sweep and no destination close with bytes. Such a contract adds nothing to
+   any byte sum (the daily transfer rollup, the clock backfill, the subnet
+   usage weight, payouts, payment plans, operator block awards). The capture
+   trigger archives a credit-bearing contract's usage in the same statement.
+   The rows deleted are the contract horizon reaper's own. The walk reads the
+   primary key over the generation's contract id range, from 15 minutes before
+   its first pass's creation to 15 minutes past its last pass's deadline, in
+   batches of 5,000, and keeps the contracts whose payer is one of the
+   generation's pass networks, which every prober contract's payer is. It
+   reads each contract of the day once (about 116M on Main, at 3,000 a second
+   by default: about 11 hours) and needs no other index; it replaced the read
+   of each pass client's closed contracts from `transfer_contract_open_source_id`
+   (`OPEN-SOURCE-ID-RETIRE.md`, option A).
+2. Then, for each of its passes, it deletes the pass's identity in
+   `ReapProberShard`'s transaction, which refuses a pass with an unresolved
+   contract, an unsettled escrow, a pending debit, a connected client or a
+   balance that is not a plain grant. A refused pass is retried after an hour,
+   and a pass whose drop failed after a minute.
+3. And it deletes the pass's registry row.
 
-A run ends when its four-minute budget does; a pass whose contracts the budget
-interrupted keeps its identity until the next run finishes them, since a pass's
-contracts are found through its clients.
+A run ends when its four-minute budget does. The walk's cursor goes into the
+task's args, so the next run resumes where it stopped, and the retry of a
+failed run resumes after its last committed batch. A pass waits, untaken, until
+its generation's walk completes: the walk keeps contracts by the network its
+registry row names. The walk serves the oldest dropped generation that still
+has a pass to drop, so a refused pass never holds a newer generation's walk,
+and a refused pass retried after its generation's walk completed drops without
+a second walk; a contract the walk kept (for its bytes or an unsettled escrow)
+is the contract horizon reaper's.
 
 It keeps, for the retention that owns each: contracts that carry bytes (the
 contract horizon reaper, because the transfer rollup can re-sum their day until
@@ -196,24 +213,34 @@ drops only once its deadline is six hours past, and the identity transaction
 refuses anything still unresolved or connected.
 
 **The control.** The drop is off until an operator sets the Redis hash
-`{prober_retention}control` (read before every pass; a run that cannot read it
-stops):
+`{prober_retention}control` (read before every pass and every walk batch; a
+run that cannot read it stops):
 
 ```
 HSET {prober_retention}control mode dry_run          # count what a drop would delete
 HSET {prober_retention}control mode on               # drop
-HSET {prober_retention}control mode off              # stop within one pass
+HSET {prober_retention}control mode off              # stop within one pass or walk batch
 HSET {prober_retention}control retainedGenerations 8 # 2..30 UTC days kept
-HSET {prober_retention}control maxContractsPerSecond 200   # up to 2000; 0 is off
+HSET {prober_retention}control maxContractsPerSecond 200   # pass contracts the walk keeps a second, up to 2000; 0 is off
+HSET {prober_retention}control maxWalkRowsPerSecond 3000   # contracts of any payer the walk reads a second, up to 20000; 0 is off
 HSET {prober_retention}control maxShardsPerMinute 30        # passes dropped a minute, up to 600; 0 is off
-HSET {prober_retention}control contracts off         # drop identities only
+HSET {prober_retention}control contracts off         # drop identities only, without a walk
+HSET {prober_retention}control windows off           # stop the window step alone
+HSET {prober_retention}control maxWindowShardsPerMinute 4  # passes the window step clears a minute, up to 120; 0 is off
 DEL  {prober_retention}control                       # code defaults (off)
 ```
 
+A dry run reads one page of due passes and walks the next generation read
+only, from the walk's cursor when it is in progress, for one budget; it changes
+nothing, the walk included. With contracts off, a generation's passes drop
+without a walk, and that generation is never walked once contracts are on
+again.
+
 **Metrics.** `urnetwork_prober_retention_*`: the mode, the kept generations,
-the cutoff, the oldest registered pass, the due backlog and the run's clock
-(gauges); passes dropped, refused (by reason) and failed; contracts deleted,
-kept for bytes, kept unsettled or busy; archived contracts; deleted rows by
+the cutoff, the oldest registered pass, the due backlog, the run's clock and
+the creation time the walk has read up to (gauges); passes dropped, refused (by
+reason) and failed; contracts deleted, kept for bytes, kept unsettled or busy;
+contracts of any payer the walk read; archived contracts; deleted rows by
 table; step durations; runs by why they stopped. While the drop keeps up, the
 oldest registered pass is within a generation of the cutoff. Each taskworker
 keeps the gauges of the last run it made, and a run publishes its clock with
@@ -225,6 +252,80 @@ minutes.
 **Settling.** `ProberBootstrap` runs `SettleDueProberShards` every five minutes:
 it fences a live pass past its deadline in any generation and settles drained
 passes of kept generations. It deletes nothing.
+
+## Window clients
+
+Each tunnel of a probe pass mints a derived client of the pass's own client
+(the taskworker's in-process credentials) and retires it when the tunnel
+closes. Measured on Main on 2026-11-17: about 4,700 a minute, 5,500 a pass and
+6.8M a day, about 1.14 for each URL turn; a window lives about 16 seconds
+(p50; p99 36 s). Until 2026-11-17 every retired window stayed until its pass's
+generation dropped, about 54M rows at the eight-day steady state and about
+166M waiting on the walk that day, with about 0.9 location reliability rows
+each and a TLS certificate for each post-quantum turn's window.
+
+**Why the windows are not reused.** A provider sees the window's client id in
+its contracts and packets. Reusing a window for another provider would let
+providers that compare notes recognize the prober as the one client that
+visits many of them, and reusing it for the same provider's next turn would
+let that provider recognize the prober when it returns; connect's own rule is
+that an identity a provider may have seen never follows the window to another
+provider. The extra mints within a turn (about one in eight) stay fresh
+identities too: the tunnel retires each identity with its exact residency
+(`ReuseFixedDestinationIdentities` off, `providertunnel`). So the step bounds
+how long windows are kept, not how many are minted.
+
+**The window step** (`model.RemoveProberShardWindows`, task
+`remove_prober_shard_windows`, a chain beside the drop's) takes the passes in
+the order of their creation. A pass is due an hour past its deadline. A due
+pass that drained, whose funded contracts are all resolved and whose
+balances' escrows are all settled (read directly: the drop's postponements
+overwrite the settle sweep's `'infinity'` mark), loses its window clients and
+the rows keyed by them: `client_tls_certificate`, `network_client_role`,
+`network_client_provider_intent`, `network_client_location_reliability` and
+`provide_key`, then their Redis state after the commit. At most 10,000 windows
+go in one transaction. Their connections stay for the connection reap, eight
+hours after they closed. A window with a connected connection or a hosted proxy
+resource stays for the drop, which refuses such a pass as before. The pass's
+own client, identity, contracts and registry row stay for its generation, so
+the drop's walk, which finds a pass's contracts by its payer network, is
+unchanged.
+
+Nothing reads a retired window once its pass settled: its contracts carry
+their own network ids (close, expiry, settlement and payout never read its
+row, as for the hosted proxy's retired windows, which go a day after their
+deactivation), it parents no client and earns nothing, and the location fold
+cannot write its row again once it is gone. Its key history keeps its own
+retention, which deletes a client's history only once its row is gone (the
+delete trigger records a child gone at its deactivation). A post-quantum
+turn's window publishes its key, about 0.95M rows a day since 2026-11-14 at
+about 2.2 KB each; that history now goes seven days after the window's
+deactivation instead of after its generation's drop.
+
+A due pass that is not settled, or still live, is waited at: the run stops
+there and the next run reads it again, after the idle interval. Six hours past
+its deadline it is passed over, and its windows wait for its generation's
+drop. A pass whose registry row another transaction holds ends the run, and
+the next run comes back to it after the resume interval. A failed run hands its
+cursor, before the failed pass, to the retry.
+
+The step runs in the control's mode: off does nothing, dry run reads one page
+and counts the windows a run would delete without moving its cursor, and on
+deletes, at most `maxWindowShardsPerMinute` passes a minute (4 by default, 120
+at most). `windows off` stops it alone. Main creates about one pass a minute,
+so the default keeps up four times over, at about 380 window deletes a second
+while behind; the backlog of about 39,000 passes of 2026-11-17 clears in about
+nine days at the default, faster at a higher rate. Caught up, Main keeps about
+an hour and a quarter of windows, about 0.35M rows instead of about 54M.
+
+**Metrics** (the taskworker dashboard's prober shard retention row):
+`urnetwork_prober_retention_window_shards_total{outcome}` (removed, waiting,
+skipped, busy, gone, error, dry_run), `urnetwork_prober_retention_window_clients_total`,
+the cursor's pass creation time
+`urnetwork_prober_retention_window_cursor_timestamp_seconds` (caught up, about
+an hour and a quarter behind now), the rows it deleted in
+`urnetwork_prober_retention_deleted_rows_total{table}` and its transactions in
+`urnetwork_prober_retention_batch_duration_seconds{step="windows"}`.
 
 ## Network boundaries
 
