@@ -1,8 +1,9 @@
 package handlers
 
-// api's edge client route (TLS-M5-11, QD-812): only the edge class's bearer reaches it; a block, host or index
-// edge.yml does not name is refused 403 with nothing created; with no edge.yml or no urnetwork-edge network it
-// answers 503; and through Postgres an admitted ask answers the derived client's jwt, the same client at each ask.
+// api's edge client route (TLS-M5-11, QD-812, QD-873): only the edge class's bearer reaches it; a block, host,
+// slot or index edge.yml and the key's slot count do not admit is refused 403 with nothing created; with no
+// edge.yml or no urnetwork-edge network it answers 503; and through Postgres an admitted ask answers the derived
+// client's jwt, the same client at each ask of its slot, and another client for the other slot.
 
 import (
 	"bytes"
@@ -30,6 +31,8 @@ type edgeClientTestWorld struct {
 	configErr   error
 	noNetwork   bool
 	environment string
+	// the last answer's Retry-After
+	lastRetryAfter string
 }
 
 func newEdgeClientTestWorld(t *testing.T, networkId server.Id) *edgeClientTestWorld {
@@ -89,6 +92,7 @@ func (self *edgeClientTestWorld) post(bearer string, body string) (int, *server.
 		self.t.Fatal(err)
 	}
 	defer response.Body.Close()
+	self.lastRetryAfter = response.Header.Get("Retry-After")
 	result := &server.EdgeClientMintResult{}
 	if response.StatusCode == http.StatusOK {
 		if err := json.NewDecoder(response.Body).Decode(result); err != nil {
@@ -118,16 +122,25 @@ func TestInternalGateEdgeClientRefusals(t *testing.T) {
 		{name: "a host not listed", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-b.example","index":0}`, code: http.StatusForbidden},
 		{name: "an index at K", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","index":2}`, code: http.StatusForbidden},
 		{name: "a negative index", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","index":-1}`, code: http.StatusForbidden},
+		// a slot at the slot count, 2, and past it: a third process of the block on the host mints nothing
+		{name: "a slot at the slot count", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":2,"index":0}`, code: http.StatusForbidden},
+		{name: "a slot past the slot count", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":7,"index":0}`, code: http.StatusForbidden},
+		{name: "a negative slot", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":-1,"index":0}`, code: http.StatusForbidden},
+		{name: "a slot that is not a number", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":"1","index":0}`, code: http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		if code, _ := world.post(c.bearer, c.body); code != c.code {
 			t.Errorf("%s: %d, want %d", c.name, code, c.code)
 		}
 	}
-	// no urnetwork_edge in sidecar.yml: unavailable, before anything is read from Postgres
+	// no urnetwork_edge in sidecar.yml: unavailable, before anything is read from Postgres, with the retry the
+	// settings name
 	world.noNetwork = true
 	if code, _ := world.post(world.edge, admitted); code != http.StatusServiceUnavailable {
 		t.Errorf("no urnetwork_edge: %d", code)
+	}
+	if retryAfter := world.lastRetryAfter; retryAfter != "5" {
+		t.Errorf("no urnetwork_edge: Retry-After %q", retryAfter)
 	}
 	world.noNetwork = false
 	// no edge.yml that parses, on a process that has read none: unavailable
@@ -155,7 +168,8 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("an admitted ask: %d", code)
 		}
-		wantClientId := server.DeriveEdgeClientId("test", "tlsedge", "lb-a.example", 1)
+		// a body with no slot is slot 0's, as a block without WARP_SLOT is while warp's change rolls out
+		wantClientId := server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, 1)
 		if first.ClientId != wantClientId.String() || first.PlatformUrl != "wss://connect.edge.example" || first.ByClientJwt == "" {
 			t.Fatalf("answered client %s, want %s", first.ClientId, wantClientId)
 		}
@@ -172,11 +186,40 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		if code != http.StatusOK || second.ClientId != first.ClientId {
 			t.Fatalf("a second ask: %d %s", code, second.ClientId)
 		}
+		code, slotZero := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":0,"index":1}`)
+		if code != http.StatusOK || slotZero.ClientId != first.ClientId {
+			t.Fatalf("slot 0 named: %d %s", code, slotZero.ClientId)
+		}
+
+		// a deploy's new process in slot 1 beside the old one in slot 0: another client, which connect's
+		// audience takes as its own, and its restart repeats it
+		code, other := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":1,"index":1}`)
+		wantOtherClientId := server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 1, 1)
+		if code != http.StatusOK || other.ClientId != wantOtherClientId.String() || other.ClientId == first.ClientId {
+			t.Fatalf("slot 1: %d %s, want %s", code, other.ClientId, wantOtherClientId)
+		}
+		otherByJwt, err := session.ParseByJwtForAudience(ctx, other.ByClientJwt, session.ByJwtAudienceConnect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if otherByJwt.ClientId == nil || *otherByJwt.ClientId != wantOtherClientId || !otherByJwt.StrictExp {
+			t.Fatalf("slot 1's jwt %+v", otherByJwt)
+		}
+		if err := session.ValidateByJwtState(ctx, byJwt, true); err != nil {
+			t.Fatalf("slot 0's client after slot 1's mint: %v", err)
+		}
+		if err := session.ValidateByJwtState(ctx, otherByJwt, true); err != nil {
+			t.Fatalf("slot 1's client: %v", err)
+		}
+		code, otherAgain := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":1,"index":1}`)
+		if code != http.StatusOK || otherAgain.ClientId != other.ClientId {
+			t.Fatalf("slot 1's second ask: %d %s", code, otherAgain.ClientId)
+		}
 		// the environment is api's own: another environment's api derives another client for the same ask
 		world.environment = "other"
-		code, other := world.post(world.edge, admitted)
-		if code != http.StatusOK || other.ClientId == first.ClientId {
-			t.Fatalf("another environment: %d %s", code, other.ClientId)
+		code, otherEnvironment := world.post(world.edge, admitted)
+		if code != http.StatusOK || otherEnvironment.ClientId == first.ClientId {
+			t.Fatalf("another environment: %d %s", code, otherEnvironment.ClientId)
 		}
 	})
 }

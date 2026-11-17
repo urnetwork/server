@@ -9,7 +9,9 @@
 // What the block builds around tlsedgeservice:
 //
 //   - ServiceHost: sidecarhost's, with Quota over api's internal gate at -api_url (quotahost.NewBlockQuota) and
-//     ServiceClient, server.NewPlatformClientSource over api's edge client route on the edge bearer.
+//     ServiceClient, server.NewPlatformClientSource over api's edge client route on the edge bearer, for the
+//     deploy slot warp hands the process in WARP_SLOT (server.LoadEdgeClientSlot, QD-873), so a deploy's new
+//     process holds other clients than the old one draining beside it.
 //   - The store: model.NewTlsEdgeStore on the block's Postgres role, read only by the engine's loops and record
 //     batches, never by a connection (I-12).
 //   - The clients: sidecar.NewEdgeClientPool, K platform clients in urnetwork-edge, Required and relay-only,
@@ -563,10 +565,16 @@ func blockDeps(quotaCtx context.Context, settings *hostSettings, apiUrl string, 
 	}
 	sourceSettings := server.DefaultPlatformClientSourceSettings()
 	sourceSettings.ClientCount = settings.TlsEdge.Clients
+	slot, err := server.LoadEdgeClientSlot(sourceSettings)
+	if err != nil {
+		glog.Errorf("[%s]no platform clients: %v\n", hostService, err)
+		return deps, end
+	}
 	source, err := server.NewPlatformClientSource(quotaCtx, &server.PlatformClientSourceArgs{
 		ApiUrl:   apiUrl,
 		Block:    hostService,
 		Host:     blockHost,
+		Slot:     slot,
 		Bearer:   bearer,
 		Settings: sourceSettings,
 	})

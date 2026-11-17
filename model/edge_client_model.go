@@ -1,9 +1,10 @@
 package model
 
-// An edge block's platform clients in urnetwork-edge (TLS-M5-11; §6.10.1, §13.6; QD-812): api's half of
+// An edge block's platform clients in urnetwork-edge (TLS-M5-11; §6.10.1, §13.6; QD-812, QD-873): api's half of
 // server.PlatformClientSource. MintEdgeClient answers a short-lived client jwt for the client whose id
-// server.DeriveEdgeClientId derives from (environment, block, host, index), creating the client and its device
-// in the urnetwork-edge network on first use, so a block's restart reuses its ids and nothing piles up there.
+// server.DeriveEdgeClientId derives from (environment, host, block, slot, index), creating the client and its
+// device in the urnetwork-edge network on first use, so a block's restart reuses its ids and nothing piles up
+// there, and a deploy's old and new process, which hold different slots, hold different clients.
 //
 // The caller, api's internal edge route, has already held the key to config/<env>/edge.yml
 // (server.EdgeClientsConfig.Admits). Nothing here takes a client id from a request.
@@ -61,7 +62,9 @@ type EdgeClientKey struct {
 	Environment string
 	Block       string
 	Host        string
-	Index       int
+	// The process's deploy slot (QD-873), which the caller has bounded by the key's SlotCount.
+	Slot  int
+	Index int
 }
 
 // A minted edge client.
@@ -78,14 +81,14 @@ func MintEdgeClient(ctx context.Context, networkId server.Id, key *EdgeClientKey
 	if settings == nil {
 		settings = DefaultEdgeClientMintSettings()
 	}
-	if key == nil || networkId == (server.Id{}) || key.Environment == "" || key.Block == "" || key.Host == "" || key.Index < 0 {
-		return nil, errors.New("an edge client needs its network, environment, block, host and index")
+	if key == nil || networkId == (server.Id{}) || key.Environment == "" || key.Block == "" || key.Host == "" || key.Slot < 0 || key.Index < 0 {
+		return nil, errors.New("an edge client needs its network, environment, block, host, slot and index")
 	}
 	if settings.JwtLife <= 0 || settings.JwtIndexStagger < 0 {
 		return nil, errors.New("an edge client's jwt needs a positive life")
 	}
-	clientId := server.DeriveEdgeClientId(key.Environment, key.Block, key.Host, key.Index)
-	deviceId := server.DeriveEdgeDeviceId(key.Environment, key.Block, key.Host, key.Index)
+	clientId := server.DeriveEdgeClientId(key.Environment, key.Host, key.Block, key.Slot, key.Index)
+	deviceId := server.DeriveEdgeDeviceId(key.Environment, key.Host, key.Block, key.Slot, key.Index)
 	defer func() {
 		if r := recover(); r != nil {
 			if server.IsDoneError(r) {

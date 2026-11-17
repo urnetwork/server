@@ -10,10 +10,11 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// MintEdgeClient on Postgres (TLS-M5-11, QD-812): the first ask creates the derived client and its device in the
-// urnetwork-edge network, a later ask reuses them, so a block's restart piles nothing up; the jwt is a strict_exp
-// client token connect accepts, ending at its exp, staggered by index; and a client that was removed, a derived
-// id that is another network's, and a network with no row are each refused with nothing created.
+// MintEdgeClient on Postgres (TLS-M5-11, QD-812, QD-873): the first ask creates the derived client and its device
+// in the urnetwork-edge network, a later ask reuses them, so a block's restart piles nothing up; another slot or
+// index is another client; the jwt is a strict_exp client token connect accepts, ending at its exp, staggered by
+// index; and a client that was removed, a derived id that is another network's, and a network with no row are
+// each refused with nothing created.
 func TestMintEdgeClientReusesItsDerivedClient(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -31,14 +32,14 @@ func TestMintEdgeClientReusesItsDerivedClient(t *testing.T) {
 		}
 		before := clientCount()
 
-		key := &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Index: 1}
+		key := &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 1, Index: 1}
 		startTime := server.NowUtc()
 		first, err := MintEdgeClient(ctx, networkId, key, settings)
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantClientId := server.DeriveEdgeClientId("test", "tlsedge", "lb-a.example", 1)
-		wantDeviceId := server.DeriveEdgeDeviceId("test", "tlsedge", "lb-a.example", 1)
+		wantClientId := server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 1, 1)
+		wantDeviceId := server.DeriveEdgeDeviceId("test", "lb-a.example", "tlsedge", 1, 1)
 		if first.ClientId != wantClientId || first.ByClientJwt == "" {
 			t.Fatalf("minted %s, want %s", first.ClientId, wantClientId)
 		}
@@ -76,12 +77,26 @@ func TestMintEdgeClientReusesItsDerivedClient(t *testing.T) {
 		}
 
 		// another index is another client
-		other, err := MintEdgeClient(ctx, networkId, &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Index: 0}, settings)
+		other, err := MintEdgeClient(ctx, networkId, &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 1, Index: 0}, settings)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if other.ClientId == first.ClientId || clientCount() != before+2 {
 			t.Fatalf("index 0 shares index 1's client")
+		}
+
+		// the other slot is another client on another device, for the deploy's other process (QD-873)
+		otherSlot, err := MintEdgeClient(ctx, networkId, &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 0, Index: 1}, settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		otherSlotByJwt, err := session.ParseByJwtForAudience(ctx, otherSlot.ByClientJwt, session.ByJwtAudienceConnect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if otherSlot.ClientId == first.ClientId || otherSlot.ClientId != server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, 1) ||
+			otherSlotByJwt.DeviceId == nil || *otherSlotByJwt.DeviceId == wantDeviceId || clientCount() != before+3 {
+			t.Fatalf("slot 0 shares slot 1's client or device")
 		}
 
 		// a removed client stays removed
@@ -98,7 +113,7 @@ func TestMintEdgeClientRefusesWhatIsNotItsNetworks(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		settings := DefaultEdgeClientMintSettings()
-		key := &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-b.example", Index: 0}
+		key := &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-b.example", Slot: 0, Index: 0}
 
 		// no network row: nothing is created
 		missingNetworkId := server.NewId()
@@ -107,7 +122,7 @@ func TestMintEdgeClientRefusesWhatIsNotItsNetworks(t *testing.T) {
 		}
 		created := 0
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM network_client WHERE client_id = $1`, server.DeriveEdgeClientId("test", "tlsedge", "lb-b.example", 0)).Scan(&created))
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM network_client WHERE client_id = $1`, server.DeriveEdgeClientId("test", "lb-b.example", "tlsedge", 0, 0)).Scan(&created))
 		})
 		if created != 0 {
 			t.Fatal("a client was created with no network")
@@ -132,6 +147,7 @@ func TestMintEdgeClientRefusesWhatIsNotItsNetworks(t *testing.T) {
 			{Environment: "test", Block: "", Host: "lb-b.example", Index: 0},
 			{Environment: "test", Block: "tlsedge", Host: "", Index: 0},
 			{Environment: "test", Block: "tlsedge", Host: "lb-b.example", Index: -1},
+			{Environment: "test", Block: "tlsedge", Host: "lb-b.example", Slot: -1, Index: 0},
 		} {
 			if _, err := MintEdgeClient(ctx, networkId, bad, settings); err == nil {
 				t.Errorf("%+v minted", bad)

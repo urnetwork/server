@@ -434,10 +434,17 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 	}
 	sourceSettings := server.DefaultPlatformClientSourceSettings()
 	sourceSettings.ClientCount = settings.Clients.ClientCount
+	// the deploy slot warp hands the process (QD-873), so a deploy's new process holds another client than the old
+	slot, err := server.LoadEdgeClientSlot(sourceSettings)
+	if err != nil {
+		glog.Errorf("[%s]no platform client: %v\n", hostService, err)
+		return deps, end
+	}
 	source, err := server.NewPlatformClientSource(ctx, &server.PlatformClientSourceArgs{
 		ApiUrl:   apiUrl,
 		Block:    hostService,
 		Host:     blockHost,
+		Slot:     slot,
 		Bearer:   bearer,
 		Settings: sourceSettings,
 	})

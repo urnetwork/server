@@ -1,19 +1,21 @@
 package handlers
 
-// api's end of an edge block's platform clients (TLS-M5-11; QD-812; §6.10.1, §13.6, §19.4): the route
+// api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873; §6.10.1, §13.6, §19.4): the route
 // server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge` class's bearer,
 // verified by its hash in constant time (server.InternalGateVerifier), and answering every other request 403
 // before anything is read:
 //
-//	POST /internal/gate/edge-client  edge  {block, host, index} -> {client_id, by_client_jwt, expire_time_millis, platform_url}
+//	POST /internal/gate/edge-client  edge  {block, host, slot, index} -> {client_id, by_client_jwt, expire_time_millis, platform_url}
 //
-// The client id is derived from (environment, block, host, index), the environment api's own, never chosen by the
-// caller (server.DeriveEdgeClientId), and the client is created in sidecar.yml's urnetwork_edge network on first
-// use (model.MintEdgeClient). api refuses, 403, a block config/<env>/edge.yml does not list, a host that is not
-// among the block's, and an index at or past the block's K, so the bearer can mint only the environment's fixed
-// edge clients. With no edge.yml that parses, no urnetwork_edge in sidecar.yml, or no such network, every call is
-// answered 503 and nothing is created. edge.yml is reread every ConfigRereadInterval, and a read that fails keeps
-// the last one that parsed.
+// The client id is derived from (environment, host, block, slot, index), the environment api's own, never chosen
+// by the caller (server.DeriveEdgeClientId), and the client is created in sidecar.yml's urnetwork_edge network on
+// first use (model.MintEdgeClient). api refuses, 403, a block config/<env>/edge.yml does not list, a host that is
+// not among the block's, a slot at or past the key's SlotCount (2: a deploy's old and new process of a block on a
+// host, QD-873) and an index at or past the block's K, so the bearer can mint only the environment's fixed edge
+// clients, at most SlotCount times K a block and host. A body without a slot reads slot 0, as a block without
+// WARP_SLOT does while warp's change rolls out. With no edge.yml that parses, no urnetwork_edge in sidecar.yml, or
+// no such network, every call is answered 503 and nothing is created. edge.yml is reread every
+// ConfigRereadInterval, and a read that fails keeps the last one that parsed.
 //
 // Nothing here logs a bearer or a jwt, and a refusal's log line names the part refused, never a host. Safe for
 // concurrent use.
@@ -22,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -37,19 +40,27 @@ const internalGateRouteEdgeClient = "edge-client"
 
 // Tunables of the route.
 type InternalGateEdgeClientSettings struct {
-	// The most bytes a request's body may hold: 4 KiB, a block, a host and an index many times over.
+	// The most bytes a request's body may hold: 4 KiB, a block, a host, a slot and an index many times over.
 	RequestMaxByteCount int64
 	// How long one read of edge.yml answers before the next: 60 s, §19.11's reread.
 	ConfigRereadInterval time.Duration
+	// What a 503 asks the block to wait before it asks again, as Retry-After in whole seconds: 5 s, its source's
+	// RetryInterval.
+	UnavailableRetryAfter time.Duration
+	// The key's limits edge.yml is read under, the same as the blocks' sources: its SlotCount bounds the slot.
+	// nil: server.DefaultEdgeClientKeySettings.
+	Key *server.EdgeClientKeySettings
 	// The mint's. nil: model.DefaultEdgeClientMintSettings.
 	Mint *model.EdgeClientMintSettings
 }
 
 func DefaultInternalGateEdgeClientSettings() *InternalGateEdgeClientSettings {
 	return &InternalGateEdgeClientSettings{
-		RequestMaxByteCount:  4 * 1024,
-		ConfigRereadInterval: 60 * time.Second,
-		Mint:                 model.DefaultEdgeClientMintSettings(),
+		RequestMaxByteCount:   4 * 1024,
+		ConfigRereadInterval:  60 * time.Second,
+		UnavailableRetryAfter: 5 * time.Second,
+		Key:                   server.DefaultEdgeClientKeySettings(),
+		Mint:                  model.DefaultEdgeClientMintSettings(),
 	}
 }
 
@@ -58,7 +69,7 @@ type InternalGateEdgeClientDeps struct {
 	// The bearers' digests. nil: server.LoadInternalGateVerifier from api's vault, read once; a vault without the
 	// file refuses every call 403.
 	Verifier *server.InternalGateVerifier
-	// Reads edge.yml. nil: server.LoadEdgeClientsConfig.
+	// Reads edge.yml. nil: server.LoadEdgeClientsConfig under the settings' Key.
 	Config func() (*server.EdgeClientsConfig, error)
 	// The urnetwork-edge network. nil: sidecar.yml's urnetwork_edge.
 	EdgeNetwork func() (server.Id, bool)
@@ -101,9 +112,15 @@ func NewInternalGateEdgeClientHandlers(deps *InternalGateEdgeClientDeps) *Intern
 			return loaded
 		})
 	}
+	settings := deps.Settings
+	if settings == nil {
+		settings = DefaultInternalGateEdgeClientSettings()
+	}
 	loadConfig := deps.Config
 	if loadConfig == nil {
-		loadConfig = server.LoadEdgeClientsConfig
+		loadConfig = func() (*server.EdgeClientsConfig, error) {
+			return server.LoadEdgeClientsConfig(settings.Key)
+		}
 	}
 	edgeNetwork := deps.EdgeNetwork
 	if edgeNetwork == nil {
@@ -114,10 +131,6 @@ func NewInternalGateEdgeClientHandlers(deps *InternalGateEdgeClientDeps) *Intern
 	environment := deps.Environment
 	if environment == nil {
 		environment = server.Env
-	}
-	settings := deps.Settings
-	if settings == nil {
-		settings = DefaultInternalGateEdgeClientSettings()
 	}
 	return &InternalGateEdgeClientHandlers{
 		verifier:    verifier,
@@ -180,12 +193,12 @@ func (self *InternalGateEdgeClientHandlers) currentConfig() *server.EdgeClientsC
 	return config
 }
 
-// Answers 503, saying why in the log alone.
-func internalGateEdgeClientUnavailable(w http.ResponseWriter, reason string) {
+// Answers 503 with UnavailableRetryAfter, saying why in the log alone.
+func (self *InternalGateEdgeClientHandlers) unavailable(w http.ResponseWriter, reason string) {
 	if glog.V(1) {
 		glog.Infof("[internalgate]%s unavailable: %s\n", internalGateRouteEdgeClient, reason)
 	}
-	w.Header().Set("Retry-After", "5")
+	w.Header().Set("Retry-After", strconv.Itoa(int(self.settings.UnavailableRetryAfter/time.Second)))
 	http.Error(w, "Unavailable.", http.StatusServiceUnavailable)
 }
 
@@ -203,7 +216,7 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 	}
 	config := self.currentConfig()
 	if config == nil {
-		internalGateEdgeClientUnavailable(w, "no edge.yml")
+		self.unavailable(w, "no edge.yml")
 		return
 	}
 	if err := config.Admits(args); err != nil {
@@ -217,18 +230,19 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 	}
 	environment, err := self.environment()
 	if err != nil || environment == "" {
-		internalGateEdgeClientUnavailable(w, "no environment")
+		self.unavailable(w, "no environment")
 		return
 	}
 	networkId, ok := self.edgeNetwork()
 	if !ok {
-		internalGateEdgeClientUnavailable(w, "sidecar.yml names no urnetwork_edge")
+		self.unavailable(w, "sidecar.yml names no urnetwork_edge")
 		return
 	}
 	mint, err := model.MintEdgeClient(r.Context(), networkId, &model.EdgeClientKey{
 		Environment: environment,
 		Block:       args.Block,
 		Host:        args.Host,
+		Slot:        args.Slot,
 		Index:       args.Index,
 	}, self.settings.Mint)
 	if err != nil {
@@ -242,7 +256,7 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 		if errors.Is(err, model.ErrEdgeClientNetworkMissing) {
 			reason = "no urnetwork-edge network"
 		}
-		internalGateEdgeClientUnavailable(w, reason)
+		self.unavailable(w, reason)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

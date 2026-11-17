@@ -1,29 +1,37 @@
 package server
 
-// An edge block's platform clients (TLS-M5-11; §6.10.1, §13.6, §19.4; QD-812): how tlsedge, mxedge's router and
-// smtpedge, which mount no vault and hold no network-level token, come to hold client jwts in urnetwork-edge.
+// An edge block's platform clients (TLS-M5-11; §6.10.1, §13.6, §19.4; QD-812, QD-873): how tlsedge, mxedge's
+// router and smtpedge, which mount no vault and hold no network-level token, come to hold client jwts in
+// urnetwork-edge.
 //
 //   - The block mounts one credential, the `edge` class's internal gate bearer (internal_gate.go:
 //     internal-gate-edge.yml among its secret_files, 256 random bits, api holding only its SHA-256).
 //   - POST EdgeClientMintPath on api, which takes only that class, answers one client's short-lived jwt for
-//     (block, host, index): the client id is derived, never chosen by the caller, so a restart asks for the ids it
-//     held before and no state lives on the edge, and a stolen bearer can mint only the environment's fixed edge
-//     clients (model.MintEdgeClient).
-//   - api admits only what config/<env>/edge.yml names: the block, a host in the block's list and an index below
-//     its K (EdgeClientsConfig). The file's name and layout are this draft's reading, as the decision names what
-//     api checks, not where the list lives. A missing or broken file admits nothing.
+//     (block, host, slot, index): the client id is derived, never chosen by the caller, so a restart asks for the
+//     ids it held before and no state lives on the edge, and a stolen bearer can mint only the environment's fixed
+//     edge clients (model.MintEdgeClient).
+//   - api admits only what config/<env>/edge.yml names: the block, a host in the block's list, a slot below the
+//     key's SlotCount and an index below the block's K (EdgeClientsConfig). The file's name and layout are this
+//     draft's reading, as the decision names what api checks, not where the list lives. A missing or broken file
+//     admits nothing.
 //
 // The derivation, fixed for the life of the environment (DeriveEdgeClientId): the first 16 bytes of
 //
-//	SHA-256("urnetwork-edge-client-v1" 0x00 <environment> 0x00 <block> 0x00 <host> 0x00 <index, decimal>)
+//	SHA-256("urnetwork-edge-client-v1" 0x00 <environment> 0x00 <host> 0x00 <block> 0x00 <slot, decimal> 0x00
+//	        <index, decimal>)
 //
 // and the client's device the same under "urnetwork-edge-device-v1". "block" is the edge block's name as edge.yml
-// lists it, tlsedge, mxedge or smtpedge: one such block runs on a host (§13.6), so no warp block name enters.
+// lists it, tlsedge, mxedge or smtpedge, never a warp block name. The slot (QD-873, which amended QD-812's
+// derivation before any deployment used it) is the deploy slot warp hands the process in WARP_SLOT, beside
+// WARP_BLOCK (LoadEdgeClientSlot): a deploy's old and new process of a block on a host hold different slots,
+// alternating per deploy, so the new process connects its own K clients while the old one drains its streams on
+// its own clients for drain_s (§13.5), each counting only its own toward readiness, and urnetwork-edge holds at
+// most SlotCount times K clients a block and host.
 //
 // PlatformClientSource is the block's end, sidecar.ServiceClientSource for sidecar.EdgeClientPool: it asks for
 // each of its K indexes at start, keeps each answer until its jwt is refreshed, and refreshes each before it
 // lapses, at RefreshLifeFraction of its life. A jwt and the bearer are secrets: neither is logged (I-7), and log
-// lines name a client by its index alone (I-13).
+// lines name a client by its slot and index alone (I-13).
 
 import (
 	"bytes"
@@ -35,6 +43,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,12 +69,18 @@ const (
 	edgeDeviceIdLabel = "urnetwork-edge-device-v1"
 )
 
+// The environment value warp hands each process its deploy slot in, beside WARP_BLOCK (QD-873).
+const EdgeClientSlotEnvName = "WARP_SLOT"
+
 // What an edge block asks of EdgeClientMintPath.
 type EdgeClientMintArgs struct {
 	// The edge block, as edge.yml lists it: tlsedge, mxedge or smtpedge.
 	Block string `json:"block"`
 	// The host the block runs on, as edge.yml lists it.
 	Host string `json:"host"`
+	// The process's deploy slot, from 0 (LoadEdgeClientSlot). A request without it reads 0, as a process without
+	// WARP_SLOT does while warp's change that sets it rolls out.
+	Slot int `json:"slot"`
 	// Which of the block's K clients, from 0.
 	Index int `json:"index"`
 }
@@ -87,7 +102,8 @@ var ErrEdgeClientRefused = errors.New("edge client refused")
 // The source could not be made or could not answer.
 var ErrPlatformClientSource = errors.New("platform client source")
 
-// The limits of an edge client's key, each the format's value (QD-702).
+// The limits of an edge client's key, each the format's value (QD-702). api's route and the block's source each
+// carry them, so each default lives here alone.
 type EdgeClientKeySettings struct {
 	// The longest host name: RFC 1035's 253.
 	HostMaxByteCount int
@@ -95,6 +111,10 @@ type EdgeClientKeySettings struct {
 	BlockMaxByteCount int
 	// The most clients one block may list as its K.
 	ClientMaxCount int
+	// The deploy slots a block's processes on one host take: 2, a deploy's old process and its new one (QD-873).
+	// A slot at or past it is refused, so urnetwork-edge holds at most this many times K clients a block and host.
+	// warp hands out the same number (warpctl's DeploySlotSettings.SlotCount). Not positive: no slot is admitted.
+	SlotCount int
 }
 
 func DefaultEdgeClientKeySettings() *EdgeClientKeySettings {
@@ -102,7 +122,13 @@ func DefaultEdgeClientKeySettings() *EdgeClientKeySettings {
 		HostMaxByteCount:  253,
 		BlockMaxByteCount: 32,
 		ClientMaxCount:    64,
+		SlotCount:         2,
 	}
+}
+
+// Whether slot is one the key admits: from 0 and below SlotCount.
+func (self *EdgeClientKeySettings) slotValid(slot int) bool {
+	return 0 <= slot && slot < self.SlotCount
 }
 
 // Whether name is lowercase letters, digits, dots and hyphens, at most maxByteCount: what a block or a host is
@@ -122,9 +148,9 @@ func edgeClientNameValid(name string, maxByteCount int) bool {
 	return true
 }
 
-func deriveEdgeId(label string, environment string, block string, host string, index int) Id {
+func deriveEdgeId(label string, environment string, host string, block string, slot int, index int) Id {
 	hash := sha256.New()
-	for _, part := range []string{label, environment, block, host} {
+	for _, part := range []string{label, environment, host, block, strconv.Itoa(slot)} {
 		hash.Write([]byte(part))
 		hash.Write([]byte{0})
 	}
@@ -135,13 +161,13 @@ func deriveEdgeId(label string, environment string, block string, host string, i
 }
 
 // The client id of an edge block's client: see the file header. The same for the life of the environment.
-func DeriveEdgeClientId(environment string, block string, host string, index int) Id {
-	return deriveEdgeId(edgeClientIdLabel, environment, block, host, index)
+func DeriveEdgeClientId(environment string, host string, block string, slot int, index int) Id {
+	return deriveEdgeId(edgeClientIdLabel, environment, host, block, slot, index)
 }
 
 // The device the client hangs from, derived the same way under its own label.
-func DeriveEdgeDeviceId(environment string, block string, host string, index int) Id {
-	return deriveEdgeId(edgeDeviceIdLabel, environment, block, host, index)
+func DeriveEdgeDeviceId(environment string, host string, block string, slot int, index int) Id {
+	return deriveEdgeId(edgeDeviceIdLabel, environment, host, block, slot, index)
 }
 
 // One edge block as edge.yml lists it.
@@ -167,11 +193,13 @@ type EdgeClientsConfig struct {
 	blockClientCounts map[string]int
 	// block -> its hosts
 	blockHosts map[string][]string
+	// the key's limits the file was read under, its SlotCount among them
+	keySettings *EdgeClientKeySettings
 }
 
 // Reads edge.yml. A key it does not know, a block or host that is not a plain name, a K outside
 // [1, ClientMaxCount] or a platform url that is not ws or wss refuses the whole file, so a misspelled entry
-// admits nothing rather than something else.
+// admits nothing rather than something else. settings nil takes the defaults.
 func ParseEdgeClientsConfig(data []byte, settings *EdgeClientKeySettings) (*EdgeClientsConfig, error) {
 	if settings == nil {
 		settings = DefaultEdgeClientKeySettings()
@@ -193,6 +221,7 @@ func ParseEdgeClientsConfig(data []byte, settings *EdgeClientKeySettings) (*Edge
 		platformUrl:       file.PlatformUrl,
 		blockClientCounts: map[string]int{},
 		blockHosts:        map[string][]string{},
+		keySettings:       settings,
 	}
 	for block, entry := range file.Blocks {
 		if !edgeClientNameValid(block, settings.BlockMaxByteCount) || entry == nil {
@@ -212,8 +241,9 @@ func ParseEdgeClientsConfig(data []byte, settings *EdgeClientKeySettings) (*Edge
 	return self, nil
 }
 
-// edge.yml from config. An error names the file and the part, and its caller then admits nothing.
-func LoadEdgeClientsConfig() (*EdgeClientsConfig, error) {
+// edge.yml from config, read under settings, nil taking the defaults. An error names the file and the part, and
+// its caller then admits nothing.
+func LoadEdgeClientsConfig(settings *EdgeClientKeySettings) (*EdgeClientsConfig, error) {
 	resource, err := Config.SimpleResource(edgeClientsConfigResourceName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: no %s: %v", ErrEdgeClientRefused, edgeClientsConfigResourceName, err)
@@ -222,7 +252,7 @@ func LoadEdgeClientsConfig() (*EdgeClientsConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrEdgeClientRefused, edgeClientsConfigResourceName, err)
 	}
-	return ParseEdgeClientsConfig(data, nil)
+	return ParseEdgeClientsConfig(data, settings)
 }
 
 // Where an edge client connects.
@@ -235,8 +265,8 @@ func (self *EdgeClientsConfig) ClientCount(block string) int {
 	return self.blockClientCounts[block]
 }
 
-// Whether the file names the block, the host among the block's hosts, and an index below the block's K. A refusal
-// says which part, never more.
+// Whether the file names the block, the host among the block's hosts, a slot below the key's SlotCount and an
+// index below the block's K. A refusal says which part, never more.
 func (self *EdgeClientsConfig) Admits(args *EdgeClientMintArgs) error {
 	if args == nil {
 		return fmt.Errorf("%w: no client", ErrEdgeClientRefused)
@@ -247,6 +277,9 @@ func (self *EdgeClientsConfig) Admits(args *EdgeClientMintArgs) error {
 	}
 	if !slices.Contains(self.blockHosts[args.Block], args.Host) {
 		return fmt.Errorf("%w: host", ErrEdgeClientRefused)
+	}
+	if !self.keySettings.slotValid(args.Slot) {
+		return fmt.Errorf("%w: slot", ErrEdgeClientRefused)
 	}
 	if args.Index < 0 || clientCount <= args.Index {
 		return fmt.Errorf("%w: index", ErrEdgeClientRefused)
@@ -267,6 +300,12 @@ type PlatformClientSourceSettings struct {
 	RequestTimeout time.Duration
 	// The most of an answer's body read: 16 KiB, a jwt and two short strings many times over.
 	AnswerMaxByteCount int64
+	// The key's limits, the same as api's: its ClientMaxCount bounds ClientCount and its SlotCount the slot.
+	Key *EdgeClientKeySettings
+	// Whether a process with no WARP_SLOT refuses to start (LoadEdgeClientSlot). false while warp's change that
+	// sets WARP_SLOT rolls out (QD-873): a missing value then reads slot 0, and the log says so. A later change
+	// makes it true once every host's warp sets it.
+	SlotRequired bool
 }
 
 func DefaultPlatformClientSourceSettings() *PlatformClientSourceSettings {
@@ -276,7 +315,43 @@ func DefaultPlatformClientSourceSettings() *PlatformClientSourceSettings {
 		RetryInterval:       5 * time.Second,
 		RequestTimeout:      10 * time.Second,
 		AnswerMaxByteCount:  16 * 1024,
+		Key:                 DefaultEdgeClientKeySettings(),
+		SlotRequired:        false,
 	}
+}
+
+// The process's deploy slot from WARP_SLOT, the decimal warp sets beside WARP_BLOCK and alternates per deploy
+// (QD-873), which the block passes to NewPlatformClientSource. A value that is not a decimal in [0, SlotCount) is
+// refused, so a process never holds a slot api would refuse or one that names another. With none set, settings'
+// SlotRequired refuses; otherwise the slot reads 0 and the log says so, which holds only while warp's change
+// rolls out. settings nil takes the defaults. The error names the variable, and a value is not secret.
+func LoadEdgeClientSlot(settings *PlatformClientSourceSettings) (int, error) {
+	value, set := os.LookupEnv(EdgeClientSlotEnvName)
+	return parseEdgeClientSlot(value, set, settings)
+}
+
+// LoadEdgeClientSlot on a value read: set false, or an empty value, is no value at all.
+func parseEdgeClientSlot(value string, set bool, settings *PlatformClientSourceSettings) (int, error) {
+	if settings == nil {
+		settings = DefaultPlatformClientSourceSettings()
+	}
+	keySettings := settings.Key
+	if keySettings == nil {
+		keySettings = DefaultEdgeClientKeySettings()
+	}
+	if !set || value == "" {
+		if settings.SlotRequired {
+			return 0, fmt.Errorf("%w: %s is not set", ErrPlatformClientSource, EdgeClientSlotEnvName)
+		}
+		glog.Warningf("[edge]%s is not set: the process holds slot 0 until warp sets it\n", EdgeClientSlotEnvName)
+		return 0, nil
+	}
+	slot, err := strconv.Atoi(value)
+	// the round trip refuses a sign, a leading zero or a space, so one slot has one spelling
+	if err != nil || strconv.Itoa(slot) != value || !keySettings.slotValid(slot) {
+		return 0, fmt.Errorf("%w: %s=%q is not a slot below %d", ErrPlatformClientSource, EdgeClientSlotEnvName, value, keySettings.SlotCount)
+	}
+	return slot, nil
 }
 
 // What NewPlatformClientSource takes.
@@ -286,6 +361,9 @@ type PlatformClientSourceArgs struct {
 	// The edge block and the host it runs on, as edge.yml lists them.
 	Block string
 	Host  string
+	// The process's deploy slot (LoadEdgeClientSlot), below the key's SlotCount: the other process of a deploy
+	// on this host holds the other slot, so the two hold disjoint clients.
+	Slot int
 	// The block's `edge` bearer, read once at start (LoadInternalGateCredential(InternalGateCallerEdge)).
 	Bearer string
 	// Carries every ask. nil: a client of its own with no proxy from the environment.
@@ -334,8 +412,8 @@ type PlatformClientSource struct {
 
 var _ sidecar.ServiceClientSource = (*PlatformClientSource)(nil)
 
-// The source for one edge block, which starts asking for each of its K indexes at once and keeps each fresh until
-// ctx ends or Close. It returns before any answer: ServiceClient waits for an index's first.
+// The source for one edge block's process, which starts asking for each of its K indexes at once and keeps each
+// fresh until ctx ends or Close. It returns before any answer: ServiceClient waits for an index's first.
 func NewPlatformClientSource(ctx context.Context, args *PlatformClientSourceArgs) (*PlatformClientSource, error) {
 	if args == nil {
 		return nil, fmt.Errorf("%w: no args", ErrPlatformClientSource)
@@ -344,7 +422,10 @@ func NewPlatformClientSource(ctx context.Context, args *PlatformClientSourceArgs
 	if settings == nil {
 		settings = DefaultPlatformClientSourceSettings()
 	}
-	keySettings := DefaultEdgeClientKeySettings()
+	keySettings := settings.Key
+	if keySettings == nil {
+		keySettings = DefaultEdgeClientKeySettings()
+	}
 	switch {
 	case settings.ClientCount < 1 || keySettings.ClientMaxCount < settings.ClientCount:
 		return nil, fmt.Errorf("%w: client count", ErrPlatformClientSource)
@@ -356,6 +437,8 @@ func NewPlatformClientSource(ctx context.Context, args *PlatformClientSourceArgs
 		return nil, fmt.Errorf("%w: block", ErrPlatformClientSource)
 	case !edgeClientNameValid(args.Host, keySettings.HostMaxByteCount):
 		return nil, fmt.Errorf("%w: host", ErrPlatformClientSource)
+	case !keySettings.slotValid(args.Slot):
+		return nil, fmt.Errorf("%w: slot", ErrPlatformClientSource)
 	case args.Bearer == "":
 		return nil, fmt.Errorf("%w: no bearer", ErrPlatformClientSource)
 	}
@@ -411,7 +494,12 @@ func (self *PlatformClientSource) askContext(ctx context.Context) (context.Conte
 func (self *PlatformClientSource) ask(ctx context.Context, index int) (*platformClientCredential, error) {
 	askCtx, done := self.askContext(ctx)
 	defer done()
-	body, err := json.Marshal(&EdgeClientMintArgs{Block: self.args.Block, Host: self.args.Host, Index: index})
+	body, err := json.Marshal(&EdgeClientMintArgs{
+		Block: self.args.Block,
+		Host:  self.args.Host,
+		Slot:  self.args.Slot,
+		Index: index,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +613,7 @@ func (self *PlatformClientSource) keepFresh(index int) {
 				return
 			}
 			// the error names a part or a status, never a secret
-			glog.Infof("[edge]client %d's credential was not answered: %v\n", index, err)
+			glog.Infof("[edge]slot %d's client %d's credential was not answered: %v\n", self.args.Slot, index, err)
 			select {
 			case <-self.ctx.Done():
 				return
@@ -562,7 +650,8 @@ func (self *PlatformClientSource) ServiceClient(ctx context.Context, clientIndex
 	return &auth, nil
 }
 
-// Whether every index holds a credential whose jwt has not ended.
+// Whether every index holds a credential whose jwt has not ended: the process's own K clients, not another
+// slot's.
 func (self *PlatformClientSource) Ready() bool {
 	if self.ctx.Err() != nil {
 		return false
