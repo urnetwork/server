@@ -236,16 +236,6 @@ func quotaRateRefusalHead(refusal *sidecar.QuotaRefusal) string {
 	return refusal.LimitKey + "\t" + strconv.FormatInt(refusal.Limit, 10) + "\t" + upgrade
 }
 
-// Whether a rule's refusal ships dark behind enforce_sidecar_limits (R-QUOTA-5, §20.5): a limit read
-// from pro.yml with no floor, which an absent pro.yml reads as zero, so that while the switch is off it
-// neither counts nor refuses and an absent pro.yml locks nobody out. The closure rates, allowance and
-// pacing are not dark: they read a fixed number or a floor, and they bound what passes at the storage
-// limit and while spent, and an empty balance refuses whatever the switch says (§20.5, §20.7's
-// closure row). The erasure push class refuses nothing, so it is not dark either.
-func quotaRateRuleDark(rule *sidecar.QuotaRateRule) bool {
-	return rule.LimitKey != "" && rule.FloorLimitKey == "" && rule.MinLimit <= 0
-}
-
 // The script's call for one CountRate, or nil when nothing is left to count: every key dark while
 // enforced is false. An unknown or misspelled key, a negative amount, a paced key counted other than
 // once, or two paced keys, is the caller's bug and an error, as FakeQuota answers it.
@@ -291,7 +281,9 @@ func newQuotaRateCall(
 
 	keys := []string{}
 	for key, rule := range keyRules {
-		if !enforced && quotaRateRuleDark(rule) {
+		// a rule's refusal ships dark behind enforce_sidecar_limits as the rule says, the reading
+		// sidecartest.FakeQuota takes too (owner decision 522)
+		if !enforced && rule.Dark() {
 			continue
 		}
 		keys = append(keys, key)

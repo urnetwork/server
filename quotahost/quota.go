@@ -166,8 +166,9 @@ func newHostQuota(ctx context.Context, source QuotaSource, redis model.QuotaRate
 	return quota, nil
 }
 
+// A caller's own copy, enforce_sidecar_limits's state with it, which a host's engines may follow.
 func cloneQuotaLimits(limits *sidecar.QuotaLimits) *sidecar.QuotaLimits {
-	return &sidecar.QuotaLimits{Tier: limits.Tier, Limits: maps.Clone(limits.Limits)}
+	return &sidecar.QuotaLimits{Tier: limits.Tier, Limits: maps.Clone(limits.Limits), Enforced: limits.Enforced}
 }
 
 func (self *HostQuota) Limits(ctx context.Context, networkId connect.Id) (*sidecar.QuotaLimits, error) {

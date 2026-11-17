@@ -21,6 +21,7 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -49,7 +50,7 @@ func (self *testGateSource) Facts(ctx context.Context, networkId sidecar.Id) (*s
 }
 
 func (self *testGateSource) CommunityLimits(ctx context.Context) (*sidecar.QuotaLimits, error) {
-	return &sidecar.QuotaLimits{Tier: "free", Limits: map[string]int64{"smtp_connections_per_day": 5}}, nil
+	return &sidecar.QuotaLimits{Tier: "free", Limits: map[string]int64{"smtp_connections_per_day": 5}, Enforced: true}, nil
 }
 
 func (self *testGateSource) loadCount(networkId sidecar.Id) int {
@@ -84,8 +85,22 @@ func TestHostGateLoadsOnAMissAndAnswersFromMemory(t *testing.T) {
 	if again, _ := gate.Facts(networkId); again.Label != "n1" {
 		t.Fatal("the gate handed out its own facts")
 	}
-	if limits, ok := gate.CommunityLimits(); !ok || limits.Tier != "free" {
+	if limits, ok := gate.CommunityLimits(); !ok || limits.Tier != "free" || !limits.Enforced {
 		t.Fatalf("community %+v, %v", limits, ok)
+	}
+}
+
+// Community's limits carry enforce_sidecar_limits's state as NetworkQuotaLimits sets it, beside the plan, which
+// they report whatever it says (owner decision 520).
+func TestModelGateSourceCommunityLimitsCarryTheSwitch(t *testing.T) {
+	source := &modelGateSource{}
+	for _, enforced := range []bool{false, true} {
+		restore := model.Testing_SetEnforceSidecarLimits(enforced)
+		limits, err := source.CommunityLimits(context.Background())
+		restore()
+		if err != nil || limits.Tier != string(model.NetworkTierFree) || limits.Enforced != enforced {
+			t.Errorf("switch %t: %+v, %v", enforced, limits, err)
+		}
 	}
 }
 

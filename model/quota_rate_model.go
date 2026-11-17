@@ -41,10 +41,11 @@ import (
 // so the rates fail open for one window and never refuse what Redis cannot count (§20.7).
 //
 // Limits come from the caller, cached 5 s (§20.7's producers). Drop, preview and receipt limits ship
-// dark behind enforce_sidecar_limits (quotaRateRuleDark); the closure bounds hold at the storage limit
-// and while spent whatever the switch, since evs asks only then and an empty balance refuses as escrow
-// does (§20.5). Bytes count only at the limit or while spent because evsservice.QuotaGate asks only
-// then; a drop spends no allowance because no drop asks. {smq_} and {acl_}q stay §14's and §7.9's.
+// dark behind enforce_sidecar_limits (sidecar.QuotaRateRule.Dark); the closure bounds hold at the
+// storage limit and while spent whatever the switch, since evs asks only then and an empty balance
+// refuses as escrow does (§20.5). Bytes count only at the limit or while spent because
+// evsservice.QuotaGate asks only then; a drop spends no allowance because no drop asks. {smq_} and
+// {acl_}q stay §14's and §7.9's.
 
 type QuotaRateSettings struct {
 	// How long every {sq_} key lives past its last write, a debit id's first answer included: §20.7's

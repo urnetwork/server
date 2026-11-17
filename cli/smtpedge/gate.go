@@ -89,9 +89,11 @@ func (self *modelGateSource) Facts(ctx context.Context, networkId sidecar.Id) (f
 	return facts, nil
 }
 
+// Community's plan, with enforce_sidecar_limits's state as NetworkQuotaLimits sets it.
 func (self *modelGateSource) CommunityLimits(ctx context.Context) (*sidecar.QuotaLimits, error) {
-	limits := model.Pro().TierFor(model.NetworkTierFree).Sidecar.Limits()
-	return &sidecar.QuotaLimits{Tier: string(model.NetworkTierFree), Limits: limits}, nil
+	pro := model.Pro()
+	limits := pro.TierFor(model.NetworkTierFree).Sidecar.Limits()
+	return &sidecar.QuotaLimits{Tier: string(model.NetworkTierFree), Limits: limits, Enforced: pro.EnforceSidecarLimits}, nil
 }
 
 var (
@@ -210,7 +212,7 @@ func (self *hostGate) CommunityLimits() (*sidecar.QuotaLimits, bool) {
 	if self.community == nil {
 		return nil, false
 	}
-	return &sidecar.QuotaLimits{Tier: self.community.Tier, Limits: maps.Clone(self.community.Limits)}, true
+	return &sidecar.QuotaLimits{Tier: self.community.Tier, Limits: maps.Clone(self.community.Limits), Enforced: self.community.Enforced}, true
 }
 
 // Refreshes Community's limits and every network asked within FactsKeepInterval, forgetting the rest, each
