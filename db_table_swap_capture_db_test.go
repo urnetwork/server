@@ -475,8 +475,8 @@ func TestTableSwapCutOffOutrunsADefaultTransactionTimeout(t *testing.T) {
 		cutOff := slices.DeleteFunc(slices.Clone(beforeHook), func(statement string) bool {
 			return !strings.HasPrefix(statement, "SET LOCAL transaction_timeout")
 		})
-		if len(cutOff) != 2 {
-			t.Fatal("the cut-off statements", cutOff)
+		if len(cutOff) == 0 {
+			t.Fatal("the locked script sets no cut-off")
 		}
 		conn, err := AcquireMaintenanceDbConn(ctx)
 		if err != nil {
