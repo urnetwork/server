@@ -958,7 +958,8 @@ func sidecarMg5TlsMigrations() []any {
 			)
 		`),
 		// what 17.2.8's budgets replay: one row each certificate, new order,
-		// failed authorization or failed route probe, kept 8 days
+		// failed authorization or failed route probe, kept 16 days
+		// (CertsCustomSettings.SpendRetention, QD-996)
 		newSqlMigration(`
 			CREATE TABLE network_tls_custom_spend (
 				spend_id uuid NOT NULL,
@@ -987,7 +988,7 @@ func sidecarMg5TlsMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_tls_custom_spend_account ON network_tls_custom_spend (account_uri, kind, at)
 		`),
-		// the 8-day retention
+		// the retention's purge
 		newSqlMigration(`
 			CREATE INDEX network_tls_custom_spend_at ON network_tls_custom_spend (at)
 		`),

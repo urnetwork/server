@@ -570,7 +570,8 @@ func (self *TlsCustomStore) grantCheckInTx(ctx context.Context, tx server.PgTx, 
 		newestRegister,
 	)
 	waits = append(waits, settings.FailureWait(failures, now))
-	// each bucket reads its key's retained spends, from which its replay finds where to start (QD-990, QD-994)
+	// each bucket reads its key's spends of the last SpendRetention, 16 d, all the purge keeps, from which its replay
+	// finds where to start (QD-994, QD-996)
 	orderBucket := settings.OrderBucket()
 	orders := tlsCustomSpendTimesInTx(
 		ctx,
@@ -1837,7 +1838,9 @@ func (self *TlsCustomStore) ExpireCustomRows(ctx context.Context, now time.Time)
 	return
 }
 
-// Spends older than before go (cert-1: 8 d).
+// Spends older than before go. The sweep passes its now less CertsCustomSettings.SpendRetention (cert-1: 16 d), where
+// every budget's replay starts reading, so the grant never misses a spend it reads, and a host's busy stretch of up to
+// 214 h keeps the quiet window before it, which paces its tenth device (QD-994, QD-996).
 func (self *TlsCustomStore) PurgeCustomSpends(ctx context.Context, before time.Time) (purgedCount int, returnErr error) {
 	if !dnsCustomHostLinked() {
 		return 0, ErrDnsUnlinked
