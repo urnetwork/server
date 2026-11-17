@@ -23,21 +23,23 @@ package model
 //	       the live Owners of each team the user is a live Owner of, locked FOR
 //	       UPDATE in (network_id, member_id) order and held to the commit
 //
-// Every path that ends or moves a team's Owner locks the team's rows it reads in
-// member_id order: this deletion, across teams in network_id order; the member
-// removal, whose count locks the team's live Owners before its refusal is
-// decided; and the role mirror, which updates an entry's members in member_id
-// order. So of two deletions by a team's two Owners the second waits on the
-// first's locks and, once the first commits, finds itself the last Owner and
-// refuses; a member removal or a role change racing a deletion waits for it, or
-// it for them. The deletion runs read committed, so after a wait it reads a row
-// as committed: one deleted meanwhile is gone, and one whose role changed is
-// read with its new role. A team in which the user became a live Owner after
-// the first read below is judged by the user's row alone, which can only refuse
-// a deletion that its retry then allows. A path that takes these rows in
-// another order, such as a team's own deletion or a log entry removing several
-// members, can deadlock with a deletion; PostgreSQL breaks it and server.Tx
-// reruns the loser.
+// The two paths that refuse to leave a team without an Owner lock the team's
+// rows they read in member_id order: this deletion, across teams in network_id
+// order, and the member removal, whose count locks the team's live Owners before
+// its refusal is decided (CountNetworkOwnersInTx). The role mirror updates an
+// entry's members in member_id order too, and SCIM's deactivation locks the one
+// row it ends. So of two deletions by a team's two Owners the second waits on
+// the first's locks and, once the first commits, finds itself the last Owner and
+// refuses; a member removal, a deactivation or a role change racing a deletion
+// waits for it, or it for them. The deletion runs read committed, so after a
+// wait it reads a row as committed: one deleted meanwhile is gone, and one whose
+// role changed is read with its new role. A team in which the user became a live
+// Owner after the first read below is judged by the user's row alone, which can
+// only refuse a deletion that its retry then allows. A path that takes these
+// rows in another order, such as a team's own deletion or a log entry removing
+// several members, can deadlock with a deletion; PostgreSQL breaks it and
+// server.Tx reruns the loser. The team's own authority, SCIM or the log, may
+// still end its last Owner; the AdminSet above is the recovery.
 //
 // Nothing here reads network_member unless the binary links MG6
 // (server.SidecarMg6Linked): without it no team exists, and the deletion runs as
