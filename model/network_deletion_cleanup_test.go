@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -530,5 +531,68 @@ func TestDeletedNetworkCleanupDeactivatesInBoundedBatches(t *testing.T) {
 		result := RemoveDeletedNetworkData(ctx, &DeletedNetwork{NetworkId: networkId}, server.NowUtc(), settings)
 		connect.AssertEqual(t, result.RowCounts[DeletedNetworkCleanupDeactivatedClients], int64(4))
 		connect.AssertEqual(t, activeCount(), int64(0))
+	})
+}
+
+// The dry run's counts under CountStatementTimeout: a count that runs past the
+// timeout is reported for its table and the counting goes on with the next
+// table. Another session holds provide_key's table lock, so that one count
+// waits past the timeout; every other count matches the unbounded baseline.
+// Unbounded, the same count waits for the lock until LockTimeout and the whole
+// count fails.
+func TestCountDeletedNetworkDataReportsTimedOutCounts(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		fixture := Testing_CreateDeletedNetworkFixture(ctx, "synthetic-deleted-"+server.NewId().String()[24:])
+		removeDeletedNetworkFixture(t, fixture)
+		networkIds := []server.Id{fixture.NetworkId}
+		now := server.NowUtc()
+
+		baseline := CountDeletedNetworkData(ctx, networkIds, nil, now, DefaultDeletedNetworkCleanupSettings())
+		if baseline.RowCounts["provide_key"] == 0 || len(baseline.TimedOutCounts) != 0 {
+			t.Fatalf("baseline = %+v, want provide_key rows and no timeouts", baseline)
+		}
+
+		locked := make(chan struct{})
+		release := make(chan struct{})
+		unlocked := make(chan struct{})
+		go func() {
+			defer close(unlocked)
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `LOCK TABLE provide_key IN ACCESS EXCLUSIVE MODE`))
+				close(locked)
+				<-release
+			})
+		}()
+		<-locked
+		// the lock goes as soon as the count returns, and also if it panics,
+		// so no other test waits behind it
+		var releaseOnce sync.Once
+		unlock := func() {
+			releaseOnce.Do(func() { close(release) })
+			<-unlocked
+		}
+		defer unlock()
+		settings := DefaultDeletedNetworkCleanupSettings()
+		settings.CountStatementTimeout = 200 * time.Millisecond
+		start := time.Now()
+		bounded := CountDeletedNetworkData(ctx, networkIds, nil, now, settings)
+		elapsed := time.Since(start)
+		unlock()
+
+		connect.AssertEqual(t, bounded.TimedOutCounts, map[string]int{"provide_key": 1})
+		wantRows := maps.Clone(baseline.RowCounts)
+		delete(wantRows, "provide_key")
+		connect.AssertEqual(t, bounded.RowCounts, wantRows)
+		connect.AssertEqual(t, bounded.ActiveClientCount, baseline.ActiveClientCount)
+		connect.AssertEqual(t, bounded.DueClientCount, baseline.DueClientCount)
+		connect.AssertEqual(t, bounded.WaitingClientCount, baseline.WaitingClientCount)
+		connect.AssertEqual(t, bounded.DeviceCount, baseline.DeviceCount)
+		// the locked count gave up at the statement timeout, well before the lock timeout
+		if settings.LockTimeout <= elapsed {
+			t.Fatalf("the bounded count took %s, want under the lock timeout %s", elapsed, settings.LockTimeout)
+		}
 	})
 }

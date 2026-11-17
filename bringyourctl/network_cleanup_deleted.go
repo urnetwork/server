@@ -22,6 +22,16 @@
 // (24 hours); the commit queues the network's cleanup task for the time they
 // are due, and the taskworker finishes them. Each chunk ends with the id to
 // pass to --start_after to resume after it; --max_networks stops early.
+//
+// --count_statement_timeout bounds each count of the dry run: every count runs
+// under its own savepoint and statement timeout, and a count past it is
+// reported as timed out for its table and network set while the counting goes
+// on. --run_tag names the run: every direct session of it, dry or commit (the
+// maintenance pool, where all the counting and deleting runs, and every pool
+// of the read-only dry run), carries the application_name "cleanup-deleted
+// <tag>" (by default the tag is pid<pid>), so an operator who stops the run
+// can cancel exactly its backends. Sessions through PgBouncer keep the default
+// name: their server connections serve other clients too.
 package main
 
 import (
@@ -60,6 +70,30 @@ type networkCleanupDeletedOptions struct {
 	cleanup      *model.DeletedNetworkCleanupSettings
 	commit       bool
 	expectDigest string
+	// names every session of the run (networkCleanupDeletedApplicationName)
+	runTag string
+}
+
+// The application_name of every direct session of a run, dry or commit, so
+// that an operator who stops the run can find and cancel exactly its backends:
+// `SELECT pg_cancel_backend(pid) FROM pg_stat_activity WHERE
+// application_name = '<this name>'`.
+func networkCleanupDeletedApplicationName(runTag string) string {
+	return "cleanup-deleted " + runTag
+}
+
+// A run tag fits in application_name (63 bytes) with its prefix and holds
+// nothing an operator must quote.
+func validNetworkCleanupDeletedRunTag(runTag string) bool {
+	if runTag == "" || 40 < len(runTag) {
+		return false
+	}
+	for _, c := range runTag {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func networkCleanupDeletedCommand(opts docopt.Opts) int {
@@ -68,6 +102,9 @@ func networkCleanupDeletedCommand(opts docopt.Opts) int {
 		fmt.Fprintf(os.Stderr, "network cleanup-deleted: %s\n", err)
 		return 1
 	}
+	applicationName := networkCleanupDeletedApplicationName(options.runTag)
+	server.SetPgDirectApplicationName(applicationName)
+	fmt.Fprintf(os.Stdout, "application_name: %s\n", applicationName)
 	// the dry run writes nothing: its process is read only, so PostgreSQL
 	// refuses any write on its path
 	if !options.commit {
@@ -137,6 +174,23 @@ func parseNetworkCleanupDeletedOptions(opts docopt.Opts) (*networkCleanupDeleted
 	options.expectDigest, _ = opts.String("--expect")
 	if options.commit && len(options.networkIds) == 0 && options.idsFile == "" {
 		return nil, errors.New("--commit needs the list the dry run wrote (--ids_file) or --network_ids")
+	}
+	if timeoutStr, _ := opts.String("--count_statement_timeout"); timeoutStr != "" {
+		if options.commit {
+			return nil, errors.New("--count_statement_timeout bounds the dry run's counts; the commit does not count")
+		}
+		timeout, err := time.ParseDuration(timeoutStr)
+		if err != nil || timeout <= 0 {
+			return nil, fmt.Errorf("--count_statement_timeout: %q is not a positive duration", timeoutStr)
+		}
+		options.cleanup.CountStatementTimeout = timeout
+	}
+	options.runTag = fmt.Sprintf("pid%d", os.Getpid())
+	if runTag, _ := opts.String("--run_tag"); runTag != "" {
+		if !validNetworkCleanupDeletedRunTag(runTag) {
+			return nil, fmt.Errorf("--run_tag: %q is not 1-40 letters, digits, '-', '_' or '.'", runTag)
+		}
+		options.runTag = runTag
 	}
 	return options, nil
 }
@@ -238,11 +292,14 @@ func runNetworkCleanupDeleted(
 			}
 		}
 		now := server.NowUtc()
-		total := &model.DeletedNetworkData{RowCounts: map[string]int64{}}
+		total := &model.DeletedNetworkData{RowCounts: map[string]int64{}, TimedOutCounts: map[string]int{}}
 		for chunk := range slices.Chunk(networkIds, options.countChunk) {
 			data := model.CountDeletedNetworkData(ctx, chunk, nil, now, options.cleanup)
 			for table, count := range data.RowCounts {
 				total.RowCounts[table] += count
+			}
+			for table, count := range data.TimedOutCounts {
+				total.TimedOutCounts[table] += count
 			}
 			total.ActiveClientCount += data.ActiveClientCount
 			total.DueClientCount += data.DueClientCount
@@ -254,6 +311,9 @@ func runNetworkCleanupDeleted(
 		fmt.Fprintf(stdout, "devices: %d\n", total.DeviceCount)
 		for _, table := range slices.Sorted(maps.Keys(total.RowCounts)) {
 			fmt.Fprintf(stdout, "rows %s: %d\n", table, total.RowCounts[table])
+		}
+		for _, table := range slices.Sorted(maps.Keys(total.TimedOutCounts)) {
+			fmt.Fprintf(stdout, "timed out %s: %d of %d network sets not counted (--count_statement_timeout=%s)\n", table, total.TimedOutCounts[table], (len(networkIds)+options.countChunk-1)/options.countChunk, options.cleanup.CountStatementTimeout)
 		}
 		fmt.Fprintf(stdout, "digest: %s\n", digest)
 		fmt.Fprintf(stdout, "nothing was changed (dry run); commit with --ids_file and --commit --expect=%s\n", digest)

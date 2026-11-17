@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -195,4 +197,88 @@ func TestNetworkCleanupDeletedUsageParses(t *testing.T) {
 		networkCleanupDeletedDigest(sortedUniqueNetworkIds([]server.Id{b, a, b})) != networkCleanupDeletedDigest(sortedUniqueNetworkIds([]server.Id{a, b})) {
 		t.Fatal("the digest does not name the sorted list")
 	}
+}
+
+// --count_statement_timeout bounds the dry run's counts only, and --run_tag
+// names the run's sessions with a tag an operator can match without quoting.
+func TestNetworkCleanupDeletedRunTagAndCountTimeoutParse(t *testing.T) {
+	parse := func(args ...string) (*networkCleanupDeletedOptions, error) {
+		opts, err := (&docopt.Parser{HelpHandler: docopt.NoHelpHandler}).ParseArgs(bringyourctlUsage, append([]string{"network", "cleanup-deleted"}, args...), "test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parseNetworkCleanupDeletedOptions(opts)
+	}
+	options, err := parse()
+	if err != nil || options.cleanup.CountStatementTimeout != 0 || options.runTag != fmt.Sprintf("pid%d", os.Getpid()) {
+		t.Fatalf("defaults = %+v, %v", options, err)
+	}
+	options, err = parse("--count_chunk=20", "--count_statement_timeout=10s", "--run_tag=d52-dry-1763390000")
+	if err != nil || options.countChunk != 20 || options.cleanup.CountStatementTimeout != 10*time.Second || options.runTag != "d52-dry-1763390000" {
+		t.Fatalf("options = %+v, %v", options, err)
+	}
+	connect.AssertEqual(t, networkCleanupDeletedApplicationName(options.runTag), "cleanup-deleted d52-dry-1763390000")
+	// the commit takes a run tag, and no count timeout: it does not count
+	options, err = parse("--ids_file=ids.txt", "--commit", "--expect=0123456789abcdef", "--run_tag=d52-canary-1")
+	if err != nil || options.runTag != "d52-canary-1" {
+		t.Fatalf("commit options = %+v, %v", options, err)
+	}
+	if _, err := parse("--ids_file=ids.txt", "--commit", "--expect=0123456789abcdef", "--count_statement_timeout=10s"); err == nil {
+		t.Fatal("a commit with a count timeout parsed")
+	}
+	for _, timeout := range []string{"0s", "-1s", "ten"} {
+		if _, err := parse("--count_statement_timeout=" + timeout); err == nil {
+			t.Fatalf("--count_statement_timeout=%s parsed", timeout)
+		}
+	}
+	for _, runTag := range []string{"a b", "x';--", "tag%", strings.Repeat("t", 41)} {
+		if _, err := parse("--run_tag=" + runTag); err == nil {
+			t.Fatalf("--run_tag=%q parsed", runTag)
+		}
+	}
+	// the longest tag fits in application_name's 63 bytes
+	if name := networkCleanupDeletedApplicationName(strings.Repeat("t", 40)); 63 < len(name) {
+		t.Fatalf("application_name %q is %d bytes", name, len(name))
+	}
+}
+
+// The run's direct sessions, on the maintenance pool where the cleanup's
+// counting and deleting run, carry the run's application_name, so an operator
+// who stops the run finds exactly its backends. A session on the pooled
+// default resource does not: through PgBouncer its server connection serves
+// other clients too, and a cancel by the name could reach them.
+func TestNetworkCleanupDeletedDirectSessionsCarryTheRunName(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		// as in production, the maintenance resource reaches the database
+		// directly; the local test vault has none, so point one at the same
+		// database
+		pg := server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName)
+		quoted := func(key string) string {
+			b, err := json.Marshal(pg.RequireString(key))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(b)
+		}
+		maintenance := fmt.Sprintf("authority: %s\nuser: %s\npassword: %s\ndb: %s\n", quoted("authority"), quoted("user"), quoted("password"), quoted("db"))
+		t.Cleanup(server.PgReset)
+		t.Cleanup(server.Vault.PushSimpleResource(server.MaintenancePgVaultResourceName, []byte(maintenance)))
+		name := networkCleanupDeletedApplicationName("test-" + server.NewId().String()[24:])
+		server.SetPgDirectApplicationName(name)
+		t.Cleanup(func() { server.SetPgDirectApplicationName("") })
+		var mainName, maintenanceName string
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&mainName))
+		})
+		server.MaintenanceTx(ctx, func(tx server.PgTx) {
+			server.Raise(tx.QueryRow(ctx, `SELECT current_setting('application_name')`).Scan(&maintenanceName))
+		})
+		connect.AssertEqual(t, maintenanceName, name)
+		if mainName == name {
+			t.Fatalf("a session on the pooled default resource carries the run's name %q", name)
+		}
+	})
 }

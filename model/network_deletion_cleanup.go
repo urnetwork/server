@@ -50,11 +50,15 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
@@ -89,6 +93,10 @@ type DeletedNetworkCleanupSettings struct {
 	RunBudget time.Duration
 	// bounds each lock wait of the cleanup's transactions
 	LockTimeout time.Duration
+	// bounds each count statement of CountDeletedNetworkData (the operator's
+	// dry run): a count that runs longer is reported in TimedOutCounts and the
+	// counting goes on with the next table. Zero leaves the counts unbounded.
+	CountStatementTimeout time.Duration
 	// how soon a run that stopped on its budget continues
 	ContinueInterval time.Duration
 	// how soon a run that failed is retried
@@ -1451,13 +1459,26 @@ type DeletedNetworkData struct {
 	// inactive clients that wait for ClientReapAfterDeactivate
 	WaitingClientCount int64
 	DeviceCount        int64
+	// the counts that ran past CountStatementTimeout, by table (network_client
+	// for the three client counts, device for DeviceCount), with the number of
+	// network sets they timed out for. The other fields leave those rows out.
+	TimedOutCounts map[string]int
+}
+
+// A statement that ran past its statement_timeout. A cancel by an operator
+// (pg_cancel_backend) is not one: it ends the count with an error.
+func isPgStatementTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgerrcode.QueryCanceled && strings.Contains(pgErr.Message, "statement timeout")
 }
 
 // Counts what the deleted networks left, in one read-only transaction per
 // network set. Networks that exist count nothing. The client-keyed and
 // device-keyed tables count the rows of the networks' clients and devices,
 // and the user tables those of the users given and of the users the
-// networks' rows name (deletedNetworkUserIds).
+// networks' rows name (deletedNetworkUserIds). With CountStatementTimeout set,
+// each count runs under its own savepoint and statement timeout, and a count
+// past it is reported in TimedOutCounts instead of holding the transaction.
 func CountDeletedNetworkData(
 	ctx context.Context,
 	networkIds []server.Id,
@@ -1465,11 +1486,11 @@ func CountDeletedNetworkData(
 	now time.Time,
 	settings *DeletedNetworkCleanupSettings,
 ) *DeletedNetworkData {
-	data := &DeletedNetworkData{RowCounts: map[string]int64{}}
+	data := &DeletedNetworkData{RowCounts: map[string]int64{}, TimedOutCounts: map[string]int{}}
 	dueTime := now.UTC().Add(-settings.ClientReapAfterDeactivate)
 	userIds = append(slices.Clone(userIds), deletedNetworkUserIds(ctx, networkIds)...)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-		data = &DeletedNetworkData{RowCounts: map[string]int64{}}
+		data = &DeletedNetworkData{RowCounts: map[string]int64{}, TimedOutCounts: map[string]int{}}
 		goneNetworkIds := []server.Id{}
 		for _, networkId := range networkIds {
 			if !deletedNetworkExistsInTx(ctx, tx, networkId) {
@@ -1478,10 +1499,36 @@ func CountDeletedNetworkData(
 		}
 		goneUserIds := deletedUserIdsInTx(ctx, tx, userIds)
 		networkIdStrings := idStrings(goneNetworkIds)
+		bounded := 0 < settings.CountStatementTimeout
+		if bounded {
+			// the counts below only; the existence checks above stay unbounded
+			_, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", max(settings.CountStatementTimeout.Milliseconds(), 1)))
+			server.Raise(err)
+		}
+		// Runs one count. When the counts are bounded it runs under its own
+		// savepoint: a count past the timeout rolls back to the savepoint, is
+		// recorded in TimedOutCounts and the next count runs.
+		scan := func(table string, sql string, args []any, dest ...any) bool {
+			if !bounded {
+				server.Raise(tx.QueryRow(ctx, sql, args...).Scan(dest...))
+				return true
+			}
+			savepoint, err := tx.Begin(ctx)
+			server.Raise(err)
+			if err := savepoint.QueryRow(ctx, sql, args...).Scan(dest...); err != nil {
+				if !isPgStatementTimeout(err) {
+					server.Raise(err)
+				}
+				server.Raise(savepoint.Rollback(ctx))
+				data.TimedOutCounts[table] += 1
+				return false
+			}
+			server.Raise(savepoint.Commit(ctx))
+			return true
+		}
 		count := func(table string, sql string, args ...any) {
 			var n int64
-			server.Raise(tx.QueryRow(ctx, sql, args...).Scan(&n))
-			if 0 < n {
+			if scan(table, sql, args, &n) && 0 < n {
 				data.RowCounts[table] += n
 			}
 		}
@@ -1494,8 +1541,8 @@ func CountDeletedNetworkData(
 		count("auth_code", `SELECT count(*) FROM auth_code WHERE network_id = ANY($1) OR user_id = ANY($2)`, networkIdStrings, idStrings(goneUserIds))
 		count("network_points_leaderboard", `SELECT count(*) FROM network_points_leaderboard WHERE network_id = ANY($1) AND snapshot_id IN (SELECT snapshot_id FROM network_points_leaderboard_snapshot)`, networkIdStrings)
 
-		server.Raise(tx.QueryRow(
-			ctx,
+		scan(
+			"network_client",
 			`
 				SELECT
 					count(*) FILTER (WHERE active),
@@ -1504,14 +1551,15 @@ func CountDeletedNetworkData(
 				FROM network_client
 				WHERE network_id = ANY($1)
 			`,
-			networkIdStrings,
-			dueTime,
-		).Scan(&data.ActiveClientCount, &data.DueClientCount, &data.WaitingClientCount))
-		server.Raise(tx.QueryRow(
-			ctx,
+			[]any{networkIdStrings, dueTime},
+			&data.ActiveClientCount, &data.DueClientCount, &data.WaitingClientCount,
+		)
+		scan(
+			"device",
 			`SELECT count(*) FROM device WHERE network_id = ANY($1)`,
-			networkIdStrings,
-		).Scan(&data.DeviceCount))
+			[]any{networkIdStrings},
+			&data.DeviceCount,
+		)
 
 		clientIdsSql := `SELECT client_id FROM network_client WHERE network_id = ANY($1)`
 		for _, table := range deletedClientHistoryTables {
