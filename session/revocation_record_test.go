@@ -80,7 +80,7 @@ func testingRevocationField(ctx context.Context, t testing.TB, key string, field
 // Simulates Redis losing every record of a network.
 func testingDropRevocationRecords(ctx context.Context, t testing.TB, networkId server.Id) {
 	err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-		for shard := range revocationRecordShardCount {
+		for shard := range DefaultRevocationRecordSettings().ShardCount {
 			if err := r.Del(ctx, revocationRecordShardKey(networkId, shard)).Err(); err != nil {
 				return err
 			}
@@ -202,7 +202,7 @@ func TestRevocationRecordRefusesRevokedSessionInEveryShard(t *testing.T) {
 		if err := RevokeSessionRecords(ctx, network.networkId, []server.Id{*account.SessionId}); err != nil {
 			t.Fatal(err)
 		}
-		for shard := range revocationRecordShardCount {
+		for shard := range DefaultRevocationRecordSettings().ShardCount {
 			value, ok := testingRevocationField(ctx, t, revocationRecordShardKey(network.networkId, shard), revocationSessionField(*account.SessionId))
 			if !ok || value != revocationTombstone {
 				t.Fatalf("shard %d does not refuse the revoked session: %q %v", shard, value, ok)
@@ -304,7 +304,7 @@ func TestRevocationRecordLossCannotReviveRevokedCredentials(t *testing.T) {
 		if err := ValidateByJwtState(ctx, child, true); !errors.Is(err, ErrByJwtInactive) {
 			t.Fatalf("a deactivated client was accepted after its record was lost: %v", err)
 		}
-		if _, ok := testingRevocationField(ctx, t, revocationRecordKey(network.networkId, *top.ClientId), revocationClientField(*child.ClientId)); ok {
+		if _, ok := testingRevocationField(ctx, t, revocationRecordKey(DefaultRevocationRecordSettings(), network.networkId, *top.ClientId), revocationClientField(*child.ClientId)); ok {
 			t.Error("the refused client was projected")
 		}
 
@@ -336,7 +336,7 @@ func TestRevocationRecordLossCannotReviveRevokedCredentials(t *testing.T) {
 			t.Fatalf("a session a prepared operation may revoke was answered: %v", err)
 		}
 		for _, sessionId := range []server.Id{*revoked.SessionId, *pending.SessionId} {
-			if _, ok := testingRevocationField(ctx, t, revocationRecordKey(network.networkId, sessionId), revocationSessionField(sessionId)); ok {
+			if _, ok := testingRevocationField(ctx, t, revocationRecordKey(DefaultRevocationRecordSettings(), network.networkId, sessionId), revocationSessionField(sessionId)); ok {
 				t.Error("a refused session was projected")
 			}
 		}
@@ -348,6 +348,7 @@ func TestRevocationRecordLossCannotReviveRevokedCredentials(t *testing.T) {
 func TestRevocationRecordProjectionKeepsTombstonesAndRefusesStaleReads(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		settings := DefaultRevocationRecordSettings()
 		networkId, userId, deviceId := server.NewId(), server.NewId(), server.NewId()
 		facts := &revocationRecordFacts{credentialChangeTime: time.UnixMicro(1000).UTC(), clientActive: true, deviceId: &deviceId, rootMatches: true}
 		credential := func() *ByJwt {
@@ -355,28 +356,28 @@ func TestRevocationRecordProjectionKeepsTombstonesAndRefusesStaleReads(t *testin
 		}
 
 		tombstoned := credential()
-		key := revocationRecordKey(networkId, *tombstoned.ClientId)
-		if err := writeRevocationTombstones(ctx, map[string][]string{key: {revocationClientField(*tombstoned.ClientId)}}); err != nil {
+		key := revocationRecordKey(settings, networkId, *tombstoned.ClientId)
+		if err := writeRevocationTombstones(ctx, settings, map[string][]string{key: {revocationClientField(*tombstoned.ClientId)}}); err != nil {
 			t.Fatal(err)
 		}
-		projectRevocationRecord(ctx, tombstoned, *tombstoned.ClientId, server.NowUtc(), facts)
+		projectRevocationRecord(ctx, settings, tombstoned, *tombstoned.ClientId, server.NowUtc(), facts)
 		if value, _ := testingRevocationField(ctx, t, key, revocationClientField(*tombstoned.ClientId)); value != revocationTombstone {
 			t.Errorf("a projection replaced a tombstone with %q", value)
 		}
 
 		stale := credential()
-		staleKey := revocationRecordKey(networkId, *stale.ClientId)
-		projectRevocationRecord(ctx, stale, *stale.ClientId, server.NowUtc().Add(-2*revocationRecordFreshness), facts)
+		staleKey := revocationRecordKey(settings, networkId, *stale.ClientId)
+		projectRevocationRecord(ctx, settings, stale, *stale.ClientId, server.NowUtc().Add(-2*settings.Freshness), facts)
 		if _, ok := testingRevocationField(ctx, t, staleKey, revocationClientField(*stale.ClientId)); ok {
 			t.Error("a stale read was projected")
 		}
 
-		if err := writeRevocationNetworkFields(ctx, []server.Id{networkId}, "cred", "5000000"); err != nil {
+		if err := writeRevocationNetworkFields(ctx, settings, []revocationNetworkWrite{{networkId: networkId, field: revocationFieldCredential}}, revocationNetworkWriteCredential, "5000000"); err != nil {
 			t.Fatal(err)
 		}
 		lower := credential()
-		projectRevocationRecord(ctx, lower, *lower.ClientId, server.NowUtc(), facts)
-		if value, _ := testingRevocationField(ctx, t, revocationRecordKey(networkId, *lower.ClientId), revocationFieldCredential); value != "5000000" {
+		projectRevocationRecord(ctx, settings, lower, *lower.ClientId, server.NowUtc(), facts)
+		if value, _ := testingRevocationField(ctx, t, revocationRecordKey(settings, networkId, *lower.ClientId), revocationFieldCredential); value != "5000000" {
 			t.Errorf("a projection lowered the credential cutoff to %q", value)
 		}
 
@@ -395,10 +396,10 @@ func TestRevocationRecordProjectionKeepsTombstonesAndRefusesStaleReads(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(fieldTtls) != 1 || fieldTtls[0] <= 0 || revocationRecordTombstoneTtl.Milliseconds() < fieldTtls[0] {
-			t.Errorf("tombstone ttl %v, want at most %s", fieldTtls, revocationRecordTombstoneTtl)
+		if len(fieldTtls) != 1 || fieldTtls[0] <= 0 || settings.TombstoneTtl.Milliseconds() < fieldTtls[0] {
+			t.Errorf("tombstone ttl %v, want at most %s", fieldTtls, settings.TombstoneTtl)
 		}
-		if keyTtl < revocationRecordTombstoneTtl || revocationRecordKeyTtl < keyTtl {
+		if keyTtl < settings.TombstoneTtl || settings.KeyTtl < keyTtl {
 			t.Errorf("record key ttl %s", keyTtl)
 		}
 	})
@@ -480,7 +481,7 @@ func TestSessionOperationEnforcedOnlyAfterEveryRecordRefusesItsTargets(t *testin
 		}
 		tombstoned := func() int {
 			count := 0
-			for shard := range revocationRecordShardCount {
+			for shard := range DefaultRevocationRecordSettings().ShardCount {
 				if value, ok := testingRevocationField(ctx, t, revocationRecordShardKey(networkId, shard), revocationSessionField(*target.SessionId)); ok && value == revocationTombstone {
 					count++
 				}
@@ -519,8 +520,8 @@ func TestSessionOperationEnforcedOnlyAfterEveryRecordRefusesItsTargets(t *testin
 		if err != nil || observed.State != "enforced" {
 			t.Fatal("the applied receipt's status read failed", observed, err)
 		}
-		if count := tombstoned(); count != revocationRecordShardCount {
-			t.Fatalf("the status read tombstoned %d of %d shards", count, revocationRecordShardCount)
+		if count := tombstoned(); count != DefaultRevocationRecordSettings().ShardCount {
+			t.Fatalf("the status read tombstoned %d of %d shards", count, DefaultRevocationRecordSettings().ShardCount)
 		}
 		recovered, err := EnforceSessionOperation(ctx, networkId, op)
 		if err != nil || recovered == nil || recovered.State != "enforced" {

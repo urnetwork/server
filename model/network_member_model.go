@@ -10,7 +10,22 @@ package model
 // user id a personal network uses, so a removal and a re-invite never revive a
 // token minted for the earlier membership: the earlier member_id names no row.
 // A user holds at most one live membership in a network, and a removal deletes
-// the row.
+// the row; a join never replaces a membership in place (AddNetworkMemberInTx
+// refuses one that exists).
+//
+// The network's Redis revocation record keeps each joined, admitted membership
+// as m:<member_id> and its user's credential cutoff as u:<user_id>, which
+// sockets reads with no SQL (owner decision 561; session/revocation_record.go).
+// So every writer that ends a membership tombstones it there before its
+// transaction commits (session.RevokeMemberRecords): a denial
+// (network_member_deny_model.go), a removal the log landed
+// (config_log_effects.go) and the user's own deletion, here. A change that keeps
+// a membership but moves its reauth_deadline drops its projection
+// (session.DropMemberRecordProjections; network_idp_model.go). A deleted team's
+// own memberships need neither: the network's deletion marks every record of
+// it deleted first. model/revocation_record_writer_guard_test.go holds every
+// statement that deletes a membership or rewrites what its field holds to one
+// of these writes.
 //
 // Roles are §7.5's seven. They are signed in the config repo (AdminSet for the
 // first four, MemberAdmit for the rest) and the server mirrors them from verified
@@ -329,13 +344,28 @@ func networkMemberEmailOfUserInTx(ctx context.Context, tx server.PgTx, userId se
 
 // The members of the user's network go with the user, in the caller's
 // transaction: its memberships and its IdP identities, as §2.8 api-1 and api-3
-// keep them for the account's life. The teams keep their synthetic owners of
-// record, so each stays sound (D-TEAM-2). A no-op while the binary does not link
-// MG6.
+// keep them for the account's life. Each membership's revocation record
+// tombstone is written first, before the transaction commits, and a failed
+// write fails the deletion. The teams keep their synthetic owners of record, so
+// each stays sound (D-TEAM-2). A no-op while the binary does not link MG6.
 func removeNetworkMembershipsOfUserInTx(ctx context.Context, tx server.PgTx, userId server.Id) {
 	if !server.SidecarMg6Linked() {
 		return
 	}
+	networkMemberIds := map[server.Id][]server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`SELECT network_id, member_id FROM network_member WHERE user_id = $1 ORDER BY network_id, member_id FOR UPDATE`,
+		userId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId, memberId server.Id
+			server.Raise(result.Scan(&networkId, &memberId))
+			networkMemberIds[networkId] = append(networkMemberIds[networkId], memberId)
+		}
+	})
+	server.Raise(session.RevokeMemberRecords(ctx, networkMemberIds))
 	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_member WHERE user_id = $1`, userId))
 	server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_idp_identity WHERE user_id = $1`, userId))
 }

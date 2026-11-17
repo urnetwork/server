@@ -13,25 +13,29 @@
 //     the token is past its exp (a strict_exp one with no leeway), it names no
 //     network, user, client, device or root (QD-040: no root claim, no
 //     answer), or its record holds a tombstone, a deleted network, another
-//     admin, or a credential cutoff after the token's creation. The engine
-//     answers 401.
+//     admin, or a credential cutoff after the token's creation. A team
+//     member's token, which carries member_id, is refused by its membership's
+//     tombstone, a membership of another user, a reauth deadline passed, or its
+//     user's cutoff after the token's creation (owner decision 561). The
+//     engine answers 401.
 //   - unavailable, a *ClientTokenUnavailableError with the wait to ask for: the
 //     keyring holds no key or not the token's, the record is not enabled
 //     (auth.yml's revocation_record_enabled; its writers must all run first),
-//     Redis fails, the record misses outside the grace, or the token is one the
-//     record keeps no state for, a team member's or one descending from an API
-//     key, which only the SQL state query answers.
+//     Redis fails, the record misses outside the grace, or the token descends
+//     from an API key, whose state the record does not keep and only the SQL
+//     state query answers.
 //
-// The grace. A client's positive record fields lapse 54-60 min after the SQL
-// fallback projected them, and only a later fallback, api's or connect's,
-// projects them again; connect's 60 s recheck does so for a connected client,
-// so a valid client's fields can be missing for about a minute, which would
-// outlast a 45 s lease. {sc_<client_id>}ok holds the last time this check found
-// the client valid, for ValidGrace, and a miss within that span counts as valid
-// without moving it. A revocation in the span shows: a removed client's or
-// root's field, or a revoked session's, holds a tombstone for 10 min, a deleted
-// network's mark and a rotation's cutoff stay on the record, and each refuses
-// whatever else is missing.
+// The grace. A client's positive record fields, a member's membership and its
+// user's cutoff included, lapse 54-60 min after the SQL fallback projected
+// them, and only a later fallback, api's or connect's, projects them again;
+// connect's 60 s recheck does so for a connected client, so a valid client's
+// fields can be missing for about a minute, which would outlast a 45 s lease.
+// {sc_<client_id>}ok holds the last time this check found the client valid,
+// for ValidGrace, and a miss within that span counts as valid without moving
+// it. A revocation in the span shows: a removed client's, root's or
+// membership's field, or a revoked session's, holds a tombstone for 10 min, a
+// deleted network's mark and a rotation's cutoff stay on the record, and each
+// refuses whatever else is missing.
 //
 // Safe for concurrent use.
 package session
@@ -79,6 +83,9 @@ func clientTokenValidKey(clientId server.Id) string {
 // What the check tunes. The defaults are QD-040's.
 type ClientTokenVerifierSettings struct {
 	Keyring *ByJwtVerifyKeyringSettings
+	// The record's layout, which must be its writers': api's and connect's
+	// defaults.
+	Record *RevocationRecordSettings
 	// How long after a valid check a record miss still counts as valid: 120 s
 	// (QD-040), past connect's 60 s recheck, which projects the record again.
 	ValidGrace time.Duration
@@ -110,6 +117,7 @@ type ClientTokenVerifierSettings struct {
 func DefaultClientTokenVerifierSettings() *ClientTokenVerifierSettings {
 	return &ClientTokenVerifierSettings{
 		Keyring:               DefaultByJwtVerifyKeyringSettings(),
+		Record:                DefaultRevocationRecordSettings(),
 		ValidGrace:            120 * time.Second,
 		GraceWriteInterval:    10 * time.Second,
 		GraceWriteMemoCount:   64 * 1024,
@@ -190,8 +198,8 @@ func (self *ClientTokenVerifier) Verify(ctx context.Context, jwtSigned string) (
 	if !RevocationRecordEnabled() {
 		return nil, self.unavailable(self.settings.UnavailableRetryAfter, errors.New("the revocation record is not enabled"))
 	}
-	if byJwt.ApiKeyId != nil || byJwt.MemberId != nil {
-		// the record keeps no API key and no membership (usesRevocationRecord)
+	if byJwt.ApiKeyId != nil {
+		// the record keeps no API key (usesRevocationRecord)
 		return nil, self.unavailable(self.settings.MissRetryAfter, errors.New("the record keeps no state for this credential"))
 	}
 	if err := self.checkRecord(ctx, byJwt); err != nil {
@@ -288,7 +296,7 @@ func Testing_FailClientTokenRecordReads(err error) func() {
 // The record's verdict on byJwt, with the grace on a miss.
 func (self *ClientTokenVerifier) checkRecord(ctx context.Context, byJwt *ByJwt) error {
 	lineage, _ := revocationRecordLineage(byJwt)
-	query := newRevocationRecordQuery(byJwt, lineage, nil)
+	query := newRevocationRecordQuery(self.settings.Record, byJwt, lineage, nil)
 	validKey := clientTokenValidKey(*byJwt.ClientId)
 	values, validValue, validFound, err := readClientTokenRecord(ctx, query.key, query.fields, validKey)
 	if err != nil {
@@ -296,10 +304,10 @@ func (self *ClientTokenVerifier) checkRecord(ctx context.Context, byJwt *ByJwt) 
 		return self.unavailable(self.settings.UnavailableRetryAfter, errors.Join(ErrAuthUnavailable, ErrSessionStoreUnavailable, err))
 	}
 	now := self.settings.Now()
-	verdict, credentialChangeTime := query.verdict(byJwt, values)
+	verdict, credentialChangeTime := query.verdict(byJwt, values, now)
 	if verdict == revocationMiss {
 		// what the record does hold refuses whatever it lacks
-		verdict, credentialChangeTime = query.presentRefusal(byJwt, values)
+		verdict, credentialChangeTime = query.presentRefusal(byJwt, values, now)
 	}
 	switch verdict {
 	case revocationValid:
@@ -366,13 +374,14 @@ func (self *ClientTokenVerifier) noteValid(ctx context.Context, clientId server.
 	}()
 }
 
-// The refusal the record's present fields hold when the verdict is a miss: a
-// revoked session, a deleted network, another admin, a removed client or root,
-// a client on another device, or a credential cutoff after the token's
-// creation. Any one refuses, whatever else the record lacks, so a lapsed
-// positive field never lets the grace accept what the record refuses.
+// The refusal the record's present fields hold at now when the verdict is a
+// miss: a revoked session, a deleted network, another admin, a removed
+// membership, one of another user or one past its reauth deadline, a removed
+// client or root, a client on another device, or a credential cutoff after the
+// token's creation. Any one refuses, whatever else the record lacks, so a
+// lapsed positive field never lets the grace accept what the record refuses.
 // revocationMiss when none refuses.
-func (self *revocationRecordQuery) presentRefusal(byJwt *ByJwt, values []any) (revocationVerdict, time.Time) {
+func (self *revocationRecordQuery) presentRefusal(byJwt *ByJwt, values []any, now time.Time) (revocationVerdict, time.Time) {
 	value := func(index int) (string, bool) {
 		if index < 0 || len(values) <= index || values[index] == nil {
 			return "", false
@@ -383,11 +392,17 @@ func (self *revocationRecordQuery) presentRefusal(byJwt *ByJwt, values []any) (r
 	if session, ok := value(self.sessionIndex); ok && session == revocationTombstone {
 		return revocationSessionRevoked, time.Time{}
 	}
-	if _, ok := value(2); ok {
+	if _, ok := value(revocationQueryDeletedIndex); ok {
 		return revocationNoActiveRow, time.Time{}
 	}
-	if user, ok := value(0); ok && user != byJwt.UserId.String() {
-		return revocationNoActiveRow, time.Time{}
+	if identity, ok := value(revocationQueryIdentityIndex); ok {
+		if self.member {
+			if refuses, _ := revocationMembershipVerdict(identity, byJwt.UserId, now); refuses {
+				return revocationNoActiveRow, time.Time{}
+			}
+		} else if identity != byJwt.UserId.String() {
+			return revocationNoActiveRow, time.Time{}
+		}
 	}
 	if client, ok := value(self.clientIndex); ok {
 		if client == revocationTombstone {
@@ -400,7 +415,7 @@ func (self *revocationRecordQuery) presentRefusal(byJwt *ByJwt, values []any) (r
 	if root, ok := value(self.rootIndex); ok && root == revocationTombstone {
 		return revocationNoActiveRow, time.Time{}
 	}
-	if credential, ok := value(self.credentialIdx); ok {
+	if credential, ok := value(revocationQueryCredentialIndex); ok {
 		if credentialMicros, err := strconv.ParseInt(credential, 10, 64); err == nil {
 			credentialChangeTime := time.UnixMicro(credentialMicros).UTC()
 			if byJwt.CreateTime.Before(credentialChangeTime) {

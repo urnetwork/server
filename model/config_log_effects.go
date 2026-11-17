@@ -491,8 +491,10 @@ func removeConfigSidecarInTx(ctx context.Context, tx server.PgTx, networkId serv
 }
 
 // Ends a member the log removed, in tx: §7.10's chain on the member at the
-// entry's time, and its network_member row where a team has one. Its devices
-// are the entry's revoked sidecars, ended beside it.
+// entry's time, and its network_member row where a team has one, the
+// membership's revocation record tombstone written first, before tx commits
+// (owner decision 561). Its devices are the entry's revoked sidecars, ended
+// beside it.
 func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId server.Id, memberId server.Id, at time.Time) error {
 	if err := ApplyRemovalEffectsInTx(ctx, tx, &Removal{
 		Subjects: []*RemovalSubject{{NetworkId: networkId, Kind: sidecar.RevocationKindMember, SubjectId: memberId}},
@@ -504,7 +506,29 @@ func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId serve
 	if !server.SidecarMg6Linked() {
 		return nil
 	}
-	_, err := tx.Exec(
+	// a personal network's member is its user, with no row and no membership in
+	// the record, and a row a denial already deleted needs nothing more
+	result, err := tx.Query(
+		ctx,
+		`SELECT member_id FROM network_member WHERE network_id = $1 AND member_id = $2 FOR UPDATE`,
+		networkId,
+		memberId,
+	)
+	if err != nil {
+		return err
+	}
+	held := result.Next()
+	result.Close()
+	if err := result.Err(); err != nil {
+		return err
+	}
+	if !held {
+		return nil
+	}
+	if err := session.RevokeMemberRecords(ctx, map[server.Id][]server.Id{networkId: {memberId}}); err != nil {
+		return err
+	}
+	_, err = tx.Exec(
 		ctx,
 		`DELETE FROM network_member WHERE network_id = $1 AND member_id = $2`,
 		networkId,

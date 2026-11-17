@@ -409,7 +409,11 @@ The reason was load. On 2026-10-26 the per-check SQL state query cost about 17k 
 | `c:<client>` | `a <device> <source client>` |
 | `r:<root>` | `a` |
 | `s:<session>` | `a` |
+| `m:<member>` | `a <user> <reauth deadline in Unix milliseconds, 0 for none>`, a joined, admitted team membership; never a pending one |
+| `u:<user>` | a team member's credential cutoff in Unix microseconds; only rises |
 | any revoked entry | the tombstone `x` |
+
+**Team members (owner decision 561, 2026-11-17).** A credential carrying `member_id` reads `m:<member>` and `u:<user>` in place of `n:user` and `n:cred`, since a team's admin user is a synthetic owner of record that never signs in. It is refused by a tombstone, a membership of another user, a reauth deadline at or before the check's time, or a `u:` cutoff after its creation. The fallback projects `m:` with the positive ttl, and `u:` too, so a cutoff read before a rotation that could not yet see a new membership lapses within the hour; a rotation's own `u:` write keeps no field ttl, as `n:cred`'s does not. sockets' Client-class verifier reads the same fields with no SQL. A credential descending from an API key stays on the SQL query.
 
 **Missing fields.** A missing field never means "no revocation". The check falls back to the SQL state query and projects a valid answer. For a session credential it first checks the network marker and the session operation journal.
 - A positive projection lives one hour.
@@ -422,8 +426,12 @@ The reason was load. On 2026-10-26 the per-check SQL state query cost about 17k 
 |---|---|
 | client deactivation, including the abandoned top-level mark and the stale-child reap | tombstone `c:`, plus `r:` for a root |
 | session enforcement | `s:` in all 64 shards, before the operation is enforced and before a status read reports an applied receipt |
-| password reset | `n:cred` in every shard of the user's networks |
+| password reset, sign-out-all | `n:cred` in every shard of the user's networks, and `u:<user>` in every shard of each team it belongs to |
 | network deletion | `n:del` in every shard |
+| a team membership's end: a denial (member-remove, SCIM), a MemberRevoke landing, the user's account deletion | tombstone `m:` in all 64 shards of the team |
+| a reauth deadline's move at an IdP sign-in | `m:` dropped from all 64 shards, a tombstone kept, so the next check reads SQL |
+
+The settings (`RevocationRecordSettings`) hold the shard count, which every reader and writer must share, and the ttls and bounds above.
 
 A commit that fails after its write is a spurious revocation, never a missed one. Tombstones live ten minutes. After that the absent field sends checks to SQL, which already refuses.
 
