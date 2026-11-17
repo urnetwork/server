@@ -65,7 +65,7 @@ type GateKeeper struct {
 const gateCheckTimeout = time.Minute
 
 // Storage failure backoff bounds: the first wait, the largest, and how long
-// without a failure resets it.
+// without a failure after a backoff ends resets it.
 const (
 	minFailureBackoff   = 5 * time.Second
 	maxFailureBackoff   = 5 * time.Minute
@@ -207,14 +207,27 @@ func (self *GateKeeper) Wait(ctx context.Context) error {
 	}
 }
 
-// A failed storage request: every worker waits out a backoff that doubles
-// with each failure inside the reset window, and the health gates are
-// checked again at once. Throttling starts at a longer wait.
+// A failed storage request: every worker waits out a backoff, and the health
+// gates are checked again at once. The backoff doubles with each failure
+// episode inside the reset window: requests in flight when MinIO stalls fail
+// together, and a failure while a backoff runs belongs to its episode and
+// does not lengthen it. Throttling starts at a longer wait.
 func (self *GateKeeper) Failed(err error, throttled bool) {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	now := self.now()
-	if now.Sub(self.lastFailure) > self.backoffReset {
+	self.failureCause = err.Error()
+	if 300 < len(self.failureCause) {
+		self.failureCause = self.failureCause[:300] + "..."
+	}
+	defer self.update()
+	defer self.kickHealth()
+	if now.Before(self.backoffUntil) {
+		self.lastFailure = now
+		return
+	}
+	// quiet since the last backoff ended
+	if now.Sub(self.backoffUntil) > self.backoffReset {
 		self.backoff = 0
 	}
 	switch {
@@ -226,14 +239,11 @@ func (self *GateKeeper) Failed(err error, throttled bool) {
 		self.backoff = min(2*self.backoff, self.maxBackoff)
 	}
 	self.lastFailure = now
-	until := now.Add(self.backoff)
-	if until.After(self.backoffUntil) {
-		self.backoffUntil = until
-	}
-	self.failureCause = err.Error()
-	if 300 < len(self.failureCause) {
-		self.failureCause = self.failureCause[:300] + "..."
-	}
+	self.backoffUntil = now.Add(self.backoff)
+}
+
+// Must hold lock. Checks the health gates again at once.
+func (self *GateKeeper) kickHealth() {
 	for index, gate := range self.gates {
 		if _, health := gate.(*MinioHealthGate); health {
 			select {
@@ -242,14 +252,13 @@ func (self *GateKeeper) Failed(err error, throttled bool) {
 			}
 		}
 	}
-	self.update()
 }
 
 // A successful object: a quiet period resets the backoff.
 func (self *GateKeeper) Succeeded() {
 	self.lock.Lock()
 	defer self.lock.Unlock()
-	if self.backoff != 0 && self.now().Sub(self.lastFailure) > self.backoffReset {
+	if self.backoff != 0 && self.now().Sub(self.backoffUntil) > self.backoffReset {
 		self.backoff = 0
 	}
 }
