@@ -322,6 +322,50 @@ it differs from the design above:
 - **Rollback** empties the kept old table under its own lock first, so the
   swap's commit unlinks no file.
 
+**Revised 11-17: the copy and the index builds left the lock**
+(db_table_swap_capture.go). The 11-17 08:47Z rehearsal on Main measured a
+copy of 2.921 s and index builds of 1.662 s for 113,749 rows, all under
+ACCESS EXCLUSIVE: 4.6 s, past the go rule's 3 s. The swap now pre-copies with
+a change capture, pg_repack style, and keeps the drain:
+- **The capture:** a row trigger on the table appends the key of every row an
+  insert, update or delete touches to a log table, in the writer's own
+  transaction; a statement trigger refuses TRUNCATE; both fire always. The
+  trigger is created under a brief SHARE ROW EXCLUSIVE (milliseconds,
+  admitted like the swap's lock), which waits out every transaction that has
+  written the table, so every write is either in the copy's snapshot (taken
+  after the trigger committed) or in the log.
+- **Before the lock:** the copy and the index builds as before, in one
+  transaction; VACUUM ANALYZE of the twin; catch-up passes that apply the
+  captured keys at one snapshot (repeatable read) by key: delete the twin's
+  rows of those keys, copy the table's current rows of them, so order and
+  repetition do not matter and the unique key never refuses; and a
+  verification that the twin holds the table's row of every key not
+  captured since, over every column.
+- **Under the lock:** the twin's lock first, then the table's; the triggers
+  checked whole and dropped; the changes captured since the last catch-up
+  (at most 1,000, read one key at a time; more releases the lock at once and
+  the swap catches up again); the taskworker check read from the twin, which
+  then holds exactly the table's rows (on Main nearly every row is scheduled
+  ahead, so the check reads nearly the whole queue, which through the bloated
+  heap costs about as much as the copy); the fingerprints; the renames.
+  `transaction_timeout` cuts the transaction off 1.5 s after its request for
+  the table's lock.
+- **The rehearsal** runs this exclusive section, with 1,000 captured changes,
+  and reports it as the lock's length; the swap refuses over 1 s. Off Main,
+  on 18.7 with a bloated pending_task (3.2 GB heap, 114k live rows spread
+  through it, Main's reloptions), the copy and builds took 2.95 s and 1.01 s
+  (Main: 2.92 s and 1.66 s), the rehearsed exclusive section 127 ms, and the
+  swap held its lock 61 ms with a producer writing 60 tasks a second.
+- **Writers** while the taskworker is stopped (listed 11-17): schedules from
+  api and connect (`ON CONFLICT (run_once_key) DO UPDATE / DO NOTHING`), the
+  contract settle's delete of queued closes, the idle wake's `UPDATE run_at`,
+  and operator commands. None changes `task_id` or `run_once_key`, truncates
+  or sets `session_replication_role`.
+- A run that fails removes its capture and twin; a killed one leaves them,
+  the preflight refuses, and `--abort` removes them. A session advisory lock
+  keeps two runs (or a run and an abort) apart. A commit whose reply is lost
+  is recognized from the catalog.
+
 ### 4.5 Readers, writers and the monitor
 
 - **No reader or writer changes.** Names, columns, keys and indexes are identical. Cached plans

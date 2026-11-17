@@ -81,12 +81,13 @@ func lingerPlanStatements(t testing.TB, sourceId server.Id, destinationId server
 	if runtimeQueries["earliest_companion_origin"].binds == 7 {
 		chainedArgs = append(chainedArgs, ByteCount(1024))
 	}
+	weeks := unexpiredContractWeeksAt(server.NowUtc())
 	return []lingerPlanStatement{
-		{name: "companion origin exists", sql: companionOriginExistsSql, args: []any{sourceId, destinationId, closeFloor}},
+		{name: "companion origin exists", sql: weeks.render(companionOriginExistsSql), args: []any{sourceId, destinationId, closeFloor}},
 		{name: "plain origin selection", sql: runtimeQueries["earliest_origin"].sql, args: plainArgs},
 		{name: "chained origin selection", sql: runtimeQueries["earliest_companion_origin"].sql, args: chainedArgs},
-		{name: "zero escrow plain origin", sql: zeroEscrowPlainOriginSql, args: []any{sourceId, destinationId, closeFloor}},
-		{name: "zero escrow chained origin", sql: zeroEscrowChainedOriginSql, args: []any{sourceId, destinationId, closeFloor, server.NewId(), server.NewId()}},
+		{name: "zero escrow plain origin", sql: weeks.render(zeroEscrowPlainOriginSql), args: []any{sourceId, destinationId, closeFloor}},
+		{name: "zero escrow chained origin", sql: weeks.render(zeroEscrowChainedOriginSql), args: []any{sourceId, destinationId, closeFloor, server.NewId(), server.NewId()}},
 	}
 }
 
@@ -199,12 +200,13 @@ func TestLegacyCompanionOriginReadsUseTheClosedPairIndex(t *testing.T) {
 		ctx := t.Context()
 		sourceId, destinationId, payerNetworkId := seedContractOriginLingerPlan(t, ctx)
 		closeFloor := server.NowUtc().Add(-CompanionOriginCloseLinger)
+		weeks := unexpiredContractWeeksAt(server.NowUtc())
 		for _, statement := range []lingerPlanStatement{
-			{name: "companion origin exists", sql: legacyCompanionOriginExistsSql, args: []any{sourceId, destinationId, closeFloor}},
-			{name: "plain origin selection", sql: legacyCompanionPlainOriginSql, args: []any{sourceId, destinationId, closeFloor, payerNetworkId, ByteCount(1024)}},
-			{name: "chained origin selection", sql: legacyCompanionChainedOriginSql, args: []any{sourceId, destinationId, closeFloor, payerNetworkId, server.NewId(), server.NewId(), ByteCount(1024)}},
-			{name: "zero escrow plain origin", sql: legacyZeroEscrowPlainOriginSql, args: []any{sourceId, destinationId, closeFloor}},
-			{name: "zero escrow chained origin", sql: legacyZeroEscrowChainedOriginSql, args: []any{sourceId, destinationId, closeFloor, server.NewId(), server.NewId()}},
+			{name: "companion origin exists", sql: weeks.render(legacyCompanionOriginExistsSql), args: []any{sourceId, destinationId, closeFloor}},
+			{name: "plain origin selection", sql: weeks.render(legacyCompanionPlainOriginSql), args: []any{sourceId, destinationId, closeFloor, payerNetworkId, ByteCount(1024)}},
+			{name: "chained origin selection", sql: weeks.render(legacyCompanionChainedOriginSql), args: []any{sourceId, destinationId, closeFloor, payerNetworkId, server.NewId(), server.NewId(), ByteCount(1024)}},
+			{name: "zero escrow plain origin", sql: weeks.render(legacyZeroEscrowPlainOriginSql), args: []any{sourceId, destinationId, closeFloor}},
+			{name: "zero escrow chained origin", sql: weeks.render(legacyZeroEscrowChainedOriginSql), args: []any{sourceId, destinationId, closeFloor, server.NewId(), server.NewId()}},
 		} {
 			nodes, raw := planContractOriginLingerStatement(t, ctx, nil, statement.sql, statement.args...)
 			pairRange := false

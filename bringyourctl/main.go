@@ -148,7 +148,7 @@ Usage:
     bringyourctl model migrate close-evidence-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model migrate provider-work-session-partition [--cutover-week=<date>] [--dry-run] [--finalize] [--rollback] [--abort] [--drop-legacy]
     bringyourctl model migrate finished-task-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
-    bringyourctl model migrate table-swap --table=<table> [--dry-run] [--rollback] [--drop-old]
+    bringyourctl model migrate table-swap --table=<table> [--dry-run] [--rollback] [--drop-old] [--abort]
     bringyourctl model migrate audit-device-event-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--max-copy-rows=<n>] [--abort]
     bringyourctl model migrate debit-journal-partition [--cutover-day=<date>] [--dry-run] [--finalize] [--rollback] [--abort]
     bringyourctl model upgrade-client-reliability-index [--parallel=<n>]
@@ -203,6 +203,9 @@ Options:
     --abort        Drop a prepared, unfinalized contract, close evidence or
                    finished_task partition cutover, or the egress health
                    history's staged table and mirror.
+                   With model migrate table-swap, remove the change capture
+                   (triggers, log, function) and the twin that an
+                   interrupted run left.
     --cutover-day=<date>  The day (YYYY-MM-DD, UTC) from which finished tasks
                    (or device audit events) go to daily partitions, at least 12
                    hours ahead; prepare only.
@@ -224,8 +227,10 @@ Options:
     --table=<table>  With model migrate table-swap, the table whose live rows
                    are copied into a fresh twin and swapped in under its name
                    (PARTITION-CANDIDATES.md §4.4): pending_task, with every
-                   taskworker stopped. The old table is kept for --rollback
-                   until --drop-old.
+                   taskworker stopped. The copy and the index builds run
+                   before the lock, with a change capture on; the lock is
+                   held only to apply the changes since and swap the names.
+                   The old table is kept for --rollback until --drop-old.
     --drop-legacy  Detach, then drop, provider_work_session_event_legacy once
                    the journal's drop guard admits it, an hour after the
                    cutover week starts (owner, 2026-11-15). A connection
@@ -2797,8 +2802,9 @@ func debitJournalPartitionMigrateOptions(opts docopt.Opts) (options server.Trans
 
 // Copies a queue table's live rows into a fresh twin and swaps the names
 // (PARTITION-CANDIDATES.md §4.4; server.SwapTable): the swap, --rollback into
-// the kept old table, and --drop-old once the rollback window has passed.
-// Each step can be rehearsed with --dry-run.
+// the kept old table, --abort of what an interrupted run left, and
+// --drop-old once the rollback window has passed. Each step can be rehearsed
+// with --dry-run.
 func modelMigrateTableSwap(opts docopt.Opts) {
 	options, err := tableSwapOptions(opts)
 	if err != nil {
@@ -2821,8 +2827,15 @@ func tableSwapOptions(opts docopt.Opts) (options server.TableSwapOptions, err er
 	options.DryRun, _ = opts.Bool("--dry-run")
 	options.Rollback, _ = opts.Bool("--rollback")
 	options.DropOld, _ = opts.Bool("--drop-old")
-	if options.Rollback && options.DropOld {
-		err = fmt.Errorf("choose one of --rollback and --drop-old")
+	options.Abort, _ = opts.Bool("--abort")
+	steps := 0
+	for _, step := range []bool{options.Rollback, options.DropOld, options.Abort} {
+		if step {
+			steps += 1
+		}
+	}
+	if 1 < steps {
+		err = fmt.Errorf("choose one of --rollback, --drop-old and --abort")
 	}
 	return
 }

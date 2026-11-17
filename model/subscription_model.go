@@ -2366,7 +2366,7 @@ var companionOriginExistsSql = `
 			(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
 			-- ids lead with their creation millisecond: an unexpired
 			-- contract's id is at least this bound
-			contract_id >= ` + unexpiredContractIdFloorSql + ` AND
+			` + unexpiredContractIdBoundSql("contract_id") + ` AND
 			COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
 			source_id = $1 AND
 			destination_id = $2
@@ -2400,7 +2400,7 @@ func companionOriginExists(
 		// the origin direction is reversed
 		server.Raise(conn.QueryRow(
 			ctx,
-			existsSql,
+			unexpiredContractWeeksAt(server.NowUtc()).render(existsSql),
 			destinationId,
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
@@ -2488,6 +2488,8 @@ func createCompanionTransferEscrow(
 		// A payer handoff must re-read the current origin, without retaining
 		// the previous selection's clamp or payer.
 		companionContractId, proberReservationByteCount, inheritedPayer = nil, nil, nil
+		// the selection's unexpired contract weeks
+		weeks := unexpiredContractWeeksAt(server.NowUtc())
 		// find the earliest open transfer contract in the opposite direction
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
@@ -2502,7 +2504,7 @@ func createCompanionTransferEscrow(
 		if lingerReads {
 			result, err = conn.Query(
 				ctx,
-				`
+				weeks.render(`
                 SELECT contract_id,
                     CASE WHEN transfer_byte_count >= $5::bigint THEN NULL
                     WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2513,7 +2515,7 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                contract_id >= `+unexpiredContractIdFloorSql+` AND
+                                `+unexpiredContractIdBoundSql("contract_id")+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
@@ -2532,7 +2534,7 @@ func createCompanionTransferEscrow(
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                             -- ids lead with their creation millisecond: an
                             -- unexpired contract's id is at least this bound
-                            contract_id >= `+unexpiredContractIdFloorSql+` AND
+                            `+unexpiredContractIdBoundSql("contract_id")+` AND
                             COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                             source_id = $1 AND
                             destination_id = $2 AND
@@ -2566,7 +2568,7 @@ func createCompanionTransferEscrow(
                     ORDER BY create_time ASC
                     LIMIT 1
                 ) AS earliest_origin
-            `,
+            `),
 				// note the origin direction is reversed
 				destinationId,
 				sourceId,
@@ -2577,7 +2579,7 @@ func createCompanionTransferEscrow(
 		} else {
 			result, err = conn.Query(
 				ctx,
-				legacyCompanionPlainOriginSql,
+				weeks.render(legacyCompanionPlainOriginSql),
 				// note the origin direction is reversed
 				destinationId,
 				sourceId,
@@ -2618,7 +2620,7 @@ func createCompanionTransferEscrow(
 			if lingerReads {
 				result, err = conn.Query(
 					ctx,
-					`
+					weeks.render(`
                     SELECT contract_id,
                         CASE WHEN transfer_byte_count >= $7::bigint THEN NULL
                         WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
@@ -2631,7 +2633,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
-                                    contract_id >= `+unexpiredContractIdFloorSql+` AND
+                                    `+unexpiredContractIdBoundSql("contract_id")+` AND
                                     COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
@@ -2662,7 +2664,7 @@ func createCompanionTransferEscrow(
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                                 -- ids lead with their creation millisecond: an
                                 -- unexpired contract's id is at least this bound
-                                contract_id >= `+unexpiredContractIdFloorSql+` AND
+                                `+unexpiredContractIdBoundSql("contract_id")+` AND
                                 COALESCE(expiration_time, create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
@@ -2690,7 +2692,7 @@ func createCompanionTransferEscrow(
                         ORDER BY create_time ASC
                         LIMIT 1
                     ) AS earliest_companion_origin
-                `,
+                `),
 					destinationId,
 					sourceId,
 					server.NowUtc().Add(-originContractTimeout),
@@ -2702,7 +2704,7 @@ func createCompanionTransferEscrow(
 			} else {
 				result, err = conn.Query(
 					ctx,
-					legacyCompanionChainedOriginSql,
+					weeks.render(legacyCompanionChainedOriginSql),
 					destinationId,
 					sourceId,
 					server.NowUtc().Add(-originContractTimeout),
@@ -2825,7 +2827,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
+			unexpiredContractWeeksAt(server.NowUtc()).render(`
                 SELECT
 
                     transfer_contract.contract_id,
@@ -2840,11 +2842,11 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
                 -- across the join equality
                 LEFT OUTER JOIN contract_close ON
                     contract_close.contract_id = transfer_contract.contract_id AND
-                    contract_close.contract_id >= `+unexpiredContractIdFloorSql+`
+                    `+unexpiredContractIdBoundSql("contract_close.contract_id")+`
 
                 INNER JOIN transfer_escrow ON
                     transfer_escrow.contract_id = transfer_contract.contract_id AND
-                    transfer_escrow.contract_id >= `+unexpiredContractIdFloorSql+`
+                    `+unexpiredContractIdBoundSql("transfer_escrow.contract_id")+`
 
                 WHERE
 					-- This is equivalent to the generated-open expression but
@@ -2852,7 +2854,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
                     -- ids lead with their creation millisecond: an unexpired
                     -- contract's id is at least this bound
-                    transfer_contract.contract_id >= `+unexpiredContractIdFloorSql+` AND
+                    `+unexpiredContractIdBoundSql("transfer_contract.contract_id")+` AND
                     COALESCE(transfer_contract.expiration_time, transfer_contract.create_time + interval '60 minutes') > statement_timestamp() AT TIME ZONE 'UTC' AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
@@ -2860,7 +2862,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
                     contract_close.contract_id IS NULL
 
                 ORDER BY transfer_contract.priority DESC, transfer_contract.create_time ASC
-            `,
+            `),
 			sourceId,
 			destinationId,
 			contractTransferByteCount,

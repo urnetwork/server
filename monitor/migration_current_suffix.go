@@ -1077,6 +1077,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// position
 	[]snMainnetMigrationContract{stLedgerV2ExtenderRelayMigrationContract},
 	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoMigrationContract},
+	// the redundant unique event id of the device events, dropped by the
+	// owner-run prepare and recorded, versioned by its position
+	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

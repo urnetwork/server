@@ -588,8 +588,14 @@ how much that cuts contracts is not known.
 
 **S1. Contract partitioning (C1).** Built 10-23; its review findings were fixed in
 09cd98565; not cut over. What is left:
-- Drops at the reaper's horizon (35 days), not the 91-day `ContractRetention`, as C4
-  and C5 already do (`db_contract_partition_maintenance.go:49`). Code, guard and tests.
+- ~~Drops at the reaper's horizon (35 days), not the 91-day `ContractRetention`, as C4
+  and C5 already do (`db_contract_partition_maintenance.go:49`). Code, guard and tests.~~
+  **Built 2026-11-17** (2d55bc9f3; CONTRACT-PARTITION.md "S1"). A week retires a day
+  after its upper bound passes the reaper's horizon. Retirement deletes no row: it
+  compacts each week the reaper has emptied down to the rows the reaper keeps
+  (CLUSTER) and drops it once it holds none. The free space C needs is in that
+  section: 5.9–7.4 TiB with the legacy indexes rebuilt once emptied, more than this
+  volume has.
 - Headroom. After the cutover new weeks stop reusing the legacy leaf's freed space, so
   it needs about 35 days of new contract data free, at 1.5–2 KB a contract: about 6–7
   TiB at today's load, 4–5.5 TiB after a 20–35% trim *(inferred)*. **Not available on

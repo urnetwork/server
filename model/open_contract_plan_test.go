@@ -32,11 +32,14 @@ const (
 	openContractOutcomeNullIndex     = "transfer_contract_outcome_null"
 )
 
-// The runtime value of a statement argument in model source: string literals
-// joined by + with the rendered contract id bound (contract_id_bound.go) and
-// the lingering origins' closed arm (contract_origin_linger.go). Any other
-// expression is not a statement this guard can bind to.
-func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
+// The template of a statement argument in model source: string literals
+// joined by + with the floor of unexpired contract ids and the hot reads'
+// bound on a contract id column (contract_id_bound.go, the bound called with a
+// literal column), the lingering origins' closed arm
+// (contract_origin_linger.go), and the weeks' render of such an expression.
+// Any other expression is not a statement this guard can bind to. The template
+// keeps the contract weeks' placeholders.
+func modelSqlExpressionTemplate(expression ast.Expr) (string, bool) {
 	switch value := expression.(type) {
 	case *ast.BasicLit:
 		if value.Kind != token.STRING {
@@ -45,16 +48,16 @@ func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 		unquoted, err := strconv.Unquote(value.Value)
 		return unquoted, err == nil
 	case *ast.ParenExpr:
-		return modelSqlExpressionValue(value.X)
+		return modelSqlExpressionTemplate(value.X)
 	case *ast.BinaryExpr:
 		if value.Op != token.ADD {
 			return "", false
 		}
-		x, ok := modelSqlExpressionValue(value.X)
+		x, ok := modelSqlExpressionTemplate(value.X)
 		if !ok {
 			return "", false
 		}
-		y, ok := modelSqlExpressionValue(value.Y)
+		y, ok := modelSqlExpressionTemplate(value.Y)
 		return x + y, ok
 	case *ast.Ident:
 		switch value.Name {
@@ -63,13 +66,41 @@ func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
 		case "contractOriginLingerClosedSql":
 			return contractOriginLingerClosedSql, true
 		}
+	case *ast.CallExpr:
+		if len(value.Args) != 1 {
+			return "", false
+		}
+		switch function := value.Fun.(type) {
+		case *ast.Ident:
+			literal, ok := value.Args[0].(*ast.BasicLit)
+			if function.Name != "unexpiredContractIdBoundSql" || !ok || literal.Kind != token.STRING {
+				return "", false
+			}
+			column, err := strconv.Unquote(literal.Value)
+			return unexpiredContractIdBoundSql(column), err == nil
+		case *ast.SelectorExpr:
+			if function.Sel.Name == "render" {
+				return modelSqlExpressionTemplate(value.Args[0])
+			}
+		}
 	}
 	return "", false
 }
 
-// The one statement a model function in subscription_model.go queries, as it
-// runs (see modelSqlExpressionValue).
-func modelFunctionStatement(t testing.TB, functionName string) string {
+// The runtime value of a statement argument: its template
+// (modelSqlExpressionTemplate) rendered with the unexpired contract weeks at
+// now.
+func modelSqlExpressionValue(expression ast.Expr) (string, bool) {
+	template, ok := modelSqlExpressionTemplate(expression)
+	if !ok {
+		return "", false
+	}
+	return unexpiredContractWeeksAt(server.NowUtc()).render(template), true
+}
+
+// The template of the one statement a model function in subscription_model.go
+// queries (see modelSqlExpressionTemplate).
+func modelFunctionStatementTemplate(t testing.TB, functionName string) string {
 	t.Helper()
 	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
 	if err != nil {
@@ -89,7 +120,7 @@ func modelFunctionStatement(t testing.TB, functionName string) string {
 			if selector, ok := call.Fun.(*ast.SelectorExpr); !ok || selector.Sel.Name != "Query" {
 				return true
 			}
-			if sql, ok := modelSqlExpressionValue(call.Args[1]); ok {
+			if sql, ok := modelSqlExpressionTemplate(call.Args[1]); ok {
 				statements = append(statements, sql)
 			}
 			return true
@@ -99,6 +130,13 @@ func modelFunctionStatement(t testing.TB, functionName string) string {
 		t.Fatalf("%s queries %d statements, want one", functionName, len(statements))
 	}
 	return statements[0]
+}
+
+// The one statement a model function in subscription_model.go queries, as it
+// runs: its template rendered with the unexpired contract weeks at now.
+func modelFunctionStatement(t testing.TB, functionName string) string {
+	t.Helper()
+	return unexpiredContractWeeksAt(server.NowUtc()).render(modelFunctionStatementTemplate(t, functionName))
 }
 
 // Resolve the real query owner only through the call whose result the public
@@ -407,7 +445,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 				args []any
 			}{
 				{sql: runtimeQueries["earliest_origin"].sql, args: plainOriginArgs},
-				{sql: zeroEscrowPlainOriginSql, args: plainOriginArgs[:3]},
+				{sql: unexpiredContractWeeksAt(server.NowUtc()).render(zeroEscrowPlainOriginSql), args: plainOriginArgs[:3]},
 			} {
 				originPlan := explainOpenContractPlan(t, ctx, conn, origin.sql, origin.args...)
 				assertPlanUsesAnyIndex(t, originPlan, openContractSourcePairIndex, openContractDestinationPairIndex)
@@ -415,7 +453,7 @@ func TestOpenContractPlansIgnoreFalseZeroGeneratedOpenStats(t *testing.T) {
 			}
 
 			// the actual companion origin existence read, before any transaction
-			existencePlan := explainOpenContractPlan(t, ctx, conn, companionOriginExistsSql, sourceId, destinationId, server.NowUtc().Add(-time.Hour))
+			existencePlan := explainOpenContractPlan(t, ctx, conn, unexpiredContractWeeksAt(server.NowUtc()).render(companionOriginExistsSql), sourceId, destinationId, server.NowUtc().Add(-time.Hour))
 			assertPlanUsesAnyIndex(t, existencePlan, openContractSourcePairIndex, openContractDestinationPairIndex)
 			assertPlanAvoidsIndexes(t, existencePlan, openContractGenericIndex, openContractOutcomeNullIndex, openContractPayerIndex)
 

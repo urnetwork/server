@@ -350,12 +350,14 @@ func readTableSwapShape(ctx context.Context, conn PgQuerier, name string) *table
 		}
 	})
 
+	// a change capture's own triggers (db_table_swap_capture.go) are what an
+	// interrupted run left, which the preflight reports as such
 	var triggers, rules, policies, publications, foreignKeys, otherConstraints, deferrables, inheritance, statistics, dependents, typeUsers int64
 	Raise(conn.QueryRow(
 		ctx,
 		`
 		SELECT
-			(SELECT count(*) FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal),
+			(SELECT count(*) FROM pg_trigger WHERE tgrelid = $1 AND NOT tgisinternal AND NOT `+tableSwapOwnCaptureTriggerSql+`),
 			(SELECT count(*) FROM pg_rewrite WHERE ev_class = $1),
 			(SELECT count(*) FROM pg_policy WHERE polrelid = $1),
 			(SELECT count(*) FROM pg_publication_rel WHERE prrelid = $1),
@@ -426,10 +428,15 @@ func readTableSwapShape(ctx context.Context, conn PgQuerier, name string) *table
 }
 
 // The names a swap of table gives, each within PostgreSQL's identifier
-// length: the twin and the indexes it builds, and the old table and its
-// indexes.
+// length: the twin and the indexes it builds, the change capture's log and
+// function, and the old table and its indexes.
 func tableSwapNameRefusals(table string, shape *tableSwapShape) (refusals []string) {
-	names := []string{table + tableSwapNextSuffix, tableSwapOldName(table, tableSwapStampLayout)}
+	names := []string{
+		table + tableSwapNextSuffix,
+		table + tableSwapLogSuffix,
+		table + tableSwapCaptureFunctionSuffix,
+		tableSwapOldName(table, tableSwapStampLayout),
+	}
 	for _, index := range shape.indexes {
 		names = append(names, tableSwapNextName(index.name), tableSwapOldName(index.name, tableSwapStampLayout))
 	}
