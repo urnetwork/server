@@ -61,12 +61,16 @@ func DefaultSnTopFoldSettings() SnTopFoldSettings {
 	return SnTopFoldSettings{SettleDelay: 3 * time.Minute, SourceChangeHoldoff: model.SnTopTempoDuration / 2}
 }
 
-// Fleet binding is blocked on mainnet (LEADERTOP.md §3.6): the commitment
-// oracle is not deployed and the fleet runtime authority has not shipped.
-// While it is, every response says so and the claim prompt stays a "claiming
-// opens soon" note (Q16). Opening it is a release decision.
+// Fleet binding is open on mainnet (LEADERTOP.md §3.7): the commitment oracle
+// mirrors fleet commitments, the reviewed fleet runtime authority is published,
+// and the validator pays selected fleets. Closed, every response says so and the
+// claim prompt is a "claiming opens soon" note (Q16). Opening it is a release
+// decision, made by merging this value: a snapshot stores the value of the
+// taskworker that folded it, so the apps follow at that build's first fold, and
+// the stored note is what the API serves for that snapshot. Only the stand-in
+// before the first snapshot reads it in the api.
 const (
-	snTopBindingOpen       = false
+	snTopBindingOpen       = true
 	snTopBindingClosedNote = "Top 200 binding isn't open on mainnet yet"
 	snTopBindingOpenNote   = ""
 )

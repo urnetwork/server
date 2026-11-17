@@ -232,6 +232,154 @@ func TestDbMaintenanceSkipsTableSwapRelations(t *testing.T) {
 	}
 }
 
+// A column of a synthetic shape with the given attoptions, in the catalog's
+// order.
+func testTableSwapColumn(name string, options ...string) tableSwapColumn {
+	sorted := slices.Clone(options)
+	slices.Sort(sorted)
+	return tableSwapColumn{
+		name:           name,
+		typeName:       "bigint",
+		notNull:        true,
+		storage:        "p",
+		statistics:     -1,
+		options:        sorted,
+		orderedOptions: slices.Clone(options),
+	}
+}
+
+func testTableSwapShapeOf(name string, columns ...tableSwapColumn) *tableSwapShape {
+	return &tableSwapShape{
+		name:            name,
+		kind:            "r",
+		persistence:     "p",
+		replicaIdentity: "d",
+		accessMethod:    "heap",
+		owner:           "bringyour",
+		columns:         columns,
+		primaryKey:      []string{columns[0].name},
+	}
+}
+
+// PostgreSQL 18.7 stamps every new column with an internal option,
+// pg_attver, which no statement can set: the twin's columns get versions the
+// table's never carry. A table from before 18.7 has none; one created since
+// has older ones. On Main on 2026-11-17 the rehearsal of pending_task read
+// pg_attver=2138604065658440 on every column of the twin and nothing on the
+// table, and refused. The comparison holds only the options a user sets, so
+// a missing or different user option still refuses.
+func TestTableSwapDifferencesIgnorePostgresInternalColumnOptions(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		table       *tableSwapShape
+		twin        *tableSwapShape
+		differences int
+	}{
+		{
+			name:  "a table from before 18.7",
+			table: testTableSwapShapeOf("pending_task", testTableSwapColumn("task_id"), testTableSwapColumn("run_at")),
+			twin: testTableSwapShapeOf(
+				"pending_task_next",
+				testTableSwapColumn("task_id", "pg_attver=2138604065658440"),
+				testTableSwapColumn("run_at", "pg_attver=2138604065658440"),
+			),
+		},
+		{
+			name: "a table created since, with a user option",
+			table: testTableSwapShapeOf(
+				"synthetic_queue",
+				testTableSwapColumn("item_id", "pg_attver=2137466531237784"),
+				testTableSwapColumn("queue_key", "pg_attver=2137466531401296", "n_distinct=-0.5"),
+			),
+			twin: testTableSwapShapeOf(
+				"synthetic_queue_next",
+				testTableSwapColumn("item_id", "pg_attver=2138604065658440"),
+				testTableSwapColumn("queue_key", "n_distinct=-0.5", "pg_attver=2138604065658440"),
+			),
+		},
+		{
+			name: "a twin without the user option",
+			table: testTableSwapShapeOf(
+				"synthetic_queue",
+				testTableSwapColumn("item_id"),
+				testTableSwapColumn("queue_key", "n_distinct=-0.5"),
+			),
+			twin: testTableSwapShapeOf(
+				"synthetic_queue_next",
+				testTableSwapColumn("item_id", "pg_attver=2138604065658440"),
+				testTableSwapColumn("queue_key", "pg_attver=2138604065658440"),
+			),
+			differences: 1,
+		},
+		{
+			name: "a twin with another user option value",
+			table: testTableSwapShapeOf(
+				"synthetic_queue",
+				testTableSwapColumn("item_id", "pg_attver=2137466531237784"),
+				testTableSwapColumn("queue_key", "pg_attver=2137466531237784", "n_distinct=-0.5"),
+			),
+			twin: testTableSwapShapeOf(
+				"synthetic_queue_next",
+				testTableSwapColumn("item_id", "pg_attver=2138604065658440"),
+				testTableSwapColumn("queue_key", "pg_attver=2138604065658440", "n_distinct=100"),
+			),
+			differences: 1,
+		},
+	} {
+		if differences := test.table.differences(test.twin, tableSwapNextName); len(differences) != test.differences {
+			t.Errorf("%s: %d difference(s), not %d:\n%s", test.name, len(differences), test.differences, strings.Join(differences, "\n"))
+		}
+	}
+}
+
+// The twin gets the options a user set on the table's columns, and never
+// PostgreSQL's own: the server gives a new column its pg_attver and drops a
+// value an ALTER COLUMN SET names.
+func TestTableSwapTwinSqlSetsOnlyUserColumnOptions(t *testing.T) {
+	table := testTableSwapShapeOf(
+		"synthetic_queue",
+		testTableSwapColumn("item_id", "pg_attver=2137466531237784"),
+		testTableSwapColumn("queue_key", "pg_attver=2137466531237784", "n_distinct=-0.5"),
+		testTableSwapColumn("payload"),
+	)
+	set := []string{}
+	for _, statement := range table.twinSql("synthetic_queue_next") {
+		if strings.Contains(statement, "pg_attver") {
+			t.Errorf("a statement sets PostgreSQL's internal option: %s", statement)
+		}
+		if strings.Contains(statement, " SET (") {
+			set = append(set, statement)
+		}
+	}
+	expected := []string{"ALTER TABLE public." + quoteIdentifier("synthetic_queue_next") + " ALTER COLUMN " + quoteIdentifier("queue_key") + " SET (n_distinct=-0.5)"}
+	if !slices.Equal(set, expected) {
+		t.Fatalf("column option statements %q, not %q", set, expected)
+	}
+}
+
+// A difference says which relation holds which value: on 2026-11-17 the
+// twin's options were read as the table's.
+func TestTableSwapDifferencesNameEachSide(t *testing.T) {
+	table := testTableSwapShapeOf("synthetic_queue", testTableSwapColumn("item_id"), testTableSwapColumn("queue_key", "n_distinct=-0.5"))
+	twin := testTableSwapShapeOf("synthetic_queue_next", testTableSwapColumn("item_id"), testTableSwapColumn("queue_key"))
+	differences := table.differences(twin, tableSwapNextName)
+	if len(differences) != 1 {
+		t.Fatalf("differences %q", differences)
+	}
+	// what the difference says relation has, through the end of the column
+	side := func(relation string) string {
+		at := strings.Index(differences[0], relation+" has {")
+		if at < 0 {
+			return ""
+		}
+		rest := differences[0][at:]
+		return rest[:strings.Index(rest, "}")+1]
+	}
+	if twinSide, tableSide := side("synthetic_queue_next"), side("synthetic_queue"); !strings.Contains(tableSide, "options:[n_distinct=-0.5]") || !strings.Contains(twinSide, "options:[]") {
+		t.Fatalf("the difference does not say which relation has which options: %s", differences[0])
+	}
+}
+
 // The preflight hook's refusal surfaces as the swap's.
 func TestTableSwapPreflightStateRefusesByCall(t *testing.T) {
 	refusal := errors.New("synthetic refusal")

@@ -112,7 +112,9 @@ func testTableSwapRows(t testing.TB, ctx context.Context, table string) map[stri
 
 // What a reader, the monitor or db audit sees of the table under its name:
 // index and constraint definitions, storage settings, the owner, grants,
-// comments and columns.
+// comments and columns with their user options. PostgreSQL's internal column
+// options (tableSwapInternalOptionPrefix) are each relation's own, so a
+// swapped-in table carries new ones.
 func testTableSwapCatalog(t testing.TB, ctx context.Context, table string) string {
 	t.Helper()
 	var catalog string
@@ -129,7 +131,8 @@ func testTableSwapCatalog(t testing.TB, ctx context.Context, table string) strin
 				c.relacl::text,
 				obj_description(c.oid, 'pg_class'),
 				(SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || ' ' || attnotnull::text || ' ' || attgenerated::text || ' ' ||
-					coalesce(attstattarget::text, '-') || ' ' || coalesce(array_to_string(attoptions, ','), '-') || ' ' ||
+					coalesce(attstattarget::text, '-') || ' ' ||
+					coalesce(nullif(array_to_string(ARRAY(SELECT o FROM unnest(attoptions) o WHERE NOT starts_with(o, 'pg_')), ','), ''), '-') || ' ' ||
 					coalesce(col_description(c.oid, attnum), '-'), E'\n' ORDER BY attnum)
 					FROM pg_attribute WHERE attrelid = c.oid AND attnum > 0 AND NOT attisdropped),
 				(SELECT string_agg(obj_description(indexrelid, 'pg_class'), ',') FROM pg_index WHERE indrelid = c.oid)
@@ -615,6 +618,116 @@ func TestTableSwapRollbackRestoresTheOldRelationWithLaterWrites(t *testing.T) {
 		// with no old table kept, the table swaps again
 		if err := testTableSwap(t, ctx, TableSwapOptions{}); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+// Each column's attoptions as the catalog has them, by column name.
+func testTableSwapColumnOptions(t testing.TB, ctx context.Context, table string) map[string][]string {
+	t.Helper()
+	options := map[string][]string{}
+	MaintenanceDb(ctx, func(conn PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT attname::text, coalesce(attoptions, ARRAY[]::text[])
+			FROM pg_attribute
+			WHERE attrelid = to_regclass($1) AND 0 < attnum AND NOT attisdropped
+			ORDER BY attnum
+			`,
+			"public."+table,
+		)
+		WithPgResult(result, err, func() {
+			for result.Next() {
+				var name string
+				var columnOptions []string
+				Raise(result.Scan(&name, &columnOptions))
+				options[name] = columnOptions
+			}
+		})
+	})
+	return options
+}
+
+// PostgreSQL's internal options of a column (tableSwapInternalOptionPrefix).
+func testTableSwapInternalOptions(options []string) []string {
+	internal := []string{}
+	for _, option := range options {
+		if strings.HasPrefix(option, tableSwapInternalOptionPrefix) {
+			internal = append(internal, option)
+		}
+	}
+	return internal
+}
+
+// PostgreSQL 18.7 and later stamp every column a relation is created with,
+// the twin's included, with an internal option (pg_attver, the column's
+// version in its row type) that no statement can set, so the twin's never
+// equal the table's. On Main on 2026-11-17 the rehearsal of pending_task
+// refused on exactly that. The dry run, the swap and the rollback run all the
+// same; the user's column option is copied, and each relation keeps the
+// versions the server gave it. A server before 18.7 stamps nothing, and the
+// swap runs the same.
+func TestTableSwapRunsBesidePostgresInternalColumnOptions(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		testTableSwapPreflight.reset(map[int]error{})
+		testTableSwapCreate(t, ctx)
+		testTableSwapSeed(t, ctx, 200)
+		// a column added later has a later version of its own
+		MaintenanceTx(ctx, func(tx PgTx) {
+			RaisePgResult(tx.Exec(ctx, `ALTER TABLE test_table_swap_queue ADD COLUMN added_later integer`))
+		})
+		before := testTableSwapColumnOptions(t, ctx, testTableSwapTable)
+		versioned := 0 < len(before)
+		for _, options := range before {
+			versioned = versioned && 0 < len(testTableSwapInternalOptions(options))
+		}
+		// the 18 releases from 18.7 keep the version in attoptions; 19 moves it
+		// to a pg_attribute column of its own
+		serverVersion := testContractPartitionScalar[int64](t, ctx, `SELECT current_setting('server_version_num')::bigint`)
+		if 180007 <= serverVersion && serverVersion < 190000 && !versioned {
+			t.Fatalf("PostgreSQL %d stamped not every column with an internal option: %v", serverVersion, before)
+		}
+		t.Logf("PostgreSQL %d, internal column options: %t", serverVersion, versioned)
+		oid := testTableSwapOid(t, ctx, testTableSwapTable)
+
+		if err := testTableSwap(t, ctx, TableSwapOptions{DryRun: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err := testTableSwap(t, ctx, TableSwapOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		after := testTableSwapColumnOptions(t, ctx, testTableSwapTable)
+		if !slices.Equal(tableSwapUserOptions(after["queue_key"]), []string{"n_distinct=-0.5"}) {
+			t.Fatalf("the user's column option is not copied: %v", after["queue_key"])
+		}
+		if len(after) != len(before) {
+			t.Fatalf("columns %v after the swap, %v before", after, before)
+		}
+		for name, options := range after {
+			if !slices.Equal(tableSwapUserOptions(options), tableSwapUserOptions(before[name])) {
+				t.Fatalf("column %s has options %v after the swap, %v before", name, options, before[name])
+			}
+			// the swapped-in table's versions are the server's own, never the
+			// old relation's
+			if internal := testTableSwapInternalOptions(options); versioned && (len(internal) == 0 || slices.Equal(internal, testTableSwapInternalOptions(before[name]))) {
+				t.Fatalf("column %s has internal options %v after the swap, %v before", name, internal, testTableSwapInternalOptions(before[name]))
+			}
+		}
+		oldTables := testTableSwapOldTables(t, ctx)
+		if len(oldTables) != 1 || fmt.Sprint(testTableSwapColumnOptions(t, ctx, oldTables[0])) != fmt.Sprint(before) {
+			t.Fatalf("the kept old relation's column options changed: %v", oldTables)
+		}
+
+		if err := testTableSwap(t, ctx, TableSwapOptions{Rollback: true}); err != nil {
+			t.Fatal(err)
+		}
+		if testTableSwapOid(t, ctx, testTableSwapTable) != oid {
+			t.Fatal("the rollback did not bring the old relation back")
+		}
+		if restored := testTableSwapColumnOptions(t, ctx, testTableSwapTable); fmt.Sprint(restored) != fmt.Sprint(before) {
+			t.Fatalf("the restored relation's column options %v, not %v", restored, before)
 		}
 	})
 }
