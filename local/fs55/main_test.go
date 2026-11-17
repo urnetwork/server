@@ -228,7 +228,7 @@ func TestFs55GroupPlansWriteNoRetiredKey(t *testing.T) {
 		}
 		gate := map[string]map[string]any{}
 		if err := yaml.Unmarshal([]byte(gateYaml), &gate); err != nil || len(gate["sidecar"]) == 0 {
-			t.Errorf("%s's gate %q does not parse as a sidecar block that opens something (%v)", groupName, gateYaml, err)
+			t.Errorf("%s's gate %q does not parse as a non-empty sidecar block (%v)", groupName, gateYaml, err)
 		}
 	}
 	for _, groupName := range []string{"MG0", "MG1"} {
