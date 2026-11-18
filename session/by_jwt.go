@@ -164,6 +164,11 @@ type ByJwt struct {
 	// (session_mint.go). Never signed or serialized, and not carried by a
 	// renewal or a copy.
 	mintStart *sessionMintStart
+	// the session a renewal carries from its presented credential, with the
+	// earliest expiry along the way: a horizon the session's registration
+	// already covers (session_mint_unextended.go). Never signed or
+	// serialized; kept by a copy.
+	carried *carriedSession
 }
 
 func newRegisteredClaims(userId server.Id) gojwt.RegisteredClaims {
@@ -949,6 +954,10 @@ func (self *ByJwt) clone() *ByJwt {
 	copy.NotBefore = cloneNumericDate(self.NotBefore)
 	copy.IssuedAt = cloneNumericDate(self.IssuedAt)
 	copy.mintStart = nil
+	if self.carried != nil {
+		carried := *self.carried
+		copy.carried = &carried
+	}
 	return &copy
 }
 
@@ -960,6 +969,7 @@ func (self *ByJwt) Renew() *ByJwt {
 	copy.Roles = slices.Clone(self.Roles)
 	copy.ClientLimitUpgrade = cloneClientLimitUpgrade(self.ClientLimitUpgrade)
 	copy.mintStart = nil
+	copy.carried = self.carriedByRenewal()
 	return &copy
 }
 

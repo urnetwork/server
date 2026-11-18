@@ -196,7 +196,7 @@ func TestRevocationRecordUnansweredKeepsTheChecksThatNeedNoRedis(t *testing.T) {
 // client_golang push.go), and Mimir adds service from the grouping.
 func TestUncheckedAcceptanceMetricsCarryNoPushGroupingLabel(t *testing.T) {
 	grouping := []string{"env", "service", "block", "host", "instance", "job"}
-	for _, collector := range []prometheus.Collector{sessionCheckUnavailableCounter, sessionMintUntaggedCounter} {
+	for _, collector := range []prometheus.Collector{sessionCheckUnavailableCounter, sessionMintUntaggedCounter, sessionMintUnextendedCounter} {
 		descs := make(chan *prometheus.Desc, 8)
 		collector.Describe(descs)
 		close(descs)
@@ -210,7 +210,7 @@ func TestUncheckedAcceptanceMetricsCarryNoPushGroupingLabel(t *testing.T) {
 		}
 	}
 	registry := prometheus.NewRegistry()
-	registry.MustRegister(sessionCheckUnavailableCounter, sessionMintUntaggedCounter)
+	registry.MustRegister(sessionCheckUnavailableCounter, sessionMintUntaggedCounter, sessionMintUnextendedCounter)
 	families, err := registry.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -228,7 +228,7 @@ func TestUncheckedAcceptanceMetricsCarryNoPushGroupingLabel(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"urnetwork_session_check_unavailable_total", "urnetwork_session_mint_untagged_total"} {
+	for _, name := range []string{"urnetwork_session_check_unavailable_total", "urnetwork_session_mint_untagged_total", "urnetwork_session_mint_unextended_total"} {
 		if !names[name] {
 			t.Errorf("%s is not exported", name)
 		}
@@ -239,5 +239,8 @@ func TestUncheckedAcceptanceMetricsCarryNoPushGroupingLabel(t *testing.T) {
 	}
 	if got := testutil.CollectAndCount(sessionMintUntaggedCounter); got < 3 {
 		t.Errorf("the untagged mint count exports %d series, want signin, code and client", got)
+	}
+	if got := testutil.CollectAndCount(sessionMintUnextendedCounter); got < 3 {
+		t.Errorf("the unextended mint count exports %d series, want signin, code and client", got)
 	}
 }
