@@ -321,7 +321,16 @@ func (self *loadPause) proceed(ctx context.Context) bool {
 	if self.last != nil && now.Sub(self.last.at) < self.interval {
 		return !self.paused
 	}
-	reading := self.target.read(ctx, self.notes)
+	// the counters alone: a host stats command is the windows' to run, not each check's
+	reading := &driveReading{at: now}
+	if self.target.Counters != nil {
+		counters, err := self.target.Counters.ReadDriveCounters(ctx, self.target.ClusterId)
+		if err != nil {
+			self.notes.add(fmt.Sprintf("the pause's drive counters unread: %v", err))
+		} else {
+			reading.counters = counters
+		}
+	}
 	if self.last != nil {
 		seconds := readingSeconds(self.last, reading)
 		operations := uint64(0)
