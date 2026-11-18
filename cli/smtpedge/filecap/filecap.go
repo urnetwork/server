@@ -2,13 +2,14 @@
 // image (QD-1066, owner decision 597; DESIGN §19.4's smtpedge capability).
 //
 // smtpedge runs as uid 65532 (D-OPS-1) and source-routes each MX dial with SO_MARK, which needs CAP_NET_ADMIN (or,
-// from Linux 5.17, CAP_NET_RAW; the block is granted CAP_NET_ADMIN).
-// warp's --cap-add=CAP_NET_ADMIN only puts the capability in the container's bounding set, and a process that is
-// not root gains a capability at exec only from its binary's file capability. setcap is in no reviewed runtime
-// package (server/cli/RUNTIME-PACKAGES.md), so the image's build stage runs this package's helper, cmd, from a
-// bind mount to write cap_net_admin=ep on the binary, and the helper never ships. The release runs the same
-// helper's check-image on the published image (CheckImage) and refuses one whose binary lacks it, since the
-// failure otherwise shows only at the first marked dial, as EPERM at SO_MARK.
+// from Linux 5.17, CAP_NET_RAW; the block is granted CAP_NET_ADMIN). warp's --cap-add=CAP_NET_ADMIN only puts
+// the capability in the container's bounding set, and a process that is not root gains a capability at exec only
+// from its binary's file capability. setcap is in no reviewed runtime package (server/cli/RUNTIME-PACKAGES.md),
+// so the image's build stage runs this package's helper, cmd, from a bind mount to write cap_net_admin=ep on the
+// binary, and the helper never ships. The release runs the same helper's check-image on the published image
+// (CheckImage) and refuses one whose binary lacks it, since the failure otherwise shows only at the first marked
+// dial, as EPERM at SO_MARK. A container run with no-new-privileges gains no file capability at exec, so the
+// block must run without it, or that EPERM returns with the attribute in place.
 //
 // The attribute is the kernel's struct vfs_cap_data, or vfs_ns_cap_data (include/uapi/linux/capability.h), in
 // little-endian order: a 32-bit magic_etc whose top byte is the revision and whose low bit is
