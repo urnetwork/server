@@ -489,16 +489,20 @@ Measured across the fleet on 2026-11-18, with sessions modelled as §5 specifies
 - The SDK maps `session_limit_reached` to a typed error, and every app shows it with a path to the Sessions screen.
 
 ### Metrics
-| Metric | Meaning |
-|---|---|
-| `urnetwork_session_check_unavailable_total` | Credentials accepted unchecked because Redis was unreachable (decision 3), labelled by service, path and credential type |
-| `urnetwork_session_mint_untagged_total` | Mints that fell back to an untagged credential (decision 3) |
-| `urnetwork_session_cap_would_refuse_total` | Mints the limit would refuse while it is unenforced (decision 6) |
-| `urnetwork_session_cap_refused_total` | Mints refused at the enforced limit (decision 7) |
-| `urnetwork_session_freed_on_removal_total` | Client-owned sessions freed by a client removal (decision 6) |
-| `urnetwork_session_live_per_network` | Sampled histogram of live sessions per network |
+| Metric | Labels | Meaning |
+|---|---|---|
+| `urnetwork_session_check_unavailable_total` | `path`, `credential` (session or client) | Credentials accepted unchecked because Redis was unreachable (decision 3). Real acceptances only; a caller that cancels mid-check is not counted. |
+| `urnetwork_session_mint_untagged_total` | `kind` | Mints that fell back to an untagged credential (decision 3) |
+| `urnetwork_session_cap_would_refuse_total` | `kind`, `cap` (live or retained) | Mints the limit would refuse while it is unenforced (decision 6) |
+| `urnetwork_session_cap_refused_total` | `kind`, `cap` | Mints refused at the enforced limit (decision 7) |
+| `urnetwork_session_freed_on_removal_total` | `path` | Client-owned sessions freed by a client removal (decision 6) |
+| `urnetwork_session_live_per_network` | none | Histogram of live sessions per network. Each sampling pass observes every network with a live set once, on a fixed period. |
 
-Alerts cover a sustained unchecked-acceptance rate and untagged-mint fallbacks. Dashboards show would-refuse counts by kind before the switch flips.
+`kind` is the session kind (`signin`, `code`, `client`).
+
+No metric declares a `service` label of its own. `service`, like env, block, host and instance, is a grouping label of the metrics push, and the push client refuses the whole push of a process when any metric already carries one. Queries still group by `service`, which the push adds.
+
+Alerts cover a sustained unchecked-acceptance rate, measured as a share of revocation-record checks, and untagged-mint fallbacks. Dashboards show would-refuse counts by kind and cap before the switch flips.
 
 ### Plan
 1. **Implement in parallel workstreams:**
