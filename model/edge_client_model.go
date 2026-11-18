@@ -9,11 +9,17 @@ package model
 // The caller, api's internal edge route, has already held the key to config/<env>/edge.yml
 // (server.EdgeClientsConfig.Admits). Nothing here takes a client id from a request.
 //
-// The jwt is a strict_exp client token: it ends at its exp with no grace, on api, on connect, whose transport
-// closes at that moment, and at sockets (session's validateStrictExp), so a copied one lasts at most JwtLife. It
-// carries no session: like a prober's it is signed outside the session registry, since an edge client is the
-// platform's own and no person signs it in or out. A client that was removed stays removed: a row that is not
-// active, or that sits in another network or on another device, is refused, never revived.
+// The jwt is a strict_exp client token: it ends at its exp with no grace, on api and on connect, whose transport
+// closes at that moment, so a copied one lasts at most JwtLife. It carries no session: like a prober's it is
+// signed outside the session registry, since an edge client is the platform's own and no person signs it in or
+// out. A client that was removed stays removed: a row that is not active, or that sits in another network or on
+// another device, is refused, never revived.
+//
+// sockets takes no jwt (QD-1029): beside each, api's route answers the client a service token of audience sockets
+// (QD-1054, oauth.MintEdgeClientSocketsToken). A removal of an edge client therefore owes its client rev/ object,
+// which sockets reads to refuse the token for the rest of its 15 minutes: the chain's own rev effect owes a
+// client's object only for a client bound to a sidecar, which no edge client is, so this file registers the
+// edge clients' own effect (applyEdgeClientRevocationEffectInTx).
 
 import (
 	"context"
@@ -22,6 +28,8 @@ import (
 	"time"
 
 	gojwt "github.com/golang-jwt/jwt/v5"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -191,4 +199,44 @@ func MintEdgeClient(ctx context.Context, networkId server.Id, key *EdgeClientKey
 		return nil, returnErr
 	}
 	return mint, nil
+}
+
+// The name the edge clients' rev/ effect registers under.
+const RemovalEffectEdgeClientRev = "rev-edge-client"
+
+func init() {
+	RegisterRemovalEffect(RemovalEffectEdgeClientRev, applyEdgeClientRevocationEffectInTx)
+}
+
+// Owes a rev/ object for each client the removal ends in urnetwork-edge, as sidecar.yml names it: each may hold
+// a sockets token api's edge client route answered it (QD-1054), whose network_id is that network, so its object
+// is the one sockets reads for it. Clients of every other network are the chain's own rev effect's. With no
+// urnetwork_edge in sidecar.yml it owes nothing, since sockets then takes no edge caller's token at all.
+func applyEdgeClientRevocationEffectInTx(ctx context.Context, tx server.PgTx, removal *Removal) error {
+	clients := removal.SubjectsOf(sidecar.RevocationKindClient)
+	if len(clients) == 0 {
+		return nil
+	}
+	edgeNetworkId, ok := server.CurrentSidecarConfig().UrnetworkEdge()
+	if !ok {
+		return nil
+	}
+	revocations := []*SidecarRevocation{}
+	for _, client := range clients {
+		if client.NetworkId != edgeNetworkId {
+			continue
+		}
+		if removal.Time.IsZero() {
+			return errors.New("a removal with no time")
+		}
+		revocations = append(revocations, &SidecarRevocation{
+			NetworkId: client.NetworkId,
+			Kind:      sidecar.RevocationKindClient,
+			SubjectId: client.SubjectId,
+			NotBefore: SidecarRevocationNotBefore(removal.Time, DefaultSidecarRevSettings()),
+			Reason:    removal.Reason,
+		})
+	}
+	WriteRevocations(ctx, tx, revocations)
+	return nil
 }

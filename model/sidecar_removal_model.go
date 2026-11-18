@@ -16,8 +16,11 @@ package model
 // The chain's own effect, "rev", owes §7.8's rev/ objects (sidecar_rev_model.go):
 // one per removed sidecar or member, and one per removed client that is bound
 // to a sidecar (sidecar_identity_binding), since only such a client can hold a
-// service token: the exchange takes only a bound key's proof. A client of a
-// binary that does not link MG1 has no binding, so it owes none.
+// service token from the exchange: it takes only a bound key's proof. A client
+// of a binary that does not link MG1 has no binding, so it owes none here. The
+// one other holder of a service token, an urnetwork-edge platform client, which
+// api's edge client route mints a sockets token (QD-1054), owes its object
+// through the edge clients' own effect (edge_client_model.go).
 
 import (
 	"context"

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -155,6 +157,103 @@ func TestMintEdgeClientRefusesWhatIsNotItsNetworks(t *testing.T) {
 		}
 		if _, err := MintEdgeClient(ctx, server.Id{}, key, settings); err == nil {
 			t.Error("the zero network minted")
+		}
+	})
+}
+
+// An edge client's removal owes its client rev/ object (QD-1054), though it is bound to no sidecar: the sockets token
+// api's route answered it is refused at sockets from not_before on, by sockets' own reader of rev/. A removed
+// unbound client of another network owes none here, and with no urnetwork_edge in sidecar.yml an edge client's
+// removal owes none either, since sockets then takes no edge caller's token. On Postgres, with rev/ on T2's
+// FakeBlobs.
+func TestRemoveEdgeClientOwesItsRevocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		revStore := newTestRevStore(t)
+		// the removal's own clock is real time, so the fake starts at it
+		revStore.clock.AdvanceTo(time.Now())
+		SetSidecarRevStore(revStore.store)
+		t.Cleanup(func() { SetSidecarRevStore(nil) })
+
+		edgeNetworkId := server.NewId()
+		adminUserId := server.NewId()
+		Testing_CreateNetwork(ctx, edgeNetworkId, "urnetwork-edge-rev-test", adminUserId)
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  urnetwork_edge: " + edgeNetworkId.String() + "\n"))
+		edgeSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: edgeNetworkId, UserId: adminUserId, NetworkName: "urnetwork-edge-rev-test"})
+		removeClient := func(clientSession *session.ClientSession, clientId server.Id) {
+			t.Helper()
+			result, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: clientId}, clientSession)
+			if err != nil || result.Error != nil {
+				t.Fatalf("remove: %v %+v", err, result)
+			}
+		}
+		held := func(networkId server.Id, clientId server.Id) *sidecar.RevocationRecord {
+			t.Helper()
+			return revStore.held(t, &SidecarRevocation{NetworkId: networkId, Kind: sidecar.RevocationKindClient, SubjectId: clientId})
+		}
+
+		mint, err := MintEdgeClient(ctx, edgeNetworkId, &EdgeClientKey{Environment: "test", Block: "smtpedge", Host: "lb-a.example", Slot: 0, Index: 0}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issuedAt := time.Now().Truncate(time.Second)
+		removeClient(edgeSession, mint.ClientId)
+		record := held(edgeNetworkId, mint.ClientId)
+		if record == nil {
+			t.Fatal("a removed edge client has no rev/ object")
+		}
+		if record.Reason != sidecar.RevocationReasonRemoved {
+			t.Fatalf("reason %s", record.Reason)
+		}
+		var deactivateTime time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT deactivate_time FROM network_client WHERE client_id = $1`, mint.ClientId).Scan(&deactivateTime))
+		})
+		if record.NotBefore.Before(deactivateTime) {
+			t.Fatalf("not_before %v before the deactivation %v", record.NotBefore, deactivateTime)
+		}
+		// sockets' reader refuses a token the route issued the client before the removal
+		settings := sidecar.DefaultRevocationSettings()
+		settings.Clock = revStore.clock
+		checker := sidecar.NewRevocationChecker(revStore.blobs, testRevVerify, settings)
+		err = checker.Check(ctx, &sidecar.Principal{
+			NetworkId: [16]byte(edgeNetworkId),
+			ClientId:  [16]byte(mint.ClientId),
+			Audience:  "sockets",
+			IssuedAt:  issuedAt,
+			ExpiresAt: issuedAt.Add(15 * time.Minute),
+		})
+		if !errors.Is(err, sidecar.ErrRevocationVoidsToken) {
+			t.Fatalf("the removed edge client's token is not void: %v", err)
+		}
+
+		// another network's unbound client owes nothing here
+		otherNetworkId := server.NewId()
+		otherUserId := server.NewId()
+		Testing_CreateNetwork(ctx, otherNetworkId, "other-rev-test", otherUserId)
+		otherSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: otherNetworkId, UserId: otherUserId, NetworkName: "other-rev-test"})
+		authResult, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "synthetic", DeviceSpec: "synthetic"}, otherSession)
+		if err != nil || authResult.Error != nil || authResult.ByClientJwt == nil {
+			t.Fatalf("client: %v %+v", err, authResult)
+		}
+		otherByJwt, err := session.ParseByJwt(ctx, *authResult.ByClientJwt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removeClient(otherSession, *otherByJwt.ClientId)
+		if record := held(otherNetworkId, *otherByJwt.ClientId); record != nil {
+			t.Fatalf("an unbound client of another network owes a rev/ object: %+v", record)
+		}
+
+		// sidecar.yml naming no urnetwork_edge: an edge client's removal owes nothing
+		unnamed, err := MintEdgeClient(ctx, edgeNetworkId, &EdgeClientKey{Environment: "test", Block: "smtpedge", Host: "lb-a.example", Slot: 1, Index: 0}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  sockets: {enabled: false}\n"))
+		removeClient(edgeSession, unnamed.ClientId)
+		if record := held(edgeNetworkId, unnamed.ClientId); record != nil {
+			t.Fatalf("an edge client's removal with no urnetwork_edge owes a rev/ object: %+v", record)
 		}
 	})
 }
