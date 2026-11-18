@@ -1746,7 +1746,8 @@
         "x": 0,
         "y": 33
       },
-      "panels": []
+      "panels": [],
+      "urnetworkInternalOnly": true
     },
     {
       "id": 48,
@@ -1997,7 +1998,8 @@
             "uid": "warp-mimir"
           }
         }
-      ]
+      ],
+      "urnetworkInternalOnly": true
     },
     {
       "id": 49,
@@ -2059,7 +2061,8 @@
             "uid": "warp-mimir"
           }
         }
-      ]
+      ],
+      "urnetworkInternalOnly": true
     },
     {
       "id": 50,
@@ -2121,7 +2124,8 @@
             "uid": "warp-mimir"
           }
         }
-      ]
+      ],
+      "urnetworkInternalOnly": true
     },
     {
       "id": 51,
@@ -2192,7 +2196,8 @@
             "uid": "warp-mimir"
           }
         }
-      ]
+      ],
+      "urnetworkInternalOnly": true
     },
     {
       "id": 13,

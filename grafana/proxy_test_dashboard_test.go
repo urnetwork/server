@@ -934,6 +934,16 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 	query := func(id int, refId string) string {
 		return proxyTestConcrete(proxyTestTarget(t, dashboard, id, refId).Expr)
 	}
+	// a copy without the internal dashboard's internal-only panels is
+	// evaluated on the panels it has
+	skipped := map[int]bool{}
+	if dashboardName != proxyTestDashboardName {
+		for _, item := range readProxyTestDocumentJson(t, proxyTestDashboardName)["panels"].([]any) {
+			if panel := item.(map[string]any); panel[proxyTestInternalOnlyKey] == true {
+				skipped[int(panel["id"].(float64))] = true
+			}
+		}
+	}
 
 	const (
 		up             = "urnetwork_proxy_test_up"
@@ -1346,6 +1356,9 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 	for _, c := range cases {
 		expressionTests := []map[string]any{}
 		for _, e := range c.evaluations {
+			if skipped[e.id] {
+				continue
+			}
 			expressionTests = append(expressionTests, map[string]any{"expr": query(e.id, e.refId), "eval_time": "1500m", "exp_samples": e.samples})
 		}
 		tests = append(tests, map[string]any{"name": c.name, "interval": "1m", "input_series": c.series, "promql_expr_test": expressionTests})
