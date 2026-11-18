@@ -33,9 +33,8 @@ func CleanupSessionOperation(ctx context.Context, operation session.SessionClean
 					ids = append(ids, id)
 				}
 			})
-			// The predicate was rechecked after waiting for locks. A newer rebind
-			// wins, and so does a descendant bound to another session.
-			_, err = deactivateLockedNetworkClientsInTx(withSessionCleanupScope(ctx, operation.TargetSessionIds), tx, ids, operation.NetworkId)
+			// The predicate was rechecked after waiting for locks. A newer rebind wins.
+			_, err = deactivateLockedNetworkClientsInTx(ctx, tx, ids, operation.NetworkId)
 			server.Raise(err)
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE auth_code SET remaining_uses=0 WHERE network_id=$1 AND origin_session_id=ANY($2) AND active`, operation.NetworkId, operation.TargetSessionIds))
 			server.Raise(tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM network_client WHERE network_id=$1 AND session_id=ANY($2) AND active)`, operation.NetworkId, operation.TargetSessionIds).Scan(&complete))
