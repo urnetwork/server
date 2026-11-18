@@ -43,7 +43,8 @@ func TestRevocationRecordPanelsChartReadAndWriteOutcomes(t *testing.T) {
 				"urnetwork_session_check_unavailable_total", "decision 3", "Readers stay off", "auth.yml", "revocation_record_enabled"}},
 		{writes, `sum by (service, kind, outcome) (rate(urnetwork_session_revocation_record_writes_total{env="$env"}[$__rate_interval]))`, "{{service}} {{kind}} {{outcome}}",
 			[]string{"client", "session", "credential", "network", "projection", "failure", "stale",
-				"fails the revocation itself", "because Redis was unavailable", "Writers always write", "revocation_record_enabled"}},
+				"fails the revocation itself", "because Redis was unavailable", "Writers always write", "revocation_record_enabled",
+				"SessionRevocationWritesFailing", "more than 1%"}},
 	} {
 		if len(chart.panel.Targets) != 1 || chart.panel.Targets[0].Expr != chart.expr || chart.panel.Targets[0].LegendFormat != chart.legend {
 			t.Errorf("%s does not chart %s", chart.panel.Title, chart.expr)

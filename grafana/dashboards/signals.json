@@ -4134,7 +4134,7 @@
     {
       "type": "timeseries",
       "title": "oldest unfinished session operation",
-      "description": "Age of the oldest unfinished session operation or index repair by state.",
+      "description": "Age of the oldest unfinished session operation or index repair by state, the largest any taskworker reports. Only the taskworker running maintenance shard 0 refreshes it, and the others keep what they last saw, so a flat value can be stale; the unfinished session work still aging panel shows only ages that are growing, which is what the alerts read. The orange line is SessionJournalStuck's 60 seconds and the red line SessionJournalStuckLong's 15 minutes.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4148,7 +4148,29 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
         },
         "overrides": []
       },
@@ -4174,7 +4196,7 @@
     {
       "type": "timeseries",
       "title": "session clock, authority loss and observation drops",
-      "description": "The conservative Redis versus local clock disagreement seen by session minting, mints suspended per second because it exceeded the fleet bound, journalled revocations per second whose Redis receipt and markers are missing, and optional observations dropped per second.",
+      "description": "The conservative Redis versus local clock disagreement seen by session minting, mints suspended per second because it exceeded the fleet bound, journalled revocations per second whose Redis receipt and markers are missing, and optional observations dropped per second. Alerts (warp grafana/alerting/session-authority.yml): SessionClockDisagreement warns above 10 seconds of disagreement on a host for 2 minutes, before the 15-second refusal; SessionClockRefusals and SessionAuthorityLoss page on any increase. The disagreement is sampled only by session mints, so it reads 0 until minting is on.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4269,7 +4291,7 @@
     {
       "type": "timeseries",
       "title": "revocation record writes / s by kind and outcome",
-      "description": "Writes to the Redis revocation record, per second by service, kind and outcome. client, session, credential and network are revocations: each writes its tombstone before its SQL change commits, and a failure fails the revocation itself, so the client or session stays active until the revoke is retried. A rising failure on these kinds means revocations are failing because Redis was unavailable. projection is a positive entry written after a SQL fallback found a credential valid: its failure only costs the next check another fallback, and stale is a projection refused because its SQL read was more than a minute old by Redis time. Writers always write, whether or not vault auth.yml has enabled readers with revocation_record_enabled, so the record is complete from the first enabled read.",
+      "description": "Writes to the Redis revocation record, per second by service, kind and outcome. client, session, credential and network are revocations: each writes its tombstone before its SQL change commits, and a failure fails the revocation itself, so the client or session stays active until the revoke is retried. A rising failure on these kinds means revocations are failing because Redis was unavailable. projection is a positive entry written after a SQL fallback found a credential valid: its failure only costs the next check another fallback, and stale is a projection refused because its SQL read was more than a minute old by Redis time. Writers always write, whether or not vault auth.yml has enabled readers with revocation_record_enabled, so the record is complete from the first enabled read. SessionRevocationWritesFailing (warn, warp grafana/alerting/session-authority.yml) fires when more than 1% of a service's revocation writes (projections left out) fail for 5 minutes, at least 0.1 a second; in the week of 2026-11-11 the share peaked at 0.05% on api and proxy.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -4307,6 +4329,126 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "session maintenance runs / min by outcome",
+      "description": "MaintainNetworkSessions runs per minute by outcome, across every taskworker: 32 shards every 30 seconds, about 62 successful runs a minute. Shard 0 also expires receipts, repairs the index outbox, recovers revocation operations and refreshes the journal gauges. SessionMaintenanceStalled (warn, warp grafana/alerting/session-authority.yml) fires under 32 successes a minute held for 10 minutes (the orange line); rolls dipped it for at most 5 minutes in the week of 2026-11-11. SessionMaintenanceFailing (warn) fires over 1 failure a minute held for 10 minutes: a shard that fails every run fails twice a minute. One lost shard among 32 is below what this rate can show; the monitor's task checks see it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 32
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_taskworker_executions_total{env=\"$env\",task=\"work.MaintainNetworkSessions\"}[5m])) * 60",
+          "legendFormat": "{{outcome}} / min"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "unfinished session work still aging",
+      "description": "The age of the oldest unfinished session work by state, counting only gauges that rose in the last 5 minutes: what SessionJournalStuck and SessionJournalStuckLong read. Only the taskworker that runs maintenance shard 0 refreshes the journal gauges, and every other taskworker keeps the value it last observed, so the oldest unfinished session operation panel can show a stale age that is not growing. A stuck operation's age rises at each observation. SessionJournalStuck (warn) fires on any state above 60 seconds (two maintenance intervals, the orange line) for 2 minutes; SessionJournalStuckLong (page) on a prepared or enforced revocation above 15 minutes (the red line) for 5 minutes. Empty while nothing is stuck.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) ((urnetwork_session_journal_oldest_seconds{env=\"$env\"} > 0) and (delta(urnetwork_session_journal_oldest_seconds{env=\"$env\"}[5m]) > 0))",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "sessions: unchecked acceptances, untagged mints, the session limit and frees (session/REVOKE-FINAL.md \u00a715)",
       "collapsed": false,
@@ -4314,7 +4456,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 233
+        "y": 241
       }
     },
     {
@@ -4325,7 +4467,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 234
+        "y": 242
       },
       "datasource": {
         "type": "prometheus",
@@ -4370,7 +4512,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 234
+        "y": 242
       },
       "datasource": {
         "type": "prometheus",
@@ -4432,7 +4574,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 234
+        "y": 242
       },
       "datasource": {
         "type": "loki",
@@ -4476,7 +4618,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 242
+        "y": 250
       },
       "datasource": {
         "type": "prometheus",
@@ -4516,7 +4658,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 242
+        "y": 250
       },
       "datasource": {
         "type": "prometheus",
@@ -4561,7 +4703,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 242
+        "y": 250
       },
       "datasource": {
         "type": "prometheus",
@@ -4601,7 +4743,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 250
+        "y": 258
       },
       "datasource": {
         "type": "prometheus",
@@ -4641,7 +4783,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 250
+        "y": 258
       },
       "datasource": {
         "type": "prometheus",
@@ -4696,7 +4838,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 250
+        "y": 258
       },
       "datasource": {
         "type": "prometheus",
@@ -4764,7 +4906,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 258
+        "y": 266
       }
     },
     {
@@ -4775,7 +4917,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 259
+        "y": 267
       },
       "datasource": {
         "type": "prometheus",
@@ -4825,7 +4967,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 259
+        "y": 267
       },
       "datasource": {
         "type": "prometheus",
@@ -4875,7 +5017,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 267
+        "y": 275
       }
     },
     {
@@ -4890,7 +5032,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 268
+        "y": 276
       },
       "fieldConfig": {
         "defaults": {
@@ -4962,7 +5104,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 268
+        "y": 276
       },
       "fieldConfig": {
         "defaults": {
@@ -5017,7 +5159,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 276
+        "y": 284
       },
       "fieldConfig": {
         "defaults": {
@@ -5089,7 +5231,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 276
+        "y": 284
       },
       "fieldConfig": {
         "defaults": {
