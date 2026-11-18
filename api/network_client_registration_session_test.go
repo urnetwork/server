@@ -231,8 +231,10 @@ func TestApiKeyRegistrationSessionRejectsUnprovenOrExpiredOriginal(t *testing.T)
 
 // A late index-enqueue failure rolls back the already inserted registration
 // tuple and associated client together, before a retry commits one operation.
+// The enqueue follows a failed index publication (the outbox takes only those).
 func TestApiKeyRegistrationSessionRollbackRetainsNoPartialBinding(t *testing.T) {
 	defer session.Testing_SetSessionCreationEnabled(true)()
+	defer session.Testing_FailSessionIndexPublishOnMint()()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {

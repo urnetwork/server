@@ -113,6 +113,49 @@ func provideKeysProvidePublicly(secretKeys map[ProvideMode][]byte) bool {
 
 type sessionFreePathKey struct{}
 type sessionFreeSkipKey struct{}
+type sessionCleanupTargetsKey struct{}
+
+// A deactivation under this context is a session revocation's cleanup of the
+// target sessions' clients: its descendant cascade passes over a descendant
+// bound to any other session, and that descendant's own descendants.
+func withSessionCleanupTargets(ctx context.Context, targets []server.Id) context.Context {
+	return context.WithValue(ctx, sessionCleanupTargetsKey{}, targets)
+}
+
+// The descendants the cascade deactivates: under a session cleanup, only those
+// bound to a target session or to none.
+func sessionCleanupDescendantsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) ([]server.Id, error) {
+	targets, ok := ctx.Value(sessionCleanupTargetsKey{}).([]server.Id)
+	if !ok || len(clientIds) == 0 {
+		return clientIds, nil
+	}
+	rows, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				(session_id IS NULL OR session_id = ANY($2))
+			ORDER BY client_id
+		`,
+		clientIds,
+		targets,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	kept := []server.Id{}
+	for rows.Next() {
+		var clientId server.Id
+		if err := rows.Scan(&clientId); err != nil {
+			return nil, err
+		}
+		kept = append(kept, clientId)
+	}
+	return kept, rows.Err()
+}
 
 // The removal path a deactivation under this context frees client sessions
 // for (urnetwork_session_freed_on_removal_total{path}).

@@ -16,9 +16,9 @@ import (
 // TestSessionIndexReviewIsTheSessionHorizonInAnyZone checks in.
 const sessionIndexHorizonZoneEnvName = "URNETWORK_TEST_SESSION_INDEX_HORIZON_ZONE"
 
-// A mint queues its network's session index for review at the session's
-// accept horizon. The outbox's next_review_time column holds UTC without a
-// zone, and pgx writes a time's wall clock, so the review is queued at the
+// A mint whose index publication fails queues its network's session index
+// for review at the session's accept horizon (a mint that publishes queues
+// nothing). The outbox's next_review_time column holds UTC without a zone, and pgx writes a time's wall clock, so the review is queued at the
 // horizon only when that time is a UTC one: in a process west of UTC it was
 // queued early by the zone's offset, and east of UTC late. A process takes its
 // zone when it starts, so the check runs in a child process in each zone.
@@ -68,6 +68,8 @@ func testSessionIndexReviewIsTheSessionHorizon(t *testing.T, zone string) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		actor := recoverySessionActor(t)
+		// the outbox takes only a failed publication
+		defer Testing_FailSessionIndexPublishOnMint()()
 		claims := NewByJwt(actor.ByJwt.NetworkId, actor.ByJwt.UserId, "session-index-horizon", false, false)
 		sessionId := server.NewId()
 		claims.SessionId = &sessionId

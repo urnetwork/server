@@ -596,7 +596,7 @@ func levelHistogram(t testing.TB) (uint64, float64) {
 // declares a grouping label as its own.
 func TestSessionCapMetricsPushUnderTheStatsGrouping(t *testing.T) {
 	grouping := map[string]bool{"env": true, "service": true, "block": true, "host": true, "instance": true}
-	collectors := []prometheus.Collector{sessionCapWouldRefuse, sessionCapRefused, sessionFreedOnRemoval, sessionLivePerNetwork, sessionLiveSamplePasses}
+	collectors := []prometheus.Collector{sessionCapWouldRefuse, sessionCapRefused, sessionFreedOnRemoval, sessionLivePerNetwork, sessionLiveSamplePasses, sessionOperationRecoveryFailures}
 	registry := prometheus.NewRegistry()
 	for _, collector := range collectors {
 		descriptions := make(chan *prometheus.Desc, 16)
@@ -652,4 +652,50 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// S2 N1: a sign out of other sessions whose kept session ended before it was
+// enforced fails for good and releases its quota. Left prepared, the journal
+// held every other session of the network unavailable, and recovery could
+// never apply it.
+func TestRevokeOthersWhoseKeptSessionEndedFailsAndReleasesTheNetwork(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		actor := recoverySessionActor(t)
+		ctx := actor.Ctx
+		other := NewByJwt(actor.ByJwt.NetworkId, actor.ByJwt.UserId, "session-recovery", false, false)
+		sid := server.NewId()
+		other.SessionId = &sid
+		if _, err := RegisterNetworkSession(ctx, other, "password", nil, false, server.NowUtc()); err != nil {
+			t.Fatal(err)
+		}
+		op := server.NewId()
+		if err := prepareSessionOperation(actor, op, "others", nil, actor.ByJwt.SessionId); err != nil {
+			t.Fatal(err)
+		}
+		// the kept session is revoked from another device before enforcement
+		if _, err := enforceSessionRevoke(ctx, actor.ByJwt.NetworkId, server.NewId(), "single", actor.ByJwt.SessionId, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := EnforceSessionOperation(ctx, actor.ByJwt.NetworkId, op)
+		var refusal *SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "current_session_required" {
+			t.Fatal("enforcement", err)
+		}
+		var status string
+		var reserved bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT status,quota_reserved FROM network_session_operation WHERE network_id=$1 AND operation_id=$2`, actor.ByJwt.NetworkId, op).Scan(&status, &reserved))
+		})
+		if status != "failed" || reserved {
+			t.Fatal("the operation stayed", status, reserved)
+		}
+		server.Raise(sessionTx(ctx, func(tx server.PgTx) error {
+			if err := sessionJournalFence(ctx, tx, actor.ByJwt.NetworkId, sid, &other.CreateTime); err != nil {
+				t.Fatal("the failed operation still fences the network", err)
+			}
+			return nil
+		}))
+	})
 }
