@@ -276,7 +276,7 @@
       "id": 5,
       "type": "stat",
       "title": "proxy removes failed, last 24 h",
-      "description": "remove-client calls that still failed after their retries in the last 24 h (urnetwork_proxy_test_remove_failures_total). Each can leave a hosted proxy alive on the wickymicky account, where it counts toward the Pro limit of 1,000 active proxies; the runner removes its own leftovers (description starting 'proxy-test ', at most 200) only at its next start. It reads 0 while the runner reports but has not written the counter. Red from 1.",
+      "description": "remove-client calls that still failed after their retries in the last 24 h (urnetwork_proxy_test_remove_failures_total). Each can leave a hosted proxy alive on the test account, where it counts toward the Pro limit of 1,000 active proxies; the runner removes its own leftovers (description starting 'proxy-test ', at most 200) only at its next start. It reads 0 while the runner reports but has not written the counter. Red from 1.",
       "gridPos": {
         "h": 4,
         "w": 5,
