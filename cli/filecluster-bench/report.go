@@ -354,8 +354,9 @@ type ReportSettings struct {
 	// The index operations format 2 adds to a push, by XFS block size (D-TEST-11's projection: format 1's measured
 	// table applied to §11.13's per-push index operations, the index on in every eligible repo). The defaults hold
 	// §11.13's inferred figures, a share of a small overwrite each: ~4 KiB a push on 1 KiB blocks, one companion
-	// push a minute per writer, and ~2 KiB on 4 KiB blocks, one every 5 minutes. EVSB-M10-08 replaces them with the
-	// M10 index row's T3 counts (D-TEST-13).
+	// push a minute per writer, and ~2 KiB on 4 KiB blocks, one every 5 minutes. They stay this report's reading for
+	// D-TEST-11's block-size choice at M2; D-TEST-13's projection (projection.go) prices the M10 index row's T3 counts
+	// in their place, and reads these only as its inferred index row, which no gate takes.
 	Format2IndexOperations map[int64][]evsservice.WriteOperation
 }
 
