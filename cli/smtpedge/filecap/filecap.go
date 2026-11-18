@@ -8,8 +8,7 @@
 // so the image's build stage runs this package's helper, cmd, from a bind mount to write cap_net_admin=ep on the
 // binary, and the helper never ships. The release runs the same helper's check-image on the published image
 // (CheckImage) and refuses one whose binary lacks it, since the failure otherwise shows only at the first marked
-// dial, as EPERM at SO_MARK. A container run with no-new-privileges gains no file capability at exec, so the
-// block must run without it, or that EPERM returns with the attribute in place.
+// dial, as EPERM at SO_MARK.
 //
 // The attribute is the kernel's struct vfs_cap_data, or vfs_ns_cap_data (include/uapi/linux/capability.h), in
 // little-endian order: a 32-bit magic_etc whose top byte is the revision and whose low bit is
