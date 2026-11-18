@@ -613,3 +613,57 @@ func TestSessionRecoveryRotatesStuckOperations(t *testing.T) {
 		}
 	})
 }
+
+// R-reset (S2 N9): a password reset retires the sign-ins but not a hosted
+// proxy's own session, and the proxy keeps minting after it.
+func TestHostedProxySurvivesPasswordResetAndKeepsMinting(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, network, "reset-proxy", user)
+		signin := session.NewByJwt(network, user, "reset-proxy", false, false)
+		if _, err := session.MintNetworkSession(ctx, signin, "password"); err != nil {
+			t.Fatal(err)
+		}
+		proxy := server.NewId()
+		Testing_CreateDevice(ctx, network, server.NewId(), proxy, "hosted", "test")
+		loaded, err := session.LoadByJwtFromClientId(ctx, proxy)
+		server.Raise(err)
+		if _, err := session.MintHostedSession(ctx, loaded); err != nil {
+			t.Fatal(err)
+		}
+		actor := session.Testing_CreateClientSession(ctx, session.NewByJwt(network, user, "reset-proxy", false, false))
+		defer actor.Cancel()
+		reset, err := AuthPasswordResetCreateCode(AuthPasswordResetCreateCodeArgs{UserAuth: userAuth}, actor)
+		if err != nil || reset.ResetCode == nil {
+			t.Fatal(reset, err)
+		}
+		result, err := AuthPasswordSet(AuthPasswordSetArgs{ResetCode: *reset.ResetCode, Password: "new-proxy-password"}, actor)
+		if err != nil || result == nil || result.Error != nil {
+			t.Fatal(result, err)
+		}
+		if err := RecoverSessionOperations(ctx, 32); err != nil {
+			t.Fatal(err)
+		}
+		if !errors.Is(session.CheckSession(ctx, network, *signin.SessionId), session.ErrSessionRevoked) {
+			t.Fatal("the reset spared the sign-in")
+		}
+		if err := session.CheckSession(ctx, network, *loaded.SessionId); err != nil {
+			t.Fatal("the reset retired the hosted proxy's session", err)
+		}
+		again, err := session.LoadByJwtFromClientId(ctx, proxy)
+		server.Raise(err)
+		if _, err := session.MintHostedSession(ctx, again); err != nil {
+			t.Fatal("the proxy could not mint after the reset", err)
+		}
+		if *again.SessionId != *loaded.SessionId {
+			t.Fatal("the proxy's session changed")
+		}
+		if err := session.ValidateByJwtState(ctx, again, true); err != nil {
+			t.Fatal("the proxy's credential after the reset does not validate", err)
+		}
+	})
+}
