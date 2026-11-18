@@ -185,8 +185,14 @@ func TestMimirAdmissionObservationFailureRecoveryRequiresCompleteQuietWindow(t *
 			"metrics-a.example": {err: fmt.Errorf("synthetic wrapper: %w", context.DeadlineExceeded)},
 		},
 	)
-	requireAlertClass(t, unknown, "mimir-series-limit")
-	requireAlertClass(t, unknown, "mimir-ingestion-rate-limit")
+	for _, class := range []string{"mimir-series-limit", "mimir-ingestion-rate-limit"} {
+		page := requireAlertClass(t, unknown, class)
+		if page.Severity != SeverityPage || !strings.Contains(page.Mechanism, "no current measurements") ||
+			strings.Contains(page.Mechanism, "counter for the per-user series limit increased.") ||
+			strings.Contains(page.Mechanism, "counter for reason=rate_limited increased.") {
+			t.Errorf("%s held page misstates current counter evidence: %s", class, page.Mechanism)
+		}
+	}
 	visibility := requireMimirAdmissionObservationFailure(t, unknown, "metrics-a.example/mimir-admission")
 	if visibility.Observed != "error_class="+observationErrorClassTimeout {
 		t.Error("causal Mimir admission error class lost: retained incident must not erase the failed source cause")
