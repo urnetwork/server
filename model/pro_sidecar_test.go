@@ -98,6 +98,12 @@ var proSidecarDesignAbuseLimits = []struct {
 	{limitKey: "smtp_destination_concurrency", value: 10},
 	{limitKey: "smtp_hard_bounce_percent", value: 10},
 	{limitKey: "smtp_hard_bounce_floor", value: 10},
+	// §21.5's breakers: 0.10%, 0.20%, 0.30% and 0.08% of recipients in parts per million, and 3 clean days
+	{limitKey: "breaker_restrict_rate", value: 1000},
+	{limitKey: "breaker_community_rate", value: 2000},
+	{limitKey: "breaker_all_rate", value: 3000},
+	{limitKey: "breaker_clear_rate", value: 800},
+	{limitKey: "breaker_clear_days", value: 3},
 	{limitKey: "directory_requests_pending", value: 20},
 	{limitKey: "directory_requests_per_day", value: 50},
 	{limitKey: "directory_requests_per_run", value: 5},

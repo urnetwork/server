@@ -290,7 +290,11 @@ func completeAbuseAction(
 	applied = action.AppliedTime != nil
 	if !applied && tryEffect {
 		abuseActionStep(AbuseActionStepEffectBefore, action.ActionId)
-		effectErr = effects.ApplyAbuseEffect(ctx, &AbuseEffect{Action: action, Lifted: lifted, Barred: barred})
+		if abuseEffectIsItsRow(action, lifted) {
+			effectErr = nil
+		} else {
+			effectErr = effects.ApplyAbuseEffect(ctx, &AbuseEffect{Action: action, Lifted: lifted, Barred: barred})
+		}
 		if effectErr == nil {
 			model.SetAbuseActionApplied(ctx, action.ActionId, server.NowUtc())
 			applied = true
@@ -311,6 +315,16 @@ func completeAbuseAction(
 		abuseActionStep(AbuseActionStepMailAfter, action.ActionId)
 	}
 	return
+}
+
+// Whether the action's row is its whole effect, so that no owner's hook is asked: §21.5's breaker rows and their
+// lifts, which smtpedge's send gate reads as they stand on its own refresh (model.GetMailBreakerState). A breaker
+// names no network, so there is no unit of one to withhold (ABUSE-M9-02).
+func abuseEffectIsItsRow(action *model.AbuseAction, lifted *model.AbuseAction) bool {
+	if action.Kind == model.AbuseActionKindMailBreaker {
+		return true
+	}
+	return action.Kind == model.AbuseActionKindLift && lifted != nil && lifted.Kind == model.AbuseActionKindMailBreaker
 }
 
 // Counts one step's result and reports a failure at most once per interval,
