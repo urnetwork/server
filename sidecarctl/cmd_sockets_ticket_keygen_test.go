@@ -912,7 +912,7 @@ func TestSocketsTicketKeygenStoppedClockNeverMoves(t *testing.T) {
 }
 
 // The binary's own registry holds the command under the design's usage, and the binary's help says what it keeps
-// and drops, the file's mode, that no key is printed, how often to run it, where the file
+// and drops, the file's mode, that no key is printed, how often to run it (once a year, QD-1039), where the file
 // goes, and that a rotation's new key signs SettleTime after a block first sees it, with no time to place it by.
 func TestSidecarctlRegistersSocketsTicketKeygen(t *testing.T) {
 	command, args := sidecarctlCommands.find([]string{"sockets", "ticket-keygen", "-out", "a.yml"})
@@ -931,7 +931,7 @@ func TestSidecarctlRegistersSocketsTicketKeygen(t *testing.T) {
 		"whose live keys are kept and expired keys dropped",
 		"created 0600 and never over a file unless -in names it",
 		"It prints the new key's id and expiry, never a key",
-		"Run it every 30 days and place the file in vault as socket-ticket-keys.yml",
+		"Run it every 365 days and place the file in vault as socket-ticket-keys.yml",
 		"which each sockets block rereads every 1m0s, and a block signs with a rotation's new key 10m0s after the first read in which it sees it.",
 	} {
 		if !strings.Contains(stdout.String(), want) {

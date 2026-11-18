@@ -1,15 +1,15 @@
 // `sidecarctl sockets ticket-keygen -out <file> [-in <file>]` writes the sockets service's ticket key file, vault's
 // socket-ticket-keys.yml (§9.8, owner decision 354, QD-902). It is a thin wrapper over
-// socketsservice.SocketTicketKeyFileAdd, which SOCK-M5-08 built for it. The owner runs it every RotationInterval (30
-// days) on a machine of their own and places the file in vault, and each sockets block rereads it every
-// ReloadInterval (a minute). It works on files alone: no env, no vault and no network.
+// socketsservice.SocketTicketKeyFileAdd, which SOCK-M5-08 built for it. The owner runs it every RotationInterval (365
+// days, once a year in each environment: QD-1039) on a machine of their own and places the file in vault, and each
+// sockets block rereads it every ReloadInterval (a minute). It works on files alone: no env, no vault and no network.
 //
 //   - -in, when given, names the current file. Its keys still live at the run's time are kept as they are, so each
 //     verifies through its own expiry, and the expired are dropped. A file the block would refuse (one that does
 //     not parse, names a key twice or holds a seed of the wrong size), an empty one, or one past MaxFileByteCount
 //     refuses the run, so a rotation never starts over from a file that lost its keys. Without -in the file is a
 //     deployment's first.
-//   - One new Ed25519 key is added, created at the run's time and expiring RotationInterval plus KeyOverlap (31
+//   - One new Ed25519 key is added, created at the run's time and expiring RotationInterval plus KeyOverlap (366
 //     days) after it. It verifies once a block has read the file, and a block signs with it once it has settled
 //     there, SettleTime (10 min) after the later of its creation and the first read in which that block saw it, by
 //     when the block has given it to every listener. So however long the placement in vault takes, it only delays
