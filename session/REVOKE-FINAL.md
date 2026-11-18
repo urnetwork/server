@@ -1,6 +1,6 @@
 # Session revocation — final implementation plan
 
-Status: implementation plan, 2026-10-09. No implementation is claimed by this document.
+Status: implementation plan, 2026-10-09, amended by the decision notes in §14 (2026-10-26) and §15 (2026-11-18). Where they differ, §15 is the current plan.
 
 This plan supersedes the alternatives and open questions in [REVOKE.md](REVOKE.md) and resolves [REVOKE-REVIEW.md](REVOKE-REVIEW.md). It covers the server, connect protocol, API, SDK and bindings through `sdk/client_session_view_controller.go`. App UI work belongs to [REVOKE-UI-FINAL.md](REVOKE-UI-FINAL.md), for a separate developer. The source proposal and review remain unchanged.
 
@@ -434,3 +434,79 @@ A commit that fails after its write is a spurious revocation, never a missed one
 **Rollout.** Readers trust the record only when vault `auth.yml` sets `revocation_record_enabled: true`; writers always write. Deploy every process that deactivates clients, rotates credentials, deletes networks or enforces session operations before enabling (api, connect, proxy, alt, taskworker). Clearing the setting returns readers to SQL.
 
 The implementation is `session/revocation_record.go`. Its guard is `model/revocation_record_writer_guard_test.go`: every statement that ends a credential's state must write the record, or name why it ends no live credential.
+
+## 15. Decision note, 2026-11-18: finishing the implementation
+
+On 2026-11-18 the owner handed the remaining session work to operations. After a new code review and a measurement of real demand, the owner decided the questions below, one at a time. Where this note differs from the sections above, this note is the plan; those sections stay as the record of the earlier decisions.
+
+Status: decided, with implementation in progress. Nothing in this note is deployed yet.
+
+Scope, from the owner:
+- Redis stays as deployed, with no replica or persistence work.
+- Load testing means local performance tests. These replace the production load gates in §12 and in [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md).
+
+### Measured demand
+Measured across the fleet on 2026-11-18, with sessions modelled as §5 specifies (one per hosted proxy and one per API-key client) and a 90-day lifetime:
+- **At the §4 limit of 1,000, with nothing freed on removal:** about 3,200 networks would reach the limit within 90 days, and 22 within a week. A few Pro networks running their full 1,000 hosted proxies would reach it on the first day.
+- **With removed clients freeing their sessions:** most demand comes from clients created and removed the same day. With frees, about a dozen networks stay over 1,000 and none go over 5,000, apart from large provider fleets, which decision 6 excludes.
+- **Auth codes:** about 1,240 are redeemed a day across about 700 networks. The busiest fleet redeems about 96 a day.
+- **Redis:** estimated use at a 90-day steady state is about 1.5–12 GB in total.
+
+### Decisions
+1. **One session per client.** §5 stands.
+   - Every hosted proxy (including the `legacy_proxy` bootstrap), every API-key-created client and every adopted device keeps its own listed, revocable session.
+   - Clients created with a network or client credential, and all their descendants, carry their parent's session.
+2. **Auth codes.** §1 and §6 stand: each redemption is an independent session. Revoking the issuing session does not sign out devices that have already redeemed.
+3. **Redis unreachable: accept and alert.** This reverses two earlier rules, for session credentials and tagged client credentials alike: §7's mapping of session-store failures to `ErrAuthUnavailable` for credential checks, and §14's "Unavailable Redis" rule.
+   - A check that cannot reach its Redis keys accepts the credential, counts it and alerts on the rate. It never answers 503 for that reason.
+   - A credential revoked during the failure keeps working until Redis answers again.
+   - Leases keep the 2026-10-11 rule: no answer, no retirement.
+   - A missing field still falls back to SQL as §14 describes. Only an unreachable Redis changes.
+   - If Redis is unreachable at mint, the mint issues an untagged credential, as before sessions, rather than a tagged session that nobody can list or revoke. The credential gets its session at its next refresh.
+4. **Hosted proxies survive password reset and sign-out.** This amends §6.
+   - A password reset, revoke-other-sessions and sign-out-all retire sign-in sessions, auth-code sessions and per-client legacy lineages, but not hosted-proxy sessions.
+   - A hosted proxy stops only when it is deleted or its own session is revoked. It never re-bootstraps after its own session is revoked.
+5. **All at once.** This replaces §12's cohort steps and the separate management switch.
+   - One release turns on minting, the Sessions list and revocation for everyone.
+   - Turning on minting in production still needs the owner's go.
+   - The capacity limit stays unenforced (decision 6).
+6. **Capacity.** This replaces §4's default limits and §9's 1,000-row bound.
+   - **What counts:** every live session (sign-in, auth code, hosted proxy, API-key client, adopted device, per-client legacy lineage), except sessions owned by a client with provide enabled.
+   - **Provide enabled** means public or stream provide mode, the same rule the concurrent-client limit uses. Provider clients are excluded from both the session limit and the concurrent-client limit.
+   - **The limit:** 5,000 live sessions per network, set in config `all/pro.yml` next to `enforce_concurrent_clients`. Its enforcement switch ships off. The owner: "The pro.yml session cap should still be not enforced until the next release goes out. Turning it on should be one config change."
+   - **While the switch is off,** no mint is refused for the live limit or the retained-ID limit. Every would-be refusal is counted, so the switch can be judged on real numbers.
+   - **Removing a client** deletes the sessions that client alone owns, without a retained tombstone, because the client-active check already refuses their credentials. That holds on every removal path, including the 30-day idle reap. Removing a client never ends a sign-in or auth-code session that other clients may share.
+   - **The 10,000 retained-ID limit** is re-evaluated with the implementation, since frees no longer leave tombstones.
+7. **At the limit, once enforced: refuse.**
+   - A new session over the limit gets `409 session_limit_reached`, with a message that points to Settings → Sessions.
+   - Existing-session refresh stays allowed (§4).
+   - Nothing is evicted.
+8. **Lifetime unchanged.** §2 stands: `credential_accept_until = exp + 60 days + clockLeeway`, about 90 days after the last refresh.
+
+### API and apps
+- `GET /network/sessions` adds `kind` (`signin`, `code`, `client`) and, for client sessions, `client_kind` (`hosted_proxy`, `api_key`, `device`, `legacy`), with cursor paging.
+- The apps list device sign-ins first, and group hosted proxies and API clients in collapsed sections.
+- The SDK maps `session_limit_reached` to a typed error, and every app shows it with a path to the Sessions screen.
+
+### Metrics
+| Metric | Meaning |
+|---|---|
+| `urnetwork_session_check_unavailable_total` | Credentials accepted unchecked because Redis was unreachable (decision 3), labelled by service, path and credential type |
+| `urnetwork_session_mint_untagged_total` | Mints that fell back to an untagged credential (decision 3) |
+| `urnetwork_session_cap_would_refuse_total` | Mints the limit would refuse while it is unenforced (decision 6) |
+| `urnetwork_session_cap_refused_total` | Mints refused at the enforced limit (decision 7) |
+| `urnetwork_session_freed_on_removal_total` | Client-owned sessions freed by a client removal (decision 6) |
+| `urnetwork_session_live_per_network` | Sampled histogram of live sessions per network |
+
+Alerts cover a sustained unchecked-acceptance rate and untagged-mint fallbacks. Dashboards show would-refuse counts by kind before the switch flips.
+
+### Plan
+1. **Implement in parallel workstreams:**
+   - session core: kinds, the limit, the provider exclusion, frees on every removal path, the reset scope and the list fields;
+   - the auth path: accept and alert, the untagged mint and the remaining review findings;
+   - the SDK and apps;
+   - local performance tests, with a baseline on main first;
+   - monitoring and docs.
+2. **Integrate** with `--no-ff` merges. Run the repository test environment, the grafana coverage tests and the local performance harness on the merged tree.
+3. **Deploy** under the usual validator gates: migrations first, if any; then api, alt, connect, proxy and taskworker; then the config release with the enforcement switch off. Then turn on minting, with the owner's go.
+4. **After the next app release:** review the would-refuse counts, then flip the enforcement switch, which is one config change.
