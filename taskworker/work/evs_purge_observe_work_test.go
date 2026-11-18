@@ -27,7 +27,7 @@ func evsObserveTestSamples(days int, cleanPerDay int64, retainedPerDay int64) []
 func evsObserveTestJobs(count int, renamed int) []*EvsObserveDropJob {
 	jobs := []*EvsObserveDropJob{}
 	for i := range count {
-		jobs = append(jobs, &EvsObserveDropJob{EndedAt: evsObserveTestStart.Add(time.Duration(i) * time.Hour), Observed: true, RenamesAndCopies: i < renamed})
+		jobs = append(jobs, &EvsObserveDropJob{EndedAt: evsObserveTestStart.Add(time.Duration(i) * time.Hour), Observed: true, Renames: i < renamed, CrossRefCopies: i < renamed})
 	}
 	return jobs
 }
@@ -92,5 +92,63 @@ func TestEvsObserveSoakReadsARestartAsANewStart(t *testing.T) {
 	report := EvsObserveSoakAt(samples, nil, evsObserveTestStart.Add(72*time.Hour), nil)
 	if report.Purge.Candidates != 7000 {
 		t.Fatalf("a restarted counter counted %d candidates, want 7000", report.Purge.Candidates)
+	}
+}
+
+// Each process's series is read alone: one that ended and one that started between two samples each count what they
+// held, where their sum, which fell by less than the first held, would have counted the second's alone; and a series
+// that fell restarted without moving the others.
+func TestEvsObserveSoakReadsEachSeriesAlone(t *testing.T) {
+	day := func(days int) time.Time { return evsObserveTestStart.Add(time.Duration(days) * 24 * time.Hour) }
+	samples := []*EvsObserveSample{
+		{At: day(0), Series: "a", Clean: 100},
+		{At: day(0), Series: "b", Clean: 50},
+		// a ended; its successor c started, and b went on
+		{At: day(1), Series: "b", Clean: 80},
+		{At: day(1), Series: "c", Clean: 30, Retained: 2},
+		// b restarted under its own labels
+		{At: day(2), Series: "b", Clean: 10},
+		{At: day(2), Series: "c", Clean: 45, Retained: 2},
+	}
+	report := EvsObserveSoakAt(samples, nil, day(2), nil)
+	// a 100; b 50, then 30 more, then 10 from zero; c 32, then 15 more
+	if report.Purge.Candidates != 100+50+30+10+32+15 || report.Purge.Retained != 2 {
+		t.Fatalf("series read alone counted %d candidates, %d retained", report.Purge.Candidates, report.Purge.Retained)
+	}
+	if !report.Purge.Start.Equal(day(0)) || report.Purge.Days != 2 {
+		t.Fatalf("the soak started %s, %.1f days", report.Purge.Start, report.Purge.Days)
+	}
+	if report.Purge.Met {
+		t.Fatal("two retained candidates left the purge soak met")
+	}
+}
+
+// D-TEST-18's share counts a job only when its snap-0 records both a rename and a cross-ref copy (owner decision
+// 513), and the report says how many record each.
+func TestEvsObserveDropSoakSharesJobsWithBothARenameAndACopy(t *testing.T) {
+	jobs := []*EvsObserveDropJob{}
+	for i := range 200 {
+		jobs = append(jobs, &EvsObserveDropJob{
+			EndedAt: evsObserveTestStart.Add(time.Duration(i) * time.Hour), Observed: true,
+			// 150 with renames, 120 with copies, 70 with both
+			Renames: i < 150, CrossRefCopies: 80 <= i,
+		})
+	}
+	now := evsObserveTestStart.Add(31 * 24 * time.Hour)
+	report := EvsObserveSoakAt(nil, jobs, now, nil)
+	if report.Drop.Renames != 150 || report.Drop.CrossRefCopies != 120 || report.Drop.RenamesAndCopies != 70 {
+		t.Fatalf("the drop soak counted %d with renames, %d with copies, %d with both", report.Drop.Renames, report.Drop.CrossRefCopies, report.Drop.RenamesAndCopies)
+	}
+	if report.Drop.Met || len(report.Drop.Unmet) != 1 || !strings.Contains(report.Drop.Unmet[0], "70 jobs on repos with renames and cross-ref copies") {
+		t.Fatalf("a share of 70 in 200 reported %v", report.Drop.Unmet)
+	}
+	if printed := strings.Join(report.Lines(), "\n"); !strings.Contains(printed, "70 on repos with renames and cross-ref copies (150 with renames, 120 with cross-ref copies)") {
+		t.Fatalf("the report does not print each count:\n%s", printed)
+	}
+	for _, job := range jobs[:100] {
+		job.Renames, job.CrossRefCopies = true, true
+	}
+	if report := EvsObserveSoakAt(nil, jobs, now, nil); !report.Drop.Met {
+		t.Fatalf("half the jobs with both left the drop soak unmet: %v", report.Drop.Unmet)
 	}
 }
