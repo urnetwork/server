@@ -311,16 +311,17 @@ func AbuseSignalOfReport(class AbuseReporterClass, category AbuseCategory, names
 }
 
 // What a machine does on a signal, at once and before any review (§21.8). Anything but
-// these rows acts on nothing, an unknown signal included. The answer names no target,
-// so no caller acts on it alone: a target goes through NextAbuseStep, which refuses
-// the root, and on a threat category gives the rung, climbing past a host kill for a
-// network already struck and adding nothing to a host already killed.
+// these rows acts on nothing, an unknown signal included. A registrar's or registry's
+// url is no machine's kill: owner decision 530 made it the rota's, inside the same
+// hour, through the staff route, since no mail or form text drives a kill. The answer
+// names no target, so no caller acts on it alone: a target goes through NextAbuseStep,
+// which refuses the root, and on a threat category gives the rung, climbing past a host
+// kill for a network already struck and adding nothing to a host already killed.
 func AbuseMachineAction(signal AbuseSignal) AbuseActionKind {
 	switch signal {
 	case AbuseSignalMailJoinHigh, AbuseSignalMailJoinMedium:
 		return AbuseActionKindMailLadder
-	case AbuseSignalWebRiskHit, AbuseSignalFeedHit, AbuseSignalTrustedFlaggerUrl,
-		AbuseSignalRegistrarUrl, AbuseSignalRegistryUrl:
+	case AbuseSignalWebRiskHit, AbuseSignalFeedHit, AbuseSignalTrustedFlaggerUrl:
 		return AbuseActionKindHostKill
 	}
 	return AbuseActionKindNone

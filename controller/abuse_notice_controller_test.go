@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -634,6 +636,64 @@ func TestAbuseStaffFileNotice(t *testing.T) {
 		}
 		if count := testAbuseIntakeCaseCount(t, ctx); count != 1 {
 			t.Errorf("%d cases, want 1", count)
+		}
+	})
+}
+
+// QD-1070: api and taskworker page notices through the webhook the monitor pages through, read from the monitor's
+// vault file under a retrying sink. A file with no endpoint, one naming an endpoint off loopback while no pager
+// service is chosen, and one that does not parse install nothing, the pager in force staying, and no error holds
+// the endpoint; the monitor's loopback webhook takes a filed notice's page under its case's key before the filing
+// answers paged.
+func TestInstallAbuseNoticePagerPagesThroughTheMonitorsWebhook(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		events := make(chan map[string]any, 8)
+		webhook := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			event := map[string]any{}
+			if err := json.NewDecoder(request.Body).Decode(&event); err == nil {
+				events <- event
+			}
+			writer.WriteHeader(http.StatusAccepted)
+		}))
+		defer webhook.Close()
+		notices := newTestAbuseNotices(t, time.Date(2026, 11, 14, 3, 0, 0, 0, time.UTC))
+
+		for _, monitorYml := range []string{
+			"alerts: {}\n",
+			"alerts:\n  pager_webhook_url: https://pager.example/events/synthetic-endpoint-token\n",
+			"alerts: [synthetic-endpoint-token\n",
+		} {
+			if _, err := newAbuseNoticePagerSink([]byte(monitorYml)); !errors.Is(err, ErrAbuseNoticePagerRefused) || strings.Contains(err.Error(), "synthetic-endpoint-token") {
+				t.Errorf("%q: %v", monitorYml, err)
+			}
+			pop := server.Vault.PushSimpleResource(AbuseNoticePagerFileName, []byte(monitorYml))
+			restore := InstallAbuseNoticePager()
+			if currentAbuseNoticePager() != notices.sink {
+				t.Errorf("%q installed a pager", monitorYml)
+			}
+			restore()
+			pop()
+		}
+
+		defer server.Vault.PushSimpleResource(AbuseNoticePagerFileName, []byte("alerts:\n  pager_webhook_url: "+webhook.URL+"/events\n"))()
+		restore := InstallAbuseNoticePager()
+		defer restore()
+		if _, ok := currentAbuseNoticePager().(*pager.RetrySink); !ok {
+			t.Fatalf("the monitor's webhook installed %T", currentAbuseNoticePager())
+		}
+		result, err := FileAbuseNotice(ctx, &AbuseNoticeArgs{Class: model.AbuseNoticeClassRegistrar, Target: testAbuseIntakeRoot})
+		if err != nil || !result.Opened || !result.Paged {
+			t.Fatalf("a registrar's notice through the webhook: %+v, %v", result, err)
+		}
+		// the filing answered paged once the webhook took the page, so the event is here
+		select {
+		case event := <-events:
+			if event["action"] != "trigger" || event["dedup_key"] != pager.NoticeDedupKey(result.CaseId) || event["both_at_once"] != true {
+				t.Fatalf("the webhook took %v", event)
+			}
+		default:
+			t.Fatal("the filing answered paged with no page at the webhook")
 		}
 	})
 }

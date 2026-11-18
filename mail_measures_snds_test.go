@@ -127,3 +127,16 @@ func TestParseSndsDataKeepsTheWorstColor(t *testing.T) {
 		t.Errorf("%v, %v", colors, err)
 	}
 }
+
+// abuse-snds.yml reads as its key, and a file with none or not YAML is refused with no value in the error.
+func TestParseSndsCredential(t *testing.T) {
+	if key, err := ParseSndsCredential([]byte("key: \" " + testSndsKey + " \"\n")); err != nil || key != testSndsKey {
+		t.Fatalf("%q, %v", key, err)
+	}
+	for _, data := range []string{"", "key: \"\"\n", "other: x\n", "key: [" + testSndsKey + "\n"} {
+		key, err := ParseSndsCredential([]byte(data))
+		if key != "" || !errors.Is(err, ErrSndsCredential) || strings.Contains(err.Error(), testSndsKey) {
+			t.Errorf("%q: %q, %v", data, key, err)
+		}
+	}
+}

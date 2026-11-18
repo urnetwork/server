@@ -14,6 +14,10 @@ package server
 // The domain is the platform's own <root>, in the path. The token rides the Authorization header, and no error or
 // log line here carries it, the url or the answer (I-13). The credential is external: a deployment gives a token
 // source, and with none the client answers unknown. Safe for concurrent use.
+//
+// The deployment's token source is NewPostmasterToolsTokenSource over vault's abuse-postmaster-tools.yml
+// (QD-1069): an OAuth 2 client and the refresh token of the account Postmaster Tools verified <root> for, traded at
+// the token endpoint for an access token kept until shortly before it expires.
 
 import (
 	"context"
@@ -25,7 +29,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The API's names: its path's parts and its day form.
@@ -38,7 +45,7 @@ const (
 // The API gave no usable answer for the day: see the file header.
 var ErrPostmasterToolsSource = errors.New("postmaster tools: the source gave no usable answer")
 
-// Tunables of the client.
+// Tunables of the client and its token source.
 type PostmasterToolsClientSettings struct {
 	// The API's origin: https, with no path.
 	BaseUrl string
@@ -46,6 +53,10 @@ type PostmasterToolsClientSettings struct {
 	RequestTimeout time.Duration
 	// The most bytes one answer is read to.
 	ResponseMaxByteCount int64
+	// The OAuth 2 token endpoint the refresh token is traded at: https.
+	TokenUrl string
+	// How long before an access token's expiry the source trades for the next.
+	TokenExpiryMargin time.Duration
 }
 
 func DefaultPostmasterToolsClientSettings() *PostmasterToolsClientSettings {
@@ -53,6 +64,125 @@ func DefaultPostmasterToolsClientSettings() *PostmasterToolsClientSettings {
 		BaseUrl:              "https://gmailpostmastertools.googleapis.com",
 		RequestTimeout:       30 * time.Second,
 		ResponseMaxByteCount: 1024 * 1024,
+		TokenUrl:             "https://oauth2.googleapis.com/token",
+		TokenExpiryMargin:    time.Minute,
+	}
+}
+
+// The vault file holding the deployment's credential (QD-1069).
+const PostmasterToolsCredentialFileName = "abuse-postmaster-tools.yml"
+
+// abuse-postmaster-tools.yml: an OAuth 2 client and the refresh token of the account Postmaster Tools verified
+// <root> for, granted the API's read-only scope. Every field is a credential.
+type PostmasterToolsCredential struct {
+	ClientId     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
+	RefreshToken string `yaml:"refresh_token"`
+}
+
+// The credential is not one a token source can use. The text names the part, never a value.
+var ErrPostmasterToolsCredential = errors.New("postmaster tools: the credential is not usable")
+
+// Reads abuse-postmaster-tools.yml. A file that does not parse or lacks a field is refused.
+func ParsePostmasterToolsCredential(data []byte) (*PostmasterToolsCredential, error) {
+	credential := &PostmasterToolsCredential{}
+	// a decode error can quote the line it failed on, so only the verdict is kept
+	if err := yaml.Unmarshal(data, credential); err != nil {
+		return nil, fmt.Errorf("%w: the file does not parse", ErrPostmasterToolsCredential)
+	}
+	credential.ClientId = strings.TrimSpace(credential.ClientId)
+	credential.ClientSecret = strings.TrimSpace(credential.ClientSecret)
+	credential.RefreshToken = strings.TrimSpace(credential.RefreshToken)
+	if credential.ClientId == "" || credential.ClientSecret == "" || credential.RefreshToken == "" {
+		return nil, fmt.Errorf("%w: client_id, client_secret and refresh_token are each needed", ErrPostmasterToolsCredential)
+	}
+	return credential, nil
+}
+
+// The token endpoint's answer, the part the source reads.
+type postmasterToolsTokenAnswer struct {
+	AccessToken string `json:"access_token"`
+	ExpiresIn   int64  `json:"expires_in"`
+	TokenType   string `json:"token_type"`
+}
+
+// A token source over credential: it trades the refresh token for an access token at settings' TokenUrl, keeps it
+// until TokenExpiryMargin before it expires, and trades again after. A trade that fails answers an error, never a
+// stale token, and the next call trades again. transport nil dials directly; now nil reads the wall clock. No error
+// carries the credential, the token or the answer. Safe for concurrent use.
+func NewPostmasterToolsTokenSource(
+	credential *PostmasterToolsCredential,
+	transport http.RoundTripper,
+	settings *PostmasterToolsClientSettings,
+	now func() time.Time,
+) PostmasterToolsTokenSource {
+	if settings == nil {
+		settings = DefaultPostmasterToolsClientSettings()
+	}
+	if transport == nil {
+		transport = &http.Transport{Proxy: nil}
+	}
+	if now == nil {
+		now = time.Now
+	}
+	httpClient := &http.Client{
+		Transport: transport,
+		// a redirect would carry the credential elsewhere
+		CheckRedirect: func(request *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	var stateLock sync.Mutex
+	var token string
+	var refreshTime time.Time
+	return func(ctx context.Context) (string, error) {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		if token != "" && now().Before(refreshTime) {
+			return token, nil
+		}
+		token = ""
+		if credential == nil {
+			return "", fmt.Errorf("%w: none", ErrPostmasterToolsCredential)
+		}
+		tokenUrl, err := url.Parse(settings.TokenUrl)
+		if err != nil || tokenUrl.Scheme != "https" || tokenUrl.Host == "" {
+			return "", fmt.Errorf("%w: no usable token endpoint", ErrPostmasterToolsSource)
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("client_id", credential.ClientId)
+		form.Set("client_secret", credential.ClientSecret)
+		form.Set("refresh_token", credential.RefreshToken)
+		requestCtx, cancel := context.WithTimeout(ctx, settings.RequestTimeout)
+		defer cancel()
+		request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, tokenUrl.String(), strings.NewReader(form.Encode()))
+		if err != nil {
+			return "", fmt.Errorf("%w: no token request", ErrPostmasterToolsSource)
+		}
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.Header.Set("Accept", "application/json")
+		requestTime := now()
+		response, err := httpClient.Do(request)
+		if err != nil {
+			return "", fmt.Errorf("%w: the token endpoint is unreachable", ErrPostmasterToolsSource)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("%w: the token endpoint's status %d", ErrPostmasterToolsSource, response.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(response.Body, settings.ResponseMaxByteCount+1))
+		if err != nil || settings.ResponseMaxByteCount < int64(len(body)) {
+			return "", fmt.Errorf("%w: a token answer past its bound", ErrPostmasterToolsSource)
+		}
+		answer := &postmasterToolsTokenAnswer{}
+		if err := json.Unmarshal(body, answer); err != nil || answer.AccessToken == "" || answer.ExpiresIn <= 0 ||
+			!strings.EqualFold(answer.TokenType, "bearer") {
+			return "", fmt.Errorf("%w: a token answer that is not the endpoint's", ErrPostmasterToolsSource)
+		}
+		token = answer.AccessToken
+		refreshTime = requestTime.Add(time.Duration(answer.ExpiresIn)*time.Second - settings.TokenExpiryMargin)
+		return token, nil
 	}
 }
 

@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A filter result, as SNDS words it.
@@ -45,6 +47,30 @@ const (
 
 // SNDS gave no usable file: see the file header.
 var ErrSndsSource = errors.New("snds: the source gave no usable answer")
+
+// The vault file holding the account's automated data access key (QD-1069).
+const SndsCredentialFileName = "abuse-snds.yml"
+
+// abuse-snds.yml: the key, a credential.
+type sndsCredentialYaml struct {
+	Key string `yaml:"key"`
+}
+
+// The file holds no usable key. The text never holds the key.
+var ErrSndsCredential = errors.New("snds: the credential is not usable")
+
+// Reads abuse-snds.yml's key. A file that does not parse or holds none is refused.
+func ParseSndsCredential(data []byte) (key string, err error) {
+	credential := &sndsCredentialYaml{}
+	// a decode error can quote the line it failed on, so only the verdict is kept
+	if err := yaml.Unmarshal(data, credential); err != nil {
+		return "", fmt.Errorf("%w: the file does not parse", ErrSndsCredential)
+	}
+	if key = strings.TrimSpace(credential.Key); key == "" {
+		return "", fmt.Errorf("%w: no key", ErrSndsCredential)
+	}
+	return key, nil
+}
 
 // Tunables of the client. The columns are the file's format, so a deployment changes them only with SNDS.
 type SndsClientSettings struct {
