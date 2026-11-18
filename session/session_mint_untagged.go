@@ -29,7 +29,6 @@ package session
 import (
 	"context"
 	"errors"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -99,14 +98,6 @@ func registerSessionMint(ctx context.Context, credential *ByJwt, kind string, or
 	registerCtx, cancelRegister := context.WithTimeout(ctx, sessionMintRedisBudget)
 	defer cancelRegister()
 	return registerNetworkSession(registerCtx, credential, kind, origin, fenceOrigin, server.NowUtc(), exempt)
-}
-
-// A created member's index publication, within the mint budget; its failure
-// queues the outbox (RegisterAndSignInTx).
-func publishSessionIndexWithinMintBudget(ctx context.Context, networkId server.Id, due time.Time) error {
-	publishCtx, cancel := context.WithTimeout(ctx, sessionMintRedisBudget)
-	defer cancel()
-	return publishSessionIndexOnMint(publishCtx, networkId, due, server.NewId().String())
 }
 
 // The fallback for a registration that failed with err. A mint that started

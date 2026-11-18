@@ -377,55 +377,59 @@ func TestSessionListPagesByKind(t *testing.T) {
 		kinds[lineage.SessionId.String()] = "client/legacy"
 		kinds[actor.ByJwt.SessionId.String()] = "signin/"
 
-		seen := map[string]bool{}
-		order := []string{}
-		var cursor string
-		for page := 0; ; page++ {
-			result, err := GetNetworkSessionsPage(actor, &NetworkSessionsArgs{Cursor: cursor, Limit: 3})
-			if err != nil {
-				t.Fatal(err)
+		// every page size walks every live session once: the current session
+		// first, then the sign-ins and codes, then the client sessions
+		for _, limit := range []int{1, 3, NetworkSessionsPageLimit} {
+			seen := map[string]bool{}
+			order := []string{}
+			var cursor string
+			for page := 0; ; page++ {
+				result, err := GetNetworkSessionsPage(actor, &NetworkSessionsArgs{Cursor: cursor, Limit: limit})
+				if err != nil {
+					t.Fatal(limit, err)
+				}
+				if page == 0 {
+					counts := *result.Counts
+					if counts.Live != 12 || counts.Capped != 11 || counts.Provider != 1 || counts.Signin != 4 || counts.Code != 1 || counts.HostedProxy != 4 || counts.ApiKey != 1 || counts.Device != 1 || counts.Legacy != 1 {
+						t.Fatalf("counts %+v", counts)
+					}
+					if len(result.Sessions) == 0 || !result.Sessions[0].Current {
+						t.Fatal("the current session does not lead the first page", limit)
+					}
+				}
+				if limit < len(result.Sessions) {
+					t.Fatal("page over its limit", limit, len(result.Sessions))
+				}
+				for _, row := range result.Sessions {
+					id := row.SessionId.String()
+					if seen[id] {
+						t.Fatal("a page repeated a session", limit, id)
+					}
+					seen[id] = true
+					clientKind := ""
+					if row.ClientKind != nil {
+						clientKind = *row.ClientKind
+					}
+					if got := row.SessionKind + "/" + clientKind; got != kinds[id] {
+						t.Fatalf("%s: %s, want %s", id, got, kinds[id])
+					}
+					if row.Provider != (id == provider.SessionId.String()) {
+						t.Fatal("provider flag", id)
+					}
+					order = append(order, row.SessionKind)
+				}
+				if result.NextCursor == nil {
+					break
+				}
+				cursor = *result.NextCursor
 			}
-			if page == 0 {
-				counts := *result.Counts
-				if counts.Live != 12 || counts.Capped != 11 || counts.Provider != 1 || counts.Signin != 4 || counts.Code != 1 || counts.HostedProxy != 4 || counts.ApiKey != 1 || counts.Device != 1 || counts.Legacy != 1 {
-					t.Fatalf("counts %+v", counts)
-				}
-				if !result.Sessions[0].Current {
-					t.Fatal("the current session is not first")
-				}
+			if len(seen) != len(kinds) {
+				t.Fatal("pages missed sessions", limit, len(seen), len(kinds))
 			}
-			if 3 < len(result.Sessions) {
-				t.Fatal("page over its limit", len(result.Sessions))
-			}
-			for _, row := range result.Sessions {
-				id := row.SessionId.String()
-				if seen[id] {
-					t.Fatal("a page repeated a session", id)
+			for i := 0; i < 5; i++ {
+				if order[i] == SessionKindClient {
+					t.Fatal("a client session came before the sign-ins", limit, order)
 				}
-				seen[id] = true
-				clientKind := ""
-				if row.ClientKind != nil {
-					clientKind = *row.ClientKind
-				}
-				if got := row.SessionKind + "/" + clientKind; got != kinds[id] {
-					t.Fatalf("%s: %s, want %s", id, got, kinds[id])
-				}
-				if row.Provider != (id == provider.SessionId.String()) {
-					t.Fatal("provider flag", id)
-				}
-				order = append(order, row.SessionKind)
-			}
-			if result.NextCursor == nil {
-				break
-			}
-			cursor = *result.NextCursor
-		}
-		if len(seen) != len(kinds) {
-			t.Fatal("pages missed sessions", len(seen), len(kinds))
-		}
-		for i := 0; i < 5; i++ {
-			if order[i] == SessionKindClient {
-				t.Fatal("a client session came before the sign-ins", order)
 			}
 		}
 		filtered, err := GetNetworkSessionsPage(actor, &NetworkSessionsArgs{SessionKind: SessionKindClient, ClientKind: ClientKindHostedProxy})

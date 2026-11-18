@@ -6,21 +6,65 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
 
 var sessionCreationOverride atomic.Pointer[bool]
 
+// How long a read of vault auth.yml's session_creation_enabled answers every
+// mint: a flip delivered to a host applies within this, without a restart.
+const sessionCreationReadInterval = 5 * time.Second
+
+type sessionCreationRead struct {
+	value bool
+	until time.Time
+}
+
+var sessionCreationCache atomic.Pointer[sessionCreationRead]
+var sessionCreationReadLock sync.Mutex
+
+// The vault read; a seam for tests.
+var readSessionCreationSetting = func() bool { return loadAuthSettingBool("session_creation_enabled") }
+
+// SessionCreationEnabled is vault auth.yml's session_creation_enabled, read at
+// most once per sessionCreationReadInterval (S1 W10: every mint read and
+// parsed the file, and a file that failed to parse panicked the mint). A read
+// that fails keeps the last value read, false before any.
 func SessionCreationEnabled() bool {
 	if value := sessionCreationOverride.Load(); value != nil {
 		return *value
 	}
-	return loadAuthSettingBool("session_creation_enabled")
+	now := time.Now()
+	if cached := sessionCreationCache.Load(); cached != nil && now.Before(cached.until) {
+		return cached.value
+	}
+	sessionCreationReadLock.Lock()
+	defer sessionCreationReadLock.Unlock()
+	if cached := sessionCreationCache.Load(); cached != nil && now.Before(cached.until) {
+		return cached.value
+	}
+	value := false
+	if cached := sessionCreationCache.Load(); cached != nil {
+		value = cached.value
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				glog.Infof("[session]session_creation_enabled could not be read; keeping %t: %v\n", value, recovered)
+			}
+		}()
+		value = readSessionCreationSetting()
+	}()
+	sessionCreationCache.Store(&sessionCreationRead{value: value, until: now.Add(sessionCreationReadInterval)})
+	return value
 }
 func Testing_SetSessionCreationEnabled(value bool) func() {
 	old := sessionCreationOverride.Swap(&value)
@@ -160,17 +204,49 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		// failed publication goes to the outbox, whose single row per network
 		// every mint used to upsert (S1 W7). An index entry published by a
 		// transaction that then rolls back only reviews early.
-		if registered.Created {
-			due := time.UnixMilli(registered.AcceptUntil).UTC()
-			if publishErr := publishSessionIndexWithinMintBudget(ctx, credential.NetworkId, due); publishErr != nil {
-				// in UTC, as next_review_time holds it
-				if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, due); err != nil {
-					return "", err
-				}
-			}
+		if err := publishRegisteredSessionInTx(ctx, tx, credential.NetworkId, registered); err != nil {
+			return "", err
 		}
 	}
 	return sign(credential), nil
+}
+
+// Publishes a registration that added its session to the live set to the
+// network's maintenance index, or queues the outbox when the publication
+// fails. A refresh adds nothing to publish (RegisterAndSignInTx).
+func publishRegisteredSessionInTx(ctx context.Context, tx server.PgTx, networkId server.Id, registered *registeredSession) error {
+	if !registered.Created {
+		return nil
+	}
+	due := time.UnixMilli(registered.AcceptUntil).UTC()
+	// the Redis step within the mint budget (session_mint_untagged.go); the
+	// outbox write keeps the transaction's context
+	publishCtx, cancelPublish := context.WithTimeout(ctx, sessionMintRedisBudget)
+	publishErr := publishSessionIndexOnMint(publishCtx, networkId, due, server.NewId().String())
+	cancelPublish()
+	if publishErr != nil {
+		// in UTC, as next_review_time holds it
+		return QueueSessionIndexInTx(ctx, tx, networkId, due)
+	}
+	return nil
+}
+
+// RegisterRestoredSessionInTx re-registers the presented credential's own
+// session before it authorizes more of that session (auth-code creation):
+// the clock check and the index publication of every registered mint, with
+// kind restored for a member the store no longer holds.
+func RegisterRestoredSessionInTx(ctx context.Context, tx server.PgTx, credential *ByJwt, now time.Time) (*registeredSession, error) {
+	if err := verifySessionMintClock(ctx); err != nil {
+		return nil, err
+	}
+	registered, err := RegisterNetworkSession(ctx, credential, "restored", nil, false, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := publishRegisteredSessionInTx(ctx, tx, credential.NetworkId, registered); err != nil {
+		return nil, err
+	}
+	return registered, nil
 }
 
 // Independent successful password/SSO/wallet/verification/seedphrase sign-ins.
