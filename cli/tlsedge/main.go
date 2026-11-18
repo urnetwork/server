@@ -10,8 +10,9 @@
 //
 //   - ServiceHost: sidecarhost's, with Quota over api's internal gate at -api_url (quotahost.NewBlockQuota) and
 //     ServiceClient, server.NewPlatformClientSource over api's edge client route on the edge bearer, for the
-//     deploy slot warp hands the process in WARP_SLOT (server.LoadEdgeClientSlot, QD-873), so a deploy's new
-//     process holds other clients than the old one draining beside it.
+//     deploy slot warp hands the process in WARP_SLOT (server.LoadEdgeClientSlot, QD-873, QD-1011), one no other
+//     running tlsedge process on the host holds, so beta's and g1's processes and a deploy's new process beside
+//     either each hold clients of their own.
 //   - The store: model.NewTlsEdgeStore on the block's Postgres role, read only by the engine's loops and record
 //     batches, never by a connection (I-12).
 //   - The clients: sidecar.NewEdgeClientPool, K platform clients in urnetwork-edge, Required and relay-only,

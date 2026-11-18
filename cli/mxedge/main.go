@@ -153,7 +153,8 @@ func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxE
 	}
 	sourceSettings := server.DefaultPlatformClientSourceSettings()
 	sourceSettings.ClientCount = mxEdgeSettings.Clients
-	// the deploy slot warp hands the process (QD-873), so a deploy's new router holds other clients than the old
+	// the deploy slot warp hands the process (QD-873, QD-1011), one no other running router on the host holds, so
+	// beta's and g1's routers and a deploy's new router beside either each hold clients of their own
 	slot, err := server.LoadEdgeClientSlot(sourceSettings)
 	if err != nil {
 		glog.Errorf("[mxedge]no platform clients: %v\n", err)

@@ -435,7 +435,8 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 	}
 	sourceSettings := server.DefaultPlatformClientSourceSettings()
 	sourceSettings.ClientCount = settings.Clients.ClientCount
-	// the deploy slot warp hands the process (QD-873), so a deploy's new process holds another client than the old
+	// the deploy slot warp hands the process (QD-873, QD-1011), one no other running smtpedge process on the host
+	// holds, so a deploy's new process holds other clients than the old one draining beside it
 	slot, err := server.LoadEdgeClientSlot(sourceSettings)
 	if err != nil {
 		glog.Errorf("[%s]no platform client: %v\n", hostService, err)
