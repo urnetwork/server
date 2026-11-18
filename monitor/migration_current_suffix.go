@@ -1093,7 +1093,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	lagDriftMigrationContracts,
 	[]snMainnetMigrationContract{
 		competitionOfficialReviewEpochTwoAstra62MigrationContract.removedAt(server.CompetitionSilleStorageRecoveryMigrationVersion()),
-		competitionSilleStorageRecoveryMigrationContract,
+		competitionSilleStorageRecoveryMigrationContract.removedAt(server.CompetitionEpochThreeSourceRecoveryMigrationVersion()),
+		competitionEpochThreeSourceRecoveryMigrationContract,
 	},
 )
 
