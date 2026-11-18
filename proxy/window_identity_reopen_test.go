@@ -23,6 +23,7 @@ import (
 	gojwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -508,4 +509,36 @@ func TestReopenAfterRepinDialsOnlyTheCurrentExit(t *testing.T) {
 		}
 		third.close()
 	})
+}
+
+// The pinned exit is read from the device config's location: a location that
+// names a provider pins it, any other location (a country, a group, the best
+// available) pins nothing.
+func TestWindowIdentityPinnedExitFromDeviceConfig(t *testing.T) {
+	providerClientId := sdk.NewId()
+	pinnedConfig := &model.ProxyDeviceConfig{
+		InitialDeviceState: &model.ProxyDeviceState{
+			Location: &sdk.ConnectLocation{
+				ConnectLocationId: &sdk.ConnectLocationId{ClientId: providerClientId},
+			},
+		},
+	}
+	pinned := windowIdentityPinnedExitClientId(pinnedConfig)
+	if pinned == nil || *pinned != server.RequireIdFromBytes(providerClientId.Bytes()) {
+		t.Fatalf("a location naming a provider pinned %v, want the provider", pinned)
+	}
+	for name, config := range map[string]*model.ProxyDeviceConfig{
+		"no state":    {},
+		"no location": {InitialDeviceState: &model.ProxyDeviceState{}},
+		"country": {InitialDeviceState: &model.ProxyDeviceState{Location: &sdk.ConnectLocation{
+			ConnectLocationId: &sdk.ConnectLocationId{LocationId: sdk.NewId()},
+		}}},
+		"best available": {InitialDeviceState: &model.ProxyDeviceState{Location: &sdk.ConnectLocation{
+			ConnectLocationId: &sdk.ConnectLocationId{BestAvailable: true},
+		}}},
+	} {
+		if pinned := windowIdentityPinnedExitClientId(config); pinned != nil {
+			t.Fatalf("%s: pinned %s, want none", name, pinned)
+		}
+	}
 }
