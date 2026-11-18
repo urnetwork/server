@@ -896,8 +896,9 @@ func getDnsZoneViewInTx(ctx context.Context, tx server.PgTx, root string, networ
 		return nil, err
 	}
 	for _, row := range getDnsZoneRowsInTx(ctx, tx, root, networkId) {
-		// the alias row is shown as Alias and AliasCertified, not as an RRset
-		if row.withheld || row.set.Kind == dnsservice.DnsRecordKindAlias {
+		// the alias row is shown as Alias and AliasCertified, not as an RRset, and a delegated row
+		// with the Team domains it delegates, not here (SMTP-M9-34)
+		if row.withheld || row.set.Kind == dnsservice.DnsRecordKindAlias || row.set.Kind == dnsservice.DnsRecordKindDelegated {
 			continue
 		}
 		typeText, ok := dns.TypeToString[row.set.Type]

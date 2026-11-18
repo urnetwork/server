@@ -43,6 +43,7 @@ import (
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
+	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -65,8 +66,27 @@ const (
 	HostZskFileName = "dns-zsk.private"
 )
 
+// smtpedge.yml in config, whose sending addresses _spf.<root> lists and whose
+// PTRs the edges' reverse zones answer (DNS-M9-02), read by both roles.
+const HostSmtpEdgeFileName = "smtpedge.yml"
+
 // The port an NS answers its SOA on.
 const hostDnsPort = 53
+
+// smtpedge.yml's sending addresses with their HELO names, as dnsservice takes
+// them, read through smtpedgeservice's own loader so the two blocks read one
+// schema: what DnsSettings.SetSendingAddresses sets beside dns.yml.
+func LoadSendingAddresses(smtpedgeYaml []byte) ([]dnsservice.DnsSendingAddress, error) {
+	smtpSettings, err := smtpedgeservice.LoadSmtpEdgeSettings(smtpedgeYaml)
+	if err != nil {
+		return nil, err
+	}
+	addresses := []dnsservice.DnsSendingAddress{}
+	for _, sendingAddress := range smtpSettings.SendingAddresses {
+		addresses = append(addresses, dnsservice.DnsSendingAddress{Address: sendingAddress.Address, Name: sendingAddress.HeloName})
+	}
+	return addresses, nil
+}
 
 // What a role is given.
 type HostSettings struct {

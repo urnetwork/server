@@ -94,7 +94,11 @@ func setProcessEnv(ctx context.Context, role string) {
 	}
 }
 
-// dns.yml from config.
+// dns.yml from config, with smtpedge.yml's sending addresses beside it
+// (DNS-M9-02): _spf.<root> lists them and the reverse zones answer their PTRs.
+// An env with no smtpedge.yml, or one that does not load, has none, so _spf
+// sends from nowhere and no PTR answers, as smtpedge, refusing the same file,
+// sends nothing.
 func loadDnsSettings() (*dnsservice.DnsSettings, error) {
 	resource, err := server.Config.SimpleResource("dns.yml")
 	if err != nil {
@@ -104,5 +108,25 @@ func loadDnsSettings() (*dnsservice.DnsSettings, error) {
 	if err != nil {
 		return nil, err
 	}
-	return dnsservice.LoadDnsSettings(data)
+	settings, err := dnsservice.LoadDnsSettings(data)
+	if err != nil {
+		return nil, err
+	}
+	smtpResource, err := server.Config.SimpleResource(dnshost.HostSmtpEdgeFileName)
+	if err != nil {
+		return settings, nil
+	}
+	smtpData, err := smtpResource.BytesE()
+	if err != nil {
+		glog.Errorf("[dns]%s unreadable, so no sending address: %v\n", dnshost.HostSmtpEdgeFileName, err)
+		return settings, nil
+	}
+	addresses, err := dnshost.LoadSendingAddresses(smtpData)
+	if err == nil {
+		err = settings.SetSendingAddresses(addresses)
+	}
+	if err != nil {
+		glog.Errorf("[dns]%s refused, so no sending address: %v\n", dnshost.HostSmtpEdgeFileName, err)
+	}
+	return settings, nil
 }
