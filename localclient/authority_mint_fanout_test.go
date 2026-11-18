@@ -275,6 +275,51 @@ func TestAuthorityMintKeepsFreshProAcrossCachedTransitions(t *testing.T) {
 	})
 }
 
+// The child's client_limit_upgrade claim needs the network's Embed allowance,
+// which a cold process cache does not hold. The mint reads it on its own
+// transaction connection, never a second pooled one, claims it for a free
+// network and for an Embed allowance, and leaves the read in the cache.
+func TestAuthorityMintReadsColdEmbedAllowanceOnItsConnection(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		// Pro raises a free network's limit, so only the Embed row decides
+		defer model.Testing_SetConcurrentClientsLimit(2, 1000)()
+		poolLabels := map[string]string{"pool": "default", "outcome": "acquired"}
+		for _, embed := range []bool{false, true} {
+			owner, _ := authorityMintTestOwner(t, ctx)
+			if embed {
+				if err := model.SetNetworkTopLevelClientLimit(ctx, owner.networkId, 5); err != nil {
+					t.Fatal(err)
+				}
+			}
+			generator, closeGenerator := authorityMintGenerator(t, ctx, owner)
+			defer closeGenerator()
+			model.Testing_ClearNetworkClientLimitCache()
+			acquiresBefore := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels)
+			args, err := generator.NewClientArgsContext(ctx)
+			if err != nil || args == nil || args.ClientAuth == nil {
+				t.Fatal("cold-cache mint failed", err)
+			}
+			if acquires := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) - acquiresBefore; acquires != 1 {
+				t.Fatalf("embed=%t: a cold-cache mint acquired %v pooled connections, want 1", embed, acquires)
+			}
+			claims, err := session.ParseByJwtForAudience(ctx, args.ClientAuth.ByJwt, session.ByJwtAudienceApi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if upgrade := claims.ClientLimitUpgrade; upgrade == nil || *upgrade != !embed {
+				t.Fatalf("embed=%t: the child does not claim client_limit_upgrade=%t", embed, !embed)
+			}
+			if override, cached := model.Testing_NetworkClientLimitCached(owner.networkId); !cached || override != embed {
+				t.Fatalf("embed=%t: the mint left override=%t cached=%t, want its read cached", embed, override, cached)
+			}
+		}
+	})
+}
+
 // Every local credential boundary still runs before acquisition: signature,
 // audience, owning account/client/device, cancellation and closed ownership.
 func TestAuthorityMintPreflightRejectsBeforePool(t *testing.T) {
@@ -378,9 +423,16 @@ func TestAuthorityMintTransactionRetryRepeatsLiveValidation(t *testing.T) {
 		if err != nil || args == nil {
 			t.Fatal("retry did not return a child identity", err)
 		}
-		if authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) != acquiresBefore+2 ||
-			authorityStateQueryMetric(t, "hosted", "mint", "client", "state_valid") != validBefore+2 {
-			t.Fatal("transaction retry reused stale parent authority or acquired a separate validation connection")
+		// Checked apart, so an extra pooled connection (3 acquires with 2
+		// validations, from 359c02259's Embed allowance read) does not read as
+		// stale parent authority.
+		acquires := authorityObservedCounter(t, "urnetwork_pg_pool_acquires_total", poolLabels) - acquiresBefore
+		valid := authorityStateQueryMetric(t, "hosted", "mint", "client", "state_valid") - validBefore
+		if valid != 2 {
+			t.Fatalf("transaction retry reused stale parent authority: validations=%v, want one per attempt (2)", valid)
+		}
+		if acquires != 2 {
+			t.Fatalf("transaction retry acquired a separate connection: acquires=%v, want one per attempt (2)", acquires)
 		}
 		if authorityMintChildCount(ctx, owner) != 1 {
 			t.Fatal("rolled-back mint leaked or duplicated its child")
