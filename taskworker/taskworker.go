@@ -271,6 +271,15 @@ func initTaskSchedule(ctx context.Context) {
 		// mx-2's hours dropped at 24 h and mx-3's retired host keys at 30
 		// days; not scheduled without MG7
 		work.ScheduleMailRetention(clientSession, tx)
+		// §14.14's four smtpedge jobs: smtp_send's days at 30 days once
+		// §21.9's holds have copied them and the report tables and halts at
+		// 13 months, the RUA check, sealed copies cleared at 30 days, and
+		// retired DKIM selectors out of DNS at 7 days and their rows 30 days
+		// later; not scheduled without MG5 and MG9
+		controller.ScheduleSmtpRetention(clientSession, tx)
+		controller.ScheduleSmtpReconcile(clientSession, tx)
+		work.ScheduleSmtpSealedReports(clientSession, tx)
+		work.ScheduleSmtpDkimExpiry(clientSession, tx)
 		// §15.15's {mxr_} route projection, following the label map and
 		// rebuilding a page a run; not scheduled without MG7
 		work.ScheduleMailRouteProjection(clientSession, tx)
@@ -863,6 +872,23 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MailRetention,
 			work.MailRetentionPost,
+		),
+		// §14.14's smtpedge jobs (SMTP-M9-17)
+		task.NewTaskTargetWithPost(
+			controller.SmtpRetention,
+			controller.SmtpRetentionPost,
+		),
+		task.NewTaskTargetWithPost(
+			controller.SmtpReconcileTask,
+			controller.SmtpReconcileTaskPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SmtpSealedReports,
+			work.SmtpSealedReportsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SmtpDkimExpiry,
+			work.SmtpDkimExpiryPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.MailRouteProjection,
