@@ -16,6 +16,13 @@ package main
 //	           highest PUT rate admitted with refusals under 0.1% is §19.9's hdd trigger's admitted throughput, neither
 //	           a higher line nor refused uploads counting as throughput
 //
+// At M10 (-m10, EVSB-M10-08), again with admission on and versionless purges at year two's rate beside the mix: 1 TiB
+// a day of 4 MiB-chunk churn and the index's shard rewrites, each object deleted the purge's allowance after its put
+// with the Purger's HEAD and the sweep's beside its DELETE (purge_load.go's load), on synthetic objects in a bucket of
+// the run's own on that cluster (-bucket), since no production store holds format 2 before its freeze, all of it held
+// while the cluster's drive operations pass §19.6's 50% of the capacity M3's run measured (-capacity), and the bucket
+// emptied after. There is no capacity step at M10: the cluster holds data by then.
+//
 // Admission is evsservice's own, in this process: an HddLoop publishing the cluster's drive operations and the
 // measured capacity into an in-process store, and an HddAdmission refusing the heaviest of NetworkCount networks'
 // uploads past the line, as evs's segment route does. The page cache is dropped through -drop_caches_command, a
@@ -100,6 +107,14 @@ type HddSettings struct {
 	// Cleanup's listing and deletes in flight.
 	CleanupListLimit int
 	CleanupInFlight  int
+	// M10's purges beside the mix, at year two's rate on a segment cluster.
+	Purges *PurgeLoadSettings
+	// M10's pause: the run's load holds while the cluster's drive operations pass this share of its capacity, read
+	// this often: §19.6's 50%, and 5 s, the counters' interval.
+	PauseShare         float64
+	PauseCheckInterval time.Duration
+	// The share of a window's offered purge PUTs that must have stored for the purges to have kept their rate: 95%.
+	PurgeKeptShare float64
 }
 
 func DefaultHddSettings() *HddSettings {
@@ -131,6 +146,10 @@ func DefaultHddSettings() *HddSettings {
 		EvidenceMixDuration:  time.Hour,
 		CleanupListLimit:     1000,
 		CleanupInFlight:      64,
+		Purges:               DefaultSegmentPurgeLoadSettings(),
+		PauseShare:           0.5,
+		PauseCheckInterval:   5 * time.Second,
+		PurgeKeptShare:       0.95,
 	}
 }
 
@@ -167,6 +186,9 @@ type HddWindow struct {
 	DrivesRead        bool    `json:"drives_read"`
 	// The page cache was dropped on every host before the window.
 	CacheDropped bool `json:"cache_dropped"`
+	// M10's purges beside the window, and the seconds the pause held the window's load.
+	Purges        *PurgeLoadCounts `json:"purges,omitempty"`
+	PausedSeconds float64          `json:"paused_seconds,omitempty"`
 }
 
 // The PUTs a second the window stored, and the share of offered PUTs refused.
@@ -203,6 +225,9 @@ type HddMeasurement struct {
 	Search        []*HddWindow `json:"search"`
 	// The capacity admission ran against, which the capacity step found unless the operator gave one.
 	AdmissionCapacityOps int64 `json:"admission_capacity_ops"`
+	// M10's run, on the bucket of its own it names.
+	M10    bool   `json:"m10,omitempty"`
+	Bucket string `json:"bucket,omitempty"`
 }
 
 // What an hdd run found (§22.8's hdd row, §19.9's hdd trigger).
@@ -407,6 +432,9 @@ type hddRun struct {
 	prefix     string
 	notes      *benchNotes
 	dropCaches func(ctx context.Context) error
+	// M10's pause, nil for none, and its purge windows so far, whose keys each window's own
+	pause        *loadPause
+	purgeWindows atomic.Int64
 	// the objects GETs read, filled before each window, each read once a window, and the windows' PUTs so far
 	poolCount atomic.Int64
 	putCount  atomic.Int64
@@ -496,6 +524,7 @@ func (self *hddRun) window(ctx context.Context, name string, putRate float64, ge
 		MaxFailureKinds: self.settings.MaxFailureKinds,
 		Clock:           clock,
 	}, func(ctx context.Context, arrival int64) error {
+		self.pause.wait(ctx)
 		start := clock.Now()
 		// arrival n is a PUT when it crosses the next multiple of putEvery, so PUTs are spread evenly at their share
 		isPut := 0 < putEvery && int64(float64(arrival+1)/putEvery) != int64(float64(arrival)/putEvery)
@@ -663,6 +692,198 @@ func RunHdd(ctx context.Context, target *BenchTarget, settings *HddSettings, pre
 	return nil
 }
 
+// One M10 window: the mix's window with the purge load beside it for its duration, both held by the pause.
+func (self *hddRun) windowWithPurges(ctx context.Context, name string, putRate float64, getRate float64, duration time.Duration, admission hddAdmitter) (*HddWindow, error) {
+	pausedBefore := self.pause.pausedDuration()
+	purgeCtx, stopPurges := context.WithCancel(ctx)
+	defer stopPurges()
+	purgesDone := make(chan *PurgeLoadCounts, 1)
+	purgeWindow := self.purgeWindows.Add(1)
+	go func() {
+		purgesDone <- runPurgeLoad(purgeCtx, self.target.clock(), self.target.Cluster, true, self.settings.Purges, duration, func(n int64) string {
+			return fmt.Sprintf("%su%03d-%012d", self.prefix, purgeWindow, n)
+		}, self.pause, self.notes)
+	}()
+	window, err := self.window(ctx, name, putRate, getRate, duration, admission, false)
+	purges := <-purgesDone
+	if window != nil {
+		window.Purges = purges
+		window.PausedSeconds = (self.pause.pausedDuration() - pausedBefore).Seconds()
+	}
+	return window, err
+}
+
+// Runs §22.8's M10 hdd row into measurement: see the file header. capacityOps is M3's measured capacity, which
+// admission and the pause run against.
+func RunHddM10(ctx context.Context, target *BenchTarget, settings *HddSettings, prefix string, capacityOps int64, newAdmission hddAdmissionFactory, measurement *HddMeasurement) error {
+	if capacityOps <= 0 {
+		return errors.New("M10's hdd run needs the capacity M3's run measured")
+	}
+	if settings.Purges == nil {
+		return errors.New("M10's hdd run needs its purges")
+	}
+	clock := target.clock()
+	notes := &benchNotes{}
+	measurement.Mode = ModeHdd
+	measurement.M10 = true
+	measurement.ClusterId = target.ClusterId
+	measurement.AdmissionCapacityOps = capacityOps
+	measurement.Started = clock.Now()
+	defer func() {
+		measurement.Ended = clock.Now()
+		measurement.Notes = append(measurement.Notes, notes.list()...)
+	}()
+	run := &hddRun{target: target, settings: settings, prefix: prefix, notes: notes,
+		pause: newLoadPause(target, settings.PauseShare*float64(capacityOps), settings.PauseCheckInterval, notes)}
+	defer func() {
+		if err := cleanupPrefix(context.WithoutCancel(ctx), target.Cluster, prefix, settings.CleanupListLimit, settings.CleanupInFlight); err != nil {
+			notes.add(fmt.Sprintf("cleanup left objects under %s: %v", prefix, err))
+		}
+	}()
+	admission, err := newAdmission(ctx, capacityOps)
+	if err != nil {
+		return err
+	}
+	defer admission.Close()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-clock.After(settings.AdmissionSettle):
+	}
+	measurement.YearOne, err = run.windowWithPurges(ctx, "year-one-m10", settings.YearOnePutsPerSecond, settings.YearOneGetsPerSecond, settings.MixDuration, admission)
+	if err != nil {
+		return err
+	}
+	measurement.YearTwo, err = run.windowWithPurges(ctx, "year-two-m10", settings.YearTwoPutsPerSecond, settings.YearTwoGetsPerSecond, settings.MixDuration, admission)
+	if err != nil {
+		return err
+	}
+	if settings.MixDuration < settings.EvidenceMixDuration {
+		measurement.Smoke = true
+		notes.add("windows shorter than §22.8's 1 h runs: a smoke")
+	}
+	for _, window := range []*HddWindow{measurement.YearOne, measurement.YearTwo} {
+		if !window.DrivesRead {
+			measurement.Smoke = true
+			notes.add("a window read no drive's counters: a smoke")
+			break
+		}
+	}
+	return nil
+}
+
+// What M10's hdd run found: year one's mix still admitting every upload with purges at year two's rate beside it,
+// the purges keeping their rate, and year two's admitted throughput with them, §19.9's hdd trigger input at M10.
+type HddM10Verdict struct {
+	YearOneAdmitsAll      bool     `json:"year_one_admits_all"`
+	PurgesKept            bool     `json:"purges_kept"`
+	YearTwoRefusalShare   float64  `json:"year_two_refusal_share"`
+	AdmittedPutsPerSecond float64  `json:"admitted_puts_per_second"`
+	PausedSeconds         float64  `json:"paused_seconds"`
+	Evidence              bool     `json:"evidence"`
+	Pass                  bool     `json:"pass"`
+	Reasons               []string `json:"reasons"`
+}
+
+// Judges an M10 hdd run: see HddM10Verdict.
+func JudgeHddM10(measurement *HddMeasurement, settings *HddSettings) *HddM10Verdict {
+	verdict := &HddM10Verdict{Evidence: !measurement.Smoke && 0 < len(measurement.CommitSet), PurgesKept: true}
+	if measurement.Smoke {
+		verdict.Reasons = append(verdict.Reasons, "it is a smoke run, which proves nothing")
+	}
+	if len(measurement.CommitSet) == 0 {
+		verdict.Reasons = append(verdict.Reasons, "it names no build")
+	}
+	for _, window := range []*HddWindow{measurement.YearOne, measurement.YearTwo} {
+		if window == nil || window.Purges == nil {
+			verdict.PurgesKept = false
+			verdict.Reasons = append(verdict.Reasons, "a window ran without its purges")
+			continue
+		}
+		verdict.PausedSeconds += window.PausedSeconds
+		// over the purges' own window, less what the pause held
+		offered := window.Purges.OfferedPutsPerSecond * max(0, window.Purges.Seconds-window.PausedSeconds)
+		if window.Purges.Failed != 0 || float64(window.Purges.Puts) < settings.PurgeKeptShare*offered {
+			verdict.PurgesKept = false
+			verdict.Reasons = append(verdict.Reasons, fmt.Sprintf("%s's purges stored %d of %.0f PUTs offered while unpaused, %d failed", window.Name, window.Purges.Puts, offered, window.Purges.Failed))
+		}
+	}
+	if one := measurement.YearOne; one != nil {
+		verdict.YearOneAdmitsAll = one.PutsRefused == 0 && 0 < one.PutsStored
+		if !verdict.YearOneAdmitsAll {
+			verdict.Reasons = append(verdict.Reasons, fmt.Sprintf("year one's mix with purges refused %d uploads, where it must admit every one", one.PutsRefused))
+		}
+	}
+	if two := measurement.YearTwo; two != nil {
+		verdict.YearTwoRefusalShare = two.refusalShare()
+		if two.refusalShare() < settings.MaxRefusalShare {
+			verdict.AdmittedPutsPerSecond = two.admittedPutsPerSecond()
+		} else {
+			verdict.Reasons = append(verdict.Reasons, fmt.Sprintf("year two's mix with purges refused %.3f%% of uploads: its admitted throughput is under year two's rate", 100*two.refusalShare()))
+		}
+	}
+	verdict.Pass = verdict.Evidence && verdict.YearOneAdmitsAll && verdict.PurgesKept
+	return verdict
+}
+
+func WriteHddM10Verdict(out io.Writer, measurement *HddMeasurement, verdict *HddM10Verdict) error {
+	b := &strings.Builder{}
+	fmt.Fprintf(b, "§22.8's M10 hdd run on %s, bucket %s, %s: %s\n", measurement.ClusterId, measurement.Bucket, measurement.Started.UTC().Format(time.RFC3339), map[bool]string{true: "pass", false: "fail"}[verdict.Pass])
+	for _, window := range []*HddWindow{measurement.YearOne, measurement.YearTwo} {
+		if window == nil {
+			continue
+		}
+		fmt.Fprintf(b, "  %-13s %6.1f puts/s admitted, refusals %.4f%%, put p99 %.1f ms, get p99 %.1f ms, paused %.0f s",
+			window.Name, window.admittedPutsPerSecond(), 100*window.refusalShare(), window.PutLatencyMillis.P99, window.GetLatencyMillis.P99, window.PausedSeconds)
+		if window.Purges != nil {
+			fmt.Fprintf(b, "; purges %d PUTs, %d DELETEs, %d HEADs, %d failed", window.Purges.Puts, window.Purges.Deletes, window.Purges.Heads, window.Purges.Failed)
+		}
+		b.WriteString("\n")
+	}
+	for _, reason := range verdict.Reasons {
+		fmt.Fprintf(b, "  %s\n", reason)
+	}
+	fmt.Fprintf(b, "  admitted throughput with purges for §19.9's hdd trigger: %.1f PUTs a second\n", verdict.AdmittedPutsPerSecond)
+	_, err := io.WriteString(out, b.String())
+	return err
+}
+
+// The clusters the file names with clusterId's bucket replaced by bucket, which must be another: M10's runs use a
+// bucket of their own on that cluster.
+func openClustersOnBucket(ctx context.Context, clustersPath string, clusterId string, bucket string) (*server.FileClusters, error) {
+	if clustersPath == "" {
+		return nil, refuseStart("-clusters names no file")
+	}
+	text, err := os.ReadFile(clustersPath)
+	if err != nil {
+		return nil, refuseStart("%v", err)
+	}
+	configs, err := server.ParseFileClusterConfigs(text)
+	if err != nil {
+		return nil, refuseStart("%v", err)
+	}
+	found := false
+	for _, config := range configs {
+		if config.ClusterId != clusterId {
+			continue
+		}
+		if bucket == "" || bucket == config.Bucket {
+			return nil, refuseStart("M10's runs use a bucket of their own on %s, not its bucket %q: name another with -bucket", clusterId, config.Bucket)
+		}
+		config.Bucket = bucket
+		found = true
+	}
+	if !found {
+		return nil, refuseStart("the clusters file names no %s", clusterId)
+	}
+	clusters, err := server.NewFileClusters(ctx, configs, nil)
+	if err != nil {
+		return nil, refuseStart("%v", err)
+	}
+	clusters.Check(ctx)
+	return clusters, nil
+}
+
 func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, error) {
 	defaults := DefaultHddSettings()
 	settings := *defaults
@@ -672,6 +893,8 @@ func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, err
 	dropCachesTemplate := flags.String("drop_caches_command", "", "a command that drops one host's page cache; {host} names the host")
 	capacity := flags.Int64("capacity", 0, "run admission against this capacity, drive operations a second, in place of the capacity step")
 	verdictPath := flags.String("verdict", "", "where the verdict's text goes, if anywhere")
+	m10 := flags.Bool("m10", false, "M10's run: the mix with admission and purges at year two's rate, under the 50% pause, on -bucket, against -capacity")
+	bucket := flags.String("bucket", "", "M10's bucket of its own on the cluster, which it empties after")
 	flags.DurationVar(&settings.CapacityStepDuration, "step", defaults.CapacityStepDuration, "each capacity step's window")
 	flags.Float64Var(&settings.CapacityStartRate, "start_rate", defaults.CapacityStartRate, "the first capacity step's operations a second")
 	flags.IntVar(&settings.CapacityMaxSteps, "max_steps", defaults.CapacityMaxSteps, "the most capacity steps")
@@ -684,7 +907,16 @@ func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, err
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
-	clusters, err := openClusters(ctx, common.clustersPath)
+	if *m10 && (*capacity <= 0 || common.clusterId == "") {
+		return false, refuseStart("M10's run needs -cluster and the -capacity M3's run measured: the cluster holds data, so no capacity step runs")
+	}
+	var clusters *server.FileClusters
+	var err error
+	if *m10 {
+		clusters, err = openClustersOnBucket(ctx, common.clustersPath, common.clusterId, *bucket)
+	} else {
+		clusters, err = openClusters(ctx, common.clustersPath)
+	}
 	if err != nil {
 		return false, err
 	}
@@ -699,7 +931,7 @@ func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, err
 	if kind := clusters.ClusterKind(common.clusterId); kind != server.FileClusterKindSegment {
 		return false, refuseStart("%s is a %q cluster: the hdd row runs on a segment cluster", common.clusterId, kind)
 	}
-	measurement := &HddMeasurement{}
+	measurement := &HddMeasurement{Bucket: *bucket}
 	if err := common.rowHeader(ctx, &measurement.RowHeader, ModeHdd, clusters, common.clusterId, map[string]string{
 		"object_size": fmt.Sprint(settings.ObjectByteCount),
 		"start_rate":  fmt.Sprint(settings.CapacityStartRate),
@@ -728,6 +960,26 @@ func runHddMode(ctx context.Context, args []string, stdout io.Writer) (bool, err
 	}
 	newAdmission := func(ctx context.Context, capacityOps int64) (hddAdmitter, error) {
 		return newInProcessHddAdmission(ctx, clusters, common.clusterId, target.Counters, capacityOps)
+	}
+	if *m10 {
+		runErr := RunHddM10(ctx, target, &settings, runPrefix(), *capacity, newAdmission, measurement)
+		if err := writeRowFile(common.outPath, stdout, measurement); err != nil {
+			return false, err
+		}
+		if runErr != nil {
+			return false, runErr
+		}
+		if *verdictPath != "" {
+			file, err := os.Create(*verdictPath)
+			if err != nil {
+				return false, err
+			}
+			defer file.Close()
+			if err := WriteHddM10Verdict(file, measurement, JudgeHddM10(measurement, &settings)); err != nil {
+				return false, err
+			}
+		}
+		return true, nil
 	}
 	runErr := RunHdd(ctx, target, &settings, runPrefix(), dropCaches, *capacity, newAdmission, measurement)
 	if err := writeRowFile(common.outPath, stdout, measurement); err != nil {
