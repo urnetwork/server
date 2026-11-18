@@ -136,7 +136,7 @@ func TestSessionCapEnforcedRefusesWithoutEviction(t *testing.T) {
 			t.Fatal("enforced cap admitted", err)
 		}
 		body, _ := json.Marshal(refusal.HttpErrorResultBody())
-		if string(body) != `{"code":"session_limit_reached","error":"Too many active sessions. Sign out of sessions you no longer use in Settings → Sessions, then try again."}` {
+		if string(body) != `{"code":"session_limit_reached","error":"Too many active sessions. Sign out of sessions you no longer use in Account → Sessions, then try again."}` {
 			t.Fatal("refusal body", string(body))
 		}
 		if got := testutil.ToFloat64(sessionCapRefused.WithLabelValues(SessionKindCode, "live")) - refusedBefore; got != 1 {

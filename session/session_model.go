@@ -32,7 +32,7 @@ type SessionError struct {
 // The message a refusal answers with: the cap refusals say what to do (owner
 // decision 7), every other code the generic message.
 var sessionErrorMessages = map[string]string{
-	"session_limit_reached":           "Too many active sessions. Sign out of sessions you no longer use in Settings → Sessions, then try again.",
+	"session_limit_reached":           "Too many active sessions. Sign out of sessions you no longer use in Account → Sessions, then try again.",
 	"session_retention_limit_reached": "Too many recently signed-out sessions. Try again later.",
 }
 
