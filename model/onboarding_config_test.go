@@ -377,7 +377,8 @@ func TestOnboardingRegistryFile(t *testing.T) {
 }
 
 // TestReengagementConfigFile parses config/main/reengagement.yml, when there is
-// one: it ships inert, and every highlight's dates parse.
+// one: every highlight's dates parse, and the comeback offer keeps its
+// accepted shape.
 func TestReengagementConfigFile(t *testing.T) {
 	root := os.Getenv("URNETWORK_CONFIG_ROOT")
 	if root == "" {
@@ -400,8 +401,8 @@ func TestReengagementConfigFile(t *testing.T) {
 	}
 
 	// the comeback offer, once the config carries it: the accepted shape,
-	// shipped off, keeping the rule over every offer at every price tier of
-	// the shipped pro.yml against the shipped welcome offer
+	// keeping the rule over every offer at every price tier of the shipped
+	// pro.yml against the shipped welcome offer
 	w := c.WinbackOffer
 	if w.Plan == "" && !w.Enabled {
 		return
@@ -410,7 +411,15 @@ func TestReengagementConfigFile(t *testing.T) {
 	connect.AssertEqual(t, 50, w.PercentOff)
 	connect.AssertEqual(t, 14, w.ValidityDays)
 	connect.AssertEqual(t, "winback_monthly_50", w.StripeCouponId)
-	connect.AssertEqual(t, "winback-monthly-50", w.PlayOfferTag)
+	// a store's handle may be empty (no offer on that store: Google Play's
+	// waits for a Play release whose app selects the offer only when the plan
+	// response carries it); a set one is the store's offer
+	if w.PlayOfferTag != "" {
+		connect.AssertEqual(t, "winback-monthly-50", w.PlayOfferTag)
+	}
+	if w.AppleOfferId != "" {
+		connect.AssertEqual(t, "winback_monthly_50", w.AppleOfferId)
+	}
 	if w.AppleOfferUrl != "" {
 		connect.AssertEqual(t, w.AppleOfferUrl, c.WinbackAppleOfferUrl())
 	}
