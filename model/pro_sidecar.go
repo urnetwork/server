@@ -191,6 +191,13 @@ var proSidecarLimitRows = [...]proSidecarLimitRow{
 	{key: "smtp_destination_concurrency", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
 	{key: "smtp_hard_bounce_percent", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
 	{key: "smtp_hard_bounce_floor", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
+	// §21.5's breaker thresholds (D-ABUSE-2), each rate in parts per million of recipients; read by
+	// ApplyProMailBreaker, and whole or not at all
+	{key: "breaker_restrict_rate", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
+	{key: "breaker_community_rate", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
+	{key: "breaker_all_rate", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
+	{key: "breaker_clear_rate", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
+	{key: "breaker_clear_days", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
 	{key: "directory_requests_pending", block: proSidecarBlockAbuse, kind: proSidecarKindCount},
 	{key: "directory_requests_per_day", block: proSidecarBlockAbuse, kind: proSidecarKindRate},
 	{key: "directory_requests_per_run", block: proSidecarBlockAbuse, kind: proSidecarKindCount},

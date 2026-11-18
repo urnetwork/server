@@ -1,0 +1,6 @@
+{
+  "name": "domains/root.example/trafficStats/20261101",
+  "domainReputation": "HIGH",
+  "spfSuccessRatio": 1,
+  "dkimSuccessRatio": 1
+}

@@ -103,7 +103,7 @@ func abuseActionKindRecorded(kind AbuseActionKind) bool {
 	case AbuseActionKindNoticeForward, AbuseActionKindHostKill, AbuseActionKindLabelKill,
 		AbuseActionKindCertRevoke, AbuseActionKindZoneSuspend, AbuseActionKindHostSuspend,
 		AbuseActionKindNetworkSuspend, AbuseActionKindMailHalt, AbuseActionKindMailLabelHalt,
-		AbuseActionKindLimitTighten, AbuseActionKindScreenAllow:
+		AbuseActionKindLimitTighten, AbuseActionKindScreenAllow, AbuseActionKindMailBreaker:
 		return true
 	}
 	return false
@@ -299,6 +299,15 @@ func RecordAbuseActionInTx(
 		if err := validateAbuseLimitTightenTarget(args.Target, args.CaseId); err != nil {
 			return nil, nil, false, err
 		}
+	}
+	if args.Kind == AbuseActionKindMailBreaker {
+		// §21.5: a breaker's row, on a breaker's case and no network's (ABUSE-M9-02)
+		if err := validateMailBreakerAction(abuseCase, args.Target); err != nil {
+			return nil, nil, false, err
+		}
+	} else if abuseCase.JoinKind == AbuseJoinKindBreaker {
+		// a breaker's case holds breaker rows and their lifts alone: no kill or halt hangs off a case with no network
+		return nil, nil, false, fmt.Errorf("%w: kind %q on a breaker's case", ErrAbuseActionInvalid, args.Kind)
 	}
 	if args.Kind == AbuseActionKindScreenAllow {
 		// §21.6: a reviewer's allow of one name, for the network its brand case names (ABUSE-M5-08)

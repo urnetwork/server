@@ -1,5 +1,6 @@
 // T2 for server/cli/smtpedge (SMTP-M9-20): the block scrubs its logs first; its gate loads a network once on a
-// miss and answers from memory, its unwired rows answering not loaded; the X-UR-Ref key file lays its keys
+// miss and answers from memory, its unwired row answering not loaded and §21.5's breaker following its source within
+// a refresh (ABUSE-M9-02); the X-UR-Ref key file lays its keys
 // over the settings and names no key when refused; and the block is not ready while a seam is missing, a
 // sending address with no FCrDNS included. Time is a fake clock and nothing waits on a sleep.
 
@@ -36,6 +37,25 @@ type testGateSource struct {
 	stateLock sync.Mutex
 	loads     map[sidecar.Id]int
 	facts     *smtpedgeservice.SmtpGateFacts
+	// §21.5's state as the source reads it; nil is a read that failed
+	breaker *smtpedgeservice.SmtpBreakerState
+	// signalled, when set, each time a refresh has read the breaker and gone on to Community's limits
+	refreshed chan struct{}
+}
+
+func (self *testGateSource) Breaker(ctx context.Context) (*smtpedgeservice.SmtpBreakerState, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.breaker == nil {
+		return nil, errors.New("not there")
+	}
+	return &smtpedgeservice.SmtpBreakerState{Level: self.breaker.Level, ListedAddresses: slices.Clone(self.breaker.ListedAddresses)}, nil
+}
+
+func (self *testGateSource) setBreaker(breaker *smtpedgeservice.SmtpBreakerState) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.breaker = breaker
 }
 
 func (self *testGateSource) Facts(ctx context.Context, networkId sidecar.Id) (*smtpedgeservice.SmtpGateFacts, error) {
@@ -50,6 +70,10 @@ func (self *testGateSource) Facts(ctx context.Context, networkId sidecar.Id) (*s
 }
 
 func (self *testGateSource) CommunityLimits(ctx context.Context) (*sidecar.QuotaLimits, error) {
+	select {
+	case self.refreshed <- struct{}{}:
+	default:
+	}
 	return &sidecar.QuotaLimits{Tier: "free", Limits: map[string]int64{"smtp_connections_per_day": 5}, Enforced: true}, nil
 }
 
@@ -104,7 +128,76 @@ func TestModelGateSourceCommunityLimitsCarryTheSwitch(t *testing.T) {
 	}
 }
 
-// mail_send and §21.5's breaker have no source in this block yet, so both answer not loaded: TRY_LATER.
+// §21.5's breaker state reaches the gate within one refresh, off every preamble's path: a level and a listed
+// sending address the source reads are the gate's after the next FactsRefreshInterval, the listed address is out of
+// the sending set's view and nowhere else in the gate, and a read that fails leaves the breaker not loaded, never
+// the state a refresh ago.
+func TestHostGateLoadsTheBreakerOnItsRefresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	listed := netip.MustParseAddr("192.0.2.10")
+	source := &testGateSource{
+		loads:     map[sidecar.Id]int{},
+		breaker:   &smtpedgeservice.SmtpBreakerState{Level: smtpedgeservice.SmtpBreakerLevelRestrict},
+		refreshed: make(chan struct{}, 16),
+	}
+	settings := defaultHostGateSettings()
+	gate := newHostGate(ctx, source, clock, settings)
+	defer gate.wait()
+	defer cancel()
+	// one refresh has read the breaker once it goes on to Community's limits, then waits for the next
+	awaitRefresh := func() {
+		t.Helper()
+		<-source.refreshed
+		if err := clock.AwaitTimers(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	awaitRefresh()
+	state, ok := gate.Breaker()
+	if !ok || state.Level != smtpedgeservice.SmtpBreakerLevelRestrict || len(state.ListedAddresses) != 0 {
+		t.Fatalf("after the first refresh: %+v, %t", state, ok)
+	}
+
+	// the breaker trips to level 2 with a sending address listed: the gate has it one refresh on, and not before
+	source.setBreaker(&smtpedgeservice.SmtpBreakerState{Level: smtpedgeservice.SmtpBreakerLevelCommunity, ListedAddresses: []netip.Addr{listed}})
+	if state, _ := gate.Breaker(); state.Level != smtpedgeservice.SmtpBreakerLevelRestrict {
+		t.Fatalf("before the refresh the gate read the source: %+v", state)
+	}
+	clock.Advance(settings.FactsRefreshInterval)
+	awaitRefresh()
+	state, ok = gate.Breaker()
+	if !ok || state.Level != smtpedgeservice.SmtpBreakerLevelCommunity || !state.Listed(listed) || state.Listed(netip.MustParseAddr("192.0.2.11")) {
+		t.Fatalf("one refresh on: %+v, %t", state, ok)
+	}
+	// a copy, so a caller's change never reaches the memory
+	state.Level = smtpedgeservice.SmtpBreakerLevelNone
+	state.ListedAddresses[0] = netip.MustParseAddr("192.0.2.99")
+	if again, _ := gate.Breaker(); again.Level != smtpedgeservice.SmtpBreakerLevelCommunity || !again.Listed(listed) {
+		t.Fatal("the gate handed out its own breaker state")
+	}
+	// the listing is the sending set's alone: no network's facts and no limits carry the address
+	if limits, ok := gate.CommunityLimits(); !ok || len(limits.Limits) != 1 {
+		t.Fatalf("community %+v, %t", limits, ok)
+	}
+
+	// a read that fails leaves nothing loaded: TRY_LATER, not the level of a refresh ago
+	source.setBreaker(nil)
+	clock.Advance(settings.FactsRefreshInterval)
+	awaitRefresh()
+	if state, ok := gate.Breaker(); ok || state != nil {
+		t.Fatalf("after a failed read the gate kept %+v", state)
+	}
+	// and it loads again once the source reads
+	source.setBreaker(&smtpedgeservice.SmtpBreakerState{Level: smtpedgeservice.SmtpBreakerLevelAll})
+	clock.Advance(settings.FactsRefreshInterval)
+	awaitRefresh()
+	if state, ok := gate.Breaker(); !ok || state.Level != smtpedgeservice.SmtpBreakerLevelAll {
+		t.Fatalf("after the source read again: %+v, %t", state, ok)
+	}
+}
+
+// mail_send has no source in this block yet, and a breaker whose source cannot read is not loaded: TRY_LATER.
 func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -115,7 +208,7 @@ func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 		t.Fatalf("mail_send %+v", decision)
 	}
 	if state, ok := gate.Breaker(); ok || state != nil {
-		t.Fatal("a breaker with no source answered")
+		t.Fatal("a breaker whose source cannot read answered")
 	}
 }
 

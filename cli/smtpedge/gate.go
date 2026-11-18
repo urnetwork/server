@@ -11,16 +11,19 @@ package main
 //	community   Community's tier limits from pro.yml, refreshed with the facts
 //	mail_send   AclGateView over the network's projection: no projection reader is wired into this block yet
 //	            (plan-SOCK-gate-data's route for smtpedge), so every network answers no state, TRY_LATER
-//	breaker     §21.5's level and listed addresses: ABUSE-M9-02's source is not here yet, so none is loaded,
-//	            TRY_LATER
+//	breaker     §21.5's level and listed sending addresses from model.GetMailBreakerState (ABUSE-M9-02), read
+//	            with the facts each FactsRefreshInterval. A read that fails, or rows that do not read whole, leave
+//	            none loaded, TRY_LATER: a state last read a refresh ago is not kept, since the level it lacks could
+//	            be a pause
 //
-// So this gate admits nothing until both closed rows are wired, the direction R-SMTP-13 wants while D-SMTP-16 has
+// So this gate admits nothing until mail_send's row is wired, the direction R-SMTP-13 wants while D-SMTP-16 has
 // not passed. Safe for concurrent use; no method that SmtpGate names does I/O.
 
 import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -61,6 +64,8 @@ type hostGateSource interface {
 	Facts(ctx context.Context, networkId sidecar.Id) (*smtpedgeservice.SmtpGateFacts, error)
 	// Community's tier limits.
 	CommunityLimits(ctx context.Context) (*sidecar.QuotaLimits, error)
+	// §21.5's breaker state; an error is a state that could not be read whole.
+	Breaker(ctx context.Context) (*smtpedgeservice.SmtpBreakerState, error)
 }
 
 // The block's source: the model on its Postgres pool, and Quota.Limits.
@@ -96,7 +101,28 @@ func (self *modelGateSource) CommunityLimits(ctx context.Context) (*sidecar.Quot
 	return &sidecar.QuotaLimits{Tier: string(model.NetworkTierFree), Limits: limits, Enforced: pro.EnforceSidecarLimits}, nil
 }
 
+// §21.5's breaker state as the standing abuse_action rows hold it: the level, value for value, and the listed
+// sending addresses.
+func (self *modelGateSource) Breaker(ctx context.Context) (state *smtpedgeservice.SmtpBreakerState, returnErr error) {
+	if r := server.HandleError(func() {
+		breaker, ok := model.GetMailBreakerState(ctx)
+		if !ok {
+			returnErr = errBreakerLoad
+			return
+		}
+		state = &smtpedgeservice.SmtpBreakerState{
+			Level:           smtpedgeservice.SmtpBreakerLevel(breaker.Level),
+			ListedAddresses: slices.Clone(breaker.ListedAddresses),
+		}
+	}); r != nil {
+		return nil, errBreakerLoad
+	}
+	return state, returnErr
+}
+
 var (
+	// The breaker rows did not read whole, or this binary links no MG5.
+	errBreakerLoad = errors.New("smtpedge gate: the breaker state did not load")
 	// The block has no Quota, so no network's limits can be read.
 	errNoQuota = errors.New("smtpedge gate: no quota")
 	// The model raised on a read.
@@ -122,6 +148,8 @@ type hostGate struct {
 	networkIdFacts map[sidecar.Id]*hostGateEntry
 	loading        map[sidecar.Id]bool
 	community      *sidecar.QuotaLimits
+	// nil until a refresh read it, and again after one that could not
+	breaker *smtpedgeservice.SmtpBreakerState
 }
 
 var _ smtpedgeservice.SmtpGate = (*hostGate)(nil)
@@ -200,9 +228,35 @@ func (self *hostGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, no
 	return sidecar.AclDecision{Reason: sidecar.AclReasonNoState}
 }
 
-// See smtpedgeservice.SmtpGate: §21.5's source is not here yet, so nothing is loaded.
+// See smtpedgeservice.SmtpGate: §21.5's state as the last refresh read it, a copy, or not loaded.
 func (self *hostGate) Breaker() (*smtpedgeservice.SmtpBreakerState, bool) {
-	return nil, false
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.breaker == nil {
+		return nil, false
+	}
+	return &smtpedgeservice.SmtpBreakerState{
+		Level:           self.breaker.Level,
+		ListedAddresses: slices.Clone(self.breaker.ListedAddresses),
+	}, true
+}
+
+// Reads §21.5's breaker state once, bounded by LoadTimeout, keeping it or, when it did not read, nothing.
+func (self *hostGate) loadBreaker() {
+	ctx, cancel := context.WithCancel(self.ctx)
+	stop := self.clock.AfterFunc(self.settings.LoadTimeout, cancel)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	breaker, err := self.source.Breaker(ctx)
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if err != nil || breaker == nil {
+		self.breaker = nil
+		return
+	}
+	self.breaker = breaker
 }
 
 // See smtpedgeservice.SmtpGate.
@@ -215,11 +269,12 @@ func (self *hostGate) CommunityLimits() (*sidecar.QuotaLimits, bool) {
 	return &sidecar.QuotaLimits{Tier: self.community.Tier, Limits: maps.Clone(self.community.Limits), Enforced: self.community.Enforced}, true
 }
 
-// Refreshes Community's limits and every network asked within FactsKeepInterval, forgetting the rest, each
-// FactsRefreshInterval until ctx ends.
+// Refreshes §21.5's breaker state, Community's limits and every network asked within FactsKeepInterval, forgetting
+// the rest, each FactsRefreshInterval until ctx ends.
 func (self *hostGate) run() {
 	defer self.group.Done()
 	for {
+		self.loadBreaker()
 		if community, err := self.source.CommunityLimits(self.ctx); err == nil && community != nil {
 			func() {
 				self.stateLock.Lock()

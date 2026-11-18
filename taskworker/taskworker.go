@@ -211,6 +211,9 @@ func initTaskSchedule(ctx context.Context) {
 		// open notices paged again under their case's key; not scheduled
 		// without MG5
 		work.ScheduleAbuseClockPass(clientSession, tx)
+		// §21.5's breakers each 5 minutes: the shared measures sampled, the level and the listed sending addresses
+		// written as abuse_action rows with no network; not scheduled without MG5 and MG9
+		work.ScheduleAbuseBreakers(clientSession, tx)
 		// §21.7's restricted rows past their until_time re-derived every hour;
 		// not scheduled without MG5
 		work.ScheduleAbuseStandingPass(clientSession, tx)
@@ -773,6 +776,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseClockPass,
 			work.AbuseClockPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseBreakers,
+			work.AbuseBreakersPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.AbuseStandingPass,

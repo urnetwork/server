@@ -44,15 +44,25 @@ type AbuseRestoredAction struct {
 
 // Re-creates the action's case under its id when there is none, in the caller's transaction; created is false when
 // the case was there. The case is open, barred, joined by its network, its target the network, and due for review
-// at now.
+// at now. A breaker row's case, which names no network, comes back as a breaker's case.
 func RestoreAbuseCaseInTx(ctx context.Context, tx server.PgTx, action *AbuseRestoredAction, now time.Time) (abuseCase *AbuseCase, created bool) {
 	if abuseCase = getAbuseCaseInTx(ctx, tx, action.CaseId, true); abuseCase != nil {
 		return abuseCase, false
 	}
 	target := action.CaseId.String()
 	targetKind := AbuseTargetKindNetwork
+	joinKind := AbuseJoinKindNetwork
+	joinKey := target
 	if action.NetworkId != nil {
 		target = action.NetworkId.String()
+		joinKey = target
+	} else if action.Kind == AbuseActionKindMailBreaker {
+		// §21.5's breaker rows are read by their case's join (GetMailBreakerRows), so a breaker's case comes back as
+		// one (ABUSE-M9-02)
+		target = mailBreakerCaseTarget
+		targetKind = AbuseTargetKindSendingDomain
+		joinKind = AbuseJoinKindBreaker
+		joinKey = mailBreakerJoinKey
 	}
 	category := action.Category
 	if !abuseCategoryKnown(category) {
@@ -83,8 +93,8 @@ func RestoreAbuseCaseInTx(ctx context.Context, tx server.PgTx, action *AbuseRest
 		string(targetKind),
 		target,
 		string(AbuseReporterClassRestore),
-		string(AbuseJoinKindNetwork),
-		target,
+		string(joinKind),
+		joinKey,
 		now.UTC(),
 		action.Time.UTC(),
 	))
