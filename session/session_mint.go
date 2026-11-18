@@ -6,78 +6,21 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/prometheus/client_golang/prometheus"
-
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
 
 var sessionCreationOverride atomic.Pointer[bool]
 
-// vault auth.yml session_creation_enabled is read at most this often. A
-// delivery of the file turns creation on or off within this interval, with no
-// restart; between reads every mint answers from the last read.
-const sessionCreationSettingInterval = 5 * time.Second
-
-var sessionCreationSetting struct {
-	stateLock sync.Mutex
-	readTime  time.Time
-	value     bool
-}
-
-// the setting's clock, for tests
-var sessionCreationSettingNow = time.Now
-
-// Every mint asks. The setting used to be read and parsed from the vault file
-// on every call, and a file that failed to parse panicked the mint (S1 W10).
-// Now a read that fails keeps the last value read.
 func SessionCreationEnabled() bool {
 	if value := sessionCreationOverride.Load(); value != nil {
 		return *value
 	}
-	setting := &sessionCreationSetting
-	setting.stateLock.Lock()
-	defer setting.stateLock.Unlock()
-	now := sessionCreationSettingNow()
-	if !setting.readTime.IsZero() && now.Sub(setting.readTime) < sessionCreationSettingInterval {
-		return setting.value
-	}
-	setting.readTime = now
-	if value, err := readAuthSettingBool("session_creation_enabled"); err == nil {
-		setting.value = value
-	} else {
-		glog.Errorf("[session]vault auth.yml could not be read (%s); session_creation_enabled stays %t\n", err, setting.value)
-	}
-	return setting.value
-}
-
-// A bool key of vault auth.yml. A missing file or key is false; a file that
-// does not parse is an error, not a panic.
-func readAuthSettingBool(key string) (bool, error) {
-	resource, err := server.Vault.SimpleResource("auth.yml")
-	if err != nil {
-		return false, nil
-	}
-	values, err := resource.ParseE()
-	if err != nil {
-		return false, err
-	}
-	value, ok := values[key].(bool)
-	return ok && value, nil
-}
-
-// Testing_ResetSessionCreationSetting forgets the last read of the setting.
-func Testing_ResetSessionCreationSetting() {
-	sessionCreationSetting.stateLock.Lock()
-	defer sessionCreationSetting.stateLock.Unlock()
-	sessionCreationSetting.readTime = time.Time{}
-	sessionCreationSetting.value = false
+	return loadAuthSettingBool("session_creation_enabled")
 }
 func Testing_SetSessionCreationEnabled(value bool) func() {
 	old := sessionCreationOverride.Swap(&value)
@@ -98,61 +41,8 @@ func PrepareSessionMint(credential *ByJwt, independent bool) {
 		sid = derived
 	}
 	credential.SessionId = &sid
+	// R-mint-redis (session_mint_untagged.go)
 	credential.mintStart = &sessionMintStart{sessionId: sid, fresh: fresh}
-}
-
-// StartSessionMint gives credential a new session that starts at this mint,
-// for a producer that allocates its own candidate id outside its retryable
-// callback (device adoption).
-func StartSessionMint(credential *ByJwt, sessionId server.Id) {
-	credential.SessionId = &sessionId
-	credential.mintStart = &sessionMintStart{sessionId: sessionId, fresh: true}
-}
-
-// The session a mint starts, when the mint chose its id: a new id, or the
-// legacy lineage derived from an untagged credential. Neither is carried from
-// a presented tagged credential or a stored association, so a token without it
-// grants nothing its caller does not already hold (R-mint-redis).
-type sessionMintStart struct {
-	sessionId server.Id
-	// a new random id, which no client row is bound to before this mint
-	fresh bool
-}
-
-// The session credential starts at this mint, or nil.
-func (self *ByJwt) startsSession() *sessionMintStart {
-	if self.mintStart == nil || self.SessionId == nil || *self.SessionId != self.mintStart.sessionId {
-		return nil
-	}
-	return self.mintStart
-}
-
-// A mint waits at most this long for each Redis step of its registration, the
-// clock sample and the mint script, inside its SQL transaction. A Redis stall
-// then holds a mint's PostgreSQL connection for at most two budgets, where
-// RedisAuth alone allows two seconds each: at the 380 tagged mints a second
-// S4 measured, two-second waits would hold more connections than PgBouncer
-// has.
-const sessionMintRedisBudget = RevocationCheckBudget
-
-// The service label comes from the stats push grouping (StartStatsPusher).
-var sessionMintUntaggedCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
-	Name: "urnetwork_session_mint_untagged_total",
-	Help: "Mints that started a session but signed an untagged token because Redis did not register the session within the mint budget (R-mint-redis, decision 3), by session kind: signin, code or client. The token gets its session at its next refresh.",
-}, []string{"kind"})
-
-func init() {
-	prometheus.MustRegister(sessionMintUntaggedCounter)
-	for _, kind := range []string{SessionKindSignin, SessionKindCode, SessionKindClient} {
-		sessionMintUntaggedCounter.WithLabelValues(kind)
-	}
-}
-
-// The §15 kind of a mint's session, as the session cap counts it
-// (sessionClass): a network credential's legacy lineage is a sign-in, a
-// client credential's is the client's own.
-func sessionKindClass(kind string, credential *ByJwt) string {
-	return sessionKindLabel(sessionClass(kind, credential.ClientId == nil))
 }
 
 // PrepareOwnSessionMint gives the client a mint creates a session of its own,
@@ -168,6 +58,7 @@ func PrepareOwnSessionMint(credential *ByJwt) {
 	sid := server.NewId()
 	credential.SessionId = &sid
 	credential.CreateTime = server.CodecTime(server.NowUtc())
+	// R-mint-redis (session_mint_untagged.go)
 	credential.mintStart = &sessionMintStart{sessionId: sid, fresh: true}
 }
 
@@ -245,19 +136,6 @@ func AssociateSessionClientInTx(ctx context.Context, tx server.PgTx, credential 
 	return err
 }
 
-// Registers a tagged credential's session, then signs it.
-//
-// R-mint-redis (decision 3, 2026-11-18): when Redis does not answer the
-// registration within sessionMintRedisBudget and the mint starts the session
-// itself, the token is signed untagged, as tokens were before sessions, and
-// counted. No tagged token then carries a session Redis does not list, and the
-// token gets its session at its next refresh. A fresh session's client
-// association, written earlier in this transaction, is cleared with it. A mint
-// that carries a session from its presented credential or a stored association
-// still needs its registration (the check-and-extend of REVOKE-FINAL.md §12):
-// signing it untagged would let the new token outlive the revocation of its
-// session, so it stays unavailable, and its caller keeps the credential it
-// holds.
 func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt, kind string, origin *server.Id, fenceOrigin bool) (string, error) {
 	if credential.ClientId != nil && credential.RootClientId == nil {
 		return "", errors.New("client mint requires resolved root")
@@ -267,29 +145,24 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		if err != nil {
 			return "", err
 		}
+		// within the mint budget; a mint that starts its session signs it
+		// untagged when Redis does not register it (session_mint_untagged.go)
 		registered, err := registerSessionMint(ctx, credential, kind, origin, fenceOrigin, exempt)
 		if err != nil {
-			start := credential.startsSession()
-			if start == nil || !errors.Is(err, ErrSessionStoreUnavailable) || ctx.Err() != nil {
-				return "", err
+			if untagErr := untagUnregisteredSessionMintInTx(ctx, tx, credential, kind, err); untagErr != nil {
+				return "", untagErr
 			}
-			if err := untagSessionMintInTx(ctx, tx, credential, start); err != nil {
-				return "", err
-			}
-			sessionMintUntaggedCounter.WithLabelValues(sessionKindClass(kind, credential)).Inc()
-		} else if registered.Created {
-			// Only a session the mint added can be the network's earliest
-			// review: a refresh only extends a member, and the network's index
-			// entry already reviews at or before it. The new member is
-			// published at once, within the mint budget; only a failed
-			// publication goes to the outbox, whose single row per network
-			// every mint used to upsert (S1 W7). An index entry published by a
-			// transaction that then rolls back only reviews early.
+			return sign(credential), nil
+		}
+		// Only a session the mint added can be the network's earliest review: a
+		// refresh only extends a member, and the network's index entry already
+		// reviews at or before it. The new member is published at once; only a
+		// failed publication goes to the outbox, whose single row per network
+		// every mint used to upsert (S1 W7). An index entry published by a
+		// transaction that then rolls back only reviews early.
+		if registered.Created {
 			due := time.UnixMilli(registered.AcceptUntil).UTC()
-			publishCtx, cancelPublish := context.WithTimeout(ctx, sessionMintRedisBudget)
-			publishErr := publishSessionIndexOnMint(publishCtx, credential.NetworkId, due, server.NewId().String())
-			cancelPublish()
-			if publishErr != nil {
+			if publishErr := publishSessionIndexWithinMintBudget(ctx, credential.NetworkId, due); publishErr != nil {
 				// in UTC, as next_review_time holds it
 				if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, due); err != nil {
 					return "", err
@@ -298,34 +171,6 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		}
 	}
 	return sign(credential), nil
-}
-
-// The clock sample and the mint script, each within the mint budget. exempt
-// is the provider exemption the mint sets (sessionMintExemption).
-func registerSessionMint(ctx context.Context, credential *ByJwt, kind string, origin *server.Id, fenceOrigin bool, exempt string) (*registeredSession, error) {
-	clockCtx, cancelClock := context.WithTimeout(ctx, sessionMintRedisBudget)
-	err := verifySessionMintClock(clockCtx)
-	cancelClock()
-	if err != nil {
-		return nil, err
-	}
-	registerCtx, cancelRegister := context.WithTimeout(ctx, sessionMintRedisBudget)
-	defer cancelRegister()
-	return registerNetworkSession(registerCtx, credential, kind, origin, fenceOrigin, server.NowUtc(), exempt)
-}
-
-// Leaves the session out of a mint that started it. Only this mint can have
-// bound a client row to a fresh id; a derived lineage's binding stays, since
-// the token's next refresh derives the same id.
-func untagSessionMintInTx(ctx context.Context, tx server.PgTx, credential *ByJwt, start *sessionMintStart) error {
-	if start.fresh && credential.ClientId != nil {
-		if _, err := tx.Exec(ctx, `UPDATE network_client SET session_id=NULL,session_create_time=NULL WHERE network_id=$1 AND client_id=$2 AND session_id=$3`, credential.NetworkId, *credential.ClientId, start.sessionId); err != nil {
-			return err
-		}
-	}
-	credential.SessionId = nil
-	credential.mintStart = nil
-	return nil
 }
 
 // Independent successful password/SSO/wallet/verification/seedphrase sign-ins.
@@ -481,6 +326,8 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 			lineage = &created
 		}
 		credential.SessionId = sid
+		// R-mint-redis (session_mint_untagged.go): only the bootstrap starts
+		// its session; a stored binding is carried
 		credential.mintStart = nil
 		if bootstrap {
 			credential.mintStart = &sessionMintStart{sessionId: candidate, fresh: true}
