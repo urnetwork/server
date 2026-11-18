@@ -2,6 +2,7 @@ package work
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"net/netip"
@@ -9,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -406,9 +410,10 @@ func TestMailBreakerRowsAreRefusedOrUnknownNeverGuessed(t *testing.T) {
 			{ActionId: server.NewId(), CaseId: breakerCaseId, Kind: model.AbuseActionKindMailBreaker, Target: "level:4"},
 			{ActionId: server.NewId(), CaseId: breakerCaseId, Kind: model.AbuseActionKindMailBreaker, Target: "shop.root.example"},
 			{ActionId: server.NewId(), CaseId: breakerCaseId, Kind: model.AbuseActionKindMailBreaker, Target: "address:not-an-address"},
-			// and no other kind hangs off a breaker's case by mistake for a level
 			{ActionId: server.NewId(), CaseId: breakerCaseId, Kind: model.AbuseActionKindMailBreaker, Target: "clean:yesterday"},
 		}
+		// and no kill or halt hangs off a breaker's case, which names no network
+		refused = append(refused, &model.AbuseActionArgs{ActionId: server.NewId(), CaseId: breakerCaseId, Kind: model.AbuseActionKindNoticeForward, Target: "mail-breaker"})
 		for _, args := range refused {
 			if _, err := controller.ApplyAbuseAction(ctx, args); !errors.Is(err, model.ErrAbuseActionInvalid) {
 				t.Errorf("%s on case %s: %v", args.Target, args.CaseId, err)
@@ -449,7 +454,7 @@ func TestMailBreakerRecordsAreRestored(t *testing.T) {
 		dumpTime := server.NowUtc().Add(-time.Hour)
 		now := testBreakerStart
 
-		// level 1, then level 2 with a listed address, delisted, a clean count
+		// level 1, then level 2 with two listed addresses, then one of them delisted
 		testBreakerPass(t, ctx, testBreakerSample(0, 1000), now, settings)
 		now = now.Add(time.Hour)
 		testBreakerPass(t, ctx, testBreakerSample(0, 0, testBreakerAddress, netip.MustParseAddr("192.0.2.11")), now, settings)
@@ -520,7 +525,8 @@ func TestMailBreakerRecordsAreRestored(t *testing.T) {
 }
 
 // The job is scheduled a pass interval ahead, once, in a binary that links
-// MG5 and MG9; with no measurer it samples nothing known and changes nothing.
+// MG5 and MG9; with no outside sources it samples the store's complaint rate
+// alone, unknown with nothing sent, and changes nothing.
 func TestAbuseBreakersIsScheduledAndHoldsWithNoMeasurer(t *testing.T) {
 	skipWithoutBreakerTables(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -543,7 +549,7 @@ func TestAbuseBreakersIsScheduledAndHoldsWithNoMeasurer(t *testing.T) {
 
 		result, err := AbuseBreakers(&AbuseBreakersArgs{}, clientSession)
 		if err != nil || result.Held || result.Level != 0 || result.AppliedCount != 0 || result.LiftedCount != 0 {
-			t.Fatalf("with no measurer: %+v, %v", result, err)
+			t.Fatalf("with no outside sources and nothing sent: %+v, %v", result, err)
 		}
 		// a measurer's sample is what the job applies, under pro.yml's thresholds
 		defer SetMailBreakerMeasurer(func(ctx context.Context, now time.Time, settings *model.MailBreakerSettings) *model.MailBreakerMeasures {
@@ -561,4 +567,121 @@ func TestAbuseBreakersIsScheduledAndHoldsWithNoMeasurer(t *testing.T) {
 			t.Fatalf("a binary without MG9 ran the breakers: %+v", result)
 		}
 	})
+}
+
+// A send record of networkId's from 192.0.2.10 with recipientCount proven
+// recipients, starting at start.
+func testBreakerSend(networkId sidecar.Id, start time.Time, recipientCount uint32) *smtpedgeservice.SmtpSendRecord {
+	sendId := make([]byte, smtpedgeservice.SmtpSendIdByteCount)
+	if _, err := rand.Read(sendId); err != nil {
+		panic(err)
+	}
+	return &smtpedgeservice.SmtpSendRecord{
+		SendId:           sendId,
+		NetworkId:        networkId,
+		ClientId:         sidecar.NewId(),
+		SendingAddress:   testBreakerAddress,
+		RecipientDomain:  "recipient.example",
+		MxHost:           "mx.recipient.example",
+		StartTime:        start,
+		EndTime:          start.Add(time.Minute),
+		ByteCount:        4096,
+		MessageIdHash:    smtpedgeservice.SmtpMessageIdHash("<" + server.NewId().String() + "@quietnet.root.example>"),
+		XUrRefKeyId:      1,
+		RecipientCount:   recipientCount,
+		MessageByteCount: 2048,
+		TlsVersion:       0x0304,
+		TlsLevel:         smtpedgeservice.SmtpTlsLevelDane,
+		Result:           "sent",
+	}
+}
+
+// The job's own measurer (ABUSE-M9-03's measures): with no outside sources it
+// samples the store's complaint rate, so complaints at 0.10% of the day's
+// recipients trip level 1, and since Postmaster Tools, SNDS and the listing
+// stay unknown, clean days of complaints clear nothing by machine. Sources a
+// process installs join the sample.
+func TestMailBreakerPassSamplesTheStoresComplaintRate(t *testing.T) {
+	skipWithoutBreakerTables(t)
+	if !server.SidecarMg9Linked() {
+		t.Skip("MG9 is pending: these cases run with -tags sidecar_pending")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newTestBreakerActionDeps(t)
+		settings := testBreakerSettings()
+		now := server.NowUtc()
+
+		// 1,000 recipients across two networks, and one complaint at high confidence
+		networkId := sidecar.NewId()
+		sends := []*smtpedgeservice.SmtpSendRecord{
+			testBreakerSend(networkId, now.Add(-2*time.Hour), 600),
+			testBreakerSend(sidecar.NewId(), now.Add(-time.Hour), 400),
+		}
+		if result, err := model.InsertSmtpSends(ctx, sends); err != nil || result.StoredCount != len(sends) {
+			t.Fatalf("the sends: %+v, %v", result, err)
+		}
+		measures := currentMailBreakerMeasurer()(ctx, now, settings)
+		if measures.ComplaintRate != model.KnownMailRate(0) || len(measures.PostmasterRates) != 0 || measures.ListingKnown {
+			t.Fatalf("with no complaint: %+v", measures)
+		}
+		if err := model.InsertSmtpComplaint(ctx, &smtpedgeservice.SmtpComplaint{
+			ComplaintId:   sidecar.NewId(),
+			NetworkId:     networkId,
+			Reporter:      "reporter.example",
+			Type:          smtpedgeservice.SmtpComplaintTypeAbuse,
+			ArrivalTime:   now.Add(-30 * time.Minute),
+			Domain:        "quietnet.root.example",
+			MessageIdHash: sends[0].MessageIdHash,
+			JoinResult:    string(smtpedgeservice.SmtpConfidenceHigh),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		measures = currentMailBreakerMeasurer()(ctx, now, settings)
+		if measures.ComplaintRate != model.KnownMailRate(1000) {
+			t.Fatalf("one complaint over 1,000 recipients: %+v", measures)
+		}
+		result := testBreakerPass(t, ctx, measures, now, settings)
+		if result.Level != model.MailBreakerLevelRestrict || result.AppliedCount != 1 {
+			t.Fatalf("the trip on the store's rate: %+v", result)
+		}
+
+		// a week on, nothing complained of and nothing sent: the rate is unknown, and the level holds
+		later := now.Add(7 * 24 * time.Hour)
+		measures = currentMailBreakerMeasurer()(ctx, later, settings)
+		if measures.ComplaintRate.Known {
+			t.Fatalf("a week on: %+v", measures)
+		}
+		if result := testBreakerPass(t, ctx, measures, later, settings); result.Level != model.MailBreakerLevelRestrict || result.AppliedCount != 0 || result.LiftedCount != 0 {
+			t.Fatalf("a week of unknown samples: %+v", result)
+		}
+
+		// installed sources join the store's rate: a listed sending address trips level 2
+		listing := &testBreakerListing{listed: []netip.Addr{testBreakerAddress}}
+		defer SetMailBreakerMeasurer(MailBreakerMeasurerOfSources(&model.MailBreakerSources{
+			SendingAddresses: []netip.Addr{testBreakerAddress},
+			Listing:          listing,
+			Snds:             listing,
+		}))()
+		measures = currentMailBreakerMeasurer()(ctx, now, settings)
+		if !measures.ListingKnown || !slices.Equal(measures.ListedAddresses, []netip.Addr{testBreakerAddress}) || measures.ComplaintRate != model.KnownMailRate(1000) {
+			t.Fatalf("with the sources installed: %+v", measures)
+		}
+		if result := testBreakerPass(t, ctx, measures, now, settings); result.Level != model.MailBreakerLevelCommunity || result.ListedCount != 1 {
+			t.Fatalf("a listing from the installed sources: %+v", result)
+		}
+	})
+}
+
+// A listing and SNDS source answering one fixed list.
+type testBreakerListing struct {
+	listed []netip.Addr
+}
+
+func (self *testBreakerListing) ListedAddresses(ctx context.Context, addresses []netip.Addr, now time.Time) ([]netip.Addr, bool) {
+	return slices.Clone(self.listed), true
+}
+
+func (self *testBreakerListing) RedAddresses(ctx context.Context, addresses []netip.Addr) ([]netip.Addr, bool) {
+	return []netip.Addr{}, true
 }

@@ -1,0 +1,13 @@
+{
+  "name": "domains/root.example/trafficStats/20261101",
+  "userReportedSpamRatio": 0.0012,
+  "ipReputations": [
+    {"reputation": "HIGH", "ipCount": "2", "sampleIps": ["192.0.2.10", "192.0.2.11"]}
+  ],
+  "domainReputation": "HIGH",
+  "spfSuccessRatio": 1,
+  "dkimSuccessRatio": 0.999,
+  "dmarcSuccessRatio": 0.998,
+  "outboundEncryptionRatio": 1,
+  "inboundEncryptionRatio": 1
+}

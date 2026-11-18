@@ -38,9 +38,17 @@ import (
 //
 // A pass that cannot read the standing rows changes nothing, and one that
 // fails part way leaves rows the next pass reads and finishes from, since the
-// state is the rows. A sample with nothing known changes nothing either,
-// which is what a process with no measurer takes. The job is scheduled only
-// in a binary that links MG5, for the rows, and MG9, the milestone the shared
+// state is the rows. A sample with nothing known changes nothing either.
+//
+// The sample is ABUSE-M9-03's model.GatherMailBreakerMeasures. A process that
+// installs no outside sources (SetMailBreakerMeasurer with
+// MailBreakerMeasurerOfSources) samples the store's complaint rate alone, with
+// Postmaster Tools, SNDS and the listing unknown: the complaint rate trips a
+// level, and no level clears by machine, since a clean sample needs every
+// measure known. No process installs them yet: their credentials, §2.8 rows
+// and the mirror's path to taskworker are question
+// abuse-m5-10-breaker-measure-credentials. The job is scheduled only in a
+// binary that links MG5, for the rows, and MG9, the milestone the shared
 // sending addresses arrive with.
 
 // Gathers one sample of the breakers' measures at now. It answers unknown,
@@ -52,13 +60,21 @@ var abuseBreakerDeps = struct {
 	stateLock sync.Mutex
 	measurer  MailBreakerMeasurer
 }{
-	measurer: noMailBreakerMeasures,
+	measurer: storeMailBreakerMeasures,
 }
 
-// What a process with no measurer samples: nothing known, so no level trips
-// and none clears.
-func noMailBreakerMeasures(ctx context.Context, now time.Time, settings *model.MailBreakerSettings) *model.MailBreakerMeasures {
-	return &model.MailBreakerMeasures{}
+// What a process with no outside sources samples: the store's complaint rate,
+// and the rest unknown.
+func storeMailBreakerMeasures(ctx context.Context, now time.Time, settings *model.MailBreakerSettings) *model.MailBreakerMeasures {
+	return model.GatherMailBreakerMeasures(ctx, nil, now, settings)
+}
+
+// The measurer over sources: the store's complaint rate beside what each
+// source answers, a nil source answering unknown.
+func MailBreakerMeasurerOfSources(sources *model.MailBreakerSources) MailBreakerMeasurer {
+	return func(ctx context.Context, now time.Time, settings *model.MailBreakerSettings) *model.MailBreakerMeasures {
+		return model.GatherMailBreakerMeasures(ctx, sources, now, settings)
+	}
 }
 
 // Installs the process's measurer, returning what puts the previous one back.
