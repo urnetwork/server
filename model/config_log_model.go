@@ -112,6 +112,10 @@ type ConfigLogSettings struct {
 	// api as at every reader (sidecar.ConfigLogSettings.AclSpendCheck; ACL-M2-07). nil installs none, so api refuses
 	// every GrantActivate as unbuilt, as it has until a process installs sidecar.NewSpendCheck here.
 	AclSpendCheck sidecar.AclSpendCheck
+	// The client-checked prefix rules' settings in each network's verifier (sidecar.ConfigLogSettings.AclPrefix),
+	// whose switch must be every reader's. nil is sidecar's defaults, the rules dark at launch (QD-1032), so api
+	// refuses every RepoPrefixRules as every reader does; a test passes the rules on to run them.
+	AclPrefix *sidecar.AclPrefixSettings
 	// Writes {acl_<networkId>}e and INCRs {acl_<networkId>}v after each entry this instance lands, with the
 	// newest base's position at it (§7.9's read cache, §8.9). nil writes nothing.
 	EntryCache func(ctx context.Context, networkId server.Id, n uint64, base uint64, entryBytes []byte) error
@@ -428,11 +432,14 @@ func configLogVerifierSettings() *sidecar.ConfigLogSettings {
 	return settings
 }
 
-// The settings of a network's verifier at this sequencer: a rows-only log's, with the spend check the sequencer's
-// settings name.
+// The settings of a network's verifier at this sequencer: a rows-only log's, with the spend check and, where they name
+// them, the prefix rules' settings the sequencer's settings name.
 func (self *ConfigLogSequencer) verifierSettings() *sidecar.ConfigLogSettings {
 	settings := configLogVerifierSettings()
 	settings.AclSpendCheck = self.settings.AclSpendCheck
+	if self.settings.AclPrefix != nil {
+		settings.AclPrefix = self.settings.AclPrefix
+	}
 	return settings
 }
 
