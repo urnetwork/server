@@ -49255,9 +49255,9 @@ owner decisions 509 and 579), so the SMART series are read under `job="node"`
 beside the host's other node series. A drive joins its cluster where its
 filesystem's mountpoint (`node_filesystem_size_bytes`, a node series of the
 same `host`) is a drive path admin info lists for the cluster.
-`urnetwork_filecluster_drive_rating_days`
-is the days until the cluster's first drive's percentage used reaches 100 at
-its 30-day rate, +Inf while none wears; a drive without a reading 30 days old
+`urnetwork_filecluster_drive_rating_days` is the days until the cluster's
+first drive's percentage used reaches 100 at its 30-day rate, +Inf while none
+wears; a drive without a reading 30 days old
 is not rated yet. P0's forgiven excess over the same 30 days is shown in
 drive-writes against the ~420 five years at the refill leave under the rating:
 `sum by (cluster) (increase(urnetwork_evs_budget_p0_forgiven_bytes_total[30d])) / 1.92e12`.
