@@ -384,6 +384,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /mail/status":                              routeAccessClient,   // the bearer's network's mail status (§15.15)
 	"POST /mail/direct-mx":                          routeAccessNetwork,  // a Team admin names its direct MX (§15.15), the Admin role by the model
 	"DELETE /mail/direct-mx":                        routeAccessNetwork,  // a Team admin takes its direct MX back (§15.15)
+	"POST /smtp/dkim-keys":                          routeAccessClient,   // the bearer's own sidecar's DKIM selectors, with mail_send (§14.14)
+	"GET /smtp/status":                              routeAccessClient,   // the bearer's network's smtp limits and halts (§14.14)
+	"GET /smtp/reports":                             routeAccessClient,   // the bearer's network's reports, to a sidecar with §8 read on the mail key's repo (§14.14)
+	"POST /smtp/appeal":                             routeAccessNetwork,  // an Owner's or Admin's recheck of the network's halts, never a client token (§14.8, AUTHZ1), the admin permission by the role gate
 	"POST /abuse/report":                            routeAccessPublic,   // §21.8's form: no credential, counted by the caller's keyed address hash (§21.16)
 	"GET /abuse/cases":                              routeAccessNetwork,  // the network's own cases (§21.16), the read permission by the role gate
 	"POST /abuse/appeal":                            routeAccessNetwork,  // an Owner's or Admin's appeal, never a client token (§21.16), the admin permission by the role gate
@@ -531,6 +535,10 @@ var strictExpRoutes = map[string]bool{
 	// §15.15's mail routes (MAIL-M7-22)
 	"POST /mail/enable": true,
 	"GET /mail/status":  true,
+	// §14.14's three Client routes (SMTP-M9-19); POST /smtp/appeal is an admin's and stays off
+	"POST /smtp/dkim-keys": true,
+	"GET /smtp/status":     true,
+	"GET /smtp/reports":    true,
 	// §21.16's status, the one /abuse/ route a sidecar reaches (ABUSE-M5-11): the report, cases, appeal and staff
 	// routes refuse it here
 	"GET /abuse/status": true,

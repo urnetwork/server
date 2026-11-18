@@ -503,6 +503,12 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// a Team's direct MX, Network class: an admin names its mail indexers or takes them back (MAIL-M7-23)
 		router.NewRoute("POST", "/mail/direct-mx", handlers.PutMailDirectMx),
 		router.NewRoute("DELETE", "/mail/direct-mx", handlers.DeleteMailDirectMx),
+		// §14.14's smtpedge routes: a sidecar's DKIM selectors, the network's status and reports, and an admin's
+		// appeal of its halts; dark until MG9 (SMTP-M9-19)
+		router.NewRoute("POST", "/smtp/dkim-keys", handlers.SmtpDkimKeys),
+		router.NewRoute("GET", "/smtp/status", handlers.GetSmtpStatus),
+		router.NewRoute("GET", "/smtp/reports", handlers.GetSmtpReports),
+		router.NewRoute("POST", "/smtp/appeal", handlers.SmtpAppeal),
 		// §21.16's customer routes: a report from the form, the network's own cases, an Owner's or Admin's appeal and
 		// the network's standing (ABUSE-M5-11)
 		router.NewRoute("POST", "/abuse/report", handlers.AbuseReport),

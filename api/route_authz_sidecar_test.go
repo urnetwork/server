@@ -205,6 +205,10 @@ var sidecarAllowlist = []string{
 	// §15.15's mail routes (MAIL-M7-22)
 	"POST /mail/enable",
 	"GET /mail/status",
+	// §14.14's Client routes (SMTP-M9-19)
+	"POST /smtp/dkim-keys",
+	"GET /smtp/status",
+	"GET /smtp/reports",
 	// §21.16's status, the one /abuse/ route on the list (ABUSE-M5-11)
 	"GET /abuse/status",
 	// §13.15's certificate routes (TLS-M5-16)

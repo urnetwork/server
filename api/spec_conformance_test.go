@@ -311,6 +311,11 @@ func registry() []specEndpoint {
 		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},
 		{"POST", "/abuse/appeal", rt(model.AbuseAppealArgs{}), rt(model.AbuseAppealResult{})},
 		{"GET", "/abuse/status", nil, rt(sidecar.AbuseStatus{})},
+		// §14.14's smtpedge routes (SMTP-M9-19)
+		{"POST", "/smtp/dkim-keys", rt(sidecar.SmtpDkimKeysArgs{}), rt(sidecar.SmtpDkimKeysResult{})},
+		{"GET", "/smtp/status", nil, rt(model.SmtpStatusResult{})},
+		{"GET", "/smtp/reports", nil, rt(model.SmtpReportsResult{})},
+		{"POST", "/smtp/appeal", rt(handlers.SmtpAppealArgs{}), rt(handlers.SmtpAppealResult{})},
 		// §21.16's staff route (ABUSE-M5-12): each kind reads its own body, so only the envelope is reflected
 		{"POST", "/abuse/action", nil, rt(controller.AbuseStaffResult{})},
 	}
