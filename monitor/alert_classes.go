@@ -62,6 +62,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"hosted-contract-cap-unobservable":      visibilityAlertClass,
 	"pgbouncer-backlog":                     incidentAlertClass,
 	"pgbouncer-backlog-unobservable":        visibilityAlertClass,
+	"proxy-heap-limit":                      incidentAlertClass,
+	"proxy-heap-limit-unobservable":         visibilityAlertClass,
 	"proxy-host-cpu":                        incidentAlertClass,
 	"proxy-host-cpu-unobservable":           visibilityAlertClass,
 	"proxy-mint-refusals":                   incidentAlertClass,

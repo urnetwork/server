@@ -139,22 +139,6 @@ func (self proxyMintRefusalsProbe) check(ctx context.Context, env *probeEnv) ([]
 	// every placed block is required; any other answering block counts with
 	// its host while it answers
 	placed, placementGaps := stormPlacedHostBlocks(env, settings.Service)
-	hostBlocks := map[string]map[string]bool{}
-	for name, blocks := range placed {
-		hostBlocks[name] = map[string]bool{}
-		for _, block := range blocks {
-			hostBlocks[name][block] = true
-		}
-	}
-	for _, part := range []string{"block_refusals", "uptime"} {
-		for _, key := range history.keys(part) {
-			name, block, _ := strings.Cut(key, "/")
-			if hostBlocks[name] == nil {
-				hostBlocks[name] = map[string]bool{}
-			}
-			hostBlocks[name][block] = true
-		}
-	}
 	reasons := history.invalidReasons()
 	if len(placed) == 0 {
 		reasons = append(reasons, "placement_missing")
@@ -168,11 +152,7 @@ func (self proxyMintRefusalsProbe) check(ctx context.Context, env *probeEnv) ([]
 	gaps := []string{}
 	findings := []finding{}
 	for _, name := range stormJudgedHosts(placed, history, "refusals", "block_refusals", "uptime") {
-		blocks := []string{}
-		for block := range hostBlocks[name] {
-			blocks = append(blocks, block)
-		}
-		sort.Strings(blocks)
+		blocks := stormHostBlocks(placed, history, name, "block_refusals", "uptime")
 		evaluate := func(step int64) proxyMintRefusalsStep {
 			// a placed block without a process is unknown; a block old enough
 			// to judge must have a rate
@@ -221,9 +201,9 @@ func (self proxyMintRefusalsProbe) check(ctx context.Context, env *probeEnv) ([]
 				symptom:   fmt.Sprintf("Proxy host %s refused more than %g hosted mints a second at every evaluation for %s", name, settings.WarnRefusals, settings.Hold),
 				mechanism: "A proxy process admits 2 hosted window-client mints at once and refuses the rest with a 429 before any database work. Connect reads the 429 as a rate limit and backs off 5 s, doubling, so a window whose first mints are refused holds its device's first CONNECT: one refusal cost a setup about 3-5 s, two 9-13 s and three 24-31 s (proxy/P90SPEED.md §3.3). A mint starved of CPU holds its slot longer, so a host whose processes sit at their Go memory limit refuses more: from 15Z on 2026-11-14 each proxy host refused tens to hundreds of mints a second (peaks of about 1,130/s), and setup p90 went from 4.3-6.9 s to 16-37 s.",
 				baseline:  fmt.Sprintf("Per host from 2026-11-07 to the load ramp at 13:51Z on 11-14: median 0.11/s, 99th percentile 1.5/s, peak 3.8/s. WARN when a host passes %g/s at every one-minute evaluation for %s, each evaluation summing the blocks whose newest process has run %s.", settings.WarnRefusals, settings.Hold, settings.MinUptime),
-				observed:  fmt.Sprintf("host=%s refusals_per_second_now=%s level=%g hold=%s mature_blocks_now=%d/%d blocks_now=%s evaluation_unix=%d", name, stormNumber(now.reading, "%.1f"), settings.WarnRefusals, settings.Hold, len(now.mature), len(blocks), proxyMintRefusalsBusiest(history, name, now.mature, history.at(), settings.MaxListed), history.at()),
+				observed:  fmt.Sprintf("host=%s refusals_per_second_now=%s level=%g hold=%s mature_blocks_now=%d/%d blocks_now=%s evaluation_unix=%d", name, stormNumber(now.reading, "%.1f"), settings.WarnRefusals, settings.Hold, len(now.mature), len(blocks), stormBlocksListed(history, "block_refusals", name, now.mature, history.at(), "%.1f", nil, settings.MaxListed), history.at()),
 				evidence:  fmt.Sprintf("One bounded Mimir range read of each host's sum by (host, block) (rate(urnetwork_hosted_mint_admission_refusals_total{service=%q}[%s])) over its blocks whose newest process has run more than %s, with each block's rate and uptime, through a services host's loopback Mimir. Process instance nonces stay in Mimir.", settings.Service, stormDuration(settings.Window), settings.MinUptime),
-				context:   "The uptime rule leaves out a block's own restart: the nightly restart of all 20 processes at 14:04-14:07Z on 11-17 refused 47-87/s per host until 14:12Z. Load sweeps that reopen thousands of hosted proxies every 35-45 minutes make a host near the level open and clear with each sweep (crisp at 8000 MiB: 29-35 times a day on 11-16 and 11-17). An out-of-balance payer's refilling windows refuse mints too (11-04 and 11-05, CPUOPT4 Part B): refusals say windows cannot mint, not why.",
+				context:   "The uptime rule leaves out a block's own restart: the nightly restart of all 20 processes at 14:04-14:07Z on 11-17 refused 47-87/s per host until 14:12Z. Load sweeps that reopen thousands of hosted proxies every 40-45 minutes make a host near the level open and clear with each sweep (crisp at 8000 MiB: 29-35 times a day on 11-16 and 11-17). An out-of-balance payer's refilling windows refuse mints too (11-04 and 11-05, CPUOPT4 Part B): refusals say windows cannot mint, not why.",
 				action:    "Read the heap-limit entry (§26.13) and proxy host CPU (§26.9) for the host: a host at its Go memory limit refuses more. Restore the host's headroom (P90SPEED.md §9, decision 1) rather than restarting: restarts relieved it for about an hour each time. Read the abandoned-CONNECT entry (§26.14) for what clients see.",
 				verify:    fmt.Sprintf("Every evaluation of a complete %s hold, once a block of the host has run %s, reads the host's refusals at or under %g/s.", settings.Hold, settings.MinUptime, settings.WarnRefusals),
 				playbook:  "SIGNALS.md §26.12 and proxy/P90SPEED.md",
@@ -244,25 +224,4 @@ func (self proxyMintRefusalsProbe) check(ctx context.Context, env *probeEnv) ([]
 		findings = append(findings, healthyFinding(proxyMintRefusalsProbeId, tierWarn, "proxy-mint-refusals-unobservable", unobservableTarget))
 	}
 	return findings, nil
-}
-
-// The host's blocks with the most refusals at a step, most first, as
-// block:rate.
-func proxyMintRefusalsBusiest(history *stormHistory, host string, blocks []string, step int64, limit int) string {
-	type blockRate struct {
-		block string
-		rate  float64
-	}
-	rates := []blockRate{}
-	for _, block := range blocks {
-		if reading := history.reading("block_refusals", host+"/"+block, step); reading.present {
-			rates = append(rates, blockRate{block: block, rate: reading.value})
-		}
-	}
-	sort.SliceStable(rates, func(i, j int) bool { return rates[i].rate > rates[j].rate })
-	listed := make([]string, 0, len(rates))
-	for _, one := range rates {
-		listed = append(listed, fmt.Sprintf("%s:%.1f", one.block, one.rate))
-	}
-	return stormListed(listed, limit)
 }

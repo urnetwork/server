@@ -4,8 +4,8 @@
 // reservation-release (§26.6), redis-pool-timeouts (§26.7), redis-main-thread
 // (§26.8), proxy-host-cpu (§26.9), contract-reply-collapse (§26.10) and
 // hosted-contract-cap (§26.11). From the hosted proxy's setup regression of
-// 2026-11-14 (proxy/P90SPEED.md): proxy-mint-refusals (§26.12). Each is in
-// signal_<key>.go.
+// 2026-11-14 (proxy/P90SPEED.md): proxy-mint-refusals (§26.12) and
+// proxy-heap-limit (§26.13). Each is in signal_<key>.go.
 //
 // Each probe evaluates its catalog PromQL at every step of one bounded
 // query_range through the loopback Mimir of a services host, ending
@@ -455,6 +455,51 @@ func stormJudgedHosts(placed map[string][]string, history *stormHistory, parts .
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// A host's blocks: those placed on it and any other a block-keyed part
+// answered, sorted.
+func stormHostBlocks(placed map[string][]string, history *stormHistory, host string, parts ...string) []string {
+	blockBools := map[string]bool{}
+	for _, block := range placed[host] {
+		blockBools[block] = true
+	}
+	for _, part := range parts {
+		for _, key := range history.keys(part) {
+			if name, block, found := strings.Cut(key, "/"); found && name == host {
+				blockBools[block] = true
+			}
+		}
+	}
+	blocks := []string{}
+	for block := range blockBools {
+		blocks = append(blocks, block)
+	}
+	sort.Strings(blocks)
+	return blocks
+}
+
+// A bounded listing of a host's blocks by their reading of a block-keyed
+// part at a step, largest first, as block:value; keep, when set, chooses the
+// readings to list.
+func stormBlocksListed(history *stormHistory, part, host string, blocks []string, step int64, format string, keep func(float64) bool, limit int) string {
+	type blockValue struct {
+		block string
+		value float64
+	}
+	values := []blockValue{}
+	for _, block := range blocks {
+		reading := history.reading(part, host+"/"+block, step)
+		if reading.present && (keep == nil || keep(reading.value)) {
+			values = append(values, blockValue{block: block, value: reading.value})
+		}
+	}
+	sort.SliceStable(values, func(i, j int) bool { return values[i].value > values[j].value })
+	listed := make([]string, 0, len(values))
+	for _, one := range values {
+		listed = append(listed, one.block+":"+fmt.Sprintf(format, one.value))
+	}
+	return stormListed(listed, limit)
 }
 
 // The placed blocks of a host that a block-keyed part did not answer at a

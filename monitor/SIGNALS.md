@@ -48521,6 +48521,7 @@ refusing up to 923 packs/s.
 | Proxy reply collapse | `contract-reply-collapse` | `urnetwork_contract_creation_completed_total` (yes) | — | replies under 25% of their trailing 2-hour median for 10 min | B: 14:56Z |
 | Contract cap | `hosted-contract-cap-saturated` | `urnetwork_hosted_contract_admission_refusals_total` (yes, proxy g4–g10 since 10-26 18:35Z) | a process over 50/s for 10 min, 30 min or more after its start | — | 10-26 20:21Z |
 | Mint refusals per proxy host | `proxy-mint-refusals` | `urnetwork_hosted_mint_admission_refusals_total` (yes) | a host over 5/s for 10 min, over its blocks 30 min or more after their start | — | 11-14 14:04Z, again 15:23Z |
+| Proxy heap at its Go memory limit | `proxy-heap-limit` | `go_memstats_heap_inuse_bytes`, `go_memstats_stack_inuse_bytes`, `go_gc_gomemlimit_bytes` (yes) | a host's highest process over 0.95 of its limit for 15 min | — | 11-14 15:34Z |
 
 A was found at 02:25Z, so its signals led by 6 h 11 min to 6 h 56 min; B's
 rollout aborted at 15:42:38Z, so its signals led by 16 to 52 minutes, with
@@ -48533,13 +48534,13 @@ database path: the registration convoy held 12,186–14,263 clients waiting
 and A's morning 148–2,877. For the proxy and Redis series, 10-26 08:00–12:00Z
 and 14:10–14:40Z serve as well.
 
-26.12 comes from the hosted proxy's setup regression of 2026-11-14
+26.12 and 26.13 come from the hosted proxy's setup regression of 2026-11-14
 (`proxy/P90SPEED.md`). From 15:17Z that day setup p90 went from 4.3–6.9 s
 to 16–37 s, while the proxy processes sat at their Go memory limit and the
 2-slot hosted mint admission refused windows' mints. No signal read
-refusals per host. Its replays run from 11-04 05:30Z to 11-18 05:30Z, at
-one-minute steps for the times given; the healthy reference is 11-07 to
-11-14 13:50Z, before the load ramp.
+refusals per host or the heap against its limit. Their replays run from
+11-04 05:30Z to 11-18 05:30Z, at one-minute steps for the times given; the
+healthy reference is 11-07 to 11-14 13:50Z, before the load ramp.
 
 Delivery: as §25, first a Grafana rule on Mimir whose contact point reaches a
 person, then a monitor probe; each entry names the probe to extend. None of
@@ -48548,7 +48549,7 @@ acknowledged by a person (§7, 2026-10-22 rule 4). These signals watch the
 services and Redis, where both incidents started; §25's watch what customers
 see.
 
-Monitor probes: 26.1–26.4 and 26.6–26.12 each have their own probe, and 26.5
+Monitor probes: 26.1–26.4 and 26.6–26.13 each have their own probe, and 26.5
 is §25.1's `contract-failure-share`. Each reads its entry's PromQL at every
 one-minute step of one bounded Mimir range read through a services host's
 loopback Mimir, ending two minutes behind now, so a watcher that runs it
@@ -49256,6 +49257,79 @@ the host: a host at its Go memory limit refuses more. Restore the host's
 headroom (P90SPEED.md §9, decision 1) rather than restarting it. Follow-up:
 P90SPEED.md's fix 2, a reserved slot or a short wait for a window's first
 mints, should take refusals under 5/s per host.
+
+### 26.13 Proxy heap at its Go memory limit
+
+Probe: `proxy-heap-limit`
+
+The probe also reads each block's highest ratio, and as the alert's context
+each host's most GC cycles a minute and its lowest limit. A maximum over
+fewer processes can only be lower, so a held band stands while a block is
+missing; a clear needs every placed block, and a placed block that does not
+answer reports `proxy-heap-limit-unobservable`. Missing GC or limit context
+reads `unknown` in the alert and leaves the band as it is.
+
+Status: proposed 2026-11-18 (`proxy/P90SPEED.md` §8); the probe above
+implements it.
+
+Source (exists): the Go collector's `go_memstats_heap_inuse_bytes`,
+`go_memstats_stack_inuse_bytes`, `go_gc_gomemlimit_bytes` and
+`go_gc_duration_seconds_count` on every proxy process. Each proxy host runs
+10 processes (GOMAXPROCS 4, GOGC 100) under a Go memory limit set per host
+from the vault's `proxy_sizing.yml` (`proxy/host_go_memory_limit.go`): 6500
+MiB on both hosts until P1115 raised crisp's to 8000 MiB on 11-15 (21:39Z).
+A process without a limit reports `math.MaxInt64` and reads near 0. Near
+its limit the runtime collects to stay under it, so GC runs back to back,
+and the CPU it takes starves the mint admission (§26.12).
+
+```promql
+max by (host) ((go_memstats_heap_inuse_bytes{env="main",service="proxy"} + go_memstats_stack_inuse_bytes{env="main",service="proxy"})
+  / go_gc_gomemlimit_bytes{env="main",service="proxy"})
+max by (host) (60 * rate(go_gc_duration_seconds_count{env="main",service="proxy"}[5m]))
+```
+
+Healthy: from 11-07 to the sign-up wave of 11-13 19:30Z each host's
+busiest process read 0.19–0.60 of its limit (median 0.33) and collected
+0.6–2.5 times a minute (median 0.6–0.8). The sign-up wave (11-13 19:48Z to
+23:18Z) read 0.86–0.93, and the morning of 11-14 up to 0.94, without a hold.
+
+Threshold: WARN `proxy-heap-limit`: a host's highest process above 0.95 of
+its limit for 15 minutes. The GC rate is context, not a band; P90SPEED.md
+§10's target for a fix is under 3 cycles a minute per process.
+
+Evidence:
+- 11-14: both hosts read 0.53–0.59 before the load ramp at 13:51Z and
+  0.92–0.94 by 13:58Z. They pass 0.95 at 15:20Z and fire at 15:34Z, 17
+  minutes after setup time's change point, with GC at about 13–14 cycles a
+  minute per process. Both held for most of 11-14 20:40Z to 11-15 23:00Z.
+- Since P1115 (11-15 21:39Z) crisp fired once, at 11-17 11:54Z. Fireside,
+  at 6500 MiB, read a median of 0.96 (0.92–1.09) from 11-16 00:00Z to 11-17
+  14:00Z, with GC at a median of 12 cycles a minute. Its per-minute maximum
+  swings across 0.95, so the strict hold broke often: it fired 32 times on
+  11-16 (174 minutes held) and 18 times on 11-17 (552 minutes).
+- At 05:30Z on 11-18 neither host holds: crisp read 0.92–0.95 of its 8000
+  MiB and fireside 0.94–0.97 over the previous 30 minutes. Crisp's 0.94 is
+  7.4 GiB; it is running out of headroom too (P90SPEED.md §4.3).
+- 11-04 03:48Z to 04:20Z and 11-05 00:52Z to about 08:10Z, on both hosts: the
+  out-of-balance payer's surge (CPUOPT4 Part B), with GC at 12–16 cycles a
+  minute.
+
+False-positive qualifiers: none recorded; every hold fell in a load surge.
+A host hovering at the level opens and clears often (fireside 32 times on
+11-16). False-negative qualifiers: the per-minute maximum swings with the
+processes' GC cycles, so a host whose median sits above the level still
+breaks the hold (fireside's 0.96). The limit is soft and counts more than
+heap plus stacks, so a process can collect at its limit just under 0.95;
+read the GC rate beside it. A restart empties the heap: the hosts relapsed
+within 1–4 hours of each restart (11-14 18:40Z, 11-15 01:14Z, 11-17 14:07Z;
+P90SPEED.md §2).
+
+ACTION: restore headroom on the host: raise its Go memory limit as far as
+its RAM allows, move blocks to a host with room, or add RAM or a host
+(P90SPEED.md §9, decision 1). Read the mint-refusal (§26.12) and proxy host
+CPU (§26.9) entries for the cost; do not count on same-image restarts.
+Follow-up: §14.7b's `proxy-runtime` reads the live set by owner, not against
+the limit.
 
 ### Rollout gates for connect and alt restarts
 

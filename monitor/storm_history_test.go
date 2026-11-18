@@ -376,7 +376,7 @@ func TestStormProbesReportFailedReadsAsVisibility(t *testing.T) {
 	signals := []Signal{
 		NewPgBouncerBacklogSignal(), NewServicesCpuSignal(), NewDbAcquireWaitSignal(), NewContractCreationsStuckSignal(),
 		NewReservationReleaseSignal(), NewRedisPoolTimeoutsSignal(), NewRedisMainThreadSignal(), NewProxyHostCpuSignal(),
-		NewContractReplyCollapseSignal(), NewHostedContractCapSignal(), NewProxyMintRefusalsSignal(),
+		NewContractReplyCollapseSignal(), NewHostedContractCapSignal(), NewProxyMintRefusalsSignal(), NewProxyHeapLimitSignal(),
 	}
 	for _, signal := range signals {
 		for _, variant := range []string{"transport", "malformed", "foreign_label"} {
@@ -431,6 +431,7 @@ func TestStormProbesRejectInvalidPolicyWithoutReading(t *testing.T) {
 		NewContractReplyCollapseSignalWithSettings(&ContractReplyCollapseSettings{}),
 		NewHostedContractCapSignalWithSettings(&HostedContractCapSettings{}),
 		NewProxyMintRefusalsSignalWithSettings(&ProxyMintRefusalsSettings{}),
+		NewProxyHeapLimitSignalWithSettings(&ProxyHeapLimitSettings{}),
 	}
 	for _, signal := range invalid {
 		source := &syntheticSource{hostFn: func(HostSettings, string) (string, error) {

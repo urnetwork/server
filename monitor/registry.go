@@ -237,6 +237,7 @@ func NewSignals() []Signal {
 		NewContractReplyCollapseSignal(),
 		NewHostedContractCapSignal(),
 		NewProxyMintRefusalsSignal(),
+		NewProxyHeapLimitSignal(),
 		NewContractStageInflightSignal(),
 		NewExtenderSeedMirrorsSignal(),
 		NewExtenderPublishingSignal(),
