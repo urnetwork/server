@@ -164,7 +164,7 @@ func sessionKindClass(kind string, credential *ByJwt) string {
 		return kind
 	case "auth_code":
 		return sessionKindCode
-	case "api_key_client", "legacy_proxy", "device_adopt":
+	case "api_key_client", "legacy_proxy", "hosted_proxy", "device_adopt":
 		return sessionKindClient
 	case "legacy":
 		if credential.ClientId != nil {
