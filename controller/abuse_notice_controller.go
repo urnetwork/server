@@ -36,7 +36,9 @@ package controller
 //
 // A process pages only once it installs its pager (SetAbuseNoticePager). Until
 // then every page is refused, the notice's case stands, and the pass of a
-// process that has one pages it.
+// process that has one pages it. api and taskworker install it at start
+// (InstallAbuseNoticePager; QD-1070): a pager.RetrySink over the webhook the
+// monitor pages through, read from the monitor's own vault file.
 
 import (
 	"context"
@@ -46,6 +48,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 
@@ -116,6 +119,78 @@ func SetAbuseNoticePager(sink pager.Sink) (restore func()) {
 		abuseNoticeDeps.stateLock.Lock()
 		defer abuseNoticeDeps.stateLock.Unlock()
 		abuseNoticeDeps.sink = previous
+	}
+}
+
+// The vault file holding the pager's endpoint: the monitor's, so api and
+// taskworker page through the webhook the monitor pages through (QD-1070).
+const AbuseNoticePagerFileName = "monitor.yml"
+
+// The one key of monitor.yml a notice's pager reads.
+type abuseNoticePagerYaml struct {
+	Alerts struct {
+		PagerWebhookUrl string `yaml:"pager_webhook_url"`
+	} `yaml:"alerts"`
+}
+
+// The pager's sink is not built. The text names the part that failed and never
+// the endpoint, which is a credential.
+var ErrAbuseNoticePagerRefused = errors.New("abuse notice pager not built")
+
+// A retrying sink over the webhook monitor.yml names (QD-1070). An error is a
+// file that does not read or an endpoint pager.NewWebhookSink refuses: none,
+// or, while plan-OPS-pager-service names no service, one off loopback.
+func newAbuseNoticePagerSink(monitorYml []byte) (*pager.RetrySink, error) {
+	pagerYaml := &abuseNoticePagerYaml{}
+	// a decode error can quote the line it failed on, so only the verdict is kept
+	if err := yaml.Unmarshal(monitorYml, pagerYaml); err != nil {
+		return nil, fmt.Errorf("%w: %s does not parse", ErrAbuseNoticePagerRefused, AbuseNoticePagerFileName)
+	}
+	webhookSettings := pager.DefaultWebhookSinkSettings()
+	webhookSettings.Url = pagerYaml.Alerts.PagerWebhookUrl
+	webhookSink, err := pager.NewWebhookSink(webhookSettings)
+	if err != nil {
+		// the webhook sink's errors are fixed words, never the endpoint
+		return nil, fmt.Errorf("%w: %w", ErrAbuseNoticePagerRefused, err)
+	}
+	retrySettings := pager.DefaultRetrySinkSettings()
+	retrySettings.Logf = func(format string, args ...any) {
+		glog.Errorf("[abuse]notice pager: "+format+"\n", args...)
+	}
+	return pager.NewRetrySink(webhookSink, retrySettings), nil
+}
+
+// Installs this process's notice pager from the monitor's vault file, in a
+// binary that links MG5: api's and taskworker's startup (QD-1070). A pager
+// that cannot be built installs nothing and says why, so every page stays owed
+// and the clock pass pages it once a process has one. Returns what puts the
+// previous pager back and closes the sink.
+func InstallAbuseNoticePager() (restore func()) {
+	if !server.SidecarMg5Linked() {
+		return func() {}
+	}
+	monitorYml, err := func() ([]byte, error) {
+		resource, err := server.Vault.SimpleResource(AbuseNoticePagerFileName)
+		if err != nil {
+			return nil, err
+		}
+		return resource.BytesE()
+	}()
+	if err != nil {
+		glog.Errorf("[abuse]no notice pager: %s is not mounted, so every notice's page is owed\n", AbuseNoticePagerFileName)
+		return func() {}
+	}
+	sink, err := newAbuseNoticePagerSink(monitorYml)
+	if err != nil {
+		glog.Errorf("[abuse]no notice pager, so every notice's page is owed: %s\n", err)
+		return func() {}
+	}
+	restorePager := SetAbuseNoticePager(sink)
+	return func() {
+		restorePager()
+		ctx, cancel := context.WithTimeout(context.Background(), pager.DefaultRetrySinkSettings().SendTimeout)
+		defer cancel()
+		sink.Close(ctx)
 	}
 }
 
