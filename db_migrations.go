@@ -11755,6 +11755,158 @@ var migrations = []any{
 	// before deploying the api, alt and taskworker that write them; the
 	// running release names its own columns and writes on.
 	newSqlMigration(verifyCohortRollingSchemaSql),
+
+	// The lag.dev drift test (lag.dev/DRIFTTEST.md E1, P2-P6, K3, R1, V4;
+	// model/lag_drift_model.go). Each run is a lag_track of kind drift, with
+	// its drift test and run number (E1); every other track is kind lag. The
+	// three columns are added under a five-second lock bound with a constant
+	// default or none, so lag_track is not rewritten, and the running release,
+	// which names its columns, inserts lag tracks as before.
+	//
+	// lag_drift_test is one token: its SHA-256, never the token (K5); the
+	// peppered hash of the visitor's /29 (/56) and its family, the hash only
+	// while a run can still start (K3: deleted when the token closes or
+	// expires); the origins it narrows the network's list to (P3); and the
+	// verdict over its window, replaced after each completed run (P4, V7).
+	// lag_drift_run is one run: its track, its state (P6), the browser's stop
+	// and the one the reports support (V10), whether it started from the
+	// token's address, and the extenders it was ticketed with and where they
+	// were placed (E2), so a verdict can be reproduced. An operator can
+	// revoke one token (revoke_time). lag_drift_network is a network's
+	// allowed parent origins (P3) and its drift switch, both set with
+	// `bringyourctl network drift-test`. No table holds an address, a prefix
+	// or a hash of one beyond the token's own client_ip_hash. Tests and runs
+	// are kept 7 days, like lag results (decision 11, R1). New tables only,
+	// created when absent: nothing existing is read or locked but lag_track's
+	// catalog entry.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_track
+			ADD COLUMN IF NOT EXISTS kind varchar(8) NOT NULL DEFAULT 'lag',
+			ADD COLUMN IF NOT EXISTS drift_test_id uuid NULL,
+			ADD COLUMN IF NOT EXISTS drift_run smallint NULL;
+
+		CREATE TABLE IF NOT EXISTS lag_drift_test (
+			drift_test_id uuid NOT NULL PRIMARY KEY,
+			network_id uuid NOT NULL,
+			token_hash bytea NOT NULL,
+			client_ip_hash bytea NULL,
+			client_ip_family smallint NOT NULL,
+			parent_origins varchar(256)[] NULL,
+			confidence double precision NOT NULL,
+			reference varchar(128) NULL,
+			created_at timestamp NOT NULL,
+			expires_at timestamp NOT NULL,
+			first_started_at timestamp NULL,
+			retest_until timestamp NULL,
+			run_count smallint NOT NULL DEFAULT 0,
+			updated_at timestamp NOT NULL,
+			failed_at timestamp NULL,
+			revoke_time timestamp NULL,
+			result_json jsonb NULL,
+			result_at timestamp NULL,
+			CONSTRAINT lag_drift_test_token_hash UNIQUE (token_hash)
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_network_id_created_at
+		ON lag_drift_test (network_id, created_at);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_created_at
+		ON lag_drift_test (created_at, drift_test_id);
+		CREATE INDEX IF NOT EXISTS lag_drift_test_client_ip_hash_created_at
+		ON lag_drift_test (created_at)
+		WHERE client_ip_hash IS NOT NULL;
+
+		CREATE TABLE IF NOT EXISTS lag_drift_run (
+			drift_test_id uuid NOT NULL,
+			run smallint NOT NULL,
+			track_id uuid NOT NULL,
+			state varchar(16) NOT NULL,
+			started_at timestamp NOT NULL,
+			finished_at timestamp NULL,
+			completed_at timestamp NULL,
+			stop varchar(16) NULL,
+			ip_family smallint NOT NULL,
+			client_ip_matches bool NULL,
+			ip_country_code varchar(2) NULL,
+			ip_country_name varchar(256) NULL,
+			extenders_json jsonb NOT NULL,
+			outcome varchar(32) NULL,
+			supported_stop varchar(16) NULL,
+			answered smallint NULL,
+			usable smallint NULL,
+			measured_ms int NULL,
+			PRIMARY KEY (drift_test_id, run),
+			CONSTRAINT lag_drift_run_track_id UNIQUE (track_id)
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_run_open_started_at
+		ON lag_drift_run (started_at)
+		WHERE state <> 'complete';
+
+		CREATE TABLE IF NOT EXISTS lag_drift_network (
+			network_id uuid NOT NULL PRIMARY KEY,
+			parent_origins varchar(256)[] NULL,
+			disable_time timestamp NULL,
+			update_time timestamp NOT NULL
+		);
+	`),
+
+	// The drift model's calibration (lag.dev/DRIFTTEST.md V3, V4, K2, Q12;
+	// model/lag_drift_calibration_model.go). One row a week: κ and σ₀ fitted
+	// over the last 7 days of lag tracks, the relay threshold behind
+	// relay_suspected, the tracks and observations the fit kept, and in
+	// summary_json the aggregates they come from: by continent, histograms of
+	// the standardized residuals and of the last-mile offset by network type,
+	// and the relay thresholds by continent and network type. Only
+	// aggregates: no track, visitor, address or place is kept, and a group too
+	// small to be anyone's is left out, so nothing per visitor outlives the
+	// lag retention (R1). The drift test reads the latest row not withdrawn,
+	// and records its id with each verdict, so a withdrawn calibration stays
+	// for the verdicts that name it. A new table only, created when absent:
+	// nothing existing is read or locked.
+	newSqlMigration(`
+		CREATE TABLE IF NOT EXISTS lag_drift_calibration (
+			calibration_id uuid NOT NULL PRIMARY KEY,
+			calibrated_at timestamp NOT NULL,
+			window_start timestamp NOT NULL,
+			window_end timestamp NOT NULL,
+			fit_tracks int NOT NULL,
+			fit_observations int NOT NULL,
+			kappa double precision NOT NULL,
+			sigma0_ms double precision NOT NULL,
+			relay_threshold_ms double precision NOT NULL,
+			summary_json jsonb NOT NULL,
+			withdrawn_at timestamp NULL
+		);
+		CREATE INDEX IF NOT EXISTS lag_drift_calibration_calibrated_at
+		ON lag_drift_calibration (calibrated_at, calibration_id)
+		WHERE withdrawn_at IS NULL;
+	`),
+
+	// The country of a drift test's client_ip (lag.dev/DRIFTTEST.md K3, review
+	// F-10), looked up in GeoLite2 at allocation and kept with the token, the
+	// country every run is judged against, never a start address's. A
+	// country is no address: the visitor's address stays only as the peppered
+	// hash of its /29 (/56). Two nullable columns on a small table, added only
+	// when absent under a five-second lock bound: nothing is rewritten, and a
+	// test allocated before it has none, which judges as an unknown country.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_drift_test
+			ADD COLUMN IF NOT EXISTS client_ip_country_code varchar(2) NULL,
+			ADD COLUMN IF NOT EXISTS client_ip_country_name varchar(256) NULL;
+	`),
+
+	// A drift run's k and k_early (lag.dev/DRIFTTEST.md V11), from V11's
+	// table for client_ip's continent at the token's confidence, as it stood
+	// at the run's start, which its stop check and verdict are judged at.
+	// Two nullable columns on a table kept 7 days, added only when absent
+	// under a five-second lock bound: nothing is rewritten, and a run started
+	// before them has none and is judged at the textbook k, as it started.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_drift_run
+			ADD COLUMN IF NOT EXISTS k double precision NULL,
+			ADD COLUMN IF NOT EXISTS k_early double precision NULL;
+	`),
 }
 
 // The deleted_network backfill (the migration above): every network an App

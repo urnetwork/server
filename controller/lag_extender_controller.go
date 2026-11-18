@@ -155,12 +155,19 @@ func getLagServing(ctx context.Context, now time.Time, maxAge time.Duration) *la
 // and the probes probe them whether or not the sample can place them or leaves
 // them out now, so an extender left out for its probes comes back with its
 // first success (lagReachableServing).
+//
+// Each says whether the extender answers to its family-pinned names
+// (FamilyServing, lag.dev/DRIFTTEST.md K6): its latest request asks for them,
+// and A8 has handed it the certificate for exactly that request. Until then,
+// as while its request for them waits for the weekly cap, it serves its
+// measurement name alone, with the certificate it had.
 func GetLagServingHosts(ctx context.Context, now time.Time) []*ExtenderMeasurementHost {
 	hosts := []*ExtenderMeasurementHost{}
 	config, err := EnvExtenderConfig()
 	if err != nil || !config.Measurement.Enabled {
 		return hosts
 	}
+	zone := config.Measurement.MeasurementZone()
 
 	published := GetExtenderMeasurementHosts(ctx, config, now)
 	extenderIds := make([]server.Id, 0, len(published))
@@ -175,6 +182,9 @@ func GetLagServingHosts(ctx context.Context, now time.Time) []*ExtenderMeasureme
 		measurement := measurements[host.ExtenderId]
 		if measurement == nil || !measurement.Serving() {
 			continue
+		}
+		if requestId, familyNames, ok := ParseExtenderMeasurementNames(measurement.Names, zone); ok && familyNames && requestId == host.ExtenderId {
+			host.FamilyServing = measurement.NamesDelivered
 		}
 		hosts = append(hosts, host)
 	}

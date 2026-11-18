@@ -18,6 +18,10 @@ import (
 // of these figures, which describe visitors' own connections. Only
 // CountLagAutomatedResultsSince counts them, so the excluded volume stays in
 // view.
+//
+// A drift test's run is a track of kind drift, which never appears on
+// lag.dev's pages (lag.dev/DRIFTTEST.md E1), so no figure here counts one or
+// its results.
 
 // The results stored in a window, by end reason and family.
 type LagResultCount struct {
@@ -38,7 +42,7 @@ func CountLagResultsSince(ctx context.Context, since time.Time) []*LagResultCoun
 			SELECT lag_result.end_reason, lag_result.extender_ip_family, count(*)
 			FROM lag_result
 			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
-			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE
+			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE AND lag_track.kind IS DISTINCT FROM 'drift'
 			GROUP BY lag_result.end_reason, lag_result.extender_ip_family
 			`,
 			since.UTC(),
@@ -66,7 +70,7 @@ func CountLagAutomatedResultsSince(ctx context.Context, since time.Time) map[str
 			SELECT lag_track.automated_reason, count(*)
 			FROM lag_result
 			INNER JOIN lag_track ON lag_track.track_id = lag_result.track_id
-			WHERE lag_result.created_at >= $1 AND lag_track.automated
+			WHERE lag_result.created_at >= $1 AND lag_track.automated AND lag_track.kind = 'lag'
 			GROUP BY lag_track.automated_reason
 			`,
 			since.UTC(),
@@ -99,7 +103,7 @@ func CountLagResultsBySourceSince(ctx context.Context, since time.Time) map[stri
 			SELECT coalesce(lag_track.source, 'web'), count(*)
 			FROM lag_result
 			LEFT JOIN lag_track ON lag_track.track_id = lag_result.track_id
-			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE
+			WHERE lag_result.created_at >= $1 AND lag_track.automated IS NOT TRUE AND lag_track.kind IS DISTINCT FROM 'drift'
 			GROUP BY 1
 			`,
 			since.UTC(),
@@ -125,7 +129,7 @@ func CountLagTracksSince(ctx context.Context, since time.Time) (count int64) {
 			`
 			SELECT count(*)
 			FROM lag_track
-			WHERE started_at >= $1 AND NOT automated
+			WHERE started_at >= $1 AND NOT automated AND kind = 'lag'
 			`,
 			since.UTC(),
 		)
@@ -235,7 +239,8 @@ func GetLagResultMediansSince(ctx context.Context, since time.Time, endReason st
 				WHERE
 					lag_result.created_at >= $1 AND
 					lag_result.end_reason = $2 AND
-					lag_track.automated IS NOT TRUE
+					lag_track.automated IS NOT TRUE AND
+					lag_track.kind IS DISTINCT FROM 'drift'
 			),
 			load_span AS (
 				SELECT
@@ -324,7 +329,7 @@ func CountLagVisitorsByCountrySince(ctx context.Context, since time.Time) map[st
 			`
 			SELECT coalesce(client_country_code, ''), count(DISTINCT network_id)
 			FROM lag_track
-			WHERE started_at >= $1 AND NOT automated
+			WHERE started_at >= $1 AND NOT automated AND kind = 'lag'
 			GROUP BY 1
 			`,
 			since.UTC(),

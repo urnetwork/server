@@ -63,6 +63,10 @@ type testMeasurementRoute53 struct {
 	// the measurement zone the IAM policy is scoped to, lower case, no
 	// trailing dot
 	policyZone string
+	// whether the policy is one from before lag.dev/DRIFTTEST.md K6, which
+	// lists no family-pinned name: it refuses any batch with a record at
+	// `<id>.ipv4.<zone>` or `<id>.ipv6.<zone>`, or at its challenge name
+	familyNamesDenied bool
 	// the record sets the api lists, by hosted zone id
 	listed map[string][]*route53.ResourceRecordSet
 	// the record sets dns answers with, by hosted zone id
@@ -186,6 +190,10 @@ func (self *testMeasurementRoute53) policyAllows(changes []*route53.Change) bool
 		name := strings.TrimSuffix(extenderDnsFqdn(aws.StringValue(change.ResourceRecordSet.Name)), ".")
 		recordType := aws.StringValue(change.ResourceRecordSet.Type)
 		if name == self.policyZone || name == "_psl."+self.policyZone {
+			return false
+		}
+		if self.familyNamesDenied &&
+			(strings.HasSuffix(name, ".ipv4."+self.policyZone) || strings.HasSuffix(name, ".ipv6."+self.policyZone)) {
 			return false
 		}
 		under := strings.HasSuffix(name, "."+self.policyZone)
@@ -417,6 +425,14 @@ func (self *testMeasurementRoute53) batches() (allowed []*route53.ChangeResource
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return slices.Clone(self.changeInputs), slices.Clone(self.deniedInputs)
+}
+
+// Makes the policy one from before K6, which refuses the family-pinned
+// names, or one that lists them.
+func (self *testMeasurementRoute53) setFamilyNamesDenied(familyNamesDenied bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.familyNamesDenied = familyNamesDenied
 }
 
 // The ACME CA.

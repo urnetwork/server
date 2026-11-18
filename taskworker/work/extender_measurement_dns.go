@@ -15,6 +15,7 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 )
 
@@ -23,20 +24,25 @@ import (
 // The measurement zone is shared. The geo dns publisher keeps its sets at the
 // zone's apex (connect/EXTENDER.md C5), and this file has two writers of its
 // own: the reconcile, which keeps each serving extender's A and AAAA records
-// at its measurement name (C8), and the DNS-01 step of an order, which adds
-// and removes its `_acme-challenge` TXT record (C5). Each changes only what
-// it owns:
+// at its measurement name (C8), and at its family-pinned names, the IPv4 name
+// with its A records alone and the IPv6 name with its AAAA records alone
+// (lag.dev/DRIFTTEST.md K6), and the DNS-01 step of an order, which adds and
+// removes its `_acme-challenge` TXT records (C5). Each changes only what it
+// owns:
 //
 //   - the reconcile changes and deletes only A and AAAA records at names that
-//     parse as measurement names (ownsRecordSet). It never touches the apex,
-//     another type or another name, so the zone's SOA, NS and CAA records,
-//     the geo sets and the Public Suffix List's proof are never its to judge;
+//     parse as measurement names or family-pinned names (ownsRecordSet). It
+//     never touches the apex, another type or another name, so the zone's
+//     SOA, NS and CAA records, the geo sets and the Public Suffix List's
+//     proof are never its to judge;
 //   - an order writes only the challenge records of its own identifiers.
 //
 // Their changes never share a batch. The scoped IAM policy
 // (lag.dev/ops/route53.md) authorizes a batch as a whole, address records
 // under one statement and challenge records under another, and denies one
-// that mixes them or names the apex.
+// that mixes them or names the apex. Nor do a measurement name's changes
+// share a batch with a family-pinned name's: a policy that does not list the
+// family-pinned names yet denies their batches alone.
 //
 // A name is published once the change that wrote its records is in sync on
 // every authoritative server, and only then does the reconcile record it so
@@ -205,16 +211,16 @@ func extenderMeasurementRecordName(recordSet *route53.ResourceRecordSet) string 
 
 // ownsRecordSet is whether a record set is the reconcile's to change or
 // delete (C8): an A or AAAA record at a name that parses as a measurement
-// name. Everything else in the zone is someone else's -- the apex, where the
-// zone's own records and the geo sets are, any other type, and any name that
-// is not a measurement name, challenge records included.
+// name or a family-pinned name (K6). Everything else in the zone is someone
+// else's -- the apex, where the zone's own records and the geo sets are, any
+// other type, and any other name, challenge records included.
 func (self *extenderMeasurementZone) ownsRecordSet(recordSet *route53.ResourceRecordSet) bool {
 	switch aws.StringValue(recordSet.Type) {
 	case route53.RRTypeA, route53.RRTypeAaaa:
 	default:
 		return false
 	}
-	_, ok := controller.ParseExtenderMeasurementName(extenderMeasurementRecordName(recordSet), self.measurementZone)
+	_, _, ok := controller.ParseExtenderMeasurementFamilyName(extenderMeasurementRecordName(recordSet), self.measurementZone)
 	return ok
 }
 
@@ -260,6 +266,12 @@ type extenderMeasurementDnsPlan struct {
 	// then upserts
 	names       []string
 	nameChanges map[string][]*route53.Change
+	// the family-pinned names among them (K6), whose changes go in batches of
+	// their own
+	familyNames map[string]bool
+	// every name a host wants a record at: its measurement name, and each
+	// family-pinned name it has an address of that family for
+	recordNames map[string]bool
 	// published names whose records are in place, or are only updated: they
 	// stay published whatever becomes of this plan's changes
 	published []string
@@ -268,8 +280,8 @@ type extenderMeasurementDnsPlan struct {
 	// Records already in place are written again, since Route 53 tells
 	// whether a change is in sync, not whether a record is
 	publishing map[string]bool
-	// published names that hold none of their records now: they must not be
-	// offered until their records are written again and in sync
+	// published measurement names that hold none of their records now: they
+	// must not be offered until their records are written again and in sync
 	absent []string
 }
 
@@ -286,31 +298,62 @@ type extenderMeasurementDnsChanges struct {
 // plan reads the zone and works out the changes that make its address records
 // exactly `hosts` (C8): for each serving extender, an A record of its IPv4
 // addresses and an AAAA record of its IPv6 addresses at its measurement name,
-// at the configured ttl and with no routing policy. An address record at a
-// measurement name that no host wants is deleted, and nothing else in the
-// zone is read as anything but an obstacle: a name that holds a CNAME, which
-// cannot share a name, is left out with an error rather than failing every
-// other name's batch.
+// and, while its certificate carries them (K6), an A record of its IPv4
+// addresses at its IPv4 name and an AAAA record of its IPv6 addresses at its
+// IPv6 name, each at the configured ttl and with no routing policy. An
+// address record at a measurement name or a family-pinned name that no host
+// wants is deleted, an IPv6 address at the IPv4 name included, and nothing
+// else in the zone is read as anything but an obstacle: a name that holds a
+// CNAME, which cannot share a name, is left out with an error rather than
+// failing every other name's batch.
 //
-// Every change is an A or AAAA change at a measurement name. A name already
+// Every change is an A or AAAA change at one of those names. A name already
 // published whose records match gets none, so a pass over a zone that matches
-// and is published sends nothing.
+// and is published sends nothing. A family-pinned name is published with its
+// host's FamilyPublishTime, and is never counted absent: its host's
+// measurement name, published by the same certificate, is what A4 offers.
 func (self *extenderMeasurementZone) plan(
 	ctx context.Context,
 	hosts []*controller.ExtenderMeasurementHost,
 ) (*extenderMeasurementDnsPlan, error) {
 	desiredValues := map[extenderMeasurementRecordKey][]string{}
-	hostNames := map[string]*controller.ExtenderMeasurementHost{}
+	// whether each name a host wants records at was published (C8)
+	namePublished := map[string]bool{}
+	addRecord := func(name string, ip netip.Addr) {
+		key := extenderMeasurementRecordKey{name: name, recordType: extenderMeasurementRecordType(ip)}
+		if value := ip.String(); !slices.Contains(desiredValues[key], value) {
+			desiredValues[key] = append(desiredValues[key], value)
+		}
+	}
 	for _, host := range hosts {
-		if _, ok := controller.ParseExtenderMeasurementName(host.Name, self.measurementZone); !ok {
+		extenderId, ok := controller.ParseExtenderMeasurementName(host.Name, self.measurementZone)
+		if !ok {
 			// only measurement names are written, as only they are deleted
 			return nil, fmt.Errorf("%s is not a measurement name in %s", host.Name, self.measurementZone)
 		}
-		hostNames[host.Name] = host
+		namePublished[host.Name] = host.PublishTime != nil
 		for _, ip := range host.Ips {
-			key := extenderMeasurementRecordKey{name: host.Name, recordType: extenderMeasurementRecordType(ip)}
-			if value := ip.String(); !slices.Contains(desiredValues[key], value) {
-				desiredValues[key] = append(desiredValues[key], value)
+			addRecord(host.Name, ip)
+		}
+		for _, familyName := range []struct {
+			name     string
+			ipFamily int
+		}{
+			{host.Ipv4Name, 4},
+			{host.Ipv6Name, 6},
+		} {
+			if familyName.name == "" {
+				continue
+			}
+			nameId, ipFamily, ok := controller.ParseExtenderMeasurementFamilyName(familyName.name, self.measurementZone)
+			if !ok || nameId != extenderId || ipFamily != familyName.ipFamily {
+				return nil, fmt.Errorf("%s is not the IPv%d name of %s", familyName.name, familyName.ipFamily, host.Name)
+			}
+			namePublished[familyName.name] = host.FamilyPublishTime != nil
+			for _, ip := range host.Ips {
+				if server.IpVersionForAddr(ip) == familyName.ipFamily {
+					addRecord(familyName.name, ip)
+				}
 			}
 		}
 	}
@@ -326,13 +369,23 @@ func (self *extenderMeasurementZone) plan(
 	plan := &extenderMeasurementDnsPlan{
 		names:       []string{},
 		nameChanges: map[string][]*route53.Change{},
+		familyNames: map[string]bool{},
+		recordNames: map[string]bool{},
 		published:   []string{},
 		publishing:  map[string]bool{},
 		absent:      []string{},
 	}
+	for key := range desiredValues {
+		plan.recordNames[key.name] = true
+	}
 	addChange := func(name string, change *route53.Change) {
 		if _, ok := plan.nameChanges[name]; !ok {
 			plan.names = append(plan.names, name)
+			// a family-pinned name's changes, a deletion of one no host wants
+			// included, go in batches of their own
+			if _, ipFamily, ok := controller.ParseExtenderMeasurementFamilyName(name, self.measurementZone); ok && ipFamily != 0 {
+				plan.familyNames[name] = true
+			}
 		}
 		plan.nameChanges[name] = append(plan.nameChanges[name], change)
 	}
@@ -372,7 +425,7 @@ func (self *extenderMeasurementZone) plan(
 
 	// a published name keeps being published while it holds a record
 	stays := func(name string) bool {
-		return hostNames[name].PublishTime != nil && presentNames[name]
+		return namePublished[name] && presentNames[name]
 	}
 
 	keys := []extenderMeasurementRecordKey{}
@@ -412,12 +465,19 @@ func (self *extenderMeasurementZone) plan(
 		if host.PublishTime != nil && !presentNames[host.Name] {
 			plan.absent = append(plan.absent, host.Name)
 		}
+	}
+	recordNames := []string{}
+	for name := range plan.recordNames {
+		recordNames = append(recordNames, name)
+	}
+	slices.Sort(recordNames)
+	for _, name := range recordNames {
 		switch {
-		case blockedNames[host.Name]:
-		case stays(host.Name):
-			plan.published = append(plan.published, host.Name)
-		case 0 < len(plan.nameChanges[host.Name]):
-			plan.publishing[host.Name] = true
+		case blockedNames[name]:
+		case stays(name):
+			plan.published = append(plan.published, name)
+		case 0 < len(plan.nameChanges[name]):
+			plan.publishing[name] = true
 		}
 	}
 	slices.Sort(plan.names)
@@ -428,24 +488,32 @@ func (self *extenderMeasurementZone) plan(
 // name is in sync, which is when every authoritative server answers for it
 // (C8). A name's changes always share a batch, so dns never answers for it
 // with only part of them: a deleted record without the one that replaces it.
-// A batch that fails, or is not in sync in time, does not keep the others;
-// the first error is returned with what was changed.
+// The measurement names' batches come first, and never carry a family-pinned
+// name's changes (K6). A batch that fails, or is not in sync in time, does
+// not keep the others; the first error is returned with what was changed.
 func (self *extenderMeasurementZone) apply(ctx context.Context, plan *extenderMeasurementDnsPlan) (*extenderMeasurementDnsChanges, error) {
 	changes := &extenderMeasurementDnsChanges{
 		published: slices.Clone(plan.published),
 	}
 
-	// whole names to a batch, up to the batch size
+	// whole names to a batch, up to the batch size, the measurement names
+	// and the family-pinned names apart
 	batches := [][]string{}
-	batchSize := 0
-	for _, name := range plan.names {
-		size := len(plan.nameChanges[name])
-		if 0 < len(batches) && batchSize+size <= ExtenderMeasurementDnsBatchSize {
-			batches[len(batches)-1] = append(batches[len(batches)-1], name)
-			batchSize += size
-		} else {
-			batches = append(batches, []string{name})
-			batchSize = size
+	for _, family := range []bool{false, true} {
+		groupStart := len(batches)
+		batchSize := 0
+		for _, name := range plan.names {
+			if plan.familyNames[name] != family {
+				continue
+			}
+			size := len(plan.nameChanges[name])
+			if groupStart < len(batches) && batchSize+size <= ExtenderMeasurementDnsBatchSize {
+				batches[len(batches)-1] = append(batches[len(batches)-1], name)
+				batchSize += size
+			} else {
+				batches = append(batches, []string{name})
+				batchSize = size
+			}
 		}
 	}
 

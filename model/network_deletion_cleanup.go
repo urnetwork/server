@@ -169,9 +169,15 @@ type deletedNetworkTable struct {
 	keyColumns []string
 	// a device's rows that match only the deleted network's
 	matchNetwork bool
+	// the table's own batch delete, with the same arguments, for a row that
+	// must wait for others to go first
+	ownDeleteSql string
 }
 
 func (self *deletedNetworkTable) deleteSql() string {
+	if self.ownDeleteSql != "" {
+		return self.ownDeleteSql
+	}
 	keys := ""
 	for i, column := range self.keyColumns {
 		if 0 < i {
@@ -262,6 +268,11 @@ var deletedNetworkTables = []*deletedNetworkTable{
 	// its track (deletedNetworkLagResultSql)
 	{table: "lag_ticket", keyColumn: "network_id", keyColumns: []string{"ticket_id"}},
 	{table: "lag_track", keyColumn: "network_id", keyColumns: []string{"track_id"}},
+	// the drift tests hold a reference and a verdict (lag.dev/DRIFTTEST.md
+	// R1); a test's tracks go with lag_track, and the test after its runs
+	// (deletedNetworkLagDriftRunSql)
+	{table: "lag_drift_test", keyColumn: "network_id", keyColumns: []string{"drift_test_id"}, ownDeleteSql: deletedNetworkLagDriftTestSql},
+	{table: "lag_drift_network", keyColumn: "network_id", keyColumns: []string{"network_id"}},
 	// small
 	{table: "oauth_authorization_code", keyColumn: "network_id", keyColumns: []string{"code_hash"}},
 	{table: "oauth_consent", keyColumn: "network_id", keyColumns: []string{"user_id", "client_id"}},
@@ -483,6 +494,7 @@ func deletedNetworkDeletedTableNames() map[string]bool {
 		"proxy_exit_assignment":      true,
 		"auth_code":                  true,
 		"network_points_leaderboard": true,
+		"lag_drift_run":              true,
 	}
 	for _, table := range deletedNetworkTables {
 		tables[table.table] = true
@@ -538,6 +550,31 @@ const deletedNetworkLagResultSql = `
 		WHERE
 			lag_result.track_id IN (SELECT track_id FROM lag_track WHERE network_id = ANY($1)) OR
 			lag_result.ticket_id IN (SELECT ticket_id FROM lag_ticket WHERE network_id = ANY($1))
+		LIMIT $2
+	)
+`
+
+// A drift test's runs, which name no network, go before it.
+const deletedNetworkLagDriftRunSql = `
+	DELETE FROM lag_drift_run
+	WHERE (lag_drift_run.drift_test_id, lag_drift_run.run) IN (
+		SELECT lag_drift_run.drift_test_id, lag_drift_run.run
+		FROM lag_drift_run
+		WHERE lag_drift_run.drift_test_id IN (SELECT drift_test_id FROM lag_drift_test WHERE network_id = ANY($1))
+		LIMIT $2
+	)
+`
+
+// A drift test goes once none of its runs is left, so no run outlives the
+// test by which it is found.
+const deletedNetworkLagDriftTestSql = `
+	DELETE FROM lag_drift_test
+	WHERE lag_drift_test.drift_test_id IN (
+		SELECT lag_drift_test.drift_test_id
+		FROM lag_drift_test
+		WHERE
+			lag_drift_test.network_id = ANY($1) AND
+			NOT EXISTS (SELECT 1 FROM lag_drift_run WHERE lag_drift_run.drift_test_id = lag_drift_test.drift_test_id)
 		LIMIT $2
 	)
 `
@@ -973,6 +1010,7 @@ func removeDeletedNetworkRows(
 			statements = append(
 				statements,
 				&deletedNetworkStatement{table: "lag_result", sql: deletedNetworkLagResultSql, args: []any{networkIdStrings, rowBatchCount}, limited: true},
+				&deletedNetworkStatement{table: "lag_drift_run", sql: deletedNetworkLagDriftRunSql, args: []any{networkIdStrings, rowBatchCount}, limited: true},
 				&deletedNetworkStatement{table: "network_points_leaderboard", sql: deletedNetworkPointsLeaderboardSql, args: []any{networkIdStrings}},
 			)
 			for _, table := range deletedNetworkTables {

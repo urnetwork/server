@@ -372,7 +372,8 @@ func verifyTestMeasurementChain(t testing.TB, ca *testAcmeCa, chainPem string, n
 	return leaf
 }
 
-// The address records below the zone's apex, as `<name> <type>` to their
+// The address records below the zone's apex, at measurement names and
+// family-pinned names (lag.dev/DRIFTTEST.md K6), as `<name> <type>` to their
 // sorted values, each checked to be a plain record at the default ttl.
 func testMeasurementAddressRecords(t testing.TB, env *testMeasurementEnv) map[string][]string {
 	t.Helper()
@@ -383,7 +384,7 @@ func testMeasurementAddressRecords(t testing.TB, env *testMeasurementEnv) map[st
 		if recordType != route53.RRTypeA && recordType != route53.RRTypeAaaa {
 			continue
 		}
-		if _, ok := controller.ParseExtenderMeasurementName(name, testMeasurementZone); !ok {
+		if _, _, ok := controller.ParseExtenderMeasurementFamilyName(name, testMeasurementZone); !ok {
 			continue
 		}
 		if recordSet.SetIdentifier != nil || aws.Int64Value(recordSet.TTL) != controller.ExtenderMeasurementDefaultDnsTtl {

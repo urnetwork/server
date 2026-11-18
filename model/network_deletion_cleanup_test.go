@@ -64,7 +64,7 @@ func TestDeletedNetworkCleanupRemovesEverythingButFinancialRows(t *testing.T) {
 		keptBefore := Testing_CountDeletedNetworkFixtureKeptRows(ctx, fixture)
 		rowsBefore := Testing_CountDeletedNetworkFixtureRows(ctx, fixture)
 		// every kind of table holds a fixture row before the deletion
-		for _, table := range []string{"network_client", "device", "account_preferences", "account_api_key", "network_referral_code", "network_referral", "auth_code", "auth_code_role", "user_auth_reset", "network_client_connection", "network_client_location", "provide_key", "client_tls_certificate", "provider_egress_health", "search_provider_stats", "audit_device_state", "audit_device_event", "audit_provider_state"} {
+		for _, table := range []string{"network_client", "device", "account_preferences", "account_api_key", "network_referral_code", "network_referral", "auth_code", "auth_code_role", "user_auth_reset", "network_client_connection", "network_client_location", "provide_key", "client_tls_certificate", "provider_egress_health", "search_provider_stats", "audit_device_state", "audit_device_event", "audit_provider_state", "lag_drift_test", "lag_drift_run", "lag_drift_network"} {
 			if rowsBefore[table] == 0 {
 				t.Fatalf("the fixture has no %s row", table)
 			}

@@ -26,19 +26,23 @@ import (
 // lag.dev measurement certificates, the operator's half (lag.dev/PLAN.md C,
 // A8-A10).
 //
-// An open tier extender with a public inbound address has one measurement
-// name, its id under the measurement zone (N1), and a certificate for exactly
-// that name, so a browser can reach its measurement API over tls (M). The name
-// resolves to the extender's active addresses of both families (N3), so an
-// address change moves records and never a certificate. The extender makes
-// its own key and sends a certificate request with an activation (C4); this
-// file reads the request, decides which extenders may be measured and at
-// which addresses, and answers the extender's polls (A8). The issuance,
-// renewal, revocation and the zone itself are the taskworker's
-// (taskworker/work/extender_measurement*.go).
+// An open tier extender with a public inbound address has a measurement name,
+// its id under the measurement zone (N1), which resolves to its active
+// addresses of both families (N3), so a browser can reach its measurement API
+// over tls (M) and an address change moves records and never a certificate.
+// Since lag.dev/DRIFTTEST.md K6 it also has a name for each IP family that
+// resolves in that family alone, `<id>.ipv4.<zone>` with only its A records
+// and `<id>.ipv6.<zone>` with only its AAAA records, so a drift test run's
+// sessions use client_ip's family. Its certificate carries all three names; an
+// extender from before K6 asks for its measurement name alone, and has no
+// family-pinned names. The extender makes its own key and sends a
+// certificate request with an activation (C4); this file reads the request,
+// decides which extenders may be measured and at which addresses, and answers
+// the extender's polls (A8). The issuance, renewal, revocation and the zone
+// itself are the taskworker's (taskworker/work/extender_measurement*.go).
 //
 // What depends on the shape of a name is in three places, so a change of
-// shape is a change of those: the two name functions here, which are the only
+// shape is a change of those: the name functions here, which are the only
 // callers of connect's; the request validation,
 // ParseExtenderMeasurementCsrDer; and the record set,
 // GetExtenderMeasurementHostsToPublish.
@@ -85,10 +89,43 @@ func ExtenderMeasurementName(extenderId server.Id, zone string) string {
 }
 
 // ParseExtenderMeasurementName is the extender a measurement name is for, the
-// inverse of ExtenderMeasurementName. Only the canonical spelling parses.
+// inverse of ExtenderMeasurementName. Only the canonical spelling parses, and
+// a family-pinned name is not a measurement name.
 func ParseExtenderMeasurementName(name string, zone string) (server.Id, bool) {
 	extenderId, ok := connect.ParseExtenderMeasurementName(name, zone)
 	return server.Id(extenderId), ok
+}
+
+// ExtenderMeasurementFamilyName is an extender's name that resolves in IP
+// family `ipFamily` alone, 4 or 6 (lag.dev/DRIFTTEST.md K6): its id, "ipv4"
+// or "ipv6", and the zone. The zero id and any other family have none, "".
+func ExtenderMeasurementFamilyName(extenderId server.Id, zone string, ipFamily int) string {
+	return connect.ExtenderMeasurementFamilyName(connect.Id(extenderId), zone, ipFamily)
+}
+
+// ExtenderMeasurementNames is the names an extender's certificate carries
+// since K6: its measurement name, then its IPv4 and its IPv6 names. Nil for
+// the zero id.
+func ExtenderMeasurementNames(extenderId server.Id, zone string) []string {
+	return connect.ExtenderMeasurementNames(connect.Id(extenderId), zone)
+}
+
+// ParseExtenderMeasurementFamilyName is the extender any of its measurement
+// names is for, and the family the name resolves in: 0 for its measurement
+// name, 4 or 6 for a family-pinned name (K6). Only those three shapes parse,
+// each in its canonical spelling.
+func ParseExtenderMeasurementFamilyName(name string, zone string) (server.Id, int, bool) {
+	extenderId, ipFamily, ok := connect.ParseExtenderMeasurementFamilyName(name, zone)
+	return server.Id(extenderId), ipFamily, ok
+}
+
+// ParseExtenderMeasurementNames is the extender a certificate's or a
+// request's names are for (C4, K6), and whether they include the
+// family-pinned names: its measurement name alone, or with both of its
+// family-pinned names, in any order. Any other set is refused.
+func ParseExtenderMeasurementNames(names []string, zone string) (extenderId server.Id, familyNames bool, ok bool) {
+	connectId, familyNames, ok := connect.ParseExtenderMeasurementNames(names, zone)
+	return server.Id(connectId), familyNames, ok
 }
 
 // One certificate request as an activation carried it (C4), parsed.
@@ -97,8 +134,14 @@ type ExtenderMeasurementRequest struct {
 	Csr []byte
 	// the request's SubjectPublicKeyInfo, DER
 	PublicKey []byte
-	// the one name it asks for, the extender's own
+	// the extender's measurement name, which every request asks for
 	Name string
+	// the names it asks for, the extender's own: Name alone, as an extender
+	// from before K6 asks, or Name and the two family-pinned names, in the
+	// order ExtenderMeasurementNames writes them
+	Names []string
+	// whether Names includes the family-pinned names
+	FamilyNames bool
 }
 
 // ParseExtenderMeasurementCsr reads a certificate request as an activation
@@ -151,12 +194,16 @@ func readRefusedExtenderMeasurementCsr(csrBase64 string) (csr []byte, publicKey 
 }
 
 // ParseExtenderMeasurementCsrDer validates an extender's certificate request
-// (C5): its signature verifies, its key is ECDSA P-256, and its only name is
-// that extender's measurement name, in its one canonical spelling (N1) -- no
-// second name, no address, email or uri name, and a common name only if it is
-// that same name. A request for another extender's name is refused like any
-// other wrong name: the name is the extender's id, and an extender gets a
-// certificate for no id but its own.
+// (C5): its signature verifies, its key is ECDSA P-256, and its names are
+// exactly that extender's measurement names, each in its one canonical
+// spelling (N1, K6). Two sets are, in any order: the measurement name alone,
+// which an extender from before K6 asks for, and the measurement name with
+// both family-pinned names. Any other set is refused -- a family's name
+// without the others, a name twice, a fourth name -- and so is an address,
+// email or uri name, and a common name that is not one of the names. A
+// request for another extender's name is refused like any other wrong name:
+// the name is the extender's id, and an extender gets a certificate for no id
+// but its own.
 func ParseExtenderMeasurementCsrDer(csr []byte, extenderId server.Id, zone string) (*ExtenderMeasurementRequest, error) {
 	request, err := x509.ParseCertificateRequest(csr)
 	if err != nil {
@@ -176,20 +223,27 @@ func ParseExtenderMeasurementCsrDer(csr []byte, extenderId server.Id, zone strin
 	if name == "" {
 		return nil, fmt.Errorf("the extender has no measurement name")
 	}
-	if len(request.DNSNames) != 1 || request.DNSNames[0] != name {
+	requestId, familyNames, ok := ParseExtenderMeasurementNames(request.DNSNames, zone)
+	if !ok || requestId != extenderId {
 		return nil, fmt.Errorf(
-			"the measurement certificate request names %v, not only the extender's measurement name %s",
+			"the measurement certificate request names %v, not the extender's measurement name %s alone or with its family-pinned names",
 			request.DNSNames,
 			name,
 		)
 	}
-	if commonName := request.Subject.CommonName; commonName != "" && commonName != name {
-		return nil, fmt.Errorf("the measurement certificate request common name %q is not the extender's measurement name", commonName)
+	names := []string{name}
+	if familyNames {
+		names = ExtenderMeasurementNames(extenderId, zone)
+	}
+	if commonName := request.Subject.CommonName; commonName != "" && !slices.Contains(names, commonName) {
+		return nil, fmt.Errorf("the measurement certificate request common name %q is not one of the extender's measurement names", commonName)
 	}
 	return &ExtenderMeasurementRequest{
-		Csr:       csr,
-		PublicKey: request.RawSubjectPublicKeyInfo,
-		Name:      name,
+		Csr:         csr,
+		PublicKey:   request.RawSubjectPublicKeyInfo,
+		Name:        name,
+		Names:       names,
+		FamilyNames: familyNames,
 	}, nil
 }
 
@@ -285,8 +339,8 @@ func ExtenderMeasurementAway(extender *model.NetworkExtender, now time.Time) boo
 		extender.CanaryChannel == ""
 }
 
-// One extender that may serve the measurement api now (C8, A4): its name, the
-// addresses the name resolves to, and since when it does.
+// One extender that may serve the measurement api now (C8, A4): its names, the
+// addresses they resolve to, and since when they do.
 type ExtenderMeasurementHost struct {
 	ExtenderId server.Id
 	// the extender's ed25519 identity key
@@ -298,14 +352,65 @@ type ExtenderMeasurementHost struct {
 	// when the dns reconcile found the name published, in sync on every
 	// authoritative server; nil while it is not yet (C8)
 	PublishTime *time.Time
+
+	// The names that resolve in one IP family alone (lag.dev/DRIFTTEST.md K6),
+	// set while a live, already valid certificate of the extender carries
+	// them, else "": Ipv4Name has the A records of its IPv4 addresses alone,
+	// and Ipv6Name the AAAA records of its IPv6 ones. A family without an
+	// address has no records, and its name does not resolve. Read them through
+	// FamilyName.
+	Ipv4Name string
+	Ipv6Name string
+	// when the dns reconcile found the names of the certificate that carries
+	// them published with it; nil while they are not yet (C8)
+	FamilyPublishTime *time.Time
+	// whether the extender answers to them: A8 has handed it the certificate
+	// for exactly the names and key of its latest request, which carries them
+	// (A8, C4). The lag.dev sample sets it (GetLagServingHosts), which the
+	// drift test chooses from (E2); it is false on a host read anywhere else.
+	FamilyServing bool
+}
+
+// FamilyName is the extender's name that resolves in IP family `ipFamily`
+// alone, 4 or 6 (lag.dev/DRIFTTEST.md K6), as server.IpVersionForAddr names
+// the family, when the extender answers to it now: its certificate carries
+// it, dns publishes it (C8), the extender holds that certificate
+// (FamilyServing), and it has an address of the family. "" otherwise, as for
+// an extender whose certificate is for its measurement name alone: one from
+// before K6, or one whose request for the family-pinned names waits for the
+// weekly cap (C7). A drift ticket names it in place of Name (E2, K6).
+func (self *ExtenderMeasurementHost) FamilyName(ipFamily int) string {
+	if !self.FamilyServing || self.FamilyPublishTime == nil {
+		return ""
+	}
+	name := ""
+	switch ipFamily {
+	case 4:
+		name = self.Ipv4Name
+	case 6:
+		name = self.Ipv6Name
+	}
+	if name == "" {
+		return ""
+	}
+	// without an address of the family, the name has no record
+	for _, ip := range self.Ips {
+		if server.IpVersionForAddr(ip) == ipFamily {
+			return name
+		}
+	}
+	return ""
 }
 
 // GetExtenderMeasurementHostsToPublish reads every extender that may serve
 // the measurement api at `now` (C8): one that may be measured and holds a
 // live, already valid certificate for its measurement name, with the
 // addresses it is measured at, whether or not its name is published yet. The
-// dns reconcile publishes exactly these -- each name's A records its IPv4
-// addresses and its AAAA records its IPv6 addresses. Ordered by name.
+// dns reconcile publishes exactly these: the measurement name's A records are
+// its IPv4 addresses and its AAAA records its IPv6 addresses, and, while a
+// live, already valid certificate carries the family-pinned names (K6), the
+// IPv4 name has its A records alone and the IPv6 name its AAAA records alone.
+// Ordered by name.
 func GetExtenderMeasurementHostsToPublish(ctx context.Context, config *ExtenderConfig, now time.Time) []*ExtenderMeasurementHost {
 	zone := config.Measurement.MeasurementZone()
 	nameHosts := map[string]*ExtenderMeasurementHost{}
@@ -336,6 +441,18 @@ func GetExtenderMeasurementHostsToPublish(ctx context.Context, config *ExtenderC
 		}
 		if publishTime := target.Cert.PublishTime; publishTime != nil && (host.PublishTime == nil || publishTime.Before(*host.PublishTime)) {
 			host.PublishTime = publishTime
+		}
+		// a certificate for the family-pinned names too (K6); one for the
+		// measurement name alone, an extender's from before K6 or the one
+		// it serves while its request for them waits, publishes none. The
+		// family names are published since the earliest certificate that
+		// carries them says, which says so only once all its names are
+		if certId, familyNames, ok := ParseExtenderMeasurementNames(target.Cert.Names, zone); ok && familyNames && certId == host.ExtenderId {
+			host.Ipv4Name = ExtenderMeasurementFamilyName(host.ExtenderId, zone, 4)
+			host.Ipv6Name = ExtenderMeasurementFamilyName(host.ExtenderId, zone, 6)
+			if publishTime := target.Cert.PublishTime; publishTime != nil && (host.FamilyPublishTime == nil || publishTime.Before(*host.FamilyPublishTime)) {
+				host.FamilyPublishTime = publishTime
+			}
 		}
 	}
 	hosts := []*ExtenderMeasurementHost{}
@@ -400,7 +517,7 @@ func extenderMeasurementId(
 
 // Stores the certificate request an activation carried (A10, C4). A request
 // that cannot be read, or that names anything but this extender's measurement
-// name, is stored refused with the reason, which the extender reads from A8,
+// names (K6), is stored refused with the reason, which the extender reads from A8,
 // and with the key and names of as much of it as could be read, which A8
 // answers with; either way the activation's own answer does not change. An
 // activation that carries no request never reaches here, so a stored request
@@ -427,11 +544,11 @@ func storeExtenderMeasurementRequest(
 		extenderId,
 		request.Csr,
 		request.PublicKey,
-		[]string{request.Name},
+		request.Names,
 		now,
 	)
 	if glog.V(1) {
-		glog.Infof("[extendermeasurement]%s requested %s: %s\n", extenderId, request.Name, state)
+		glog.Infof("[extendermeasurement]%s requested %s: %s\n", extenderId, strings.Join(request.Names, ","), state)
 	}
 }
 
@@ -465,10 +582,16 @@ type ExtenderMeasurementCertArgs struct {
 type ExtenderMeasurementCertResult struct {
 	// none, pending, issued, refused or withdrawn
 	State string `json:"state"`
-	// the extender's one measurement name: the request's when pending or
+	// the extender's measurement names: the request's when pending or
 	// refused, the certificate's when issued, and the withdrawn certificate's
 	// when withdrawn
 	Names []string `json:"names"`
+	// that this operator issues for the family-pinned names
+	// (lag.dev/DRIFTTEST.md K6); always true. An extender since connect
+	// 60388f9b asks for its measurement name alone when an answer leaves this
+	// out, as one from an operator from before K6 does, which refuses a
+	// request for more
+	FamilyNames bool `json:"family_names"`
 	// the hex SHA-256 of the SubjectPublicKeyInfo of the key the answer is
 	// for: the certificate's when issued, else the request's. Every answer
 	// with a request or certificate behind it carries one -- pending, issued,
@@ -500,8 +623,16 @@ type ExtenderMeasurementCertResult struct {
 // an operator's override, or its owner's opt-out. While it is away it is
 // answered issued with the chain it holds (amendment 23).
 //
-// The state is the extender's latest request's, with two exceptions:
+// The state is the extender's latest request's, with three exceptions:
 //
+//   - a pending request for the family-pinned names (K6) of an extender that
+//     holds a live certificate for its measurement name alone, under the same
+//     key, reads as issued with that certificate, the newest one. The
+//     request waits for its order, the weekly cap's (C7) as a new set of names
+//     to the CA, and meanwhile the extender keeps serving its measurement name
+//     and is handed each renewal of that certificate (C6), which a pending
+//     answer would not hand it. Its next activations carry the request
+//     again, which the operator already holds;
 //   - while the operator does not issue, a pending request reads as refused
 //     rather than pending, which an extender keeps polling for. The request
 //     stays pending in its row and keeps its place in the queue (C7), and the
@@ -530,8 +661,9 @@ func ExtenderMeasurementCert(
 	clientSession *session.ClientSession,
 ) (*ExtenderMeasurementCertResult, error) {
 	result := &ExtenderMeasurementCertResult{
-		State: model.NetworkExtenderMeasurementStateNone,
-		Names: []string{},
+		State:       model.NetworkExtenderMeasurementStateNone,
+		Names:       []string{},
+		FamilyNames: true,
 	}
 	if clientSession.ByJwt == nil || clientSession.ByJwt.ClientId == nil {
 		// the route requires a client jwt; this is the structural guard for a
@@ -566,7 +698,12 @@ func ExtenderMeasurementCert(
 	result.KeySha256 = extenderMeasurementKeySha256(measurement.PublicKey)
 	result.Reason = measurement.Reason
 
-	if measurement.State == model.NetworkExtenderMeasurementStateIssued {
+	if measurement.State == model.NetworkExtenderMeasurementStatePending && cert != nil {
+		// the measurement name's certificate answers a request that adds the
+		// family-pinned names to it (K6), until that request's is issued
+		result.State = model.NetworkExtenderMeasurementStateIssued
+	}
+	if result.State == model.NetworkExtenderMeasurementStateIssued {
 		if cert != nil {
 			if cert.DeliverTime == nil {
 				model.MarkNetworkExtenderMeasurementCertDelivered(clientSession.Ctx, cert.CertId, now)

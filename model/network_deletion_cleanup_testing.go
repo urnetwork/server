@@ -26,6 +26,8 @@ type Testing_DeletedNetworkFixture struct {
 	ConnectionIds []server.Id
 	// the network's auth codes, whose roles go with them
 	AuthCodeIds []server.Id
+	// the network's drift tests, whose runs go with them
+	DriftTestIds []server.Id
 }
 
 // Creates the network, its admin user (a guest, with no sign-in address) and
@@ -85,6 +87,23 @@ func Testing_CreateDeletedNetworkFixture(ctx context.Context, networkName string
 		)
 		exec(`INSERT INTO network_top_level_client_limit (network_id, top_level_client_limit, update_time) VALUES ($1, 3, $2)`, fixture.NetworkId, now)
 		exec(`INSERT INTO network_connection_reliability_window (network_id, bucket_number) VALUES ($1, 1)`, fixture.NetworkId)
+		driftTestId := server.NewId()
+		fixture.DriftTestIds = []server.Id{driftTestId}
+		exec(
+			`
+				INSERT INTO lag_drift_test (drift_test_id, network_id, token_hash, client_ip_family, confidence, reference, created_at, expires_at, run_count, updated_at)
+				VALUES ($1, $2, $3, 4, 0.99, 'synthetic', $4, $5, 1, $4)
+			`,
+			driftTestId, fixture.NetworkId, driftTestId.Bytes(), now, now.Add(time.Hour),
+		)
+		exec(
+			`
+				INSERT INTO lag_drift_run (drift_test_id, run, track_id, state, started_at, ip_family, extenders_json)
+				VALUES ($1, 1, $2, 'complete', $3, 4, '[]'::jsonb)
+			`,
+			driftTestId, server.NewId(), now,
+		)
+		exec(`INSERT INTO lag_drift_network (network_id, update_time) VALUES ($1, $2)`, fixture.NetworkId, now)
 
 		// the user's own rows
 		exec(`INSERT INTO user_auth_reset (user_auth_reset_id, user_id, reset_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.UserId, "synthetic-"+server.NewId().String())
@@ -208,6 +227,7 @@ func Testing_CountDeletedNetworkFixtureRows(ctx context.Context, fixture *Testin
 		{table: "network_client_latency", sql: `SELECT count(*) FROM network_client_latency WHERE connection_id = ANY($1)`, args: []any{connectionIds}},
 		{table: "network_client_speed", sql: `SELECT count(*) FROM network_client_speed WHERE connection_id = ANY($1)`, args: []any{connectionIds}},
 		{table: "network_client_connection", sql: `SELECT count(*) FROM network_client_connection WHERE client_id = ANY($1)`, args: []any{clientIds}},
+		{table: "lag_drift_run", sql: `SELECT count(*) FROM lag_drift_run WHERE drift_test_id = ANY($1)`, args: []any{idStrings(fixture.DriftTestIds)}},
 	}
 	for _, table := range deletedNetworkTables {
 		queries = append(queries, countQuery{table: table.table, sql: table.countSql(), args: []any{networkIds}})

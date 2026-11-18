@@ -351,6 +351,11 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /lag/extenders":                            routeAccessClient,
 	"POST /lag/track":                               routeAccessClient,
 	"POST /network/extender-lag-report":             routeAccessClient,
+	"POST /lag/drift-test":                          routeAccessNetwork, // allocates a drift test; an Embed API (lag.dev/DRIFTTEST.md P1)
+	"GET /lag/drift-test":                           routeAccessNetwork, // a drift test's runs and verdict; an Embed API
+	"POST /lag/drift-test/start":                    routeAccessPublic,  // the drift test's token, in the body, is the credential
+	"POST /lag/drift-test/finish":                   routeAccessPublic,  // the drift test's token, in the body, is the credential
+	"POST /lag/drift-test/result":                   routeAccessPublic,  // the drift test's token, in the body, is the credential
 	"POST /updates/brevo":                           routeAccessPublic,
 	"POST /log/([^/]+)/upload":                      routeAccessClient,
 	"GET /\\.well-known/oauth-authorization-server": routeAccessPublic,

@@ -22,9 +22,13 @@ import (
 //     issued is answered by a live certificate for the same names and key;
 //     refused says why not; withdrawn is a request whose certificate was
 //     withdrawn (C9), which stands until the extender asks again. A request
-//     is known by its names and its key, never by its bytes. An extender has
-//     one measurement name, its id under the zone (N1), which the controller
-//     checks; these tables keep a list and do not depend on its shape.
+//     is known by its names and its key, never by its bytes. An extender asks
+//     for its measurement name, its id under the zone (N1), alone or with its
+//     two family-pinned names (lag.dev/DRIFTTEST.md K6), which the
+//     controller checks; these tables keep a list and depend on its shape in
+//     one place only, where a certificate for the measurement name alone
+//     answers a request that adds the family-pinned names
+//     (networkExtenderMeasurementCertAnswersSql).
 //   - network_extender_measurement_cert is one certificate the CA issued. It
 //     is live until it expires or is withdrawn (C9), and a renewal (C6) marks
 //     the certificate it replaces as renewed without withdrawing it, since
@@ -1761,29 +1765,26 @@ func GetLiveNetworkExtenderMeasurementCerts(ctx context.Context, now time.Time) 
 	return targets
 }
 
-// The column form of each of several single names.
-func networkExtenderMeasurementNameValues(names []string) []string {
-	values := []string{}
-	for _, name := range names {
-		if value := joinNetworkExtenderMeasurementNames([]string{name}); value != "" && !slices.Contains(values, value) {
-			values = append(values, value)
-		}
-	}
-	return values
+// Names as the names column lists them: lower case, deduplicated, sorted.
+func networkExtenderMeasurementNameList(names []string) []string {
+	return splitNetworkExtenderMeasurementNames(joinNetworkExtenderMeasurementNames(names))
 }
 
 // PublishNetworkExtenderMeasurementNames records that the dns reconcile found
 // these names published, in sync on every authoritative server (C8): each
-// live certificate for one of them that does not say so yet takes
-// `publishTime`, and one that does keeps its own. That includes a renewal
-// that arrived while its name was published. Returns how many certificates it
-// marked.
+// live certificate all of whose names are among them that does not say so
+// yet takes `publishTime`, and one that does keeps its own. That includes a
+// renewal that arrived while its names were published. A certificate for the
+// family-pinned names too (lag.dev/DRIFTTEST.md K6) is published once all
+// three are; the reconcile counts a family's name as published with the
+// others when the extender has no address of that family, since the name
+// then has no record to publish. Returns how many certificates it marked.
 //
 // Only the reconcile calls this, and only after Route 53 reported the change
-// that wrote the name's records in sync, so a name is never marked published
+// that wrote the names' records in sync, so a name is never marked published
 // before dns answers for it everywhere.
 func PublishNetworkExtenderMeasurementNames(ctx context.Context, names []string, publishTime time.Time) (published int) {
-	values := networkExtenderMeasurementNameValues(names)
+	values := networkExtenderMeasurementNameList(names)
 	if len(values) == 0 {
 		return 0
 	}
@@ -1794,7 +1795,7 @@ func PublishNetworkExtenderMeasurementNames(ctx context.Context, names []string,
 			UPDATE network_extender_measurement_cert
 			SET publish_time = $2
 			WHERE
-				names = ANY($1) AND
+				string_to_array(names, ',') <@ $1::text[] AND
 				publish_time IS NULL AND
 				withdraw_time IS NULL AND
 				$2 < not_after
@@ -1809,9 +1810,10 @@ func PublishNetworkExtenderMeasurementNames(ctx context.Context, names []string,
 
 // UnpublishNetworkExtenderMeasurementNames records that these names are not
 // published (C8): the reconcile found that they hold none of their records,
-// and is about to write them again. Returns how many certificates it changed.
+// and is about to write them again. Every certificate for one of them stops
+// being published. Returns how many certificates it changed.
 func UnpublishNetworkExtenderMeasurementNames(ctx context.Context, names []string) (unpublished int) {
-	values := networkExtenderMeasurementNameValues(names)
+	values := networkExtenderMeasurementNameList(names)
 	if len(values) == 0 {
 		return 0
 	}
@@ -1821,7 +1823,7 @@ func UnpublishNetworkExtenderMeasurementNames(ctx context.Context, names []strin
 			`
 			UPDATE network_extender_measurement_cert
 			SET publish_time = NULL
-			WHERE names = ANY($1) AND publish_time IS NOT NULL
+			WHERE string_to_array(names, ',') && $1::text[] AND publish_time IS NOT NULL
 			`,
 			values,
 		))
@@ -1831,20 +1833,22 @@ func UnpublishNetworkExtenderMeasurementNames(ctx context.Context, names []strin
 }
 
 // UnpublishNetworkExtenderMeasurementNamesExcept records that every name but
-// `keepNames` is not published (C8). The reconcile calls it with the names it
-// is to publish before it deletes any record, so a name that is to go stops
-// being offered before its records do (A4), whatever certificate it was
-// published for: one withdrawn or expired since, or one whose extender may not
-// be measured now. Returns how many certificates it changed.
+// `keepNames` is not published (C8): every certificate with a name outside
+// them stops being published. The reconcile calls it with the names of the
+// certificates it is to publish before it deletes any record, so a name that
+// is to go stops being offered before its records do (A4), whatever
+// certificate it was published for: one withdrawn or expired since, or one
+// whose extender may not be measured now. Returns how many certificates it
+// changed.
 func UnpublishNetworkExtenderMeasurementNamesExcept(ctx context.Context, keepNames []string) (unpublished int) {
-	values := networkExtenderMeasurementNameValues(keepNames)
+	values := networkExtenderMeasurementNameList(keepNames)
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			UPDATE network_extender_measurement_cert
 			SET publish_time = NULL
-			WHERE publish_time IS NOT NULL AND NOT (names = ANY($1))
+			WHERE publish_time IS NOT NULL AND NOT (string_to_array(names, ',') <@ $1::text[])
 			`,
 			values,
 		))
@@ -2101,8 +2105,9 @@ func DeferNetworkExtenderMeasurementCertRevocation(ctx context.Context, certId s
 // with: the extender the calling client activated -- the one with this key
 // when a key is given, else its active one, and of those the one activated
 // last -- its latest request, and the newest live certificate that answers
-// that request. Every result is nil when the client activated no such
-// extender.
+// that request (networkExtenderMeasurementCertAnswersSql), one for exactly
+// its names before one for its measurement name alone. Every result is nil
+// when the client activated no such extender.
 //
 // The record stamp does not pick the extender: the drip advances it for every
 // active extender, so a client that changed its identity key could be
@@ -2177,11 +2182,10 @@ func GetNetworkExtenderMeasurementForClient(
 			FROM network_extender_measurement_cert
 			WHERE
 				extender_id = $1 AND
-				names = $2 AND
-				public_key = $3 AND
+				`+networkExtenderMeasurementCertAnswersSql("network_extender_measurement_cert", "$2::text", "$3::bytea")+` AND
 				withdraw_time IS NULL AND
 				$4 < not_after
-			ORDER BY issue_time DESC, cert_id DESC
+			ORDER BY names = $2 DESC, issue_time DESC, cert_id DESC
 			LIMIT 1
 			`,
 			*extenderId,
@@ -2253,6 +2257,24 @@ const networkExtenderMeasurementCertServesSql = `
 			network_extender_measurement.public_key = network_extender_measurement_cert.public_key
 	)
 `
+
+// The condition that a network_extender_measurement_cert row `cert`, a table
+// name or alias, answers a request for the names value `names` under the key
+// `publicKey`, both SQL expressions (A8, lag.dev/DRIFTTEST.md K6): it is for
+// the same key, and for exactly the request's names or for one of them alone.
+// A request and a certificate are only ever for an extender's measurement
+// name alone or with both of its family-pinned names
+// (controller.ParseExtenderMeasurementCsrDer), so a certificate for one of a
+// request's names alone is for the measurement name, of a request that adds
+// the family-pinned names to it: the certificate the extender serves while
+// that request waits for its order.
+func networkExtenderMeasurementCertAnswersSql(cert string, names string, publicKey string) string {
+	return `(` +
+		cert + `.public_key = ` + publicKey + ` AND (` +
+		cert + `.names = ` + names + ` OR ` +
+		cert + `.names = ANY(string_to_array(` + names + `, ','))` +
+		`))`
+}
 
 // The same for several extenders on the caller's connection; an extender
 // with no live certificate that serves has no entry.

@@ -273,6 +273,47 @@ func TestStatsLagIdleLatencyLeavesOutNeighboursLoads(t *testing.T) {
 	})
 }
 
+// The calibration's age gauge reads how long ago the drift model's
+// calibration in force ran (lag.dev/DRIFTTEST.md V4), the latest one not
+// withdrawn, and has no value while the defaults apply: before the first
+// calibration, and once every one is withdrawn.
+func TestStatsRefreshLagDriftCalibrationAge(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc().Truncate(time.Second)
+		noValue := func() bool {
+			// a gauge never set is not exported; one set before reads NaN
+			return !statsLagDriftCalibrationAgeGauge.registered || math.IsNaN(testutil.ToFloat64(statsLagDriftCalibrationAgeGauge.gauge))
+		}
+
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, noValue(), true)
+
+		calibration := func(kappa float64) *model.LagDriftCalibrationResult {
+			return &model.LagDriftCalibrationResult{Kappa: kappa, Sigma0Ms: 1.1, RelayThresholdMs: 70, Applied: true}
+		}
+		calibratedAt := now.Add(-8 * 24 * time.Hour)
+		model.AddLagDriftCalibration(ctx, calibratedAt, calibratedAt.Add(-7*24*time.Hour), calibratedAt, calibration(0.22))
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagDriftCalibrationAgeGauge.gauge), (8 * 24 * time.Hour).Seconds())
+
+		// a newer calibration is in force, and younger
+		newer := model.AddLagDriftCalibration(ctx, now.Add(-time.Hour), now.Add(-time.Hour-7*24*time.Hour), now.Add(-time.Hour), calibration(0.26))
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagDriftCalibrationAgeGauge.gauge), time.Hour.Seconds())
+
+		// withdrawn, the older is in force again, with its own age
+		connect.AssertEqual(t, model.WithdrawLagDriftCalibration(ctx, newer, now), true)
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, testutil.ToFloat64(statsLagDriftCalibrationAgeGauge.gauge), (8 * 24 * time.Hour).Seconds())
+
+		// every one withdrawn: the defaults, no value
+		model.WithdrawLagDriftCalibrations(ctx, now)
+		statsRefreshLag(ctx, now)
+		connect.AssertEqual(t, noValue(), true)
+	})
+}
+
 // A track started at startedAt with one ticket per dot, in order.
 func newLagStatsTestTrack(ctx context.Context, startedAt time.Time, dots int) (*model.LagTrack, []*model.LagTicket) {
 	track := &model.LagTrack{

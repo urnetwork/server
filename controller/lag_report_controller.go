@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
@@ -161,20 +162,6 @@ func extenderLagReport(
 	ctx := clientSession.Ctx
 	reporterClientId := *clientSession.ByJwt.ClientId
 
-	limit, err := model.CheckLagClientRateLimit(
-		ctx,
-		lagReportRateLimitName,
-		reporterClientId,
-		settings.ReportLimit,
-		settings.ReportLimitWindow,
-	)
-	if err != nil {
-		return nil, err
-	}
-	if !limit.Allowed {
-		return nil, &lagReportLimitError{retryAfter: limit.RetryAfter}
-	}
-
 	// the extenders the reports name, by hex key, read at most once a post
 	extenders := map[string]*model.NetworkExtender{}
 	extenderByKey := func(publicKey []byte) *model.NetworkExtender {
@@ -187,8 +174,40 @@ func extenderLagReport(
 		return extender
 	}
 
+	// a post of a drift test's prompt reports isn't counted
+	// (lag.dev/DRIFTTEST.md E4, lag_drift_process.go)
+	driftPost := lagDriftReadReportPost(ctx, reporterClientId, args.Reports, now, extenderByKey)
+	if !driftPost.prompt {
+		limit, err := model.CheckLagClientRateLimit(
+			ctx,
+			lagReportRateLimitName,
+			reporterClientId,
+			settings.ReportLimit,
+			settings.ReportLimitWindow,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !limit.Allowed {
+			return nil, &lagReportLimitError{retryAfter: limit.RetryAfter}
+		}
+	}
+
 	for index, reportText := range args.Reports {
-		reason := storeLagReport(clientSession, reporterClientId, reportText, now, settings, extenderByKey)
+		if driftPost.repeats[index] {
+			// its drift ticket has its report: answered and dropped
+			result.Rejected = append(result.Rejected, &ExtenderLagReportRejection{
+				Index:  index,
+				Reason: LagReportRejectDuplicate,
+			})
+			continue
+		}
+		var reason string
+		if read := driftPost.read[index]; read != nil {
+			reason = storeReadLagReport(ctx, read.body, read.extender, now, settings)
+		} else {
+			reason = storeLagReport(clientSession, reporterClientId, reportText, now, settings, extenderByKey)
+		}
 		if reason == "" {
 			result.Accepted += 1
 		} else {
@@ -224,6 +243,49 @@ func decodeLagReportText(text string) ([]byte, error) {
 	return nil, err
 }
 
+// A report read and verified (readLagReport).
+type lagReadReport struct {
+	body     *protocol.LagReportBody
+	extender *model.NetworkExtender
+}
+
+// Reads and verifies one report: its body, verified under the key of an
+// extender the reporting client activated, and that extender, or why not.
+func readLagReport(
+	reporterClientId server.Id,
+	reportText string,
+	extenderByKey func(publicKey []byte) *model.NetworkExtender,
+) (body *protocol.LagReportBody, extender *model.NetworkExtender, reason string) {
+	reportBytes, err := decodeLagReportText(reportText)
+	if err != nil {
+		return nil, nil, LagReportRejectMalformed
+	}
+	report := &protocol.LagReport{}
+	if err := proto.Unmarshal(reportBytes, report); err != nil {
+		return nil, nil, LagReportRejectMalformed
+	}
+	// The body is read before it is verified only to find the key to verify
+	// it under; nothing else of it is used until it verifies, and the
+	// verification checks the body names that same key.
+	claimed := &protocol.LagReportBody{}
+	if err := proto.Unmarshal(report.Body, claimed); err != nil {
+		return nil, nil, LagReportRejectMalformed
+	}
+	if len(claimed.ExtenderPublicKey) != ed25519.PublicKeySize {
+		return nil, nil, LagReportRejectMalformed
+	}
+	extender = extenderByKey(claimed.ExtenderPublicKey)
+	if extender == nil || extender.ClientId != reporterClientId {
+		// an extender reports only its own sessions
+		return nil, nil, LagReportRejectExtender
+	}
+	body, err = connect.VerifyLagReport(report, ed25519.PublicKey(extender.PublicKey))
+	if err != nil {
+		return nil, nil, LagReportRejectSignature
+	}
+	return body, extender, ""
+}
+
 // Verifies, checks and stores one report, and answers why not, or "" when it
 // was stored.
 func storeLagReport(
@@ -234,36 +296,22 @@ func storeLagReport(
 	settings *LagSettings,
 	extenderByKey func(publicKey []byte) *model.NetworkExtender,
 ) (reason string) {
-	ctx := clientSession.Ctx
+	body, extender, reason := readLagReport(reporterClientId, reportText, extenderByKey)
+	if reason != "" {
+		return reason
+	}
+	return storeReadLagReport(clientSession.Ctx, body, extender, now, settings)
+}
 
-	reportBytes, err := decodeLagReportText(reportText)
-	if err != nil {
-		return LagReportRejectMalformed
-	}
-	report := &protocol.LagReport{}
-	if err := proto.Unmarshal(reportBytes, report); err != nil {
-		return LagReportRejectMalformed
-	}
-	// The body is read before it is verified only to find the key to verify
-	// it under; nothing else of it is used until it verifies, and the
-	// verification checks the body names that same key.
-	claimed := &protocol.LagReportBody{}
-	if err := proto.Unmarshal(report.Body, claimed); err != nil {
-		return LagReportRejectMalformed
-	}
-	if len(claimed.ExtenderPublicKey) != ed25519.PublicKeySize {
-		return LagReportRejectMalformed
-	}
-	extender := extenderByKey(claimed.ExtenderPublicKey)
-	if extender == nil || extender.ClientId != reporterClientId {
-		// an extender reports only its own sessions
-		return LagReportRejectExtender
-	}
-	body, err := connect.VerifyLagReport(report, ed25519.PublicKey(extender.PublicKey))
-	if err != nil {
-		return LagReportRejectSignature
-	}
-
+// Checks and stores one report read and verified (readLagReport), and answers
+// why not, or "" when it was stored.
+func storeReadLagReport(
+	ctx context.Context,
+	body *protocol.LagReportBody,
+	extender *model.NetworkExtender,
+	now time.Time,
+	settings *LagSettings,
+) (reason string) {
 	ticketId, err := server.IdFromBytes(body.TicketId)
 	if err != nil {
 		return LagReportRejectMalformed
@@ -271,6 +319,12 @@ func storeLagReport(
 	trackId, err := server.IdFromBytes(body.TrackId)
 	if err != nil {
 		return LagReportRejectMalformed
+	}
+	// a drift demo's session is never reported, and an extender that
+	// predates NoReport reports it anyway: dropped unstored and counted
+	// (lag.dev/DRIFTTEST.md W8, E4)
+	if lagDriftDemoReport(ticketId, trackId) {
+		return LagReportRejectTicket
 	}
 	ticket := model.GetLagTicket(ctx, ticketId)
 	if ticket == nil ||
@@ -299,6 +353,9 @@ func storeLagReport(
 	if !model.AddLagResult(ctx, result) {
 		return LagReportRejectDuplicate
 	}
+	// a drift test's run completes as its reports arrive
+	// (lag.dev/DRIFTTEST.md E5, lag_drift_process.go)
+	lagDriftReportStored(ctx, ticket.TrackId, now)
 	return ""
 }
 
