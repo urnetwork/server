@@ -839,6 +839,30 @@ func RevokeSessionRecords(ctx context.Context, networkId server.Id, sessionIds [
 	return writeRevocationTombstones(ctx, keyFields)
 }
 
+// The session tombstones a revocation operation's targets need before it is
+// enforced (F4, approved 2026-11-18).
+//
+// A single revoke and a revoke of the other sessions tombstone every target
+// in every shard: a session's client credentials read s:<session> in their
+// own root's shard, where their fallback projected it positive, and an
+// explicit re-auth leaves a client's earlier tokens carrying the session after
+// the client is bound to another, so no smaller set of shards is known to
+// cover them.
+//
+// A password reset (or sign-out-all) and a network deletion write none. The
+// transaction that journaled them already wrote, to every shard of the
+// network, the credential cutoff (n:cred) or the deletion mark (n:del), and
+// those refuse every target: each credential of a session carries the lineage
+// time its session was created with, and a reset retires only sessions
+// created before its cutoff. One field per shard does what a field per
+// target per shard did.
+func revokeOperationSessionRecords(ctx context.Context, networkId server.Id, action string, sessionIds []server.Id) error {
+	if action == "reset" || action == "delete" {
+		return nil
+	}
+	return RevokeSessionRecords(ctx, networkId, sessionIds)
+}
+
 // Raises the credential cutoff of every network the user administers, in tx,
 // before the credential change commits. Credentials created before the cutoff
 // are refused by every record of those networks.
