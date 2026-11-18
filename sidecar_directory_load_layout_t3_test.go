@@ -11,8 +11,11 @@
 // limit blocks the gate (D-TEST-17), so a miss fails the test, and the owner hears then.
 //
 // It runs in sidecar-t3.sh nightly, never in the whole-suite scripts, and its numbers are a reading only with nothing
-// else running on the machine: the hour is real time. It fails rather than skips when the layouts are down. The local
-// stack's runs of the same schedule (sidecar_directory_load_t3_test.go) are the reduced-scale form and gate nothing.
+// else running on the machine (owner decision 598): the hour is real time. Nothing here can tell a quiet machine, so it
+// logs the machine's load average when the hour begins and when it ends, beside the phases' numbers, and a miss names
+// both. It fails rather than skips when the layouts are down. The local stack's runs of the same schedule
+// (sidecar_directory_load_t3_test.go) are the reduced-scale form and no reading of the row: there the Team limit's p99
+// misses are logged and fail nothing, and its 412 rerun, 429 BUSY and FOLD_BEHIND ceilings still hold.
 //
 // Not here: the stress case's hour, which is no gate's; format 2's index entries and heads; the year-one mix beside the
 // directory's pushes; the 26 h run; and the governor's FI-14.
@@ -20,6 +23,7 @@
 package server_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -48,12 +52,15 @@ func TestFs86CardCommitsAtTheTeamLimitOnTheLayouts(t *testing.T) {
 		settings := fault.DefaultFs86CardsEvsSettings()
 		// the peak hour whole, at the Team limit's rate, the defaults' 2.3 pushes a second
 		settings.PeakDuration = time.Hour
+		startLoad := sidecarDirectoryLoadMachineAverage()
 		state, err := fault.RunFs86CardsEvs(tb, sidecart3.NetSettings(tb, sidecarDirectoryLoadLayoutSettings(tb)), settings)
+		where := fmt.Sprintf("the Team limit on the layouts (load average %s at the start, %s at the end)", startLoad, sidecarDirectoryLoadMachineAverage())
+		tb.Log(where)
 		if err != nil {
-			tb.Fatal(err)
+			tb.Fatalf("%s: %v", where, err)
 		}
 		if phases := state.Phases(); len(phases) != 3 {
-			tb.Fatalf("%d phases ran", len(phases))
+			tb.Fatalf("%s: %d phases ran", where, len(phases))
 		}
 	})
 }

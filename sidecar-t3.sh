@@ -11,9 +11,11 @@
 #                           FS-86's card commits on the 4-host file-cluster layouts
 #                           (server/local/file-cluster-t3/t3.sh up), a whole peak hour at the Team limit's
 #                           rate held to §16.11's cards ref commits row, which is that row's reading only with
-#                           nothing else running on the machine (RECORD-M10-07; QD-1068), then T3's cluster
-#                           faults on the same layouts (TEST-M2-07), which kill and start hosts and so run
-#                           only here, the two saying "not run" when the layouts do not answer, then
+#                           nothing else running on the machine (RECORD-M10-07; QD-1068, owner decision 598),
+#                           printing its phases' numbers and the machine's load average whether it passes or not
+#                           (the local stack's run of it is the reduced-scale form, which nothing here runs), then
+#                           T3's cluster faults on the same layouts (TEST-M2-07), which kill and start hosts and
+#                           so run only here, the two saying "not run" when the layouts do not answer, then
 #                           §22.8's disruption rows (TEST-M2-15), which use real time and real processes, and
 #                           last FS-41's storage losses on the same layouts (EVSB-M2-20;
 #                           local/file-cluster-t3/wipe.sh), which remove every drive the layouts have and leave
@@ -126,10 +128,13 @@ scenarios() {
 # FS-86's card commits on T3's 4-host layouts (RECORD-M10-07; sidecar_directory_load_layout_t3_test.go): 16 devices'
 # card writes on the one cards ref for a whole peak hour at the Team limit's rate, then its 3x burst, held to §16.11's
 # row. A miss fails the run, as a Team-limit miss blocks the gate (D-TEST-17). It runs before the cluster faults, on
-# layouts no fault has touched, and its hour is real time, so it takes CARD_COMMITS_TIMEOUT.
+# layouts no fault has touched, and its hour is real time, so it takes CARD_COMMITS_TIMEOUT. The numbers are the
+# reading, and go test shows a passing test's log only with -v: each phase's commits, median, p99, reruns, BUSY and
+# FOLD_BEHIND, and the machine's load average when the hour began and ended, which says whether it was a quiet one
+# (owner decision 598).
 card_commits() {
   if layout_up; then
-    TEST_TIMEOUT=$CARD_COMMITS_TIMEOUT go_t3 . -tags "$tags,sidecar_filecluster_t3" -run '^TestFs86CardCommitsAtTheTeamLimitOnTheLayouts$'
+    TEST_TIMEOUT=$CARD_COMMITS_TIMEOUT go_t3 . -v -tags "$tags,sidecar_filecluster_t3" -run '^TestFs86CardCommitsAtTheTeamLimitOnTheLayouts$'
   else
     skip "FS-86's card commits: the 4-host file-cluster layouts do not answer (local/file-cluster-t3/t3.sh up)"
   fi
