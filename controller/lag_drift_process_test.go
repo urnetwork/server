@@ -330,10 +330,79 @@ func TestLagDriftProcessDisagree(t *testing.T) {
 	})
 }
 
+// A pooled verdict is judged at the largest k of its runs (V11), which P4
+// reports, and a run's clear stop at its own k_early: one recorded too large
+// for the visitor's distance confirms no clear stop. A run from before V11,
+// with none recorded, is judged at the textbook k. Pure apart from the runs.
+func TestLagDriftVerdictK(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLagDriftTestFixture(t, ctx)
+		now := server.NowUtc().Truncate(time.Millisecond)
+		allocated := fixture.allocate(t, now, nil)
+		setRun := func(driftTestId server.Id, run int, column string, value float64) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`UPDATE lag_drift_run SET `+column+` = $3 WHERE drift_test_id = $1 AND run = $2`,
+					driftTestId,
+					run,
+					value,
+				))
+			})
+		}
+
+		at := now
+		for run := 1; run <= 2; run += 1 {
+			fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
+				visitor:    lagDriftTestBerlin,
+				lastMileMs: 5,
+				durationMs: 5000,
+			}, LagDriftStopConverged, at)
+			at = at.Add(10 * time.Second)
+		}
+		view := fixture.read(t, allocated.DriftTestId, at)
+		connect.AssertEqual(t, view.Result.RunsInVerdict, []int{1, 2})
+		connect.AssertEqual(t, view.Result.K, lagdrift.DefaultK(0.99, "EU"))
+
+		// a run started under a calibration with a larger k: the window's
+		// next verdict takes the largest
+		setRun(allocated.DriftTestId, 1, "k", 3.9)
+		fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
+			visitor:    lagDriftTestBerlin,
+			lastMileMs: 5,
+			durationMs: 5000,
+		}, LagDriftStopConverged, at)
+		view = fixture.read(t, allocated.DriftTestId, at.Add(10*time.Second))
+		connect.AssertEqual(t, view.Result.RunsInVerdict, []int{1, 2, 3})
+		connect.AssertEqual(t, view.Result.K, 3.9)
+
+		// a clear stop checked at the run's own k_early
+		allocated = fixture.allocate(t, now, nil)
+		start := fixture.start(t, allocated.Token, lagDriftTestVisitorAddress, "", now)
+		setRun(allocated.DriftTestId, 1, "k_early", 1000)
+		sessions := lagDriftTestSessions{
+			visitor:         lagDriftTestCairo,
+			lastMileMs:      5,
+			durationMs:      3400,
+			sessionStartsAt: now.Add(300 * time.Millisecond),
+		}
+		fixture.report(t, start, sessions, now.Add(3900*time.Millisecond))
+		fixture.finish(t, allocated.Token, start.Run, LagDriftStopClear, now.Add(4*time.Second))
+		fixture.read(t, allocated.DriftTestId, now.Add(5*time.Second))
+		connect.AssertNotEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopClear)
+
+		// before V11, the textbook k
+		test := &model.LagDriftTest{Confidence: 0.99}
+		connect.AssertEqual(t, lagDriftRunK(test, &model.LagDriftRun{}), lagdrift.KForConfidence(0.99))
+		connect.AssertEqual(t, lagDriftRunKEarly(test, &model.LagDriftRun{}), lagdrift.KEarly(lagdrift.KForConfidence(0.99)))
+	})
+}
+
 // The server's check of the stop (V10, E5), with the e2e's runs
-// (2026-11-17): a converged stop at 3.4 s is supported by fits from the
-// sessions' first round trips, and a clear one at 3.4 s by the round trips
-// back by the close itself. A run the browser stopped before the rules apply
+// (2026-11-17): a converged stop is supported by fits from the first look
+// with 6 usable extenders, and a clear one at 3.4 s by the round trips back
+// by the close itself. A run the browser stopped before the rules apply
 // stays out of the window. The browser's own stop is the one recorded when the
 // reports support it.
 func TestLagDriftProcessStop(t *testing.T) {
@@ -342,14 +411,16 @@ func TestLagDriftProcessStop(t *testing.T) {
 		fixture := newLagDriftTestFixture(t, ctx)
 		now := server.NowUtc().Truncate(time.Millisecond)
 
-		// a pass run, converged at 3.4 s
+		// a pass run, converged at 4.5 s: on the fits over usable
+		// extenders, the first at about 1.8 s once each has 8 round trips,
+		// the 2 s converged looks back on hold from about 4 s
 		allocated := fixture.allocate(t, now, nil)
 		fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
 			visitor:    lagDriftTestBerlin,
 			lastMileMs: 5,
-			durationMs: 3400,
+			durationMs: 4500,
 		}, LagDriftStopConverged, now)
-		view := fixture.read(t, allocated.DriftTestId, now.Add(5*time.Second))
+		view := fixture.read(t, allocated.DriftTestId, now.Add(6*time.Second))
 		connect.AssertEqual(t, view.Runs[0].Outcome, LagDriftRunOutcomeCounted)
 		connect.AssertEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopConverged)
 		connect.AssertEqual(t, view.Result.Verdict, LagDriftVerdictAgree)
@@ -438,22 +509,24 @@ func TestLagDriftStopE2eConverged(t *testing.T) {
 }
 
 // The last look is at the close itself (V10): the e2e's clear run at 3.4 s
-// had its eighth extender's twelfth round trip back between the 250 ms grid
-// point before the close and the close, so a look on the grid alone saw only
-// seven. Built on the timeline directly, where the pongs' times are exact.
+// had its eighth usable extender's twelfth round trip back between the look
+// before the close and the close, so a look before it saw only seven. Built
+// on the timeline directly, where the pongs' times are exact.
 func TestLagDriftStopLooksAtTheClose(t *testing.T) {
 	t.Cleanup(Testing_SetLagDriftBorders(lagDriftTestBorders(t)))
 	settings := DefaultLagSettings()
 	drift := &settings.Drift
-	// a visitor in Cairo, ticketed seven extenders near Berlin that ping from
-	// their sessions' start, one in Cairo whose first ping goes out 400 ms
-	// in, its twelfth pong back at 3,155 ms, between the grid point at
-	// 3,000 ms and the close at 3,200 ms, and four 600 ms in, too late for
-	// twelve by the close
+	// a visitor in Cairo, ticketed seven extenders around the eastern
+	// Mediterranean that ping from their sessions' start, one in Cairo whose
+	// pings start late enough that the round trip that makes it count, its
+	// needed-th, is back at 3,155 ms, between the look at 2,950 ms and the
+	// close at 3,200 ms, and four later still, short of it by the close; it
+	// counts once usable and with lagdrift's stop count of round trips
+	needed := max(drift.UsableRoundTrips, lagdrift.StopRoundTrips)
 	places := []lagdrift.Point{
-		{Lat: 52.52, Lon: 13.40}, {Lat: 51.34, Lon: 12.37}, {Lat: 53.55, Lon: 9.99}, {Lat: 51.05, Lon: 13.74},
-		{Lat: 53.43, Lon: 14.55}, {Lat: 50.08, Lon: 14.44}, {Lat: 52.23, Lon: 21.01}, lagDriftTestCairo,
-		{Lat: 48.86, Lon: 2.35}, {Lat: 41.90, Lon: 12.50}, {Lat: 25.20, Lon: 55.27}, {Lat: 6.52, Lon: 3.38},
+		{Lat: 37.98, Lon: 23.73}, {Lat: 41.01, Lon: 28.98}, {Lat: 32.09, Lon: 34.78}, {Lat: 24.71, Lon: 46.68},
+		{Lat: 15.50, Lon: 32.56}, {Lat: 36.81, Lon: 10.18}, {Lat: 41.90, Lon: 12.50}, lagDriftTestCairo,
+		{Lat: 48.86, Lon: 2.35}, {Lat: 52.52, Lon: 13.40}, {Lat: 25.20, Lon: 55.27}, {Lat: 6.52, Lon: 3.38},
 	}
 	run := &model.LagDriftRun{Run: 1, Stop: LagDriftStopClear}
 	timeline := &lagDriftTimeline{lastPongMs: -1}
@@ -469,14 +542,15 @@ func TestLagDriftStopLooksAtTheClose(t *testing.T) {
 		openMs := 0.0
 		switch {
 		case position == 7:
-			openMs = 400
+			openMs = float64(3150 - 250*(needed-1))
 		case 7 < position:
-			openMs = 600
+			openMs = float64(3150 - 250*(needed-1) + 200)
 		}
 		rttMs := 5 + lagdrift.MsPerKm*lagdrift.DistanceKm(lagDriftTestCairo, place)
 		session := &lagDriftSession{
 			report:     &model.LagDriftReport{Position: position, IpFamily: 4},
 			extender:   extender,
+			openMs:     openMs,
 			lastSendMs: -1,
 		}
 		for sendMs := openMs; sendMs+rttMs <= 3200; sendMs += 250 {
@@ -489,24 +563,82 @@ func TestLagDriftStopLooksAtTheClose(t *testing.T) {
 		timeline.lastPongMs = max(timeline.lastPongMs, session.lastPongMs())
 	}
 	timeline.closeMs = 3200
-	test := &model.LagDriftTest{ClientIpCountryCode: "de", ClientIpFamily: 4}
+	test := &model.LagDriftTest{ClientIpCountryCode: "de", ClientIpFamily: 4, Confidence: 0.99}
 	berlin := &lagDriftPoint{latitude: lagDriftTestBerlin.Lat, longitude: lagDriftTestBerlin.Lon}
 	calibration := model.DefaultLagDriftCalibration()
 
 	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, berlin, drift, calibration), LagDriftStopClear)
 
-	// the Cairo session's twelfth pong a millisecond past the close: seven
-	// with twelve round trips, and no rule holds
-	connect.AssertEqual(t, len(timeline.sessions[7].pongMs), 12)
-	timeline.sessions[7].pongMs[11] = 3201
+	// the Cairo session's needed-th pong a millisecond past the close:
+	// seven count, and no rule holds
+	connect.AssertEqual(t, len(timeline.sessions[7].pongMs), needed)
+	timeline.sessions[7].pongMs[needed-1] = 3201
 	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, berlin, drift, calibration), "")
+}
+
+// A stop is decided on the verdict's evidence, the extenders usable by each
+// look (V10, E5), as the e2e's VPN run of 2026-11-17 showed: there the frame's
+// clear look rested on far sessions that opened 2-3 s late with 4 round trips
+// each, while the verdict, on the usable ones, was low_precision. A visitor in
+// Poland 3 degrees east of the border, with the eight usable extenders all
+// west of them in Germany and Czechia, and four to the east that opened
+// 2.6 s late: on every estimate the region is clear of Germany, but on the
+// usable ones it isn't, and the clear stop isn't supported.
+func TestLagDriftStopUsableExtenders(t *testing.T) {
+	t.Cleanup(Testing_SetLagDriftBorders(lagDriftTestBorders(t)))
+	settings := DefaultLagSettings()
+	visitor := lagdrift.Point{Lat: 52.4, Lon: 18.0}
+	usable := []lagdrift.Point{
+		{Lat: 52.52, Lon: 13.40}, {Lat: 51.34, Lon: 12.37}, {Lat: 53.55, Lon: 9.99}, {Lat: 51.05, Lon: 13.74},
+		{Lat: 50.08, Lon: 14.44}, {Lat: 48.14, Lon: 11.58}, {Lat: 50.11, Lon: 8.68}, {Lat: 54.32, Lon: 10.12},
+	}
+	late := []lagdrift.Point{{Lat: 52.23, Lon: 21.01}, {Lat: 50.45, Lon: 30.52}, {Lat: 54.69, Lon: 25.28}, {Lat: 47.50, Lon: 19.04}}
+	run := &model.LagDriftRun{Run: 1, Stop: LagDriftStopClear}
+	timeline := &lagDriftTimeline{lastPongMs: -1, closeMs: 3400}
+	for position, place := range append(slices.Clone(usable), late...) {
+		extender := &model.LagDriftRunExtender{
+			Position:     position,
+			ExtenderId:   server.NewId(),
+			Latitude:     place.Lat,
+			Longitude:    place.Lon,
+			PlaceErrorKm: 50,
+		}
+		run.Extenders = append(run.Extenders, extender)
+		openMs := 0.0
+		if len(usable) <= position {
+			openMs = 2600
+		}
+		rttMs := 2 + lagdrift.MsPerKm*lagdrift.DistanceKm(visitor, place)
+		session := &lagDriftSession{
+			report:     &model.LagDriftReport{Position: position, IpFamily: 4},
+			extender:   extender,
+			openMs:     openMs,
+			lastSendMs: -1,
+		}
+		for sendMs := openMs; sendMs+rttMs <= timeline.closeMs; sendMs += 250 {
+			session.sendMs = append(session.sendMs, sendMs)
+			session.rttMs = append(session.rttMs, rttMs)
+			session.pongMs = append(session.pongMs, sendMs+rttMs)
+			session.lastSendMs = sendMs
+		}
+		timeline.sessions = append(timeline.sessions, session)
+		timeline.lastPongMs = max(timeline.lastPongMs, session.lastPongMs())
+	}
+	test := &model.LagDriftTest{ClientIpCountryCode: "de", ClientIpFamily: 4, Confidence: 0.99}
+	calibration := model.DefaultLagDriftCalibration()
+
+	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, nil, &settings.Drift, calibration), "")
+	// on every estimate, as the frame looked before, it was clear
+	everyEstimate := settings.Drift
+	everyEstimate.UsableRoundTrips = 1
+	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, nil, &everyEstimate, calibration), LagDriftStopClear)
 }
 
 // A session whose extender's clock is more than 5 s off the median of the
 // run's openings is laid at the run's opening (V10, review F-14): five
 // extenders whose clocks run 8 s ahead of the others' don't move their
 // sessions 8 s late on the run's timeline, nor do clocks 8 s behind move them
-// early, and the e2e's converged stop at 3.4 s holds.
+// early, and a converged stop at 4.5 s holds.
 func TestLagDriftProcessClockSkew(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -521,10 +653,10 @@ func TestLagDriftProcessClockSkew(t *testing.T) {
 			fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
 				visitor:    lagDriftTestBerlin,
 				lastMileMs: 5,
-				durationMs: 3400,
+				durationMs: 4500,
 				clockSkews: skews,
 			}, LagDriftStopConverged, now)
-			view := fixture.read(t, allocated.DriftTestId, now.Add(5*time.Second))
+			view := fixture.read(t, allocated.DriftTestId, now.Add(6*time.Second))
 			connect.AssertEqual(t, view.Runs[0].Outcome, LagDriftRunOutcomeCounted)
 			connect.AssertEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopConverged)
 			connect.AssertEqual(t, view.Result.Verdict, LagDriftVerdictAgree)
@@ -579,10 +711,10 @@ func TestLagDriftProcessCap(t *testing.T) {
 		connect.AssertEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopCap)
 		connect.AssertEqual(t, view.Result.Verdict, LagDriftVerdictAgree)
 
-		// five sessions open 1.5 s late, so at 4 s no eight extenders have
-		// 12 round trips and no rule on the fit holds: a cut there is a look
-		// the client chose
-		late = map[int]int{7: 1500, 8: 1500, 9: 1500, 10: 1500, 11: 1500}
+		// five sessions open 2.5 s late, so at 4 s only seven extenders are
+		// usable and no rule on the fit holds: a cut there is a look the
+		// client chose
+		late = map[int]int{7: 2500, 8: 2500, 9: 2500, 10: 2500, 11: 2500}
 		cut := map[int]int{}
 		for position := 1; position < 12; position += 1 {
 			cut[position] = 4000
@@ -637,15 +769,15 @@ func TestLagDriftProcessInterrupted(t *testing.T) {
 		connect.AssertEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopInterrupted)
 		connect.AssertEqual(t, view.Result.Verdict, LagDriftVerdictAgree)
 
-		// quiet from 3.5 s, when the five sessions that opened 1.5 s late
-		// had too few round trips for any rule to hold
+		// quiet from 3.5 s, when the five sessions that opened 2.5 s late
+		// were too new to be usable, so no rule held
 		allocated = fixture.allocate(t, now, nil)
 		fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
 			visitor:       lagDriftTestBorderTown,
 			lastMileMs:    5,
 			durationMs:    7600,
 			silentAfterMs: 3500,
-			openDelays:    map[int]int{7: 1500, 8: 1500, 9: 1500, 10: 1500, 11: 1500},
+			openDelays:    map[int]int{7: 2500, 8: 2500, 9: 2500, 10: 2500, 11: 2500},
 		}, LagDriftStopInterrupted, now)
 		view = fixture.read(t, allocated.DriftTestId, now.Add(12*time.Second))
 		connect.AssertEqual(t, view.Runs[0].Outcome, LagDriftRunOutcomeStoppedEarly)
@@ -699,8 +831,9 @@ func TestLagDriftProcessExcluded(t *testing.T) {
 
 		run, result = outcome(lagDriftTestVisitorAddress, lagDriftTestSessions{
 			visitor: lagDriftTestBerlin, lastMileMs: 5, durationMs: 5000,
-			// 7 of 12 pinged 2 s, under 12 round trips
-			shortPositions: map[int]int{0: 2000, 1: 2000, 2: 2000, 3: 2000, 4: 2000, 5: 2000, 6: 2000},
+			// 7 of 12 pinged 1.5 s, under the 8 round trips that make one
+			// usable
+			shortPositions: map[int]int{0: 1500, 1: 1500, 2: 1500, 3: 1500, 4: 1500, 5: 1500, 6: 1500},
 		})
 		connect.AssertEqual(t, run.Outcome, LagDriftRunOutcomeTooFewExtenders)
 		connect.AssertEqual(t, result.Reason, LagDriftReasonTooFewExtenders)

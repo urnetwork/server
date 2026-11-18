@@ -255,11 +255,11 @@ func lagDriftSupportedStop(
 		}
 	}
 	expected := lagDriftExpectedPoint(cityPoint, country, all)
-	// a clear stop holds only at a k_early, which lagdrift requires (V11):
-	// the textbook k's, until the run records its own
+	// a clear stop holds only at the run's own k_early, which lagdrift
+	// requires (V11)
 	tolerance := lagdrift.StopTolerance{
 		AreaRatio: drift.StopAreaTolerance,
-		KEarly:    lagdrift.KEarly(lagdrift.KForConfidence(test.Confidence)),
+		KEarly:    lagDriftRunKEarly(test, run),
 	}
 
 	// whole ms, rounded up, so the pong at the close is in the look there
@@ -272,7 +272,7 @@ func lagDriftSupportedStop(
 	if 0 <= lastPongMs {
 		lookMs = min(closeMs, lastPongMs+lagDriftLookMs)
 	}
-	history := lagDriftHistory(run, timeline, calibration.Model(), expected, lookMs, closeMs)
+	history := lagDriftHistory(run, timeline, calibration.Model(), expected, drift.UsableRoundTrips, lookMs, closeMs)
 
 	if lagDriftInterrupted(run, timeline, history, closeMs, lastPongMs, country, tolerance) {
 		// it counts only if converged or clear held when the silence began
@@ -310,14 +310,18 @@ func lagDriftSupportedStop(
 // run's timeline by its sessions' setup: counted back from the close, the
 // looks fall where its own did, so the 2 s converged looks back on start where
 // the frame's did (the e2e run of 2026-11-17). Each fits the round trips back
-// by then, from the look before, once the frame would fit: with
-// lagDriftLookExtenders estimates. Every look measures from the same expected
-// point, so the stop check can compare their positions.
+// by then, from the look before, of the extenders usable by then, with
+// usableRoundTrips round trips: the verdict's evidence, on which the frame
+// decides its stops too (E5, V10; the e2e VPN run of 2026-11-17, whose clear
+// look rested on far extenders with 4). It fits once lagDriftLookExtenders
+// are usable. Every look measures from the same expected point, so the stop
+// check can compare their positions.
 func lagDriftHistory(
 	run *model.LagDriftRun,
 	timeline *lagDriftTimeline,
 	driftModel lagdrift.Model,
 	expected lagdrift.Point,
+	usableRoundTrips int,
 	atMs ...int64,
 ) []lagdrift.Snapshot {
 	firstPongMs := math.Inf(1)
@@ -344,6 +348,9 @@ func lagDriftHistory(
 		for _, session := range timeline.sessions {
 			rttMs := session.roundTripsBy(float64(lookMs))
 			roundTrips = append(roundTrips, len(rttMs))
+			if len(rttMs) < usableRoundTrips {
+				continue
+			}
 			if observation, ok := lagDriftObservation(session, rttMs, run.Run); ok {
 				observations = append(observations, observation)
 			}
@@ -457,6 +464,24 @@ func lagDriftOrigin(cityPoint *lagDriftPoint, country *lagdrift.Country) *lagDri
 	return &lagDriftPoint{latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2}
 }
 
+// The region's k a run is judged at (V11): recorded at its start, or for a
+// run started before V11, the textbook k at the token's confidence.
+func lagDriftRunK(test *model.LagDriftTest, run *model.LagDriftRun) float64 {
+	if run.K != nil && 0 < *run.K {
+		return *run.K
+	}
+	return lagdrift.KForConfidence(test.Confidence)
+}
+
+// A run's k_early (V11): recorded at its start, else lagdrift.KEarly of its
+// k, so a clear stop is always judged at one.
+func lagDriftRunKEarly(test *model.LagDriftTest, run *model.LagDriftRun) float64 {
+	if run.KEarly != nil && 0 < *run.KEarly {
+		return *run.KEarly
+	}
+	return lagdrift.KEarly(lagDriftRunK(test, run))
+}
+
 // The drift country (V6, G3): the IP country when its own polygons hold the
 // fit, since a disputed area belongs to every claimant and the borders name
 // the first claimant by code; otherwise the country containing the fit, else
@@ -542,9 +567,12 @@ func lagDriftWindowResult(
 		return result
 	}
 
-	// the textbook k at the token's confidence (V6), as before V11's
-	// per-run k
-	k := lagdrift.KForConfidence(test.Confidence)
+	// the largest k of the window's runs (V11)
+	k := 0.0
+	for _, run := range window {
+		k = max(k, lagDriftRunK(test, run))
+	}
+	result.K = k
 	verdict, reason, judgement := lagdrift.Decide(fit, country, observations, k, drift.MaxSigmaKm)
 	result.Verdict = string(verdict)
 	result.Reason = string(reason)

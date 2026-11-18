@@ -21,11 +21,11 @@ import (
 //	  max_runs: 6                 # per token (decision 4)
 //	  retest_window: 15m          # after the first start (decision 4)
 //	  window_runs: 3              # the runs pooled for the verdict (V7)
-//	  confidence_default: 0.99    # when the allocation names none (V6)
+//	  confidence_default: 0.99    # when the allocation names none, 0.95 or 0.99 (V6, V11)
 //	  max_sigma_km: 1500          # a larger 1σ ellipse places no one (V6)
 //	  report_wait_ms: 20000       # from finish to completing without every report (E5)
 //	  processing_after: 30s       # a run without finish stops measuring (P6)
-//	  usable_round_trips: 12      # an extender's report is usable with this many (E5)
+//	  usable_round_trips: 8       # an extender is usable with this many, for the verdict and the stop check (E5, V10)
 //	  min_extenders: 6            # usable extenders a run needs to count (E5)
 //	  stop_area_tolerance: 1.17   # the server's ±8% on the ellipse's area (V10)
 //	  allocate_limit: 600         # per network per allocate_limit_window (P7)
@@ -36,8 +36,8 @@ import (
 //	  ticket_ttl: 1m              # to open a run's sessions
 //	  sweep_interval: 15s         # the drift sweep (E5, K3, R1)
 //	  retention: 168h             # drift tests and runs, 7 days (R1)
-//	  pin_origin_ipv4: https://api4.bringyour.com   # the API's IPv4-only name, for a start pinned to client_ip's family (K6, P5)
-//	  pin_origin_ipv6: https://api6.bringyour.com   # the API's IPv6-only name
+//	  pin_origin_ipv4: https://api-v4.bringyour.com   # the API's IPv4-only name, for a start pinned to client_ip's family (K6, P5)
+//	  pin_origin_ipv6: https://api-v6.bringyour.com   # the API's IPv6-only name
 //
 // The model's constants, κ and σ₀ (V3), and the relay threshold behind
 // relay_suspected (K2, Q12) are the weekly calibration's (V4), with its
@@ -95,7 +95,7 @@ func DefaultLagDriftSettings() *LagDriftSettings {
 		MaxSigmaKm:          1500,
 		ReportWaitMs:        20000,
 		ProcessingAfter:     30 * time.Second,
-		UsableRoundTrips:    12,
+		UsableRoundTrips:    8,
 		MinExtenders:        6,
 		StopAreaTolerance:   1.17,
 		AllocateLimit:       600,
@@ -106,8 +106,8 @@ func DefaultLagDriftSettings() *LagDriftSettings {
 		TicketTtl:           time.Minute,
 		SweepInterval:       15 * time.Second,
 		Retention:           7 * 24 * time.Hour,
-		PinOriginIpv4:       "https://api4.bringyour.com",
-		PinOriginIpv6:       "https://api6.bringyour.com",
+		PinOriginIpv4:       "https://api-v4.bringyour.com",
+		PinOriginIpv6:       "https://api-v6.bringyour.com",
 	}
 }
 
@@ -205,7 +205,9 @@ func (self *LagDriftSettings) Excluded() map[server.Id]bool {
 }
 
 // The confidences an allocation may name (P2, V6).
-var lagDriftConfidences = []float64{0.95, 0.99, 0.999}
+// The confidences a drift test takes (V11): an honest 99.9% region is too
+// wide to reject anything near.
+var lagDriftConfidences = []float64{0.95, 0.99}
 
 func lagDriftConfidenceAllowed(confidence float64) bool {
 	for _, allowed := range lagDriftConfidences {

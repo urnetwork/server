@@ -20,6 +20,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/lagdrift"
 	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
@@ -92,7 +93,9 @@ const (
 const (
 	lagDriftAllocateRateLimitName = "drift_allocate"
 	lagDriftStartRateLimitName    = "drift_start"
-	lagDriftDemoRateLimitName     = "drift_demo"
+	// the token reads of starts (P5), pinned or not
+	lagDriftLookupRateLimitName = "drift_lookup"
+	lagDriftDemoRateLimitName   = "drift_demo"
 )
 
 // A drift test's states (P4).
@@ -431,7 +434,7 @@ func lagDriftTestAllocate(
 	if args.Confidence != nil {
 		confidence = *args.Confidence
 		if !lagDriftConfidenceAllowed(confidence) {
-			return nil, lagDriftInvalid("confidence is 0.95, 0.99 or 0.999.")
+			return nil, lagDriftInvalid("confidence is 0.95 or 0.99.")
 		}
 	}
 	if lagDriftMaxReference < utf8.RuneCountInString(args.Reference) || !utf8.ValidString(args.Reference) {
@@ -725,9 +728,13 @@ type LagDriftStartResult struct {
 	// the cap from the sessions' opening (V10)
 	MeasureMs int `json:"measure_ms,omitempty"`
 	// the token's confidence, at which the radar draws the region (V8)
-	Confidence float64           `json:"confidence,omitempty"`
-	Ip         *LagDriftIpPlace  `json:"ip,omitempty"`
-	Tickets    []*LagDriftTicket `json:"tickets,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+	// the region's k at that confidence for client_ip's continent, and
+	// k_early for the clear stop, from V11's table
+	K       float64           `json:"k,omitempty"`
+	KEarly  float64           `json:"k_early,omitempty"`
+	Ip      *LagDriftIpPlace  `json:"ip,omitempty"`
+	Tickets []*LagDriftTicket `json:"tickets,omitempty"`
 	// RFC 3339: every session must open before this
 	ExpiresAt string    `json:"expires_at,omitempty"`
 	Error     *LagError `json:"error,omitempty"`
@@ -788,35 +795,27 @@ func lagDriftTestStart(
 		return lagDriftDemoStart(ctx, addr, now, settings)
 	}
 
-	var test *model.LagDriftTest
-	tokenHash, ok := lagDriftTokenHash(args.Token)
-	if ok {
-		test = model.GetLagDriftTestByTokenHash(ctx, tokenHash)
-	}
-	// pinned to client_ip's family (K6, P5): a start over the other family
-	// is pointed at the API's name in client_ip's family, and uses no run and
-	// no count of the start limit. One the frame sends unpinned, having
-	// failed to reach that name, goes ahead from the other family (K3).
-	if test != nil && !args.Unpinned && server.IpVersionForAddr(addr) != test.ClientIpFamily {
-		return &LagDriftStartResult{Pin: drift.PinOrigin(test.ClientIpFamily)}, nil
-	}
-
-	limit, err := model.CheckLagPrefixRateLimit(ctx, lagDriftStartRateLimitName, addr, drift.StartLimit, drift.StartLimitWindow)
+	limitedMessage := "Too many location checks from your network. The limit is shared by everyone on it, so this may not be your own activity."
+	// every start reads its token, and the reads count: a start pointed at
+	// client_ip's family counts here alone, using no run and no count of the
+	// start limit, and one that goes ahead counts against both. The frame
+	// sends a pinned start at most twice here, once more unpinned (P5).
+	lookups, err := model.CheckLagPrefixRateLimit(ctx, lagDriftLookupRateLimitName, addr, lagDriftLookupsPerStart*drift.StartLimit, drift.StartLimitWindow)
 	if err != nil {
 		return nil, err
 	}
-	if !limit.Allowed {
-		return &LagDriftStartResult{
-			Error: lagDriftLimited(
-				limit,
-				"Too many location checks from your network. The limit is shared by everyone on it, so this may not be your own activity.",
-			),
-		}, nil
+	if !lookups.Allowed {
+		return &LagDriftStartResult{Error: lagDriftLimited(lookups, limitedMessage)}, nil
 	}
 
 	expired := &LagDriftStartResult{
 		Error: lagDriftRefusal(LagDriftErrorCodeExpired, "This check has expired."),
 	}
+	tokenHash, ok := lagDriftTokenHash(args.Token)
+	if !ok {
+		return expired, nil
+	}
+	test := model.GetLagDriftTestByTokenHash(ctx, tokenHash)
 	if test == nil {
 		return expired, nil
 	}
@@ -834,6 +833,22 @@ func lagDriftTestStart(
 	}
 	if refusal := model.LagDriftStartRefusal(test, model.GetLagDriftRuns(ctx, test.DriftTestId), now, drift.MaxRuns, drift.ProcessingAfter); refusal != "" {
 		return &LagDriftStartResult{Error: lagDriftStartRefusalError(refusal)}, nil
+	}
+	// pinned to client_ip's family (K6, P5): a start over the other family
+	// is pointed at the API's name in client_ip's family. Only a token that
+	// could start a run here is pinned, so a pin never tells a token that
+	// can't, expired, revoked or switched off, from none. One the frame sends
+	// unpinned, having failed to reach that name, goes ahead from the other
+	// family (K3).
+	if !args.Unpinned && server.IpVersionForAddr(addr) != test.ClientIpFamily {
+		return &LagDriftStartResult{Pin: drift.PinOrigin(test.ClientIpFamily)}, nil
+	}
+	limit, err := model.CheckLagPrefixRateLimit(ctx, lagDriftStartRateLimitName, addr, drift.StartLimit, drift.StartLimitWindow)
+	if err != nil {
+		return nil, err
+	}
+	if !limit.Allowed {
+		return &LagDriftStartResult{Error: lagDriftLimited(limit, limitedMessage)}, nil
 	}
 	// a verdict needs the borders, so without them no run starts (G1)
 	if lagDriftBorders() == nil {
@@ -869,6 +884,12 @@ func lagDriftTestStart(
 	// in memory (K3)
 	client := newLagTrackClient(addr)
 	startIpHash := server.ClientIpHashForAddr(addr)
+	// the region's k at the token's confidence for client_ip's continent,
+	// from V11's table, and k_early, recorded on the run and answered for
+	// the frame's stop rules (V11); lag.dev's weekly measurement only warns
+	// when the table needs deriving again
+	k := lagdrift.DefaultK(test.Confidence, model.ContinentCodeForCountry(test.ClientIpCountryCode))
+	kEarly := lagdrift.KEarly(k)
 	added := model.AddLagDriftRun(ctx, &model.AddLagDriftRunArgs{
 		DriftTestId:   test.DriftTestId,
 		StartIpHash:   startIpHash,
@@ -886,6 +907,8 @@ func lagDriftTestStart(
 		IpCountryCode:   place.CountryCode,
 		IpCountryName:   place.CountryName,
 		Extenders:       lagDriftRunExtenders(chosen),
+		K:               k,
+		KEarly:          kEarly,
 		Now:             now,
 		MaxRuns:         drift.MaxRuns,
 		RetestWindow:    drift.RetestWindow,
@@ -903,25 +926,33 @@ func lagDriftTestStart(
 		RunsLeft:    added.RunsLeft,
 		MeasureMs:   drift.MeasureMs,
 		Confidence:  test.Confidence,
+		K:           k,
+		KEarly:      kEarly,
 		Ip:          lagDriftStartIpView(place, client, test),
 		Tickets:     ticketsResult,
 		ExpiresAt:   lagDriftTime(expiresAt),
 	}, nil
 }
 
-// The IP place a run's start answers (P5): the start address's, with the
-// point the run's fits measure from (lagDriftOrigin), the city's own point
-// the track keeps, else the middle of client_ip's country, so the frame's fits
-// and the server's agree; none when there is neither.
+// The IP place a run's start answers (P5), with the point the run's fits
+// measure from (lagDriftOrigin), so the frame's fits and the server's agree:
+// the start address's place with its city's own point, which the track keeps,
+// else client_ip's country, by name and with no city, at the middle of its
+// box; the start address's place with no point when there is neither.
 func lagDriftStartIpView(place *lagDriftAddrPlace, client *model.LagTrackClient, test *model.LagDriftTest) *LagDriftIpPlace {
 	view := place.view()
-	var cityPoint *lagDriftPoint
-	if client != nil && client.Latitude != nil && client.Longitude != nil {
-		cityPoint = &lagDriftPoint{latitude: *client.Latitude, longitude: *client.Longitude}
-	}
 	view.Latitude = nil
 	view.Longitude = nil
-	if origin := lagDriftOrigin(cityPoint, lagDriftBorders().country(test.ClientIpCountryCode)); origin != nil {
+	var origin *lagDriftPoint
+	if client != nil && client.Latitude != nil && client.Longitude != nil {
+		origin = &lagDriftPoint{latitude: *client.Latitude, longitude: *client.Longitude}
+	} else if origin = lagDriftOrigin(nil, lagDriftBorders().country(test.ClientIpCountryCode)); origin != nil {
+		view = &LagDriftIpPlace{
+			CountryCode: test.ClientIpCountryCode,
+			CountryName: test.ClientIpCountryName,
+		}
+	}
+	if origin != nil {
 		latitude := origin.latitude
 		longitude := origin.longitude
 		view.Latitude = &latitude
@@ -967,16 +998,25 @@ func lagDriftDemoStart(ctx context.Context, addr netip.Addr, now time.Time, sett
 	if err != nil {
 		return nil, err
 	}
+	// the demo has no client_ip: its k is for its own address's continent
+	// (V11)
+	k := lagdrift.DefaultK(drift.ConfidenceDefault, model.ContinentCodeForCountry(place.CountryCode))
 	return &LagDriftStartResult{
 		Demo:       true,
 		RunsLeft:   drift.MaxRuns,
 		MeasureMs:  drift.MeasureMs,
 		Confidence: drift.ConfidenceDefault,
+		K:          k,
+		KEarly:     lagdrift.KEarly(k),
 		Ip:         place.view(),
 		Tickets:    ticketsResult,
 		ExpiresAt:  lagDriftTime(expiresAt),
 	}, nil
 }
+
+// How many token reads a start limit allows: a pinned start reads its
+// token once more, unpinned (P5).
+const lagDriftLookupsPerStart = 2
 
 // The refusal of a start for the token's own state (P5).
 func lagDriftStartRefusalError(refusal string) *LagError {

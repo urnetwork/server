@@ -187,8 +187,14 @@ func readLagSettings() *LagSettings {
 		return settings
 	}
 	if err := resource.UnmarshalYamlE(settings); err != nil {
-		glog.Errorf("[lag]lag.yml is not readable, using the defaults: %s\n", err)
-		return DefaultLagSettings()
+		// a file that may have switched drift tests off can't switch them on
+		// (lag.dev/DRIFTTEST.md P7): they stay off, the demo's too, until it
+		// reads again; read once per process, so this is said once
+		glog.Errorf("[lag]lag.yml is not readable, so drift tests are off and the rest uses its defaults: %s\n", err)
+		settings = DefaultLagSettings()
+		off := false
+		settings.Drift.Enabled = &off
+		return settings
 	}
 	return settings.withDefaults()
 }

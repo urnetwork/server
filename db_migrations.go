@@ -11871,4 +11871,17 @@ var migrations = []any{
 			ADD COLUMN IF NOT EXISTS client_ip_country_code varchar(2) NULL,
 			ADD COLUMN IF NOT EXISTS client_ip_country_name varchar(256) NULL;
 	`),
+
+	// A drift run's k and k_early (lag.dev/DRIFTTEST.md V11), from V11's
+	// table for client_ip's continent at the token's confidence, as it stood
+	// at the run's start, which its stop check and verdict are judged at.
+	// Two nullable columns on a table kept 7 days, added only when absent
+	// under a five-second lock bound: nothing is rewritten, and a run started
+	// before them has none and is judged at the textbook k, as it started.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE lag_drift_run
+			ADD COLUMN IF NOT EXISTS k double precision NULL,
+			ADD COLUMN IF NOT EXISTS k_early double precision NULL;
+	`),
 }

@@ -73,6 +73,9 @@ type LagDriftResult struct {
 	// a run whose verdict is not in yet, else null; set as the test is read
 	PendingRun *int    `json:"pending_run"`
 	Confidence float64 `json:"confidence"`
+	// the region's k the verdict was judged at (V11): the largest of its
+	// runs', each from V11's table at its start; absent with no run
+	K float64 `json:"k,omitempty"`
 	// the borders the verdict was judged against (G1)
 	GeometryVersion string      `json:"geometry_version,omitempty"`
 	Ip              *LagDriftIp `json:"ip"`

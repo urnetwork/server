@@ -189,5 +189,10 @@ func TestLagSettingsResource(t *testing.T) {
 	connect.AssertEqual(t, settings.MaxStreams, 4)
 	connect.AssertEqual(t, settings.GuestLimit, 10)
 
-	connect.AssertEqual(t, read("guest_ttl: [not, a, duration]\n"), DefaultLagSettings())
+	// an unreadable file: the defaults, with drift tests off
+	// (lag.dev/DRIFTTEST.md P7)
+	unreadable := DefaultLagSettings()
+	off := false
+	unreadable.Drift.Enabled = &off
+	connect.AssertEqual(t, read("guest_ttl: [not, a, duration]\n"), unreadable)
 }

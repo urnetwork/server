@@ -325,8 +325,8 @@ func lagDriftChoose(
 	}
 
 	// near: the band reaches the nearest nearCount, and at least the mid
-	// band's start; within it pinned names first, unused extenders first,
-	// then repeats, then anything nearer than the rest
+	// band's start; within it unused extenders first, pinned names first
+	// within those, then repeats, then anything nearer than the rest
 	nearLimitKm := lagDriftMidMinKm
 	if 0 < nearCount && nearCount <= len(candidates) {
 		nearLimitKm = max(nearLimitKm, candidates[nearCount-1].distanceKm)
@@ -342,17 +342,17 @@ func lagDriftChoose(
 				}
 				return -1
 			}
-			if a.pinned != b.pinned {
-				if a.pinned {
-					return -1
-				}
-				return 1
-			}
 			if a.used != b.used {
 				if a.used {
 					return 1
 				}
 				return -1
+			}
+			if a.pinned != b.pinned {
+				if a.pinned {
+					return -1
+				}
+				return 1
 			}
 			return 0
 		})
@@ -431,15 +431,18 @@ func lagDriftChoose(
 }
 
 // The candidates in four groups, each in the order given: pinned names
-// unused, pinned names used, plain names unused, plain names used (K6, E2).
+// unused, plain names unused, pinned names used, plain names used (K6, E2). A
+// new path adds independent evidence (V7), and K4 checks a plain-named
+// session's family, so a retest takes an unused plain name over a pinned one
+// it has used.
 func lagDriftPreferenceGroups(candidates []*lagDriftExtender) [4][]*lagDriftExtender {
 	groups := [4][]*lagDriftExtender{}
 	for _, candidate := range candidates {
 		group := 0
-		if !candidate.pinned {
+		if candidate.used {
 			group += 2
 		}
-		if candidate.used {
+		if !candidate.pinned {
 			group += 1
 		}
 		groups[group] = append(groups[group], candidate)

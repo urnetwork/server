@@ -130,6 +130,10 @@ type LagDriftRun struct {
 	Answered      *int
 	Usable        *int
 	MeasuredMs    *int
+	// the region's k and k_early the run is judged at, from its start (V11);
+	// nil for a run started before them
+	K      *float64
+	KEarly *float64
 }
 
 func (self *LagDriftRun) Complete() bool {
@@ -216,7 +220,9 @@ const lagDriftRunColumns = `
 	supported_stop,
 	answered,
 	usable,
-	measured_ms
+	measured_ms,
+	k,
+	k_early
 `
 
 func scanLagDriftRun(result server.PgResult) *LagDriftRun {
@@ -242,6 +248,8 @@ func scanLagDriftRun(result server.PgResult) *LagDriftRun {
 		&run.Answered,
 		&run.Usable,
 		&run.MeasuredMs,
+		&run.K,
+		&run.KEarly,
 	))
 	for _, field := range []struct {
 		value  *string
@@ -420,9 +428,12 @@ type AddLagDriftRunArgs struct {
 	IpCountryCode string
 	IpCountryName string
 	Extenders     []*LagDriftRunExtender
-	Now           time.Time
-	MaxRuns       int
-	RetestWindow  time.Duration
+	// the region's k and k_early for the run (V11)
+	K            float64
+	KEarly       float64
+	Now          time.Time
+	MaxRuns      int
+	RetestWindow time.Duration
 	// a run started this long ago measures no more (P6)
 	ProcessingAfter time.Duration
 }
@@ -537,9 +548,11 @@ func AddLagDriftRun(ctx context.Context, args *AddLagDriftRunArgs) *AddLagDriftR
 				client_ip_matches,
 				ip_country_code,
 				ip_country_name,
-				extenders_json
+				extenders_json,
+				k,
+				k_early
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			`,
 			test.DriftTestId,
 			run,
@@ -551,6 +564,8 @@ func AddLagDriftRun(ctx context.Context, args *AddLagDriftRunArgs) *AddLagDriftR
 			nullString(args.IpCountryCode),
 			nullString(args.IpCountryName),
 			extendersJson,
+			args.K,
+			args.KEarly,
 		))
 
 		server.RaisePgResult(tx.Exec(

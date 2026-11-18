@@ -77,6 +77,9 @@ const (
 	// IPv6 from France, as a dual-stack visitor's on a VPN in Germany over
 	// IPv4 only
 	lagDriftTestLyonIpv6 = "[2001:db8:2::7]:52000"
+	// Africa, whose k at 99% is above the textbook's (V11)
+	lagDriftTestCairoIp      = "100.64.20.5"
+	lagDriftTestCairoAddress = "100.64.20.5:52000"
 	// a German city the place list has no point for
 	lagDriftTestLeipzigIp      = "100.64.30.5"
 	lagDriftTestLeipzigAddress = "100.64.30.5:52000"
@@ -87,6 +90,13 @@ var lagDriftTestLeipzigBlock = lagTestCityBlock{
 	region: "Saxony", regionGeonameId: 2842566,
 	city: "Leipzig", cityGeonameId: 2879139,
 	latitude: 51.34, longitude: 12.37,
+}
+
+var lagDriftTestCairoBlock = lagTestCityBlock{
+	countryCode: "eg", country: "Egypt", countryGeonameId: 357994,
+	region: "Cairo Governorate", regionGeonameId: 360631,
+	city: "Cairo", cityGeonameId: 360630,
+	latitude: 30.06, longitude: 31.25,
 }
 
 var lagTestLyon = lagTestCityBlock{
@@ -167,6 +177,7 @@ func newLagDriftTestFixture(t testing.TB, ctx context.Context) *lagDriftTestFixt
 		"2001:db8:1::/48": lagTestBerlinNorth,
 		"2001:db8:2::/48": lagTestLyon,
 		"100.64.30.0/24":  lagDriftTestLeipzigBlock,
+		"100.64.20.0/24":  lagDriftTestCairoBlock,
 	})
 	t.Cleanup(model.Testing_PushPlaces(lagTestPlaces))
 	t.Cleanup(Testing_SetLagDriftBorders(lagDriftTestBorders(t)))
@@ -430,7 +441,7 @@ func TestLagDriftAllocate(t *testing.T) {
 		connect.AssertEqual(t, fixture.read(t, result.DriftTestId, expiresAt).State, LagDriftStateExpired)
 
 		// the options
-		confidence := 0.999
+		confidence := 0.95
 		ttlSeconds := 60
 		result = fixture.allocate(t, now, &LagDriftTestArgs{
 			ClientIp:      " 2001:db8:1::30 ",
@@ -439,14 +450,15 @@ func TestLagDriftAllocate(t *testing.T) {
 			TtlSeconds:    &ttlSeconds,
 		})
 		test = model.GetLagDriftTest(ctx, result.DriftTestId)
-		connect.AssertEqual(t, test.Confidence, 0.999)
+		connect.AssertEqual(t, test.Confidence, 0.95)
 		connect.AssertEqual(t, test.ClientIpFamily, 6)
 		connect.AssertEqual(t, test.ParentOrigins, []string{"https://example.com", "http://localhost:3000"})
 		expiresAt, _ = time.Parse(time.RFC3339, result.ExpiresAt)
 		connect.AssertEqual(t, expiresAt.Equal(now.Add(time.Minute).Truncate(time.Second)), true)
 
-		// the bounds
+		// the bounds; 0.999 is refused (V11)
 		half := 0.5
+		tooConfident := 0.999
 		longReference := strings.Repeat("x", 129)
 		tooShort := 59
 		tooLong := 3601
@@ -456,6 +468,7 @@ func TestLagDriftAllocate(t *testing.T) {
 			{ClientIp: "not an address"},
 			{ClientIp: "0.0.0.0"},
 			{ClientIp: lagDriftTestVisitorIp, Confidence: &half},
+			{ClientIp: lagDriftTestVisitorIp, Confidence: &tooConfident},
 			{ClientIp: lagDriftTestVisitorIp, Reference: longReference},
 			{ClientIp: lagDriftTestVisitorIp, TtlSeconds: &tooShort},
 			{ClientIp: lagDriftTestVisitorIp, TtlSeconds: &tooLong},
@@ -828,18 +841,20 @@ func TestLagDriftStartLimit(t *testing.T) {
 // A start over client_ip's other family is pinned to client_ip's (K6, P5):
 // it answers the API's origin in that family and nothing else, using no run
 // and no count of the start limit. Sent unpinned, it runs as an other-family
-// run (K3). A start over client_ip's family, and the demo's, are never pinned.
+// run (K3). A start over client_ip's family, and the demo's, are never
+// pinned, and nor is a token that can't start, which answers as an unknown
+// one does. Every start's token read counts first, at twice the start limit.
 func TestLagDriftStartPinned(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLagDriftTestFixture(t, ctx)
 		fixture.settings.Drift.StartLimit = 1
 		now := server.NowUtc().Truncate(time.Millisecond)
-		start := func(token string, clientAddress string, unpinned bool) *LagDriftStartResult {
+		start := func(token string, clientAddress string, unpinned bool, at time.Time) *LagDriftStartResult {
 			result, err := lagDriftTestStart(
 				&LagDriftStartArgs{Token: token, Unpinned: unpinned},
 				fixture.widgetSession(t, clientAddress),
-				now,
+				at,
 				fixture.settings,
 			)
 			if err != nil {
@@ -850,40 +865,96 @@ func TestLagDriftStartPinned(t *testing.T) {
 
 		// client_ip over IPv4, the start over IPv6
 		allocated := fixture.allocate(t, now, nil)
-		for range 3 {
-			pinned := start(allocated.Token, lagDriftTestVisitorIpv6, false)
-			connect.AssertEqual(t, pinned.Pin, "https://api4.bringyour.com")
-			pinnedJson, err := json.Marshal(pinned)
-			if err != nil {
-				t.Fatal(err)
-			}
-			connect.AssertEqual(t, string(pinnedJson), `{"pin":"https://api4.bringyour.com"}`)
+		pinned := start(allocated.Token, lagDriftTestVisitorIpv6, false, now)
+		connect.AssertEqual(t, pinned.Pin, "https://api-v4.bringyour.com")
+		pinnedJson, err := json.Marshal(pinned)
+		if err != nil {
+			t.Fatal(err)
 		}
+		connect.AssertEqual(t, string(pinnedJson), `{"pin":"https://api-v4.bringyour.com"}`)
 		view := fixture.read(t, allocated.DriftTestId, now)
 		connect.AssertEqual(t, len(view.Runs), 0)
 		connect.AssertEqual(t, view.State, LagDriftStateCreated)
 
-		// unpinned, the start goes ahead from the other family: the pins
-		// counted nothing, so the /48's one start is this one
-		unpinned := start(allocated.Token, lagDriftTestVisitorIpv6, true)
+		// unpinned, the start goes ahead from the other family: the pin
+		// counted no start, so the /48's one start is this one
+		unpinned := start(allocated.Token, lagDriftTestVisitorIpv6, true, now)
 		connect.AssertEqual(t, unpinned.Pin, "")
 		connect.AssertEqual(t, unpinned.Error, (*LagError)(nil))
 		connect.AssertEqual(t, unpinned.Run, 1)
 		connect.AssertEqual(t, fixture.runView(t, allocated.DriftTestId, 1, now).ClientIpMatches, (*bool)(nil))
 		other := fixture.allocate(t, now, nil)
-		assertLagDriftRefused(t, start(other.Token, lagDriftTestVisitorIpv6, true).Error, LagErrorCodeLimit)
+		assertLagDriftRefused(t, start(other.Token, lagDriftTestVisitorIpv6, true, now).Error, LagErrorCodeLimit)
 
 		// client_ip over IPv6, the start over IPv4
 		allocated = fixture.allocate(t, now, &LagDriftTestArgs{ClientIp: "2001:db8:1::30"})
-		connect.AssertEqual(t, start(allocated.Token, lagDriftTestVisitorAddress, false).Pin, "https://api6.bringyour.com")
-		connect.AssertEqual(t, start(allocated.Token, lagDriftTestVisitorIpv6, false).Pin, "")
+		connect.AssertEqual(t, start(allocated.Token, lagDriftTestVisitorAddress, false, now).Pin, "https://api-v6.bringyour.com")
 
-		// an unknown token is expired from either family, and the demo is
-		// never pinned
-		assertLagDriftRefused(t, start("dt1_unknown", lagDriftTestLyonIpv6, false).Error, LagDriftErrorCodeExpired)
-		demo := start(LagDriftDemoToken, lagDriftTestLyonIpv6, false)
+		// a token that can't start answers as an unknown one does, never
+		// with a pin that would say it exists and in which family: expired,
+		// revoked, or its network switched off; each from a /48 of its own
+		ttlSeconds := 60
+		expiring := fixture.allocate(t, now, &LagDriftTestArgs{ClientIp: lagDriftTestVisitorIp, TtlSeconds: &ttlSeconds})
+		assertLagDriftRefused(t, start(expiring.Token, "[2001:db8:4::1]:52000", false, now.Add(2*time.Minute)).Error, LagDriftErrorCodeExpired)
+		revoked := fixture.allocate(t, now, nil)
+		connect.AssertEqual(t, model.RevokeLagDriftTest(ctx, revoked.DriftTestId, now), true)
+		assertLagDriftRefused(t, start(revoked.Token, "[2001:db8:5::1]:52000", false, now).Error, LagDriftErrorCodeExpired)
+		assertLagDriftRefused(t, start("dt1_unknown", "[2001:db8:6::1]:52000", false, now).Error, LagDriftErrorCodeExpired)
+		switchedOff := fixture.allocate(t, now, nil)
+		connect.AssertEqual(t, model.SetLagDriftNetworkDisabled(ctx, fixture.networkId, true), nil)
+		assertLagDriftRefused(t, start(switchedOff.Token, "[2001:db8:7::1]:52000", false, now).Error, LagDriftErrorCodeExpired)
+		connect.AssertEqual(t, model.SetLagDriftNetworkDisabled(ctx, fixture.networkId, false), nil)
+
+		// the token reads count before the token is read: twice the start
+		// limit from a /48, whatever the tokens
+		for range 2 {
+			assertLagDriftRefused(t, start("dt1_unknown", "[2001:db8:8::1]:52000", false, now).Error, LagDriftErrorCodeExpired)
+		}
+		assertLagDriftRefused(t, start("dt1_unknown", "[2001:db8:8::1]:52000", false, now).Error, LagErrorCodeLimit)
+
+		// the demo is never pinned
+		demo := start(LagDriftDemoToken, lagDriftTestLyonIpv6, false, now)
 		connect.AssertEqual(t, demo.Pin, "")
 		connect.AssertEqual(t, demo.Demo, true)
+	})
+}
+
+// A run's k and k_early (V11): the calibration's k at the token's confidence
+// for client_ip's continent, here the defaults, and k_early from it, answered
+// by start and recorded on the run. The demo's are for its own address's
+// continent.
+func TestLagDriftStartK(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLagDriftTestFixture(t, ctx)
+		now := server.NowUtc().Truncate(time.Millisecond)
+		// Africa's k at 99% is above the textbook's, and so its k_early above 4
+		connect.AssertEqual(t, lagdrift.KForConfidence(0.99) < lagdrift.DefaultK(0.99, "AF"), true)
+		connect.AssertEqual(t, lagdrift.EarlyK < lagdrift.KEarly(lagdrift.DefaultK(0.99, "AF")), true)
+		for _, check := range []struct {
+			clientIp      string
+			clientAddress string
+			confidence    float64
+			k             float64
+		}{
+			{lagDriftTestVisitorIp, lagDriftTestVisitorAddress, 0.99, lagdrift.DefaultK(0.99, "EU")},
+			{lagDriftTestVisitorIp, lagDriftTestVisitorAddress, 0.95, lagdrift.DefaultK(0.95, "EU")},
+			{lagDriftTestCairoIp, lagDriftTestCairoAddress, 0.99, lagdrift.DefaultK(0.99, "AF")},
+		} {
+			confidence := check.confidence
+			allocated := fixture.allocate(t, now, &LagDriftTestArgs{ClientIp: check.clientIp, Confidence: &confidence})
+			start := fixture.start(t, allocated.Token, check.clientAddress, "", now)
+			connect.AssertEqual(t, start.Error, (*LagError)(nil))
+			connect.AssertEqual(t, start.K, check.k)
+			connect.AssertEqual(t, start.KEarly, lagdrift.KEarly(check.k))
+			run := model.GetLagDriftRuns(ctx, allocated.DriftTestId)[0]
+			connect.AssertEqual(t, *run.K, check.k)
+			connect.AssertEqual(t, *run.KEarly, lagdrift.KEarly(check.k))
+		}
+
+		demo := fixture.start(t, LagDriftDemoToken, lagDriftTestCairoAddress, "", now)
+		connect.AssertEqual(t, demo.K, lagdrift.DefaultK(0.99, "AF"))
+		connect.AssertEqual(t, demo.KEarly, lagdrift.KEarly(demo.K))
 	})
 }
 
@@ -903,12 +974,15 @@ func TestLagDriftStartOrigin(t *testing.T) {
 		connect.AssertEqual(t, *start.Ip.Latitude, 52.5196)
 		connect.AssertEqual(t, *start.Ip.Longitude, 13.4069)
 
-		// Leipzig has no point of its own: the middle of Germany's box,
-		// 47.3 to 55.0 north and 5.9 to 15.0 east
+		// Leipzig has no point of its own: Germany, with no city, at the
+		// middle of its box, 47.3 to 55.0 north and 5.9 to 15.0 east
 		allocated = fixture.allocate(t, now, &LagDriftTestArgs{ClientIp: lagDriftTestLeipzigIp})
 		start = fixture.start(t, allocated.Token, lagDriftTestLeipzigAddress, "", now)
 		connect.AssertEqual(t, start.Error, (*LagError)(nil))
-		connect.AssertEqual(t, start.Ip.City, "Leipzig")
+		connect.AssertEqual(t, start.Ip.CountryCode, "de")
+		connect.AssertEqual(t, start.Ip.CountryName, "Germany")
+		connect.AssertEqual(t, start.Ip.City, "")
+		connect.AssertEqual(t, start.Ip.Region, "")
 		if math.Abs(*start.Ip.Latitude-51.15) > 0.01 || math.Abs(*start.Ip.Longitude-10.45) > 0.01 {
 			t.Fatalf("the origin is %v, %v, want the middle of Germany's box", *start.Ip.Latitude, *start.Ip.Longitude)
 		}
@@ -1202,6 +1276,15 @@ func TestLagDriftChoose(t *testing.T) {
 	connect.AssertEqual(t, lagDriftHost(byCity["Berlin"], 4), byCity["Berlin"].Name)
 	// a run over IPv6, whose names none has, chooses as without them
 	connect.AssertEqual(t, cities(lagDriftChoose(set, berlin, nil, drift, 6, driftModel, nil)), cities(first))
+
+	// a retest takes the unused plain names, Berlin and Leipzig, before the
+	// pinned ones it has used
+	pinnedUsed := map[server.Id]bool{}
+	for _, choice := range pinned[:12] {
+		pinnedUsed[choice.extender.ExtenderId] = true
+	}
+	pinnedRetest := lagDriftChoose(set, berlin, pinnedUsed, drift, 4, driftModel, nil)
+	connect.AssertEqual(t, cities(pinnedRetest)[:2], []string{"Berlin", "Leipzig"})
 }
 
 // A run's tickets name each extender's host pinned to the run's family where
@@ -1312,11 +1395,17 @@ func TestLagDriftSettings(t *testing.T) {
 	connect.AssertEqual(t, read("drift:\n  calibration_enabled: false\n").CalibrationOn(), false)
 
 	// the pinned origins (K6, P5)
-	connect.AssertEqual(t, defaults.PinOrigin(4), "https://api4.bringyour.com")
-	connect.AssertEqual(t, defaults.PinOrigin(6), "https://api6.bringyour.com")
+	connect.AssertEqual(t, defaults.PinOrigin(4), "https://api-v4.bringyour.com")
+	connect.AssertEqual(t, defaults.PinOrigin(6), "https://api-v6.bringyour.com")
 	pinned := read("drift:\n  pin_origin_ipv4: https://api4.example.com/\n  pin_origin_ipv6: \" \"\n")
 	connect.AssertEqual(t, pinned.PinOrigin(4), "https://api4.example.com")
-	connect.AssertEqual(t, pinned.PinOrigin(6), "https://api6.bringyour.com")
+	connect.AssertEqual(t, pinned.PinOrigin(6), "https://api-v6.bringyour.com")
+
+	// a lag.yml that doesn't read leaves drift tests off, never on by the
+	// defaults, whatever it meant to say (P7)
+	for _, body := range []string{"drift:\n  enabled: false\n  max_runs: [\n", "drift:\n  enabled: maybe\n", "guest_ttl: [\n"} {
+		connect.AssertEqual(t, read(body).On(), false)
+	}
 }
 
 // The drift counters' labels as the dashboard reads them (P7, ops runbook):
