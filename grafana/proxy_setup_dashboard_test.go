@@ -1,4 +1,5 @@
-// The proxy dashboard's setup-time and per-host saturation rows (proxy
+// The proxy dashboard's setup-time and per-host saturation rows, panels 200
+// to 214 at the end of the dashboard (proxy
 // setup_metrics.go, P90SPEED.md §8): the CONNECT setup, route wait, first exit
 // and first dial histograms by how the device was opened, and per host the
 // hosted mint admissions and refusals, the Go heap against its memory limit,
@@ -17,21 +18,21 @@ import (
 )
 
 const (
-	proxySetupRow              = 84
-	proxySetupPercentilesPanel = 85
-	proxySetupByHostPanel      = 86
-	proxyRouteWaitPanel        = 87
-	proxyUnroutedPanel         = 88
-	proxyBuildsPanel           = 89
-	proxyFirstExitPanel        = 90
-	proxyFirstDialPanel        = 91
-	proxySaturationRow         = 92
-	proxyMintsPanel            = 93
-	proxyMintRefusedSharePanel = 94
-	proxyHeapLimitPanel        = 95
-	proxyHeapBytesPanel        = 96
-	proxyGcPanel               = 97
-	proxyAbandonedPanel        = 98
+	proxySetupRow              = 200
+	proxySetupPercentilesPanel = 201
+	proxySetupByHostPanel      = 202
+	proxyRouteWaitPanel        = 203
+	proxyUnroutedPanel         = 204
+	proxyBuildsPanel           = 205
+	proxyFirstExitPanel        = 206
+	proxyFirstDialPanel        = 207
+	proxySaturationRow         = 208
+	proxyMintsPanel            = 209
+	proxyMintRefusedSharePanel = 210
+	proxyHeapLimitPanel        = 211
+	proxyHeapBytesPanel        = 212
+	proxyGcPanel               = 213
+	proxyAbandonedPanel        = 214
 )
 
 // Each panel and the metric it must read.

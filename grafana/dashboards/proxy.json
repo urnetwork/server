@@ -3891,7 +3891,7 @@
       ]
     },
     {
-      "id": 84,
+      "id": 200,
       "type": "row",
       "title": "setup time: CONNECT to first byte, the wait for a first exit, and the first dial, by how the device was opened (P90SPEED.md §8)",
       "collapsed": false,
@@ -3904,7 +3904,7 @@
       "panels": []
     },
     {
-      "id": 85,
+      "id": 201,
       "type": "timeseries",
       "title": "CONNECT setup to the destination's first byte, p50 and p90, by how the device was opened",
       "description": "From the proxy taking a CONNECT to the first byte the destination sends back through the new tunnel: for HTTP the start of the CONNECT's 30 s dial budget, so retried dial attempts count from the first; for SOCKS the CONNECT request, after the sign-in that starts the device. It includes the TLS round trip of a client that speaks first. CONNECTs that never get a byte (timeouts, refusals, clients that leave) are not in it: read the route wait and the library events beside it. open is how the CONNECT found its device: cold, it built (or waited on the build of) the proxy's first device, a proxy created less than 10 minutes before; reopen, it built an older proxy's device again after an idle close or a restart; warm, the device was installed before the CONNECT began.",
@@ -3973,7 +3973,7 @@
       ]
     },
     {
-      "id": 86,
+      "id": 202,
       "type": "timeseries",
       "title": "CONNECT setup p90 by host and how the device was opened, 10-minute windows",
       "description": "The setup p90 of each proxy host over 10-minute windows, split by open, so a fix rolled to one host or block, or a memory limit changed on one host, reads against the other. open is how the CONNECT found its device: cold, it built (or waited on the build of) the proxy's first device, a proxy created less than 10 minutes before; reopen, it built an older proxy's device again after an idle close or a restart; warm, the device was installed before the CONNECT began.",
@@ -4018,7 +4018,7 @@
       ]
     },
     {
-      "id": 87,
+      "id": 203,
       "type": "timeseries",
       "title": "wait for the window's first exit (route wait), p50 and p90 of the waits that routed",
       "description": "Each CONNECT's wait in WaitForRoute until its device's window holds an exit, or holds its minimum. A warm device's window usually routes at once. A slow cold or reopen wait is the window's first exit setup: the mint admission, connect's backoff after a refused mint, and exits that never answer (P90SPEED.md §3). open is how the CONNECT found its device: cold, it built (or waited on the build of) the proxy's first device, a proxy created less than 10 minutes before; reopen, it built an older proxy's device again after an idle close or a restart; warm, the device was installed before the CONNECT began.",
@@ -4083,7 +4083,7 @@
       ]
     },
     {
-      "id": 88,
+      "id": 204,
       "type": "timeseries",
       "title": "route waits that ended without an exit / s, by how the device was opened",
       "description": "CONNECTs whose wait ended with no exit in the window: the 30 s budget ran out, the client left, or the device closed. Each is a failed setup that the setup panels cannot show. open is how the CONNECT found its device: cold, it built (or waited on the build of) the proxy's first device, a proxy created less than 10 minutes before; reopen, it built an older proxy's device again after an idle close or a restart; warm, the device was installed before the CONNECT began.",
@@ -4124,7 +4124,7 @@
       ]
     },
     {
-      "id": 89,
+      "id": 205,
       "type": "timeseries",
       "title": "devices built / s by host and how they were opened",
       "description": "Device constructions installed per second. cold: a proxy's first device, built within 10 minutes of the proxy's creation. reopen: an older proxy's device, built again after an idle close (10 minutes unused, 45 minutes after traffic) or a restart. Sweeps that reopen thousands of proxies show here as reopen bursts (P90SPEED.md §4.1).",
@@ -4165,7 +4165,7 @@
       ]
     },
     {
-      "id": 90,
+      "id": 206,
       "type": "timeseries",
       "title": "construction to the window's first exit, p50 and p90 by host, 10-minute windows",
       "description": "From the start of a device's construction (its database reads, hosted session and windows) to its window's first added exit, once per device. A device that closes before its first exit is not in it. cold: a proxy's first device; reopen: an older proxy's device built again.",
@@ -4230,7 +4230,7 @@
       ]
     },
     {
-      "id": 91,
+      "id": 207,
       "type": "timeseries",
       "title": "first dial through each new device, p90 by host, and failed first dials / s",
       "description": "The first dial through each new device: the DNS lookup over DoH and the TCP handshake through its first exits, once per device. A failed first dial (right axis) is usually an exit that does not answer. cold: a proxy's first device; reopen: an older proxy's device built again.",
@@ -4293,7 +4293,7 @@
       ]
     },
     {
-      "id": 92,
+      "id": 208,
       "type": "row",
       "title": "per-host saturation: hosted mint admissions and refusals, Go heap against the memory limit, GC, abandoned CONNECTs",
       "collapsed": false,
@@ -4306,7 +4306,7 @@
       "panels": []
     },
     {
-      "id": 93,
+      "id": 209,
       "type": "timeseries",
       "title": "hosted mints admitted and refused / s by host",
       "description": "admitted: hosted window-client mints that ran (urnetwork_jwt_state_queries_total, caller hosted, operation mint). refused: mints the 2-slot admission turned away with a 429 (urnetwork_hosted_mint_admission_refusals_total); connect backs off 5 s, doubling, after each, which is most of the setup tail (P90SPEED.md §3.3). The red line is the alert's 5 refusals/s per host (SIGNALS.md §26.12).",
@@ -4370,7 +4370,7 @@
       ]
     },
     {
-      "id": 94,
+      "id": 210,
       "type": "timeseries",
       "title": "share of hosted mint attempts refused, by host",
       "description": "Refused mints over admitted plus refused, per host. Before 11-14 it was 0.2-1%; at the regression's worst 67-79% (P90SPEED.md §3.3 and B-proxy notes).",
@@ -4411,7 +4411,7 @@
       ]
     },
     {
-      "id": 95,
+      "id": 211,
       "type": "timeseries",
       "title": "Go heap plus stacks against the memory limit, highest process per host",
       "description": "(heap in use + stacks in use) / GOMEMLIMIT for the fullest proxy process on each host. Near 1 the Go collector runs over and over to stay under the limit and the process starves for CPU: GC 10-13 times a minute and mint refusals (P90SPEED.md §4.2). The red line is the alert's 95% (SIGNALS.md §26.13). The limit is per host (vault proxy_sizing.yml).",
@@ -4470,7 +4470,7 @@
       ]
     },
     {
-      "id": 96,
+      "id": 212,
       "type": "timeseries",
       "title": "Go heap plus stacks and the memory limit, by host",
       "description": "The fullest process's heap plus stacks in use on each host, and its memory limit (dashed).",
@@ -4535,7 +4535,7 @@
       ]
     },
     {
-      "id": 97,
+      "id": 213,
       "type": "timeseries",
       "title": "GC cycles a minute per process, highest and mean by host",
       "description": "Go GC cycles a minute (go_gc_duration_seconds_count). Healthy processes run 0.6-1 a minute; at the memory limit 7-13 (P90SPEED.md §4.2-4.3).",
@@ -4600,7 +4600,7 @@
       ]
     },
     {
-      "id": 98,
+      "id": 214,
       "type": "timeseries",
       "title": "CONNECTs abandoned by the client / s by host, against its 24-hour median",
       "description": "HTTP CONNECTs whose client left before the proxy dialed (library event connect_client_gone), against each host's median of the last 24 h at 15-minute steps, 30 minutes back (dashed). They rose from 1-5/s per host before 11-14 as setup slowed; bots that open CONNECTs and leave raise it too, so read it with setup time and mint refusals. The alert fires above 3x the median and 50/s for 15 minutes (SIGNALS.md §26.14).",
