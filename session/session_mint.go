@@ -6,21 +6,65 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
 
 var sessionCreationOverride atomic.Pointer[bool]
 
+// How long a read of vault auth.yml's session_creation_enabled answers every
+// mint: a flip delivered to a host applies within this, without a restart.
+const sessionCreationReadInterval = 5 * time.Second
+
+type sessionCreationRead struct {
+	value bool
+	until time.Time
+}
+
+var sessionCreationCache atomic.Pointer[sessionCreationRead]
+var sessionCreationReadLock sync.Mutex
+
+// The vault read; a seam for tests.
+var readSessionCreationSetting = func() bool { return loadAuthSettingBool("session_creation_enabled") }
+
+// SessionCreationEnabled is vault auth.yml's session_creation_enabled, read at
+// most once per sessionCreationReadInterval (S1 W10: every mint read and
+// parsed the file, and a file that failed to parse panicked the mint). A read
+// that fails keeps the last value read, false before any.
 func SessionCreationEnabled() bool {
 	if value := sessionCreationOverride.Load(); value != nil {
 		return *value
 	}
-	return loadAuthSettingBool("session_creation_enabled")
+	now := time.Now()
+	if cached := sessionCreationCache.Load(); cached != nil && now.Before(cached.until) {
+		return cached.value
+	}
+	sessionCreationReadLock.Lock()
+	defer sessionCreationReadLock.Unlock()
+	if cached := sessionCreationCache.Load(); cached != nil && now.Before(cached.until) {
+		return cached.value
+	}
+	value := false
+	if cached := sessionCreationCache.Load(); cached != nil {
+		value = cached.value
+	}
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				glog.Infof("[session]session_creation_enabled could not be read; keeping %t: %v\n", value, recovered)
+			}
+		}()
+		value = readSessionCreationSetting()
+	}()
+	sessionCreationCache.Store(&sessionCreationRead{value: value, until: now.Add(sessionCreationReadInterval)})
+	return value
 }
 func Testing_SetSessionCreationEnabled(value bool) func() {
 	old := sessionCreationOverride.Swap(&value)
