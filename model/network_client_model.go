@@ -1607,8 +1607,9 @@ func retireProberNetworkClientInTx(ctx context.Context, tx server.PgTx, clientId
 }
 
 // matches the batch size `RemoveDisconnectedNetworkClients` already uses for
-// bounded maintenance sweeps of this same table (see `markTopLevelBatchCount`
-// above): large enough to make a real dent per transaction, small enough that
+// bounded maintenance sweeps of this same table (see
+// `RemoveDisconnectedNetworkClientsSettings.MarkTopLevelBatchCount` below):
+// large enough to make a real dent per transaction, small enough that
 // no single transaction runs long or holds locks for long.
 const RemoveNetworkClientsBatchCount = 10000
 
@@ -4843,11 +4844,6 @@ func RetireNetworkClientHandlerConnection(
 	return
 }
 
-// `minConnectionTime` bounds how long disconnected connection rows are
-// retained. `minClientTime` bounds when disconnected clients are reaped —
-// a client is reaped only if it has not authed or connected since
-// `minClientTime` (see the auth_time refresh in `ConnectNetworkClient`).
-// Keep the client window much larger than the connection window: provisioned
 // an inactive client is reaped this long after it was deactivated (user
 // removal or the idle top-level marker), giving a notice window before the
 // hard delete and its cascades. Hosted clients go sooner: retired windows a
@@ -4862,7 +4858,8 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // the jwt refresh fail so the app logs the user out (see
 // FindActiveClientNetwork), and the reap hard deletes it
 // `NetworkClientReapAfterDeactivate` later. A returning user logs in again
-// with a fresh client id.
+// with a fresh client id. The clients of sidecar.yml's urnetwork_edge are
+// never marked (owner decision 591): see RemoveDisconnectedNetworkClients.
 //
 // Tightened 90d -> 30d (2026-07-18). A top-level client stays active for this
 // whole window, so under identity churn (a fresh device_id per login) or a
@@ -4873,8 +4870,8 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // still letting a monthly-active user re-login rather than stranding a session.
 // Tradeoff: a device idle longer than this is logged out on its next jwt
 // refresh; raise the constant to be gentler. NOTE: the first reaper run after a
-// decrease deactivates the entire newly-eligible band, in bounded 10k batches
-// (a large one-time pass).
+// decrease deactivates the entire newly-eligible band, in bounded batches
+// (MarkTopLevelBatchCount; a large one-time pass).
 const TopLevelClientIdleExpiration = 30 * 24 * time.Hour
 
 // One batch of closed connections older than $1, at most $2, with their
@@ -4907,28 +4904,75 @@ const removeDisconnectedConnectionsSql = `
 	WHERE network_client_connection.connection_id = candidate.connection_id
 `
 
+// Tunables of RemoveDisconnectedNetworkClients's passes. Each is a batch
+// bound, so that no single transaction holds its locks for long. A pass whose
+// count is not positive is skipped.
+type RemoveDisconnectedNetworkClientsSettings struct {
+	// The most closed connections one statement deletes, with their location,
+	// latency and speed rows: 50,000, since that cascade is a set of primary
+	// key probes.
+	ConnectionBatchCount int
+	// The most idle top-level clients one transaction marks inactive: 10,000,
+	// each with its revocation records and removal effects in the same
+	// transaction.
+	MarkTopLevelBatchCount int
+	// The most inactive clients one statement hard deletes: 10,000.
+	ReapInactiveBatchCount int
+	// The most child clients one statement bumps out of the reap band, and the
+	// most one statement reaps: 10,000, as both passes walk the same stale
+	// auth_time band.
+	ReapChildBatchCount int
+}
+
+func DefaultRemoveDisconnectedNetworkClientsSettings() *RemoveDisconnectedNetworkClientsSettings {
+	return &RemoveDisconnectedNetworkClientsSettings{
+		ConnectionBatchCount:   50000,
+		MarkTopLevelBatchCount: 10000,
+		ReapInactiveBatchCount: 10000,
+		ReapChildBatchCount:    10000,
+	}
+}
+
+// `minConnectionTime` bounds how long disconnected connection rows are
+// retained. `minClientTime` bounds when disconnected clients are reaped —
+// a client is reaped only if it has not authed or connected since
+// `minClientTime` (see the auth_time refresh in `ConnectNetworkClient`).
+// Keep the client window much larger than the connection window: provisioned
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
-// recover from a reaped client_id.
+// recover from a reaped client_id. `minTopLevelAuthTime` bounds the idle
+// top-level marker (TopLevelClientIdleExpiration), which leaves the clients of
+// sidecar.yml's urnetwork_edge alone (owner decision 591). Under the default
+// settings.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
+	RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, DefaultRemoveDisconnectedNetworkClientsSettings())
+}
+
+// RemoveDisconnectedNetworkClients under the caller's batch bounds.
+func RemoveDisconnectedNetworkClientsWithSettings(
+	ctx context.Context,
+	minConnectionTime time.Time,
+	minClientTime time.Time,
+	minTopLevelAuthTime time.Time,
+	settings *RemoveDisconnectedNetworkClientsSettings,
+) {
 	// remove old disconnected connections in bounded batches, cascading
 	// network_client_location/latency/speed for the same connection ids in one
 	// statement. The per-connection tables are keyed by connection_id, so the
 	// cascade is a set of pk probes instead of the full-table anti-joins this
 	// used to do (see SweepOrphanNetworkClientData for the safety net).
 	// keep batches bounded so no single tx holds locks for long
-	removeConnectionBatchCount := 50000
-	for {
+	for 0 < settings.ConnectionBatchCount {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				removeDisconnectedConnectionsSql,
 				minConnectionTime.UTC(),
-				removeConnectionBatchCount,
+				settings.ConnectionBatchCount,
 			))
 			batchCount = tag.RowsAffected()
 		}, server.TxReadCommitted)
-		if batchCount < int64(removeConnectionBatchCount) {
+		if batchCount < int64(settings.ConnectionBatchCount) {
 			break
 		}
 	}
@@ -4938,8 +4982,22 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// live connection. Marking makes the jwt refresh fail so the app logs the
 	// user out; the reap below hard deletes the row
 	// `NetworkClientReapAfterDeactivate` after deactivate_time.
-	markTopLevelBatchCount := 10000
-	for {
+	//
+	// The clients of sidecar.yml's urnetwork_edge are never marked (owner
+	// decision 591; §13.6, §19.4): an edge block's platform clients connect
+	// only while a process holds their deploy slot, so a slot no process has
+	// held for TopLevelClientIdleExpiration would otherwise lose its clients,
+	// and api's mint (MintEdgeClient), which answers only a client it finds
+	// active, would refuse the next deploy into it. The set is bounded by
+	// edge.yml (SlotCount times K a block and host), so each batch steps over
+	// at most that many rows. An operator's removal still ends one: it is
+	// inactive, and the inactive reap below takes it like any other. With no
+	// urnetwork_edge in sidecar.yml, $3 is null and no network is left out.
+	var edgeNetworkId *server.Id
+	if networkId, ok := server.CurrentSidecarConfig().UrnetworkEdge(); ok {
+		edgeNetworkId = &networkId
+	}
+	for 0 < settings.MarkTopLevelBatchCount {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// an attempt that does not commit marked nothing
@@ -4959,6 +5017,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 							network_client.active = true AND
 							network_client.source_client_id IS NULL AND
 							network_client.auth_time < $1 AND
+							network_client.network_id IS DISTINCT FROM $3 AND
 							network_client_connection.client_id IS NULL
 						ORDER BY network_client.auth_time ASC, network_client.client_id ASC
 						LIMIT $2
@@ -4973,12 +5032,14 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 						network_client.active = true AND
 						network_client.source_client_id IS NULL AND
 						network_client.auth_time < $1 AND
+						network_client.network_id IS DISTINCT FROM $3 AND
 						network_client_connection.client_id IS NULL
 					ORDER BY network_client.client_id
 					FOR UPDATE OF network_client
 				`,
 				minTopLevelAuthTime.UTC(),
-				markTopLevelBatchCount,
+				settings.MarkTopLevelBatchCount,
+				edgeNetworkId,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -5032,7 +5093,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		if 0 < batchCount {
 			glog.Infof("[ncm]marked %d abandoned top level clients inactive\n", batchCount)
 		}
-		if batchCount < int64(markTopLevelBatchCount) {
+		if batchCount < int64(settings.MarkTopLevelBatchCount) {
 			break
 		}
 	}
@@ -5068,8 +5129,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// bounded batches so no single tx holds locks for long, and driven by the
 	// network_client_inactive_reap_time partial index (oldest deactivation
 	// first) instead of a full scan of the active = false band
-	reapInactiveBatchCount := 10000
-	for {
+	for 0 < settings.ReapInactiveBatchCount {
 		var batchClientIds, batchDeviceIds []server.Id
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			batchClientIds, batchDeviceIds = nil, nil
@@ -5087,21 +5147,17 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				RETURNING client_id, device_id
 				`,
 				minClientTime.UTC(),
-				reapInactiveBatchCount,
+				settings.ReapInactiveBatchCount,
 			)
 			batchClientIds, batchDeviceIds = collectReaped(rows, err)
 		}, server.TxReadCommitted)
 		// Only the successful attempt owns downstream cleanup.
 		reapedClientIds = append(reapedClientIds, batchClientIds...)
 		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
-		if len(batchClientIds) < reapInactiveBatchCount {
+		if len(batchClientIds) < settings.ReapInactiveBatchCount {
 			break
 		}
 	}
-
-	// batch limit shared by the connected-child bump and the child reap below,
-	// which walk the same stale-auth_time band
-	reapChildBatchCount := 10000
 
 	// bump currently-connected children out of the stale-auth_time band before
 	// the child reap walks it. auth_time refreshes only on auth and (throttled)
@@ -5114,8 +5170,9 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	// termination: bumped rows leave the band (auth_time = now >= $1), so each
 	// batch shrinks it and the loop drains.
 	// driver = the network_client_child_reap_auth_time partial index; probe =
-	// network_client_connection_connected_client_id (connected, client_id)
-	for {
+	// network_client_connection_connected_client_id (connected, client_id).
+	// ReapChildBatchCount bounds this pass and the child reap below alike.
+	for 0 < settings.ReapChildBatchCount {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(
@@ -5140,7 +5197,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				WHERE network_client.client_id = batch.client_id
 				`,
 				minClientTime.UTC(),
-				reapChildBatchCount,
+				settings.ReapChildBatchCount,
 				server.NowUtc(),
 			))
 			batchCount = tag.RowsAffected()
@@ -5148,7 +5205,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		if 0 < batchCount {
 			glog.Infof("[ncm]bumped %d connected child clients out of the reap band\n", batchCount)
 		}
-		if batchCount < int64(reapChildBatchCount) {
+		if batchCount < int64(settings.ReapChildBatchCount) {
 			break
 		}
 	}
@@ -5162,7 +5219,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 	//            the app will need to create a new client id for these clients when it notices the existing jwt fails
 	// bounded batches (see the inactive reap above); driven by the
 	// network_client_child_reap_auth_time partial index, oldest auth_time first
-	for {
+	for 0 < settings.ReapChildBatchCount {
 		var batchClientIds, batchDeviceIds []server.Id
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			batchClientIds, batchDeviceIds = nil, nil
@@ -5185,7 +5242,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				RETURNING network_client.client_id, network_client.device_id, network_client.network_id, network_client.source_client_id
 				`,
 				minClientTime.UTC(),
-				reapChildBatchCount,
+				settings.ReapChildBatchCount,
 			)
 			// this reap removes active children too, so the revocation
 			// records refuse every removed row before the batch commits
@@ -5212,7 +5269,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 		}, server.TxReadCommitted)
 		reapedClientIds = append(reapedClientIds, batchClientIds...)
 		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
-		if len(batchClientIds) < reapChildBatchCount {
+		if len(batchClientIds) < settings.ReapChildBatchCount {
 			break
 		}
 	}
