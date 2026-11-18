@@ -30,7 +30,10 @@ func TestProxyDeviceManagerOwnsOneMintAdmission(t *testing.T) {
 // The default admits two registrations in flight per process, the brake on the
 // 2026-10-22 identity-churn loop. localclient's
 // TestAuthorityMintAdmissionBoundOfTwoRefusesTheThird shows a bound of two
-// refusing the third concurrent registration as a 429.
+// refusing the third concurrent registration as a 429 after its wait, and
+// TestMintAdmissionHoldsChurningDevicesToTheSharedSlots that devices that
+// never route are held to these two once their reserved registrations are
+// spent.
 func TestProxyDeviceManagerDefaultMintBoundIsTwo(t *testing.T) {
 	if settings := DefaultProxyDeviceManagerSettings(); settings.HostedMintConcurrency != 2 {
 		t.Fatalf("default registration bound = %d, want 2", settings.HostedMintConcurrency)
@@ -54,6 +57,10 @@ func TestProxyDeviceAuthoritySharesManagerAdmissions(t *testing.T) {
 		}
 		if pd.localControl == nil || pd.localControl.Testing_MintAdmission() != h.proxyDeviceManager.mintAdmission {
 			t.Fatal("the device authority does not register through its manager's bound")
+		}
+		// the device's route decides its claim on the bound's reserved slots
+		if pd.localControl.Testing_Routable() == nil {
+			t.Fatal("the device authority does not read the device's route")
 		}
 		if h.proxyDeviceManager.contractAdmission == nil {
 			t.Fatal("the test manager has no contract creation bound")

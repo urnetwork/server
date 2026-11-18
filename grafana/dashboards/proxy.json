@@ -3043,10 +3043,10 @@
       "id": 40,
       "type": "timeseries",
       "title": "hosted registrations and contract creations refused, and invalid performance profiles / s",
-      "description": "Hosted derived-client registrations and contract creations refused because the owner's concurrent registration or contract creation bound was full, and stored initial performance profiles that connect refuses, read back in auto by this service. A refused creation is asked again on the device's own retry schedule. The API dashboard shows the auth-client refusals.",
+      "description": "Hosted derived-client registrations and contract creations refused because the owner's concurrent registration or contract creation bound was full, and stored initial performance profiles that connect refuses, read back in auto by this service. A registration is refused at once when 32 others already wait for a slot, or after its own 1 s wait; the next panel shows the waits. A refused creation is asked again on the device's own retry schedule. The API dashboard shows the auth-client refusals.",
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 192
       },
@@ -3087,6 +3087,57 @@
           "refId": "C",
           "expr": "sum (rate(urnetwork_hosted_contract_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "contract creation refused"
+        }
+      ]
+    },
+    {
+      "id": 100,
+      "type": "timeseries",
+      "title": "hosted registrations admitted by lane, waited for a slot by outcome, and refused / s by host",
+      "description": "Each proxy process's concurrent registration bound (localclient.MintAdmission) admits two registrations at once in its shared lane. When both are busy, a device that cannot route yet (no exit added, the test WaitForRoute uses) takes one of two reserved slots, for at most six registrations in the device's life; reserved is that lane. A registration that finds no slot waits for one, first come first served, at most 1 s and with at most 32 waiting: waited admitted got a slot, waited refused ran out of time and is in the refusals, waited canceled lost its caller. A refusal is asked again by the window: within 250-500 ms while it has no exit, at most 5 times, else on its 5 s doubling backoff.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 192
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, lane) (rate(urnetwork_hosted_mint_admission_admissions_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "admitted {{lane}} {{host}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (host, outcome) (rate(urnetwork_hosted_mint_admission_waits_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "waited {{outcome}} {{host}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (host) (rate(urnetwork_hosted_mint_admission_refusals_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "refused {{host}}"
         }
       ]
     },
@@ -3568,6 +3619,52 @@
           "refId": "A",
           "expr": "sum by (window, outcome) (rate(urnetwork_proxy_window_balance_probes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "{{window}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 101,
+      "type": "timeseries",
+      "title": "hosted registration wait for a slot before admission, p50 and p90 by host",
+      "description": "How long the hosted registrations that found every slot of their process's registration bound busy waited before a slot was returned to them (localclient.MintAdmission). Only admitted waits count; a wait that ran out is refused at 1 s and counted in the panel beside the registration refusals. At the 1.4-2.0 Erlang offered to two slots on 2026-11-18 the waiters' mean was expected near 0.2 s; a p90 near 1 s means the bound is overloaded and waits turn into refusals.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 242
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (host, le) (rate(urnetwork_hosted_mint_admission_wait_seconds_bucket{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{host}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (host, le) (rate(urnetwork_hosted_mint_admission_wait_seconds_bucket{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p90 {{host}}"
         }
       ]
     },
