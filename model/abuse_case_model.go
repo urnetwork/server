@@ -44,11 +44,19 @@ const (
 	// a case that names its network directly: a staff filing, or the worker's
 	// closure-growth case (§21.7)
 	AbuseJoinKindNetwork AbuseJoinKind = "network"
+	// a filed notice (§21.8's paged row), its key the notice's class
+	// (AbuseNoticeClass): the case names the network a host it names joined,
+	// or none
+	AbuseJoinKindNotice AbuseJoinKind = "notice"
+	// §21.5's breakers, which act on tiers and addresses and name no network:
+	// the key is the breaker's name (ABUSE-M9-02)
+	AbuseJoinKindBreaker AbuseJoinKind = "breaker"
 )
 
 func (self AbuseJoinKind) known() bool {
 	switch self {
-	case AbuseJoinKindHost, AbuseJoinKindAddress, AbuseJoinKindHeaders, AbuseJoinKindConnection, AbuseJoinKindNetwork:
+	case AbuseJoinKindHost, AbuseJoinKindAddress, AbuseJoinKindHeaders, AbuseJoinKindConnection, AbuseJoinKindNetwork,
+		AbuseJoinKindNotice, AbuseJoinKindBreaker:
 		return true
 	}
 	return false

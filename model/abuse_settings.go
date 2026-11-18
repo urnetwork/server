@@ -86,6 +86,28 @@ type AbuseSettings struct {
 	// Non-positive reports every failure.
 	ActionReportInterval time.Duration
 
+	// How often AbuseClockPass counts the open cases past their review clock
+	// and pages again the notices whose case is still open (§21.8): each
+	// minute, so a notice whose page was lost to a crash between its case's
+	// commit and the pager is paged within a minute of the worker running.
+	ClockPassInterval time.Duration
+	// One clock pass's bound; a pass that runs out leaves the rest to the next.
+	ClockPassMaxTime time.Duration
+	// The task runner's bound on one clock pass, past ClockPassMaxTime.
+	ClockPassTaskMaxTime time.Duration
+	// How long after a notice is filed the clock pass keeps paging it while
+	// its case is open: 24 hours, far past the notice's hour, so a worker that
+	// was down still pages when it returns. The page's key is the case's, so
+	// a page still open at the pager takes no second. Non-positive pages no
+	// notice again.
+	NoticeRepageWindow time.Duration
+	// The most open notices one clock pass pages again, oldest first.
+	NoticeRepageBatchSize int
+	// How long filing a notice waits for the pager to take its page before
+	// answering that the page is owed: 15 seconds, past the pager client's own
+	// 10-second hand-off, so one slow hand-off is waited out.
+	NoticePageTimeout time.Duration
+
 	// Cases, actions and appeals are kept this many calendar months after the
 	// case last closes (§21.10, §2.8 api-14, plan-ABUSE-small-readings #9): 13,
 	// §2.8's published ttl, so a longer value breaks that promise.
@@ -160,6 +182,12 @@ func DefaultAbuseSettings() *AbuseSettings {
 		ActionPassMaxTime:        5 * time.Minute,
 		ActionPassTaskMaxTime:    10 * time.Minute,
 		ActionReportInterval:     time.Minute,
+		ClockPassInterval:        time.Minute,
+		ClockPassMaxTime:         time.Minute,
+		ClockPassTaskMaxTime:     5 * time.Minute,
+		NoticeRepageWindow:       24 * time.Hour,
+		NoticeRepageBatchSize:    100,
+		NoticePageTimeout:        15 * time.Second,
 		CaseRetentionMonths:      13,
 		LegalRetentionYears:      3,
 		RetentionBatchSize:       1000,
