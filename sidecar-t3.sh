@@ -94,6 +94,10 @@ suites() {
   go_t3 ./sidecarhost -tags "$tags" -run '^(TestRedisConformsOnTheTestStore|TestCountingRedisConformsOnTheTestStore)$'
   go_t3 ./model -tags "$tags" -run '^(TestSidecarPushStorePassesItsSuite|TestSocketStorePassesItsSuite|TestMxEdgeStorePassesTheSuite|TestTlsEdgeStorePassesItsSuite|TestSmtpEdgeStorePassesTheSuite|TestConfigLogSequencerPassesTheStoreSuite)$'
   go_t3 ./dnshost -tags "$tags" -run '^(TestStoreRunsTheDnsStoreSuite|TestRestoreStoreRunsItsSuite|TestCustomHostMapsRunsItsSuite)$'
+  # §12 on T3 (DNS-M5-24): §22.5's §12 row through DnsHarness on dnshost.Store, R-DNS-7, CC4 and the static
+  # CROSSSLOT lint; FS-42's and FS-41's dns and labels steps; FS-52; and §22.9's validators, each saying not run
+  # where its tool is not on the host (local/dns-conformance)
+  go_t3 ./cli/dns -tags "$tags" -run '^(TestDnsT3|TestFs42|TestFs52|TestDnsConformance|TestRestoreStepRegeneratesTheCustomHostMap)'
   if [ "$cadence" = nightly ] || stack_up; then
     go_t3 . -tags "$tags,sidecar_localstack" -run '^TestFileClustersConformOnTheLocalStack$'
     go_t3 ./model -tags "$tags,sidecar_localstack" -run '^TestConfigLogSequencerPassesTheStoreSuiteOnMinio$'
