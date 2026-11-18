@@ -180,10 +180,14 @@ sending_addresses:
 		t.Fatal("a block with no store, gate, resolver, verifier or client is ready")
 	}
 	missing := block.Missing()
-	for _, want := range []string{"the store", "the send gate", "MX resolver", "PTR resolver", "the proof verifier", "the platform client", "sidecar"} {
+	for _, want := range []string{"the store", "the send gate", "MX resolver", "PTR resolver", "the proof verifier", "the platform client"} {
 		if !slices.ContainsFunc(missing, func(text string) bool { return strings.Contains(text, want) }) {
 			t.Fatalf("missing %q does not name %q", missing, want)
 		}
+	}
+	// the dialing sidecar is each admitted ticket's dialer_sidecar_id, no seam of the block's (QD-989)
+	if slices.ContainsFunc(missing, func(text string) bool { return strings.Contains(text, "sidecar") }) {
+		t.Fatalf("missing %q names a dialer-to-sidecar seam", missing)
 	}
 	if lines := log.Lines(); len(lines) != 1 || !strings.Contains(lines[0], "not ready without") {
 		t.Fatalf("the block logged %q", lines)

@@ -24,10 +24,13 @@
 // answers a preamble out of the gate TRY_LATER while the block stays ready: it stays off until D-SMTP-16 passes
 // (R-SMTP-13).
 //
+// The dialing sidecar, the subject mail_send is judged for, needs no seam here: each stream's admitted ur/ ticket
+// names it in dialer_sidecar_id, which sockets filled at Find from the caller's token and signed (QD-989).
+//
 // What this draft does not have, each leaving the block not ready and saying so: a DNSSEC-validating MX resolver
-// and a PTR resolver for FCrDNS (none is built for a server host yet), the proof verifier (smtpproof.NewVerifier
-// over a pinned KeySet: no release pins one, SMTP-M9-27, SMTP-M9-40), and the dialer-to-sidecar source
-// (question smtp-m9-13-dialer-sidecar). The gate's mail_send and breaker rows answer not loaded (gate.go).
+// and a PTR resolver for FCrDNS (none is built for a server host yet) and the proof verifier
+// (smtpproof.NewVerifier over a pinned KeySet: no release pins one, SMTP-M9-27, SMTP-M9-40). The gate's mail_send
+// and breaker rows answer not loaded (gate.go).
 package main
 
 import (
@@ -107,7 +110,6 @@ type hostDeps struct {
 	Ptr      smtpedgeservice.SmtpPtrResolver
 	Dialer   sidecar.SmtpMxDialer
 	Verifier sidecar.SmtpProofVerifier
-	Dialers  smtpedgeservice.SmtpDialerSource
 	// Makes the block's client. Called again until it answers.
 	NewClients func(ctx context.Context) (hostClients, error)
 	// How the client's ur/smtpedge registration reaches sockets.
@@ -188,7 +190,6 @@ func newSmtpEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps
 	need(deps.Ptr != nil, "a PTR resolver for the sending addresses' FCrDNS")
 	need(deps.Dialer != nil, "the MX dialer")
 	need(deps.Verifier != nil, "the proof verifier (smtpproof.NewVerifier over a pinned KeySet)")
-	need(deps.Dialers != nil, "the dialing client's sidecar (question smtp-m9-13-dialer-sidecar)")
 	need(deps.NewClients != nil && deps.Registrations != nil, "the platform client, api's edge client route on the edge bearer (QD-812)")
 	var store smtpedgeservice.SmtpEdgeStore
 	engineDeps := &smtpedgeservice.SmtpEdgeDeps{
@@ -196,7 +197,6 @@ func newSmtpEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps
 		Resolver: deps.Resolver,
 		Dialer:   deps.Dialer,
 		Ptr:      deps.Ptr,
-		Dialers:  deps.Dialers,
 		Sink:     model.NewAbuseSmtpSink(nil),
 	}
 	if deps.Store != nil {
