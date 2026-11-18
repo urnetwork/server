@@ -10,7 +10,11 @@ package main
 //
 // Year two's per-set overwrite rate: §11.13's year two of 2,000 pushes a second on the five to six sets §19.9 sizes,
 // ~360 pushes a set, each overwriting its head and ~0.9 folded entries, ~700 overwrites a second; a setting. At M10
-// the row runs again with versionless purges at year two's rate, which is EVSB-M10-08's.
+// (-purges, EVSB-M10-08) the row runs again with versionless purges at year two's rate beside the overwrites: slots
+// created and deleted the purge's allowance later (purge_load.go), and its two runs are judged as their own pair.
+//
+// .trash is sampled on a schedule set from the window's start, each sample's timer armed before the load begins, so
+// a run on a fake clock samples at each interval however its goroutines are scheduled.
 
 import (
 	"context"
@@ -50,6 +54,8 @@ type TrashSettings struct {
 	EvidenceDuration time.Duration
 	CleanupListLimit int
 	CleanupInFlight  int
+	// M10's slot purges beside the overwrites; nil runs M3's row.
+	Purges *PurgeLoadSettings
 }
 
 func DefaultTrashSettings() *TrashSettings {
@@ -93,6 +99,9 @@ type TrashMeasurement struct {
 	RawUsageDelta int64            `json:"raw_usage_delta"`
 	InodeDelta    int64            `json:"inode_delta"`
 	Samples       []*TrashSample   `json:"samples"`
+	// M10's run: the purges beside the overwrites.
+	M10    bool             `json:"m10,omitempty"`
+	Purges *PurgeLoadCounts `json:"purges,omitempty"`
 }
 
 // A run's figures per overwrite and its .trash.
@@ -134,15 +143,26 @@ func trashFigures(measurement *TrashMeasurement) *TrashFigures {
 
 // What the trash row's two runs decide: §19.6's MINIO_API_DELETE_CLEANUP_INTERVAL.
 type TrashVerdict struct {
+	M10      bool            `json:"m10"`
 	Runs     []*TrashFigures `json:"runs"`
 	Interval time.Duration   `json:"interval"`
 	Pass     bool            `json:"pass"`
 	Reasons  []string        `json:"reasons"`
 }
 
-// Judges the 5 min and 30 s runs: see the file header.
+// Judges the 5 min and 30 s runs: see the file header. M3's pair and M10's are each a pair of their own.
 func JudgeTrash(measurements []*TrashMeasurement, settings *TrashSettings) *TrashVerdict {
 	verdict := &TrashVerdict{}
+	for _, measurement := range measurements {
+		if measurement.M10 != measurements[0].M10 {
+			verdict.Reasons = append(verdict.Reasons, "M3's runs and M10's are judged apart, each pair alone")
+			return verdict
+		}
+		if measurement.M10 && (measurement.Purges == nil || measurement.Purges.Puts == 0 || 0 < measurement.Purges.Failed) {
+			verdict.Reasons = append(verdict.Reasons, fmt.Sprintf("the %s M10 run's purges did not run whole", measurement.SweepInterval))
+		}
+	}
+	verdict.M10 = 0 < len(measurements) && measurements[0].M10
 	byInterval := map[time.Duration]*TrashFigures{}
 	for _, measurement := range measurements {
 		if measurement.Smoke {
@@ -175,7 +195,7 @@ func JudgeTrash(measurements []*TrashMeasurement, settings *TrashSettings) *Tras
 
 func WriteTrashVerdict(out io.Writer, verdict *TrashVerdict) error {
 	b := &strings.Builder{}
-	fmt.Fprintf(b, "§22.8's trash row: %s\n", map[bool]string{true: "pass", false: "fail"}[verdict.Pass])
+	fmt.Fprintf(b, "§22.8's trash row%s: %s\n", map[bool]string{true: " at M10, with purges", false: ""}[verdict.M10], map[bool]string{true: "pass", false: "fail"}[verdict.Pass])
 	for _, run := range verdict.Runs {
 		fmt.Fprintf(b, "  sweep %-6s %.0f B a drive, %.0f raw bytes and %.3f inodes an overwrite; .trash peak %d B, %d inodes; swept %.0f B/s\n",
 			run.SweepInterval, run.BytesPerOverwrite, run.RawBytesPerOverwrite, run.InodesPerOverwrite, run.PeakTrashByteCount, run.PeakTrashInodeCount, run.SweepBytesPerSecond)
@@ -238,6 +258,7 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 	}
 
 	start := clock.Now()
+	sampleLock := sync.Mutex{}
 	sample := func() {
 		if trash == nil {
 			notes.add("no host stats command: .trash unread")
@@ -248,24 +269,50 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 			notes.add(fmt.Sprintf(".trash unread: %v", err))
 			return
 		}
+		sampleLock.Lock()
+		defer sampleLock.Unlock()
 		reading.Seconds = clock.Now().Sub(start).Seconds()
 		measurement.Samples = append(measurement.Samples, reading)
 	}
-	sampleCtx, stopSampling := context.WithCancel(ctx)
-	samplingDone := make(chan struct{})
 	before := target.read(ctx, notes)
 	sample()
-	go func() {
-		defer close(samplingDone)
-		for {
-			select {
-			case <-sampleCtx.Done():
-				return
-			case <-clock.After(settings.SampleInterval):
-			}
+	// each periodic sample's timer is armed from the start, before the load, and the next armed as it fires
+	samplingStopped := false
+	var stopSample func() bool
+	var arm func(k int)
+	arm = func(k int) {
+		due := start.Add(time.Duration(k) * settings.SampleInterval)
+		// never a timer due already, which a clock may fire on this goroutine while it holds the lock
+		stopSample = clock.AfterFunc(max(due.Sub(clock.Now()), time.Nanosecond), func() {
 			sample()
-		}
+			sampleLock.Lock()
+			defer sampleLock.Unlock()
+			if !samplingStopped {
+				arm(k + 1)
+			}
+		})
+	}
+	func() {
+		sampleLock.Lock()
+		defer sampleLock.Unlock()
+		arm(1)
 	}()
+	stopSampling := func() {
+		sampleLock.Lock()
+		defer sampleLock.Unlock()
+		samplingStopped = true
+		stopSample()
+	}
+	var purges chan *PurgeLoadCounts
+	if settings.Purges != nil {
+		measurement.M10 = true
+		purges = make(chan *PurgeLoadCounts, 1)
+		go func() {
+			purges <- runPurgeLoad(ctx, clock, target.Cluster, false, settings.Purges, settings.Duration, func(n int64) string {
+				return fmt.Sprintf("%su%012d", prefix, n)
+			}, nil, notes)
+		}()
+	}
 	var overwrites atomic.Int64
 	driver := load.NewDriver(&load.DriverSettings{
 		Name:            "trash",
@@ -289,8 +336,10 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 		return nil
 	})
 	report := driver.Run(ctx)
+	if purges != nil {
+		measurement.Purges = <-purges
+	}
 	stopSampling()
-	<-samplingDone
 	after := target.read(ctx, notes)
 	sample()
 	for kind, count := range report.FailureKinds {
@@ -348,8 +397,12 @@ func runTrashMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 	flags.DurationVar(&settings.Duration, "duration", defaults.Duration, "the window")
 	flags.DurationVar(&settings.SampleInterval, "sample", defaults.SampleInterval, "how often .trash is read")
 	flags.Int64Var(&settings.ObjectCount, "objects", defaults.ObjectCount, "the objects overwritten in turn")
+	m10 := flags.Bool("purges", false, "M10's run: slot purges at year two's rate beside the overwrites")
 	if err := flags.Parse(args); err != nil {
 		return false, err
+	}
+	if *m10 {
+		settings.Purges = DefaultSlotPurgeLoadSettings()
 	}
 	if *sweep <= 0 {
 		return false, refuseStart("-sweep must declare the interval the cluster runs with")
@@ -371,6 +424,7 @@ func runTrashMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 		"rate":     fmt.Sprint(settings.OverwritesPerSecond),
 		"duration": settings.Duration.String(),
 		"objects":  fmt.Sprint(settings.ObjectCount),
+		"purges":   fmt.Sprint(*m10),
 	}); err != nil {
 		return false, err
 	}
@@ -423,6 +477,14 @@ func runVerdictMode(ctx context.Context, args []string, stdout io.Writer) (bool,
 				return false, refuseStart("%s: %v", path, err)
 			}
 			settings := DefaultHddSettings()
+			if measurement.M10 {
+				verdict := JudgeHddM10(measurement, settings)
+				pass = pass && verdict.Pass
+				if err := WriteHddM10Verdict(stdout, measurement, verdict); err != nil {
+					return false, err
+				}
+				continue
+			}
 			verdict := JudgeHdd(measurement, settings)
 			pass = pass && verdict.Pass
 			if err := WriteHddVerdict(stdout, measurement, verdict, settings); err != nil {

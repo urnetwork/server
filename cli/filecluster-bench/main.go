@@ -8,6 +8,9 @@
 //	filecluster-bench mix -clusters <file> -block <1024|4096> -monoroot <dir> -fs116 fs116.json -out mix-1k.json
 //	filecluster-bench report -in ops-1k.json -in mix-1k.json -in ops-4k.json -in mix-4k.json -out report.txt -price_table price-table.json
 //	filecluster-bench hdd|hosts|trash ... (hdd.go, hosts.go, trash.go)
+//	filecluster-bench index -clusters <file> -load <name> -monoroot <dir> -out index.json (index.go, M10)
+//	filecluster-bench drop -clusters <file> -capacity <ops> -monoroot <dir> -out drop.json -figures drop.txt (drop.go, M10)
+//	filecluster-bench projection -m2 ops-1k.json -m2 mix-1k.json ... -index index.json -out projection.txt (projection.go, D-TEST-13)
 //
 // -clusters is a vault file's text (file-clusters-<service>.yml) the operator hands it, as filecluster-suite's: the
 // harness reads no vault and prints no secret. fs116 runs FS-116 on the monoroot's sidecar commit and records it;
@@ -51,7 +54,7 @@ import (
 )
 
 // A usage error: exit 2.
-var errUsage = errors.New("usage: filecluster-bench fs116|ops|mix|report|hdd|hosts|trash|verdict|hoststats [flags]")
+var errUsage = errors.New("usage: filecluster-bench fs116|ops|mix|report|hdd|hosts|trash|verdict|hoststats|index|drop|projection [flags]")
 
 // A run that could not start: exit 2.
 type startError struct {
@@ -70,15 +73,18 @@ type benchMode func(ctx context.Context, args []string, stdout io.Writer) (pass 
 
 func benchModes() map[string]benchMode {
 	return map[string]benchMode{
-		"fs116":     runFs116Mode,
-		"ops":       runOpsMode,
-		"mix":       runMixMode,
-		"report":    runReportMode,
-		"hdd":       runHddMode,
-		"hosts":     runHostsMode,
-		"trash":     runTrashMode,
-		"verdict":   runVerdictMode,
-		"hoststats": runHostStatsMode,
+		"fs116":      runFs116Mode,
+		"ops":        runOpsMode,
+		"mix":        runMixMode,
+		"report":     runReportMode,
+		"hdd":        runHddMode,
+		"hosts":      runHostsMode,
+		"trash":      runTrashMode,
+		"verdict":    runVerdictMode,
+		"hoststats":  runHostStatsMode,
+		"index":      runIndexMode,
+		"drop":       runDropMode,
+		"projection": runProjectionMode,
 	}
 }
 
