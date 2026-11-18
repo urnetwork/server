@@ -2262,6 +2262,32 @@ func TestCacheAndSourcePanelsUseActionableQueries(t *testing.T) {
 	}
 }
 
+// Each refusing worker must stay visible beside an available peer. Each
+// source clock and cumulative lookup outcome retains its process identity.
+func TestProviderEgressDashboardShowsEachWorker(t *testing.T) {
+	dashboard := readTestDashboard(t, "signals.json")
+	const selector = `{env="$env",service="taskworker",instance!=""}`
+	want := map[string]string{
+		"urnetwork_stats_provider_egress_refresh_available" + selector:                            "available",
+		"time() - (urnetwork_stats_provider_egress_source_started_seconds" + selector + " > 0)":   "source started age seconds",
+		"time() - (urnetwork_stats_provider_egress_source_completed_seconds" + selector + " > 0)": "source completed age seconds",
+		"urnetwork_stats_provider_egress_cache_lookups_total" + selector:                          "{{outcome}}",
+	}
+	for _, panel := range dashboard.Panels {
+		for _, target := range panel.Targets {
+			if legend, ok := want[target.Expr]; ok {
+				if target.LegendFormat != legend+" {{host}} / {{block}} / {{instance}}" {
+					t.Errorf("worker series %q has ambiguous legend %q", target.Expr, target.LegendFormat)
+				}
+				delete(want, target.Expr)
+			}
+		}
+	}
+	for expression := range want {
+		t.Errorf("missing per-worker query %q", expression)
+	}
+}
+
 // registeredApplicationMetrics inventories prometheus option literals in the
 // production Go sources. The stats collector creates its gauges through
 // small wrappers (newStatsGauge, newStatsGaugeVec), so their string-literal
