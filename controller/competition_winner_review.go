@@ -26,6 +26,9 @@ type CompetitionWinnerReviewState struct {
 }
 
 func winnerReviewWithinCheckpoint(state *CompetitionWinnerReviewState, seal *model.CompetitionEvaluationSeal, checkpoint *model.CompetitionWinnerReviewCheckpoint) bool {
+	if seal == nil {
+		return false
+	}
 	review := state.ApprovedReview
 	if model.CompetitionReviewWithinCheckpointForEpoch(review, checkpoint, seal.Epoch) {
 		return true
@@ -65,7 +68,8 @@ type competitionSupervisorWinnerReviewDriver interface {
 // restart, infrastructure retry or unchanged decision cannot reset its clock.
 func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, lease model.CompetitionSupervisorLease, snapshot *CompetitionSupervisorSnapshot, transition *model.CompetitionSupervisorTransition, now time.Time) (*model.CompetitionSupervisorTransition, string, error, bool) {
 	state := snapshot.WinnerReview
-	if snapshot.Round == nil || snapshot.Seal == nil || state == nil || !model.IsCompetitionWinnerReviewPolicy(state.Policy.WinnerReviewPolicy) || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
+	if snapshot.Round == nil || snapshot.Seal == nil || snapshot.Seal.Epoch != snapshot.Round.Epoch ||
+		state == nil || !model.IsCompetitionWinnerReviewPolicy(state.Policy.WinnerReviewPolicy) || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
 		return transition, "winner_review_blocked", ErrConflict, true
 	}
 	if now.Before(snapshot.Seal.PublicationAt) {
