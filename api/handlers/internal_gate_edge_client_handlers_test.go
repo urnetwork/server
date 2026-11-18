@@ -40,6 +40,8 @@ type edgeClientTestWorld struct {
 	environment string
 	// while set, every sockets token mint fails with it, as an issuer with no svc- key does
 	socketsTokenErr error
+	// while set, every sockets token mint panics with it, as oauth's key loader does with no auth.yml
+	socketsTokenPanic error
 	// the last answer's Retry-After
 	lastRetryAfter string
 }
@@ -78,6 +80,9 @@ func newEdgeClientTestWorld(t *testing.T, networkId server.Id) *edgeClientTestWo
 			return self.environment, nil
 		},
 		MintSocketsToken: func(networkId server.Id, clientId server.Id) (string, time.Time, error) {
+			if self.socketsTokenPanic != nil {
+				panic(self.socketsTokenPanic)
+			}
 			if self.socketsTokenErr != nil {
 				return "", time.Time{}, self.socketsTokenErr
 			}
@@ -298,6 +303,14 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 			t.Fatalf("no sockets token: %d, Retry-After %q", code, world.lastRetryAfter)
 		}
 		world.socketsTokenErr = nil
+		world.socketsTokenPanic = errors.New("resource not found in vault (auth.yml)")
+		if code, _ := world.post(world.edge, admitted); code != http.StatusServiceUnavailable || world.lastRetryAfter != "5" {
+			t.Fatalf("no auth.yml: %d, Retry-After %q", code, world.lastRetryAfter)
+		}
+		world.socketsTokenPanic = nil
+		if code, _ := world.post(world.edge, admitted); code != http.StatusOK {
+			t.Fatalf("a signer back: %d", code)
+		}
 
 		// a removed client is refused, and is minted no sockets token
 		server.Tx(ctx, func(tx server.PgTx) {

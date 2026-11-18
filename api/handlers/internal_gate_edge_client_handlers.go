@@ -21,7 +21,7 @@ package handlers
 // Beside the jwt the answer carries the client's 15-minute service token of audience sockets (QD-1054,
 // oauth.MintEdgeClientSocketsToken), minted only once the jwt's mint has answered the client as urnetwork-edge's
 // active one, so the checks above bound it as they bound the jwt. A process that cannot sign one, with no svc-
-// key, answers 503: an edge block's every call to sockets needs it.
+// key or no usable auth.yml, answers 503: an edge block's every call to sockets needs it.
 //
 // Nothing here logs a bearer, a jwt or a token, and a refusal's log line names the part refused, never a host.
 // Safe for concurrent use.
@@ -276,8 +276,19 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 		self.unavailable(w, reason)
 		return
 	}
-	// only now, for the client the mint answered as urnetwork-edge's active one (QD-1054)
-	socketsToken, socketsTokenExpireTime, err := self.mintSocketsToken(networkId, mint.ClientId)
+	// only now, for the client the mint answered as urnetwork-edge's active one (QD-1054). A process with no usable
+	// auth.yml panics in oauth's key loader, which reads here as no key
+	socketsToken, socketsTokenExpireTime, err := func() (socketsToken string, socketsTokenExpireTime time.Time, returnErr error) {
+		defer func() {
+			if r := recover(); r != nil {
+				if server.IsDoneError(r) {
+					panic(r)
+				}
+				socketsToken, socketsTokenExpireTime, returnErr = "", time.Time{}, fmt.Errorf("the signer failed: %v", r)
+			}
+		}()
+		return self.mintSocketsToken(networkId, mint.ClientId)
+	}()
 	if err == nil && socketsToken == "" {
 		err = errors.New("an empty token")
 	}
