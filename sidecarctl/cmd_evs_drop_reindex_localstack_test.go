@@ -30,6 +30,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest/localstack"
 
 	"github.com/urnetwork/server"
@@ -110,10 +111,13 @@ func evsDropReindexStackClusters(t *testing.T) *server.FileClusters {
 	return clusters
 }
 
-// The binary's own command, default settings and all, on the env WARP_ENV names: a job's missing list file written
-// fresh; a corrupt one refused while the segment cluster's build has not passed the settle cases, the file untouched;
-// and once sidecar.yml names the build the stack's hosts report, the corrupt file deleted and written again with the
-// bytes resolve wrote, a second run rewriting nothing.
+// The binary's own command, default settings and all, on the env WARP_ENV names. With no snap-0, as owner decision
+// 512 gave it: a job's missing list file written fresh from the drop named, taken unchecked. Then with the job's
+// snap-0 on the segment cluster (owner decision 570, QD-1021): a corrupt list file and no drops named, the drops taken
+// from snap-0 and the run refused while the segment cluster's build has not passed the settle cases, the file
+// untouched; once sidecar.yml names the build the stack's hosts report, a drop named otherwise than snap-0 has it
+// refused, the file untouched, then with none named the corrupt file deleted and written again with the bytes resolve
+// wrote, the drop taken from snap-0 printed; and a second run, naming the drop as snap-0 has it, rewriting nothing.
 func TestEvsDropReindexOnTheLocalStack(t *testing.T) {
 	ctx := t.Context()
 	clusters := evsDropReindexStackClusters(t)
@@ -158,10 +162,10 @@ func TestEvsDropReindexOnTheLocalStack(t *testing.T) {
 		}
 		return listBytes
 	}
-	run := func() (int, string, string) {
+	run := func(drops ...string) (int, string, string) {
 		stdout := &bytes.Buffer{}
 		stderr := &bytes.Buffer{}
-		code := sidecarctlCommands.run([]string{"evs", "drop-reindex", sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId), evsDropReindexTuple(drop)}, stdout, stderr)
+		code := sidecarctlCommands.run(append([]string{"evs", "drop-reindex", sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)}, drops...), stdout, stderr)
 		return code, stdout.String(), stderr.String()
 	}
 
@@ -175,16 +179,34 @@ func TestEvsDropReindexOnTheLocalStack(t *testing.T) {
 		}
 	})
 
-	// gone, as a run stopped between its DELETE and its write leaves it: written fresh, which no gate stands before
+	// no snap-0 and no list file: with no drops named there is nothing to take them from
 	code, stdout, stderr := run()
-	if code != 0 || !strings.Contains(stdout, "\nrewritten none\nwritten 0\nstray none\n") {
+	if code != 1 || !strings.Contains(stderr, "name its drops") || stdout != "" {
+		t.Fatalf("no list file, no snap-0 and no drops named: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+
+	// gone, as a run stopped between its DELETE and its write leaves it: written fresh from the drop named, which no
+	// gate stands before and no snap-0 is there to check
+	code, stdout, stderr = run(evsDropReindexTuple(drop))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 1 named, unchecked: the job has no snap-0\nrewritten none\nwritten 0\nstray none\n") {
 		t.Fatalf("a missing file: exited %d, printing %q and %q", code, stdout, stderr)
 	}
 	if !bytes.Equal(readList(), original) {
 		t.Fatal("the list file was written with bytes other than resolve's")
 	}
 
-	// corrupt, on a stock build no sidecar.yml names: refused, the file as it was
+	// the job's snap-0, as the drop job writes it and keeps it, read from here on through DropFiles.Read on MinIO
+	snapBytes := evsservice.EncodeDropCoveredFile(world.repoId, world.jobId, []*evsservice.DropCovered{{
+		DropId: drop.DropId, RefId: drop.RefId, Version: drop.Version, PushId: drop.PushId,
+		Place:  &protocol.EvsPlace{Minute: 29000000, Instance: 1, Seq: 1, Length: 512},
+		SeenMs: world.clock.Now().UnixMilli(),
+	}})
+	if _, err := segment.PutIfNoneMatch(ctx, evsservice.DropFileKey(world.repoId, world.jobId, evsservice.DropFileSnap, 0), snapBytes, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// corrupt, on a stock build no sidecar.yml names, no drops named: the drops are snap-0's and the run is refused at
+	// the DELETE, the file as it was
 	corrupt := bytes.Clone(original)
 	corrupt[len(corrupt)-1] ^= 1
 	if err := segment.Delete(ctx, listKey); err != nil {
@@ -218,15 +240,27 @@ func TestEvsDropReindexOnTheLocalStack(t *testing.T) {
 	popUnsettled()
 	unsettledPopped = true
 	t.Cleanup(server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  file_clusters:\n    %s: {settle_passed_build: %q}\n", segment.ClusterId(), build)))
+	// the drop named at another version than snap-0 gives it: refused, the file as it was
+	otherwise := *drop
+	otherwise.Version = drop.Version - 1
+	code, stdout, stderr = run(evsDropReindexTuple(&otherwise))
+	if code != 1 || !strings.Contains(stderr, "the drops named are not the 1 its snap-0 covers, so nothing was written: the line names with another ref, version or push "+sidecar.EvsKeyId(drop.DropId)) || stdout != "" {
+		t.Fatalf("a drop named otherwise than snap-0's: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	if !bytes.Equal(readList(), corrupt) {
+		t.Fatal("a refused run changed the list file")
+	}
+
+	// none named: snap-0's drop, printed, and the file rewritten
 	code, stdout, stderr = run()
-	if code != 0 || !strings.Contains(stdout, "\nrewritten 0\nwritten none\nstray none\n") {
+	if code != 0 || !strings.Contains(stdout, "\ndrops 1 taken from the job's snap-0, no list file of it reading whole\ndrop "+evsDropReindexTuple(drop)+"\nrewritten 0\nwritten none\nstray none\n") {
 		t.Fatalf("a settled cluster: exited %d, printing %q and %q", code, stdout, stderr)
 	}
 	if !bytes.Equal(readList(), original) {
 		t.Fatal("the list file was written again with bytes other than resolve's")
 	}
-	code, stdout, stderr = run()
-	if code != 0 || !strings.Contains(stdout, "\nrewritten none\nwritten none\n") {
+	code, stdout, stderr = run(evsDropReindexTuple(drop))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 1 named, the ones the job's snap-0 covers\nrewritten none\nwritten none\n") {
 		t.Fatalf("a second run: exited %d, printing %q and %q", code, stdout, stderr)
 	}
 }

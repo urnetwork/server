@@ -6,12 +6,23 @@
 // a DELETE naming the LastModified it read and written again with resolve's bytes. A drop that no longer resolves is
 // an error and nothing is written, and nothing is deleted while the segment cluster has not passed the settle cases.
 //
-// With no drops named, Reindex takes them from the first of the job's list files that reads whole, and with none
-// reading whole it refuses and writes nothing. The operator then names every drop the job covers, each as
-// <drop_id>:<ref_id>:<version>:<push_id>, the four ids a list file's header and the job's snap-0 file hold per drop.
+// With no drops named, Reindex takes them from the first of the job's list files that reads whole. With none reading
+// whole, the command takes them from the job's snap-0 file (dropscan/<repo>/<job>/snap-0000000000 on the segment
+// cluster, read through evsservice.DropFiles.Read), which names the drops the job's resolve wrote the list files for
+// and which the job keeps for the repo's life, as it keeps the list files (owner decision 570, QD-1021); it prints
+// each drop it took, as <drop_id>:<ref_id>:<version>:<push_id>.
+//
+// Drops may still be named, each as <drop_id>:<ref_id>:<version>:<push_id>, and with a snap-0 the named set must be
+// the set it covers: Reindex trusts the drops it is handed, and a set that leaves one of the job's drops out resolves
+// and would be written without that drop's rows, so that once the drop's table entry has left, §11.9's serve would
+// answer a version it removed. A set that differs is refused, writing nothing, with the ids that differ. So is every
+// run that needs a snap-0 which is there and does not read whole, and one whose snap-0 covers no drop. A job with no
+// snap-0, one whose cleanup ran before snap-0 was kept, runs as owner decision 512 gave it: with no list file reading
+// whole and no drops named it refuses, and named drops are taken as named, which the run prints as unchecked.
+//
 // A drop named twice is a usage mistake, since its rows would be listed twice and the files written would not be the
 // ones resolve wrote; so is an id that does not parse, the zero id, and a version that is not a positive decimal.
-// Each named drop must resolve on its ref's history, or Reindex refuses them all.
+// Each drop must resolve on its ref's history, or Reindex refuses them all.
 //
 // It reaches the clusters as taskworker does, through vault's file-clusters-taskworker.yml (server.LoadFileClusters,
 // as taskworker's evs host and the restore frame's ops step load it): that block's MinIO user reaches every cluster
@@ -22,11 +33,12 @@
 // DropSettings, the defaults taskworker's drop job runs under, so the bytes computed are the ones its resolve wrote and
 // the scan reads no faster than a job does.
 //
-// It prints the job's and repo's ids, the sequences rewritten, written where none stood and found stray (past what
-// the drops give, left as they are), and the bytes the scan read: ids and counts only, never a path or a name (I-13).
+// It prints the job's and repo's ids, where the drops came from when a line named them or snap-0 gave them, the
+// sequences rewritten, written where none stood and found stray (past what the drops give, left as they are), and the
+// bytes the scan read: ids and counts only, never a path or a name (I-13).
 // Any error exits 1 with Reindex's words, saying first what the run had already rewritten or written. Running it again
 // is safe: a file holding resolve's bytes is left alone, so a second run rewrites nothing, and a run stopped between a
-// DELETE and its write leaves that sequence missing, which the next run writes fresh, given the drops by name when no
+// DELETE and its write leaves that sequence missing, which the next run writes fresh, from snap-0's drops when no
 // other list file of the job reads whole.
 
 package main
@@ -39,6 +51,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -60,7 +73,7 @@ func init() {
 	registerSidecarctlCommand(&sidecarctlCommand{
 		words:   "evs drop-reindex",
 		usage:   "<repo_id> <job_id> [<drop_id>:<ref_id>:<version>:<push_id>...]",
-		summary: "Write a drop job's list files again after drop_index_corrupt pages, in the env WARP_ENV names: each that fails its trailer or layout, or holds other bytes, is deleted and written again with the bytes the job's resolve wrote. With no drops named they come from the first of the job's list files that reads whole. Safe to run again.",
+		summary: "Write a drop job's list files again after drop_index_corrupt pages, in the env WARP_ENV names: each that fails its trailer or layout, or holds other bytes, is deleted and written again with the bytes the job's resolve wrote. With no drops named they come from the first of the job's list files that reads whole, else from the job's snap-0 file. Drops named are refused unless they are the ones snap-0 covers. Safe to run again.",
 		run:     runEvsDropReindex,
 	})
 }
@@ -128,8 +141,82 @@ func newServerEvsDropReindexer(blobs sidecar.BlobStore, dropSettings *evsservice
 type evsDropReindexJob struct {
 	repoId sidecar.Id
 	jobId  sidecar.Id
-	// as named, in order; nil when the line names none, so Reindex takes them from the job's list files
+	// as named, in order; nil when the line names none, so Reindex takes them from the job's list files, or the run
+	// from its snap-0
 	drops []*evsservice.DropListDrop
+}
+
+// The drops the job's snap-0 covers, as a list file names a drop, in snap-0's order, and whether the job has a snap-0:
+// absent is no error. A snap-0 that fails its trailer or layout, is not this job's, or names a drop twice, which no
+// job writes and whose rows a reindex would list twice, is evsservice.ErrDropFileInvalid.
+func readEvsDropReindexCovered(ctx context.Context, files *evsservice.DropFiles) ([]*evsservice.DropListDrop, bool, error) {
+	file, err := files.Read(ctx, evsservice.DropFileSnap, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if file == nil {
+		return nil, false, nil
+	}
+	coveredDrops := make([]*evsservice.DropListDrop, 0, len(file.Covered))
+	coveredDropIds := map[sidecar.Id]bool{}
+	for _, covered := range file.Covered {
+		if coveredDropIds[covered.DropId] {
+			return nil, true, fmt.Errorf("%w: snap 0 names drop %s twice", evsservice.ErrDropFileInvalid, sidecar.EvsKeyId(covered.DropId))
+		}
+		coveredDropIds[covered.DropId] = true
+		coveredDrops = append(coveredDrops, &evsservice.DropListDrop{DropId: covered.DropId, RefId: covered.RefId, Version: covered.Version, PushId: covered.PushId})
+	}
+	return coveredDrops, true, nil
+}
+
+// How the drops a line names differ from the ones the job's snap-0 covers, as sets, the order named never mattering:
+// "" when they are the same set, else the drop ids snap-0 covers that the line leaves out, the ones the line names
+// that snap-0 does not cover, and the ones named with another ref, version or push than snap-0 gives them, each list
+// ascending. Ids only (I-13).
+func evsDropReindexDropsDifference(namedDrops []*evsservice.DropListDrop, coveredDrops []*evsservice.DropListDrop) string {
+	coveredDropIdDrops := map[sidecar.Id]*evsservice.DropListDrop{}
+	for _, covered := range coveredDrops {
+		coveredDropIdDrops[covered.DropId] = covered
+	}
+	namedDropIds := map[sidecar.Id]bool{}
+	leftOut := []string{}
+	notCovered := []string{}
+	otherwise := []string{}
+	for _, named := range namedDrops {
+		namedDropIds[named.DropId] = true
+		covered, ok := coveredDropIdDrops[named.DropId]
+		switch {
+		case !ok:
+			notCovered = append(notCovered, sidecar.EvsKeyId(named.DropId))
+		case *covered != *named:
+			otherwise = append(otherwise, sidecar.EvsKeyId(named.DropId))
+		}
+	}
+	for _, covered := range coveredDrops {
+		if !namedDropIds[covered.DropId] {
+			leftOut = append(leftOut, sidecar.EvsKeyId(covered.DropId))
+		}
+	}
+	parts := []string{}
+	for _, part := range []struct {
+		what    string
+		dropIds []string
+	}{
+		{what: "it covers and the line leaves out", dropIds: leftOut},
+		{what: "the line names and it does not cover", dropIds: notCovered},
+		{what: "the line names with another ref, version or push", dropIds: otherwise},
+	} {
+		if len(part.dropIds) != 0 {
+			slices.Sort(part.dropIds)
+			parts = append(parts, part.what+" "+strings.Join(part.dropIds, " "))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// A drop as a command line names it and a run prints it.
+func evsDropReindexDropText(drop *evsservice.DropListDrop) string {
+	return fmt.Sprintf("%s:%s:%d:%s", sidecar.EvsKeyId(drop.DropId), sidecar.EvsKeyId(drop.RefId), drop.Version, sidecar.EvsKeyId(drop.PushId))
 }
 
 // `sidecarctl evs drop-reindex`, against the env as server reaches it, ending early on SIGINT or SIGTERM.
@@ -247,6 +334,9 @@ func reindexEvsDropJob(ctx context.Context, job *evsDropReindexJob, settings *ev
 	}
 
 	var result *evsservice.DropReindexResult
+	// where the drops came from when the line named them or snap-0 gave them, and the ones snap-0 gave
+	dropsLine := ""
+	var takenDrops []*evsservice.DropListDrop
 	err := sidecarctlServerCall(func() error {
 		blobs, closeBlobs, err := settings.openBlobs(ctx)
 		if err == nil && blobs == nil {
@@ -277,18 +367,56 @@ func reindexEvsDropJob(ctx context.Context, job *evsDropReindexJob, settings *ev
 		if err != nil {
 			return err
 		}
-		result, err = reindexer.Reindex(ctx, &evsservice.DropReindexRequest{
-			Cluster:        cluster,
-			SegmentCluster: segmentCluster,
-			RepoId:         job.repoId,
-			JobId:          job.jobId,
-			Drops:          job.drops,
-			Pace:           pace,
-		})
-		if err == nil && result == nil {
-			err = errors.New("the reindex answered no result")
+		files := evsservice.NewDropFiles(segmentCluster, job.repoId, job.jobId, settings.dropSettings)
+		reindex := func(drops []*evsservice.DropListDrop) error {
+			reindexed, err := reindexer.Reindex(ctx, &evsservice.DropReindexRequest{
+				Cluster:        cluster,
+				SegmentCluster: segmentCluster,
+				RepoId:         job.repoId,
+				JobId:          job.jobId,
+				Drops:          drops,
+				Pace:           pace,
+			})
+			result = reindexed
+			if err == nil && result == nil {
+				err = errors.New("the reindex answered no result")
+			}
+			return err
 		}
-		return err
+		if job.drops != nil {
+			// named drops are written only as the set snap-0 covers, checked before Reindex reads or writes anything
+			coveredDrops, covers, err := readEvsDropReindexCovered(ctx, files)
+			if err != nil {
+				return fmt.Errorf("its snap-0 does not read, so the drops named cannot be held to the ones it covers and nothing was written; if it stays so, report it: %w", err)
+			}
+			if !covers {
+				dropsLine = fmt.Sprintf("drops %d named, unchecked: the job has no snap-0", len(job.drops))
+				return reindex(job.drops)
+			}
+			if difference := evsDropReindexDropsDifference(job.drops, coveredDrops); difference != "" {
+				return fmt.Errorf("the drops named are not the %d its snap-0 covers, so nothing was written: %s; name none and a run takes the drops it needs itself", len(coveredDrops), difference)
+			}
+			dropsLine = fmt.Sprintf("drops %d named, the ones the job's snap-0 covers", len(job.drops))
+			return reindex(job.drops)
+		}
+		err = reindex(nil)
+		if !errors.Is(err, evsservice.ErrDropReindexNoDrops) {
+			return err
+		}
+		// no list file reads whole, which Reindex found before it wrote anything: the drops are snap-0's
+		coveredDrops, covers, snapErr := readEvsDropReindexCovered(ctx, files)
+		switch {
+		case snapErr != nil:
+			return fmt.Errorf("no list file of it reads whole and its snap-0 does not read, so nothing was written; if it stays so, report it: %w", snapErr)
+		case !covers:
+			// a job cleaned before snap-0 was kept: Reindex's refusal stands, as owner decision 512 has it
+			return err
+		case len(coveredDrops) == 0:
+			return errors.New("no list file of it reads whole and its snap-0 covers no drop, so it has no list file to write and nothing was written: report it")
+		}
+		dropsLine = fmt.Sprintf("drops %d taken from the job's snap-0, no list file of it reading whole", len(coveredDrops))
+		takenDrops = coveredDrops
+		return reindex(coveredDrops)
 	})
 	if err != nil {
 		// what changed before it stopped, so the operator reads the store's state from the error alone
@@ -305,6 +433,12 @@ func reindexEvsDropJob(ctx context.Context, job *evsDropReindexJob, settings *ev
 		return fmt.Errorf("%s stopped: %w", jobLabel, err)
 	}
 	fmt.Fprintf(out, "%s: its list files hold the bytes its drops resolve to\n", jobLabel)
+	if dropsLine != "" {
+		fmt.Fprintf(out, "%s\n", dropsLine)
+	}
+	for _, drop := range takenDrops {
+		fmt.Fprintf(out, "drop %s\n", evsDropReindexDropText(drop))
+	}
 	fmt.Fprintf(out, "rewritten %s\n", sequences(result.Rewritten))
 	fmt.Fprintf(out, "written %s\n", sequences(result.Written))
 	fmt.Fprintf(out, "stray %s\n", sequences(result.Stray))
