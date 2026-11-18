@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
@@ -438,5 +439,44 @@ func TestDnsScopeRecordsAreTheNetworksFunction(t *testing.T) {
 	}
 	if _, err := DnsScopeRecords(&DnsScopeState{Root: root, Apex: apex, Scope: "a.b"}, &ttl); !errors.Is(err, dnsservice.ErrDnsScopeLabelRefused) {
 		t.Errorf("a scope of two labels: %v", err)
+	}
+}
+
+// _spf.<root> lists the sending addresses the host sets beside dns.yml (DNS-M9-02), in address order, and
+// sends from nowhere with none; the SOA takes dns.yml's timers.
+func TestDnsRootSpfFollowsTheSendingAddresses(t *testing.T) {
+	settings := testDnsRootSettings(t, `
+root_records:
+  zone.example: {}
+soa: {refresh_s: 7201, retry_s: 3601, expire_s: 1209601}
+`)
+	spfLine := func() string {
+		t.Helper()
+		sets, err := DnsRootRecords("zone.example.", settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range dnsSystemRecordLines(sets) {
+			if strings.HasPrefix(line, "zone.example. SOA ") && !strings.HasSuffix(line, " 1 7201 3601 1209601 60") {
+				t.Errorf("soa %s", line)
+			}
+			if strings.HasPrefix(line, "_spf.") {
+				return line
+			}
+		}
+		t.Fatal("no _spf")
+		return ""
+	}
+	if got := spfLine(); got != `_spf.zone.example. TXT system "v=spf1 -all"` {
+		t.Errorf("none: %s", got)
+	}
+	if err := settings.SetSendingAddresses([]dnsservice.DnsSendingAddress{
+		{Address: netip.MustParseAddr("192.0.2.11"), Name: "o2.out.report.example"},
+		{Address: netip.MustParseAddr("192.0.2.10"), Name: "o1.out.report.example"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := spfLine(); got != `_spf.zone.example. TXT system "v=spf1 ip4:192.0.2.10 ip4:192.0.2.11 -all"` {
+		t.Errorf("two: %s", got)
 	}
 }

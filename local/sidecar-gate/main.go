@@ -9,10 +9,12 @@
 // catalog.yml (C-18; TEST-M1-11), for the gate's rows, and ops-matrix.yml for
 // §19's ids, runs each row's direct go test on its package, through the
 // private-store wrapper SIDECAR_GATE_STORE_WRAPPER names when the test needs
-// stores, and each row's commands, and runs check-tables and each repo's
-// commit-msg scan. It records the commit set the run saw, repo by repo. Each
-// row reports pass, fail, missing or open: missing means no test exists yet,
-// which is never a pass, so nothing looks finished before it is.
+// stores, under the entry's own timeout where it names one (QD-1058) and the
+// settings' bound where it does not, and each row's commands, and runs
+// check-tables and each repo's commit-msg scan. It records the commit set the
+// run saw, repo by repo. Each row reports pass, fail, missing or open: missing
+// means no test exists yet, which is never a pass, so nothing looks finished
+// before it is.
 //
 // A gate is G0, Mn-in for milestone n's entry review, Mn for its exit review,
 // every for each Gn-out's rows alone, or next. An exit review also runs every
@@ -66,16 +68,33 @@ const gateStoreWrapperVariable = "SIDECAR_GATE_STORE_WRAPPER"
 
 // The tunables of a gate run.
 type gateSettings struct {
-	// The bound on one go test or command.
+	// The bound on one go test, passed as its -timeout, and on one command: long enough for a package's tests on
+	// a loaded host, short enough that a hung test still ends the report. A test entry's own timeout takes its
+	// place for that test alone (QD-1058). Non-positive bounds nothing usable: go test reads 0 as no bound, and a
+	// command could not start.
 	TestTimeout time.Duration
-	// The most of a failing test's message a report carries.
+	// How long past its go test's -timeout the command running it lives before it is killed, so that go test
+	// reports its own timeout, which names the test that hung: a minute. Zero kills the command as that timeout
+	// fires, and the report may lose go test's message; negative kills it sooner.
+	TestTimeoutGrace time.Duration
+	// The most bytes of a failing test's message, or of a command's reason, a report carries.
 	MessageLimit int
+	// How many of a run's last output lines a finding quotes when a test did not build or run, or ended before
+	// it reported, or when a command failed: three, enough for an error and what led to it. Non-positive quotes
+	// none.
+	DetailLineCount int
+	// How many lines before a command's outcome line a finding quotes as its reason: one, the line a stage's
+	// verdict or the assembly's last finding prints there. Non-positive quotes none.
+	ReasonLineCount int
 }
 
 func defaultGateSettings() *gateSettings {
 	return &gateSettings{
-		TestTimeout:  40 * time.Minute,
-		MessageLimit: 400,
+		TestTimeout:      40 * time.Minute,
+		TestTimeoutGrace: time.Minute,
+		MessageLimit:     400,
+		DetailLineCount:  3,
+		ReasonLineCount:  1,
 	}
 }
 
@@ -86,8 +105,45 @@ type gateTest struct {
 	Package string   `yaml:"package"`
 	Names   []string `yaml:"names"`
 	Tags    string   `yaml:"tags"`
-	Stores  bool     `yaml:"stores"`
-	Args    []string `yaml:"args"`
+	// Zero when the entry names none, which runs it under the settings' TestTimeout.
+	Timeout gateTimeout `yaml:"timeout"`
+	Stores  bool        `yaml:"stores"`
+	Args    []string    `yaml:"args"`
+}
+
+// The bound an entry's go test runs under: its own timeout, or the settings' when it names none.
+func (self *gateTest) testTimeout(settings *gateSettings) time.Duration {
+	if 0 < self.Timeout {
+		return time.Duration(self.Timeout)
+	}
+	return settings.TestTimeout
+}
+
+// A test entry's own bound, which takes the place of gateSettings.TestTimeout for that test alone (QD-1058), for a
+// test known to outlast it: §22.4's release fixture, whose make check takes over an hour and grows with the tree,
+// runs under 3h, as run.sh's BUILD_TEST runs it (QD-1056). The entry writes a Go duration with its unit, 3h or 90m.
+// Loading refuses anything else, a bare number, a word, a list, or a duration of zero or less, rather than run the
+// test under a bound nobody wrote. A timeout key with no value is YAML's null, which names none.
+type gateTimeout time.Duration
+
+// Reads an entry's timeout as the type says, or refuses it with its line.
+func (self *gateTimeout) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.ScalarNode {
+		return fmt.Errorf("line %d: a timeout is a duration, such as 3h or 90m, not a list or a map", value.Line)
+	}
+	// a number without its unit says nothing of minutes or seconds, so it is no duration, though Go parses "0"
+	if value.ShortTag() != "!!str" {
+		return fmt.Errorf("line %d: timeout %q is no duration: write it with its unit, such as 3h or 90m", value.Line, value.Value)
+	}
+	duration, err := time.ParseDuration(value.Value)
+	if err != nil {
+		return fmt.Errorf("line %d: timeout %q is no duration: %w", value.Line, value.Value, err)
+	}
+	if duration <= 0 {
+		return fmt.Errorf("line %d: timeout %q bounds nothing: a timeout is longer than zero", value.Line, value.Value)
+	}
+	*self = gateTimeout(duration)
+	return nil
 }
 
 // One non-Go check run in a repo's directory.
@@ -519,7 +575,7 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 			return gateOpen, []string{where + ": the gate registers no migration group, so there is no group to check"}
 		}
 	}
-	key := fmt.Sprintf("%s|%s|%s|%s|%t|%q|%q", test.Repo, test.Dir, test.Package, test.Tags, test.Stores, test.Names, expandGateArgs(test.Args, report))
+	key := fmt.Sprintf("%s|%s|%s|%s|%s|%t|%q|%q", test.Repo, test.Dir, test.Package, test.Tags, test.testTimeout(options.settings), test.Stores, test.Names, expandGateArgs(test.Args, report))
 	if run, ok := report.testRuns[key]; ok {
 		return run.outcome, slices.Clone(run.details)
 	}
@@ -549,7 +605,10 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 	for _, name := range test.Names {
 		quoted = append(quoted, regexp.QuoteMeta(name))
 	}
-	goArgs := []string{"-count=1", "-v", "-timeout", options.settings.TestTimeout.String(), "-run", "^(" + strings.Join(quoted, "|") + ")$"}
+	// the entry's own timeout, or the settings', bounds go test, and the command running it lives the grace past
+	// that, so go test reports its own timeout before the command is killed
+	timeout := test.testTimeout(options.settings)
+	goArgs := []string{"-count=1", "-v", "-timeout", timeout.String(), "-run", "^(" + strings.Join(quoted, "|") + ")$"}
 	if test.Tags != "" {
 		goArgs = append(goArgs, "-tags", test.Tags)
 	}
@@ -558,7 +617,7 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 
 	directory := filepath.Join(options.root, test.Repo, test.Dir)
 	var command *exec.Cmd
-	testCtx, cancel := context.WithTimeout(ctx, options.settings.TestTimeout+time.Minute)
+	testCtx, cancel := context.WithTimeout(ctx, timeout+options.settings.TestTimeoutGrace)
 	defer cancel()
 	if test.Stores {
 		wrapper := gateLookup(options.environ, gateStoreWrapperVariable)
@@ -574,6 +633,9 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 	// lowgo's -trimpath among them, would move the paths tests find their files by
 	command.Env = gateChildEnv(options.environ)
 	output, runErr := command.CombinedOutput()
+	// the run's own bound ended it, not the caller's: a hang, or a test that outlasts its bound, as the
+	// release fixture outlasted the settings' before QD-1058 gave it its own
+	endedAtBound := runErr != nil && testCtx.Err() != nil && ctx.Err() == nil
 
 	verdicts := map[string]string{}
 	for _, match := range regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (\S+)`).FindAllStringSubmatch(string(output), -1) {
@@ -600,14 +662,14 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 		default:
 			if runErr != nil && !strings.Contains(string(output), "=== RUN") {
 				outcomes = append(outcomes, gateFail)
-				details = append(details, fmt.Sprintf("%s %s: did not build or run: %s", where, name, lastLines(string(output), 3)))
+				details = append(details, fmt.Sprintf("%s %s: did not build or run: %s", where, name, lastLines(string(output), options.settings.DetailLineCount)))
 				continue
 			}
 			// a declared test a crash cut off is not one that does not exist
 			switch {
 			case declared[name] && runErr != nil:
 				outcomes = append(outcomes, gateFail)
-				details = append(details, fmt.Sprintf("%s %s: declared, and the run ended before it reported: %s", where, name, lastLines(string(output), 3)))
+				details = append(details, fmt.Sprintf("%s %s: declared, and the run ended before it reported: %s", where, name, lastLines(string(output), options.settings.DetailLineCount)))
 			case declared[name]:
 				outcomes = append(outcomes, gateMissing)
 				details = append(details, fmt.Sprintf("%s %s: declared, but not in this build: its file's build tags are not this entry's", where, name))
@@ -616,6 +678,9 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 				details = append(details, fmt.Sprintf("%s %s: no such test", where, name))
 			}
 		}
+	}
+	if endedAtBound {
+		details = append(details, fmt.Sprintf("%s: the run outlived its bound, %s and the %s grace after it, and was killed", where, timeout, options.settings.TestTimeoutGrace))
 	}
 	return combineOutcomes(outcomes), details
 }
@@ -648,8 +713,11 @@ func lastTestMessages(output string, limit int) map[string]string {
 	return messages
 }
 
-// The last lines of a command's output, for a finding.
+// The last count lines of a command's output, for a finding: none for a count of zero or less.
 func lastLines(output string, count int) string {
+	if count <= 0 {
+		return ""
+	}
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if count < len(lines) {
 		lines = lines[len(lines)-count:]
@@ -700,7 +768,7 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 			outcome = gateFail
 		}
 		detail := where + ": " + outcome
-		if reason := lastLines(string(output[:last[0]]), 1); reason != "" {
+		if reason := lastLines(string(output[:last[0]]), options.settings.ReasonLineCount); reason != "" {
 			reason = strings.TrimPrefix(reason, "- ")
 			if options.settings.MessageLimit < len(reason) {
 				reason = strings.ToValidUTF8(reason[:options.settings.MessageLimit], "") + "..."
@@ -710,7 +778,7 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 		return outcome, []string{detail}
 	}
 	if err != nil {
-		return gateFail, []string{where + ": " + lastLines(string(output), 3)}
+		return gateFail, []string{where + ": " + lastLines(string(output), options.settings.DetailLineCount)}
 	}
 	if match := regexp.MustCompile(`skipped=([0-9]+)`).FindStringSubmatch(string(output)); match != nil {
 		return gateOpen, []string{where + ": passed with " + match[1] + " skipped, so not all shown"}
@@ -751,7 +819,8 @@ func runRepoChecks(ctx context.Context, options *gateOptions) []*gateResult {
 	return results
 }
 
-// One id of the matrix: its tests and commands, then what it waits on.
+// One id of the matrix: its tests and commands, then what it waits on. In -list a command is listed and not run,
+// as a row's is (QD-1082): a matrix command may run a repo's suite or start a container, which a list never does.
 func runMatrixEntry(ctx context.Context, options *gateOptions, report *gateReport, id string, entry *matrixEntry) *gateResult {
 	result := &gateResult{label: id + " " + entry.Title}
 	outcomes := []string{}
@@ -761,6 +830,11 @@ func runMatrixEntry(ctx context.Context, options *gateOptions, report *gateRepor
 		result.details = append(result.details, details...)
 	}
 	for _, command := range entry.Commands {
+		if options.list {
+			outcomes = append(outcomes, gateListed)
+			result.details = append(result.details, command.Repo+"/"+command.Dir+": "+strings.Join(command.Command, " ")+": not run in list mode")
+			continue
+		}
 		outcome, details := runGateCommand(ctx, options, command)
 		outcomes = append(outcomes, outcome)
 		result.details = append(result.details, details...)

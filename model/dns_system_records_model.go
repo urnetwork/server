@@ -38,7 +38,14 @@ package model
 //     @ TXT v=spf1 -all, @ MX 10 to the report host, @ A and AAAA kind edge
 //     when the apex redirects, _dmarc strict with psd=y once company mail has
 //     left, _psl and _spf (reading 16), each from dns.yml's root_records, so
-//     no code names a platform host.
+//     no code names a platform host. _spf lists smtpedge.yml's sending
+//     addresses (M9; DNS-M9-02), which the dns block's host sets beside
+//     dns.yml, and stays v=spf1 -all with none; the same addresses' PTRs are
+//     the edges' reverse zones, which take no row (dnsservice/reverse.go).
+//   - A Team network's delegated _domainkey.<domain> zones (v1, §14.6; plan
+//     reading 17): one delegated row at its label apex naming each apex,
+//     which DnsSetDelegatedZonesInTx writes for the domains SMTP-M9-34 gives
+//     it (dnsservice/delegated.go).
 //
 // A reconcile writes only what differs from the stored rows of the owners and
 // types its set manages, through §12.6's one write path, and writes no
@@ -352,15 +359,18 @@ func DnsRootRecords(root string, settings *dnsservice.DnsSettings) ([]dnsservice
 	for _, ns := range settings.Ns {
 		nsNames = append(nsNames, ns+"."+root)
 	}
+	soa := &settings.Soa
 	sets := []dnsservice.DnsRecordSet{
 		{
 			Owner: root, Type: dns.TypeSOA, Ttl: ttl.Ns, Kind: dnsservice.DnsRecordKindSystem,
 			// the edge answers the root's serial in place of the 1, and no secondary reads the timers
-			Rdata: []string{fmt.Sprintf("%s %s 1 7200 3600 1209600 %d", nsNames[0], rname, ttl.SoaMinimum)},
+			Rdata: []string{fmt.Sprintf("%s %s 1 %d %d %d %d", nsNames[0], rname, soa.RefreshSeconds, soa.RetrySeconds, soa.ExpireSeconds, ttl.SoaMinimum)},
 		},
 		{Owner: root, Type: dns.TypeNS, Ttl: ttl.Ns, Kind: dnsservice.DnsRecordKindSystem, Rdata: nsNames},
 		dnsSystemTxt(root, dnsSpfNone, ttl.MailPolicy),
-		dnsSystemTxt("_spf."+root, dnsSpfNone, ttl.MailPolicy),
+		// the sending addresses smtpedge.yml lists, as the host sets them beside dns.yml (DNS-M9-02),
+		// or v=spf1 -all with none
+		{Owner: "_spf." + root, Type: dns.TypeTXT, Ttl: ttl.MailPolicy, Kind: dnsservice.DnsRecordKindSystem, Rdata: []string{dnsservice.DnsSpfRdata(settings)}},
 	}
 	caa := slices.Clone(records.Caa)
 	if len(caa) == 0 {
@@ -533,4 +543,37 @@ func DnsReconcileRootRecords(ctx context.Context, settings *dnsservice.DnsSettin
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Delegates each domain's _domainkey zone to the network's label zone in root
+// (v1, §14.6, D-SMTP-15; plan reading 17; DNS-M9-02), in the caller's
+// transaction, which must be read committed: the one delegated row at
+// <label>.<root>, written through §12.6's one path, or withdrawn with no
+// domain. One journal write when the set changed and none otherwise; nil when
+// nothing was written. Which domains is SMTP-M9-34's: a Team network's verified
+// ones, each a dotted name of host labels outside every root and reverse zone,
+// which dnsservice.NewDnsDelegatedRow refuses otherwise. Needs MG2 and MG5.
+func DnsSetDelegatedZonesInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, domains []string) (*DnsWriteResult, error) {
+	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
+		return nil, ErrDnsUnlinked
+	}
+	if networkId == (server.Id{}) {
+		return nil, fmt.Errorf("%w: no network", dnsservice.ErrDnsDelegatedRefused)
+	}
+	root = dnsLabelRoot(root)
+	label, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root)
+	if err != nil {
+		return nil, err
+	}
+	apex := label + "." + root
+	desired := []dnsservice.DnsRecordSet{}
+	if len(domains) != 0 {
+		row, err := dnsservice.NewDnsDelegatedRow(dnsZoneSettings(), root, apex, domains)
+		if err != nil {
+			return nil, err
+		}
+		desired = append(desired, *row)
+	}
+	managed := []dnsservice.DnsRecordKey{{Owner: apex, Type: dnsservice.DnsDelegatedType}}
+	return reconcileDnsSystemRowsInTx(ctx, tx, root, networkId, managed, desired)
 }
