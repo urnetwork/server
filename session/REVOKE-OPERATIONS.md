@@ -17,7 +17,7 @@ Session/root-tagged credentials require `exp`. Normal expiry is 30 days; the fle
 - Sessions owned by a client with public or stream provide mode do not count. That is the same rule that keeps provider clients out of the concurrent-client limit.
 - `enforce_session_cap` in the same file ships false. While it is false, no mint is refused for the live limit or the retained-identity limit. Each would-be refusal counts in `urnetwork_session_cap_would_refuse_total{kind,cap}`, by session kind (`signin`, `code`, `client`) and cap (`live`, `retained`).
 - Turning enforcement on is that one config change.
-- Once enforced, a new session over the limit gets 409 `session_limit_reached`, pointing to Settings → Sessions, and counts in `urnetwork_session_cap_refused_total{kind,cap}`.
+- Once enforced, a new session over the limit gets 409 `session_limit_reached`, pointing to Settings → Sessions, and counts in `urnetwork_session_cap_refused_total{kind,cap}`. At the retained-identity limit the code is `session_retention_limit_reached`.
 - Nothing is evicted and no marker is shortened. Existing session refresh remains possible.
 - The retained-identity limit is re-evaluated with the implementation, since frees leave no marker.
 
@@ -43,17 +43,17 @@ Auth-code redemption has a durable, globally unique request ID and immutable pre
 
 ## Bounded maintenance and connections
 
-`MaintainNetworkSessions` is registered in startup, targets and the auth maintenance workload. It runs 32 fixed shards every 30 seconds, reviewing at most 32 networks per task with a five-second outer budget. Shard zero sweeps first, then expires up to 128 terminal receipts, repairs up to 64 outbox entries, and resumes up to 32 operations. Each stage has its own one-second budget; failures do not starve later stages. Optional backlog metrics run last for at most 100ms. Client cleanup is bounded to 128 rows per operation and rechecks SID under row locks, preserving explicit rebinds to a new session. Unfinished operations are not expired. A sampling pass observes every network that has a live session set once every 15 minutes, into the histogram `urnetwork_session_live_per_network`, which has no network labels.
+`MaintainNetworkSessions` is registered in startup, targets and the auth maintenance workload. It runs 32 fixed shards every 30 seconds, reviewing at most 32 networks per task with a five-second outer budget. Shard zero sweeps first, then expires up to 128 terminal receipts, repairs up to 64 outbox entries, and resumes up to 32 operations. Each stage has its own one-second budget; failures do not starve later stages. Optional backlog metrics run last for at most 100ms. Client cleanup is bounded to 128 rows per operation and rechecks SID under row locks, preserving explicit rebinds to a new session. Unfinished operations are not expired. A taskworker sample pass, about every 15 minutes, observes every network that has a live session set once into the histogram `urnetwork_session_live_per_network`, with the live sessions the limit counts. The histogram has no network labels. `urnetwork_session_live_sample_passes_total{outcome}` counts the passes, `complete` or `partial` (cut short by the budget).
 
 Index publication only lowers the next review deadline and updates a revision. Review can raise/remove only when its observed revision still matches. Repair recalculates the network's earliest acceptance/retention deadline. Natural TTLs and list filtering remain correct if an index update is delayed. Normal maintenance does not scan Redis keyspace.
 
 The authentication Redis client has a normal pool, no preflight PING and no hidden command retries. Its total budget is two seconds, shortened by the caller; dial, handshake, pool wait, reads, writes and bounded cluster redirects participate. Optional metadata, hints and metrics cannot turn successful authentication into 401.
 
 **Redis unreachable: accept and alert (decision 3).** This covers session credentials and tagged client credentials, at the API and at connect.
-- A check that cannot reach its Redis keys accepts the credential. It never answers 503 or a credential rejection for that reason.
+- A check that cannot reach its Redis keys, or gets no answer within its short check budget, accepts the credential. It never answers 503 or a credential rejection for that reason, and it does not ask SQL instead.
   - Each such acceptance counts in `urnetwork_session_check_unavailable_total{path,credential}`. A caller that cancelled is not counted.
   - A credential revoked meanwhile keeps working until Redis answers again.
-- A mint that cannot reach Redis issues an untagged credential, as before sessions.
+- A mint that cannot register its session in Redis within its budget issues an untagged credential, as before sessions.
   - So no tagged session exists that nobody can list or revoke.
   - It counts in `urnetwork_session_mint_untagged_total{kind}`.
   - The credential is outside session revocation, but client removal and password reset still end it. It gets its session at its next refresh.
@@ -101,7 +101,7 @@ Monitor bounded-label metrics:
 | `urnetwork_session_cap_would_refuse_total{kind,cap}` | Would-be refusals while `enforce_session_cap` is off. Review the daily count by kind before flipping the switch. |
 | `urnetwork_session_cap_refused_total{kind,cap}` | Refusals at the enforced limit. A rise after the flip is networks at 5,000; a refusal is never an eviction. |
 | `urnetwork_session_freed_on_removal_total{path}` | Client sessions freed by removal. A removal path that frees nothing while it removes session-owning clients leaves sessions counted toward the limit until their horizon. |
-| `urnetwork_session_live_per_network` | Live sessions per network, sampled every 15 minutes. Networks near 5,000 are the ones the enforced limit would refuse. |
+| `urnetwork_session_live_per_network`, `urnetwork_session_live_sample_passes_total{outcome}` | Live sessions per network, sampled about every 15 minutes, and the passes. Networks near 5,000 are the ones the enforced limit would refuse. Partial passes undercount; a stream of them means the pass needs a larger budget. |
 
 Existing auth rejection, compatibility and state-query metrics continue to report common validation. Do not label metrics with network, client, session or operation IDs.
 
