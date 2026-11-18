@@ -35,6 +35,13 @@ const (
 	RetentionTableTlsConnectionDay = "tls_connection_day"
 	// §15's sidecar table (MG7): host keys 30 days after their retirement
 	RetentionTableMailHostKey = "mail_host_key"
+	// §14's sidecar tables (MG5, MG9): reports, aggregate counts and halts past
+	// their 13 months, and DKIM keys 30 days after their selector left DNS
+	// (smtp_retention_model.go)
+	RetentionTableSmtpComplaint  = "smtp_complaint"
+	RetentionTableSmtpDmarcDaily = "smtp_dmarc_daily"
+	RetentionTableSmtpHalt       = "smtp_halt"
+	RetentionTableSmtpDkimKey    = "smtp_dkim_key"
 	// §21's tables (MG5): cases with their actions and appeals 13 months after
 	// the case closes, legal requests 3 years after they close and the access
 	// log 3 years after each read (§21.10)
@@ -66,6 +73,10 @@ var retentionTables = []string{
 	RetentionTableNetworkAclShare,
 	RetentionTableTlsConnectionDay,
 	RetentionTableMailHostKey,
+	RetentionTableSmtpComplaint,
+	RetentionTableSmtpDmarcDaily,
+	RetentionTableSmtpHalt,
+	RetentionTableSmtpDkimKey,
 	RetentionTableAbuseCase,
 	RetentionTableAbuseAction,
 	RetentionTableAbuseAppeal,

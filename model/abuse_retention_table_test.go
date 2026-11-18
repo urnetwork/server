@@ -52,7 +52,10 @@ var retentionSweepHoldLines = []retentionSweepHoldLine{
 	{sweep: "mail_connection_record", row: "mx-2", how: retentionSweepHonors, detail: "its hourly drop keeps a held hour while the hold lives, no copy being registered until ABUSE-M7-01"},
 	{sweep: "smtp_send", row: "smtp-3", how: retentionSweepHonors, detail: "its daily drop keeps a held day while the hold lives, no copy being registered until ABUSE-M9-01"},
 	{sweep: RetentionTableMailHostKey, row: "mx-3", how: retentionSweepHonors, detail: "removeRetiredMailHostKeysSql skips a network with a live part 0"},
-	{sweep: "smtp_complaint, smtp_dmarc_daily", row: "smtp-5", how: retentionSweepGap, detail: "no sweep yet; the one SMTP lands at 13 months reads HeldNetworkIds"},
+	{sweep: RetentionTableSmtpComplaint, row: "smtp-5", how: retentionSweepHonors, detail: "removeExpiredSmtpComplaintsSql and the sealed copies' clearing skip a network with a live part 0"},
+	{sweep: RetentionTableSmtpDmarcDaily, row: "smtp-5", how: retentionSweepHonors, detail: "removeExpiredSmtpDmarcDaysSql skips a network with a live part 0"},
+	{sweep: RetentionTableSmtpHalt, row: "smtp-4", how: retentionSweepHonors, detail: "removeExpiredSmtpHaltsSql skips a network with a live part 0"},
+	{sweep: RetentionTableSmtpDkimKey, row: "smtp-6", how: retentionSweepHonors, detail: "removeExpiredSmtpDkimKeysSql skips a network with a live part 0"},
 
 	// connect-1 (QD-036: connect-1 joins copied_rows)
 	{sweep: "contract", row: "connect-1", how: retentionSweepGap, detail: "the weekly drops and the horizon reaper call AbuseHoldCopyPending, and connect-1's tables register a copy by client, on QD-036; neither is built"},
@@ -145,6 +148,11 @@ func TestEveryRetentionSweepHonorsHolds(t *testing.T) {
 	for name, sql := range map[string]string{
 		RetentionTableTlsConnectionDay: removeExpiredTlsConnectionDaysSql,
 		RetentionTableMailHostKey:      removeRetiredMailHostKeysSql,
+		RetentionTableSmtpComplaint:    removeExpiredSmtpComplaintsSql,
+		RetentionTableSmtpDmarcDaily:   removeExpiredSmtpDmarcDaysSql,
+		RetentionTableSmtpHalt:         removeExpiredSmtpHaltsSql,
+		RetentionTableSmtpDkimKey:      removeExpiredSmtpDkimKeysSql,
+		"smtp_complaint sealed copies": clearExpiredSmtpSealedReportsSql,
 		RetentionTableAbuseCase:        removeExpiredAbuseCasesSql,
 		RetentionTableLegalRequest:     removeExpiredLegalRequestsSql,
 		RetentionTableAbuseAccessLog:   removeExpiredAbuseAccessLogSql,

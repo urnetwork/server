@@ -1091,9 +1091,10 @@ func sidecarMg5SmtpMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX smtp_dmarc_daily_report ON smtp_dmarc_daily (reporter, report_id)
 		`),
-		// the 13-month retention cursor
+		// the 13-month retention cursor, and the RUA check's pages of one day's
+		// networks in id order (SMTP-M9-17)
 		newSqlMigration(`
-			CREATE INDEX smtp_dmarc_daily_day ON smtp_dmarc_daily (day)
+			CREATE INDEX smtp_dmarc_daily_day ON smtp_dmarc_daily (day, network_id)
 		`),
 	}
 }
