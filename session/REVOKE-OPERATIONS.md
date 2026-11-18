@@ -37,8 +37,9 @@ Operations move from prepared to enforced to complete. Receipt recovery precedes
 Auth-code redemption has a durable, globally unique request ID and immutable prepared claims before consuming a use. A different code with the same ID gets generic `409 request_id_conflict`. A completed redemption is an independent session and can replay after its creator is revoked. An unredeemed code still depends on its origin. Hosted NULL migration chooses one durable SID/lineage under a row lock; restarts reuse it. A hosted producer also checks durable operation targets before renewing a stored binding: unfinished cleanup cannot revive a revoked SID after Redis retention expires, and an applicable prepared operation gives unavailable until recovery resolves it. This is a producer check, not a SQL session lookup on every request.
 
 **Reset scope (decision 4).**
-- A password reset, sign-out-all and revoke-other-sessions retire sign-in sessions, auth-code sessions and per-client legacy lineages.
-- They skip hosted-proxy sessions. A hosted proxy keeps working, and keeps minting, after a reset.
+- A password reset, sign-out-all and revoke-other-sessions retire every session except hosted-proxy sessions.
+- That includes sign-in and auth-code sessions, API-key clients' and adopted devices' sessions, and per-client legacy lineages. An API-key client is minted again with the key.
+- Hosted-proxy sessions are skipped. A hosted proxy keeps working, and keeps minting, after a reset.
 - A hosted proxy stops only when it is deleted or its own session is revoked. It never bootstraps again after its own session is revoked.
 
 ## Bounded maintenance and connections
@@ -83,7 +84,7 @@ Redis stays as deployed (owner, 2026-11-18): no replicas and no persistence work
 
 Before enablement, verify keyspace event configuration for optional hints, index validity, scheduled shard execution and outbox recovery. Redis remains a denylist: losing acknowledged markers can restore acceptance. SQL recovers application crashes and unfinished cleanup; it is not a durable per-request allowlist. A status read detecting a missing retained receipt and missing expected marker reports unavailable and increments `urnetwork_session_authority_loss_total`. Treat any increase as an authority incident, stop new minting/management writes, investigate and restore the known authority state. Do not disable required marker reads as an availability workaround or claim success from a historical SQL result alone.
 
-Every registered mint samples Redis TIME. More than 15 seconds of disagreement per server, or backwards local time, refuses minting; the per-server bound permits at most 30 seconds fleet spread. Alert before 10 seconds and immediately on any refusal. Observe all API/connect/worker hosts and Redis with the deployment's clock monitoring. The five-minute retention margin is not permission to ignore a broken clock; correct the clocks before resuming mints.
+Every registered mint samples Redis TIME. More than 15 seconds of disagreement per server, or backwards local time, refuses minting; the per-server bound permits at most 30 seconds fleet spread. Alert before 10 seconds and immediately on any refusal: SessionClockDisagreement warns above 10 seconds on a host for 2 minutes, and SessionClockRefusals pages on any refusal. Both see only hosts that mint. Observe all API/connect/worker hosts and Redis with the deployment's clock monitoring; host clock offsets are not collected yet. The five-minute retention margin is not permission to ignore a broken clock; correct the clocks before resuming mints.
 
 Monitor bounded-label metrics:
 
@@ -91,11 +92,13 @@ Monitor bounded-label metrics:
 |---|---|
 | `urnetwork_session_storage_seconds{operation,outcome}` | Track p95/p99 and unavailable rate; investigate checks approaching the two-second budget. |
 | `urnetwork_session_capacity_refusals_total{capacity}` | Investigate live/retained exhaustion; do not evict old accepted entries. |
-| `urnetwork_session_clock_disagreement_seconds`, `urnetwork_session_clock_refusals_total` | Alert at the clock thresholds above. |
-| `urnetwork_session_journal_pending{state}`, `urnetwork_session_journal_oldest_seconds{state}` | Alert on prepared/enforced/index work older than two maintenance intervals and sustained growth. Keep unfinished rows for recovery. |
+| `urnetwork_session_clock_disagreement_seconds`, `urnetwork_session_clock_refusals_total` | SessionClockDisagreement warns above 10 seconds for 2 minutes; SessionClockRefusals pages on any refusal. Correct the clock first. |
+| `urnetwork_session_journal_pending{state}`, `urnetwork_session_journal_oldest_seconds{state}` | SessionJournalStuck warns on work older than two maintenance intervals (60 seconds) that is still aging, for 2 minutes. SessionJournalStuckLong pages on a prepared or enforced revocation older than 15 minutes. Only the shard-0 taskworker refreshes these gauges, and the others keep stale values, so the alerts count only rising ages; a growing backlog shows as aging work. Keep unfinished rows for recovery. |
 | `urnetwork_session_lease_retirements_total{cause}` | Separate dependency-driven retirement from confirmed revocation/expiry. |
 | `urnetwork_session_observation_drops_total` | Presentation freshness degradation; do not weaken auth to repair it. |
-| `urnetwork_session_authority_loss_total` | Any increase requires authority-state incident investigation. |
+| `urnetwork_session_authority_loss_total` | Any increase requires authority-state incident investigation. SessionAuthorityLoss pages on it. |
+| `urnetwork_session_revocation_record_writes_total{kind,outcome}` | SessionRevocationWritesFailing warns when more than 1% of a service's revocation writes fail for 5 minutes (projections left out). Those changes commit only when a retry reaches Redis. |
+| `urnetwork_taskworker_executions_total{task="work.MaintainNetworkSessions"}` | About 62 successful runs a minute. SessionMaintenanceStalled warns under 32 for 10 minutes; SessionMaintenanceFailing warns over 1 failure a minute for 10 minutes. One lost shard is below what the rate shows; the monitor's task checks see it. |
 | `urnetwork_session_check_unavailable_total{path,credential}` | Credentials accepted unchecked (decision 3). SessionChecksUnchecked warns above 5% of a service's record checks held for 10 minutes; SessionChecksUncheckedSevere pages above 25% held for 5 minutes. Find the unreachable node: Redis pool timeouts, the logged pool dial failures, RedisNodeDown. |
 | `urnetwork_session_mint_untagged_total{kind}` | Mints issued untagged (decision 3). SessionMintsUntagged warns above 1% of a service's mints held for 10 minutes. The credentials heal at their next refresh; fix Redis. |
 | `urnetwork_session_cap_would_refuse_total{kind,cap}` | Would-be refusals while `enforce_session_cap` is off. Review the daily count by kind before flipping the switch. |
@@ -105,7 +108,7 @@ Monitor bounded-label metrics:
 
 Existing auth rejection, compatibility and state-query metrics continue to report common validation. Do not label metrics with network, client, session or operation IDs.
 
-These are charted on the server signals dashboard, in the "sessions and credential state" row and the session rollout row after it. The alert rules are in warp `grafana/alerting/session-auth.yml`; §15's metrics table gives each metric's meaning.
+These are charted on the server signals dashboard, in the "sessions and credential state" row and the session rollout row after it. The alert rules are in warp `grafana/alerting/session-auth.yml` (unchecked acceptances and untagged mints) and `grafana/alerting/session-authority.yml` (the rest); §15's metrics table gives each metric's meaning.
 
 Legacy network JWTs remain a deliberate coverage limit. Upgrade derives a documented lineage ID, not a historical sign-in identity; old auth-code lineages may group. Original untagged tokens remain valid under their original compatibility rules and may derive the lineage again after its finite marker lifetime. Responses therefore say `legacy_coverage: partial`. Account credential rotation remains the account-wide fallback.
 

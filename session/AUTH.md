@@ -194,7 +194,8 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 ## 6. Revocation
 
 - **Password reset.** Every credential whose `create_time` is before the reset is rejected: the network token and every client token minted from it.
-  - A password reset, sign-out-all and "sign out other sessions" retire sign-in sessions, auth-code sessions and per-client legacy lineages, but not hosted-proxy sessions (owner decision 4, 2026-11-18).
+  - A password reset, sign-out-all and "sign out other sessions" retire every session except hosted-proxy sessions (owner decision 4, 2026-11-18).
+  - That includes sign-in and auth-code sessions, API-key clients' and adopted devices' sessions, and per-client legacy lineages. An API-key client is minted again with the key.
   - A hosted proxy stops only when it is deleted or its own session is revoked.
 - **Removing a client.** Its tokens stop working at once. For untagged tokens, so do its descendants'. Connections close at the next answered lease recheck (§3), within about 90 s.
   - When session creation is on, a removal also frees the sessions the client alone owns: a hosted proxy's, an API-key client's, an adopted device's, or a per-client legacy lineage.
@@ -263,7 +264,7 @@ After the flip, a network token that expired unrenewed needs a new sign-in.
 | Client creation and own-client limits | `model/network_client_model.go` | `model/network_client_authz_test.go` |
 | Refresh routes | `controller/auth_controller.go` | `api/auth_refresh_db_test.go` |
 | Connect transport auth and leases | `connect/transport.go`, `connect/transport_authentication.go`, `session/authorization_lease.go` | `connect/*_test.go` |
-| Session and credential-check panels and alerts | `grafana/dashboards/signals.json` (the sessions rows), warp `grafana/alerting/session-auth.yml` | `grafana/session_rollout_dashboard_test.go`, `grafana/revocation_record_dashboard_test.go`, warp `grafana/session_auth_alerts_test.go` |
+| Session and credential-check panels and alerts | `grafana/dashboards/signals.json` (the sessions rows), warp `grafana/alerting/session-auth.yml` and `session-authority.yml` | `grafana/session_rollout_dashboard_test.go`, `grafana/session_authority_dashboard_test.go`, `grafana/revocation_record_dashboard_test.go`, warp `grafana/session_auth_alerts_test.go` and `session_authority_alerts_test.go` |
 | SSO id tokens | `session/sso_jwt.go`, `session/google_jwt.go`, `session/apple_jwt.go` | `session/*_jwt_test.go` |
 | No cookies: dropped from requests and responses | `session/cookies.go`, `router/router.go`, `router/metrics.go` | `session/cookies_test.go`, `router/router_cookies_test.go` |
 | Lag guests: the claim, the route gate, the connect refusal, no grants | `session/by_jwt.go`, `router/lag_guest_credential.go`, `api/route_authz.go` (`lagGuestRoutes`), `connect/transport_authentication.go`, `controller/lag_session_controller.go`, `model/lag_guest_model.go` | `session/lag_guest_jwt_test.go`, `router/lag_guest_credential_test.go`, `api/lag_route_test.go`, `connect/transport_lag_guest_test.go`, `model/lag_grant_test.go` |
