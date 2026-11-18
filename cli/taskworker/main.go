@@ -30,7 +30,7 @@ func main() {
 	usage := `BringYour task worker.
 
 Usage:
-  taskworker [--port=<port>] [--count=<count>] [--batch_size=<batch_size>]
+  taskworker [--port=<port>] [--count=<count>] [--batch_size=<batch_size>] [--feed_dir=<feed_dir>]
   taskworker init-tasks
   taskworker -h | --help
   taskworker --version
@@ -40,7 +40,8 @@ Options:
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].
   -n --count=<count>  Number of worker processes [default: 8].
-  -b --batch_size=<batch_size>  Batch size [default: 4].`
+  -b --batch_size=<batch_size>  Batch size [default: 4].
+  --feed_dir=<feed_dir>  §21.5's breakers: this host's copy of the IP listing feed's mirror directory; none leaves the listing unknown.`
 
 	opts, err := (&docopt.Parser{HelpHandler: logs.DocoptHelp}).ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -86,6 +87,12 @@ Options:
 	// §21.8's notice pager: the monitor's webhook from monitor.yml under a
 	// retrying sink (QD-1070); none built leaves every notice's page owed
 	controller.InstallAbuseNoticePager()
+	// §21.5's breakers' outside measures (QD-1069): <root> and the sending
+	// addresses from smtpedge.yml, Postmaster Tools and SNDS from their vault
+	// files, and the listing over this host's copy of the feed mirror; each
+	// missing one stays unknown and holds the breakers
+	feedDir, _ := opts.String("--feed_dir")
+	work.InstallMailBreakerSources(&work.MailBreakerSourcesArgs{FeedDirectory: feedDir})
 	// §21.7's standing and network_verified for the reports, record writes and
 	// grant activations this process runs (ABUSE-M5-07)
 	controller.InstallAbuseStanding(ctx)

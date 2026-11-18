@@ -10,9 +10,12 @@ import (
 
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/sidecar/smtpedgeservice"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/mxedgehost"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/task"
 )
@@ -40,16 +43,16 @@ import (
 // fails part way leaves rows the next pass reads and finishes from, since the
 // state is the rows. A sample with nothing known changes nothing either.
 //
-// The sample is ABUSE-M9-03's model.GatherMailBreakerMeasures. A process that
-// installs no outside sources (SetMailBreakerMeasurer with
-// MailBreakerMeasurerOfSources) samples the store's complaint rate alone, with
-// Postmaster Tools, SNDS and the listing unknown: the complaint rate trips a
-// level, and no level clears by machine, since a clean sample needs every
-// measure known. No process installs them yet: their credentials, §2.8 rows
-// and the mirror's path to taskworker are question
-// abuse-m5-10-breaker-measure-credentials. The job is scheduled only in a
-// binary that links MG5, for the rows, and MG9, the milestone the shared
-// sending addresses arrive with.
+// The sample is ABUSE-M9-03's model.GatherMailBreakerMeasures. taskworker
+// installs the outside sources at start (InstallMailBreakerSources; QD-1069):
+// <root> and the shared sending addresses from config's smtpedge.yml, Postmaster
+// Tools on vault's abuse-postmaster-tools.yml, SNDS on vault's abuse-snds.yml,
+// and the listing over a copy of the feed mirror on taskworker's host. A source
+// that is not there answers unknown, and a process that installs none samples
+// the store's complaint rate alone: the complaint rate trips a level, and no
+// level clears by machine, since a clean sample needs every measure known. The
+// job is scheduled only in a binary that links MG5, for the rows, and MG9, the
+// milestone the shared sending addresses arrive with.
 
 // Gathers one sample of the breakers' measures at now. It answers unknown,
 // never zero, for what it cannot measure.
@@ -94,6 +97,90 @@ func currentMailBreakerMeasurer() MailBreakerMeasurer {
 	abuseBreakerDeps.stateLock.Lock()
 	defer abuseBreakerDeps.stateLock.Unlock()
 	return abuseBreakerDeps.measurer
+}
+
+// The config file naming <root> and the shared sending addresses, smtpedge's own.
+const mailBreakerSendingFileName = "smtpedge.yml"
+
+// What InstallMailBreakerSources reads beside config and the vault.
+type MailBreakerSourcesArgs struct {
+	// This host's copy of the listing feed's mirror, which the feed's pull keeps
+	// beside mxedge's (QD-1069). Empty leaves the listing unknown.
+	FeedDirectory string
+}
+
+// The sources one process's files give, each nil that is not there, and why each
+// missing one is missing, in fixed words.
+func mailBreakerSourcesOfFiles(args *MailBreakerSourcesArgs) (sources *model.MailBreakerSources, missing []string) {
+	sources = &model.MailBreakerSources{}
+	read := func(resolver *server.Resolver, name string) ([]byte, bool) {
+		resource, err := resolver.SimpleResource(name)
+		if err != nil {
+			return nil, false
+		}
+		data, err := resource.BytesE()
+		return data, err == nil
+	}
+
+	if data, ok := read(server.Config, mailBreakerSendingFileName); !ok {
+		missing = append(missing, mailBreakerSendingFileName+" is not there, so no root and no sending address")
+	} else if smtpSettings, err := smtpedgeservice.LoadSmtpEdgeSettings(data); err != nil {
+		missing = append(missing, mailBreakerSendingFileName+" does not load, so no root and no sending address")
+	} else {
+		sources.Root = smtpSettings.Root
+		for _, sendingAddress := range smtpSettings.SendingAddresses {
+			sources.SendingAddresses = append(sources.SendingAddresses, sendingAddress.Address)
+		}
+	}
+
+	if data, ok := read(server.Vault, server.PostmasterToolsCredentialFileName); !ok {
+		missing = append(missing, server.PostmasterToolsCredentialFileName+" is not mounted, so the Postmaster rate is unknown")
+	} else if credential, err := server.ParsePostmasterToolsCredential(data); err != nil {
+		missing = append(missing, err.Error())
+	} else {
+		settings := server.DefaultPostmasterToolsClientSettings()
+		sources.Postmaster = server.NewPostmasterToolsClient(&server.PostmasterToolsClientArgs{
+			TokenSource: server.NewPostmasterToolsTokenSource(credential, nil, settings, nil),
+			Settings:    settings,
+		})
+	}
+
+	if data, ok := read(server.Vault, server.SndsCredentialFileName); !ok {
+		missing = append(missing, server.SndsCredentialFileName+" is not mounted, so SNDS's colors are unknown")
+	} else if key, err := server.ParseSndsCredential(data); err != nil {
+		missing = append(missing, err.Error())
+	} else {
+		sources.Snds = server.NewSndsClient(&server.SndsClientArgs{Key: key})
+	}
+
+	if args == nil || args.FeedDirectory == "" {
+		missing = append(missing, "no feed mirror directory, so the listing is unknown")
+	} else {
+		mirrorSettings := mxedgehost.DefaultFeedMirrorSettings()
+		mirrorSettings.Directory = args.FeedDirectory
+		if mirror, err := mxedgehost.NewFeedMirrorSource(mirrorSettings); err != nil {
+			missing = append(missing, "the feed mirror does not open, so the listing is unknown")
+		} else {
+			sources.Listing = server.NewSpamhausListingClient(mirror, nil)
+		}
+	}
+	return sources, missing
+}
+
+// Installs §21.5's outside measures in this process from its files (see the file
+// header), in a binary that links MG5 and MG9: taskworker's startup. Each source
+// that is not there is left out and said, its measure staying unknown, which
+// holds the breakers; the store's complaint rate is sampled whatever is
+// installed. Returns what puts the previous measurer back.
+func InstallMailBreakerSources(args *MailBreakerSourcesArgs) (restore func()) {
+	if !abuseBreakersLinked() {
+		return func() {}
+	}
+	sources, missing := mailBreakerSourcesOfFiles(args)
+	for _, reason := range missing {
+		glog.Errorf("[abuse]the mail breakers' measures: %s\n", reason)
+	}
+	return SetMailBreakerMeasurer(MailBreakerMeasurerOfSources(sources))
 }
 
 // The reasons a machine's lift of a breaker row records: fixed words.

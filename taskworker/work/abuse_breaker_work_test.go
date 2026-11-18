@@ -6,7 +6,10 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -684,4 +687,61 @@ func (self *testBreakerListing) ListedAddresses(ctx context.Context, addresses [
 
 func (self *testBreakerListing) RedAddresses(ctx context.Context, addresses []netip.Addr) ([]netip.Addr, bool) {
 	return []netip.Addr{}, true
+}
+
+// QD-1069's install from a taskworker's files: with none, every outside source is missing and each is said, so a
+// sample reads the store's complaint rate alone; with smtpedge.yml, both credentials and the feed mirror's copy,
+// every source is built, over <root> and the shared sending addresses alone. Nothing here asks a built source
+// anything, since the clients over the vault's credentials would reach their services.
+func TestMailBreakerSourcesOfFiles(t *testing.T) {
+	sources, missing := mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{})
+	if sources.Root != "" || len(sources.SendingAddresses) != 0 || sources.Postmaster != nil || sources.Snds != nil || sources.Listing != nil || len(missing) != 4 {
+		t.Fatalf("with no files: %+v, missing %q", sources, missing)
+	}
+
+	defer server.Config.PushSimpleResource("smtpedge.yml", []byte(
+		"root: root.example\nreport_host: rpt.report.example\nhelo_domain: out.report.example\n"+
+			"sending_addresses:\n  - {address: 192.0.2.10, helo: o1.out.report.example}\n  - {address: 192.0.2.11, helo: o2.out.report.example}\n",
+	))()
+	defer server.Vault.PushSimpleResource(server.PostmasterToolsCredentialFileName, []byte(
+		"client_id: test-client\nclient_secret: test-secret-value\nrefresh_token: test-refresh-value\n",
+	))()
+	defer server.Vault.PushSimpleResource(server.SndsCredentialFileName, []byte("key: test-key-value\n"))()
+	sources, missing = mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{FeedDirectory: "../../testdata/mail_measures/mirror"})
+	if len(missing) != 0 {
+		t.Fatalf("with every file: missing %q", missing)
+	}
+	if sources.Root != "root.example" || !slices.Equal(sources.SendingAddresses, []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}) {
+		t.Fatalf("the root and addresses: %q, %v", sources.Root, sources.SendingAddresses)
+	}
+	if sources.Postmaster == nil || sources.Snds == nil || sources.Listing == nil {
+		t.Fatalf("a source was not built: %+v", sources)
+	}
+	// the listing over the mirror's copy reads the fixture's zones, current at its oldest file's time: 192.0.2.11 is
+	// on SBL
+	paths, err := filepath.Glob("../../testdata/mail_measures/mirror/*.rbldnsd")
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no mirror fixture: %v", err)
+	}
+	var copyTime time.Time
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if copyTime.IsZero() || info.ModTime().Before(copyTime) {
+			copyTime = info.ModTime()
+		}
+	}
+	listed, known := sources.Listing.ListedAddresses(context.Background(), sources.SendingAddresses, copyTime.Add(time.Minute))
+	if !known || !slices.Equal(listed, []netip.Addr{netip.MustParseAddr("192.0.2.11")}) {
+		t.Fatalf("the mirror's copy lists %v, known %t", listed, known)
+	}
+
+	// a credential that is not usable is said, its source left out, and the error holds no value
+	defer server.Vault.PushSimpleResource(server.SndsCredentialFileName, []byte("key: \"\"\n"))()
+	sources, missing = mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{FeedDirectory: "../../testdata/mail_measures/mirror"})
+	if sources.Snds != nil || len(missing) != 1 || strings.Contains(missing[0], "test-key-value") {
+		t.Fatalf("an empty key: %+v, missing %q", sources, missing)
+	}
 }
