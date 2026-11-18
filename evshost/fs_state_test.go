@@ -46,8 +46,8 @@ func TestFs62LeaseHolderResyncOnT3(t *testing.T) {
 	runClauseOnT3(t, "FS-62", "lease holder resync", fault.Fs62LeaseHolderResync)
 }
 
-func TestFs4ThreeSourcesOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-4", "three sources", fault.Fs4ThreeSources)
+func TestFs4TwoSourcesOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-4", "two sources", fault.Fs4TwoSources)
 }
 
 func TestFs6OnT3(t *testing.T) {

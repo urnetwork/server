@@ -247,11 +247,11 @@ gates:
       tests:
         - {repo: sidecar, package: ./protocol, names: [TestEvsReservesOnlyTheListedNumbers, TestEvsDeclaresTheListedFields, TestEvsDeclaresTheListedValues, TestEvsListHoldsTheDecidedReservations, TestPhaseReservations]}
         - {repo: sidecar, package: ./sidecartest, names: [TestEvsFormat2ConstructsRefusedAtAFormat1Evs, TestEvsFormat2ConstructsAtAFormat1Reader, TestEvsFormat1EvsServesAFormat2RepoAndTakesNoPush, TestEvsFormat2WritesRefusedAtAFormat1Writer, TestEvsFormat2BatchLeftByAFormat1Evacuator, TestEvsSlotRuleRefusedAtAFormat1Evs, TestEvsFormat2RefusalVectorsCoverTheReservations]}
-    - item: acl.proto's RepoPrefixRules (SignedType 0x1111) and AclRepo.prefix_rules reserved, which code from M2 verifies and folds and M6 enforces (DESIGN-DETAILS 16.8's line for D-PHASE-9; QD-212; ACL-M2-18)
+    - item: 'acl.proto''s RepoPrefixRules (SignedType 0x1111) and AclRepo.prefix_rules reserved, their numbers kept while the client-checked prefix rules wait for Later (QD-1032): at launch every log refuses a RepoPrefixRules at its position and folds no set, a base''s tail included (DESIGN-DETAILS 16.8''s line for D-PHASE-9; QD-212; ACL-M2-18)'
       tests:
         - {repo: sidecar, package: ./protocol, names: [TestPhaseReservations]}
         - {repo: sidecar, package: ./protocol/bridge, names: [TestSignedTypeNumbersStable]}
-        - {repo: sidecar, package: ., names: [TestAclRepoPrefixRulesSigners, TestAclRepoPrefixRulesTakesOnlyALiveGeneralRepo, TestAclRepoPrefixRulesBodyByteCounts, TestAclRepoPrefixRulesStopsAtSetMaxCount, TestFoldAclReposAppendsAPrefixRulesRowPerSet, TestAclRepoPrefixRulesMovesNoRightAndReappliesAlike, TestAclRepoPrefixRulesRowsAgreeAcrossBases, TestAclPrefixRulesRowsAreBaseIndependentOverGeneratedLogs, TestAclRowsCheckLimitsCountsThePrefixRuleRows]}
+        - {repo: sidecar, package: ., names: [TestAclPrefixRulesAreDarkInTheLaunchSettings, TestConfigLogRefusesRepoPrefixRulesAtLaunch, TestConfigLogFoldsNoSetFromABasesTailAtLaunch]}
     - item: '§23.6''s M2 design closure: the head object and its pins; generation serialization; the delta-prefix commitment; the recovery veto; ref witnesses; path epochs; the git model with git-mode tip CAS; placement; the config leaf rule; IndexerSet; the ephemeral ceiling; deposit-only principals and the depositor rule; shred and restore; staged versions; orphans; the path-directory bound; format 2''s reserved numbers and format 1''s refusal of them; the directory kind, autogroup:dst-owner and EvsShare.expires; refusal records; the write budget''s accounts, wallet and P0 reports; the store''s deadline and settle rules; Delegation key drops and ends; key deliveries'' identity and authority, ReaderKey validity and gkm''s route scopes; the presence countersignature; usage batches, relayed reservations, quota maintenance; Q-CTX-4, Q-KEYS-11, Q-EVS-6, Q-OPS-2, Q-EVS-24'
       external: 'people: the Gn-in review reads and signs the closure (§23.8)'
     - item: the changes since G0 and §22's exit-test plan for M2 reviewed (§23.8's Gn-in)
@@ -275,7 +275,7 @@ gates:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs4OnT3]}
     - row: FS-5
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs5OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs5OnT3]}
     - row: FS-6
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6]}
@@ -1034,10 +1034,10 @@ gates:
       case: rollback
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Rollback]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs72RollbackOnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72RollbackOnT3]}
     - row: FS-73
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs73OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs73OnT3]}
       store_clock: true
     - row: FS-74
       tests:

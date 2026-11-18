@@ -49247,12 +49247,17 @@ Probe: `filecluster-wear`
 
 Every 5 min, from Mimir: the busiest drive's
 `urnetwork_filecluster_drive_dwpd{cluster,window}` (the budget loop's), and
-each NVMe drive's hourly SMART log (`urnetwork_filecluster_smart_*`,
-`job="file_cluster"`, xops's smart-textfile.sh). A drive joins its cluster
-where its filesystem's mountpoint (`node_filesystem_size_bytes`) is a drive
-path admin info lists for the cluster. `urnetwork_filecluster_drive_rating_days`
-is the days until the cluster's first drive's percentage used reaches 100 at
-its 30-day rate, +Inf while none wears; a drive without a reading 30 days old
+each NVMe drive's hourly SMART log (`urnetwork_filecluster_smart_*`, xops's
+smart-textfile.sh). The SMART log rides the storage host's shared Fluent Bit,
+whose one `node_exporter_metrics` input reads it as a textfile and labels
+every series it ships `job="node"` (xops's files/fluent-bit/fluent-bit.conf;
+owner decisions 509 and 579), so the SMART series are read under `job="node"`
+beside the host's other node series. A drive joins its cluster where its
+filesystem's mountpoint (`node_filesystem_size_bytes`, a node series of the
+same `host`) is a drive path admin info lists for the cluster.
+`urnetwork_filecluster_drive_rating_days` is the days until the cluster's
+first drive's percentage used reaches 100 at its 30-day rate, +Inf while none
+wears; a drive without a reading 30 days old
 is not rated yet. P0's forgiven excess over the same 30 days is shown in
 drive-writes against the ~420 five years at the refill leave under the rating:
 `sum by (cluster) (increase(urnetwork_evs_budget_p0_forgiven_bytes_total[30d])) / 1.92e12`.
@@ -49270,8 +49275,13 @@ Classes:
   business row): at its 30-day rate the drive's whole rated endurance lasts
   under five years of service.
 - `filecluster-wear-unobservable` (visibility): Mimir or admin info did not
-  read, a metadata cluster's loop publishes no drive writes, or no SMART log
-  reached Mimir for its drives.
+  read, a metadata cluster's loop publishes no drive writes, or its SMART log
+  under `job="node"` is missing: on the cluster when none of its drives has a
+  reading now (a reading 30 days old alone is no log), and on the drive
+  (`<host>/<device>`) when its filesystem joins it to a cluster whose other
+  drives report and it lacks its percentage used, available spare or media
+  errors. A drive whose SMART log cannot be found reads as missing, never as
+  healthy (§19.6's wear row), so its open alerts stay open.
 
 ### 29.5 Write budget, P0 and HDD admission
 
