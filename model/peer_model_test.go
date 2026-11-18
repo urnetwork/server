@@ -724,7 +724,17 @@ func TestNetworkPeerStaleAddAfterProvideUpdateIsRejected(t *testing.T) {
 		expectedMutationVersion := prepareNetworkPeerMutation(ctx, networkId, clientId)
 
 		provideModes := map[ProvideMode]bool{ProvideModeStream: true}
-		updateNetworkPeerProvideModes(ctx, networkId, clientId, provideModes)
+		// The providing client already committed its modes. An intent-only
+		// peer needs its fence advanced even when the canonical read would fail.
+		readErr := fmt.Errorf("synthetic canonical read unavailable")
+		recovered := server.HandleError(func() {
+			updateNetworkPeerProvideModesWithLoader(ctx, networkId, clientId, func() map[ProvideMode]bool {
+				panic(readErr)
+			})
+		})
+		if recovered != nil && recovered != readErr {
+			t.Fatal("provide update failed outside the canonical read")
+		}
 		added := addNetworkPeerAtMutationVersion(
 			ctx,
 			networkId,
@@ -739,7 +749,10 @@ func TestNetworkPeerStaleAddAfterProvideUpdateIsRejected(t *testing.T) {
 			server.NewId(),
 		)
 		if added {
-			t.Fatal("stale Add committed after a provide update advanced its fence")
+			t.Fatal("stale Add committed when the canonical mode read was unavailable")
+		}
+		if recovered != nil {
+			t.Fatal("intent-only provide update read the unavailable canonical modes")
 		}
 		if GetNetworkPeerMember(ctx, networkId, clientId) != nil {
 			t.Fatal("rejected stale Add left registered metadata")
