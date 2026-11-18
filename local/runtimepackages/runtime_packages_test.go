@@ -148,7 +148,7 @@ func checkRuntimePackageLock(lock runtimePackageLock) error {
 			}
 		}
 	}
-	wantServices := map[string]string{"alt": "certificates", "api": "certificates", "connect": "certificates", "dns": "certificates", "dnsedge": "certificates", "evs": "certificates", "gkm": "certificates", "gossip": "certificates", "mcp": "certificates", "mxedge": "certificates", "mxedge-platform": "certificates", "sockets": "certificates", "taskworker": "certificates", "tlsedge": "certificates", "proxy": "proxy"}
+	wantServices := map[string]string{"alt": "certificates", "api": "certificates", "connect": "certificates", "dns": "certificates", "dnsedge": "certificates", "evs": "certificates", "gkm": "certificates", "gossip": "certificates", "mcp": "certificates", "mxedge": "certificates", "mxedge-platform": "certificates", "smtpedge": "certificates", "sockets": "certificates", "taskworker": "certificates", "tlsedge": "certificates", "proxy": "proxy"}
 	if !reflect.DeepEqual(lock.Services, wantServices) {
 		return errors.New("service package coverage changed")
 	}
@@ -167,6 +167,35 @@ func checkRuntimePackageLock(lock runtimePackageLock) error {
 	return nil
 }
 
+// A role whose binary carries a file capability (owner decision 597; sidecar DESIGN §19.4): the stage between the
+// package stage and the final one where the role's static helper, bind-mounted from the build context so it never
+// ships, writes the attribute, and the final stage's copy of the binary with it and the helper's check, each
+// exactly as reviewed. Nothing after the check, and nothing else in the final stage, may name the binary or the
+// helper: a copy over the binary, or a chown of it, drops the attribute.
+type fileCapabilityRecipe struct {
+	binary string
+	helper string
+	stage  []string
+	final  []string
+}
+
+var fileCapabilityRecipes = map[string]fileCapabilityRecipe{
+	"smtpedge": {
+		binary: "/usr/local/sbin/bringyour-smtpedge",
+		helper: "build/$TARGETPLATFORM/filecap",
+		stage: []string{
+			"FROM scratch AS file-capability",
+			"ARG TARGETPLATFORM",
+			"COPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge",
+			`RUN --network=none --mount=type=bind,source=build/$TARGETPLATFORM/filecap,target=/filecap ["/filecap", "set", "/usr/local/sbin/bringyour-smtpedge"]`,
+		},
+		final: []string{
+			"COPY --from=file-capability /usr/local/sbin/bringyour-smtpedge /usr/local/sbin/bringyour-smtpedge",
+			`RUN --network=none --mount=type=bind,source=build/$TARGETPLATFORM/filecap,target=/filecap ["/filecap", "check", "/usr/local/sbin/bringyour-smtpedge"]`,
+		},
+	},
+}
+
 // Check the executable instructions rather than matching comments or whitespace.
 // This intentionally covers the simple service recipes, not arbitrary Dockerfiles.
 func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) error {
@@ -180,6 +209,9 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 	}
 	stage, installs := 0, 0
 	pending := ""
+	capability, hasCapability := fileCapabilityRecipes[role]
+	// how many of the capability stage's instructions, and of the final stage's, have come
+	capabilityStageCount, capabilityFinalCount := 0, 0
 	for _, line := range strings.Split(recipe, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -191,6 +223,35 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 		}
 		instruction := pending + line
 		pending = ""
+		if hasCapability {
+			if stage == 1 && capabilityStageCount == 0 && instruction == capability.stage[0] {
+				if len(wanted) != 0 {
+					return errors.New("unlocked or incomplete package base stage")
+				}
+				capabilityStageCount++
+				continue
+			}
+			if 0 < capabilityStageCount && capabilityStageCount < len(capability.stage) {
+				if instruction != capability.stage[capabilityStageCount] {
+					return errors.New("file capability stage gained, lost or changed an instruction")
+				}
+				capabilityStageCount++
+				continue
+			}
+			if stage == 2 {
+				if capabilityFinalCount < len(capability.final) && instruction == capability.final[capabilityFinalCount] {
+					capabilityFinalCount++
+					continue
+				}
+				if (strings.Contains(instruction, capability.binary) && !strings.HasPrefix(instruction, "CMD ")) || strings.Contains(instruction, capability.helper) {
+					return errors.New("final stage writes the binary without its file capability, or ships the helper")
+				}
+				verb, _, _ := strings.Cut(instruction, " ")
+				if capabilityFinalCount == len(capability.final) && !slices.Contains([]string{"ARG", "ENV", "STOPSIGNAL", "CMD"}, verb) {
+					return errors.New("final stage changes the image after the file capability check")
+				}
+			}
+		}
 		switch {
 		case strings.HasPrefix(instruction, "FROM "):
 			stage++
@@ -230,6 +291,9 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 	}
 	if pending != "" || stage != 2 || installs != 1 || len(wanted) != 0 {
 		return errors.New("incomplete package install")
+	}
+	if hasCapability && (capabilityStageCount != len(capability.stage) || capabilityFinalCount != len(capability.final)) {
+		return errors.New("binary lost its file capability stage, copy or check")
 	}
 	return nil
 }
@@ -331,5 +395,86 @@ func TestRuntimePackagesRejectCrossTargetAndCurlGaps(t *testing.T) {
 		if err := checkRuntimePackageLock(changed); err == nil {
 			t.Fatalf("%s lost package coverage", fault)
 		}
+	}
+}
+
+// smtpedge's binary keeps its file capability stage, copy and check exactly (owner decision 597): dropping or
+// changing any of them, copying the binary in from the context, shipping the helper, or changing the image after
+// the check is refused, and no other role may take the stage.
+func TestRuntimePackagesHoldSmtpEdgeFileCapability(t *testing.T) {
+	cli, lock := loadRuntimePackageLock(t)
+	raw, err := os.ReadFile(filepath.Join(cli, "smtpedge", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := string(raw)
+	if err := checkRuntimePackageRecipe(lock, "smtpedge", good); err != nil {
+		t.Fatal(err)
+	}
+	helperRun := func(mode string) string {
+		return `RUN --network=none --mount=type=bind,source=build/$TARGETPLATFORM/filecap,target=/filecap \` + "\n" +
+			`    ["/filecap", "` + mode + `", "/usr/local/sbin/bringyour-smtpedge"]` + "\n"
+	}
+	stage := "FROM scratch AS file-capability\nARG TARGETPLATFORM\nCOPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge\n" + helperRun("set")
+	copyOn := "COPY --from=file-capability /usr/local/sbin/bringyour-smtpedge /usr/local/sbin/bringyour-smtpedge\n"
+	for _, part := range []string{stage, copyOn + helperRun("check")} {
+		if strings.Count(good, part) != 1 {
+			t.Fatalf("the recipe does not hold %q once", part)
+		}
+	}
+	beforeStop := func(instruction string) string {
+		return strings.Replace(good, "STOPSIGNAL SIGTERM", instruction+"\nSTOPSIGNAL SIGTERM", 1)
+	}
+	for _, fault := range []string{"no-stage", "unset", "networked-set", "stage-on-base", "stage-gained", "plain-copy", "unchecked", "check-before-copy",
+		"copy-after-check", "chown-after-check", "config-after-check", "shipped-helper", "second-copy"} {
+		changed := good
+		switch fault {
+		case "no-stage":
+			changed = strings.Replace(changed, stage, "", 1)
+		case "unset":
+			changed = strings.Replace(changed, helperRun("set"), "", 1)
+		case "networked-set":
+			changed = strings.Replace(changed, helperRun("set"), strings.Replace(helperRun("set"), "--network=none ", "", 1), 1)
+		case "stage-on-base":
+			changed = strings.Replace(changed, "FROM scratch AS file-capability", "FROM "+lock.BaseImage+" AS file-capability", 1)
+		case "stage-gained":
+			changed = strings.Replace(changed, stage, stage+"RUN [\"/filecap\", \"set\", \"/etc/passwd\"]\n", 1)
+		case "plain-copy":
+			changed = strings.Replace(changed, copyOn, "COPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge\n", 1)
+		case "unchecked":
+			changed = strings.Replace(changed, copyOn+helperRun("check"), copyOn, 1)
+		case "check-before-copy":
+			changed = strings.Replace(changed, copyOn+helperRun("check"), helperRun("check")+copyOn, 1)
+		case "copy-after-check":
+			changed = beforeStop("COPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge")
+		case "chown-after-check":
+			changed = beforeStop("RUN chown 65532 /usr/local/sbin/bringyour-smtpedge")
+		case "config-after-check":
+			changed = beforeStop("COPY smtpedge.yml /etc/smtpedge.yml")
+		case "shipped-helper":
+			changed = strings.Replace(changed, copyOn, "COPY build/$TARGETPLATFORM/filecap /usr/local/sbin/filecap\n"+copyOn, 1)
+		case "second-copy":
+			changed = strings.Replace(changed, copyOn, copyOn+copyOn, 1)
+		}
+		if changed == good || checkRuntimePackageRecipe(lock, "smtpedge", changed) == nil {
+			t.Fatalf("%s escaped file capability admission", fault)
+		}
+	}
+	// a role with no reviewed capability stage may not take one
+	apiRaw, err := os.ReadFile(filepath.Join(cli, "api", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := string(apiRaw)
+	if err := checkRuntimePackageRecipe(lock, "api", api); err != nil {
+		t.Fatal(err)
+	}
+	baseAt := strings.Index(api, "\nFROM "+lock.BaseImage+"\n")
+	if baseAt < 0 {
+		t.Fatal("api's recipe has no final stage")
+	}
+	adopted := api[:baseAt+1] + stage + api[baseAt+1:]
+	if checkRuntimePackageRecipe(lock, "api", adopted) == nil {
+		t.Fatal("api took a file capability stage")
 	}
 }
