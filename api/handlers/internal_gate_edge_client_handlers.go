@@ -29,6 +29,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -277,9 +278,12 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 	}
 	// only now, for the client the mint answered as urnetwork-edge's active one (QD-1054)
 	socketsToken, socketsTokenExpireTime, err := self.mintSocketsToken(networkId, mint.ClientId)
-	if err != nil || socketsToken == "" {
+	if err == nil && socketsToken == "" {
+		err = errors.New("an empty token")
+	}
+	if err != nil {
 		// the error names a missing key or a claim, never a token
-		self.unavailable(w, "no sockets token was signed")
+		self.unavailable(w, fmt.Sprintf("no sockets token was signed: %v", err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
