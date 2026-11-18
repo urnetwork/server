@@ -8,11 +8,19 @@
 // sidecar.yml's mxedge gate every 60 s.
 //
 // The router holds no TLS key and mounts nothing of the platform role's: its secret_files hold redis.yml, the
-// Postgres role its session records are written under, its internal gate bearer for the quota surface
-// (internal-gate-mxedge.yml), the edge bearer its platform clients are minted on (internal-gate-edge.yml) and
-// the feed credential (MAIL-M7-20). It routes by SNI through {mxr_<net>} and splices to receivers found at the
-// sockets service (-sockets_url), its quota and clients at api (-api_url), each Find on its first client's sockets
-// token, which api's edge client route answers beside the client's jwt (QD-1054).
+// Postgres role its session records are written under (pg-mxedge.yml), its internal gate bearer for the quota
+// surface (internal-gate-mxedge.yml), the edge bearer its platform clients are minted on (internal-gate-edge.yml)
+// and the feed credential (MAIL-M7-20). It routes by SNI through {mxr_<net>} and splices to receivers found at
+// the sockets service (-sockets_url), its quota and clients at api (-api_url), each Find on its first client's
+// sockets token, which api's edge client route answers beside the client's jwt (QD-1054).
+//
+// Which Postgres file each role reads: server's main pool reads the file of the process's own service where its
+// vault holds one, and the platform's pg.yml only where it holds none (QD-992; server/db.go's
+// pgServiceVaultResourceName). The router's service is mxedge, so it reads pg-mxedge.yml and never pg.yml, which
+// it does not hold; until the owner creates that role and its file, the router's store cannot connect and the
+// block stays not ready. The platform role's service is mxedge-platform, whose secret_files hold pg.yml and no
+// file of its own, so it reads pg.yml as before. The local stack's vault holds only pg.yml, which both read
+// there.
 package main
 
 import (

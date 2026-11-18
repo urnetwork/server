@@ -2,9 +2,13 @@
 // the tlsedge engine, §13.5's layer-4 router by SNI, one warp block on every lb host, since each lb proxies only
 // to its own blocks, run by sidecarhost.Run with GET /status on port 80, {vault: no, config: yes, site: no} and
 // user 65532. It mounts no vault and holds no TLS key (D-TLS-1): its secret_files hold redis.yml, the restricted
-// Postgres role the label map and the kill rows are read under (plan-TLS-edge-data-source), its internal gate
-// bearer for the quota surface (internal-gate-tlsedge.yml), the edge bearer its platform clients are minted on
-// (internal-gate-edge.yml, QD-812) and grafana-push.yml.
+// Postgres role the label map and the kill rows are read under (pg-tlsedge.yml, plan-TLS-edge-data-source), its
+// internal gate bearer for the quota surface (internal-gate-tlsedge.yml), the edge bearer its platform clients
+// are minted on (internal-gate-edge.yml, QD-812) and grafana-push.yml. server's main pool reads pg-tlsedge.yml,
+// the file of the process's own service, in place of the platform's pg.yml, which the block does not hold
+// (QD-992; server/db.go's pgServiceVaultResourceName), and falls back to pg.yml only where pg-tlsedge.yml is
+// absent, as in the local stack. Until the owner creates the role and its file, the store cannot connect and
+// the block stays not ready.
 //
 // What the block builds around tlsedgeservice:
 //
@@ -13,8 +17,8 @@
 //     deploy slot warp hands the process in WARP_SLOT (server.LoadEdgeClientSlot, QD-873, QD-1011), one no other
 //     running tlsedge process on the host holds, so beta's and g1's processes and a deploy's new process beside
 //     either each hold clients of their own.
-//   - The store: model.NewTlsEdgeStore on the block's Postgres role, read only by the engine's loops and record
-//     batches, never by a connection (I-12).
+//   - The store: model.NewTlsEdgeStore on the block's Postgres role, pg-tlsedge.yml's, read only by the engine's
+//     loops and record batches, never by a connection (I-12).
 //   - The clients: sidecar.NewEdgeClientPool, K platform clients in urnetwork-edge, Required and relay-only,
 //     providing Service alone (D-TLS-4, I-3). The pool is made once the source answers every index, tried again
 //     each ClientsRetryInterval until then.
