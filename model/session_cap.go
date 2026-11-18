@@ -7,6 +7,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -248,13 +249,48 @@ func queueClientSessionFreeInTx(ctx context.Context, tx server.PgTx, networkSess
 	server.AddTxPostCommit(tx, "session_free/"+server.NewId().String(), func() any {
 		postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), server.TxPostCommitTimeout)
 		defer cancel()
-		for networkId, sids := range free {
-			if _, err := session.FreeClientSessions(postCtx, networkId, sids, path); err != nil {
-				// a lost free leaves the session listed until its horizon
-				return err
-			}
-		}
-		return nil
+		return freeClientSessions(postCtx, free, path)
 	})
+	return nil
+}
+
+// How many networks' frees run at once after one commit: an idle reap batch
+// marks up to 10,000 clients across as many networks, one script each, inside
+// the post's bounded time.
+const sessionFreeConcurrency = 16
+
+// Frees each network's sessions (session.FreeClientSessions), a bounded number
+// of networks at once. A free that fails or runs out of time leaves its
+// sessions listed until their horizon; the first error is returned.
+func freeClientSessions(ctx context.Context, free map[server.Id][]server.Id, path string) error {
+	type work struct {
+		networkId  server.Id
+		sessionIds []server.Id
+	}
+	works := make(chan work)
+	errs := make(chan error, len(free))
+	var wait sync.WaitGroup
+	for range min(sessionFreeConcurrency, len(free)) {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for w := range works {
+				server.HandleError(func() {
+					if _, err := session.FreeClientSessions(ctx, w.networkId, w.sessionIds, path); err != nil {
+						errs <- err
+					}
+				}, func(err error) { errs <- err })
+			}
+		}()
+	}
+	for networkId, sessionIds := range free {
+		works <- work{networkId: networkId, sessionIds: sessionIds}
+	}
+	close(works)
+	wait.Wait()
+	close(errs)
+	for err := range errs {
+		return err
+	}
 	return nil
 }

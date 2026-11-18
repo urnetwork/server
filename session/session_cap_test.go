@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/push"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -205,14 +206,15 @@ func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 			t.Fatal("the exemption outlived provide")
 		}
 		// a sign-in session is never exempt
-		signin := sessionFixtureCredential(network, now)
-		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-			return r.ZRem(ctx, SessionKey(network, "z"), *providers[1].SessionId).Err()
-		}))
-		if err := UpdateSessionProvideExemption(ctx, network, *signin.SessionId, true); err != nil {
+		other := server.NewId()
+		signin := sessionFixtureCredential(other, now)
+		if _, err := RegisterNetworkSession(ctx, signin, "password", nil, false, now); err != nil {
 			t.Fatal(err)
 		}
-		if sessionContains(sessionLiveMembers(t, ctx, network, "xz"), *signin.SessionId) {
+		if err := UpdateSessionProvideExemption(ctx, other, *signin.SessionId, true); err != nil {
+			t.Fatal(err)
+		}
+		if sessionContains(sessionLiveMembers(t, ctx, other, "xz"), *signin.SessionId) {
 			t.Fatal("a sign-in session became exempt")
 		}
 	})
@@ -385,7 +387,7 @@ func TestSessionListPagesByKind(t *testing.T) {
 			}
 			if page == 0 {
 				counts := *result.Counts
-				if counts.Live != 13 || counts.Capped != 12 || counts.Provider != 1 || counts.Signin != 4 || counts.Code != 1 || counts.HostedProxy != 4 || counts.ApiKey != 1 || counts.Device != 1 || counts.Legacy != 1 {
+				if counts.Live != 12 || counts.Capped != 11 || counts.Provider != 1 || counts.Signin != 4 || counts.Code != 1 || counts.HostedProxy != 4 || counts.ApiKey != 1 || counts.Device != 1 || counts.Legacy != 1 {
 					t.Fatalf("counts %+v", counts)
 				}
 				if !result.Sessions[0].Current {
@@ -484,6 +486,8 @@ func TestSessionMintPublishesNewMemberIndexWithoutOutbox(t *testing.T) {
 			return score, true
 		}
 		claims := NewByJwt(network, actor.ByJwt.UserId, "session-index", false, false)
+		sessionId := server.NewId()
+		claims.SessionId = &sessionId
 		if _, err := MintNetworkSession(ctx, claims, "password"); err != nil {
 			t.Fatal(err)
 		}
@@ -504,6 +508,8 @@ func TestSessionMintPublishesNewMemberIndexWithoutOutbox(t *testing.T) {
 		}
 		defer Testing_FailSessionIndexPublishOnMint()()
 		failed := NewByJwt(network, actor.ByJwt.UserId, "session-index", false, false)
+		failedId := server.NewId()
+		failed.SessionId = &failedId
 		if _, err := MintNetworkSession(ctx, failed, "password"); err != nil {
 			t.Fatal(err)
 		}
@@ -698,4 +704,52 @@ func TestRevokeOthersWhoseKeptSessionEndedFailsAndReleasesTheNetwork(t *testing.
 			return nil
 		}))
 	})
+}
+
+// S2 R5 (the release-1 invariant, pinned): with new session creation off, a
+// credential that already carries a session still registers and extends it
+// before signing, and a revoked one is refused.
+func TestSessionDarkCreationStillExtendsTaggedRenewals(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer Testing_SetSessionCreationEnabled(false)()
+		actor := recoverySessionActor(t)
+		ctx := actor.Ctx
+		network := actor.ByJwt.NetworkId
+		score := func() float64 {
+			var value float64
+			server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				var err error
+				value, err = r.ZScore(ctx, SessionKey(network, "z"), actor.ByJwt.SessionId.String()).Result()
+				return err
+			}))
+			return value
+		}
+		before := score()
+		renewed := actor.ByJwt.Renew()
+		renewed.ExpiresAt = gojwt.NewNumericDate(actor.ByJwt.ExpiresAt.Time.Add(24 * time.Hour))
+		server.Raise(sessionTx(ctx, func(tx server.PgTx) error {
+			_, err := RegisterAndSignInTx(ctx, tx, renewed, "password", nil, false)
+			return err
+		}))
+		if score() <= before {
+			t.Fatal("a dark tagged renewal did not extend its session")
+		}
+		if _, err := enforceSessionRevoke(ctx, network, server.NewId(), "single", actor.ByJwt.SessionId, nil); err != nil {
+			t.Fatal(err)
+		}
+		err := sessionTx(ctx, func(tx server.PgTx) error {
+			_, err := RegisterAndSignInTx(ctx, tx, actor.ByJwt.Renew(), "password", nil, false)
+			return err
+		})
+		if !errors.Is(err, ErrSessionRevoked) && !isSessionCode(err, "session_revoked") {
+			t.Fatal("a dark renewal of a revoked session was signed", err)
+		}
+	})
+}
+
+func isSessionCode(err error, code string) bool {
+	var refusal *SessionError
+	return errors.As(err, &refusal) && refusal.Code == code
 }
