@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	promdto "github.com/prometheus/client_model/go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -395,8 +396,8 @@ func TestHostedProxyOwnRevokeEndsItForGood(t *testing.T) {
 		}
 		after, err := session.LoadByJwtFromClientId(ctx, proxy)
 		server.Raise(err)
-		if signed, err := session.MintHostedSession(ctx, after); signed != "" || err == nil {
-			t.Fatal("a removed proxy bootstrapped another session")
+		if signed, err := session.MintHostedSession(ctx, after); signed != "" || !errors.Is(err, session.ErrByJwtInactive) {
+			t.Fatal("a removed proxy bootstrapped another session, or was refused without the inactive credential error", err)
 		}
 		if got := len(sessionCapMembers(t, ctx, network.networkId, "z")); got != live-1 {
 			t.Fatal("live sessions", got, live)
@@ -708,6 +709,200 @@ func TestAuthCodeCreateRestoredSessionIsPublished(t *testing.T) {
 		})
 		if !published && queued == 0 {
 			t.Fatal("the restored session's network is neither in the index nor queued for it")
+		}
+	})
+}
+
+// R-refuse (session1118 D F1): an SSO sign-in at an enforced session cap
+// returns the cap's refusal, which the router answers 409
+// session_limit_reached. Its mint raised the refusal, which escaped the route
+// as a 500.
+func TestSsoSignInReturnsTheSessionCapRefusal(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1000, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, network, "sso-cap", user)
+		members := make([]redis.Z, 1000)
+		for i := range members {
+			members[i] = redis.Z{Score: float64(server.NowUtc().AddDate(0, 0, 30).UnixMilli()), Member: server.NewId().String()}
+		}
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			return r.ZAdd(ctx, session.SessionKey(network, "z"), members...).Err()
+		}))
+		result, err := handleLoginParsedAuthJwt(&HandleLoginParsedAuthJwtArgs{
+			AuthJwt:           AuthJwt{AuthType: SsoAuthTypeGoogle, UserAuth: userAuth},
+			UserAuthAttemptId: UserAuthAttemptId{},
+		}, ctx)
+		var refusal *session.SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" || result != nil {
+			t.Fatal("the SSO sign-in at the cap", result, err)
+		}
+	})
+}
+
+// Adds count live sessions no caller knows to the network's live set, and
+// returns them.
+func fillLiveSessions(t testing.TB, ctx context.Context, networkId server.Id, count int) []string {
+	t.Helper()
+	members := make([]redis.Z, count)
+	ids := make([]string, count)
+	for i := range members {
+		ids[i] = server.NewId().String()
+		members[i] = redis.Z{Score: float64(server.NowUtc().AddDate(0, 0, 30).UnixMilli()), Member: ids[i]}
+	}
+	server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		return r.ZAdd(ctx, session.SessionKey(networkId, "z"), members...).Err()
+	}))
+	return ids
+}
+
+func liveSessionCount(t testing.TB, ctx context.Context, networkId server.Id) int64 {
+	t.Helper()
+	var live int64
+	server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		var err error
+		live, err = r.ZCard(ctx, session.SessionKey(networkId, "z")).Result()
+		return err
+	}))
+	return live
+}
+
+// session1118 C: a signed-in caller that verifies a sign-in method of its own
+// network (an email or phone added in Account) keeps its session. The verify
+// started another session, which no app installs: an unused "Verification
+// code" sign-in counted toward the cap, and at an enforced cap the step was
+// refused.
+func TestSignedInVerifyKeepsTheCallersSession(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1000, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		Testing_CreateNetwork(ctx, network, "verify-own", user)
+		signed, err := session.MintNetworkSession(ctx, session.NewByJwt(network, user, "verify-own", false, false), "password")
+		server.Raise(err)
+		caller, err := session.ParseByJwt(ctx, signed)
+		server.Raise(err)
+		// a phone added to the email account (one email per account)
+		added := "+1 609-737-0021"
+		addUnverifiedUserAuth(t, ctx, user, added)
+		normalAdded, _ := NormalUserAuthV1(&added)
+		// with the caller's own: the cap
+		fillLiveSessions(t, ctx, network, 999)
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		code, err := AuthVerifyCreateCode(AuthVerifyCreateCodeArgs{UserAuth: added}, clientSession)
+		server.Raise(err)
+		clientSession.Header["Authorization"] = []string{"Bearer " + signed}
+		result, err := AuthVerify(AuthVerifyArgs{UserAuth: added, VerifyCode: *code.VerifyCode}, clientSession)
+		if err != nil || result == nil || result.Error != nil || result.Network == nil {
+			t.Fatal("the signed-in verify at the cap", result, err)
+		}
+		returned, err := session.ParseByJwt(ctx, result.Network.ByJwt)
+		server.Raise(err)
+		if returned.SessionId == nil || caller.SessionId == nil || *returned.SessionId != *caller.SessionId {
+			t.Fatal("the verify started another session", returned.SessionId, caller.SessionId)
+		}
+		if live := liveSessionCount(t, ctx, network); live != 1000 {
+			t.Fatal("live sessions after the verify", live)
+		}
+		var verified bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, *normalAdded).Scan(&verified))
+		})
+		if !verified {
+			t.Fatal("the added sign-in method was not verified")
+		}
+	})
+}
+
+// session1118 C: a verify the session cap refuses commits nothing of the
+// verification. It committed before the session was refused: the step
+// reported a refusal for a verified sign-in method, and the retry answered
+// "Invalid code."
+func TestVerifyRefusedAtTheCapLeavesTheCodeUnused(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1000, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		Testing_CreateNetwork(ctx, network, "verify-cap", user)
+		// a phone added to the email account (one email per account)
+		added := "+1 609-737-0022"
+		addUnverifiedUserAuth(t, ctx, user, added)
+		normalAdded, _ := NormalUserAuthV1(&added)
+		members := fillLiveSessions(t, ctx, network, 1000)
+		code, err := AuthVerifyCreateCode(AuthVerifyCreateCodeArgs{UserAuth: added}, session.Testing_CreateClientSession(ctx, nil))
+		server.Raise(err)
+		args := AuthVerifyArgs{UserAuth: added, VerifyCode: *code.VerifyCode}
+		result, err := AuthVerify(args, session.Testing_CreateClientSession(ctx, nil))
+		var refusal *session.SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" || result != nil {
+			t.Fatal("the verify at the cap", result, err)
+		}
+		var used int
+		var verified bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM user_auth_verify WHERE user_id=$1 AND used`, user).Scan(&used))
+			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, *normalAdded).Scan(&verified))
+		})
+		if used != 0 || verified {
+			t.Fatal("the refused verify committed its verification", used, verified)
+		}
+		// one session signed out: the same code verifies
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			return r.ZRem(ctx, session.SessionKey(network, "z"), members[0]).Err()
+		}))
+		result, err = AuthVerify(args, session.Testing_CreateClientSession(ctx, nil))
+		if err != nil || result == nil || result.Error != nil || result.Network == nil {
+			t.Fatal("the verify after a session was signed out", result, err)
+		}
+	})
+}
+
+// session1118 C: an SSO sign-in the session cap refuses links no new provider
+// to the account (nor notices it of one). The link committed before the
+// session was refused.
+func TestSsoSignInRefusedAtTheCapLinksNoProvider(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1000, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, network, "sso-link", user)
+		fillLiveSessions(t, ctx, network, 1000)
+		err := func() (err error) {
+			// a refusal raised out of the sign-in is the same refusal here
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err, _ = recovered.(error)
+				}
+			}()
+			_, err = handleLoginParsedAuthJwt(&HandleLoginParsedAuthJwtArgs{
+				AuthJwt:           AuthJwt{AuthType: SsoAuthTypeGoogle, UserAuth: userAuth},
+				UserAuthAttemptId: UserAuthAttemptId{},
+			}, ctx)
+			return
+		}()
+		var refusal *session.SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" {
+			t.Fatal("the SSO sign-in at the cap", err)
+		}
+		var links int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM network_user_auth_sso WHERE user_id=$1`, user).Scan(&links))
+		})
+		if links != 0 {
+			t.Fatal("the refused sign-in linked the provider", links)
 		}
 	})
 }
