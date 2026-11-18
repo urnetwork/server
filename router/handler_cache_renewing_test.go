@@ -148,7 +148,8 @@ func (self *renewingCacheTestStore) counts() (int, int) {
 // The unchanged generic cache is the causal control: at 31 seconds a second
 // database-producing callback starts while its first callback remains held.
 // The opt-in path keeps exactly one callback through 70 seconds and publishes
-// the result for the original 30-second response lifetime.
+// the result for four times its 70-second fill (renewingHandlerCacheValueTtl):
+// lease renewal itself extends no freshness.
 func TestHandlerCacheRenewingSlowFillPairedControl(t *testing.T) {
 	// The exact 30s lifetime below needs the value ttl jitter pinned to zero;
 	// TestHandlerCacheValueTtlJitterBound covers the jitter itself.
@@ -229,13 +230,13 @@ func TestHandlerCacheRenewingSlowFillPairedControl(t *testing.T) {
 						t.Fatalf("70s owner = (%v, %v)", result.value, result.err)
 					}
 					before, publishes := store.counts()
-					time.Sleep(29 * time.Second)
+					time.Sleep(4*70*time.Second - time.Second)
 					if _, exists, _ := store.get(ctx, newHandlerCacheKeys(key).value); !exists {
-						t.Fatal("response expired before its unchanged 30s lifetime")
+						t.Fatal("response expired before four times its 70s fill")
 					}
 					time.Sleep(2 * time.Second)
 					if _, exists, _ := store.get(ctx, newHandlerCacheKeys(key).value); exists {
-						t.Fatal("response freshness was extended by fill renewal")
+						t.Fatal("response freshness was extended past its fill cost by fill renewal")
 					}
 					if after, finalPublishes := store.counts(); before != after || publishes != 1 || finalPublishes != 1 {
 						t.Fatal("successful fill left renewal or publication running")
@@ -561,7 +562,8 @@ func TestHandlerCacheRenewingLastGoodAnswersSlowRefresh(t *testing.T) {
 		}
 
 		// A refresh within the wait is answered fresh, not from the last good list.
-		time.Sleep(time.Minute)
+		// The 20 s refresh's list lived four times its fill.
+		time.Sleep(2 * time.Minute)
 		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, 2*time.Second, "third"))
 		expect("quick refresh", value, err, elapsed, "third", 2*time.Second)
 
@@ -591,6 +593,89 @@ func TestHandlerCacheRenewingLastGoodAnswersSlowRefresh(t *testing.T) {
 	})
 }
 
+// What the db layer raises when the context of a query ends (server.Db,
+// through dbContextDoneCause): its done stop joined with the driver's error
+// and the context's own, as the api logged it on 2026-11-18: "Done",
+// "timeout: context deadline exceeded", "context deadline exceeded".
+func renewingCacheTestDbStop(ctx context.Context) error {
+	return errors.Join(server.DbContextDoneError, errors.New("timeout: context deadline exceeded"), ctx.Err())
+}
+
+// A fill whose database read outlasts the context it runs under, which
+// queryContext derives from the fill context, and raises the db layer's stop
+// when that context ends.
+func renewingCacheTestDbReadOutlasting(
+	queryContext func(context.Context) (context.Context, context.CancelFunc),
+) func(context.Context) (*handlerCacheTestResult, error) {
+	return func(fillCtx context.Context) (*handlerCacheTestResult, error) {
+		ctx, cancel := queryContext(fillCtx)
+		defer cancel()
+		<-ctx.Done()
+		panic(renewingCacheTestDbStop(ctx))
+	}
+}
+
+// The root cause of "[h]renewing cache fill panic: Done" every ~3 minutes on
+// 2026-11-18: the largest network's provider list reached its 2-minute owner
+// budget inside a database read, and the db layer ended the read by raising
+// its done stop. The fill ends with the budget's error instead: a caller that
+// waits past the budget is answered context.DeadlineExceeded, not the raise,
+// and the lease is cut to its failure fence with renewal joined. A lost
+// renewal ends the same read as unavailable. The control: the same stop for a
+// narrower context of the fill's own, while the fill context is live, is
+// still raised unchanged.
+func TestHandlerCacheRenewingDbStopAtFillEndReturnsError(t *testing.T) {
+	call := func(store *renewingCacheTestStore, key string, fill func(context.Context) (*handlerCacheTestResult, error)) (value *handlerCacheTestResult, err error, raised any) {
+		defer func() { raised = recover() }()
+		value, err = cacheJsonWithRenewingFill(context.Background(), store, key, 30*time.Second, 2*time.Minute, fill)
+		return
+	}
+	fillContext := func(ctx context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) }
+	t.Run("budget", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			start := time.Now()
+			value, err, raised := call(store, "db-budget", renewingCacheTestDbReadOutlasting(fillContext))
+			if raised != nil || value != nil || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != 2*time.Minute {
+				t.Fatalf("db read at the fill budget = (%v,%v) raised=%v after %v, want context.DeadlineExceeded after 2m", value, err, raised, time.Since(start))
+			}
+			token, exists, _ := store.get(context.Background(), newHandlerCacheKeys("db-budget").fill)
+			if !exists || !isHandlerCacheFence(token) {
+				t.Fatalf("budget-ended fill left lease %q (exists=%v), want its failure fence", token, exists)
+			}
+			renews, publishes := store.counts()
+			time.Sleep(time.Minute)
+			if after, _ := store.counts(); after != renews || publishes != 0 {
+				t.Fatal("budget-ended fill left a renewal or publication running")
+			}
+		})
+	})
+	t.Run("lost-renewal", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			store.failAt, store.fault = 2, "replacement"
+			value, err, raised := call(store, "db-lost-renewal", renewingCacheTestDbReadOutlasting(fillContext))
+			var unavailable *handlerCacheUnavailableError
+			if raised != nil || value != nil || !errors.As(err, &unavailable) {
+				t.Fatalf("db read ended by a lost renewal = (%v,%v) raised=%v, want unavailable", value, err, raised)
+			}
+		})
+	})
+	t.Run("narrower-context", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			value, err, raised := call(store, "db-own-timeout", renewingCacheTestDbReadOutlasting(
+				func(ctx context.Context) (context.Context, context.CancelFunc) {
+					return context.WithTimeout(ctx, 10*time.Second)
+				}))
+			stop, ok := raised.(error)
+			if !ok || !errors.Is(stop, server.DbContextDoneError) || value != nil || err != nil {
+				t.Fatalf("stop of the fill's own narrower context = (%v,%v) raised=%v, want it raised unchanged", value, err, raised)
+			}
+		})
+	})
+}
+
 // A fill that panics after its caller left cannot take the process down. The
 // panic is logged, and the lease is cut to the failure fence as for a panic
 // its caller sees.
@@ -615,4 +700,84 @@ func TestHandlerCacheRenewingPanicAfterItsCallerLeft(t *testing.T) {
 			t.Fatal("panicked fill left a renewal or publication running")
 		}
 	})
+}
+
+// The root cause of back-to-back fills of the largest provider lists
+// (2026-11-18): a value lived the key's 30 s ttl however long its fill took,
+// so a once-a-minute poller started a new minute-long fill on every request.
+// A value now lives four times as long as its fill took, at most
+// handlerCacheRenewingValueTtlLimit; a quick fill keeps the ttl (the control).
+// Just inside that lifetime a request is answered at once without a fill.
+// Just past it a refresh starts, and while the refresh is slower than the
+// wait the last good list answers at the wait limit, not 503.
+func TestHandlerCacheRenewingValueLivesWithItsFillCost(t *testing.T) {
+	prior := handlerCacheValueTtlJitter
+	defer func() { handlerCacheValueTtlJitter = prior }()
+	handlerCacheValueTtlJitter = func(time.Duration) time.Duration { return 0 }
+	for _, control := range []struct {
+		name     string
+		fill     time.Duration
+		lifetime time.Duration
+	}{
+		{"quick-fill-keeps-ttl", time.Second, 30 * time.Second},
+		{"minute-fill", time.Minute, 4 * time.Minute},
+		{"limited", 100 * time.Second, handlerCacheRenewingValueTtlLimit},
+	} {
+		t.Run(control.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				// joins a fill still running when an assertion ends the test early
+				defer time.Sleep(3 * time.Minute)
+				store := newRenewingCacheTestStore()
+				const key = "provider-list-fill-cost"
+				var fills atomic.Int64
+				value, err, elapsed := renewingCacheTestCall(store, key, 3*time.Minute, renewingCacheTestFillTaking(&fills, control.fill, "first"))
+				if err != nil || value == nil || value.Message != "first" || elapsed != control.fill {
+					t.Fatalf("first list = (%v,%v) after %v", value, err, elapsed)
+				}
+
+				time.Sleep(control.lifetime - time.Second)
+				value, err, elapsed = renewingCacheTestCall(store, key, 3*time.Minute, renewingCacheTestFillTaking(&fills, control.fill, "unused"))
+				if err != nil || value == nil || value.Message != "first" || elapsed != 0 || fills.Load() != 1 {
+					t.Fatalf("1s inside its %v lifetime = (%v,%v) after %v, fills=%d; want the list at once from its one fill", control.lifetime, value, err, elapsed, fills.Load())
+				}
+
+				time.Sleep(2 * time.Second)
+				value, err, elapsed = renewingCacheTestCall(store, key, 3*time.Minute, renewingCacheTestFillTaking(&fills, 20*time.Second, "refreshed"))
+				if err != nil || value == nil || value.Message != "first" || elapsed != handlerCacheFillWaitLimit || fills.Load() != 2 {
+					t.Fatalf("1s past its %v lifetime = (%v,%v) after %v, fills=%d; want the last good list at the wait limit from a refresh", control.lifetime, value, err, elapsed, fills.Load())
+				}
+				// join the refresh, which publishes after its caller left
+				time.Sleep(20 * time.Second)
+				value, err, elapsed = renewingCacheTestCall(store, key, 3*time.Minute, renewingCacheTestFillTaking(&fills, control.fill, "unused"))
+				if err != nil || value == nil || value.Message != "refreshed" || elapsed != 0 {
+					t.Fatalf("after the refresh = (%v,%v) after %v", value, err, elapsed)
+				}
+			})
+		})
+	}
+}
+
+// A value's lifetime grows with its fill but never past the limit, and stays a
+// whole fill budget inside the last good value's 15 minutes, so a refresh
+// that starts at its expiry can use its budget while the last good answers.
+func TestRenewingHandlerCacheValueTtl(t *testing.T) {
+	for _, test := range []struct {
+		ttl, budget, fill, want time.Duration
+	}{
+		{30 * time.Second, 2 * time.Minute, 0, 30 * time.Second},
+		{30 * time.Second, 2 * time.Minute, 7 * time.Second, 30 * time.Second},
+		{30 * time.Second, 2 * time.Minute, 10 * time.Second, 40 * time.Second},
+		{30 * time.Second, 2 * time.Minute, time.Minute, 4 * time.Minute},
+		{30 * time.Second, 2 * time.Minute, 2 * time.Minute, handlerCacheRenewingValueTtlLimit},
+		{30 * time.Second, 12 * time.Minute, 10 * time.Minute, handlerCacheLastGoodTtl - 12*time.Minute},
+		{30 * time.Second, 20 * time.Minute, 10 * time.Minute, 30 * time.Second},
+		{10 * time.Minute, 2 * time.Minute, time.Second, 10 * time.Minute},
+	} {
+		if got := renewingHandlerCacheValueTtl(test.ttl, test.budget, test.fill); got != test.want {
+			t.Errorf("ttl=%v budget=%v fill=%v: lifetime %v, want %v", test.ttl, test.budget, test.fill, got, test.want)
+		}
+		if got := renewingHandlerCacheValueTtl(test.ttl, test.budget, test.fill); test.ttl < got && handlerCacheLastGoodTtl-test.budget < got {
+			t.Errorf("ttl=%v budget=%v fill=%v: lifetime %v leaves a refresh less than its budget inside the last good value", test.ttl, test.budget, test.fill, got)
+		}
+	}
 }
