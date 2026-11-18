@@ -73,6 +73,9 @@ type CompareSettings struct {
 	RoundTripTolerance float64
 	// The fewest operations a result needs for its p99 to mean anything.
 	MinCount int
+	// How far apart two runs' paces may be, as a fraction of the faster, for one to be held to the other: a
+	// run paced otherwise measures another load.
+	PaceTolerance float64
 }
 
 func DefaultCompareSettings() *CompareSettings {
@@ -81,6 +84,7 @@ func DefaultCompareSettings() *CompareSettings {
 		ThroughputTolerance: 0.05,
 		RoundTripTolerance:  0.05,
 		MinCount:            1000,
+		PaceTolerance:       0,
 	}
 }
 
@@ -136,6 +140,24 @@ func compareAgainst(verdict *Verdict, againstLabel string, against *Measurements
 			verdict.Pass = false
 		}
 		verdict.Checks = append(verdict.Checks, check)
+	}
+	// a latency or a throughput is held only to one measured at the same pace
+	for _, pair := range [][2]*Result{{baseAdmission, admission}, {baseSettlement, settlement}} {
+		faster := max(pair[0].TargetPerSecond, pair[1].TargetPerSecond)
+		slower := min(pair[0].TargetPerSecond, pair[1].TargetPerSecond)
+		paceBound := faster * (1 - settings.PaceTolerance)
+		check := &Check{
+			What:     pair[1].Name + " pace",
+			Baseline: pair[0].TargetPerSecond,
+			Measured: pair[1].TargetPerSecond,
+			Bound:    pair[0].TargetPerSecond,
+			Unit:     "/s",
+			Pass:     paceBound <= slower,
+		}
+		if !check.Pass {
+			check.Note = "the runs were paced differently, so one does not measure the other's load"
+		}
+		add(check)
 	}
 	latencyBound := float64(baseAdmission.P99Ns) * (1 + settings.LatencyTolerance)
 	add(&Check{
@@ -226,13 +248,41 @@ func CompareEntry(baseline *Measurements, candidate *Measurements, settings *Com
 }
 
 // M6's exit: candidate, the rerun, against baseline, main's run, and against entry, the run M6's entry
-// passed on, read with its gate on as the order then frozen.
+// passed on, read with its gate on as the order then frozen. The entry run is the yardstick only as the run
+// the entry passed on: it is held to the baseline again here, with its own short or failed results failing
+// the exit, and the rerun is one measured after it.
 func CompareExit(baseline *Measurements, entry *Measurements, candidate *Measurements, settings *CompareSettings) (*Verdict, error) {
 	verdict := &Verdict{Mode: ModeExit, Pass: true}
 	checkResults(verdict, "baseline", baseline, settings)
+	checkResults(verdict, "entry", entry, settings)
 	checkResults(verdict, "candidate", candidate, settings)
 	if err := compareAgainst(verdict, "baseline", baseline, candidate, settings); err != nil {
 		return nil, err
+	}
+	entryVerdict := &Verdict{Pass: true}
+	if err := compareAgainst(entryVerdict, "baseline", baseline, entry, settings); err != nil {
+		return nil, fmt.Errorf("the entry run: %w", err)
+	}
+	for _, check := range entryVerdict.Checks {
+		if check.Pass {
+			continue
+		}
+		check.What = "the entry run's " + check.What
+		check.Note = "the entry run does not pass against the baseline, so it is no yardstick"
+		verdict.Pass = false
+		verdict.Checks = append(verdict.Checks, check)
+	}
+	if !entry.Time.Before(candidate.Time) {
+		verdict.Pass = false
+		verdict.Checks = append(verdict.Checks, &Check{
+			What:     "the rerun's time",
+			Against:  "entry",
+			Baseline: float64(entry.Time.Unix()),
+			Measured: float64(candidate.Time.Unix()),
+			Bound:    float64(entry.Time.Unix()),
+			Unit:     "s",
+			Note:     "the candidate was not measured after the entry run, so it is no rerun",
+		})
 	}
 	entryAdmission := entry.Result(ResultAdmission, true)
 	entrySettlement := entry.Result(ResultSettlement, true)

@@ -71,6 +71,9 @@ func newT3Oracle(ctx context.Context) *sidecartest.QuotaOracle {
 	return sidecartest.NewQuotaOracle(&t3OracleSource{ctx: ctx})
 }
 
+// newT3Oracle for this package's external tests, as NewT3TargetOn is.
+var NewT3Oracle = newT3Oracle
+
 // Every token the balance's reservations hold in Redis, with its amount.
 func t3Tokens(ctx context.Context, balanceId server.Id) map[string]string {
 	var tokenAmounts map[string]string
