@@ -718,8 +718,17 @@ func runSourceSupervisor(opts docopt.Opts) {
 			return runSourceSupervisorWorkerCommandWithSettings(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease}, runtime.processSettings)
 		},
 	}}
+	var officialReviewRoundId *server.Id
+	if value := optString(opts, "--official-review-round-id", ""); value != "" {
+		roundId, err := server.ParseId(value)
+		if err != nil || roundId == (server.Id{}) || settings.AutomationPolicy.Staging || preparationOnly {
+			fatalf("official review requires an exact production round identity")
+		}
+		officialReviewRoundId = &roundId
+	}
 	supervisor := &controller.CompetitionSupervisor{Enabled: true, PreparationOnly: preparationOnly, OwnerId: optString(opts, "--owner-id", ""), Driver: driver,
-		CleanupGrace: processSettings.WorkerControlJoinTimeout + processSettings.WorkerHandoffTimeout}
+		OfficialReviewRoundId: officialReviewRoundId,
+		CleanupGrace:          processSettings.WorkerControlJoinTimeout + processSettings.WorkerHandoffTimeout}
 	ctx, cancel := signalContext()
 	defer cancel()
 	report := func(state string, err error) {

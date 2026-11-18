@@ -190,6 +190,9 @@ type CompetitionSupervisor struct {
 	// Preparation-only reconciliation may publish an existing intent and obtain
 	// real role evidence, but never activates source or runs ordinary evaluation.
 	PreparationOnly bool
+	// An exact production epoch-two round waits for official external review
+	// after checkpointing. It never delegates to the native broker.
+	OfficialReviewRoundId *server.Id
 }
 
 // Deployment-owned callbacks are pinned by the executable harness. They may
