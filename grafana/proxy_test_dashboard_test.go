@@ -50,21 +50,44 @@ var proxyTestMetrics = map[string]proxyTestMetric{
 	"urnetwork_proxy_test_exit_country_mismatch_total":              {counter: true, labels: []string{"country"}},
 	"urnetwork_proxy_test_remove_failures_total":                    {counter: true},
 	"urnetwork_proxy_test_api_errors_total":                         {counter: true, labels: []string{"call"}},
+	// the lanes, the count windows of the last 100 setups, and the proxy's
+	// host and block
+	"urnetwork_proxy_test_setup_window_seconds":             {labels: []string{"lane", "country", "stat"}},
+	"urnetwork_proxy_test_setup_window_samples":             {labels: []string{"lane", "country"}},
+	"urnetwork_proxy_test_setup_window_timeouts":            {labels: []string{"lane", "country"}},
+	"urnetwork_proxy_test_setup_window_age_seconds":         {labels: []string{"lane", "country"}},
+	"urnetwork_proxy_test_all_setup_window_seconds":         {labels: []string{"lane", "stat"}},
+	"urnetwork_proxy_test_all_setup_window_samples":         {labels: []string{"lane"}},
+	"urnetwork_proxy_test_all_setup_window_timeouts":        {labels: []string{"lane"}},
+	"urnetwork_proxy_test_all_setup_window_age_seconds":     {labels: []string{"lane"}},
+	"urnetwork_proxy_test_proxy_setup_window_seconds":       {labels: []string{"proxy_host", "proxy_block", "stat"}},
+	"urnetwork_proxy_test_proxy_setup_window_samples":       {labels: []string{"proxy_host", "proxy_block"}},
+	"urnetwork_proxy_test_proxy_setup_window_timeouts":      {labels: []string{"proxy_host", "proxy_block"}},
+	"urnetwork_proxy_test_proxy_setup_window_age_seconds":   {labels: []string{"proxy_host", "proxy_block"}},
+	"urnetwork_proxy_test_setups_total":                     {counter: true, labels: []string{"lane", "proxy_host", "proxy_block", "result"}},
+	"urnetwork_proxy_test_lane_runs_total":                  {counter: true, labels: []string{"lane", "outcome"}},
+	"urnetwork_proxy_test_lane_exit_country_mismatch_total": {counter: true, labels: []string{"lane"}},
 }
 
 // The values of the contract's closed labels. country is open, so the
-// dashboard selects it only through the country variable; country_name and
-// version are never matched.
+// dashboard selects it only through the country variable; country_name,
+// version, proxy_host and proxy_block are never matched. The outcome ready is
+// a probe-only lane's (lane_runs_total), never the round-robin runs_total's.
 var proxyTestLabelValues = map[string][]string{
-	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error", "site_refused", "load_timeout"},
+	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error", "site_refused", "load_timeout", "ready"},
 	"phase":   {"create", "setup", "connect", "load"},
 	"call":    {"login", "locations", "create", "remove", "list"},
+	"lane":    {"round_robin", "us_probe"},
+	"result":  {"ready", "timeout"},
 }
 
 // stat takes different values in the per-country and the all-country windows.
 var proxyTestStatValues = map[string][]string{
-	"urnetwork_proxy_test_phase_seconds_window":     {"p50", "p90", "max"},
-	"urnetwork_proxy_test_all_phase_seconds_window": {"p50", "p90", "p99", "max"},
+	"urnetwork_proxy_test_phase_seconds_window":       {"p50", "p90", "max"},
+	"urnetwork_proxy_test_all_phase_seconds_window":   {"p50", "p90", "p99", "max"},
+	"urnetwork_proxy_test_setup_window_seconds":       {"p50", "p90", "max"},
+	"urnetwork_proxy_test_all_setup_window_seconds":   {"p50", "p90", "p99", "max"},
+	"urnetwork_proxy_test_proxy_setup_window_seconds": {"p50", "p90", "max"},
 }
 
 // The dashboard's panels.
@@ -97,12 +120,28 @@ const (
 	proxyTestProvidersAgePanel   = 32
 	proxyTestProvidersTrendPanel = 33
 	proxyTestProvidersTablePanel = 34
+	// the lanes and their count windows (proxy_test_lanes_dashboard_test.go)
+	proxyTestRoundRobinP90Panel      = 36
+	proxyTestRoundRobinSamplesPanel  = 37
+	proxyTestRoundRobinTimeoutsPanel = 38
+	proxyTestRoundRobinAgePanel      = 39
+	proxyTestUsProbeP90Panel         = 40
+	proxyTestUsProbeSamplesPanel     = 41
+	proxyTestUsProbeTimeoutsPanel    = 42
+	proxyTestUsProbeAgePanel         = 43
+	proxyTestLanePercentilesPanel    = 44
+	proxyTestLaneTimeoutSharePanel   = 45
+	proxyTestLaneCountryTablePanel   = 46
+	proxyTestProxyHostTablePanel     = 48
+	proxyTestProxyHostP90Panel       = 49
+	proxyTestProxyHostSetupsPanel    = 50
+	proxyTestLaneRunsPanel           = 51
 )
 
 // The labels the runner writes, besides the env, host and job that its
 // metrics shipping adds: the only ones a query may group by, and so the only
 // ones a panel of the shared copy may show.
-var proxyTestLabels = []string{"country", "country_name", "outcome", "phase", "stat", "call", "version"}
+var proxyTestLabels = []string{"country", "country_name", "outcome", "phase", "stat", "call", "version", "lane", "proxy_host", "proxy_block", "result"}
 
 // The functions a read may sit in, between it and its max: counters through
 // increase() or rate(), gauges over time.
@@ -135,8 +174,10 @@ const proxyTestProvidersFillIn = "fill in as history accumulates from the deploy
 const proxyTestDeliveredOutcomes = "ok|load_timeout|site_refused|http_error"
 
 // The panels that follow the country variable, and those over every country.
-var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel, proxyTestProvidersTablePanel}
-var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestDeliveredPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel, proxyTestProvidersPanel, proxyTestProvidersAgePanel, proxyTestProvidersTrendPanel}
+var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel, proxyTestProvidersTablePanel, proxyTestLaneCountryTablePanel}
+var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestDeliveredPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel, proxyTestProvidersPanel, proxyTestProvidersAgePanel, proxyTestProvidersTrendPanel,
+	proxyTestRoundRobinP90Panel, proxyTestRoundRobinSamplesPanel, proxyTestRoundRobinTimeoutsPanel, proxyTestRoundRobinAgePanel, proxyTestUsProbeP90Panel, proxyTestUsProbeSamplesPanel, proxyTestUsProbeTimeoutsPanel, proxyTestUsProbeAgePanel,
+	proxyTestLanePercentilesPanel, proxyTestLaneTimeoutSharePanel, proxyTestProxyHostTablePanel, proxyTestProxyHostP90Panel, proxyTestProxyHostSetupsPanel, proxyTestLaneRunsPanel}
 
 // The fields of the document that testDashboard does not read.
 type proxyTestDatasource struct {
@@ -893,6 +934,16 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 	query := func(id int, refId string) string {
 		return proxyTestConcrete(proxyTestTarget(t, dashboard, id, refId).Expr)
 	}
+	// a copy without the internal dashboard's internal-only panels is
+	// evaluated on the panels it has
+	skipped := map[int]bool{}
+	if dashboardName != proxyTestDashboardName {
+		for _, item := range readProxyTestDocumentJson(t, proxyTestDashboardName)["panels"].([]any) {
+			if panel := item.(map[string]any); panel[proxyTestInternalOnlyKey] == true {
+				skipped[int(panel["id"].(float64))] = true
+			}
+		}
+	}
 
 	const (
 		up             = "urnetwork_proxy_test_up"
@@ -913,6 +964,21 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 		countryCounts  = "urnetwork_proxy_test_country_providers"
 		providers      = "urnetwork_proxy_test_providers"
 		providersRead  = "urnetwork_proxy_test_providers_last_success_timestamp_seconds"
+		laneWindow     = "urnetwork_proxy_test_setup_window_seconds"
+		laneSamples    = "urnetwork_proxy_test_setup_window_samples"
+		laneTimeouts   = "urnetwork_proxy_test_setup_window_timeouts"
+		laneAge        = "urnetwork_proxy_test_setup_window_age_seconds"
+		allWindow2     = "urnetwork_proxy_test_all_setup_window_seconds"
+		allSamples     = "urnetwork_proxy_test_all_setup_window_samples"
+		allTimeouts    = "urnetwork_proxy_test_all_setup_window_timeouts"
+		allAge         = "urnetwork_proxy_test_all_setup_window_age_seconds"
+		hostWindow     = "urnetwork_proxy_test_proxy_setup_window_seconds"
+		hostSamples    = "urnetwork_proxy_test_proxy_setup_window_samples"
+		hostTimeouts   = "urnetwork_proxy_test_proxy_setup_window_timeouts"
+		hostAge        = "urnetwork_proxy_test_proxy_setup_window_age_seconds"
+		setups         = "urnetwork_proxy_test_setups_total"
+		laneRuns       = "urnetwork_proxy_test_lane_runs_total"
+		laneMismatch   = "urnetwork_proxy_test_lane_exit_country_mismatch_total"
 	)
 	// One sample a minute from 0 to 25 h, evaluated at 25 h (time() = 90000).
 	file := func(env string, host string) func(metric, labels, values string) map[string]string {
@@ -1046,6 +1112,59 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 		copied(providers, "", constant("119")),
 		other(providers, "", constant("999")),
 		planetoid(providersRead, "", "0+60x1500"),
+
+		// the lanes' count windows: the round-robin window is full, with 4
+		// timeouts in it; the US probe lane's holds 40, too few for its p90
+		planetoid(allWindow2, `,lane="round_robin",stat="p50"`, constant("3")),
+		planetoid(allWindow2, `,lane="round_robin",stat="p90"`, constant("12")),
+		copied(allWindow2, `,lane="round_robin",stat="p90"`, constant("11")),
+		planetoid(allWindow2, `,lane="round_robin",stat="p99"`, constant("60.5")),
+		planetoid(allWindow2, `,lane="round_robin",stat="max"`, constant("61")),
+		planetoid(allSamples, `,lane="round_robin"`, constant("100")),
+		copied(allSamples, `,lane="round_robin"`, constant("100")),
+		planetoid(allTimeouts, `,lane="round_robin"`, constant("4")),
+		planetoid(allAge, `,lane="round_robin"`, constant("21600")),
+		planetoid(allWindow2, `,lane="us_probe",stat="p50"`, constant("1.5")),
+		planetoid(allWindow2, `,lane="us_probe",stat="p90"`, constant("2.5")),
+		planetoid(allSamples, `,lane="us_probe"`, constant("40")),
+		planetoid(allTimeouts, `,lane="us_probe"`, constant("2")),
+		planetoid(allAge, `,lane="us_probe"`, constant("9000")),
+		other(allWindow2, `,lane="round_robin",stat="p90"`, constant("99")),
+		// per lane and country
+		planetoid(laneSamples, `,lane="round_robin",country="de"`, constant("30")),
+		planetoid(laneTimeouts, `,lane="round_robin",country="de"`, constant("1")),
+		planetoid(laneWindow, `,lane="round_robin",country="de",stat="p50"`, constant("4")),
+		planetoid(laneWindow, `,lane="round_robin",country="de",stat="p90"`, constant("9")),
+		copied(laneWindow, `,lane="round_robin",country="de",stat="p90"`, constant("8")),
+		planetoid(laneWindow, `,lane="round_robin",country="de",stat="max"`, constant("20")),
+		planetoid(laneAge, `,lane="round_robin",country="de"`, constant("500000")),
+		planetoid(laneSamples, `,lane="us_probe",country="us"`, constant("40")),
+		planetoid(laneTimeouts, `,lane="us_probe",country="us"`, constant("2")),
+		planetoid(laneWindow, `,lane="us_probe",country="us",stat="p50"`, constant("1.5")),
+		planetoid(laneWindow, `,lane="us_probe",country="us",stat="p90"`, constant("2.5")),
+		planetoid(laneWindow, `,lane="us_probe",country="us",stat="max"`, constant("61")),
+		planetoid(laneAge, `,lane="us_probe",country="us"`, constant("9000")),
+		// by the proxy's host and block
+		planetoid(hostSamples, `,proxy_host="crisp.example",proxy_block="g1"`, constant("100")),
+		planetoid(hostTimeouts, `,proxy_host="crisp.example",proxy_block="g1"`, constant("3")),
+		planetoid(hostWindow, `,proxy_host="crisp.example",proxy_block="g1",stat="p50"`, constant("2")),
+		planetoid(hostWindow, `,proxy_host="crisp.example",proxy_block="g1",stat="p90"`, constant("8")),
+		planetoid(hostWindow, `,proxy_host="crisp.example",proxy_block="g1",stat="max"`, constant("61")),
+		planetoid(hostAge, `,proxy_host="crisp.example",proxy_block="g1"`, constant("80000")),
+		planetoid(hostSamples, `,proxy_host="fireside.example",proxy_block="g2"`, constant("90")),
+		planetoid(hostWindow, `,proxy_host="fireside.example",proxy_block="g2",stat="p90"`, constant("18")),
+		copied(hostWindow, `,proxy_host="fireside.example",proxy_block="g2",stat="p90"`, constant("17")),
+		// crisp g1: 2 ready and 1 timeout a minute from the round-robin lane, 1
+		// ready from the US probe lane, also from the second host
+		planetoid(setups, `,lane="round_robin",proxy_host="crisp.example",proxy_block="g1",result="ready"`, "0+2x1500"),
+		copied(setups, `,lane="round_robin",proxy_host="crisp.example",proxy_block="g1",result="ready"`, "0+2x1500"),
+		planetoid(setups, `,lane="round_robin",proxy_host="crisp.example",proxy_block="g1",result="timeout"`, "0+1x1500"),
+		planetoid(setups, `,lane="us_probe",proxy_host="crisp.example",proxy_block="g1",result="ready"`, "0+1x1500"),
+		planetoid(laneRuns, `,lane="round_robin",outcome="ok"`, "0+3x1500"),
+		planetoid(laneRuns, `,lane="us_probe",outcome="ready"`, "0+1x1500"),
+		planetoid(laneRuns, `,lane="us_probe",outcome="ready_timeout"`, constant("0")),
+		planetoid(laneMismatch, `,lane="us_probe"`, "0+1x1500"),
+		planetoid(laneMismatch, `,lane="round_robin"`, constant("0")),
 	}
 	lastTested := by("country", map[string]float64{"de": 0, "fr": 3600, "jp": 18000, "us": 0, "it": 90000})
 	dayEvaluations := []evaluation{
@@ -1114,6 +1233,34 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 		{proxyTestProvidersTablePanel, "C", byCountry(map[string]float64{"us": 101, "de": 12, "jp": 3, "tr": 5})},
 		{proxyTestProvidersTablePanel, "D", byCountry(map[string]float64{"us": 100, "de": 10, "jp": 3, "tr": 5})},
 		{proxyTestProvidersTablePanel, "E", byCountry(map[string]float64{"us": 1542, "de": 14, "jp": 3, "tr": 5})},
+
+		// the lanes: the US probe lane's p90 waits for 50 setups
+		{proxyTestRoundRobinP90Panel, "A", value(12)},
+		{proxyTestRoundRobinSamplesPanel, "A", value(100)},
+		{proxyTestRoundRobinTimeoutsPanel, "A", value(4)},
+		{proxyTestRoundRobinAgePanel, "A", value(21600)},
+		{proxyTestUsProbeP90Panel, "A", none},
+		{proxyTestUsProbeSamplesPanel, "A", value(40)},
+		{proxyTestUsProbeTimeoutsPanel, "A", value(2)},
+		{proxyTestUsProbeAgePanel, "A", value(9000)},
+		{proxyTestLanePercentilesPanel, "A", []map[string]any{
+			{"labels": `{lane="round_robin",stat="p50"}`, "value": 3},
+			{"labels": `{lane="round_robin",stat="p90"}`, "value": 12},
+		}},
+		{proxyTestLaneTimeoutSharePanel, "A", by("lane", map[string]float64{"round_robin": 0.04, "us_probe": 0.05})},
+		{proxyTestLaneCountryTablePanel, "A", []map[string]any{{"labels": `{lane="round_robin",country="de"}`, "value": 30}, {"labels": `{lane="us_probe",country="us"}`, "value": 40}}},
+		{proxyTestLaneCountryTablePanel, "B", []map[string]any{{"labels": `{lane="round_robin",country="de"}`, "value": 1}, {"labels": `{lane="us_probe",country="us"}`, "value": 2}}},
+		{proxyTestLaneCountryTablePanel, "D", []map[string]any{{"labels": `{lane="round_robin",country="de"}`, "value": 9}, {"labels": `{lane="us_probe",country="us"}`, "value": 2.5}}},
+		{proxyTestLaneCountryTablePanel, "F", []map[string]any{{"labels": `{lane="round_robin",country="de"}`, "value": 500000}, {"labels": `{lane="us_probe",country="us"}`, "value": 9000}}},
+		{proxyTestProxyHostTablePanel, "A", []map[string]any{{"labels": `{proxy_host="crisp.example",proxy_block="g1"}`, "value": 100}, {"labels": `{proxy_host="fireside.example",proxy_block="g2"}`, "value": 90}}},
+		{proxyTestProxyHostTablePanel, "B", []map[string]any{{"labels": `{proxy_host="crisp.example",proxy_block="g1"}`, "value": 3}}},
+		{proxyTestProxyHostTablePanel, "D", []map[string]any{{"labels": `{proxy_host="crisp.example",proxy_block="g1"}`, "value": 8}, {"labels": `{proxy_host="fireside.example",proxy_block="g2"}`, "value": 18}}},
+		{proxyTestProxyHostTablePanel, "F", []map[string]any{{"labels": `{proxy_host="crisp.example",proxy_block="g1"}`, "value": 80000}}},
+		{proxyTestProxyHostP90Panel, "A", []map[string]any{{"labels": `{proxy_host="crisp.example",proxy_block="g1"}`, "value": 8}, {"labels": `{proxy_host="fireside.example",proxy_block="g2"}`, "value": 18}}},
+		// (120 round-robin + 60 US probe) ready setups and 60 timeouts an hour on crisp
+		{proxyTestProxyHostSetupsPanel, "A", []map[string]any{{"labels": `{proxy_host="crisp.example",result="ready"}`, "value": 180}, {"labels": `{proxy_host="crisp.example",result="timeout"}`, "value": 60}}},
+		{proxyTestLaneRunsPanel, "A", []map[string]any{{"labels": `{lane="round_robin",outcome="ok"}`, "value": 180}, {"labels": `{lane="us_probe",outcome="ready"}`, "value": 60}, {"labels": `{lane="us_probe",outcome="ready_timeout"}`, "value": 0}}},
+		{proxyTestLaneRunsPanel, "B", by("lane", map[string]float64{"us_probe": 60, "round_robin": 0})},
 	}
 
 	cases := []struct {
@@ -1193,12 +1340,25 @@ func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels
 			{proxyTestOutcomesPanel, "A", none},
 			{proxyTestCountryTablePanel, "G", none},
 			{proxyTestCountryTablePanel, "J", none},
+			{proxyTestRoundRobinP90Panel, "A", none},
+			{proxyTestRoundRobinSamplesPanel, "A", none},
+			{proxyTestUsProbeSamplesPanel, "A", none},
+			{proxyTestLanePercentilesPanel, "A", none},
+			{proxyTestLaneTimeoutSharePanel, "A", none},
+			{proxyTestLaneCountryTablePanel, "D", none},
+			{proxyTestProxyHostTablePanel, "D", none},
+			{proxyTestProxyHostP90Panel, "A", none},
+			{proxyTestProxyHostSetupsPanel, "A", none},
+			{proxyTestLaneRunsPanel, "A", none},
 		}},
 	}
 	tests := []map[string]any{}
 	for _, c := range cases {
 		expressionTests := []map[string]any{}
 		for _, e := range c.evaluations {
+			if skipped[e.id] {
+				continue
+			}
 			expressionTests = append(expressionTests, map[string]any{"expr": query(e.id, e.refId), "eval_time": "1500m", "exp_samples": e.samples})
 		}
 		tests = append(tests, map[string]any{"name": c.name, "interval": "1m", "input_series": c.series, "promql_expr_test": expressionTests})

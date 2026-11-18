@@ -622,11 +622,16 @@ func (self *ProxyDeviceManager) createProxyDevice(proxyId server.Id, pdState *pr
 	// cannot consume or reject this device's admission budget.
 	// Construction owns the signed proxy's durable configuration and identity
 	// reads. Recover here so every coalesced opener receives a completed result.
+	buildStart := time.Now()
 	pd, err := server.HandleError2(func() (*ProxyDevice, error) {
 		return self.proxyDeviceBuilder(proxyId)
 	}, func(err error) (*ProxyDevice, error) {
 		return nil, err
 	})
+	if err == nil && pd != nil {
+		// before publication, so every opener reads how it was opened
+		pd.setup.built(proxyId, buildStart, time.Now())
+	}
 
 	accepted := false
 	pdState.StateLock.Lock()
@@ -655,6 +660,7 @@ func (self *ProxyDeviceManager) createProxyDevice(proxyId server.Id, pdState *pr
 	pdState.StateLock.Unlock()
 
 	if accepted {
+		pd.setup.installed(pd.proxyDeviceState())
 		self.startProxyDevice(proxyId, pd)
 	} else {
 		if pd != nil {
@@ -1387,6 +1393,10 @@ type ProxyDevice struct {
 	// The throughput share of a unique-exit proxy (proxy_unique_exit.go); nil
 	// for every other device. Set once at construction.
 	uniqueExitShare *uniqueExitShare
+
+	// How the manager opened the device, and its setup-time observations
+	// (setup_metrics.go).
+	setup proxyDeviceSetup
 }
 
 func NewProxyDeviceWithDefaults(
@@ -2486,6 +2496,7 @@ func (self *ProxyDevice) Close() error {
 		if self.hostedEvaluationPoolSub != nil {
 			self.hostedEvaluationPoolSub.Close()
 		}
+		self.setup.closed()
 		// No receive state lock may be held while callbacks drain.
 		if self.closeDeviceLocalForTest != nil {
 			self.closeDeviceLocalForTest()

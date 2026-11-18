@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-proxy-test",
   "title": "urnetwork / proxy test",
-  "description": "The proxy test runner on planetoid (tests repo, tests/proxy-test) measures hosted proxies on main the way a customer sees them. As the wickymicky Pro test account it creates a hosted proxy in a country, requests cloudflare.com/cdn-cgi/trace through it, opens a random well-known site through it in a fresh headless Chrome, and removes it, over every available country in a shuffled round-robin. setup is the create call to the first successful request through the proxy; connect is Chrome's navigation start to the page's first byte; load is navigation start to loadEventEnd. The runner writes /var/lib/proxy-test/metrics/proxy-test.prom, and Fluent Bit ships it with env=\"main\", host=\"planetoid\" and job=\"node\". Percentiles come from the runner's in-memory windows (1 h for all countries, 24 h per country), which start empty after a restart. Counters are read with increase(), which absorbs restarts, and every query deduplicates with max, so a duplicate scrape or a second host never double-counts. The providers section shows the provider count of every country in the public provider-locations list, which the runner reads every minute apart from its test schedule (urnetwork_proxy_test_country_providers, urnetwork_proxy_test_providers and urnetwork_proxy_test_providers_last_success_timestamp_seconds).",
+  "description": "The proxy test runner on planetoid (tests repo, tests/proxy-test) measures hosted proxies on main the way a customer sees them. As the Pro test account it creates a hosted proxy in a country, requests cloudflare.com/cdn-cgi/trace through it, opens a random well-known site through it in a fresh headless Chrome, and removes it, over every available country in a shuffled round-robin. setup is the create call to the first successful request through the proxy; connect is Chrome's navigation start to the page's first byte; load is navigation start to loadEventEnd. The runner writes /var/lib/proxy-test/metrics/proxy-test.prom, and Fluent Bit ships it with env=\"main\", host=\"planetoid\" and job=\"node\". Percentiles come from the runner's in-memory windows (1 h for all countries, 24 h per country), which start empty after a restart. Counters are read with increase(), which absorbs restarts, and every query deduplicates with max, so a duplicate scrape or a second host never double-counts. The providers section shows the provider count of every country in the public provider-locations list, which the runner reads every minute apart from its test schedule (urnetwork_proxy_test_country_providers, urnetwork_proxy_test_providers and urnetwork_proxy_test_providers_last_success_timestamp_seconds). The lanes section reads the runner's count windows: the last 100 setups of each lane (round_robin, the Chrome runs over every country; us_probe, a probe-only US lane every 3-4 minutes), per country and by the proxy's host and block, with ready timeouts counted as their wait, so the US p90 rests on 100 setups and failures raise it.",
   "tags": [
     "urnetwork",
     "proxy",
@@ -276,7 +276,7 @@
       "id": 5,
       "type": "stat",
       "title": "proxy removes failed, last 24 h",
-      "description": "remove-client calls that still failed after their retries in the last 24 h (urnetwork_proxy_test_remove_failures_total). Each can leave a hosted proxy alive on the wickymicky account, where it counts toward the Pro limit of 1,000 active proxies; the runner removes its own leftovers (description starting 'proxy-test ', at most 200) only at its next start. It reads 0 while the runner reports but has not written the counter. Red from 1.",
+      "description": "remove-client calls that still failed after their retries in the last 24 h (urnetwork_proxy_test_remove_failures_total). Each can leave a hosted proxy alive on the test account, where it counts toward the Pro limit of 1,000 active proxies; the runner removes its own leftovers (description starting 'proxy-test ', at most 200) only at its next start. It reads 0 while the runner reports but has not written the counter. Red from 1.",
       "gridPos": {
         "h": 4,
         "w": 5,
@@ -834,6 +834,1372 @@
       ]
     },
     {
+      "id": 35,
+      "type": "row",
+      "title": "setup over the last 100 setups, ready timeouts counted: the round-robin and US probe lanes",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "panels": []
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "round-robin setup p90, last 100",
+      "description": "Nearest-rank p90 of setup over the last 100 round-robin setups (urnetwork_proxy_test_all_setup_window_seconds, lane round_robin), the round-robin lane: the runner's Chrome runs over every country in turn. A ready_timeout enters at its wait, at least the 60 s ready timeout, so failures raise the p90 instead of leaving it. Blank while the window holds fewer than 50 setups. Orange from 15 s, red from 30 s.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "noValue": "fewer than 50 setups",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_seconds{env=\"main\",lane=\"round_robin\",stat=\"p90\"}) and on() (max(urnetwork_proxy_test_all_setup_window_samples{env=\"main\",lane=\"round_robin\"}) >= 50)",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "round-robin setups in the window",
+      "description": "How many setups the round-robin window holds (urnetwork_proxy_test_all_setup_window_samples): up to 100, the newest. It starts empty after a runner restart.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_samples{env=\"main\",lane=\"round_robin\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "round-robin ready timeouts in it",
+      "description": "Setups in the round-robin window that never got a first successful request within the 60 s ready timeout (urnetwork_proxy_test_all_setup_window_timeouts).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 6,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_timeouts{env=\"main\",lane=\"round_robin\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "round-robin window covers",
+      "description": "How far back the round-robin window reaches: the age of its oldest setup (urnetwork_proxy_test_all_setup_window_age_seconds).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 9,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_age_seconds{env=\"main\",lane=\"round_robin\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "US probe setup p90, last 100",
+      "description": "Nearest-rank p90 of setup over the last 100 US probe setups (urnetwork_proxy_test_all_setup_window_seconds, lane us_probe), the US probe lane: a hosted proxy pinned to the US every 3-4 minutes, probed until ready and removed, without a browser. A ready_timeout enters at its wait, at least the 60 s ready timeout, so failures raise the p90 instead of leaving it. Blank while the window holds fewer than 50 setups. Orange from 15 s, red from 30 s.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 12,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "noValue": "fewer than 50 setups",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_seconds{env=\"main\",lane=\"us_probe\",stat=\"p90\"}) and on() (max(urnetwork_proxy_test_all_setup_window_samples{env=\"main\",lane=\"us_probe\"}) >= 50)",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "US probe setups in the window",
+      "description": "How many setups the US probe window holds (urnetwork_proxy_test_all_setup_window_samples): up to 100, the newest. It starts empty after a runner restart.",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 15,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_samples{env=\"main\",lane=\"us_probe\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "US probe ready timeouts in it",
+      "description": "Setups in the US probe window that never got a first successful request within the 60 s ready timeout (urnetwork_proxy_test_all_setup_window_timeouts).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 18,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_timeouts{env=\"main\",lane=\"us_probe\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "US probe window covers",
+      "description": "How far back the US probe window reaches: the age of its oldest setup (urnetwork_proxy_test_all_setup_window_age_seconds).",
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 21,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "noValue": "none yet",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_all_setup_window_age_seconds{env=\"main\",lane=\"us_probe\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "setup p50 and p90 by lane, last 100 setups (ready timeouts counted)",
+      "description": "Nearest-rank p50 and p90 over each lane's last 100 setups (urnetwork_proxy_test_all_setup_window_seconds). round_robin: the Chrome runs over every country in turn; us_probe: the probe-only US lane every 3-4 minutes. A ready_timeout counts as its wait, at least 60 s. A lane is hidden while its window holds fewer than 50 setups.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (lane, stat) (urnetwork_proxy_test_all_setup_window_seconds{env=\"main\",stat=~\"p50|p90\"}) and on (lane) (max by (lane) (urnetwork_proxy_test_all_setup_window_samples{env=\"main\"}) >= 50)",
+          "legendFormat": "{{lane}} {{stat}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "share of the last 100 setups that timed out, by lane",
+      "description": "Ready timeouts over the setups in each lane's window (urnetwork_proxy_test_all_setup_window_timeouts and _samples): setups that never got a first successful request within 60 s.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (lane) (urnetwork_proxy_test_all_setup_window_timeouts{env=\"main\"}) / (max by (lane) (urnetwork_proxy_test_all_setup_window_samples{env=\"main\"}) > 0)",
+          "legendFormat": "{{lane}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 46,
+      "type": "table",
+      "title": "setup by lane and country, last 100 setups (selected countries)",
+      "description": "One row per lane and country: the nearest-rank p50, p90 and max over the country's last 100 setups in the lane (urnetwork_proxy_test_setup_window_seconds), how many setups that is, how many of them timed out (a timeout counts as its wait, at least 60 s), and how far back the window reaches. A round-robin country gets about 17 runs a day, so its window reaches back days; the US probe lane fills its window in about 6 hours. Sorted by p90, slowest first.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "setups"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "timeouts"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p50"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p90"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #E"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "max"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #F"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "window covers"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "p90",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "lane": 0,
+              "country": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6,
+              "Value #F": 7
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_samples{env=\"main\",country=~\"$country\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_timeouts{env=\"main\",country=~\"$country\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_seconds{env=\"main\",country=~\"$country\",stat=\"p50\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_seconds{env=\"main\",country=~\"$country\",stat=\"p90\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_seconds{env=\"main\",country=~\"$country\",stat=\"max\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "F",
+          "expr": "max by (lane, country) (urnetwork_proxy_test_setup_window_age_seconds{env=\"main\",country=~\"$country\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 47,
+      "type": "row",
+      "title": "setup by the proxy's host and block",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "panels": [],
+      "urnetworkInternalOnly": true
+    },
+    {
+      "id": 48,
+      "type": "table",
+      "title": "setup by proxy host and block, last 100 setups (both lanes)",
+      "description": "One row per proxy host and block that the runner's proxies were placed on: the nearest-rank p50, p90 and max over that host and block's last 100 setups from both lanes (urnetwork_proxy_test_proxy_setup_window_seconds), how many setups and timeouts that is, and how far back the window reaches. The host is the proxy URL's host without its first label, which is the proxy's token; the block comes with the create call. A timeout counts as its wait, at least 60 s. Sorted by p90, slowest first.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "setups"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "timeouts"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p50"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "p90"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #E"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "max"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #F"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "window covers"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "p90",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "proxy_host": 0,
+              "proxy_block": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6,
+              "Value #F": 7
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_samples{env=\"main\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_timeouts{env=\"main\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_seconds{env=\"main\",stat=\"p50\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_seconds{env=\"main\",stat=\"p90\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_seconds{env=\"main\",stat=\"max\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "F",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_age_seconds{env=\"main\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "urnetworkInternalOnly": true
+    },
+    {
+      "id": 49,
+      "type": "timeseries",
+      "title": "setup p90 by proxy host and block, last 100 setups",
+      "description": "Each proxy host and block's nearest-rank p90 over its last 100 setups from both lanes (urnetwork_proxy_test_proxy_setup_window_seconds), timeouts counted as their wait. A fix or a memory limit rolled to one host or block shows against the others.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (proxy_host, proxy_block) (urnetwork_proxy_test_proxy_setup_window_seconds{env=\"main\",stat=\"p90\"})",
+          "legendFormat": "{{proxy_host}} {{proxy_block}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "urnetworkInternalOnly": true
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "setups / h by proxy host: ready and timed out",
+      "description": "Setups per hour from both lanes by the proxy's host, ready (the probe succeeded) or timeout (no success within 60 s), from increase() of urnetwork_proxy_test_setups_total.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (proxy_host, result) (max by (lane, proxy_host, proxy_block, result) (increase(urnetwork_proxy_test_setups_total{env=\"main\"}[1h])))",
+          "legendFormat": "{{proxy_host}} {{result}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "urnetworkInternalOnly": true
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "runs / h by lane and outcome, and exit-country mismatches",
+      "description": "Every lane's runs per hour by outcome (urnetwork_proxy_test_lane_runs_total): ready is a probe-only run whose probe succeeded. Exit mismatches are probes whose trace loc differed from the requested country (urnetwork_proxy_test_lane_exit_country_mismatch_total); they are recorded, not failures.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (lane, outcome) (increase(urnetwork_proxy_test_lane_runs_total{env=\"main\"}[1h]))",
+          "legendFormat": "{{lane}} {{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (lane) (increase(urnetwork_proxy_test_lane_exit_country_mismatch_total{env=\"main\"}[1h]))",
+          "legendFormat": "{{lane}} exit mismatches",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ],
+      "urnetworkInternalOnly": true
+    },
+    {
       "id": 13,
       "type": "row",
       "title": "coverage",
@@ -842,7 +2208,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 52
       },
       "panels": []
     },
@@ -855,7 +2221,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 11
+        "y": 53
       },
       "datasource": {
         "type": "prometheus",
@@ -920,7 +2286,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 11
+        "y": 53
       },
       "datasource": {
         "type": "prometheus",
@@ -984,7 +2350,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 11
+        "y": 53
       },
       "datasource": {
         "type": "prometheus",
@@ -1055,7 +2421,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 57
       },
       "panels": []
     },
@@ -1068,7 +2434,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 16
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -1133,7 +2499,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 20
+        "y": 62
       },
       "datasource": {
         "type": "prometheus",
@@ -1202,7 +2568,7 @@
         "h": 8,
         "w": 18,
         "x": 6,
-        "y": 16
+        "y": 58
       },
       "datasource": {
         "type": "prometheus",
@@ -1267,7 +2633,7 @@
         "h": 20,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 66
       },
       "datasource": {
         "type": "prometheus",
@@ -1504,7 +2870,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 86
       },
       "panels": []
     },
@@ -1517,7 +2883,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 87
       },
       "datasource": {
         "type": "prometheus",
@@ -1579,7 +2945,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 87
       },
       "datasource": {
         "type": "prometheus",
@@ -1733,7 +3099,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 53
+        "y": 95
       },
       "datasource": {
         "type": "prometheus",
@@ -1797,7 +3163,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 53
+        "y": 95
       },
       "datasource": {
         "type": "prometheus",
@@ -1869,7 +3235,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 103
       },
       "panels": []
     },
@@ -1882,7 +3248,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 104
       },
       "datasource": {
         "type": "prometheus",
@@ -2508,7 +3874,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 116
       },
       "datasource": {
         "type": "prometheus",
@@ -2583,7 +3949,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 74
+        "y": 116
       },
       "datasource": {
         "type": "prometheus",
@@ -2659,7 +4025,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 84
+        "y": 126
       },
       "datasource": {
         "type": "prometheus",
@@ -2734,7 +4100,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 84
+        "y": 126
       },
       "datasource": {
         "type": "prometheus",
@@ -2810,7 +4176,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 136
       },
       "datasource": {
         "type": "prometheus",

@@ -9,13 +9,29 @@ import (
 	"testing"
 )
 
-// The ten consumers share one read path but keep independent signal identities.
+// The consumers share one read path but keep independent signal identities.
 func stormDiagnosticSignals() []Signal {
 	return []Signal{
 		NewPgBouncerBacklogSignal(), NewServicesCpuSignal(), NewDbAcquireWaitSignal(), NewContractCreationsStuckSignal(),
 		NewReservationReleaseSignal(), NewRedisPoolTimeoutsSignal(), NewRedisMainThreadSignal(), NewProxyHostCpuSignal(),
-		NewContractReplyCollapseSignal(), NewHostedContractCapSignal(),
+		NewContractReplyCollapseSignal(), NewHostedContractCapSignal(), NewProxyMintRefusalsSignal(), NewProxyHeapLimitSignal(),
+		NewProxyConnectsAbandonedSignal(),
 	}
+}
+
+// The complete healthy history of a consumer: its recorded replay, or a
+// synthetic answer for the probes added after the ten replay fixtures.
+func stormDiagnosticHealthyAlerts(t *testing.T, signal Signal) Alerts {
+	t.Helper()
+	synthetic := map[string]func(testing.TB) string{
+		"proxy-mint-refusals":      proxyMintRefusalsHealthyResponse,
+		"proxy-heap-limit":         proxyHeapLimitHealthyResponse,
+		"proxy-connects-abandoned": proxyConnectsAbandonedHealthyResponse,
+	}
+	if response, ok := synthetic[signal.Key()]; ok {
+		return runStormSynthetic(t, signal, stormSyntheticNow, response(t), nil)
+	}
+	return runStormReplay(t, signal, loadStormReplayFixture(t, signal.Key())["healthy"], nil)
 }
 
 // Typed causes and independent local markers survive the source wrapper,
@@ -83,8 +99,7 @@ func TestStormSourceDiagnosticsKeepSuccessfulAndInvalidReadsSeparate(t *testing.
 				requireAlertOmits(t, alert, "private-storm-malformed-body")
 			}
 		}
-		cases := loadStormReplayFixture(t, signal.Key())
-		alerts := runStormReplay(t, signal, cases["healthy"], nil)
+		alerts := stormDiagnosticHealthyAlerts(t, signal)
 		if len(alerts) != 0 {
 			t.Fatalf("%s: complete healthy history changed", signal.Key())
 		}

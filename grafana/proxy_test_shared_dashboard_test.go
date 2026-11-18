@@ -1,6 +1,6 @@
 // The proxy test dashboard's shared copy: the internal proxy test dashboard
 // over every country, with fixed queries, so that a grafana public dashboard
-// runs every panel. It is tagged public and unlisted: published for an outside
+// runs every panel, less the panels marked internal-only. It is tagged public and unlisted: published for an outside
 // viewer given its link (owner decision, 2026-11-09) and left out of the public
 // directory. The copy is derived from the internal dashboard, so these tests
 // hold the two together: an edit to proxy-test.json fails here until the copy
@@ -19,6 +19,15 @@ import (
 )
 
 const proxyTestSharedDashboardName = "proxy-test-shared.json"
+
+// The key that marks a panel of the internal dashboard internal-only: the
+// shared copy leaves it out. The proxy's host, block and port are internal
+// only (owner, 2026-11-18), so the panels that show them carry it.
+const proxyTestInternalOnlyKey = "urnetworkInternalOnly"
+
+// The runner's labels that name the proxy a run set up, which no part of the
+// shared copy may carry.
+var proxyTestInternalOnlyLabels = []string{"proxy_host", "proxy_block", "proxy_port"}
 
 // The country variable's matcher as every per-country query of the internal
 // dashboard writes it. With every country selected it is country=~".*", which
@@ -56,8 +65,9 @@ func proxyTestDocumentPanels(document map[string]any) []map[string]any {
 }
 
 // The shared copy as derived from the internal dashboard document: its
-// identity and tags, no variables and no links, every country matcher
-// dropped, and titles that said "selected countries" saying "all countries".
+// identity and tags, no variables and no links, no internal-only panel, every
+// country matcher dropped, and titles that said "selected countries" saying
+// "all countries".
 // The tags leave out the internal dashboard's host tag, since public viewers
 // read the tags. Descriptions are the copy's own, and are checked on their own.
 func proxyTestSharedFromInternal(t *testing.T, internal map[string]any) map[string]any {
@@ -79,6 +89,13 @@ func proxyTestSharedFromInternal(t *testing.T, internal map[string]any) map[stri
 	}
 	templating["list"] = []any{}
 	shared["links"] = []any{}
+	kept := []any{}
+	for _, item := range shared["panels"].([]any) {
+		if panel, ok := item.(map[string]any); !ok || panel[proxyTestInternalOnlyKey] != true {
+			kept = append(kept, item)
+		}
+	}
+	shared["panels"] = kept
 	for _, panel := range proxyTestDocumentPanels(shared) {
 		if title, ok := panel["title"].(string); ok {
 			panel["title"] = strings.ReplaceAll(title, "selected countries", "all countries")
@@ -319,6 +336,61 @@ func TestProxyTestSharedDashboardDescriptionsReadForAnOutsideViewer(t *testing.T
 			if !slices.Contains([]string{"the", "a", "test"}, match[1]) {
 				t.Errorf("description names an account (%q): %s", match[0], description)
 			}
+		}
+	}
+}
+
+// The panels that show the proxy a run set up are internal-only, and the
+// shared copy carries none of them: no panel, row or marker, and no proxy
+// host, block or port label or variable anywhere in its document. An
+// internal-only row's panels, up to the next row, are internal-only too, so
+// the copy never keeps a section without its title or a title without its
+// section.
+func TestProxyTestSharedDashboardLeavesOutInternalOnlyPanels(t *testing.T) {
+	internal := readProxyTestDocumentJson(t, proxyTestDashboardName)
+	internalOnly := map[int]bool{}
+	rowInternalOnly := false
+	for _, item := range internal["panels"].([]any) {
+		panel := item.(map[string]any)
+		id := int(panel["id"].(float64))
+		marked := panel[proxyTestInternalOnlyKey] == true
+		if value, present := panel[proxyTestInternalOnlyKey]; present && value != true {
+			t.Errorf("panel %d marks itself internal-only with %v; the marker is true or absent", id, value)
+		}
+		if panel["type"] == "row" {
+			rowInternalOnly = marked
+		} else if rowInternalOnly && !marked {
+			t.Errorf("panel %d sits in an internal-only row but is not internal-only", id)
+		}
+		if marked {
+			internalOnly[id] = true
+		}
+		body, err := json.Marshal(panel)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, label := range proxyTestInternalOnlyLabels {
+			if strings.Contains(string(body), label) && !marked {
+				t.Errorf("panel %d (%v) shows %s but is not internal-only", id, panel["title"], label)
+			}
+		}
+	}
+	if len(internalOnly) == 0 {
+		t.Fatal("the internal dashboard marks no panel internal-only")
+	}
+
+	body, err := dashboardsFs.ReadFile("dashboards/" + proxyTestSharedDashboardName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range append(slices.Clone(proxyTestInternalOnlyLabels), proxyTestInternalOnlyKey) {
+		if strings.Contains(string(body), forbidden) {
+			t.Errorf("the shared copy carries %s", forbidden)
+		}
+	}
+	for _, panel := range proxyTestDocumentPanels(readProxyTestDocumentJson(t, proxyTestSharedDashboardName)) {
+		if id := int(panel["id"].(float64)); internalOnly[id] {
+			t.Errorf("the shared copy has internal-only panel %d (%v)", id, panel["title"])
 		}
 	}
 }
