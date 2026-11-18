@@ -2,11 +2,22 @@ package router
 
 import (
 	"context"
+	"errors"
+	"runtime/debug"
 	"time"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
+
+// How long a renewing key's last published value stays answerable after its
+// own lifetime ends. A miss whose refresh is slower than its wait answers with
+// it instead of 503 (cacheJsonWithRenewingFill). It covers the pollers seen on
+// 2026-11-18, which come back every 1 and every ~5 minutes; the provider list's
+// created_time says how old the answer is.
+const handlerCacheLastGoodTtl = 15 * time.Minute
 
 // Only explicitly selected expensive handlers renew their fill ownership.
 // Ordinary cache callers retain their existing lease-expiry behavior.
@@ -57,6 +68,22 @@ func (self *handlerCacheRenewingAttempt) acquire(
 ) (bool, error) {
 	self.key, self.token, self.ttl = key, token, ttl
 	return self.handlerCacheRenewingStore.acquire(ctx, key, token, ttl)
+}
+
+// A publication also keeps its value as the key's last good answer. That write
+// is best effort: losing it leaves the previous last good answer in place.
+func (self *handlerCacheRenewingAttempt) publish(
+	ctx context.Context,
+	keys handlerCacheKeys,
+	token string,
+	value string,
+	ttl time.Duration,
+) (bool, error) {
+	published, err := self.handlerCacheRenewingStore.publish(ctx, keys, token, value, ttl)
+	if err == nil && published {
+		_ = self.handlerCacheRenewingStore.set(ctx, keys.last, value, handlerCacheLastGoodTtl, false)
+	}
+	return published, err
 }
 
 // Renew within both the old lease's conservative lifetime and a short Redis
@@ -163,6 +190,27 @@ func renewingHandlerCacheFill[R any](
 	return value, fillErr
 }
 
+// A miss of a renewing key is answered from a fill its caller cannot cancel.
+//
+// The coordinated attempt (cacheJson: take the lease, or wait for its holder)
+// runs on its own goroutine under the caller's context without its
+// cancellation, and an owner's fill keeps the owner budget (fillTimeout) and
+// lease renewal of renewingHandlerCacheFill. The caller waits for that outcome
+// until its own end; when it leaves first, the fill still publishes and the
+// next request of the key finds the value.
+//
+// A miss that has no answer after handlerCacheFillWaitLimit, or whose attempt
+// ends unavailable (a failure fence, a lost lease, Redis, the fill budget),
+// answers the key's last published value while one is kept
+// (handlerCacheLastGoodTtl) instead of 503. A fill that answers within the
+// wait is answered fresh, as before, and other fill errors keep their status.
+//
+// Before 2026-11-18 the fill ran under its caller's context. A provider list
+// slower than its callers' patience (the lb cuts an upstream at 30 s; clients
+// give up after about 10 s) was canceled with each caller and never
+// published, so every request of that network answered 503 or nothing. One
+// client's list took 2 s to fill on 2026-11-14 and more than 10 s from the
+// evening of 11-16, and none of its requests succeeded after that.
 func cacheJsonWithRenewingFill[R any](
 	ctx context.Context,
 	store handlerCacheRenewingStore,
@@ -174,15 +222,93 @@ func cacheJsonWithRenewingFill[R any](
 	if handlerCacheFillLeaseTtl(ttl) < time.Second || fillTimeout <= 0 {
 		return nil, &handlerCacheUnavailableError{}
 	}
+	keys := newHandlerCacheKeys(key)
+	if cachedValue, ok, err := getCachedJson[R](ctx, store, keys.value); err != nil {
+		return nil, &handlerCacheUnavailableError{}
+	} else if ok {
+		return cachedValue, nil
+	}
+
+	outcomes := make(chan handlerCacheRenewingOutcome[R])
+	abandoned := make(chan struct{})
+	defer close(abandoned)
+	go runRenewingHandlerCacheAttempt(context.WithoutCancel(ctx), store, key, ttl, fillTimeout, fill, outcomes, abandoned)
+
+	wait := time.NewTimer(handlerCacheFillWaitLimit)
+	defer wait.Stop()
+	waitDone := wait.C
+	for {
+		select {
+		case outcome := <-outcomes:
+			if outcome.panicked {
+				panic(outcome.panicValue)
+			}
+			if outcome.err != nil && handlerCacheRenewingUnavailable(outcome.err) {
+				if lastGood, ok, err := getCachedJson[R](ctx, store, keys.last); err == nil && ok {
+					return lastGood, nil
+				}
+			}
+			return outcome.value, outcome.err
+		case <-waitDone:
+			waitDone = nil
+			if lastGood, ok, err := getCachedJson[R](ctx, store, keys.last); err == nil && ok {
+				return lastGood, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// One coordinated attempt's result, or the panic that ended it.
+type handlerCacheRenewingOutcome[R any] struct {
+	value      *R
+	err        error
+	panicked   bool
+	panicValue any
+}
+
+// Runs one coordinated attempt and hands its outcome to the caller while the
+// caller waits. A panic is logged with its own stack and handed over to be
+// raised again in the caller; once the caller has left, it is only logged.
+func runRenewingHandlerCacheAttempt[R any](
+	ctx context.Context,
+	store handlerCacheRenewingStore,
+	key string,
+	ttl time.Duration,
+	fillTimeout time.Duration,
+	fill func(context.Context) (*R, error),
+	outcomes chan<- handlerCacheRenewingOutcome[R],
+	abandoned <-chan struct{},
+) {
+	var outcome handlerCacheRenewingOutcome[R]
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			glog.Errorf("[h]renewing cache fill panic: %v\n%s", recovered, debug.Stack())
+			outcome = handlerCacheRenewingOutcome[R]{panicked: true, panicValue: recovered}
+		}
+		select {
+		case outcomes <- outcome:
+		case <-abandoned:
+		}
+	}()
 	attempt := &handlerCacheRenewingAttempt{handlerCacheRenewingStore: store}
-	return cacheJson(ctx, attempt, key, ttl, func() (*R, error) {
+	outcome.value, outcome.err = cacheJson(ctx, attempt, key, ttl, func() (*R, error) {
 		return renewingHandlerCacheFill(ctx, attempt, fillTimeout, fill)
 	})
+}
+
+// An attempt that ended without an answer: a fence, a lost lease or a Redis
+// failure (503), or the owner budget. A fill's own refusal is not one.
+func handlerCacheRenewingUnavailable(err error) bool {
+	var unavailable *handlerCacheUnavailableError
+	return errors.As(err, &unavailable) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // Opt-in ownership for an expensive network-scoped cache fill. Response TTL,
 // key scope and failure policy match CacheWithNetworkAuth. A lease loss cancels
 // only the copied session's fill context; it cannot mutate the caller session.
+// The fill's context does not end with the caller (cacheJsonWithRenewingFill).
 func CacheWithNetworkAuthRenewingFill[R any](
 	impl ImplFunction[*R],
 	key string,
