@@ -4858,7 +4858,8 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // the jwt refresh fail so the app logs the user out (see
 // FindActiveClientNetwork), and the reap hard deletes it
 // `NetworkClientReapAfterDeactivate` later. A returning user logs in again
-// with a fresh client id.
+// with a fresh client id. The clients of sidecar.yml's urnetwork_edge are
+// never marked (owner decision 591): see RemoveDisconnectedNetworkClients.
 //
 // Tightened 90d -> 30d (2026-07-18). A top-level client stays active for this
 // whole window, so under identity churn (a fresh device_id per login) or a
@@ -4939,7 +4940,9 @@ func DefaultRemoveDisconnectedNetworkClientsSettings() *RemoveDisconnectedNetwor
 // Keep the client window much larger than the connection window: provisioned
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id. `minTopLevelAuthTime` bounds the idle
-// top-level marker (TopLevelClientIdleExpiration). Under the default settings.
+// top-level marker (TopLevelClientIdleExpiration), which leaves the clients of
+// sidecar.yml's urnetwork_edge alone (owner decision 591). Under the default
+// settings.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
 	RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, DefaultRemoveDisconnectedNetworkClientsSettings())
 }
@@ -4979,6 +4982,21 @@ func RemoveDisconnectedNetworkClientsWithSettings(
 	// live connection. Marking makes the jwt refresh fail so the app logs the
 	// user out; the reap below hard deletes the row
 	// `NetworkClientReapAfterDeactivate` after deactivate_time.
+	//
+	// The clients of sidecar.yml's urnetwork_edge are never marked (owner
+	// decision 591; §13.6, §19.4): an edge block's platform clients connect
+	// only while a process holds their deploy slot, so a slot no process has
+	// held for TopLevelClientIdleExpiration would otherwise lose its clients,
+	// and api's mint (MintEdgeClient), which answers only a client it finds
+	// active, would refuse the next deploy into it. The set is bounded by
+	// edge.yml (SlotCount times K a block and host), so each batch steps over
+	// at most that many rows. An operator's removal still ends one: it is
+	// inactive, and the inactive reap below takes it like any other. With no
+	// urnetwork_edge in sidecar.yml, $3 is null and no network is left out.
+	var edgeNetworkId *server.Id
+	if networkId, ok := server.CurrentSidecarConfig().UrnetworkEdge(); ok {
+		edgeNetworkId = &networkId
+	}
 	for 0 < settings.MarkTopLevelBatchCount {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -4999,6 +5017,7 @@ func RemoveDisconnectedNetworkClientsWithSettings(
 							network_client.active = true AND
 							network_client.source_client_id IS NULL AND
 							network_client.auth_time < $1 AND
+							network_client.network_id IS DISTINCT FROM $3 AND
 							network_client_connection.client_id IS NULL
 						ORDER BY network_client.auth_time ASC, network_client.client_id ASC
 						LIMIT $2
@@ -5013,12 +5032,14 @@ func RemoveDisconnectedNetworkClientsWithSettings(
 						network_client.active = true AND
 						network_client.source_client_id IS NULL AND
 						network_client.auth_time < $1 AND
+						network_client.network_id IS DISTINCT FROM $3 AND
 						network_client_connection.client_id IS NULL
 					ORDER BY network_client.client_id
 					FOR UPDATE OF network_client
 				`,
 				minTopLevelAuthTime.UTC(),
 				settings.MarkTopLevelBatchCount,
+				edgeNetworkId,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {

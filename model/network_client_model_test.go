@@ -2460,6 +2460,211 @@ func reapTestClientState(ctx context.Context, clientId server.Id) (exists bool, 
 	return
 }
 
+// An edge slot that no process has held for TopLevelClientIdleExpiration can
+// still be deployed into (owner decision 591, QD-1059): the idle marker leaves
+// the clients of sidecar.yml's urnetwork_edge active, and MintEdgeClient
+// answers each of them again, a jwt whose state holds, while an ordinary
+// top-level client idle as long is still marked and then reaped. The idle edge
+// clients are older than the ordinary one and a batch marks one client, so a
+// skip taken after the candidates' LIMIT, which would fill the batch with edge
+// clients and end the pass, fails here.
+func TestRemoveDisconnectedNetworkClientsLeavesEdgeClientsActive(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		edgeNetworkId := server.NewId()
+		Testing_CreateNetwork(ctx, edgeNetworkId, "urnetwork-edge-reap-test", server.NewId())
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  urnetwork_edge: " + edgeNetworkId.String() + "\n"))
+
+		// slot 3's clients, which no process has held since their first deploy
+		edgeKeys := []*EdgeClientKey{
+			{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 3, Index: 0},
+			{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 3, Index: 1},
+		}
+		edgeClientIds := []server.Id{}
+		for i, key := range edgeKeys {
+			mint, err := MintEdgeClient(ctx, edgeNetworkId, key, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edgeClientIds = append(edgeClientIds, mint.ClientId)
+			reapTestSetAuthTime(ctx, mint.ClientId, now.Add(-TopLevelClientIdleExpiration-time.Duration(3+i)*24*time.Hour))
+		}
+
+		// an ordinary top-level client of another network, idle past the expiration
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "ordinary-reap-test", server.NewId())
+		idleClientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), idleClientId, "synthetic", "synthetic")
+		reapTestSetAuthTime(ctx, idleClientId, now.Add(-TopLevelClientIdleExpiration-24*time.Hour))
+
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+		settings := DefaultRemoveDisconnectedNetworkClientsSettings()
+		settings.MarkTopLevelBatchCount = 1
+		RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, settings)
+
+		// the ordinary client is marked, from behind the older edge clients
+		exists, active, deactivateTime := reapTestClientState(ctx, idleClientId)
+		if !exists || active || deactivateTime == nil {
+			t.Fatalf("the idle ordinary client: exists %t, active %t, deactivate_time %v", exists, active, deactivateTime)
+		}
+
+		// each edge client stays active, and the next deploy into its slot is minted for it
+		for i, key := range edgeKeys {
+			exists, active, deactivateTime := reapTestClientState(ctx, edgeClientIds[i])
+			if !exists || !active || deactivateTime != nil {
+				t.Fatalf("idle edge client %d: exists %t, active %t, deactivate_time %v", i, exists, active, deactivateTime)
+			}
+			mint, err := MintEdgeClient(ctx, edgeNetworkId, key, nil)
+			if err != nil {
+				t.Fatalf("idle edge client %d is not minted after the reap: %v", i, err)
+			}
+			if mint.ClientId != edgeClientIds[i] {
+				t.Fatalf("idle edge client %d minted as %s, want %s", i, mint.ClientId, edgeClientIds[i])
+			}
+			byJwt, err := session.ParseByJwtForAudience(ctx, mint.ByClientJwt, session.ByJwtAudienceConnect)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := session.ValidateByJwtState(ctx, byJwt, true); err != nil {
+				t.Fatalf("idle edge client %d's jwt after the reap: %v", i, err)
+			}
+		}
+
+		// past the reap window the marked client is hard deleted, and the edge
+		// clients, whose mint refreshed no auth_time, are still left alone
+		reapTestSetDeactivateTime(ctx, idleClientId, now.Add(-NetworkClientReapAfterDeactivate-24*time.Hour))
+		RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, settings)
+		if exists, _, _ := reapTestClientState(ctx, idleClientId); exists {
+			t.Fatal("the marked ordinary client outlived the reap window")
+		}
+		for i, edgeClientId := range edgeClientIds {
+			if exists, active, _ := reapTestClientState(ctx, edgeClientId); !exists || !active {
+				t.Fatalf("idle edge client %d after the second reap: exists %t, active %t", i, exists, active)
+			}
+		}
+	})
+}
+
+// An operator's removal still ends an edge client (owner decision 591): the
+// removal marks it inactive and its mint is refused, and the inactive reap
+// hard deletes it NetworkClientReapAfterDeactivate later, though sidecar.yml
+// names its network as urnetwork_edge, while its idle sibling stays active.
+func TestRemoveDisconnectedNetworkClientsReapsRemovedEdgeClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		edgeNetworkId := server.NewId()
+		adminUserId := server.NewId()
+		Testing_CreateNetwork(ctx, edgeNetworkId, "urnetwork-edge-removal-test", adminUserId)
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  urnetwork_edge: " + edgeNetworkId.String() + "\n"))
+		edgeSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: edgeNetworkId, UserId: adminUserId, NetworkName: "urnetwork-edge-removal-test"})
+
+		removedKey := &EdgeClientKey{Environment: "test", Block: "smtpedge", Host: "lb-a.example", Slot: 2, Index: 0}
+		keptKey := &EdgeClientKey{Environment: "test", Block: "smtpedge", Host: "lb-a.example", Slot: 2, Index: 1}
+		removed, err := MintEdgeClient(ctx, edgeNetworkId, removedKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept, err := MintEdgeClient(ctx, edgeNetworkId, keptKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idleAuthTime := now.Add(-TopLevelClientIdleExpiration - 24*time.Hour)
+		reapTestSetAuthTime(ctx, removed.ClientId, idleAuthTime)
+		reapTestSetAuthTime(ctx, kept.ClientId, idleAuthTime)
+
+		removeResult, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: removed.ClientId}, edgeSession)
+		if err != nil || removeResult.Error != nil {
+			t.Fatalf("remove: %v %+v", err, removeResult)
+		}
+		if _, err := MintEdgeClient(ctx, edgeNetworkId, removedKey, nil); !errors.Is(err, ErrEdgeClientRetired) {
+			t.Fatalf("a removed edge client was minted for: %v", err)
+		}
+
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+
+		// within the reap window the removed client is kept, inactive
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		if exists, active, deactivateTime := reapTestClientState(ctx, removed.ClientId); !exists || active || deactivateTime == nil {
+			t.Fatalf("the removed edge client within the window: exists %t, active %t, deactivate_time %v", exists, active, deactivateTime)
+		}
+
+		// past it the removed client is hard deleted, and its idle sibling stays
+		reapTestSetDeactivateTime(ctx, removed.ClientId, now.Add(-NetworkClientReapAfterDeactivate-24*time.Hour))
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		if exists, _, _ := reapTestClientState(ctx, removed.ClientId); exists {
+			t.Fatal("the removed edge client outlived the reap window")
+		}
+		if exists, active, deactivateTime := reapTestClientState(ctx, kept.ClientId); !exists || !active || deactivateTime != nil {
+			t.Fatalf("the idle edge client: exists %t, active %t, deactivate_time %v", exists, active, deactivateTime)
+		}
+	})
+}
+
+// The skip keys on sidecar.yml: with urnetwork_edge naming another network, or
+// with none named, the edge network's idle clients are top-level clients like
+// any other, marked inactive, and the mint then refuses the next deploy into
+// their slot, which is the refusal QD-1059 fixed.
+func TestRemoveDisconnectedNetworkClientsMarksEdgeClientsSidecarYmlDoesNotName(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		edgeNetworkId := server.NewId()
+		Testing_CreateNetwork(ctx, edgeNetworkId, "urnetwork-edge-unnamed-test", server.NewId())
+
+		otherNamedKey := &EdgeClientKey{Environment: "test", Block: "mxedge", Host: "lb-a.example", Slot: 3, Index: 0}
+		noneNamedKey := &EdgeClientKey{Environment: "test", Block: "mxedge", Host: "lb-a.example", Slot: 3, Index: 1}
+		otherNamed, err := MintEdgeClient(ctx, edgeNetworkId, otherNamedKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		noneNamed, err := MintEdgeClient(ctx, edgeNetworkId, noneNamedKey, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		idleAuthTime := now.Add(-TopLevelClientIdleExpiration - 24*time.Hour)
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+		requireMarked := func(name string, clientId server.Id, key *EdgeClientKey) {
+			t.Helper()
+			if exists, active, deactivateTime := reapTestClientState(ctx, clientId); !exists || active || deactivateTime == nil {
+				t.Fatalf("%s: exists %t, active %t, deactivate_time %v", name, exists, active, deactivateTime)
+			}
+			if _, err := MintEdgeClient(ctx, edgeNetworkId, key, nil); !errors.Is(err, ErrEdgeClientRetired) {
+				t.Fatalf("%s: a marked client was minted for: %v", name, err)
+			}
+		}
+
+		// urnetwork_edge naming another network
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  urnetwork_edge: " + server.NewId().String() + "\n"))
+		reapTestSetAuthTime(ctx, otherNamed.ClientId, idleAuthTime)
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		requireMarked("with another network named", otherNamed.ClientId, otherNamedKey)
+		if _, active, _ := reapTestClientState(ctx, noneNamed.ClientId); !active {
+			t.Fatal("a client seen at its mint was marked")
+		}
+
+		// no urnetwork_edge at all: the pass leaves out no network
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar:\n  sockets: {enabled: false}\n"))
+		if _, ok := server.CurrentSidecarConfig().UrnetworkEdge(); ok {
+			t.Fatal("the pushed sidecar.yml names an urnetwork_edge")
+		}
+		reapTestSetAuthTime(ctx, noneNamed.ClientId, idleAuthTime)
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		requireMarked("with none named", noneNamed.ClientId, noneNamedKey)
+	})
+}
+
 // A pass whose batch bound is not positive is skipped rather than looping on
 // LIMIT 0: under zeroed settings an idle top-level client stays active and an
 // inactive client past the reap window stays, and under the defaults the one
