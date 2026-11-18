@@ -466,42 +466,61 @@ const (
 )
 
 // One page of members, walking the groups in ARGV[4] (comma separated) from
-// the cursor: group ARGV[5] (0 starts at the first), at scores up to ARGV[6]
-// and below member ARGV[7] at that score. Within a group the order is the
-// index's: latest acceptance horizon first, so the most recently minted
-// first. ARGV[8] '1' skips code sessions in the sign-in group. Returns at
-// most ARGV[3] members, the next cursor and the network's counts.
+// the cursor: group ARGV[5] (0: the walk has not started), at scores up to
+// ARGV[6] and below member ARGV[7] at that score. Within a group the order is
+// the index's: latest acceptance horizon first, so the most recently minted
+// first. ARGV[8] '1' skips code sessions in the sign-in group. ARGV[9] is the
+// caller's current session, or empty: the first page (ARGV[10] '1') leads
+// with it when it is live in a walked group, and every walk passes over it,
+// so it is read once, first. The next cursor is the last member the walk
+// returned, or the walk's start when the page held only the current session.
+// Returns at most ARGV[3] members, the next cursor and the network's counts.
 const sessionPageLua = sessionLuaCommon + `
 prune();local generation,eid=revision()
 local groupkey={6,7,8,9,10,11}
 local limit=tonumber(ARGV[3])
-local cg=tonumber(ARGV[5]);local cs=tonumber(ARGV[6]);local cm=ARGV[7]
-local out={};local started=(cg==0)
+local cg=tonumber(ARGV[5]);local cs=tonumber(ARGV[6]);local cm=ARGV[7];local current=ARGV[9]
+local out={}
+if ARGV[10]=='1' and current~='' then
+ for g in string.gmatch(ARGV[4],'%d+') do
+  g=tonumber(g)
+  local score=redis.call('ZSCORE',KEYS[groupkey[g]],current)
+  if score and tonumber(score)>now and not (g==1 and ARGV[8]=='1' and redis.call('ZSCORE',KEYS[7],current)) then
+   table.insert(out,{current,g,tonumber(score)});break
+  end
+ end
+end
+local budget=limit-#out
+local walked={};local started=(cg==0)
 for g in string.gmatch(ARGV[4],'%d+') do
  g=tonumber(g)
  if not started and g==cg then started=true end
- if started and #out<=limit then
+ if started and #walked<=budget then
   local key=KEYS[groupkey[g]];local max='+inf';local skipping=false
   if g==cg then max=ARGV[6];skipping=true end
   local offset=0
-  while #out<=limit do
+  while #walked<=budget do
    local batch=redis.call('ZREVRANGEBYSCORE',key,max,'('..now,'WITHSCORES','LIMIT',offset,128)
    if #batch==0 then break end
    for i=1,#batch,2 do
     local m=batch[i];local s=tonumber(batch[i+1]);local take=true
     if skipping then if s==cs and m>=cm then take=false else skipping=false end end
+    if take and m==current then take=false end
     if take and g==1 and ARGV[8]=='1' and redis.call('ZSCORE',KEYS[7],m) then take=false end
-    if take then table.insert(out,{m,g,s}) end
-    if #out>limit then break end
+    if take then table.insert(walked,{m,g,s}) end
+    if #walked>budget then break end
    end
    offset=offset+128
   end
  end
 end
 local nextcursor='null'
-if #out>limit then
- local last=out[limit];nextcursor=cjson.encode({last[2],last[3],last[1]});table.remove(out)
+if #walked>budget then
+ table.remove(walked)
+ if #walked>0 then local last=walked[#walked];nextcursor=cjson.encode({last[2],last[3],last[1]})
+ else nextcursor='[0,0,""]' end
 end
+for _,w in ipairs(walked) do table.insert(out,w) end
 local members=cjson.encode(out);if #out==0 then members='[]' end
 local counts={}
 for _,i in ipairs({1,5,6,7,8,9,10,11}) do table.insert(counts,redis.call('ZCOUNT',KEYS[i],'('..now,'+inf')) end
@@ -591,7 +610,9 @@ func decodeSessionPageCursor(encoded string, groups string) (*sessionPageCursor,
 		return nil, sessionError("invalid_request")
 	}
 	cursor := &sessionPageCursor{groups: groups}
-	if cursor.group, err = strconv.Atoi(parts[2]); err != nil || cursor.group < sessionGroupInteractive || sessionGroupLegacy < cursor.group {
+	// group 0 is the walk's start, after a first page that held the current
+	// session only
+	if cursor.group, err = strconv.Atoi(parts[2]); err != nil || cursor.group < 0 || sessionGroupLegacy < cursor.group {
 		return nil, sessionError("invalid_request")
 	}
 	if cursor.score, err = strconv.ParseInt(parts[3], 10, 64); err != nil {
@@ -652,11 +673,18 @@ func GetNetworkSessionsPage(clientSession *ClientSession, args *NetworkSessionsA
 	defer cancel()
 	for attempts := 0; attempts < 4; attempts++ {
 		now := server.NowUtc()
-		pageArgs := []any{now.UnixMilli(), server.NewId().String(), limit, groupList, 0, 0, ""}
-		if cursor != nil {
-			pageArgs = []any{now.UnixMilli(), server.NewId().String(), limit, groupList, cursor.group, cursor.score, cursor.member.String()}
+		current := ""
+		if clientSession.ByJwt.SessionId != nil {
+			current = clientSession.ByJwt.SessionId.String()
 		}
-		pageArgs = append(pageArgs, signinOnlyValue)
+		pageArgs := []any{now.UnixMilli(), server.NewId().String(), limit, groupList, 0, 0, "", signinOnlyValue, current, "1"}
+		if cursor != nil {
+			member := ""
+			if cursor.group != 0 {
+				member = cursor.member.String()
+			}
+			pageArgs = []any{now.UnixMilli(), server.NewId().String(), limit, groupList, cursor.group, cursor.score, member, signinOnlyValue, current, "0"}
+		}
 		var page struct {
 			Members    [][3]json.RawMessage `json:"members"`
 			Next       []json.RawMessage    `json:"next"`
@@ -755,8 +783,12 @@ func GetNetworkSessionsPage(clientSession *ClientSession, args *NetworkSessionsA
 			if json.Unmarshal(page.Next[0], &next.group) != nil || json.Unmarshal(page.Next[1], &next.score) != nil || json.Unmarshal(page.Next[2], &member) != nil {
 				return nil, ErrSessionStoreUnavailable
 			}
-			if next.member, err = server.ParseId(member); err != nil {
-				return nil, ErrSessionStoreUnavailable
+			// group 0: the walk has not started (the page held the current
+			// session only)
+			if next.group != 0 {
+				if next.member, err = server.ParseId(member); err != nil {
+					return nil, ErrSessionStoreUnavailable
+				}
 			}
 			next.groups = groupList
 			encoded := encodeSessionPageCursor(next)
