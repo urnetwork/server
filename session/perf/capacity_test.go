@@ -151,7 +151,7 @@ func (self *harness) capacityLiveCap() {
 		heldShare := float64(breakdown["held"]) * float64(markerCount) / float64(max(1, held))
 		self.report.addMemory("retained marker (r: key + its held entry)", int(markerCount), breakdown["r:"]+int64(heldShare), nil)
 	}
-	self.report.addMemory("revoke receipts (op: keys, kept 24 h)", int(breakdown["op:#count"]), breakdown["op:"], nil)
+	self.report.addMemory("revoke receipts (op: keys: every target id, kept until the targets' horizon)", int(breakdown["op:#count"]), breakdown["op:"], nil)
 
 	self.measureListAndHint(profile, "max")
 
@@ -245,6 +245,10 @@ func (self *harness) recordSlowScripts(name string) {
 	self.must(err, "slowlog")
 	summary := &slowSummary{Name: name, ByScript: map[string]*slowScript{}}
 	for _, entry := range entries {
+		// the harness's own reads
+		if entry.Command == "slowlog" || entry.Command == "info" || entry.Command == "memory" || entry.Command == "cluster" {
+			continue
+		}
 		key := entry.Command
 		if entry.ScriptHint != "" {
 			key = "eval:" + entry.ScriptHint
