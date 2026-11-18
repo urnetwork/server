@@ -224,6 +224,8 @@ func EnforceSessionOperation(ctx context.Context, networkId, operationId server.
 		if err = RevokeSessionRecords(ctx, networkId, receipt.TargetSessionIds); err != nil {
 			return err
 		}
+		// only now can a recheck read the refusal (session_revocation_event.go)
+		announceSessionRevocation(ctx, networkId)
 		receipt.SessionId = op.Target
 		receipt.KeptSessionId = op.Keep
 		receipt.State = "enforced"
@@ -299,6 +301,7 @@ func GetSessionOperation(clientSession *ClientSession, operationId server.Id) (r
 				if err := RevokeSessionRecords(clientSession.Ctx, clientSession.ByJwt.NetworkId, receipt.TargetSessionIds); err != nil {
 					return err
 				}
+				announceSessionRevocation(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 				receipt.SessionId = op.Target
 				receipt.KeptSessionId = op.Keep
 				receipt.State = "enforced"
