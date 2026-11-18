@@ -202,11 +202,10 @@ func TestSocketsTicketKeygenWritesAFirstFile(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"added ticket key " + key.KeyId + ": created " + socketsTicketKeygenTestTimeText(key.CreatedMillis),
-		"it verifies until " + socketsTicketKeygenTestTimeText(key.ExpireMillis),
-		"signs from " + socketsTicketKeygenTestTimeText(key.CreatedMillis+settings.SettleTime.Milliseconds()),
+		"added ticket key " + key.KeyId + ": created " + socketsTicketKeygenTestTimeText(key.CreatedMillis) + ", it verifies until " + socketsTicketKeygenTestTimeText(key.ExpireMillis) + "\n",
+		"the new key is the file's only one, so it signs as soon as a sockets block reads the file",
 		"wrote " + outPath + ", readable by its owner alone",
-		"in vault as socket-ticket-keys.yml now",
+		"place " + outPath + " in vault as socket-ticket-keys.yml: each sockets block rereads it every 1m0s and gives the new key to its listeners\n",
 		"run this again by " + socketsTicketKeygenTestTimeText(key.CreatedMillis+settings.RotationInterval.Milliseconds()),
 	} {
 		if !strings.Contains(stdout.String(), want) {
@@ -216,6 +215,11 @@ func TestSocketsTicketKeygenWritesAFirstFile(t *testing.T) {
 	if strings.Contains(stdout.String(), "-in=") {
 		t.Errorf("a first file's output speaks of -in: %s", stdout)
 	}
+	// a block settles a key from its own first sight of it (QD-1016), so the placement has no deadline
+	if strings.Contains(stdout.String(), "well before") || strings.Contains(stdout.String(), "socket-ticket-keys.yml now") ||
+		strings.Contains(stdout.String(), socketsTicketKeygenTestTimeText(key.CreatedMillis+settings.SettleTime.Milliseconds())) {
+		t.Errorf("stdout gives a time to place the file by: %s", stdout)
+	}
 	if names := socketsTicketKeygenTestNames(t, directory); !slices.Equal(names, []string{"socket-ticket-keys.yml"}) {
 		t.Fatalf("the run left %v", names)
 	}
@@ -223,8 +227,9 @@ func TestSocketsTicketKeygenWritesAFirstFile(t *testing.T) {
 
 // A rotation keeps each key of -in that is live at the run's time exactly as it was (id, seed and times) and drops
 // the expired, a key expiring at the run's millisecond counting as expired; the new key is the run's; the output
-// lists the kept keys and never the dropped; and the block reading the new file verifies under every key in it and
-// signs with the settled one until the new key settles.
+// lists the kept keys and never the dropped, and says the new key signs SettleTime after a block first sees it, with
+// no time to place the file by; and a block first reading the new file verifies under every key in it and signs with
+// the oldest that outlives SignMargin, the second key, since none has settled there.
 func TestSocketsTicketKeygenKeepsLiveKeysAndDropsExpired(t *testing.T) {
 	directory := t.TempDir()
 	settings := socketsservice.DefaultSocketTicketKeySettings()
@@ -287,6 +292,12 @@ func TestSocketsTicketKeygenKeepsLiveKeysAndDropsExpired(t *testing.T) {
 		}
 		if strings.Contains(stdout, "no key of -in can sign") {
 			t.Errorf("%s: stdout says no key of -in signs, though the second does", c.name)
+		}
+		if want := "each sockets block signs with the new key 10m0s after the first read in which it sees the file, and with a key of -in until then\n"; !strings.Contains(stdout, want) {
+			t.Errorf("%s: stdout lacks %q: %s", c.name, want, stdout)
+		}
+		if strings.Contains(stdout, "well before") || strings.Contains(stdout, socketsTicketKeygenTestTimeText(c.at.Add(settings.SettleTime).UnixMilli())) {
+			t.Errorf("%s: stdout gives a time to place the file by: %s", c.name, stdout)
 		}
 
 		keySet := readSocketsTicketKeygenTestKeySet(t, thirdPath, c.at)
@@ -710,6 +721,7 @@ func TestSocketsTicketKeygenRefusesAFullFile(t *testing.T) {
 // expiry.
 func TestSocketsTicketKeygenWritesNothingTheReadBackRefuses(t *testing.T) {
 	directory := t.TempDir()
+	ticketKeySettings := socketsservice.DefaultSocketTicketKeySettings()
 	start := socketsTicketKeygenTestStart()
 	runTime := start.Add(time.Hour)
 	inPath := filepath.Join(directory, "in.yml")
@@ -791,7 +803,7 @@ func TestSocketsTicketKeygenWritesNothingTheReadBackRefuses(t *testing.T) {
 					return keys
 				})
 			},
-			wantStderr: "the new key does not expire 744h0m0s after " + socketsTicketKeygenTestTimeText(runTime.UnixMilli()),
+			wantStderr: fmt.Sprintf("the new key does not expire %s after %s", ticketKeySettings.RotationInterval+ticketKeySettings.KeyOverlap, socketsTicketKeygenTestTimeText(runTime.UnixMilli())),
 		},
 	} {
 		settings := defaultSocketsTicketKeygenSettings()
@@ -848,6 +860,9 @@ func TestSocketsTicketKeygenSaysWhenNoKeyOfInSigns(t *testing.T) {
 		if !strings.Contains(stdout, "no key of -in can sign any more, so the new key signs as soon as a sockets block reads the file") {
 			t.Errorf("%s: stdout does not say the new key signs at once: %s", c.name, stdout)
 		}
+		if strings.Contains(stdout, "after the first read in which it sees the file") {
+			t.Errorf("%s: stdout says the new key waits to settle, though nothing else can sign: %s", c.name, stdout)
+		}
 		if keys := readSocketsTicketKeygenTestFile(t, outPath); len(keys) != c.wantKeyCount {
 			t.Errorf("%s: the file holds %d keys, want %d", c.name, len(keys), c.wantKeyCount)
 		}
@@ -897,7 +912,8 @@ func TestSocketsTicketKeygenStoppedClockNeverMoves(t *testing.T) {
 }
 
 // The binary's own registry holds the command under the design's usage, and the binary's help says what it keeps
-// and drops, the file's mode, that no key is printed, how often to run it, and where the file goes and when.
+// and drops, the file's mode, that no key is printed, how often to run it, where the file
+// goes, and that a rotation's new key signs SettleTime after a block first sees it, with no time to place it by.
 func TestSidecarctlRegistersSocketsTicketKeygen(t *testing.T) {
 	command, args := sidecarctlCommands.find([]string{"sockets", "ticket-keygen", "-out", "a.yml"})
 	if command == nil || command.words != "sockets ticket-keygen" {
@@ -915,11 +931,16 @@ func TestSidecarctlRegistersSocketsTicketKeygen(t *testing.T) {
 		"whose live keys are kept and expired keys dropped",
 		"created 0600 and never over a file unless -in names it",
 		"It prints the new key's id and expiry, never a key",
-		"Run it every 30 days and place the file in vault at once as socket-ticket-keys.yml",
-		"which each sockets block rereads every 1m0s: the new key signs 10m0s after the run",
+		"Run it every 30 days and place the file in vault as socket-ticket-keys.yml",
+		"which each sockets block rereads every 1m0s, and a block signs with a rotation's new key 10m0s after the first read in which it sees it.",
 	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("the help lacks %q", want)
+		}
+	}
+	for _, deadline := range []string{"at once", "after the run"} {
+		if strings.Contains(stdout.String(), deadline) {
+			t.Errorf("the help still times the placement: %q", deadline)
 		}
 	}
 }

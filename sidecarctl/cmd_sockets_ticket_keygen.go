@@ -9,10 +9,13 @@
 //     not parse, names a key twice or holds a seed of the wrong size), an empty one, or one past MaxFileByteCount
 //     refuses the run, so a rotation never starts over from a file that lost its keys. Without -in the file is a
 //     deployment's first.
-//   - One new Ed25519 key is added, created at the run's time and expiring RotationInterval plus KeyOverlap (31 days)
-//     after it. It verifies once a block has read the file and signs once settled, SettleTime (10 min) after its
-//     creation, by when the blocks are to have given it to every listener: so the file goes into vault at once, which
-//     the output says with the time (question sockets-ticket-keygen-settle-from-creation).
+//   - One new Ed25519 key is added, created at the run's time and expiring RotationInterval plus KeyOverlap (31
+//     days) after it. It verifies once a block has read the file, and a block signs with it once it has settled
+//     there, SettleTime (10 min) after the later of its creation and the first read in which that block saw it, by
+//     when the block has given it to every listener. So however long the placement in vault takes, it only delays
+//     the switch, and the output gives no time to place the file by (owner decision 562, QD-1016). A deployment's
+//     first key, or one added when no key of -in can sign any more, signs as soon as a block reads the file, which
+//     the output says.
 //   - -out gets the file, mode 0600. A path that exists is written over only when -in names that same file, the
 //     rotation in place; a symlink, or anything else that is not a regular file, at -out is refused. The bytes go into
 //     a new file beside -out and are synced, then linked into place for a new path, which never writes over a file
@@ -85,7 +88,8 @@ func (self *socketsTicketKeygenSettings) summary() string {
 	return fmt.Sprintf("Add a new ticket key to the sockets service's key file (§9.8, owner decision 354): -in names the "+
 		"current file, whose live keys are kept and expired keys dropped; -out gets the new file, created %04o and never "+
 		"over a file unless -in names it. It prints the new key's id and expiry, never a key. Run it every %s and place "+
-		"the file in vault at once as %s, which each sockets block rereads every %s: the new key signs %s after the run.",
+		"the file in vault as %s, which each sockets block rereads every %s, and a block signs with a rotation's new "+
+		"key %s after the first read in which it sees it.",
 		self.outputFileMode.Perm(), socketsTicketKeygenDurationText(self.ticketKeySettings.RotationInterval),
 		socketsTicketKeyResourceName, self.ticketKeySettings.ReloadInterval, self.ticketKeySettings.SettleTime)
 }
@@ -179,21 +183,27 @@ func runSocketsTicketKeygenWithSettings(args []string, settings *socketsTicketKe
 		return err
 	}
 
-	signTime := now.Add(settings.ticketKeySettings.SettleTime)
-	fmt.Fprintf(out, "added ticket key %s: created %s, it verifies until %s and signs from %s\n",
-		newKey.KeyId, socketsTicketKeygenTimeText(now), socketsTicketKeygenMillisText(newKey.ExpireTimeMillis), socketsTicketKeygenTimeText(signTime))
+	fmt.Fprintf(out, "added ticket key %s: created %s, it verifies until %s\n",
+		newKey.KeyId, socketsTicketKeygenTimeText(now), socketsTicketKeygenMillisText(newKey.ExpireTimeMillis))
 	if inPath.given {
 		fmt.Fprintf(out, "kept the keys of -in=%s still live at %s, each as it was (%d in all); any expired were dropped\n", inPath.value, socketsTicketKeygenTimeText(now), len(keptKeys))
 		for _, key := range keptKeys {
 			fmt.Fprintf(out, "kept ticket key %s, which verifies until %s\n", key.KeyId, socketsTicketKeygenMillisText(key.ExpireTimeMillis))
 		}
-		if signingKeyId == newKey.KeyId {
-			fmt.Fprintf(out, "no key of -in can sign any more, so the new key signs as soon as a sockets block reads the file, before its listeners have been given it\n")
-		}
+	}
+	// what a block first reading the file at the run's time signs with: a key of -in while one can sign
+	switch {
+	case signingKeyId != newKey.KeyId:
+		fmt.Fprintf(out, "each sockets block signs with the new key %s after the first read in which it sees the file, and with a key of -in until then\n",
+			settings.ticketKeySettings.SettleTime)
+	case inPath.given:
+		fmt.Fprintf(out, "no key of -in can sign any more, so the new key signs as soon as a sockets block reads the file, before its listeners have been given it\n")
+	default:
+		fmt.Fprintf(out, "the new key is the file's only one, so it signs as soon as a sockets block reads the file\n")
 	}
 	fmt.Fprintf(out, "wrote %s, readable by its owner alone; no key was printed\n", outPath.value)
-	fmt.Fprintf(out, "place %s in vault as %s now, well before %s: each sockets block rereads it every %s and gives the new key to its listeners, which must all hold it before it signs\n",
-		outPath.value, socketsTicketKeyResourceName, socketsTicketKeygenTimeText(signTime), settings.ticketKeySettings.ReloadInterval)
+	fmt.Fprintf(out, "place %s in vault as %s: each sockets block rereads it every %s and gives the new key to its listeners\n",
+		outPath.value, socketsTicketKeyResourceName, settings.ticketKeySettings.ReloadInterval)
 	fmt.Fprintf(out, "run this again by %s with -in naming this file, so its keys go on verifying while the next one settles\n",
 		socketsTicketKeygenTimeText(now.Add(settings.ticketKeySettings.RotationInterval)))
 	return nil
@@ -245,7 +255,9 @@ func (self *socketsTicketKeygenSettings) readIn(path string) ([]byte, error) {
 }
 
 // What a key file holds as the sockets block reads it at now, on a clock stopped there: the keys that verify, oldest
-// first, and the id of the one that signs, empty when none does. A file the block refuses holds none.
+// first, and the id of the one that signs, empty when none does. The set first sees every key at now, so none has
+// settled and the signer is the oldest that outlives SignMargin, as for a block first reading the file. A file the
+// block refuses holds none.
 func (self *socketsTicketKeygenSettings) readKeys(data []byte, now time.Time) ([]*sidecar.SocketTicketKey, string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// ends the set's reread loop, which waits on a clock that never moves
