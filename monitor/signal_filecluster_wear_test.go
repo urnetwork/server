@@ -2,9 +2,9 @@ package monitor
 
 // SIGNALS.md §29.4 through the probe's own query, on a fake Mimir holding the series as the storage hosts and the
 // budget loop ship them: the drive-write lines, SMART's spare and media errors, the rating projection and the
-// rating-days gauge, the join of a drive to its cluster, the blind cases, and the SMART log read under job="node",
-// the label the host's shared Fluent Bit gives every series it ships (owner decisions 509 and 579), and under no
-// other job.
+// rating-days gauge, the join of a drive to its cluster, the blind cases (a drive whose SMART log cannot be found
+// among them, read as missing and never as healthy), and the SMART log read under job="node", the label the
+// host's shared Fluent Bit gives every series it ships (owner decisions 509 and 579), and under no other job.
 
 import (
 	"context"
@@ -469,6 +469,104 @@ func TestFileClusterWearMissingSourcesAreBlind(t *testing.T) {
 	}
 	requireSidecarStorageRaised(t, findings, "filecluster-wear-unobservable meta-1", "filecluster-wear-unobservable meta-1")
 	requireFileClusterWearBlindFrames(t, findings, "admin-info", "smart")
+}
+
+// A drive its filesystem joins to meta-1 that lacks its SMART log, whole or one reading of it, while the other
+// drive's log reads, is blind on the drive, with what it lacks; the boot drive lacking its log raises nothing.
+func TestFileClusterWearDriveLackingItsSmartLogReadsBlind(t *testing.T) {
+	requireObserved := func(findings []finding, want string) {
+		t.Helper()
+		for _, finding := range findings {
+			if finding.class == fileClusterWearClassUnobservable && !finding.healthy && finding.observed != want {
+				t.Errorf("observed %q, want %q", finding.observed, want)
+			}
+		}
+	}
+	series := fileClusterWearTestSeriesSet(5, 4)
+	withoutDrive := filterFileClusterWearTestSeries(series, func(s *fileClusterWearTestSeries) bool {
+		return !(isFileClusterWearTestSmart(s) && s.labels["device"] == "nvme1n1")
+	})
+	findings := checkFileClusterWear(t, withoutDrive, nil)
+	requireSidecarStorageRaised(t, findings, "filecluster-wear-unobservable store-1/nvme1n1")
+	requireFileClusterWearBlindFrames(t, findings, "smart")
+	requireObserved(findings, "cluster=meta-1 job=node missing=percentage_used,available_spare,media_errors")
+
+	withoutSpare := filterFileClusterWearTestSeries(series, func(s *fileClusterWearTestSeries) bool {
+		return !(s.metric == "urnetwork_filecluster_smart_available_spare" && s.labels["device"] == "nvme0n1")
+	})
+	findings = checkFileClusterWear(t, withoutSpare, nil)
+	requireSidecarStorageRaised(t, findings, "filecluster-wear-unobservable store-1/nvme0n1")
+	requireObserved(findings, "cluster=meta-1 job=node missing=available_spare")
+
+	withoutBoot := filterFileClusterWearTestSeries(series, func(s *fileClusterWearTestSeries) bool {
+		return !(isFileClusterWearTestSmart(s) && s.labels["device"] == "nvme2n1")
+	})
+	requireSidecarStorageRaised(t, checkFileClusterWear(t, withoutBoot, nil))
+}
+
+// A SMART log that stopped reaching Mimir is missing although its readings of 30 days ago still read: the cluster
+// is blind once every drive's log stopped, and the drive alone when only its own did.
+func TestFileClusterWearStoppedSmartLogReadsBlind(t *testing.T) {
+	series := fileClusterWearTestSeriesSet(5, 4)
+	for _, s := range series {
+		if isFileClusterWearTestSmart(s) {
+			s.stale = true
+		}
+	}
+	findings := checkFileClusterWear(t, series, nil)
+	requireSidecarStorageRaised(t, findings, "filecluster-wear-unobservable meta-1")
+	requireFileClusterWearBlindFrames(t, findings, "smart")
+
+	series = fileClusterWearTestSeriesSet(5, 4)
+	for _, s := range series {
+		if isFileClusterWearTestSmart(s) && s.labels["device"] == "nvme0n1" {
+			s.stale = true
+		}
+	}
+	requireSidecarStorageRaised(t, checkFileClusterWear(t, series, nil), "filecluster-wear-unobservable store-1/nvme0n1")
+}
+
+// Through the notifiers' incident rule: nvme0n1's media-errors alert, once raised, stays open while the drive's
+// SMART log is missing, for more runs than would clear it, and clears once the log reads again without errors.
+func TestFileClusterWearDriveAlertStaysOpenWhileItsLogIsMissing(t *testing.T) {
+	signal := NewFileClusterWearSignal()
+	clearAfterCompleteRuns := 2
+	keyIncidents := map[string]*slackIncident{}
+	kindNames := map[slackTransitionKind]string{slackRaised: "raised", slackEscalated: "escalated", slackCleared: "cleared"}
+	requireObserve := func(series []*fileClusterWearTestSeries, want ...string) {
+		t.Helper()
+		alerts := sidecarStorageTestAlerts(signal, checkFileClusterWear(t, series, nil), func() time.Time { return fileClusterTestNow })
+		got := []string{}
+		for _, transition := range observeIncidents(keyIncidents, clearAfterCompleteRuns, signal.Key(), SignalExecution{Alerts: alerts}, func(Alert) bool { return false }) {
+			got = append(got, kindNames[transition.kind]+" "+transition.alert.Class+" "+transition.alert.Target)
+		}
+		slices.Sort(got)
+		if want == nil {
+			want = []string{}
+		}
+		slices.Sort(want)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("transitions %v, want %v", got, want)
+		}
+	}
+
+	faulty := fileClusterWearTestSeriesSet(5, 4)
+	setFileClusterWearTestValue(faulty, "urnetwork_filecluster_smart_media_errors", "nvme0n1", 2)
+	requireObserve(faulty, "raised filecluster-drive-media-errors store-1/nvme0n1")
+
+	missing := filterFileClusterWearTestSeries(faulty, func(s *fileClusterWearTestSeries) bool {
+		return !(isFileClusterWearTestSmart(s) && s.labels["device"] == "nvme0n1")
+	})
+	requireObserve(missing, "raised filecluster-wear-unobservable store-1/nvme0n1")
+	for range clearAfterCompleteRuns + 1 {
+		requireObserve(missing)
+	}
+
+	healthy := fileClusterWearTestSeriesSet(5, 4)
+	for range clearAfterCompleteRuns - 1 {
+		requireObserve(healthy)
+	}
+	requireObserve(healthy, "cleared filecluster-drive-media-errors store-1/nvme0n1", "cleared filecluster-wear-unobservable store-1/nvme0n1")
 }
 
 // The query selects the SMART log under job="node" and under no other job, joins drives to the paths admin info

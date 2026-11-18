@@ -19,7 +19,9 @@ package monitor
 //     days, in drive-writes, is shown against the ~420 five years at the refill leave under the rating (§19.6's
 //     wear row);
 //   - filecluster-wear-unobservable reports what it could not read: Mimir, admin info, a metadata cluster's
-//     drive-write series, or its drives' SMART log.
+//     drive-write series, or its drives' SMART log, on the cluster when none of its drives has a reading now and on
+//     the drive when its filesystem joins it to the cluster and it lacks its percentage used, spare or media
+//     errors, so that a drive whose log cannot be found reads as missing, never as healthy (§19.6's wear row).
 //
 // §19.8's business-hours pages are raised at page severity, and the pager holds each until the business calendar
 // opens (QD-754; page_classes.go's business rows). Slack carries them at once.
@@ -27,6 +29,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"path"
@@ -289,7 +292,10 @@ func (self fileClusterWearProbe) evaluate(settings *SidecarStorageSettings, clus
 			// a drive no metadata cluster's path names: boot media, or another cluster's
 			continue
 		}
-		clusterSmartCounts[found.clusterId] += 1
+		if found.hasUsed || found.hasSpare || found.hasErrors {
+			// a reading now: the reading 30 days old alone is the log of a host that stopped shipping it
+			clusterSmartCounts[found.clusterId] += 1
+		}
 		target := found.host + "/" + found.device
 		if found.hasErrors && 0 < found.mediaErrors {
 			findings = append(findings, self.wearFinding(settings, fileClusterWearClassMediaErrors, target, "",
@@ -324,10 +330,39 @@ func (self fileClusterWearProbe) evaluate(settings *SidecarStorageSettings, clus
 			findings = append(findings, healthyFinding(fileClusterWearProbeId, tierPage, fileClusterWearClassRatingShort, target))
 		}
 	}
+	// A drive its filesystem joins to a cluster whose other drives' SMART log reads, but which lacks a reading
+	// judged here, reads as missing, never as healthy (§19.6's wear row, owner decision 579): reporting nothing for
+	// it would let its open alerts clear by their absence. A cluster with no SMART log at all reads blind once.
+	for _, key := range slices.Sorted(maps.Keys(hostDeviceClusters)) {
+		clusterId := hostDeviceClusters[key]
+		if clusterSmartCounts[clusterId] == 0 {
+			continue
+		}
+		found, ok := drives[key]
+		if !ok {
+			found = &fileClusterWearDrive{}
+		}
+		missing := []string{}
+		if !found.hasUsed {
+			missing = append(missing, fileClusterWearCheckUsed)
+		}
+		if !found.hasSpare {
+			missing = append(missing, fileClusterWearCheckSpare)
+		}
+		if !found.hasErrors {
+			missing = append(missing, fileClusterWearCheckMediaErrors)
+		}
+		if 0 < len(missing) {
+			findings = append(findings, self.wearFinding(settings, fileClusterWearClassUnobservable, key, "smart",
+				"a metadata drive's SMART log lacks readings now, so the drive cannot be judged on them",
+				fmt.Sprintf("cluster=%s job=%s missing=%s", clusterId, fileClusterSmartJob, strings.Join(missing, ","))))
+		}
+	}
 	for _, clusterId := range clusterIds {
 		if clusterSmartCounts[clusterId] == 0 {
 			findings = append(findings, self.wearFinding(settings, fileClusterWearClassUnobservable, clusterId, "smart",
-				"no SMART log reached Mimir for the cluster's drives, so their spare, media errors and rating cannot be seen", ""))
+				"no SMART log reached Mimir for the cluster's drives, so their spare, media errors and rating cannot be seen",
+				"job="+fileClusterSmartJob))
 		}
 		if settings.Gauges != nil {
 			ratingDays, known := clusterRatingDays[clusterId]

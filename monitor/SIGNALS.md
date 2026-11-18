@@ -49275,8 +49275,13 @@ Classes:
   business row): at its 30-day rate the drive's whole rated endurance lasts
   under five years of service.
 - `filecluster-wear-unobservable` (visibility): Mimir or admin info did not
-  read, a metadata cluster's loop publishes no drive writes, or no SMART log
-  reached Mimir under `job="node"` for its drives.
+  read, a metadata cluster's loop publishes no drive writes, or its SMART log
+  under `job="node"` is missing: on the cluster when none of its drives has a
+  reading now (a reading 30 days old alone is no log), and on the drive
+  (`<host>/<device>`) when its filesystem joins it to a cluster whose other
+  drives report and it lacks its percentage used, available spare or media
+  errors. A drive whose SMART log cannot be found reads as missing, never as
+  healthy (§19.6's wear row), so its open alerts stay open.
 
 ### 29.5 Write budget, P0 and HDD admission
 
