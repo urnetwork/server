@@ -4635,8 +4635,8 @@
     },
     {
       "type": "timeseries",
-      "title": "networks above each live-session level (per 15-minute pass)",
-      "description": "The taskworker observes every network that has a live session set once per pass, every 15 minutes, into the histogram urnetwork_session_live_per_network (buckets 10, 100, 500, 1,000, 2,000, 5,000 and 10,000; no network labels). Each line is networks per pass: the last hour's observations divided by its 4 passes, so it is off by the same factor if the period changes. Above 5,000 is over the live-session limit (config all/pro.yml), which refuses only once enforce_session_cap is on. Logarithmic axis.",
+      "title": "networks above each live-session level (per sample pass)",
+      "description": "Each pass of the taskworker's session level sample observes every network that has a live session set once, about every 15 minutes, into the histogram urnetwork_session_live_per_network (buckets 10, 100, 500, 1,000, 2,000, 5,000 and 10,000; no network labels), with the live sessions the limit counts. Each line is networks per pass: the last hour's observations divided by its passes (urnetwork_session_live_sample_passes_total), so it does not depend on the period. The passes are drawn too: a partial pass was cut short by its budget and observed only some networks, so the lines read low while partial passes appear. Above 5,000 is over the live-session limit (config all/pro.yml), which refuses only once enforce_session_cap is on. Logarithmic axis.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4673,13 +4673,18 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h])) / 4",
+          "expr": "sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h])) / sum(increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h]))",
           "legendFormat": "networks with a live session"
         },
         {
           "refId": "B",
-          "expr": "(scalar(sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h]))) - sum by (le) (increase(urnetwork_session_live_per_network_bucket{env=\"$env\",le=~\"10|100|500|1000|2000|5000|10000\"}[1h]))) / 4",
+          "expr": "(scalar(sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h]))) - sum by (le) (increase(urnetwork_session_live_per_network_bucket{env=\"$env\",le=~\"10|100|500|1000|2000|5000|10000\"}[1h]))) / scalar(sum(increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h])))",
           "legendFormat": "above {{le}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (outcome) (increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h]))",
+          "legendFormat": "sample passes in the last hour: {{outcome}}"
         }
       ]
     },

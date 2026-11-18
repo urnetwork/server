@@ -52,6 +52,8 @@ func TestSessionRolloutPanelsChartFailOpenLimitAndFrees(t *testing.T) {
 	}
 	const unchecked = `urnetwork_session_check_unavailable_total{env="$env"}`
 	const liveBuckets = `urnetwork_session_live_per_network_bucket{env="$env"}[1h]`
+	const liveCount = `urnetwork_session_live_per_network_count{env="$env"}[1h]`
+	const passes = `urnetwork_session_live_sample_passes_total{env="$env"}[1h]`
 	charts := []chart{
 		{"credentials accepted unchecked / s by service, path and credential", "ops", [][2]string{
 			{`sum by (service, path, credential) (rate(` + unchecked + `[$__rate_interval]))`, "unchecked {{service}} {{path}} {{credential}}"},
@@ -76,10 +78,11 @@ func TestSessionRolloutPanelsChartFailOpenLimitAndFrees(t *testing.T) {
 		{"client sessions freed on removal / s by path", "ops", [][2]string{
 			{`sum by (service, path) (rate(urnetwork_session_freed_on_removal_total{env="$env"}[$__rate_interval]))`, "{{service}} {{path}}"},
 		}, []string{"decision 6", "30-day idle reap", "no retained marker", "lifecycle lock", "never frees a sign-in or auth-code session"}},
-		{"networks above each live-session level (per 15-minute pass)", "short", [][2]string{
-			{`sum(increase(urnetwork_session_live_per_network_count{env="$env"}[1h])) / 4`, "networks with a live session"},
-			{`(scalar(sum(increase(urnetwork_session_live_per_network_count{env="$env"}[1h]))) - sum by (le) (increase(urnetwork_session_live_per_network_bucket{env="$env",le=~"10|100|500|1000|2000|5000|10000"}[1h]))) / 4`, "above {{le}}"},
-		}, []string{"once per pass, every 15 minutes", "no network labels", "divided by its 4 passes", "enforce_session_cap", "Logarithmic"}},
+		{"networks above each live-session level (per sample pass)", "short", [][2]string{
+			{`sum(increase(` + liveCount + `)) / sum(increase(` + passes + `))`, "networks with a live session"},
+			{`(scalar(sum(increase(` + liveCount + `))) - sum by (le) (increase(urnetwork_session_live_per_network_bucket{env="$env",le=~"10|100|500|1000|2000|5000|10000"}[1h]))) / scalar(sum(increase(` + passes + `)))`, "above {{le}}"},
+			{`sum by (outcome) (increase(` + passes + `))`, "sample passes in the last hour: {{outcome}}"},
+		}, []string{"observes every network that has a live session set once", "no network labels", "divided by its passes", "does not depend on the period", "partial", "enforce_session_cap", "Logarithmic"}},
 		{"live sessions per network: p50, p99, p99.9", "short", [][2]string{
 			{`histogram_quantile(0.5, sum by (le) (rate(` + liveBuckets + `)))`, "p50"},
 			{`histogram_quantile(0.99, sum by (le) (rate(` + liveBuckets + `)))`, "p99"},
@@ -179,7 +182,7 @@ func TestSessionRolloutPanelsChartFailOpenLimitAndFrees(t *testing.T) {
 			t.Errorf("%s queries %q, want warp-mimir", p.Title, p.Datasource.Uid)
 		}
 		scale := p.FieldConfig.Defaults.Custom.ScaleDistribution
-		if p.Title == "networks above each live-session level (per 15-minute pass)" {
+		if p.Title == "networks above each live-session level (per sample pass)" {
 			if scale.Type != "log" || scale.Log != 10 || p.FieldConfig.Defaults.Min != nil {
 				t.Errorf("the networks per level do not use a base-10 logarithmic axis without a zero minimum: %+v", scale)
 			}
@@ -225,7 +228,7 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 		series("urnetwork_jwt_state_record_checks_total", "synthetic", "connect", "c1", `,caller="unknown",operation="validate",credential="client",outcome="record_unavailable"`, "0+18000x20"),
 		series("urnetwork_session_check_unavailable_total", "synthetic", "connect", "c1", `,path="lease",credential="client"`, "0+12000x20"),
 		series("urnetwork_session_check_unavailable_total", "synthetic", "connect", "c2", `,path="lease",credential="client"`, "0+5400x20"),
-		series("urnetwork_session_check_unavailable_total", "synthetic", "connect", "c2", `,path="admission",credential="session"`, "0+600x20"),
+		series("urnetwork_session_check_unavailable_total", "synthetic", "connect", "c2", `,path="connect_h1",credential="session"`, "0+600x20"),
 		// proxy: unchecked acceptances and no record checks read 100%
 		series("urnetwork_session_check_unavailable_total", "synthetic", "proxy", "p1", `,path="hosted",credential="client"`, "0+120x20"),
 		series("urnetwork_redis_pool_timeouts_total", "synthetic", "connect", "c1", "", "0+30x20"),
@@ -250,13 +253,13 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 		capTitle       = "session limit: would refuse (unenforced) and refused / s by kind and cap"
 		dayTitle       = "would-refuse new sessions in the last 24 hours by kind and cap"
 		freedTitle     = "client sessions freed on removal / s by path"
-		networksTitle  = "networks above each live-session level (per 15-minute pass)"
+		networksTitle  = "networks above each live-session level (per sample pass)"
 		quantileTitle  = "live sessions per network: p50, p99, p99.9"
 	)
 	minuteTests := []map[string]any{
 		{"expr": expression(uncheckedTitle, 0), "eval_time": "10m", "exp_samples": []map[string]any{
 			sample(`{credential="client",path="lease",service="connect"}`, 290),
-			sample(`{credential="session",path="admission",service="connect"}`, 10),
+			sample(`{credential="session",path="connect_h1",service="connect"}`, 10),
 			sample(`{credential="client",path="hosted",service="proxy"}`, 2),
 		}},
 		{"expr": expression(uncheckedTitle, 1), "eval_time": "10m", "exp_samples": []map[string]any{
@@ -283,33 +286,58 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 		}},
 	}
 
-	// one sample per 15-minute pass. taskworker t1 observed networks of 5 and
-	// 6,000 live sessions in every pass and t2 one of 1,500, so a pass sees 3
-	// networks: 2 above 10, 100, 500 and 1,000, 1 above 2,000 and 5,000, none
-	// above 10,000
-	histogram := func(env, instance string, perPass map[string]int) []map[string]string {
+	// Every pass observes the same 3 networks, of 5, 1,500 and 6,000 live
+	// sessions: 2 above 10, 100, 500 and 1,000, 1 above 2,000 and 5,000, none
+	// above 10,000. Samples are 30 minutes apart, each after passes of its
+	// own: the panel divides the observations by the passes counted beside
+	// them, whatever the period and whichever taskworker ran them.
+	perPass := map[string]int{"10": 1, "100": 1, "500": 1, "1000": 1, "2000": 2, "5000": 2, "10000": 3, "+Inf": 3}
+	taskworker := func(env, instance string, passesPerSample int, partial bool) []map[string]string {
+		values := func(perSample int) string { return "0+" + strconv.Itoa(perSample) + "x6" }
 		inputs := []map[string]string{}
-		for _, le := range []string{"10", "100", "500", "1000", "2000", "5000", "10000", "+Inf"} {
-			inputs = append(inputs, series("urnetwork_session_live_per_network_bucket", env, "taskworker", instance, `,le="`+le+`"`, "0+"+strconv.Itoa(perPass[le])+"x12"))
+		for le, count := range perPass {
+			inputs = append(inputs, series("urnetwork_session_live_per_network_bucket", env, "taskworker", instance, `,le="`+le+`"`, values(count*passesPerSample)))
 		}
-		return append(inputs, series("urnetwork_session_live_per_network_count", env, "taskworker", instance, "", "0+"+strconv.Itoa(perPass["+Inf"])+"x12"))
+		inputs = append(inputs,
+			series("urnetwork_session_live_per_network_count", env, "taskworker", instance, "", values(perPass["+Inf"]*passesPerSample)),
+			series("urnetwork_session_live_sample_passes_total", env, "taskworker", instance, `,outcome="complete"`, values(passesPerSample)))
+		if partial {
+			inputs = append(inputs, series("urnetwork_session_live_sample_passes_total", env, "taskworker", instance, `,outcome="partial"`, values(0)))
+		}
+		return inputs
 	}
-	passInputs := slices.Concat(
-		histogram("synthetic", "t1", map[string]int{"10": 1, "100": 1, "500": 1, "1000": 1, "2000": 1, "5000": 1, "10000": 2, "+Inf": 2}),
-		histogram("synthetic", "t2", map[string]int{"10": 0, "100": 0, "500": 0, "1000": 0, "2000": 1, "5000": 1, "10000": 1, "+Inf": 1}),
-		histogram("other", "o1", map[string]int{"10": 0, "100": 0, "500": 0, "1000": 0, "2000": 0, "5000": 0, "10000": 0, "+Inf": 900}),
+	perPassSamples := func(complete, partial float64) []map[string]any {
+		return []map[string]any{
+			{"expr": expression(networksTitle, 0), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 3)}},
+			{"expr": expression(networksTitle, 1), "eval_time": "2h", "exp_samples": []map[string]any{
+				sample(`{le="10"}`, 2), sample(`{le="100"}`, 2), sample(`{le="500"}`, 2), sample(`{le="1000"}`, 2),
+				sample(`{le="2000"}`, 1), sample(`{le="5000"}`, 1), sample(`{le="10000"}`, 0),
+			}},
+			{"expr": expression(networksTitle, 2), "eval_time": "2h", "exp_samples": func() []map[string]any {
+				samples := []map[string]any{sample(`{outcome="complete"}`, complete)}
+				if 0 <= partial {
+					samples = append(samples, sample(`{outcome="partial"}`, partial))
+				}
+				return samples
+			}()},
+		}
+	}
+	// two taskworkers each run a pass every 30 minutes: 4 passes an hour
+	fourInputs := slices.Concat(
+		taskworker("synthetic", "t1", 1, true),
+		taskworker("synthetic", "t2", 1, false),
+		taskworker("other", "o1", 300, false),
 	)
-	passTests := []map[string]any{
-		{"expr": expression(networksTitle, 0), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 3)}},
-		{"expr": expression(networksTitle, 1), "eval_time": "2h", "exp_samples": []map[string]any{
-			sample(`{le="10"}`, 2), sample(`{le="100"}`, 2), sample(`{le="500"}`, 2), sample(`{le="1000"}`, 2),
-			sample(`{le="2000"}`, 1), sample(`{le="5000"}`, 1), sample(`{le="10000"}`, 0),
-		}},
+	fourTests := append(perPassSamples(4, 0),
 		// linear within a bucket: rank 1.5 of 3 is halfway from 1,000 to 2,000
-		{"expr": expression(quantileTitle, 0), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 1500)}},
-		{"expr": expression(quantileTitle, 1), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 9850)}},
-		{"expr": expression(quantileTitle, 2), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 9985)}},
-	}
+		map[string]any{"expr": expression(quantileTitle, 0), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 1500)}},
+		map[string]any{"expr": expression(quantileTitle, 1), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 9850)}},
+		map[string]any{"expr": expression(quantileTitle, 2), "eval_time": "2h", "exp_samples": []map[string]any{sample(`{}`, 9985)}},
+	)
+	// one taskworker runs a pass every 30 minutes: 2 passes an hour, the same
+	// networks per pass
+	twoInputs := taskworker("synthetic", "t3", 1, false)
+	twoTests := perPassSamples(2, -1)
 
 	// hourly samples over a day and a half: 24 would-be refusals an hour
 	dayInputs := []map[string]string{
@@ -322,7 +350,8 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 
 	fixture, err := json.Marshal(map[string]any{"evaluation_interval": "1m", "tests": []map[string]any{
 		{"name": "session rollout rates and shares", "interval": "1m", "input_series": minuteInputs, "promql_expr_test": minuteTests},
-		{"name": "live sessions per network per pass", "interval": "15m", "input_series": passInputs, "promql_expr_test": passTests},
+		{"name": "live sessions per network, 4 passes an hour on two taskworkers", "interval": "30m", "input_series": fourInputs, "promql_expr_test": fourTests},
+		{"name": "live sessions per network, 2 passes an hour", "interval": "30m", "input_series": twoInputs, "promql_expr_test": twoTests},
 		{"name": "would-be refusals per day", "interval": "1h", "input_series": dayInputs, "promql_expr_test": dayTests},
 	}})
 	if err != nil {
