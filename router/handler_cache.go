@@ -106,6 +106,9 @@ func handlerCacheValueTtl(ttl time.Duration) time.Duration {
 type handlerCacheKeys struct {
 	value string
 	fill  string
+	// the last published value, kept past the value's own lifetime; only the
+	// renewing fill writes and reads it (handler_cache_renewing.go)
+	last string
 }
 
 // Storage is abstracted at the four correctness boundaries so concurrency,
@@ -144,6 +147,7 @@ func newHandlerCacheKeys(key string) handlerCacheKeys {
 	return handlerCacheKeys{
 		value: prefix + ":value",
 		fill:  prefix + ":fill",
+		last:  prefix + ":last",
 	}
 }
 

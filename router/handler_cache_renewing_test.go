@@ -292,6 +292,10 @@ func TestHandlerCacheRenewingInitialFailureDoesNotStartFill(t *testing.T) {
 	})
 }
 
+// The owner budget, not the caller, bounds a fill. A caller that cancels or
+// whose own deadline passes stops waiting at once, while its fill keeps the
+// lease to the end of the budget, leaves the failure fence and joins its
+// renewal; a miss after the fence recovers.
 func TestHandlerCacheRenewingCancellationAndBudgetLeaveExpiringFence(t *testing.T) {
 	for _, control := range []struct {
 		name          string
@@ -318,17 +322,29 @@ func TestHandlerCacheRenewingCancellationAndBudgetLeaveExpiringFence(t *testing.
 					go func() { time.Sleep(time.Second); cancel() }()
 				}
 				start := time.Now()
+				fillEnded := make(chan time.Duration, 1)
 				value, err := cacheJsonWithRenewingFill(ctx, store, "bounded", 30*time.Second, 2*time.Minute,
 					func(fillCtx context.Context) (*handlerCacheTestResult, error) {
 						<-fillCtx.Done()
+						fillEnded <- time.Since(start)
 						return nil, fillCtx.Err()
 					})
 				if value != nil || !errors.Is(err, control.wantErr) || time.Since(start) != control.elapsed {
 					t.Fatalf("bounded result=(%v,%v) elapsed=%v", value, err, time.Since(start))
 				}
+				time.Sleep(2*time.Minute - time.Since(start))
+				synctest.Wait()
+				select {
+				case ended := <-fillEnded:
+					if ended != 2*time.Minute {
+						t.Fatalf("fill ended after %v, want its 2m owner budget", ended)
+					}
+				default:
+					t.Fatal("fill outlived its owner budget")
+				}
 				before, _ := store.counts()
 				if _, exists, _ := store.get(context.Background(), newHandlerCacheKeys("bounded").fill); !exists {
-					t.Fatal("canceled owner released its retry fence")
+					t.Fatal("ended owner released its retry fence")
 				}
 				time.Sleep(31 * time.Second)
 				after, _ := store.counts()
@@ -437,6 +453,166 @@ func TestHandlerCacheRenewingNetworkInputAndSessionScope(t *testing.T) {
 		}
 		if fills != 3 || original.Ctx != ctx || ctx.Err() != nil {
 			t.Fatalf("scope/session mutated: fills=%d callerErr=%v", fills, ctx.Err())
+		}
+	})
+}
+
+// A fill that takes the given time unless its context ends first.
+func renewingCacheTestFillTaking(fills *atomic.Int64, d time.Duration, message string) func(context.Context) (*handlerCacheTestResult, error) {
+	return func(fillCtx context.Context) (*handlerCacheTestResult, error) {
+		fills.Add(1)
+		select {
+		case <-time.After(d):
+			return &handlerCacheTestResult{Message: message}, nil
+		case <-fillCtx.Done():
+			return nil, fillCtx.Err()
+		}
+	}
+}
+
+// One request of a caller that gives up after patience, and how long it took.
+func renewingCacheTestCall(
+	store handlerCacheRenewingStore,
+	key string,
+	patience time.Duration,
+	fill func(context.Context) (*handlerCacheTestResult, error),
+) (*handlerCacheTestResult, error, time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), patience)
+	defer cancel()
+	start := time.Now()
+	value, err := cacheJsonWithRenewingFill(ctx, store, key, 30*time.Second, 2*time.Minute, fill)
+	return value, err, time.Since(start)
+}
+
+// The root cause of GET /stats/providers answering 503 to every request of a
+// large network (2026-11-16..18): a provider list slower than its callers'
+// patience was canceled with each caller and never published. Here every
+// caller gives up after 10 s (as a client does; the lb cuts at 30 s) and the
+// list takes 20 s. The fill must outlive its first caller and publish, so a
+// later caller is answered at once from that one fill.
+func TestHandlerCacheRenewingFillOutlivesItsCaller(t *testing.T) {
+	prior := handlerCacheValueTtlJitter
+	defer func() { handlerCacheValueTtlJitter = prior }()
+	handlerCacheValueTtlJitter = func(time.Duration) time.Duration { return 0 }
+	synctest.Test(t, func(t *testing.T) {
+		store := newRenewingCacheTestStore()
+		var fills atomic.Int64
+		fill := renewingCacheTestFillTaking(&fills, 20*time.Second, "providers")
+		value, err, elapsed := renewingCacheTestCall(store, "slow-provider-list", 10*time.Second, fill)
+		if value != nil || !errors.Is(err, context.DeadlineExceeded) || elapsed != 10*time.Second {
+			t.Fatalf("first caller = (%v,%v) after %v", value, err, elapsed)
+		}
+		time.Sleep(15 * time.Second)
+		value, err, elapsed = renewingCacheTestCall(store, "slow-provider-list", 10*time.Second, fill)
+		if err != nil || value == nil || value.Message != "providers" || elapsed != 0 {
+			t.Fatalf("caller after the fill = (%v,%v) after %v", value, err, elapsed)
+		}
+		if fills.Load() != 1 {
+			t.Fatalf("fills = %d, want the first caller's fill only", fills.Load())
+		}
+	})
+}
+
+// Once a provider list has been published, a refresh slower than a miss's wait
+// answers the last published list, to its owner and to overlapping misses,
+// instead of 503; the refresh still publishes. A refresh within the wait is
+// answered fresh, a fill's own refusal keeps its error, and the last good list
+// expires handlerCacheLastGoodTtl after its publication.
+func TestHandlerCacheRenewingLastGoodAnswersSlowRefresh(t *testing.T) {
+	prior := handlerCacheValueTtlJitter
+	defer func() { handlerCacheValueTtlJitter = prior }()
+	handlerCacheValueTtlJitter = func(time.Duration) time.Duration { return 0 }
+	synctest.Test(t, func(t *testing.T) {
+		store := newRenewingCacheTestStore()
+		const key = "provider-list-refresh"
+		var fills atomic.Int64
+		expect := func(name string, value *handlerCacheTestResult, err error, elapsed time.Duration, message string, wantElapsed time.Duration) {
+			t.Helper()
+			if err != nil || value == nil || value.Message != message || elapsed != wantElapsed {
+				t.Fatalf("%s = (%v,%v) after %v, want %q after %v", name, value, err, elapsed, message, wantElapsed)
+			}
+		}
+
+		value, err, elapsed := renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, time.Second, "first"))
+		expect("first list", value, err, elapsed, "first", time.Second)
+
+		// Five minutes later the list has expired and its refresh takes 20 s.
+		time.Sleep(5 * time.Minute)
+		owner := make(chan handlerCacheTestCallResult, 1)
+		go func() {
+			value, err, elapsed := renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, 20*time.Second, "second"))
+			if elapsed != handlerCacheFillWaitLimit {
+				err = errors.Join(err, errors.New("refresh owner did not answer at the wait limit"))
+			}
+			owner <- handlerCacheTestCallResult{value, err}
+		}()
+		time.Sleep(time.Second)
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, time.Second, "duplicate"))
+		expect("overlapping miss", value, err, elapsed, "first", handlerCacheFillWaitLimit)
+		result := <-owner
+		expect("refresh owner", result.value, result.err, handlerCacheFillWaitLimit, "first", handlerCacheFillWaitLimit)
+
+		// The refresh still publishes: the next miss is answered fresh at once.
+		time.Sleep(15 * time.Second)
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, time.Second, "unused"))
+		expect("after the refresh", value, err, elapsed, "second", 0)
+		if fills.Load() != 2 {
+			t.Fatalf("fills = %d, want the first list and one refresh", fills.Load())
+		}
+
+		// A refresh within the wait is answered fresh, not from the last good list.
+		time.Sleep(time.Minute)
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, 2*time.Second, "third"))
+		expect("quick refresh", value, err, elapsed, "third", 2*time.Second)
+
+		// A fill's own refusal keeps its error; a miss inside its failure fence
+		// answers the last good list at once.
+		time.Sleep(time.Minute)
+		refusal := errors.New("synthetic payout attribution refusal")
+		value, err, _ = renewingCacheTestCall(store, key, 10*time.Second, func(context.Context) (*handlerCacheTestResult, error) {
+			return nil, refusal
+		})
+		if value != nil || !errors.Is(err, refusal) {
+			t.Fatalf("refused refresh = (%v,%v), want the refusal", value, err)
+		}
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, time.Second, "fenced"))
+		expect("miss in the fence", value, err, elapsed, "third", 0)
+
+		// The last good list lasts handlerCacheLastGoodTtl from its publication.
+		time.Sleep(handlerCacheLastGoodTtl)
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, 20*time.Second, "late"))
+		if value != nil || !errors.Is(err, context.DeadlineExceeded) || elapsed != 10*time.Second {
+			t.Fatalf("miss after the last good list expired = (%v,%v) after %v", value, err, elapsed)
+		}
+		// Join the late fill, which publishes after its caller left.
+		time.Sleep(15 * time.Second)
+		value, err, elapsed = renewingCacheTestCall(store, key, 10*time.Second, renewingCacheTestFillTaking(&fills, time.Second, "unused"))
+		expect("after the late fill", value, err, elapsed, "late", 0)
+	})
+}
+
+// A fill that panics after its caller left cannot take the process down. The
+// panic is logged, and the lease is cut to the failure fence as for a panic
+// its caller sees.
+func TestHandlerCacheRenewingPanicAfterItsCallerLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := newRenewingCacheTestStore()
+		value, err, elapsed := renewingCacheTestCall(store, "late-panic", time.Second, func(context.Context) (*handlerCacheTestResult, error) {
+			time.Sleep(3 * time.Second)
+			panic("synthetic late fill panic")
+		})
+		if value != nil || !errors.Is(err, context.DeadlineExceeded) || elapsed != time.Second {
+			t.Fatalf("caller = (%v,%v) after %v", value, err, elapsed)
+		}
+		time.Sleep(3 * time.Second)
+		token, exists, _ := store.get(context.Background(), newHandlerCacheKeys("late-panic").fill)
+		if !exists || !isHandlerCacheFence(token) {
+			t.Fatalf("late panic left lease %q (exists=%v), want its failure fence", token, exists)
+		}
+		renews, publishes := store.counts()
+		time.Sleep(time.Minute)
+		if after, _ := store.counts(); after != renews || publishes != 0 {
+			t.Fatal("panicked fill left a renewal or publication running")
 		}
 	})
 }
