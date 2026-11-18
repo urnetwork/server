@@ -1,21 +1,28 @@
 package handlers
 
-// api's edge client route (TLS-M5-11, QD-812, QD-873): only the edge class's bearer reaches it; a block, host,
-// slot or index edge.yml and the key's slot count do not admit is refused 403 with nothing created; with no
+// api's edge client route (TLS-M5-11, QD-812, QD-873, QD-1054): only the edge class's bearer reaches it; a block,
+// host, slot or index edge.yml and the key's slot count do not admit is refused 403 with nothing created; with no
 // edge.yml or no urnetwork-edge network it answers 503; and through Postgres an admitted ask answers the derived
-// client's jwt, the same client at each ask of its slot, and another client for the other slot.
+// client's jwt and, beside it, the client's service token of audience sockets naming it in urnetwork-edge and
+// nothing more, the same client at each ask of its slot, another client for the other slot, and 503 when no
+// sockets token can be signed.
 
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
@@ -31,6 +38,8 @@ type edgeClientTestWorld struct {
 	configErr   error
 	noNetwork   bool
 	environment string
+	// while set, every sockets token mint fails with it, as an issuer with no svc- key does
+	socketsTokenErr error
 	// the last answer's Retry-After
 	lastRetryAfter string
 }
@@ -68,6 +77,12 @@ func newEdgeClientTestWorld(t *testing.T, networkId server.Id) *edgeClientTestWo
 		Environment: func() (string, error) {
 			return self.environment, nil
 		},
+		MintSocketsToken: func(networkId server.Id, clientId server.Id) (string, time.Time, error) {
+			if self.socketsTokenErr != nil {
+				return "", time.Time{}, self.socketsTokenErr
+			}
+			return oauth.MintEdgeClientSocketsToken(networkId, clientId)
+		},
 		Settings: settings,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -100,6 +115,56 @@ func (self *edgeClientTestWorld) post(bearer string, body string) (int, *server.
 		}
 	}
 	return response.StatusCode, result
+}
+
+// The test's issuer and svc- key in place of auth.yml's, and a verifier of that key, as sockets mounts it.
+func installEdgeClientTestServiceKey(t testing.TB) *oauth.ServiceTokenVerifier {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint, err := oauth.SignerKid(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(oauth.Testing_SetIssuer("https://auth.edge.example"))
+	t.Cleanup(oauth.Testing_SetSignerKeys(&oauth.SignerKey{
+		Kid:        oauth.SignerKeySetService.KidPrefix() + thumbprint,
+		Alg:        "ES256",
+		Set:        oauth.SignerKeySetService,
+		PrivateKey: privateKey,
+	}))
+	verifier, err := oauth.NewServiceTokenVerifier(&oauth.PublicJwksDocument{
+		Issuer: "https://auth.edge.example",
+		Keys:   oauth.PublicJwks(oauth.SignerKeySetService).Keys,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verifier
+}
+
+// The answer's sockets token, verified as sockets verifies it: audience sockets, naming clientId in networkId and
+// nothing more, ending when the answer says.
+func checkEdgeClientTestSocketsToken(t testing.TB, verifier *oauth.ServiceTokenVerifier, answer *server.EdgeClientMintResult, networkId server.Id, clientId server.Id) {
+	t.Helper()
+	claims, err := verifier.Verify(answer.SocketsToken, "sockets")
+	if err != nil {
+		t.Fatalf("the sockets token does not verify: %v", err)
+	}
+	if claims.NetworkId != networkId || claims.ClientId != clientId {
+		t.Fatalf("the sockets token names %s in %s, want %s in %s", claims.ClientId, claims.NetworkId, clientId, networkId)
+	}
+	if claims.SidecarId != nil || claims.MemberId != nil || claims.SubjectClientId != nil || claims.Act != nil || claims.Scope != "" {
+		t.Fatalf("the sockets token claims more than its client: %+v", claims)
+	}
+	if claims.ExpiresAt == nil || claims.ExpiresAt.Time.UnixMilli() != answer.SocketsTokenExpireTimeMillis {
+		t.Fatalf("the sockets token's exp %v, answered %d", claims.ExpiresAt, answer.SocketsTokenExpireTimeMillis)
+	}
+	if _, err := verifier.Verify(answer.SocketsToken, "evs"); err == nil {
+		t.Fatal("evs takes the edge client's sockets token")
+	}
 }
 
 func TestInternalGateEdgeClientRefusals(t *testing.T) {
@@ -154,6 +219,7 @@ func TestInternalGateEdgeClientRefusals(t *testing.T) {
 func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(testing.TB) {
 		ctx := context.Background()
+		verifier := installEdgeClientTestServiceKey(t)
 		networkId := server.NewId()
 		world := newEdgeClientTestWorld(t, networkId)
 		admitted := `{"block":"tlsedge","host":"lb-a.example","index":1}`
@@ -181,6 +247,8 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 			byJwt.ExpiresAt.Time.UnixMilli() != first.ExpireTimeMillis {
 			t.Fatalf("jwt %+v, answered exp %d", byJwt, first.ExpireTimeMillis)
 		}
+		// beside the jwt, the client's sockets token (QD-1054)
+		checkEdgeClientTestSocketsToken(t, verifier, first, networkId, wantClientId)
 		// a restart's ask: the same client
 		code, second := world.post(world.edge, admitted)
 		if code != http.StatusOK || second.ClientId != first.ClientId {
@@ -198,6 +266,7 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		if code != http.StatusOK || other.ClientId != wantOtherClientId.String() || other.ClientId == first.ClientId {
 			t.Fatalf("slot 1: %d %s, want %s", code, other.ClientId, wantOtherClientId)
 		}
+		checkEdgeClientTestSocketsToken(t, verifier, other, networkId, wantOtherClientId)
 		otherByJwt, err := session.ParseByJwtForAudience(ctx, other.ByClientJwt, session.ByJwtAudienceConnect)
 		if err != nil {
 			t.Fatal(err)
@@ -220,6 +289,22 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		code, otherEnvironment := world.post(world.edge, admitted)
 		if code != http.StatusOK || otherEnvironment.ClientId == first.ClientId {
 			t.Fatalf("another environment: %d %s", code, otherEnvironment.ClientId)
+		}
+		world.environment = "test"
+
+		// a process that cannot sign a sockets token answers unavailable, never a jwt alone
+		world.socketsTokenErr = errors.New("auth.yml lists no svc signer key")
+		if code, _ := world.post(world.edge, admitted); code != http.StatusServiceUnavailable || world.lastRetryAfter != "5" {
+			t.Fatalf("no sockets token: %d, Retry-After %q", code, world.lastRetryAfter)
+		}
+		world.socketsTokenErr = nil
+
+		// a removed client is refused, and is minted no sockets token
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, wantClientId))
+		})
+		if code, answer := world.post(world.edge, admitted); code != http.StatusForbidden || answer.SocketsToken != "" {
+			t.Fatalf("a removed client: %d", code)
 		}
 	})
 }

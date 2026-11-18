@@ -11,14 +11,14 @@
 // Postgres role its session records are written under, its internal gate bearer for the quota surface
 // (internal-gate-mxedge.yml), the edge bearer its platform clients are minted on (internal-gate-edge.yml) and
 // the feed credential (MAIL-M7-20). It routes by SNI through {mxr_<net>} and splices to receivers found at the
-// sockets service (-sockets_url), its quota and clients at api (-api_url).
+// sockets service (-sockets_url), its quota and clients at api (-api_url), each Find on its first client's sockets
+// token, which api's edge client route answers beside the client's jwt (QD-1054).
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -192,18 +192,9 @@ func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxE
 	deps.NewDial = func(clients mxedgehost.RouterClients) (mxedgehost.RouterSocketDial, error) {
 		dialer, err := sidecar.NewSocketEdgeDialer(&sidecar.SocketEdgeDialerArgs{
 			Clients: clients.Clients(),
-			Find: &sidecar.SocketFindHttpArgs{
-				SocketsUrl: socketsUrl,
-				Transport:  &http.Transport{},
-				// a Find is the block's own call, on the first of its K clients' jwts
-				Bearer: func(ctx context.Context) (string, error) {
-					auth, err := source.ServiceClient(ctx, 0)
-					if err != nil {
-						return "", err
-					}
-					return auth.ByJwt, nil
-				},
-			},
+			// a Find is the block's own call, on the first of its K clients' sockets tokens, the service tokens of
+			// audience sockets api's edge client route answers beside their jwts (QD-1054)
+			Find: source.SocketFindHttpArgs(socketsUrl),
 			Settings: &sidecar.SocketEdgeDialSettings{
 				FindTimeout:   mxEdgeSettings.FindTimeout,
 				FindCount:     mxEdgeSettings.FindCount,

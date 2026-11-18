@@ -15,7 +15,9 @@
 //     preamble's path (I-12);
 //   - the gate: gate.go's, from memory filled off the path;
 //   - the clients: sidecar.NewEdgeClientPool, one platform client in urnetwork-edge (§14.9), its credential from
-//     server.NewPlatformClientSource on the edge bearer; once it exists the engine serves ur/smtpedge on it;
+//     server.NewPlatformClientSource on the edge bearer; once it exists the engine serves ur/smtpedge on it,
+//     registering at sockets on the client's sockets token, the service token of audience sockets api's edge
+//     client route answers beside its jwt (QD-1054);
 //   - the dialer: smtpedgeservice.SmtpMxNetDialer, SO_MARK per sending address.
 //
 // config/<env>/sidecar.yml's smtpedge gate is reread every 60 s through sidecarhost's Gates, and the engine
@@ -34,7 +36,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -458,8 +459,6 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 		return deps, end
 	}
 	deps.Source = source
-	var pool *sidecar.EdgeClientPool
-	var poolLock sync.Mutex
 	deps.NewClients = func(ctx context.Context) (hostClients, error) {
 		made, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
 			Source:   source,
@@ -469,33 +468,11 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 		if err != nil {
 			return nil, err
 		}
-		poolLock.Lock()
-		pool = made
-		poolLock.Unlock()
 		return poolClients{EdgeClientPool: made}, nil
 	}
-	deps.Registrations = &sidecar.SocketPlatformRegistrationsArgs{
-		SocketsUrl: socketsUrl,
-		Transport:  &http.Transport{},
-		// a registration is the client's own call, on its own jwt
-		Bearer: func(ctx context.Context, clientId sidecar.Id) (string, error) {
-			poolLock.Lock()
-			made := pool
-			poolLock.Unlock()
-			if made == nil {
-				return "", errors.New("no platform client")
-			}
-			index := slices.Index(made.ClientIds(), clientId)
-			if index < 0 {
-				return "", errors.New("not the block's client")
-			}
-			auth, err := source.ServiceClient(ctx, index)
-			if err != nil {
-				return "", err
-			}
-			return auth.ByJwt, nil
-		},
-	}
+	// a registration is the client's own call, on its own sockets token, the service token of audience sockets
+	// api's edge client route answers beside its jwt (QD-1054); a client the source holds no answer for has none
+	deps.Registrations = source.SocketPlatformRegistrationsArgs(socketsUrl)
 	return deps, end
 }
 

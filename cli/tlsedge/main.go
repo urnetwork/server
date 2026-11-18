@@ -18,7 +18,9 @@
 //     providing Service alone (D-TLS-4, I-3). The pool is made once the source answers every index, tried again
 //     each ClientsRetryInterval until then.
 //   - The dialer: sidecar.NewSocketEdgeDialer over the pool's clients and the sockets service at -sockets_url,
-//     each Find on the first client's own jwt, as tlsedgeservice.TlsEdgeDialer (hostDialer).
+//     each Find on the first client's sockets token, the service token of audience sockets api's edge client
+//     route answers beside its jwt (QD-1054; the source's SocketFindHttpArgs), as tlsedgeservice.TlsEdgeDialer
+//     (hostDialer).
 //   - One key-event subscriber per process (sidecarhost's), never one per client or network: {tes_*}n, the family
 //     model.TlsSuspensionKeyEventPattern names, reaches KillChanged, and after a resubscription KillsResync runs,
 //     since events in the gap are gone. The engine reloads every kill each 60 s besides.
@@ -42,7 +44,6 @@ import (
 	"errors"
 	"flag"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -602,18 +603,8 @@ func blockDeps(quotaCtx context.Context, settings *hostSettings, apiUrl string, 
 	deps.NewDial = func(clients hostClients) (hostSocketDial, error) {
 		dialer, err := sidecar.NewSocketEdgeDialer(&sidecar.SocketEdgeDialerArgs{
 			Clients: clients.Clients(),
-			Find: &sidecar.SocketFindHttpArgs{
-				SocketsUrl: socketsUrl,
-				Transport:  &http.Transport{},
-				// a Find is the block's own call, on the first of its K clients' jwts
-				Bearer: func(ctx context.Context) (string, error) {
-					auth, err := source.ServiceClient(ctx, 0)
-					if err != nil {
-						return "", err
-					}
-					return auth.ByJwt, nil
-				},
-			},
+			// a Find is the block's own call, on the first of its K clients' sockets tokens (QD-1054)
+			Find: source.SocketFindHttpArgs(socketsUrl),
 			Settings: &sidecar.SocketEdgeDialSettings{
 				FindTimeout:   settings.TlsEdge.FindTimeout,
 				FindCount:     settings.TlsEdge.FindMaxCount,

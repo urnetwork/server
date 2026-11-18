@@ -1,11 +1,12 @@
 package handlers
 
-// api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873; §6.10.1, §13.6, §19.4): the route
-// server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge` class's bearer,
-// verified by its hash in constant time (server.InternalGateVerifier), and answering every other request 403
-// before anything is read:
+// api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873, QD-1054; §6.10.1, §13.6, §19.4): the
+// route server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge` class's
+// bearer, verified by its hash in constant time (server.InternalGateVerifier), and answering every other request
+// 403 before anything is read:
 //
-//	POST /internal/gate/edge-client  edge  {block, host, slot, index} -> {client_id, by_client_jwt, expire_time_millis, platform_url}
+//	POST /internal/gate/edge-client  edge  {block, host, slot, index}
+//	  -> {client_id, by_client_jwt, expire_time_millis, platform_url, sockets_token, sockets_token_expire_time_millis}
 //
 // The client id is derived from (environment, host, block, slot, index), the environment api's own, never chosen
 // by the caller (server.DeriveEdgeClientId), and the client is created in sidecar.yml's urnetwork_edge network on
@@ -17,8 +18,13 @@ package handlers
 // no such network, every call is answered 503 and nothing is created. edge.yml is reread every
 // ConfigRereadInterval, and a read that fails keeps the last one that parsed.
 //
-// Nothing here logs a bearer or a jwt, and a refusal's log line names the part refused, never a host. Safe for
-// concurrent use.
+// Beside the jwt the answer carries the client's 15-minute service token of audience sockets (QD-1054,
+// oauth.MintEdgeClientSocketsToken), minted only once the jwt's mint has answered the client as urnetwork-edge's
+// active one, so the checks above bound it as they bound the jwt. A process that cannot sign one, with no svc-
+// key, answers 503: an edge block's every call to sockets needs it.
+//
+// Nothing here logs a bearer, a jwt or a token, and a refusal's log line names the part refused, never a host.
+// Safe for concurrent use.
 
 import (
 	"encoding/json"
@@ -32,6 +38,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 )
 
@@ -75,17 +82,21 @@ type InternalGateEdgeClientDeps struct {
 	EdgeNetwork func() (server.Id, bool)
 	// api's environment. nil: WARP_ENV.
 	Environment func() (string, error)
+	// Mints a client's sockets token and says when it ends. nil: oauth.MintEdgeClientSocketsToken, under auth.yml's
+	// newest svc- key.
+	MintSocketsToken func(networkId server.Id, clientId server.Id) (string, time.Time, error)
 	// nil: the defaults.
 	Settings *InternalGateEdgeClientSettings
 }
 
 // See the file header.
 type InternalGateEdgeClientHandlers struct {
-	verifier    func() *server.InternalGateVerifier
-	loadConfig  func() (*server.EdgeClientsConfig, error)
-	edgeNetwork func() (server.Id, bool)
-	environment func() (string, error)
-	settings    *InternalGateEdgeClientSettings
+	verifier         func() *server.InternalGateVerifier
+	loadConfig       func() (*server.EdgeClientsConfig, error)
+	edgeNetwork      func() (server.Id, bool)
+	environment      func() (string, error)
+	mintSocketsToken func(networkId server.Id, clientId server.Id) (string, time.Time, error)
+	settings         *InternalGateEdgeClientSettings
 
 	stateLock sync.Mutex
 	// the last edge.yml that parsed, and when the next read is due
@@ -132,12 +143,17 @@ func NewInternalGateEdgeClientHandlers(deps *InternalGateEdgeClientDeps) *Intern
 	if environment == nil {
 		environment = server.Env
 	}
+	mintSocketsToken := deps.MintSocketsToken
+	if mintSocketsToken == nil {
+		mintSocketsToken = oauth.MintEdgeClientSocketsToken
+	}
 	return &InternalGateEdgeClientHandlers{
-		verifier:    verifier,
-		loadConfig:  loadConfig,
-		edgeNetwork: edgeNetwork,
-		environment: environment,
-		settings:    settings,
+		verifier:         verifier,
+		loadConfig:       loadConfig,
+		edgeNetwork:      edgeNetwork,
+		environment:      environment,
+		mintSocketsToken: mintSocketsToken,
+		settings:         settings,
 	}
 }
 
@@ -202,7 +218,7 @@ func (self *InternalGateEdgeClientHandlers) unavailable(w http.ResponseWriter, r
 	http.Error(w, "Unavailable.", http.StatusServiceUnavailable)
 }
 
-// POST /internal/gate/edge-client: one edge client's jwt.
+// POST /internal/gate/edge-client: one edge client's jwt and sockets token.
 func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter, r *http.Request) {
 	if !self.authenticate(w, r) {
 		return
@@ -259,13 +275,22 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 		self.unavailable(w, reason)
 		return
 	}
+	// only now, for the client the mint answered as urnetwork-edge's active one (QD-1054)
+	socketsToken, socketsTokenExpireTime, err := self.mintSocketsToken(networkId, mint.ClientId)
+	if err != nil || socketsToken == "" {
+		// the error names a missing key or a claim, never a token
+		self.unavailable(w, "no sockets token was signed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(w).Encode(&server.EdgeClientMintResult{
-		ClientId:         mint.ClientId.String(),
-		ByClientJwt:      mint.ByClientJwt,
-		ExpireTimeMillis: mint.ExpireTime.UnixMilli(),
-		PlatformUrl:      config.PlatformUrl(),
+		ClientId:                     mint.ClientId.String(),
+		ByClientJwt:                  mint.ByClientJwt,
+		ExpireTimeMillis:             mint.ExpireTime.UnixMilli(),
+		PlatformUrl:                  config.PlatformUrl(),
+		SocketsToken:                 socketsToken,
+		SocketsTokenExpireTimeMillis: socketsTokenExpireTime.UnixMilli(),
 	}); err != nil {
 		glog.Infof("[internalgate]could not write an edge client\n")
 	}

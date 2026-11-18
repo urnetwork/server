@@ -1,11 +1,13 @@
 package server
 
-// An edge block's platform clients (TLS-M5-11, QD-812, QD-873): edge.yml admits only the block, host, slot and
-// index it names; the derivation is fixed; two processes of one block on one host in different slots hold
+// An edge block's platform clients (TLS-M5-11, QD-812, QD-873, QD-1054): edge.yml admits only the block, host, slot
+// and index it names; the derivation is fixed; two processes of one block on one host in different slots hold
 // disjoint clients and both connect their pools, and one slot holds the same clients across restarts; WARP_SLOT
-// reads only a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's id for its life,
-// refreshes each jwt at its refresh point, rides an api outage on the jwt it holds until that ends, and never
-// puts the bearer or a jwt in an error. api is an httptest server and time a fake clock: nothing sleeps.
+// reads only a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's
+// id for its life, keeps each client's sockets token beside its jwt, refreshes both at the refresh point of the
+// shorter-lived, rides an api outage on the jwt and the token it holds until each ends, refuses an answer with no
+// sockets token, presents each client's token, never its jwt, to sockets, and never puts the bearer, a jwt or a token
+// in an error. api is an httptest server and time a fake clock: nothing sleeps.
 
 import (
 	"context"
@@ -168,15 +170,17 @@ func TestDeriveEdgeClientIdIsFixed(t *testing.T) {
 	}
 }
 
-// api's edge client route as a test stands it up: a jwt per ask, each ending life after the ask on the clock, for
-// the client derived from the ask's host, block, slot and index under the environment "test", and a slot past
-// the default slot count refused as api refuses it.
+// api's edge client route as a test stands it up: a jwt and a sockets token per ask, each ending its life after
+// the ask on the clock, for the client derived from the ask's host, block, slot and index under the environment
+// "test", and a slot past the default slot count refused as api refuses it.
 type platformClientTestApi struct {
 	t      testing.TB
 	clock  *sidecartest.FakeClock
 	bearer string
 	life   time.Duration
-	server *httptest.Server
+	// a sockets token's life: a service token's 15 minutes
+	socketsTokenLife time.Duration
+	server           *httptest.Server
 
 	stateLock sync.Mutex
 	// {slot, index} -> asks answered
@@ -185,6 +189,8 @@ type platformClientTestApi struct {
 	failStatus int
 	// while set, every answer names this client id for every index
 	clientIdOverride string
+	// while set, every answer carries no sockets token
+	noSocketsToken bool
 }
 
 func newPlatformClientTestApi(t testing.TB, clock *sidecartest.FakeClock) *platformClientTestApi {
@@ -193,6 +199,7 @@ func newPlatformClientTestApi(t testing.TB, clock *sidecartest.FakeClock) *platf
 		clock:              clock,
 		bearer:             "edge-bearer-secret",
 		life:               time.Hour,
+		socketsTokenLife:   15 * time.Minute,
 		slotIndexAskCounts: map[[2]int]int{},
 	}
 	self.server = httptest.NewServer(http.HandlerFunc(self.serve))
@@ -223,12 +230,19 @@ func (self *platformClientTestApi) serve(w http.ResponseWriter, r *http.Request)
 	if self.clientIdOverride != "" {
 		clientId = self.clientIdOverride
 	}
-	json.NewEncoder(w).Encode(&EdgeClientMintResult{
-		ClientId:         clientId,
-		ByClientJwt:      fmt.Sprintf("jwt-secret-%d-%d-%d", args.Slot, args.Index, self.slotIndexAskCounts[key]),
-		ExpireTimeMillis: self.clock.Now().Add(self.life).UnixMilli(),
-		PlatformUrl:      "wss://connect.edge.example",
-	})
+	result := &EdgeClientMintResult{
+		ClientId:                     clientId,
+		ByClientJwt:                  fmt.Sprintf("jwt-secret-%d-%d-%d", args.Slot, args.Index, self.slotIndexAskCounts[key]),
+		ExpireTimeMillis:             self.clock.Now().Add(self.life).UnixMilli(),
+		PlatformUrl:                  "wss://connect.edge.example",
+		SocketsToken:                 fmt.Sprintf("sockets-secret-%d-%d-%d", args.Slot, args.Index, self.slotIndexAskCounts[key]),
+		SocketsTokenExpireTimeMillis: self.clock.Now().Add(self.socketsTokenLife).UnixMilli(),
+	}
+	if self.noSocketsToken {
+		result.SocketsToken = ""
+		result.SocketsTokenExpireTimeMillis = 0
+	}
+	json.NewEncoder(w).Encode(result)
 }
 
 func (self *platformClientTestApi) askCount(slot int, index int) int {
@@ -328,11 +342,11 @@ func TestPlatformClientSourceAsksEachIndexAndRefreshesBeforeItLapses(t *testing.
 	if api.askCount(0, 0) != 1 || api.askCount(0, 1) != 1 {
 		t.Fatalf("asked %d %d times", api.askCount(0, 0), api.askCount(0, 1))
 	}
-	// at half the jwt's life each index is asked again, with nobody calling
+	// at half the shorter life, the sockets token's 15 minutes, each index is asked again, with nobody calling
 	if err := clock.AwaitTimers(ctx, 2); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(30 * time.Minute)
+	clock.Advance(7*time.Minute + 30*time.Second)
 	awaitPlatformClientAnswers(t, ctx, source, 4)
 	for index := range 2 {
 		auth, err := source.ServiceClient(ctx, index)
@@ -681,5 +695,160 @@ func TestLoadEdgeClientSlotReadsOnlyASlotTheKeyAdmits(t *testing.T) {
 	t.Setenv(EdgeClientSlotEnvName, "2")
 	if _, err := LoadEdgeClientSlot(nil); !errors.Is(err, ErrPlatformClientSource) {
 		t.Errorf("WARP_SLOT=2: %v", err)
+	}
+}
+
+// Each client's sockets token (QD-1054) is kept beside its jwt from the same answer, answered by index and by the
+// client's id, renewed at half its life with nobody calling, and the jwt with it; a client id the source holds no
+// answer for has no token.
+func TestPlatformClientSourceKeepsEachSocketsTokenFresh(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	source := api.newSource(ctx, 2)
+	awaitPlatformClientAnswers(t, ctx, source, 2)
+	for index := range 2 {
+		token, err := source.SocketsToken(ctx, index)
+		if err != nil || token != fmt.Sprintf("sockets-secret-0-%d-1", index) {
+			t.Fatalf("client %d's sockets token: %v", index, err)
+		}
+		clientId := DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, index)
+		byClient, err := source.ClientSocketsToken(ctx, sidecar.Id(clientId))
+		if err != nil || byClient != token {
+			t.Fatalf("client %d's sockets token by its id: %v", index, err)
+		}
+	}
+	if _, err := source.ClientSocketsToken(ctx, sidecar.Id(NewId())); !errors.Is(err, ErrPlatformClientSource) {
+		t.Fatalf("a client the source does not hold: %v", err)
+	}
+	for _, index := range []int{-1, 2} {
+		if _, err := source.SocketsToken(ctx, index); !errors.Is(err, ErrPlatformClientSource) {
+			t.Fatalf("index %d: %v", index, err)
+		}
+	}
+	// half the token's life on: each index asked again unprompted, a new token and a new jwt for the same client
+	if err := clock.AwaitTimers(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(7*time.Minute + 30*time.Second)
+	awaitPlatformClientAnswers(t, ctx, source, 4)
+	for index := range 2 {
+		token, err := source.SocketsToken(ctx, index)
+		if err != nil || token != fmt.Sprintf("sockets-secret-0-%d-2", index) {
+			t.Fatalf("client %d's sockets token was not renewed: %v", index, err)
+		}
+		auth, err := source.ServiceClient(ctx, index)
+		if err != nil || auth.ByJwt != fmt.Sprintf("jwt-secret-0-%d-2", index) {
+			t.Fatalf("client %d's jwt did not come with its token: %v", index, err)
+		}
+	}
+	if api.askCount(0, 0) != 2 || api.askCount(0, 1) != 2 {
+		t.Fatalf("asked %d %d times", api.askCount(0, 0), api.askCount(0, 1))
+	}
+	if !source.Ready() {
+		t.Fatal("not ready on fresh tokens")
+	}
+}
+
+// An api outage past the refresh point: the held sockets token answers until it ends, then nothing does and the
+// source is not ready, while the held jwt still answers until its own end; api back, the next call recovers both.
+func TestPlatformClientSourceRidesAnOutageOnItsSocketsToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	source := api.newSource(ctx, 1)
+	awaitPlatformClientAnswers(t, ctx, source, 1)
+	api.setFailStatus(http.StatusServiceUnavailable)
+	clock.Advance(10 * time.Minute)
+	token, err := source.SocketsToken(ctx, 0)
+	if err != nil || token != "sockets-secret-0-0-1" {
+		t.Fatalf("the held token did not answer in an outage: %v", err)
+	}
+	if !source.Ready() {
+		t.Fatal("not ready on a held token that has not ended")
+	}
+	clock.Advance(5 * time.Minute)
+	_, err = source.SocketsToken(ctx, 0)
+	if !errors.Is(err, ErrPlatformClientSource) {
+		t.Fatalf("an ended token answered: %v", err)
+	}
+	if strings.Contains(err.Error(), "sockets-secret") || strings.Contains(err.Error(), api.bearer) {
+		t.Fatalf("the error holds a secret: %v", err)
+	}
+	if source.Ready() {
+		t.Fatal("ready on an ended sockets token")
+	}
+	if auth, err := source.ServiceClient(ctx, 0); err != nil || auth.ByJwt != "jwt-secret-0-0-1" {
+		t.Fatalf("the held jwt, an hour's, did not answer: %v", err)
+	}
+	api.setFailStatus(0)
+	token, err = source.SocketsToken(ctx, 0)
+	if err != nil || token != "sockets-secret-0-0-2" || !source.Ready() {
+		t.Fatalf("the source did not recover: %v", err)
+	}
+}
+
+// An answer with no sockets token is no client's: it is never kept, so nothing answers and the source is not
+// ready, and the error names no secret.
+func TestPlatformClientSourceRefusesAnAnswerWithNoSocketsToken(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	func() {
+		api.stateLock.Lock()
+		defer api.stateLock.Unlock()
+		api.noSocketsToken = true
+	}()
+	source := api.newSource(ctx, 1)
+	_, err := source.ServiceClient(ctx, 0)
+	if !errors.Is(err, ErrPlatformClientSource) || !strings.Contains(err.Error(), "no sockets token") {
+		t.Fatalf("an answer with no sockets token was kept: %v", err)
+	}
+	if strings.Contains(err.Error(), "jwt-secret") || strings.Contains(err.Error(), api.bearer) {
+		t.Fatalf("the error holds a secret: %v", err)
+	}
+	if _, err := source.SocketsToken(ctx, 0); !errors.Is(err, ErrPlatformClientSource) {
+		t.Fatalf("a sockets token answered: %v", err)
+	}
+	if source.Ready() {
+		t.Fatal("ready with no sockets token")
+	}
+}
+
+// What the edge blocks hand their dialer and their platform listener: a Find presents the first client's sockets
+// token, a registration its own client's, never a jwt, each to the sockets url given and on a transport of its own.
+func TestPlatformClientSourcePresentsSocketsTokensToSockets(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	source := api.newSource(ctx, 2)
+	awaitPlatformClientAnswers(t, ctx, source, 2)
+
+	findArgs := source.SocketFindHttpArgs("https://sockets.edge.example")
+	if findArgs.SocketsUrl != "https://sockets.edge.example" || findArgs.Transport == nil {
+		t.Fatalf("find args %q", findArgs.SocketsUrl)
+	}
+	bearer, err := findArgs.Bearer(ctx)
+	if err != nil || bearer != "sockets-secret-0-0-1" {
+		t.Fatalf("a Find's bearer is not the first client's sockets token: %v", err)
+	}
+
+	registrationsArgs := source.SocketPlatformRegistrationsArgs("https://sockets.edge.example")
+	if registrationsArgs.SocketsUrl != "https://sockets.edge.example" || registrationsArgs.Transport == nil {
+		t.Fatalf("registrations args %q", registrationsArgs.SocketsUrl)
+	}
+	for index := range 2 {
+		clientId := sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, index))
+		bearer, err := registrationsArgs.Bearer(ctx, clientId)
+		if err != nil || bearer != fmt.Sprintf("sockets-secret-0-%d-1", index) {
+			t.Fatalf("client %d's registration bearer is not its sockets token: %v", index, err)
+		}
+	}
+	if _, err := registrationsArgs.Bearer(ctx, sidecar.Id(NewId())); err == nil {
+		t.Fatal("a client the block does not hold has a registration bearer")
 	}
 }

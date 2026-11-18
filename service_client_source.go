@@ -29,9 +29,18 @@ package server
 // most SlotCount times K clients a block and host.
 //
 // PlatformClientSource is the block's end, sidecar.ServiceClientSource for sidecar.EdgeClientPool: it asks for
-// each of its K indexes at start, keeps each answer until its jwt is refreshed, and refreshes each before it
-// lapses, at RefreshLifeFraction of its life. A jwt and the bearer are secrets: neither is logged (I-7), and log
-// lines name a client by its slot and index alone (I-13).
+// each of its K indexes at start, keeps each answer until it is refreshed, and refreshes each before it lapses,
+// at RefreshLifeFraction of the shorter life the answer carries.
+//
+// Each answer also carries the client's 15-minute service token of audience sockets (QD-1054), since sockets
+// takes service tokens alone (QD-1029) and no edge client can use the token exchange: it binds no ClientKey, no
+// sidecar and no projection. The source keeps it beside the jwt, renewed with it, and the block's calls to
+// sockets present it: tlsedge's and mxedge's router's Finds on the first client's (SocketFindHttpArgs), and
+// smtpedge's ur/smtpedge registrations each on its own client's (SocketPlatformRegistrationsArgs). A removed
+// edge client is refused at sockets by its client rev/ object (model's edge client removal effect).
+//
+// A jwt, a sockets token and the bearer are secrets: none is logged (I-7), and log lines name a client by its
+// slot and index alone (I-13).
 
 import (
 	"bytes"
@@ -94,6 +103,12 @@ type EdgeClientMintResult struct {
 	ExpireTimeMillis int64 `json:"expire_time_millis"`
 	// Where the client connects, ws or wss.
 	PlatformUrl string `json:"platform_url"`
+	// The client's service token of audience sockets (QD-1054): network_id urnetwork-edge's and ur_client_id this
+	// client's, with no sidecar, member or scope, signed under the svc- set as the token exchange signs. A secret:
+	// never logged.
+	SocketsToken string `json:"sockets_token"`
+	// When the sockets token ends, as its exp carries it: a service token's 15 minutes after its mint.
+	SocketsTokenExpireTimeMillis int64 `json:"sockets_token_expire_time_millis"`
 }
 
 // An edge client that edge.yml does not admit, or a file that admits nothing.
@@ -291,8 +306,9 @@ func (self *EdgeClientsConfig) Admits(args *EdgeClientMintArgs) error {
 type PlatformClientSourceSettings struct {
 	// K, the indexes the source keeps: the pool's ClientCount.
 	ClientCount int
-	// The refresh point: the part of a jwt's life, from the answer that carried it to its end, after which the
-	// source asks for the next. 0.5, as a client token refreshes between 40% and 50% of its life.
+	// The refresh point: the part of an answer's life, from the answer to the end of the shorter-lived of its jwt
+	// and its sockets token, after which the source asks for the next. 0.5, as a client token refreshes between
+	// 40% and 50% of its life: with a 15-minute sockets token beside an hour's jwt, an ask every 7.5 minutes.
 	RefreshLifeFraction float64
 	// How long a refused or failed ask waits before the next: 5 s.
 	RetryInterval time.Duration
@@ -377,7 +393,10 @@ type PlatformClientSourceArgs struct {
 // One index's last answer.
 type platformClientCredential struct {
 	auth *sidecar.ServiceClientAuth
-	// when the jwt ends, and when the source asks for the next
+	// the client's service token of audience sockets, a secret, and when it ends
+	socketsToken           string
+	socketsTokenExpireTime time.Time
+	// when the jwt ends, and when the source asks for the next: RefreshLifeFraction into the shorter life
 	expireTime  time.Time
 	refreshTime time.Time
 }
@@ -540,6 +559,16 @@ func (self *PlatformClientSource) ask(ctx context.Context, index int) (*platform
 	if life <= 0 {
 		return nil, fmt.Errorf("%w: api's answer holds a jwt that has ended", ErrPlatformClientSource)
 	}
+	// the token sockets takes (QD-1054): an answer without one is no client's, since the block's every call to
+	// sockets needs it
+	if result.SocketsToken == "" {
+		return nil, fmt.Errorf("%w: api's answer holds no sockets token", ErrPlatformClientSource)
+	}
+	socketsTokenExpireTime := time.UnixMilli(result.SocketsTokenExpireTimeMillis)
+	socketsTokenLife := socketsTokenExpireTime.Sub(askTime)
+	if socketsTokenLife <= 0 {
+		return nil, fmt.Errorf("%w: api's answer holds a sockets token that has ended", ErrPlatformClientSource)
+	}
 	return &platformClientCredential{
 		auth: &sidecar.ServiceClientAuth{
 			ClientId:    connect.Id(clientId),
@@ -547,8 +576,10 @@ func (self *PlatformClientSource) ask(ctx context.Context, index int) (*platform
 			ApiUrl:      self.args.ApiUrl,
 			PlatformUrl: result.PlatformUrl,
 		},
-		expireTime:  expireTime,
-		refreshTime: askTime.Add(time.Duration(float64(life) * self.settings.RefreshLifeFraction)),
+		socketsToken:           result.SocketsToken,
+		socketsTokenExpireTime: socketsTokenExpireTime,
+		expireTime:             expireTime,
+		refreshTime:            askTime.Add(time.Duration(float64(min(life, socketsTokenLife)) * self.settings.RefreshLifeFraction)),
 	}, nil
 }
 
@@ -623,10 +654,10 @@ func (self *PlatformClientSource) keepFresh(index int) {
 	}
 }
 
-// See sidecar.ServiceClientSource: the index's credential, the one held while it is before its refresh point,
-// and otherwise a new one asked of api now. When that ask fails, the held one still answers until its jwt ends:
-// an api outage shorter than the rest of a jwt's life costs no client.
-func (self *PlatformClientSource) ServiceClient(ctx context.Context, clientIndex int) (*sidecar.ServiceClientAuth, error) {
+// The index's credential: the one held while it is before its refresh point, and otherwise a new one asked of
+// api now. When that ask fails, the held one still answers until the end heldEnd reads of it passes, so an api
+// outage shorter than the rest of what the caller presents costs it nothing.
+func (self *PlatformClientSource) current(ctx context.Context, clientIndex int, heldEnd func(*platformClientCredential) time.Time) (*platformClientCredential, error) {
 	if clientIndex < 0 || len(self.indexes) <= clientIndex {
 		return nil, fmt.Errorf("%w: no client %d", ErrPlatformClientSource, clientIndex)
 	}
@@ -634,24 +665,89 @@ func (self *PlatformClientSource) ServiceClient(ctx context.Context, clientIndex
 		return nil, fmt.Errorf("%w: closed", ErrPlatformClientSource)
 	}
 	held := self.held(clientIndex)
-	now := self.clock.Now()
-	if held != nil && now.Before(held.refreshTime) {
-		auth := *held.auth
-		return &auth, nil
+	if held != nil && self.clock.Now().Before(held.refreshTime) {
+		return held, nil
 	}
 	credential, err := self.refresh(ctx, clientIndex, held)
 	if err != nil {
-		if held == nil || !self.clock.Now().Before(held.expireTime) {
+		if held == nil || !self.clock.Now().Before(heldEnd(held)) {
 			return nil, err
 		}
-		credential = held
+		return held, nil
+	}
+	return credential, nil
+}
+
+// See sidecar.ServiceClientSource: the index's credential as current answers it, an outage ridden on the held
+// jwt until it ends.
+func (self *PlatformClientSource) ServiceClient(ctx context.Context, clientIndex int) (*sidecar.ServiceClientAuth, error) {
+	credential, err := self.current(ctx, clientIndex, func(held *platformClientCredential) time.Time {
+		return held.expireTime
+	})
+	if err != nil {
+		return nil, err
 	}
 	auth := *credential.auth
 	return &auth, nil
 }
 
-// Whether every index holds a credential whose jwt has not ended: the process's own K clients, not another
-// slot's.
+// The index's service token of audience sockets (QD-1054), as current answers it, an outage ridden on the held
+// token until it ends. A secret: the caller presents it to sockets alone and never logs it.
+func (self *PlatformClientSource) SocketsToken(ctx context.Context, clientIndex int) (string, error) {
+	credential, err := self.current(ctx, clientIndex, func(held *platformClientCredential) time.Time {
+		return held.socketsTokenExpireTime
+	})
+	if err != nil {
+		return "", err
+	}
+	return credential.socketsToken, nil
+}
+
+// The sockets token of the index whose client is clientId, as SocketsToken answers it: what a client's own call
+// to sockets presents. A client no index has been answered for is refused.
+func (self *PlatformClientSource) ClientSocketsToken(ctx context.Context, clientId sidecar.Id) (string, error) {
+	clientIndex := func() int {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for index, state := range self.indexes {
+			if state.clientId != (connect.Id{}) && state.clientId == connect.Id(clientId) {
+				return index
+			}
+		}
+		return -1
+	}()
+	if clientIndex < 0 {
+		return "", fmt.Errorf("%w: not one of the source's clients", ErrPlatformClientSource)
+	}
+	return self.SocketsToken(ctx, clientIndex)
+}
+
+// How an edge block's dialer sends its Finds (tlsedge's, mxedge's router's) to the sockets service at
+// socketsUrl: each Find on the sockets token of the first of the block's K clients, since a Find is the block's
+// own call, naming all K (§9.6). Carried by a transport of its own.
+func (self *PlatformClientSource) SocketFindHttpArgs(socketsUrl string) *sidecar.SocketFindHttpArgs {
+	return &sidecar.SocketFindHttpArgs{
+		SocketsUrl: socketsUrl,
+		Transport:  &http.Transport{},
+		Bearer: func(ctx context.Context) (string, error) {
+			return self.SocketsToken(ctx, 0)
+		},
+	}
+}
+
+// How an edge block's platform listener (smtpedge's ur/smtpedge) sends each client's registrations to the
+// sockets service at socketsUrl: each on that client's own sockets token, since a registration is the client's
+// own lease (§9.5). Carried by a transport of its own.
+func (self *PlatformClientSource) SocketPlatformRegistrationsArgs(socketsUrl string) *sidecar.SocketPlatformRegistrationsArgs {
+	return &sidecar.SocketPlatformRegistrationsArgs{
+		SocketsUrl: socketsUrl,
+		Transport:  &http.Transport{},
+		Bearer:     self.ClientSocketsToken,
+	}
+}
+
+// Whether every index holds a credential whose jwt and sockets token have not ended: the process's own K
+// clients, not another slot's.
 func (self *PlatformClientSource) Ready() bool {
 	if self.ctx.Err() != nil {
 		return false
@@ -660,7 +756,7 @@ func (self *PlatformClientSource) Ready() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	for _, state := range self.indexes {
-		if state.credential == nil || !now.Before(state.credential.expireTime) {
+		if state.credential == nil || !now.Before(state.credential.expireTime) || !now.Before(state.credential.socketsTokenExpireTime) {
 			return false
 		}
 	}
