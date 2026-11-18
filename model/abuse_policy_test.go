@@ -86,9 +86,9 @@ func TestAbuseMachineActionTakesEveryRowOfTheSignalTable(t *testing.T) {
 		{signal: AbuseSignalWebRiskHit, kind: AbuseActionKindHostKill},
 		{signal: AbuseSignalFeedHit, kind: AbuseActionKindHostKill},
 		{signal: AbuseSignalTrustedFlaggerUrl, kind: AbuseActionKindHostKill},
-		// notices: a kill only for a registrar's or registry's url
-		{signal: AbuseSignalRegistrarUrl, kind: AbuseActionKindHostKill},
-		{signal: AbuseSignalRegistryUrl, kind: AbuseActionKindHostKill},
+		// notices: none, a registrar's or registry's url included, whose kill is the rota's (owner decision 530)
+		{signal: AbuseSignalRegistrarUrl, kind: AbuseActionKindNone},
+		{signal: AbuseSignalRegistryUrl, kind: AbuseActionKindNone},
 		{signal: AbuseSignalRegistrarNotice, kind: AbuseActionKindNone},
 		{signal: AbuseSignalRegistryNotice, kind: AbuseActionKindNone},
 		{signal: AbuseSignalLawEnforcementEmergency, kind: AbuseActionKindNone},
