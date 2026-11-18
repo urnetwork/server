@@ -284,6 +284,9 @@ func (self *harness) runSignOutPhase() {
 	if result.EnforcementError != nil {
 		storm.Error = result.EnforcementError.Error()
 	}
+	storm.RecordBytesAfter = self.networkRecordBytes(large.network.id)
+	sessionBytes, _ := self.networkSessionBytes(large.network.id)
+	storm.SessionBytesAfter = sessionBytes
 
 	// the owner's sign-in is retired; hosted proxies are expected to survive
 	refused, accepted := self.probe([]*credential{large.actor}, 1)
@@ -304,7 +307,11 @@ func (self *harness) runSignOutPhase() {
 		} else {
 			remintRefused++
 			if remintRefused == 1 {
-				storm.RemintError = classify(err)
+				text := err.Error()
+				if 120 < len(text) {
+					text = text[:120]
+				}
+				storm.RemintError = classify(err) + ": " + text
 				if errors.Is(err, session.ErrSessionRevoked) {
 					storm.RemintError = "session_revoked"
 				}

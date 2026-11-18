@@ -129,7 +129,10 @@ func (self *harness) capacityLiveCap() {
 		}
 		need := int64(retainedCapProfile-liveCapProfile) - markers
 		if need >= liveCapProfile-1 {
-			self.revokeOthers(profile, "capacity.revoke.others@1000", fmt.Sprintf("revoke.others@1000.cycle%d", cycle))
+			result := self.revokeOthers(profile, "capacity.revoke.others@1000", fmt.Sprintf("revoke.others@1000.cycle%d", cycle))
+			if cycle == 0 {
+				self.recordReceipt(profile.network.id, result)
+			}
 		} else {
 			self.revokeSingle(profile, int(need))
 		}
@@ -152,6 +155,10 @@ func (self *harness) capacityLiveCap() {
 
 	self.measureListAndHint(profile, "max")
 
+	// the retained cap alone: one live slot free, so the live cap cannot
+	// answer first
+	self.revokeSingle(profile, 1)
+	held, live = self.heldCount(profile.network.id), self.liveSessionCount(profile.network.id)
 	start = time.Now()
 	_, err = self.signIn(profile.network)
 	self.ops.observe("capacity.mint.at_retained_cap", start, err)
@@ -170,6 +177,7 @@ func outcomeName(err error) string {
 
 func (self *harness) measureListAndHint(network *capacityNetwork, label string) {
 	lists := 10
+	self.must(self.admin.slowlogReset(self.ctx), "slowlog reset")
 	self.measure("list@"+label, lists, func() {
 		for range lists {
 			actor := self.credentialSession(network.actor)
@@ -182,7 +190,9 @@ func (self *harness) measureListAndHint(network *capacityNetwork, label string) 
 			}
 		}
 	})
+	self.recordSlowScripts("list@" + label)
 	hints := 50
+	self.must(self.admin.slowlogReset(self.ctx), "slowlog reset")
 	self.measure("hint@"+label, hints, func() {
 		for range hints {
 			start := time.Now()
@@ -190,6 +200,7 @@ func (self *harness) measureListAndHint(network *capacityNetwork, label string) 
 			self.ops.observe("capacity.hint@"+label, start, err)
 		}
 	})
+	self.recordSlowScripts("hint@" + label)
 }
 
 // Revokes every live session of the network but the actor's, through the
@@ -412,4 +423,21 @@ func (self *harness) capacityLarge() {
 	self.report.addMemory("revocation record projection per hosted proxy client", len(large.clients), recordAfter-recordBefore, nil)
 
 	self.measureListAndHint(&large.capacityNetwork, fmt.Sprintf("%d", sessions))
+}
+
+// The bulk revoke's receipt: its size per revoked session and how long Redis
+// keeps it.
+func (self *harness) recordReceipt(networkId server.Id, result *session.SessionOperationResult) {
+	key := session.SessionKey(networkId, "op:"+result.OperationId.String())
+	var ttl time.Duration
+	self.must(server.RedisAuth(self.ctx, func(ctx context.Context, r server.RedisClient) error {
+		var err error
+		ttl, err = r.PTTL(ctx, key).Result()
+		return err
+	}), "receipt ttl")
+	bytes, err := self.admin.memoryUsage(self.ctx, []string{key})
+	self.must(err, "receipt memory")
+	revoked := max(1, result.RevokedCount)
+	self.report.addMemory(fmt.Sprintf("bulk revoke receipt per revoked session (kept %.1f days)", ttl.Hours()/24), revoked, bytes, map[string]int64{"ttl_seconds": int64(ttl.Seconds()), "targets": int64(len(result.TargetSessionIds))})
+	self.report.ReceiptDays = ttl.Hours() / 24
 }

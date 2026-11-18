@@ -4,8 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -38,6 +42,9 @@ func (self *harness) runSteadyPhase() {
 	nextNetwork := func() *workingNetwork {
 		return working.networks[int(networkCursor.Add(1))%len(working.networks)]
 	}
+	// the distinct networks with a registered mint in each 30 s maintenance
+	// interval: each leaves an index outbox row that one repair must drain
+	minting := newMintTracker(30 * time.Second)
 	hotRate := productionRates["hotproxy"] * profile.compression
 	codeRate := productionRates["code"] * profile.compression * 5
 
@@ -58,6 +65,7 @@ func (self *harness) runSteadyPhase() {
 			_, clientId, _, err := self.authClient(clientSession, false)
 			self.ops.observe(op, start, err)
 			if err == nil {
+				minting.note(network.network.id)
 				authClients.push(queuedClient{created: time.Now(), network: network.network, clientId: clientId})
 			}
 		}},
@@ -82,6 +90,7 @@ func (self *harness) runSteadyPhase() {
 			_, clientId, err := self.childMint(parent)
 			self.ops.observe("steady.mint.child", start, err)
 			if err == nil {
+				minting.note(network.network.id)
 				children.push(queuedClient{created: time.Now(), network: network.network, clientId: clientId, remover: self.credentialSession(parent)})
 			}
 		}},
@@ -100,6 +109,9 @@ func (self *harness) runSteadyPhase() {
 			start := time.Now()
 			_, err := self.refresh(network.signIn, network.network)
 			self.ops.observe("steady.refresh", start, err)
+			if err == nil {
+				minting.note(network.network.id)
+			}
 		}},
 		{name: "signin", rate: rates["signin"], workers: 4, op: func(ctx context.Context) {
 			network := nextNetwork()
@@ -107,6 +119,7 @@ func (self *harness) runSteadyPhase() {
 			credential, err := self.signIn(network.network)
 			self.ops.observe("steady.mint.signin", start, err)
 			if err == nil {
+				minting.note(network.network.id)
 				revocableLock.Lock()
 				revocable[network.network.id] = append(revocable[network.network.id], credential)
 				revocableLock.Unlock()
@@ -125,6 +138,7 @@ func (self *harness) runSteadyPhase() {
 			start = time.Now()
 			_, err = self.hostedMint(hot, *credential.claims.DeviceId, clientId)
 			self.ops.observe("steady.hotproxy.device_open", start, err)
+			minting.note(hot.id)
 			proxies.push(queuedClient{created: time.Now(), network: hot, clientId: clientId})
 		}},
 		{name: "hotproxy.remove", rate: hotRate, workers: 8, op: func(ctx context.Context) {
@@ -148,6 +162,9 @@ func (self *harness) runSteadyPhase() {
 			start = time.Now()
 			_, err = self.codeLogin(authCode)
 			self.ops.observe("steady.code.login", start, err)
+			if err == nil {
+				minting.note(code.id)
+			}
 		}},
 		{name: "api", rate: rates["api"], workers: 64, op: func(ctx context.Context) {
 			credential := all[rand.IntN(len(all))]
@@ -206,6 +223,14 @@ func (self *harness) runSteadyPhase() {
 		{name: "maintenance", rate: 1.0 / 30, workers: 1, op: func(ctx context.Context) {
 			self.runMaintenance("steady")
 		}},
+		// a bare Redis round trip on the harness's own pool, beside the
+		// measured paths: what the network path and Redis add under this load
+		{name: "redis.rtt", rate: 20, workers: 2, op: func(ctx context.Context) {
+			credential := all[rand.IntN(len(all))]
+			start := time.Now()
+			err := self.admin.client.HMGet(ctx, self.recordKey(credential.claims), "n:user").Err()
+			self.ops.observe("steady.redis.rtt", start, err)
+		}},
 	}
 
 	steady := &steadyReport{
@@ -218,6 +243,7 @@ func (self *harness) runSteadyPhase() {
 	before, err := self.admin.snapshot(self.ctx)
 	self.must(err, "snapshot")
 	running := startLoads(self.ctx, loads)
+	previousProcess := processCpuSeconds()
 	seriesDone := make(chan struct{})
 	seriesStopped := make(chan struct{})
 	go func() {
@@ -237,6 +263,10 @@ func (self *harness) runSteadyPhase() {
 			}
 			cost := self.costSince(snapshot, previous)
 			previous = snapshot
+			processNow := processCpuSeconds()
+			harnessCores := (processNow - previousProcess) / cost.Wall
+			previousProcess = processNow
+			containers := containerCores()
 			point := &seriesPoint{
 				Seconds:      snapshot.at.Sub(before.at).Seconds(),
 				RedisCores:   cost.CpuSeconds / cost.Wall,
@@ -247,9 +277,12 @@ func (self *harness) runSteadyPhase() {
 				HotLive:      self.liveSessionCount(hot.id),
 				LargeLive:    self.liveSessionCount(large.network.id),
 				Connections:  float64(cost.Connections) / cost.Wall,
+				HarnessCores: harnessCores,
+				PgCores:      containers["urnetwork-local-pg"],
+				RedisDocker:  containers["urnetwork-session-perf-redis"],
 			}
 			steady.Series = append(steady.Series, point)
-			self.logf("steady %3.0fs: Redis %.2f cores (max node %.2f), %.0f commands/s, %.1f MB, outbox %d, hot network %d live", point.Seconds, point.RedisCores, point.MaxNodeCores, point.Commands, float64(point.UsedMemory)/1e6, point.Outbox, point.HotLive)
+			self.logf("steady %3.0fs: Redis %.2f cores (max node %.2f), %.0f commands/s, %.1f MB, outbox %d, hot network %d live; harness %.2f cores, PostgreSQL container %.2f, Redis container %.2f", point.Seconds, point.RedisCores, point.MaxNodeCores, point.Commands, float64(point.UsedMemory)/1e6, point.Outbox, point.HotLive, point.HarnessCores, point.PgCores, point.RedisDocker)
 		}
 	}()
 	time.Sleep(profile.steadyDuration)
@@ -263,6 +296,7 @@ func (self *harness) runSteadyPhase() {
 	steady.HotLiveEnd = self.liveSessionCount(hot.id)
 	steady.HotHeldEnd = self.heldCount(hot.id)
 	steady.PendingRemovals = authClients.size() + children.size() + proxies.size()
+	steady.MintingNetworksPerInterval = minting.counts()
 	self.report.Steady = steady
 	self.logf("steady loads: %s", describeLoads(steady.Loads))
 }
@@ -402,4 +436,68 @@ func (self *harness) runReapPhase() {
 	refused, accepted := self.probe(reap.clients, 500)
 	self.report.addOutcome("idle-reaped clients' credentials at their next check", "refused", refused, accepted)
 	self.logf("idle reap: %d of %d clients deactivated, %d sessions freed (%d live before, %d after)", inactive, len(reap.clients), freed, liveBefore, liveAfter)
+}
+
+// Distinct networks with a registered mint, per interval since the start.
+type mintTracker struct {
+	lock     sync.Mutex
+	start    time.Time
+	interval time.Duration
+	windows  map[int]map[server.Id]bool
+}
+
+func newMintTracker(interval time.Duration) *mintTracker {
+	return &mintTracker{start: time.Now(), interval: interval, windows: map[int]map[server.Id]bool{}}
+}
+
+func (self *mintTracker) note(networkId server.Id) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	window := int(time.Since(self.start) / self.interval)
+	if self.windows[window] == nil {
+		self.windows[window] = map[server.Id]bool{}
+	}
+	self.windows[window][networkId] = true
+}
+
+// Every complete interval's count.
+func (self *mintTracker) counts() []int {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	complete := int(time.Since(self.start) / self.interval)
+	counts := []int{}
+	for window := 0; window < complete; window++ {
+		counts = append(counts, len(self.windows[window]))
+	}
+	return counts
+}
+
+// This process's CPU seconds, user and system.
+func processCpuSeconds() float64 {
+	var usage syscall.Rusage
+	if syscall.Getrusage(syscall.RUSAGE_SELF, &usage) != nil {
+		return 0
+	}
+	return float64(usage.Utime.Sec+usage.Stime.Sec) + float64(usage.Utime.Usec+usage.Stime.Usec)/1e6
+}
+
+// Cores each local container uses now, by name, from docker stats. Best
+// effort: an empty map when docker does not answer.
+func containerCores() map[string]float64 {
+	cores := map[string]float64{}
+	output, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}").Output()
+	if err != nil {
+		return cores
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		name, percent, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSuffix(percent, "%"), 64)
+		if err == nil {
+			cores[name] = value / 100
+		}
+	}
+	return cores
 }

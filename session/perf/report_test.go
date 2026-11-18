@@ -30,6 +30,7 @@ type perfReport struct {
 	Units         []*unitCost        `json:"units"`
 	Memory        []*memoryFigure    `json:"memory"`
 	MaxStateBytes int64              `json:"max_state_bytes"`
+	ReceiptDays   float64            `json:"receipt_days"`
 	Outcomes      []*outcome         `json:"outcomes"`
 	Storms        []*stormReport     `json:"storms"`
 	Steady        *steadyReport      `json:"steady,omitempty"`
@@ -145,6 +146,10 @@ type seriesPoint struct {
 	Outbox       int64   `json:"outbox_rows"`
 	HotLive      int64   `json:"hot_network_live"`
 	LargeLive    int64   `json:"large_network_live"`
+	// the test process, and the local containers as docker stats sees them
+	HarnessCores float64 `json:"harness_cores"`
+	PgCores      float64 `json:"postgres_container_cores"`
+	RedisDocker  float64 `json:"redis_container_cores"`
 }
 
 type steadyReport struct {
@@ -160,6 +165,8 @@ type steadyReport struct {
 	HotLiveEnd      int64          `json:"hot_network_live_end"`
 	HotHeldEnd      int64          `json:"hot_network_held_end"`
 	PendingRemovals int            `json:"pending_removals"`
+	// distinct networks with a registered mint in each 30 s interval
+	MintingNetworksPerInterval []int `json:"minting_networks_per_30s"`
 }
 
 type outboxReport struct {
@@ -289,11 +296,16 @@ func (self *harness) evaluateGates() {
 		self.gate("G1", "Max-state memory (1,000 live + 9,000 markers)", verdict, fmt.Sprintf("%d B (%.2fx)", self.report.MaxStateBytes, ratio), "2,717,332 B (pass at most 1.25x)", "")
 	}
 	self.budgetGate("G2", "List at the live cap (1,000)", "capacity.list@1000", fmt.Sprintf("%.1f ms; budget 2 s", referenceListMs))
+	self.annotateScript("G2", "list@1000", "eval:list")
 	self.budgetGate("G3", "List at the maximum state", "capacity.list@max", fmt.Sprintf("%.1f ms; budget 2 s", referenceListMs))
+	self.annotateScript("G3", "list@max", "eval:list")
 	self.budgetGate("G4", "Bulk revoke at the live cap (1,000)", "capacity.revoke.others@1000", fmt.Sprintf("%.1f ms (Lua only); budget 2 s", referenceBulkRevokeMs))
+	self.annotateScript("G4", "revoke.others@1000.cycle", "eval:revoke")
 	self.budgetGate("G5", "Bulk revoke at the maximum state", "capacity.revoke.others@max", fmt.Sprintf("%.1f ms (Lua only); budget 2 s", referenceBulkRevokeMs))
+	self.annotateScript("G5", "revoke.others@max", "eval:revoke")
 	large := fmt.Sprintf("%d", self.config.profile.largeSessions)
 	self.budgetGate("G6", "List at the new cap ("+large+")", "capacity.list@"+large, "budget 2 s")
+	self.annotateScript("G6", "list@"+large, "eval:list")
 
 	// G7 the bulk Lua maximum at the new cap, and the node time it holds
 	stormOp := ""
@@ -368,6 +380,13 @@ func (self *harness) evaluateGates() {
 	}
 	checkGate("G9", "Periodic revalidation (lease checks) under steady load", "steady.lease.check")
 	checkGate("G10", "API request authentication under steady load", "steady.api.auth")
+	if rtt := self.op("steady.redis.rtt"); 0 < rtt.Count {
+		for _, gate := range self.report.Gates {
+			if gate.Id == "G9" || gate.Id == "G10" {
+				gate.Note = strings.TrimSpace(gate.Note + fmt.Sprintf(" (a bare Redis round trip under the same load: p50 %s, p99 %s ms)", ms(rtt.P50Ms), ms(rtt.P99Ms)))
+			}
+		}
+	}
 
 	// G11 mints and removals under steady load fail only by design
 	mintOps := []string{"steady.authclient.apikey", "steady.authclient.jwt", "steady.mint.child", "steady.refresh", "steady.mint.signin", "steady.hotproxy.create", "steady.hotproxy.device_open", "steady.code.login", "steady.remove.client", "steady.remove.child", "steady.hotproxy.remove", "steady.revoke.single", "steady.list.large", "steady.hint.large", "steady.hint.small"}
@@ -414,14 +433,22 @@ func (self *harness) evaluateGates() {
 		}
 		self.gate("G13", "No key eviction", verdict, fmt.Sprintf("%d evicted", steady.Cost.Evicted), "0 (volatile-ttl would evict authority keys)", "")
 
-		// G14 the index outbox drains as fast as minting networks fill it
+		// G14 the index outbox drains as fast as minting networks fill it:
+		// every registered mint upserts its network's row, and only shard
+		// zero's repair drains them, 64 a 30 s run
 		growth := steady.OutboxEnd - steady.OutboxStart
 		perMinute := float64(growth) / (steady.DurationSeconds / 60)
-		verdict = "PASS"
-		if 64 < growth {
-			verdict = "FAIL"
+		busiest := 0
+		for _, count := range steady.MintingNetworksPerInterval {
+			busiest = max(busiest, count)
 		}
-		self.gate("G14", "Index outbox keeps up with minting networks", verdict, fmt.Sprintf("%d -> %d rows (%+.0f/min)", steady.OutboxStart, steady.OutboxEnd, perMinute), "drain is one 64-row repair per 30 s (128/min), shard 0 only", "")
+		verdict = "PASS"
+		note := "the outbox holds one row a network, so this run's backlog is bounded by its own network count"
+		if 64 < growth || 64 < busiest {
+			verdict = "FAIL"
+			note = "more distinct networks mint per 30 s than one repair drains; with Main's network diversity the backlog grows toward every network that mints"
+		}
+		self.gate("G14", "Index outbox keeps up with minting networks", verdict, fmt.Sprintf("%d distinct minting networks per 30 s at most; outbox %d -> %d rows (%+.0f/min)", busiest, steady.OutboxStart, steady.OutboxEnd, perMinute), "drain: one 64-row repair per 30 s, shard 0 only", note)
 	}
 
 	// G15 the repair and its gauges at a backlog
@@ -546,7 +573,11 @@ func (self *harness) markdown() string {
 
 	fmt.Fprintf(&out, "\n## Memory (MEMORY USAGE of the keys, every element sampled)\n\n| Item | Units | Bytes | Bytes/unit | Per 1,000 units |\n|---|---|---|---|---|\n")
 	for _, figure := range report.Memory {
-		fmt.Fprintf(&out, "| %s | %d | %d | %.0f | %.2f MB |\n", figure.Name, figure.Units, figure.Bytes, figure.PerUnit, figure.PerUnit*1000/1e6)
+		perThousand := "-"
+		if 1 < figure.Units {
+			perThousand = fmt.Sprintf("%.2f MB", figure.PerUnit*1000/1e6)
+		}
+		fmt.Fprintf(&out, "| %s | %d | %d | %.0f | %s |\n", figure.Name, figure.Units, figure.Bytes, figure.PerUnit, perThousand)
 	}
 
 	fmt.Fprintf(&out, "\n## Capacity and correctness outcomes\n\n| Event | Outcome | Matching | Other |\n|---|---|---|---|\n")
@@ -581,13 +612,13 @@ func (self *harness) markdown() string {
 		fmt.Fprintf(&out, "- code fleet: %.2f redemptions/s; large network %d live sessions\n", steady.CodeRate, steady.LargeSessions)
 		fmt.Fprintf(&out, "- Redis: %.2f cores on average across the cluster (%.2f on the busiest node), %.0f commands/s, %d evicted\n", steady.Cost.CpuSeconds/steady.Cost.Wall, steady.Cost.MaxNodeCpu/steady.Cost.Wall, float64(steady.Cost.TotalCommands)/steady.Cost.Wall, steady.Cost.Evicted)
 		fmt.Fprintf(&out, "- top commands: %s\n", strings.Join(steady.Cost.topCommands(12), ", "))
-		fmt.Fprintf(&out, "- index outbox: %d rows at the start, %d at the end\n\n| Load | Target/s | Achieved/s | Dropped |\n|---|---|---|---|\n", steady.OutboxStart, steady.OutboxEnd)
+		fmt.Fprintf(&out, "- index outbox: %d rows at the start, %d at the end; distinct minting networks per 30 s: %v (one repair drains 64)\n\n| Load | Target/s | Achieved/s | Dropped |\n|---|---|---|---|\n", steady.OutboxStart, steady.OutboxEnd, steady.MintingNetworksPerInterval)
 		for _, load := range steady.Loads {
 			fmt.Fprintf(&out, "| %s | %.2f | %.2f | %d |\n", load.Name, load.Target, load.Achieved, load.Dropped)
 		}
-		fmt.Fprintf(&out, "\n| t (s) | Redis cores | busiest node | commands/s | new connections/s | used MB | outbox rows | hot network live | large network live |\n|---|---|---|---|---|---|---|---|---|\n")
+		fmt.Fprintf(&out, "\nRedis cores come from INFO (the nodes' own accounting); the container columns are docker stats, which also count the container's network path.\n\n| t (s) | Redis cores | busiest node | commands/s | new connections/s | used MB | outbox rows | hot network live | large network live | harness cores | PostgreSQL container | Redis container |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 		for _, point := range steady.Series {
-			fmt.Fprintf(&out, "| %.0f | %.2f | %.2f | %.0f | %.1f | %.1f | %d | %d | %d |\n", point.Seconds, point.RedisCores, point.MaxNodeCores, point.Commands, point.Connections, float64(point.UsedMemory)/1e6, point.Outbox, point.HotLive, point.LargeLive)
+			fmt.Fprintf(&out, "| %.0f | %.2f | %.2f | %.0f | %.1f | %.1f | %d | %d | %d | %.2f | %.2f | %.2f |\n", point.Seconds, point.RedisCores, point.MaxNodeCores, point.Commands, point.Connections, float64(point.UsedMemory)/1e6, point.Outbox, point.HotLive, point.LargeLive, point.HarnessCores, point.PgCores, point.RedisDocker)
 		}
 	}
 
@@ -663,5 +694,27 @@ func (self *harness) project() {
 			Cores:       unit.CpuMicrosPerOp * item.rate / 1e6,
 			Source:      item.source,
 		})
+	}
+}
+
+// Adds the longest node time one script of the measured calls held, from the
+// slowlog, to a gate's measured column.
+func (self *harness) annotateScript(id string, slowPrefix string, script string) {
+	longest := 0.0
+	for _, summary := range self.report.Slow {
+		if !strings.HasPrefix(summary.Name, slowPrefix) {
+			continue
+		}
+		if item := summary.ByScript[script]; item != nil {
+			longest = max(longest, item.MaxMs)
+		}
+	}
+	if longest == 0 {
+		return
+	}
+	for _, gate := range self.report.Gates {
+		if gate.Id == id {
+			gate.Measured += fmt.Sprintf("; the %s script itself %s ms at most (slowlog)", strings.TrimPrefix(script, "eval:"), ms(longest))
+		}
 	}
 }
