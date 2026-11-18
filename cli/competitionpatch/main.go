@@ -69,11 +69,15 @@ func main() {
 	}
 }
 
-// Canonical patch refusals remain exit one. Trusted source/application failure
-// is infrastructure, never unsupported evidence of candidate wrongdoing.
+// Canonical patch refusals remain exit one; a proved source conflict uses the
+// dedicated build-protocol status, and other source failures are infrastructure.
 func competitionPatchExitCode(err error) int {
 	var applicationError *repositoryApplicationError
 	if errors.As(err, &applicationError) {
+		var gitError *repositoryGitOperationError
+		if errors.As(applicationError, &gitError) && gitError.patchConflict {
+			return 42
+		}
 		return 2
 	}
 	return 1

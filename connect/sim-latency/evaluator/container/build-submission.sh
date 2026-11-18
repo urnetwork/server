@@ -224,7 +224,16 @@ cleanup() {
         rm -rf -- "$build_context"
     fi
 }
-trap cleanup EXIT INT TERM
+trusted_patch_conflict=false
+cleanup_on_exit() {
+    local status=$?
+    cleanup
+    if [ "$status" -eq 42 ] && [ "$trusted_patch_conflict" != true ]; then
+        exit 2
+    fi
+}
+trap cleanup_on_exit EXIT
+trap cleanup INT TERM
 if [[ "$subevaluation_scoped" = true ]]; then
     trap 'exit 2' INT TERM
 fi
@@ -317,6 +326,10 @@ if [[ ${patch_path_base:-} == mono_root_v1 || "$subevaluation_scoped" = true ]];
         :
     else
         application_status=$?
+        if [[ "$application_status" == 42 ]]; then
+            trusted_patch_conflict=true
+            exit 42
+        fi
         [[ "$application_status" == 1 ]] || infrastructure_failure "trusted multi-repository source application failed"
         exit 1
     fi

@@ -3901,11 +3901,19 @@ func TestSubmissionBuildFailureRequiresOnlyBuildBoundaryEvidence(t *testing.T) {
 	if !security.passedFor(evalError) {
 		t.Fatal("contained terminal build failure was rejected")
 	}
+	patchConflict := submissionError("patch_does_not_apply", "private Git diagnostic")
+	if !security.passedFor(patchConflict) {
+		t.Fatal("contained patch rejection was rejected")
+	}
+	if public := scoreJobEvaluationFailure("failed", patchConflict); public == nil ||
+		public.Kind != "submission" || public.Code != "patch_does_not_apply" || public.Retriable {
+		t.Fatalf("wrong message-free patch rejection: %+v", public)
+	}
 	if security.passedFor(nil) {
 		t.Fatal("build-only evidence was accepted as a completed measurement")
 	}
 	security.OfflineBuild = false
-	if security.passedFor(evalError) {
+	if security.passedFor(evalError) || security.passedFor(patchConflict) {
 		t.Fatal("submission failure without offline-build evidence was accepted")
 	}
 }
@@ -3930,6 +3938,13 @@ func TestAuthenticateSubmissionFailureArtifacts(t *testing.T) {
 	}
 	if _, err := authenticateResultArtifacts(root, declared[:2], evalError); err == nil {
 		t.Fatal("submission failure without completion marker was accepted")
+	}
+	patchConflict := submissionError("patch_does_not_apply", "private Git diagnostic")
+	if _, err := authenticateResultArtifacts(root, declared, patchConflict); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authenticateResultArtifacts(root, declared[:2], patchConflict); err == nil {
+		t.Fatal("patch rejection without completion marker was accepted")
 	}
 }
 

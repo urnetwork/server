@@ -34,8 +34,8 @@ type repositoryApplySettings struct {
 	MaximumOutputBytes int
 }
 
-// Keeps a typed boundary without classifying Git stderr or an empty diff. A
-// future genuine patch-nonapplication classification may narrow this safely.
+// Keeps trusted source failures distinct from screening and from a proved
+// patch conflict. An ambiguous Git failure is never a submission rejection.
 type repositoryApplicationError struct {
 	cause error
 }

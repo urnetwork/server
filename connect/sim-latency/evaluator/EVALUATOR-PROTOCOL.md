@@ -147,9 +147,12 @@ limits; this changed boundary requires fresh qualification before activation.
 }
 ```
 
-Exactly one of `score` and `eval_error` is non-null. A submission error is
-terminal and non-retriable. A `candidate_build_failed` result occurs before
-any workload process starts, so it must authenticate `submission-error.json`,
+Exactly one of `score` and `eval_error` is non-null. A submission rejection is
+terminal, non-retriable, and has no score. `patch_does_not_apply` means the
+submitted diff could not be applied to the authenticated frozen epoch source.
+An ambiguous Git, I/O, or timeout error remains an infrastructure failure.
+Both `patch_does_not_apply` and `candidate_build_failed` occur before
+any workload process starts, so they must authenticate `submission-error.json`,
 the completion marker, the offline/default-deny build boundary, cleanup, and
 immutable evidence; reset/cgroup/accounting booleans remain false rather than
 pretending a measurement ran. Every other result requires the full runtime

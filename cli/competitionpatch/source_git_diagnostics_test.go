@@ -20,6 +20,54 @@ import (
 // its standard descriptors, then restore them only inside the explicit role.
 const repositoryGitDiagnosticBootstrap = "exec 3>&1 4>&2\nexport COMPETITION_TEST_GIT_DIAGNOSTIC_FDS=3,4\nexec \"$@\" >/dev/null 2>&1\n"
 
+// A real Git context mismatch in a pristine checkout is a submission rejection.
+func TestRepositoryGitRejectsNonapplyingPatch(t *testing.T) {
+	root := t.TempDir()
+	init := exec.Command("git", "init", "--quiet", root)
+	if output, err := init.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, output)
+	}
+	if err := os.WriteFile(filepath.Join(root, "source.txt"), []byte("frozen source\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	patchPath := filepath.Join(t.TempDir(), "candidate.patch")
+	patch := "diff --git a/source.txt b/source.txt\n--- a/source.txt\n+++ b/source.txt\n@@ -1 +1 @@\n-other source\n+new source\n"
+	if err := os.WriteFile(patchPath, []byte(patch), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"apply", "--check", "--whitespace=error-all", patchPath}
+	command := exec.CommandContext(t.Context(), "git", args...)
+	command.Dir = root
+	command.Env = append(os.Environ(), "LANG=C", "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	output := &repositoryGitOutput{limit: 4096}
+	command.Stdout, command.Stderr = output, output
+	runErr := command.Run()
+	if runErr == nil {
+		t.Fatal("patch unexpectedly applied against the frozen source")
+	}
+	err := &repositoryApplicationError{cause: repositoryGitFailure(t.Context(), args, command, output, runErr)}
+	if got := competitionPatchExitCode(err); got != 42 {
+		t.Fatalf("wrong conflict exit: %d (%v); private fixture diagnostic %q", got, err, output.content.String())
+	}
+	if strings.Contains(err.Error(), "source.txt") {
+		t.Fatal("Git path exposed in the public diagnostic")
+	}
+}
+
+// Infrastructure output cannot borrow the submission rejection classification.
+func TestRepositoryGitPatchConflictRefusesAmbiguousOutput(t *testing.T) {
+	for _, output := range []string{
+		"error: could not open file: Permission denied\n",
+		"error: patch failed: a.txt:1\n",
+		"error: patch failed: a.txt:1\nerror: b.txt: patch does not apply\n",
+		"error: patch failed: a.txt:1\nerror: a.txt: patch does not apply\nfatal: out of memory\n",
+	} {
+		if repositoryGitPatchConflict(output) {
+			t.Errorf("ambiguous error classified as a conflict: %q", output)
+		}
+	}
+}
+
 // The shell replaces itself; native exit/signal and context ownership stay on
 // the same process, with no separate launcher left holding the output pipes.
 func repositoryGitDiagnosticCommand(ctx context.Context, executable string) *exec.Cmd {
