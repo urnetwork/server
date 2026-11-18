@@ -283,13 +283,20 @@ func TestConfigLogRefusesTheDirectoryOutsideTheTeamTier(t *testing.T) {
 	}
 }
 
-// QD-1032 at api: with the defaults, the client-checked prefix rules dark at launch, api's verifier refuses every
-// RepoPrefixRules as every reader does, 403 with the tip and ErrConfigRuleMissing naming the deferral, whoever signs it
-// and whatever its body, and nothing is sequenced; the next statement lands at the tip's next position, and a gate
-// reading the log as the store holds it holds no set.
+// QD-1032 at api: api's process settings name no prefix settings, so its verifiers run sidecar's defaults, the
+// client-checked prefix rules dark at launch; with them api's verifier refuses every RepoPrefixRules as every reader
+// does, 403 with the tip and ErrConfigRuleMissing naming the deferral, whatever its body, and nothing is sequenced; the
+// next statement lands at the tip's next position, and a gate reading the log as the store holds it holds no set.
 func TestConfigLogRefusesRepoPrefixRulesAtLaunch(t *testing.T) {
 	ctx := context.Background()
 	cluster := testConfigLogFakeCluster(t)
+	api := NewApiConfigLogSettings()
+	if api.AclPrefix != nil {
+		t.Fatalf("api's settings name prefix settings %+v", api.AclPrefix)
+	}
+	if verifier := NewConfigLogSequencer(cluster, api, nil).verifierSettings(); verifier.AclPrefix == nil || verifier.AclPrefix.Enabled {
+		t.Fatalf("api's verifier runs the prefix rules: %+v", verifier.AclPrefix)
+	}
 	world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
 	settings := DefaultConfigLogSettings()
 	settings.Clock = world.Clock()
