@@ -13,12 +13,23 @@ type logReconcileSuccess struct {
 	completed time.Time
 }
 
+// Every page in a completed attempt used this exclusive source-time cutoff.
+func (s logReconcileSuccess) end() time.Time {
+	return s.start.Add(logReconcileLookback)
+}
+
 func (s logReconcileSuccess) valid() bool {
-	return !s.start.IsZero() && !s.completed.IsZero() && s.completed.After(s.start)
+	return !s.start.IsZero() && !s.completed.IsZero() && !s.completed.Before(s.end())
+}
+
+// A locally recent completion may cover only a historical source window.
+func (s logReconcileSuccess) freshAt(now time.Time) bool {
+	return s.valid() && !now.Before(s.completed) && now.Sub(s.end()) < 2*logReconcileInterval
 }
 
 func (s logReconcileSuccess) advancesTo(next logReconcileSuccess) bool {
-	return s.valid() && next.valid() && next.start.After(s.start) &&
+	return s.freshAt(s.completed) && next.freshAt(next.completed) &&
+		next.start.After(s.start) && next.start.Before(s.end()) &&
 		next.completed.After(s.completed) &&
 		next.completed.Sub(s.completed) < 2*logReconcileInterval
 }
@@ -111,12 +122,12 @@ func logReconcileScope(service string, enabled bool, started, lastSuccess time.T
 	if !enabled {
 		return row
 	}
-	fresh = latest.valid() && !now.Before(latest.completed) && now.Sub(latest.completed) < 2*logReconcileInterval
+	fresh = latest.freshAt(now)
 	two = fresh && previous.advancesTo(latest)
 	switch {
 	case started.After(now) || lastSuccess.After(now) || latest.start.After(now) || latest.completed.After(now) ||
 		previous.start.After(now) || previous.completed.After(now) ||
-		(!latest.start.IsZero() && !latest.completed.IsZero() && !latest.completed.After(latest.start)):
+		(!latest.start.IsZero() && !latest.completed.IsZero() && latest.completed.Before(latest.end())):
 		row.CoverageState = "invalid-time"
 	case !latest.valid():
 		row.CoverageState = "no-valid-window"
@@ -161,11 +172,18 @@ type logReconcileCollectorSnapshot struct {
 	failure     logReconcileFailure
 	previous    logReconcileSuccess
 	latest      logReconcileSuccess
+	attempt     logReconcileAttempt
 }
 
 // Sample the observation clock after every copy. This orders the receipt after
 // its inputs without making the per-collector snapshots an atomic fleet view.
 func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileReceipt {
+	snapshots := self.reconcileSnapshots()
+	return newLogReconcileReceipt(snapshots, clock())
+}
+
+// Copy coverage and activity together under each collector's state lock.
+func (self *logTailProbe) reconcileSnapshots() []logReconcileCollectorSnapshot {
 	snapshots := make([]logReconcileCollectorSnapshot, 0, len(self.tailers))
 	for _, tailer := range self.tailers {
 		tailer.stateLock.Lock()
@@ -174,11 +192,15 @@ func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileR
 			lastSuccess: tailer.lastReconcileTime, failed: tailer.lastReconcileError != "",
 			failure:  tailer.lastReconcileFailure,
 			previous: tailer.reconcileSuccesses[0], latest: tailer.reconcileSuccesses[1],
+			attempt: tailer.reconcileAttempt,
 		}
 		tailer.stateLock.Unlock()
 		snapshots = append(snapshots, snapshot)
 	}
-	now := clock()
+	return snapshots
+}
+
+func newLogReconcileReceipt(snapshots []logReconcileCollectorSnapshot, now time.Time) logReconcileReceipt {
 	receipt := logReconcileReceipt{Schema: 2, ObservedAt: now.UTC(), Collectors: len(snapshots),
 		CollectorScopes: make([]logReconcileCollectorScope, 0, len(logReconcileServiceKeys))}
 	var scopes [len(logReconcileServiceKeys)]logReconcileCollectorScope
@@ -210,7 +232,7 @@ func (self *logTailProbe) reconcileReceipt(clock func() time.Time) logReconcileR
 		}
 		receipt.LatestWindowStart.add(latest.start)
 		receipt.LatestCompletedAt.add(latest.completed)
-		fresh := !now.Before(latest.completed) && now.Sub(latest.completed) < 2*logReconcileInterval
+		fresh := latest.freshAt(now)
 		if fresh {
 			receipt.Fresh++
 		}
@@ -243,17 +265,20 @@ func encodeLogReconcileReceipt(receipt logReconcileReceipt) []byte {
 	return encoded
 }
 
-// One existing diagnostic write per cadence, with no collection or I/O changes.
+// Each independently bounded line uses the same post-snapshot observation.
 func (self *logTailProbe) writeReconcileReceipt(clock func() time.Time) {
-	if self.reconcileDiagnostics == nil {
+	if self.reconcileDiagnostics == nil && self.activityDiagnostics == nil {
 		return
 	}
-	encoded := encodeLogReconcileReceipt(self.reconcileReceipt(clock))
-	if encoded == nil {
-		return
+	snapshots := self.reconcileSnapshots()
+	coverage := newLogReconcileReceipt(snapshots, clock())
+	// A leading separator preserves both prefixes after unterminated stderr.
+	if self.reconcileDiagnostics != nil {
+		if encoded := encodeLogReconcileReceipt(coverage); encoded != nil {
+			_, _ = fmt.Fprintf(self.reconcileDiagnostics, "\n%s%s\n", logReconcileReceiptPrefix, encoded)
+		}
 	}
-	// One bounded Write, with a leading separator in case another diagnostic
-	// ended mid-line. Sink failure cannot alter collection or invent an Alert;
-	// an absent or truncated receipt is not completion evidence.
-	_, _ = fmt.Fprintf(self.reconcileDiagnostics, "\n%s%s\n", logReconcileReceiptPrefix, encoded)
+	if self.activityDiagnostics != nil {
+		self.writeReconcileActivity(snapshots, coverage)
+	}
 }

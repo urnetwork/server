@@ -170,6 +170,7 @@ type mimirAdmissionAssessment struct {
 	counterResets         int
 	directComplete        bool
 	comparable            bool
+	stateSaved            bool
 	incidentActive        bool
 	quietFor              time.Duration
 	rateIncidentActive    bool
@@ -495,14 +496,14 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 	stateFileLock, err := stateLocker(ctx, env.cfg.stateDir, "mimir-admission")
 	if err != nil {
-		return self.stateFailureFindings(env.now().UTC(), len(hosts),
+		return self.stateFailureFindings(len(hosts),
 			"mimir-admission/state",
 			fmt.Errorf("durable state lock is unavailable"),
 		), nil
 	}
 	defer stateFileLock.Close()
 	if err := self.loadState(env.cfg.stateDir); err != nil {
-		return self.stateFailureFindings(env.now().UTC(), len(hosts),
+		return self.stateFailureFindings(len(hosts),
 			"mimir-admission/state",
 			fmt.Errorf("durable state is unreadable"),
 		), nil
@@ -597,10 +598,9 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 
 	now := env.now().UTC()
 	assessment := mimirAdmissionAssessment{}
-	stateSaved := false
 	stateSaveFailed := false
 	if err := validateMimirAdmissionCurrentIdentities(results); err != nil {
-		assessment = mimirAdmissionRetainedAssessment(now, len(results), priorState)
+		assessment = mimirAdmissionRetainedAssessment(len(results), priorState)
 		assessment.visibilityFailures = append(assessment.visibilityFailures, mimirAdmissionVisibilityFailure{
 			target: "mimir-admission/state",
 			err:    err,
@@ -612,17 +612,17 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			stateSaveFailed = true
 			if priorState.incident {
 				assessment.incidentActive = true
-				assessment.quietFor = mimirAdmissionQuietDuration(now, priorState.quietSince)
+				assessment.quietFor = 0
 			}
 			if priorState.rateIncident {
 				assessment.rateIncidentActive = true
-				assessment.rateQuietFor = mimirAdmissionQuietDuration(now, priorState.rateQuietSince)
+				assessment.rateQuietFor = 0
 			}
 		} else {
 			self.stateLock.Lock()
 			self.quietResetDone = true
 			self.stateLock.Unlock()
-			stateSaved = true
+			assessment.stateSaved = true
 		}
 	}
 	findings := make([]finding, 0, len(assessment.visibilityFailures)+4)
@@ -642,21 +642,21 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	}
 	if assessment.incidentActive {
 		findings = append(findings, mimirAdmissionLimitFinding(assessment))
-	} else if stateSaved && assessment.directComplete && assessment.comparable {
+	} else if assessment.stateSaved && assessment.directComplete && assessment.comparable {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-admission", tierPage, "mimir-series-limit", "mimir-fleet",
 		))
 	}
 	if assessment.rateIncidentActive {
 		findings = append(findings, mimirAdmissionRateLimitFinding(assessment))
-	} else if stateSaved && assessment.directComplete && assessment.comparable {
+	} else if assessment.stateSaved && assessment.directComplete && assessment.comparable {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-admission", tierPage, "mimir-ingestion-rate-limit", "mimir-fleet",
 		))
 	}
 	if assessment.headroomLowInstances > 0 {
 		findings = append(findings, mimirAdmissionHeadroomFinding(assessment))
-	} else if stateSaved && assessment.directComplete && assessment.comparable && assessment.headroomObservedCount > 0 {
+	} else if assessment.stateSaved && assessment.directComplete && assessment.comparable && assessment.headroomObservedCount > 0 {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-admission", tierWarn, "mimir-series-headroom", "mimir-fleet",
 		))
@@ -668,7 +668,6 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 // already known by this process. The snapshot is rendered but never mutated;
 // a caller with no successfully loaded history emits visibility only.
 func (self *mimirAdmissionProbe) stateFailureFindings(
-	now time.Time,
 	configuredHosts int,
 	target string,
 	err error,
@@ -676,11 +675,11 @@ func (self *mimirAdmissionProbe) stateFailureFindings(
 	findings := []finding{cannotObserveFinding(target, err)}
 	state := self.snapshotState()
 	if state.incident {
-		assessment := mimirAdmissionRetainedAssessment(now, configuredHosts, state)
+		assessment := mimirAdmissionRetainedAssessment(configuredHosts, state)
 		findings = append(findings, mimirAdmissionLimitFinding(assessment))
 	}
 	if state.rateIncident {
-		assessment := mimirAdmissionRetainedAssessment(now, configuredHosts, state)
+		assessment := mimirAdmissionRetainedAssessment(configuredHosts, state)
 		findings = append(findings, mimirAdmissionRateLimitFinding(assessment))
 	}
 	return findings
@@ -723,7 +722,6 @@ func validateMimirAdmissionCurrentIdentities(results []mimirAdmissionHostResult)
 }
 
 func mimirAdmissionRetainedAssessment(
-	now time.Time,
 	configuredHosts int,
 	state mimirAdmissionRuntimeState,
 ) mimirAdmissionAssessment {
@@ -732,17 +730,8 @@ func mimirAdmissionRetainedAssessment(
 		directComplete:     false,
 		comparable:         false,
 		incidentActive:     state.incident,
-		quietFor:           mimirAdmissionQuietDuration(now, state.quietSince),
 		rateIncidentActive: state.rateIncident,
-		rateQuietFor:       mimirAdmissionQuietDuration(now, state.rateQuietSince),
 	}
-}
-
-func mimirAdmissionQuietDuration(now time.Time, quietSince time.Time) time.Duration {
-	if quietSince.IsZero() || !now.After(quietSince) {
-		return 0
-	}
-	return now.Sub(quietSince)
 }
 
 // Counter comparison and quiet-hold mutation occur under one lock. Unknown
@@ -1048,25 +1037,36 @@ func mimirAdmissionHeadroomFinding(assessment mimirAdmissionAssessment) finding 
 	}
 }
 
+// A new generation establishes a lifetime total. A known same-generation
+// increase remains affirmative even when another child is unobservable.
+func (self *mimirAdmissionAssessment) incidentState(affected int, initialPositive int) string {
+	switch {
+	case affected > initialPositive:
+		return "new direct counter increase"
+	case initialPositive > 0:
+		return "positive counter at first observation of child generation"
+	case self.directComplete && self.comparable && self.stateSaved:
+		return "two-hour complete quiet hold in progress"
+	default:
+		return "incident held pending verified quiet evidence"
+	}
+}
+
 // The fixed finding keeps replicated child increments distinct from unique
 // rejected requests and never elevates publisher correlation into causation.
 func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
-	state := "new direct counter increase"
-	if !assessment.discardIncrease.overflow && assessment.discardIncrease.value == 0 {
-		state = "two-hour complete quiet hold in progress"
-	}
 	return finding{
 		probeId: "observability/mimir-admission", tier: tierPage,
 		class: "mimir-series-limit", target: "mimir-fleet", frame: "per-user-series-limit", sustain: 1,
-		symptom:   "Mimir series admission rejected samples or remains inside its required quiet hold",
-		mechanism: "An exact Mimir child counter for the per-user series limit increased. The child increment is affirmative ingestion loss, but replicated child counters are not unique rejected requests. A rollout can exhaust headroom through rejected-candidate publisher churn, while steady exporter families or unrelated cardinality growth can reach the same limit.",
+		symptom:   "The Mimir series admission incident is open",
+		mechanism: "A positive exact-child per-user-series discard counter establishes ingestion loss on that generation. A same-generation increase dates loss to the comparison interval. With zero qualified children, the displayed counter and limit zeros supply no current measurements. Replicated counters cannot count unique rejected requests. A rollout can exhaust headroom through rejected-candidate publisher churn, while steady exporter families or unrelated cardinality growth can reach the same limit.",
 		baseline: fmt.Sprintf(
 			"Every enabled services host has a complete exact-child observation, no per-user-series discard counter increases, and the fleet remains complete and comparable for %s after the last increase.",
 			mimirAdmissionQuietWindow,
 		),
 		observed: fmt.Sprintf(
 			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d discard_counter_increase=%s memory_series=%d..%d active_series=%d..%d local_limit=%d..%d global_limit=%d..%d local_headroom=%d..%d created_increase=%s removed_increase=%s generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%s readiness_rejects=%s admission_rejects=%s",
-			state,
+			assessment.incidentState(assessment.affectedInstances, assessment.initialPositive),
 			assessment.configuredHosts,
 			assessment.observableHosts,
 			assessment.instanceCount,
@@ -1112,22 +1112,18 @@ func mimirAdmissionLimitFinding(assessment mimirAdmissionAssessment) finding {
 // counter can increase while the per-user series counter and headroom remain
 // flat. Runtime limits are context, never producer attribution.
 func mimirAdmissionRateLimitFinding(assessment mimirAdmissionAssessment) finding {
-	state := "new direct counter increase"
-	if !assessment.rateDiscardIncrease.overflow && assessment.rateDiscardIncrease.value == 0 {
-		state = "two-hour complete quiet hold in progress"
-	}
 	return finding{
 		probeId: "observability/mimir-admission", tier: tierPage,
 		class: "mimir-ingestion-rate-limit", target: "mimir-fleet", frame: "rate-limited", sustain: 1,
-		symptom:   "Mimir ingestion-rate admission rejected samples or remains inside its required quiet hold",
-		mechanism: "An exact Mimir child counter for reason=rate_limited increased. The distributor's per-tenant sample token bucket rejected ingestion independently of the per-user in-memory series limit; the child-counter delta proves lost samples but does not identify the producer whose remote-write request crossed the shared budget.",
+		symptom:   "The Mimir ingestion-rate admission incident is open",
+		mechanism: "A positive exact-child counter for reason=rate_limited establishes a token-bucket rejection on that generation. A same-generation increase dates loss to the comparison interval but does not identify the producer. With zero qualified children, the displayed counter and limit zeros supply no current measurements.",
 		baseline: fmt.Sprintf(
 			"Every enabled services host has a complete exact-child observation, no rate-limited discard counter increases, and the fleet remains complete and comparable for %s after the last increase.",
 			mimirAdmissionQuietWindow,
 		),
 		observed: fmt.Sprintf(
 			"state=%s configured_hosts=%d observable_hosts=%d mimir_instances=%d descriptor_instances=%d source_zero_instances=%d affected_instances=%d initial_positive_instances=%d rate_discard_counter_increase=%s ingestion_rate_limit=%g..%g/s ingestion_burst_limit=%d..%d series_discard_counter_increase=%s memory_series=%d..%d active_series=%d..%d generation_changes=%d counter_resets=%d direct_complete=%t comparable=%t quiet_complete=%s journal_hosts=%d publisher_starts=%s readiness_rejects=%s",
-			state,
+			assessment.incidentState(assessment.rateAffectedInstances, assessment.rateInitialPositive),
 			assessment.configuredHosts,
 			assessment.observableHosts,
 			assessment.instanceCount,

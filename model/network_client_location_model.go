@@ -6832,6 +6832,7 @@ func FindProviders2(
 				requirePostQuantumPositive: postQuantumReady,
 				now:                        requestTime,
 			}
+			drawPools := make(findProviders2DrawPools, 0, 3)
 			hardExcludedClientIds := map[server.Id]bool{}
 			qualityExcludedClientIds := map[server.Id]bool{}
 			// The candidates this request's live read (readQuality) found
@@ -7147,7 +7148,7 @@ func FindProviders2(
 				// a cache written without facets fell back to its un-faceted
 				// buckets, whose scores carry no proven family and read as v4-only
 				requestFilter.apply(clientScores, observation)
-				observation.eligible += len(clientScores)
+				observation.passedRequestFilters = observation.passedRequestFilters || len(clientScores) > 0
 				if findProviders2.ForceMinimum {
 					for _, clientScore := range clientScores {
 						clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
@@ -7399,6 +7400,7 @@ func FindProviders2(
 					nativeClientScores[clientId] = clientScore
 				}
 			}
+			drawPools.record(nativeClientScores, count, rankMode)
 			if rankMode == RankModeOnline {
 				clientIds = selectOnlineUniformly(nativeClientScores, count)
 			} else {
@@ -7499,6 +7501,7 @@ func FindProviders2(
 						}
 						borrowableClientScores[clientId] = clientScore
 					}
+					drawPools.record(borrowableClientScores, remainingCount(), otherRankMode)
 					for _, clientId := range selectProviders(borrowableClientScores, otherRankMode, remainingCount()) {
 						clientScore := otherClientScores[clientId]
 						borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset, false)
@@ -7566,6 +7569,7 @@ func FindProviders2(
 								onlineClientScores[clientId] = clientScore
 							}
 						}
+						drawPools.record(onlineClientScores, remainingCount(), RankModeOnline)
 						for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
 							clientScore := onlineClientScores[clientId]
 							findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
@@ -7600,6 +7604,9 @@ func FindProviders2(
 				findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
 			}
 			chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
+			if len(providers) == 0 {
+				observation.drawable = drawPools.hasSurvivor(hardExcludedClientIds, offlineClientIds, incapableClientIds, qualityExcludedClientIds)
+			}
 			observation.discoveryReturned = len(chosenClientIds)
 			for _, clientId := range clientIds {
 				recordFindProviders2AnsweredModern(rankMode, "native", clientScores[clientId] != nil && clientScores[clientId].Modern)

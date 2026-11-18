@@ -92,7 +92,7 @@ func TestProviderMetricSourceFailuresPreserveNativeResponseControls(t *testing.T
 				pageClass = "provider-selection-empty-despite-eligible"
 				reason := "returned"
 				if failure {
-					reason = "eligible_not_selected"
+					reason = "drawable_not_selected"
 				}
 				rows = selectionTestRows(reason, 3)
 				settings = selectionTestSettings(t, "")

@@ -107,7 +107,7 @@ func TestLogReconcileRetryAfterGatesActualOwnerAndKeepsFailure(t *testing.T) {
 	if !advice.Equal(until) {
 		t.Fatal("native query completion lost its parsed deadline")
 	}
-	_, _, success, failure := tailer.reconcileSnapshot()
+	_, _, success, _, failure := tailer.reconcileSnapshot()
 	if !success.IsZero() || !strings.Contains(failure, "observation-log-query-http-429") || !strings.Contains(failure, "response_shape=unknown") {
 		t.Fatal("advice hid the original visibility failure")
 	}
@@ -119,7 +119,7 @@ func TestLogReconcileRetryAfterGatesActualOwnerAndKeepsFailure(t *testing.T) {
 	}
 	runner.runLocal = func(ctx context.Context, name string, args ...string) (string, string, error) {
 		calls++
-		if name != "warpctl" || len(args) != 5 || args[0] != "logs" || args[1] != "synthetic" || args[2] != "fixture-service" || args[4] != "--limit=20000" {
+		if name != "warpctl" || len(args) != 6 || args[0] != "logs" || args[1] != "synthetic" || args[2] != "fixture-service" || args[4] != "--until="+now.UTC().Format(time.RFC3339Nano) || args[5] != "--limit=20000" {
 			t.Error("retry changed the ordinary bounded overlap arguments")
 		}
 		return runLocalCommand(ctx, name, args...)
@@ -131,7 +131,7 @@ func TestLogReconcileRetryAfterGatesActualOwnerAndKeepsFailure(t *testing.T) {
 			t.Fatal("a premature scheduled overlap crossed retry admission")
 		}
 	}
-	_, _, _, retainedFailure := tailer.reconcileSnapshot()
+	_, _, _, _, retainedFailure := tailer.reconcileSnapshot()
 	if retainedFailure != failure {
 		t.Fatal("waiting cleared cannot-observe or fabricated successful coverage")
 	}
@@ -140,7 +140,7 @@ func TestLogReconcileRetryAfterGatesActualOwnerAndKeepsFailure(t *testing.T) {
 	if calls != 1 || !advice.IsZero() {
 		t.Fatal("expiry did not resume the unchanged overlap operation")
 	}
-	_, _, _, failure = tailer.reconcileSnapshot()
+	_, _, _, _, failure = tailer.reconcileSnapshot()
 	if failure != "" {
 		t.Fatal("healthy completion did not retain existing recovery behavior")
 	}
@@ -160,7 +160,7 @@ func TestLogRetryAfterCancellationAndFallback(t *testing.T) {
 	}
 	// A fresh collector has no process-global or persisted retry state.
 	tailer := newLogTailer("fixture-other-service", nil)
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 	if !tailer.reconcileTick(context.Background(), time.Time{}).IsZero() {
 		t.Fatal("a new collector inherited another owner's advice")
 	}

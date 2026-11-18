@@ -160,6 +160,7 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (alert
 			if finding.class == "monitor-host-scope-partial" {
 				observation.SourceCoverageComplete = false
 				observation.ShapeCoverageComplete = false
+				observation.DrawCoverageComplete = false
 				observation.Reason = "monitor-host-scope-partial"
 			}
 		}

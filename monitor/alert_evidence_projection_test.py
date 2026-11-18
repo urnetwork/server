@@ -21,6 +21,19 @@ def alert(owner='server/controller.ConnectControlFrames', sqlstate='unknown', er
 
 
 class EvidenceProjectionControls(unittest.TestCase):
+    def test_direct_redis_caller_requires_own_producer_sample(self):
+        owner = 'server/v2026/model.proxyAdmissionRedis'
+        raw = alert(owner=owner, error_type='context.deadlineExceededError')
+        suffix = b' redis_caller=GetProxyDeviceConfig'
+        qualified = raw.replace(b' sqlstate=unknown\n', b' sqlstate=unknown' + suffix + b'\n')
+        projected = MODULE.project_alert(qualified)
+        self.assertEqual(projected.get('observed_redis_caller', 'unknown'), 'GetProxyDeviceConfig')
+        self.assertEqual(projected['observed_error_type'], 'context.deadlineExceededError')
+        self.assertEqual(MODULE.project_alert(raw + suffix)['observed_redis_caller'], 'unknown')
+        for invalid in (qualified.replace(owner.encode(), b'server/model.Other'),
+                        qualified.replace(b'GetProxyDeviceConfig', b'UnboundedCaller')):
+            self.assertEqual(MODULE.project_alert(invalid)['status'], 'cannot_observe')
+
     def test_old_whole_object_predicate_RED(self):
         raw = alert()
         # Exact proven defective predicate class: whole-object token search.

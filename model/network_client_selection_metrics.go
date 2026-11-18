@@ -43,7 +43,7 @@ var findProviders2NativeSourceSchema = prometheus.NewGauge(prometheus.GaugeOpts{
 // Registers the schema even on a process with no requests; quiet and old
 // producers remain distinguishable without a sentinel customer request.
 func init() {
-	findProviders2SelectionSchema.Set(3)
+	findProviders2SelectionSchema.Set(4)
 	findProviders2NativeSourceSchema.Set(1)
 	prometheus.MustRegister(findProviders2SelectionOutcomes, findProviders2StageSeconds, findProviders2StageInflight, findProviders2SelectionSchema, findProviders2NativeSourceOutcomes, findProviders2NativeSourceSchema)
 }
@@ -62,6 +62,35 @@ type findProviders2LoadObservation struct {
 	unreadNonModernRows int
 }
 
+// The pools actually offered to positive-quota answer draws in one location
+// attempt. Keep their existing maps until the level finishes. A later live
+// verdict can revoke a candidate from every pool, including earlier phases.
+type findProviders2DrawPool struct {
+	scores  map[server.Id]*ClientScore
+	quality bool
+}
+
+type findProviders2DrawPools []findProviders2DrawPool
+
+func (self *findProviders2DrawPools) record(scores map[server.Id]*ClientScore, quota int, mode RankMode) {
+	if quota > 0 && len(scores) > 0 {
+		*self = append(*self, findProviders2DrawPool{scores: scores, quality: mode == RankModeQuality})
+	}
+}
+
+// Called only for an empty answer. A Quality-only refusal revokes that
+// native admission; it does not revoke a separately admitted Online draw.
+func (self findProviders2DrawPools) hasSurvivor(hard, offline, incapable, quality map[server.Id]bool) bool {
+	for _, pool := range self {
+		for id := range pool.scores {
+			if !hard[id] && !offline[id] && !incapable[id] && !(pool.quality && quality[id]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Owned by one request. No identity map or observation state outlives it.
 type findProviders2SelectionObservation struct {
 	args                 *FindProviders2Args
@@ -78,7 +107,8 @@ type findProviders2SelectionObservation struct {
 	directRequested      bool
 	backfillUnavailable  bool
 	loaded               int
-	eligible             int
+	passedRequestFilters bool
+	drawable             bool
 	dropped              [5]int
 	explicitSources      uint8
 	requestedCount       int
@@ -288,12 +318,12 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 		self.reason = "filtered_capability"
 	case self.loaded == 0:
 		self.reason = "cache_empty"
-	case 0 < self.eligible:
-		if self.rankMode == "unknown" {
-			self.reason = "unsupported_rank"
-		} else {
-			self.reason = "eligible_not_selected"
-		}
+	case self.passedRequestFilters && self.rankMode == "unknown":
+		self.reason = "unsupported_rank"
+	case self.drawable:
+		self.reason = "drawable_not_selected"
+	case self.passedRequestFilters:
+		self.reason = "no_drawable_candidates"
 	default:
 		self.reason = self.filterReason()
 	}

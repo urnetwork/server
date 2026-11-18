@@ -31,6 +31,8 @@ type ProviderSelectionObservation struct {
 	Reason                 string                                `json:"reason"`
 	SourceCoverageComplete bool                                  `json:"source_coverage_complete"`
 	ShapeCoverageComplete  bool                                  `json:"shape_coverage_complete"`
+	DrawCoverageComplete   bool                                  `json:"draw_coverage_complete"`
+	DrawPairedProcesses    int                                   `json:"draw_paired_processes"`
 	PairedProcesses        int                                   `json:"paired_processes"`
 	ShapePairedProcesses   int                                   `json:"shape_paired_processes"`
 	ExpectedSlots          int                                   `json:"expected_slots"`
@@ -51,6 +53,7 @@ func newProviderSelectionObservation(environment string, now time.Time, evidence
 		WindowStart: now.Add(-5 * time.Minute), WindowSeconds: 300,
 		Reason: evidence.reason, SourceCoverageComplete: evidence.complete,
 		ShapeCoverageComplete: evidence.shapeComplete, PairedProcesses: evidence.paired,
+		DrawCoverageComplete: evidence.drawComplete, DrawPairedProcesses: evidence.drawPaired,
 		ShapePairedProcesses: evidence.shapePaired, ExpectedSlots: evidence.expected,
 		CountsScope: "observed-process-subset", Outcomes: []ProviderSelectionOutcomeObservation{},
 	}

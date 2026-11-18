@@ -110,6 +110,8 @@ func TestProviderCountUnexplainedZerosStillPage(t *testing.T) {
 		{"city", "cache_missing", 20},
 		{"city", "cache_page_gap", 20},
 		{"city", "eligible_not_selected", 20},
+		{targetKind: "country", reason: "drawable_not_selected", value: 20},
+		{targetKind: "country", reason: "no_drawable_candidates", value: 20},
 		{"city", "filtered_hard", 20},
 		{"city", "filtered_mixed", 20},
 		{"city", "filtered_client_ids", 20},
