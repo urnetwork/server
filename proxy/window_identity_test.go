@@ -70,6 +70,13 @@ func TestProxyWindowIdentityReuse(t *testing.T) {
 			t.Fatalf("window identity snapshot was wiped by the shutdown teardown")
 		}
 
+		// the session the first device opened with, which the recreated
+		// device reuses rather than minting another (hosted_session_reuse.go)
+		openedSession, ok := h.proxyDeviceManager.hostedSessions.reusable(h.pdClientId)
+		if !ok {
+			t.Fatalf("the first device's hosted session is not reusable")
+		}
+
 		// ---- the recreated device must REUSE the identity ----
 		pd2, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
 		if err != nil {
@@ -80,6 +87,10 @@ func TestProxyWindowIdentityReuse(t *testing.T) {
 		}
 		if ready := pd2.WaitForReady(h.ctx, 60*time.Second); !ready {
 			t.Fatalf("recreated proxy device did not become ready")
+		}
+		// a mint would have replaced the remembered session
+		if reopenedSession, ok := h.proxyDeviceManager.hostedSessions.reusable(h.pdClientId); !ok || reopenedSession != openedSession {
+			t.Fatalf("the recreated device minted a new hosted session instead of reusing the first device's")
 		}
 
 		// the recreated window re-recorded its live snapshot reusing (at

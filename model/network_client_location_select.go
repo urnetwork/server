@@ -585,6 +585,9 @@ func findProviders2WithSelect(
 	if findProviders2.RankMode != "" {
 		rankMode = findProviders2.RankMode
 	}
+	// the lease shards whose read failed in this request, which its later
+	// pages do not read again
+	livenessRequest := newProviderLivenessRequest()
 	metricRankMode := findProviders2MetricRankMode(rankMode)
 	findProviders2SelectRequests.WithLabelValues(metricRankMode, selection.ip, selection.protocol).Inc()
 	callerCountryCode := ""
@@ -813,7 +816,7 @@ func findProviders2WithSelect(
 						leaseClientIds = append(leaseClientIds, clientId)
 					}
 				}
-				offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
+				offline, err := readFindProviders2Liveness(session.Ctx, livenessRequest, leaseClientIds, server.NowUtc(), rankMode)
 				if err != nil {
 					return err
 				}

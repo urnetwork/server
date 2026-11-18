@@ -47,6 +47,11 @@ type Authority struct {
 	appearances *model.ProviderAppearances
 	// the owner's concurrent registration bound; nil admits everything
 	mintAdmission *MintAdmission
+	// Whether the device can route a new flow (SetRoutable); unset reads as
+	// routable, which takes no reserved registration.
+	routable atomic.Pointer[func() bool]
+	// the reserved registrations left to this device (MintAdmission)
+	reservedMints atomic.Int64
 	// the owner's concurrent contract creation bound; nil admits everything
 	contractAdmission *ContractAdmission
 
@@ -113,7 +118,7 @@ func newAuthority(ctx context.Context, claims *session.ByJwt, token string, apiU
 		publisherCtx, cancel = context.WithCancel(context.WithoutCancel(ctx))
 		notifications = model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings())
 	}
-	return &Authority{
+	authority := &Authority{
 		networkId:         claims.NetworkId,
 		userId:            claims.UserId,
 		clientId:          *claims.ClientId,
@@ -127,6 +132,26 @@ func newAuthority(ctx context.Context, claims *session.ByJwt, token string, apiU
 		mintAdmission:     settings.MintAdmission,
 		contractAdmission: settings.ContractAdmission,
 	}
+	authority.reservedMints.Store(settings.MintAdmission.reservedCountPerDevice())
+	return authority
+}
+
+// Sets how the authority learns whether its device can route a new flow. While
+// it cannot, the device's registrations may take the owner's reserved slots
+// (MintAdmission). Set it before the device's windows start; the probe runs
+// only when the shared slots are full, outside every admission lock.
+func (self *Authority) SetRoutable(routable func() bool) {
+	if routable == nil {
+		self.routable.Store(nil)
+		return
+	}
+	self.routable.Store(&routable)
+}
+
+// Whether the device reported that it cannot route a new flow.
+func (self *Authority) noRoute() bool {
+	routable := self.routable.Load()
+	return routable != nil && !(*routable)()
 }
 
 // Must be called only after the hosted device has joined every control owner,
@@ -244,11 +269,13 @@ func (self *Authority) AuthNetworkClient(ctx context.Context, args *connect.Auth
 		if self.closed.Load() {
 			return nil, context.Canceled
 		}
-		// refused before any credential or database read
-		if !self.mintAdmission.tryAcquire() {
-			return nil, mintAdmissionRefusedError()
+		// waits for a slot, and is refused, before any credential or database
+		// read
+		lane, err := self.mintAdmission.acquire(ctx, self.noRoute, &self.reservedMints)
+		if err != nil {
+			return nil, err
 		}
-		defer self.mintAdmission.release()
+		defer self.mintAdmission.release(lane)
 		claims, err := self.parseClaimsPreflight(ctx, self.token(), true)
 		if err != nil {
 			return nil, err

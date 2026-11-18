@@ -99,10 +99,12 @@ const ProviderLivenessLeaseWriteTimeout = 2 * time.Second
 // all, stops vouching for its leases before any of them lapses.
 const ProviderLivenessWriterWithholdAge = 75 * time.Second
 
-// How long an API process reuses its verdict on writer coverage.
+// How long an API process uses its verdict on writer coverage, from the start
+// of the judging that made it, however its later judgings fare.
 const ProviderLivenessCoverageCacheAge = 5 * time.Second
 
-// The budget of one API read of the lease: the writer set or the shards.
+// The budget of one API read of the lease: the writer set, or a request's
+// shards. A background refresh of the lease cache has its own.
 const ProviderLivenessReadTimeout = 150 * time.Millisecond
 
 // The bound of an API process's read of the live connect handlers.

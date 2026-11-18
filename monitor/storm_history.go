@@ -1,9 +1,12 @@
-// SIGNALS.md §26 shared history read of the backlog and storm signals from the
-// 2026-10-26 incidents: pgbouncer-backlog (§26.1), services-cpu (§26.2),
+// SIGNALS.md §26 shared history read of the backlog and storm signals. From
+// the 2026-10-26 incidents: pgbouncer-backlog (§26.1), services-cpu (§26.2),
 // db-acquire-wait (§26.3), contract-creations-stuck (§26.4),
 // reservation-release (§26.6), redis-pool-timeouts (§26.7), redis-main-thread
 // (§26.8), proxy-host-cpu (§26.9), contract-reply-collapse (§26.10) and
-// hosted-contract-cap (§26.11), each in signal_<key>.go.
+// hosted-contract-cap (§26.11). From the hosted proxy's setup regression of
+// 2026-11-14 (proxy/P90SPEED.md): proxy-mint-refusals (§26.12),
+// proxy-heap-limit (§26.13) and proxy-connects-abandoned (§26.14). Each is in
+// signal_<key>.go.
 //
 // Each probe evaluates its catalog PromQL at every step of one bounded
 // query_range through the loopback Mimir of a services host, ending
@@ -406,6 +409,110 @@ func stormPlacedHosts(env *probeEnv, services []string) ([]string, []string) {
 	sort.Strings(hosts)
 	sort.Strings(gaps)
 	return hosts, gaps
+}
+
+// The blocks the active placement of a service puts on each host, by host,
+// and the gaps (a disabled or excluded host, the service with no placement)
+// that leave the set incomplete. A per-host probe requires each listed block
+// at every evaluation.
+func stormPlacedHostBlocks(env *probeEnv, service string) (map[string][]string, []string) {
+	inventory := newFleetSlotInventory(env, []string{service}, nil)
+	blocks := map[string][]string{}
+	gapBools := map[string]bool{}
+	for _, slot := range inventory.slots {
+		if slot.allowed {
+			blocks[slot.host] = append(blocks[slot.host], slot.block)
+		} else {
+			gapBools[slot.host+"[excluded]"] = true
+		}
+	}
+	for _, missing := range inventory.missingServices {
+		gapBools[missing+"[placement-missing]"] = true
+	}
+	gaps := []string{}
+	for gap := range gapBools {
+		gaps = append(gaps, gap)
+	}
+	sort.Strings(gaps)
+	return blocks, gaps
+}
+
+// The hosts a per-host probe judges: every host with a placed block, and any
+// other host a part answered, sorted.
+func stormJudgedHosts(placed map[string][]string, history *stormHistory, parts ...string) []string {
+	hostBools := map[string]bool{}
+	for name := range placed {
+		hostBools[name] = true
+	}
+	for _, part := range parts {
+		for _, key := range history.keys(part) {
+			name, _, _ := strings.Cut(key, "/")
+			hostBools[name] = true
+		}
+	}
+	hosts := []string{}
+	for name := range hostBools {
+		hosts = append(hosts, name)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// A host's blocks: those placed on it and any other a block-keyed part
+// answered, sorted.
+func stormHostBlocks(placed map[string][]string, history *stormHistory, host string, parts ...string) []string {
+	blockBools := map[string]bool{}
+	for _, block := range placed[host] {
+		blockBools[block] = true
+	}
+	for _, part := range parts {
+		for _, key := range history.keys(part) {
+			if name, block, found := strings.Cut(key, "/"); found && name == host {
+				blockBools[block] = true
+			}
+		}
+	}
+	blocks := []string{}
+	for block := range blockBools {
+		blocks = append(blocks, block)
+	}
+	sort.Strings(blocks)
+	return blocks
+}
+
+// A bounded listing of a host's blocks by their reading of a block-keyed
+// part at a step, largest first, as block:value; keep, when set, chooses the
+// readings to list.
+func stormBlocksListed(history *stormHistory, part, host string, blocks []string, step int64, format string, keep func(float64) bool, limit int) string {
+	type blockValue struct {
+		block string
+		value float64
+	}
+	values := []blockValue{}
+	for _, block := range blocks {
+		reading := history.reading(part, host+"/"+block, step)
+		if reading.present && (keep == nil || keep(reading.value)) {
+			values = append(values, blockValue{block: block, value: reading.value})
+		}
+	}
+	sort.SliceStable(values, func(i, j int) bool { return values[i].value > values[j].value })
+	listed := make([]string, 0, len(values))
+	for _, one := range values {
+		listed = append(listed, one.block+":"+fmt.Sprintf(format, one.value))
+	}
+	return stormListed(listed, limit)
+}
+
+// The placed blocks of a host that a block-keyed part did not answer at a
+// step, as "host/block".
+func stormAbsentBlocks(history *stormHistory, part, host string, blocks []string, step int64) []string {
+	absent := []string{}
+	for _, block := range blocks {
+		if !history.reading(part, host+"/"+block, step).present {
+			absent = append(absent, host+"/"+block)
+		}
+	}
+	return absent
 }
 
 // The services among publishers that the active placement runs, sorted; a

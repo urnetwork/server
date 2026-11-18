@@ -6621,6 +6621,9 @@ func FindProviders2(
 	if findProviders2.RankMode != "" {
 		rankMode = findProviders2.RankMode
 	}
+	// the lease shards whose read failed in this request, which its later
+	// pages do not read again
+	livenessRequest := newProviderLivenessRequest()
 	callerCountryCode := ""
 
 	// an unknown filter is refused before any spec is read: a filter this
@@ -6959,10 +6962,11 @@ func FindProviders2(
 				// A candidate without a current liveness lease leaves every draw
 				// of the request like one the live read finds offline. The lease
 				// read fails open (provider_liveness_lease_read.go), and judges
-				// at its own instant, which needs nothing of the request's. A
-				// named provider keeps its place whatever its lease: a redial
-				// that names its exit gets one try, and a wrong offline verdict
-				// there changes the user's IP.
+				// at its own instant, which needs nothing of the request's but
+				// the shards its earlier pages failed to read. A named provider
+				// keeps its place whatever its lease: a redial that names its
+				// exit gets one try, and a wrong offline verdict there changes
+				// the user's IP.
 				namedClientIdSet := map[server.Id]bool{}
 				for _, clientId := range namedClientIds {
 					namedClientIdSet[clientId] = true
@@ -6973,7 +6977,7 @@ func FindProviders2(
 						leaseClientIds = append(leaseClientIds, clientId)
 					}
 				}
-				offline, err := readFindProviders2Liveness(session.Ctx, leaseClientIds, server.NowUtc(), rankMode)
+				offline, err := readFindProviders2Liveness(session.Ctx, livenessRequest, leaseClientIds, server.NowUtc(), rankMode)
 				if err != nil {
 					return err
 				}
