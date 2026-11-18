@@ -125,6 +125,7 @@ for port in "${ports[@]}"; do
 done
 
 lock_held=0
+container_started=0
 release_lock() {
     if [[ "$lock_held" == 1 ]]; then
         rm -f "$lock_dir/owner"
@@ -133,7 +134,10 @@ release_lock() {
     fi
 }
 cleanup() {
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    # only the container this run started
+    if [[ "$container_started" == 1 ]]; then
+        docker rm -f "$container" >/dev/null 2>&1 || true
+    fi
     release_lock
 }
 trap cleanup EXIT
@@ -166,6 +170,11 @@ done
 # follow Main's redis.conf where they change behavior: no persistence (the
 # run is disposable), volatile-ttl, lazy freeing, two I/O threads. The harness
 # sets Main's keyspace notification classes itself.
+if docker inspect "$container" >/dev/null 2>&1; then
+    perf_error "a container named $container appeared while this run waited; refusing"
+    exit 1
+fi
+container_started=1
 docker run -d --name "$container" --label urnetwork.session-perf=1 \
     -e "PERF_PORTS=${ports[*]}" -e "PERF_HOST=$bind_ip" -e "PERF_MAXMEMORY=$maxmemory" \
     "${publish[@]}" "$image" sh -c '
