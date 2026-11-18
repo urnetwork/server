@@ -189,12 +189,45 @@ const DefaultPgConfigResourceName = "db.yml"
 const MaintenancePgVaultResourceName = "pg_maintenance.yml"
 const MaintenancePgConfigResourceName = "db_maintenance.yml"
 
-// The vault file of a block's own restricted Postgres role, pg-<service>.yml (QD-992, QD-029): a block that mounts
-// one, such as tlsedge or mxedge's router, connects its main pool with that role and never with the platform's
-// pg.yml, which it does not mount; every other process keeps pg.yml. Read first, as grafanaPushSettings reads
-// grafana-push-<service>.yml (QD-249).
+// Which vault file each pool connects with:
+//
+//   - The main pool (Db, Tx): pg-<service>.yml where the process's vault holds one, the service being
+//     WARP_SERVICE, and pg.yml otherwise. A block that mounts its own restricted role, as tlsedge mounts
+//     pg-tlsedge.yml and mxedge's router pg-mxedge.yml (QD-992, QD-029), connects with that role and never with
+//     the platform's pg.yml, which it does not mount. Every other process, and a block mounting no role of its
+//     own, reads pg.yml as before.
+//   - The maintenance pool (MaintenanceDb, MaintenanceTx): pg_maintenance.yml where the vault holds one and
+//     pg.yml otherwise, never a service's file, so a block holding only its own role has no maintenance pool.
+//   - A read-only process (RequirePgReadOnly): a service's own file where it holds one, else pg_maintenance.yml
+//     where the vault holds one, else pg.yml.
+//
+// The service's file is resolved the way grafanaPushSettings resolves grafana-push-<service>.yml (QD-249): only
+// the process's own service names a file, so one service never reads another's; a service name that could not be
+// a file name is refused; and the platform's pg.yml is read only where the service's file is proved absent. A
+// file that is there but cannot be reached is an error, never a fall back to another role.
 func pgServiceVaultResourceName(service string) string {
 	return fmt.Sprintf("pg-%s.yml", service)
+}
+
+// The process's own role file, or nil where it has no service or its vault holds none.
+func pgServiceVaultResource() (*SimpleResource, error) {
+	service, err := Service()
+	if err != nil {
+		// no service names no file
+		return nil, nil
+	}
+	if !grafanaServiceNamePattern.MatchString(service) {
+		return nil, fmt.Errorf("service %q names no Postgres role file", service)
+	}
+	resourceName := pgServiceVaultResourceName(service)
+	resource, err := Vault.SimpleResource(resourceName)
+	if err == nil {
+		return resource, nil
+	}
+	if !errors.Is(err, ErrResourceNotFound) || errors.Is(err, ErrResourceUnavailable) {
+		return nil, fmt.Errorf("vault %s: %w", resourceName, err)
+	}
+	return nil, nil
 }
 
 type safePgPool struct {
@@ -219,19 +252,19 @@ type safePgPool struct {
 // or does not define the size. The test harness redirects both pool resources
 // when a production-shaped profile supplies pg_maintenance.yml, and the
 // fallback still tolerates that resource being absent. The main pool's names
-// ARE the defaults, so its resolution is unchanged.
+// are the defaults, and it reads its service's own role file ahead of pg.yml
+// (see pgServiceVaultResourceName).
 func (self *safePgPool) resolveResources() (vaultKeys *SimpleResource, configKeys *SimpleResource) {
 	if self.vaultResourceName == DefaultPgVaultResourceName {
 		// a block's own restricted role, where it mounts one, and nothing else of the vault's (QD-992)
-		if service, err := Service(); err == nil && service != "" {
-			if r, err := Vault.SimpleResource(pgServiceVaultResourceName(service)); err == nil {
-				vaultKeys = r
-			}
+		serviceVaultKeys, err := pgServiceVaultResource()
+		if err != nil {
+			// neither the service's role nor, in its place, the platform's
+			panic(err)
 		}
-	}
-	if vaultKeys != nil {
-		configKeys = self.resolveConfigResource()
-		return
+		if serviceVaultKeys != nil {
+			return serviceVaultKeys, self.resolveConfigResource()
+		}
 	}
 	vaultKeys = Vault.RequireSimpleResource(DefaultPgVaultResourceName)
 	vaultResourceName := self.vaultResourceName
