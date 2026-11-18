@@ -27,6 +27,7 @@ const defaultSnHistoryPageObjects = 256
 var (
 	publishSnEvidence       = controller.StPublishEvidence
 	loadSnEvidenceBlobStore = server.LoadBlobStore
+	loadSnArtifactBlobStore = server.LoadBlobStore
 )
 
 // SnSetWallet backs `POST /sn/wallet` (sn/PLAN.md §5): sets the caller
@@ -68,8 +69,15 @@ func SnEpoch(w http.ResponseWriter, r *http.Request) {
 // SnArtifact serves immutable canonical bytes by their sha256 content hash.
 // The hash is rechecked before any bytes are returned so a corrupt object
 // store cannot silently provide a different payout tree.
+//
+// A hash the store holds no payout artifact under is 404. Only a store that
+// fails to answer, or stored bytes that fail their recheck, are 502. On
+// 2026-11-09..18 this route answered 350-750 502s a day and no 200, and every
+// lookup sampled was of the v1 sweep record's hash, which vault1 commits as
+// epoch 4's artifact hash: the sdk claim reader asks for it here, and the
+// record is a ledger object, served by /sn/ledger/object.
 func SnArtifact(w http.ResponseWriter, r *http.Request) {
-	store, ok := server.LoadBlobStore()
+	store, ok := loadSnArtifactBlobStore()
 	if !ok {
 		http.Error(w, "Artifact store unavailable.", http.StatusServiceUnavailable)
 		return
@@ -81,6 +89,10 @@ func SnArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	artifact, b, err := startifact.Read(r.Context(), store, hash)
 	if err != nil {
+		if server.IsBlobNotFound(err) {
+			http.Error(w, "No payout artifact has this hash. A ledger object, such as the v1 sweep record, is read from /sn/ledger/object.", http.StatusNotFound)
+			return
+		}
 		http.Error(w, "Artifact unavailable or failed integrity.", http.StatusBadGateway)
 		return
 	}
