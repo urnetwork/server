@@ -48520,6 +48520,7 @@ refusing up to 923 packs/s.
 | Proxy host CPU | `proxy-host-cpu` | `node_cpu_seconds_total` (yes) | a host over 85% for 10 min | — | B: 15:26Z |
 | Proxy reply collapse | `contract-reply-collapse` | `urnetwork_contract_creation_completed_total` (yes) | — | replies under 25% of their trailing 2-hour median for 10 min | B: 14:56Z |
 | Contract cap | `hosted-contract-cap-saturated` | `urnetwork_hosted_contract_admission_refusals_total` (yes, proxy g4–g10 since 10-26 18:35Z) | a process over 50/s for 10 min, 30 min or more after its start | — | 10-26 20:21Z |
+| Mint refusals per proxy host | `proxy-mint-refusals` | `urnetwork_hosted_mint_admission_refusals_total` (yes) | a host over 5/s for 10 min, over its blocks 30 min or more after their start | — | 11-14 14:04Z, again 15:23Z |
 
 A was found at 02:25Z, so its signals led by 6 h 11 min to 6 h 56 min; B's
 rollout aborted at 15:42:38Z, so its signals led by 16 to 52 minutes, with
@@ -48532,6 +48533,14 @@ database path: the registration convoy held 12,186–14,263 clients waiting
 and A's morning 148–2,877. For the proxy and Redis series, 10-26 08:00–12:00Z
 and 14:10–14:40Z serve as well.
 
+26.12 comes from the hosted proxy's setup regression of 2026-11-14
+(`proxy/P90SPEED.md`). From 15:17Z that day setup p90 went from 4.3–6.9 s
+to 16–37 s, while the proxy processes sat at their Go memory limit and the
+2-slot hosted mint admission refused windows' mints. No signal read
+refusals per host. Its replays run from 11-04 05:30Z to 11-18 05:30Z, at
+one-minute steps for the times given; the healthy reference is 11-07 to
+11-14 13:50Z, before the load ramp.
+
 Delivery: as §25, first a Grafana rule on Mimir whose contact point reaches a
 person, then a monitor probe; each entry names the probe to extend. None of
 these rows is in §7's tables yet; add each when its rule is built. A PAGE is
@@ -48539,7 +48548,7 @@ acknowledged by a person (§7, 2026-10-22 rule 4). These signals watch the
 services and Redis, where both incidents started; §25's watch what customers
 see.
 
-Monitor probes: 26.1–26.4 and 26.6–26.11 each have their own probe, and 26.5
+Monitor probes: 26.1–26.4 and 26.6–26.12 each have their own probe, and 26.5
 is §25.1's `contract-failure-share`. Each reads its entry's PromQL at every
 one-minute step of one bounded Mimir range read through a services host's
 loopback Mimir, ending two minutes behind now, so a watcher that runs it
@@ -49176,6 +49185,77 @@ the stuck-creation, release-error and Redis entries, and hold rollouts. The
 cap protects the process; it does not end the storm. Follow-up: add it to
 `identity-churn` (§14.8), which already reads the mint cap's
 `urnetwork_hosted_mint_admission_refusals_total`.
+
+### 26.12 Proxy host hosted mint refusals
+
+Probe: `proxy-mint-refusals`
+
+The probe also reads each block's refusals and each block's newest
+process's uptime. An evaluation where none of a host's blocks has run 30
+minutes counts as neither beyond nor within the band, so a restart of every
+block neither fires nor clears it. A sum over fewer blocks can only be
+lower, so a held band stands while a block is missing; a clear needs every
+placed block. A placed block with no process, or a block old enough to judge
+without a rate, reports `proxy-mint-refusals-unobservable`.
+
+Status: proposed 2026-11-18 (`proxy/P90SPEED.md` §8); the probe above
+implements it.
+
+Source (exists): `urnetwork_hosted_mint_admission_refusals_total`, the hosted
+window-client mints a proxy process refused with a 429 because 2
+(`defaultHostedMintConcurrency`) were already in flight. The refusal comes
+before any database work. Connect reads it as a rate limit and backs off
+5 s, doubling, so a window whose first mints are refused holds its device's
+first CONNECT: one refusal cost a setup about 3–5 s, two 9–13 s and three
+24–31 s (P90SPEED.md §3.3). A mint starved of CPU holds its slot longer, so
+a host whose processes sit at their Go memory limit refuses more (§26.13).
+`identity-churn` (§14.8) reads the fleet's sum against 100/s.
+
+```promql
+sum by (host) (
+  sum by (host, block) (rate(urnetwork_hosted_mint_admission_refusals_total{env="main",service="proxy"}[5m]))
+    and on (host, block)
+      (time() - max by (host, block) (process_start_time_seconds{env="main",service="proxy"}) > 1800))
+```
+
+Healthy: from 11-07 to the load ramp at 13:51Z on 11-14, per host, a median
+of 0.11/s, a 99th percentile of 1.5/s and a peak of 3.8/s (5-minute steps).
+
+Threshold: WARN `proxy-mint-refusals`: a host above 5/s for 10 minutes,
+summed over its blocks that have run 30 minutes. P90SPEED.md §10's target
+for a fix is under 5/s per host.
+
+Evidence:
+- 11-14: both hosts fire at 14:04Z, 13 minutes into the load ramp, and clear
+  at 14:15Z. They fire again at 15:23Z, six minutes after setup time's change
+  point (15:17Z, P90SPEED.md §2), and hold for most of 11-14 19:44Z to 11-15
+  22:09Z, with one-minute peaks of 1,129/s on crisp and 1,139/s on fireside.
+- P1115 raised crisp's limit to 8000 MiB (11-15 21:39Z). Since then crisp
+  fires in bursts with the sweeps, which come every 40–45 minutes
+  (P90SPEED.md §4.1): 35 times on 11-16 (170 minutes held) and 29 times on
+  11-17 (611 minutes). Fireside, still at 6500 MiB, held for 1,154 and 1,197
+  minutes of those days.
+- At 05:30Z on 11-18 both hosts are firing: over the previous 30 minutes
+  crisp refused 42–207/s and fireside 118–257/s.
+- 11-04 02:53Z and 11-05 00:11Z, on both hosts: an out-of-balance payer's
+  refilling windows (CPUOPT4 Part B), at medians of 380–440/s, until about
+  17:00Z and 08:15Z.
+- The nightly restart of all 20 processes at 14:04–14:07Z on 11-17 refused
+  47–87/s per host until 14:12Z. No block had run 30 minutes until 14:34Z,
+  so the rule left the burst out.
+
+False-positive qualifiers: a host near 5/s opens and clears with each sweep,
+as crisp did 29–35 times a day. An out-of-balance payer's windows refuse
+mints too (11-04, 11-05): refusals say windows cannot mint, not why, so read
+`identity-churn` and the proxy's `insufficient_balance` contract rejections.
+False-negative qualifiers: the uptime rule hides a block's first 30 minutes,
+and a restart relieves a host for about an hour (P90SPEED.md §2).
+
+ACTION: read the heap-limit (§26.13) and proxy host CPU (§26.9) entries for
+the host: a host at its Go memory limit refuses more. Restore the host's
+headroom (P90SPEED.md §9, decision 1) rather than restarting it. Follow-up:
+P90SPEED.md's fix 2, a reserved slot or a short wait for a window's first
+mints, should take refusals under 5/s per host.
 
 ### Rollout gates for connect and alt restarts
 

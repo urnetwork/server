@@ -64,6 +64,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"pgbouncer-backlog-unobservable":        visibilityAlertClass,
 	"proxy-host-cpu":                        incidentAlertClass,
 	"proxy-host-cpu-unobservable":           visibilityAlertClass,
+	"proxy-mint-refusals":                   incidentAlertClass,
+	"proxy-mint-refusals-unobservable":      visibilityAlertClass,
 	"redis-connection-churn":                incidentAlertClass,
 	"redis-main-thread-saturated":           incidentAlertClass,
 	"redis-main-thread-unobservable":        visibilityAlertClass,
