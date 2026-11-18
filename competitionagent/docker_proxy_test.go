@@ -806,6 +806,85 @@ func TestDockerProxyAbruptProcessExitKeepsIssuedRecordHeld(t *testing.T) {
 	}
 }
 
+// The owner can die between forwarding a bodyless wait and saving its reply.
+// Recovery must close admission, keep the original journal bytes and reap.
+func TestDockerProxyRecoversIssuedContainerWait(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	operation := &dockerProxyOperation{
+		Schema: Schema, Id: strings.Repeat("a", 32), RunId: fixture.plan.RunId, Kind: "http",
+		Method: http.MethodPost, Uri: "/v1.45/containers/" + strings.Repeat("c", 64) + "/wait",
+		State: "issued", RequestSha256: digestDockerBytes(nil),
+	}
+	if err := fixture.proxy.storeOperation(operation); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(fixture.proxy.operationDirectory(), operation.Id+".json")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := newDockerProxy(fixture.plan, fixture.settings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if snapshot := recovered.Snapshot(); !snapshot.AdmissionsClosed || snapshot.Operations != 1 || snapshot.UnknownOperations != 0 || snapshot.Quiesced {
+		t.Fatalf("recovered wait has wrong custody: %+v", snapshot)
+	}
+	if err := recovered.Quiesce(context.Background()); err != nil || !recovered.Snapshot().Quiesced {
+		t.Fatalf("read-only wait blocked cleanup: %v", err)
+	}
+	retained, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(original, retained) {
+		t.Fatalf("recovery rewrote the unresolved wait: %v", err)
+	}
+}
+
+// Mutations and ambiguous wait lookalikes retain the existing unknown barrier.
+func TestDockerProxyUncertainWaitLookalikesStillBlockCleanup(t *testing.T) {
+	containerPath := "/v1.45/containers/" + strings.Repeat("c", 64)
+	for _, test := range []struct {
+		name string
+		edit func(*dockerProxyOperation)
+	}{
+		{"mutation", func(op *dockerProxyOperation) { op.Uri = containerPath + "/start" }},
+		{"query", func(op *dockerProxyOperation) { op.Uri += "?condition=removed" }},
+		{"escaped path", func(op *dockerProxyOperation) { op.Uri = containerPath + "/%77ait" }},
+		{"body", func(op *dockerProxyOperation) { op.RequestBytes = 1 }},
+		{"bad request digest", func(op *dockerProxyOperation) { op.RequestSha256 = strings.Repeat("0", 64) }},
+		{"partial response", func(op *dockerProxyOperation) { op.StatusCode = http.StatusOK }},
+		{"unknown state", func(op *dockerProxyOperation) { op.State = "unknown" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newDockerProxyTest(t)
+			operation := &dockerProxyOperation{
+				Schema: Schema, Id: strings.Repeat("a", 32), RunId: fixture.plan.RunId, Kind: "http",
+				Method: http.MethodPost, Uri: containerPath + "/wait", State: "issued", RequestSha256: digestDockerBytes(nil),
+			}
+			test.edit(operation)
+			if err := fixture.proxy.storeOperation(operation); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.proxy.Close(); err != nil {
+				t.Fatal(err)
+			}
+			recovered, err := newDockerProxy(fixture.plan, fixture.settings, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := recovered.Snapshot()
+			err = recovered.Quiesce(context.Background())
+			_ = recovered.Close()
+			if !snapshot.AdmissionsClosed || snapshot.UnknownOperations != 1 || !errors.Is(err, ErrDockerProxyUnknown) {
+				t.Errorf("unsafe cleanup: %+v, %v", snapshot, err)
+			}
+		})
+	}
+}
+
 // Bounded rejected bodies and disabled budgets cannot reach upstream mutation.
 func TestDockerProxyBodyAndContextBoundsRejectBeforeIssue(t *testing.T) {
 	fixture := newDockerProxyTest(t)

@@ -210,7 +210,11 @@ func TestExistingControlTerminalArtifactsRequireOriginalStopCleanup(t *testing.T
 	if err != nil || response.State != "succeeded" || response.ExistingRun == nil || !response.ExistingRun.StopCleanupVerified {
 		t.Fatal("authenticated terminal artifact receipt was unavailable", err)
 	}
-	if err := ReadFiles(body, t.TempDir(), response.Files, fixture.config.Limits.ArtifactBytes, fixture.config.Limits); err != nil {
+	destination := filepath.Join(t.TempDir(), "artifacts")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadFiles(body, destination, response.Files, fixture.config.Limits.ArtifactBytes, fixture.config.Limits); err != nil {
 		t.Fatal("actual terminal artifact bodies did not authenticate", err)
 	}
 	if forbidden.Load() != 0 || !sameIdentityForExistingTest(response.Identity, &fixture.manifest.Identity) {
