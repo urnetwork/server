@@ -789,8 +789,10 @@ func TestSignedInVerifyKeepsTheCallersSession(t *testing.T) {
 		server.Raise(err)
 		caller, err := session.ParseByJwt(ctx, signed)
 		server.Raise(err)
-		added := fmt.Sprintf("added-%s@bringyour.com", network)
+		// a phone added to the email account (one email per account)
+		added := "+1 609-737-0021"
 		addUnverifiedUserAuth(t, ctx, user, added)
+		normalAdded, _ := NormalUserAuthV1(&added)
 		// with the caller's own: the cap
 		fillLiveSessions(t, ctx, network, 999)
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
@@ -811,7 +813,7 @@ func TestSignedInVerifyKeepsTheCallersSession(t *testing.T) {
 		}
 		var verified bool
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, added).Scan(&verified))
+			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, *normalAdded).Scan(&verified))
 		})
 		if !verified {
 			t.Fatal("the added sign-in method was not verified")
@@ -832,8 +834,10 @@ func TestVerifyRefusedAtTheCapLeavesTheCodeUnused(t *testing.T) {
 		ctx := t.Context()
 		network, user := server.NewId(), server.NewId()
 		Testing_CreateNetwork(ctx, network, "verify-cap", user)
-		added := fmt.Sprintf("signin-%s@bringyour.com", network)
+		// a phone added to the email account (one email per account)
+		added := "+1 609-737-0022"
 		addUnverifiedUserAuth(t, ctx, user, added)
+		normalAdded, _ := NormalUserAuthV1(&added)
 		members := fillLiveSessions(t, ctx, network, 1000)
 		code, err := AuthVerifyCreateCode(AuthVerifyCreateCodeArgs{UserAuth: added}, session.Testing_CreateClientSession(ctx, nil))
 		server.Raise(err)
@@ -847,7 +851,7 @@ func TestVerifyRefusedAtTheCapLeavesTheCodeUnused(t *testing.T) {
 		var verified bool
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM user_auth_verify WHERE user_id=$1 AND used`, user).Scan(&used))
-			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, added).Scan(&verified))
+			server.Raise(conn.QueryRow(ctx, `SELECT verified FROM network_user_auth_password WHERE user_id=$1 AND user_auth=$2`, user, *normalAdded).Scan(&verified))
 		})
 		if used != 0 || verified {
 			t.Fatal("the refused verify committed its verification", used, verified)
