@@ -75,20 +75,22 @@ func observeControlFrame(
 	metrics.inflight.WithLabelValues(ingress, messageLabel).Inc()
 	defer func() {
 		recovered := recover()
+		metrics.inflight.WithLabelValues(ingress, messageLabel).Dec()
+		metrics.duration.WithLabelValues(ingress, messageLabel).Observe(metrics.now().Sub(start).Seconds())
+		// The outcome and panic disposition use the same cancellation decision.
+		canceled := ctx.Err() != nil
 		outcome := "handler_ok"
 		switch {
-		case ctx.Err() != nil:
+		case canceled:
 			outcome = "canceled"
 		case recovered != nil:
 			outcome = "panic"
 		case err != nil:
 			outcome = "error"
 		}
-		metrics.inflight.WithLabelValues(ingress, messageLabel).Dec()
-		metrics.duration.WithLabelValues(ingress, messageLabel).Observe(metrics.now().Sub(start).Seconds())
 		metrics.completions.WithLabelValues(ingress, messageLabel, outcome).Inc()
 		if recovered != nil {
-			if ctx.Err() != nil {
+			if canceled {
 				panic(recovered)
 			}
 			err = fmt.Errorf("control frame %T panicked: %v", message, recovered)
