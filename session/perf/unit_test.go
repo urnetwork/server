@@ -278,7 +278,18 @@ func (self *harness) runUnitPhase() {
 		})
 	}
 	removeOne("remove.client.jwt", jwtClients)
+	// each API key client owns its session: R-free expects its removal to
+	// free it from the live set
+	liveBefore := self.totalLive(networks)
 	removeOne("remove.client.apikey", apiKeyClients)
+	liveAfter := self.totalLive(networks)
+	owned := 0
+	for _, client := range apiKeyClients {
+		if client != nil {
+			owned++
+		}
+	}
+	self.report.addOutcome("sessions freed by removing API key clients (R-free expects all)", "freed", int(liveBefore-liveAfter), owned-int(liveBefore-liveAfter))
 
 	// the record answers for removed clients from their tombstones
 	var refused, accepted int
@@ -295,4 +306,12 @@ func (self *harness) runUnitPhase() {
 		}
 	})
 	self.report.addOutcome("removed clients' credentials at their next check", "refused", refused, accepted)
+}
+
+func (self *harness) totalLive(networks []*perfNetwork) int64 {
+	var total int64
+	for _, network := range networks {
+		total += self.liveSessionCount(network.id)
+	}
+	return total
 }

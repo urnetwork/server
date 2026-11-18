@@ -371,3 +371,35 @@ func (self *harness) seedOutbox(rows int) {
 		})
 	}
 }
+
+// The 30-day idle reap (taskworker RemoveDisconnectedNetworkClients) of a
+// network whose hosted clients each own a session, with the task's own
+// windows. R-free expects the reap to free their sessions; the reap bypasses
+// the model's removal functions.
+func (self *harness) runReapPhase() {
+	reap := self.largeNetwork("reap", liveCapProfile)
+	runParallel(len(reap.clients), 16, func(index int) {
+		self.leaseCheck(reap.clients[index].claims)
+	})
+	liveBefore := self.liveSessionCount(reap.network.id)
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(self.ctx, `UPDATE network_client SET auth_time=$2 WHERE network_id=$1 AND source_client_id IS NULL`, reap.network.id, server.NowUtc().Add(-model.TopLevelClientIdleExpiration-24*time.Hour)))
+	})
+	self.measure("reap.idle", len(reap.clients), func() {
+		now := server.NowUtc()
+		start := time.Now()
+		model.RemoveDisconnectedNetworkClients(self.ctx, now.Add(-8*time.Hour), now.Add(-model.NetworkClientReapAfterDeactivate), now.Add(-model.TopLevelClientIdleExpiration))
+		self.ops.observe("reap.idle", start, nil)
+	})
+	liveAfter := self.liveSessionCount(reap.network.id)
+	var inactive int64
+	server.Db(self.ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(self.ctx, `SELECT count(*) FROM network_client WHERE network_id=$1 AND NOT active`, reap.network.id).Scan(&inactive))
+	})
+	freed := liveBefore - liveAfter
+	self.report.addOutcome(fmt.Sprintf("clients deactivated by the idle reap of %d", len(reap.clients)), "deactivated", int(inactive), len(reap.clients)-int(inactive))
+	self.report.addOutcome("sessions freed by the idle reap (R-free expects all)", "freed", int(freed), int(inactive-freed))
+	refused, accepted := self.probe(reap.clients, 500)
+	self.report.addOutcome("idle-reaped clients' credentials at their next check", "refused", refused, accepted)
+	self.logf("idle reap: %d of %d clients deactivated, %d sessions freed (%d live before, %d after)", inactive, len(reap.clients), freed, liveBefore, liveAfter)
+}

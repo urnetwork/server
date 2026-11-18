@@ -19,7 +19,7 @@ Settings are environment variables:
 | `SESSION_PERF_PROFILE` | `standard` | `quick` or `standard` |
 | `SESSION_PERF_OUT` | `temp/session-perf/<utc time>` | where `report.md`, `report.json` and `test.log` go |
 | `SESSION_PERF_LABEL` | `branch@commit` | the report's title |
-| `SESSION_PERF_PHASES` | all | a comma list of `unit,capacity,steady,storm,signout,outbox` |
+| `SESSION_PERF_PHASES` | all | a comma list of `unit,capacity,steady,storm,signout,reap,outbox` |
 | `SESSION_PERF_STEADY_SECONDS` | profile | the steady phase's length |
 | `SESSION_PERF_RATES` | profile | per-load overrides, for example `api=4000,lease=3000` |
 | `SESSION_PERF_LOCK_DIR` | none | a mkdir lock held while the run uses the test database |
@@ -62,6 +62,7 @@ Every call goes through the same entry points production uses:
 | sign-out-all (the password reset's retirement) | `model.PlanNetworkSignOut`, `model.CommitNetworkSignOut` |
 | remove-client | `model.RemoveNetworkClient` |
 | the maintenance task | `session.SweepSessionIndexShard`, `ExpireSessionReceipts`, `RepairSessionIndexes`, `model.RecoverSessionOperations`, `session.ObserveSessionMaintenance`, with the task's budgets |
+| the 30-day idle reap | `model.RemoveDisconnectedNetworkClients` |
 
 The run switches `session_creation_enabled` and `revocation_record_enabled` on, and lifts the hosted proxy caps.
 
@@ -86,7 +87,8 @@ The run switches `session_creation_enabled` and `revocation_record_enabled` on, 
    A time series records Redis cores, commands, memory, index outbox rows and the hot network's live sessions every 10 s.
 4. **storm.** Sign out other sessions on the 5,000-session network, then its client cleanup, while background lease checks run. Checks are split by whether their record key lives on the revoked network's node. The slowlog gives the node time each script holds.
 5. **signout** (standard profile). Sign-out-all on a second 5,000-session network, then probes whether its hosted proxies still check and re-mint (decision 4).
-6. **outbox.** The index repair and its backlog gauges, timed at seeded outbox backlogs.
+6. **reap.** The 30-day idle reap (`model.RemoveDisconnectedNetworkClients`, with the task's windows) of a network whose 999 hosted clients each own a session. It reports how many sessions the reap freed.
+7. **outbox.** The index repair and its backlog gauges, timed at seeded outbox backlogs.
 
 ## Rates
 
@@ -125,3 +127,5 @@ Each load is open-loop. A load that can't keep up counts dropped arrivals instea
 | G16 revocation and removal | every revoked or removed credential refused at its next check |
 | G17 decision 4 | hosted proxies still check and re-mint after sign-out-all |
 | G18 stream lease fan-out | not run here; connect's tests own it |
+| G19 removing API key clients | frees every session the clients owned (FIXPLAN R-free) |
+| G20 the idle reap | frees every reaped client's session (FIXPLAN R-free) |

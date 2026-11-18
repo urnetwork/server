@@ -448,7 +448,7 @@ func (self *harness) evaluateGates() {
 	// G16 revocation takes effect
 	effective := []string{}
 	verdict := "SKIP"
-	for _, prefix := range []string{"removed clients' credentials", "revoked hosted clients' credentials"} {
+	for _, prefix := range []string{"removed clients' credentials", "revoked hosted clients' credentials", "idle-reaped clients' credentials"} {
 		if item := self.report.outcome(prefix); item != nil {
 			if verdict == "SKIP" {
 				verdict = "PASS"
@@ -477,6 +477,22 @@ func (self *harness) evaluateGates() {
 		self.gate("G17", "Hosted proxies survive sign-out-all (decision 4, S2 N9)", "SKIP", "not run", "all accepted", "")
 	}
 	self.gate("G18", "Stream lease fan-out (1,000-stream grant renewal)", "SKIP", "not exercised", "p50 1.292, p99 3.941 ms", "connect's own tests own it; its credential checks are the lease checks of G9")
+
+	// G19, G20 R-free: a removal frees the client sessions it owns
+	freedGate := func(id, name, prefix string) {
+		item := self.report.outcome(prefix)
+		if item == nil {
+			self.gate(id, name, "SKIP", "not run", "every owned session freed", "")
+			return
+		}
+		verdict := "PASS"
+		if 0 < item.Other || item.Matching == 0 {
+			verdict = "FAIL"
+		}
+		self.gate(id, name, verdict, fmt.Sprintf("%d freed, %d still live", item.Matching, item.Other), "every owned session freed (FIXPLAN R-free)", "")
+	}
+	freedGate("G19", "Removing API key clients frees their sessions", "sessions freed by removing API key clients")
+	freedGate("G20", "The 30-day idle reap frees its clients' sessions", "sessions freed by the idle reap")
 }
 
 func (self *harness) markdown() string {

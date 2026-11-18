@@ -205,6 +205,7 @@ func (self *harness) run() {
 		{"steady", self.runSteadyPhase},
 		{"storm", self.runStormPhase},
 		{"signout", self.runSignOutPhase},
+		{"reap", self.runReapPhase},
 		{"outbox", self.runOutboxPhase},
 	}
 	for _, phase := range phases {
