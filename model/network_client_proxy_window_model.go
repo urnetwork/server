@@ -87,7 +87,9 @@ func SetProxyWindowIdentities(
 // written at its window's last change names them, so restarting the ttl
 // keeps them restorable for proxyWindowIdentityTtl after the close. It never
 // writes identities, so a snapshot a newer device has since replaced or
-// cleared is not overwritten with an older one.
+// cleared is not overwritten with an older one. It runs on the device's close
+// path and is only an optimization, so an error is raised at once rather than
+// retried: an unanswered refresh leaves the snapshot its earlier ttl.
 func RefreshProxyWindowIdentities(
 	ctx context.Context,
 	proxyId server.Id,
@@ -97,7 +99,7 @@ func RefreshProxyWindowIdentities(
 		var err error
 		refreshed, err = r.Expire(ctx, proxyWindowIdentityKey(proxyId), proxyWindowIdentityTtl).Result()
 		server.Raise(err)
-	})
+	}, server.OptNoRetry())
 	return refreshed
 }
 
