@@ -1,11 +1,11 @@
 package handlers
 
-// api's edge client route (TLS-M5-11, QD-812, QD-873, QD-1054): only the edge class's bearer reaches it; a block,
-// host, slot or index edge.yml and the key's slot count do not admit is refused 403 with nothing created; with no
-// edge.yml or no urnetwork-edge network it answers 503; and through Postgres an admitted ask answers the derived
-// client's jwt and, beside it, the client's service token of audience sockets naming it in urnetwork-edge and
-// nothing more, the same client at each ask of its slot, another client for the other slot, and 503 when no
-// sockets token can be signed.
+// api's edge client route (TLS-M5-11, QD-812, QD-873, QD-1011, QD-1054): only the edge class's bearer reaches it; a
+// block, host, slot or index edge.yml and the key's slot count do not admit is refused 403 with nothing created,
+// slot 4 among them while slots 0 to 3 pass; with no edge.yml or no urnetwork-edge network it answers 503; and
+// through Postgres an admitted ask answers the derived client's jwt and, beside it, the client's service token of
+// audience sockets naming it in urnetwork-edge and nothing more, the same client at each ask of its slot, another
+// client for each other slot, and 503 when no sockets token can be signed.
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -192,8 +193,8 @@ func TestInternalGateEdgeClientRefusals(t *testing.T) {
 		{name: "a host not listed", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-b.example","index":0}`, code: http.StatusForbidden},
 		{name: "an index at K", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","index":2}`, code: http.StatusForbidden},
 		{name: "a negative index", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","index":-1}`, code: http.StatusForbidden},
-		// a slot at the slot count, 2, and past it: a third process of the block on the host mints nothing
-		{name: "a slot at the slot count", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":2,"index":0}`, code: http.StatusForbidden},
+		// a slot at the slot count, 4, and past it: a fifth process of the service on the host mints nothing
+		{name: "a slot at the slot count", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":4,"index":0}`, code: http.StatusForbidden},
 		{name: "a slot past the slot count", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":7,"index":0}`, code: http.StatusForbidden},
 		{name: "a negative slot", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":-1,"index":0}`, code: http.StatusForbidden},
 		{name: "a slot that is not a number", bearer: world.edge, body: `{"block":"tlsedge","host":"lb-a.example","slot":"1","index":0}`, code: http.StatusBadRequest},
@@ -211,6 +212,17 @@ func TestInternalGateEdgeClientRefusals(t *testing.T) {
 	}
 	if retryAfter := world.lastRetryAfter; retryAfter != "5" {
 		t.Errorf("no urnetwork_edge: Retry-After %q", retryAfter)
+	}
+	// slots 0 to 3 pass the key's check, the service's beta and g1 processes on a host and a deploy's new process
+	// beside either (QD-1011), and so get as far as the missing network, where slot 4 is refused before it
+	for slot := range 4 {
+		body := fmt.Sprintf(`{"block":"tlsedge","host":"lb-a.example","slot":%d,"index":1}`, slot)
+		if code, _ := world.post(world.edge, body); code != http.StatusServiceUnavailable {
+			t.Errorf("slot %d: %d, want admitted", slot, code)
+		}
+	}
+	if code, _ := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":4,"index":1}`); code != http.StatusForbidden {
+		t.Errorf("slot 4 with no urnetwork_edge: %d, want refused", code)
 	}
 	world.noNetwork = false
 	// no edge.yml that parses, on a process that has read none: unavailable
@@ -288,6 +300,41 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		code, otherAgain := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":1,"index":1}`)
 		if code != http.StatusOK || otherAgain.ClientId != other.ClientId {
 			t.Fatalf("slot 1's second ask: %d %s", code, otherAgain.ClientId)
+		}
+		// the other warp block's process and a deploy's new process beside either take slots 2 and 3 (QD-1011):
+		// each its own client, so the four slots' clients are four
+		slotClientIds := map[string]int{first.ClientId: 0, other.ClientId: 1}
+		for slot := 2; slot < 4; slot += 1 {
+			code, answer := world.post(world.edge, fmt.Sprintf(`{"block":"tlsedge","host":"lb-a.example","slot":%d,"index":1}`, slot))
+			wantSlotClientId := server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", slot, 1)
+			if code != http.StatusOK || answer.ClientId != wantSlotClientId.String() {
+				t.Fatalf("slot %d: %d %s, want %s", slot, code, answer.ClientId, wantSlotClientId)
+			}
+			if heldSlot, ok := slotClientIds[answer.ClientId]; ok {
+				t.Fatalf("slot %d answered slot %d's client", slot, heldSlot)
+			}
+			slotClientIds[answer.ClientId] = slot
+			checkEdgeClientTestSocketsToken(t, verifier, answer, networkId, wantSlotClientId)
+		}
+		// slot 4 is refused, and its client is never created
+		if code, _ := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":4,"index":1}`); code != http.StatusForbidden {
+			t.Fatalf("slot 4: %d", code)
+		}
+		slotFourClientCount := 0
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*) FROM network_client WHERE client_id = $1`,
+				server.DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 4, 1),
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&slotFourClientCount))
+				}
+			})
+		})
+		if slotFourClientCount != 0 {
+			t.Fatalf("slot 4's client was created")
 		}
 		// the environment is api's own: another environment's api derives another client for the same ask
 		world.environment = "other"

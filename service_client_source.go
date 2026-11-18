@@ -1,7 +1,7 @@
 package server
 
-// An edge block's platform clients (TLS-M5-11; §6.10.1, §13.6, §19.4; QD-812, QD-873): how tlsedge, mxedge's
-// router and smtpedge, which mount no vault and hold no network-level token, come to hold client jwts in
+// An edge block's platform clients (TLS-M5-11; §6.10.1, §13.6, §19.4; QD-812, QD-873, QD-1011): how tlsedge,
+// mxedge's router and smtpedge, which mount no vault and hold no network-level token, come to hold client jwts in
 // urnetwork-edge.
 //
 //   - The block mounts one credential, the `edge` class's internal gate bearer (internal_gate.go:
@@ -23,10 +23,13 @@ package server
 // and the client's device the same under "urnetwork-edge-device-v1". "block" is the edge block's name as edge.yml
 // lists it, tlsedge, mxedge or smtpedge, never a warp block name. The slot (QD-873, which amended QD-812's
 // derivation before any deployment used it) is the deploy slot warp hands the process in WARP_SLOT, beside
-// WARP_BLOCK (LoadEdgeClientSlot): a deploy's old and new process of a block on a host hold different slots,
-// alternating per deploy, so the new process connects its own K clients while the old one drains its streams on
-// its own clients for drain_s (§13.5), each counting only its own toward readiness, and urnetwork-edge holds at
-// most SlotCount times K clients a block and host.
+// WARP_BLOCK (LoadEdgeClientSlot): one of SlotCount, 4, that no other running process of the edge service on the
+// host holds (QD-1011, owner decision 577). The beta and g1 warp blocks of tlsedge, and of mxedge's router, run
+// side by side on every lb host (§19.4) and pass the same environment, host and block, and a deploy's new process
+// of either starts beside the old one, so up to four processes of a service run on a host, each in its own slot.
+// Each connects its own K clients, a deploy's old process draining its streams on its own for drain_s (§13.5),
+// each counts only its own toward readiness, and urnetwork-edge holds at most four times K clients a block and
+// host.
 //
 // PlatformClientSource is the block's end, sidecar.ServiceClientSource for sidecar.EdgeClientPool: it asks for
 // each of its K indexes at start, keeps each answer until it is refreshed, and refreshes each before it lapses,
@@ -126,9 +129,11 @@ type EdgeClientKeySettings struct {
 	BlockMaxByteCount int
 	// The most clients one block may list as its K.
 	ClientMaxCount int
-	// The deploy slots a block's processes on one host take: 2, a deploy's old process and its new one (QD-873).
-	// A slot at or past it is refused, so urnetwork-edge holds at most this many times K clients a block and host.
-	// warp hands out the same number (warpctl's DeploySlotSettings.SlotCount). Not positive: no slot is admitted.
+	// The deploy slots an edge service's processes on one host take: 4, its beta and g1 blocks' processes and a
+	// deploy's new process beside either (QD-1011, which raised QD-873's 2). A slot at or past it is refused, so
+	// urnetwork-edge holds at most this many times K clients a block and host. warp hands out the same number
+	// (warpctl's DeploySlotSettings.SlotCount), giving each new process a slot no running process of its service
+	// on the host holds. Not positive: no slot is admitted.
 	SlotCount int
 }
 
@@ -137,7 +142,7 @@ func DefaultEdgeClientKeySettings() *EdgeClientKeySettings {
 		HostMaxByteCount:  253,
 		BlockMaxByteCount: 32,
 		ClientMaxCount:    64,
-		SlotCount:         2,
+		SlotCount:         4,
 	}
 }
 
@@ -336,11 +341,12 @@ func DefaultPlatformClientSourceSettings() *PlatformClientSourceSettings {
 	}
 }
 
-// The process's deploy slot from WARP_SLOT, the decimal warp sets beside WARP_BLOCK and alternates per deploy
-// (QD-873), which the block passes to NewPlatformClientSource. A value that is not a decimal in [0, SlotCount) is
-// refused, so a process never holds a slot api would refuse or one that names another. With none set, settings'
-// SlotRequired refuses; otherwise the slot reads 0 and the log says so, which holds only while warp's change
-// rolls out. settings nil takes the defaults. The error names the variable, and a value is not secret.
+// The process's deploy slot from WARP_SLOT, the decimal warp sets beside WARP_BLOCK, a slot no other running
+// process of the edge service on the host holds (QD-873, QD-1011), which the block passes to
+// NewPlatformClientSource. A value that is not a decimal in [0, SlotCount) is refused, so a process never holds a
+// slot api would refuse or one that names another. With none set, settings' SlotRequired refuses; otherwise the
+// slot reads 0 and the log says so, which holds only while warp's change rolls out. settings nil takes the
+// defaults. The error names the variable, and a value is not secret.
 func LoadEdgeClientSlot(settings *PlatformClientSourceSettings) (int, error) {
 	value, set := os.LookupEnv(EdgeClientSlotEnvName)
 	return parseEdgeClientSlot(value, set, settings)
@@ -377,8 +383,9 @@ type PlatformClientSourceArgs struct {
 	// The edge block and the host it runs on, as edge.yml lists them.
 	Block string
 	Host  string
-	// The process's deploy slot (LoadEdgeClientSlot), below the key's SlotCount: the other process of a deploy
-	// on this host holds the other slot, so the two hold disjoint clients.
+	// The process's deploy slot (LoadEdgeClientSlot), below the key's SlotCount: each other process of the edge
+	// service running on this host, the other warp block's and a deploy's old or new one, holds another, so each
+	// holds clients of its own.
 	Slot int
 	// The block's `edge` bearer, read once at start (LoadInternalGateCredential(InternalGateCallerEdge)).
 	Bearer string

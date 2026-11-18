@@ -1,9 +1,9 @@
 package handlers
 
-// api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873, QD-1054; §6.10.1, §13.6, §19.4): the
-// route server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge` class's
-// bearer, verified by its hash in constant time (server.InternalGateVerifier), and answering every other request
-// 403 before anything is read:
+// api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873, QD-1011, QD-1054; §6.10.1, §13.6,
+// §19.4): the route server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge`
+// class's bearer, verified by its hash in constant time (server.InternalGateVerifier), and answering every other
+// request 403 before anything is read:
 //
 //	POST /internal/gate/edge-client  edge  {block, host, slot, index}
 //	  -> {client_id, by_client_jwt, expire_time_millis, platform_url, sockets_token, sockets_token_expire_time_millis}
@@ -11,9 +11,10 @@ package handlers
 // The client id is derived from (environment, host, block, slot, index), the environment api's own, never chosen
 // by the caller (server.DeriveEdgeClientId), and the client is created in sidecar.yml's urnetwork_edge network on
 // first use (model.MintEdgeClient). api refuses, 403, a block config/<env>/edge.yml does not list, a host that is
-// not among the block's, a slot at or past the key's SlotCount (2: a deploy's old and new process of a block on a
-// host, QD-873) and an index at or past the block's K, so the bearer can mint only the environment's fixed edge
-// clients, at most SlotCount times K a block and host. A body without a slot reads slot 0, as a block without
+// not among the block's, a slot at or past the key's SlotCount (4: an edge service's beta and g1 processes on a
+// host and a deploy's new process beside either, each in a slot of its own, QD-873, QD-1011) and an index at or
+// past the block's K, so the bearer can mint only the environment's fixed edge clients, at most four times K a
+// block and host. A body without a slot reads slot 0, as a block without
 // WARP_SLOT does while warp's change rolls out. With no edge.yml that parses, no urnetwork_edge in sidecar.yml, or
 // no such network, every call is answered 503 and nothing is created. edge.yml is reread every
 // ConfigRereadInterval, and a read that fails keeps the last one that parsed.

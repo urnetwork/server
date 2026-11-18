@@ -1,9 +1,10 @@
 package server
 
-// An edge block's platform clients (TLS-M5-11, QD-812, QD-873, QD-1054): edge.yml admits only the block, host, slot
-// and index it names; the derivation is fixed; two processes of one block on one host in different slots hold
-// disjoint clients and both connect their pools, and one slot holds the same clients across restarts; WARP_SLOT
-// reads only a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's
+// An edge block's platform clients (TLS-M5-11, QD-812, QD-873, QD-1011, QD-1054): edge.yml admits only the block,
+// host, slot and index it names, slots 0 to 3; the derivation is fixed; the four processes of an edge service one
+// host can run, its beta and g1 processes and a deploy's new process beside either, in slots 0 to 3 hold disjoint
+// clients and all connect their pools, and one slot holds the same clients across restarts; WARP_SLOT reads only
+// a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's
 // id for its life, keeps each client's sockets token beside its jwt, refreshes both at the refresh point of the
 // shorter-lived, rides an api outage on the jwt and the token it holds until each ends, refuses an answer with no
 // sockets token, presents each client's token, never its jwt, to sockets, and never puts the bearer, a jwt or a token
@@ -43,8 +44,10 @@ func TestEdgeClientsConfigAdmitsOnlyWhatItNames(t *testing.T) {
 	admitted := []*EdgeClientMintArgs{
 		{Block: "tlsedge", Host: "lb-a.example", Slot: 0, Index: 0},
 		{Block: "tlsedge", Host: "lb-b.example", Slot: 0, Index: 3},
-		// a deploy's new process beside the old one
+		// the other warp block's process, and a deploy's new process beside either (QD-1011)
 		{Block: "tlsedge", Host: "lb-b.example", Slot: 1, Index: 3},
+		{Block: "tlsedge", Host: "lb-b.example", Slot: 2, Index: 3},
+		{Block: "tlsedge", Host: "lb-b.example", Slot: 3, Index: 0},
 		{Block: "smtpedge", Host: "lb-a.example", Slot: 1, Index: 0},
 	}
 	for _, args := range admitted {
@@ -61,8 +64,9 @@ func TestEdgeClientsConfigAdmitsOnlyWhatItNames(t *testing.T) {
 		{Block: "smtpedge", Host: "lb-b.example", Index: 0},
 		{Block: "tlsedge", Host: "lb-c.example", Index: 0},
 		{Block: "tlsedge", Host: "", Index: 0},
-		// a slot at or past the slot count, 2
-		{Block: "tlsedge", Host: "lb-a.example", Slot: 2, Index: 0},
+		// a slot at or past the slot count, 4
+		{Block: "tlsedge", Host: "lb-a.example", Slot: 4, Index: 0},
+		{Block: "tlsedge", Host: "lb-a.example", Slot: 5, Index: 0},
 		{Block: "tlsedge", Host: "lb-a.example", Slot: -1, Index: 0},
 		// an index at or past the block's K
 		{Block: "tlsedge", Host: "lb-a.example", Index: 4},
@@ -75,17 +79,17 @@ func TestEdgeClientsConfigAdmitsOnlyWhatItNames(t *testing.T) {
 		}
 	}
 	// the slot's refusal names the part, and the slot count is the key settings' the file was read under
-	if err := config.Admits(&EdgeClientMintArgs{Block: "tlsedge", Host: "lb-a.example", Slot: 2, Index: 0}); err == nil || !strings.HasSuffix(err.Error(), ": slot") {
-		t.Errorf("slot 2's refusal: %v", err)
+	if err := config.Admits(&EdgeClientMintArgs{Block: "tlsedge", Host: "lb-a.example", Slot: 4, Index: 0}); err == nil || !strings.HasSuffix(err.Error(), ": slot") {
+		t.Errorf("slot 4's refusal: %v", err)
 	}
 	keySettings := DefaultEdgeClientKeySettings()
-	keySettings.SlotCount = 3
+	keySettings.SlotCount = 5
 	wider, err := ParseEdgeClientsConfig([]byte("platform_url: wss://connect.edge.example\nblocks: {tlsedge: {clients: 4, hosts: [lb-a.example]}}\n"), keySettings)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := wider.Admits(&EdgeClientMintArgs{Block: "tlsedge", Host: "lb-a.example", Slot: 2, Index: 0}); err != nil {
-		t.Errorf("slot 2 under a slot count of 3: %v", err)
+	if err := wider.Admits(&EdgeClientMintArgs{Block: "tlsedge", Host: "lb-a.example", Slot: 4, Index: 0}); err != nil {
+		t.Errorf("slot 4 under a slot count of 5: %v", err)
 	}
 	keySettings.SlotCount = 0
 	none, err := ParseEdgeClientsConfig([]byte("platform_url: wss://connect.edge.example\nblocks: {tlsedge: {clients: 4, hosts: [lb-a.example]}}\n"), keySettings)
@@ -142,6 +146,15 @@ func TestDeriveEdgeClientIdIsFixed(t *testing.T) {
 	if got := hex.EncodeToString(otherSlotId[:]); got != "e2790ef9a1428e11aaf51a7d1dc46c27" {
 		t.Fatalf("slot 1's client id %s", got)
 	}
+	// the slots QD-1011 added, under the same derivation
+	slotTwoId := DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 2, 0)
+	if got := hex.EncodeToString(slotTwoId[:]); got != "b90cf0a0a21879f23b500b72a31df692" {
+		t.Fatalf("slot 2's client id %s", got)
+	}
+	slotThreeId := DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 3, 0)
+	if got := hex.EncodeToString(slotThreeId[:]); got != "539eca59b668c48dd39e08b085d73c00" {
+		t.Fatalf("slot 3's client id %s", got)
+	}
 	again := DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 0, 0)
 	if clientId != again || clientId == (Id{}) {
 		t.Fatalf("the derivation is not a function: %s %s", clientId, again)
@@ -153,6 +166,10 @@ func TestDeriveEdgeClientIdIsFixed(t *testing.T) {
 		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 0, 1),
 		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 1, 0),
 		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 1, 1),
+		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 2, 0),
+		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 2, 1),
+		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 3, 0),
+		DeriveEdgeClientId("main", "lb-a.example", "tlsedge", 3, 1),
 		DeriveEdgeDeviceId("main", "lb-a.example", "tlsedge", 0, 0),
 		// the host and the block are not interchangeable
 		DeriveEdgeClientId("main", "tlsedge", "lb-a.example", 0, 0),
@@ -368,49 +385,59 @@ func TestPlatformClientSourceAsksEachIndexAndRefreshesBeforeItLapses(t *testing.
 	}
 }
 
-// A deploy's old and new process of one block on one host (QD-873): in different slots they ask for, hold and are
-// ready on disjoint clients, each its own K.
-func TestPlatformClientSourcesInTwoSlotsHoldDisjointClients(t *testing.T) {
+// The processes of one edge service on one host (QD-873, QD-1011): its beta and g1 processes side by side and a
+// deploy's new process beside either, at most four, in slots 0 to 3 ask for, hold and are ready on pairwise
+// disjoint clients, each its own K, and one ending costs the others nothing.
+func TestPlatformClientSourcesInFourSlotsHoldDisjointClients(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	api := newPlatformClientTestApi(t, clock)
 	clientCount := 4
-	oldSource := api.newSlotSource(ctx, 0, clientCount)
-	awaitPlatformClientAnswers(t, ctx, oldSource, uint64(clientCount))
-	// the new process starts while the old one still holds its clients
-	newSource := api.newSlotSource(ctx, 1, clientCount)
-	awaitPlatformClientAnswers(t, ctx, newSource, uint64(clientCount))
-	if !oldSource.Ready() || !newSource.Ready() {
-		t.Fatalf("ready old %t new %t", oldSource.Ready(), newSource.Ready())
+	slotCount := DefaultEdgeClientKeySettings().SlotCount
+	if slotCount != 4 {
+		t.Fatalf("the slot count is %d, want 4 (QD-1011), the same as warpctl's DeploySlotSettings.SlotCount", slotCount)
 	}
-	oldClientIds := platformClientIds(t, ctx, oldSource, clientCount)
-	newClientIds := platformClientIds(t, ctx, newSource, clientCount)
-	seen := map[Id]bool{}
-	for index := range clientCount {
-		if oldClientIds[index] != DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, index) ||
-			newClientIds[index] != DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 1, index) {
-			t.Fatalf("index %d holds another slot's client", index)
+	// beta's and g1's processes, then a deploy's new process beside each, each starting while the others hold
+	// their clients
+	sources := []*PlatformClientSource{}
+	for slot := range slotCount {
+		source := api.newSlotSource(ctx, slot, clientCount)
+		awaitPlatformClientAnswers(t, ctx, source, uint64(clientCount))
+		sources = append(sources, source)
+	}
+	seen := map[Id]int{}
+	for slot, source := range sources {
+		if !source.Ready() {
+			t.Fatalf("slot %d is not ready", slot)
 		}
-		for _, clientId := range []Id{oldClientIds[index], newClientIds[index]} {
-			if seen[clientId] {
-				t.Fatalf("index %d's client is held twice", index)
+		for index, clientId := range platformClientIds(t, ctx, source, clientCount) {
+			if clientId != DeriveEdgeClientId("test", "lb-a.example", "tlsedge", slot, index) {
+				t.Fatalf("slot %d index %d holds another slot's client", slot, index)
 			}
-			seen[clientId] = true
+			if heldSlot, ok := seen[clientId]; ok {
+				t.Fatalf("slot %d index %d holds slot %d's client", slot, index, heldSlot)
+			}
+			seen[clientId] = slot
 		}
 	}
 	// each asked only for its own: one ask a slot and index
-	for slot := range 2 {
+	for slot := range slotCount {
 		for index := range clientCount {
 			if api.askCount(slot, index) != 1 {
 				t.Fatalf("slot %d index %d asked %d times", slot, index, api.askCount(slot, index))
 			}
 		}
 	}
-	// the old process ending costs the new one nothing
-	oldSource.Close()
-	if oldSource.Ready() || !newSource.Ready() {
-		t.Fatalf("after the old process ended: ready old %t new %t", oldSource.Ready(), newSource.Ready())
+	// a drained process ending costs the others nothing
+	sources[0].Close()
+	if sources[0].Ready() {
+		t.Fatal("a closed source is ready")
+	}
+	for slot := 1; slot < slotCount; slot += 1 {
+		if !sources[slot].Ready() {
+			t.Fatalf("after slot 0 ended, slot %d is not ready", slot)
+		}
 	}
 }
 
@@ -466,11 +493,12 @@ func (self *platformClientTestProcess) OpenClient(ctx context.Context, args *sid
 	}, nil
 }
 
-// A deploy's old and new process of one block on one host, each its own K clients in an EdgeClientPool on its slot's
-// source: both connect and stay connected, on a platform that lets one client id be connected from one process
-// alone. A third process in the old one's slot, as before QD-873, takes the old one's clients over, which is what
-// the slot keeps from a deploy.
-func TestPlatformClientSourcesInTwoSlotsBothConnect(t *testing.T) {
+// The four processes one edge service can run on one host, beta's and g1's side by side and a deploy's new process
+// beside each, each its own K clients in an EdgeClientPool on its slot's source: all connect and stay connected,
+// on a platform that lets one client id be connected from one process alone. A fifth process in a held slot, as
+// beta's and g1's both were in slot 0 before QD-1011, takes that slot's clients over and no other's, which is what
+// a slot of its own keeps from each process.
+func TestPlatformClientSourcesInFourSlotsAllConnect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
@@ -493,23 +521,32 @@ func TestPlatformClientSourcesInTwoSlotsBothConnect(t *testing.T) {
 		t.Cleanup(pool.Close)
 		return pool
 	}
-	oldPool := openPool("old", 0)
-	if !oldPool.Ready() {
-		t.Fatal("the old process is not connected")
-	}
-	newPool := openPool("new", 1)
-	if !oldPool.Ready() || !newPool.Ready() {
-		t.Fatalf("connected: old %d new %d of %d", oldPool.ConnectedCount(), newPool.ConnectedCount(), clientCount)
-	}
-	for index := range clientCount {
-		if oldPool.ClientIds()[index] != sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 0, index)) ||
-			newPool.ClientIds()[index] != sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", 1, index)) {
-			t.Fatalf("index %d's clients are not their slots'", index)
+	names := []string{"beta", "g1", "beta-new", "g1-new"}
+	pools := []*sidecar.EdgeClientPool{}
+	for slot, name := range names {
+		pool := openPool(name, slot)
+		pools = append(pools, pool)
+		for startedSlot, startedPool := range pools {
+			if !startedPool.Ready() {
+				t.Fatalf("after %s started, %s holds %d of %d clients", name, names[startedSlot], startedPool.ConnectedCount(), clientCount)
+			}
 		}
 	}
-	sameSlotPool := openPool("same-slot", 0)
-	if !sameSlotPool.Ready() || oldPool.Ready() || oldPool.ConnectedCount() != 0 || !newPool.Ready() {
-		t.Fatalf("a process in the old one's slot: old %d, new %d, same slot %d connected", oldPool.ConnectedCount(), newPool.ConnectedCount(), sameSlotPool.ConnectedCount())
+	for slot, pool := range pools {
+		for index := range clientCount {
+			if pool.ClientIds()[index] != sidecar.Id(DeriveEdgeClientId("test", "lb-a.example", "tlsedge", slot, index)) {
+				t.Fatalf("%s's client %d is not its slot's", names[slot], index)
+			}
+		}
+	}
+	sameSlotPool := openPool("same-slot", 1)
+	if !sameSlotPool.Ready() || pools[1].Ready() || pools[1].ConnectedCount() != 0 {
+		t.Fatalf("a process in g1's slot: g1 %d, same slot %d connected", pools[1].ConnectedCount(), sameSlotPool.ConnectedCount())
+	}
+	for _, slot := range []int{0, 2, 3} {
+		if !pools[slot].Ready() {
+			t.Fatalf("a process in g1's slot took %s's clients: %d connected", names[slot], pools[slot].ConnectedCount())
+		}
 	}
 }
 
@@ -610,8 +647,8 @@ func TestPlatformClientSourceRefusesWhatItCannotRunOn(t *testing.T) {
 		func(args *PlatformClientSourceArgs) { args.Block = "" },
 		func(args *PlatformClientSourceArgs) { args.Host = "LB A" },
 		func(args *PlatformClientSourceArgs) { args.Bearer = "" },
-		// a slot api would refuse: at the slot count, or below 0
-		func(args *PlatformClientSourceArgs) { args.Slot = 2 },
+		// a slot api would refuse: at the slot count, 4, or below 0
+		func(args *PlatformClientSourceArgs) { args.Slot = 4 },
 		func(args *PlatformClientSourceArgs) { args.Slot = -1 },
 		func(args *PlatformClientSourceArgs) {
 			args.Settings = DefaultPlatformClientSourceSettings()
@@ -640,27 +677,29 @@ func TestPlatformClientSourceRefusesWhatItCannotRunOn(t *testing.T) {
 	if _, err := NewPlatformClientSource(ctx, nil); !errors.Is(err, ErrPlatformClientSource) {
 		t.Errorf("nil args: %v", err)
 	}
-	// slot 1 runs
-	args := good()
-	args.Slot = 1
-	source, err := NewPlatformClientSource(ctx, args)
-	if err != nil {
-		t.Fatalf("slot 1: %v", err)
+	// slots 1 to 3 run, as slot 0 does
+	for slot := 1; slot < 4; slot += 1 {
+		args := good()
+		args.Slot = slot
+		source, err := NewPlatformClientSource(ctx, args)
+		if err != nil {
+			t.Fatalf("slot %d: %v", slot, err)
+		}
+		source.Close()
 	}
-	source.Close()
 }
 
-// WARP_SLOT as an edge block reads it (QD-873): a slot below the slot count in one spelling, anything else
-// refused; with none set, slot 0 until the source's settings require it, then refused.
+// WARP_SLOT as an edge block reads it (QD-873, QD-1011): a slot below the slot count, 4, in one spelling, anything
+// else refused; with none set, slot 0 until the source's settings require it, then refused.
 func TestLoadEdgeClientSlotReadsOnlyASlotTheKeyAdmits(t *testing.T) {
 	settings := DefaultPlatformClientSourceSettings()
-	for value, want := range map[string]int{"0": 0, "1": 1} {
+	for value, want := range map[string]int{"0": 0, "1": 1, "2": 2, "3": 3} {
 		slot, err := parseEdgeClientSlot(value, true, settings)
 		if err != nil || slot != want {
 			t.Errorf("%q: %d %v, want %d", value, slot, err, want)
 		}
 	}
-	for _, value := range []string{"2", "-1", "+1", "01", " 1", "1 ", "x", "1.0", "0x1"} {
+	for _, value := range []string{"4", "5", "-1", "+1", "01", " 1", "1 ", "x", "1.0", "0x1"} {
 		if slot, err := parseEdgeClientSlot(value, true, settings); !errors.Is(err, ErrPlatformClientSource) {
 			t.Errorf("%q: %d %v, want refused", value, slot, err)
 		}
@@ -683,18 +722,18 @@ func TestLoadEdgeClientSlotReadsOnlyASlotTheKeyAdmits(t *testing.T) {
 	}
 	// the bound is the key settings' slot count
 	wider := DefaultPlatformClientSourceSettings()
-	wider.Key.SlotCount = 3
-	if slot, err := parseEdgeClientSlot("2", true, wider); err != nil || slot != 2 {
-		t.Errorf("2 under a slot count of 3: %d %v", slot, err)
+	wider.Key.SlotCount = 5
+	if slot, err := parseEdgeClientSlot("4", true, wider); err != nil || slot != 4 {
+		t.Errorf("4 under a slot count of 5: %d %v", slot, err)
 	}
 	// and the environment's own value is what LoadEdgeClientSlot reads
-	t.Setenv(EdgeClientSlotEnvName, "1")
-	if slot, err := LoadEdgeClientSlot(required); err != nil || slot != 1 {
-		t.Errorf("WARP_SLOT=1: %d %v", slot, err)
+	t.Setenv(EdgeClientSlotEnvName, "3")
+	if slot, err := LoadEdgeClientSlot(required); err != nil || slot != 3 {
+		t.Errorf("WARP_SLOT=3: %d %v", slot, err)
 	}
-	t.Setenv(EdgeClientSlotEnvName, "2")
+	t.Setenv(EdgeClientSlotEnvName, "4")
 	if _, err := LoadEdgeClientSlot(nil); !errors.Is(err, ErrPlatformClientSource) {
-		t.Errorf("WARP_SLOT=2: %v", err)
+		t.Errorf("WARP_SLOT=4: %v", err)
 	}
 }
 
