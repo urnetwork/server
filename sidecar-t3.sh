@@ -8,9 +8,12 @@
 #                           run every merge in sidecar/test.sh)
 #   sidecar-t3.sh nightly   the suites, then every FS row registered on T3, under §22.8's rules with the
 #                           100 nightly explorer seeds, then §22.7's scenarios and CC3's leak self-test, then
-#                           T3's cluster faults on the 4-host file-cluster
-#                           layouts (server/local/file-cluster-t3/t3.sh up; TEST-M2-07), which kill and start
-#                           hosts and so run only here, and say "not run" when the layouts do not answer, then
+#                           FS-86's card commits on the 4-host file-cluster layouts
+#                           (server/local/file-cluster-t3/t3.sh up), a whole peak hour at the Team limit's
+#                           rate held to §16.11's cards ref commits row, which is that row's reading only with
+#                           nothing else running on the machine (RECORD-M10-07; QD-1068), then T3's cluster
+#                           faults on the same layouts (TEST-M2-07), which kill and start hosts and so run
+#                           only here, the two saying "not run" when the layouts do not answer, then
 #                           §22.8's disruption rows (TEST-M2-15), which use real time and real processes, and
 #                           last FS-41's storage losses on the same layouts (EVSB-M2-20;
 #                           local/file-cluster-t3/wipe.sh), which remove every drive the layouts have and leave
@@ -27,8 +30,9 @@
 # dial outside the attested list, never port 5432, 6432 or 6379-6427. This takes no suite lock, as
 # sidecar/test.sh takes none: tests/run-all.sh holds the network-intensive lock around both.
 #
-# GO names the go command (as in GO=lowgo), TEST_TIMEOUT go test's -timeout, SIDECAR_T3_STATE_DIR where the
-# last connect pin run is kept (a lost one only reruns the rows).
+# GO names the go command (as in GO=lowgo), TEST_TIMEOUT go test's -timeout, CARD_COMMITS_TIMEOUT the card
+# commits' -timeout, past their hour, SIDECAR_T3_STATE_DIR where the last connect pin run is kept (a lost one
+# only reruns the rows).
 #
 # exit: 0 every phase that ran passed; the failing phase's status otherwise; 64 usage.
 
@@ -37,6 +41,7 @@ set -u
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 GO=${GO:-go}
 TEST_TIMEOUT=${TEST_TIMEOUT:-30m}
+CARD_COMMITS_TIMEOUT=${CARD_COMMITS_TIMEOUT:-90m}
 state_dir=${SIDECAR_T3_STATE_DIR:-${TMPDIR:-/tmp}/sidecar-t3-state}
 export WARP_TEST_ENV_FAIL_FAST=1
 tags=sidecar_testhooks,sidecar_pending
@@ -114,6 +119,18 @@ scenarios() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_leaktest" -run '^TestT3EveryStoreClassCatchesItsLeak$'
 }
 
+# FS-86's card commits on T3's 4-host layouts (RECORD-M10-07; sidecar_directory_load_layout_t3_test.go): 16 devices'
+# card writes on the one cards ref for a whole peak hour at the Team limit's rate, then its 3x burst, held to §16.11's
+# row. A miss fails the run, as a Team-limit miss blocks the gate (D-TEST-17). It runs before the cluster faults, on
+# layouts no fault has touched, and its hour is real time, so it takes CARD_COMMITS_TIMEOUT.
+card_commits() {
+  if layout_up; then
+    TEST_TIMEOUT=$CARD_COMMITS_TIMEOUT go_t3 . -tags "$tags,sidecar_filecluster_t3" -run '^TestFs86CardCommitsAtTheTeamLimitOnTheLayouts$'
+  else
+    skip "FS-86's card commits: the 4-host file-cluster layouts do not answer (local/file-cluster-t3/t3.sh up)"
+  fi
+}
+
 # QuorumLoss, DriveMiss, HostDown and HostUp on T3's 4-host layouts, which take hosts down for real.
 cluster_faults() {
   if layout_up; then
@@ -160,6 +177,7 @@ suites
 if [ "$cadence" = nightly ]; then
   rows
   scenarios
+  card_commits
   cluster_faults
   disruptions
   site_loss
