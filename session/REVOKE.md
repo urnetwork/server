@@ -1,6 +1,6 @@
 # REVOKE — sign-in sessions: tracking, listing and revocation
 
-Status: design, 2026-10-09. Nothing here is implemented yet.
+Status: design, 2026-10-09. Superseded where they differ by [REVOKE-FINAL.md](REVOKE-FINAL.md) and its decision notes. The current plan is REVOKE-FINAL.md §15 (2026-11-18). In particular, §5.3's fail-closed 503 on Redis errors is replaced by accept and alert, and §4.4's cap by a 5,000-session limit in config that ships unenforced.
 
 A user who thinks someone else is using their account (support inbox item
 7881) cannot see where the account is signed in, and cannot cut one sign-in

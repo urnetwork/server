@@ -42,8 +42,8 @@ func TestWarpctlLog429ResponseShapeCausal(t *testing.T) {
 		tailer.clock = func() time.Time { return now }
 		tailer.startedAt = now.Add(-time.Minute)
 		tailer.recordReconcile(now.Add(-2*time.Minute), fmt.Errorf("private-selector: %w", err))
-		_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
-		finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError)
+		_, _, lastSuccess, latest, lastError := tailer.reconcileSnapshot()
+		finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError)
 		alert := alertFromFinding(syntheticSettings(&syntheticSource{}), "1.5", "log-errors", "Log errors", finding)
 		if alert.SignalID != "monitor/visibility" || alert.Class != "tailer-reconcile" || alert.Target != "logs/fixture-service" || alert.Frame != "" || alert.Severity != SeverityWarn || alert.Sustain != 2 {
 			t.Fatal("response hint changed the visibility identity")
@@ -52,9 +52,9 @@ func TestWarpctlLog429ResponseShapeCausal(t *testing.T) {
 			t.Fatal("reconciliation discarded the fixed response hint")
 		}
 		requireAlertOmits(t, alert, "private-selector", test.body, "panic:", "/synthetic/")
-		tailer.recordReconcile(now.Add(-time.Minute), nil)
-		_, _, lastSuccess, lastError = tailer.reconcileSnapshot()
-		if !tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError).healthy {
+		tailer.recordReconcile(now.Add(-logReconcileLookback), nil)
+		_, _, lastSuccess, latest, lastError = tailer.reconcileSnapshot()
+		if !tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError).healthy {
 			t.Fatal("subsequent healthy reconciliation did not clear the original identity")
 		}
 	}

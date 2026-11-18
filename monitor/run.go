@@ -191,6 +191,7 @@ func (m *Monitor) prepareRunLoop(ctx context.Context) ([]Signal, []*logTailer, e
 			tailers:              tailers,
 			monitorRouteEvidence: collectTailTransportMonitorRouteEvidence,
 			reconcileDiagnostics: os.Stderr,
+			activityDiagnostics:  os.Stderr,
 		},
 		accept: logSignal.accept,
 	}
@@ -306,6 +307,12 @@ func (self *Monitor) runExecutionLoop(ctx context.Context, options RunLoopOption
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if self.settings.APIReleaseProof == nil && isApiReleaseProofSignal(signal) {
+				// Selection alone does not arm a release expectation. A watcher
+				// focused on this idle signal still lives until cancellation.
+				<-ctx.Done()
+				return
+			}
 			standingLogSignal := isStandingLogSignal(signal)
 			startupSample := startupSampleDone != nil && signal.ID() == "pg/query-sample"
 			initialDelay := options.MinimumProbeCadence

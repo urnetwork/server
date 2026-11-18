@@ -134,7 +134,13 @@ func runMimirShellCommand(parent context.Context, name string, args []string, st
 		return "", "", &observationBoundaryError{err: &mimirShellOutputError{stream: stream}, boundary: boundary}
 	}
 	if err != nil {
-		return "", "", &observationBoundaryError{err: &mimirShellNativeError{err: err, stderr: stderr.buffer.String()}, boundary: boundary}
+		// The SSH classifier requires empty native stdout. Failed body bytes
+		// stay private, so decide eligibility before discarding them.
+		failure := &mimirShellNativeError{err: err}
+		if stdout.buffer.Len() == 0 {
+			failure.stderr = stderr.buffer.String()
+		}
+		return "", "", &observationBoundaryError{err: failure, boundary: boundary}
 	}
 	return stdout.buffer.String(), "", nil
 }

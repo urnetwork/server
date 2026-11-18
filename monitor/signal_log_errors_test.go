@@ -94,6 +94,36 @@ func TestPanicOwnerLongErrorRetainsPrivateSafeDiscriminator(t *testing.T) {
 	}
 }
 
+// These six independent synthetic operations each produce one diagnostic.
+// The aggregate keeps the first owner's sample and the other owner pages at five.
+func TestPanicLogRateCountsDiagnosticsAcrossOwners(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	for index, owner := range []string{"First", "Second", "Second", "Second", "Second", "Second"} {
+		errorText := fmt.Sprintf("synthetic operation %d", index)
+		tailer.classify(panicOwnerTestLine(t, errorText, "github.com/urnetwork/server/model."+owner))
+	}
+	alerts := panicOwnerTestAlerts(t, tailer)
+	if len(alerts) != 2 {
+		t.Fatal("six diagnostics across two owners must page the service and its five-line owner")
+	}
+	for _, test := range []struct {
+		frame string
+		owner string
+		rate  string
+	}{
+		{"", "server/model.First", "rate=6/min"},
+		{"server/model.Second", "server/model.Second", "rate=5/min"},
+	} {
+		alert := alerts[test.frame]
+		if !strings.Contains(alert.Observed, test.rate) || !strings.Contains(alert.Evidence, "sample: panic owner="+test.owner+" ") {
+			t.Fatal("aggregate or owner count and first sample changed")
+		}
+		if !strings.Contains(alert.Baseline, "panic-shaped diagnostic lines") || strings.Contains(alert.Markdown(), "volume is retry amplification") {
+			t.Fatal("panic baseline assigns retries to independent diagnostic lines")
+		}
+	}
+}
+
 // Independent owner thresholds cannot split the original service-wide page.
 func TestPanicOwnerMixedThreePlusTwoPreservesAggregate(t *testing.T) {
 	tailer := newLogTailer("api", nil)

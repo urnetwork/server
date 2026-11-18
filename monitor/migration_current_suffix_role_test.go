@@ -1,5 +1,5 @@
-// A role policy can hold before its migration when that migration explicitly
-// skips the pool role. This changes no production catalog predicate or lifetime.
+// A published predicate can hold early when a migration skips the pool role
+// or a data migration checks an existing table.
 package monitor
 
 import (
@@ -22,9 +22,12 @@ func migrationPoolRoleSuperuserForTest(t testing.TB, ctx context.Context) bool {
 	return superuser
 }
 
-// Only the published transaction-bound predicate explicitly treats an
-// unbounded superuser as satisfied. Every other future artifact stays absent.
+// The backfill checks its target table from the schema migration onward.
+// The transaction bound accepts a superuser even before its migration.
 func migrationCurrentSuffixExpectedPresenceForTest(artifact migrationArtifact, head int, poolRoleSuperuser bool) bool {
+	if artifact.requiredVersion == deletedNetworkBackfillMigrationContract.artifact.requiredVersion {
+		return deletedNetworkMigrationContract.artifact.requiredVersion <= head
+	}
 	return artifact.requiredVersion <= head || poolRoleSuperuser &&
 		artifact.requiredVersion == server.CodeMigrationVersion(server.ApplicationTransactionTimeoutMigrationId)
 }

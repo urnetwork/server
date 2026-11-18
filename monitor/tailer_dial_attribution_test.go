@@ -8,7 +8,103 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server"
 )
+
+// The API scrubs addresses before its logs reach a collector. The first
+// exemplar retains only its port. Other destinations still share the count.
+func TestDialTimeoutCountsApiDiagnosticsScrubbedAtSource(t *testing.T) {
+	lines := []string{}
+	for i := range 11 {
+		destination := "[2001:db8::2]:7443"
+		if i == 0 {
+			destination = "198.51.100.20:6384"
+		}
+		line := fmt.Sprintf("sequence=%d caller=192.0.2.1:40000 dial tcp %s: i/o timeout", i, destination)
+		lines = append(lines, server.ScrubAddrsText(line))
+	}
+	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
+		if len(args) > 1 && args[0] == "ls" {
+			return "repo names synthetic-api", nil
+		}
+		return strings.Join(lines, "\n"), nil
+	}}
+	alerts, err := NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "dial-io-timeout")
+	if alert.Target != "api" || alert.Frame != "[scrubbed]:6384" || alert.Severity != SeverityPage ||
+		!strings.Contains(alert.Observed, "rate=11/min") {
+		t.Fatalf("scrubbed API diagnostics lost their count or first exemplar: %s", alert.Observed)
+	}
+	for _, value := range []string{"192.0.2.1", "198.51.100.20", "2001:db8", "40000", "7443", "sequence="} {
+		requireAlertOmits(t, alert, value)
+	}
+}
+
+// A delay reported for reading an established connection does not change an
+// earlier dial refusal into a dial timeout. Preserve the refusal's own page.
+func TestDialTimeoutRequiresTimeoutOfTheDial(t *testing.T) {
+	for _, destination := range []string{"198.51.100.20:6384", "[scrubbed]:6384"} {
+		tailer := newLogTailer("api", nil)
+		for range 10 {
+			tailer.classify("dial tcp " + destination + ": connect: connection refused; later read: i/o timeout")
+		}
+		findings := tailer.drainWindow()
+		if !findingByClass(t, findings, "dial-io-timeout").healthy || findingByClass(t, findings, "connection-refused").healthy {
+			t.Fatal("an unrelated read timeout displaced a dial refusal")
+		}
+	}
+}
+
+// A missing endpoint or terminal error does not supply the tenth diagnostic.
+func TestDialTimeoutScrubbedSourceBelowThreshold(t *testing.T) {
+	tailer := newLogTailer("api", nil)
+	for range 9 {
+		tailer.classify("dial tcp [scrubbed]:6384: i/o timeout")
+	}
+	for _, line := range []string{
+		"dial tcp [scrubbed]:6384: connected",
+		"dial tcp [scrubbed]: i/o timeout",
+		"read tcp [scrubbed]:6384: i/o timeout",
+	} {
+		tailer.classify(line)
+	}
+	if !findingByClass(t, tailer.drainWindow(), "dial-io-timeout").healthy {
+		t.Fatal("a partial or different operation crossed the dial diagnostic threshold")
+	}
+}
+
+// A dial with a bound local address names its destination after the arrow.
+// New IPv6 forms retain only their port, including on an interface-scoped link.
+func TestDialTimeoutEndpointForms(t *testing.T) {
+	for _, tc := range []struct {
+		line  string
+		frame string
+	}{
+		{"dial tcp4 192.0.2.1:1000->198.51.100.2:6384: connect: i/o timeout", "198.51.100.2:6384"},
+		{"dial tcp [scrubbed]:1000->[scrubbed]:6416: i/o timeout", "[scrubbed]:6416"},
+		{"dial tcp6 [2001:db8::2]:6416: i/o timeout", "[scrubbed]:6416"},
+		{"dial tcp6 [fe80::1%synthetic]:6416: i/o timeout", "[scrubbed]:6416"},
+		{"dial tcp [scrubbed]:99999: i/o timeout", ""},
+		{"dial tcp 999.999.999.999:6416: i/o timeout", ""},
+		{"dial tcp6 [2001:db8::1]:443: i/o timeout; dial tcp4 192.0.2.1:80: i/o timeout", ""},
+	} {
+		tailer := newLogTailer("api", nil)
+		for range 10 {
+			tailer.classify(tc.line)
+		}
+		finding := findingByClass(t, tailer.drainWindow(), "dial-io-timeout")
+		if finding.healthy || finding.frame != tc.frame || !strings.Contains(finding.observed, "rate=10/min") {
+			t.Errorf("dial shape %q: got healthy=%t frame=%q", tc.line, finding.healthy, finding.frame)
+		}
+		if !strings.Contains(finding.baseline, "Unique attempts, retries and failed operations are unknown") {
+			t.Error("a diagnostic count was attributed to retries or operations")
+		}
+	}
+}
 
 // An earlier caller or metadata endpoint must not replace the matched dial.
 func TestDialTimeoutFrameUsesMatchedDestination(t *testing.T) {

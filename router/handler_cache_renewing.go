@@ -19,6 +19,29 @@ import (
 // created_time says how old the answer is.
 const handlerCacheLastGoodTtl = 15 * time.Minute
 
+// A renewing key's fresh value lives longer the longer its fill took:
+// handlerCacheRenewingValueTtlFactor times the fill, and never shorter than
+// the key's own ttl. It stays within handlerCacheRenewingValueTtlLimit, and at
+// least one fill budget inside the last good value's lifetime, so a refresh
+// that starts when the value expires can run its whole budget while the last
+// good value still answers (cacheJsonWithRenewingFill).
+//
+// Before 2026-11-18 every value lived the key's ttl (30 s for the provider
+// list) however long its fill took, and a once-a-minute poller started a new
+// fill on every request: for the largest networks, a fill of a minute or more
+// of database reads, back to back.
+const (
+	handlerCacheRenewingValueTtlFactor = 4
+	handlerCacheRenewingValueTtlLimit  = 5 * time.Minute
+)
+
+// The lifetime of a value its fill took fillDuration to produce. A fill
+// that takes a quarter of the ttl or less keeps the ttl unchanged.
+func renewingHandlerCacheValueTtl(ttl time.Duration, fillTimeout time.Duration, fillDuration time.Duration) time.Duration {
+	limit := min(handlerCacheRenewingValueTtlLimit, handlerCacheLastGoodTtl-fillTimeout)
+	return max(ttl, min(handlerCacheRenewingValueTtlFactor*fillDuration, limit))
+}
+
 // Only explicitly selected expensive handlers renew their fill ownership.
 // Ordinary cache callers retain their existing lease-expiry behavior.
 type handlerCacheRenewingStore interface {
@@ -58,6 +81,11 @@ type handlerCacheRenewingAttempt struct {
 	key   string
 	token string
 	ttl   time.Duration
+	// the key's own value ttl and fill budget, and how long this attempt's
+	// fill took; a fill that did not run leaves it zero
+	valueTtl     time.Duration
+	fillTimeout  time.Duration
+	fillDuration time.Duration
 }
 
 func (self *handlerCacheRenewingAttempt) acquire(
@@ -71,7 +99,9 @@ func (self *handlerCacheRenewingAttempt) acquire(
 }
 
 // A publication also keeps its value as the key's last good answer. That write
-// is best effort: losing it leaves the previous last good answer in place.
+// is best effort: losing it leaves the previous last good answer in place. The
+// value lives as long as its fill's cost allows (renewingHandlerCacheValueTtl),
+// with the same jitter as the key's own ttl.
 func (self *handlerCacheRenewingAttempt) publish(
 	ctx context.Context,
 	keys handlerCacheKeys,
@@ -79,6 +109,9 @@ func (self *handlerCacheRenewingAttempt) publish(
 	value string,
 	ttl time.Duration,
 ) (bool, error) {
+	if grown := renewingHandlerCacheValueTtl(self.valueTtl, self.fillTimeout, self.fillDuration); self.valueTtl < grown {
+		ttl = max(ttl, handlerCacheValueTtl(grown))
+	}
 	published, err := self.handlerCacheRenewingStore.publish(ctx, keys, token, value, ttl)
 	if err == nil && published {
 		_ = self.handlerCacheRenewingStore.set(ctx, keys.last, value, handlerCacheLastGoodTtl, false)
@@ -176,18 +209,50 @@ func renewingHandlerCacheFill[R any](
 		}
 	}
 	defer stop()
-	value, fillErr := fill(fillCtx)
+	fillStarted := time.Now()
+	value, fillErr := callRenewingHandlerCacheFill(fillCtx, fill)
+	attempt.fillDuration = time.Since(fillStarted)
 	stop()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	if fillCtx.Err() == context.DeadlineExceeded {
+		glog.Infof("[h]renewing cache fill ended at its %s budget\n", fillTimeout)
 		return nil, context.DeadlineExceeded
 	}
 	if renewalErr != nil {
 		return nil, &handlerCacheUnavailableError{}
 	}
 	return value, fillErr
+}
+
+// The db layer ends work whose context has ended by raising its done stop
+// (server.DbContextDoneError) instead of returning an error. When the fill's
+// own context has ended (the owner budget, or the cancel of a lost renewal),
+// that raise is this owner's own stop, which renewingHandlerCacheFill
+// classifies, and the fill returns the context's error. Any other raise, and
+// a done stop while the fill context is live (a narrower context of the
+// fill's own), is raised again unchanged.
+//
+// Before 2026-11-18 the stop escaped as a panic: the largest network's
+// provider list ran into its 2-minute budget in the database every ~3
+// minutes, and each time the api logged "[h]renewing cache fill panic: Done"
+// with a stack, and a caller still waiting had the panic raised in it.
+func callRenewingHandlerCacheFill[R any](
+	fillCtx context.Context,
+	fill func(context.Context) (*R, error),
+) (value *R, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			stop, ok := recovered.(error)
+			ended := fillCtx.Err()
+			if !ok || ended == nil || !(errors.Is(stop, server.DbContextDoneError) || errors.Is(stop, ended)) {
+				panic(recovered)
+			}
+			value, err = nil, ended
+		}
+	}()
+	return fill(fillCtx)
 }
 
 // A miss of a renewing key is answered from a fill its caller cannot cancel.
@@ -292,7 +357,7 @@ func runRenewingHandlerCacheAttempt[R any](
 		case <-abandoned:
 		}
 	}()
-	attempt := &handlerCacheRenewingAttempt{handlerCacheRenewingStore: store}
+	attempt := &handlerCacheRenewingAttempt{handlerCacheRenewingStore: store, valueTtl: ttl, fillTimeout: fillTimeout}
 	outcome.value, outcome.err = cacheJson(ctx, attempt, key, ttl, func() (*R, error) {
 		return renewingHandlerCacheFill(ctx, attempt, fillTimeout, fill)
 	})

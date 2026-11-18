@@ -1180,7 +1180,12 @@ Require `collectors=enabled=fresh=consecutive_two > 0`, matching the intended
 collector inventory. Check `collector_started_at`, `previous_window_start`,
 `latest_window_start`, `previous_completed_at`, and `latest_completed_at`:
 their oldest/newest ranges must be non-null, ordered, advancing, and meet the
-incident's post-boundary window. Bind the receipt to the immutable binary,
+incident's post-boundary window. For a watcher built with fixed-end
+reconciliation, verify that the paired Warpctl accepts the explicit exclusive
+`--until` for bounded Grafana logs. The source cutoff for each such query
+is its original lower bound plus two minutes. A completed historical window
+and two disjoint source intervals leave current overlapping coverage unverified.
+Bind the receipt to the immutable binary,
 durable session, and stderr object; never combine predecessor and candidate
 histories. Query lower bounds and local completions do not establish fresh
 source-record timestamps or live-stream liveness; retain those independent
@@ -1201,6 +1206,14 @@ silently rewrite aggregate booleans. An older retained scope Alert is not a
 same-receipt row. Update version-aware readers before promotion; never
 reconstruct predecessor scope rows from aggregate ranges. See `SIGNALS.md`
 §1.5 and `MONITOR.md` §3.7 for the fixed schema.
+
+For an active-versus-idle question, use the separately framed
+`monitor-log-reconcile-activity ` schema-1 diagnostic from the same watcher.
+Join by observation time, public service key and collector start. Compare
+page counts only within one attempt number and collector generation. A page
+return records local progress. A repeated count, missing companion, or idle
+interval supplies no HTTP timing or coverage proof. Continue to use the
+coverage receipt for the two-window gate.
 
 A passive local reader of retained stderr may select a bounded recent window
 under its unchanged total source-content read budget, including any witness

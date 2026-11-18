@@ -82,13 +82,13 @@ func AuthConnect(w http.ResponseWriter, r *http.Request) {
  * Apple webhook handling
  */
 
-// Every notification ends in one outcome (controller/store_notification_flow.go):
+// The handler records notification outcomes (controller/store_notification_flow.go):
 // refused_malformed for an envelope that is not one, refused_unavailable when
 // apple.yml cannot build the verifier (503, logged as a fail-closed
 // refusal), refused_signature for a JWS that does not verify against the
-// pinned roots, refused_claims for a verified notification of another app,
-// environment or version, error when a verified notification could not be
-// processed, and accepted.
+// pinned roots, refused_claims for rejected decoded claims or missing required
+// data after the outer signature passed, error for a returned processing
+// failure after verification, and accepted.
 func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	const maxAppleNotificationBytes int64 = 1024 * 1024
 	outcome := func(outcome string) {
@@ -136,8 +136,7 @@ func AppleNotification(w http.ResponseWriter, r *http.Request) {
 	notification, err := verifier.verifyNotification(payload.SignedPayload)
 	if err != nil {
 		glog.Infof("[apple] Rejected notification: %v", err)
-		// a JWS that does not verify, or a verified notification whose claims
-		// are not this app's
+		// An outer or nested signature failure has its own outcome.
 		var signatureErr *appleSignatureError
 		if errors.As(err, &signatureErr) {
 			outcome(controller.StoreNotificationRefusedSignature)

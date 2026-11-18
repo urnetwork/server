@@ -33,18 +33,28 @@ var revokingStatementOwners = map[string]struct {
 	hooks  []string
 	reason string
 }{
-	"model/network_client_model.go:deactivateLockedNetworkClientsInTx": {hooks: []string{"RevokeClientRecordsInTx"}},
+	// the write of deactivateLockedNetworkClientsInTx, which only calls it
+	// since da2872676
+	"model/network_client_model.go:deactivateLockedNetworkClientsCountedInTx": {hooks: []string{"RevokeClientRecordsInTx"}},
 	// the abandoned top-level mark and the stale child reap end active
 	// clients; its inactive reap deletes only rows already ended
 	"model/network_client_model.go:RemoveDisconnectedNetworkClients":              {hooks: []string{"RevokeNetworkClientRecordsInTx", "RevokeRetiredClientRecordsInTx"}},
 	"model/network_client_retired_hosted.go:removeRetiredHostedNetworkClientsSql": {reason: "deletes only rows already inactive (NOT locked.active)"},
+	// the account deletion cleanup's hard delete (da2872676): its relock takes
+	// only clients of the deleted network that are inactive and past the reap
+	// delay, which their deactivation (deactivateDeletedNetworkClients, through
+	// the locked writer) already tombstoned
+	"model/network_deletion_cleanup.go:removeDeletedNetworkClients": {reason: "deletes only rows its relock finds inactive (NOT active), of a network already deleted"},
+	// the prober retention's window clients (5c35034b4), each retired when its
+	// tunnel closed
+	"model/prober_shard_window_clients.go:proberShardWindowDeleteSql": {reason: "deletes only rows already inactive (NOT client.active), locked in its CTE"},
 	// the 2-day hosted proxy reap (91f14f258): its delete re-checks, under the
 	// row lock, that the client is inactive and was deactivated before the
 	// horizon, so the deactivation already tombstoned it
 	// (TestHostedProxyReapDeleteEndsNoLiveCredential)
 	"model/network_client_hosted_proxy_reap.go:removeHostedProxyClientsSql": {reason: "deletes only rows already inactive (NOT locked.active), deactivated before the reap horizon"},
 	"model/prober_shard_model.go:reapProberShard":                           {hooks: []string{"RetireNetworkRecords"}},
-	"model/account_model.go:RemoveNetworkWithStoreSnapshot":                 {hooks: []string{"RetireNetworkRecords"}},
+	"model/account_model.go:RemoveNetworkWithRemovals":                      {hooks: []string{"RetireNetworkRecords"}},
 	"model/lag_guest_model.go:removeExpiredLagGuest":                        {hooks: []string{"RetireNetworkRecords"}},
 	"model/auth_model.go:AuthPasswordSet":                                   {hooks: []string{"RotateCredentialRecordsInTx"}},
 	// bringyourctl network sign-out-all runs the password reset's rotation

@@ -24,6 +24,12 @@ const (
 )
 
 var alertClassKinds = map[string]alertClassKind{
+	hostedSetupSlow:                        incidentAlertClass,
+	hostedSetupUnknown:                     visibilityAlertClass,
+	apiRouteErrorsClass:                    incidentAlertClass,
+	apiRouteErrorsUnknown:                  visibilityAlertClass,
+	connectHandshakeClass:                  incidentAlertClass,
+	connectHandshakeUnknownClass:           visibilityAlertClass,
 	"contract-failure-share":               incidentAlertClass,
 	"contract-failure-share-unobservable":  visibilityAlertClass,
 	"contract-stage-inflight-high":         incidentAlertClass,
@@ -48,6 +54,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"gossip-mesh-links-dropped":             incidentAlertClass,
 	"gossip-mesh-saturated":                 incidentAlertClass,
 	"gossip-mesh-unobservable":              visibilityAlertClass,
+	deliveredTrafficClass:                   incidentAlertClass,
+	deliveredTrafficUnknownClass:            visibilityAlertClass,
 	"provider-fleet-departure":              incidentAlertClass,
 	"provider-fleet-departure-unobservable": visibilityAlertClass,
 	// SIGNALS.md §26 backlog and storm signals
@@ -624,6 +632,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"provider-picker-read-or-request-error":               incidentAlertClass,
 	"provider-selection-cache-missing":                    incidentAlertClass,
 	"provider-selection-cache-page-gap":                   incidentAlertClass,
+	"provider-selection-empty-after-prefilter":            incidentAlertClass,
 	"provider-selection-empty-despite-eligible":           incidentAlertClass,
 	"provider-supply-ineligible":                          incidentAlertClass,
 	"provider-tunnel-read-done":                           incidentAlertClass,

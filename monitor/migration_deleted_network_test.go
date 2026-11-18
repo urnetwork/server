@@ -27,6 +27,26 @@ func deletedNetworkTestOwner(t *testing.T, version int) string {
 	return fmt.Sprintf("%s@v%d", migrationCurrentSuffixTestContract(t, version).artifact.name, version)
 }
 
+// The backfill reuses the deleted-account table. Its predicate first holds
+// with that table, while the move table first appears at its own version.
+func TestMigrationsDeletedNetworkBackfillPrefixExpectations(t *testing.T) {
+	deleted, move, backfill := deletedNetworkTestVersions(t)
+	for _, test := range []struct{ version, firstPresent int }{
+		{version: deleted, firstPresent: deleted},
+		{version: move, firstPresent: move},
+		{version: backfill, firstPresent: deleted},
+	} {
+		artifact := migrationCurrentSuffixTestContract(t, test.version).artifact
+		for head := deleted - 1; head <= backfill; head++ {
+			for _, superuser := range []bool{false, true} {
+				if got := migrationCurrentSuffixExpectedPresenceForTest(artifact, head, superuser); got != (test.firstPresent <= head) {
+					t.Fatalf("artifact %d at prefix %d (superuser %t) reads %t, first present at %d", test.version, head, superuser, got, test.firstPresent)
+				}
+			}
+		}
+	}
+}
+
 // Each contract pins every column and key it publishes, so a rolled-back shape
 // of any of them is drift its migration owns.
 func TestMigrationsDeletedNetworkContractsNameTheirArtifacts(t *testing.T) {
@@ -143,17 +163,15 @@ func TestMigrationsDeletedNetworkPublishedSchemaAndFaults(t *testing.T) {
 		if rows[head] == nil {
 			t.Fatalf("the schema at %d was not observed", head)
 		}
+		if got := migrationBool(rows[head][column(backfill)]); got != (deleted <= head) {
+			t.Fatalf("the backfill target at prefix %d reads %t, first present at %d", head, got, deleted)
+		}
 	}
 	if rows[deleted-1][column(deleted)] != "f" || rows[deleted][column(deleted)] != "t" {
 		t.Fatalf("the record of deleted accounts reads %q one version behind and %q at its version", rows[deleted-1][column(deleted)], rows[deleted][column(deleted)])
 	}
 	if rows[deleted][column(move)] != "f" || rows[move][column(move)] != "t" {
 		t.Fatalf("the moves read %q one version behind and %q at their version", rows[deleted][column(move)], rows[move][column(move)])
-	}
-	// the backfill writes into the table 992 published, so it reads present
-	// from 992 on; at its own version it must
-	if rows[backfill][column(backfill)] != "t" {
-		t.Fatalf("the backfilled record reads %q at its version", rows[backfill][column(backfill)])
 	}
 	verifyCohortCensusRequireAlerts(t, "pending record of deleted accounts", deleted-1, alertsAt[deleted-1], false, deletedOwner)
 	verifyCohortCensusRequireAlerts(t, "published record of deleted accounts", deleted, alertsAt[deleted], false, deletedOwner)

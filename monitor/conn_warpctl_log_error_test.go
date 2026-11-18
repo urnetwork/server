@@ -74,8 +74,8 @@ func TestWarpctlLogQueryReconciliationKeepsSafeFailureClass(t *testing.T) {
 	tailer.clock = func() time.Time { return now }
 	tailer.startedAt = now.Add(-time.Minute)
 	tailer.recordReconcile(now.Add(-2*time.Minute), fmt.Errorf("block fixture-private-selector continuation: %w", queryErr))
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
-	finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError)
+	_, _, lastSuccess, latest, lastError := tailer.reconcileSnapshot()
+	finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError)
 	alert := alertFromFinding(syntheticSettings(&syntheticSource{}), "1.5", "log-errors", "Log errors", finding)
 	if alert.SignalID != "monitor/visibility" || alert.Class != "tailer-reconcile" ||
 		alert.Target != "logs/fixture-service" || alert.Frame != "" || alert.Sustain != 2 || alert.Severity != SeverityWarn {
@@ -85,9 +85,9 @@ func TestWarpctlLogQueryReconciliationKeepsSafeFailureClass(t *testing.T) {
 		t.Error("standing reconciliation lost the fixed query-failure cause")
 	}
 	requireAlertOmits(t, alert, "fixture-private-response", "fixture-private-selector", "partial remote data", "panic:")
-	tailer.recordReconcile(now.Add(-time.Minute), nil)
-	_, _, lastSuccess, lastError = tailer.reconcileSnapshot()
-	if restored := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError); !restored.healthy {
+	tailer.recordReconcile(now.Add(-logReconcileLookback), nil)
+	_, _, lastSuccess, latest, lastError = tailer.reconcileSnapshot()
+	if restored := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError); !restored.healthy {
 		t.Fatal("a subsequent complete query did not clear the same visibility identity")
 	}
 }

@@ -33,7 +33,7 @@ func migrationCurrentSuffixContractsInVersionOrder(contracts []snMainnetMigratio
 
 func migrationCurrentSuffixArtifacts() []migrationArtifact {
 	artifacts := make([]migrationArtifact, 0, len(migrationCurrentSuffixContracts))
-	for _, contract := range migrationCurrentSuffixContractsInVersionOrder(migrationCurrentSuffixContracts) {
+	for _, contract := range migrationCurrentSuffixContracts {
 		artifacts = append(artifacts, contract.artifact)
 	}
 	return artifacts
@@ -75,7 +75,7 @@ func migrationCurrentSuffixVersionQueries(contracts []snMainnetMigrationContract
 	return strings.Join(queries, ",\n")
 }
 
-var migrationCurrentSuffixContracts = slices.Concat(
+var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOrder(slices.Concat(
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(794, "tiered extender directory and release custody",
 			snMainnetMigrationColumns("network_extender",
@@ -1096,7 +1096,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		competitionSilleStorageRecoveryMigrationContract.removedAt(server.CompetitionEpochThreeSourceRecoveryMigrationVersion()),
 		competitionEpochThreeSourceRecoveryMigrationContract,
 	},
-)
+))
 
 // Free space a table keeps on every page it writes, so an update of an
 // unindexed column can stay on its page (HOT) instead of writing index entries.

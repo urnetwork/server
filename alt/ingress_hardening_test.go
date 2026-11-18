@@ -185,3 +185,69 @@ func TestAltFrontsCountAForgedForwardedForOnce(t *testing.T) {
 		}
 	}
 }
+
+// SIGNALS.md §25.3. The status listener exports its own 503. Its unmatched
+// paths share a 404 child with the embedded API. The public status refusal
+// happens outside either router's metrics.
+func TestAltRouteMetricsSeparateStatusListenerFromCustomerRoute(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fail := func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }
+	front := newApiFrontHandler(router.NewRouter(ctx, []*router.Route{
+		router.NewRoute("GET", "/status", fail), router.NewRoute("GET", "/network/user", fail),
+	}), NewLimits(ctx, testLimitsSettings(t)))
+	status := newStatusHandler(ctx, &Alt{})
+	// These are the only fixed children the check reads from the registry.
+	counts := func() map[string]float64 {
+		t.Helper()
+		families, err := prometheus.DefaultGatherer.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]float64{}
+		for _, family := range families {
+			if family.GetName() != "urnetwork_http_requests_total" {
+				continue
+			}
+			for _, metric := range family.GetMetric() {
+				route, code := "", ""
+				for _, label := range metric.GetLabel() {
+					switch label.GetName() {
+					case "route":
+						route = label.GetValue()
+					case "status":
+						code = label.GetValue()
+					}
+				}
+				switch route {
+				case "GET ^/status$", "GET ^/network/user$", "not_found":
+					got[route+" "+code] += metric.GetCounter().GetValue()
+				}
+			}
+		}
+		return got
+	}
+	before := counts()
+	for i, tc := range []struct {
+		handler http.Handler
+		path    string
+		code    int
+	}{
+		{front, "/status", 404}, {status, "/status", 503}, {front, "/network/user", 503},
+		{status, "/unknown", 404}, {front, "/unknown", 404},
+	} {
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req.RemoteAddr = fmt.Sprintf("198.51.100.%d:53000", i+1)
+		response := httptest.NewRecorder()
+		tc.handler.ServeHTTP(response, req)
+		if response.Code != tc.code {
+			t.Fatalf("request %d returned %d", i, response.Code)
+		}
+	}
+	after := counts()
+	for key, want := range map[string]float64{"GET ^/status$ 503": 1, "GET ^/status$ 404": 0, "GET ^/network/user$ 503": 1, "not_found 404": 2} {
+		if delta := after[key] - before[key]; delta != want {
+			t.Errorf("fixed child %s advanced by %v, want %v", key, delta, want)
+		}
+	}
+}

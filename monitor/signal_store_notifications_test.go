@@ -261,12 +261,15 @@ func TestLogErrorsSignalClassifiesStoreNotificationLines(t *testing.T) {
 	prefix := "W1112 19:29:42.879518       1 store_notification_flow.go:160] "
 
 	for _, test := range []struct {
-		line  string
-		frame string
+		line    string
+		frame   string
+		meaning string
 	}{
-		{line: prefix + "[store-notification]google refused_audience", frame: "store=google outcome=refused_audience"},
-		{line: prefix + "[store-notification]apple refused_claims", frame: "store=apple outcome=refused_claims"},
-		{line: prefix + "[store-notification]google error", frame: "store=google outcome=error"},
+		{line: prefix + "[store-notification]google refused_audience", frame: "store=google outcome=refused_audience", meaning: "matched the configured publisher"},
+		{line: prefix + "[store-notification]apple refused_claims", frame: "store=apple outcome=refused_claims", meaning: "Missing required data"},
+		{line: prefix + "[store-notification]apple error", frame: "store=apple outcome=error", meaning: "processing returned an error"},
+		{line: prefix + "[store-notification]google error", frame: "store=google outcome=error", meaning: "before publisher verification"},
+		{line: prefix + "[store-notification]apple refused_audience", frame: "store=apple outcome=refused_audience", meaning: "stage for this combination is unknown"},
 	} {
 		alert := requireAlertClass(t, run([]string{test.line}), "store-notification-refused")
 		if alert.Severity != SeverityPage {
@@ -274,6 +277,13 @@ func TestLogErrorsSignalClassifiesStoreNotificationLines(t *testing.T) {
 		}
 		if !strings.Contains(alert.Observed, test.frame) {
 			t.Fatalf("%s: not framed by %q: %s", test.line, test.frame, alert.Observed)
+		}
+		if !strings.Contains(alert.Evidence, test.meaning) || !strings.Contains(alert.Evidence, "sample: [store-notification]"+test.frame) {
+			t.Errorf("%s: missing the producer stage or fixed sample", test.frame)
+		}
+		if !strings.Contains(alert.Baseline, "Retry count and purchase impact are unknown") ||
+			!strings.Contains(alert.Context, "independent receipts") {
+			t.Errorf("%s: missing the diagnostic count or delivery boundary", test.frame)
 		}
 	}
 

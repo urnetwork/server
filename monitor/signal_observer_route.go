@@ -331,21 +331,24 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) (findin
 		sort.Strings(exits)
 		findings = append(findings, finding{
 			probeId: observerRouteProbeId, tier: tierWarn, class: "observer-route-diverted", target: target, sustain: settings.Sustain,
-			symptom:   fmt.Sprintf("The monitor host's route to %d inventory overlay address(es) is outside its observer contract", len(broken)),
-			mechanism: "Every overlay observation of these hosts leaves the monitor host through an interface or gateway the operator's observer_overlay contract does not name, or has no route at all. A broken local tunnel sends them to the LAN or default route; until it is restored, their SSH failures and stale tails are observation-path loss, not production faults.",
-			baseline:  "Every enabled inventory overlay address routes through a contract interface or gateway.",
-			observed:  counts + " diverted_exit_interfaces=[" + strings.Join(exits, ",") + "]",
-			evidence:  "Monitor-local route lookups only (route get / ip route get); no host was contacted. Affected inventory hosts: diverted=[" + strings.Join(hostStates[observerRouteDiverted], ",") + "] absent=[" + strings.Join(hostStates[observerRouteAbsent], ",") + "]. Addresses and gateways stay private.",
-			context:   "Correlate cannot-observe and stale-tail findings for the listed hosts from the same minutes: they are local observation-path candidates. A route sample cannot establish when the path broke or that every earlier failure shared it, and a conforming route does not prove the tunnel delivers packets.",
-			action:    "Restore the intended observer route or VPN session on the monitor host under the workstation operator's authority, then rerun the affected signals. Do not restart production services, deploy, or mutate a VPN merely to improve this observation; never contact disabled hosts.",
-			verify:    "Two consecutive observations with every overlay address on a contract route, and every affected target supplying a concrete healthy or broken observation again.",
-			playbook:  "SIGNALS.md §1.7",
+			scopeEvidenceHostName: broken[0],
+			symptom:               fmt.Sprintf("The monitor host's route to %d inventory overlay address(es) is outside its observer contract", len(broken)),
+			mechanism:             "The local kernel selected an interface and gateway outside the declared route contract, or reported an absent route. An active VPN device can also fall outside the contract. Packet delivery and remote service state remain unknown.",
+			baseline:              "Every enabled inventory overlay address routes through a contract interface or gateway.",
+			observed:              counts + " diverted_exit_interfaces=[" + strings.Join(exits, ",") + "]",
+			evidence:              "Monitor-local route lookups only (route get / ip route get); no host was contacted. Affected inventory hosts: diverted=[" + strings.Join(hostStates[observerRouteDiverted], ",") + "] absent=[" + strings.Join(hostStates[observerRouteAbsent], ",") + "]. Addresses and gateways stay private.",
+			context:               "Correlate cannot-observe and stale-tail findings for the listed hosts from the same minutes: they are local observation-path candidates. A route sample cannot establish when the path broke or that every earlier failure shared it, and a conforming route does not prove the tunnel delivers packets.",
+			action:                "Confirm the intended route for the affected hosts with the workstation operator. Compare the selected interface and gateway with that intent to determine whether the contract or local routing needs correction. Use the existing scheduled observations to verify recovery.",
+			verify:                "Two consecutive observations with every overlay address on a contract route, and every affected target supplying a concrete healthy or broken observation again.",
+			playbook:              "SIGNALS.md §1.7",
 		})
 	} else {
 		findings = append(findings, healthyFinding(observerRouteProbeId, tierWarn, "observer-route-diverted", target))
 	}
 	if unknownHosts := hostStates[observerRouteUnknown]; len(unknownHosts) != 0 {
-		findings = append(findings, self.unknown(target, counts+" unknown_hosts=["+strings.Join(unknownHosts, ",")+"]", nil))
+		unknown := self.unknown(target, counts+" unknown_hosts=["+strings.Join(unknownHosts, ",")+"]", nil)
+		unknown.scopeEvidenceHostName = unknownHosts[0]
+		findings = append(findings, unknown)
 	} else {
 		findings = append(findings, healthyFinding(observerRouteProbeId, tierWarn, "observer-route-unobservable", target))
 	}

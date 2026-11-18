@@ -17,9 +17,23 @@ func competitionIntakeFirstCatalogTestQuery(t testing.TB) string {
 	return snMainnetMigrationProbePrefix(t) + "SELECT " + competitionIntakeFirstArtifactQuery()
 }
 
-// Every replacement is a reviewed intake-lineage successor. Post-close
-// recovery is a separate lineage which joins only in the final composite.
-// Do not follow an arbitrary registered retirement or waive an old predicate.
+// These published successors retain the intake predicate at each transfer.
+var competitionIntakeFirstCatalogSuccessors = []snMainnetMigrationContract{
+	competitionReviewHandoffMigrationContract,
+	competitionOfficialReviewMigrationContract,
+	competitionExecutorControlAmendmentMigrationContract,
+	competitionExecutorQualificationRecoveryMigrationContract,
+	competitionExecutorAdmissionExceptionMigrationContract,
+	competitionExecutorAdmissionClaimMigrationContract,
+	competitionDistributedReevaluationMigrationContract,
+	competitionOperatorRequestedPatchRetryMigrationContract,
+	competitionSecondRecoveryMigrationContract,
+	competitionOfficialReviewEpochTwoMigrationContract,
+	competitionOfficialReviewEpochTwoAstra62MigrationContract,
+	competitionSilleStorageRecoveryMigrationContract,
+}
+
+// Verify every retirement and its replacement query before selecting the owner.
 func competitionIntakeFirstCatalogTestPredicateAt(t testing.TB, head int) string {
 	t.Helper()
 	query := competitionIntakeFirstArtifactQuery()
@@ -27,16 +41,7 @@ func competitionIntakeFirstCatalogTestPredicateAt(t testing.TB, head int) string
 	if previous == 0 {
 		return query
 	}
-	for _, successor := range []snMainnetMigrationContract{
-		competitionReviewHandoffMigrationContract,
-		competitionOfficialReviewMigrationContract,
-		competitionExecutorControlAmendmentMigrationContract,
-		competitionExecutorQualificationRecoveryMigrationContract,
-		competitionExecutorAdmissionExceptionMigrationContract,
-		competitionExecutorAdmissionClaimMigrationContract,
-		competitionDistributedReevaluationMigrationContract,
-		competitionOperatorRequestedPatchRetryMigrationContract,
-	} {
+	for _, successor := range competitionIntakeFirstCatalogSuccessors {
 		version := successor.artifact.requiredVersion
 		prior := migrationCurrentSuffixTestContract(t, previous)
 		registered := migrationCurrentSuffixTestContract(t, version)
@@ -54,21 +59,11 @@ func competitionIntakeFirstCatalogTestPredicateAt(t testing.TB, head int) string
 	return query
 }
 
-// The old fixture stopped at AdmissionException and therefore rejected a
-// coherent Claim/current schema. Exact-byte boundary controls fail before a
-// database opens if either known successor is accidentally omitted again.
+// Each owner applies from its publication up to the next transfer.
 func TestMigrationsCompetitionIntakeFirstCatalogSelectsExactPublishedOwner(t *testing.T) {
-	owners := []snMainnetMigrationContract{
+	owners := append([]snMainnetMigrationContract{
 		migrationCurrentSuffixTestContract(t, server.CompetitionIntakeFirstMigrationVersion()),
-		competitionReviewHandoffMigrationContract,
-		competitionOfficialReviewMigrationContract,
-		competitionExecutorControlAmendmentMigrationContract,
-		competitionExecutorQualificationRecoveryMigrationContract,
-		competitionExecutorAdmissionExceptionMigrationContract,
-		competitionExecutorAdmissionClaimMigrationContract,
-		competitionDistributedReevaluationMigrationContract,
-		competitionOperatorRequestedPatchRetryMigrationContract,
-	}
+	}, competitionIntakeFirstCatalogSuccessors...)
 	for index, owner := range owners {
 		heads := []int{owner.artifact.requiredVersion}
 		if index+1 < len(owners) {

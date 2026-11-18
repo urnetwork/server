@@ -471,7 +471,11 @@ taxonomy as it arrives. A connected external WebSocket is not a completeness
 proof: Loki can ingest an older source timestamp behind an already-advanced
 cursor, and an internal gRPC tail backend can fail while the external stream
 stays open. Each tailer therefore also runs a bounded two-minute range
-reconciliation every 45 seconds. Exact fingerprints make alert-relevant
+reconciliation every 45 seconds. Each logical query supplies one exclusive
+`--until` cutoff to all Warpctl aggregate, block and continuation reads.
+The cutoff equals the original lower bound plus two minutes. Coverage
+freshness ages from that cutoff. Two-window recovery requires overlapping
+source intervals and advancing, timely completions. Exact fingerprints make alert-relevant
 overlap idempotent; ordinary lines are not retained. Per
 minute, each tailer folds its counts into
 findings — (class, target ip:port, innermost frame) identity, rate, one
@@ -487,13 +491,22 @@ fails every aggregate, block, or continuation page, even when the query exits
 zero below the requested cap; the fixed diagnostic resets completion proof
 without retaining the producer's timestamp, count, or block selector.
 
-Every standing-log cadence also writes one bounded line to retained stderr:
-the exact prefix `monitor-log-reconcile ` followed by a versioned JSON object.
+Every standing-log cadence writes coverage and activity to retained stderr.
+The coverage line uses the exact prefix `monitor-log-reconcile ` followed by a versioned JSON object.
 Historical schema 1 contains `schema`, `observed_at`, integer `collectors`,
 `enabled`, `fresh`, and `consecutive_two`, plus five `{oldest,newest}` UTC ranges:
 `collector_started_at`, `previous_window_start`, `latest_window_start`,
 `previous_completed_at`, and `latest_completed_at`. Missing endpoints are null.
 Schema 1 is aggregate-only; it cannot identify deficient collectors.
+
+The separate `monitor-log-reconcile-activity ` line has schema 1 and a 4-KiB
+bound. It shares the per-collector copy and observation clock with coverage.
+For each fixed service key, an active row reports the collector start, local
+attempt number and start, completed Warpctl page count, and most recent local
+page return. A saturated page can increment this count while coverage stays
+stale. An idle row has no active-attempt fields. A missing line, ambiguous
+key, or invalid clock supplies no activity evidence. Activity has no effect
+on Alert output, cadence, pagination, freshness or two-window recovery.
 
 Schema 2 uses `collector_scopes` with fixed public service keys
 alt/api/app/connect/gossip/grafana/mcp/mmm/proxy/taskworker/web and

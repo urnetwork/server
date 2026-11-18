@@ -705,6 +705,7 @@ func findProviders2WithSelect(
 		match := LocationType("")
 		for {
 			// what the level knows of each candidate, shared by its phases
+			drawPools := make(findProviders2DrawPools, 0, 3)
 			hardExcludedClientIds := map[server.Id]bool{}
 			qualityExcludedClientIds := map[server.Id]bool{}
 			offlineClientIds := map[server.Id]bool{}
@@ -916,7 +917,7 @@ func findProviders2WithSelect(
 				observation.dropped[0] += before - len(clientScores) - capabilityDropped
 				observation.dropped[4] += capabilityDropped
 				requestFilter.apply(clientScores, observation)
-				observation.eligible += len(clientScores)
+				observation.passedRequestFilters = observation.passedRequestFilters || len(clientScores) > 0
 				if findProviders2.ForceMinimum {
 					for _, clientScore := range clientScores {
 						clientScore.ScaledWeights = maps.Clone(clientScore.ScaledWeights)
@@ -1246,6 +1247,7 @@ func findProviders2WithSelect(
 				}
 				phaseNativeClientScores = nativeClientScores
 				var clientIds []server.Id
+				drawPools.record(nativeClientScores, n, rankMode)
 				if rankMode == RankModeOnline {
 					clientIds = selectOnlineUniformly(nativeClientScores, n)
 				} else {
@@ -1316,6 +1318,7 @@ func findProviders2WithSelect(
 					}
 					borrowableClientScores[clientId] = clientScore
 				}
+				drawPools.record(borrowableClientScores, remainingCount(), otherRankMode)
 				for _, clientId := range selectProviders(borrowableClientScores, otherRankMode, remainingCount()) {
 					clientScore := otherClientScores[clientId]
 					answer(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset, "borrowed")
@@ -1378,6 +1381,7 @@ func findProviders2WithSelect(
 						onlineClientScores[clientId] = clientScore
 					}
 				}
+				drawPools.record(onlineClientScores, remainingCount(), RankModeOnline)
 				for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
 					clientScore := onlineClientScores[clientId]
 					findProviders2OnlineFallbackEvidence.WithLabelValues(rankMode, clientScoreEvidence(clientScore, filterTime).String()).Inc()
@@ -1495,6 +1499,9 @@ func findProviders2WithSelect(
 					outcome = "met"
 				}
 				findProviders2SelectIpv6Need.WithLabelValues(metricRankMode, outcome).Inc()
+			}
+			if len(providers) == 0 {
+				observation.drawable = drawPools.hasSurvivor(hardExcludedClientIds, offlineClientIds, incapableClientIds, qualityExcludedClientIds)
 			}
 			observation.discoveryReturned = discovered
 			if modernPriorityIncomplete {
