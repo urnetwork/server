@@ -18,7 +18,11 @@
 //     server.NewPlatformClientSource on the edge bearer; once it exists the engine serves ur/smtpedge on it,
 //     registering at sockets on the client's sockets token, the service token of audience sockets api's edge
 //     client route answers beside its jwt (QD-1054);
-//   - the dialer: smtpedgeservice.SmtpMxNetDialer, SO_MARK per sending address.
+//   - the dialer: smtpedgeservice.SmtpMxNetDialer, SO_MARK per sending address;
+//   - the proof verifier: smtpproof.NewVerifier over smtpedge.yml's proof_key_sets (OPS-M9-02; DESIGN-DETAILS
+//     3.2.7), each set's directory opened against its id, a set past its not_after dropped at start. A file
+//     that lists none gives a verifier that holds none, so every preamble answers KEYS; a listed set that does
+//     not open leaves the block with no verifier and not ready.
 //
 // config/<env>/sidecar.yml's smtpedge gate is reread every 60 s through sidecarhost's Gates, and the engine
 // answers a preamble out of the gate TRY_LATER while the block stays ready: it stays off until D-SMTP-16 passes
@@ -28,9 +32,9 @@
 // names it in dialer_sidecar_id, which sockets filled at Find from the caller's token and signed (QD-989).
 //
 // What this draft does not have, each leaving the block not ready and saying so: a DNSSEC-validating MX resolver
-// and a PTR resolver for FCrDNS (none is built for a server host yet) and the proof verifier
-// (smtpproof.NewVerifier over a pinned KeySet: no release pins one, SMTP-M9-27, SMTP-M9-40). The gate's mail_send
-// and breaker rows answer not loaded (gate.go).
+// and a PTR resolver for FCrDNS (none is built for a server host yet). No production key set exists either: no
+// setup has run and no release pins one (SMTP-M9-27, SMTP-M9-40), so config/main lists none and the verifier
+// there holds none. The gate's mail_send and breaker rows answer not loaded (gate.go).
 package main
 
 import (
@@ -41,6 +45,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -52,6 +57,7 @@ import (
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
+	"github.com/urnetwork/sidecar/smtpproof"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/core"
@@ -73,6 +79,9 @@ const (
 type hostSettings struct {
 	// The engine's, from smtpedge.yml and the key file.
 	Config *smtpedgeservice.SmtpEdgeConfig
+	// The directory smtpedge.yml sits in, which a proof key set's relative directory is under. Empty when the
+	// file has none, and then only an absolute directory opens.
+	ConfigHome string
 	// The pool's: one client (§14.9).
 	Clients *sidecar.EdgeClientPoolSettings
 	Gate    *hostGateSettings
@@ -190,7 +199,7 @@ func newSmtpEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps
 	need(deps.Resolver != nil, "a DNSSEC-validating MX resolver")
 	need(deps.Ptr != nil, "a PTR resolver for the sending addresses' FCrDNS")
 	need(deps.Dialer != nil, "the MX dialer")
-	need(deps.Verifier != nil, "the proof verifier (smtpproof.NewVerifier over a pinned KeySet)")
+	need(deps.Verifier != nil, "the proof verifier (smtpproof.NewVerifier over smtpedge.yml's proof_key_sets)")
 	need(deps.NewClients != nil && deps.Registrations != nil, "the platform client, api's edge client route on the edge bearer (QD-812)")
 	var store smtpedgeservice.SmtpEdgeStore
 	engineDeps := &smtpedgeservice.SmtpEdgeDeps{
@@ -367,32 +376,65 @@ func applyXUrRefKeys(settings *smtpedgeservice.SmtpEdgeSettings, data []byte) er
 	return settings.Validate()
 }
 
-// smtpedge.yml from config, with the X-UR-Ref keys from the vault.
-func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, error) {
+// smtpedge.yml from config, with the X-UR-Ref keys from the vault, and the directory the file sits in.
+func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, string, error) {
 	resource, err := server.Config.SimpleResource(hostSettingsResourceName)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	data, err := resource.BytesE()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	config, err := smtpedgeservice.LoadSmtpEdgeConfig(data, server.RequireFwMark())
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	keyResource, err := server.Vault.SimpleResource(hostXUrRefResourceName)
 	if err != nil {
-		return nil, fmt.Errorf("no %s", hostXUrRefResourceName)
+		return nil, "", fmt.Errorf("no %s", hostXUrRefResourceName)
 	}
 	keyData, err := keyResource.BytesE()
 	if err != nil {
-		return nil, fmt.Errorf("no %s", hostXUrRefResourceName)
+		return nil, "", fmt.Errorf("no %s", hostXUrRefResourceName)
 	}
 	if err := applyXUrRefKeys(config.Settings, keyData); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return config, nil
+	configHome := ""
+	if path, err := server.Config.ResourcePath(hostSettingsResourceName); err == nil {
+		configHome = filepath.Dir(path)
+	}
+	return config, configHome, nil
+}
+
+// The verifier over smtpedge.yml's proof_key_sets (DESIGN-DETAILS 3.2.7): each set the file lists that is not
+// past its not_after at now, its directory checked against its id and opened, its verifying keys checked
+// against its keyset.json. A session verifies under the set its preamble names, and a preamble that names any
+// other set, an expired one included, answers KEYS. A file that lists none gives a verifier that holds none.
+// A listed set that does not open is an error and no verifier: the block then stays not ready, since a
+// verifier holding fewer sets than the file lists would answer KEYS to hosts the operator meant to accept.
+// The error names the entry by its place and the id it was listed under, which is public, and never a path.
+func newProofVerifier(config *smtpedgeservice.SmtpEdgeConfig, configHome string, now time.Time) (*smtpproof.Verifier, error) {
+	verifierSettings := smtpproof.DefaultVerifierSettings()
+	verifierSettings.KeySetMaxCount = config.Settings.ProofKeySetMaxCount
+	keySets := []*smtpproof.VerifierKeySet{}
+	for _, proofKeySet := range config.ProofKeySetsAt(now) {
+		directory, err := config.ProofKeySetDirectory(proofKeySet, configHome)
+		if err != nil {
+			return nil, err
+		}
+		keySet, err := smtpproof.OpenKeySet(directory, proofKeySet.Id)
+		if err != nil {
+			return nil, fmt.Errorf("proof key set %x does not open", proofKeySet.Id)
+		}
+		keySets = append(keySets, &smtpproof.VerifierKeySet{KeySet: keySet, NotAfter: proofKeySet.NotAfter})
+	}
+	verifier, err := smtpproof.NewVerifier(verifierSettings, keySets)
+	if err != nil {
+		return nil, errors.New("the proof key sets' verifying keys do not load")
+	}
+	return verifier, nil
 }
 
 // The pool as the block's client.
@@ -408,6 +450,16 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 		Store:  model.NewSmtpEdgeStore(nil),
 		Dialer: smtpedgeservice.NewSmtpMxNetDialer(settings.Config.Settings),
 		Abuse:  model.NewAbuseGate(ctx, model.NewAbuseHardDenySnapshot(ctx, nil), nil),
+	}
+	if verifier, err := newProofVerifier(settings.Config, settings.ConfigHome, time.Now()); err != nil {
+		glog.Errorf("[%s]no proof verifier: %v\n", hostService, err)
+	} else {
+		deps.Verifier = verifier
+		if live := len(settings.Config.ProofKeySetsAt(time.Now())); live == 0 {
+			glog.Errorf("[%s]%s lists no proof key set to accept: every preamble answers KEYS\n", hostService, hostSettingsResourceName)
+		} else {
+			glog.Infof("[%s]the proof verifier holds %d key sets\n", hostService, live)
+		}
 	}
 	ends := []func(){}
 	end := func() {
@@ -550,12 +602,13 @@ func main() {
 
 	var settings *hostSettings
 	var deps *hostDeps
-	config, err := loadSmtpEdgeConfig()
+	config, configHome, err := loadSmtpEdgeConfig()
 	if err != nil {
 		// a refused file names the key, never a value, and the key file never a key
 		glog.Errorf("[%s]%s: %v\n", hostService, hostSettingsResourceName, err)
 	} else {
 		settings = defaultHostSettings(config)
+		settings.ConfigHome = configHome
 		// on a context of its own, so a SIGTERM's drain can still send the open usage window
 		depsCtx, depsCancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer depsCancel()
