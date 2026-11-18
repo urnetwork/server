@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -68,7 +69,8 @@ func setupTestListenerCount(window *lazyOpenTestWindow) int {
 // since before.
 func requireSetupTestSamples(t *testing.T, name string, before setupTestSamples, after setupTestSamples, count uint64, sum float64) {
 	t.Helper()
-	if after.count-before.count != count || after.sum-before.sum != sum {
+	// the sum is a float other tests' observations also added to
+	if after.count-before.count != count || math.Abs(after.sum-before.sum-sum) > 1e-6 {
 		t.Errorf("%s gained %d samples summing to %v, want %d summing to %v", name, after.count-before.count, after.sum-before.sum, count, sum)
 	}
 }
@@ -356,15 +358,24 @@ func TestProxyHttpConnectSetupMetrics(t *testing.T) {
 }
 
 // A CONNECT whose window never gets an exit observes its whole wait as
-// unrouted, and no setup.
+// unrouted, and no setup. The device takes a second to build, and the
+// library's budget, 20 s here, ends the wait at 19 s. On a fake clock a budget
+// equal to the dial callback's own 30 s timeout would expire in the same
+// instant, which a real clock never does, and could let the library start a
+// second attempt as the budget ends.
 func TestProxyHttpConnectUnroutedWait(t *testing.T) {
 	configureHttpBudgetTest(t)
 	synctest.Test(t, func(t *testing.T) {
 		manager := newHttpConnectTestManager(t)
 		proxyId := setupTestProxyIdAt(time.Now().Add(-time.Hour))
 		seedHttpConnectTestLock(manager, proxyId, true)
-		newLazyOpenTestDevices(t, manager, newLazyOpenTestWindow())
+		devices := newLazyOpenTestDevices(t, manager, newLazyOpenTestWindow())
+		manager.proxyDeviceBuilder = func(proxyId server.Id) (*ProxyDevice, error) {
+			time.Sleep(time.Second)
+			return devices.build(proxyId)
+		}
 		core := newHttpConnectTestProxy(manager)
+		core.Settings().ProxyConnectBudget = 20 * time.Second
 
 		unrouted := setupTestHistogram(t, proxyConnectRouteWaitSeconds, proxyOpenReopen, "unrouted")
 		setup := setupTestHistogram(t, proxyConnectSetupSeconds, "http", proxyOpenReopen)
@@ -373,7 +384,7 @@ func TestProxyHttpConnectUnroutedWait(t *testing.T) {
 			t.Fatalf("CONNECT answered %d, want 504", code)
 		}
 		<-handlerDone
-		requireSetupTestSamples(t, "the unrouted wait", unrouted, setupTestHistogram(t, proxyConnectRouteWaitSeconds, proxyOpenReopen, "unrouted"), 1, 30)
+		requireSetupTestSamples(t, "the unrouted wait", unrouted, setupTestHistogram(t, proxyConnectRouteWaitSeconds, proxyOpenReopen, "unrouted"), 1, 19)
 		requireSetupTestSamples(t, "the setup", setup, setupTestHistogram(t, proxyConnectSetupSeconds, "http", proxyOpenReopen), 0, 0)
 	})
 }

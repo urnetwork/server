@@ -588,7 +588,7 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			return nil, err
 		}
 		pd.recordFlowTraceDial("socks", conn)
-		return instrumentProxySetupConnection("socks", conn, pd.UpdateActivity, pd.setup.connectSetup("socks", connectStart)), nil
+		return observeConnectFirstByte(instrumentProxyConnection("socks", conn, pd.UpdateActivity), pd.setup.connectSetup("socks", connectStart)), nil
 	}
 
 	socksSettings := proxy.DefaultSocksProxySettings()
@@ -795,7 +795,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			return nil, connectDialRefusal(err)
 		}
 		pd.recordFlowTraceDial("http", conn)
-		return instrumentProxySetupConnection("http", conn, pd.UpdateActivity, pd.setup.connectSetup("http", connectStart)), nil
+		return observeConnectFirstByte(instrumentProxyConnection("http", conn, pd.UpdateActivity), pd.setup.connectSetup("http", connectStart)), nil
 	}
 
 	httpSettings := proxy.DefaultHttpProxySettings()

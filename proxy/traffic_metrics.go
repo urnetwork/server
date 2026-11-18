@@ -336,14 +336,15 @@ func instrumentProxyConnection(protocol string, conn net.Conn, activity func() b
 	return defaultProxyTrafficMetrics.instrumentConnection(protocol, conn, activity)
 }
 
-// instrumentProxySetupConnection is instrumentProxyConnection that also
-// observes the CONNECT's setup time at the destination's first byte.
-func instrumentProxySetupConnection(protocol string, conn net.Conn, activity func() bool, firstByte *proxyConnectFirstByte) net.Conn {
-	instrumented := defaultProxyTrafficMetrics.instrumentConnection(protocol, conn, activity)
-	if metricsConn, ok := instrumented.(*proxyMetricsConn); ok {
+// observeConnectFirstByte has a relay connection that
+// instrumentProxyConnection returned observe its CONNECT's setup time at the
+// destination's first byte (setup_metrics.go), and returns it. Called before
+// the connection is handed to the relay.
+func observeConnectFirstByte(conn net.Conn, firstByte *proxyConnectFirstByte) net.Conn {
+	if metricsConn, ok := conn.(*proxyMetricsConn); ok {
 		metricsConn.firstByte = firstByte
 	}
-	return instrumented
+	return conn
 }
 
 // instrumentConnection wraps one successful dial with this metric family.
