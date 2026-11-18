@@ -242,6 +242,10 @@ func abuseJoinLookupKey(joinKind AbuseJoinKind, joinKey string) (string, bool) {
 			return "", false
 		}
 		return id.String(), true
+	case AbuseJoinKindNotice, AbuseJoinKindBreaker:
+		// a notice's class or a breaker's name: a fixed word
+		word := abuseName(joinKey)
+		return word, word != ""
 	}
 	return "", false
 }

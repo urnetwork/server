@@ -207,6 +207,10 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleNetworkAuditWebhookDelivery(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
+		// §21.8's review clocks each minute: cases past their clock counted,
+		// open notices paged again under their case's key; not scheduled
+		// without MG5
+		work.ScheduleAbuseClockPass(clientSession, tx)
 		// §21.7's restricted rows past their until_time re-derived every hour;
 		// not scheduled without MG5
 		work.ScheduleAbuseStandingPass(clientSession, tx)
@@ -765,6 +769,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
 			work.AbuseActionPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.AbuseClockPass,
+			work.AbuseClockPassPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.AbuseStandingPass,
