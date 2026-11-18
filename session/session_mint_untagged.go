@@ -16,10 +16,10 @@
 // refresh derives the same id.
 //
 // A mint that carries a session from a presented tagged credential or a
-// stored binding still needs its registration (the check-and-extend of
-// REVOKE-FINAL.md §12). Signed untagged, the new token would outlive the
-// revocation of its session, so the mint stays unavailable and its caller
-// keeps the credential it holds.
+// stored binding is not signed untagged: the new token would outlive the
+// revocation of its session. It is signed on its session unextended when its
+// presented credential bounds it (session_mint_unextended.go), and otherwise
+// stays unavailable, and its caller keeps the credential it holds.
 //
 // The hooks in session_mint.go: PrepareSessionMint and MintHostedSession mark
 // the session a mint starts, and RegisterAndSignInTx registers within the
@@ -100,15 +100,24 @@ func registerSessionMint(ctx context.Context, credential *ByJwt, kind string, or
 	return registerNetworkSession(registerCtx, credential, kind, origin, fenceOrigin, server.NowUtc(), exempt)
 }
 
-// The fallback for a registration that failed with err. A mint that started
-// its session, whose registration Redis did not answer while its caller still
-// waits, leaves the session out of its token, clears a fresh session's client
-// binding, is counted, and returns nil. Any other failure returns err: a
-// refusal by the mint script, a clock out of bounds, a carried session, or a
-// caller that ended.
+// The fallback for a registration that failed with err, named for its first
+// case. When Redis did not answer while the caller still waits, a mint that
+// started its session leaves the session out of its token, clears a fresh
+// session's client binding, is counted, and returns nil; a mint that carries
+// its presented credential's session keeps it, unextended and expiring no
+// later than the presented credential (session_mint_unextended.go), and
+// returns nil. Any other failure returns err: a refusal by the mint script, a
+// clock out of bounds, a session neither started nor carried within its
+// presented credential's expiry, or a caller that ended.
 func untagUnregisteredSessionMintInTx(ctx context.Context, tx server.PgTx, credential *ByJwt, kind string, err error) error {
+	if !errors.Is(err, ErrSessionStoreUnavailable) || ctx.Err() != nil {
+		return err
+	}
 	start := credential.startsSession()
-	if start == nil || !errors.Is(err, ErrSessionStoreUnavailable) || ctx.Err() != nil {
+	if start == nil {
+		if unextendCarriedSessionMint(credential, kind) {
+			return nil
+		}
 		return err
 	}
 	if start.fresh && credential.ClientId != nil {

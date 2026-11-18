@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/server"
@@ -266,23 +267,150 @@ func TestDerivedLineageKeepsItsBindingWhenRedisDoesNotRegister(t *testing.T) {
 	})
 }
 
-// A mint that carries a registered session, here a sign-in token's renewal,
-// still needs its registration: signed untagged, the new token would outlive
-// a revocation of its session. It stays unavailable, and the caller keeps the
-// token it holds.
-func TestCarriedSessionRenewalStillNeedsItsRegistration(t *testing.T) {
+func testingSessionMarkerTtl(ctx context.Context, t testing.TB, networkId server.Id, sessionId server.Id) time.Duration {
+	var ttl time.Duration
+	if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		var err error
+		ttl, err = r.PTTL(ctx, SessionMarkerKey(networkId, sessionId)).Result()
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return ttl
+}
+
+// A sign-in token an hour from its expiry, its session registered for it.
+func testingRegisteredSignIn(t testing.TB, actor *ClientSession) *ClientSession {
+	ctx := actor.Ctx
+	credential := NewByJwt(actor.ByJwt.NetworkId, actor.ByJwt.UserId, "carried", false, false)
+	sid := server.NewId()
+	credential.SessionId = &sid
+	credential.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(time.Hour))
+	if _, err := RegisterNetworkSession(ctx, credential, "password", nil, false, server.NowUtc()); err != nil {
+		t.Fatal(err)
+	}
+	presented := NewLocalClientSession(ctx, "192.0.2.1:1", credential)
+	t.Cleanup(presented.Cancel)
+	return presented
+}
+
+// The no-extend fallback: a renewal carries its presented credential's
+// session, so when Redis does not register it the token is signed on the
+// session without extending it, expiring with the presented token, and
+// counted. Before, the renewal failed unavailable, a 503. The session's horizon
+// stays where the presented token's mint put it, a revocation once Redis
+// answers keeps its marker past the token's own horizon and refuses it, and
+// the next refresh registers and extends the session.
+func TestCarriedSessionRenewalSignsUnextendedWhenRedisDoesNotRegister(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		actor := recoverySessionActor(t)
+		ctx := actor.Ctx
+		networkId := actor.ByJwt.NetworkId
+		for _, next := range []string{"revoke", "refresh"} {
+			presented := testingRegisteredSignIn(t, actor)
+			sid := *presented.ByJwt.SessionId
+			horizon := testingSessionScore(ctx, t, networkId, sid)
+
+			_, pop := server.Testing_StallAuthRedisDials(48)
+			unextended := testingUnextendedMints(SessionKindSignin)
+			untagged := testingUntaggedMints(SessionKindSignin)
+			start := time.Now()
+			signed, err := RenewSessionCredential(presented, "carried", false, nil)
+			elapsed := time.Since(start)
+			pop()
+			if err != nil {
+				t.Fatalf("a carried session's renewal failed while Redis did not answer: %v", err)
+			}
+			// the marker in the transaction and the clock sample, a budget each
+			if bound := 2*RevocationCheckBudget + time.Second; bound < elapsed {
+				t.Errorf("the renewal took %s, want at most %s", elapsed, bound)
+			}
+			renewed, err := ParseByJwt(ctx, signed)
+			if err != nil || renewed.SessionId == nil || *renewed.SessionId != sid {
+				t.Fatalf("the renewed token does not carry the session %s: %v %v", sid, renewed, err)
+			}
+			if !renewed.ExpiresAt.Time.Equal(presented.ByJwt.ExpiresAt.Time) {
+				t.Fatalf("the unextended token expires %v, want the presented token's %v", renewed.ExpiresAt, presented.ByJwt.ExpiresAt)
+			}
+			if got := testingUnextendedMints(SessionKindSignin) - unextended; got != 1 {
+				t.Errorf("counted %.0f unextended mints, want 1", got)
+			}
+			if got := testingUntaggedMints(SessionKindSignin) - untagged; got != 0 {
+				t.Errorf("a carried session was signed untagged %.0f times", got)
+			}
+			if got := testingSessionScore(ctx, t, networkId, sid); got != horizon {
+				t.Fatalf("the session's horizon moved from %.0f to %.0f", horizon, got)
+			}
+			if float64(DeadlineMillis(renewed.AcceptUntil())) > horizon {
+				t.Fatalf("the token's horizon %d passes its session's %.0f", DeadlineMillis(renewed.AcceptUntil()), horizon)
+			}
+			if err := ValidateByJwtState(ctx, renewed, false); err != nil {
+				t.Fatalf("the unextended token is refused: %v", err)
+			}
+
+			switch next {
+			case "revoke":
+				op := server.NewId()
+				if err := prepareSessionOperation(actor, op, "single", &sid, nil); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := EnforceSessionOperation(ctx, networkId, op); err != nil {
+					t.Fatal(err)
+				}
+				if ttl := testingSessionMarkerTtl(ctx, t, networkId, sid); time.Until(renewed.AcceptUntil()) > ttl {
+					t.Fatalf("the revocation's marker lives %s, short of the unextended token's horizon in %s", ttl, time.Until(renewed.AcceptUntil()))
+				}
+				if err := ValidateByJwtState(ctx, renewed, false); !errors.Is(err, ErrSessionRevoked) {
+					t.Fatalf("the unextended token of a revoked session answered %v", err)
+				}
+			case "refresh":
+				refreshed := NewLocalClientSession(ctx, "192.0.2.1:1", renewed)
+				defer refreshed.Cancel()
+				signed, err := RenewSessionCredential(refreshed, "carried", false, nil)
+				if err != nil {
+					t.Fatalf("the next refresh failed: %v", err)
+				}
+				extended, err := ParseByJwt(ctx, signed)
+				if err != nil || extended.SessionId == nil || *extended.SessionId != sid || !extended.ExpiresAt.Time.After(renewed.ExpiresAt.Time) {
+					t.Fatalf("the next refresh did not extend the session %s: %v %v", sid, extended, err)
+				}
+				if got := testingSessionScore(ctx, t, networkId, sid); got < float64(DeadlineMillis(extended.AcceptUntil())) {
+					t.Fatalf("the next refresh left the session's horizon at %.0f, short of its token's %d", got, DeadlineMillis(extended.AcceptUntil()))
+				}
+			}
+		}
+	})
+}
+
+// A presented token past its expiry gains nothing from a token with the same
+// expiry: its renewal stays unavailable while Redis does not answer, and is
+// not counted, and the caller keeps the token it holds.
+func TestExpiredCarriedSessionRenewalStaysUnavailable(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer Testing_SetRejectExpired(false)()
+		actor := recoverySessionActor(t)
+		ctx := actor.Ctx
+		credential := NewByJwt(actor.ByJwt.NetworkId, actor.ByJwt.UserId, "expired", false, false)
+		sid := server.NewId()
+		credential.SessionId = &sid
+		credential.ExpiresAt = gojwt.NewNumericDate(server.NowUtc().Add(-time.Minute))
+		if _, err := RegisterNetworkSession(ctx, credential, "password", nil, false, server.NowUtc()); err != nil {
+			t.Fatal(err)
+		}
+		presented := NewLocalClientSession(ctx, "192.0.2.1:1", credential)
+		defer presented.Cancel()
 		_, pop := server.Testing_StallAuthRedisDials(48)
 		defer pop()
-		untagged := testingUntaggedMints(SessionKindSignin)
-		if _, err := RenewSessionCredential(actor, "carried", false, nil); !errors.Is(err, ErrAuthUnavailable) {
-			t.Fatalf("a carried session's renewal answered %v, want unavailable", err)
+		unextended := testingUnextendedMints(SessionKindSignin)
+		if _, err := RenewSessionCredential(presented, "expired", false, nil); !errors.Is(err, ErrAuthUnavailable) {
+			t.Fatalf("an expired carried session's renewal answered %v, want unavailable", err)
 		}
-		if got := testingUntaggedMints(SessionKindSignin) - untagged; got != 0 {
-			t.Errorf("a carried session was signed untagged %.0f times", got)
+		if got := testingUnextendedMints(SessionKindSignin) - unextended; got != 0 {
+			t.Errorf("an expired carried session was counted %.0f times", got)
 		}
 	})
 }
@@ -290,7 +418,8 @@ func TestCarriedSessionRenewalStillNeedsItsRegistration(t *testing.T) {
 // The hosted bootstrap of a proxy with no session starts one; signed
 // untagged, as hosted proxies were before sessions, it leaves the proxy
 // unbound for its next mint. A proxy already bound to a session needs that
-// session's registration.
+// session's registration: the hosted loader presents no credential whose
+// expiry would bound the token.
 func TestHostedBootstrapSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -328,8 +457,14 @@ func TestHostedBootstrapSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 			t.Errorf("counted %.0f untagged mints, want 1", got)
 		}
 
+		// no presented credential bounds a bound proxy's token: it is not
+		// signed on its session unextended either
+		unextended := testingUnextendedMints(SessionKindClient)
 		if _, err := MintHostedSession(ctx, bound.Renew()); !errors.Is(err, ErrAuthUnavailable) {
 			t.Fatalf("a bound proxy's mint answered %v, want unavailable", err)
+		}
+		if got := testingUnextendedMints(SessionKindClient) - unextended; got != 0 {
+			t.Errorf("a bound proxy's mint was signed unextended %.0f times", got)
 		}
 	})
 }
