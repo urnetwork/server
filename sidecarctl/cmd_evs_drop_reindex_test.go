@@ -320,7 +320,7 @@ func (self *evsDropReindexWorld) snap(drops ...*evsservice.DropListDrop) {
 		})
 	}
 	key := evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileSnap, 0)
-	if _, err := self.segment.PutIfNoneMatch(self.ctx, key, evsservice.EncodeDropCoveredFile(self.repoId, self.jobId, covered), nil); err != nil {
+	if _, err := self.segment.PutIfNoneMatch(self.ctx, key, evsservice.EncodeDropCoveredFile(self.repoId, self.jobId, covered, evsservice.DropListedShape{}), nil); err != nil {
 		self.t.Fatal(err)
 	}
 }
