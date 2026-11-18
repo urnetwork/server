@@ -96,11 +96,13 @@ func mintHostedSessionForClient(ctx context.Context, clientId server.Id) (string
 
 // The signed hosted session of the proxy client and the device's local
 // authority built on it: the session the proxy's previous device opened with
-// while it is reusable and validates, else a newly minted one.
+// while it is reusable and validates, else a newly minted one. apiUrl is read
+// only to build the authority, so a refused mint returns before the device's
+// network space is touched.
 func (self *hostedSessionCache) openAuthority(
 	ctx context.Context,
 	clientId server.Id,
-	apiUrl string,
+	apiUrl func() string,
 	authoritySettings *localclient.AuthoritySettings,
 ) (string, *localclient.Authority, error) {
 	if self == nil {
@@ -108,7 +110,7 @@ func (self *hostedSessionCache) openAuthority(
 		if err != nil {
 			return "", nil, err
 		}
-		localControl, err := localclient.NewWithSettings(ctx, signedByJwt, apiUrl, authoritySettings)
+		localControl, err := localclient.NewWithSettings(ctx, signedByJwt, apiUrl(), authoritySettings)
 		if err != nil {
 			return "", nil, err
 		}
@@ -116,7 +118,7 @@ func (self *hostedSessionCache) openAuthority(
 	}
 
 	if signedByJwt, ok := self.reusable(clientId); ok {
-		localControl, err := self.newAuthority(ctx, signedByJwt, apiUrl, authoritySettings)
+		localControl, err := self.newAuthority(ctx, signedByJwt, apiUrl(), authoritySettings)
 		if err == nil {
 			return signedByJwt, localControl, nil
 		}
@@ -131,7 +133,7 @@ func (self *hostedSessionCache) openAuthority(
 	if err != nil {
 		return "", nil, err
 	}
-	localControl, err := self.newAuthority(ctx, signedByJwt, apiUrl, authoritySettings)
+	localControl, err := self.newAuthority(ctx, signedByJwt, apiUrl(), authoritySettings)
 	if err != nil {
 		return "", nil, err
 	}

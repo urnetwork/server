@@ -1414,7 +1414,7 @@ func NewProxyDevice(
 	signedByJwt, localControl, err := settings.hostedSessions.openAuthority(
 		ctx,
 		proxyDeviceConfig.ClientId,
-		networkSpace.GetApiUrl(),
+		networkSpace.GetApiUrl,
 		settings.authoritySettings(),
 	)
 	if err != nil {

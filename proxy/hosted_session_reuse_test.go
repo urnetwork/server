@@ -51,9 +51,13 @@ func newHostedSessionTestCache(authority *hostedSessionTestAuthority) *hostedSes
 	return cache
 }
 
+func hostedSessionTestApiUrl() string {
+	return "https://api.reuse.example"
+}
+
 func hostedSessionTestOpen(t *testing.T, cache *hostedSessionCache, clientId server.Id) string {
 	t.Helper()
-	signedByJwt, localControl, err := cache.openAuthority(t.Context(), clientId, "https://api.reuse.example", &localclient.AuthoritySettings{})
+	signedByJwt, localControl, err := cache.openAuthority(t.Context(), clientId, hostedSessionTestApiUrl, &localclient.AuthoritySettings{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +141,7 @@ func TestRevokedHostedSessionFailsAsWithoutReuse(t *testing.T) {
 	authority.refused = map[string]error{first: session.ErrSessionRevoked}
 	authority.mintErr = session.ErrSessionRevoked
 
-	_, _, err := cache.openAuthority(t.Context(), proxyClientId, "https://api.reuse.example", &localclient.AuthoritySettings{})
+	_, _, err := cache.openAuthority(t.Context(), proxyClientId, hostedSessionTestApiUrl, &localclient.AuthoritySettings{})
 	if !errors.Is(err, session.ErrSessionRevoked) {
 		t.Fatalf("the revoked proxy opened with err=%v, want the mint's refusal", err)
 	}
