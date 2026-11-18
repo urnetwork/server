@@ -496,7 +496,7 @@ const lagDriftRingMeasurementMs = 0.3
 // variance for the path: measurement, σ₀, κ times the distance, and the place
 // error held (V3). The area is the determinant of the position's block of the
 // information's inverse. Ported from lagdriftsim's informationRingScore
-// (connect 232faf11, 734a65b2).
+// (connect 984a349b, b3f8f6eb).
 func lagDriftRingScore(ipPoint lagDriftPoint, driftModel lagdrift.Model) func(picked []*lagDriftExtender) float64 {
 	type weightedPlace struct {
 		at     lagdrift.Point

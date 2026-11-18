@@ -1032,7 +1032,7 @@ func lagDriftStartRefusalError(refusal string) *LagError {
 
 // The load caps of a drift ticket (lag.dev/DRIFTTEST.md E3): 1 each, the
 // least an extender of any version honors. An extender before connect
-// 76acc8a1 reads a zero cap as its default, 5 s each way over 4 streams up to
+// 1248c30d reads a zero cap as its default, 5 s each way over 4 streams up to
 // 2 GiB, so a ticket of zeros would admit a full load there; the server can't
 // tell an extender's version. With 1s, every extender clamps the phases to its
 // 250 ms floor, one stream and one byte, and its hello names 250 ms, 250 ms

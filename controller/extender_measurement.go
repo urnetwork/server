@@ -588,7 +588,7 @@ type ExtenderMeasurementCertResult struct {
 	Names []string `json:"names"`
 	// that this operator issues for the family-pinned names
 	// (lag.dev/DRIFTTEST.md K6); always true. An extender since connect
-	// 66d0dfc0 asks for its measurement name alone when an answer leaves this
+	// 60388f9b asks for its measurement name alone when an answer leaves this
 	// out, as one from an operator from before K6 does, which refuses a
 	// request for more
 	FamilyNames bool `json:"family_names"`
