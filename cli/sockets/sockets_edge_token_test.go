@@ -15,7 +15,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -268,7 +267,7 @@ func TestHostTakesEdgeClientsSocketsTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 		if recorder := hostTestServe(host, http.MethodPost, "/socket/registrations", otherToken, &sidecar.SocketRegistrationsArgs{SetVersion: 1}, ""); recorder.Code != http.StatusOK {
-			t.Fatalf("the other client's registration answered %d: %s", recorder.Code, fmt.Sprint(recorder.Body))
+			t.Fatalf("the other client's registration answered %d: %s", recorder.Code, recorder.Body.String())
 		}
 	})
 }
