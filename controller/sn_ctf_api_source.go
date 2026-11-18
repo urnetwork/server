@@ -6,8 +6,10 @@ package controller
 // fixed at the first live build covering each epoch, the census, its
 // commitment and the draw (model/ctf_model.go, keyed by the operator's n), and
 // the epoch clock. Every read raises on a database failure, as the model does;
-// the source turns that into an error, which the routes answer as 503. The
-// claim states of GET /sn/ctf/client's wins are read in sn_ctf_api_claims.go.
+// the source turns that into an error, which the routes answer as 503. Before
+// the pool starts the view says so (snCtfView.NotStarted) instead of failing.
+// The claim states of GET /sn/ctf/client's wins are read in
+// sn_ctf_api_claims.go.
 
 import (
 	"cmp"
@@ -60,33 +62,30 @@ type snCtfPoolRegistration struct {
 
 var snCtfPoolRegistrations sync.Map
 
-// snCtfFirstEpoch is the CTF pool's first epoch, from vault2.pools(P). A
-// registered pool is kept for good; an unregistered answer is read again after
-// a minute, and is errSnCtfNotConfigured.
-func snCtfFirstEpoch(ctx context.Context, cfg *StConfig, poolId uint64) (uint64, error) {
+// snCtfPoolOf is the CTF pool's registration, from vault2.pools(P): whether
+// vault2 has registered it and, if it has, its first epoch. A registered pool
+// is kept for good; an unregistered answer is read again after a minute.
+func snCtfPoolOf(ctx context.Context, cfg *StConfig, poolId uint64) (registered bool, firstEpoch uint64, err error) {
 	key := fmt.Sprintf("%s|%s|%d", cfg.DeploymentKey(), cfg.VaultV2.Hex(), poolId)
 	if value, ok := snCtfPoolRegistrations.Load(key); ok {
 		pool := value.(snCtfPoolRegistration)
-		if pool.registered {
-			return pool.firstEpoch, nil
-		}
-		if time.Since(pool.checked) < time.Minute {
-			return 0, errSnCtfNotConfigured
+		if pool.registered || time.Since(pool.checked) < time.Minute {
+			return pool.registered, pool.firstEpoch, nil
 		}
 	}
 	client := stLedgerV2Client()
 	if client == nil {
-		return 0, errStLedgerV2NotConfigured
+		return false, 0, errStLedgerV2NotConfigured
 	}
-	registered, firstEpoch, err := client.LedgerV2Pool(ctx, poolId)
+	registered, firstEpoch, err = client.LedgerV2Pool(ctx, poolId)
 	if err != nil {
-		return 0, err
+		return false, 0, err
+	}
+	if !registered {
+		firstEpoch = 0
 	}
 	snCtfPoolRegistrations.Store(key, snCtfPoolRegistration{registered: registered, firstEpoch: firstEpoch, checked: time.Now()})
-	if !registered {
-		return 0, errSnCtfNotConfigured
-	}
-	return firstEpoch, nil
+	return registered, firstEpoch, nil
 }
 
 // Header times of mined blocks, which do not change.
@@ -123,7 +122,8 @@ func snCtfBlockTime(ctx context.Context, block uint64) (time.Time, error) {
 }
 
 // snCtfClockOf is this epoch, from the synced epoch summary, else the chain.
-func snCtfClockOf(ctx context.Context, cfg *StConfig) (*snCtfClock, error) {
+// Tests replace it.
+var snCtfClockOf = func(ctx context.Context, cfg *StConfig) (*snCtfClock, error) {
 	clock := &snCtfClock{}
 	if summary := model.GetStEpochSummaryCache(ctx, cfg.DeploymentKey()); summary != nil && 0 < summary.TEpochBlocks {
 		clock.Epoch, clock.StartBlock, clock.EndBlock = summary.Epoch, summary.StartBlock, summary.StartBlock+summary.TEpochBlocks-1
@@ -217,7 +217,7 @@ func (self *snCtfCoreSource) view(ctx context.Context) (*snCtfView, error) {
 	cfg := self.cfg
 	key := cfg.DeploymentKey()
 	poolId, _ := stCtfPoolId(cfg)
-	firstEpoch, err := snCtfFirstEpoch(ctx, cfg, poolId)
+	registered, firstEpoch, err := snCtfPoolOf(ctx, cfg, poolId)
 	if err != nil {
 		return nil, err
 	}
@@ -226,6 +226,24 @@ func (self *snCtfCoreSource) view(ctx context.Context) (*snCtfView, error) {
 		return nil, err
 	}
 	carry, err := snCtfCarryOf(ctx, cfg, clock.Epoch)
+	// Not started: vault2 has not registered the pool, which it does before
+	// the pool's first epoch, or it has and that epoch is still to come while
+	// st.yml names no carry. No root of the pool exists before its first epoch
+	// ends, so nothing has been drawn or won. Once the first epoch has begun,
+	// a missing carry is a driver that is not configured, and unavailable.
+	if !registered || (errors.Is(err, errSnCtfNotConfigured) && clock.Epoch < firstEpoch) {
+		view := &snCtfView{
+			Pool:       snCtfPoolFacts{NoId: cfg.NoId, PoolId: poolId, Vault: cfg.VaultV2, FirstEpoch: firstEpoch},
+			Clock:      *clock,
+			Roots:      []*snCtfRoot{},
+			AsOf:       clock.StartTime,
+			NotStarted: true,
+		}
+		if err == nil {
+			view.Pool.CarryContract = carry
+		}
+		return view, nil
+	}
 	if err != nil {
 		return nil, err
 	}

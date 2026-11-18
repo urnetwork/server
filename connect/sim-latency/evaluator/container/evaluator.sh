@@ -850,6 +850,12 @@ write_evidence_manifest() {
 
 emit_candidate_build_failure() {
     local build_log="$1"
+    local build_status="$2"
+    local code="candidate_build_failed" message="candidate did not pass the frozen offline build"
+    if [ "$build_status" -eq 42 ]; then
+        code="patch_does_not_apply"
+        message="submission patch does not apply to the frozen epoch source"
+    fi
     write_evaluation_progress failed "$replicates" 0
     if [ -f "$build_log" ] && [ "$MAX_BUILD_LOG_BYTES" -lt "$(file_bytes "$build_log")" ]; then
         tail -c "$MAX_BUILD_LOG_BYTES" "$build_log" > "$build_log.tail"
@@ -865,8 +871,8 @@ emit_candidate_build_failure() {
     local submission_error="$artifact_dir/submission-error.json"
     jq -n --arg job_id "$job_id" --arg round_id "$round_id" \
         --arg patch_sha256 "$patch_sha256" \
-        '{schema:1,kind:"submission",code:"candidate_build_failed",
-          message:"candidate did not pass the frozen offline build",
+        --arg code "$code" --arg message "$message" \
+        '{schema:1,kind:"submission",code:$code,message:$message,
           retriable:false,job_id:$job_id,round_id:$round_id,
           patch_sha256:$patch_sha256}' > "$submission_error"
     chmod 0400 "$submission_error"
@@ -878,13 +884,13 @@ emit_candidate_build_failure() {
         --arg base_image_id "$base_image_id" --arg patch_sha256 "$patch_sha256" \
         --arg providers_sha256 "$providers_sha256" \
         --arg baseline_sha256 "$baseline_sha256" \
-        --arg submission_error_sha256 "$(sha256_file "$submission_error")" \
+        --arg submission_error_sha256 "$(sha256_file "$submission_error")" --arg code "$code" \
         --arg evidence_manifest_sha256 "$(sha256_file "$evidence_manifest")" \
         '{schema:1,kind:"sim-latency-worker-evaluation-complete",job_id:$job_id,
           round_id:$round_id,attempt:$attempt,base_image_id:$base_image_id,
           candidate_image_id:null,patch_sha256:$patch_sha256,
           providers_sha256:$providers_sha256,cleanup_complete:true,
-          terminal_error:"candidate_build_failed",
+          terminal_error:$code,
           artifacts:{baseline:$baseline_sha256,submission_error:$submission_error_sha256,
             evidence_manifest:$evidence_manifest_sha256}}' > "$complete_path"
     chmod 0400 "$complete_path"
@@ -1546,7 +1552,7 @@ if [ "$candidate_build_status" -ne 0 ]; then
        ! sudo -n docker image inspect "$base_image_id" >/dev/null 2>&1; then
         die "candidate builder failed because evaluator infrastructure is unavailable"
     fi
-    emit_candidate_build_failure "$candidate_build_log"
+    emit_candidate_build_failure "$candidate_build_log" "$candidate_build_status"
     exit 0
 fi
 chmod 0400 "$candidate_build_json" "$candidate_build_log"

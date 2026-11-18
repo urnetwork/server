@@ -300,6 +300,31 @@ func TestWinnerClosingApprovesBuildsQualifiesAndOpens(t *testing.T) {
 	}
 }
 
+// The exact official round creates one deadline and does not start Snow.
+func TestWinnerClosingWaitsForExactOfficialEpochTwoReview(t *testing.T) {
+	fixture := newWinnerClosingFixture()
+	fixture.snapshot.Round.Epoch = 2
+	roundId := fixture.snapshot.Round.RoundId
+	supervisor := &CompetitionSupervisor{Enabled: true, OwnerId: "test-owner", Driver: fixture,
+		Now: func() time.Time { return fixture.now }, OfficialReviewRoundId: &roundId}
+	for range 3 {
+		state, err := supervisor.Reconcile(t.Context())
+		if err != nil || state != "winner_review_pending" {
+			t.Fatalf("official wait: %q, %v", state, err)
+		}
+	}
+	checkpoint := fixture.snapshot.Transition.WinnerReview
+	if checkpoint == nil || checkpoint.HandoffId != "" || !checkpoint.StartedAt.Equal(fixture.now) || fixture.reviews != 0 || fixture.opens != 0 {
+		t.Fatal("official review did not keep an empty native handoff")
+	}
+	fixture.now = checkpoint.Deadline
+	state, err := supervisor.Reconcile(t.Context())
+	if state != "winner_review_blocked" || !errors.Is(err, ErrWinnerReviewTimedOut) || fixture.reviews != 0 ||
+		!fixture.snapshot.Transition.WinnerReview.Deadline.Equal(checkpoint.Deadline) {
+		t.Fatalf("expired official checkpoint was not preserved: %q, %v", state, err)
+	}
+}
+
 // A new control binary resumes an explicitly historical closing policy with
 // its original provider; default migration cannot relabel existing approvals.
 func TestWinnerClosingPreservesHistoricalProviderThroughActivation(t *testing.T) {

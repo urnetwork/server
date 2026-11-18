@@ -288,6 +288,16 @@ func Testing_ClearNetworkClientLimitCache() {
 	networkClientLimitLocal.Clear()
 }
 
+// Testing_NetworkClientLimitCached returns the Embed plan override this
+// process's cache holds for the network, and whether it holds an entry,
+// whatever the entry's expiry.
+func Testing_NetworkClientLimitCached(networkId server.Id) (override bool, cached bool) {
+	networkClientLimitLocal.stateLock.Lock()
+	defer networkClientLimitLocal.stateLock.Unlock()
+	entry, cached := networkClientLimitLocal.entries[networkId]
+	return entry.override, cached
+}
+
 // networkClientLimitOverride returns the network's Embed plan limit and
 // whether it has one, through the process cache.
 func networkClientLimitOverride(ctx context.Context, networkId server.Id) (limit int, override bool) {
@@ -302,6 +312,20 @@ func networkClientLimitOverride(ctx context.Context, networkId server.Id) (limit
 		expiry:   now.Add(networkClientLimitLocalCacheTtl),
 	})
 	return clientLimit.Limit, clientLimit.Override
+}
+
+// readNetworkClientLimitLocalEntry reads the network's Embed plan limit on the
+// caller's own connection or transaction, as an entry of the process cache.
+// The caller puts it in the cache once it may publish the read, which keeps a
+// hosted mint to its one pooled connection (authNetworkClientWithParentState).
+func readNetworkClientLimitLocalEntry(ctx context.Context, query server.PgCanQuery, networkId server.Id) networkClientLimitLocalEntry {
+	now := server.NowUtc()
+	limit, override := readNetworkTopLevelClientLimit(ctx, query, networkId)
+	return networkClientLimitLocalEntry{
+		limit:    limit,
+		override: override,
+		expiry:   now.Add(networkClientLimitLocalCacheTtl),
+	}
 }
 
 // networkConcurrentClientLimit is the network's concurrent connected top-level

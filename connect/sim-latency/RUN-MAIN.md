@@ -231,6 +231,10 @@ Public import remains embargoed until publication and is only for the current
 elected job/revision/decision. The import must fit the already recorded closing
 checkpoint; no missing, expired or native-owned checkpoint is reset or adopted.
 An earlier genuine prereview need not claim completion after checkpoint creation.
+Start the supervisor with `--official-review-round-id=<epoch-2-round-id>` for
+this operator-approved round. It records the normal bounded checkpoint but
+leaves its native handoff empty, awaiting the official Astra import. Other
+rounds continue to use their own pinned review policy.
 
 Deploy the appended Astra 6.2 reviewer-ID migration through the normal
 migration-before-code pipeline, then deploy the API, monitor and supervisor

@@ -1255,7 +1255,7 @@ func (self evaluationSecurity) passedFor(evalError *CompetitionError) bool {
 		self.ManagementMemoryReserved &&
 		self.NoProductionSecrets && self.StructuralPatchCheck &&
 		self.CleanupComplete && self.ImmutableReports
-	if evalError != nil && evalError.Kind == "submission" && evalError.Code == "candidate_build_failed" {
+	if isCompetitionBuildRejection(evalError) {
 		return buildBoundary
 	}
 	return buildBoundary && self.TemplateDatabaseReset && self.RedisReset &&
@@ -1909,8 +1909,15 @@ func authenticateArtifacts(root string, declared []evaluationArtifact) ([]evalua
 	})
 }
 
+// A refusal before candidate execution has authenticated build evidence, but
+// cannot have measurement artifacts or a completed evaluation score.
+func isCompetitionBuildRejection(evalError *CompetitionError) bool {
+	return evalError != nil && evalError.Kind == "submission" &&
+		(evalError.Code == "candidate_build_failed" || evalError.Code == "patch_does_not_apply")
+}
+
 func authenticateResultArtifacts(root string, declared []evaluationArtifact, evalError *CompetitionError) ([]evaluationArtifact, error) {
-	if evalError != nil && evalError.Kind == "submission" && evalError.Code == "candidate_build_failed" {
+	if isCompetitionBuildRejection(evalError) {
 		return authenticateArtifactsRequired(root, declared, map[string]bool{
 			"baseline.json": false, "submission-error.json": false, "evaluation.complete.json": false,
 		})
@@ -4249,6 +4256,7 @@ func scoreJobEvaluationFailure(status string, evalError *CompetitionError) *Eval
 	known := false
 	switch evalError.Kind + "\x00" + evalError.Code {
 	case "submission\x00candidate_build_failed",
+		"submission\x00patch_does_not_apply",
 		"submission\x00incomplete_run",
 		"submission\x00outside_epoch_window",
 		"submission\x00resource_violation",

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -146,10 +148,11 @@ func (self repositoryGitResult) String() string {
 
 // Error is a safe projection, while Unwrap preserves existing typed ownership.
 type repositoryGitOperationError struct {
-	phase    repositoryGitPhase
-	result   repositoryGitResult
-	exitCode int
-	cause    error
+	phase         repositoryGitPhase
+	result        repositoryGitResult
+	exitCode      int
+	cause         error
+	patchConflict bool
 }
 
 // Only finite source vocabulary and the native numeric result are formatted.
@@ -159,6 +162,27 @@ func (self *repositoryGitOperationError) Error() string {
 
 // Neither original exec error strings nor stderr are retained in the chain.
 func (self *repositoryGitOperationError) Unwrap() error { return self.cause }
+
+// Only complete, paired C-locale context diagnostics prove nonapplication.
+// Mixed output, unexpected layouts and other Git failures remain infrastructure.
+func repositoryGitPatchConflict(output string) bool {
+	lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+	if len(lines) < 2 || len(lines)%2 != 0 {
+		return false
+	}
+	for i := 0; i < len(lines); i += 2 {
+		first, ok := strings.CutPrefix(lines[i], "error: patch failed: ")
+		offset := strings.LastIndexByte(first, ':')
+		if !ok || offset <= 0 {
+			return false
+		}
+		line, err := strconv.ParseUint(first[offset+1:], 10, 64)
+		if err != nil || line == 0 || lines[i+1] != "error: "+first[:offset]+": patch does not apply" {
+			return false
+		}
+	}
+	return true
+}
 
 // Fixed boundary messages stay byte-identical while retaining diagnostic and
 // cancellation identities previously discarded by the caller's replacement.
@@ -213,5 +237,7 @@ func repositoryGitFailure(ctx context.Context, args []string, command *exec.Cmd,
 		result = repositoryGitCanceled
 	}
 	cause = errors.Join(ctx.Err(), cause)
-	return &repositoryGitOperationError{phase: repositoryGitPhaseForArguments(args), result: result, exitCode: exitCode, cause: cause}
+	phase := repositoryGitPhaseForArguments(args)
+	return &repositoryGitOperationError{phase: phase, result: result, exitCode: exitCode, cause: cause,
+		patchConflict: phase == repositoryGitApplyCheck && result == repositoryGitExited && exitCode == 1 && repositoryGitPatchConflict(output.content.String())}
 }

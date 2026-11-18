@@ -2005,7 +2005,7 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 // liveness lease (offline providers, failing open on unknown) and the hard
 // exclusions find-providers2 applies (blackhole and TLS authentication).
 var uniqueExitProviderOffline = func(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
-	offline, _, err := getProviderLivenessExclusions(ctx, clientIds, now)
+	offline, _, err := getProviderLivenessExclusions(ctx, nil, clientIds, now)
 	return offline, err
 }
 

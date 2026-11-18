@@ -101,8 +101,10 @@ throwaway store passwords use an explicit local-evaluator-only override. After
 candidate execution ends, the worker validates the tree, copies only the
 bounded evidence to durable storage, authenticates it, and seals it read-only.
 A compile/vet failure returns the terminal typed
-`candidate_build_failed` result with build-boundary evidence; it does not forge
-runtime reset or accounting claims for a measurement that never started.
+`candidate_build_failed` result. A confirmed conflict against the authenticated
+epoch source returns the terminal `patch_does_not_apply` submission rejection.
+Both retain build-boundary evidence without claiming runtime reset or
+accounting for a measurement that never started.
 
 Post-run checks validate PostgreSQL and Redis state as well as the runner:
 backing services must remain healthy, running, unrestarted, and free of OOM

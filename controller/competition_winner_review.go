@@ -152,6 +152,12 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 	if checkpoint.HandoffId != "" {
 		return block("multipass_pending_explicit_operator_review", ErrWinnerReviewPending)
 	}
+	if self.OfficialReviewRoundId != nil && *self.OfficialReviewRoundId == snapshot.Round.RoundId {
+		if snapshot.Round.Epoch != 2 || snapshot.Round.Staging || state.Policy.Staging {
+			return block("official_review_round_scope_mismatch", ErrConflict)
+		}
+		return transition, "winner_review_pending", nil, true
+	}
 	driver, ok := self.Driver.(competitionSupervisorWinnerReviewDriver)
 	if !ok {
 		return block("reviewer_integration_missing", errors.New("elected-winner reviewer integration is unavailable"))
