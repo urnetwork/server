@@ -1090,6 +1090,14 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// each head summary, each member's last epoch and when the rolling census
 	// started, versioned by its position
 	[]snMainnetMigrationContract{verifyCohortRollingMigrationContract},
+	// the lag.dev drift test's tables with lag_track's kind and drift
+	// columns, the drift model's calibration, the country of a drift test's
+	// client_ip, and a drift run's k and k_early, each versioned by its
+	// position
+	[]snMainnetMigrationContract{lagDriftMigrationContract},
+	[]snMainnetMigrationContract{lagDriftCalibrationMigrationContract},
+	[]snMainnetMigrationContract{lagDriftClientIpCountryMigrationContract},
+	[]snMainnetMigrationContract{lagDriftRunKMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

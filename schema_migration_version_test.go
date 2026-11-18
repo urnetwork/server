@@ -36,6 +36,10 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{name: "record of deleted accounts", sql: deletedNetworkSchemaSql, version: DeletedNetworkSchemaMigrationVersion},
 		{name: "App Store subscriptions moved from deleted accounts", sql: appleSubscriptionMoveSchemaSql, version: AppleSubscriptionMoveSchemaMigrationVersion},
 		{name: "accounts deleted before their record, backfilled", sql: DeletedNetworkBackfillSql, version: DeletedNetworkBackfillMigrationVersion},
+		{name: "lag.dev drift tables and track kind", sql: lagDriftSchemaSql, version: LagDriftSchemaMigrationVersion},
+		{name: "lag.dev drift calibration", sql: lagDriftCalibrationSchemaSql, version: LagDriftCalibrationSchemaMigrationVersion},
+		{name: "lag.dev drift test client country", sql: lagDriftClientIpCountrySchemaSql, version: LagDriftClientIpCountrySchemaMigrationVersion},
+		{name: "lag.dev drift run k and k_early", sql: lagDriftRunKSchemaSql, version: LagDriftRunKSchemaMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {
