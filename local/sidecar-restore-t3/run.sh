@@ -30,4 +30,5 @@ fi
 
 cd "$server"
 export SIDECAR_RESTORE_T3=1
-exec "$GO" test -tags sidecar_pending -count=1 -timeout 1800s -run '^TestFs42' "$@" ./sidecarrestore/
+# server/cli/dns holds DNS-M5-24's step (TestFs42DnsStepOnTheRestoreFrame), on the same fixture
+exec "$GO" test -tags sidecar_pending -count=1 -timeout 1800s -run '^TestFs42' "$@" ./sidecarrestore/ ./cli/dns/

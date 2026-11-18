@@ -65,14 +65,14 @@ func (self *dnsT3Rollout) wrap(ns string, current http.RoundTripper) http.RoundT
 		if !dnsT3FeedPath(request.URL.Path) {
 			return current.RoundTrip(request)
 		}
-		next, unreadable := func() (http.Handler, bool) {
+		next := func() http.Handler {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			self.nsCounts[ns] += 1
 			if self.next == nil || self.nsCounts[ns]%4 != 0 {
-				return nil, false
+				return nil
 			}
-			return self.next, self.unreadable
+			return self.next
 		}()
 		if next == nil {
 			response, err := current.RoundTrip(request)
@@ -93,6 +93,13 @@ func (self *dnsT3Rollout) wrap(ns string, current http.RoundTripper) http.RoundT
 		if err != nil {
 			return nil, err
 		}
+		// what N+1 holds back is as it stands when the answer goes, so a poll held across the rollback answers as N+1
+		// then serves
+		unreadable := func() bool {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			return self.unreadable
+		}()
 		added, err := dnsT3NextReleaseAnswer(body, unreadable)
 		if err != nil {
 			return nil, err
@@ -165,6 +172,34 @@ func dnsT3NextReleaseAnswer(body []byte, unreadable bool) ([]byte, error) {
 		out.WriteByte('\n')
 	}
 	return out.Bytes(), nil
+}
+
+// Moves the Net's clock a retry at a time until every edge serves serial, waking at each timer set or serial served:
+// an edge that was refused or answered at once waits its backoff on that clock, which only a move ends, and its timer
+// may be set before this watches.
+func (self *dnsT3) awaitServedMovingTheClock(t testing.TB, ctx context.Context, serial uint64) {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(ctx, dnsT3WaitTimeout)
+	defer cancel()
+	for {
+		_, timerAdded := self.net.Clock().WatchTimers()
+		var behind chan struct{}
+		for _, ns := range self.settings.Ns {
+			if served, changed := self.harness.Edge(ns).ServedSerial(self.root); served < serial {
+				behind = changed
+			}
+		}
+		if behind == nil {
+			return
+		}
+		self.net.Clock().Advance(time.Duration(self.settings.Feed.RetryMaxSeconds) * time.Second)
+		select {
+		case <-timerAdded:
+		case <-behind:
+		case <-waitCtx.Done():
+			t.Fatalf("an edge never served %d: %v", serial, waitCtx.Err())
+		}
+	}
 }
 
 // N+1: a block of its own over the harness's store and deps, on the Net's clock and the harness's gates.
@@ -257,9 +292,10 @@ func TestFs52BlocksNAndNextServeTogetherAndRollBack(t *testing.T) {
 			if refused() {
 				break
 			}
+			// a move ends every hold and backoff, so each edge asks again, a quarter of its polls on N+1
+			stack.net.Clock().Advance(time.Duration(stack.settings.Feed.RetryMaxSeconds) * time.Second)
 			select {
 			case <-timerAdded:
-				stack.net.Clock().Advance(time.Duration(stack.settings.Feed.RetryMaxSeconds) * time.Second)
 			case <-answered:
 			case <-waitCtx.Done():
 				t.Fatalf("no edge took an unreadable answer: %v", waitCtx.Err())
@@ -271,16 +307,16 @@ func TestFs52BlocksNAndNextServeTogetherAndRollBack(t *testing.T) {
 			}
 		}
 
-		// the rollback: N+1 stops and N answers alone; both NS go on from their last good views
+		// the rollback: N+1 stops and N answers alone; both NS go on from their last good views, an edge in its backoff
+		// asking again once the Net's clock passes it
 		rollout.setNext(nil, false)
-		for range 2 {
-			stack.net.Clock().Advance(time.Duration(stack.settings.Feed.RetryMaxSeconds) * time.Second)
-		}
-		if err := stack.harness.AwaitServed(waitCtx, stack.root, gated); err != nil {
+		stack.awaitServedMovingTheClock(t, ctx, gated)
+		requireBoth("gated."+apex, "gated")
+		if _, err := model.DnsWrite(ctx, &model.DnsWriteArgs{Root: stack.root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{dnsT3Txt("rolled-back."+apex, "after the rollback")}}); err != nil {
 			t.Fatal(err)
 		}
-		requireBoth("gated."+apex, "gated")
-		after := write("rolled-back."+apex, "after the rollback")
+		after := stack.serial(t, ctx)
+		stack.awaitServedMovingTheClock(t, ctx, after)
 		requireBoth("rolled-back."+apex, "after the rollback")
 		for _, ns := range stack.settings.Ns {
 			if soa := stack.query(t, ctx, ns, stack.root, dns.TypeSOA, false); soa.Answer[0].(*dns.SOA).Serial != uint32(after) {
