@@ -3765,9 +3765,9 @@ func SetProvideWithCapabilities(
 		})
 
 		// the session cap excludes a top-level client's own session while it
-		// provides publicly; a change is recorded on the session after the
+		// has provide enabled; a change is recorded on the session after the
 		// commit (its next mint records it too)
-		if provides := provideKeysProvidePublicly(secretKeys); provides != provideKeysProvidePublicly(storedSecretKeys) && sourceClientId == nil && sessionId != nil && clientNetworkId != nil {
+		if provides := provideKeysEnableProvide(secretKeys); provides != provideKeysEnableProvide(storedSecretKeys) && sourceClientId == nil && sessionId != nil && clientNetworkId != nil {
 			exemptionNetworkId, exemptionSessionId, exemption = clientNetworkId, sessionId, provides
 		}
 

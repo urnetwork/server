@@ -93,8 +93,8 @@ func sessionKindLabel(class string) string {
 // decision 6), and the retained marker cap.
 type SessionCapPolicy struct {
 	// The most live sessions of a network the cap counts: every live session
-	// except the client sessions whose client provides publicly. Zero or less
-	// is no cap.
+	// except the client sessions whose client has provide enabled (public or
+	// stream provide mode). Zero or less is no cap.
 	Live int
 	// The most retained revocation markers of a network: revoked sessions
 	// whose horizon has not ended. Zero or less is no cap.
@@ -136,9 +136,9 @@ func Testing_SetSessionCapPolicy(policy SessionCapPolicy) func() {
 	return func() { sessionCapPolicyOverride.Store(old) }
 }
 
-// Whether a client provides publicly (model's one provider predicate,
-// ClientProvidesPubliclyInTx). A top-level client's own session is excluded
-// from the session cap while it does.
+// Whether a client has provide enabled (model's one provider predicate,
+// ClientProvideEnabledInTx: public or stream provide mode). A top-level
+// client's own session is excluded from the session cap while it does.
 type ClientProvideEnabledInTx func(ctx context.Context, tx server.PgTx, clientId server.Id) (bool, error)
 
 var clientProvideEnabledInTx atomic.Pointer[ClientProvideEnabledInTx]

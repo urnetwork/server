@@ -1,7 +1,6 @@
 // The session cap (pro.yml max_sessions, enforce_session_cap), the one
-// provider predicate both client caps exclude by, and what a client's removal
-// frees (session1118 FIXPLAN R-cap, R-dark, R-free; owner decisions
-// 2026-11-18).
+// provider predicate it excludes by, and what a client's removal frees
+// (session1118 FIXPLAN R-cap, R-dark, R-free; owner decisions 2026-11-18).
 package model
 
 import (
@@ -19,7 +18,7 @@ func init() {
 		return Pro().SessionCapPolicy()
 	})
 	session.SetClientProvideEnabledInTx(func(ctx context.Context, tx server.PgTx, clientId server.Id) (bool, error) {
-		return ClientProvidesPubliclyInTx(ctx, tx, clientId)
+		return ClientProvideEnabledInTx(ctx, tx, clientId)
 	})
 }
 
@@ -54,24 +53,22 @@ func Testing_SetMaxSessions(maxSessions int) func() {
 	return func() { c.MaxSessions = prev }
 }
 
-// The provide modes whose registered key makes a client a public provider:
-// the one predicate the session cap and the concurrent client limit's
-// provider test share (owner, 2026-11-18: "clients with provide enabled are
-// excluded from the session cap and the client cap").
+// The provide modes whose registered key makes a client a provider the
+// session cap excludes: "provide enabled" is public or stream provide mode,
+// the rule of the concurrent-client exemption (owner, 2026-11-18). A client
+// that provides only to its own network or to friends and family counts. A
+// mint's exemption (ClientProvideEnabledInTx), a provide change's
+// (provideKeysEnableProvide) and the SQL all read these modes, and nothing
+// else decides it.
 //
-// pro.yml's concurrent-client exemption reads "public + stream provide mode".
-// That text is the removed isPublicProvider's (25a3b1ead, 2026-10-06), which
-// required both. Every sdk client registers Stream, the return-traffic mode,
+// Stream is also the return-traffic mode every connect client registers
 // whatever it provides (connect ContractManager.SetProvideModesWithReturnTraffic),
-// so a Public key is what tells a provider apart, and for every sdk client
-// Public implies Stream. "Public or Stream" would exempt every client that
-// ever connected, hosted proxies included. A different reading is a change
-// here and nowhere else.
-var providerProvideModes = []ProvideMode{ProvideModePublic}
+// so a client is excluded from its first provide registration on.
+var providerProvideModes = []ProvideMode{ProvideModePublic, ProvideModeStream}
 
-// clientProvidesPubliclySql is the predicate in SQL, for a trusted client id
+// clientProvideEnabledSql is the predicate in SQL, for a trusted client id
 // expression (never request text).
-func clientProvidesPubliclySql(clientIdExpression string) string {
+func clientProvideEnabledSql(clientIdExpression string) string {
 	modes := "{"
 	for i, mode := range providerProvideModes {
 		if 0 < i {
@@ -87,10 +84,10 @@ func clientProvidesPubliclySql(clientIdExpression string) string {
 	)
 }
 
-// ClientProvidesPubliclyInTx reports whether the client provides publicly, by
+// ClientProvideEnabledInTx reports whether the client has provide enabled, by
 // its registered provide keys.
-func ClientProvidesPubliclyInTx(ctx context.Context, query server.PgCanQuery, clientId server.Id) (provides bool, returnErr error) {
-	rows, err := query.Query(ctx, `SELECT `+clientProvidesPubliclySql("$1"), clientId)
+func ClientProvideEnabledInTx(ctx context.Context, query server.PgCanQuery, clientId server.Id) (provides bool, returnErr error) {
+	rows, err := query.Query(ctx, `SELECT `+clientProvideEnabledSql("$1"), clientId)
 	if err != nil {
 		return false, err
 	}
@@ -103,8 +100,8 @@ func ClientProvidesPubliclyInTx(ctx context.Context, query server.PgCanQuery, cl
 	return provides, rows.Err()
 }
 
-// provideKeysProvidePublicly is the predicate over a provide's key set.
-func provideKeysProvidePublicly(secretKeys map[ProvideMode][]byte) bool {
+// provideKeysEnableProvide is the predicate over a provide's key set.
+func provideKeysEnableProvide(secretKeys map[ProvideMode][]byte) bool {
 	for _, mode := range providerProvideModes {
 		if _, ok := secretKeys[mode]; ok {
 			return true

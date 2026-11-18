@@ -477,7 +477,9 @@ func TestApiKeyReissueKeepsTheClientsSession(t *testing.T) {
 }
 
 // R-cap: a top-level client's provide state moves its own session in and out
-// of the cap's provider exemption, at the provide and at its mints.
+// of the cap's provider exemption, at the provide and at its mints. Provide
+// enabled is public or stream provide mode (owner, 2026-11-18): a client that
+// provides only to its own network or to friends and family stays counted.
 func TestProvideChangeMovesTheSessionExemption(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -493,22 +495,82 @@ func TestProvideChangeMovesTheSessionExemption(t *testing.T) {
 			t.Fatal("a client that does not provide is exempt")
 		}
 		key := []byte{1, 2, 3}
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key})
+		if exempt() {
+			t.Fatal("a network-only provider's session is exempt")
+		}
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key})
+		if exempt() {
+			t.Fatal("a friends-and-family provider's session is exempt")
+		}
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
+		if !exempt() {
+			t.Fatal("a stream provider's session is counted")
+		}
 		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key, ProvideModePublic: key})
 		if !exempt() {
 			t.Fatal("a public provider's session is counted")
 		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key})
 		if exempt() {
-			t.Fatal("return traffic alone exempts a session")
+			t.Fatal("a provider that went network-only stayed exempt")
 		}
-		// the mint records it too
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key, ProvideModePublic: key})
+		// the mint records it too, both ways
+		reissue := func() {
+			sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+				return AuthNetworkClient(&AuthNetworkClientArgs{ClientId: &client, Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
+			})
+		}
+		server.Raise(session.UpdateSessionProvideExemption(ctx, network.networkId, *claims.SessionId, true))
+		reissue()
+		if exempt() {
+			t.Fatal("a network-only provider's mint kept the exemption")
+		}
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
 		server.Raise(session.UpdateSessionProvideExemption(ctx, network.networkId, *claims.SessionId, false))
-		sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
-			return AuthNetworkClient(&AuthNetworkClientArgs{ClientId: &client, Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
-		})
+		reissue()
 		if !exempt() {
 			t.Fatal("the mint did not record the provider exemption")
+		}
+	})
+}
+
+// Owner, 2026-11-18: provide enabled is public or stream provide mode, so a
+// client that provides only to its own network, or to friends and family,
+// takes a place under the session cap; a stream provider's session does not.
+func TestNetworkOnlyProviderCountsTowardTheSessionCap(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		network := newSessionCapTestNetwork(t, ctx)
+		client, _ := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+			return AuthNetworkClient(&AuthNetworkClientArgs{Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
+		})
+		// the cap: the network's live sessions now, its sign-in and the client's
+		live := len(sessionCapMembers(t, ctx, network.networkId, "z"))
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: live, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		signIn := func() error {
+			_, err := session.MintNetworkSession(ctx, session.NewByJwt(network.networkId, network.userId, "session-cap", false, false), "password")
+			return err
+		}
+		key := []byte{1, 2, 3}
+		for _, modes := range []map[ProvideMode][]byte{
+			{ProvideModeNetwork: key},
+			{ProvideModeFriendsAndFamily: key},
+			{ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key},
+		} {
+			SetProvide(ctx, client, modes)
+			var refusal *session.SessionError
+			if err := signIn(); !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" {
+				t.Fatal("a sign-in past the cap while the client provides", modes, err)
+			}
+		}
+		// a stream provider's session leaves the count: one more sign-in fits
+		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
+		if err := signIn(); err != nil {
+			t.Fatal("a stream provider's session took a place under the cap", err)
 		}
 	})
 }

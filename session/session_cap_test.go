@@ -158,7 +158,7 @@ func TestSessionCapEnforcedRefusesWithoutEviction(t *testing.T) {
 	})
 }
 
-// R-cap: a client session whose top-level client provides publicly is not
+// R-cap: a client session whose top-level client has provide enabled is not
 // counted, and is admitted at the cap; the exemption follows the client's
 // provide state.
 func TestSessionCapExcludesProviderClientSessions(t *testing.T) {

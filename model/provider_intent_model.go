@@ -985,8 +985,7 @@ func checkProviderIntentAt(ctx context.Context, networkId server.Id, clientId se
 	return &checkTime
 }
 
-// Reads what qualifies a provider: a registered public provide key (the one
-// provider predicate the session cap shares, clientProvidesPubliclySql), egress
+// Reads what qualifies a provider: a registered public provide key, egress
 // probes since `since`, its creation time and its 12 hour reliability.
 func getProviderIntentEvidence(ctx context.Context, clientId server.Id, since time.Time, now time.Time) *providerIntentEvidence {
 	evidence := &providerIntentEvidence{
@@ -998,22 +997,25 @@ func getProviderIntentEvidence(ctx context.Context, clientId server.Id, since ti
 			ctx,
 			`
 				SELECT
-					`+clientProvidesPubliclySql("$1")+` AS public_provider,
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE client_id = $1 AND provide_mode = $2
+					) AS public_provider,
 					EXISTS (
 						SELECT 1 FROM provider_egress_health_history
 						WHERE
 							client_id = $1 AND
 							url_probe AND
 							0 < total_count AND
-							$2 <= measured_at AND
-							measured_at <= $3
+							$3 <= measured_at AND
+							measured_at <= $4
 					) OR EXISTS (
 						SELECT 1 FROM provider_url_probe_run
 						WHERE
 							client_id = $1 AND
-							$2 <= claimed_at AND
+							$3 <= claimed_at AND
 							completed_at IS NOT NULL AND
-							completed_at <= $3
+							completed_at <= $4
 					) AS probe_attempted,
 					EXISTS (
 						SELECT 1 FROM provider_egress_health_history
@@ -1021,8 +1023,8 @@ func getProviderIntentEvidence(ctx context.Context, clientId server.Id, since ti
 							client_id = $1 AND
 							url_probe AND
 							0 < ok_count AND
-							$2 <= measured_at AND
-							measured_at <= $3
+							$3 <= measured_at AND
+							measured_at <= $4
 					) AS probe_passed,
 					(
 						SELECT create_time FROM network_client
@@ -1030,10 +1032,11 @@ func getProviderIntentEvidence(ctx context.Context, clientId server.Id, since ti
 					) AS client_create_time,
 					(
 						SELECT independent_reliability_weight FROM client_connection_reliability_score
-						WHERE client_id = $1 AND lookback_index = $4
+						WHERE client_id = $1 AND lookback_index = $5
 					) AS reliability_weight
 			`,
 			clientId,
+			ProvideModePublic,
 			since.UTC(),
 			now.UTC(),
 			providerIntentReliabilityLookbackIndex,

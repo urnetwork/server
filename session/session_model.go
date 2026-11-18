@@ -84,8 +84,8 @@ type NetworkSession struct {
 	// for a client session what owns it: hosted_proxy, api_key, device or
 	// legacy (ClientKind*); null for a sign-in or code session
 	ClientKind *string `json:"client_kind"`
-	// a client session whose client provides publicly: the session cap does
-	// not count it
+	// a client session whose client has provide enabled: the session cap
+	// does not count it
 	Provider        bool             `json:"provider"`
 	CreateTime      time.Time        `json:"create_time"`
 	LastMintTime    time.Time        `json:"last_mint_time"`
@@ -101,7 +101,7 @@ type NetworkSessionCounts struct {
 	Live int `json:"live"`
 	// the live sessions the session cap counts: all but the provider ones
 	Capped int `json:"capped"`
-	// client sessions whose client provides publicly
+	// client sessions whose client has provide enabled
 	Provider    int `json:"provider"`
 	Signin      int `json:"signin"`
 	Code        int `json:"code"`
@@ -162,8 +162,8 @@ type SessionOperationResult struct {
 //	1 z          live sessions, scored by acceptance horizon
 //	2 held       live and revoked-retained sessions, scored by retention
 //	3 generation 4 eid    the revision
-//	5 xz         live client sessions whose client provides publicly (the cap
-//	             does not count them), scored as in z
+//	5 xz         live client sessions whose client has provide enabled (the
+//	             cap does not count them), scored as in z
 //	6 zi         live sign-in and code sessions; 7 zco live code sessions
 //	8 zh, 9 za, 10 zd, 11 zl  live client sessions of a hosted proxy, an API
 //	             key (or MCP) client, an adopted device and a per-client
