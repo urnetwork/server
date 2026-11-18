@@ -1432,6 +1432,9 @@ func NewProxyDevice(
 	// refreshes; until the device exists they read as active
 	var activityDevice atomic.Pointer[ProxyDevice]
 	deviceLocalSettings.UserActivitySince = proxyDeviceUserActivitySince(&activityDevice)
+	// until the device can route, its window clients may take the manager's
+	// reserved registrations (proxy_device_route_priority.go)
+	localControl.SetRoutable(proxyDeviceRoutable(&activityDevice))
 	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,
