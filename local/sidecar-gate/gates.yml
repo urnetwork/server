@@ -7,11 +7,12 @@
 # Gates: G0; Mn-in, milestone n's entry review; Mn, its exit review (Mn-out); every, each Gn-out (FS-55); next,
 # before place_new names a new metadata cluster. A row is an FS row's case, or an item: repo and package name
 # each test, names are the tests, each of which must report PASS, so a test that does not exist reads missing,
-# never pass; tags, a build tag; stores: true runs it through the private-store wrapper SIDECAR_GATE_STORE_WRAPPER
-# names; args go after the package, {base} and {group} filled from the run; commands run in a repo's directory
-# and pass on exit 0, or read the outcome a last "sidecar-gate outcome: <outcome>" line names, a nonzero exit still
-# failing. A row with nothing to run is missing. external says what outside the build (hardware,
-# production, people) the row also waits on, or the later gate a later-of case passes at, and reads open.
+# never pass; tags, a build tag; timeout, a Go duration, bounds that test's run in place of the tool's default,
+# for a test known to outlast it (QD-1058); stores: true runs it through the private-store wrapper
+# SIDECAR_GATE_STORE_WRAPPER names; args go after the package, {base} and {group} filled from the run; commands
+# run in a repo's directory and pass on exit 0, or read the outcome a last "sidecar-gate outcome: <outcome>" line
+# names, a nonzero exit still failing. A row with nothing to run is missing. external says what outside the build
+# (hardware, production, people) the row also waits on, or the later gate a later-of case passes at, and reads open.
 # store_clock: true says the case's T3 run reads stored ages through T3's store clock (QD-264), which the report
 # names beside its outcome. A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test
 # TestFs<n><Case>OnT3 in server's sidecart3, by convention, so this file does not change as rows land.
@@ -74,7 +75,7 @@ gates:
         - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestDeps, TestLayering, TestLegs, TestCgo, TestHygiene, TestEveryRowHasARuleAndAPlantedViolation]}
     - item: §22.4's release fixture, from the consumer wiring (build's sidecar release step)
       tests:
-        - {repo: build, dir: all, package: ., tags: sidecar_release_fixture, names: [TestSidecarReleaseFixture]}
+        - {repo: build, dir: all, package: ., tags: sidecar_release_fixture, timeout: 3h0m0s, names: [TestSidecarReleaseFixture]}
   M2-in:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:

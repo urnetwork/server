@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The gate report on a fixture monoroot, and gates.yml against §23.6.
@@ -399,5 +400,190 @@ func TestTheRealFilesNameTestsAsTests(t *testing.T) {
 				t.Errorf("%q is not a test's name", testName)
 			}
 		}
+	}
+}
+
+// A fixture test that passes only when its binary runs under the -timeout its -fixture.timeout names, so a row's
+// outcome says which bound the gate ran it under.
+func writeTimeoutFixture(t *testing.T, options *gateOptions) {
+	t.Helper()
+	content := "package widget\n\nimport (\n\t\"flag\"\n\t\"testing\"\n)\n\n" +
+		"var timeout = flag.String(\"fixture.timeout\", \"\", \"the -timeout the gate runs this binary under\")\n\n" +
+		"func TestRunsUnderItsTimeout(t *testing.T) {\n" +
+		"\tif got := flag.Lookup(\"test.timeout\").Value.String(); got != *timeout {\n" +
+		"\t\tt.Fatalf(\"test.timeout %s, want %s\", got, *timeout)\n\t}\n}\n"
+	if err := os.WriteFile(filepath.Join(options.root, "fixture", "widget", "timeout_test.go"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An entry's own timeout is the -timeout its go test runs under (QD-1058): the fixture's test passes only when its
+// binary got the entry's 7m, not the settings' 40 minutes.
+func TestGateEntryRunsUnderItsOwnTimeout(t *testing.T) {
+	gates := `gates:
+  M3:
+    - row: FS-940
+      tests:
+        - {repo: fixture, package: ./widget, timeout: 7m, names: [TestRunsUnderItsTimeout], args: ["-fixture.timeout=7m0s"]}
+`
+	options := writeGateFixture(t, gates, "ids: {}\n")
+	options.gate = "M3"
+	writeTimeoutFixture(t, options)
+	report, err := runGate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.rows) != 1 || report.rows[0].outcome != gatePass {
+		for _, row := range report.rows {
+			t.Logf("%s: %s: %s", row.label, row.outcome, strings.Join(row.details, "; "))
+		}
+		t.Fatal("an entry's own timeout is not the -timeout its test ran under")
+	}
+}
+
+// An entry that names no timeout runs under the settings' TestTimeout, the 40 minutes every entry but the release
+// fixture keeps (QD-1058).
+func TestGateEntryWithoutATimeoutRunsUnderTheDefault(t *testing.T) {
+	settings := defaultGateSettings()
+	if settings.TestTimeout != 40*time.Minute {
+		t.Fatalf("the default bound is %s, not 40 minutes", settings.TestTimeout)
+	}
+	gates := `gates:
+  M3:
+    - row: FS-941
+      tests:
+        - {repo: fixture, package: ./widget, names: [TestRunsUnderItsTimeout], args: ["-fixture.timeout=` + settings.TestTimeout.String() + `"]}
+`
+	options := writeGateFixture(t, gates, "ids: {}\n")
+	options.gate = "M3"
+	writeTimeoutFixture(t, options)
+	report, err := runGate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.rows) != 1 || report.rows[0].outcome != gatePass {
+		for _, row := range report.rows {
+			t.Logf("%s: %s: %s", row.label, row.outcome, strings.Join(row.details, "; "))
+		}
+		t.Fatal("an entry with no timeout did not run under the settings' bound")
+	}
+}
+
+// The command running an entry lives the entry's own timeout and the grace, not the settings' bound: a stores
+// entry whose wrapper ignores go test's -timeout and never returns on its own is killed at the entry's bound, and
+// the report says the bound ended it.
+func TestGateEntryTimeoutBoundsTheCommandRunningIt(t *testing.T) {
+	options := writeGateFixture(t, "gates: {}\n", "ids: {}\n")
+	// only a kill ends this wrapper before its sleep does, and that sleep outlasts the caller's bound below, so
+	// nothing of it outlives the test by long even if the kill never comes
+	wrapper := filepath.Join(options.root, "hangs.sh")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\nexec sleep 120\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options.environ = append(options.environ, gateStoreWrapperVariable+"="+wrapper)
+	options.settings.TestTimeoutGrace = 0
+	// the caller's bound ends a run the entry's did not
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	entry := gateTest{Repo: "fixture", Package: "./widget", Stores: true, Timeout: gateTimeout(100 * time.Millisecond), Names: []string{"TestPasses"}}
+	outcome, details := runGateTest(ctx, options, &gateReport{}, entry)
+	if ctx.Err() != nil {
+		t.Fatal("the run outlived its entry's bound, and only the caller's ended it")
+	}
+	joined := strings.Join(details, "\n")
+	if outcome != gateFail || !strings.Contains(joined, "the run outlived its bound, 100ms and the 0s grace after it, and was killed") {
+		t.Fatalf("a run its bound killed: %s:\n%s", outcome, joined)
+	}
+}
+
+// A timeout that is no Go duration longer than zero, written with its unit, is refused when gates.yml loads, never
+// run under the default or under some other bound; one that is loads as its duration.
+func TestGateRefusesAMalformedTimeoutWhenGatesYmlLoads(t *testing.T) {
+	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
+	writeGates := func(timeout string) {
+		gates := "gates:\n  M1:\n    - row: FS-950\n      tests:\n        - {repo: fixture, package: ./widget, timeout: " + timeout + ", names: [TestPasses]}\n"
+		if err := os.WriteFile(options.gatesPath, []byte(gates), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, timeout := range []string{"10800", "0", "1.5", "true", `"180"`, "3 hours", "3H", "3h junk", `""`, "0s", "-1h", "[3h]", "{hours: 3}"} {
+		writeGates(timeout)
+		if _, err := runGate(context.Background(), options); err == nil || !strings.Contains(err.Error(), "gates.yml") || !strings.Contains(err.Error(), "timeout") {
+			t.Errorf("timeout %s: %v", timeout, err)
+		}
+	}
+	for timeout, want := range map[string]time.Duration{"3h": 3 * time.Hour, "3h0m0s": 3 * time.Hour, "90m": 90 * time.Minute, `"1h30m"`: 90 * time.Minute} {
+		writeGates(timeout)
+		gates := &gatesFile{}
+		if err := readYamlFile(options.gatesPath, gates); err != nil {
+			t.Errorf("timeout %s: %v", timeout, err)
+			continue
+		}
+		if got := time.Duration(gates.Gates["M1"][0].Tests[0].Timeout); got != want {
+			t.Errorf("timeout %s loads as %s, want %s", timeout, got, want)
+		}
+	}
+}
+
+// The tool runs gates.yml's release fixture under 3h, as run.sh's BUILD_TEST runs it (QD-1056, QD-1058), and every
+// other entry it reads, in gates.yml, ops-matrix.yml, trace.yml and stages.yml, under the settings' bound.
+func TestGatesYmlGivesOnlyTheReleaseFixtureItsOwnTimeout(t *testing.T) {
+	gates := &gatesFile{}
+	if err := readYamlFile("gates.yml", gates); err != nil {
+		t.Fatal(err)
+	}
+	matrix := &matrixFile{}
+	if err := readYamlFile("ops-matrix.yml", matrix); err != nil {
+		t.Fatal(err)
+	}
+	trace := &traceFile{}
+	if err := readStrictYamlFile("trace.yml", trace); err != nil {
+		t.Fatal(err)
+	}
+	stages := &stagesFile{}
+	if err := readStrictYamlFile("stages.yml", stages); err != nil {
+		t.Fatal(err)
+	}
+	tests := []gateTest{}
+	for _, rows := range gates.Gates {
+		for _, row := range rows {
+			tests = append(tests, row.Tests...)
+		}
+	}
+	for _, entry := range matrix.Ids {
+		tests = append(tests, entry.Tests...)
+	}
+	var collect func(evidence *traceEvidence)
+	collect = func(evidence *traceEvidence) {
+		if evidence == nil {
+			return
+		}
+		tests = append(tests, evidence.Tests...)
+		collect(evidence.Sidecar)
+		collect(evidence.Server)
+	}
+	for _, row := range trace.Rows {
+		collect(&row.traceEvidence)
+	}
+	for _, stage := range stages.Stages {
+		for _, item := range stage.Items {
+			collect(&item.traceEvidence)
+		}
+	}
+	settings := defaultGateSettings()
+	fixtures := 0
+	for _, test := range tests {
+		got := test.testTimeout(settings)
+		if slices.Contains(test.Names, "TestSidecarReleaseFixture") {
+			fixtures += 1
+			if got != 3*time.Hour || test.Tags != "sidecar_release_fixture" {
+				t.Errorf("the release fixture runs under %s with tags %q", got, test.Tags)
+			}
+		} else if got != settings.TestTimeout {
+			t.Errorf("%s %s's %v runs under %s", test.Repo, test.Package, test.Names, got)
+		}
+	}
+	if fixtures != 1 || len(tests) < 100 {
+		t.Fatalf("the files name the release fixture %d times among %d entries", fixtures, len(tests))
 	}
 }
