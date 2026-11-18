@@ -7,10 +7,11 @@ package monitor
 //   - the busiest drive's urnetwork_filecluster_drive_dwpd{cluster,window}, which the budget loop publishes: its
 //     last 24 h past 0.8 DWPD warns (filecluster-drive-dwpd-day), its 7-day mean over 0.5 warns
 //     (filecluster-drive-dwpd-week) and over 0.75 pages in business hours (filecluster-drive-dwpd-business);
-//   - each NVMe drive's hourly SMART log (xops's smart-textfile.sh): media errors (filecluster-drive-media-errors)
-//     or available spare under 10% (filecluster-drive-spare-low) warn, and a drive whose percentage used, at its
-//     30-day rate, spends its whole rated endurance in under five years of service pages in business hours
-//     (filecluster-drive-rating-short);
+//   - each NVMe drive's hourly SMART log (xops's smart-textfile.sh), which rides the host's shared Fluent Bit and
+//     so reaches Mimir under job="node" with the host's other node series (owner decisions 509 and 579): media
+//     errors (filecluster-drive-media-errors) or available spare under 10% (filecluster-drive-spare-low) warn, and
+//     a drive whose percentage used, at its 30-day rate, spends its whole rated endurance in under five years of
+//     service pages in business hours (filecluster-drive-rating-short);
 //   - urnetwork_filecluster_drive_rating_days{cluster}, which this publishes: the days until the cluster's first
 //     drive's percentage used reaches 100 at its 30-day rate, +Inf while none wears. A drive joins its cluster
 //     where its filesystem's mountpoint (node_filesystem_size_bytes) is a drive path admin info lists for the
@@ -58,7 +59,6 @@ const (
 	fileClusterWearClassUnobservable  = "filecluster-wear-unobservable"
 	fileClusterDwpdWindowDay          = "24h"
 	fileClusterDwpdWindowWeek         = "7d"
-	fileClusterSmartJob               = "file_cluster"
 	fileClusterWearCheckDwpd          = "dwpd"
 	fileClusterWearCheckUsed          = "percentage_used"
 	fileClusterWearCheckUsedThen      = "percentage_used_window_start"
@@ -67,6 +67,11 @@ const (
 	fileClusterWearCheckFilesystem    = "filesystem"
 	fileClusterWearCheckForgivenBytes = "forgiven_bytes"
 )
+
+// The job the SMART series reach Mimir under. They ride the host's shared Fluent Bit, whose one
+// node_exporter_metrics input labels every series it ships job="node" (owner decisions 509 and 579); no series
+// carries the job="file_cluster" a second input would have given them.
+const fileClusterSmartJob = "node"
 
 // A partition's name, which names its disk: nvme0n1p2 or sdb1 (as file_cluster_counters.go).
 var fileClusterWearPartitionPattern = regexp.MustCompile(`^(nvme[0-9]+n[0-9]+)p[0-9]+$|^((?:s|v|xv|h)d[a-z]+)[0-9]+$`)
