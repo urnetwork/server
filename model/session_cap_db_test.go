@@ -82,15 +82,13 @@ func sessionCapKind(t testing.TB, ctx context.Context, networkId, sessionId serv
 	return kind
 }
 
-// Waits for the post-commit free of a removal, which runs after its commit.
+// The post-commit free of a removal runs before the removal's transaction
+// returns (server.Tx runs its posts after the commit), so a removal that
+// returned has freed what it frees.
 func waitSessionFreed(t testing.TB, ctx context.Context, networkId, sessionId server.Id) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for sessionCapMembers(t, ctx, networkId, "z")[sessionId] {
-		if time.Now().After(deadline) {
-			t.Fatal("the removed client's session was not freed", sessionId)
-		}
-		time.Sleep(10 * time.Millisecond)
+	if sessionCapMembers(t, ctx, networkId, "z")[sessionId] {
+		t.Fatal("the removed client's session was not freed", sessionId)
 	}
 }
 
@@ -134,7 +132,6 @@ func TestRemovedClientFreesItsOwnSession(t *testing.T) {
 		if err != nil || removed.Error != nil {
 			t.Fatal(removed, err)
 		}
-		time.Sleep(200 * time.Millisecond)
 		if !sessionCapMembers(t, ctx, network.networkId, "z")[*network.signin.ByJwt.SessionId] {
 			t.Fatal("removing a client freed the sign-in session")
 		}
@@ -233,7 +230,6 @@ func TestSessionCleanupRunsNoFree(t *testing.T) {
 		if active {
 			t.Fatal("cleanup left the client active")
 		}
-		time.Sleep(200 * time.Millisecond)
 		if sessionStorageCount(t, "free") != frees {
 			t.Fatal("the revocation cleanup ran a free")
 		}
