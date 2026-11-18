@@ -14,7 +14,21 @@ const (
 	CompetitionJobReevaluationDistributedInfrastructure    = "operator_authorized_distributed_infrastructure_v1"
 	CompetitionDistributedReevaluationRetentionBudget      = "retention_budget_exhausted"
 	CompetitionDistributedReevaluationLegacyPrelaunch      = "closed_legacy_prelaunch"
+	CompetitionSilleStorageRecoveryReason                  = "sille_storage_interruption_20261117"
 )
+
+// MatchCompetitionSilleStorageRecoveryScope recognizes only the retained
+// production interruption. The same identity guards the grant and receipt.
+func MatchCompetitionSilleStorageRecoveryScope(environment, competitionId, seasonId, roundId, jobId, hostId, runId, evidenceSha256 string) bool {
+	return environment == "main" &&
+		competitionId == "sim-latency-season-1" &&
+		seasonId == "sim-latency-production-20261028-r2" &&
+		roundId == "01a1c110-585b-ce38-4f29-ca4860a1c058" &&
+		jobId == "01a1e738-6c64-357a-8d4f-143e4b3364d3" &&
+		hostId == "sille" &&
+		runId == "35e95bdc8f4db995113463b989323b19be5f5f4681b375ca7d8f731a35eece9b" &&
+		evidenceSha256 == "3fc5cbab1e3e2ad6c7c85929f94d67ba599be415c5521ceb9e54bb8c59ef15e0"
+}
 
 // An exact census of every frozen host's empty database slot. A missing host,
 // changed fence or substituted slot cannot borrow another host's idle proof.
@@ -85,7 +99,10 @@ func validCompetitionReevaluationCycleClass(cycle *CompetitionJobReevaluationCyc
 	}
 	proof := cycle.Distributed
 	return cycle.Schema == 2 && cycle.IncidentClass == CompetitionJobReevaluationDistributedInfrastructure && proof != nil && proof.Schema == 1 && proof.PatchRetry == nil &&
-		(proof.Reason == CompetitionDistributedReevaluationRetentionBudget || proof.Reason == CompetitionDistributedReevaluationLegacyPrelaunch) &&
+		(proof.Reason == CompetitionDistributedReevaluationRetentionBudget || proof.Reason == CompetitionDistributedReevaluationLegacyPrelaunch ||
+			proof.Reason == CompetitionSilleStorageRecoveryReason && cycle.Cycle == 1 &&
+				MatchCompetitionSilleStorageRecoveryScope(cycle.Environment, cycle.CompetitionId, cycle.SeasonId, cycle.RoundId.String(), cycle.JobId.String(),
+					proof.OriginalHostId, proof.OriginalRunId, proof.ClosureEvidenceSha256)) &&
 		competitionAutomationScope.MatchString(proof.OriginalHostId) && proof.OriginalSlotId > 0 && proof.OriginalFencingToken > 0 &&
 		competitionAutomationSha256.MatchString(proof.OriginalRunId) && !proof.OriginalStartedAt.IsZero() &&
 		proof.OriginalDeadlineAt.Equal(proof.OriginalStartedAt.Add(3*time.Hour)) &&

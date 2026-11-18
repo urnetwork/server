@@ -94,14 +94,19 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{version: patchRetryVersion, removedAt: secondRecoveryVersion, name: "separately authorized unchanged-patch retry"},
 		{version: secondRecoveryVersion, removedAt: epochTwoOfficialVersion, name: "exact-job second recovery with immutable prior receipt"},
 		{version: epochTwoOfficialVersion, removedAt: epochTwoAstra62Version, name: "epoch-two official reviewer substitution with retained complete custody"},
-		{version: epochTwoAstra62Version, removedAt: 0, name: "epoch-two Astra 6.2 reviewer provenance with retained complete custody"},
+		{version: epochTwoAstra62Version, removedAt: server.CompetitionSilleStorageRecoveryMigrationVersion(), name: "epoch-two Astra 6.2 reviewer provenance with retained complete custody"},
+		{version: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: 0, name: "exact Sille storage interruption recovery with retained catalog custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("epoch-two Astra 6.2 reviewer provenance with retained complete custody@v%d", epochTwoAstra62Version)
+	return fmt.Sprintf("exact Sille storage interruption recovery with retained catalog custody@v%d", server.CompetitionSilleStorageRecoveryMigrationVersion())
+}
+
+func competitionSourceGuardsEpochTwoAstra62Owner() string {
+	return fmt.Sprintf("epoch-two Astra 6.2 reviewer provenance with retained complete custody@v%d", server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion())
 }
 
 func competitionSourceGuardsEpochTwoOfficialOwner() string {
@@ -189,7 +194,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{oldVersion: server.CompetitionDistributedReevaluationMigrationVersion(), nextVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), oldOwner: competitionSourceGuardsDistributedOwner(), nextOwner: competitionSourceGuardsPatchRetryOwner()},
 		{oldVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), nextVersion: server.CompetitionSecondRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsPatchRetryOwner(), nextOwner: competitionSourceGuardsSecondRecoveryOwner()},
 		{oldVersion: server.CompetitionSecondRecoveryMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), oldOwner: competitionSourceGuardsSecondRecoveryOwner(), nextOwner: competitionSourceGuardsEpochTwoOfficialOwner()},
-		{oldVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoOfficialOwner(), nextOwner: currentOwner},
+		{oldVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoOfficialOwner(), nextOwner: competitionSourceGuardsEpochTwoAstra62Owner()},
+		{oldVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), nextVersion: server.CompetitionSilleStorageRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoAstra62Owner(), nextOwner: currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -219,7 +225,9 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 				wantDrift = 1
 			}
 			if requireAlertClassCount(alerts, "migration-schema-drift") != wantDrift || requireAlertClassCount(alerts, "cannot-observe") != 0 {
-				t.Fatal("source guard publication or retirement boundary changed")
+				t.Fatalf("source guard boundary changed: head=%d missing=%d target=%q drift=%d want=%d cannot-observe=%d",
+					control.head, control.missingVersion, control.wantOwner,
+					requireAlertClassCount(alerts, "migration-schema-drift"), wantDrift, requireAlertClassCount(alerts, "cannot-observe"))
 			}
 			if wantDrift != 0 {
 				alert := requireAlertClass(t, alerts, "migration-schema-drift")
@@ -314,7 +322,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{head: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), removedAt: server.CompetitionSecondRecoveryMigrationVersion(), owner: competitionSourceGuardsPatchRetryOwner()},
 		{head: server.CompetitionSecondRecoveryMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), owner: competitionSourceGuardsSecondRecoveryOwner()},
 		{head: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), owner: competitionSourceGuardsEpochTwoOfficialOwner()},
-		{head: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), removedAt: 0, owner: currentOwner},
+		{head: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), removedAt: server.CompetitionSilleStorageRecoveryMigrationVersion(), owner: competitionSourceGuardsEpochTwoAstra62Owner()},
+		{head: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: 0, owner: currentOwner},
 	}
 	faults := []struct {
 		name string

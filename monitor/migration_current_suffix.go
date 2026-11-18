@@ -1090,7 +1090,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// each head summary, each member's last epoch and when the rolling census
 	// started, versioned by its position
 	[]snMainnetMigrationContract{verifyCohortRollingMigrationContract},
-	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoAstra62MigrationContract},
+	lagDriftMigrationContracts,
+	[]snMainnetMigrationContract{
+		competitionOfficialReviewEpochTwoAstra62MigrationContract.removedAt(server.CompetitionSilleStorageRecoveryMigrationVersion()),
+		competitionSilleStorageRecoveryMigrationContract,
+	},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

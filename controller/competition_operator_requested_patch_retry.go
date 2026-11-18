@@ -47,7 +47,8 @@ func competitionDistributedRecoveryRequestClassAllowed(a model.CompetitionJobRee
 		return false
 	}
 	if a.Kind == model.CompetitionDistributedJobReevaluationAuthorizationKind && a.IncidentClass == model.CompetitionJobReevaluationDistributedInfrastructure {
-		return d.PatchRetry == nil && (d.Reason == model.CompetitionDistributedReevaluationRetentionBudget || d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch)
+		return d.PatchRetry == nil && (d.Reason == model.CompetitionDistributedReevaluationRetentionBudget || d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch ||
+			competitionSilleStorageRecoveryScope(a))
 	}
 	if a.Kind != model.CompetitionOperatorRequestedPatchRetryAuthorizationKind || a.IncidentClass != model.CompetitionJobReevaluationOperatorRequestedPatchRetry ||
 		d.Reason != model.CompetitionJobReevaluationOperatorRequestedPatchRetry || d.PatchRetry == nil || d.PatchRetry.Schema != 1 ||

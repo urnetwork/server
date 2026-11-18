@@ -141,6 +141,21 @@ func validateCompetitionDistributedRecoveryEnvelope(response competitionagent.Re
 	return nil
 }
 
+func competitionDistributedRecoveryTerminalMatches(reason string, response competitionagent.Response) bool {
+	switch reason {
+	case model.CompetitionDistributedReevaluationRetentionBudget:
+		return response.State == "succeeded" && response.ExitCode == 0 && response.ErrorCode == ""
+	case model.CompetitionDistributedReevaluationLegacyPrelaunch:
+		return response.State == "failed" && response.ExitCode == -1 && response.ErrorCode == "legacy_prelaunch_infrastructure_failure"
+	case model.CompetitionJobReevaluationOperatorRequestedPatchRetry:
+		return response.State == "failed" && response.ExitCode == 1 && response.ErrorCode == "evaluator_process_failed"
+	case competitionSilleStorageRecoveryReason:
+		return response.State == "expired" && response.ExitCode == 1 && response.ErrorCode == "original_deadline_elapsed"
+	default:
+		return false
+	}
+}
+
 // A terminal native result is insufficient without the independent all-host
 // availability observations and the database's held, empty, unchanged fences.
 func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settings, round *roundRecord, request model.CompetitionJobReevaluationRequest, transportForHost competitionDistributedRecoveryTransportFactory) (*competitionDistributedRecoveryProof, error) {
@@ -165,9 +180,10 @@ func observeCompetitionDistributedRecovery(ctx context.Context, settings *Settin
 				response.ManifestSha256 != d.OriginalManifestSha256 || response.RequestSha256 != d.OriginalRequestSha256 || len(response.SelfCheck) != 0 {
 				return nil, ErrConflict
 			}
-			if d.Reason == model.CompetitionDistributedReevaluationRetentionBudget && (response.State != "succeeded" || response.ExitCode != 0 || response.ErrorCode != "") ||
-				d.Reason == model.CompetitionDistributedReevaluationLegacyPrelaunch && (response.State != "failed" || response.ExitCode != -1 || response.ErrorCode != "legacy_prelaunch_infrastructure_failure") ||
-				d.Reason == model.CompetitionJobReevaluationOperatorRequestedPatchRetry && (response.State != "failed" || response.ExitCode != 1 || response.ErrorCode != "evaluator_process_failed") {
+			if !competitionDistributedRecoveryTerminalMatches(d.Reason, response) {
+				return nil, ErrConflict
+			}
+			if d.Reason == competitionSilleStorageRecoveryReason && !competitionSilleStorageRecoveryScope(a) {
 				return nil, ErrConflict
 			}
 			proof.OriginalStatus = response

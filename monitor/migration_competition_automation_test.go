@@ -233,9 +233,12 @@ func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 	secondRecovery := server.CompetitionSecondRecoveryMigrationVersion()
 	epochTwoOfficial := server.CompetitionOfficialReviewEpochTwoMigrationVersion()
 	epochTwoAstra62 := server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion()
+	silleRecovery := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff, official - 1, official, control - 1, control, recovery - 1, recovery, exception - 1, exception, claim - 1, claim, distributed - 1, distributed, distributed + 1, epochTwoAstra62 - 1, server.MigrationCount()} {
 		want := 846
 		switch {
+		case head >= silleRecovery:
+			want = silleRecovery
 		case head >= epochTwoAstra62:
 			want = epochTwoAstra62
 		case head >= epochTwoOfficial:

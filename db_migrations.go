@@ -11911,6 +11911,10 @@ var migrations = []any{
 	// Accept truthful epoch-two Astra 6.2 Max provenance without relabeling
 	// historical reviews or changing the full-request operator grant.
 	newSqlMigration(competitionOfficialReviewEpochTwoAstra62Migration()),
+
+	// Preserve the original failed attempt while allowing the exact retained
+	// Sille storage interruption to receive one controlled recovery.
+	newSqlMigration(CompetitionSilleStorageRecoveryMigrationSql()),
 }
 
 // The deleted_network backfill (the migration above): every network an App

@@ -30,8 +30,21 @@ func migrationEpochTwoAstra62TestOwner(t testing.TB) migrationArtifact {
 	previous := migrationEpochTwoOfficialTestOwner(t)
 	current := migrationCurrentSuffixTestContract(t, version).artifact
 	if version <= previous.requiredVersion || previous.removedVersion != version ||
-		current.name != "epoch-two Astra 6.2 reviewer provenance with retained complete custody" || current.removedVersion != 0 {
+		current.name != "epoch-two Astra 6.2 reviewer provenance with retained complete custody" ||
+		current.removedVersion != server.CompetitionSilleStorageRecoveryMigrationVersion() {
 		t.Fatal("epoch-two Astra 6.2 catalog owner has an unreviewed boundary")
+	}
+	return current
+}
+
+func migrationSilleStorageRecoveryTestOwner(t testing.TB) migrationArtifact {
+	t.Helper()
+	previous := migrationEpochTwoAstra62TestOwner(t)
+	version := server.CompetitionSilleStorageRecoveryMigrationVersion()
+	current := migrationCurrentSuffixTestContract(t, version).artifact
+	if version <= previous.requiredVersion || previous.removedVersion != version || current.removedVersion != 0 ||
+		current.name != "exact Sille storage interruption recovery with retained catalog custody" {
+		t.Fatal("Sille storage recovery catalog owner has an unreviewed boundary")
 	}
 	return current
 }
