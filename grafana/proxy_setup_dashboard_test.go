@@ -1,10 +1,10 @@
 // The proxy dashboard's setup-time and per-host saturation rows, panels 200
-// to 214 at the end of the dashboard (proxy
-// setup_metrics.go, P90SPEED.md §8): the CONNECT setup, route wait, first exit
-// and first dial histograms by how the device was opened, and per host the
-// hosted mint admissions and refusals, the Go heap against its memory limit,
-// GC cycles a minute and abandoned CONNECTs, with the alert levels of
-// SIGNALS.md §26.12-§26.14 drawn as threshold lines.
+// to 214 at the end of the dashboard (proxy setup_metrics.go, P90SPEED.md
+// §8): the CONNECT setup, route wait, first exit and first dial histograms by
+// how the device was opened, and per host the hosted mint admissions and
+// refusals, the Go heap against its memory limit, GC cycles a minute and
+// abandoned CONNECTs, with the alert levels of SIGNALS.md §26.12-§26.14 drawn
+// as threshold lines.
 package grafana
 
 import (
