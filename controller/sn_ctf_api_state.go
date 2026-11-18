@@ -248,6 +248,13 @@ type snCtfView struct {
 	AsOf    time.Time
 	// links.page of the hub; a country's page is PageUrl + "/" + code
 	PageUrl string
+	// NotStarted: capture the flag is configured, but its pool has not
+	// started. vault2 has not registered the pool, or its first epoch is
+	// still to come while st.yml names no carry. No root of the pool exists
+	// before its first epoch ends, so the view has no root, no covered epoch
+	// and no pending draw, and the pool's first epoch and carry may be
+	// unknown (zero).
+	NotStarted bool
 }
 
 // The latest covered epoch: last epoch, nil before the pool's first root.
