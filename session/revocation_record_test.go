@@ -317,13 +317,16 @@ func TestRevocationRecordOverrulesUncommittedNetworkRevocations(t *testing.T) {
 			t.Errorf("counted %.0f overruled refusals, want 2", got)
 		}
 
-		deleted := newTestingStateRefusalNetwork(ctx)
-		client := deleted.taggedClient(ctx, nil)
-		if err := RetireNetworkRecords(ctx, deleted.networkId); err != nil {
+		// the network's deletion fails after its record write too
+		if err := RetireNetworkRecords(ctx, rotated.networkId); err != nil {
 			t.Fatal(err)
 		}
-		if err := ValidateByJwtState(ctx, client, true); err != nil {
+		before = overruled()
+		if err := ValidateByJwtState(ctx, top, true); err != nil {
 			t.Fatalf("an uncommitted deletion refused the credential: %v", err)
+		}
+		if got := overruled() - before; got != 1 {
+			t.Errorf("counted %.0f overruled deletion refusals, want 1", got)
 		}
 	})
 }
