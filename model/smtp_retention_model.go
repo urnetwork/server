@@ -270,6 +270,8 @@ type smtpDkimKeyRef struct {
 	domain    string
 	networkId server.Id
 	sidecarId server.Id
+	// when it was retired, for key expiry's cursor
+	retireTime time.Time
 }
 
 // Who a DKIM record write's admin event names as its actor (§7.11). A zero one is the system's.
@@ -289,75 +291,60 @@ func ExpireSmtpDkimKeys(ctx context.Context, now time.Time, settings *SmtpRetent
 		return result
 	}
 	retiredBefore := now.UTC().Add(-settings.DkimRetiredKeepTimeout)
-	refs := []*smtpDkimKeyRef{}
-	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(
-			ctx,
-			`
-			SELECT selector, domain, network_id, sidecar_id
-			FROM smtp_dkim_key
-			WHERE state = $1 AND retire_time < $2
-			ORDER BY retire_time, selector, domain
-			LIMIT $3
-			`,
-			SmtpDkimKeyStateRetired,
-			retiredBefore,
-			settings.DkimExpiryBatchSize,
-		)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				ref := &smtpDkimKeyRef{}
-				server.Raise(rows.Scan(&ref.selector, &ref.domain, &ref.networkId, &ref.sidecarId))
-				refs = append(refs, ref)
+	deadline := time.Now().Add(settings.RunBudget)
+	// a page at a time past the last key taken, so a selector whose zone takes no write holds back no other
+	var after *smtpDkimKeyRef
+	for {
+		refs := []*smtpDkimKeyRef{}
+		server.Db(ctx, func(conn server.PgConn) {
+			afterTime, afterSelector, afterDomain := time.Time{}, "", ""
+			if after != nil {
+				afterTime, afterSelector, afterDomain = after.retireTime, after.selector, after.domain
 			}
-		})
-	})
-	result.More = len(refs) == settings.DkimExpiryBatchSize
-	for _, ref := range refs {
-		removed := false
-		err := dnsCatchRefusal(func() {
-			server.Tx(ctx, func(tx server.PgTx) {
-				lockSmtpDkimNetworkZonesInTx(ctx, tx, ref.networkId)
-				var state string
-				var retireTime *time.Time
-				found := false
-				rows, err := tx.Query(
-					ctx,
-					`SELECT state, retire_time FROM smtp_dkim_key WHERE selector = $1 AND domain = $2 FOR UPDATE`,
-					ref.selector,
-					ref.domain,
-				)
-				server.WithPgResult(rows, err, func() {
-					if rows.Next() {
-						server.Raise(rows.Scan(&state, &retireTime))
-						found = true
-					}
-				})
-				// a removal or another run took it since the read
-				if !found || state != SmtpDkimKeyStateRetired || retireTime == nil || !retireTime.Before(retiredBefore) {
-					return
+			rows, err := conn.Query(
+				ctx,
+				`
+				SELECT selector, domain, network_id, sidecar_id, retire_time
+				FROM smtp_dkim_key
+				WHERE
+					state = $1 AND retire_time < $2 AND
+					($4 OR (retire_time, selector, domain) > ($5, $6, $7))
+				ORDER BY retire_time, selector, domain
+				LIMIT $3
+				`,
+				SmtpDkimKeyStateRetired,
+				retiredBefore,
+				settings.DkimExpiryBatchSize,
+				after == nil,
+				afterTime,
+				afterSelector,
+				afterDomain,
+			)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					ref := &smtpDkimKeyRef{}
+					server.Raise(rows.Scan(&ref.selector, &ref.domain, &ref.networkId, &ref.sidecarId, &ref.retireTime))
+					refs = append(refs, ref)
 				}
-				if err := deleteSmtpDkimSelectorRecordsInTx(ctx, tx, ref, smtpDkimActor{}); err != nil {
-					panic(dnsWriteRefusal{err: err})
-				}
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`UPDATE smtp_dkim_key SET state = $3, remove_time = $4 WHERE selector = $1 AND domain = $2`,
-					ref.selector,
-					ref.domain,
-					SmtpDkimKeyStateRemoved,
-					now.UTC(),
-				))
-				removed = true
-			}, server.TxReadCommitted)
+			})
 		})
-		switch {
-		case err != nil:
-			// the selector's id is opaque and random, so a log may carry it (I-13)
-			result.FailedCount += 1
-			glog.Warningf("[smtpretention]retired selector %s stays in dns for the next run: %v\n", ref.selector, err)
-		case removed:
-			result.RemovedFromDnsCount += 1
+		for _, ref := range refs {
+			switch removed, err := expireSmtpDkimKey(ctx, ref, retiredBefore, now); {
+			case err != nil:
+				// the selector's id is opaque and random, so a log may carry it (I-13)
+				result.FailedCount += 1
+				glog.Warningf("[smtpretention]retired selector %s stays in dns for the next run: %v\n", ref.selector, err)
+			case removed:
+				result.RemovedFromDnsCount += 1
+			}
+		}
+		if len(refs) < settings.DkimExpiryBatchSize {
+			break
+		}
+		after = refs[len(refs)-1]
+		if !time.Now().Before(deadline) {
+			result.More = true
+			break
 		}
 	}
 	deletedCount, moreDeletes := removeRetentionBatches(ctx, RetentionTableSmtpDkimKey, settings.BatchSize, time.Now().Add(settings.RunBudget), func(tx server.PgTx) int64 {
@@ -367,6 +354,50 @@ func ExpireSmtpDkimKeys(ctx context.Context, now time.Time, settings *SmtpRetent
 	result.DeletedCount = deletedCount
 	result.More = result.More || moreDeletes
 	return result
+}
+
+// Takes one retired selector out of DNS with its row's move to removed, in a transaction of its own: removed false
+// when a removal or another run took it since the read.
+func expireSmtpDkimKey(ctx context.Context, ref *smtpDkimKeyRef, retiredBefore time.Time, now time.Time) (removed bool, returnErr error) {
+	returnErr = dnsCatchRefusal(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			lockSmtpDkimNetworkZonesInTx(ctx, tx, ref.networkId)
+			var state string
+			var retireTime *time.Time
+			found := false
+			rows, err := tx.Query(
+				ctx,
+				`SELECT state, retire_time FROM smtp_dkim_key WHERE selector = $1 AND domain = $2 FOR UPDATE`,
+				ref.selector,
+				ref.domain,
+			)
+			server.WithPgResult(rows, err, func() {
+				if rows.Next() {
+					server.Raise(rows.Scan(&state, &retireTime))
+					found = true
+				}
+			})
+			if !found || state != SmtpDkimKeyStateRetired || retireTime == nil || !retireTime.Before(retiredBefore) {
+				return
+			}
+			if err := deleteSmtpDkimSelectorRecordsInTx(ctx, tx, ref, smtpDkimActor{}); err != nil {
+				panic(dnsWriteRefusal{err: err})
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE smtp_dkim_key SET state = $3, remove_time = $4 WHERE selector = $1 AND domain = $2`,
+				ref.selector,
+				ref.domain,
+				SmtpDkimKeyStateRemoved,
+				now.UTC(),
+			))
+			removed = true
+		}, server.TxReadCommitted)
+	})
+	if returnErr != nil {
+		removed = false
+	}
+	return
 }
 
 // The network's roots in name order, each as the zone writers key it.

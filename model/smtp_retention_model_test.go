@@ -509,3 +509,41 @@ func TestSmtpReconcileDaysPageReportedAgainstProven(t *testing.T) {
 		}
 	})
 }
+
+// A selector whose zone refuses the delete, suspended here, stays retired and counted failed, and the run goes on
+// past it to the next one, a page of one at a time; once the zone takes writes the next run takes it out.
+func TestSmtpKeyExpiryGoesPastASelectorItsZoneRefuses(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		settings := DefaultSmtpRetentionSettings()
+		settings.DkimExpiryBatchSize = 1
+		root := testDnsRoot(t, ctx)
+		suspendedNetworkId, suspendedApex := testDnsNetwork(t, ctx, root)
+		networkId, apex := testDnsNetwork(t, ctx, root)
+		retireTime := time.Date(2032, time.March, 1, 12, 0, 0, 0, time.UTC)
+		refused := smtpTestSelector()
+		taken := smtpTestSelector()
+		smtpTestPublishDkimKey(t, ctx, root, suspendedNetworkId, server.NewId(), refused, strings.TrimSuffix(suspendedApex, "."), "", retireTime)
+		smtpTestPublishDkimKey(t, ctx, root, networkId, server.NewId(), taken, strings.TrimSuffix(apex, "."), "", retireTime.Add(time.Minute))
+		if err := SuspendZone(ctx, suspendedNetworkId, "abuse", nil); err != nil {
+			t.Fatal(err)
+		}
+		now := retireTime.Add(settings.DkimRetiredKeepTimeout + time.Hour)
+		result := ExpireSmtpDkimKeys(ctx, now, settings)
+		if result.FailedCount != 1 || result.RemovedFromDnsCount != 1 {
+			t.Fatalf("expiry %+v", result)
+		}
+		if state, _ := smtpTestDkimKeyState(ctx, refused, strings.TrimSuffix(suspendedApex, ".")); state != SmtpDkimKeyStateRetired {
+			t.Fatalf("the refused key is %s", state)
+		}
+		if state, _ := smtpTestDkimKeyState(ctx, taken, strings.TrimSuffix(apex, ".")); state != SmtpDkimKeyStateRemoved {
+			t.Fatalf("the other key is %s", state)
+		}
+		if err := Restore(ctx, suspendedNetworkId, ""); err != nil {
+			t.Fatal(err)
+		}
+		if again := ExpireSmtpDkimKeys(ctx, now, settings); again.FailedCount != 0 || again.RemovedFromDnsCount != 1 {
+			t.Fatalf("after the restore %+v", again)
+		}
+	})
+}
