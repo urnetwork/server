@@ -115,7 +115,10 @@ func TestNetworkClientLifecycleWritesFollowExplicitRowLocks(t *testing.T) {
 	slices.Sort(writers)
 	reviewed := []string{
 		"model/network_client_model.go: RemoveDisconnectedNetworkClients",
-		"model/network_client_model.go: deactivateLockedNetworkClientsInTx",
+		// the write of deactivateLockedNetworkClientsInTx, which only calls it
+		// since da2872676; every caller of either holds FOR UPDATE on its
+		// clients, and the writer locks their active descendants
+		"model/network_client_model.go: deactivateLockedNetworkClientsCountedInTx",
 	}
 	if !slices.Equal(writers, reviewed) {
 		t.Fatalf("network_client lifecycle writers = %v, want exactly the reviewed writers %v", writers, reviewed)
