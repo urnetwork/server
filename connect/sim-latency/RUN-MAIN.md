@@ -254,6 +254,23 @@ own exact bound final import/grant; prereview reports are not bulk API approvals
 Epoch 1 retains its separately authorized legacy contract unchanged. Epoch 3
 does not inherit this amendment, a new time window, or qualification credit.
 
+### One-time epoch-3 source recovery
+
+The sealed epoch-2 reward decision remains unchanged. Migration 1002 lets
+the existing scoped review endpoint accept one separately pinned import for
+the exact elected epoch-2 winner, whose timely review approved reward but
+deferred source. It preserves the original checkpoint and only extends the
+source path for the separately reviewed epoch-3 competition build. It is not
+authority to merge the patch into product main.
+
+Apply the migration before deploying the API, monitor and supervisor; deploy
+the matching config pin before sending the exact import from a scoped
+`review_operator`. Confirm the public result keeps its reward revision and
+records source approval. Resume the supervisor against the same predecessor,
+publish through the normal source driver, and verify epoch 3 is open with
+grading paused. Do not substitute the retained epoch-2 score for the new
+baseline or start grading before the exact epoch-3 runtime is qualified.
+
 Legacy v1 candidate honesty review and source promotion apply only to production.
 Legacy staging automatically names the highest-ranked placeable candidate passing
 every gate after close and drain, without a significance or takeover-margin
