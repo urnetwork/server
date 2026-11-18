@@ -1076,7 +1076,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the relay chunks of an epoch's extender component, versioned by its
 	// position
 	[]snMainnetMigrationContract{stLedgerV2ExtenderRelayMigrationContract},
-	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoMigrationContract},
+	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoMigrationContract.removedAt(server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion())},
 	// the redundant unique event id of the device events, dropped by the
 	// owner-run prepare and recorded, versioned by its position
 	[]snMainnetMigrationContract{auditDeviceEventUniqueRecordMigrationContract},
@@ -1090,6 +1090,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// each head summary, each member's last epoch and when the rolling census
 	// started, versioned by its position
 	[]snMainnetMigrationContract{verifyCohortRollingMigrationContract},
+	[]snMainnetMigrationContract{competitionOfficialReviewEpochTwoAstra62MigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

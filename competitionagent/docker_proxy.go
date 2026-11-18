@@ -748,8 +748,8 @@ func (self *DockerProxy) reserveSpool(bytes int64) error {
 	return nil
 }
 
-// Recovery examines at most the configured finite per-run inventory. Issued or
-// corrupt work is never forwarded again; it permanently holds this run.
+// Recovery examines a finite per-run inventory and never replays issued work.
+// An abandoned read-only wait closes admission but does not block cleanup.
 func (self *DockerProxy) recoverJournal() error {
 	stems := map[string]bool{}
 	for _, metadata := range []bool{true, false} {
@@ -799,7 +799,10 @@ func (self *DockerProxy) recoverJournal() error {
 					}
 					self.operationsByIds[stem] = operation
 					if operation.State != "acknowledged" && operation.State != "not-issued" {
-						self.unknown++
+						self.accepting = false
+						if !isUnacknowledgedDockerWait(operation) {
+							self.unknown++
+						}
 					}
 				}
 				if errors.Is(readErr, io.EOF) {
@@ -816,6 +819,24 @@ func (self *DockerProxy) recoverJournal() error {
 	}
 	self.operations = len(stems)
 	return nil
+}
+
+// The exact bodyless default container wait observes exit without modifying
+// Docker resources. Keep its unknown result in the journal; do not generalize
+// this exception to query variants, ambiguous paths, or other requests.
+func isUnacknowledgedDockerWait(operation *dockerProxyOperation) bool {
+	if operation.State != "issued" || operation.Kind != "http" || operation.Method != http.MethodPost ||
+		operation.RequestBytes != 0 || operation.RequestSha256 != digestDockerBytes(nil) ||
+		operation.ResponseBytes != 0 || operation.ResponseSha256 != "" || operation.StatusCode != 0 || operation.GrpcStatus != "" {
+		return false
+	}
+	path := dockerProxyApiPath(operation.Uri)
+	containerId, ok := strings.CutPrefix(path, "/containers/")
+	if !ok {
+		return false
+	}
+	containerId, ok = strings.CutSuffix(containerId, "/wait")
+	return ok && len(containerId) == 64 && isDockerProxyHex(containerId)
 }
 
 // Path generation never uses a caller-controlled filename.

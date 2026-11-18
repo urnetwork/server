@@ -51,7 +51,8 @@ const competitionSourceGuardsHeadOwner = "trusted instrument overlay with two-me
 
 // Validate the registered 900-to-benefit-to-intake-to-handoff-to-official
 // review-to-executor control-to-qualification recovery-to-admission exception
-// to-admitted claim-to-distributed recovery-to-operator patch retry
+// to-admitted claim-to-distributed recovery-to-operator patch retry and
+// official epoch-two reviewer provenance
 // transfers before selecting the current owner. This is the known lineage,
 // never a generic waiver for an unknown successor or an expired predicate.
 func competitionSourceGuardsCurrentOwner(t testing.TB) string {
@@ -68,9 +69,11 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	patchRetryVersion := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
 	secondRecoveryVersion := server.CompetitionSecondRecoveryMigrationVersion()
 	epochTwoOfficialVersion := server.CompetitionOfficialReviewEpochTwoMigrationVersion()
+	epochTwoAstra62Version := server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion()
 	if benefitVersion <= 900 || intakeVersion <= benefitVersion || handoffVersion <= intakeVersion ||
 		officialVersion <= handoffVersion || controlVersion <= officialVersion || recoveryVersion <= controlVersion ||
-		exceptionVersion <= recoveryVersion || claimVersion <= exceptionVersion || distributedVersion <= claimVersion || patchRetryVersion <= distributedVersion || secondRecoveryVersion <= patchRetryVersion || epochTwoOfficialVersion <= secondRecoveryVersion || server.MigrationCount() < epochTwoOfficialVersion {
+		exceptionVersion <= recoveryVersion || claimVersion <= exceptionVersion || distributedVersion <= claimVersion || patchRetryVersion <= distributedVersion ||
+		secondRecoveryVersion <= patchRetryVersion || epochTwoOfficialVersion <= secondRecoveryVersion || epochTwoAstra62Version <= epochTwoOfficialVersion || server.MigrationCount() < epochTwoAstra62Version {
 		t.Fatal("source guard successors are not published in order")
 	}
 	for _, expected := range []struct {
@@ -90,14 +93,19 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{version: distributedVersion, removedAt: patchRetryVersion, name: "separately authorized distributed infrastructure recovery"},
 		{version: patchRetryVersion, removedAt: secondRecoveryVersion, name: "separately authorized unchanged-patch retry"},
 		{version: secondRecoveryVersion, removedAt: epochTwoOfficialVersion, name: "exact-job second recovery with immutable prior receipt"},
-		{version: epochTwoOfficialVersion, removedAt: 0, name: "epoch-two official reviewer substitution with retained complete custody"},
+		{version: epochTwoOfficialVersion, removedAt: epochTwoAstra62Version, name: "epoch-two official reviewer substitution with retained complete custody"},
+		{version: epochTwoAstra62Version, removedAt: 0, name: "epoch-two Astra 6.2 reviewer provenance with retained complete custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("epoch-two official reviewer substitution with retained complete custody@v%d", epochTwoOfficialVersion)
+	return fmt.Sprintf("epoch-two Astra 6.2 reviewer provenance with retained complete custody@v%d", epochTwoAstra62Version)
+}
+
+func competitionSourceGuardsEpochTwoOfficialOwner() string {
+	return fmt.Sprintf("epoch-two official reviewer substitution with retained complete custody@v%d", server.CompetitionOfficialReviewEpochTwoMigrationVersion())
 }
 
 // The intake-first owner, current from its version until the review handoff.
@@ -180,7 +188,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{oldVersion: server.CompetitionExecutorAdmissionClaimMigrationVersion(), nextVersion: server.CompetitionDistributedReevaluationMigrationVersion(), oldOwner: competitionSourceGuardsClaimOwner(), nextOwner: competitionSourceGuardsDistributedOwner()},
 		{oldVersion: server.CompetitionDistributedReevaluationMigrationVersion(), nextVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), oldOwner: competitionSourceGuardsDistributedOwner(), nextOwner: competitionSourceGuardsPatchRetryOwner()},
 		{oldVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), nextVersion: server.CompetitionSecondRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsPatchRetryOwner(), nextOwner: competitionSourceGuardsSecondRecoveryOwner()},
-		{oldVersion: server.CompetitionSecondRecoveryMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), oldOwner: competitionSourceGuardsSecondRecoveryOwner(), nextOwner: currentOwner},
+		{oldVersion: server.CompetitionSecondRecoveryMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), oldOwner: competitionSourceGuardsSecondRecoveryOwner(), nextOwner: competitionSourceGuardsEpochTwoOfficialOwner()},
+		{oldVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoOfficialOwner(), nextOwner: currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -304,7 +313,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{head: server.CompetitionDistributedReevaluationMigrationVersion(), removedAt: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), owner: competitionSourceGuardsDistributedOwner()},
 		{head: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), removedAt: server.CompetitionSecondRecoveryMigrationVersion(), owner: competitionSourceGuardsPatchRetryOwner()},
 		{head: server.CompetitionSecondRecoveryMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), owner: competitionSourceGuardsSecondRecoveryOwner()},
-		{head: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), removedAt: 0, owner: currentOwner},
+		{head: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), owner: competitionSourceGuardsEpochTwoOfficialOwner()},
+		{head: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), removedAt: 0, owner: currentOwner},
 	}
 	faults := []struct {
 		name string

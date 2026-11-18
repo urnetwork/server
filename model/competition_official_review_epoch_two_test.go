@@ -60,6 +60,52 @@ func TestCompetitionEpochTwoOfficialReviewPreservesEpochOne(t *testing.T) {
 	}
 }
 
+// Both genuine IDs remain exact. No alias, neighboring model, or changed effort
+// can enter the import path or pass stored checkpoint validation.
+func TestCompetitionEpochTwoOfficialReviewPinsExactReviewer(t *testing.T) {
+	for _, pair := range []struct {
+		model, reasoning string
+		accepted         bool
+	}{
+		{"gpt-6-astra", "max", true},
+		{"gpt-6.2-astra", "max", true},
+		{"gpt-6.2-astra", "high", false},
+		{"gpt-6-astra", "low", false},
+		{"gpt-6.2-sol", "max", false},
+		{"gpt-6.2-astra ", "max", false},
+		{"Astra Max", "max", false},
+		{"", "max", false},
+		{"gpt-6.2-astra", "", false},
+	} {
+		policy, request, _, checkpoint := epochTwoOfficialReviewFixture()
+		request.Review.ReviewerModel, request.Review.ReviewerReasoning = pair.model, pair.reasoning
+		review := CompetitionIntegrityReviewResult{RoundId: request.RoundId, Request: request.Review, CreatedAt: checkpoint.StartedAt}
+		if accepted := ValidateCompetitionOfficialReviewImportForEpoch(request, policy, 2) == nil; accepted != pair.accepted {
+			t.Fatal("unexpected epoch-two import identity", pair, accepted)
+		}
+		if accepted := CompetitionReviewWithinCheckpointForEpoch(&review, &checkpoint, 2); accepted != pair.accepted {
+			t.Fatal("unexpected epoch-two checkpoint identity", pair, accepted)
+		}
+	}
+
+	policy, request, _, checkpoint := epochTwoOfficialReviewFixture()
+	request.Review.ReviewerModel = "gpt-6.2-astra"
+	review := CompetitionIntegrityReviewResult{RoundId: request.RoundId, Request: request.Review, CreatedAt: checkpoint.StartedAt}
+	if ValidateCompetitionOfficialReviewImportForEpoch(request, policy, 3) == nil || CompetitionReviewWithinCheckpointForEpoch(&review, &checkpoint, 3) {
+		t.Fatal("epoch-two reviewer entered a later epoch")
+	}
+	policy.Staging = true
+	if ValidateCompetitionOfficialReviewImportForEpoch(request, policy, 2) == nil {
+		t.Fatal("epoch-two reviewer entered staging")
+	}
+	policy, request = officialReviewFixture()
+	request.Review.ReviewerModel = "gpt-6.2-astra"
+	review.Request = request.Review
+	if ValidateCompetitionOfficialReviewImportForEpoch(request, policy, 1) == nil || CompetitionReviewWithinCheckpointForEpoch(&review, &checkpoint, 1) {
+		t.Fatal("epoch-two reviewer acquired the historical epoch-one waiver")
+	}
+}
+
 // An honest integrity finding does not by itself approve production deployment.
 func TestCompetitionEpochTwoOfficialReviewDoesNotForceSourceApproval(t *testing.T) {
 	policy, request, _, _ := epochTwoOfficialReviewFixture()

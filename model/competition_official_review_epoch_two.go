@@ -8,6 +8,11 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Preserve the exact historical model ID; an accepted ID is not an import grant.
+func isCompetitionEpochTwoOfficialReviewer(modelName, reasoning string) bool {
+	return reasoning == "max" && (modelName == "gpt-6-astra" || modelName == "gpt-6.2-astra")
+}
+
 // Published epoch-one imports retain their original waiver contract. Later
 // epochs cannot acquire this exception through an epoch-two-shaped request.
 func ValidateCompetitionOfficialReviewImportForEpoch(value CompetitionOfficialReviewImport, policy CompetitionAutomationPolicy, epoch int) error {
@@ -17,7 +22,7 @@ func ValidateCompetitionOfficialReviewImportForEpoch(value CompetitionOfficialRe
 	request := value.Review
 	proof := request.OfficialReviewOverride
 	if epoch != 2 || policy.Staging || !IsCompetitionWinnerReviewPolicy(policy.WinnerReviewPolicy) || value.RoundId == (server.Id{}) || proof == nil || proof.NativeQualificationWaived ||
-		request.HandoffId != "" || request.ReviewerModel != "gpt-6-astra" || request.ReviewerReasoning != "max" ||
+		request.HandoffId != "" || !isCompetitionEpochTwoOfficialReviewer(request.ReviewerModel, request.ReviewerReasoning) ||
 		!competitionAutomationSha256.MatchString(proof.AuthorizationSha256) || proof.CompletedAt.IsZero() ||
 		!competitionAutomationSha256.MatchString(request.ExpectedDecisionSha256) ||
 		request.SupersedesReviewId != nil || request.AppealId != "" || request.ExpectedReplacementJobId != nil || request.RewardDisposition == "restored" {
@@ -85,7 +90,7 @@ func CompetitionReviewWithinCheckpointForEpoch(review *CompetitionIntegrityRevie
 	return epoch == 2 && checkpoint != nil && !proof.NativeQualificationWaived && checkpoint.HandoffId == "" &&
 		review.RoundId == checkpoint.RoundId && review.Request.JobId == checkpoint.JobId && review.Request.ExpectedRevision == checkpoint.RewardRevision &&
 		review.Request.ExpectedDecisionSha256 == checkpoint.RewardDecisionSha256 && review.Request.HandoffId == "" && review.ModelCompletedAt == nil &&
-		review.Request.ReviewerModel == "gpt-6-astra" && review.Request.ReviewerReasoning == "max" &&
+		isCompetitionEpochTwoOfficialReviewer(review.Request.ReviewerModel, review.Request.ReviewerReasoning) &&
 		competitionAutomationSha256.MatchString(proof.AuthorizationSha256) && !proof.CompletedAt.IsZero() && !proof.CompletedAt.After(review.CreatedAt) &&
 		!review.CreatedAt.Before(checkpoint.StartedAt) && review.CreatedAt.Before(checkpoint.Deadline)
 }

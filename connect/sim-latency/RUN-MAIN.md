@@ -213,13 +213,16 @@ agent handoff.
 
 ### Epoch 2 official Astra amendment (2026-11-17)
 
-The operator-authorized Epoch 2 honesty reviewer is `gpt-6-astra` with `max`
-reasoning. Qwen/Gemma qualification remains work for Epoch 3, not an Epoch 2
-fallback. This substitutes only the reviewer; it does not accept calibration,
-release any hold, alter scoring or eligibility, or approve source/reward by
-default. All six genuine findings and the production-benefit addendum remain
-required. A substantiated rejection revokes reward and source together; an
-honesty approval with source deferred cannot authorize source promotion.
+For the operator-authorized Epoch 2 GPT-6.2 Astra Max honesty review, record
+`reviewer_model: gpt-6.2-astra` and `reviewer_reasoning: max` only if that was the
+model and effort actually used. Historical `gpt-6-astra` / `max` reviews retain
+their original identity and digest; the two IDs are not aliases. Qwen/Gemma
+qualification remains work for Epoch 3, not an Epoch 2 fallback. This substitutes
+only the reviewer; it does not accept calibration, release any hold, alter scoring
+or eligibility, or approve source/reward by default. All six genuine findings and
+the production-benefit addendum remain required. A substantiated rejection revokes
+reward and source together; an honesty approval with source deferred cannot
+authorize source promotion.
 
 Private prereviews may run before close. Preserve their actual completion time
 and bind the job, canonical patch, base source, score, baseline and artifact
@@ -229,10 +232,11 @@ elected job/revision/decision. The import must fit the already recorded closing
 checkpoint; no missing, expired or native-owned checkpoint is reset or adopted.
 An earlier genuine prereview need not claim completion after checkpoint creation.
 
-Deploy the appended migration through the normal migration-before-code pipeline,
-then deploy the API, monitor and supervisor control CLI. The supervisor embeds
-the direct-store approval projection; an old Epoch 1-only control binary cannot
-recognize an Epoch 2 import. The import uses the existing
+Deploy the appended Astra 6.2 reviewer-ID migration through the normal
+migration-before-code pipeline, then deploy the API, monitor and supervisor
+control CLI. The supervisor embeds the direct-store approval projection, so
+older control builds cannot recognize `gpt-6.2-astra` from a new review. This
+compatibility append doesn't authorize any particular import. Use the existing
 `POST /competition/v2/official-review-imports` route and an existing scoped
 `review_operator`; it additionally needs `official_review_import_sha256` to equal
 `model.CompetitionAutomationDigest` of the **entire exact final import request**.

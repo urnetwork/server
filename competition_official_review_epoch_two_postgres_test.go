@@ -48,7 +48,8 @@ func TestCompetitionEpochTwoOfficialReviewPostgresPrereviewAndGates(t *testing.T
 		oldBody = strings.Replace(oldBody, newCondition, oldCondition, 1)
 		oldControl := "CREATE FUNCTION synthetic_official_old_deferral_findings(request jsonb) RETURNS boolean LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $old_deferral$" + oldBody + "$old_deferral$;"
 		Db(tb.Context(), func(conn PgConn) {
-			RaisePgResult(conn.Exec(tb.Context(), prepare+before+competitionOfficialReviewEpochTwoMigration()+oldControl+competitionOfficialEpochTwoAfterSql, pgx.QueryExecModeSimpleProtocol))
+			RaisePgResult(conn.Exec(tb.Context(), prepare+before+competitionOfficialReviewEpochTwoMigration()+oldControl+competitionOfficialEpochTwoAfterSql+
+				competitionOfficialEpochTwoAstra62BeforeSql+competitionOfficialReviewEpochTwoAstra62Migration()+competitionOfficialEpochTwoAstra62AfterSql, pgx.QueryExecModeSimpleProtocol))
 		}, OptReadWrite(), OptNoRetry())
 	})
 }
@@ -178,4 +179,71 @@ BEGIN
  PERFORM synthetic_official_expect_reject('UPDATE competition_official_review_authorization SET actor_id=''synthetic-changed''');
  IF (SELECT count(*) FROM competition_official_review_authorization)<>2 THEN RAISE EXCEPTION 'invalid import added authority'; END IF;
 END $after_official_two$;
+`
+
+const competitionOfficialEpochTwoAstra62BeforeSql = `
+DO $before_official_astra62$
+DECLARE request jsonb;
+BEGIN
+ SELECT r.request||jsonb_build_object('reviewer_model','gpt-6.2-astra') INTO request FROM synthetic_official_request r WHERE r.epoch=2;
+ IF competition_official_review_epoch_two_findings_valid(request) THEN
+  RAISE EXCEPTION 'published reviewer predicate no longer distinguishes exact Astra 6.2 provenance';
+ END IF;
+END $before_official_astra62$;
+`
+
+const competitionOfficialEpochTwoAstra62AfterSql = `
+DO $after_official_astra62$
+DECLARE legacy_one jsonb; legacy_two jsonb; request jsonb; altered jsonb;
+ round_one uuid:='00000000-0000-0000-0000-000000000101'; round_two uuid:='00000000-0000-0000-0000-000000000102';
+ imported_at timestamp:='2000-01-01 01:02:00';
+BEGIN
+ SELECT r.request INTO legacy_one FROM synthetic_official_request r WHERE r.epoch=1;
+ SELECT r.request INTO legacy_two FROM synthetic_official_request r WHERE r.epoch=2;
+ IF NOT competition_official_review_request_authorized(round_one,legacy_one)
+  OR NOT competition_official_review_request_authorized(round_two,legacy_two)
+  OR competition_official_review_findings_valid(legacy_one||jsonb_build_object('reviewer_model','gpt-6.2-astra')) THEN
+  RAISE EXCEPTION 'reviewer ID append altered historical authorization or the legacy epoch-one provider';
+ END IF;
+ request:=legacy_two||jsonb_build_object('reviewer_model','gpt-6.2-astra');
+ IF NOT competition_official_review_epoch_two_findings_valid(request)
+  OR NOT competition_official_review_epoch_two_binding(round_two,request,imported_at)
+  OR competition_official_review_request_authorized(round_two,request)
+  OR competition_official_review_epoch_two_binding(round_one,request,imported_at)
+  OR competition_official_review_epoch_two_binding(round_two,request,timestamp '2000-01-01 01:11:00') THEN
+  RAISE EXCEPTION 'reviewer ID did not extend shape only under the exact existing bindings';
+ END IF;
+
+ FOR altered IN SELECT request||jsonb_build_object('reviewer_model','gpt-6.2-sol')
+  UNION ALL SELECT request||jsonb_build_object('reviewer_model','gpt-6.2-astra ')
+  UNION ALL SELECT request||jsonb_build_object('reviewer_model','Astra Max')
+  UNION ALL SELECT request||jsonb_build_object('reviewer_model',NULL)
+  UNION ALL SELECT request-'reviewer_model'
+  UNION ALL SELECT request||jsonb_build_object('reviewer_reasoning','high')
+  UNION ALL SELECT request-'reviewer_reasoning'
+  UNION ALL SELECT jsonb_set(request,'{official_review_override,native_qualification_waived}','true') LOOP
+  IF competition_official_review_epoch_two_findings_valid(altered) OR competition_official_review_epoch_two_binding(round_two,altered,imported_at) THEN
+   RAISE EXCEPTION 'changed or missing reviewer identity, effort or custody passed the successor';
+  END IF;
+ END LOOP;
+
+ request:=jsonb_set(request,'{official_review_override,authorization_sha256}',to_jsonb(repeat('4',64)));
+ PERFORM set_config('urnetwork.competition_official_review_actor','synthetic-operator',true);
+ PERFORM set_config('urnetwork.competition_official_review_import_sha256',repeat('8',64),true);
+ PERFORM synthetic_official_expect_reject(format('INSERT INTO competition_official_review_authorization VALUES(%L,%L,%L,%L,%L::jsonb,%L::timestamp)',
+  repeat('4',64),round_two,'synthetic-operator',repeat('9',64),jsonb_build_object('round_id',round_two,'review',request),imported_at));
+ PERFORM set_config('urnetwork.competition_official_review_import_sha256',repeat('9',64),true);
+ INSERT INTO competition_official_review_authorization VALUES(repeat('4',64),round_two,'synthetic-operator',repeat('9',64),jsonb_build_object('round_id',round_two,'review',request),imported_at);
+ IF NOT competition_official_review_request_authorized(round_two,request)
+  OR competition_official_review_request_authorized(round_one,request)
+  OR competition_official_review_request_authorized(round_two,request||jsonb_build_object('reviewer_model','gpt-6-astra'))
+  OR competition_official_review_request_authorized(round_two,request||jsonb_build_object('public_explanation','Changed after authorization.'))
+  OR (SELECT import_json->'review' FROM competition_official_review_authorization WHERE authorization_sha256=repeat('1',64)) IS DISTINCT FROM legacy_one
+  OR (SELECT import_json->'review' FROM competition_official_review_authorization WHERE authorization_sha256=repeat('2',64)) IS DISTINCT FROM legacy_two
+  OR (SELECT import_json->'review' FROM competition_official_review_authorization WHERE authorization_sha256=repeat('4',64)) IS DISTINCT FROM request
+  OR (SELECT count(*) FROM competition_official_review_authorization)<>3 THEN
+  RAISE EXCEPTION 'exact new authorization was absent or rerecorded legacy evidence';
+ END IF;
+ PERFORM synthetic_official_expect_reject('UPDATE competition_official_review_authorization SET actor_id=''synthetic-changed''');
+END $after_official_astra62$;
 `
