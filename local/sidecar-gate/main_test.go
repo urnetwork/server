@@ -643,11 +643,10 @@ func TestGateListRunsNoMatrixCommand(t *testing.T) {
 	}
 }
 
-// sidecar-gate -list M2 on this tree (TEST-M2-19): every case M2's exit sweep names where its tests run lists, each
-// of its tests declared in its package; every item lists or reads open on what it waits on, or reads missing only
-// for a §22.7 row nothing is registered to; FS-54 and FS-55 ride along; and nothing fails. A case the convention
-// names may read missing, which its owner's tests close.
-func TestGateM2ListsOnThisTree(t *testing.T) {
+// sidecar-gate -list <gate> on this tree, and gates.yml's rows of the gate; skips t when no sidecar checkout sits
+// beside the server.
+func listGateOnThisTree(t *testing.T, gate string) (*gateReport, []gateRow) {
+	t.Helper()
 	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -659,7 +658,7 @@ func TestGateM2ListsOnThisTree(t *testing.T) {
 		return strings.HasPrefix(variable, gateStoreWrapperVariable+"=")
 	})
 	report, err := runGate(context.Background(), &gateOptions{
-		gate:           "M2",
+		gate:           gate,
 		base:           "sidecar",
 		root:           root,
 		serverRelative: "server",
@@ -677,22 +676,29 @@ func TestGateM2ListsOnThisTree(t *testing.T) {
 	if err := readYamlFile("gates.yml", gates); err != nil {
 		t.Fatal(err)
 	}
-	// the cases M2's sweep names in place of the convention: a T3 entry outside the convention's package or tags
+	return report, gates.Gates[gate]
+}
+
+// Holds a list of gate on this tree to its sweep: every case the sweep names where its tests run (a server entry
+// outside the convention's package or tags) lists, each of its tests declared; every item lists, or reads open on what
+// it waits on, or reads missing only when it names nothing to run; nothing fails; and at an exit review FS-54 and FS-55
+// ride along. A case the convention names may read missing, which its owner's tests close. Returns how many cases the
+// sweep names and how many items the gate holds.
+func checkGateListsOnThisTree(t *testing.T, gate string) (int, int) {
+	t.Helper()
+	report, rows := listGateOnThisTree(t, gate)
 	swept := map[string]bool{}
 	items := map[string]gateRow{}
-	for _, row := range gates.Gates["M2"] {
+	for _, row := range rows {
 		if row.Item != "" {
 			items[row.Item] = row
 			continue
 		}
 		for _, test := range row.Tests {
-			if test.Repo == "server" && (test.Package != "./sidecart3" || test.Tags != "sidecar_testhooks,sidecar_pending") {
+			if test.Repo == "server" && (test.Package != "./sidecart3" || test.Tags != gateConventionT3Tags) {
 				swept[row.label()] = true
 			}
 		}
-	}
-	if len(swept) < 20 || len(items) < 20 {
-		t.Fatalf("M2's sweep names %d cases and %d items", len(swept), len(items))
 	}
 	labels := map[string]bool{}
 	for _, result := range report.rows {
@@ -700,9 +706,9 @@ func TestGateM2ListsOnThisTree(t *testing.T) {
 		details := strings.Join(result.details, "; ")
 		switch {
 		case result.outcome == gateFail:
-			t.Errorf("%s fails a list: %s", result.label, details)
-		case swept[result.label] && result.outcome != gateListed:
-			t.Errorf("%s, which M2's sweep names, reads %s: %s", result.label, result.outcome, details)
+			t.Errorf("%s at %s fails a list: %s", result.label, gate, details)
+		case swept[result.label] && result.outcome != gateListed && result.outcome != gateOpen:
+			t.Errorf("%s, which %s's sweep names, reads %s: %s", result.label, gate, result.outcome, details)
 		}
 		item, isItem := items[result.label]
 		if !isItem {
@@ -711,19 +717,47 @@ func TestGateM2ListsOnThisTree(t *testing.T) {
 		switch result.outcome {
 		case gateListed, gateOpen:
 		case gateMissing:
-			if 0 < len(item.Tests) || 0 < len(item.Commands) || !strings.HasPrefix(result.label, "§22.7's ") {
-				t.Errorf("item %q reads missing: %s", result.label, details)
+			if 0 < len(item.Tests) || 0 < len(item.Commands) || item.External != "" {
+				t.Errorf("item %q at %s reads missing: %s", result.label, gate, details)
 			}
 		default:
-			t.Errorf("item %q reads %s: %s", result.label, result.outcome, details)
+			t.Errorf("item %q at %s reads %s: %s", result.label, gate, result.outcome, details)
 		}
 	}
-	if !labels["FS-54"] || !labels["FS-55"] {
-		t.Errorf("M2's report lacks every Gn-out's rows: %v", labels)
+	if strings.HasPrefix(gate, "M") && !strings.HasSuffix(gate, "-in") && (!labels["FS-54"] || !labels["FS-55"]) {
+		t.Errorf("%s's report lacks every Gn-out's rows: %v", gate, labels)
 	}
 	for item := range items {
 		if !labels[item] {
-			t.Errorf("M2's report lacks its item %q", item)
+			t.Errorf("%s's report lacks its item %q", gate, item)
 		}
+	}
+	return len(swept), len(items)
+}
+
+// The tags the convention's T3 entry builds under (sidecar's gate.go; QD-1085).
+const gateConventionT3Tags = "sidecar_testhooks,sidecar_pending,sidecar_localstack"
+
+// sidecar-gate -list M2 on this tree (TEST-M2-19): see checkGateListsOnThisTree.
+func TestGateM2ListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M2")
+	if swept < 14 || items < 20 {
+		t.Errorf("M2's sweep names %d cases and %d items", swept, items)
+	}
+}
+
+// sidecar-gate -list M3 on this tree (TEST-M3-02): see checkGateListsOnThisTree.
+func TestGateM3ListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M3")
+	if swept < 4 || items < 10 {
+		t.Errorf("M3's sweep names %d cases and %d items", swept, items)
+	}
+}
+
+// sidecar-gate -list next on this tree (TEST-M3-02): the next cluster's review runs §22.9's file-cluster suite beside
+// FS-63's and FS-119's next-cluster cases, and fails nothing.
+func TestGateNextListsOnThisTree(t *testing.T) {
+	if _, items := checkGateListsOnThisTree(t, "next"); items != 1 {
+		t.Errorf("next holds %d items", items)
 	}
 }
