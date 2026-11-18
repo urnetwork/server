@@ -121,8 +121,12 @@ func (self *approvalScheduleState) ApproverCount() int {
 	return 1
 }
 
-func (self *approvalScheduleState) Eligible(memberId sidecar.Id) bool {
+func (self *approvalScheduleState) Names(memberId sidecar.Id) bool {
 	return memberId == self.approver
+}
+
+func (self *approvalScheduleState) ClauseAdmin(memberId sidecar.Id) bool {
+	return false
 }
 
 func (self *approvalScheduleState) AdminClauseMet(memberIds []sidecar.Id) bool {
