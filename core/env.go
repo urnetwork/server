@@ -8,6 +8,9 @@
 // operator.NotGrantedError when the process's role does not allow the service or the host was given
 // none. The clock, the gates and the abuse gate keep ServiceHost's own answers for a host that set none:
 // real time, every gate closed, and no network loaded, each of which fails closed.
+//
+// Each service process sets its Env as operator's global Env at its start through SetProcessEnv
+// (QD-1027), under the grants ProcessGrants names for it.
 package core
 
 import (
@@ -26,13 +29,31 @@ type Grants struct {
 	Db bool
 }
 
-// The grants of each process that hosts an engine, by the service name of its block (§19.4), from what
-// each host package builds today: a block whose host holds Postgres is granted the db, and one that
-// holds none is not. A process this table does not name is refused, so a new block states its grants
-// before it gets an Env.
+// The grants of each process the server repo launches as a service, by the service name of its block
+// (§19.4) or, for a process §19.4's table does not list, the name of its main under server/cli. The db
+// is §19.4's state column: a process that holds a Postgres pool is granted it, and one that holds none
+// is not. A process this table does not name is refused, so a new block states its grants before it
+// gets an Env.
+//
+//   - The platform's own services hold the platform's Postgres role: api, taskworker, connect, gossip,
+//     mcp, monitor, proxy and competitionworker.
+//   - all runs api, connect and taskworker, and gossip when asked, in one process, and alt runs the
+//     connect node and the api: each sets one Env with the widest of its services' grants, which is
+//     api's.
+//   - Of sidecar's blocks, the dns API, mxedge's router and its platform listener (mxedge-platform, the
+//     router's binary in its own role) and smtpedge hold a pool, the router's under its own restricted
+//     role.
+//   - evs and gkm keep durable state only in the file clusters (owner decisions 2, 19, 21), sockets
+//     keeps soft state in Redis alone, and the dns edges hold no Redis or Postgres handle at all (I-12).
+//     tlsedge's pool is under a restricted role of its own (owner decision 495), for its engine's store
+//     alone, the label map and the kill rows: its Env grants no extension a db.
 func ProcessGrants(process string) (*Grants, error) {
 	switch process {
-	case "api", "taskworker", "dns", "mxedge":
+	case "api", "taskworker", "connect", "gossip", "mcp", "monitor", "proxy", "competitionworker":
+		return &Grants{Db: true}, nil
+	case "all", "alt":
+		return &Grants{Db: true}, nil
+	case "dns", "mxedge", "mxedge-platform", "smtpedge":
 		return &Grants{Db: true}, nil
 	case "evs", "gkm", "sockets", "tlsedge", "dnsedge":
 		return &Grants{Db: false}, nil
@@ -76,6 +97,21 @@ func NewProcessEnv(process string, host *sidecar.ServiceHost) (*Env, error) {
 		return nil, err
 	}
 	return NewEnv(host, grants)
+}
+
+// Builds process's Env through NewProcessEnv and sets it as operator's global Env (QD-1027), which
+// sidecar/work and sidecar/handler read. Every main under server/cli that runs as a deployed service
+// calls it once at its start, before it serves, with the ServiceHost its block built or, where it builds
+// none, the smallest one its existing services fill, so every service the process lacks refuses. A
+// process ProcessGrants does not name, or a nil host, sets nothing and leaves the global Env as it
+// stood, which at a process's start refuses every service.
+func SetProcessEnv(process string, host *sidecar.ServiceHost) (*Env, error) {
+	env, err := NewProcessEnv(process, host)
+	if err != nil {
+		return nil, err
+	}
+	operator.SetGlobalEnv(env)
+	return env, nil
 }
 
 // The refusal for a service the host was given none of.

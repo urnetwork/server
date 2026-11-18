@@ -13,9 +13,11 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/edgeplacement"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // this value is set via the linker, e.g.
@@ -108,6 +110,14 @@ Options:
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// the process's Env, operator's global one (QD-1027), set before anything
+	// serves: over the smallest ServiceHost proxy's own services fill, the
+	// db, Redis, metrics, the service token authenticator, sidecar.yml's
+	// gates and task scheduling, every other service refusing
+	if _, err := core.SetProcessEnv("proxy", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 
 	// readiness gates /status (PROXYDRAIN1.md §3.1): warpctl's new-container
 	// health poll gets a 503 until the initial proxy client sync has been

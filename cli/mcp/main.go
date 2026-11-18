@@ -9,7 +9,9 @@ import (
 	"syscall"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/mcp"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 var (
@@ -40,6 +42,13 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// the process's Env, operator's global one (QD-1027), set before anything
+	// serves: over the smallest ServiceHost mcp's own services fill, the db,
+	// Redis, metrics, the service token authenticator, sidecar.yml's gates
+	// and task scheduling, every other service refusing
+	if _, err := core.SetProcessEnv("mcp", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 	if err := mcp.Run(ctx, mcp.RunOptions{Port: *port}); err != nil {
 		panic(err)
 	}

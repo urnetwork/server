@@ -11,6 +11,8 @@ import (
 	"github.com/urnetwork/server"
 	connectserver "github.com/urnetwork/server/connect"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/core"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 func main() {
@@ -59,6 +61,13 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// the process's Env, operator's global one (QD-1027), set before anything
+	// serves: over the smallest ServiceHost connect's own services fill, the
+	// db, Redis, metrics, the service token authenticator, sidecar.yml's
+	// gates and task scheduling, every other service refusing
+	if _, err := core.SetProcessEnv("connect", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 	// §21's hard deny for the residents' CreateContract (ABUSE-M5-07); a binary
 	// that does not link MG5 installs none
 	controller.InstallAbuseHardDeny(ctx)

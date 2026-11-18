@@ -36,6 +36,7 @@ import (
 	"github.com/urnetwork/sidecar/mxedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/mxedgehost"
 	"github.com/urnetwork/server/quotahost"
@@ -114,7 +115,28 @@ func main() {
 			}
 		}
 	}
+	setProcessEnv(ctx, *role, routerDeps)
 	if err := mxedgehost.RunHost(ctx, *role, settings, deps, routerDeps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
+		panic(err)
+	}
+}
+
+// Sets the process's Env, operator's global one (QD-1027), before the block serves, over the smallest ServiceHost
+// role's own services fill, as mxedgehost builds each role's: the platform listener's, the block mxedge-platform,
+// with Postgres, Redis, metrics, the service token authenticator, sidecar.yml's gates and task scheduling; the
+// router's, the block mxedge, with those and its Quota and platform client source where routerBlockDeps made
+// them. Each role holds a Postgres pool, the router's under its own restricted role, so each Env grants the db.
+func setProcessEnv(ctx context.Context, role string, routerDeps *mxedgehost.RouterDeps) {
+	process := "mxedge-platform"
+	options := &sidecarhost.ServiceHostOptions{Postgres: true}
+	if role == mxedgehost.HostRoleRouter {
+		process = "mxedge"
+		if routerDeps != nil {
+			options.Quota = routerDeps.Quota
+			options.ServiceClient = routerDeps.Source
+		}
+	}
+	if _, err := core.SetProcessEnv(process, sidecarhost.NewServiceHost(ctx, options)); err != nil {
 		panic(err)
 	}
 }

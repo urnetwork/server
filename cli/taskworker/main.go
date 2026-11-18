@@ -10,6 +10,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/core"
+	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/taskworker"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -64,6 +66,15 @@ Options:
 	}
 	batchSize, err := opts.Int("--batch_size")
 	if err != nil {
+		panic(err)
+	}
+	// the process's Env, operator's global one, which sidecar/work reads
+	// (QD-1027), set before anything serves: over the smallest ServiceHost
+	// taskworker's own services fill, so the db, Redis, metrics, the service
+	// token authenticator, sidecar.yml's gates and the worker's own sidecar
+	// task registry answer, a job bound through it being one this worker
+	// claims, and every service taskworker builds none of here refuses
+	if _, err := core.SetProcessEnv("taskworker", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true, Tasks: taskworker.SidecarTasks()})); err != nil {
 		panic(err)
 	}
 	// §21's effects and sealed off-site records for the owed actions the
