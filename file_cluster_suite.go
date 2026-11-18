@@ -17,7 +17,11 @@ package server
 //	barrier hooks    a settle_testhooks build of the same commit, with each host's control port (FS-114): a head
 //	                 PUT's drive commits held after their checks past the drive timeout, on one host and on two, the
 //	                 request cancelled; two DELETEs of one key, each with commits held past their deadline; a create
-//	                 whose last drive commit is held before its check across an acknowledged DELETE of the key
+//	                 whose last drive commit is held before its check across an acknowledged DELETE of the key; and
+//	                 M10's purge and drop cases (EVSB-M10-08): v1's unconditional purge DELETE and a drop job's DELETE
+//	                 naming its object's LastModified, each held at a drive past the drive timeout on one host and on
+//	                 two, on the cluster's own family, a kind-5 segment streamed to seg/ on a segment cluster or a slot
+//	                 created on a metadata cluster
 //	host control     each host stopped and started (T3's containers): a LIST answered whole or 503 by how many of a
 //	                 set's drives are offline; stale conditions refused with a host lost (§11.3)
 //
@@ -38,8 +42,10 @@ package server
 // at a time per cluster.
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -268,6 +274,10 @@ func fileClusterSuiteCases() []*fileClusterSuiteCaseSpec {
 		{name: "fs114-head-two-hosts-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuiteHeadTwoHostsHeld},
 		{name: "fs114-two-deletes-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuiteTwoDeletesHeld},
 		{name: "fs114-create-held-across-a-delete", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuiteCreateAcrossDelete},
+		{name: "fs114-purge-delete-one-host-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuitePurgeDeleteOneHostHeld},
+		{name: "fs114-purge-delete-two-hosts-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuitePurgeDeleteTwoHostsHeld},
+		{name: "fs114-drop-delete-one-host-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuiteDropDeleteOneHostHeld},
+		{name: "fs114-drop-delete-two-hosts-held", needs: fileClusterSuiteNeedsHooks, run: fileClusterSuiteDropDeleteTwoHostsHeld},
 		{name: "list-whole-or-503", needs: fileClusterSuiteNeedsControl, run: fileClusterSuiteListWhole},
 		{name: "stale-conditions-refused-with-a-host-lost", needs: fileClusterSuiteNeedsControl, run: fileClusterSuiteStaleWithHostLost},
 	}
@@ -1020,6 +1030,285 @@ func fileClusterSuiteCreateAcrossDelete(ctx context.Context, run *fileClusterSui
 		return err
 	}
 	// the held host's own drives answer too: a commit that landed there would be read through it
+	return run.expectAbsent(ctx, key)
+}
+
+// What a purge or a drop job DELETEs, as its cluster holds it: a kind-5 segment streamed to seg/ with its id as its
+// checksum on a segment cluster, as an upload writes one, or a slot created on a metadata cluster, as step 6 writes
+// one. The same bytes stored again are a re-upload, which a later push adopting the segment, or a rewrite of the
+// slot, makes.
+func (self *fileClusterSuiteRun) putCandidate(ctx context.Context, cluster *FileCluster, key string, body []byte) error {
+	if self.target.Config.Kind == FileClusterKindSegment {
+		checksum := sha256.Sum256(body)
+		_, err := cluster.PutStream(ctx, key, bytes.NewReader(body), int64(len(body)), checksum[:])
+		return err
+	}
+	_, err := cluster.PutIfNoneMatch(ctx, key, body, nil)
+	return err
+}
+
+// FS-114's purge case on one host: v1's purge DELETE, unconditional as the Purger issues it, its commits held after
+// their checks on one host past the drive timeout and the request cancelled. It holds a write quorum, so the object
+// is gone through every host at once; a re-upload of the same bytes commits and reads at once; and once the held
+// commits are released the re-upload stays, read through every host: a DELETE's late commit never takes a newer
+// object.
+func fileClusterSuitePurgeDeleteOneHostHeld(ctx context.Context, run *fileClusterSuiteRun, prefix string) error {
+	key := prefix + "candidate/_"
+	body := []byte("a replaced versionless version's content")
+	last := len(run.hostClusters) - 1
+	if err := run.putCandidate(ctx, run.hostClusters[0], key, body); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	held := run.hooks[last]
+	if err := held.arm(ctx, FileClusterSuiteCommitChecked, key, 0); err != nil {
+		return err
+	}
+	released := false
+	defer func() {
+		if !released {
+			held.release(context.WithoutCancel(ctx), FileClusterSuiteCommitChecked)
+		}
+	}()
+	del := run.start(ctx, run.settings.HeldRequestDeadline, func(deleteCtx context.Context) error {
+		return run.hostClusters[0].Delete(deleteCtx, key)
+	})
+	if err := held.wait(ctx, FileClusterSuiteCommitChecked, run.target.DrivesPerHost); err != nil {
+		return err
+	}
+	del.cancel()
+	if err := run.pastDriveTimeout(ctx); err != nil {
+		return err
+	}
+	if err := run.expectAbsent(ctx, key); err != nil {
+		return fmt.Errorf("the purge DELETE with a quorum: %w", err)
+	}
+	started := time.Now()
+	if err := run.putCandidate(sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline)), run.hostClusters[1], key, body); err != nil {
+		return fmt.Errorf("the re-upload: %w", err)
+	}
+	if err := run.expectBody(ctx, key, body); err != nil {
+		return err
+	}
+	if elapsed := time.Since(started); run.settings.ShortRequestDeadline+run.settings.RoundTripSlack < elapsed {
+		return fmt.Errorf("the re-upload and its reads took %s", elapsed)
+	}
+	released = true
+	if err := held.release(ctx, FileClusterSuiteCommitChecked); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	return run.expectBody(ctx, key, body)
+}
+
+// Arms the last two hosts to hold their commits at the check point on key, and the release, done once.
+func (self *fileClusterSuiteRun) holdTwoHosts(ctx context.Context, key string) (hooks []*fileClusterSuiteHook, release func(ctx context.Context) error, err error) {
+	count := len(self.hooks)
+	hooks = []*fileClusterSuiteHook{self.hooks[count-2], self.hooks[count-1]}
+	released := false
+	release = func(ctx context.Context) error {
+		if released {
+			return nil
+		}
+		released = true
+		for _, hook := range hooks {
+			if err := hook.release(ctx, FileClusterSuiteCommitChecked); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, hook := range hooks {
+		if err := hook.arm(ctx, FileClusterSuiteCommitChecked, key, self.target.DrivesPerHost); err != nil {
+			return hooks, release, err
+		}
+	}
+	return hooks, release, nil
+}
+
+// FS-114's purge case on two hosts: the purge DELETE short of its quorum, its commits held past its deadline. It
+// answers no outcome and its key is held, so a re-upload and a GET fail until the held commits are released and the
+// settle reverts them; then the object reads through every host, the DELETE never taken, and the sweep's DELETE of
+// the candidate it left takes it.
+func fileClusterSuitePurgeDeleteTwoHostsHeld(ctx context.Context, run *fileClusterSuiteRun, prefix string) error {
+	key := prefix + "candidate/_"
+	body := []byte("a replaced versionless version's content")
+	if err := run.putCandidate(ctx, run.hostClusters[0], key, body); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	heldHooks, release, err := run.holdTwoHosts(ctx, key)
+	defer release(context.WithoutCancel(ctx))
+	if err != nil {
+		return err
+	}
+	del := run.start(ctx, run.settings.ShortRequestDeadline, func(deleteCtx context.Context) error {
+		return run.hostClusters[0].Delete(deleteCtx, key)
+	})
+	for _, hook := range heldHooks {
+		if err := hook.wait(ctx, FileClusterSuiteCommitChecked, run.target.DrivesPerHost); err != nil {
+			return err
+		}
+	}
+	var unknown *sidecar.BlobUnknownError
+	if err := <-del.done; !errors.As(err, &unknown) {
+		return fmt.Errorf("a purge DELETE short of its quorum answered %v, want an unknown outcome", err)
+	}
+	if err := run.pastDriveTimeout(ctx); err != nil {
+		return err
+	}
+	shortCtx := sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline))
+	if err := run.putCandidate(shortCtx, run.hostClusters[1], key, body); !errors.As(err, &unknown) {
+		return fmt.Errorf("a re-upload on the held key: %v, want 503's unknown outcome", err)
+	}
+	if _, err := run.hostClusters[1].Get(sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline)), key); err == nil {
+		return errors.New("a GET on the held key was served")
+	}
+	if held, err := run.heldNow(ctx); err != nil || held != 1 {
+		return fmt.Errorf("%d keys held, want the one: %v", held, err)
+	}
+	if err := release(ctx); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	if err := run.expectBody(ctx, key, body); err != nil {
+		return fmt.Errorf("after the settle reverted the purge DELETE: %w", err)
+	}
+	if err := run.hostClusters[0].Delete(ctx, key); err != nil {
+		return fmt.Errorf("the sweep's DELETE: %w", err)
+	}
+	return run.expectAbsent(ctx, key)
+}
+
+// FS-114's drop case on one host: a drop job's DELETE, naming the LastModified its HEAD read and carrying the lease's
+// deadline, its commits held after their checks on one host past the drive timeout and the request cancelled. It
+// holds a quorum, so the object is gone at once; a re-upload stores a newer object, which a stale instance's
+// delayed DELETE naming the old LastModified is refused, 412, and leaves (owner decision 225); and once the held
+// commits are released the re-upload stays, read through every host.
+func fileClusterSuiteDropDeleteOneHostHeld(ctx context.Context, run *fileClusterSuiteRun, prefix string) error {
+	key := prefix + "candidate/_"
+	body := []byte("a dropped version's content")
+	last := len(run.hostClusters) - 1
+	if err := run.putCandidate(ctx, run.hostClusters[0], key, body); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	info, err := run.hostClusters[0].Head(ctx, key)
+	if err != nil {
+		return err
+	}
+	held := run.hooks[last]
+	if err := held.arm(ctx, FileClusterSuiteCommitChecked, key, 0); err != nil {
+		return err
+	}
+	released := false
+	defer func() {
+		if !released {
+			held.release(context.WithoutCancel(ctx), FileClusterSuiteCommitChecked)
+		}
+	}()
+	del := run.start(ctx, run.settings.HeldRequestDeadline, func(deleteCtx context.Context) error {
+		return run.hostClusters[0].Delete(sidecar.WithBlobUnmodified(deleteCtx, info.LastModified), key)
+	})
+	if err := held.wait(ctx, FileClusterSuiteCommitChecked, run.target.DrivesPerHost); err != nil {
+		return err
+	}
+	del.cancel()
+	if err := run.pastDriveTimeout(ctx); err != nil {
+		return err
+	}
+	if err := run.expectAbsent(ctx, key); err != nil {
+		return fmt.Errorf("the drop DELETE with a quorum: %w", err)
+	}
+	if err := run.putCandidate(sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline)), run.hostClusters[1], key, body); err != nil {
+		return fmt.Errorf("the re-upload: %w", err)
+	}
+	if err := run.expectBody(ctx, key, body); err != nil {
+		return err
+	}
+	staleCtx := sidecar.WithBlobUnmodified(sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline)), info.LastModified)
+	if err := run.hostClusters[1].Delete(staleCtx, key); !errors.Is(err, sidecar.ErrBlobPrecondition) {
+		return fmt.Errorf("a stale DELETE naming the old object: %v, want 412", err)
+	}
+	if err := run.expectBody(ctx, key, body); err != nil {
+		return fmt.Errorf("after the stale DELETE: %w", err)
+	}
+	released = true
+	if err := held.release(ctx, FileClusterSuiteCommitChecked); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	return run.expectBody(ctx, key, body)
+}
+
+// FS-114's drop case on two hosts: the drop job's named DELETE short of its quorum, its commits held past its
+// deadline. It answers no outcome and holds the key, so another instance's DELETE of it fails too, until the held
+// commits are released and the settle reverts them; then the object reads, and a DELETE naming its LastModified, the
+// object's own, takes it.
+func fileClusterSuiteDropDeleteTwoHostsHeld(ctx context.Context, run *fileClusterSuiteRun, prefix string) error {
+	key := prefix + "candidate/_"
+	body := []byte("a dropped version's content")
+	if err := run.putCandidate(ctx, run.hostClusters[0], key, body); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	info, err := run.hostClusters[0].Head(ctx, key)
+	if err != nil {
+		return err
+	}
+	heldHooks, release, err := run.holdTwoHosts(ctx, key)
+	defer release(context.WithoutCancel(ctx))
+	if err != nil {
+		return err
+	}
+	del := run.start(ctx, run.settings.ShortRequestDeadline, func(deleteCtx context.Context) error {
+		return run.hostClusters[0].Delete(sidecar.WithBlobUnmodified(deleteCtx, info.LastModified), key)
+	})
+	for _, hook := range heldHooks {
+		if err := hook.wait(ctx, FileClusterSuiteCommitChecked, run.target.DrivesPerHost); err != nil {
+			return err
+		}
+	}
+	var unknown *sidecar.BlobUnknownError
+	if err := <-del.done; !errors.As(err, &unknown) {
+		return fmt.Errorf("a drop DELETE short of its quorum answered %v, want an unknown outcome", err)
+	}
+	if err := run.pastDriveTimeout(ctx); err != nil {
+		return err
+	}
+	otherCtx := sidecar.WithBlobUnmodified(sidecar.WithBlobDeadline(ctx, time.Now().Add(run.settings.ShortRequestDeadline)), info.LastModified)
+	if err := run.hostClusters[1].Delete(otherCtx, key); !errors.As(err, &unknown) {
+		return fmt.Errorf("another instance's DELETE on the held key: %v, want 503's unknown outcome", err)
+	}
+	if held, err := run.heldNow(ctx); err != nil || held != 1 {
+		return fmt.Errorf("%d keys held, want the one: %v", held, err)
+	}
+	if err := release(ctx); err != nil {
+		return err
+	}
+	if err := run.quiesce(ctx); err != nil {
+		return err
+	}
+	if err := run.expectBody(ctx, key, body); err != nil {
+		return fmt.Errorf("after the settle reverted the drop DELETE: %w", err)
+	}
+	if err := run.hostClusters[0].Delete(sidecar.WithBlobUnmodified(ctx, info.LastModified), key); err != nil {
+		return fmt.Errorf("a DELETE naming the object's own LastModified: %w", err)
+	}
 	return run.expectAbsent(ctx, key)
 }
 
