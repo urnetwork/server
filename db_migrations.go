@@ -11907,6 +11907,10 @@ var migrations = []any{
 			ADD COLUMN IF NOT EXISTS k double precision NULL,
 			ADD COLUMN IF NOT EXISTS k_early double precision NULL;
 	`),
+
+	// Accept truthful epoch-two Astra 6.2 Max provenance without relabeling
+	// historical reviews or changing the full-request operator grant.
+	newSqlMigration(competitionOfficialReviewEpochTwoAstra62Migration()),
 }
 
 // The deleted_network backfill (the migration above): every network an App

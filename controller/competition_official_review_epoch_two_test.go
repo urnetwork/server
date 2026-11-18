@@ -42,14 +42,28 @@ func newEpochTwoOfficialWinnerFixture(t *testing.T) *winnerClosingFixture {
 // The real reconciliation entry point must retain the genuine prereview time
 // and refuse to interpret it as a completed native Snow call.
 func TestWinnerClosingEpochTwoOfficialPrereviewUsesCurrentCheckpoint(t *testing.T) {
-	fixture := newEpochTwoOfficialWinnerFixture(t)
-	before := *fixture.snapshot.Transition.WinnerReview
-	completed := fixture.snapshot.WinnerReview.ApprovedReview.Request.OfficialReviewOverride.CompletedAt
-	fixture.step(t, "source_choice_pending", false)
-	fixture.step(t, "source_publication_pending", false)
-	if *fixture.snapshot.Transition.WinnerReview != before || fixture.reviews != 0 || fixture.builds != 1 ||
-		fixture.snapshot.WinnerReview.ApprovedReview.ModelCompletedAt != nil || !fixture.snapshot.WinnerReview.ApprovedReview.Request.OfficialReviewOverride.CompletedAt.Equal(completed) {
-		t.Fatal("prereview was retimed, relabeled or renewed its checkpoint")
+	for _, modelName := range []string{"gpt-6-astra", "gpt-6.2-astra"} {
+		t.Run(modelName, func(t *testing.T) {
+			fixture := newEpochTwoOfficialWinnerFixture(t)
+			prior := fixture.snapshot.WinnerReview
+			review := prior.ApprovedReview
+			review.Request.ReviewerModel = modelName
+			state, err := winnerReviewState(&model.CompetitionV2RoundResult{Seal: *fixture.snapshot.Seal,
+				Decisions: []model.CompetitionRewardDecision{prior.CurrentDecision}, IntegrityReviews: []model.CompetitionIntegrityReviewResult{*review}}, prior.Policy)
+			if err != nil || state.ApprovedReview == nil || state.ApprovedReview.ReviewId != review.ReviewId {
+				t.Fatal("persisted official reviewer could not be projected", err)
+			}
+			fixture.snapshot.WinnerReview = state
+			before := *fixture.snapshot.Transition.WinnerReview
+			completed := review.Request.OfficialReviewOverride.CompletedAt
+			fixture.step(t, "source_choice_pending", false)
+			fixture.step(t, "source_publication_pending", false)
+			if *fixture.snapshot.Transition.WinnerReview != before || fixture.reviews != 0 || fixture.builds != 1 ||
+				state.ApprovedReview.ModelCompletedAt != nil || state.ApprovedReview.Request.ReviewerModel != modelName ||
+				!state.ApprovedReview.Request.OfficialReviewOverride.CompletedAt.Equal(completed) {
+				t.Fatal("prereview was retimed, relabeled or renewed its checkpoint")
+			}
+		})
 	}
 }
 
@@ -175,6 +189,11 @@ func TestCompetitionEpochTwoOfficialReplayDoesNotReauthorizeAfterRejection(t *te
 	tx := &epochTwoOfficialReplayTx{epoch: 2, same: true, now: fixture.now.Add(time.Hour)}
 	if err := (PostgresStore{}).authorizeOfficialReviewInTx(t.Context(), tx, settings, "synthetic-operator", request, fixture.snapshot.WinnerReview.Policy); err != nil || tx.mutations != 0 {
 		t.Fatal("exact historical rejection was reauthorized or rejected", err, tx.mutations)
+	}
+	newReviewer := request
+	newReviewer.Review.ReviewerModel = "gpt-6.2-astra"
+	if err := (PostgresStore{}).authorizeOfficialReviewInTx(t.Context(), tx, settings, "synthetic-operator", newReviewer, fixture.snapshot.WinnerReview.Policy); !errors.Is(err, ErrConflict) || tx.mutations != 0 {
+		t.Fatal("changed model provenance reused the historical grant", err, tx.mutations)
 	}
 	for _, changed := range []*epochTwoOfficialReplayTx{
 		{epoch: 2, same: false, now: tx.now}, {epoch: 2, same: true, staging: true, now: tx.now}, {epoch: 3, same: true, now: tx.now},

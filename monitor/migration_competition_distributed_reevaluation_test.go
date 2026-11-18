@@ -29,6 +29,9 @@ func migrationDistributedRecoveryTestOwner(t testing.TB, priorVersion, head int)
 	if current.name != "separately authorized distributed infrastructure recovery" || current.removedVersion != patchRetry || patchRetry <= version {
 		t.Fatal("distributed owner oracle has an unreviewed successor")
 	}
+	if head >= server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion() {
+		return migrationEpochTwoAstra62TestOwner(t)
+	}
 	if head >= server.CompetitionOfficialReviewEpochTwoMigrationVersion() {
 		return migrationEpochTwoOfficialTestOwner(t)
 	}
@@ -49,9 +52,11 @@ func migrationDistributedRecoveryTestOwner(t testing.TB, priorVersion, head int)
 func TestMigrationsDistributedRecoveryOwnerOracleClosedBoundaries(t *testing.T) {
 	version := server.CompetitionDistributedReevaluationMigrationVersion()
 	for _, previous := range []int{server.CompetitionReevaluationPostCloseMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion()} {
-		for _, head := range []int{previous, version - 1, version, version + 1, server.MigrationCount()} {
+		for _, head := range []int{previous, version - 1, version, version + 1, server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion() - 1, server.MigrationCount()} {
 			want := previous
-			if head >= server.CompetitionOfficialReviewEpochTwoMigrationVersion() {
+			if head >= server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion() {
+				want = server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion()
+			} else if head >= server.CompetitionOfficialReviewEpochTwoMigrationVersion() {
 				want = server.CompetitionOfficialReviewEpochTwoMigrationVersion()
 			} else if head >= server.CompetitionSecondRecoveryMigrationVersion() {
 				want = server.CompetitionSecondRecoveryMigrationVersion()

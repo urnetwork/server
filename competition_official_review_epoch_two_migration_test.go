@@ -32,10 +32,31 @@ func TestCompetitionEpochTwoOfficialMigrationRetainsNarrowAuthority(t *testing.T
 		}
 	}
 	version := CompetitionOfficialReviewEpochTwoMigrationVersion()
-	if version <= CompetitionSecondRecoveryMigrationVersion() || version != len(migrations) {
-		t.Fatal("reviewer amendment must follow every currently published migration", version)
+	if version <= CompetitionSecondRecoveryMigrationVersion() || version >= CompetitionOfficialReviewEpochTwoAstra62MigrationVersion() {
+		t.Fatal("reviewer amendment must retain its published order", version)
 	}
 	if CompetitionOfficialReviewBodiesSql().FindingsValid == "" || strings.Contains(competitionOfficialReviewMigration(), "official_two") {
 		t.Fatal("frozen epoch-one migration changed")
+	}
+}
+
+func TestCompetitionEpochTwoOfficialAstra62MigrationChangesOnlyReviewerIdentity(t *testing.T) {
+	version := CompetitionOfficialReviewEpochTwoAstra62MigrationVersion()
+	if version <= CompetitionOfficialReviewEpochTwoMigrationVersion() || version <= AuditDeviceEventUniqueRecordVersion() || version > len(migrations) {
+		t.Fatal("new reviewer ID must append after the published prefix", version)
+	}
+	prior := CompetitionOfficialReviewEpochTwoBodiesSql().FindingsValid
+	const currentPair = `(request->>'reviewer_model' IS DISTINCT FROM 'gpt-6-astra' AND request->>'reviewer_model' IS DISTINCT FROM 'gpt-6.2-astra')`
+	const historicalPair = `request->>'reviewer_model' IS DISTINCT FROM 'gpt-6-astra'`
+	body := CompetitionOfficialReviewEpochTwoAstra62FindingsBodySql()
+	if strings.Count(body, currentPair) != 1 || strings.Replace(body, currentPair, historicalPair, 1) != prior {
+		t.Fatal("reviewer ID append modified unrelated findings or removed legacy identity")
+	}
+	const prefix = `
+SET LOCAL lock_timeout = '5s';
+CREATE OR REPLACE FUNCTION competition_official_review_epoch_two_findings_valid(request jsonb)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE AS $official_two_findings$`
+	if sql := competitionOfficialReviewEpochTwoAstra62Migration(); sql != prefix+body+"$official_two_findings$;\n" {
+		t.Fatal("reviewer ID append performs DDL outside the one epoch-two function")
 	}
 }

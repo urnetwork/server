@@ -170,6 +170,27 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 			t.Errorf("RUN-MAIN.md is missing agent handoff contract %q", required)
 		}
 	}
+	// The separately authorized official review is not a general agent role.
+	// Limit the historical/new Astra references to that documented exception.
+	const officialHeading = "\n### Epoch 2 official Astra amendment (2026-11-17)\n"
+	const legacyHeading = "\n\nLegacy v1 candidate honesty review"
+	beforeOfficial, remainder, hasOfficial := strings.Cut(string(seasonRunbook), officialHeading)
+	official, afterOfficial, hasEnd := strings.Cut(remainder, legacyHeading)
+	if !hasOfficial || !hasEnd {
+		t.Fatal("RUN-MAIN.md is missing the bounded epoch-two official review section")
+	}
+	officialRunbook := strings.Join(strings.Fields(official), " ")
+	for _, required := range []string{
+		"`reviewer_model: gpt-6.2-astra` and `reviewer_reasoning: max`",
+		"Historical `gpt-6-astra` / `max` reviews retain their original identity and digest",
+		"`official_review_import_sha256`",
+		"`native_qualification_waived: false`",
+	} {
+		if !strings.Contains(officialRunbook, required) {
+			t.Errorf("RUN-MAIN.md is missing official review provenance contract %q", required)
+		}
+	}
+	roleRunbook := strings.Join(strings.Fields(beforeOfficial+legacyHeading+afterOfficial), " ")
 	for _, stale := range []string{
 		"gpt-6-sol",
 		"gpt-6-astra",
@@ -181,7 +202,11 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		"Terra medium",
 		"Terra must not",
 	} {
-		if strings.Contains(runbook, stale) {
+		checked := runbook
+		if stale == "gpt-6-astra" || stale == "Astra" {
+			checked = roleRunbook
+		}
+		if strings.Contains(checked, stale) {
 			t.Errorf("RUN-MAIN.md retains superseded agent handoff contract %q", stale)
 		}
 	}
