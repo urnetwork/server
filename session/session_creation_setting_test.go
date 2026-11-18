@@ -65,16 +65,15 @@ func TestUntaggedMintKindIsTheSessionKind(t *testing.T) {
 		credential *ByJwt
 		want       string
 	}{
-		{"password", network, sessionKindSignin},
-		{"signup", network, sessionKindSignin},
-		{"auth_code", network, sessionKindCode},
-		{"api_key_client", client, sessionKindClient},
-		{"legacy_proxy", client, sessionKindClient},
-		{"hosted_proxy", client, sessionKindClient},
-		{"device_adopt", client, sessionKindClient},
-		{"legacy", client, sessionKindClient},
-		{"legacy", network, sessionKindSignin},
-		{sessionKindCode, network, sessionKindCode},
+		{"password", network, SessionKindSignin},
+		{"signup", network, SessionKindSignin},
+		{"auth_code", network, SessionKindCode},
+		{"api_key_client", client, SessionKindClient},
+		{"legacy_proxy", client, SessionKindClient},
+		{"hosted_proxy", client, SessionKindClient},
+		{"device_adopt", client, SessionKindClient},
+		{"legacy", client, SessionKindClient},
+		{"legacy", network, SessionKindSignin},
 	} {
 		if got := sessionKindClass(test.kind, test.credential); got != test.want {
 			t.Errorf("kind %s of a %v credential counts as %s, want %s", test.kind, test.credential.ClientId != nil, got, test.want)

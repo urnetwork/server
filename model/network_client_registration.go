@@ -240,9 +240,9 @@ func (self *networkClientRegistrationOwner) resumeInTx(tx server.PgTx, clientSes
 	}
 	server.Raise(session.ValidateSessionReplayInTx(ctx, tx, credential))
 	server.Raise(session.AssociateSessionClientInTx(ctx, tx, credential, false))
-	kind := "legacy"
-	if clientSession.ApiKeyAuthenticated {
-		kind = "api_key_client"
+	kind := session.MintKindLegacy
+	if clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
+		kind = session.MintKindApiKeyClient
 	}
 	signed, mintErr := session.RegisterAndSignInTx(ctx, tx, credential, kind, nil, false)
 	server.Raise(mintErr)

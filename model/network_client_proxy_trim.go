@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // Trimming networks to the hosted proxy cap (owner, 2026-11-05: "Trim networks
@@ -307,7 +308,7 @@ func CommitNetworkProxyTrim(ctx context.Context, options NetworkProxyTrimOptions
 			var count int64
 			server.Tx(ctx, func(tx server.PgTx) {
 				var err error
-				count, err = deactivateActiveNetworkClientsInTx(ctx, tx, batch, network.NetworkId)
+				count, err = deactivateActiveNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathTrimProxies), tx, batch, network.NetworkId)
 				server.Raise(err)
 			}, server.TxReadCommitted, server.TxLockTimeout(removeNetworkClientsBatchLockTimeout))
 			result.RemovedCount += count

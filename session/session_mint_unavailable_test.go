@@ -147,7 +147,7 @@ func TestNewSignInSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 		ctx := actor.Ctx
 		_, pop := server.Testing_StallAuthRedisDials(48)
 		defer pop()
-		untagged := testingUntaggedMints(sessionKindSignin)
+		untagged := testingUntaggedMints(SessionKindSignin)
 		credential := NewByJwt(actor.ByJwt.NetworkId, actor.ByJwt.UserId, "untagged", false, false)
 		start := time.Now()
 		signed, err := MintNetworkSession(ctx, credential, "password")
@@ -166,7 +166,7 @@ func TestNewSignInSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 		if err != nil || parsed.SessionId != nil {
 			t.Fatalf("the signed token is not untagged: %v %v", parsed, err)
 		}
-		if got := testingUntaggedMints(sessionKindSignin) - untagged; got != 1 {
+		if got := testingUntaggedMints(SessionKindSignin) - untagged; got != 1 {
 			t.Errorf("counted %.0f untagged mints, want 1", got)
 		}
 	})
@@ -191,7 +191,7 @@ func TestFreshClientSessionUnbindsItsClientWhenRedisDoesNotRegister(t *testing.T
 		}
 		_, pop := server.Testing_StallAuthRedisDials(48)
 		defer pop()
-		untagged := testingUntaggedMints(sessionKindClient)
+		untagged := testingUntaggedMints(SessionKindClient)
 		var signed string
 		err := sessionTx(ctx, func(tx server.PgTx) error {
 			if err := LockSessionLifecycle(ctx, tx, network.networkId, false); err != nil {
@@ -213,7 +213,7 @@ func TestFreshClientSessionUnbindsItsClientWhenRedisDoesNotRegister(t *testing.T
 		if binding := testingClientSessionBinding(ctx, t, network.networkId, *top.ClientId); binding != nil {
 			t.Fatalf("the client stays bound to the unregistered session %s", binding)
 		}
-		if got := testingUntaggedMints(sessionKindClient) - untagged; got != 1 {
+		if got := testingUntaggedMints(SessionKindClient) - untagged; got != 1 {
 			t.Errorf("counted %.0f untagged mints, want 1", got)
 		}
 	})
@@ -235,7 +235,7 @@ func TestDerivedLineageKeepsItsBindingWhenRedisDoesNotRegister(t *testing.T) {
 		defer clientSession.Cancel()
 
 		_, pop := server.Testing_StallAuthRedisDials(48)
-		untagged := testingUntaggedMints(sessionKindClient)
+		untagged := testingUntaggedMints(SessionKindClient)
 		signed, err := RenewSessionCredential(clientSession, "derived", false, nil)
 		pop()
 		if err != nil {
@@ -245,7 +245,7 @@ func TestDerivedLineageKeepsItsBindingWhenRedisDoesNotRegister(t *testing.T) {
 		if err != nil || parsed.SessionId != nil {
 			t.Fatalf("the refreshed token is not untagged: %v %v", parsed, err)
 		}
-		if got := testingUntaggedMints(sessionKindClient) - untagged; got != 1 {
+		if got := testingUntaggedMints(SessionKindClient) - untagged; got != 1 {
 			t.Errorf("counted %.0f untagged mints, want 1", got)
 		}
 		if binding := testingClientSessionBinding(ctx, t, network.networkId, *top.ClientId); binding == nil || *binding != derived {
@@ -277,11 +277,11 @@ func TestCarriedSessionRenewalStillNeedsItsRegistration(t *testing.T) {
 		actor := recoverySessionActor(t)
 		_, pop := server.Testing_StallAuthRedisDials(48)
 		defer pop()
-		untagged := testingUntaggedMints(sessionKindSignin)
+		untagged := testingUntaggedMints(SessionKindSignin)
 		if _, err := RenewSessionCredential(actor, "carried", false, nil); !errors.Is(err, ErrAuthUnavailable) {
 			t.Fatalf("a carried session's renewal answered %v, want unavailable", err)
 		}
-		if got := testingUntaggedMints(sessionKindSignin) - untagged; got != 0 {
+		if got := testingUntaggedMints(SessionKindSignin) - untagged; got != 0 {
 			t.Errorf("a carried session was signed untagged %.0f times", got)
 		}
 	})
@@ -312,7 +312,7 @@ func TestHostedBootstrapSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 
 		_, pop := server.Testing_StallAuthRedisDials(48)
 		defer pop()
-		untagged := testingUntaggedMints(sessionKindClient)
+		untagged := testingUntaggedMints(SessionKindClient)
 		hosted := proxy.Renew()
 		signed, err := MintHostedSession(ctx, hosted)
 		if err != nil || signed == "" {
@@ -324,7 +324,7 @@ func TestHostedBootstrapSignsUntaggedWhenRedisDoesNotRegister(t *testing.T) {
 		if binding := testingClientSessionBinding(ctx, t, network.networkId, *proxy.ClientId); binding != nil {
 			t.Fatalf("the proxy stays bound to the unregistered session %s", binding)
 		}
-		if got := testingUntaggedMints(sessionKindClient) - untagged; got != 1 {
+		if got := testingUntaggedMints(SessionKindClient) - untagged; got != 1 {
 			t.Errorf("counted %.0f untagged mints, want 1", got)
 		}
 

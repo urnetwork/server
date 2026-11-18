@@ -128,8 +128,12 @@ func TestAuthCodeSessionRegistrationFailurePreservesUseAndIdentity(t *testing.T)
 		creator := authCodeSessionCreator(t)
 		code := authCodeSessionCode(t, creator)
 		network := creator.ByJwt.NetworkId
-		// Fill live admission capacity without spending 1,000 SQL transactions.
-		members := make([]redis.Z, session.NetworkSessionLiveLimit)
+		// Fill an enforced live cap without spending a SQL transaction per
+		// session. The cap refuses only while enforced (pro.yml
+		// enforce_session_cap); dark, it would admit the redemption.
+		const liveCap = 8
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: liveCap, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		members := make([]redis.Z, liveCap)
 		remove := make([]any, len(members))
 		for i := range members {
 			id := server.NewId().String()
