@@ -32,6 +32,15 @@ var sessionFreedOnRemoval = prometheus.NewCounterVec(prometheus.CounterOpts{Name
 // observes every network with a live set once: its live sessions the cap
 // counts. No per-network label.
 var sessionLivePerNetwork = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "urnetwork_session_live_per_network", Help: "Live sessions the cap counts, per network with a live set, observed once per network per sample pass", Buckets: []float64{10, 100, 500, 1000, 2000, 5000, 10000}})
+
+// Pending session operations recovery could not advance in a pass (each is
+// retried in its turn, behind the others).
+var sessionOperationRecoveryFailures = prometheus.NewCounter(prometheus.CounterOpts{Name: "urnetwork_session_operation_recovery_failures_total", Help: "Pending session operations a recovery pass could not advance"})
+
+// ObserveSessionOperationRecoveryFailure counts one pending operation a
+// recovery pass could not advance.
+func ObserveSessionOperationRecoveryFailure() { sessionOperationRecoveryFailures.Inc() }
+
 var sessionLiveSamplePasses = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_live_sample_passes_total", Help: "Session level sample passes, complete or cut short by the budget"}, []string{"outcome"})
 
 // The paths a removal frees from, each exported from the start.
@@ -50,7 +59,7 @@ const (
 
 func init() {
 	prometheus.MustRegister(sessionStorageSeconds, sessionCapacityRefusals, sessionLeaseRetirements, sessionLeaseUnavailableRechecks, sessionLeaseUnverifiedSeconds, sessionJournalBacklog, sessionJournalAge)
-	prometheus.MustRegister(sessionCapWouldRefuse, sessionCapRefused, sessionFreedOnRemoval, sessionLivePerNetwork, sessionLiveSamplePasses)
+	prometheus.MustRegister(sessionCapWouldRefuse, sessionCapRefused, sessionFreedOnRemoval, sessionLivePerNetwork, sessionLiveSamplePasses, sessionOperationRecoveryFailures)
 	for _, kind := range []string{SessionKindSignin, SessionKindCode, SessionKindClient} {
 		for _, capacity := range []string{"live", "retained"} {
 			sessionCapWouldRefuse.WithLabelValues(kind, capacity)

@@ -1614,6 +1614,11 @@ func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.Pg
 			if err != nil {
 				return nil, err
 			}
+			// a session cleanup spares descendants bound to other sessions
+			generationClientIds, err = sessionCleanupDescendantsInTx(ctx, tx, generationClientIds)
+			if err != nil {
+				return nil, err
+			}
 			descendantClientIds = append(descendantClientIds, generationClientIds...)
 			parentClientIds = generationClientIds
 		}

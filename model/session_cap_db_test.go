@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -510,6 +511,105 @@ func TestProvideChangeMovesTheSessionExemption(t *testing.T) {
 		})
 		if !exempt() {
 			t.Fatal("the mint did not record the provider exemption")
+		}
+	})
+}
+
+// S2 R3: a session's cleanup deactivates the clients bound to it and their
+// descendants, but spares a descendant an explicit re-auth bound to another
+// session, whose credentials that session carries. The cascade added on
+// 2026-11-05 deactivated it whatever its session.
+func TestSessionCleanupSparesADescendantBoundToAnotherSession(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		network := newSessionCapTestNetwork(t, ctx)
+		parent, _ := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+			return AuthNetworkClient(&AuthNetworkClientArgs{Description: "device", DeviceSpec: "test"}, network.signin)
+		})
+		child, _ := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+			return AuthNetworkClient(&AuthNetworkClientArgs{SourceClientId: &parent, Description: "child", DeviceSpec: "test"}, network.signin)
+		})
+		// another sign-in re-authenticates the child: an explicit rebind to B
+		claimsB := session.NewByJwt(network.networkId, network.userId, "session-cap", false, false)
+		if _, err := session.MintNetworkSession(ctx, claimsB, "password"); err != nil {
+			t.Fatal(err)
+		}
+		signinB := session.Testing_CreateClientSession(ctx, claimsB)
+		_, childB := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+			return AuthNetworkClient(&AuthNetworkClientArgs{ClientId: &child, Description: "child", DeviceSpec: "test"}, signinB)
+		})
+		if *childB.SessionId != *claimsB.SessionId {
+			t.Fatal("the re-auth did not bind the child to B")
+		}
+		result, err := session.RevokeNetworkSession(&session.RevokeSessionArgs{SessionId: *network.signin.ByJwt.SessionId, OperationId: server.NewId()}, signinB)
+		if err != nil || result.State != "enforced" {
+			t.Fatal(result, err)
+		}
+		if _, err := CleanupSessionOperation(ctx, session.SessionCleanupOperation{NetworkId: network.networkId, OperationId: result.OperationId, TargetSessionIds: result.TargetSessionIds}); err != nil {
+			t.Fatal(err)
+		}
+		active := map[server.Id]bool{}
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, `SELECT client_id, active FROM network_client WHERE client_id = ANY($1)`, []server.Id{parent, child})
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var clientId server.Id
+					var isActive bool
+					server.Raise(rows.Scan(&clientId, &isActive))
+					active[clientId] = isActive
+				}
+			})
+		})
+		if active[parent] {
+			t.Fatal("the cleanup left the revoked session's client active")
+		}
+		if !active[child] {
+			t.Fatal("the cleanup deactivated a descendant bound to another session")
+		}
+		if err := session.ValidateByJwtState(ctx, childB, true); err != nil {
+			t.Fatal("the descendant's credential under B no longer validates", err)
+		}
+	})
+}
+
+// S2 N1: recovery reads the 32 oldest pending operations; one it cannot
+// advance moves behind the others, so 33 stuck operations (here, enforced
+// with their receipt and markers lost) no longer starve a 34th.
+func TestSessionRecoveryRotatesStuckOperations(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		network := newSessionCapTestNetwork(t, ctx)
+		target := session.NewByJwt(network.networkId, network.userId, "session-cap", false, false)
+		if _, err := session.MintNetworkSession(ctx, target, "password"); err != nil {
+			t.Fatal(err)
+		}
+		old := server.NowUtc().Add(-time.Hour)
+		server.Tx(ctx, func(tx server.PgTx) {
+			for i := 0; i < 33; i++ {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_session_operation(network_id,operation_id,action,fingerprint,actor,credential_epoch,status,result,target_session_ids,quota_reserved,create_time,update_time,retain_until) VALUES($1,$2,'single','stuck','{}',$3,'enforced','{}',$4,false,$3,$3,$5)`, server.NewId(), server.NewId(), old.Add(time.Duration(i)*time.Second), `["`+server.NewId().String()+`"]`, server.NowUtc().Add(24*time.Hour)))
+			}
+		})
+		// a valid single revoke, prepared after the stuck ones
+		op := server.NewId()
+		actor, err := json.Marshal(network.signin.ByJwt)
+		server.Raise(err)
+		server.Tx(ctx, func(tx server.PgTx) {
+			var epoch time.Time
+			server.Raise(tx.QueryRow(ctx, `SELECT credential_change_time FROM network_user WHERE user_id=$1`, network.userId).Scan(&epoch))
+			now := server.NowUtc()
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_session_operation(network_id,operation_id,action,fingerprint,actor,credential_epoch,target_session_id,status,create_time,update_time,retain_until) VALUES($1,$2,'single','valid',$3,$4,$5,'prepared',$6,$6,$7)`, network.networkId, op, actor, epoch, *target.SessionId, now, now.Add(24*time.Hour)))
+		})
+		for range 2 {
+			_ = RecoverSessionOperations(ctx, 32)
+		}
+		if !errors.Is(session.CheckSession(ctx, network.networkId, *target.SessionId), session.ErrSessionRevoked) {
+			t.Fatal("stuck operations starved a later one")
 		}
 	})
 }
