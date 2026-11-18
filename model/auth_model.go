@@ -1941,7 +1941,7 @@ func AuthCodeCreate(
 		now := server.NowUtc()
 		endTime := now.Add(duration)
 		if clientSession.ByJwt.SessionId != nil {
-			horizon, err := session.RegisterNetworkSession(clientSession.Ctx, clientSession.ByJwt, "restored", nil, false, now)
+			horizon, err := session.RegisterRestoredSessionInTx(clientSession.Ctx, tx, clientSession.ByJwt, now)
 			server.Raise(err)
 			// in UTC, as the end_time column holds it
 			effective := time.UnixMilli(horizon.AcceptUntil).UTC()

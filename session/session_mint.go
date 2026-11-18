@@ -195,17 +195,44 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		// failed publication goes to the outbox, whose single row per network
 		// every mint used to upsert (S1 W7). An index entry published by a
 		// transaction that then rolls back only reviews early.
-		if registered.Created {
-			due := time.UnixMilli(registered.AcceptUntil).UTC()
-			if publishErr := publishSessionIndexOnMint(ctx, credential.NetworkId, due, server.NewId().String()); publishErr != nil {
-				// in UTC, as next_review_time holds it
-				if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, due); err != nil {
-					return "", err
-				}
-			}
+		if err := publishRegisteredSessionInTx(ctx, tx, credential.NetworkId, registered); err != nil {
+			return "", err
 		}
 	}
 	return sign(credential), nil
+}
+
+// Publishes a registration that added its session to the live set to the
+// network's maintenance index, or queues the outbox when the publication
+// fails. A refresh adds nothing to publish (RegisterAndSignInTx).
+func publishRegisteredSessionInTx(ctx context.Context, tx server.PgTx, networkId server.Id, registered *registeredSession) error {
+	if !registered.Created {
+		return nil
+	}
+	due := time.UnixMilli(registered.AcceptUntil).UTC()
+	if publishErr := publishSessionIndexOnMint(ctx, networkId, due, server.NewId().String()); publishErr != nil {
+		// in UTC, as next_review_time holds it
+		return QueueSessionIndexInTx(ctx, tx, networkId, due)
+	}
+	return nil
+}
+
+// RegisterRestoredSessionInTx re-registers the presented credential's own
+// session before it authorizes more of that session (auth-code creation):
+// the clock check and the index publication of every registered mint, with
+// kind restored for a member the store no longer holds.
+func RegisterRestoredSessionInTx(ctx context.Context, tx server.PgTx, credential *ByJwt, now time.Time) (*registeredSession, error) {
+	if err := verifySessionMintClock(ctx); err != nil {
+		return nil, err
+	}
+	registered, err := RegisterNetworkSession(ctx, credential, "restored", nil, false, now)
+	if err != nil {
+		return nil, err
+	}
+	if err := publishRegisteredSessionInTx(ctx, tx, credential.NetworkId, registered); err != nil {
+		return nil, err
+	}
+	return registered, nil
 }
 
 // Independent successful password/SSO/wallet/verification/seedphrase sign-ins.

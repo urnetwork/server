@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -660,6 +661,53 @@ func TestHostedProxySurvivesPasswordResetAndKeepsMinting(t *testing.T) {
 		}
 		if err := session.ValidateByJwtState(ctx, again, true); err != nil {
 			t.Fatal("the proxy's credential after the reset does not validate", err)
+		}
+	})
+}
+
+// S1: auth-code creation re-registers its creator's session (kind restored
+// when the store no longer holds it). It skipped the mint clock check and
+// never published the restored member to the maintenance index, so the
+// network could hold a live set no review or level sample would find.
+func TestAuthCodeCreateRestoredSessionIsPublished(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		creator := authCodeSessionCreator(t)
+		network := creator.ByJwt.NetworkId
+		// the store lost the member and the index entry (as after their keys expired)
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			for shard := 0; shard < session.SessionIndexShards; shard++ {
+				if err := r.ZRem(ctx, fmt.Sprintf("{nsi_%02d}z", shard), network.String()).Err(); err != nil {
+					return err
+				}
+			}
+			return r.Del(ctx, session.SessionKey(network, "z"), session.SessionKey(network, "held"), session.SessionKey(network, "zi")).Err()
+		}))
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_session_index_outbox WHERE network_id=$1`, network))
+		})
+		authCodeSessionCode(t, creator)
+		if !sessionCapMembers(t, ctx, network, "z")[*creator.ByJwt.SessionId] {
+			t.Fatal("code creation did not restore the creator's session")
+		}
+		published := false
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			for shard := 0; shard < session.SessionIndexShards; shard++ {
+				if _, err := r.ZScore(ctx, fmt.Sprintf("{nsi_%02d}z", shard), network.String()).Result(); err == nil {
+					published = true
+				}
+			}
+			return nil
+		}))
+		var queued int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM network_session_index_outbox WHERE network_id=$1`, network).Scan(&queued))
+		})
+		if !published && queued == 0 {
+			t.Fatal("the restored session's network is neither in the index nor queued for it")
 		}
 	})
 }
