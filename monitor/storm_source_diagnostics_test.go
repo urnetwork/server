@@ -15,6 +15,7 @@ func stormDiagnosticSignals() []Signal {
 		NewPgBouncerBacklogSignal(), NewServicesCpuSignal(), NewDbAcquireWaitSignal(), NewContractCreationsStuckSignal(),
 		NewReservationReleaseSignal(), NewRedisPoolTimeoutsSignal(), NewRedisMainThreadSignal(), NewProxyHostCpuSignal(),
 		NewContractReplyCollapseSignal(), NewHostedContractCapSignal(), NewProxyMintRefusalsSignal(), NewProxyHeapLimitSignal(),
+		NewProxyConnectsAbandonedSignal(),
 	}
 }
 
@@ -23,8 +24,9 @@ func stormDiagnosticSignals() []Signal {
 func stormDiagnosticHealthyAlerts(t *testing.T, signal Signal) Alerts {
 	t.Helper()
 	synthetic := map[string]func(testing.TB) string{
-		"proxy-mint-refusals": proxyMintRefusalsHealthyResponse,
-		"proxy-heap-limit":    proxyHeapLimitHealthyResponse,
+		"proxy-mint-refusals":      proxyMintRefusalsHealthyResponse,
+		"proxy-heap-limit":         proxyHeapLimitHealthyResponse,
+		"proxy-connects-abandoned": proxyConnectsAbandonedHealthyResponse,
 	}
 	if response, ok := synthetic[signal.Key()]; ok {
 		return runStormSynthetic(t, signal, stormSyntheticNow, response(t), nil)

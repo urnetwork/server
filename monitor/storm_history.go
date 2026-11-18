@@ -4,8 +4,9 @@
 // reservation-release (§26.6), redis-pool-timeouts (§26.7), redis-main-thread
 // (§26.8), proxy-host-cpu (§26.9), contract-reply-collapse (§26.10) and
 // hosted-contract-cap (§26.11). From the hosted proxy's setup regression of
-// 2026-11-14 (proxy/P90SPEED.md): proxy-mint-refusals (§26.12) and
-// proxy-heap-limit (§26.13). Each is in signal_<key>.go.
+// 2026-11-14 (proxy/P90SPEED.md): proxy-mint-refusals (§26.12),
+// proxy-heap-limit (§26.13) and proxy-connects-abandoned (§26.14). Each is in
+// signal_<key>.go.
 //
 // Each probe evaluates its catalog PromQL at every step of one bounded
 // query_range through the loopback Mimir of a services host, ending

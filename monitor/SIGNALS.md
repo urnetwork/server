@@ -48522,6 +48522,7 @@ refusing up to 923 packs/s.
 | Contract cap | `hosted-contract-cap-saturated` | `urnetwork_hosted_contract_admission_refusals_total` (yes, proxy g4–g10 since 10-26 18:35Z) | a process over 50/s for 10 min, 30 min or more after its start | — | 10-26 20:21Z |
 | Mint refusals per proxy host | `proxy-mint-refusals` | `urnetwork_hosted_mint_admission_refusals_total` (yes) | a host over 5/s for 10 min, over its blocks 30 min or more after their start | — | 11-14 14:04Z, again 15:23Z |
 | Proxy heap at its Go memory limit | `proxy-heap-limit` | `go_memstats_heap_inuse_bytes`, `go_memstats_stack_inuse_bytes`, `go_gc_gomemlimit_bytes` (yes) | a host's highest process over 0.95 of its limit for 15 min | — | 11-14 15:34Z |
+| Abandoned CONNECTs per proxy host | `proxy-connects-abandoned` | `urnetwork_proxy_ingress_events_total{reason="connect_client_gone"}` (yes) | a host over 3 times its trailing 24-hour median and over 50/s for 15 min | — | 11-14 20:23Z |
 
 A was found at 02:25Z, so its signals led by 6 h 11 min to 6 h 56 min; B's
 rollout aborted at 15:42:38Z, so its signals led by 16 to 52 minutes, with
@@ -48534,13 +48535,16 @@ database path: the registration convoy held 12,186–14,263 clients waiting
 and A's morning 148–2,877. For the proxy and Redis series, 10-26 08:00–12:00Z
 and 14:10–14:40Z serve as well.
 
-26.12 and 26.13 come from the hosted proxy's setup regression of 2026-11-14
+26.12–26.14 come from the hosted proxy's setup regression of 2026-11-14
 (`proxy/P90SPEED.md`). From 15:17Z that day setup p90 went from 4.3–6.9 s
 to 16–37 s, while the proxy processes sat at their Go memory limit and the
 2-slot hosted mint admission refused windows' mints. No signal read
-refusals per host or the heap against its limit. Their replays run from
-11-04 05:30Z to 11-18 05:30Z, at one-minute steps for the times given; the
-healthy reference is 11-07 to 11-14 13:50Z, before the load ramp.
+refusals per host, the heap against its limit, or the CONNECTs clients
+gave up on. Their replays run from 11-04 05:30Z to 11-18 05:30Z, at
+one-minute steps for the times given; the healthy reference is 11-07 to
+11-14 13:50Z, before the load ramp. On 11-14 they fire in catalog order:
+refusals at 14:04Z and 15:23Z, the heap at 15:34Z, and abandoned CONNECTs
+five hours later, at 20:23Z.
 
 Delivery: as §25, first a Grafana rule on Mimir whose contact point reaches a
 person, then a monitor probe; each entry names the probe to extend. None of
@@ -48549,7 +48553,7 @@ acknowledged by a person (§7, 2026-10-22 rule 4). These signals watch the
 services and Redis, where both incidents started; §25's watch what customers
 see.
 
-Monitor probes: 26.1–26.4 and 26.6–26.13 each have their own probe, and 26.5
+Monitor probes: 26.1–26.4 and 26.6–26.14 each have their own probe, and 26.5
 is §25.1's `contract-failure-share`. Each reads its entry's PromQL at every
 one-minute step of one bounded Mimir range read through a services host's
 loopback Mimir, ending two minutes behind now, so a watcher that runs it
@@ -49330,6 +49334,76 @@ its RAM allows, move blocks to a host with room, or add RAM or a host
 CPU (§26.9) entries for the cost; do not count on same-image restarts.
 Follow-up: §14.7b's `proxy-runtime` reads the live set by owner, not against
 the limit.
+
+### 26.14 Proxy CONNECTs abandoned against the previous day
+
+Probe: `proxy-connects-abandoned`
+
+The probe also reads which blocks each host's rate sums. At or under the
+floor a host reads within the band whatever its reference; above it, a
+zero reference is a rise from nothing and a missing one is unknown. A sum
+over fewer blocks can only be lower, so a held band stands while a block is
+missing; a clear needs every placed block, and a placed block that does not
+answer reports `proxy-connects-abandoned-unobservable`.
+
+Status: proposed 2026-11-18 (`proxy/P90SPEED.md` §8, "Track: CONNECTs the
+client abandoned"); the probe above implements it.
+
+Source (exists):
+`urnetwork_proxy_ingress_events_total{protocol="http",reason="connect_client_gone"}`,
+the CONNECTs a proxy process gave up on because the client dropped them
+while the proxy was still dialing the target through the hosted device, or
+because the proxy shut down under them. A first CONNECT waits until one of
+its window's exits answers, and refused mints (§26.12) stretch that wait to
+tens of seconds, so people and their tools give up and retry. Bots that open
+CONNECTs and drop them are counted the same way.
+
+```promql
+sum by (host) (rate(urnetwork_proxy_ingress_events_total{env="main",service="proxy",protocol="http",reason="connect_client_gone"}[15m]))
+quantile_over_time(0.5, sum by (host) (rate(urnetwork_proxy_ingress_events_total{env="main",service="proxy",protocol="http",reason="connect_client_gone"}[15m]))[24h:15m] offset 30m)
+```
+
+Healthy: from 11-07 to the load ramp at 13:51Z on 11-14, per host, a median
+of 2.2–2.3/s, a 99th percentile of 6.5–10.6/s and a peak of 20/s on crisp
+and 8.4/s on fireside.
+
+Threshold: WARN `proxy-connects-abandoned`: a host's rate above 3 times its
+median over the previous 24 hours (at 15-minute steps, offset 30 minutes)
+and above 50/s, for 15 minutes. The offset keeps the rise from pulling its
+own reference up, as §26.10's does; the floor keeps a quiet host's swing
+from 2/s to 10/s out.
+
+Evidence:
+- 11-14: abandoned CONNECTs stayed at 5–15/s per host through the setup
+  regression's first hours. Crisp passed 50/s at 20:09Z and fires at
+  20:23Z, fireside at 20:29Z, at 9–13 times references of 6.1/s and 4.6/s.
+- 11-15 to 11-16: fireside fires from 20:48Z on 11-15 to 09:25Z on 11-16
+  (up to 16 times its reference), crisp from 23:25Z to 05:06Z and three more
+  times until 13:03Z (up to 10 times). The median then caught up: the
+  100–400/s of 11-16 and 11-17 fired nothing from 13:03Z on 11-16 to 22:03Z
+  on 11-17.
+- At 05:30Z on 11-18 both hosts are firing, fireside since 23:55Z and crisp
+  since 00:49Z: 750–990/s per host against references of 114/s and 141/s,
+  about 1,700/s over the fleet. P90SPEED.md §8 counted 100–720/s from 11-16.
+- 11-05 at 00:54Z (fireside) and 00:56Z (crisp), on the payer surge's second
+  night. Abandoned CONNECTs then stayed at 50–380/s per host until about
+  02:00Z on 11-06, past the surge's end at about 08Z, so the median caught up
+  and the rule cleared at about 12Z and 14Z.
+- The nightly restart of 11-17 14:04–14:07Z counted 84–124/s on crisp for
+  four minutes at 1-minute rates; crisp's 15-minute rate kept falling.
+
+False-positive qualifiers: bots that open CONNECTs and drop them raise the
+count as much as people who give up, so read it with setup time (the
+proxy-test runner) and mint refusals before calling it what customers see.
+False-negative qualifiers: the median absorbs a rise within about a day
+(the 100–400/s of 11-16 and 11-17), and a host under 50/s never fires.
+
+ACTION: read the mint-refusal (§26.12) and heap-limit (§26.13) entries for
+the host and the runner's setup time. If they agree, hosted proxies are slow
+to set up: restore the host's headroom (P90SPEED.md §9, decision 1). If they
+are quiet, look for clients that open CONNECTs and drop them before treating
+this as an outage. Follow-up: P90SPEED.md §8's first-CONNECT histograms would
+measure the wait itself.
 
 ### Rollout gates for connect and alt restarts
 
