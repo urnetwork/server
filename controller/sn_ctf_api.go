@@ -13,6 +13,13 @@ package controller
 //	  enabled: false                  # the /sn/ctf routes answer
 //	  page_url: https://ur.xyz/ctf    # links.page; a country's page is page_url/<cc>
 //
+// Configured before the pool starts (snCtfView.NotStarted: vault2 has not
+// registered it, or its first epoch is still to come while st.yml names no
+// carry), GET /sn/ctf/client answers as before the pool's first root, no
+// epochs and no wins, since nothing has been drawn or won. The routes that
+// describe the pool, its first epoch, its carry and its draws, answer 503 until
+// vault2 has registered it and st.yml names its carry.
+//
 // The same switch, with st.yml's ctf block on, has the ledger route and the
 // claim relay read the operator's capture the flag pool (stCtfPoolOn); while
 // either is off, they read no capture the flag pool at all.
@@ -212,9 +219,21 @@ func snCtfLoadView(ctx context.Context, source snCtfSource) (*snCtfView, error) 
 	return nil, errors.New("the capture the flag view is not read yet")
 }
 
-// snCtfReadView reads the view. On a failure it has answered 503 and returns
-// nil.
+// snCtfReadView reads the view of the routes that describe the pool: its first
+// epoch, its carry and its draws. On a failure, and while the pool has not
+// started, it has answered 503 and returns nil.
 func snCtfReadView(w http.ResponseWriter, r *http.Request) (snCtfSource, *snCtfView) {
+	source, view := snCtfReadAnyView(w, r)
+	if view != nil && view.NotStarted {
+		WriteSnProblem(w, http.StatusServiceUnavailable, SnProblemUnavailable, "Capture the flag has not started on this server yet.")
+		return nil, nil
+	}
+	return source, view
+}
+
+// snCtfReadAnyView reads the view, of a pool that has not started too. On a
+// failure it has answered 503 and returns nil.
+func snCtfReadAnyView(w http.ResponseWriter, r *http.Request) (snCtfSource, *snCtfView) {
 	source, err := snCtfSourceOf()
 	if err != nil {
 		if !errors.Is(err, errSnCtfNotConfigured) {
@@ -418,7 +437,9 @@ func snCtfClientScopeOf(byJwt *session.ByJwt) snCtfClientScope {
 // SnCtfClient serves GET /sn/ctf/client?limit=: for a client token, its
 // client's status and wins; for the network credential (a network token or an
 // API key), the wins of every client of its network. Only a request without a
-// credential that authenticates is answered 401, never a network's.
+// credential that authenticates is answered 401, never a network's. Before the
+// pool starts the view has no covered epoch, so the answer is the one before
+// the pool's first root: no epochs and no wins.
 func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 	SnOperatorCors(w, r)
 	unauthorized := func() {
@@ -449,7 +470,7 @@ func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 		WriteSnProblem(w, http.StatusBadRequest, SnProblemBadRequest, fmt.Sprintf("limit must be an integer from 1 to %d.", snCtfClientMaximumLimit))
 		return
 	}
-	source, view := snCtfReadView(w, r)
+	source, view := snCtfReadAnyView(w, r)
 	if view == nil {
 		return
 	}
