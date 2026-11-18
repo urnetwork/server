@@ -286,18 +286,19 @@ func UpdateSessionProvideExemption(ctx context.Context, networkId, sessionId ser
 	return sessionEval(ctx, sessionExemptLua, keys, []any{server.NowUtc().UnixMilli(), server.NewId().String(), sessionId.String(), value}, nil)
 }
 
-// How many index members one read of a sample pass takes, and how many
-// networks one pipeline reads.
-const sessionLevelIndexPage = 1024
+// How many networks one pipeline of a sample pass reads.
 const sessionLevelPipeline = 512
 
 // SampleSessionLevels is one pass of the session level sample: every network
 // in the 32 maintenance index shards (session_maintenance.go), which hold
 // every network with session state, that has a live set is observed once in
 // urnetwork_session_live_per_network with the live sessions the cap counts
-// (live minus provider-exempt). It only reads: no script, no prune, no ttl.
-// A pass the context ends is partial: the networks it read were observed once
-// and the rest not at all. Returns the networks observed.
+// (live minus provider-exempt). Each shard's index is read whole in one
+// command, a snapshot no concurrent review can shift, and a network is in one
+// shard only, so a pass observes each network at most once. It only reads:
+// no script, no prune, no ttl. A pass the context ends is partial: the
+// networks it read were observed once and the rest not at all. Returns the
+// networks observed.
 func SampleSessionLevels(ctx context.Context, now time.Time) (observed int, complete bool, returnErr error) {
 	defer func() {
 		outcome := "complete"
@@ -309,50 +310,45 @@ func SampleSessionLevels(ctx context.Context, now time.Time) (observed int, comp
 	liveFrom := "(" + strconv.FormatInt(now.UnixMilli(), 10)
 	for shard := 0; shard < SessionIndexShards; shard++ {
 		indexKey := fmt.Sprintf("{nsi_%02d}z", shard)
-		for offset := int64(0); ; offset += sessionLevelIndexPage {
-			var members []string
+		var members []string
+		if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			var err error
+			members, err = r.ZRange(ctx, indexKey, 0, -1).Result()
+			return err
+		}); err != nil {
+			return observed, false, err
+		}
+		for start := 0; start < len(members); start += sessionLevelPipeline {
+			batch := members[start:min(len(members), start+sessionLevelPipeline)]
+			networkIds := make([]server.Id, 0, len(batch))
+			for _, member := range batch {
+				if networkId, err := server.ParseId(member); err == nil {
+					networkIds = append(networkIds, networkId)
+				}
+			}
+			var live, provider []*redis.IntCmd
 			if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-				var err error
-				members, err = r.ZRange(ctx, indexKey, offset, offset+sessionLevelIndexPage-1).Result()
+				pipeline := r.Pipeline()
+				live, provider = make([]*redis.IntCmd, len(networkIds)), make([]*redis.IntCmd, len(networkIds))
+				for i, networkId := range networkIds {
+					live[i] = pipeline.ZCount(ctx, SessionKey(networkId, "z"), liveFrom, "+inf")
+					provider[i] = pipeline.ZCount(ctx, SessionKey(networkId, "xz"), liveFrom, "+inf")
+				}
+				_, err := pipeline.Exec(ctx)
+				if errors.Is(err, server.RedisNil) {
+					err = nil
+				}
 				return err
 			}); err != nil {
 				return observed, false, err
 			}
-			for start := 0; start < len(members); start += sessionLevelPipeline {
-				batch := members[start:min(len(members), start+sessionLevelPipeline)]
-				networkIds := make([]server.Id, 0, len(batch))
-				for _, member := range batch {
-					if networkId, err := server.ParseId(member); err == nil {
-						networkIds = append(networkIds, networkId)
-					}
+			for i := range networkIds {
+				count := live[i].Val()
+				if count <= 0 {
+					continue
 				}
-				var live, provider []*redis.IntCmd
-				if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-					pipeline := r.Pipeline()
-					live, provider = make([]*redis.IntCmd, len(networkIds)), make([]*redis.IntCmd, len(networkIds))
-					for i, networkId := range networkIds {
-						live[i] = pipeline.ZCount(ctx, SessionKey(networkId, "z"), liveFrom, "+inf")
-						provider[i] = pipeline.ZCount(ctx, SessionKey(networkId, "xz"), liveFrom, "+inf")
-					}
-					_, err := pipeline.Exec(ctx)
-					if errors.Is(err, server.RedisNil) {
-						err = nil
-					}
-					return err
-				}); err != nil {
-					return observed, false, err
-				}
-				for i := range networkIds {
-					count := live[i].Val()
-					if count <= 0 {
-						continue
-					}
-					sessionLivePerNetwork.Observe(float64(max(0, count-provider[i].Val())))
-					observed++
-				}
-			}
-			if len(members) < sessionLevelIndexPage {
-				break
+				sessionLivePerNetwork.Observe(float64(max(0, count-provider[i].Val())))
+				observed++
 			}
 		}
 	}
