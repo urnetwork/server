@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -247,6 +248,19 @@ func rememberContractClientTopLevel(clientId server.Id, sourceClientId *server.I
 	contractClientTopLevels.Store(clientId, topLevelClientId)
 }
 
+// In-flight claims survive eviction from the bounded timestamp cache. Each
+// owner releases its key after the stamp and any retry-marker update return.
+var contractTimeStampClaims sync.Map
+
+// A cached marker can suppress the same writes as the database predicate.
+func contractTimeStampKnownFresh(topLevelClientId server.Id, now time.Time) bool {
+	stampedTime, known := contractTimeStampGate.Load(topLevelClientId)
+	return known && now.Sub(stampedTime) < clientAuthTimeRefreshMinInterval
+}
+
+// Tests can pause a caller after its cold read and before it claims the stamp.
+type contractTimeStampClaimTestKey struct{}
+
 // StampTopLevelClientContractTime records contract-creating usage for the
 // top-level identity of payerClientId: it sets contract_time = now on the
 // top-level row (payerClientId itself, or its source client when
@@ -263,11 +277,20 @@ func StampTopLevelClientContractTime(ctx context.Context, payerClientId server.I
 	if !ok {
 		topLevelClientId = payerClientId
 	}
-	if stampedTime, ok := contractTimeStampGate.Load(topLevelClientId); ok && now.Sub(stampedTime) < clientAuthTimeRefreshMinInterval {
+	if contractTimeStampKnownFresh(topLevelClientId, now) {
 		return
 	}
-	// claimed before the write, so concurrent contracts of one identity do
-	// not all probe
+	if beforeClaim, _ := ctx.Value(contractTimeStampClaimTestKey{}).(func()); beforeClaim != nil {
+		beforeClaim()
+	}
+	if _, claimed := contractTimeStampClaims.LoadOrStore(topLevelClientId, struct{}{}); claimed {
+		return
+	}
+	defer contractTimeStampClaims.Delete(topLevelClientId)
+	// An earlier owner may have completed after the first freshness read.
+	if contractTimeStampKnownFresh(topLevelClientId, now) {
+		return
+	}
 	contractTimeStampGate.Store(topLevelClientId, now)
 
 	server.HandleError(func() {
