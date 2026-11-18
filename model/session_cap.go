@@ -6,6 +6,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -110,6 +111,28 @@ func provideKeysProvidePublicly(secretKeys map[ProvideMode][]byte) bool {
 		}
 	}
 	return false
+}
+
+// recoverSessionRefusal, deferred by a minting route's model entry, returns a
+// session refusal its transaction raised (a *session.SessionError, such as the
+// cap's 409 session_limit_reached) as the route's error, which the router
+// answers with its status and code. Raised, it escaped the route as a 500
+// (session1118 D F1). Any other panic continues.
+func recoverSessionRefusal[R any](result *R, err *error) {
+	recovered := recover()
+	if recovered == nil {
+		return
+	}
+	if recoveredErr, ok := recovered.(error); ok {
+		var refusal *session.SessionError
+		if errors.As(recoveredErr, &refusal) {
+			var zero R
+			*result = zero
+			*err = recoveredErr
+			return
+		}
+	}
+	panic(recovered)
 }
 
 type sessionFreePathKey struct{}

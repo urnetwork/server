@@ -514,7 +514,10 @@ func legacyAppleSsoUserId(
 func handleLoginParsedAuthJwt(
 	args *HandleLoginParsedAuthJwtArgs,
 	ctx context.Context,
-) (*AuthLoginResult, error) {
+) (result *AuthLoginResult, returnErr error) {
+	// the sign-in's mint raises a refusal (409 session_limit_reached, ...);
+	// it is the route's answer, not a 500
+	defer recoverSessionRefusal(&result, &returnErr)
 	return handleLoginParsedAuthJwtWithStore(args, ctx, &parsedAuthJwtLoginDb)
 }
 

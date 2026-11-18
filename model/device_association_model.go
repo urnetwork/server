@@ -753,6 +753,9 @@ func DeviceConfirmAdopt(
 	confirmAdopt *DeviceConfirmAdoptArgs,
 	clientSession *session.ClientSession,
 ) (confirmAdoptResult *DeviceConfirmAdoptResult, returnErr error) {
+	// a mint refused in the transaction (409 session_limit_reached, ...) is
+	// the route's answer, not a 500
+	defer recoverSessionRefusal(&confirmAdoptResult, &returnErr)
 	// Discover the target network without mutating the adoption record. The
 	// entitlement lookup owns separate PostgreSQL/Redis operations and must
 	// finish before the adoption transaction checks out its connection.

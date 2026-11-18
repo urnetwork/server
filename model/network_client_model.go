@@ -359,6 +359,9 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, clientSession *session
 // Parent validation belongs to the transaction that creates the child. Other
 // entry points keep their existing caller-owned authentication boundary.
 func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool, internalProbe ...bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	// a mint refused in the transaction (409 session_limit_reached, ...) is
+	// the route's answer, not a 500
+	defer recoverSessionRefusal(&authClientResult, &authClientError)
 	mintCredential := clientSession.ByJwt.Renew()
 	probe := len(internalProbe) > 0 && internalProbe[0]
 	// a new hosted proxy has a session of its own whatever creates it; a
