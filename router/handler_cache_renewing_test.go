@@ -591,6 +591,89 @@ func TestHandlerCacheRenewingLastGoodAnswersSlowRefresh(t *testing.T) {
 	})
 }
 
+// What the db layer raises when the context of a query ends (server.Db,
+// through dbContextDoneCause): its done stop joined with the driver's error
+// and the context's own, as the api logged it on 2026-11-18: "Done",
+// "timeout: context deadline exceeded", "context deadline exceeded".
+func renewingCacheTestDbStop(ctx context.Context) error {
+	return errors.Join(server.DbContextDoneError, errors.New("timeout: context deadline exceeded"), ctx.Err())
+}
+
+// A fill whose database read outlasts the context it runs under, which
+// queryContext derives from the fill context, and raises the db layer's stop
+// when that context ends.
+func renewingCacheTestDbReadOutlasting(
+	queryContext func(context.Context) (context.Context, context.CancelFunc),
+) func(context.Context) (*handlerCacheTestResult, error) {
+	return func(fillCtx context.Context) (*handlerCacheTestResult, error) {
+		ctx, cancel := queryContext(fillCtx)
+		defer cancel()
+		<-ctx.Done()
+		panic(renewingCacheTestDbStop(ctx))
+	}
+}
+
+// The root cause of "[h]renewing cache fill panic: Done" every ~3 minutes on
+// 2026-11-18: the largest network's provider list reached its 2-minute owner
+// budget inside a database read, and the db layer ended the read by raising
+// its done stop. The fill ends with the budget's error instead: a caller that
+// waits past the budget is answered context.DeadlineExceeded, not the raise,
+// and the lease is cut to its failure fence with renewal joined. A lost
+// renewal ends the same read as unavailable. The control: the same stop for a
+// narrower context of the fill's own, while the fill context is live, is
+// still raised unchanged.
+func TestHandlerCacheRenewingDbStopAtFillEndReturnsError(t *testing.T) {
+	call := func(store *renewingCacheTestStore, key string, fill func(context.Context) (*handlerCacheTestResult, error)) (value *handlerCacheTestResult, err error, raised any) {
+		defer func() { raised = recover() }()
+		value, err = cacheJsonWithRenewingFill(context.Background(), store, key, 30*time.Second, 2*time.Minute, fill)
+		return
+	}
+	fillContext := func(ctx context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) }
+	t.Run("budget", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			start := time.Now()
+			value, err, raised := call(store, "db-budget", renewingCacheTestDbReadOutlasting(fillContext))
+			if raised != nil || value != nil || !errors.Is(err, context.DeadlineExceeded) || time.Since(start) != 2*time.Minute {
+				t.Fatalf("db read at the fill budget = (%v,%v) raised=%v after %v, want context.DeadlineExceeded after 2m", value, err, raised, time.Since(start))
+			}
+			token, exists, _ := store.get(context.Background(), newHandlerCacheKeys("db-budget").fill)
+			if !exists || !isHandlerCacheFence(token) {
+				t.Fatalf("budget-ended fill left lease %q (exists=%v), want its failure fence", token, exists)
+			}
+			renews, publishes := store.counts()
+			time.Sleep(time.Minute)
+			if after, _ := store.counts(); after != renews || publishes != 0 {
+				t.Fatal("budget-ended fill left a renewal or publication running")
+			}
+		})
+	})
+	t.Run("lost-renewal", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			store.failAt, store.fault = 2, "replacement"
+			value, err, raised := call(store, "db-lost-renewal", renewingCacheTestDbReadOutlasting(fillContext))
+			var unavailable *handlerCacheUnavailableError
+			if raised != nil || value != nil || !errors.As(err, &unavailable) {
+				t.Fatalf("db read ended by a lost renewal = (%v,%v) raised=%v, want unavailable", value, err, raised)
+			}
+		})
+	})
+	t.Run("narrower-context", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			store := newRenewingCacheTestStore()
+			value, err, raised := call(store, "db-own-timeout", renewingCacheTestDbReadOutlasting(
+				func(ctx context.Context) (context.Context, context.CancelFunc) {
+					return context.WithTimeout(ctx, 10*time.Second)
+				}))
+			stop, ok := raised.(error)
+			if !ok || !errors.Is(stop, server.DbContextDoneError) || value != nil || err != nil {
+				t.Fatalf("stop of the fill's own narrower context = (%v,%v) raised=%v, want it raised unchanged", value, err, raised)
+			}
+		})
+	})
+}
+
 // A fill that panics after its caller left cannot take the process down. The
 // panic is logged, and the lease is cut to the failure fence as for a panic
 // its caller sees.

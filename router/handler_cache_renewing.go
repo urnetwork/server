@@ -176,18 +176,48 @@ func renewingHandlerCacheFill[R any](
 		}
 	}
 	defer stop()
-	value, fillErr := fill(fillCtx)
+	value, fillErr := callRenewingHandlerCacheFill(fillCtx, fill)
 	stop()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 	if fillCtx.Err() == context.DeadlineExceeded {
+		glog.Infof("[h]renewing cache fill ended at its %s budget\n", fillTimeout)
 		return nil, context.DeadlineExceeded
 	}
 	if renewalErr != nil {
 		return nil, &handlerCacheUnavailableError{}
 	}
 	return value, fillErr
+}
+
+// The db layer ends work whose context has ended by raising its done stop
+// (server.DbContextDoneError) instead of returning an error. When the fill's
+// own context has ended (the owner budget, or the cancel of a lost renewal),
+// that raise is this owner's own stop, which renewingHandlerCacheFill
+// classifies, and the fill returns the context's error. Any other raise, and
+// a done stop while the fill context is live (a narrower context of the
+// fill's own), is raised again unchanged.
+//
+// Before 2026-11-18 the stop escaped as a panic: the largest network's
+// provider list ran into its 2-minute budget in the database every ~3
+// minutes, and each time the api logged "[h]renewing cache fill panic: Done"
+// with a stack, and a caller still waiting had the panic raised in it.
+func callRenewingHandlerCacheFill[R any](
+	fillCtx context.Context,
+	fill func(context.Context) (*R, error),
+) (value *R, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			stop, ok := recovered.(error)
+			ended := fillCtx.Err()
+			if !ok || ended == nil || !(errors.Is(stop, server.DbContextDoneError) || errors.Is(stop, ended)) {
+				panic(recovered)
+			}
+			value, err = nil, ended
+		}
+	}()
+	return fill(fillCtx)
 }
 
 // A miss of a renewing key is answered from a fill its caller cannot cancel.
