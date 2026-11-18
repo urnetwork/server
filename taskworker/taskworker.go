@@ -290,6 +290,10 @@ func initTaskSchedule(ctx context.Context) {
 		// of what was sent against Stripe's summaries; not scheduled without MG6
 		work.ScheduleReportStripeMeters(clientSession, tx)
 		work.ScheduleAuditStripeMeters(clientSession, tx)
+		// §20.7's downgrade job, daily: what a network 14 days past its
+		// downgrade holds over its tier's limits withheld, a renewal's release,
+		// and storage_over; not scheduled without MG2, MG5 and MG6
+		work.ScheduleApplyNetworkDowngrades(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -892,6 +896,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AuditStripeMeters,
 			work.AuditStripeMetersPost,
+		),
+		// §20.7's downgrade job (model.ApplyNetworkDowngrades)
+		task.NewTaskTargetWithPost(
+			work.ApplyNetworkDowngrades,
+			work.ApplyNetworkDowngradesPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,

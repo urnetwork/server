@@ -60,7 +60,7 @@ type TlsListenFactsSettings struct {
 // §20.7's 14 days, and room for every device and scope of a large Team twice over.
 func DefaultTlsListenFactsSettings() *TlsListenFactsSettings {
 	return &TlsListenFactsSettings{
-		DowngradeGrace: 14 * 24 * time.Hour,
+		DowngradeGrace: DefaultNetworkDowngradeSettings().DowngradeGrace,
 		CertMaxCount:   4096,
 	}
 }
