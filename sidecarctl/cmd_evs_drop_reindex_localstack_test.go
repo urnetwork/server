@@ -200,7 +200,7 @@ func TestEvsDropReindexOnTheLocalStack(t *testing.T) {
 		DropId: drop.DropId, RefId: drop.RefId, Version: drop.Version, PushId: drop.PushId,
 		Place:  &protocol.EvsPlace{Minute: 29000000, Instance: 1, Seq: 1, Length: 512},
 		SeenMs: world.clock.Now().UnixMilli(),
-	}})
+	}}, evsservice.DropListedShape{})
 	if _, err := segment.PutIfNoneMatch(ctx, evsservice.DropFileKey(world.repoId, world.jobId, evsservice.DropFileSnap, 0), snapBytes, nil); err != nil {
 		t.Fatal(err)
 	}

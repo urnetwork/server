@@ -8,15 +8,20 @@ package work
 //	        retained version that could name it, clean or retained, in urnetwork_evs_versionless_observe_total; the
 //	        soak needs at least PurgeSoakDays since its first sample and PurgeSoakCandidates candidates checked, with
 //	        none retained. A retained count above zero fails it whatever else holds, and a counter that fell between
-//	        two samples (a restart) is read as having started again from zero there, never as negative
+//	        two samples (a restart) is read as having started again from zero there, never as negative. Each
+//	        process pushes its own series, so the samples are read a series at a time (EvsObserveSample.Series): a
+//	        sum over processes falls when one of them ends, by more or less than the others rose, which would
+//	        count too many candidates or too few
 //	drop    D-TEST-18: drop jobs that ran every phase under `drop: observe` and recorded their delete sets (state
 //	        observed); the soak needs at least DropSoakDays since its first job and DropSoakJobs jobs, at least
 //	        DropSoakRenameShare of them on repos with renames and cross-ref copies, and no job refused {verify}, the
-//	        drop oracle's finding a delete-set member a retained version names
+//	        drop oracle's finding a delete-set member a retained version names. A job is on such a repo when its
+//	        snap-0 file records both a rename and a cross-ref copy among its listed versions (owner decision 513)
 //
-// The inputs are what the operations command reads for it: the counter's samples from the monitor and each repo's
-// drop table rows (question evs2-m10-33-observe-report-command). Every count is of opaque events; nothing here names
-// a network, repo or path (I-13).
+// The inputs are what the operations command reads for it (`sidecarctl evs observe-report <env>`, owner decision 513,
+// QD-987): the counter's samples from the monitor and each repo's drop table rows and its jobs' snap-0 files
+// (question evs2-m10-33-observe-report-command). Every count is of opaque events; nothing here names a network, repo
+// or path (I-13).
 
 import (
 	"fmt"
@@ -45,9 +50,12 @@ func DefaultEvsObserveSoakSettings() *EvsObserveSoakSettings {
 	}
 }
 
-// One reading of urnetwork_evs_versionless_observe_total, summed over the processes that serve it.
+// One reading of urnetwork_evs_versionless_observe_total.
 type EvsObserveSample struct {
-	At       time.Time
+	At time.Time
+	// The series read, as the monitor tells the processes that push the counter apart: a fall is a restart of that
+	// series alone. Opaque, compared and never printed. "" for a reading summed over the processes.
+	Series   string
 	Clean    int64
 	Retained int64
 }
@@ -59,8 +67,11 @@ type EvsObserveDropJob struct {
 	Observed bool
 	// Refused {verify}: the drop oracle found a delete-set member a retained version names.
 	RefusedVerify bool
-	// Its repo's history holds renames and cross-ref copies.
-	RenamesAndCopies bool
+	// What its snap-0 records of its listed versions (owner decision 513): a push that removed one path and created
+	// another citing its kind-5 content, and a chain that named a reuse source of another ref. The job counts toward
+	// the share when both hold.
+	Renames        bool
+	CrossRefCopies bool
 }
 
 // What the report says of one soak.
@@ -82,8 +93,12 @@ type EvsObservePurgeSoak struct {
 // The drop soak.
 type EvsObserveDropSoak struct {
 	EvsObserveSoak
-	Jobs             int
+	Jobs int
+	// Observed jobs whose snap-0 records both a rename and a cross-ref copy, which the share counts, and those that
+	// record each.
 	RenamesAndCopies int
+	Renames          int
+	CrossRefCopies   int
 	RefusedVerify    int
 }
 
@@ -106,14 +121,19 @@ func EvsObserveSoakAt(samples []*EvsObserveSample, jobs []*EvsObserveDropJob, no
 func evsObservePurgeSoak(samples []*EvsObserveSample, now time.Time, settings *EvsObserveSoakSettings) *EvsObservePurgeSoak {
 	soak := &EvsObservePurgeSoak{}
 	ordered := slices.Clone(samples)
-	slices.SortFunc(ordered, func(a *EvsObserveSample, b *EvsObserveSample) int { return a.At.Compare(b.At) })
-	var prior *EvsObserveSample
+	slices.SortStableFunc(ordered, func(a *EvsObserveSample, b *EvsObserveSample) int { return a.At.Compare(b.At) })
+	// each series' reading before the one at hand
+	seriesPriors := map[string]*EvsObserveSample{}
 	for _, sample := range ordered {
-		if prior == nil {
+		if soak.Start.IsZero() || sample.At.Before(soak.Start) {
 			soak.Start = sample.At
+		}
+		prior := seriesPriors[sample.Series]
+		seriesPriors[sample.Series] = sample
+		if prior == nil {
+			// a series' first reading counts whole: a process starts its counter at zero
 			soak.Candidates += sample.Clean + sample.Retained
 			soak.Retained += sample.Retained
-			prior = sample
 			continue
 		}
 		clean, retained := sample.Clean-prior.Clean, sample.Retained-prior.Retained
@@ -123,7 +143,6 @@ func evsObservePurgeSoak(samples []*EvsObserveSample, now time.Time, settings *E
 		}
 		soak.Candidates += clean + retained
 		soak.Retained += retained
-		prior = sample
 	}
 	if !soak.Start.IsZero() {
 		soak.Days = now.Sub(soak.Start).Hours() / 24
@@ -156,7 +175,13 @@ func evsObserveDropSoak(jobs []*EvsObserveDropJob, now time.Time, settings *EvsO
 			continue
 		}
 		soak.Jobs += 1
-		if job.RenamesAndCopies {
+		if job.Renames {
+			soak.Renames += 1
+		}
+		if job.CrossRefCopies {
+			soak.CrossRefCopies += 1
+		}
+		if job.Renames && job.CrossRefCopies {
 			soak.RenamesAndCopies += 1
 		}
 		if soak.Start.IsZero() || job.EndedAt.Before(soak.Start) {
@@ -199,8 +224,8 @@ func (self *EvsObserveSoakReport) Lines() []string {
 	for _, unmet := range self.Purge.Unmet {
 		lines = append(lines, "  "+unmet)
 	}
-	lines = append(lines, fmt.Sprintf("drop observe (D-TEST-18): %s: %.1f days, %d jobs, %d on repos with renames and cross-ref copies, %d refused by the oracle",
-		verdict(self.Drop.Met), self.Drop.Days, self.Drop.Jobs, self.Drop.RenamesAndCopies, self.Drop.RefusedVerify))
+	lines = append(lines, fmt.Sprintf("drop observe (D-TEST-18): %s: %.1f days, %d jobs, %d on repos with renames and cross-ref copies (%d with renames, %d with cross-ref copies), %d refused by the oracle",
+		verdict(self.Drop.Met), self.Drop.Days, self.Drop.Jobs, self.Drop.RenamesAndCopies, self.Drop.Renames, self.Drop.CrossRefCopies, self.Drop.RefusedVerify))
 	for _, unmet := range self.Drop.Unmet {
 		lines = append(lines, "  "+unmet)
 	}
