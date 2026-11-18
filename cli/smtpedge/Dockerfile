@@ -6,6 +6,16 @@ ADD --checksum=sha256:bf0b51fb18187c4e1b03900e1049dc219047080ff511aa3bf691dbe24e
 ADD --checksum=sha256:1f2401db59a0beffde6cc47bea3664965ab8fa206b7a5ac8f1cc649cfeeb056b https://snapshot.ubuntu.com/ubuntu/20260927T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.15_amd64.deb /runtime-packages/amd64/openssl.deb
 ADD --checksum=sha256:818b4ab7092eb3365358ce41896ad08206b30cdb67445d7ec0503262893a0d95 https://snapshot.ubuntu.com/ubuntu/20260927T000000Z/pool/main/o/openssl/openssl_3.0.13-0ubuntu3.15_arm64.deb /runtime-packages/arm64/openssl.deb
 
+# smtpedge dials each MX with SO_MARK, which needs CAP_NET_ADMIN, and runs as uid 65532 (D-OPS-1), so its binary
+# carries the capability as a file capability, cap_net_admin=ep (QD-1066, owner decision 597; DESIGN §19.4).
+# filecap, this directory's static helper (filecap/cmd), writes it here from a bind mount, so the helper never
+# ships and nothing is installed or fetched for it.
+FROM scratch AS file-capability
+ARG TARGETPLATFORM
+COPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge
+RUN --network=none --mount=type=bind,source=build/$TARGETPLATFORM/filecap,target=/filecap \
+    ["/filecap", "set", "/usr/local/sbin/bringyour-smtpedge"]
+
 FROM ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 # https://www.docker.com/blog/faster-multi-platform-builds-dockerfile-cross-compilation-guide/
 
@@ -20,7 +30,11 @@ RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target
     && update-ca-certificates \
     && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log
 
-COPY build/$TARGETPLATFORM/smtpedge /usr/local/sbin/bringyour-smtpedge
+# The binary with its attribute, which the stage copy keeps; the check fails the build where it did not, so no
+# image without it is published. build/all/run.sh reads it again out of each published platform.
+COPY --from=file-capability /usr/local/sbin/bringyour-smtpedge /usr/local/sbin/bringyour-smtpedge
+RUN --network=none --mount=type=bind,source=build/$TARGETPLATFORM/filecap,target=/filecap \
+    ["/filecap", "check", "/usr/local/sbin/bringyour-smtpedge"]
 
 STOPSIGNAL SIGTERM
 CMD ["/usr/local/sbin/bringyour-smtpedge", "--port", "80"]
