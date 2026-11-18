@@ -1464,9 +1464,19 @@ func fileClusterSuiteStaleWithHostLost(ctx context.Context, run *fileClusterSuit
 		}); err != nil {
 			return err
 		}
-		object, err := run.hostClusters[0].Get(ctx, key)
-		if err != nil {
-			return err
+		// the read is asked again until it answers, as the writes are: at production's 30 s drive timeout a read may
+		// wait on the lost host's drives past this client's 10 s for a response, and a read that fails says nothing of
+		// what the key holds
+		var object *sidecar.BlobObject
+		var readErr error
+		if err := run.waitFor(ctx, "a read with the host lost answered", func() bool {
+			object, readErr = run.hostClusters[0].Get(ctx, key)
+			return readErr == nil || errors.Is(readErr, sidecar.ErrBlobNotFound)
+		}); err != nil {
+			return fmt.Errorf("%w: %v", err, readErr)
+		}
+		if readErr != nil {
+			return readErr
 		}
 		body, _ := io.ReadAll(object.Body)
 		object.Body.Close()
