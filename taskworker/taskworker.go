@@ -98,6 +98,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleWebSearchAnalytics(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthCodes(clientSession, tx)
 		work.ScheduleMaintainNetworkSessions(clientSession, tx)
+		work.ScheduleSampleSessionLevels(clientSession, tx)
 		controller.ScheduleAppleOfferCodeTopUp(clientSession, tx, server.NowUtc().Add(1*time.Hour))
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
@@ -376,6 +377,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.BackfillClockPost,
 		),
 		work.NewMaintainNetworkSessionsTaskTarget(),
+		task.NewTaskTargetWithPost(
+			work.SampleSessionLevels,
+			work.SampleSessionLevelsPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.WebSearchAnalytics,
 			work.WebSearchAnalyticsPost,

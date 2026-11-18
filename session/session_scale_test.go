@@ -12,6 +12,9 @@ import (
 
 // A reproducible local release profile at both configured limits. Numbers are
 // reported as measurements, not a claim about production Redis/SQL hardware.
+// The profile's live set: one full page of GET /network/sessions.
+const sessionScaleProfileLive = NetworkSessionsPageLimit
+
 func TestSessionScaleProfile(t *testing.T) {
 	if testing.Short() {
 		t.Skip("requires local Redis and Postgres")
@@ -24,7 +27,7 @@ func TestSessionScaleProfile(t *testing.T) {
 		network := server.NewId()
 		first := sessionFixtureCredential(network, now)
 		keys := append([]string{}, sessionSharedKeys(network)...)
-		for i := 0; i < NetworkSessionLiveLimit; i++ {
+		for i := 0; i < sessionScaleProfileLive; i++ {
 			credential := first
 			if i > 0 {
 				credential = sessionFixtureCredential(network, now)
@@ -38,7 +41,7 @@ func TestSessionScaleProfile(t *testing.T) {
 		// marker strings and the same retention score used by the revoke script.
 		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
 			pipeline := r.Pipeline()
-			for i := NetworkSessionLiveLimit; i < NetworkSessionRetainedLimit; i++ {
+			for i := sessionScaleProfileLive; i < NetworkSessionRetainedLimit; i++ {
 				sid := server.NewId()
 				marker := SessionMarkerKey(network, sid)
 				keys = append(keys, marker)
@@ -59,13 +62,13 @@ func TestSessionScaleProfile(t *testing.T) {
 		listStart := time.Now()
 		list, err := GetNetworkSessions(actor)
 		listDuration := time.Since(listStart)
-		if err != nil || len(list.Sessions) != NetworkSessionLiveLimit {
+		if err != nil || len(list.Sessions) != sessionScaleProfileLive {
 			t.Fatal("capacity inventory incomplete", err)
 		}
 		revokeStart := time.Now()
 		result, err := enforceSessionRevoke(ctx, network, server.NewId(), "others", nil, first.SessionId)
 		revokeDuration := time.Since(revokeStart)
-		if err != nil || result.RevokedCount != NetworkSessionLiveLimit-1 {
+		if err != nil || result.RevokedCount != sessionScaleProfileLive-1 {
 			t.Fatal("maximum bulk failed", result, err)
 		}
 		// A thousand connections sharing one sign-in still run fresh authority
@@ -88,6 +91,6 @@ func TestSessionScaleProfile(t *testing.T) {
 		}
 		total := time.Since(start)
 		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-		t.Logf("session scale: live=%d retained=%d Redis measured bytes=%d list=%s bulk=%s authoritative SQL+Redis checks=1000 total=%s p50=%s p99=%s", NetworkSessionLiveLimit, NetworkSessionRetainedLimit, memory, listDuration, revokeDuration, total, durations[500], durations[990])
+		t.Logf("session scale: live=%d retained=%d Redis measured bytes=%d list=%s bulk=%s authoritative SQL+Redis checks=1000 total=%s p50=%s p99=%s", sessionScaleProfileLive, NetworkSessionRetainedLimit, memory, listDuration, revokeDuration, total, durations[500], durations[990])
 	})
 }

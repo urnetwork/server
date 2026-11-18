@@ -8,6 +8,7 @@ import (
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 	"net/http"
+	"strconv"
 )
 
 func sessionOperationFormatter(w http.ResponseWriter) router.FormatFunction[*session.SessionOperationResult] {
@@ -30,8 +31,27 @@ func sessionOperationFormatter(w http.ResponseWriter) router.FormatFunction[*ses
 	}
 }
 
+// GET /network/sessions[?cursor=&limit=&session_kind=&client_kind=]: one page
+// of the network's live sessions (session.GetNetworkSessionsPage). Without
+// parameters, the first page of every kind, sign-ins first.
 func NetworkSessions(w http.ResponseWriter, r *http.Request) {
-	router.WrapRequireAuth(session.GetNetworkSessions, w, r)
+	query := r.URL.Query()
+	args := &session.NetworkSessionsArgs{
+		Cursor:      query.Get("cursor"),
+		SessionKind: query.Get("session_kind"),
+		ClientKind:  query.Get("client_kind"),
+	}
+	limitText := query.Get("limit")
+	router.WrapRequireAuth(func(clientSession *session.ClientSession) (*session.NetworkSessionsResult, error) {
+		if limitText != "" {
+			limit, err := strconv.Atoi(limitText)
+			if err != nil || limit < 1 {
+				return nil, &session.SessionError{Code: "invalid_request", Status: 400}
+			}
+			args.Limit = limit
+		}
+		return session.GetNetworkSessionsPage(clientSession, args)
+	}, w, r)
 }
 func RevokeNetworkSession(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(func(args *session.RevokeSessionArgs, actor *session.ClientSession) (*session.SessionOperationResult, error) {

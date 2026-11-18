@@ -17,8 +17,52 @@ var sessionLeaseUnverifiedSeconds = prometheus.NewHistogram(prometheus.Histogram
 var sessionJournalBacklog = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_session_journal_pending", Help: "Durable session operation and index repair backlog"}, []string{"state"})
 var sessionJournalAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_session_journal_oldest_seconds", Help: "Age of oldest unfinished session operation or index repair"}, []string{"state"})
 
+// The session cap (session_cap.go). kind is the minting session's R-kind
+// (signin, code, client) and cap the cap it reached (live, retained). None of
+// these declares a push grouping label (env, service, block, host, instance;
+// grafana.go): a metric that carries one makes the pusher refuse every push of
+// the process.
+var sessionCapWouldRefuse = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_cap_would_refuse_total", Help: "Session mints admitted over a session cap while pro.yml enforce_session_cap is false"}, []string{"kind", "cap"})
+var sessionCapRefused = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_cap_refused_total", Help: "Session mints refused at a session cap (409 session_limit_reached or session_retention_limit_reached), nothing evicted"}, []string{"kind", "cap"})
+
+// Client sessions a client's removal freed from the live set, by removal path.
+var sessionFreedOnRemoval = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_freed_on_removal_total", Help: "Client-owned sessions freed from the live set when their last client was removed"}, []string{"path"})
+
+// Each pass of the taskworker's session level sample (SampleSessionLevels)
+// observes every network with a live set once: its live sessions the cap
+// counts. No per-network label.
+var sessionLivePerNetwork = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "urnetwork_session_live_per_network", Help: "Live sessions the cap counts, per network with a live set, observed once per network per sample pass", Buckets: []float64{10, 100, 500, 1000, 2000, 5000, 10000}})
+var sessionLiveSamplePasses = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_session_live_sample_passes_total", Help: "Session level sample passes, complete or cut short by the budget"}, []string{"outcome"})
+
+// The paths a removal frees from, each exported from the start.
+const (
+	SessionFreePathRemoveClient    = "remove_client"
+	SessionFreePathRemoveClients   = "remove_clients"
+	SessionFreePathTrimProxies     = "trim_proxies"
+	SessionFreePathNetworkDeletion = "network_deletion"
+	SessionFreePathLagGuest        = "lag_guest"
+	SessionFreePathSignOutAll      = "sign_out_all"
+	SessionFreePathIdleReap        = "idle_reap"
+	SessionFreePathStaleChild      = "stale_child"
+	SessionFreePathProber          = "prober"
+	SessionFreePathOther           = "other"
+)
+
 func init() {
 	prometheus.MustRegister(sessionStorageSeconds, sessionCapacityRefusals, sessionLeaseRetirements, sessionLeaseUnavailableRechecks, sessionLeaseUnverifiedSeconds, sessionJournalBacklog, sessionJournalAge)
+	prometheus.MustRegister(sessionCapWouldRefuse, sessionCapRefused, sessionFreedOnRemoval, sessionLivePerNetwork, sessionLiveSamplePasses)
+	for _, kind := range []string{SessionKindSignin, SessionKindCode, SessionKindClient} {
+		for _, capacity := range []string{"live", "retained"} {
+			sessionCapWouldRefuse.WithLabelValues(kind, capacity)
+			sessionCapRefused.WithLabelValues(kind, capacity)
+		}
+	}
+	for _, path := range []string{SessionFreePathRemoveClient, SessionFreePathRemoveClients, SessionFreePathTrimProxies, SessionFreePathNetworkDeletion, SessionFreePathLagGuest, SessionFreePathSignOutAll, SessionFreePathIdleReap, SessionFreePathStaleChild, SessionFreePathProber, SessionFreePathOther} {
+		sessionFreedOnRemoval.WithLabelValues(path)
+	}
+	for _, outcome := range []string{"complete", "partial"} {
+		sessionLiveSamplePasses.WithLabelValues(outcome)
+	}
 }
 
 func observeSessionStorage(operation string, start time.Time, err error) {

@@ -311,7 +311,7 @@ func removeExpiredLagGuest(
 				}
 			})
 			if 0 < len(clientIds) {
-				_, err := deactivateNetworkClientsInTx(ctx, tx, clientIds, networkId)
+				_, err := deactivateNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathLagGuest), tx, clientIds, networkId)
 				server.Raise(err)
 			}
 

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/urnetwork/server"
 )
 
@@ -36,6 +38,69 @@ func PrepareSessionMint(credential *ByJwt, independent bool) {
 		sid = LegacySessionId(credential, sid)
 	}
 	credential.SessionId = &sid
+}
+
+// PrepareOwnSessionMint gives the client a mint creates a session of its own,
+// whatever the creating credential carries (owner decision 1: every hosted
+// proxy keeps its own listed, revocable session). Its lineage starts at the
+// mint: the creator's sign-in is no parent of it, so revoking that sign-in, a
+// password reset or a sign-out-all does not end it. Allocate outside retryable
+// callbacks, like PrepareSessionMint.
+func PrepareOwnSessionMint(credential *ByJwt) {
+	if !SessionCreationEnabled() {
+		return
+	}
+	sid := server.NewId()
+	credential.SessionId = &sid
+	credential.CreateTime = server.CodecTime(server.NowUtc())
+}
+
+// A client session that can carry a reissued client's credential: live,
+// unrevoked, of a client class, never carried by a network credential.
+const sessionReusableLua = `
+local accept=redis.call('ZSCORE',KEYS[1],ARGV[2])
+if not accept or tonumber(accept)<=tonumber(ARGV[1]) or redis.call('EXISTS',KEYS[3])==1 then return 0 end
+local class=redis.call('HGET',KEYS[2],'class')
+if (class=='hosted_proxy' or class=='api_key' or class=='device' or class=='legacy') and redis.call('HGET',KEYS[2],'network')~='1' then return 1 end
+return 0
+`
+
+// ReuseClientSessionInTx keeps one session per client (owner decision 1) when
+// an API key or an MCP identity reissues an existing client: the credential
+// carries the client's own live session instead of the fresh one the
+// independent mint prepared, which would rebind the client and leave its own
+// session listed and unowned. A client bound to a sign-in session, or to none
+// that can be reused, keeps the prepared session, as before. Call it under the
+// shared lifecycle lock, before AssociateSessionClientInTx.
+func ReuseClientSessionInTx(ctx context.Context, tx server.PgTx, credential *ByJwt) error {
+	if credential.ClientId == nil || credential.SessionId == nil {
+		return nil
+	}
+	var associated *server.Id
+	err := tx.QueryRow(ctx, `SELECT session_id FROM network_client WHERE client_id=$1 AND network_id=$2 AND active FOR UPDATE`, *credential.ClientId, credential.NetworkId).Scan(&associated)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if associated == nil || *associated == *credential.SessionId {
+		return nil
+	}
+	var reusable int64
+	err = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		var err error
+		reusable, err = r.Eval(ctx, sessionReusableLua, []string{SessionKey(credential.NetworkId, "z"), SessionKey(credential.NetworkId, "s:"+associated.String()), SessionMarkerKey(credential.NetworkId, *associated)}, server.NowUtc().UnixMilli(), associated.String()).Int64()
+		return err
+	})
+	if err != nil {
+		return errors.Join(ErrAuthUnavailable, ErrSessionStoreUnavailable)
+	}
+	if reusable == 1 {
+		sid := *associated
+		credential.SessionId = &sid
+	}
+	return nil
 }
 
 // Callers acquire the shared lifecycle lock before touching any client/code row.
@@ -72,13 +137,28 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		if err := verifySessionMintClock(ctx); err != nil {
 			return "", err
 		}
-		registered, err := RegisterNetworkSession(ctx, credential, kind, origin, fenceOrigin, server.NowUtc())
+		exempt, err := sessionMintExemption(ctx, tx, credential)
 		if err != nil {
 			return "", err
 		}
-		// in UTC, as next_review_time holds it
-		if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, time.UnixMilli(registered.AcceptUntil).UTC()); err != nil {
+		registered, err := registerNetworkSession(ctx, credential, kind, origin, fenceOrigin, server.NowUtc(), exempt)
+		if err != nil {
 			return "", err
+		}
+		// Only a session the mint added can be the network's earliest review: a
+		// refresh only extends a member, and the network's index entry already
+		// reviews at or before it. The new member is published at once; only a
+		// failed publication goes to the outbox, whose single row per network
+		// every mint used to upsert (S1 W7). An index entry published by a
+		// transaction that then rolls back only reviews early.
+		if registered.Created {
+			due := time.UnixMilli(registered.AcceptUntil).UTC()
+			if publishErr := publishSessionIndexOnMint(ctx, credential.NetworkId, due, server.NewId().String()); publishErr != nil {
+				// in UTC, as next_review_time holds it
+				if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, due); err != nil {
+					return "", err
+				}
+			}
 		}
 	}
 	return sign(credential), nil
@@ -201,6 +281,16 @@ func SignInternalProbeInTx(ctx context.Context, tx server.PgTx, credential *ByJw
 }
 
 // Hosted migration allocates under the row lock and reuses the durable winner.
+//
+// A hosted proxy survives a password reset and sign-out-all (owner decision
+// 4): neither retires its own session (sessionRevokeLua), and a reset that
+// moved the network's credential cutoff past the stored lineage moves the
+// lineage to the cutoff, so the proxy keeps minting. Its credentials minted
+// before the reset are refused by the rotation like every other credential
+// of the network, until the proxy's device mints again. The proxy ends when
+// it is removed, or when its own session is revoked: the journal refuses the
+// revoked binding and the session's cleanup deactivates the client, so it can
+// never bootstrap another.
 func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, err error) {
 	candidate := server.NewId()
 	created := server.CodecTime(server.NowUtc())
@@ -217,7 +307,7 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 			// A hosted loader has no old JWT expiry to bound a newly fabricated
 			// token. Unfinished cleanup must therefore fence that durable binding
 			// even after its finite Redis marker/receipt has naturally expired.
-			if err := validateHostedSessionJournalInTx(ctx, tx, credential.NetworkId, *sid, lineage); err != nil {
+			if err := hostedSessionJournalFence(ctx, tx, credential.NetworkId, *sid); err != nil {
 				return err
 			}
 		}
@@ -227,6 +317,17 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 		}
 		credential.SessionId = sid
 		if lineage != nil {
+			var cutoff time.Time
+			if err := tx.QueryRow(ctx, `SELECT u.credential_change_time FROM network_user u JOIN network n ON n.admin_user_id=u.user_id WHERE n.network_id=$1`, credential.NetworkId).Scan(&cutoff); err != nil {
+				return err
+			}
+			if lineage.Before(cutoff) {
+				moved := server.CodecTime(cutoff.UTC())
+				if moved.Before(created) {
+					moved = created
+				}
+				lineage = &moved
+			}
 			credential.CreateTime = *lineage
 		}
 		if err := ValidateByJwtStateInTx(ctx, tx, credential, true); err != nil {
@@ -236,10 +337,43 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 			return err
 		}
 		var err error
-		signed, err = RegisterAndSignInTx(ctx, tx, credential, "legacy_proxy", nil, false)
+		signed, err = RegisterAndSignInTx(ctx, tx, credential, MintKindLegacyProxy, nil, false)
 		return err
 	})
 	return
+}
+
+// The journal's verdict on a hosted proxy's own session: as
+// sessionJournalFence, except that a pending reset or sign out of other
+// sessions never applies to it (sessionRevokeLua skips hosted proxy sessions),
+// so neither makes its mint wait for recovery.
+func hostedSessionJournalFence(ctx context.Context, conn server.PgCanQuery, networkId, sessionId server.Id) error {
+	var retired, pending bool
+	rows, err := conn.Query(ctx, `SELECT
+		EXISTS(SELECT 1 FROM network_session_operation WHERE network_id=$1
+			AND status IN ('enforced','complete') AND target_session_ids ? $2),
+		EXISTS(SELECT 1 FROM network_session_operation WHERE network_id=$1 AND status='prepared'
+			AND ((action='single' AND target_session_id=$2::uuid) OR action='delete'))`,
+		networkId, sessionId.String())
+	if err == nil {
+		if rows.Next() {
+			err = rows.Scan(&retired, &pending)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+	}
+	if err != nil {
+		return errors.Join(ErrAuthUnavailable, err)
+	}
+	if retired {
+		return ErrSessionRevoked
+	}
+	if pending {
+		return ErrAuthUnavailable
+	}
+	return nil
 }
 
 // Replay has no presented original token to bound expired Redis markers. The

@@ -264,7 +264,7 @@ func drainProberShardInTx(ctx context.Context, tx server.PgTx, owner *ProberShar
 	if err != nil {
 		return err
 	}
-	if _, err = deactivateLockedNetworkClientsInTx(ctx, tx, clients, owner.NetworkId); err != nil {
+	if _, err = deactivateLockedNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathProber), tx, clients, owner.NetworkId); err != nil {
 		return err
 	}
 	// active is a generated amount predicate. Expire admission without changing

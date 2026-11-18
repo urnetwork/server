@@ -52,6 +52,21 @@ func publishSessionIndex(ctx context.Context, networkId server.Id, due time.Time
 	})
 }
 
+// A mint's publication of a new member (RegisterAndSignInTx). A seam, so a
+// test can take the outbox path a failed publication takes.
+var publishSessionIndexOnMint = publishSessionIndex
+
+// Testing_FailSessionIndexPublishOnMint makes every mint's index publication
+// fail, so it queues the outbox, until the returned function restores it.
+// Tests that use it must not run in parallel.
+func Testing_FailSessionIndexPublishOnMint() func() {
+	previous := publishSessionIndexOnMint
+	publishSessionIndexOnMint = func(context.Context, server.Id, time.Time, string) error {
+		return errors.New("synthetic session index publication failure")
+	}
+	return func() { publishSessionIndexOnMint = previous }
+}
+
 func RepairSessionIndexes(ctx context.Context, limit int) error {
 	return sessionTx(ctx, func(tx server.PgTx) error {
 		rows, err := tx.Query(ctx, `SELECT network_id,revision,next_review_time FROM network_session_index_outbox ORDER BY update_time,network_id LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
