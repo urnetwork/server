@@ -4,7 +4,8 @@
 // how the device was opened, and per host the hosted mint admissions and
 // refusals, the Go heap against its memory limit, GC cycles a minute and
 // abandoned CONNECTs, with the alert levels of SIGNALS.md §26.12-§26.14 drawn
-// as threshold lines.
+// as threshold lines; and panels 215 to 223, find-providers2's liveness check
+// per host and block (fix #4), on which a proxy canary is judged.
 package grafana
 
 import (
