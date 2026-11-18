@@ -40,6 +40,12 @@ const LagDriftBordersResource = "lag/ne-admin0-10m.bin"
 // sessions open (V10).
 const lagDriftLookMs = 250
 
+// How far from the median of a run's session openings, on their extenders'
+// clocks, a session's may be and still be laid at its own opening
+// (newLagDriftTimeline): a session not open within 4 s is a spare's (E2), so
+// one further off has a clock off the others'.
+const lagDriftOpenSpreadMs = 5000.0
+
 // How many extenders with an estimate the frame's fit needs before it fits
 // at all (lag.dev's check.ts): the server's history has a fit only where the
 // frame's could.
@@ -191,25 +197,8 @@ func lagDriftObservation(session *lagDriftSession, rttMs []float64, run int) (la
 // shortest round trip. One run's looks all measure from the same place, so
 // the stop check can compare their positions (V10).
 func lagDriftExpectedPoint(cityPoint *lagDriftPoint, country *lagdrift.Country, observations []lagdrift.Observation) lagdrift.Point {
-	if cityPoint != nil {
-		return lagdrift.Point{Lat: cityPoint.latitude, Lon: cityPoint.longitude}
-	}
-	if country != nil {
-		var largest []lagdrift.Point
-		for _, polygon := range country.Polygons {
-			if 0 < len(polygon) && len(largest) < len(polygon[0]) {
-				largest = polygon[0]
-			}
-		}
-		if 0 < len(largest) {
-			minLat, maxLat := largest[0].Lat, largest[0].Lat
-			minLon, maxLon := largest[0].Lon, largest[0].Lon
-			for _, point := range largest {
-				minLat, maxLat = min(minLat, point.Lat), max(maxLat, point.Lat)
-				minLon, maxLon = min(minLon, point.Lon), max(maxLon, point.Lon)
-			}
-			return lagdrift.Point{Lat: (minLat + maxLat) / 2, Lon: (minLon + maxLon) / 2}
-		}
+	if origin := lagDriftOrigin(cityPoint, country); origin != nil {
+		return lagdrift.Point{Lat: origin.latitude, Lon: origin.longitude}
 	}
 	expected := lagdrift.Point{}
 	shortest := math.Inf(1)
@@ -314,12 +303,16 @@ func lagDriftSupportedStop(
 	return ""
 }
 
-// The frame's looks rebuilt from the reports (V10): one every 250 ms from the
-// run's opening, from the first that has a round trip back, and one at each
-// of the given moments, in order. Each fits the round trips back by then,
-// from the look before, once the frame would fit: with lagDriftLookExtenders
-// estimates. Every look measures from the same expected point, so the stop
-// check can compare their positions.
+// The frame's looks rebuilt from the reports (V10): one at each of the given
+// moments, and one every 250 ms back from the last of them to the first round
+// trip, in order. The frame stopped at a look just before the sessions
+// closed, and looked every 250 ms before it, but its clock is offset from the
+// run's timeline by its sessions' setup: counted back from the close, the
+// looks fall where its own did, so the 2 s converged looks back on start where
+// the frame's did (the e2e run of 2026-11-17). Each fits the round trips back
+// by then, from the look before, once the frame would fit: with
+// lagDriftLookExtenders estimates. Every look measures from the same expected
+// point, so the stop check can compare their positions.
 func lagDriftHistory(
 	run *model.LagDriftRun,
 	timeline *lagDriftTimeline,
@@ -336,9 +329,8 @@ func lagDriftHistory(
 	if math.IsInf(firstPongMs, 1) {
 		return []lagdrift.Snapshot{}
 	}
-	lastMs := slices.Max(atMs)
 	looks := slices.Clone(atMs)
-	for lookMs := int64(math.Ceil(max(firstPongMs, 0)/lagDriftLookMs)) * lagDriftLookMs; lookMs <= lastMs; lookMs += lagDriftLookMs {
+	for lookMs := slices.Max(atMs) - lagDriftLookMs; max(firstPongMs, 0) <= float64(lookMs); lookMs -= lagDriftLookMs {
 		looks = append(looks, lookMs)
 	}
 	slices.Sort(looks)
@@ -420,8 +412,8 @@ func lagDriftCapHolds(run *model.LagDriftRun, timeline *lagDriftTimeline, drift 
 			// a spare is no main session
 			continue
 		}
-		// the session's times are from its own start (newLagDriftTimeline)
-		if float64(drift.MeasureMs)-lagDriftCapSessionSlackMs <= session.lastPongMs() {
+		// on the session's own clock
+		if float64(drift.MeasureMs)-lagDriftCapSessionSlackMs <= session.lastPongMs()-session.openMs {
 			lasted += 1
 		}
 	}
@@ -433,6 +425,36 @@ func lagDriftCapHolds(run *model.LagDriftRun, timeline *lagDriftTimeline, drift 
 		return false
 	}
 	return true
+}
+
+// The point a run's fits measure from, the frame's and the server's alike
+// (V5, V10), nil for none: the city's own point the track keeps (A5), else
+// the middle of the box around the IP country's largest outline. start
+// answers it as the IP place's point, so the frame's fits start from the
+// same place, whose distances weight their first pass.
+func lagDriftOrigin(cityPoint *lagDriftPoint, country *lagdrift.Country) *lagDriftPoint {
+	if cityPoint != nil {
+		return cityPoint
+	}
+	if country == nil {
+		return nil
+	}
+	var largest []lagdrift.Point
+	for _, polygon := range country.Polygons {
+		if 0 < len(polygon) && len(largest) < len(polygon[0]) {
+			largest = polygon[0]
+		}
+	}
+	if len(largest) == 0 {
+		return nil
+	}
+	minLat, maxLat := largest[0].Lat, largest[0].Lat
+	minLon, maxLon := largest[0].Lon, largest[0].Lon
+	for _, point := range largest {
+		minLat, maxLat = min(minLat, point.Lat), max(maxLat, point.Lat)
+		minLon, maxLon = min(minLon, point.Lon), max(maxLon, point.Lon)
+	}
+	return &lagDriftPoint{latitude: (minLat + maxLat) / 2, longitude: (minLon + maxLon) / 2}
 }
 
 // The drift country (V6, G3): the IP country when its own polygons hold the

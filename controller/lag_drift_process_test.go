@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -383,6 +384,59 @@ func TestLagDriftProcessStop(t *testing.T) {
 	})
 }
 
+// The e2e's converged run (2026-11-17), its own reports: a visitor in Austin
+// whose sessions opened up to 3 s apart, as sessions to far extenders do, and
+// whose frame stopped converged at about 5.75 s. Laid at their own openings,
+// the reports support it at their close; laid each at its own start, the late
+// openers' round trips came seconds early and the close 0.7 s before the
+// frame's look, and they didn't.
+func TestLagDriftStopE2eConverged(t *testing.T) {
+	t.Cleanup(Testing_SetLagDriftBorders(lagDriftTestBorders(t)))
+	fixtureJson, err := os.ReadFile("testdata/lag_drift_e2e_converged_run.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e2e struct {
+		CityPoint struct {
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+		} `json:"city_point"`
+		Stop      string                       `json:"stop"`
+		Extenders []*model.LagDriftRunExtender `json:"extenders"`
+		Reports   []struct {
+			Position       int     `json:"position"`
+			IpFamily       int     `json:"ip_family"`
+			SessionStartMs int64   `json:"session_start_ms"`
+			WindowStartMs  int64   `json:"window_start_ms"`
+			PingOffsetMs   []int32 `json:"ping_offset_ms"`
+			PingMicros     []int32 `json:"ping_micros"`
+		} `json:"reports"`
+	}
+	if err := json.Unmarshal(fixtureJson, &e2e); err != nil {
+		t.Fatal(err)
+	}
+	run := &model.LagDriftRun{Run: 1, Stop: e2e.Stop, Extenders: e2e.Extenders}
+	reports := []*model.LagDriftReport{}
+	for _, report := range e2e.Reports {
+		reports = append(reports, &model.LagDriftReport{
+			Position:         report.Position,
+			IpFamily:         report.IpFamily,
+			SessionStartTime: time.UnixMilli(report.SessionStartMs),
+			WindowStartTime:  time.UnixMilli(report.WindowStartMs),
+			PingOffsetMs:     report.PingOffsetMs,
+			PingMicros:       report.PingMicros,
+		})
+	}
+	settings := DefaultLagSettings()
+	timeline := newLagDriftTimeline(run, reports, &settings.Drift)
+	if timeline.closeMs < 5600 || 5900 < timeline.closeMs {
+		t.Fatalf("the reports close at %.0f ms, want near the frame's 5.75 s", timeline.closeMs)
+	}
+	austin := &lagDriftPoint{latitude: e2e.CityPoint.Latitude, longitude: e2e.CityPoint.Longitude}
+	test := &model.LagDriftTest{ClientIpCountryCode: "us", Confidence: 0.99}
+	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, austin, &settings.Drift, model.DefaultLagDriftCalibration()), LagDriftStopConverged)
+}
+
 // The last look is at the close itself (V10): the e2e's clear run at 3.4 s
 // had its eighth extender's twelfth round trip back between the 250 ms grid
 // point before the close and the close, so a look on the grid alone saw only
@@ -448,10 +502,11 @@ func TestLagDriftStopLooksAtTheClose(t *testing.T) {
 	connect.AssertEqual(t, lagDriftSupportedStop(test, run, timeline, berlin, drift, calibration), "")
 }
 
-// Each session is laid at its own start, by its own extender's clock (V10,
-// review F-14): five extenders whose clocks run 8 s ahead of the others' don't
-// move their sessions 8 s late on the run's timeline, nor do clocks 8 s
-// behind move them early, and the e2e's converged stop at 3.4 s holds.
+// A session whose extender's clock is more than 5 s off the median of the
+// run's openings is laid at the run's opening (V10, review F-14): five
+// extenders whose clocks run 8 s ahead of the others' don't move their
+// sessions 8 s late on the run's timeline, nor do clocks 8 s behind move them
+// early, and the e2e's converged stop at 3.4 s holds.
 func TestLagDriftProcessClockSkew(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -509,8 +564,8 @@ func TestLagDriftProcessCap(t *testing.T) {
 		fixture := newLagDriftTestFixture(t, ctx)
 		now := server.NowUtc().Truncate(time.Millisecond)
 
-		// seven of the twelve sessions open 1.1 s late, so the reports'
-		// close, counted from the median opening, is short of 11 s
+		// seven of the twelve sessions open 1.1 s late, so they last 10.9 s
+		// on their own clocks
 		late := map[int]int{5: 1100, 6: 1100, 7: 1100, 8: 1100, 9: 1100, 10: 1100, 11: 1100}
 		allocated := fixture.allocate(t, now, nil)
 		fixture.runAt(t, allocated.Token, lagDriftTestVisitorAddress, lagDriftTestSessions{
@@ -520,7 +575,6 @@ func TestLagDriftProcessCap(t *testing.T) {
 			openDelays: late,
 		}, LagDriftStopCap, now)
 		view := fixture.read(t, allocated.DriftTestId, now.Add(13*time.Second))
-		connect.AssertEqual(t, *view.Runs[0].MeasuredMs < 11000, true)
 		connect.AssertEqual(t, view.Runs[0].Outcome, LagDriftRunOutcomeCounted)
 		connect.AssertEqual(t, fixture.supportedStop(t, allocated.DriftTestId, 1), LagDriftStopCap)
 		connect.AssertEqual(t, view.Result.Verdict, LagDriftVerdictAgree)

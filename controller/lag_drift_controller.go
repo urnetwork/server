@@ -903,10 +903,31 @@ func lagDriftTestStart(
 		RunsLeft:    added.RunsLeft,
 		MeasureMs:   drift.MeasureMs,
 		Confidence:  test.Confidence,
-		Ip:          place.view(),
+		Ip:          lagDriftStartIpView(place, client, test),
 		Tickets:     ticketsResult,
 		ExpiresAt:   lagDriftTime(expiresAt),
 	}, nil
+}
+
+// The IP place a run's start answers (P5): the start address's, with the
+// point the run's fits measure from (lagDriftOrigin), the city's own point
+// the track keeps, else the middle of client_ip's country, so the frame's fits
+// and the server's agree; none when there is neither.
+func lagDriftStartIpView(place *lagDriftAddrPlace, client *model.LagTrackClient, test *model.LagDriftTest) *LagDriftIpPlace {
+	view := place.view()
+	var cityPoint *lagDriftPoint
+	if client != nil && client.Latitude != nil && client.Longitude != nil {
+		cityPoint = &lagDriftPoint{latitude: *client.Latitude, longitude: *client.Longitude}
+	}
+	view.Latitude = nil
+	view.Longitude = nil
+	if origin := lagDriftOrigin(cityPoint, lagDriftBorders().country(test.ClientIpCountryCode)); origin != nil {
+		latitude := origin.latitude
+		longitude := origin.longitude
+		view.Latitude = &latitude
+		view.Longitude = &longitude
+	}
+	return view
 }
 
 // The demo token's run (W8): tickets to extenders chosen as for any run, with

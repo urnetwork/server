@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -76,7 +77,17 @@ const (
 	// IPv6 from France, as a dual-stack visitor's on a VPN in Germany over
 	// IPv4 only
 	lagDriftTestLyonIpv6 = "[2001:db8:2::7]:52000"
+	// a German city the place list has no point for
+	lagDriftTestLeipzigIp      = "100.64.30.5"
+	lagDriftTestLeipzigAddress = "100.64.30.5:52000"
 )
+
+var lagDriftTestLeipzigBlock = lagTestCityBlock{
+	countryCode: "de", country: "Germany", countryGeonameId: 2921044,
+	region: "Saxony", regionGeonameId: 2842566,
+	city: "Leipzig", cityGeonameId: 2879139,
+	latitude: 51.34, longitude: 12.37,
+}
 
 var lagTestLyon = lagTestCityBlock{
 	countryCode: "fr", country: "France", countryGeonameId: 3017382,
@@ -155,6 +166,7 @@ func newLagDriftTestFixture(t testing.TB, ctx context.Context) *lagDriftTestFixt
 		"203.0.113.0/24":  lagTestLyon,
 		"2001:db8:1::/48": lagTestBerlinNorth,
 		"2001:db8:2::/48": lagTestLyon,
+		"100.64.30.0/24":  lagDriftTestLeipzigBlock,
 	})
 	t.Cleanup(model.Testing_PushPlaces(lagTestPlaces))
 	t.Cleanup(Testing_SetLagDriftBorders(lagDriftTestBorders(t)))
@@ -872,6 +884,34 @@ func TestLagDriftStartPinned(t *testing.T) {
 		demo := start(LagDriftDemoToken, lagDriftTestLyonIpv6, false)
 		connect.AssertEqual(t, demo.Pin, "")
 		connect.AssertEqual(t, demo.Demo, true)
+	})
+}
+
+// start answers as the IP place's point the point the run's fits measure
+// from (V5, V10): the city's own point the track keeps, else the middle of
+// the box around client_ip's country, so the frame's fits and the server's
+// start from one place.
+func TestLagDriftStartOrigin(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newLagDriftTestFixture(t, ctx)
+		now := server.NowUtc().Truncate(time.Millisecond)
+
+		allocated := fixture.allocate(t, now, nil)
+		start := fixture.start(t, allocated.Token, lagDriftTestVisitorAddress, "", now)
+		connect.AssertEqual(t, start.Ip.City, "Berlin")
+		connect.AssertEqual(t, *start.Ip.Latitude, 52.5196)
+		connect.AssertEqual(t, *start.Ip.Longitude, 13.4069)
+
+		// Leipzig has no point of its own: the middle of Germany's box,
+		// 47.3 to 55.0 north and 5.9 to 15.0 east
+		allocated = fixture.allocate(t, now, &LagDriftTestArgs{ClientIp: lagDriftTestLeipzigIp})
+		start = fixture.start(t, allocated.Token, lagDriftTestLeipzigAddress, "", now)
+		connect.AssertEqual(t, start.Error, (*LagError)(nil))
+		connect.AssertEqual(t, start.Ip.City, "Leipzig")
+		if math.Abs(*start.Ip.Latitude-51.15) > 0.01 || math.Abs(*start.Ip.Longitude-10.45) > 0.01 {
+			t.Fatalf("the origin is %v, %v, want the middle of Germany's box", *start.Ip.Latitude, *start.Ip.Longitude)
+		}
 	})
 }
 

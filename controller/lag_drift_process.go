@@ -361,7 +361,9 @@ func lagDriftSafely(compute func()) (err error) {
 type lagDriftSession struct {
 	report   *model.LagDriftReport
 	extender *model.LagDriftRunExtender
-	// ms from the session's own start (newLagDriftTimeline)
+	// the session's opening on the run's timeline (newLagDriftTimeline), so
+	// its own durations are its times less this
+	openMs float64
 	sendMs []float64
 	pongMs []float64
 	rttMs  []float64
@@ -398,9 +400,8 @@ func (self *lagDriftSession) lastActivityMs() float64 {
 // A run's reports on one timeline (V10): ms from the sessions' opening.
 type lagDriftTimeline struct {
 	sessions []*lagDriftSession
-	// the run's opening on the extenders' clocks, unix ms: the median of its
-	// own sessions' openings, only to estimate on the operator's clock how
-	// long the sessions took to open (lagDriftOperatorCloseMs)
+	// the run's opening on the extenders' clocks, unix ms: its earliest
+	// plausible session opening (newLagDriftTimeline)
 	openedUnixMs float64
 	// when the sessions closed, as the reports show it: the median of the
 	// run's own sessions' last activity
@@ -409,13 +410,17 @@ type lagDriftTimeline struct {
 	lastPongMs float64
 }
 
-// Lays a run's reports on one timeline (V10). Each report's times are its
-// extender's clock (A7), which may be well off another's, so each session is
-// laid at its own start, its pings at their send offsets from it, and no
-// clocks are compared (review F-14). The frame opens the sessions together,
-// and a late opener's offset is within V10's tolerance. Each round trip's
-// pong arrives its round trip after its ping was sent. A report whose
-// position the run never ticketed is left out.
+// Lays a run's reports on one timeline (V10), as the frame saw them: each
+// session at its own opening, its pings at their send offsets from it. The
+// frame opens the sessions together, but sessions to far extenders open
+// seconds later (the e2e run of 2026-11-17: up to 3 s), and the frame's look
+// counts their round trips that late. The run opens at its earliest
+// plausible session opening, the nearest to the frame's own. Each report's
+// times are its extender's clock (A7), so an opening further than
+// lagDriftOpenSpreadMs from the median of the run's own sessions' openings
+// is a clock off the others' (review F-14): such a session is laid at the
+// run's opening. Each round trip's pong arrives its round trip after its ping
+// was sent. A report whose position the run never ticketed is left out.
 func newLagDriftTimeline(run *model.LagDriftRun, reports []*model.LagDriftReport, drift *LagDriftSettings) *lagDriftTimeline {
 	extenders := map[int]*model.LagDriftRunExtender{}
 	for _, extender := range run.Extenders {
@@ -432,7 +437,16 @@ func newLagDriftTimeline(run *model.LagDriftRun, reports []*model.LagDriftReport
 			openings = append(openings, float64(report.SessionStartTime.UnixMilli()))
 		}
 	}
-	runOpenMs := lagDriftMedian(openings)
+	medianOpenMs := lagDriftMedian(openings)
+	plausible := func(openingMs float64) bool {
+		return math.Abs(openingMs-medianOpenMs) <= lagDriftOpenSpreadMs
+	}
+	runOpenMs := medianOpenMs
+	for _, openingMs := range openings {
+		if plausible(openingMs) {
+			runOpenMs = min(runOpenMs, openingMs)
+		}
+	}
 
 	timeline := &lagDriftTimeline{openedUnixMs: runOpenMs, lastPongMs: -1}
 	closes := []float64{}
@@ -441,13 +455,17 @@ func newLagDriftTimeline(run *model.LagDriftRun, reports []*model.LagDriftReport
 		if extender == nil {
 			continue
 		}
+		openMs := 0.0
+		if openingMs := float64(report.SessionStartTime.UnixMilli()); plausible(openingMs) {
+			openMs = openingMs - runOpenMs
+		}
 		windowMs := float64(report.WindowStartTime.Sub(report.SessionStartTime).Milliseconds())
-		session := &lagDriftSession{report: report, extender: extender, lastSendMs: -1}
+		session := &lagDriftSession{report: report, extender: extender, openMs: openMs, lastSendMs: -1}
 		for i, offsetMs := range report.PingOffsetMs {
 			if len(report.PingMicros) <= i {
 				break
 			}
-			sendMs := windowMs + float64(offsetMs)
+			sendMs := openMs + windowMs + float64(offsetMs)
 			session.lastSendMs = max(session.lastSendMs, sendMs)
 			micros := report.PingMicros[i]
 			if micros <= 0 {
