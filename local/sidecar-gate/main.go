@@ -12,9 +12,9 @@
 // stores, under the entry's own timeout where it names one (QD-1058) and the
 // settings' bound where it does not, and each row's commands, and runs
 // check-tables and each repo's commit-msg scan. It records the commit set the
-// run saw, repo by repo. Each
-// row reports pass, fail, missing or open: missing means no test exists yet,
-// which is never a pass, so nothing looks finished before it is.
+// run saw, repo by repo. Each row reports pass, fail, missing or open: missing
+// means no test exists yet, which is never a pass, so nothing looks finished
+// before it is.
 //
 // A gate is G0, Mn-in for milestone n's entry review, Mn for its exit review,
 // every for each Gn-out's rows alone, or next. An exit review also runs every
@@ -126,6 +126,7 @@ func (self *gateTest) testTimeout(settings *gateSettings) time.Duration {
 // test under a bound nobody wrote. A timeout key with no value is YAML's null, which names none.
 type gateTimeout time.Duration
 
+// Reads an entry's timeout as the type says, or refuses it with its line.
 func (self *gateTimeout) UnmarshalYAML(value *yaml.Node) error {
 	if value.Kind != yaml.ScalarNode {
 		return fmt.Errorf("line %d: a timeout is a duration, such as 3h or 90m, not a list or a map", value.Line)
