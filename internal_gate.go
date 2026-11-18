@@ -74,7 +74,8 @@ const (
 	// connect's contract gate in CreateContract, which reads projections through api (QD-680)
 	InternalGateCallerConnect InternalGateCaller = "connect"
 	// an edge block's platform credential (QD-812): tlsedge, mxedge's router and smtpedge each mount it, and it
-	// reaches only the route that mints the block's own urnetwork-edge client jwts (EdgeClientMintPath)
+	// reaches only the route that mints the block's own urnetwork-edge clients' jwts and, beside each, the
+	// client's sockets token (EdgeClientMintPath; QD-1054)
 	InternalGateCallerEdge InternalGateCaller = "edge"
 )
 

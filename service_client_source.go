@@ -66,7 +66,7 @@ import (
 	"github.com/urnetwork/sidecar"
 )
 
-// The route that mints an edge client's jwt, under the internal gate's prefix.
+// The route that mints an edge client's jwt and its sockets token, under the internal gate's prefix.
 const EdgeClientMintPath = InternalGatePathPrefix + "edge-client"
 
 // The file under config/<env> that names each edge block's hosts and K.
