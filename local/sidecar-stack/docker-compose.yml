@@ -1,0 +1,41 @@
+# The sidecar's local stack (sidecar DESIGN §19.11's local row; OPS-M9-01): what the local tier needs beside
+# server/local's postgres and redis, which this file leaves alone (the urnetwork-local project and its
+# urnetwork-local-* containers are run-local.sh's).
+#
+#   smtp-sink   an MX that takes every message and delivers none, for a local smtpedge to send to
+#               SMTP     127.0.0.1:52525   (STARTTLS on a throwaway certificate made at start)
+#               control  127.0.0.1:52526   GET /status, GET /messages, DELETE /messages
+#
+# Don't run this with a bare `docker compose up`: stack.sh builds the image first, sidecar-test-smtp-sink:local,
+# FROM scratch with the one binary built here, so nothing is pulled. Every container is named sidecar-test-*
+# and every port is published on 127.0.0.1 above 50000. The sink keeps what it takes in memory, in the clear,
+# and loses it when it stops.
+#
+# The project and its network are named for the sink alone. sidecar/local's shared stores are the compose
+# project sidecar-test-stack, and a second file under that name would make each file's containers the
+# other's orphans, which a `down --remove-orphans` removes: so this file never takes that name, and stack.sh
+# never removes orphans.
+
+name: sidecar-test-smtp-sink
+
+services:
+  smtp-sink:
+    image: ${SIDECAR_STACK_SMTP_SINK_IMAGE:-sidecar-test-smtp-sink:local}
+    pull_policy: never
+    container_name: sidecar-test-smtp-sink
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [smtp-sink]
+    command: ["-smtp", ":2525", "-control", ":8025", "-hostname", "sink.mail.example"]
+    ports:
+      - "127.0.0.1:52525:2525"
+      - "127.0.0.1:52526:8025"
+    # smtpsink answers each open session 421 and exits 0 on SIGTERM
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+
+networks:
+  smtp-sink:
+    name: sidecar-test-smtp-sink

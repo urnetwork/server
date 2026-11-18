@@ -17,6 +17,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/core"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // Dispatches exact-generation probes before starting ordinary worker services.
@@ -141,6 +143,14 @@ Options:
 	quit := server.NewEventWithContext(context.Background())
 	closeSignals := quit.SetOnSignals(syscall.SIGQUIT, syscall.SIGTERM, syscall.SIGINT)
 	defer closeSignals()
+	// the process's Env, operator's global one (QD-1027), set before the
+	// worker runs and never for a probe: over the smallest ServiceHost the
+	// worker's own services fill, the db, Redis, metrics, the service token
+	// authenticator, sidecar.yml's gates and task scheduling, every other
+	// service refusing
+	if _, err := core.SetProcessEnv("competitionworker", sidecarhost.NewServiceHost(quit.Ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 	controller.StartRunnerHeartbeat(quit.Ctx)
 	controller.StartMetrics(quit.Ctx)
 	flushStats := server.StartStatsPusher(quit.Ctx)

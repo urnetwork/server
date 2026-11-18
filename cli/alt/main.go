@@ -11,6 +11,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/alt"
+	"github.com/urnetwork/server/core"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // Splits a comma separated option into its values. An absent or empty option
@@ -78,6 +80,15 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// the process's Env, operator's global one (QD-1027), set before anything
+	// serves. alt runs the connect node and the api in one process, so it sets
+	// one Env with the widest of their grants, api's: over the smallest
+	// ServiceHost their own services fill, the db, Redis, metrics, the
+	// service token authenticator, sidecar.yml's gates and task scheduling,
+	// every other service refusing
+	if _, err := core.SetProcessEnv("alt", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 	if err := alt.Run(ctx, alt.RunOptions{
 		Port:         port,
 		H3Port:       h3Port,

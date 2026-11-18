@@ -21,8 +21,10 @@ import (
 	"github.com/urnetwork/server/api"
 	connectserver "github.com/urnetwork/server/connect"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/gossip"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/taskworker"
 )
 
@@ -388,6 +390,19 @@ func validateGossip(port int, config *controller.ExtenderConfig, configErr error
 	return nil
 }
 
+// Sets the process's Env, operator's global one, which sidecar/handler and
+// sidecar/work read (QD-1027), before any service starts. This process runs
+// api, connect and taskworker, and gossip when asked, so it sets one Env with
+// the widest of their grants, api's and taskworker's: over the smallest
+// ServiceHost their own services fill, so the db, Redis, metrics, the service
+// token authenticator, sidecar.yml's gates and the worker's own sidecar task
+// registry answer, and every service none of them builds here refuses.
+func setProcessEnv(ctx context.Context) error {
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true, Tasks: taskworker.SidecarTasks()})
+	_, err := core.SetProcessEnv("all", host)
+	return err
+}
+
 // Startup reads the same Warp resources as standalone services. Optional
 // subnet operation becomes a required gate when explicitly requested.
 func runCommand(ctx context.Context, options commandOptions, output io.Writer) error {
@@ -418,6 +433,9 @@ func runCommand(ctx context.Context, options commandOptions, output io.Writer) e
 		}
 		extenderConfig, extenderErr := controller.EnvExtenderConfig()
 		if err := validateGossip(options.gossipPort, extenderConfig, extenderErr); err != nil {
+			return err
+		}
+		if err := setProcessEnv(ctx); err != nil {
 			return err
 		}
 		services := operatorServices(options, serviceRunners{api: api.Run, connect: connectserver.Run, taskworker: taskworker.Run, gossip: gossip.Run})

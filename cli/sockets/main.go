@@ -67,6 +67,7 @@ import (
 	"github.com/urnetwork/sidecar/socketsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/quotahost"
@@ -570,8 +571,10 @@ func run(ctx context.Context, options *runOptions) error {
 	host, err := newSocketsHost(ctx, options.Settings, options.Deps)
 	if err != nil {
 		glog.Errorf("[%s]not ready: %v\n", hostService, err)
+		setProcessEnv(&sidecar.ServiceHost{})
 	} else {
 		engine = host
+		setProcessEnv(host.host)
 	}
 	runOptions := &sidecarhost.RunOptions{
 		Service:    hostService,
@@ -582,6 +585,15 @@ func run(ctx context.Context, options *runOptions) error {
 		runOptions.Http = httpEngine
 	}
 	return sidecarhost.Run(ctx, runOptions)
+}
+
+// Sets the process's Env, operator's global one (QD-1027), before the block serves: over the engine's own
+// ServiceHost, or an empty one for a block that could not start, which holds no service, so every gate reads
+// closed and the rest refuses. sockets holds no Postgres, so its Env refuses the db either way.
+func setProcessEnv(host *sidecar.ServiceHost) {
+	if _, err := core.SetProcessEnv(hostService, host); err != nil {
+		panic(err)
+	}
 }
 
 var (

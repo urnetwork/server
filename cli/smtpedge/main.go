@@ -54,6 +54,7 @@ import (
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
@@ -498,6 +499,7 @@ func run(ctx context.Context, port int, settings *hostSettings, deps *hostDeps) 
 	if settings != nil {
 		host, err := newSmtpEdgeHost(ctx, settings, deps)
 		if err == nil {
+			setProcessEnv(host.host)
 			return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
 				Service:    hostService,
 				StatusPort: port,
@@ -508,11 +510,21 @@ func run(ctx context.Context, port int, settings *hostSettings, deps *hostDeps) 
 		}
 		glog.Errorf("[%s]not ready: %v\n", hostService, err)
 	}
+	setProcessEnv(&sidecar.ServiceHost{})
 	return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
 		Service:    hostService,
 		StatusPort: port,
 		Engine:     notReadyEngine{},
 	})
+}
+
+// Sets the process's Env, operator's global one (QD-1027), before the block serves: over the engine's own
+// ServiceHost, or an empty one for a block that could not start, which holds no service, so every gate reads
+// closed and the rest refuses but the db. smtpedge holds a Postgres pool, so its Env grants the db either way.
+func setProcessEnv(host *sidecar.ServiceHost) {
+	if _, err := core.SetProcessEnv(hostService, host); err != nil {
+		panic(err)
+	}
 }
 
 var (
