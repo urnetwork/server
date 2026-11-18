@@ -791,3 +791,49 @@ func TestSessionIndexRepairDrainsABacklogInOneStage(t *testing.T) {
 		}
 	})
 }
+
+// The browser extension's session lists the distribution its client reported
+// (session1118 C), so the sessions list labels it "Browser extension" rather
+// than "Web", the device type it shares with the site. Each use kept only the
+// device type and app version.
+func TestSessionListShowsTheClientDistribution(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		actor := recoverySessionActor(t)
+		extension := sessionFixtureCredential(actor.ByJwt.NetworkId, now)
+		if _, err := RegisterNetworkSession(ctx, extension, "password", nil, false, now); err != nil {
+			t.Fatal(err)
+		}
+		use := Testing_CreateClientSession(ctx, extension)
+		use.ClientInfo = ParseClientInfo(`{"v":1,"device_type":"web","app_version":"2026.11.18","distribution":"extension_chrome"}`, "")
+		use.ObserveAuthenticatedUse()
+		result, err := GetNetworkSessionsPage(actor, &NetworkSessionsArgs{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// as the route encodes it
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var listed struct {
+			Sessions []struct {
+				SessionId string         `json:"session_id"`
+				LastUsed  map[string]any `json:"last_used"`
+			} `json:"sessions"`
+		}
+		if err := json.Unmarshal(encoded, &listed); err != nil {
+			t.Fatal(err)
+		}
+		for _, listedSession := range listed.Sessions {
+			if listedSession.SessionId == extension.SessionId.String() {
+				if listedSession.LastUsed == nil || listedSession.LastUsed["distribution"] != "extension_chrome" || listedSession.LastUsed["device_type"] != "web" {
+					t.Fatal("the extension's session lists its use as", listedSession.LastUsed)
+				}
+				return
+			}
+		}
+		t.Fatal("the extension's session is not listed")
+	})
+}
