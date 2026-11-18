@@ -118,7 +118,7 @@ type evsObserveReportSettings struct {
 	sampleInterval time.Duration
 	// Bounds one query's answer: two results a process series, 256 B a series, so a megabyte holds 2,000 processes.
 	queryMaxByteCount int
-	// The objects one LIST of drops/ asks for. Positive.
+	// The objects one LIST of drops/ or of a repo's dropscan/ asks for. Positive.
 	listLimit int
 	// The soaks' thresholds, D-TEST-12's and D-TEST-18's.
 	soakSettings *work.EvsObserveSoakSettings
