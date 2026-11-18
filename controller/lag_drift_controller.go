@@ -330,7 +330,7 @@ type LagDriftTestArgs struct {
 	ClientIp string `json:"client_ip"`
 	// narrows the network's allowed parent origins (P3)
 	ParentOrigins []string `json:"parent_origins,omitempty"`
-	// 0.95, 0.99 or 0.999 (V6)
+	// 0.95 or 0.99 (V11); 0.999 is refused
 	Confidence *float64 `json:"confidence,omitempty"`
 	// at most 128 characters, returned as given
 	Reference string `json:"reference,omitempty"`
