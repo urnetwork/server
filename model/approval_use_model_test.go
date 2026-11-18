@@ -114,8 +114,13 @@ func (self *testApprovalState) ApproverCount() int {
 }
 
 // The approver alone.
-func (self *testApprovalState) Eligible(memberId sidecar.Id) bool {
+func (self *testApprovalState) Names(memberId sidecar.Id) bool {
 	return memberId == self.approver
+}
+
+// No admin clause, so no admin's decision meets one.
+func (self *testApprovalState) ClauseAdmin(memberId sidecar.Id) bool {
+	return false
 }
 
 // No admin clause.
