@@ -9,7 +9,9 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	gossipserver "github.com/urnetwork/server/gossip"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 func main() {
@@ -45,6 +47,13 @@ Options:
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
+	// the process's Env, operator's global one (QD-1027), set before anything
+	// serves: over the smallest ServiceHost gossip's own services fill, the
+	// db, Redis, metrics, the service token authenticator, sidecar.yml's
+	// gates and task scheduling, every other service refusing
+	if _, err := core.SetProcessEnv("gossip", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+		panic(err)
+	}
 	if err := gossipserver.Run(ctx, gossipserver.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}

@@ -13,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/urnetwork/server/core"
 	servermonitor "github.com/urnetwork/server/monitor"
 	"github.com/urnetwork/server/pager"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 type stringFlags []string
@@ -58,8 +60,22 @@ type monitorOptions struct {
 	pagerAlerts                  bool
 }
 
+// Sets the process's Env for the continuous run. nil outside main, so a test
+// that drives a run function sets nothing process-wide.
+var setProcessEnv func(ctx context.Context) error
+
+// Sets the process's Env, operator's global one (QD-1027): over the smallest
+// ServiceHost monitor's own services fill, the db, Redis, metrics, the service
+// token authenticator, sidecar.yml's gates and task scheduling, every other
+// service refusing.
+func setMonitorProcessEnv(ctx context.Context) error {
+	_, err := core.SetProcessEnv("monitor", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true}))
+	return err
+}
+
 // Exit only after the command-owned process lifecycle has returned.
 func main() {
+	setProcessEnv = setMonitorProcessEnv
 	os.Exit(runMonitorProcess(func() error {
 		return run(os.Args[1:], os.Stdout)
 	}, os.Stderr, server.ScrubProcessLogs))
@@ -306,6 +322,13 @@ func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func
 		handler = pagedAlertHandler(pagerNotifier, handler)
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: pager notifications disabled: -pager-alerts is off")
+	}
+	// The continuous run is the deployed service, so it sets the process's Env before its loop starts; a
+	// one-shot run, a diagnostic, returned above and sets none.
+	if setProcessEnv != nil {
+		if err := setProcessEnv(ctx); err != nil {
+			return err
+		}
 	}
 	// The gauges a watcher owns, such as SIGNALS.md §29's urnetwork_filecluster_set_state, reach Mimir from
 	// the process's registry; outside warp this publishes nothing and says so.

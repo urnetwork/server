@@ -19,8 +19,10 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/evshost"
 	"github.com/urnetwork/server/quotahost"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 var (
@@ -58,6 +60,14 @@ func main() {
 	} else {
 		deps.Quota = quota
 		defer quota.Drain(context.Background())
+	}
+	// the process's Env, operator's global one (QD-1027), set before the block serves: over the smallest ServiceHost
+	// this main's own services fill, Redis, metrics, the service token authenticator, sidecar.yml's gates and the
+	// Quota above, on the quota's context so the gates are still read through the drain. evs holds no Postgres, so
+	// the Env refuses the db, and the file clusters, clock check, write budget and push the engine's own host builds
+	// inside evshost are not in it and refuse
+	if _, err := core.SetProcessEnv("evs", sidecarhost.NewServiceHost(quotaCtx, &sidecarhost.ServiceHostOptions{Quota: deps.Quota})); err != nil {
+		panic(err)
 	}
 	// the block's own stores for the rest; what server has no implementation of yet keeps it not ready (evshost's
 	// header)

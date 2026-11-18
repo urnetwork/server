@@ -61,6 +61,7 @@ import (
 	"github.com/urnetwork/sidecar/tlsedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
@@ -668,16 +669,28 @@ func run(ctx context.Context, options *runOptions) error {
 	if options.Settings != nil {
 		host, err := newTlsEdgeHost(ctx, options.Settings, options.Deps)
 		if err == nil {
+			setProcessEnv(host.host)
 			// on the host's own context, so the listeners outlive ctx until the drain closes them
 			return sidecarhost.Run(ctx, hostRunOptions(host.ctx, options.Port, host))
 		}
 		glog.Errorf("[%s]not ready: %v\n", hostService, err)
 	}
+	setProcessEnv(&sidecar.ServiceHost{})
 	return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
 		Service:    hostService,
 		StatusPort: options.Port,
 		Engine:     notReadyEngine{},
 	})
+}
+
+// Sets the process's Env, operator's global one (QD-1027), before the block serves: over the engine's own
+// ServiceHost, or an empty one for a block that could not start, which holds no service, so every gate reads
+// closed and the rest refuses. tlsedge's pool is under its restricted role for the engine's store alone, so its
+// Env refuses the db either way.
+func setProcessEnv(host *sidecar.ServiceHost) {
+	if _, err := core.SetProcessEnv(hostService, host); err != nil {
+		panic(err)
+	}
 }
 
 var (

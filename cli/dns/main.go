@@ -16,6 +16,7 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/dnshost"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -67,9 +68,28 @@ func main() {
 	if hostSettings.CredentialFileName == "" {
 		hostSettings.CredentialFileName = "internal-" + os.Getenv("WARP_SERVICE") + ".yml"
 	}
+	setProcessEnv(ctx, *role)
 	// the API releases each root's DNSKEY windows from its secret_files; a root with no window file
 	// feeds no edge a window, so none of them is ready
 	if err := dnshost.RunHost(ctx, *role, hostSettings, nil, &dnshost.HostPorts{Status: *port, Dns: *dnsPort}); err != nil {
+		panic(err)
+	}
+}
+
+// Sets the process's Env, operator's global one (QD-1027), before the block serves, over the smallest
+// ServiceHost role's own services fill, as dnshost builds each role's: the API's, the block dns, with
+// Postgres, Redis, metrics, the service token authenticator, sidecar.yml's gates and task scheduling;
+// the edge's, the block dnsedge, with no Redis or Postgres handle at all (I-12), so its Env refuses
+// both. What the engine's own host builds inside dnshost, the API's abuse gate among it, is not in
+// either and refuses.
+func setProcessEnv(ctx context.Context, role string) {
+	process := "dns"
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: role == dnshost.HostRoleApi})
+	if role == dnshost.HostRoleEdge {
+		process = "dnsedge"
+		host.Redis = nil
+	}
+	if _, err := core.SetProcessEnv(process, host); err != nil {
 		panic(err)
 	}
 }
