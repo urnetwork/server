@@ -328,7 +328,7 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 		if !ok {
 			return errors.New("no object to overwrite")
 		}
-		if err := trashOverwrite(ctx, target.Cluster, objects, opsKey(prefix, settings.ObjectByteCount, n), n, etag, opsBody(settings.ObjectByteCount, n, int(arrival/settings.ObjectCount)+1)); err != nil {
+		if err := overwriteObject(ctx, target.Cluster, objects, opsKey(prefix, settings.ObjectByteCount, n), n, etag, opsBody(settings.ObjectByteCount, n, int(arrival/settings.ObjectCount)+1)); err != nil {
 			return err
 		}
 		overwrites.Add(1)
@@ -357,10 +357,10 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 	return ctx.Err()
 }
 
-// One overwrite of object n at key from etag, keeping its new ETag. A failed one may have landed, an unknown outcome,
-// so the object's ETag is read again for its next overwrite, which would otherwise fail on the old one for the rest
-// of the window.
-func trashOverwrite(ctx context.Context, cluster sidecar.BlobCluster, objects *opsObjects, key string, n int64, etag string, body []byte) error {
+// One overwrite of object n at key from etag, keeping its new ETag: the ops and trash rows' overwrites. A failed one
+// may have landed, an unknown outcome, so the object's ETag is read again for its next overwrite, which would
+// otherwise fail on the old one for the rest of the window.
+func overwriteObject(ctx context.Context, cluster sidecar.BlobCluster, objects *opsObjects, key string, n int64, etag string, body []byte) error {
 	newEtag, err := cluster.PutIfMatch(ctx, key, etag, body, nil)
 	if err != nil {
 		if info, headErr := cluster.Head(ctx, key); headErr == nil {

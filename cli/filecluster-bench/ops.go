@@ -389,12 +389,7 @@ func RunOps(ctx context.Context, target *BenchTarget, settings *OpsSettings, pre
 			if !ok {
 				return errors.New("no object to overwrite")
 			}
-			newEtag, err := target.Cluster.PutIfMatch(ctx, opsKey(prefix, objectByteCount, object), etag, opsBody(objectByteCount, object, int(n/created)+1), nil)
-			if err != nil {
-				return err
-			}
-			objects.set(object, newEtag)
-			return nil
+			return overwriteObject(ctx, target.Cluster, objects, opsKey(prefix, objectByteCount, object), object, etag, opsBody(objectByteCount, object, int(n/created)+1))
 		})
 		if err != nil {
 			return err
