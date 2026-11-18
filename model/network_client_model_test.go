@@ -2432,6 +2432,76 @@ func TestRemoveDisconnectedNetworkClientsTopLevelReap(t *testing.T) {
 	})
 }
 
+// The client's auth_time, as an idle client would hold it.
+func reapTestSetAuthTime(ctx context.Context, clientId server.Id, authTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET auth_time = $2 WHERE client_id = $1`, clientId, authTime))
+	})
+}
+
+// The client's deactivate_time, as a client deactivated then would hold it.
+func reapTestSetDeactivateTime(ctx context.Context, clientId server.Id, deactivateTime time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET deactivate_time = $2 WHERE client_id = $1`, clientId, deactivateTime))
+	})
+}
+
+// Whether the client's row is there, and what it holds.
+func reapTestClientState(ctx context.Context, clientId server.Id) (exists bool, active bool, deactivateTime *time.Time) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, `SELECT active, deactivate_time FROM network_client WHERE client_id = $1`, clientId)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				exists = true
+				server.Raise(result.Scan(&active, &deactivateTime))
+			}
+		})
+	})
+	return
+}
+
+// A pass whose batch bound is not positive is skipped rather than looping on
+// LIMIT 0: under zeroed settings an idle top-level client stays active and an
+// inactive client past the reap window stays, and under the defaults the one
+// is marked and the other hard deleted.
+func TestRemoveDisconnectedNetworkClientsSkipsPassesWithNoBatch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "reap-batch-test", server.NewId())
+		idleClientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), idleClientId, "synthetic", "synthetic")
+		reapTestSetAuthTime(ctx, idleClientId, now.Add(-TopLevelClientIdleExpiration-24*time.Hour))
+		inactiveClientId := server.NewId()
+		Testing_CreateDevice(ctx, networkId, server.NewId(), inactiveClientId, "synthetic", "synthetic")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, inactiveClientId))
+		})
+		reapTestSetDeactivateTime(ctx, inactiveClientId, now.Add(-NetworkClientReapAfterDeactivate-24*time.Hour))
+
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+		RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, &RemoveDisconnectedNetworkClientsSettings{})
+		if exists, active, _ := reapTestClientState(ctx, idleClientId); !exists || !active {
+			t.Fatalf("zeroed settings marked the idle client: exists %t, active %t", exists, active)
+		}
+		if exists, _, _ := reapTestClientState(ctx, inactiveClientId); !exists {
+			t.Fatal("zeroed settings reaped the inactive client")
+		}
+
+		RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, DefaultRemoveDisconnectedNetworkClientsSettings())
+		if exists, active, _ := reapTestClientState(ctx, idleClientId); !exists || active {
+			t.Fatalf("the defaults left the idle client: exists %t, active %t", exists, active)
+		}
+		if exists, _, _ := reapTestClientState(ctx, inactiveClientId); exists {
+			t.Fatal("the defaults left the inactive client past its window")
+		}
+	})
+}
+
 // `ConnectNetworkClient` refreshes `network_client.auth_time` at most once per
 // `clientAuthTimeRefreshMinInterval`: auth_time keys the reap partial indexes,
 // so every refresh is a non-HOT update that maintains all of the table's
