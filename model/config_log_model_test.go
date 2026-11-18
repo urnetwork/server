@@ -5,7 +5,8 @@ package model
 // config_log_model_localstack_test.go; network_acl_head following each append; a refusal's body; the
 // writes spending the write budget as P0; the gate path, a rows-only verifier reading the log from
 // the store, under the Postgres tripwire (I-12); and a RepoPrefixRules judged as every reader judges it
-// (ACL-M2-18).
+// (ACL-M2-18): refused at launch, where the client-checked prefix rules are dark (QD-1032), and with the
+// rules on the id-level table they keep for Later.
 
 import (
 	"context"
@@ -282,18 +283,87 @@ func TestConfigLogRefusesTheDirectoryOutsideTheTeamTier(t *testing.T) {
 	}
 }
 
-// ACL-M2-18 (DESIGN-DETAILS 16.2.2, QD-212): api sequences a RepoPrefixRules through the shared rule table as every
-// reader takes it, and refuses each row of the id-level table as the readers do, 403 with the tip and the readers'
-// refusal class: a signer that is neither a repo admin nor a config writer, a record repo, a deleted repo, a body of 47,
-// 48 and 303 B and one past the cap, and the 257th set in a repo, naming the limit. Each refused row's positive twin
-// lands: the same device once the repo names it admin, a general repo, 304 B, the 256th set. A gate reading the log as
-// the store holds it folds the 256 rows.
+// QD-1032 at api: with the defaults, the client-checked prefix rules dark at launch, api's verifier refuses every
+// RepoPrefixRules as every reader does, 403 with the tip and ErrConfigRuleMissing naming the deferral, whoever signs it
+// and whatever its body, and nothing is sequenced; the next statement lands at the tip's next position, and a gate
+// reading the log as the store holds it holds no set.
+func TestConfigLogRefusesRepoPrefixRulesAtLaunch(t *testing.T) {
+	ctx := context.Background()
+	cluster := testConfigLogFakeCluster(t)
+	world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
+	settings := DefaultConfigLogSettings()
+	settings.Clock = world.Clock()
+	sequencer := NewConfigLogSequencer(cluster, settings, nil)
+	networkId := server.Id(world.NetworkId())
+	signedHeader, rows, genesis, configPushes := world.BaseOne()
+	tip, err := sequencer.AppendBase(ctx, networkId, &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis, ConfigPushes: configPushes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world.SetTip(tip)
+	general := sidecar.Id(server.NewId())
+	tip, err = sequencer.AppendStatement(ctx, networkId, world.SignAsOwner(bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
+		Header: world.Header(), RepoId: general.Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	world.SetTip(tip)
+	for _, byteCount := range []int{48 + 256, 47} {
+		signed := world.SignAsOwner(bridge.SignedType_SIGNED_REPO_PREFIX_RULES, &protocol.RepoPrefixRules{
+			Header: world.Header(), RepoId: general.Bytes(), SealedRules: make([]byte, byteCount),
+		})
+		_, err := sequencer.AppendStatement(ctx, networkId, signed)
+		configLogError := &ConfigLogError{}
+		if !errors.As(err, &configLogError) || configLogError.Status != http.StatusForbidden || configLogError.Tip.GetVersion() != tip.GetVersion() ||
+			!errors.Is(err, sidecar.ErrConfigRuleMissing) || configLogError.Err == nil || !strings.Contains(configLogError.Err.Error(), "QD-1032") {
+			t.Fatalf("a set of %d B at launch: %v", byteCount, err)
+		}
+	}
+	next, err := sequencer.AppendStatement(ctx, networkId, world.SignAsOwner(bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
+		Header: world.Header(), RepoId: sidecar.Id(server.NewId()).Bytes(), Kind: protocol.RepoKind_REPO_KIND_GENERAL,
+	}))
+	if err != nil || next.GetVersion() != tip.GetVersion()+1 {
+		t.Fatalf("the next statement at %v, the tip %d: %v", next, tip.GetVersion(), err)
+	}
+
+	read, err := sequencer.Read(ctx, networkId, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := sidecar.NewConfigLogRowsOnly(nil, read.SignedGenesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gate.ApplyRun(read.Entries, sidecar.ConfigRowsOnlySource(func(networkId sidecar.Id, rowsSha256 []byte) ([]byte, error) {
+		return configLogGetRows(ctx, cluster, networkId, rowsSha256)
+	})); err != nil {
+		t.Fatal(err)
+	}
+	acl, err := gate.State().Acl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sets := acl.Repo(general).GetPrefixRules(); len(sets) != 0 {
+		t.Errorf("the gate holds %d sets", len(sets))
+	}
+}
+
+// ACL-M2-18 (DESIGN-DETAILS 16.2.2, QD-212), with the prefix rules on, as Later brings them back (QD-1032): api
+// sequences a RepoPrefixRules through the shared rule table as every reader takes it, and refuses each row of the
+// id-level table as the readers do, 403 with the tip and the readers' refusal class: a signer that is neither a repo
+// admin nor a config writer, a record repo, a deleted repo, a body of 47, 48 and 303 B and one past the cap, and the
+// 257th set in a repo, naming the limit. Each refused row's positive twin lands: the same device once the repo names it
+// admin, a general repo, 304 B, the 256th set. A gate reading the log as the store holds it, the rules on as api's,
+// folds the 256 rows.
 func TestConfigLogSequencesRepoPrefixRulesAsReadersJudgeThem(t *testing.T) {
 	ctx := context.Background()
 	cluster := testConfigLogFakeCluster(t)
 	world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
 	settings := DefaultConfigLogSettings()
 	settings.Clock = world.Clock()
+	settings.AclPrefix = sidecar.DefaultAclPrefixSettings()
+	settings.AclPrefix.Enabled = true
 	sequencer := NewConfigLogSequencer(cluster, settings, nil)
 	networkId := server.Id(world.NetworkId())
 	signedHeader, rows, genesis, configPushes := world.BaseOne()
@@ -388,12 +458,14 @@ func TestConfigLogSequencesRepoPrefixRulesAsReadersJudgeThem(t *testing.T) {
 		t.Errorf("the 257th set's refusal names no limit: %v", refused.Err)
 	}
 
-	// a gate reading the log as the store holds it holds the rows api's verifier folded
+	// a gate reading the log as the store holds it, the rules on as api's, holds the rows api's verifier folded
 	read, err := sequencer.Read(ctx, networkId, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := sidecar.NewConfigLogRowsOnly(nil, read.SignedGenesis)
+	gateSettings := sidecar.DefaultConfigLogSettings()
+	gateSettings.AclPrefix = settings.AclPrefix
+	gate, err := sidecar.NewConfigLogRowsOnly(gateSettings, read.SignedGenesis)
 	if err != nil {
 		t.Fatal(err)
 	}
