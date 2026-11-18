@@ -9,7 +9,9 @@
 //	go run ./cli/escrowbench exit -baseline main.json -entry dark.json -candidate m6.json -out exit-report.txt
 //
 // entry holds the dark build, gate on, to main's run. exit holds the rerun to main's run and to the entry
-// run's gate-on results, the order then frozen. It exits 1 when the benchmark fails, 2 when it cannot judge.
+// run's gate-on results, the order then frozen, and fails where the entry file is no yardstick: a run that does
+// not itself pass against main's, or one measured after the candidate. Either mode fails two runs paced
+// differently. It exits 1 when the benchmark fails, 2 when it cannot judge.
 package main
 
 import (
@@ -44,6 +46,7 @@ func run(args []string, stdout io.Writer, now time.Time) (pass bool, returnErr e
 	flags.Float64Var(&settings.ThroughputTolerance, "throughput_tolerance", defaults.ThroughputTolerance, "how far settlement throughput may fall, as a fraction")
 	flags.Float64Var(&settings.RoundTripTolerance, "round_trip_tolerance", defaults.RoundTripTolerance, "how far pool acquires an admission may rise before a round trip counts as added")
 	flags.IntVar(&settings.MinCount, "min_count", defaults.MinCount, "the fewest operations a result needs")
+	flags.Float64Var(&settings.PaceTolerance, "pace_tolerance", defaults.PaceTolerance, "how far apart two runs' paces may be, as a fraction")
 	if err := flags.Parse(args[1:]); err != nil {
 		return false, err
 	}
