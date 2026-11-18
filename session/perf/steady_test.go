@@ -242,7 +242,7 @@ func (self *harness) runSteadyPhase() {
 	steady.OutboxStart = self.outboxRows()
 	before, err := self.admin.snapshot(self.ctx)
 	self.must(err, "snapshot")
-	running := startLoads(self.ctx, loads)
+	running := startRecordedLoads(self.ctx, loads, self.ops)
 	previousProcess := processCpuSeconds()
 	seriesDone := make(chan struct{})
 	seriesStopped := make(chan struct{})

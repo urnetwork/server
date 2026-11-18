@@ -103,7 +103,12 @@ func (self *harness) authClient(clientSession *session.ClientSession, proxy bool
 	if proxy {
 		args = proxyArgs()
 	}
-	result, err := model.AuthNetworkClient(args, clientSession)
+	var result *model.AuthNetworkClientResult
+	err := routeCall(func() error {
+		var err error
+		result, err = model.AuthNetworkClient(args, clientSession)
+		return err
+	})
 	if err != nil {
 		return nil, server.Id{}, "", err
 	}
@@ -127,11 +132,16 @@ func (self *harness) childMint(parent *credential) (*credential, server.Id, erro
 	clientSession := self.credentialSession(parent)
 	defer clientSession.Cancel()
 	source := *parent.claims.ClientId
-	result, err := model.AuthNetworkClientFromParent(&model.AuthNetworkClientArgs{
-		SourceClientId: &source,
-		Description:    "perf child",
-		DeviceSpec:     "child",
-	}, clientSession)
+	var result *model.AuthNetworkClientResult
+	err := routeCall(func() error {
+		var err error
+		result, err = model.AuthNetworkClientFromParent(&model.AuthNetworkClientArgs{
+			SourceClientId: &source,
+			Description:    "perf child",
+			DeviceSpec:     "child",
+		}, clientSession)
+		return err
+	})
 	if err != nil {
 		return nil, server.Id{}, err
 	}
@@ -150,7 +160,12 @@ func (self *harness) childMint(parent *credential) (*credential, server.Id, erro
 }
 
 func (self *harness) removeClient(clientSession *session.ClientSession, clientId server.Id) error {
-	result, err := model.RemoveNetworkClient(&model.RemoveNetworkClientArgs{ClientId: clientId}, clientSession)
+	var result *model.RemoveNetworkClientResult
+	err := routeCall(func() error {
+		var err error
+		result, err = model.RemoveNetworkClient(&model.RemoveNetworkClientArgs{ClientId: clientId}, clientSession)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -188,7 +203,12 @@ var errCodeRefused = errors.New("auth code refused")
 func (self *harness) codeCreate(creator *credential) (string, error) {
 	clientSession := self.credentialSession(creator)
 	defer clientSession.Cancel()
-	result, err := model.AuthCodeCreate(&model.AuthCodeCreateArgs{DurationMinutes: 60, Uses: 1}, clientSession)
+	var result *model.AuthCodeCreateResult
+	err := routeCall(func() error {
+		var err error
+		result, err = model.AuthCodeCreate(&model.AuthCodeCreateArgs{DurationMinutes: 60, Uses: 1}, clientSession)
+		return err
+	})
 	if err != nil {
 		return "", err
 	}
@@ -206,7 +226,12 @@ func (self *harness) codeLogin(code string) (*credential, error) {
 	clientSession := session.NewLocalClientSession(self.ctx, "192.0.2.12:1", nil)
 	defer clientSession.Cancel()
 	requestId := server.NewId()
-	result, err := model.AuthCodeLogin(&model.AuthCodeLoginArgs{RequestId: &requestId, AuthCode: code}, clientSession)
+	var result *model.AuthCodeLoginResult
+	err := routeCall(func() error {
+		var err error
+		result, err = model.AuthCodeLogin(&model.AuthCodeLoginArgs{RequestId: &requestId, AuthCode: code}, clientSession)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -279,4 +304,28 @@ func (self *clientQueue) size() int {
 	self.lock.Lock()
 	defer self.lock.Unlock()
 	return len(self.entries)
+}
+
+// A panic a model call raised, as a route handler sees it: the api router's
+// recover answers it 500 with the generic message (router.go), whatever error
+// it carried. Its class is "panic:" and the carried error's class.
+type routePanic struct {
+	err error
+}
+
+func (self *routePanic) Error() string { return "route panic: " + self.err.Error() }
+func (self *routePanic) Unwrap() error { return self.err }
+
+// Calls fn as a route handler body: a panic comes back as a *routePanic.
+func routeCall(fn func() error) (returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err, ok := recovered.(error)
+			if !ok {
+				err = fmt.Errorf("%v", recovered)
+			}
+			returnErr = &routePanic{err: err}
+		}
+	}()
+	return fn()
 }

@@ -86,7 +86,7 @@ func (self *harness) startTaggedChecks(name string, rate float64, node string) *
 			tags[index] = "storm-node"
 		}
 	}
-	return startLoads(self.ctx, []*load{{
+	return startRecordedLoads(self.ctx, []*load{{
 		name:    name,
 		rate:    rate,
 		workers: 64,
@@ -96,7 +96,7 @@ func (self *harness) startTaggedChecks(name string, rate float64, node string) *
 			err := self.leaseCheck(all[index].claims)
 			self.ops.observeTagged(name, tags[index], start, time.Since(start), classify(err), err)
 		},
-	}})
+	}}, self.ops)
 }
 
 type stormWindow struct {

@@ -156,3 +156,21 @@ func TestReportRendersEveryState(t *testing.T) {
 		t.Fatalf("full report:\n%s", text)
 	}
 }
+
+// A refusal a model call raises reaches the harness as the route handler sees
+// it, and is both a refusal and a failure.
+func TestRouteCallClassifiesRaisedRefusals(t *testing.T) {
+	err := routeCall(func() error {
+		panic(&session.SessionError{Code: "session_limit_reached", Status: 409})
+	})
+	if class := classify(err); class != "panic:refused:session_limit_reached" {
+		t.Fatalf("class = %q", class)
+	}
+	summary := &opSummary{Errors: map[string]int{classify(err): 1}}
+	if summary.failureCount() != 1 {
+		t.Fatal("a raised refusal is not a failure")
+	}
+	if routeCall(func() error { return nil }) != nil {
+		t.Fatal("a clean call failed")
+	}
+}

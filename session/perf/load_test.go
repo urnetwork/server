@@ -84,6 +84,10 @@ func classify(err error) string {
 	if err == nil {
 		return ""
 	}
+	var panicked *routePanic
+	if errors.As(err, &panicked) {
+		return "panic:" + classify(panicked.err)
+	}
 	var refusal *session.SessionError
 	if errors.As(err, &refusal) {
 		return "refused:" + refusal.Code
@@ -269,6 +273,11 @@ type runningLoads struct {
 // stop returns: stop ends the arrivals and waits for calls in flight, so no
 // call is cut short and counted as an error by the end of a phase.
 func startLoads(ctx context.Context, loads []*load) *runningLoads {
+	return startRecordedLoads(ctx, loads, nil)
+}
+
+// startLoads, recording a panic an op raised under "load.<name>" in recorder.
+func startRecordedLoads(ctx context.Context, loads []*load, recorder *opRecorder) *runningLoads {
 	arrivalCtx, stop := context.WithCancel(ctx)
 	running := &runningLoads{stop: stop, started: time.Now()}
 	for _, item := range loads {
@@ -287,7 +296,11 @@ func startLoads(ctx context.Context, loads []*load) *runningLoads {
 			go func() {
 				defer running.wait.Done()
 				for range arrivals {
-					item.op(ctx)
+					if err := routeCall(func() error { item.op(ctx); return nil }); err != nil {
+						if recorder != nil {
+							recorder.observeTagged("load."+item.name, "", time.Now(), 0, classify(err), err)
+						}
+					}
 					done.Add(1)
 				}
 			}()

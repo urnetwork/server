@@ -390,6 +390,11 @@ func (self *harness) evaluateGates() {
 
 	// G11 mints and removals under steady load fail only by design
 	mintOps := []string{"steady.authclient.apikey", "steady.authclient.jwt", "steady.mint.child", "steady.refresh", "steady.mint.signin", "steady.hotproxy.create", "steady.hotproxy.device_open", "steady.code.login", "steady.remove.client", "steady.remove.child", "steady.hotproxy.remove", "steady.revoke.single", "steady.list.large", "steady.hint.large", "steady.hint.small"}
+	for _, name := range self.ops.opNames() {
+		if strings.HasPrefix(name, "load.") {
+			mintOps = append(mintOps, name)
+		}
+	}
 	failures := []string{}
 	refusals := []string{}
 	ran := false
@@ -400,9 +405,10 @@ func (self *harness) evaluateGates() {
 		}
 		ran = true
 		for class, count := range summary.Errors {
-			if strings.HasPrefix(class, "refused:") {
+			if strings.Contains(class, "refused:") {
 				refusals = append(refusals, fmt.Sprintf("%s %s x%d", name, class, count))
-			} else {
+			}
+			if !strings.HasPrefix(class, "refused:") {
 				failures = append(failures, fmt.Sprintf("%s %s x%d", name, class, count))
 			}
 		}
