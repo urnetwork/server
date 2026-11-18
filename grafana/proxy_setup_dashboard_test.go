@@ -33,6 +33,16 @@ const (
 	proxyHeapBytesPanel        = 212
 	proxyGcPanel               = 213
 	proxyAbandonedPanel        = 214
+	// find-providers2 liveness (fix #4, branch fix/p90-L-1118)
+	proxyLivenessRow           = 215
+	proxyLivenessUnknownPanel  = 216
+	proxyLivenessFailOpenPanel = 217
+	proxyLivenessReasonsPanel  = 218
+	proxyLivenessCachePanel    = 219
+	proxyLivenessHitPanel      = 220
+	proxyLivenessRefreshPanel  = 221
+	proxyLivenessClientsPanel  = 222
+	proxyLivenessErrorsPanel   = 223
 )
 
 // Each panel and the metric it must read.
@@ -50,11 +60,19 @@ var proxySetupPanelMetrics = map[int][]string{
 	proxyHeapBytesPanel:        {"go_memstats_heap_inuse_bytes", "go_memstats_stack_inuse_bytes", "go_gc_gomemlimit_bytes"},
 	proxyGcPanel:               {"go_gc_duration_seconds_count"},
 	proxyAbandonedPanel:        {"urnetwork_proxy_ingress_events_total"},
+	proxyLivenessUnknownPanel:  {"urnetwork_findproviders2_liveness_candidates_total"},
+	proxyLivenessFailOpenPanel: {"urnetwork_findproviders2_liveness_failopens_total"},
+	proxyLivenessReasonsPanel:  {"urnetwork_findproviders2_liveness_failopens_total"},
+	proxyLivenessCachePanel:    {"urnetwork_findproviders2_liveness_cache_total"},
+	proxyLivenessHitPanel:      {"urnetwork_findproviders2_liveness_cache_total"},
+	proxyLivenessRefreshPanel:  {"urnetwork_findproviders2_liveness_refreshes_total"},
+	proxyLivenessClientsPanel:  {"urnetwork_findproviders2_liveness_cache_clients"},
+	proxyLivenessErrorsPanel:   {"urnetwork_findproviders2_liveness_read_errors_total"},
 }
 
 func TestProxyDashboardShowsSetupTimeAndHostSaturation(t *testing.T) {
 	dashboard := readTestDashboard(t, "proxy.json")
-	for _, id := range []int{proxySetupRow, proxySaturationRow} {
+	for _, id := range []int{proxySetupRow, proxySaturationRow, proxyLivenessRow} {
 		if row := dashboardPanelById(dashboard, id); row == nil || row.Type != "row" {
 			t.Fatalf("proxy dashboard row %d is missing", id)
 		}
@@ -107,6 +125,17 @@ func TestProxyDashboardShowsSetupTimeAndHostSaturation(t *testing.T) {
 	}
 	if thresholds[proxyMintsPanel] != 5 || thresholds[proxyHeapLimitPanel] != 0.95 {
 		t.Errorf("alert lines: mint refusals %v, heap %v; want 5 and 0.95 (SIGNALS.md §26.12, §26.13)", thresholds[proxyMintsPanel], thresholds[proxyHeapLimitPanel])
+	}
+	// P90SPEED.md §10's target for the unknown share, and the lease cache's bound
+	if thresholds[proxyLivenessUnknownPanel] != 0.05 || thresholds[proxyLivenessClientsPanel] != 65536 {
+		t.Errorf("liveness lines: unknown share %v, cache clients %v; want 0.05 and 65536", thresholds[proxyLivenessUnknownPanel], thresholds[proxyLivenessClientsPanel])
+	}
+	// the liveness row is per host and block, and service="proxy" (the scope
+	// check of TestProxyDashboardCoversBoundedServiceTrafficAndCapacity)
+	for _, id := range []int{proxyLivenessUnknownPanel, proxyLivenessFailOpenPanel, proxyLivenessHitPanel, proxyLivenessClientsPanel, proxyLivenessErrorsPanel} {
+		if expr := dashboardPanelById(dashboard, id).Targets[0].Expr; !strings.Contains(expr, "by (host, block)") {
+			t.Errorf("liveness panel %d is not per host and block: %s", id, expr)
+		}
 	}
 }
 
@@ -176,6 +205,11 @@ func TestProxyDashboardSetupPromqlEvaluates(t *testing.T) {
 		series("go_gc_duration_seconds_count", "crisp", "", "0+30x120"),
 		// another environment is never read
 		map[string]string{"series": `go_gc_duration_seconds_count{env="other",service="proxy",host="crisp",block="g1",instance="c3"}`, "values": "0+1000x120"},
+		// liveness on crisp g1: a second, 3 candidates live and 1 unknown; 3 from the cache and 1 read
+		series("urnetwork_findproviders2_liveness_candidates_total", "crisp", `,rank_mode="quality",verdict="live"`, "0+180x120"),
+		series("urnetwork_findproviders2_liveness_candidates_total", "crisp", `,rank_mode="quality",verdict="unknown"`, "0+60x120"),
+		series("urnetwork_findproviders2_liveness_cache_total", "crisp", `,result="hit"`, "0+180x120"),
+		series("urnetwork_findproviders2_liveness_cache_total", "crisp", `,result="read"`, "0+60x120"),
 	)
 	value := func(labels string, v float64) map[string]any { return map[string]any{"labels": labels, "value": v} }
 	evaluations := []struct {
@@ -190,6 +224,8 @@ func TestProxyDashboardSetupPromqlEvaluates(t *testing.T) {
 		{proxyHeapLimitPanel, "A", []map[string]any{value(`{host="crisp"}`, 0.95), value(`{host="fireside"}`, 0.95)}},
 		{proxyHeapBytesPanel, "B", []map[string]any{value(`{host="crisp"}`, 8000000000), value(`{host="fireside"}`, 6500000000)}},
 		{proxyGcPanel, "A", []map[string]any{value(`{host="crisp"}`, 30)}},
+		{proxyLivenessUnknownPanel, "A", []map[string]any{value(`{host="crisp",block="g1"}`, 0.25)}},
+		{proxyLivenessHitPanel, "A", []map[string]any{value(`{host="crisp",block="g1"}`, 0.75)}},
 	}
 	tests := []map[string]any{}
 	expressionTests := []map[string]any{}

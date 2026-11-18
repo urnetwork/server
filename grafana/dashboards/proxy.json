@@ -4663,6 +4663,415 @@
           "legendFormat": "{{host}} 24 h median"
         }
       ]
+    },
+    {
+      "id": 215,
+      "type": "row",
+      "title": "find-providers2 liveness: the online check of hosted window candidates, per host and block (P90SPEED.md §4.4)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 334
+      },
+      "panels": []
+    },
+    {
+      "id": 216,
+      "type": "timeseries",
+      "title": "candidates the online check left unknown, share by host and block",
+      "description": "Of the hosted window candidates the in-process find-providers2 judged, the share whose liveness lease could not be read, so it was left unknown and admitted (urnetwork_findproviders2_liveness_candidates_total, verdict unknown, over every verdict). It was about 1% on 11-12/13 and 33-94% under the regression's load, which let dead exits into windows (P90SPEED.md §4.4). The red line is §10's target, 5%.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 335
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block) (rate(urnetwork_findproviders2_liveness_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",verdict=\"unknown\"}[$__rate_interval])) / sum by (host, block) (rate(urnetwork_findproviders2_liveness_candidates_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
+    },
+    {
+      "id": 217,
+      "type": "timeseries",
+      "title": "liveness fail-opens / s by host and block",
+      "description": "Candidates the online check failed open (admitted unknown), every reason, per host and block (urnetwork_findproviders2_liveness_failopens_total). Select a block with the block variable to read its reasons beside.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 335
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block) (rate(urnetwork_findproviders2_liveness_failopens_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
+    },
+    {
+      "id": 218,
+      "type": "timeseries",
+      "title": "liveness fail-opens / s by reason (selected hosts and blocks)",
+      "description": "Fail-opens by reason over the selected hosts and blocks. read_backoff: a lease read after a failed one; before fix #4 any shard error failed every read of the process for 5 s, after it only the same request's later reads of that shard. writers_error: the writer set read failed. shard_error: the candidate's own shard read failed.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 343
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(urnetwork_findproviders2_liveness_failopens_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 219,
+      "type": "timeseries",
+      "title": "lease cache results / s (selected hosts and blocks)",
+      "description": "How each candidate's verdict was found (urnetwork_findproviders2_liveness_cache_total): hit, from the process's lease cache; read, read by the request; stale, the last verdict, at most 30 s old, after a failed read; failopen, no verdict and the read failed, so unknown. The lease cache series (cache results, refreshes, cache clients) come with the liveness lease cache (fix #4, branch fix/p90-L-1118); a process without it has none.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 343
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_findproviders2_liveness_cache_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 220,
+      "type": "timeseries",
+      "title": "lease cache hits, share by host and block",
+      "description": "The share of candidates answered from the lease cache, per host and block. The lease cache series (cache results, refreshes, cache clients) come with the liveness lease cache (fix #4, branch fix/p90-L-1118); a process without it has none.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 343
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block) (rate(urnetwork_findproviders2_liveness_cache_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\",result=\"hit\"}[$__rate_interval])) / sum by (host, block) (rate(urnetwork_findproviders2_liveness_cache_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
+    },
+    {
+      "id": 221,
+      "type": "timeseries",
+      "title": "background lease refreshes / s by host and result",
+      "description": "The lease cache's background refresh rounds (urnetwork_findproviders2_liveness_refreshes_total): at most one in flight and one start a second per process. error rounds leave the cache's verdicts to age. The lease cache series (cache results, refreshes, cache clients) come with the liveness lease cache (fix #4, branch fix/p90-L-1118); a process without it has none.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 351
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, result) (rate(urnetwork_findproviders2_liveness_refreshes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 222,
+      "type": "timeseries",
+      "title": "lease cache clients per process, by host and block",
+      "description": "Clients held in each process's lease cache (urnetwork_findproviders2_liveness_cache_clients), bounded at 65,536 (the red line). The lease cache series (cache results, refreshes, cache clients) come with the liveness lease cache (fix #4, branch fix/p90-L-1118); a process without it has none.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 351
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 65536
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block) (urnetwork_findproviders2_liveness_cache_clients{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
+    },
+    {
+      "id": 223,
+      "type": "timeseries",
+      "title": "liveness lease read errors / s by host and block",
+      "description": "Failed lease reads (urnetwork_findproviders2_liveness_read_errors_total): a request's, the writer set's, and with fix #4 the background refresh's.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 351
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block) (rate(urnetwork_findproviders2_liveness_read_errors_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
     }
   ]
 }
