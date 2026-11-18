@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest/load"
 
 	"github.com/urnetwork/server"
@@ -327,11 +328,9 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 		if !ok {
 			return errors.New("no object to overwrite")
 		}
-		newEtag, err := target.Cluster.PutIfMatch(ctx, opsKey(prefix, settings.ObjectByteCount, n), etag, opsBody(settings.ObjectByteCount, n, int(arrival/settings.ObjectCount)+1), nil)
-		if err != nil {
+		if err := overwriteObject(ctx, target.Cluster, objects, opsKey(prefix, settings.ObjectByteCount, n), n, etag, opsBody(settings.ObjectByteCount, n, int(arrival/settings.ObjectCount)+1)); err != nil {
 			return err
 		}
-		objects.set(n, newEtag)
 		overwrites.Add(1)
 		return nil
 	})
@@ -356,6 +355,21 @@ func RunTrash(ctx context.Context, target *BenchTarget, trash TrashReader, setti
 		notes.add("a window under 1 h, or one that read no drive counters or no .trash: a smoke")
 	}
 	return ctx.Err()
+}
+
+// One overwrite of object n at key from etag, keeping its new ETag: the ops and trash rows' overwrites. A failed one
+// may have landed, an unknown outcome, so the object's ETag is read again for its next overwrite, which would
+// otherwise fail on the old one for the rest of the window.
+func overwriteObject(ctx context.Context, cluster sidecar.BlobCluster, objects *opsObjects, key string, n int64, etag string, body []byte) error {
+	newEtag, err := cluster.PutIfMatch(ctx, key, etag, body, nil)
+	if err != nil {
+		if info, headErr := cluster.Head(ctx, key); headErr == nil {
+			objects.set(n, info.Etag)
+		}
+		return err
+	}
+	objects.set(n, newEtag)
+	return nil
 }
 
 // The .trash of every drive through the host stats command: its answer's trash fields, by the drives admin info
@@ -398,11 +412,13 @@ func runTrashMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 	flags.DurationVar(&settings.SampleInterval, "sample", defaults.SampleInterval, "how often .trash is read")
 	flags.Int64Var(&settings.ObjectCount, "objects", defaults.ObjectCount, "the objects overwritten in turn")
 	m10 := flags.Bool("purges", false, "M10's run: slot purges at year two's rate beside the overwrites")
+	purgeRate := flags.Float64("purge_rate", DefaultSlotPurgeLoadSettings().Rates[0].PerSecond, "the purges' slots a second")
 	if err := flags.Parse(args); err != nil {
 		return false, err
 	}
 	if *m10 {
 		settings.Purges = DefaultSlotPurgeLoadSettings()
+		settings.Purges.Rates[0].PerSecond = *purgeRate
 	}
 	if *sweep <= 0 {
 		return false, refuseStart("-sweep must declare the interval the cluster runs with")
@@ -420,11 +436,12 @@ func runTrashMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 	}
 	measurement := &TrashMeasurement{SweepInterval: *sweep}
 	if err := common.rowHeader(ctx, &measurement.RowHeader, ModeTrash, clusters, common.clusterId, map[string]string{
-		"sweep":    sweep.String(),
-		"rate":     fmt.Sprint(settings.OverwritesPerSecond),
-		"duration": settings.Duration.String(),
-		"objects":  fmt.Sprint(settings.ObjectCount),
-		"purges":   fmt.Sprint(*m10),
+		"sweep":      sweep.String(),
+		"rate":       fmt.Sprint(settings.OverwritesPerSecond),
+		"duration":   settings.Duration.String(),
+		"objects":    fmt.Sprint(settings.ObjectCount),
+		"purges":     fmt.Sprint(*m10),
+		"purge_rate": fmt.Sprint(*purgeRate),
 	}); err != nil {
 		return false, err
 	}

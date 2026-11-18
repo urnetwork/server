@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,5 +187,42 @@ func TestVerdictModeExitsByEachRowsVerdict(t *testing.T) {
 	}
 	if code := run(context.Background(), []string{"verdict", "-in", filepath.Join(dir, "odd.json")}, &bytes.Buffer{}, &bytes.Buffer{}); code != 2 {
 		t.Fatalf("an odd file exited %d", code)
+	}
+}
+
+// An overwrite whose answer is lost has landed, so the object's ETag is read again: the next overwrite of that
+// object succeeds instead of failing on the old ETag for the rest of the window.
+func TestOverwriteRereadsTheEtagAfterALostAnswer(t *testing.T) {
+	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), nil, nil, nil)
+	cluster, _ := blobs.Cluster("meta-1")
+	ctx := context.Background()
+	key := "filecluster-bench/0123456789abcdef/s000004096/o000000000002"
+	etag, err := cluster.PutIfNoneMatch(ctx, key, []byte("v0"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects := &opsObjects{etags: map[int64]string{2: etag}}
+	if _, err := blobs.Faults().Add(&sidecartest.FaultPlan{Op: sidecartest.FaultOpPut, KeyPrefix: key, Result: sidecartest.ApplyThenDrop}); err != nil {
+		t.Fatal(err)
+	}
+	if err := overwriteObject(ctx, cluster, objects, key, 2, etag, []byte("v1")); err == nil {
+		t.Fatal("a lost answer read as an overwrite")
+	}
+	landed, _ := objects.get(2)
+	if landed == etag {
+		t.Fatal("the ETag was not read again after the lost answer")
+	}
+	next, _ := objects.get(2)
+	if err := overwriteObject(ctx, cluster, objects, key, 2, next, []byte("v2")); err != nil {
+		t.Fatalf("the next overwrite: %v", err)
+	}
+	object, err := cluster.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(object.Body)
+	object.Body.Close()
+	if string(body) != "v2" {
+		t.Fatalf("the object reads %q", body)
 	}
 }
