@@ -819,7 +819,8 @@ func runRepoChecks(ctx context.Context, options *gateOptions) []*gateResult {
 	return results
 }
 
-// One id of the matrix: its tests and commands, then what it waits on.
+// One id of the matrix: its tests and commands, then what it waits on. In -list a command is listed and not run,
+// as a row's is (QD-1082): a matrix command may run a repo's suite or start a container, which a list never does.
 func runMatrixEntry(ctx context.Context, options *gateOptions, report *gateReport, id string, entry *matrixEntry) *gateResult {
 	result := &gateResult{label: id + " " + entry.Title}
 	outcomes := []string{}
@@ -829,6 +830,11 @@ func runMatrixEntry(ctx context.Context, options *gateOptions, report *gateRepor
 		result.details = append(result.details, details...)
 	}
 	for _, command := range entry.Commands {
+		if options.list {
+			outcomes = append(outcomes, gateListed)
+			result.details = append(result.details, command.Repo+"/"+command.Dir+": "+strings.Join(command.Command, " ")+": not run in list mode")
+			continue
+		}
 		outcome, details := runGateCommand(ctx, options, command)
 		outcomes = append(outcomes, outcome)
 		result.details = append(result.details, details...)

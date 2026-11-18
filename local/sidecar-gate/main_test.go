@@ -587,3 +587,58 @@ func TestGatesYmlGivesOnlyTheReleaseFixtureItsOwnTimeout(t *testing.T) {
 		t.Fatalf("the files name the release fixture %d times among %d entries", fixtures, len(tests))
 	}
 }
+
+// -list runs no matrix command either (QD-1082): an id whose command would fail, and would leave a file behind, if
+// run reads listed with the file never written, as a row's command does, and a test beside it still resolves from
+// its package's files.
+func TestGateListRunsNoMatrixCommand(t *testing.T) {
+	matrix := `ids:
+  R-OPS-9:
+    title: a command that must not run in a list
+    commands:
+      - {repo: fixture, command: [sh, -c, "touch ran-in-a-list && exit 1"]}
+  D-OPS-6:
+    title: a command beside a declared test
+    tests:
+      - {repo: fixture, package: ./widget, names: [TestPasses]}
+    commands:
+      - {repo: fixture, dir: widget, command: [sh, -c, "touch ran-in-a-list && exit 1"]}
+`
+	gates := `gates:
+  M1:
+    - item: "a row whose command must not run in a list"
+      commands:
+        - {repo: fixture, command: [sh, -c, "touch ran-in-a-list && exit 1"]}
+`
+	options := writeGateFixture(t, gates, matrix)
+	options.list = true
+	report, err := runGate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{filepath.Join(options.root, "fixture"), filepath.Join(options.root, "fixture", "widget")} {
+		if _, err := os.Stat(filepath.Join(directory, "ran-in-a-list")); err == nil {
+			t.Errorf("a list ran a command in %s", directory)
+		}
+	}
+	got := gateOutcomes(report.matrix)
+	for label, outcome := range map[string]string{
+		"R-OPS-9 a command that must not run in a list": gateListed,
+		"D-OPS-6 a command beside a declared test":      gateListed,
+	} {
+		if got[label] != outcome {
+			t.Errorf("%s: %s, want %s", label, got[label], outcome)
+		}
+	}
+	for _, result := range report.matrix {
+		if !strings.Contains(strings.Join(result.details, "\n"), "not run in list mode") {
+			t.Errorf("%s does not say its command was not run: %v", result.label, result.details)
+		}
+	}
+	if rows := gateOutcomes(report.rows); rows["a row whose command must not run in a list"] != gateListed {
+		t.Errorf("the row's command: %v", rows)
+	}
+	if report.failed() {
+		t.Error("a list run failed")
+	}
+}
