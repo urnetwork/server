@@ -36,6 +36,7 @@ type perfReport struct {
 	Outbox        []*outboxReport    `json:"outbox"`
 	Slow          []*slowSummary     `json:"slow_scripts"`
 	Gates         []*gateResult      `json:"gates"`
+	Projection    []*projectedCost   `json:"projection"`
 }
 
 func newPerfReport(config *perfConfig) *perfReport {
@@ -221,6 +222,7 @@ func (self *harness) finishReport() {
 		self.report.Ops = append(self.report.Ops, self.op(name))
 	}
 	self.evaluateGates()
+	self.project()
 	dir := self.config.outDir
 	if dir == "" {
 		dir = self.t.TempDir()
@@ -516,6 +518,16 @@ func (self *harness) markdown() string {
 		fmt.Fprintf(&out, "| %s | %d | %.2f | %.1f | %.1f | %.2f | %.2f | %.1f | %.0f |\n", unit.Name, unit.Ops, unit.WallSeconds, unit.CpuMicrosPerOp, unit.CpuMainMicrosPerOp, unit.CommandsPerOp, unit.EvalsPerOp, unit.EvalMicrosPerOp, unit.MemoryBytesPerOp)
 	}
 
+	if 0 < len(report.Projection) {
+		total := 0.0
+		fmt.Fprintf(&out, "\n## Projected Redis CPU at Main's rates\n\nThe isolated Redis CPU per call times Main's measured rate (2026-11-18). This machine's cores are not Main's, so read it as an order of magnitude. Main has 48 masters.\n\n| Operation | Measured as | Main rate/s | Redis CPU µs/op | Cores | Source of the rate |\n|---|---|---|---|---|---|\n")
+		for _, item := range report.Projection {
+			total += item.Cores
+			fmt.Fprintf(&out, "| %s | %s | %.1f | %.1f | %.3f | %s |\n", item.Name, item.Unit, item.Rate, item.MicrosPerOp, item.Cores, item.Source)
+		}
+		fmt.Fprintf(&out, "| total | | | | %.3f | %.4f cores a master |\n", total, total/48)
+	}
+
 	fmt.Fprintf(&out, "\n## Memory (MEMORY USAGE of the keys, every element sampled)\n\n| Item | Units | Bytes | Bytes/unit | Per 1,000 units |\n|---|---|---|---|---|\n")
 	for _, figure := range report.Memory {
 		fmt.Fprintf(&out, "| %s | %d | %d | %.0f | %.2f MB |\n", figure.Name, figure.Units, figure.Bytes, figure.PerUnit, figure.PerUnit*1000/1e6)
@@ -589,4 +601,51 @@ func (self *harness) markdown() string {
 		}
 	}
 	return out.String()
+}
+
+// Main's session traffic priced at the isolated per-call Redis CPU.
+type projectedCost struct {
+	Name        string  `json:"name"`
+	Unit        string  `json:"unit"`
+	Rate        float64 `json:"rate_per_second"`
+	MicrosPerOp float64 `json:"redis_cpu_us_per_op"`
+	Cores       float64 `json:"cores"`
+	Source      string  `json:"source"`
+}
+
+func (self *harness) project() {
+	units := map[string]*unitCost{}
+	for _, unit := range self.report.Units {
+		units[unit.Name] = unit
+	}
+	for _, item := range []struct {
+		name, unit string
+		rate       float64
+		source     string
+	}{
+		{"record checks (api, connect, proxy, alt)", "check.hit", 14700, "S3: jwt_state_record_checks ~14.7k/s"},
+		{"API authentications beyond the record check", "api.auth.client", 0, "counted in the record checks"},
+		{"session hint reads (connect)", "hint.small", 5300, "S3: connect inventory EVALs ~5.3k/s"},
+		{"auth-client with a network credential", "authclient.jwt", 158, "S4: 172.7/s auth-client less API-key mints"},
+		{"auth-client with an API key (own session)", "authclient.apikey", 14.8, "S4: api_key auth attempts 14.8/s, an upper bound for its mints"},
+		{"hosted derived child mints", "mint.child", 223, "S4: 31 reserved + 192 shared admissions/s"},
+		{"hosted device opens", "mint.hosted.reuse", 15.3, "S4: 1.1 cold + 14.2 reopen builds/s"},
+		{"refresh", "refresh", 7.4, "S4: /auth/refresh 7.3/s + network-refresh 0.13/s"},
+		{"password sign-ins", "mint.signin", 1.6, "S4: lb log, ~141k/day"},
+		{"remove-client", "remove.client.jwt", 162, "S4: remove-client 162/s"},
+		{"code redemptions", "code.login", 0.0097, "S4: ~840/day real redemptions"},
+	} {
+		unit := units[item.unit]
+		if unit == nil || item.rate == 0 {
+			continue
+		}
+		self.report.Projection = append(self.report.Projection, &projectedCost{
+			Name:        item.name,
+			Unit:        item.unit,
+			Rate:        item.rate,
+			MicrosPerOp: unit.CpuMicrosPerOp,
+			Cores:       unit.CpuMicrosPerOp * item.rate / 1e6,
+			Source:      item.source,
+		})
+	}
 }

@@ -106,3 +106,53 @@ func TestOpRecorderQuantilesAndClasses(t *testing.T) {
 		t.Fatal("a wrapped capacity refusal was not classified")
 	}
 }
+
+// The gates and the Markdown render for a run that skipped every phase, and
+// for one with data in every section, without a service.
+func TestReportRendersEveryState(t *testing.T) {
+	config := &perfConfig{label: "self-test", profile: quickProfile(), phases: map[string]bool{}}
+	empty := &harness{t: t, config: config, ops: newOpRecorder(), report: newPerfReport(config)}
+	empty.evaluateGates()
+	empty.project()
+	if text := empty.markdown(); !strings.Contains(text, "| G1 ") || !strings.Contains(text, "SKIP") {
+		t.Fatalf("empty report:\n%s", text)
+	}
+
+	full := &harness{t: t, config: config, ops: newOpRecorder(), report: newPerfReport(config)}
+	now := time.Now()
+	for _, op := range []string{"capacity.list@1000", "capacity.list@max", "capacity.revoke.others@1000", "capacity.revoke.others@max", "capacity.list@5000", "storm.revoke.others@5000", "steady.lease.check", "steady.api.auth", "steady.hotproxy.create"} {
+		full.ops.observeTagged(op, "", now, 3*time.Millisecond, "", nil)
+	}
+	full.ops.observeTagged("steady.hotproxy.create", "", now, 0, "refused:session_limit_reached", nil)
+	full.ops.observeTagged("storm.check", "storm-node", now.Add(time.Second), time.Millisecond, "", nil)
+	cost := &clusterCost{Wall: 1, CpuSeconds: 0.5, Commands: map[string]*commandStat{"eval": {Calls: 10, Usec: 100}}, PerNodeCpu: map[string]float64{}}
+	full.report.MaxStateBytes = referenceMaxStateBytes
+	full.report.Units = append(full.report.Units, &unitCost{Name: "check.hit", Ops: 10, Cost: cost})
+	full.report.Units[0].derive()
+	full.report.addMemory("live session", 1000, 680000, nil)
+	full.report.addOutcome("removed clients' credentials at their next check", "refused", 10, 0)
+	full.report.addOutcome("hosted proxy credentials after sign-out-all", "accepted", 0, 10)
+	marks := []time.Time{now, now.Add(time.Second), now.Add(2 * time.Second)}
+	full.report.Storms = append(full.report.Storms, &stormReport{
+		Name: "sign out other sessions", LiveSessions: 5000, RevokeCost: cost, CleanupCost: cost,
+		Windows: full.windows("storm", "storm.check", marks, []string{"before", "revoke"}),
+	})
+	full.report.Slow = append(full.report.Slow, &slowSummary{Name: "storm.revoke.others@5000", ByScript: map[string]*slowScript{"eval:revoke": {Count: 1, MaxMs: 150, MaxKeys: 15005, MaxNode: "node1"}}})
+	full.report.Steady = &steadyReport{DurationSeconds: 60, Cost: cost, OutboxStart: 0, OutboxEnd: 500, Series: []*seriesPoint{{Seconds: 10}}}
+	full.report.Outbox = append(full.report.Outbox, &outboxReport{Rows: 100000, RepairMs: []float64{1500}, ObserveMs: 150})
+	full.evaluateGates()
+	full.project()
+	text := full.markdown()
+	verdicts := map[string]string{}
+	for _, gate := range full.report.Gates {
+		verdicts[gate.Id] = gate.Verdict
+	}
+	for id, want := range map[string]string{"G1": "PASS", "G7b": "WARN", "G12": "FAIL", "G14": "FAIL", "G15": "FAIL", "G16": "PASS", "G17": "FAIL"} {
+		if verdicts[id] != want {
+			t.Errorf("%s = %s, want %s", id, verdicts[id], want)
+		}
+	}
+	if !strings.Contains(text, "## Projected Redis CPU") || !strings.Contains(text, "## Storm") {
+		t.Fatalf("full report:\n%s", text)
+	}
+}
