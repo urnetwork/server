@@ -3,9 +3,12 @@
 // whose drop job's resolve wrote the list files, built through evsservice's own writers as its drop_resolve_test.go
 // builds its world. The repo is placed on the second metadata cluster, so a run that did not read place/ finds no
 // history. A corrupt list file is written again with resolve's bytes and its sequence printed; with no drops named
-// they come from a whole list file, and with none whole the named drops are taken; a refusal exits 1 having written
-// nothing. A recording reindex holds the rest: what the command passes Reindex, a line it refuses before opening
-// anything, its pace and its exit codes.
+// they come from a whole list file, and with none whole from the job's snap-0, printed (owner decision 570, QD-1021);
+// drops named are written only as the set snap-0 covers, a set missing one, holding another or naming one otherwise
+// refused with nothing written, as is a run that needs a snap-0 which does not read; a job with no snap-0 runs as
+// owner decision 512 gave it, the named drops taken unchecked; a refusal exits 1 having written nothing. A recording
+// reindex holds the rest: what the command passes Reindex, a line it refuses before opening anything, its pace and
+// its exit codes.
 
 package main
 
@@ -304,6 +307,45 @@ func (self *evsDropReindexWorld) resolve(drops ...*evsservice.DropListDrop) {
 	}
 }
 
+// Writes the job's snap-0 covering drops, as the drop job writes it once its resolve has: each drop's four ids with
+// the place and seen_ms its table entry held.
+func (self *evsDropReindexWorld) snap(drops ...*evsservice.DropListDrop) {
+	self.t.Helper()
+	covered := []*evsservice.DropCovered{}
+	for i, drop := range drops {
+		covered = append(covered, &evsservice.DropCovered{
+			DropId: drop.DropId, RefId: drop.RefId, Version: drop.Version, PushId: drop.PushId,
+			Place:  &protocol.EvsPlace{Minute: 29000000, Instance: 1, Seq: uint32(i + 1), Length: 512},
+			SeenMs: self.clock.Now().UnixMilli(),
+		})
+	}
+	key := evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileSnap, 0)
+	if _, err := self.segment.PutIfNoneMatch(self.ctx, key, evsservice.EncodeDropCoveredFile(self.repoId, self.jobId, covered), nil); err != nil {
+		self.t.Fatal(err)
+	}
+}
+
+// Replaces the job's snap-0 with its bytes, the last one, the trailer's, flipped.
+func (self *evsDropReindexWorld) corruptSnap() {
+	self.t.Helper()
+	key := evsservice.DropFileKey(self.repoId, self.jobId, evsservice.DropFileSnap, 0)
+	original := self.object(self.segment.ClusterId(), key)
+	if len(original) == 0 {
+		self.t.Fatal("no snap-0")
+	}
+	corrupt := bytes.Clone(original)
+	corrupt[len(corrupt)-1] ^= 1
+	if _, err := evsservice.DecodeDropFile(corrupt, self.repoId, self.jobId, evsservice.DropFileSnap, 0); !errors.Is(err, evsservice.ErrDropFileInvalid) {
+		self.t.Fatalf("a flipped trailer reads as %v", err)
+	}
+	if err := self.segment.Delete(self.ctx, key); err != nil {
+		self.t.Fatal(err)
+	}
+	if _, err := self.segment.PutIfNoneMatch(self.ctx, key, corrupt, nil); err != nil {
+		self.t.Fatal(err)
+	}
+}
+
 // The name the fake store's Dump gives the job's list file of sequence. Dump's values are a privacy scan's, the key
 // and metadata before the body, so they compare with each other and never with an object's bytes.
 func (self *evsDropReindexWorld) listFileName(sequence uint32) string {
@@ -469,8 +511,9 @@ func TestEvsDropReindexWritesACorruptListFileAgainAndNamesItsSequence(t *testing
 	}
 }
 
-// A job of one list file, corrupt: with no drops named nothing reads whole, so the run refuses, exit 1, writing
-// nothing; named, the drops are taken as named and the file is written again with resolve's bytes.
+// A job with no snap-0, as one whose cleanup ran before snap-0 was kept, runs as owner decision 512 gave it. Of one
+// list file, corrupt: with no drops named nothing reads whole, so the run refuses, exit 1, writing nothing; named, the
+// drops are taken as named, printed as unchecked, and the file is written again with resolve's bytes.
 func TestEvsDropReindexTakesTheNamedDropsWhenNoListFileReadsWhole(t *testing.T) {
 	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
 	path := evsDropReindexTestPath("x")
@@ -489,11 +532,351 @@ func TestEvsDropReindexTakesTheNamedDropsWhenNoListFileReadsWhole(t *testing.T) 
 	}
 
 	code, stdout, stderr = runEvsDropReindexTest(world.settings(), sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId), evsDropReindexTuple(drop))
-	if code != 0 || !strings.Contains(stdout, "\nrewritten 0\nwritten none\nstray none\n") {
+	if code != 0 || !strings.Contains(stdout, "\ndrops 1 named, unchecked: the job has no snap-0\nrewritten 0\nwritten none\nstray none\n") {
 		t.Fatalf("with the drop named: exited %d, printing %q and %q", code, stdout, stderr)
 	}
 	if !bytes.Equal(world.listFile(0), original) {
 		t.Fatal("the list file was written again with bytes other than resolve's")
+	}
+}
+
+// A job of two drops on a world's ref, each of a path of its own with two listed versions, resolved into one list
+// file, with a third drop the job does not cover committed after them. Returns the job's two and the third.
+func newEvsDropReindexTwoDropJob(world *evsDropReindexWorld) (*evsservice.DropListDrop, *evsservice.DropListDrop, *evsservice.DropListDrop) {
+	world.t.Helper()
+	pathX := evsDropReindexTestPath("x")
+	pathY := evsDropReindexTestPath("y")
+	pathZ := evsDropReindexTestPath("z")
+	listedX := world.write(pathX, 2)
+	listedY := world.write(pathY, 2)
+	listedZ := world.write(pathZ, 2)
+	dropX := world.drop(evsDropReindexTestId("drop x"), pathX, listedX)
+	dropY := world.drop(evsDropReindexTestId("drop y"), pathY, listedY)
+	world.resolve(dropX, dropY)
+	dropZ := world.drop(evsDropReindexTestId("drop z"), pathZ, listedZ)
+	if world.listFile(0) == nil || world.listFile(1) != nil {
+		world.t.Fatal("the job's resolve did not write one list file")
+	}
+	return dropX, dropY, dropZ
+}
+
+// Owner decision 570 (QD-1021): a job of two drops whose one list file is corrupt, so none reads whole, with its
+// snap-0. With no drops named the run takes snap-0's, deletes the file and writes it again with the bytes resolve
+// wrote, prints the drops it took as the line names a drop, ids only, and touches no other object, snap-0 among them.
+func TestEvsDropReindexTakesTheDropsFromSnapZeroWhenNoListFileReadsWhole(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	dropX, dropY, _ := newEvsDropReindexTwoDropJob(world)
+	// snap-0 in the other order than the list file's, which is by drop id: the set is what counts
+	snapDrops := []*evsservice.DropListDrop{dropX, dropY}
+	if bytes.Compare(dropX.DropId[:], dropY.DropId[:]) < 0 {
+		snapDrops = []*evsservice.DropListDrop{dropY, dropX}
+	}
+	world.snap(snapDrops...)
+	original := world.corruptListFile(0)
+	before := evsDropReindexObjectsBesides(world, 0)
+	world.clock.Advance(time.Minute)
+
+	code, stdout, stderr := runEvsDropReindexTest(world.settings(), sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId))
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, stderr)
+	}
+	if !bytes.Equal(world.listFile(0), original) {
+		t.Fatal("the list file was written again with bytes other than resolve's")
+	}
+	if !maps.EqualFunc(evsDropReindexObjectsBesides(world, 0), before, bytes.Equal) {
+		t.Fatal("a run changed an object besides the corrupt list file")
+	}
+	wantLines := []string{
+		fmt.Sprintf("job %s of repo %s: its list files hold the bytes its drops resolve to", sidecar.EvsKeyId(world.jobId), sidecar.EvsKeyId(world.repoId)),
+		"drops 2 taken from the job's snap-0, no list file of it reading whole",
+		"drop " + evsDropReindexTuple(snapDrops[0]),
+		"drop " + evsDropReindexTuple(snapDrops[1]),
+		"rewritten 0",
+		"written none",
+		"stray none",
+	}
+	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
+	if len(lines) != 8 || !slices.Equal(lines[:7], wantLines) || !strings.HasPrefix(lines[7], "scanned_bytes ") || lines[7] == "scanned_bytes 0" {
+		t.Fatalf("printed %q, want %q and the bytes scanned", stdout, wantLines)
+	}
+	// ids and counts only (I-13): no key, so no path of any kind
+	if strings.Contains(stdout, "/") || strings.Contains(stdout, "dropscan") {
+		t.Fatalf("printed %q, which names a key", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("printed %q to stderr", stderr)
+	}
+
+	// a second run reads the list file whole, so it takes nothing from snap-0 and rewrites nothing
+	code, stdout, stderr = runEvsDropReindexTest(world.settings(), sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId))
+	if code != 0 || !strings.Contains(stdout, "\nrewritten none\nwritten none\n") || strings.Contains(stdout, "\ndrop") {
+		t.Fatalf("a second run exited %d, printing %q and %q", code, stdout, stderr)
+	}
+
+	// a list file that is gone, as a run stopped between its DELETE and its write leaves it, is written fresh from
+	// snap-0's drops too
+	if err := world.segment.Delete(world.ctx, evsservice.DropFileKey(world.repoId, world.jobId, evsservice.DropFileList, 0)); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runEvsDropReindexTest(world.settings(), sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 2 taken from the job's snap-0, no list file of it reading whole\n") || !strings.Contains(stdout, "\nrewritten none\nwritten 0\nstray none\n") {
+		t.Fatalf("a missing file: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	if !bytes.Equal(world.listFile(0), original) {
+		t.Fatal("the list file was written fresh with bytes other than resolve's")
+	}
+}
+
+// Drops named that are the set snap-0 covers, in whichever order, are written: the corrupt file again with resolve's
+// bytes, the run saying the named drops are snap-0's. So are they when a list file reads whole.
+func TestEvsDropReindexWritesNamedDropsThatAreTheOnesSnapZeroCovers(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	dropX, dropY, _ := newEvsDropReindexTwoDropJob(world)
+	world.snap(dropX, dropY)
+	original := world.corruptListFile(0)
+	before := evsDropReindexObjectsBesides(world, 0)
+	world.clock.Advance(time.Minute)
+
+	repo, job := sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)
+	code, stdout, stderr := runEvsDropReindexTest(world.settings(), repo, job, evsDropReindexTuple(dropY), evsDropReindexTuple(dropX))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 2 named, the ones the job's snap-0 covers\nrewritten 0\nwritten none\nstray none\n") {
+		t.Fatalf("exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	if !bytes.Equal(world.listFile(0), original) {
+		t.Fatal("the list file was written again with bytes other than resolve's")
+	}
+	if !maps.EqualFunc(evsDropReindexObjectsBesides(world, 0), before, bytes.Equal) {
+		t.Fatal("a run changed an object besides the corrupt list file")
+	}
+	code, stdout, stderr = runEvsDropReindexTest(world.settings(), repo, job, evsDropReindexTuple(dropX), evsDropReindexTuple(dropY))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 2 named, the ones the job's snap-0 covers\nrewritten none\nwritten none\nstray none\n") {
+		t.Fatalf("with the list file whole: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+}
+
+// Drops named that are not the set snap-0 covers are refused, exit 1, before Reindex reads or writes anything, with
+// the ids that differ and nothing else on stderr's line, whether the job's list file is corrupt or whole: a set
+// leaving out one of the job's drops, which would resolve and be written without that drop's rows; a set with a drop
+// of the ref that the job does not cover, which resolves too; one drop named at another version, another push or
+// another ref; and all three at once.
+func TestEvsDropReindexRefusesNamedDropsThatDifferFromSnapZero(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	dropX, dropY, dropZ := newEvsDropReindexTwoDropJob(world)
+	world.snap(dropX, dropY)
+	world.clock.Advance(time.Minute)
+	otherVersion := *dropY
+	otherVersion.Version = dropZ.Version
+	otherPush := *dropY
+	otherPush.PushId = dropZ.PushId
+	otherRef := *dropY
+	otherRef.RefId = evsDropReindexTestId("another ref")
+	idX, idY, idZ := sidecar.EvsKeyId(dropX.DropId), sidecar.EvsKeyId(dropY.DropId), sidecar.EvsKeyId(dropZ.DropId)
+	cases := []struct {
+		label string
+		drops []*evsservice.DropListDrop
+		want  string
+	}{
+		{label: "one of the job's left out", drops: []*evsservice.DropListDrop{dropX}, want: "it covers and the line leaves out " + idY + ";"},
+		{label: "the other left out", drops: []*evsservice.DropListDrop{dropY}, want: "it covers and the line leaves out " + idX + ";"},
+		{label: "a drop the job does not cover", drops: []*evsservice.DropListDrop{dropX, dropY, dropZ}, want: "the line names and it does not cover " + idZ + ";"},
+		{label: "another version", drops: []*evsservice.DropListDrop{dropX, &otherVersion}, want: "the line names with another ref, version or push " + idY + ";"},
+		{label: "another push", drops: []*evsservice.DropListDrop{dropX, &otherPush}, want: "the line names with another ref, version or push " + idY + ";"},
+		{label: "another ref", drops: []*evsservice.DropListDrop{&otherRef, dropX}, want: "the line names with another ref, version or push " + idY + ";"},
+		{
+			label: "all three",
+			drops: []*evsservice.DropListDrop{dropZ, &otherVersion},
+			want:  "it covers and the line leaves out " + idX + "; the line names and it does not cover " + idZ + "; the line names with another ref, version or push " + idY + ";",
+		},
+	}
+	for _, listFile := range []string{"whole", "corrupt"} {
+		if listFile == "corrupt" {
+			world.corruptListFile(0)
+		}
+		for _, c := range cases {
+			reindexer := &recordingEvsDropReindexer{result: &evsservice.DropReindexResult{}}
+			args := []string{sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)}
+			for _, drop := range c.drops {
+				args = append(args, evsDropReindexTuple(drop))
+			}
+			before := world.host.Blobs.Dump()
+			// the reindex for real, so a set this let through would be written
+			code, stdout, stderr := runEvsDropReindexTest(world.settings(), args...)
+			if code != 1 || !strings.Contains(stderr, "stopped: the drops named are not the 2 its snap-0 covers, so nothing was written: "+c.want+" name none") {
+				t.Errorf("%s, the list file %s: exited %d with %q, want 1 and %q", c.label, listFile, code, stderr, c.want)
+			}
+			if stdout != "" {
+				t.Errorf("%s, the list file %s: printed %q", c.label, listFile, stdout)
+			}
+			if !maps.EqualFunc(world.host.Blobs.Dump(), before, bytes.Equal) {
+				t.Errorf("%s, the list file %s: a refused run changed the store", c.label, listFile)
+			}
+			// and Reindex is never asked
+			if code, _, _ := runEvsDropReindexTest(recordingEvsDropReindexSettings(world, reindexer), args...); code != 1 || len(reindexer.requests) != 0 {
+				t.Errorf("%s, the list file %s: exited %d having asked Reindex %d times", c.label, listFile, code, len(reindexer.requests))
+			}
+			if strings.Contains(stderr, "/") || strings.Contains(stderr, "dropscan") {
+				t.Errorf("%s: printed %q, which names a key", c.label, stderr)
+			}
+		}
+	}
+}
+
+// What the refused set would have cost, shown on a job with no snap-0, where named drops are taken unchecked: naming
+// one of the job's two drops resolves and writes a list file without the other's rows. The check against snap-0 is
+// what stands between a typo and that file.
+func TestEvsDropReindexWithNoSnapZeroWritesTheNamedSetAsItIs(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	dropX, _, _ := newEvsDropReindexTwoDropJob(world)
+	original := world.corruptListFile(0)
+	world.clock.Advance(time.Minute)
+	code, stdout, stderr := runEvsDropReindexTest(world.settings(), sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId), evsDropReindexTuple(dropX))
+	if code != 0 || !strings.Contains(stdout, "\ndrops 1 named, unchecked: the job has no snap-0\nrewritten 0\n") {
+		t.Fatalf("exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	written, err := evsservice.DecodeDropListFile(world.listFile(0), world.repoId, world.jobId, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(written.Drops) != 1 || bytes.Equal(world.listFile(0), original) {
+		t.Fatalf("the file names %d drops, where the job covered 2", len(written.Drops))
+	}
+}
+
+// A snap-0 that is there and does not read whole stops every run that needs it, exit 1, writing nothing: one naming
+// drops, which cannot be held to it, and one naming none while no list file reads whole. A run that names none while
+// a list file reads whole never reads snap-0, and runs.
+func TestEvsDropReindexRefusesWhenSnapZeroDoesNotRead(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	dropX, dropY, _ := newEvsDropReindexTwoDropJob(world)
+	world.snap(dropX, dropY)
+	world.corruptSnap()
+	world.clock.Advance(time.Minute)
+	repo, job := sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)
+
+	code, stdout, stderr := runEvsDropReindexTest(world.settings(), repo, job)
+	if code != 0 || !strings.Contains(stdout, "\nrewritten none\nwritten none\n") || strings.Contains(stdout, "\ndrop") {
+		t.Fatalf("none named, the list file whole: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+
+	world.corruptListFile(0)
+	cases := []struct {
+		label string
+		drops []string
+		want  string
+	}{
+		{label: "drops named", drops: []string{evsDropReindexTuple(dropX), evsDropReindexTuple(dropY)}, want: "its snap-0 does not read, so the drops named cannot be held to the ones it covers and nothing was written"},
+		{label: "none named", want: "no list file of it reads whole and its snap-0 does not read, so nothing was written"},
+	}
+	for _, c := range cases {
+		before := world.host.Blobs.Dump()
+		code, stdout, stderr := runEvsDropReindexTest(world.settings(), append([]string{repo, job}, c.drops...)...)
+		if code != 1 || !strings.Contains(stderr, c.want) || !strings.Contains(stderr, "report it") || stdout != "" {
+			t.Errorf("%s: exited %d, printing %q and %q, want 1 and %q", c.label, code, stdout, stderr, c.want)
+		}
+		if !maps.EqualFunc(world.host.Blobs.Dump(), before, bytes.Equal) {
+			t.Errorf("%s: a refused run changed the store", c.label)
+		}
+	}
+}
+
+// A snap-0 that covers no drop, as a job whose every drop its resolve refused writes it, gives a run nothing to take:
+// with no list file it refuses, and any drop named is one it does not cover. A snap-0 naming a drop twice, which no
+// job writes, is refused as one that does not read.
+func TestEvsDropReindexRefusesASnapZeroThatCoversNoDropOrOneTwice(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	path := evsDropReindexTestPath("x")
+	drop := world.drop(evsDropReindexTestId("drop x"), path, world.write(path, 2))
+	world.snap()
+	world.clock.Advance(time.Minute)
+	repo, job := sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)
+	before := world.host.Blobs.Dump()
+	code, stdout, stderr := runEvsDropReindexTest(world.settings(), repo, job)
+	if code != 1 || !strings.Contains(stderr, "its snap-0 covers no drop") || stdout != "" {
+		t.Fatalf("none named: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	code, stdout, stderr = runEvsDropReindexTest(world.settings(), repo, job, evsDropReindexTuple(drop))
+	if code != 1 || !strings.Contains(stderr, "the drops named are not the 0 its snap-0 covers") || !strings.Contains(stderr, "the line names and it does not cover "+sidecar.EvsKeyId(drop.DropId)) || stdout != "" {
+		t.Fatalf("one named: exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	if !maps.EqualFunc(world.host.Blobs.Dump(), before, bytes.Equal) {
+		t.Fatal("a refused run changed the store")
+	}
+
+	twice := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(evsservice.DefaultDropSettings().FileRowCount))
+	twiceDrop := twice.drop(evsDropReindexTestId("drop x"), path, twice.write(path, 2))
+	twice.snap(twiceDrop, twiceDrop)
+	twice.clock.Advance(time.Minute)
+	before = twice.host.Blobs.Dump()
+	for _, drops := range [][]string{nil, {evsDropReindexTuple(twiceDrop)}} {
+		code, stdout, stderr := runEvsDropReindexTest(twice.settings(), append([]string{sidecar.EvsKeyId(twice.repoId), sidecar.EvsKeyId(twice.jobId)}, drops...)...)
+		if code != 1 || !strings.Contains(stderr, "its snap-0 does not read") || !strings.Contains(stderr, "twice") || stdout != "" {
+			t.Errorf("a drop twice, %d named: exited %d, printing %q and %q", len(drops), code, stdout, stderr)
+		}
+	}
+	if !maps.EqualFunc(twice.host.Blobs.Dump(), before, bytes.Equal) {
+		t.Fatal("a refused run changed the store")
+	}
+}
+
+// With a recording reindex: a run naming no drops asks Reindex with none first, and only on its answer that no list
+// file reads whole asks again with snap-0's, in snap-0's order; any other error ends the run with no second ask; and
+// an error from the second ask says what it changed, as any error does.
+func TestEvsDropReindexAsksAgainWithSnapZerosDropsOnlyWhenNoListFileReadsWhole(t *testing.T) {
+	world := newEvsDropReindexWorld(t, evsDropReindexTestDropSettings(1))
+	drops := []*evsservice.DropListDrop{
+		{DropId: evsDropReindexTestId("drop b"), RefId: evsDropReindexTestId("ref b"), Version: 7, PushId: evsDropReindexTestId("push b")},
+		{DropId: evsDropReindexTestId("drop a"), RefId: evsDropReindexTestId("ref a"), Version: 9, PushId: evsDropReindexTestId("push a")},
+	}
+	world.snap(drops...)
+	repo, job := sidecar.EvsKeyId(world.repoId), sidecar.EvsKeyId(world.jobId)
+
+	noDrops := fmt.Errorf("%w: no list file reads whole", evsservice.ErrDropReindexNoDrops)
+	reindexer := &recordingEvsDropReindexer{result: &evsservice.DropReindexResult{Rewritten: []uint32{0}}}
+	reindexer.onReindex = func(ctx context.Context, request *evsservice.DropReindexRequest) error {
+		if request.Drops == nil {
+			return noDrops
+		}
+		return nil
+	}
+	code, stdout, stderr := runEvsDropReindexTest(recordingEvsDropReindexSettings(world, reindexer), repo, job)
+	if code != 0 || !strings.Contains(stdout, "\ndrops 2 taken from the job's snap-0, no list file of it reading whole\ndrop "+evsDropReindexTuple(drops[0])+"\ndrop "+evsDropReindexTuple(drops[1])+"\nrewritten 0\n") {
+		t.Fatalf("exited %d, printing %q and %q", code, stdout, stderr)
+	}
+	if len(reindexer.requests) != 2 || reindexer.requests[0].Drops != nil {
+		t.Fatalf("%d requests, the first with %v", len(reindexer.requests), reindexer.requests[0].Drops)
+	}
+	second := reindexer.requests[1]
+	if len(second.Drops) != 2 || *second.Drops[0] != *drops[0] || *second.Drops[1] != *drops[1] || second.Pace == nil ||
+		second.Cluster.ClusterId() != evsDropReindexTestClusterId || second.SegmentCluster.ClusterId() != world.segment.ClusterId() || second.RepoId != world.repoId || second.JobId != world.jobId {
+		t.Fatalf("the second request: %+v", second)
+	}
+
+	// a whole list file: one ask, snap-0 unread
+	reindexer = &recordingEvsDropReindexer{result: &evsservice.DropReindexResult{}}
+	code, stdout, stderr = runEvsDropReindexTest(recordingEvsDropReindexSettings(world, reindexer), repo, job)
+	if code != 0 || len(reindexer.requests) != 1 || strings.Contains(stdout, "\ndrop") {
+		t.Fatalf("exited %d after %d requests, printing %q and %q", code, len(reindexer.requests), stdout, stderr)
+	}
+
+	// another error: one ask
+	reindexer = &recordingEvsDropReindexer{result: &evsservice.DropReindexResult{}, err: errors.New("the store went away")}
+	code, stdout, stderr = runEvsDropReindexTest(recordingEvsDropReindexSettings(world, reindexer), repo, job)
+	if code != 1 || len(reindexer.requests) != 1 || !strings.Contains(stderr, "stopped: the store went away") || stdout != "" {
+		t.Fatalf("exited %d after %d requests, printing %q and %q", code, len(reindexer.requests), stdout, stderr)
+	}
+
+	// the second ask failing after a write says so, and prints nothing
+	reindexer = &recordingEvsDropReindexer{result: &evsservice.DropReindexResult{Written: []uint32{1}}}
+	reindexer.onReindex = func(ctx context.Context, request *evsservice.DropReindexRequest) error {
+		if request.Drops == nil {
+			return noDrops
+		}
+		reindexer.err = errors.New("the store went away")
+		return nil
+	}
+	code, stdout, stderr = runEvsDropReindexTest(recordingEvsDropReindexSettings(world, reindexer), repo, job)
+	if code != 1 || len(reindexer.requests) != 2 || !strings.Contains(stderr, "stopped after writing list files 1: the store went away") || stdout != "" {
+		t.Fatalf("exited %d after %d requests, printing %q and %q", code, len(reindexer.requests), stdout, stderr)
 	}
 }
 
