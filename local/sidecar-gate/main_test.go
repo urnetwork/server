@@ -642,3 +642,88 @@ func TestGateListRunsNoMatrixCommand(t *testing.T) {
 		t.Error("a list run failed")
 	}
 }
+
+// sidecar-gate -list M2 on this tree (TEST-M2-19): every case M2's exit sweep names where its tests run lists, each
+// of its tests declared in its package; every item lists or reads open on what it waits on, or reads missing only
+// for a §22.7 row nothing is registered to; FS-54 and FS-55 ride along; and nothing fails. A case the convention
+// names may read missing, which its owner's tests close.
+func TestGateM2ListsOnThisTree(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sidecar", "sidecartest", "fault", "catalog.yml")); err != nil {
+		t.Skipf("not run: no sidecar checkout beside the server (%v)", err)
+	}
+	environ := slices.DeleteFunc(os.Environ(), func(variable string) bool {
+		return strings.HasPrefix(variable, gateStoreWrapperVariable+"=")
+	})
+	report, err := runGate(context.Background(), &gateOptions{
+		gate:           "M2",
+		base:           "sidecar",
+		root:           root,
+		serverRelative: "server",
+		gatesPath:      "gates.yml",
+		matrixPath:     "ops-matrix.yml",
+		repos:          gateRepos,
+		environ:        environ,
+		settings:       defaultGateSettings(),
+		list:           true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gates := &gatesFile{}
+	if err := readYamlFile("gates.yml", gates); err != nil {
+		t.Fatal(err)
+	}
+	// the cases M2's sweep names in place of the convention: a T3 entry outside the convention's package or tags
+	swept := map[string]bool{}
+	items := map[string]gateRow{}
+	for _, row := range gates.Gates["M2"] {
+		if row.Item != "" {
+			items[row.Item] = row
+			continue
+		}
+		for _, test := range row.Tests {
+			if test.Repo == "server" && (test.Package != "./sidecart3" || test.Tags != "sidecar_testhooks,sidecar_pending") {
+				swept[row.label()] = true
+			}
+		}
+	}
+	if len(swept) < 20 || len(items) < 20 {
+		t.Fatalf("M2's sweep names %d cases and %d items", len(swept), len(items))
+	}
+	labels := map[string]bool{}
+	for _, result := range report.rows {
+		labels[result.label] = true
+		details := strings.Join(result.details, "; ")
+		switch {
+		case result.outcome == gateFail:
+			t.Errorf("%s fails a list: %s", result.label, details)
+		case swept[result.label] && result.outcome != gateListed:
+			t.Errorf("%s, which M2's sweep names, reads %s: %s", result.label, result.outcome, details)
+		}
+		item, isItem := items[result.label]
+		if !isItem {
+			continue
+		}
+		switch result.outcome {
+		case gateListed, gateOpen:
+		case gateMissing:
+			if 0 < len(item.Tests) || 0 < len(item.Commands) || !strings.HasPrefix(result.label, "§22.7's ") {
+				t.Errorf("item %q reads missing: %s", result.label, details)
+			}
+		default:
+			t.Errorf("item %q reads %s: %s", result.label, result.outcome, details)
+		}
+	}
+	if !labels["FS-54"] || !labels["FS-55"] {
+		t.Errorf("M2's report lacks every Gn-out's rows: %v", labels)
+	}
+	for item := range items {
+		if !labels[item] {
+			t.Errorf("M2's report lacks its item %q", item)
+		}
+	}
+}

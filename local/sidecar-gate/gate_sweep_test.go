@@ -1,11 +1,12 @@
 package main
 
 // The server tests a gate's sweep names for an FS case in place of the convention's sidecart3 test (owner decision
-// 548): FS-54's and FS-55's OPS tests, and FS-5's, FS-73's and FS-72's rollback case's T3 tests in evshost. A row
-// whose test is renamed, or whose file's build tags drift from the entry's, reads missing at the gate, never pass.
-// This test fails first: each test must be declared in its package, in a file that go test builds on this host
-// with the entry's tags. The convention's own sidecart3 entries are left out, since a test nobody has written yet
-// reads missing by design.
+// 548; QD-1081): FS-54's and FS-55's OPS tests, the T3 tests in evshost, FS-5's, FS-73's, FS-72's rollback case's
+// and M2's (gate_m2_out.go), and the sidecart3 tests M2's sweep names under the local stack's tag. A row whose test is
+// renamed, or whose file's build tags drift from the entry's, reads missing at the gate, never pass. This test fails
+// first: each test must be declared in its package, in a file that go test builds on this host with the entry's
+// tags. The convention's own sidecart3 entries, its name under its tags, are left out, since a test nobody has
+// written yet reads missing by design.
 
 import (
 	"go/ast"
@@ -65,7 +66,7 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 				continue
 			}
 			for _, test := range row.Tests {
-				conventional := test.Package == "./sidecart3" && slices.Equal(test.Names, []string{fault.GateT3TestName(testCase)})
+				conventional := test.Package == "./sidecart3" && test.Tags == "sidecar_testhooks,sidecar_pending" && slices.Equal(test.Names, []string{fault.GateT3TestName(testCase)})
 				if test.Repo != "server" || conventional {
 					continue
 				}
@@ -95,7 +96,14 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 	}
 	for _, want := range []string{
 		"M1 FS-54 . TestSidecarPendingBuildTags",
+		"M2 FS-1 ./evshost TestFs1OnT3",
 		"M2 FS-5 ./evshost TestFs5OnT3",
+		"M2 FS-10 ./evshost TestFs10TwinOnT3",
+		"M2 FS-10 ./evshost TestFs10RollbackTwinOnT3",
+		"M2 FS-113 ./evshost TestFs113OnT3",
+		"M2 FS-14 ./sidecart3 TestFs14OnT3",
+		"M2 FS-19's config-read ./sidecart3 TestFs19ConfigReadOnT3",
+		"M2 FS-124's forged ./sidecart3 TestFs124ForgedOnT3",
 		"M10 FS-73 ./evshost TestFs73OnT3",
 		"M10 FS-72's rollback ./evshost TestFs72RollbackOnT3",
 		"every FS-55 ./local/fs55 TestFs55OnServerBinaries",
