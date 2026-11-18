@@ -949,7 +949,7 @@ func DeviceConfirmAdopt(
 		if mintCredential == nil {
 			mintCredential = session.NewByJwtWithCreateTime(networkId, userId, networkName, mintTime, authType == AuthTypeGuest, isPro).Client(deviceId, clientId)
 			if session.SessionCreationEnabled() {
-				mintCredential.SessionId = &candidateSessionId
+				session.StartSessionMint(mintCredential, candidateSessionId)
 			}
 		}
 		server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, mintCredential, true))

@@ -5,8 +5,14 @@
 // transport and its lease, and rechecks on a backoff until the store answers.
 // This is the owner decision of 2026-10-11 (REVOKE-FINAL.md): during the
 // 2026-10-10 database saturation, retiring on unavailability disconnected
-// about 3 million healthy provider transports. Admission is unchanged: a new
-// transport still needs a successful check.
+// about 3 million healthy provider transports.
+//
+// Admission needs a check that answers, except that a revocation check Redis
+// does not answer accepts the credential (decision 3, 2026-11-18,
+// revocation_check.go). A transport admitted that way starts unverified: its
+// lease rechecks on the unavailable backoff, not a minute later, and a recheck
+// Redis does not answer holds the lease, as any unanswered recheck does,
+// rather than renewing it.
 package session
 
 import (
@@ -164,6 +170,26 @@ type AuthorizationLease struct {
 	check func(context.Context, *ByJwt) error
 	// start of the admission check, the first verification
 	started time.Time
+	// admitted without a verified check, or without its published connection
+	// authority: the first recheck runs on the unavailable backoff
+	admittedUnverified bool
+}
+
+// A recheck whose revocation check Redis did not answer: the credential was
+// accepted unchecked, which holds the lease and verifies nothing.
+var errAuthorizationRecheckUnchecked = errors.New("revocation check unanswered; credential accepted unchecked")
+
+// The authoritative check with the caller's revocation check report.
+func runAuthorizationCheck(ctx context.Context, check func(context.Context, *ByJwt) error, credential *ByJwt) (unchecked bool, err error) {
+	ctx, report := withRevocationCheckReport(ctx)
+	err = check(ctx, credential)
+	return err == nil && report.Unchecked(), err
+}
+
+// The delay before a retry after an unanswered check, stretched by the
+// credential's fixed jitter.
+func (self *AuthorizationLease) retryDelay(interval time.Duration) time.Duration {
+	return interval + time.Duration(float64(interval)*authorizationRetryJitter(self.credential)/2)
 }
 
 // Registration into the owning connection map must happen before calling this.
@@ -194,7 +220,7 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 		}
 	}
 	checkCtx, cancelCheck := context.WithTimeout(ctx, 2*time.Second)
-	err := check(checkCtx, credential)
+	unchecked, err := runAuthorizationCheck(checkCtx, check, credential)
 	cancelCheck()
 	if err != nil {
 		return nil, err
@@ -207,8 +233,18 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 		return nil, errors.New("credential expired")
 	}
 	if publish != nil {
-		if err := publish(ctx, deadline); err != nil {
-			return nil, ErrAuthUnavailable
+		// Best effort within the check budget, as at every recheck: until a
+		// recheck publishes it, the endpoint's new streams stay on relay. A
+		// Redis that does not answer must not refuse the transport
+		// (decision 3) or hold its handshake for seconds.
+		publishCtx, cancelPublish := context.WithTimeout(ctx, RevocationCheckBudget)
+		err := publish(publishCtx, deadline)
+		cancelPublish()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ErrAuthUnavailable
+			}
+			unchecked = true
 		}
 	}
 	// The caller's state-query source names the final check above, a query of
@@ -216,7 +252,7 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 	// that source does not describe and no other covers yet, so they count as
 	// unknown.
 	leaseCtx, cancel := context.WithCancel(WithStateQuerySource(ctx, StateQueryUnknown))
-	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check, started: start}
+	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check, started: start, admittedUnverified: unchecked}
 	go lease.runTimer()
 	go lease.runChecks()
 	return lease, nil
@@ -283,10 +319,14 @@ func (self *AuthorizationLease) runTimer() {
 func (self *AuthorizationLease) runChecks() {
 	ticker := time.NewTicker(AuthorizationRecheckInterval)
 	defer ticker.Stop()
-	// armed only after an unanswered recheck; a nil channel never fires
+	// armed only after an unanswered check; a nil channel never fires
 	var retry <-chan time.Time
 	retryInterval := AuthorizationUnavailableRetryInterval
 	verified := self.started
+	if self.admittedUnverified {
+		retry = time.After(self.retryDelay(retryInterval))
+		retryInterval = min(2*retryInterval, AuthorizationUnavailableRetryMaxInterval)
+	}
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -307,9 +347,12 @@ func (self *AuthorizationLease) runChecks() {
 		if closed {
 			return
 		}
-		ctx, cancel := context.WithTimeout(self.ctx, 2*time.Second)
-		err := check(ctx, self.credential)
+		ctx, cancel := context.WithTimeout(withRevocationCheckPath(self.ctx, revocationCheckPathLease), 2*time.Second)
+		unchecked, err := runAuthorizationCheck(ctx, check, self.credential)
 		cancel()
+		if unchecked {
+			err = errAuthorizationRecheckUnchecked
+		}
 		if err != nil {
 			if !authorizationRejectionDefinitive(err) {
 				noteAuthorizationUnanswered(self.credential, start.Sub(verified), err)
@@ -324,7 +367,7 @@ func (self *AuthorizationLease) runChecks() {
 					_ = self.publish(ctx, deadline)
 					cancel()
 				}
-				retry = time.After(retryInterval + time.Duration(float64(retryInterval)*authorizationRetryJitter(self.credential)/2))
+				retry = time.After(self.retryDelay(retryInterval))
 				retryInterval = min(2*retryInterval, AuthorizationUnavailableRetryMaxInterval)
 				continue
 			}
