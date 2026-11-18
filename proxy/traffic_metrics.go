@@ -271,6 +271,9 @@ type proxyMetricsConn struct {
 	closeOnce    sync.Once
 	readFailure  atomic.Bool
 	writeFailure atomic.Bool
+	// observes the CONNECT's setup at the destination's first byte; nil
+	// observes nothing (setup_metrics.go)
+	firstByte *proxyConnectFirstByte
 }
 
 // Read implements net.Conn.
@@ -279,6 +282,9 @@ func (self *proxyMetricsConn) Read(buffer []byte) (int, error) {
 	if 0 < count {
 		self.readBytes.Add(float64(count))
 		self.reportActivity()
+		if self.firstByte != nil {
+			self.firstByte.observe()
+		}
 	}
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 		self.readFailure.Store(true)
@@ -328,6 +334,16 @@ func (self *proxyMetricsConn) Close() error {
 // through (`ProxyDevice.UpdateActivity`); nil records none.
 func instrumentProxyConnection(protocol string, conn net.Conn, activity func() bool) net.Conn {
 	return defaultProxyTrafficMetrics.instrumentConnection(protocol, conn, activity)
+}
+
+// instrumentProxySetupConnection is instrumentProxyConnection that also
+// observes the CONNECT's setup time at the destination's first byte.
+func instrumentProxySetupConnection(protocol string, conn net.Conn, activity func() bool, firstByte *proxyConnectFirstByte) net.Conn {
+	instrumented := defaultProxyTrafficMetrics.instrumentConnection(protocol, conn, activity)
+	if metricsConn, ok := instrumented.(*proxyMetricsConn); ok {
+		metricsConn.firstByte = firstByte
+	}
+	return instrumented
 }
 
 // instrumentConnection wraps one successful dial with this metric family.

@@ -541,6 +541,8 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 	}
 
 	connectDial := func(ctx context.Context, r proxy.SocksRequest, network string, addr string) (net.Conn, error) {
+		// the library dials a SOCKS CONNECT once, as the request comes
+		connectStart := time.Now()
 		ctx, cancel := context.WithTimeout(ctx, connectBudget)
 		defer cancel()
 		username := r.AuthContext.Payload["username"]
@@ -567,7 +569,10 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 		// every provider, drops the dial's SYNs and its DoH queries, and the
 		// dial would wait out the stack's backoff, missing a provider that
 		// joins late in the budget. Wait for the first one, within ctx.
-		if !pd.WaitForRoute(ctx, connectBudget) {
+		routeWaitStart := time.Now()
+		routed := pd.WaitForRoute(ctx, connectBudget)
+		pd.setup.observeRouteWait(connectStart, routed, time.Since(routeWaitStart))
+		if !routed {
 			recordProxyAdmissionFailure("socks", false)
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -575,13 +580,15 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			return nil, errProxyDeviceNoRoute
 		}
 
+		dialStart := time.Now()
 		conn, err := pd.DialContext(ctx, network, addr)
+		pd.setup.observeDial(time.Since(dialStart), err)
 		if err != nil {
 			recordProxyAdmissionFailure("socks", false)
 			return nil, err
 		}
 		pd.recordFlowTraceDial("socks", conn)
-		return instrumentProxyConnection("socks", conn, pd.UpdateActivity), nil
+		return instrumentProxySetupConnection("socks", conn, pd.UpdateActivity, pd.setup.connectSetup("socks", connectStart)), nil
 	}
 
 	socksSettings := proxy.DefaultSocksProxySettings()
@@ -712,6 +719,9 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 	// answers at once (see proxy.ConnectRefusal); any other error is retried
 	// within the proxy's connect budget, which ctx carries.
 	connectDial := func(ctx context.Context, r *http.Request, network string, addr string) (net.Conn, error) {
+		// the library's budget is the same, from the same settings, so this
+		// attempt's CONNECT began one budget before its dial deadline
+		connectStart := proxyConnectStart(ctx, connectBudget, time.Now())
 		// CONNECT already supplies its total budget. Ordinary forwarding also
 		// needs a finite setup deadline for admission's Redis socket reads.
 		ctx, cancel := context.WithTimeout(ctx, connectBudget)
@@ -766,7 +776,10 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 		// A window still forming has no provider to carry the dial. Wait for its
 		// first one, within ctx, rather than dial into it and be retried on a
 		// timer.
-		if !pd.WaitForRoute(ctx, self.settings.ProxyConnectBudget) {
+		routeWaitStart := time.Now()
+		routed := pd.WaitForRoute(ctx, self.settings.ProxyConnectBudget)
+		pd.setup.observeRouteWait(connectStart, routed, time.Since(routeWaitStart))
+		if !routed {
 			recordProxyAdmissionFailure("http", false)
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -774,13 +787,15 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			return nil, errProxyDeviceNoRoute
 		}
 
+		dialStart := time.Now()
 		conn, err := pd.DialContext(ctx, network, addr)
+		pd.setup.observeDial(time.Since(dialStart), err)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
 			return nil, connectDialRefusal(err)
 		}
 		pd.recordFlowTraceDial("http", conn)
-		return instrumentProxyConnection("http", conn, pd.UpdateActivity), nil
+		return instrumentProxySetupConnection("http", conn, pd.UpdateActivity, pd.setup.connectSetup("http", connectStart)), nil
 	}
 
 	httpSettings := proxy.DefaultHttpProxySettings()
