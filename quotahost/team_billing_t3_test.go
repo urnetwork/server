@@ -13,7 +13,9 @@ package quotahost
 //	E-b  a partial settlement keeps bytes on the grant and the pack and returns the line's reservation first
 //	E-e  the provider is paid for the line's bytes at the line's rate
 //	E-c  each byte the line paid reaches Stripe once: the day's team_transfer_overage row is the line's bytes,
-//	     its meter row is sent once under its identifier, and a rerun of the rollup and of the sender adds none
+//	     its meter row is sent once under its identifier, a rerun of the rollup and of the sender adds none, and
+//	     an event Stripe took while its answer was lost is sent again under the same identifier and billed once
+//	     (FS-43's first step, on these rows)
 //	E-d  a lease on the line whose edge is killed leaves no reservation and no debit past its token's lifetime
 //
 // and escrow_draw_order refuses to turn off while the line is in window. The Stripe here is this file's: it takes
@@ -101,6 +103,9 @@ type teamBillingStripe struct {
 	identifierValues map[string]int64
 	identifierMeters map[string]string
 	sendCount        int
+	// the next event on this meter is taken and its answer dropped (FS-43)
+	dropAnswerMeter string
+	droppedCount    int
 }
 
 // Sends every row due at now, as the sender does, until none is: each claimed row once, an identifier Stripe
@@ -121,7 +126,14 @@ func (self *teamBillingStripe) sendDue(t testing.TB, ctx context.Context, now ti
 				self.identifierValues[send.Report.Identifier] = send.Report.Value
 				self.identifierMeters[send.Report.Identifier] = send.Report.Meter
 			}
-			if _, err := model.RecordStripeMeterOutcome(ctx, send, model.StripeMeterOutcomeSent, now); err != nil {
+			outcome := model.StripeMeterOutcomeSent
+			if self.dropAnswerMeter != "" && send.Report.Meter == self.dropAnswerMeter {
+				// Stripe holds the event; the sender saw a timeout
+				self.dropAnswerMeter = ""
+				self.droppedCount += 1
+				outcome = model.StripeMeterOutcomeUncertain
+			}
+			if _, err := model.RecordStripeMeterOutcome(ctx, send, outcome, now); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -500,7 +512,19 @@ func TestTeamBillingFs46T3(t *testing.T) {
 		byteCount, written = world.overage(tomorrow)
 		connect.AssertEqual(t, written, true)
 		connect.AssertEqual(t, byteCount, int64(lineSecondDay))
+		// FS-43 on these rows: Stripe takes the second day's transfer event and drops its answer, and the
+		// sender's retry under the same identifier adds nothing
+		stripe.dropAnswerMeter = model.TeamMeterTransferOverage
+		sendCount = stripe.sendCount
 		stripe.sendDue(t, ctx, nextClose.Add(time.Minute))
+		connect.AssertEqual(t, stripe.droppedCount, 1)
+		heldCount := len(stripe.identifierValues)
+		stripe.sendDue(t, ctx, nextClose.Add(3*time.Hour))
+		if stripe.sendCount <= sendCount+1 {
+			t.Fatal("FS-43: the event whose answer was dropped was not sent again")
+		}
+		connect.AssertEqual(t, len(stripe.identifierValues), heldCount)
+		stripe.sendDue(t, ctx, nextClose.Add(6*time.Hour))
 		// FI-13 (d) E-c: what Stripe bills is what the line paid, each byte once
 		lineUsed := int64(teamBillingRoom - world.balance(world.lineId))
 		connect.AssertEqual(t, lineUsed, int64(lineFirstDay+lineSecondDay))
