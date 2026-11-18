@@ -20,10 +20,18 @@ type windowIdentityStore struct {
 	ctx         context.Context
 	proxyId     server.Id
 	restoreGate *windowIdentityRestoreGate
+	// The provider the device's location pins, as a unique-exit proxy's
+	// does, else nil. A restored identity must dial it: a unique exit can be
+	// replaced while the proxy has no device (a sweep, or the owner's
+	// rotate), and the snapshot then still names the exit it replaced.
+	pinnedExitClientId *server.Id
 
 	loadWindowIdentities  func(context.Context, server.Id) []*model.ProxyWindowClientIdentity
 	storeWindowIdentities func(context.Context, server.Id, []*model.ProxyWindowClientIdentity)
-	restoreHeldLogged     atomic.Bool
+	// restarts the persisted snapshot's ttl at the device's close
+	// (model.RefreshProxyWindowIdentities)
+	refreshWindowIdentities func(context.Context, server.Id) bool
+	restoreHeldLogged       atomic.Bool
 }
 
 // A replacement accepts new public traffic before the old instance finishes
@@ -138,15 +146,55 @@ func (self *windowIdentityRestoreGate) Release() {
 // Adapts the production Redis functions and the process deployment gate.
 func newWindowIdentityStore(
 	ctx context.Context,
-	proxyId server.Id,
+	proxyDeviceConfig *model.ProxyDeviceConfig,
 	restoreGate *windowIdentityRestoreGate,
 ) *windowIdentityStore {
 	return &windowIdentityStore{
-		ctx:                   ctx,
-		proxyId:               proxyId,
-		restoreGate:           restoreGate,
-		loadWindowIdentities:  model.GetProxyWindowIdentities,
-		storeWindowIdentities: model.SetProxyWindowIdentities,
+		ctx:                     ctx,
+		proxyId:                 proxyDeviceConfig.ProxyId,
+		restoreGate:             restoreGate,
+		pinnedExitClientId:      windowIdentityPinnedExitClientId(proxyDeviceConfig),
+		loadWindowIdentities:    model.GetProxyWindowIdentities,
+		storeWindowIdentities:   model.SetProxyWindowIdentities,
+		refreshWindowIdentities: model.RefreshProxyWindowIdentities,
+	}
+}
+
+// The provider the device's initial location pins (ConnectLocationId
+// ClientId), else nil.
+func windowIdentityPinnedExitClientId(proxyDeviceConfig *model.ProxyDeviceConfig) *server.Id {
+	initialDeviceState := proxyDeviceConfig.InitialDeviceState
+	if initialDeviceState == nil ||
+		initialDeviceState.Location == nil ||
+		initialDeviceState.Location.ConnectLocationId == nil ||
+		initialDeviceState.Location.ConnectLocationId.ClientId == nil {
+		return nil
+	}
+	clientId := server.RequireIdFromBytes(initialDeviceState.Location.ConnectLocationId.ClientId.Bytes())
+	return &clientId
+}
+
+// Called once the device's DeviceLocal has closed, after the window's last
+// snapshot write. A closing device leaves its window identities registered
+// (connect keeps them when a store is set), and the snapshot written at the
+// window's last change names them. This restarts the snapshot's ttl, so a
+// reopen within model.ProxyWindowIdentityTtl of the close restores the
+// identities instead of minting new ones (P90SPEED.md §4.1, fix 4). It writes
+// no identities, so it cannot replace a snapshot a newer device of the proxy
+// wrote. Skipped while the deployment gate holds restoration (the gate's
+// release writes the newest snapshot with a full ttl) and once the owner is
+// shutting down; a failure is logged and the snapshot keeps its ttl.
+func (self *windowIdentityStore) deviceClosed() {
+	if self == nil || self.refreshWindowIdentities == nil {
+		return
+	}
+	if !self.restoreGate.restorationAllowed() || self.ctx.Err() != nil {
+		return
+	}
+	if r := server.HandleError(func() {
+		self.refreshWindowIdentities(self.ctx, self.proxyId)
+	}); r != nil {
+		glog.Infof("[pd][%s]window identity refresh at close err=%v\n", self.proxyId, r)
 	}
 }
 
@@ -210,6 +258,10 @@ func (self *windowIdentityStore) LoadWindowClientIdentitiesContext(ctx context.C
 		}
 		destination, err := connect.NewMultiHopId(destinationIds...)
 		if err != nil {
+			continue
+		}
+		// a pinned device restores only identities of its current exit
+		if self.pinnedExitClientId != nil && server.Id(destination.Tail()) != *self.pinnedExitClientId {
 			continue
 		}
 		identities = append(identities, &connect.WindowClientIdentity{

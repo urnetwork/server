@@ -22,7 +22,6 @@ import (
 	"github.com/urnetwork/server/localclient"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy/flowtrace"
-	"github.com/urnetwork/server/session"
 )
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
@@ -265,6 +264,9 @@ type ProxyDeviceManager struct {
 	// for a manager without an owner.
 	featureUseNoter    func(proxyId server.Id, feature string, useTime time.Time)
 	windowIdentityGate *windowIdentityRestoreGate
+	// Each proxy's hosted session, reused by its next device
+	// (hosted_session_reuse.go).
+	hostedSessions *hostedSessionCache
 	// One registration bound shared by every device this manager opens.
 	mintAdmission *localclient.MintAdmission
 	// One contract creation bound shared by every device this manager opens.
@@ -350,6 +352,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		windowIdentityGate: newWindowIdentityRestoreGate(
 			settings.HoldWindowIdentityRestore,
 		),
+		hostedSessions:         newHostedSessionCache(),
 		mintAdmission:          localclient.NewMintAdmission(settings.HostedMintConcurrency),
 		contractAdmission:      localclient.NewContractAdmission(settings.HostedContractConcurrency),
 		schedulerPauseDetector: connect.NewSchedulerPauseDetector(cancelCtx),
@@ -766,6 +769,7 @@ func (self *ProxyDeviceManager) proxyDeviceSettings() *ProxyDeviceSettings {
 	settings.HostedEvaluationPoolMultiple = self.settings.HostedEvaluationPoolMultiple
 	settings.PlatformPlacement = self.settings.PlatformPlacement
 	settings.windowIdentityGate = self.windowIdentityGate
+	settings.hostedSessions = self.hostedSessions
 	settings.mintAdmission = self.mintAdmission
 	settings.contractAdmission = self.contractAdmission
 	settings.contractOriginNotifications = self.contractOriginNotifications
@@ -1265,6 +1269,8 @@ type ProxyDeviceSettings struct {
 	// ProxyDeviceManagerSettings). Nil resolves the platform host.
 	PlatformPlacement  connect.PlatformPlacement
 	windowIdentityGate *windowIdentityRestoreGate
+	// the owning manager's hosted sessions; nil mints one for every device
+	hostedSessions *hostedSessionCache
 	// the owning manager's registration bound; nil is unbounded
 	mintAdmission *localclient.MintAdmission
 	// the owning manager's contract creation bound; nil is unbounded
@@ -1308,6 +1314,9 @@ type ProxyDevice struct {
 
 	deviceLocal  *sdk.DeviceLocal
 	localControl *localclient.Authority
+	// the window identity persistence, whose ttl Close restarts
+	// (windowIdentityStore.deviceClosed); nil when persistence is off
+	windowIdentityStore *windowIdentityStore
 	// applies the hosted evaluation pool multiple to each window; nil when
 	// the device keeps the connect default
 	hostedEvaluationPoolSub sdk.Sub
@@ -1399,22 +1408,19 @@ func NewProxyDevice(
 	networkSpace *sdk.NetworkSpace,
 	settings *ProxyDeviceSettings,
 ) (*ProxyDevice, error) {
-	// this jwt is used to access the services in the network space
-	byJwt, err := session.LoadByJwtFromClientId(ctx, proxyDeviceConfig.ClientId)
+	// this jwt is used to access the services in the network space: the
+	// proxy's previous device's while it is reusable, else a new one
+	// (hosted_session_reuse.go)
+	signedByJwt, localControl, err := settings.hostedSessions.openAuthority(
+		ctx,
+		proxyDeviceConfig.ClientId,
+		networkSpace.GetApiUrl(),
+		settings.authoritySettings(),
+	)
 	if err != nil {
 		return nil, err
-	}
-
-	signedByJwt, mintErr := session.MintHostedSession(ctx, byJwt)
-	if mintErr != nil {
-		return nil, mintErr
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
-	localControl, err := localclient.NewWithSettings(ctx, signedByJwt, networkSpace.GetApiUrl(), settings.authoritySettings())
-	if err != nil {
-		cancel()
-		return nil, err
-	}
 	transferredControl := false
 	defer func() {
 		if !transferredControl {
@@ -1517,6 +1523,8 @@ func NewProxyDevice(
 	rpcListener := sdk.NewHostedDeviceRpcListener(cancelCtx)
 	deviceLocal.StartHostedRpc(rpcListener, deviceGeneration.String())
 
+	// nil when the device persists no window identities
+	identityStore, _ := deviceLocalSettings.MultiClientIdentityStore.(*windowIdentityStore)
 	proxyDevice := &ProxyDevice{
 		ctx:                     cancelCtx,
 		cancel:                  cancel,
@@ -1525,6 +1533,7 @@ func NewProxyDevice(
 		proxyDeviceConfig:       proxyDeviceConfig,
 		deviceLocal:             deviceLocal,
 		localControl:            localControl,
+		windowIdentityStore:     identityStore,
 		hostedEvaluationPoolSub: hostedEvaluationPoolSub,
 		deviceState:             deviceLocal,
 		tun:                     tun,
@@ -1599,7 +1608,7 @@ func newProxyDeviceLocalSettings(
 	if !proxyDeviceSettings.DisableWindowIdentityPersistence {
 		deviceLocalSettings.MultiClientIdentityStore = newWindowIdentityStore(
 			ctx,
-			proxyDeviceConfig.ProxyId,
+			proxyDeviceConfig,
 			proxyDeviceSettings.windowIdentityGate,
 		)
 	}
@@ -2480,6 +2489,8 @@ func (self *ProxyDevice) Close() error {
 		} else if self.deviceLocal != nil {
 			_ = self.deviceLocal.CloseAndWait(context.Background())
 		}
+		// after the window's last snapshot write
+		self.windowIdentityStore.deviceClosed()
 		if self.localControl != nil {
 			self.localControl.Close()
 		}
