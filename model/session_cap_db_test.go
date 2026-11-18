@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	promdto "github.com/prometheus/client_model/go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -395,8 +396,8 @@ func TestHostedProxyOwnRevokeEndsItForGood(t *testing.T) {
 		}
 		after, err := session.LoadByJwtFromClientId(ctx, proxy)
 		server.Raise(err)
-		if signed, err := session.MintHostedSession(ctx, after); signed != "" || err == nil {
-			t.Fatal("a removed proxy bootstrapped another session")
+		if signed, err := session.MintHostedSession(ctx, after); signed != "" || !errors.Is(err, session.ErrByJwtInactive) {
+			t.Fatal("a removed proxy bootstrapped another session, or was refused without the inactive credential error", err)
 		}
 		if got := len(sessionCapMembers(t, ctx, network.networkId, "z")); got != live-1 {
 			t.Fatal("live sessions", got, live)
@@ -708,6 +709,37 @@ func TestAuthCodeCreateRestoredSessionIsPublished(t *testing.T) {
 		})
 		if !published && queued == 0 {
 			t.Fatal("the restored session's network is neither in the index nor queued for it")
+		}
+	})
+}
+
+// R-refuse (session1118 D F1): an SSO sign-in at an enforced session cap
+// returns the cap's refusal, which the router answers 409
+// session_limit_reached. Its mint raised the refusal, which escaped the route
+// as a 500.
+func TestSsoSignInReturnsTheSessionCapRefusal(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1000, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		ctx := t.Context()
+		network, user := server.NewId(), server.NewId()
+		userAuth := Testing_CreateNetwork(ctx, network, "sso-cap", user)
+		members := make([]redis.Z, 1000)
+		for i := range members {
+			members[i] = redis.Z{Score: float64(server.NowUtc().AddDate(0, 0, 30).UnixMilli()), Member: server.NewId().String()}
+		}
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			return r.ZAdd(ctx, session.SessionKey(network, "z"), members...).Err()
+		}))
+		result, err := handleLoginParsedAuthJwt(&HandleLoginParsedAuthJwtArgs{
+			AuthJwt:           AuthJwt{AuthType: SsoAuthTypeGoogle, UserAuth: userAuth},
+			UserAuthAttemptId: UserAuthAttemptId{},
+		}, ctx)
+		var refusal *session.SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" || result != nil {
+			t.Fatal("the SSO sign-in at the cap", result, err)
 		}
 	})
 }

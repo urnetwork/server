@@ -664,10 +664,12 @@ func contains(s, sub string) bool {
 	return false
 }
 
-// S2 N1: a sign out of other sessions whose kept session ended before it was
-// enforced fails for good and releases its quota. Left prepared, the journal
-// held every other session of the network unavailable, and recovery could
-// never apply it.
+// S2 N1: a sign out of other sessions whose kept session left the live set
+// before it was enforced (its horizon passed, or the store lost the member)
+// fails for good and releases its quota. Left prepared, the journal held every
+// other session of the network unavailable, and recovery could never apply it.
+// (A kept session revoked from another device instead cancels the operation:
+// its actor no longer validates.)
 func TestRevokeOthersWhoseKeptSessionEndedFailsAndReleasesTheNetwork(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -684,10 +686,10 @@ func TestRevokeOthersWhoseKeptSessionEndedFailsAndReleasesTheNetwork(t *testing.
 		if err := prepareSessionOperation(actor, op, "others", nil, actor.ByJwt.SessionId); err != nil {
 			t.Fatal(err)
 		}
-		// the kept session is revoked from another device before enforcement
-		if _, err := enforceSessionRevoke(ctx, actor.ByJwt.NetworkId, server.NewId(), "single", actor.ByJwt.SessionId, nil); err != nil {
-			t.Fatal(err)
-		}
+		// the kept session leaves the live set, with no marker, before enforcement
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			return r.ZRem(ctx, SessionKey(actor.ByJwt.NetworkId, "z"), actor.ByJwt.SessionId.String()).Err()
+		}))
 		_, err := EnforceSessionOperation(ctx, actor.ByJwt.NetworkId, op)
 		var refusal *SessionError
 		if !errors.As(err, &refusal) || refusal.Code != "current_session_required" {
@@ -756,4 +758,36 @@ func TestSessionDarkCreationStillExtendsTaggedRenewals(t *testing.T) {
 func isSessionCode(err error, code string) bool {
 	var refusal *SessionError
 	return errors.As(err, &refusal) && refusal.Code == code
+}
+
+// session1118 D F7: one repair stage drains an outbox several batches deep,
+// as a Redis blip leaves one. It repaired one 64-network batch per 30-second
+// pass, and the backlog of Main's minting networks grew without bound.
+func TestSessionIndexRepairDrainsABacklogInOneStage(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		networks := make([]server.Id, 300)
+		server.Raise(sessionTx(ctx, func(tx server.PgTx) error {
+			for i := range networks {
+				networks[i] = server.NewId()
+				if err := QueueSessionIndexInTx(ctx, tx, networks[i], now.Add(time.Hour)); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+		stageCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := RepairSessionIndexes(stageCtx, 64); err != nil {
+			t.Fatal(err)
+		}
+		var left int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM network_session_index_outbox WHERE network_id = ANY($1)`, networks).Scan(&left))
+		})
+		if left != 0 {
+			t.Fatal("the repair left a backlog", left)
+		}
+	})
 }

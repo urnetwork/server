@@ -67,8 +67,30 @@ func Testing_FailSessionIndexPublishOnMint() func() {
 	return func() { publishSessionIndexOnMint = previous }
 }
 
+// RepairSessionIndexes drains the index outbox, limit networks per
+// transaction, batch after batch until the outbox is empty, a batch leaves an
+// entry it could not repair, or the context ends. One 64-network batch per
+// 30-second pass could not keep up with networks that mint (session1118 D
+// F7); mints now publish inline and queue only a failed publication (W7), and
+// a stage drains what a Redis blip leaves within its budget.
 func RepairSessionIndexes(ctx context.Context, limit int) error {
-	return sessionTx(ctx, func(tx server.PgTx) error {
+	for ctx.Err() == nil {
+		selected, repaired, err := repairSessionIndexBatch(ctx, limit)
+		if err != nil {
+			return err
+		}
+		if selected < limit || repaired < selected {
+			return nil
+		}
+	}
+	return nil
+}
+
+// One batch: the oldest limit outbox entries, each reviewed and published,
+// then deleted at its revision, in one transaction.
+func repairSessionIndexBatch(ctx context.Context, limit int) (selected int, repaired int, returnErr error) {
+	returnErr = sessionTx(ctx, func(tx server.PgTx) error {
+		selected, repaired = 0, 0
 		rows, err := tx.Query(ctx, `SELECT network_id,revision,next_review_time FROM network_session_index_outbox ORDER BY update_time,network_id LIMIT $1 FOR UPDATE SKIP LOCKED`, limit)
 		if err != nil {
 			return err
@@ -91,6 +113,7 @@ func RepairSessionIndexes(ctx context.Context, limit int) error {
 		if err != nil {
 			return err
 		}
+		selected = len(repairs)
 		for _, item := range repairs {
 			// A lost index can coexist with older live sessions. The touched
 			// mint's deadline alone is not the network's next review time.
@@ -109,9 +132,11 @@ func RepairSessionIndexes(ctx context.Context, limit int) error {
 			if _, err = tx.Exec(ctx, `DELETE FROM network_session_index_outbox WHERE network_id=$1 AND revision=$2`, item.networkId, item.revision); err != nil {
 				return err
 			}
+			repaired++
 		}
 		return nil
 	})
+	return
 }
 
 // Review each network under its own slot, then use a revision CAS on the index.

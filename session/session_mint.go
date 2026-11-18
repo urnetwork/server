@@ -372,6 +372,12 @@ func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, e
 		var sid *server.Id
 		var lineage *time.Time
 		if err := tx.QueryRow(ctx, `SELECT session_id,session_create_time FROM network_client WHERE network_id=$1 AND client_id=$2 AND active FOR UPDATE`, credential.NetworkId, credential.ClientId).Scan(&sid, &lineage); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// a removed proxy (its own session revoked and cleaned up, or
+				// the client deleted) is a definitive refusal, not a bare
+				// "no rows in result set" (session1118 D F3)
+				return ErrByJwtInactive
+			}
 			return err
 		}
 		if sid != nil {
