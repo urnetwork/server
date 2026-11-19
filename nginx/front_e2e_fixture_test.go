@@ -204,6 +204,9 @@ func newE2eUpstream(t *testing.T, service string, block string, monitor *e2eMoni
 		Handler:   http.HandlerFunc(upstream.serveHttp),
 		ConnState: upstream.connState,
 		ErrorLog:  log.New(io.Discard, "", 0),
+		// past nginx's max_headers, so a head the front forwards whole
+		// reaches the handler
+		MaxHeaderValueCount: 4 * 1000,
 	}
 	go upstream.server.Serve(listener)
 	t.Cleanup(func() {

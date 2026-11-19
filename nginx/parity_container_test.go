@@ -247,6 +247,9 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 			httpServer := &http.Server{
 				Handler:  harness.recorder.handler(service.Name, block.Name),
 				ErrorLog: discardLog,
+				// past nginx's max_headers, so a head both sides forward
+				// whole reaches the recorder
+				MaxHeaderValueCount: 4 * 1000,
 			}
 			harness.httpServers = append(harness.httpServers, httpServer)
 			go httpServer.Serve(listener)

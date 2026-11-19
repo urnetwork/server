@@ -448,6 +448,13 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	if want := 2 * httpSettings.MaxRequestHeadersTotalBytes; httpServer.MaxHeaderBytes != want {
 		t.Errorf("MaxHeaderBytes %d, want twice MaxRequestHeadersTotalBytes, %d", httpServer.MaxHeaderBytes, want)
 	}
+	// twice nginx's max_headers, past Go's default 500
+	if httpSettings.ServerHeaderLinesMultiple != 2 || httpSettings.MaxRequestHeaderLines != 1000 {
+		t.Errorf("ServerHeaderLinesMultiple %d, MaxRequestHeaderLines %d, want 2 and 1000", httpSettings.ServerHeaderLinesMultiple, httpSettings.MaxRequestHeaderLines)
+	}
+	if httpServer.MaxHeaderValueCount != 2*1000 {
+		t.Errorf("MaxHeaderValueCount %d, want twice MaxRequestHeaderLines, 2000", httpServer.MaxHeaderValueCount)
+	}
 	if httpServer.HTTP2 == nil ||
 		httpServer.HTTP2.MaxConcurrentStreams != httpSettings.Http2MaxConcurrentStreams ||
 		httpServer.HTTP2.WriteByteTimeout != httpSettings.SendTimeout ||
@@ -479,11 +486,20 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	zeroSettings.Http.MaxRequestHeadersTotalBytes = 0
 	zeroSettings.Http.Http2MaxConcurrentStreams = 0
 	zeroSettings.Http.SendTimeout = 0
+	zeroSettings.Http.MaxRequestHeaderLines = 0
 	zeroFront := newTestFront(t, loadTestRouteTable(t), zeroSettings)
 	zeroServer := &http.Server{}
 	zeroFront.front.ConfigureServer(zeroServer)
-	if zeroServer.ReadHeaderTimeout != 0 || zeroServer.MaxHeaderBytes != 0 || zeroServer.HTTP2 != nil {
-		t.Errorf("non-positive settings set ReadHeaderTimeout %s, MaxHeaderBytes %d, HTTP2 %+v", zeroServer.ReadHeaderTimeout, zeroServer.MaxHeaderBytes, zeroServer.HTTP2)
+	if zeroServer.ReadHeaderTimeout != 0 || zeroServer.MaxHeaderBytes != 0 || zeroServer.MaxHeaderValueCount != 0 || zeroServer.HTTP2 != nil {
+		t.Errorf("non-positive settings set ReadHeaderTimeout %s, MaxHeaderBytes %d, MaxHeaderValueCount %d, HTTP2 %+v", zeroServer.ReadHeaderTimeout, zeroServer.MaxHeaderBytes, zeroServer.MaxHeaderValueCount, zeroServer.HTTP2)
+	}
+	zeroMultipleSettings := testFrontSettings()
+	zeroMultipleSettings.Http.ServerHeaderLinesMultiple = 0
+	zeroMultipleFront := newTestFront(t, loadTestRouteTable(t), zeroMultipleSettings)
+	zeroMultipleServer := &http.Server{}
+	zeroMultipleFront.front.ConfigureServer(zeroMultipleServer)
+	if zeroMultipleServer.MaxHeaderValueCount != 0 {
+		t.Errorf("a non-positive lines multiple set MaxHeaderValueCount %d", zeroMultipleServer.MaxHeaderValueCount)
 	}
 
 	// the server's header bytes follow the multiple, and a non-positive one

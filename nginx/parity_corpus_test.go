@@ -511,6 +511,17 @@ func parityCorpus() []*parityCase {
 		limitIndex += 1
 		return client
 	}
+	// count short header lines
+	shortHeaderLines := func(count int) [][2]string {
+		lines := [][2]string{}
+		for i := range count {
+			lines = append(lines, [2]string{"X-Parity-Line-" + strconv.Itoa(i), "v"})
+		}
+		return lines
+	}
+	// the lines an h1 GET carries besides its own: Host, the case's two,
+	// User-Agent and Connection
+	const parityGetOwnHeaderLines = 5
 	headLines := func(count int) [][2]string {
 		lines := [][2]string{}
 		for i := range count {
@@ -863,6 +874,11 @@ func parityCorpus() []*parityCase {
 		{name: "limits/head-of-73k", request: parityWith(api, "", headLines(11)...)},
 		{name: "limits/head-of-139k", request: parityWith(api, "", headLines(21)...), tags: []string{"past-max-header-bytes"}},
 		{name: "limits/head-of-60k-over-h2", request: parityOverH2(parityWith(api, "", headLines(9)...))},
+		// nginx's max_headers: 1000 header lines, Host included, and one more
+		// is a 400
+		{name: "limits/header-lines-at-1000", request: parityWith(api, "", shortHeaderLines(1000-parityGetOwnHeaderLines)...)},
+		{name: "limits/header-lines-past-1000", request: parityWith(api, "", shortHeaderLines(1001-parityGetOwnHeaderLines)...)},
+		{name: "limits/header-lines-past-1000-with-ignored-names", request: parityWith(api, "", append(shortHeaderLines(1000-parityGetOwnHeaderLines), [2]string{"X_Parity_Ignored", "v"})...)},
 		{name: "limits/trace", request: parityWith(api, "TRACE")},
 		{name: "limits/trace-over-h2", request: parityOverH2(parityWith(api, "TRACE"))},
 		{name: "limits/lowercase-method", request: parityWith(api, "get")},

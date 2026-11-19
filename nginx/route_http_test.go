@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -823,6 +824,97 @@ func TestRouteHttpH3ServesOnlyApiAuthorities(t *testing.T) {
 	}
 	if len(testFront.forwarders["mcp"].recordedForwards()) != 0 || len(testFront.connectHandler.recordedRequests()) != 0 {
 		t.Error("an h3 request reached a service other than the api")
+	}
+}
+
+// A request may carry nginx's max_headers, 1000 header lines, and one more
+// is a 400: on h1 every line Go's server left in the header map, and its
+// Host and Transfer-Encoding lines, which it took out; on h2 and h3 every
+// field but Cookie, which nginx merges uncounted, a Host field included.
+// Lines nginx ignores for their names don't count. The refused request is
+// never forwarded.
+func TestRouteHttpCountsHeaderLinesAsNginxMaxHeaders(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	maxRequestHeaderLines := testFront.front.settings.Http.MaxRequestHeaderLines
+	if maxRequestHeaderLines != 1000 {
+		t.Fatalf("MaxRequestHeaderLines %d, want nginx's max_headers 1000", maxRequestHeaderLines)
+	}
+	// a request whose header map holds lineCount lines of short headers
+	withLines := func(r *http.Request, lineCount int) *http.Request {
+		for i := range lineCount {
+			r.Header.Add("X-Line-"+strconv.Itoa(i%10), "v")
+		}
+		return r
+	}
+	cases := []struct {
+		name       string
+		request    func() *http.Request
+		statusCode int
+	}{
+		// Host is the 1000th line
+		{name: "h1 at the limit", request: func() *http.Request {
+			return withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+		}, statusCode: 200},
+		{name: "h1 past the limit", request: func() *http.Request {
+			return withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines)
+		}, statusCode: 400},
+		{name: "h1 chunked past the limit", request: func() *http.Request {
+			r := withLines(newTestRequest("POST", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+			r.TransferEncoding = []string{"chunked"}
+			return r
+		}, statusCode: 400},
+		{name: "h1 cookies past the limit", request: func() *http.Request {
+			r := withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-2)
+			r.Header.Add("Cookie", "a=1")
+			r.Header.Add("Cookie", "b=2")
+			return r
+		}, statusCode: 400},
+		{name: "h1 past the limit with lines nginx ignores", request: func() *http.Request {
+			r := withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+			r.Header.Add("X_Ignored", "v")
+			r.Header.Add("X.Ignored", "v")
+			return r
+		}, statusCode: 200},
+		{name: "h2 at the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+		}, statusCode: 200},
+		{name: "h2 at the limit with a cookie", request: func() *http.Request {
+			r := withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+			r.Header.Add("Cookie", "a=1; b=2")
+			return r
+		}, statusCode: 200},
+		{name: "h2 past the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines+1)
+		}, statusCode: 400},
+		{name: "h2 past the limit with a Host field", request: func() *http.Request {
+			r := withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+			r.Header.Set("Host", "api.service.example")
+			return r
+		}, statusCode: 400},
+		{name: "h3 past the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 3), maxRequestHeaderLines+1)
+		}, statusCode: 400},
+	}
+	forwardCount := 0
+	for _, c := range cases {
+		response := serveTestRequest(handler, c.request())
+		if response.Code != c.statusCode {
+			t.Errorf("%s = %d, want %d", c.name, response.Code, c.statusCode)
+		}
+		if c.statusCode == http.StatusOK {
+			forwardCount += 1
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != forwardCount {
+		t.Errorf("%d requests forwarded, want the %d under the limit", len(forwards), forwardCount)
+	}
+
+	unlimitedSettings := testFrontSettings()
+	unlimitedSettings.Http.MaxRequestHeaderLines = 0
+	unlimitedFront := newTestFront(t, loadTestRouteTable(t), unlimitedSettings)
+	if response := serveTestRequest(unlimitedFront.front.HttpsHandler("eth1"), withLines(newTestRequest("GET", "api.service.example", "/v1", true), 5000)); response.Code != http.StatusOK {
+		t.Errorf("with no line limit, 5000 lines = %d", response.Code)
 	}
 }
 

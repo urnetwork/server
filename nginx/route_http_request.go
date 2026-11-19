@@ -16,6 +16,11 @@ package nginx
 //     MaxRequestHeadersTotalBytes, else 400;
 //   - a header name outside [A-Za-z0-9-] is dropped, as nginx ignores it
 //     (ignore_invalid_headers on, underscores_in_headers off);
+//   - the headers kept number at most MaxRequestHeaderLines, nginx's
+//     max_headers, else 400: on h1 every line, Host included, and on h2 and
+//     h3 every field but the pseudo-headers and Cookie, which nginx merges
+//     uncounted (ngx_http_process_request_headers,
+//     ngx_http_v2_state_process_header);
 //   - on h2 and h3, a Host header that differs from :authority is a 400, and
 //     neither is a 400;
 //   - the host is valid, as nginx's $host normalization decides
@@ -24,12 +29,14 @@ package nginx
 //   - TRACE and CONNECT are 405.
 //
 // Go's servers refuse part of this first, with their own statuses: an h1
-// head over the server's MaxHeaderBytes (431), a missing, malformed or
-// repeated Host on h1 (400, as nginx answers a repeated one), an h2 or h3
-// head over its header list limit. So Front.ConfigureServer sets
-// MaxHeaderBytes to a multiple of MaxRequestHeadersTotalBytes, twice by
-// default (HttpSettings.ServerHeaderBytesMultiple), for the handler to apply
-// nginx's statuses within that.
+// head over the server's MaxHeaderBytes or MaxHeaderValueCount (431), a
+// missing, malformed or repeated Host on h1 (400, as nginx answers a repeated
+// one), an h2 or h3 head over its header list limit. So
+// Front.ConfigureServer sets MaxHeaderBytes to a multiple of
+// MaxRequestHeadersTotalBytes, and MaxHeaderValueCount to a multiple of
+// MaxRequestHeaderLines, twice by default
+// (HttpSettings.ServerHeaderBytesMultiple, ServerHeaderLinesMultiple), for
+// the handler to apply nginx's statuses within that.
 
 import (
 	"net/http"
@@ -118,6 +125,26 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 	for name := range r.Header {
 		if !validRouteHeaderName(name) {
 			delete(r.Header, name)
+		}
+	}
+
+	if maxRequestHeaderLines := httpSettings.MaxRequestHeaderLines; 0 < maxRequestHeaderLines {
+		headerLineCount := 0
+		if r.ProtoMajor == 1 {
+			// the lines Go's h1 server takes out of the header map
+			if r.Host != "" {
+				headerLineCount += 1
+			}
+			headerLineCount += len(r.TransferEncoding)
+		}
+		for name, values := range r.Header {
+			if 2 <= r.ProtoMajor && name == "Cookie" {
+				continue
+			}
+			headerLineCount += len(values)
+		}
+		if maxRequestHeaderLines < headerLineCount {
+			return nil, http.StatusBadRequest
 		}
 	}
 

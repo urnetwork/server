@@ -48,6 +48,11 @@ type frontConnection struct {
 //     MaxRequestHeadersTotalBytes, twice by default, so the handlers answer
 //     nginx's 400 and 414 for every head within that, and Go's 431 answers
 //     only beyond it;
+//   - MaxHeaderValueCount, which bounds h1's header lines and h2's header
+//     fields, is ServerHeaderLinesMultiple times MaxRequestHeaderLines,
+//     twice nginx's max_headers by default, so the handlers answer nginx's
+//     400 past its 1000 lines, where Go's default 500 would answer 431 to
+//     heads nginx serves;
 //   - the h2 stream limit is Http2MaxConcurrentStreams;
 //   - the h2 write byte timeout is SendTimeout, so an h2 connection whose
 //     frame write stays blocked on the socket that long is closed, which
@@ -83,6 +88,9 @@ func (self *Front) ConfigureServer(httpServer *http.Server) {
 	}
 	if 0 < httpSettings.MaxRequestHeadersTotalBytes && 0 < httpSettings.ServerHeaderBytesMultiple {
 		httpServer.MaxHeaderBytes = httpSettings.ServerHeaderBytesMultiple * httpSettings.MaxRequestHeadersTotalBytes
+	}
+	if 0 < httpSettings.MaxRequestHeaderLines && 0 < httpSettings.ServerHeaderLinesMultiple {
+		httpServer.MaxHeaderValueCount = httpSettings.ServerHeaderLinesMultiple * httpSettings.MaxRequestHeaderLines
 	}
 	if 0 < httpSettings.Http2MaxConcurrentStreams || 0 < httpSettings.SendTimeout {
 		// a copy, so a config the caller shares is never written

@@ -18,12 +18,13 @@ import (
 // public server (front_server.go): its ReadHeaderTimeout is
 // ClientHeaderTimeout, its IdleTimeout KeepaliveTimeout, its
 // HTTP2.MaxConcurrentStreams Http2MaxConcurrentStreams, its
-// HTTP2.WriteByteTimeout SendTimeout, and its MaxHeaderBytes
-// ServerHeaderBytesMultiple times MaxRequestHeadersTotalBytes, so the
-// handler sees every head nginx would answer with a 414 or 400 instead of Go
-// answering 431. It sets no WriteTimeout, which would cut a stream
-// SendTimeout lets live. KeepaliveRequests and KeepaliveTime, which Go's
-// server lacks, are applied per connection, from state ConfigureServer
+// HTTP2.WriteByteTimeout SendTimeout, its MaxHeaderBytes
+// ServerHeaderBytesMultiple times MaxRequestHeadersTotalBytes, and its
+// MaxHeaderValueCount ServerHeaderLinesMultiple times MaxRequestHeaderLines,
+// so the handler sees every head nginx would answer with a 414 or 400
+// instead of Go answering 431. It sets no WriteTimeout, which would cut a
+// stream SendTimeout lets live. KeepaliveRequests and KeepaliveTime, which
+// Go's server lacks, are applied per connection, from state ConfigureServer
 // attaches.
 //
 // Of nginx's lingering close only LingeringTimeout applies: Go's h1 server
@@ -84,6 +85,17 @@ type HttpSettings struct {
 	// server's bound tied to nginx's buffers. Non-positive leaves Go's
 	// default, 1 MiB.
 	ServerHeaderBytesMultiple int
+	// the header lines a request may carry: nginx's default `max_headers
+	// 1000`, which counts each header it keeps, Host included, but not one
+	// it ignores for its name, an h2 or h3 pseudo-header or an h2 cookie. One
+	// more is a 400. Non-positive means no limit.
+	MaxRequestHeaderLines int
+	// the header values a public server parses before its handler sees
+	// them, its MaxHeaderValueCount, as a multiple of MaxRequestHeaderLines:
+	// 2. Go's default, 500, would answer 431 to heads nginx serves; within
+	// the multiple the handlers answer nginx's own 400. Go counts every line,
+	// and on h2 every field. Non-positive leaves Go's default.
+	ServerHeaderLinesMultiple int
 	// concurrent streams on one h2 connection: nginx's default
 	// `http2_max_concurrent_streams 128`. Each stream counts against the
 	// address's concurrency limit (D8). Non-positive leaves Go's default.
@@ -132,6 +144,8 @@ func DefaultHttpSettings() *HttpSettings {
 		MaxRequestHeaderBytes:       8 * 1024,
 		MaxRequestHeadersTotalBytes: 8 * 8 * 1024,
 		ServerHeaderBytesMultiple:   2,
+		MaxRequestHeaderLines:       1000,
+		ServerHeaderLinesMultiple:   2,
 		Http2MaxConcurrentStreams:   128,
 		LingeringTimeout:            5 * time.Second,
 		DrainTimeout:                60 * time.Minute,
