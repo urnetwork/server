@@ -389,6 +389,61 @@ func TestRouteHttpServicePrefixesAndStreamablePaths(t *testing.T) {
 	}
 }
 
+// An exact location streams when one of the service's streamable_paths
+// matches its path whole, as the generator's exact locations do
+// (streamablePathsMatch): a route_rate_limits and a route_request_bodies
+// path on a service name, and a route_request_bodies path under
+// p/by/service and p/by/b, each with the stream timeout and its own body
+// settings. An exact path no pattern matches stays buffered.
+func TestRouteHttpExactRoutesStreamTheirStreamablePaths(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	api := testRouteService(t, routeTable, "api")
+	api.StreamablePaths = []string{"/connect/[a-z]+", "/upload/artifact"}
+	api.RouteRequestBodies = append(api.RouteRequestBodies, &RouteRequestBody{
+		Path:                     "/upload/buffered",
+		ClientBodyBufferSize:     32 * 1024,
+		ClientBodyTimeoutSeconds: 30,
+	})
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	settings := testFront.front.settings
+
+	cases := []struct {
+		host                 string
+		target               string
+		blockName            string
+		upstreamPath         string
+		streamed             bool
+		clientBodyBufferSize int64
+	}{
+		// the route zone's exact location
+		{host: "api.service.example", target: "/connect/control", upstreamPath: "/connect/control", streamed: true, clientBodyBufferSize: settings.Body.MemoryPrefixBytes},
+		{host: "api.service.example", target: "/upload/artifact?a", upstreamPath: "/upload/artifact?a", streamed: true, clientBodyBufferSize: 65536},
+		{host: "api.service.example", target: "/upload/buffered", upstreamPath: "/upload/buffered", streamed: false, clientBodyBufferSize: 32 * 1024},
+		{host: "test-lb.service.example", target: "/hidden-example/by/service/api/upload/artifact", upstreamPath: "/upload/artifact", streamed: true, clientBodyBufferSize: 65536},
+		{host: "test-lb.service.example", target: "/hidden-example/by/b/api/g1/upload/artifact", blockName: "g1", upstreamPath: "/upload/artifact", streamed: true, clientBodyBufferSize: 65536},
+		{host: "test-lb.service.example", target: "/hidden-example/by/b/api/g2/upload/buffered", blockName: "g2", upstreamPath: "/upload/buffered", streamed: false, clientBodyBufferSize: 32 * 1024},
+	}
+	for _, c := range cases {
+		response := serveTestRequest(handler, newTestRequest("POST", c.host, c.target, true))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s %s = %d", c.host, c.target, response.Code)
+		}
+		forwards := testFront.forwarders["api"].recordedForwards()
+		options := forwards[len(forwards)-1].options
+		readTimeout := settings.Forward.ProxyReadTimeout
+		if c.streamed {
+			readTimeout = settings.Forward.StreamTimeout
+		}
+		if options.streamed != c.streamed || options.readTimeout != readTimeout {
+			t.Errorf("%s %s: streamed %t, read timeout %s, want %t, %s", c.host, c.target, options.streamed, options.readTimeout, c.streamed, readTimeout)
+		}
+		if options.upstreamPath != c.upstreamPath || options.blockName != c.blockName || options.clientBodyBufferSize != c.clientBodyBufferSize {
+			t.Errorf("%s %s: options %+v, want %q, block %q, buffer %d", c.host, c.target, options, c.upstreamPath, c.blockName, c.clientBodyBufferSize)
+		}
+	}
+}
+
 // A websocket service is forwarded with the websocket mode and the stream
 // timeouts, on every request.
 func TestRouteHttpWebsocketServiceForwardsWithItsMode(t *testing.T) {
@@ -604,9 +659,12 @@ func TestRouteHttpH3ServesOnlyApiAuthorities(t *testing.T) {
 	}
 }
 
-// nginx's request validation, before any server: an invalid Host, TRACE and
-// CONNECT, a request line or headers over the limits, a target nginx can't
-// parse, and an h2 or h3 :authority that differs from Host. Header names
+// nginx's request validation, before any server: a method outside
+// [A-Z_-]+, an invalid Host, TRACE and CONNECT, a request line or headers
+// over the limits, a target nginx can't parse, and an h2 or h3 :authority
+// that differs from Host. A refused request is never forwarded, and on h1
+// the front's own 400 and 414 close the connection, as nginx's do; h2 and
+// h3 get no Connection header, and 405 keeps the connection. Header names
 // nginx ignores are dropped.
 func TestRouteHttpRequestValidation(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
@@ -616,73 +674,108 @@ func TestRouteHttpRequestValidation(t *testing.T) {
 		name       string
 		request    func() *http.Request
 		statusCode int
+		// Connection: close
+		closes bool
 	}{
-		{name: "invalid host", request: func() *http.Request { return newTestRequest("GET", "api..service.example", "/", true) }, statusCode: 400},
-		{name: "host with a slash", request: func() *http.Request { return newTestRequest("GET", "api.service.example/x", "/", true) }, statusCode: 400},
-		{name: "trace", request: func() *http.Request { return newTestRequest("TRACE", "api.service.example", "/", true) }, statusCode: 405},
+		{name: "a lowercase method", request: func() *http.Request { return newTestRequest("get", "api.service.example", "/v1", true) }, statusCode: 400, closes: true},
+		{name: "a mixed case method", request: func() *http.Request { return newTestRequest("Get", "api.service.example", "/v1", true) }, statusCode: 400, closes: true},
+		{name: "a method with a digit", request: func() *http.Request { return newTestRequest("M2", "api.service.example", "/v1", true) }, statusCode: 400, closes: true},
+		{name: "a method with a dot", request: func() *http.Request { return newTestRequest("FOO.BAR", "api.service.example", "/v1", true) }, statusCode: 400, closes: true},
+		{name: "an invalid method on a request line over 8 KiB", request: func() *http.Request {
+			return newTestRequest("get", "api.service.example", "/"+strings.Repeat("a", 8*1024), true)
+		}, statusCode: 400, closes: true},
+		{name: "an h2 lowercase method", request: func() *http.Request {
+			return asTestProtocol(newTestRequest("post", "api.service.example", "/v1", true), 2)
+		}, statusCode: 400, closes: false},
+		{name: "invalid host", request: func() *http.Request { return newTestRequest("GET", "api..service.example", "/", true) }, statusCode: 400, closes: true},
+		{name: "host with a slash", request: func() *http.Request { return newTestRequest("GET", "api.service.example/x", "/", true) }, statusCode: 400, closes: true},
+		{name: "trace", request: func() *http.Request { return newTestRequest("TRACE", "api.service.example", "/", true) }, statusCode: 405, closes: false},
 		{name: "connect", request: func() *http.Request {
 			r := newTestRequest("CONNECT", "api.service.example", "/", true)
 			r.RequestURI = "api.service.example:443"
 			return r
-		}, statusCode: 405},
+		}, statusCode: 405, closes: false},
 		{name: "asterisk", request: func() *http.Request {
 			r := newTestRequest("OPTIONS", "api.service.example", "/", true)
 			r.RequestURI = "*"
 			return r
-		}, statusCode: 400},
+		}, statusCode: 400, closes: true},
 		{name: "bad escape", request: func() *http.Request {
 			r := newTestRequest("GET", "api.service.example", "/", true)
 			r.RequestURI = "/%zz"
 			return r
-		}, statusCode: 400},
-		{name: "above the root", request: func() *http.Request { return newTestRequest("GET", "api.service.example", "/a/../..", true) }, statusCode: 400},
+		}, statusCode: 400, closes: true},
+		{name: "above the root", request: func() *http.Request { return newTestRequest("GET", "api.service.example", "/a/../..", true) }, statusCode: 400, closes: true},
 		{name: "request line over 8 KiB", request: func() *http.Request {
 			return newTestRequest("GET", "api.service.example", "/"+strings.Repeat("a", 8*1024), true)
-		}, statusCode: 414},
+		}, statusCode: 414, closes: true},
 		{name: "a header over 8 KiB", request: func() *http.Request {
 			r := newTestRequest("GET", "api.service.example", "/", true)
 			r.Header.Set("X-Big", strings.Repeat("a", 8*1024))
 			return r
-		}, statusCode: 400},
+		}, statusCode: 400, closes: true},
 		{name: "headers over 64 KiB", request: func() *http.Request {
 			r := newTestRequest("GET", "api.service.example", "/", true)
 			for i := range 10 {
 				r.Header.Set("X-Big-"+string(rune('a'+i)), strings.Repeat("a", 7*1024))
 			}
 			return r
-		}, statusCode: 400},
+		}, statusCode: 400, closes: true},
 		{name: "h2 authority and a different Host", request: func() *http.Request {
 			r := asTestProtocol(newTestRequest("GET", "api.service.example", "/", true), 2)
 			r.Header.Set("Host", "mcp.service.example")
 			return r
-		}, statusCode: 400},
+		}, statusCode: 400, closes: false},
 		{name: "h3 authority and a different Host", request: func() *http.Request {
 			r := asTestProtocol(newTestRequest("GET", "api.service.example", "/", true), 3)
 			r.Header.Set("Host", "connect.service.example")
 			return r
-		}, statusCode: 400},
+		}, statusCode: 400, closes: false},
 		{name: "h2 with neither", request: func() *http.Request {
 			return asTestProtocol(newTestRequest("GET", "", "/", true), 2)
-		}, statusCode: 400},
-		{name: "h2 authority and the same Host", request: func() *http.Request {
-			r := asTestProtocol(newTestRequest("GET", "api.service.example", "/", true), 2)
-			r.Header.Set("Host", "api.service.example")
-			return r
-		}, statusCode: 200},
-		{name: "a header just under 8 KiB", request: func() *http.Request {
-			r := newTestRequest("GET", "api.service.example", "/", true)
-			r.Header.Set("X-Big", strings.Repeat("a", 8*1024-len("X-Big: \r\n")))
-			return r
-		}, statusCode: 200},
+		}, statusCode: 400, closes: false},
 	}
 	for _, c := range cases {
 		response := serveTestRequest(handler, c.request())
 		if response.Code != c.statusCode {
 			t.Errorf("%s = %d, want %d", c.name, response.Code, c.statusCode)
 		}
-		if c.statusCode != http.StatusOK {
-			checkNoAddedHeaders(t, c.name, response.Header())
+		checkNoAddedHeaders(t, c.name, response.Header())
+		if values := response.Header().Values("Connection"); c.closes && !slices.Equal(values, []string{"close"}) || !c.closes && len(values) != 0 {
+			t.Errorf("%s: Connection %q, want close %t", c.name, values, c.closes)
 		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != 0 {
+		t.Errorf("%d refused requests were forwarded", len(forwards))
+	}
+
+	// what nginx accepts: any method of [A-Z_-]+, a Host equal to the h2
+	// :authority, and a header just under the limit
+	accepted := []*http.Request{
+		newTestRequest("FOO_BAR-X", "api.service.example", "/v1", true),
+		func() *http.Request {
+			r := asTestProtocol(newTestRequest("GET", "api.service.example", "/", true), 2)
+			r.Header.Set("Host", "api.service.example")
+			return r
+		}(),
+		func() *http.Request {
+			r := newTestRequest("GET", "api.service.example", "/", true)
+			r.Header.Set("X-Big", strings.Repeat("a", 8*1024-len("X-Big: \r\n")))
+			return r
+		}(),
+	}
+	for _, r := range accepted {
+		method := r.Method
+		if response := serveTestRequest(handler, r); response.Code != http.StatusOK || response.Header().Get("Connection") != "" {
+			t.Errorf("%s %s = %d %q, want it forwarded", method, r.URL.Path, response.Code, response.Header().Get("Connection"))
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != len(accepted) || forwards[0].method != "FOO_BAR-X" {
+		t.Errorf("forwards %d, want the %d accepted requests", len(forwards), len(accepted))
+	}
+	h3 := testFront.front.H3ApiHandler("eth1")
+	if response := serveTestRequest(h3, asTestProtocol(newTestRequest("get", "api.service.example", "/v1", true), 3)); response.Code != http.StatusBadRequest {
+		t.Errorf("an h3 lowercase method = %d, want 400", response.Code)
 	}
 
 	r := asTestProtocol(newTestRequest("GET", "api.service.example", "/headers", true), 2)

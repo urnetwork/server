@@ -2,16 +2,20 @@ package nginx
 
 // Tests of the D8 limits as the handlers apply them: nginx's phase order,
 // the lb status exemptions, route zones on service names only, one source
-// across two interfaces, exclusions, every h2 and h3 stream counted, and an
-// upgraded connection holding its slot until its tunnel closes.
+// across two interfaces, exclusions, every h2 and h3 stream counted, an
+// upgraded connection holding its slot until its tunnel closes, and the
+// body cap.
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -67,8 +71,13 @@ func TestRouteHttpLimitsFollowNginxPhaseOrder(t *testing.T) {
 	if response := serveTestRequest(https, newTestRequestFrom(addr, "GET", "api.service.example", "/v1", true)); response.Code != http.StatusOK {
 		t.Fatalf("the first limited request = %d, want 200", response.Code)
 	}
-	if response := serveTestRequest(https, newTestRequestFrom(addr, "GET", "api.service.example", "/v1", true)); response.Code != http.StatusTooManyRequests {
+	response := serveTestRequest(https, newTestRequestFrom(addr, "GET", "api.service.example", "/v1", true))
+	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("the second = %d, want 429", response.Code)
+	}
+	// nginx keeps the connection after its 429, as after a 403 or a 404
+	if values := response.Header().Values("Connection"); len(values) != 0 {
+		t.Errorf("429: Connection %q, want none while not draining", values)
 	}
 
 	charged := []struct {
@@ -82,8 +91,12 @@ func TestRouteHttpLimitsFollowNginxPhaseOrder(t *testing.T) {
 		{name: "port 80's deny", handler: http80, request: newTestRequestFrom("198.51.100.14:1000", "GET", "unknown.example", "/", false), statusCode: http.StatusForbidden},
 	}
 	for _, c := range charged {
-		if response := serveTestRequest(c.handler, c.request); response.Code != c.statusCode {
+		response := serveTestRequest(c.handler, c.request)
+		if response.Code != c.statusCode {
 			t.Fatalf("%s = %d, want %d", c.name, response.Code, c.statusCode)
+		}
+		if values := response.Header().Values("Connection"); len(values) != 0 {
+			t.Errorf("%s: Connection %q, want none while not draining", c.name, values)
 		}
 		next := newTestRequestFrom(c.request.RemoteAddr, "GET", "api.service.example", "/v1", true)
 		if response := serveTestRequest(https, next); response.Code != http.StatusTooManyRequests {
@@ -159,6 +172,18 @@ func TestRouteHttpLbStatusPathsSkipTheLimits(t *testing.T) {
 		r.ProtoMinor = 0
 		if response := serveTestRequest(https, r); response.Code != http.StatusOK {
 			t.Fatalf("no host, request %d = %d, want 200: exempt", i, response.Code)
+		}
+	}
+
+	// nginx's map lowercases its keys and what it looks up, so a case
+	// variant of an exempt path skips the limits too, though no location,
+	// which matches with case, serves it: a 404 each time, never a 429
+	for _, target := range []string{"/HIDDEN-EXAMPLE/STATUS", "/hidden-example/BY/B/api/g1/status", "/Hidden-Example/By/Service/API/Status"} {
+		for i := range 3 {
+			response := serveTestRequest(https, newTestRequestFrom("198.51.100.26:1000", "GET", "test-lb.service.example", target, true))
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("%s request %d = %d, want 404: exempt, and served by no location", target, i, response.Code)
+			}
 		}
 	}
 }
@@ -449,7 +474,8 @@ func TestRouteHttpUpgradeHoldsItsSlotUntilTheTunnelCloses(t *testing.T) {
 // A declared body over client_max_body_size is a 413 at find-config, before
 // the rewrite phase and the limits: never charged, before a preflight, and
 // with the location's always headers but no Access-Control-Allow-Origin,
-// which the rewrite phase sets.
+// which the rewrite phase sets. On h1 it closes the connection, as nginx's
+// 413 does; h2 gets no Connection header.
 func TestRouteHttpDeclaredBodyOverTheCapIs413BeforeTheLimits(t *testing.T) {
 	routeTable := loadTestRouteTable(t)
 	setTestRateLimit(t, routeTable, "eth1", 1, 0, 0)
@@ -458,13 +484,24 @@ func TestRouteHttpDeclaredBodyOverTheCapIs413BeforeTheLimits(t *testing.T) {
 	maxBodyBytes := testFront.front.settings.Body.MaxBodyBytes
 
 	const addr = "198.51.100.61:1000"
-	for _, method := range []string{"POST", "OPTIONS"} {
-		r := newTestRequestFrom(addr, method, "api.service.example", "/v1", true)
+	for _, c := range []struct {
+		method     string
+		protoMajor int
+		connection []string
+	}{
+		{method: "POST", protoMajor: 1, connection: []string{"close"}},
+		{method: "OPTIONS", protoMajor: 1, connection: []string{"close"}},
+		{method: "POST", protoMajor: 2, connection: nil},
+	} {
+		r := newTestRequestFrom(addr, c.method, "api.service.example", "/v1", true)
+		if c.protoMajor == 2 {
+			r = asTestProtocol(r, 2)
+		}
 		r.ContentLength = maxBodyBytes + 1
 		r.Header.Set("Origin", "https://app.service.example")
 		response := serveTestRequest(handler, r)
 		if response.Code != http.StatusRequestEntityTooLarge {
-			t.Fatalf("%s over the cap = %d, want 413", method, response.Code)
+			t.Fatalf("%s over the cap = %d, want 413", c.method, response.Code)
 		}
 		checkSecurityHeaders(t, "413", response.Header())
 		if values := response.Header().Values("Access-Control-Allow-Origin"); len(values) != 0 {
@@ -472,6 +509,9 @@ func TestRouteHttpDeclaredBodyOverTheCapIs413BeforeTheLimits(t *testing.T) {
 		}
 		if response.Header().Get("Access-Control-Allow-Methods") == "" || response.Header().Get("Vary") != "Origin" {
 			t.Errorf("413: the other CORS headers are missing: %v", response.Header())
+		}
+		if values := response.Header().Values("Connection"); !slices.Equal(values, c.connection) {
+			t.Errorf("%s over HTTP/%d: Connection %q, want %q", c.method, c.protoMajor, values, c.connection)
 		}
 	}
 	atCap := newTestRequestFrom(addr, "POST", "api.service.example", "/v1", true)
@@ -481,5 +521,62 @@ func TestRouteHttpDeclaredBodyOverTheCapIs413BeforeTheLimits(t *testing.T) {
 	}
 	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != 1 {
 		t.Fatalf("%d forwards, want only the body at the cap", len(forwards))
+	}
+}
+
+// Connect's names are served in-process, so the front caps a body of
+// unknown length as nginx's client_max_body_size does while it reads one:
+// connect's read of a chunked body over BodySettings.MaxBodyBytes fails at
+// the cap with *http.MaxBytesError, on h1 and h2, and a body exactly at the
+// cap is read whole. The declared-length 413 never sees such a body.
+func TestRouteHttpConnectCapsABodyOfUnknownLength(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Body.MaxBodyBytes = 1024
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	type bodyRead struct {
+		byteCount int
+		err       error
+	}
+	var lastBodyRead bodyRead
+	testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		lastBodyRead = bodyRead{
+			byteCount: len(body),
+			err:       err,
+		}
+	}
+	handler := testFront.front.HttpsHandler("eth1")
+
+	for _, c := range []struct {
+		protoMajor int
+		bodyBytes  int
+		capped     bool
+	}{
+		{protoMajor: 1, bodyBytes: 1024, capped: false},
+		{protoMajor: 1, bodyBytes: 1025, capped: true},
+		{protoMajor: 1, bodyBytes: 64 * 1024, capped: true},
+		{protoMajor: 2, bodyBytes: 1024, capped: false},
+		{protoMajor: 2, bodyBytes: 1025, capped: true},
+	} {
+		r := newTestRequest("POST", "connect.service.example", "/", true)
+		if c.protoMajor == 2 {
+			r = asTestProtocol(r, 2)
+		}
+		r.Body = io.NopCloser(strings.NewReader(strings.Repeat("a", c.bodyBytes)))
+		// chunked: no declared length
+		r.ContentLength = -1
+		lastBodyRead = bodyRead{}
+		serveTestRequest(handler, r)
+
+		var maxBytesError *http.MaxBytesError
+		switch {
+		case !c.capped && (lastBodyRead.err != nil || lastBodyRead.byteCount != c.bodyBytes):
+			t.Errorf("HTTP/%d, %d bytes: read %d, %v, want the whole body", c.protoMajor, c.bodyBytes, lastBodyRead.byteCount, lastBodyRead.err)
+		case c.capped && (!errors.As(lastBodyRead.err, &maxBytesError) || maxBytesError.Limit != 1024 || lastBodyRead.byteCount != 1024):
+			t.Errorf("HTTP/%d, %d bytes: read %d, %v, want 1024 and the cap's error", c.protoMajor, c.bodyBytes, lastBodyRead.byteCount, lastBodyRead.err)
+		}
+	}
+	if requests := testFront.connectHandler.recordedRequests(); len(requests) != 5 {
+		t.Fatalf("%d requests reached connect, want 5: the cap is enforced while it reads", len(requests))
 	}
 }

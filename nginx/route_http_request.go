@@ -4,6 +4,11 @@ package nginx
 // request, before any server or location applies, and so before the limits
 // and without added headers:
 //
+//   - the method is one or more of 'A' to 'Z', '_' and '-', as nginx's
+//     parsers require on h1 and h2, else 400, ahead of every check below.
+//     Go's servers accept any token, "get" or "M.2" say. The rule applies on
+//     h3 too, where alt took any token, so the front checks every protocol
+//     alike;
 //   - the request target is origin form or absolute form, and its uri
 //     parses (route_http_uri.go): else 400;
 //   - the request line fits HttpSettings.MaxRequestLineBytes, else 414; a
@@ -59,6 +64,12 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 		return nil, http.StatusInternalServerError
 	}
 	clientAddrPort := netip.AddrPortFrom(peerAddrPort.Addr().Unmap().WithZone(""), peerAddrPort.Port())
+
+	// nginx parses the method first, so a long request line with an invalid
+	// method is a 400, not a 414
+	if !validRouteMethod(r.Method) {
+		return nil, http.StatusBadRequest
+	}
 
 	requestLineBytes := len(r.Method) + len(" ") + len(r.RequestURI) + len(" ") + len(r.Proto) + len("\r\n")
 	if 0 < httpSettings.MaxRequestLineBytes && httpSettings.MaxRequestLineBytes < requestLineBytes {
@@ -137,6 +148,21 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 		return nil, http.StatusMethodNotAllowed
 	}
 	return request, 0
+}
+
+// Whether nginx's parser takes a method: one or more of 'A' to 'Z', '_' and
+// '-' (ngx_http_parse_request_line, ngx_http_v2_parse_method).
+func validRouteMethod(method string) bool {
+	if method == "" {
+		return false
+	}
+	for i := 0; i < len(method); i += 1 {
+		c := method[i]
+		if !('A' <= c && c <= 'Z' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // Whether nginx keeps a request header of this name: only letters, digits

@@ -239,7 +239,10 @@ type routeHttpTable struct {
 	defaultHttpServer *routeHttpServer
 	// the lb status paths whose requests on an lb name skip both limits
 	// (rateLimitStatusPaths): p/status, and p/by/service/<svc>/status and
-	// p/by/b/<svc>/<block>/status for lb_exposed standard-status services
+	// p/by/b/<svc>/<block>/status for lb_exposed standard-status services.
+	// Lowercased: nginx's `map $uri` lowercases its exact keys and what it
+	// looks up, so a case variant is exempt too, though no location serves
+	// it
 	limitExemptLbPaths map[string]bool
 	services           map[string]*routeHttpService
 	noAccessLogHosts   map[string]bool
@@ -411,7 +414,7 @@ func newRouteHttpServiceServer(routeService *routeHttpService, inProcess bool) *
 // status paths to the limit exemptions (rateLimitStatusPaths).
 func addLbRoutes(routes *routeHttpTable, routeTable *RouteTable, lbRoutePrefix string) {
 	statusPath := lbRoutePrefix + "/status"
-	routes.limitExemptLbPaths[statusPath] = true
+	routes.limitExemptLbPaths[strings.ToLower(statusPath)] = true
 	for _, server := range []*routeHttpServer{routes.lbHttpsServer, routes.lbHttpServer} {
 		server.addExact(&routeHttpLocation{
 			kind:            routeHttpLocationLbStatus,
@@ -440,9 +443,9 @@ func addLbRoutes(routes *routeHttpTable, routeTable *RouteTable, lbRoutePrefix s
 			continue
 		}
 		if service.Status == routeServiceStatusStandard {
-			routes.limitExemptLbPaths[lbRoutePrefix+"/by/service/"+service.Name+"/status"] = true
+			routes.limitExemptLbPaths[strings.ToLower(lbRoutePrefix+"/by/service/"+service.Name+"/status")] = true
 			for _, block := range service.Blocks {
-				routes.limitExemptLbPaths[lbRoutePrefix+"/by/b/"+service.Name+"/"+block.Name+"/status"] = true
+				routes.limitExemptLbPaths[strings.ToLower(lbRoutePrefix+"/by/b/"+service.Name+"/"+block.Name+"/status")] = true
 			}
 		}
 
@@ -621,8 +624,9 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 		}
 	}
 
-	// preaccess: the limits, which an lb status path on an lb name skips
-	if !(routes.lbNames[host] && routes.limitExemptLbPaths[request.uri.path]) {
+	// preaccess: the limits, which an lb status path on an lb name skips,
+	// in any case. The host is normalized, so already lowercase.
+	if !(routes.lbNames[host] && routes.limitExemptLbPaths[strings.ToLower(request.uri.path)]) {
 		var routeZone *limitRouteZone
 		if location != nil {
 			routeZone = location.routeZone
