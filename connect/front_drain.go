@@ -200,10 +200,20 @@ func (self *frontServer) close() {
 			if forcedCloseTimeout <= 0 {
 				break
 			}
+			// a step already done is never reported, even once the budget
+			// is spent and the timer below would be due at once
 			select {
 			case <-step.done:
-			case <-time.After(forcedCloseTimeout - time.Since(closeTime)):
+				continue
+			default:
+			}
+			select {
+			case <-step.done:
+			case <-time.After(max(0, forcedCloseTimeout-time.Since(closeTime))):
 				glog.Infof("[front]the %s did not close within %s\n", step.name, forcedCloseTimeout)
+				if self.settings.forcedCloseReportObserverForTest != nil {
+					self.settings.forcedCloseReportObserverForTest(step.name)
+				}
 			}
 		}
 		// the drain's shutdowns are all past their transports' close

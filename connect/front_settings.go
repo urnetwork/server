@@ -85,6 +85,9 @@ type FrontServerSettings struct {
 	// message a public HTTP server wrote to its error log, as it is counted,
 	// and the text the front logged for it, empty when it logged nothing.
 	httpErrorObserverForTest func(portKind string, kind string, logged string)
+	// Nil outside package tests. Called with the name of each forced close
+	// step reported as not closed within ForcedCloseTimeout, as it is logged.
+	forcedCloseReportObserverForTest func(step string)
 }
 
 // A new instance on every call, with its own nginx front defaults.

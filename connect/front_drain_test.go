@@ -1039,3 +1039,47 @@ func TestFrontDrainDeadlineKeepsTheStopReserve(t *testing.T) {
 		t.Fatalf("drain deadline %s without a reserve, want the drain timeout", deadline)
 	}
 }
+
+// The forced close reports only the steps that did not close. Once the
+// sockets step has spent the whole ForcedCloseTimeout, the nginx front's
+// step has no budget left, and a front that already closed must not be
+// reported as one that did not close within it. Each pass's close is a
+// fresh front, since the report raced a due timer against a closed channel
+// one time in two.
+func TestFrontCloseReportsOnlyTheStepsThatDidNotClose(t *testing.T) {
+	const (
+		forcedCloseTimeout = 50 * time.Millisecond
+		passCount          = 10
+	)
+	for pass := range passCount {
+		releaseSockets := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() {
+			releaseOnce.Do(func() {
+				close(releaseSockets)
+			})
+		}
+		reportLock := sync.Mutex{}
+		reports := []string{}
+		env := newTestFrontEnv(t, func(env *testFrontEnv) {
+			env.settings.Front.Http.ForcedCloseTimeout = forcedCloseTimeout
+			// every socket's release waits past the budget
+			env.settings.socketServeEndObserverForTest = func(key frontSocketKey) {
+				<-releaseSockets
+			}
+			env.settings.forcedCloseReportObserverForTest = func(step string) {
+				reportLock.Lock()
+				defer reportLock.Unlock()
+				reports = append(reports, step)
+			}
+		})
+		env.frontServer.close()
+		release()
+		reportLock.Lock()
+		passReports := slices.Clone(reports)
+		reportLock.Unlock()
+		if !slices.Equal(passReports, []string{"sockets"}) {
+			t.Fatalf("pass %d: the forced close reported %v not closed, want only the sockets", pass, passReports)
+		}
+	}
+}
