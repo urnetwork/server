@@ -291,8 +291,7 @@ type testFront struct {
 	httpHandler  func(interfaceName string) http.Handler
 	h3ApiHandler func(interfaceName string) http.Handler
 
-	// called after connect's own ConnState on every public server
-	// ConfigureServer is given, when set
+	// the ConnState of every public server ConfigureServer is given, when set
 	connState func(conn net.Conn, connState http.ConnState)
 	// signaled after each release of an admitted QUIC connection, while it
 	// has room
@@ -496,14 +495,7 @@ func (self *testFront) ConfigureServer(httpServer *http.Server) {
 	}()
 	self.configuringFront.ConfigureServer(httpServer)
 	if self.connState != nil {
-		// after connect's own hook, which marks a hijack
-		serverConnState := httpServer.ConnState
-		httpServer.ConnState = func(conn net.Conn, connState http.ConnState) {
-			if serverConnState != nil {
-				serverConnState(conn, connState)
-			}
-			self.connState(conn, connState)
-		}
+		httpServer.ConnState = self.connState
 	}
 }
 

@@ -15,10 +15,9 @@ package connect
 // tunnels http.Server forgets once hijacked, and the forced close can cut
 // them (D12). Once a write to one fails on its deadline, every later write
 // fails at once, so TLS's close_notify can't hold a handler on a client that
-// stopped reading; and until a hijack, a write left without a deadline is
-// bounded by send_timeout, so crypto/tls's own writes, such as its answer to
-// a client's KeyUpdate request, can't hold a connection for good
-// (frontTrackedConn).
+// stopped reading; and a write left without a deadline is bounded by
+// send_timeout, so crypto/tls's own writes, such as its answer to a client's
+// KeyUpdate request, can't hold a connection for good (frontTrackedConn).
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
@@ -96,10 +95,8 @@ func (self *frontTcpRun) close() {
 }
 
 // A server for one interface's port. connect sets what is its own: the
-// handler, the error log that counts, the serving context, and the
-// connection state hook that marks a hijacked connection, whose writes keep
-// only their owner's deadlines (frontTrackedConn). The nginx front sets the
-// rest from its HttpSettings (nginx.Front.ConfigureServer,
+// handler, the error log that counts and the serving context. The nginx
+// front sets the rest from its HttpSettings (nginx.Front.ConfigureServer,
 // LBALT-IMPL.md §7), as the parity harness's servers get them: the header
 // timeout, which covers the TLS handshake, request line and headers; the
 // idle timeout; header bytes of a multiple of nginx's header buffers, twice
@@ -127,19 +124,6 @@ func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *h
 		// requests end with the front
 		BaseContext: func(net.Listener) context.Context {
 			return self.ctx
-		},
-		// net/http reports a hijack with the connection it serves: the
-		// tls.Conn on 443, the tracked socket itself on 80
-		ConnState: func(conn net.Conn, connState http.ConnState) {
-			if connState != http.StateHijacked {
-				return
-			}
-			if tlsConn, ok := conn.(*tls.Conn); ok {
-				conn = tlsConn.NetConn()
-			}
-			if trackedConn, ok := conn.(*frontTrackedConn); ok {
-				trackedConn.hijacked.Store(true)
-			}
 		},
 	}
 	self.front.ConfigureServer(httpServer)
@@ -245,23 +229,25 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // would hold the handler and its limit slot that much longer, and on h2 the
 // connection's serving goroutine, which makes that close.
 //
-// Until net/http hands the connection to a hijacker, a write its owner left
-// without a deadline is bounded by send_timeout (LBALT-IMPL.md §7): it fails
-// once none of it has gone out for sendTimeout, as nginx's send_timeout
-// bounds a blocked write. Those writes are crypto/tls's own, made on the
-// reading goroutine under its write lock, such as the answer to a client's
-// KeyUpdate request: net/http clears the write deadline after each request,
-// and its idle and header timeouts are read deadlines, which a goroutine
-// blocked in a write never sees. A TLS 1.3 client that sends KeyUpdate
-// requests and stops reading would otherwise hold the connection, its
-// goroutine and its buffers for good, where nginx's read timer closes it
-// (ngx_ssl_handle_recv leaves a blocked write to that timer). Once the
-// bounded write fails, the latch fails every later one, and the read
-// deadline ends the connection. The bound lasts only as long as its write,
-// so a connection idle between writes has none, and an owner's deadline set
-// meanwhile takes over the write and stands. A hijacked connection's writes
-// keep only their owner's deadlines, as a websocket or H1+ tunnel may wait
-// on its client for as long as its owner allows.
+// A write its owner left without a deadline is bounded by send_timeout,
+// hijacked or not (LBALT-IMPL.md §7): it fails once none of it has gone out
+// for sendTimeout, as nginx's send_timeout bounds every blocked client write,
+// an upgraded connection's included (ngx_http_upstream_process_upgraded).
+// Those writes are crypto/tls's own, made on the reading goroutine under its
+// write lock, such as the answer to a client's KeyUpdate request. net/http
+// clears the write deadline after each request, and gorilla's websocket
+// upgrade and connect's H1+ one after their 101, while the read deadlines on
+// an idle keepalive connection, a request's head or a websocket's auth frame
+// never reach a goroutine blocked in a write. A TLS 1.3 client that sends
+// KeyUpdate requests and stops reading would otherwise hold the connection,
+// its goroutine and its buffers for good, and a websocket's limit slot
+// before it authenticates, where nginx's timers close it (ngx_ssl_handle_recv
+// leaves a blocked write to the read timer). Once the bounded write fails,
+// the latch fails every later one, and the reader's error or deadline ends
+// the connection. The bound lasts only as long as its write, so a connection
+// idle between writes has none, and an owner's deadline set meanwhile takes
+// over the write and stands: a websocket or tunnel that sets its own
+// deadlines keeps them.
 //
 // It passes net/http's half-close to the socket (CloseWrite), which
 // embedding net.Conn would hide.
@@ -274,9 +260,6 @@ type frontTrackedConn struct {
 	closeOnce   sync.Once
 	// the error of the first write that failed on its deadline, once one has
 	writeTimeoutErr atomic.Pointer[error]
-	// net/http handed the connection to a hijacker (newHttpServer's
-	// connection state hook)
-	hijacked atomic.Bool
 
 	// the socket's write deadline is set only under stateLock, so it never
 	// disagrees with the owner's and the bound's: a call out under the lock,
@@ -298,12 +281,12 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 	for {
 		// bounds the write when its owner left it without a deadline
 		bounded := func() bool {
-			if self.sendTimeout <= 0 || self.hijacked.Load() {
+			if self.sendTimeout <= 0 {
 				return false
 			}
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if self.hijacked.Load() || !self.ownerWriteDeadline.IsZero() {
+			if !self.ownerWriteDeadline.IsZero() {
 				return false
 			}
 			self.boundWriteCount += 1

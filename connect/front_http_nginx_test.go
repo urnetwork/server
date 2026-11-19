@@ -1,15 +1,14 @@
 package connect
 
 // The front's tcp servers as the nginx front configures them: connect sets
-// only the handler, the error log, the serving context and the hook that
-// marks a hijack, and the nginx front sets the rest
-// (nginx.Front.ConfigureServer). Through connect's own public sockets and
-// the real nginx front, nginx's keepalive_requests and keepalive_time close
-// connections on h1 and h2, on the lb status route of an lb name, which no
-// limit charges; and a client that stops reading over TLS, on h1 or h2, is
-// cut at send_timeout without close_notify holding its handler. The public
-// sockets bound a write left without a deadline by send_timeout until a
-// hijack (frontTrackedConn).
+// only the handler, the error log and the serving context, and the nginx
+// front sets the rest (nginx.Front.ConfigureServer). Through connect's own
+// public sockets and the real nginx front, nginx's keepalive_requests and
+// keepalive_time close connections on h1 and h2, on the lb status route of
+// an lb name, which no limit charges; and a client that stops reading over
+// TLS, on h1 or h2, is cut at send_timeout without close_notify holding its
+// handler. The public sockets bound a write left without a deadline by
+// send_timeout, hijacked or not (frontTrackedConn).
 
 import (
 	"bufio"
@@ -28,15 +27,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/net/http2"
 
 	"github.com/urnetwork/server/nginx"
 )
 
 // connect sets only its own fields on each public server, the handler, the
-// counting error log, the serving context and the connection state hook
-// that marks a hijack, and hands every one to the nginx front to configure
-// (LBALT-IMPL.md §7), which keeps them, so their limits are the nginx
+// counting error log and the serving context, and hands every one to the
+// nginx front to configure (LBALT-IMPL.md §7), so their limits are the nginx
 // front's, header bytes at twice nginx's buffers included.
 func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 	env := newTestFrontEnv(t, nil)
@@ -46,8 +45,8 @@ func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 	}
 	httpSettings := env.settings.Front.Http
 	for _, httpServer := range configuredServers {
-		if httpServer.Handler == nil || httpServer.ErrorLog == nil || httpServer.BaseContext == nil || httpServer.BaseContext(nil) != env.frontServer.ctx || httpServer.ConnState == nil {
-			t.Fatal("a public server lacks connect's handler, error log, serving context or connection state hook")
+		if httpServer.Handler == nil || httpServer.ErrorLog == nil || httpServer.BaseContext == nil || httpServer.BaseContext(nil) != env.frontServer.ctx {
+			t.Fatal("a public server lacks connect's handler, error log or serving context")
 		}
 		if httpServer.ReadHeaderTimeout != httpSettings.ClientHeaderTimeout ||
 			httpServer.IdleTimeout != httpSettings.KeepaliveTimeout ||
@@ -657,19 +656,123 @@ func TestFrontHttpsClosesAnIdleConnectionWhoseTlsWriteStallsOnAClientThatStopped
 	env.waitOpen(0)
 }
 
-// Until a hijack, a write net/http leaves without a deadline is bounded by
-// send_timeout (frontTrackedConn), the response of a handler that set none
-// included; a hijacked connection's writes keep only their owner's
-// deadlines, none here, so a websocket or H1+ tunnel may wait on its client
-// for as long as its owner allows. Over TLS on 443, where net/http reports
-// the hijack with the tls.Conn over the tracked socket, and plain on 80.
-func TestFrontHijackedConnectionWritesKeepOnlyTheirOwnersDeadlines(t *testing.T) {
+// A connect websocket, upgraded as connect's handler upgrades it, whose
+// client sends no auth frame and stops reading closes once a write
+// crypto/tls makes on the reading goroutine has stalled for send_timeout.
+// gorilla's upgrade clears the write deadline after its 101, as connect's
+// H1+ upgrade does, and the auth frame's read deadline never reaches a
+// goroutine blocked in a write, so an unauthenticated client would otherwise
+// keep the connection and its limit slot until it closes them, where nginx
+// bounds an upgraded connection's every blocked client write by send_timeout
+// (frontTrackedConn). The write here is the alert answering a record that
+// fails to decrypt; a client's KeyUpdate request asks for the same kind of
+// write, as often as it likes.
+func TestFrontClosesAnUnauthenticatedWebsocketWhoseTlsWriteStallsOnAClientThatStoppedReading(t *testing.T) {
+	readEnded := make(chan error, 1)
+	connectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			HandshakeTimeout: testFrontProgressTimeout,
+		}
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		// the auth frame's deadline, far past the test, so only the bound
+		// of the write the read makes can end it
+		ws.SetReadDeadline(time.Now().Add(time.Hour))
+		_, _, err = ws.ReadMessage()
+		readEnded <- err
+	})
+	accepted := make(chan *testFrontStallingConn, 16)
+	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.SendTimeout = 100 * time.Millisecond
+		listen := env.settings.Listen
+		env.settings.Listen = func(network string, address string) (net.Listener, error) {
+			listener, err := listen(network, address)
+			if err != nil {
+				return listener, err
+			}
+			return &testFrontStallingListener{
+				Listener: listener,
+				accepted: accepted,
+			}, nil
+		}
+	}, connectHandler)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontConnectName)
+	var stallingConn *testFrontStallingConn
+	select {
+	case stallingConn = <-accepted:
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("no connection was accepted")
+	}
+	// a front that never bounds the stalled write would otherwise hold the
+	// test's own close of the front
+	t.Cleanup(func() {
+		stallingConn.Close()
+	})
+	fmt.Fprintf(client.conn, "GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", testFrontConnectName)
+	response, err := http.ReadResponse(client.reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("the upgrade = %d", response.StatusCode)
+	}
+	stallingConn.stalled.Store(true)
+	// an application data record of 32 bytes that no key decrypts
+	record := append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
+	if _, err := client.conn.NetConn().Write(record); err != nil {
+		t.Fatal(err)
+	}
+	testFrontWait(t, stallingConn.closed, "the close of the unauthenticated websocket whose alert stalled")
+	select {
+	case err := <-readEnded:
+		if err == nil {
+			t.Fatal("the auth read returned a message")
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the auth read never ended")
+	}
+	env.waitOpen(0)
+}
+
+// A response net/http writes for a handler that set no deadline is bounded
+// by send_timeout, over TLS on 443 and plain on 80; so is a hijacked
+// connection's write its owner left without one, while one its owner gave a
+// deadline is written under that deadline alone (frontTrackedConn).
+func TestFrontPublicTcpWritesWithoutADeadlineAreBoundedBySendTimeout(t *testing.T) {
 	const sendTimeout = time.Hour
+	ownerDeadline := time.Now().Add(2 * time.Hour)
+	hijackingHandler := func(interfaceName string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/upgrade" {
+				io.WriteString(w, "plain")
+				return
+			}
+			conn, readWriter, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			readWriter.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: test-owned\r\nConnection: Upgrade\r\n\r\n")
+			if err := readWriter.Flush(); err != nil {
+				return
+			}
+			conn.SetWriteDeadline(ownerDeadline)
+			if _, err := io.WriteString(conn, "owned\n"); err != nil {
+				return
+			}
+			// until the client closes
+			io.Copy(io.Discard, readWriter)
+		})
+	}
 	accepted := make(chan *testFrontStallingConn, 16)
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		env.settings.Front.Http.SendTimeout = sendTimeout
-		env.front.httpsHandler = testFrontEchoHandler
-		env.front.httpHandler = testFrontEchoHandler
+		env.front.httpsHandler = hijackingHandler
+		env.front.httpHandler = hijackingHandler
 		listen := env.settings.Listen
 		env.settings.Listen = func(network string, address string) (net.Listener, error) {
 			listener, err := listen(network, address)
@@ -683,6 +786,9 @@ func TestFrontHijackedConnectionWritesKeepOnlyTheirOwnersDeadlines(t *testing.T)
 		}
 	})
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	bounded := func(deadline time.Time) bool {
+		return sendTimeout/2 < time.Until(deadline) && !deadline.After(time.Now().Add(sendTimeout))
+	}
 	cases := []struct {
 		portKind string
 		dial     func() (net.Conn, error)
@@ -735,13 +841,13 @@ func TestFrontHijackedConnectionWritesKeepOnlyTheirOwnersDeadlines(t *testing.T)
 			t.Fatalf("%s: the response was never written", c.portKind)
 		}
 		for _, deadline := range responseDeadlines {
-			if time.Until(deadline) < sendTimeout/2 {
+			if !bounded(deadline) {
 				t.Errorf("%s: net/http's response started under the deadline %s, want send_timeout's bound, %s", c.portKind, testFrontDeadlineText(deadline), sendTimeout)
 			}
 		}
 
 		from = len(rawConn.startedWriteDeadlines())
-		fmt.Fprintf(conn, "GET /upgrade HTTP/1.1\r\nHost: %s\r\nUpgrade: test-echo\r\nConnection: Upgrade\r\n\r\n", testFrontConnectName)
+		fmt.Fprintf(conn, "GET /upgrade HTTP/1.1\r\nHost: %s\r\nUpgrade: test-owned\r\nConnection: Upgrade\r\n\r\n", testFrontConnectName)
 		response, err = http.ReadResponse(reader, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", c.portKind, err)
@@ -749,18 +855,18 @@ func TestFrontHijackedConnectionWritesKeepOnlyTheirOwnersDeadlines(t *testing.T)
 		if response.StatusCode != http.StatusSwitchingProtocols {
 			t.Fatalf("%s: the upgrade = %d", c.portKind, response.StatusCode)
 		}
-		fmt.Fprintf(conn, "tunnel\n")
-		if line, err := reader.ReadString('\n'); line != "tunnel\n" || err != nil {
-			t.Fatalf("%s: the echo = %q, %v", c.portKind, line, err)
+		if line, err := reader.ReadString('\n'); line != "owned\n" || err != nil {
+			t.Fatalf("%s: the tunnel sent %q, %v", c.portKind, line, err)
 		}
 		tunnelDeadlines := rawConn.startedWriteDeadlines()[from:]
-		if len(tunnelDeadlines) == 0 {
-			t.Fatalf("%s: the tunnel wrote nothing", c.portKind)
+		if len(tunnelDeadlines) != 2 {
+			t.Fatalf("%s: the tunnel made %d writes, want its 101 and its owned line", c.portKind, len(tunnelDeadlines))
 		}
-		for _, deadline := range tunnelDeadlines {
-			if !deadline.IsZero() {
-				t.Errorf("%s: a hijacked write started under the deadline %s, want only its owner's, none", c.portKind, testFrontDeadlineText(deadline))
-			}
+		if deadline := tunnelDeadlines[0]; !bounded(deadline) {
+			t.Errorf("%s: the hijacked 101, left without a deadline, started under the deadline %s, want send_timeout's bound, %s", c.portKind, testFrontDeadlineText(deadline), sendTimeout)
+		}
+		if deadline := tunnelDeadlines[1]; !deadline.Equal(ownerDeadline) {
+			t.Errorf("%s: the hijacked write its owner gave a deadline started under the deadline %s, want the owner's alone", c.portKind, testFrontDeadlineText(deadline))
 		}
 	}
 }
