@@ -10,7 +10,8 @@ package connect_test
 //   - a real api server (the full api.Routes()) used by the clients for
 //     out-of-band control (contract setup) via connect.NewApiOutOfBandControl
 //   - two real connect.Clients with production-default settings, one platform
-//     transport each (H1 websocket), client A homed on perf0 and B on perf1
+//     transport each (H1+, the urnetwork-framer/1 upgrade, pinned, and checked
+//     after the first message), client A homed on perf0 and B on perf1
 //
 // Phases, each reported with "[perf]" lines:
 //
@@ -30,6 +31,11 @@ package connect_test
 // A CPU profile is written per throughput phase, and mutex/block profiles are
 // captured during the 1 KiB one-way phase, all under profile/.
 //
+// The carrier cases at the end of the file (TestConnectPerformanceCarriers*)
+// measure each of connect's edge carriers on its own: the websocket and H1+
+// pinned apart, raw QUIC and whodis, directly, through connect's lb_alt
+// front, and through warp/lb's nginx build as the baseline (LBALT.md §9).
+//
 // Run with the standard local test env (see test.sh), without -race for
 // meaningful numbers:
 //
@@ -43,17 +49,21 @@ package connect_test
 import (
 	"context"
 	cryptorand "crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -340,7 +350,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 
 	// ---- clients with the real api for out-of-band control --------------------
 
-	newPeerClient := func(p *peer, wsPort int) (*connect.Client, *connect.PlatformTransport) {
+	newPeerClient := func(p *peer, wsPort int) (*connect.Client, *connect.PlatformTransport, *connect.H1ConnectionStats) {
 		strategySettings := connect.DefaultClientStrategySettings()
 		strategySettings.EnableResilient = false
 		clientStrategy := connect.NewClientStrategy(ctx, strategySettings)
@@ -353,6 +363,14 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			InstanceId: connect.Id(p.instanceId),
 			AppVersion: "0.0.0",
 		}
+		// the phases measure H1+, pinned, which is the platform transport's
+		// default. A refused upgrade falls back to the websocket unseen, so
+		// the first message checks what each client negotiated. The carrier
+		// cases below measure the websocket apart.
+		h1Stats := &connect.H1ConnectionStats{}
+		transportSettings := connect.DefaultPlatformTransportSettings()
+		transportSettings.EnableH1Plus = true
+		transportSettings.H1ConnectionStats = h1Stats
 		transport := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategy,
@@ -360,13 +378,13 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			fmt.Sprintf("ws://127.0.0.1:%d", wsPort),
 			auth,
 			connect.TransportModeH1,
-			connect.DefaultPlatformTransportSettings(),
+			transportSettings,
 		)
-		return client, transport
+		return client, transport, h1Stats
 	}
 
-	clientA, transportA := newPeerClient(peerA, wsPort0)
-	clientB, transportB := newPeerClient(peerB, wsPort1)
+	clientA, transportA, h1StatsA := newPeerClient(peerA, wsPort0)
+	clientB, transportB, h1StatsB := newPeerClient(peerB, wsPort1)
 
 	defer func() {
 		clientA.Close()
@@ -564,6 +582,12 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	pingContent := perfRandContent(32)
 	firstRtt := pingPong(0, pingContent, nil, nil)
 	fmt.Printf("[perf]first message rtt = %s (includes contract bootstrap)\n", firstRtt)
+	// each client carries the phases on the H1+ they pin, not the websocket
+	for _, h1Stats := range []*connect.H1ConnectionStats{h1StatsA, h1StatsB} {
+		if h1Snapshot := h1Stats.Snapshot(); h1Snapshot.H1PlusConnectionCount != 1 || h1Snapshot.WebSocketConnectionCount != 0 {
+			t.Fatalf("[perf]a client negotiated %+v, want one H1+ connection", h1Snapshot)
+		}
+	}
 
 	// ---- phase 2: ping-pong latency --------------------------------------------
 
@@ -915,4 +939,713 @@ func perfDrain(messages chan *perfReceivedMessage) {
 			return
 		}
 	}
+}
+
+// ---- carriers (LBALT.md §9 "Performance") -----------------------------------
+//
+// Each carrier of connect's edge measured on its own, through each way a
+// client reaches the exchange:
+//
+//   - direct: the websocket and the urnetwork-framer/1 upgrade (H1+) on
+//     connect's plain H1 port, each pinned. The harness above runs H1+, the
+//     platform transport's default, pins it and checks it.
+//   - lb_alt: the websocket, H1+, raw QUIC and QUIC under whodis through the
+//     public sockets of connect's lb_alt front (Testing_NewLbAltFront), TLS
+//     terminated in connect.
+//   - nginx: the same four through warp/lb's pinned nginx build, as an nginx
+//     edge interface carries them today: H1 through its http proxy, and QUIC
+//     and whodis through its udp stream with PROXY v2 to connect's trusted
+//     listeners. The local build has no ssl module, so its H1 hop is
+//     plaintext where production terminates TLS in nginx. The case skips
+//     without the build (`make nginx_local` in warp/lb).
+//
+// Two clients, each with its own transport on the carrier under test, send
+// to each other without contracts through one exchange. A run takes the echo
+// round trip's percentiles and the one-way acked message rate at 1 KiB. Each
+// carrier is run perfCarrierRunCount times and its best run is held to the
+// carrier's floors, with up to mcPerfExtraRunCount more runs only while a
+// floor is unmet. The floors are collapse detectors, not targets: a carrier
+// that wedges or loses the exchange fails, a slow or loaded host does not.
+// Whodis has floors of its own: the server can answer only the client's
+// queries, so its rate is the client's query pace, about 20 messages a
+// second at 1 KiB on an idle loopback through nginx and the front alike.
+
+const (
+	perfCarrierRunCount         = 3
+	perfCarrierPingPongCount    = 100
+	perfCarrierPingPongWarmup   = 10
+	perfCarrierBlastDuration    = 3 * time.Second
+	perfCarrierBlastContentSize = 1024
+	// the first message crosses a cold path: both connects, the residents
+	perfCarrierFirstMessageTimeout = 120 * time.Second
+	// the best run's echo p50 at most, and its message rate at least: H1 and
+	// QUIC measure thousands to tens of thousands of messages a second and a
+	// p50 under 2 ms on loopback, whodis 18 to 20 a second and about 60 ms
+	perfCarrierMaxEchoRttP50        = 500 * time.Millisecond
+	perfCarrierMinMessageRate       = 100.0
+	perfCarrierWhodisMaxEchoRttP50  = 2 * time.Second
+	perfCarrierWhodisMinMessageRate = 5.0
+)
+
+// How one client reaches the exchange on a carrier: its platform url, and the
+// settings of its strategy and its transport.
+type perfCarrierDial struct {
+	platformUrl       string
+	strategySettings  *connect.ClientStrategySettings
+	transportSettings *connect.PlatformTransportSettings
+}
+
+// One carrier of one path.
+type perfCarrierCase struct {
+	name string
+	mode connect.TransportMode
+	// on h1: the urnetwork-framer/1 upgrade rather than the websocket
+	h1Plus bool
+	// a new dial for each client
+	dial func() *perfCarrierDial
+}
+
+// The floors of a carrier's best run: its echo p50 at most, and its message
+// rate at least.
+func (self *perfCarrierCase) floors() (time.Duration, float64) {
+	if self.mode == connect.TransportModeH3Dns {
+		return perfCarrierWhodisMaxEchoRttP50, perfCarrierWhodisMinMessageRate
+	}
+	return perfCarrierMaxEchoRttP50, perfCarrierMinMessageRate
+}
+
+// One measured run of a carrier.
+type perfCarrierRun struct {
+	echoRttP50  time.Duration
+	echoRttP99  time.Duration
+	messageRate float64
+	goodputMibS float64
+}
+
+// One network with one client, for a carrier's measurement.
+type perfCarrierPeer struct {
+	clientId   server.Id
+	instanceId server.Id
+	byJwt      string
+}
+
+// Creates a network with one client.
+func newPerfCarrierPeer(ctx context.Context, name string) *perfCarrierPeer {
+	networkId := server.NewId()
+	userId := server.NewId()
+	deviceId := server.NewId()
+	clientId := server.NewId()
+	networkName := fmt.Sprintf("perf-%s-%s", name, networkId)
+	model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+	model.Testing_CreateDevice(ctx, networkId, deviceId, clientId, name, name)
+	return &perfCarrierPeer{
+		clientId:   clientId,
+		instanceId: server.NewId(),
+		byJwt: session.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			false,
+			false,
+		).Client(deviceId, clientId).Testing_Sign(),
+	}
+}
+
+// A platform transport budget of the default size for one client, so the
+// clients of a measurement never contend for the process's.
+func newPerfCarrierTransportBudget() *connect.PlatformTransportBudget {
+	budgetStats := connect.DefaultPlatformTransportBudget().Stats()
+	return connect.NewPlatformTransportBudget(
+		budgetStats.TotalByteCount,
+		budgetStats.MaxTransportCount,
+	)
+}
+
+// Measures one carrier of one path: two clients connect on it, the first
+// message crosses cold, then each run takes the echo round trip and the
+// one-way acked rate. The h1 carriers must negotiate the carrier they pin.
+func testConnectCarrierPerformance(t testing.TB, ctx context.Context, pathName string, carrierCase *perfCarrierCase) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	label := fmt.Sprintf("path=%s carrier=%s", pathName, carrierCase.name)
+
+	type perfCarrierClient struct {
+		peer      *perfCarrierPeer
+		client    *connect.Client
+		h1Stats   *connect.H1ConnectionStats
+		transport *connect.PlatformTransport
+		strategy  *connect.ClientStrategy
+	}
+	newClient := func(name string) *perfCarrierClient {
+		peer := newPerfCarrierPeer(ctx, pathName+"-"+carrierCase.name+"-"+name)
+		client := connect.NewClient(ctx, connect.Id(peer.clientId), connect.NewNoContractClientOob(), newLocalPerformanceClientSettings())
+		dial := carrierCase.dial()
+		strategy := connect.NewClientStrategy(ctx, dial.strategySettings)
+		h1Stats := &connect.H1ConnectionStats{}
+		dial.transportSettings.H1ConnectionStats = h1Stats
+		dial.transportSettings.EnableH1Plus = carrierCase.h1Plus
+		transport := connect.NewPlatformTransportWithTargetMode(
+			ctx,
+			strategy,
+			client.RouteManager(),
+			dial.platformUrl,
+			&connect.ClientAuth{
+				ByJwt:      peer.byJwt,
+				InstanceId: connect.Id(peer.instanceId),
+				AppVersion: "0.0.0",
+			},
+			carrierCase.mode,
+			dial.transportSettings,
+		)
+		return &perfCarrierClient{
+			peer:      peer,
+			client:    client,
+			h1Stats:   h1Stats,
+			transport: transport,
+			strategy:  strategy,
+		}
+	}
+	clientA := newClient("a")
+	clientB := newClient("b")
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		for _, perfClient := range []*perfCarrierClient{clientA, clientB} {
+			perfClient.transport.Close()
+			perfClient.client.Close()
+			perfClient.transport.CloseAndWait(closeCtx)
+			perfClient.client.CloseAndWait(closeCtx)
+			perfClient.strategy.Close()
+		}
+	}()
+	destinationA := connect.Id(clientA.peer.clientId)
+	destinationB := connect.Id(clientB.peer.clientId)
+	clientA.client.ContractManager().AddNoContractPeer(destinationB)
+	clientB.client.ContractManager().AddNoContractPeer(destinationA)
+
+	// b echoes every message back to a while echoing, and counts what it
+	// receives
+	echoOn := &atomic.Bool{}
+	echoContent := perfRandContent(32)
+	echoesToA := make(chan uint32, 4096)
+	var receivedCountB atomic.Int64
+	addReceive := func(client *connect.Client, onMessage func(index uint32)) {
+		client.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, peer connect.Peer) {
+			for _, frame := range frames {
+				message, err := connect.FromFrame(frame)
+				if err != nil {
+					continue
+				}
+				if simpleMessage, ok := message.(*protocol.SimpleMessage); ok {
+					onMessage(simpleMessage.MessageIndex)
+				}
+			}
+		})
+	}
+	addReceive(clientA.client, func(index uint32) {
+		select {
+		case echoesToA <- index:
+		default:
+		}
+	})
+	addReceive(clientB.client, func(index uint32) {
+		receivedCountB.Add(1)
+		if echoOn.Load() {
+			// a receive callback must not block on a send: the echo goes out
+			// from its own goroutine
+			go connectserver.TestingSendConnectFrame(clientB.client, perfRequireFrame(index, 1, echoContent), destinationA, func(error) {})
+		}
+	})
+
+	echoOn.Store(true)
+	pingContent := perfRandContent(32)
+	pingPong := func(index uint32, timeout time.Duration) time.Duration {
+		startTime := time.Now()
+		connectserver.TestingSendConnectFrame(clientA.client, perfRequireFrame(index, 1, pingContent), destinationB, func(error) {})
+		deadline := time.After(timeout)
+		for {
+			select {
+			case echoIndex := <-echoesToA:
+				if echoIndex == index {
+					return time.Since(startTime)
+				}
+			case <-deadline:
+				t.Fatalf("[perfcarrier]%s: no echo of %d within %s", label, index, timeout)
+			}
+		}
+	}
+	firstRtt := pingPong(0, perfCarrierFirstMessageTimeout)
+	fmt.Printf("[perfcarrier]%s first message rtt = %s\n", label, firstRtt)
+
+	// the carrier each client negotiated is the one pinned
+	for _, perfClient := range []*perfCarrierClient{clientA, clientB} {
+		h1Snapshot := perfClient.h1Stats.Snapshot()
+		var webSocketCount, h1PlusCount int64
+		switch {
+		case carrierCase.mode != connect.TransportModeH1:
+		case carrierCase.h1Plus:
+			h1PlusCount = 1
+		default:
+			webSocketCount = 1
+		}
+		if h1Snapshot.WebSocketConnectionCount != webSocketCount || h1Snapshot.H1PlusConnectionCount != h1PlusCount {
+			t.Fatalf("[perfcarrier]%s negotiated %+v", label, h1Snapshot)
+		}
+	}
+
+	nextIndex := uint32(1)
+	measure := func(run int) *perfCarrierRun {
+		echoOn.Store(true)
+		rtts := []time.Duration{}
+		for i := range perfCarrierPingPongWarmup + perfCarrierPingPongCount {
+			rtt := pingPong(nextIndex, perfSettleTimeout)
+			nextIndex += 1
+			if perfCarrierPingPongWarmup <= i {
+				rtts = append(rtts, rtt)
+			}
+		}
+		echoOn.Store(false)
+
+		content := perfRandContent(perfCarrierBlastContentSize)
+		var acked atomic.Int64
+		var ackErrs atomic.Int64
+		var lastAckNanos atomic.Int64
+		startTime := time.Now()
+		sent := int64(0)
+		for time.Since(startTime) < perfCarrierBlastDuration {
+			connectserver.TestingSendConnectFrame(clientA.client, perfRequireFrame(nextIndex, 1, content), destinationB, func(err error) {
+				if err != nil {
+					ackErrs.Add(1)
+					return
+				}
+				acked.Add(1)
+				lastAckNanos.Store(time.Now().UnixNano())
+			})
+			nextIndex += 1
+			sent += 1
+		}
+		err := connectserver.TestingWaitForConnectCondition(ctx, perfSettleTimeout, 50*time.Millisecond, func(context.Context) (bool, string) {
+			return sent <= acked.Load()+ackErrs.Load(), fmt.Sprintf("sent=%d acked=%d ackErrs=%d", sent, acked.Load(), ackErrs.Load())
+		})
+		if err != nil {
+			t.Fatalf("[perfcarrier]%s run %d: %s", label, run, err)
+		}
+		if ackErrCount := ackErrs.Load(); 0 < ackErrCount {
+			t.Fatalf("[perfcarrier]%s run %d: %d messages were not acknowledged", label, run, ackErrCount)
+		}
+		elapsed := time.Unix(0, lastAckNanos.Load()).Sub(startTime)
+		if elapsed <= 0 {
+			elapsed = time.Since(startTime)
+		}
+		measuredRun := &perfCarrierRun{
+			echoRttP50:  perfPercentile(rtts, 0.50),
+			echoRttP99:  perfPercentile(rtts, 0.99),
+			messageRate: float64(acked.Load()) / elapsed.Seconds(),
+			goodputMibS: float64(acked.Load()) * float64(len(content)) / (1024 * 1024) / elapsed.Seconds(),
+		}
+		fmt.Printf(
+			"[perfcarrier]%s run=%d echo_rtt p50=%s p99=%s rate=%.0f msg/s goodput=%.2f MiB/s\n",
+			label,
+			run,
+			measuredRun.echoRttP50,
+			measuredRun.echoRttP99,
+			measuredRun.messageRate,
+			measuredRun.goodputMibS,
+		)
+		return measuredRun
+	}
+
+	maxEchoRttP50, minMessageRate := carrierCase.floors()
+	var bestEchoRttP50 time.Duration
+	bestMessageRate := 0.0
+	floorsMet := func() bool {
+		return 0 < bestEchoRttP50 && bestEchoRttP50 <= maxEchoRttP50 && minMessageRate <= bestMessageRate
+	}
+	for run := 0; run < perfCarrierRunCount || (!floorsMet() && run < perfCarrierRunCount+mcPerfExtraRunCount); run += 1 {
+		measuredRun := measure(run)
+		if bestEchoRttP50 == 0 || measuredRun.echoRttP50 < bestEchoRttP50 {
+			bestEchoRttP50 = measuredRun.echoRttP50
+		}
+		bestMessageRate = max(bestMessageRate, measuredRun.messageRate)
+	}
+	fmt.Printf("[perfcarrier]%s best echo_rtt p50=%s rate=%.0f msg/s received_b=%d\n", label, bestEchoRttP50, bestMessageRate, receivedCountB.Load())
+	if maxEchoRttP50 < bestEchoRttP50 {
+		t.Fatalf("[perfcarrier]%s: best echo p50 %s over the %s ceiling", label, bestEchoRttP50, maxEchoRttP50)
+	}
+	if bestMessageRate < minMessageRate {
+		t.Fatalf("[perfcarrier]%s: best rate %.0f msg/s under the %.0f floor", label, bestMessageRate, minMessageRate)
+	}
+}
+
+// Connect for the direct and nginx paths: one exchange with its handler on a
+// plain H1 port, as connect's private H1 serves nginx today, and with
+// trustedUdp the handler's trusted h3 and h3dns listeners, which read nginx's
+// PROXY v2 header, on loopback.
+type perfCarrierConnect struct {
+	h1Port  int
+	h3Port  int
+	dnsPort int
+}
+
+// Starts connect's side of the direct or nginx path; it closes with the test.
+func newPerfCarrierConnect(t testing.TB, ctx context.Context, trustedUdp bool) *perfCarrierConnect {
+	listenTcp := func() net.Listener {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return listener
+	}
+	exchangeListener := listenTcp()
+	exchangePort := exchangeListener.Addr().(*net.TCPAddr).Port
+	settings := connectserver.DefaultExchangeSettings()
+	settings.ConnectionAnnounceTimeout = 0
+	settings.ConnectionRateLimitSettings.BurstConnectionCount = 1000
+	settings.ForwardEnforceActiveContracts = false
+	settings.ConnectionTestConfig = connectserver.V0TestConfig()
+	settings.ListenH3Port = 0
+	settings.ListenDnsPort = 0
+	settings.ListenDnsCompatibilityPorts = nil
+	packetConns := connectserver.ConnectHandlerPacketConns{}
+	perfConnect := &perfCarrierConnect{}
+	if trustedUdp {
+		listenUdp := func() net.PacketConn {
+			packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return packetConn
+		}
+		packetConns.H3 = listenUdp()
+		packetConns.Dns = listenUdp()
+		perfConnect.h3Port = packetConns.H3.LocalAddr().(*net.UDPAddr).Port
+		perfConnect.dnsPort = packetConns.Dns.LocalAddr().(*net.UDPAddr).Port
+		settings.ListenH3Port = perfConnect.h3Port
+		settings.ListenDnsPort = perfConnect.dnsPort
+		// what nginx streams to: the PROXY v2 reader, and connect's own
+		// certificate, self-signed here
+		settings.EnableProxyProtocol = true
+		settings.TransportTlsSettings.EnableSelfSign = true
+	}
+	exchange := connectserver.NewExchangeWithListeners(
+		ctx,
+		"perfcarrier",
+		"connect",
+		"test",
+		map[int]int{exchangePort: exchangePort},
+		map[string]string{"perfcarrier": "127.0.0.1"},
+		settings,
+		map[int]net.Listener{exchangePort: exchangeListener},
+	)
+	connectHandler := connectserver.NewConnectHandlerWithPacketConns(ctx, server.NewId(), exchange, &settings.ConnectHandlerSettings, packetConns)
+	h1Listener := listenTcp()
+	perfConnect.h1Port = h1Listener.Addr().(*net.TCPAddr).Port
+	h1Server := &http.Server{
+		Handler: router.NewRouter(ctx, []*router.Route{
+			router.NewRoute("GET", "/", connectHandler.Connect),
+		}),
+	}
+	go h1Server.Serve(h1Listener)
+	t.Cleanup(func() {
+		connectHandler.Close()
+		h1Server.Close()
+		exchange.Close()
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer closeCancel()
+		if !connectHandler.WaitForIdle(closeCtx) {
+			t.Errorf("connect's handler did not finish")
+		}
+	})
+	if trustedUdp {
+		err := connectserver.TestingWaitForConnectCondition(ctx, perfSettleTimeout, 20*time.Millisecond, func(context.Context) (bool, string) {
+			_, err := connectHandler.ListenerReadyUdpPorts()
+			return err == nil, fmt.Sprintf("trusted listeners: %v", err)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return perfConnect
+}
+
+// The direct path's dial: a plain websocket url to connect's H1 port.
+func (self *perfCarrierConnect) directDial() *perfCarrierDial {
+	strategySettings := connect.DefaultClientStrategySettings()
+	strategySettings.EnableResilient = false
+	transportSettings := connect.DefaultPlatformTransportSettings()
+	transportSettings.PlatformTransportBudget = newPerfCarrierTransportBudget()
+	return &perfCarrierDial{
+		platformUrl:       fmt.Sprintf("ws://127.0.0.1:%d", self.h1Port),
+		strategySettings:  strategySettings,
+		transportSettings: transportSettings,
+	}
+}
+
+// The websocket and H1+ on connect's H1 port, each pinned.
+func TestConnectPerformanceCarriersDirect(t *testing.T) {
+	perfTestEnv().Run(t, func(t testing.TB) {
+		if testing.Short() {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		perfConnect := newPerfCarrierConnect(t, ctx, false)
+		for _, carrierCase := range []*perfCarrierCase{
+			{name: "websocket", mode: connect.TransportModeH1, h1Plus: false, dial: perfConnect.directDial},
+			{name: "h1+", mode: connect.TransportModeH1, h1Plus: true, dial: perfConnect.directDial},
+		} {
+			testConnectCarrierPerformance(t, ctx, "direct", carrierCase)
+		}
+	})
+}
+
+// The websocket, H1+, raw QUIC and QUIC under whodis through the public
+// sockets of connect's lb_alt front.
+func TestConnectPerformanceCarriersLbAlt(t *testing.T) {
+	perfTestEnv().Run(t, func(t testing.TB) {
+		if testing.Short() {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		front := connectserver.Testing_NewLbAltFront(t)
+		frontDial := func(mode connect.TransportMode, h1Plus bool) func() *perfCarrierDial {
+			return func() *perfCarrierDial {
+				platformUrl, strategySettings, transportSettings := front.Dial(mode, h1Plus)
+				return &perfCarrierDial{
+					platformUrl:       platformUrl,
+					strategySettings:  strategySettings,
+					transportSettings: transportSettings,
+				}
+			}
+		}
+		for _, carrierCase := range []*perfCarrierCase{
+			{name: "websocket", mode: connect.TransportModeH1, h1Plus: false, dial: frontDial(connect.TransportModeH1, false)},
+			{name: "h1+", mode: connect.TransportModeH1, h1Plus: true, dial: frontDial(connect.TransportModeH1, true)},
+			{name: "quic", mode: connect.TransportModeH3, h1Plus: false, dial: frontDial(connect.TransportModeH3, false)},
+			{name: "whodis", mode: connect.TransportModeH3Dns, h1Plus: false, dial: frontDial(connect.TransportModeH3Dns, false)},
+		} {
+			testConnectCarrierPerformance(t, ctx, "lb_alt", carrierCase)
+		}
+	})
+}
+
+// warp/lb's pinned nginx build (`make nginx_local`): NGINX_UDP_PROXY_V2_BINARY
+// when set, as warp/lb's own tests read it, then the build in the warp
+// checkout beside the server's or under WARP_HOME. "" with the reason when
+// there is none.
+func perfNginxBinary() (string, string) {
+	if configuredBinary := os.Getenv("NGINX_UDP_PROXY_V2_BINARY"); configuredBinary != "" {
+		resolvedBinary, err := exec.LookPath(configuredBinary)
+		if err != nil {
+			return "", fmt.Sprintf("NGINX_UDP_PROXY_V2_BINARY=%q is not executable: %v", configuredBinary, err)
+		}
+		return resolvedBinary, ""
+	}
+	buildPath := filepath.Join("warp", "lb", "build", "nginx-local", "sbin", "nginx")
+	candidates := []string{
+		filepath.Join("..", "..", buildPath),
+	}
+	if warpHome := os.Getenv("WARP_HOME"); warpHome != "" {
+		candidates = append(candidates, filepath.Join(warpHome, buildPath))
+	}
+	for _, candidate := range candidates {
+		if resolvedBinary, err := exec.LookPath(candidate); err == nil {
+			return resolvedBinary, ""
+		}
+	}
+	return "", "the pinned nginx build was not found; run `make nginx_local` in warp/lb"
+}
+
+// Runs nginx with the edge's connect paths in front of perfConnect: an http
+// proxy to connect's H1 port with the websocket upgrade, and udp streams with
+// PROXY v2 to connect's trusted h3 and h3dns listeners, with the lb's
+// proxy settings. Returns the ports nginx listens on, plain http first. nginx
+// stops with the test.
+func startPerfNginx(t testing.TB, nginxBinary string, perfConnect *perfCarrierConnect) (httpPort int, h3Port int, dnsPort int) {
+	versionOutput, err := exec.Command(nginxBinary, "-V").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read the nginx build configuration: %v: %s", err, versionOutput)
+	}
+	if !strings.Contains(string(versionOutput), "--with-stream") {
+		t.Skipf("the nginx build has no stream module: %s", versionOutput)
+	}
+	freePort := func(network string) int {
+		if network == "tcp" {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			return listener.Addr().(*net.TCPAddr).Port
+		}
+		packetConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer packetConn.Close()
+		return packetConn.LocalAddr().(*net.UDPAddr).Port
+	}
+	httpPort = freePort("tcp")
+	h3Port = freePort("udp")
+	dnsPort = freePort("udp")
+
+	prefixDir := t.TempDir()
+	configPath := filepath.Join(prefixDir, "nginx.conf")
+	config := fmt.Sprintf(`
+worker_processes 2;
+pid nginx.pid;
+error_log stderr warn;
+daemon off;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log off;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+
+    server {
+        listen 127.0.0.1:%d;
+        location / {
+            proxy_pass http://127.0.0.1:%d;
+            proxy_set_header X-UR-Forwarded-For $remote_addr:$remote_port;
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header X-Forwarded-Source-Port "";
+            proxy_set_header Host $host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection 'upgrade';
+            proxy_read_timeout 60s;
+            proxy_send_timeout 60s;
+        }
+    }
+}
+
+stream {
+    server {
+        listen 127.0.0.1:%d udp reuseport;
+        proxy_protocol v2;
+        proxy_timeout 30s;
+        proxy_requests 0;
+        proxy_pass 127.0.0.1:%d;
+    }
+
+    server {
+        listen 127.0.0.1:%d udp reuseport;
+        proxy_protocol v2;
+        proxy_timeout 30s;
+        proxy_requests 0;
+        proxy_pass 127.0.0.1:%d;
+    }
+}
+`, httpPort, perfConnect.h1Port, h3Port, perfConnect.h3Port, dnsPort, perfConnect.dnsPort)
+	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(prefixDir, "nginx-output.log")
+	outputFile, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nginxCmd := exec.Command(nginxBinary, "-p", prefixDir+string(os.PathSeparator), "-c", configPath)
+	nginxCmd.Stdout = outputFile
+	nginxCmd.Stderr = outputFile
+	nginxCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := nginxCmd.Start(); err != nil {
+		outputFile.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		syscall.Kill(-nginxCmd.Process.Pid, syscall.SIGQUIT)
+		waitDone := make(chan error, 1)
+		go func() {
+			waitDone <- nginxCmd.Wait()
+		}()
+		select {
+		case <-waitDone:
+		case <-time.After(10 * time.Second):
+			syscall.Kill(-nginxCmd.Process.Pid, syscall.SIGKILL)
+			<-waitDone
+		}
+		outputFile.Close()
+		if t.Failed() {
+			output, _ := os.ReadFile(outputPath)
+			fmt.Printf("[perfcarrier]nginx output:\n%s\n", output)
+		}
+	})
+	// ready once its http listener accepts
+	readyDeadline := time.Now().Add(perfSettleTimeout)
+	for {
+		conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", httpPort))
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if readyDeadline.Before(time.Now()) {
+			output, _ := os.ReadFile(outputPath)
+			t.Fatalf("nginx did not become ready: %v\n%s", err, output)
+		}
+		select {
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return httpPort, h3Port, dnsPort
+}
+
+// The websocket, H1+, raw QUIC and QUIC under whodis through warp/lb's nginx
+// build, as an nginx edge interface carries them: the baseline of the lb_alt
+// cases. Skips without the build.
+func TestConnectPerformanceCarriersNginx(t *testing.T) {
+	nginxBinary, reason := perfNginxBinary()
+	if nginxBinary == "" {
+		t.Skip(reason)
+	}
+	perfTestEnv().Run(t, func(t testing.TB) {
+		if testing.Short() {
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		perfConnect := newPerfCarrierConnect(t, ctx, true)
+		httpPort, h3Port, dnsPort := startPerfNginx(t, nginxBinary, perfConnect)
+		nginxDial := func(mode connect.TransportMode) func() *perfCarrierDial {
+			return func() *perfCarrierDial {
+				strategySettings := connect.DefaultClientStrategySettings()
+				strategySettings.EnableResilient = false
+				transportSettings := connect.DefaultPlatformTransportSettings()
+				transportSettings.PlatformTransportBudget = newPerfCarrierTransportBudget()
+				// connect's trusted listeners serve a self-signed certificate
+				// here
+				transportSettings.QuicTlsConfig = &tls.Config{
+					InsecureSkipVerify: true,
+				}
+				platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", httpPort)
+				switch mode {
+				case connect.TransportModeH3:
+					platformUrl = "wss://connect.service.example"
+					transportSettings.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", h3Port)
+				case connect.TransportModeH3Dns:
+					// the trusted h3dns listener decodes with connect's
+					// default tld, which the client's settings keep
+					platformUrl = "wss://connect.service.example"
+					transportSettings.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", dnsPort)
+				}
+				return &perfCarrierDial{
+					platformUrl:       platformUrl,
+					strategySettings:  strategySettings,
+					transportSettings: transportSettings,
+				}
+			}
+		}
+		for _, carrierCase := range []*perfCarrierCase{
+			{name: "websocket", mode: connect.TransportModeH1, h1Plus: false, dial: nginxDial(connect.TransportModeH1)},
+			{name: "h1+", mode: connect.TransportModeH1, h1Plus: true, dial: nginxDial(connect.TransportModeH1)},
+			{name: "quic", mode: connect.TransportModeH3, h1Plus: false, dial: nginxDial(connect.TransportModeH3)},
+			{name: "whodis", mode: connect.TransportModeH3Dns, h1Plus: false, dial: nginxDial(connect.TransportModeH3Dns)},
+		} {
+			testConnectCarrierPerformance(t, ctx, "nginx", carrierCase)
+		}
+	})
 }
