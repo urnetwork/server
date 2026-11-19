@@ -360,7 +360,7 @@ func evidenceSnapshotHashesCommand(opts docopt.Opts) {
 	manifest.Finished = time.Now().UTC()
 	manifest.Export = *report
 	manifest.Sort = sorted
-	sample, err := evidencemove.SampleSnapshot(outPath, 2000, uint64(time.Now().UnixNano()))
+	sample, err := evidencemove.SampleSnapshot(outPath, 2000)
 	if err != nil {
 		evidenceFail(err)
 	}

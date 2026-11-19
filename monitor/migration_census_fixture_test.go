@@ -16,11 +16,7 @@ import (
 // finish; the ordinary reader supplies the actual read-only transaction commit.
 // Both paths use every production batch and the same strict frame decoder.
 func migrationCensusFixtureInTx(ctx context.Context, tx server.PgTx, query string, observation *migrationCensusObservation, finish func() error) ([]Row, error) {
-	plan, err := planMigrationCensus(query, observation.settings)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := runMigrationCensus(ctx, query, observation, func(_ string) (string, error) {
+	rows, err := runMigrationCensus(ctx, query, observation, func(plan *migrationCensusPlan, _ string) (string, error) {
 		var isolation string
 		if err := tx.QueryRow(ctx, "SELECT current_setting('transaction_isolation')").Scan(&isolation); err != nil {
 			return "", err

@@ -1905,6 +1905,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
+			egressProxyFromHeader(r.Header),
 			auth.AppVersion,
 			self.handlerId,
 			self.connectionReconcile,
@@ -2917,6 +2918,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
+			// h3 never carries a proxied transport (transport_egress_proxy.go)
+			false,
 			appVersion,
 			self.handlerId,
 			self.connectionReconcile,

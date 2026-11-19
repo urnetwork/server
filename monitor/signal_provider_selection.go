@@ -91,32 +91,52 @@ type providerSelectionEvidence struct {
 	drawPaired       int
 	drawComplete     bool
 	reason           string
+	sourceRejection  string
 }
 
 // Does not echo untrusted metric labels or source error bodies on failure.
 func parseProviderSelection(raw, environment string, now time.Time, scope providerPickerScope) providerSelectionEvidence {
 	evidence := providerSelectionEvidence{counts: map[providerSelectionKey]float64{}, expected: len(scope.slots), reason: "incomplete-process-window"}
-	invalid := func() providerSelectionEvidence {
-		return providerSelectionEvidence{expected: len(scope.slots), reason: "invalid-source-response"}
+	invalid := func(boundary string) providerSelectionEvidence {
+		return providerSelectionEvidence{expected: len(scope.slots), reason: "invalid-source-response", sourceRejection: boundary}
 	}
 	var response struct {
 		mimirInstantResponse
 		Warnings []string `json:"warnings"`
 		Infos    []string `json:"infos"`
 	}
-	if len(raw) > providerSelectionMaxBytes || json.Unmarshal([]byte(raw), &response) != nil || response.Status != "success" || response.Data.ResultType != "vector" || len(response.Warnings) != 0 || len(response.Infos) != 0 || len(response.Data.Result) > 8192 {
-		return invalid()
+	switch {
+	case len(raw) > providerSelectionMaxBytes:
+		return invalid("byte-limit")
+	case json.Unmarshal([]byte(raw), &response) != nil:
+		return invalid("json-decode")
+	case response.Status != "success":
+		return invalid("response-status")
+	case response.Data.ResultType != "vector":
+		return invalid("result-type")
+	case len(response.Warnings) != 0 || len(response.Infos) != 0:
+		return invalid("response-annotations")
+	case len(response.Data.Result) > 8192:
+		return invalid("row-limit")
 	}
 	processes := map[pickerProcessKey]*providerSelectionProcess{}
 	contains := func(v string, allowed string) bool { return slices.Contains(strings.Split(allowed, "|"), v) }
 	for _, row := range response.Data.Result {
 		at, value, err := mimirInstantValue(row.Value)
-		if err != nil || at.Unix() != now.Unix() || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 9007199254740991 {
-			return invalid()
+		switch {
+		case err != nil:
+			return invalid("sample-decode")
+		case at.Unix() != now.Unix():
+			return invalid("evaluation-time")
+		case math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 9007199254740991:
+			return invalid("sample-value")
 		}
 		key := pickerProcessKey{host: row.Metric["host"], block: row.Metric["block"], instance: row.Metric["instance"]}
-		if row.Metric["env"] != environment || row.Metric["job"] != "api" || !scope.slots[key.host+"\x00"+key.block] || key.instance == "" || len(key.instance) > 512 {
-			return invalid()
+		if row.Metric["env"] != environment || row.Metric["job"] != "api" || !scope.slots[key.host+"\x00"+key.block] {
+			return invalid("process-scope")
+		}
+		if key.instance == "" || len(key.instance) > 512 {
+			return invalid("process-identity")
 		}
 		process := processes[key]
 		if process == nil {
@@ -131,7 +151,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		case "count", "count_time", "resets", "samples":
 			outcome := providerSelectionKey{targetKind: row.Metric["target_kind"], requestClass: row.Metric["request_class"], family: row.Metric["ip_family"], rankMode: row.Metric["rank_mode"], outcome: row.Metric["outcome"], reason: row.Metric["reason"]}
 			if !contains(outcome.targetKind, "none|direct|country|region|city|location_unknown|group|best_available|mixed") || !contains(outcome.requestClass, "default_minimum|count_zero|count_small|count_positive|forced_minimum") || !contains(outcome.family, "any|v4|v6|dualstack|unknown") || !contains(outcome.rankMode, "quality|speed|online|unknown") {
-				return invalid()
+				return invalid("cohort-labels")
 			}
 			validReason := false
 			switch outcome.outcome {
@@ -143,7 +163,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 				validReason = contains(outcome.reason, "validate|caller_location|load_primary|load_backfill|hard_exclusions|filter|directory|select|record_matches")
 			}
 			if !validReason {
-				return invalid()
+				return invalid("outcome-reason")
 			}
 			fields = process.outcomes[outcome]
 			if fields == nil {
@@ -151,10 +171,10 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 				process.outcomes[outcome] = fields
 			}
 		default:
-			return invalid()
+			return invalid("series-field")
 		}
 		if _, exists := fields[field]; exists {
-			return invalid()
+			return invalid("duplicate-cell")
 		}
 		fields[field] = value
 	}
@@ -267,12 +287,16 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 		} else if evidence.complete {
 			reason, frame = "incomplete-shape-schema-window", "response-shape"
 		}
+		observed := fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s draw_paired_processes=%d", evidence.paired, evidence.shapePaired, evidence.expected, reason, evidence.drawPaired)
+		if evidence.sourceRejection != "" {
+			observed += " source_rejection=" + evidence.sourceRejection
+		}
 		findings = append(findings, finding{
 			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
 			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 2 adds small-list attribution, schema 3 adds capability refusals, and schema 4 establishes terminal draw eligibility. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
 			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1 through schema-4 window and valid observed counter partitions; complete response-shape attribution requires schema 2 or newer everywhere.",
-			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s draw_paired_processes=%d", evidence.paired, evidence.shapePaired, evidence.expected, reason, evidence.drawPaired),
+			observed:  observed,
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
 			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",
 			action:    "Verify emitting API ancestry for the selection diagnostic schema, complete the authorized rollout and inspect scrape/generation/reset coverage. Do not change selection filters to restore telemetry.",

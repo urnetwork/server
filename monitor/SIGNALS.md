@@ -891,6 +891,13 @@ six-of-22 historical replay had complete fleet authority.
   discoverable through `errors.Is`/`errors.As` when the owner ends. Unknown never
   emits a healthy collapse finding, so the notifier keeps an existing incident
   through telemetry loss.
+  A bounded gateway read that fails while the probe is active adds the shared
+  `error_class` and any typed `ssh_admission_failures` or
+  `execution_boundaries` to its visibility warning (§1.7). A joined native
+  wait identifies the local SSH child's completion. A remote HTTP result and
+  the fleet transport count each require their own evidence. The 02:25 UTC
+  warning on 2026-11-19 retained only `bounded_source_unavailable` and its
+  specific source failure remains unknown.
 - False-positive qualifiers: transport multiplicity can change without the
   same change in distinct provider availability. Receiver-held samples can lag
   cessation by up to three minutes; concurrent live carriers are real transport
@@ -3019,7 +3026,7 @@ that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
-error class or direct Redis caller described below. Raw errors, stack arguments,
+error class, Redis caller and operation, or Redis adapter described below. Raw errors, stack arguments,
 source paths and line numbers, endpoints and identities stay private. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -3035,6 +3042,30 @@ exact standard-library sentinel representation. Error text alone cannot
 identify that type. Neither field establishes the selected pool, remaining
 budget, downstream latency or request outcome. Each applies only to the
 first diagnostic in its own bucket.
+The optional `redis_operation` field records where that diagnostic arose.
+`device_config_read` requires the direct device configuration reader.
+`feature_use_plan_lookup` requires the continuous source frames from the
+entitlement read or cache write through `lookupProNetwork` (or
+`IsProNetwork` on earlier workers) to the concrete feature-use planner. `feature_use_flush_plan` additionally requires the
+planner's direct call from `countMarks`, its recovery boundary and the
+enclosing `flush`. In this source, `flush` reaches that call after the mark
+store acknowledges the write. A shorter stack can retain the direct caller
+or planner alone. The request decision, metric label and completed flush count
+require their own evidence.
+For a `TakeClientCloseRequests` owner, the optional `redis_adapter` is
+`Redis` or `RedisDoOnce`. The named adapter in `redis.go` must be followed
+immediately by the named taker in `client_close_model.go` from the same
+ordinary or versioned Server module. If the selected frame is the taker's
+SPOP callback, its contiguous `redisWithClient.func1`, `redisWithClient` and
+matching adapter `.func1` frames must lead to that same pair. A missing
+source pair, another selected owner, an unfamiliar bridge, or competing
+adapter or taker frames leaves the field absent. The field identifies the
+adapter in that bucket's first exemplar. Command dispatch, mutation, reply,
+effective retries, initiating failure and close completion each require
+independent evidence. At 08:44 UTC on 2026-11-19, the Connect aggregate and
+taker alerts each reported 467 lines/minute. Their retained samples leave
+the adapter, error type and SQLSTATE unknown.
+
 The optional `[legacy_registration_db]` annotation accompanies only a returned
 failed acquisition in close-owner registration. It leaves the original
 `Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner
@@ -5621,6 +5652,36 @@ Global permits still cover the entire `Signal.Run` call, including subordinate
 admission and cleanup, and end before the alert handler or cadence wait. The
 inclusive 40-second owner, native 22-second minimum and global-four/host-two
 caps are unchanged; a lawful wait over 18 seconds can still prevent sampling.
+
+The optional private `host_permit_holders` schema1 records the watcher-local
+command semaphore for the exact address selected by the sampler (§2.1a).
+`at_request` captures other occupied permits just before the existing channel
+select. `at_return` captures them after that select and excludes the sampler's
+own grant. Each holds at most two code-owned catalog keys and distinct,
+address-local grant ordinals. A caller with no recognized scheduled key is
+`unknown`. The receipt keeps the count and last two exact releases between
+these observations, in release order. Each release belongs to the original
+command's once-only release closure. Commands sharing a key retain separate
+ordinals. No address, host name, argv, SQL, credential or external queue token
+enters the projection.
+
+`unique_release` requires a complete, initially full census, a sampler grant
+and exactly one release of an initially occupied permit. `multiple_releases`
+keeps individual release evidence and leaves the enabling release ambiguous.
+`no_release_required` records an initially available slot and no intervening
+release. `not_full_at_request` leaves a release from a partially occupied start
+unattributed. `not_granted` accompanies a canceled or expired acquisition.
+If a command acquired the channel before publishing its holder record, that
+snapshot reports `unavailable` and withholds the holder list. Unsupported
+capacity or exhausted counters withhold the affected evidence. Missing or
+legacy blocks leave ownership unknown. The original receipt and private SQL
+representatives take precedence at the combined 256 KiB storage limit.
+
+These snapshots include local descheduling and the command's full permit
+lifetime, including shared admission and cleanup. They establish neither a
+blocked syscall nor remote execution, database health, avoidable contention or
+the holder of an earlier uninstrumented turn. The existing host timing span,
+shared queue and native lifecycle each retain their own authority.
 
 New PG receipts optionally include fixed-schema `local_phase_timing` offsets
 in nanoseconds from the original monotonic run-slot request, or explicitly
@@ -13128,6 +13189,26 @@ partitions remain absent, never zero; partial healthy data and source failures
 cannot clear a prior invariant PAGE. The retained selection observation remains
 incomplete with no invented outcome rows. Require exact query/source authority
 and independent producer/policy evidence to distinguish these boundaries.
+
+At 01:27 UTC on 2026-11-19 the monitor reported
+`reason=invalid-source-response` and zero paired processes across 20 expected
+slots. That monitor retained only the whole-response verdict. A separate
+picker query in the same drain cannot identify which selection check failed.
+
+When the parser rejects a response, the warning and selection JSONL include
+`source_rejection`, the first parser check that failed. The possible checks
+are `byte-limit`, `json-decode`, `response-status`, `result-type`,
+`response-annotations` (warnings or infos), `row-limit`, `sample-decode`,
+`evaluation-time`, `sample-value`, `process-scope`, `process-identity`,
+`cohort-labels`, `outcome-reason`, `series-field` and `duplicate-cell`. The
+HTTP reader enforces the byte limit before parsing and reports
+`mimir_query_phase=response-bound` for an oversized body.
+
+One invalid row discards the entire response, including valid rows from other
+processes. Zero paired processes then describes the monitor's evidence. A
+healthy quiet window has complete coverage and no rejection field. Additional
+defects can be hidden behind the first failed check. Use the two complete
+post-convergence windows and independent route outcome below to verify recovery.
 
 `-provider-selection-output <path>` appends one JSONL observation for every
 existing probe execution, including qualified nonempty/quiet windows and
@@ -36225,6 +36306,20 @@ are archive-specific and closed. Invalid integrity labels are reduced to a
 bounded reason and count rather than emitted. The query and direct
 discriminator carry no credentials, repository names, checksums, private key
 paths, or backup contents.
+
+When a read produces the WARN/Sustain2 `monitor/visibility` alert for
+`cannot-observe` on `observability/backup-archives`, its observed values carry
+`backup_archive_stage=mimir-query` when the gateway query returns an error or
+`backup_archive_stage=writer-read` when the direct writer read returns an error.
+The stage names the local operation. The writer read follows a decoded
+successful vector that can still carry warnings.
+Admission and native execution markers describe any execution boundaries the
+returned error proves. Earlier timeouts with only `native-wait/started-joined`
+leave the read unidentified. Remote authentication, command execution, writer
+health and archive freshness require independent evidence. A successful
+fallback discards earlier gateway failures. Parent-only cancellations,
+inventory errors and response parser rejections retain their own diagnostics.
+Command output and source error text stay out of these diagnostic fields.
 
 A successful vector carrying any nonempty `warnings` list is incomplete for
 this probe, including a list containing only an empty string. Warning text is

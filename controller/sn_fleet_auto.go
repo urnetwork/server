@@ -999,6 +999,31 @@ type snFleetAutoPlanMember struct {
 	ValidTo   uint64
 }
 
+// The devices the plan can choose from: those with a client key, a prefix
+// pin, verify eligibility and no refusal. A device that declared a proxy
+// egress has no pin (model/verify_proxied_egress_model.go): it shows no unit,
+// so binding it would only cost it its pool share. The zero hash is no prefix
+// either.
+func snFleetAutoCandidates(clientIds []server.Id, evidence *snFleetAutoEvidence, lastCheck map[server.Id]time.Time, refused map[server.Id]bool, versions []*model.SnFleetBindingVersion, epoch uint64) []*snFleetAutoCandidate {
+	candidates := []*snFleetAutoCandidate{}
+	for _, clientId := range clientIds {
+		clientKey, hasKey := evidence.ClientKeys[clientId]
+		prefix, hasPrefix := evidence.Prefixes[clientId]
+		if !hasKey || !hasPrefix || prefix == ([32]byte{}) || !evidence.Eligible[clientId] || refused[clientId] {
+			continue
+		}
+		candidates = append(candidates, &snFleetAutoCandidate{
+			ClientId:  clientId,
+			ClientKey: clientKey,
+			Prefix:    prefix,
+			Measured:  evidence.Measured[clientId],
+			LastCheck: lastCheck[clientId],
+			Binding:   snFleetAutoOpenVersion(versions, clientId, epoch),
+		})
+	}
+	return candidates
+}
+
 func snFleetAutoInFleet(version *model.SnFleetBindingVersion, fleetId [32]byte, hotkey [32]byte) bool {
 	return version != nil && version.FleetId == fleetId && version.Hotkey == hotkey
 }
@@ -1115,22 +1140,7 @@ func snFleetAutoBuild(ctx context.Context, cfg *StConfig, deploymentKey model.St
 	}
 	evidence := snFleetAutoEvidenceFn(ctx, clientIds, now)
 	versions := model.GetSnFleetBindingVersionsForClients(ctx, deploymentKey, clientIds)
-	candidates := []*snFleetAutoCandidate{}
-	for _, clientId := range clientIds {
-		clientKey, hasKey := evidence.ClientKeys[clientId]
-		prefix, hasPrefix := evidence.Prefixes[clientId]
-		if !hasKey || !hasPrefix || !evidence.Eligible[clientId] || refused[clientId] {
-			continue
-		}
-		candidates = append(candidates, &snFleetAutoCandidate{
-			ClientId:  clientId,
-			ClientKey: clientKey,
-			Prefix:    prefix,
-			Measured:  evidence.Measured[clientId],
-			LastCheck: lastCheck[clientId],
-			Binding:   snFleetAutoOpenVersion(versions, clientId, epoch),
-		})
-	}
+	candidates := snFleetAutoCandidates(clientIds, evidence, lastCheck, refused, versions, epoch)
 	limit := min(evidence.PerFleet, sdkprotocol.FleetRelayDeviceLimit)
 	plan := snFleetAutoPlan(candidates, limit, epoch, authorization.FleetId, authorization.Hotkey)
 	binds := false

@@ -45,7 +45,9 @@ func GetVerifyEligibleClientIds(ctx context.Context) []server.Id {
 // that each client scores by: one per provider (§8.1), its IPv4 address while
 // it has one, else its IPv6 /64, else a v2 entry, the least hash of the
 // family when there are several. Both reverse index versions are read.
-// Expired entries are skipped, not deleted; the feeder path owns cleanup.
+// Expired entries are skipped, not deleted; the feeder path owns cleanup. A
+// client marked as leaving through a proxy scores by none and is absent
+// (MarkVerifyProxiedEgress).
 func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[server.Id][]string {
 	hashes := map[server.Id][]string{}
 	if len(clientIds) == 0 {
@@ -55,7 +57,10 @@ func GetVerifyLiveEgressHashes(ctx context.Context, clientIds []server.Id) map[s
 	server.Redis(ctx, func(r server.RedisClient) {
 		for start := 0; start < len(clientIds); start += 512 {
 			end := min(start+512, len(clientIds))
-			chunk := clientIds[start:end]
+			marked := readVerifyProxiedEgress(ctx, r, clientIds[start:end])
+			chunk := slices.DeleteFunc(slices.Clone(clientIds[start:end]), func(clientId server.Id) bool {
+				return marked[clientId]
+			})
 			cmds := make([][]*redis.MapStringStringCmd, len(chunk))
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
@@ -215,6 +220,10 @@ func decodeVerifyHeadHash(hashHex string, what string) [32]byte {
 // The first hop of a window pins the provider's candidate
 // (verifyHeadHashCandidate). A poison trail's hop reads the pin, or the
 // candidate, but never sets it, with the same Redis work as a real one's.
+//
+// A provider marked as leaving through a proxy (MarkVerifyProxiedEgress)
+// records the zero hash, which shows no unit, whatever its pin: its pin is
+// neither read nor set.
 func PinVerifyHopEgressIpHash(ctx context.Context, clientId server.Id, sourceIp netip.Addr, window string, poison bool, settings *VerifySettings) (pinned [32]byte) {
 	key := verifyHeadHashKey(clientId, window)
 	lifetime := verifyHeadHashLifetime(ctx, window, settings)
@@ -224,6 +233,9 @@ func PinVerifyHopEgressIpHash(ctx context.Context, clientId server.Id, sourceIp 
 	}
 	nowMs := uint64(server.NowUtc().UnixMilli())
 	server.Redis(ctx, func(r server.RedisClient) {
+		if verifyProxiedEgressMarked(ctx, r, clientId) {
+			return
+		}
 		candidate := verifyHeadHashCandidate(ctx, r, clientId, sourceIp, settings, nowMs)
 		pinnedHex, err := r.Eval(ctx, `
 local pinned = redis.call('GET', KEYS[1])
@@ -270,7 +282,9 @@ func GetSnTopPrefixPins(ctx context.Context, clientIds []server.Id, settings *Ve
 	return getVerifyHeadPrefixPins(ctx, clientIds, settings, window, window == current)
 }
 
-// getVerifyHeadPrefixPins owns the Redis pipelines for one explicit window.
+// getVerifyHeadPrefixPins owns the Redis pipelines for one explicit window. A
+// client marked as leaving through a proxy (MarkVerifyProxiedEgress) has no
+// pin, whatever an earlier hop or fold pinned, and none is set for it.
 func getVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, settings *VerifySettings, window string, allowLive bool) (pins map[server.Id][32]byte) {
 	pins = map[server.Id][32]byte{}
 	if len(clientIds) == 0 {
@@ -288,7 +302,10 @@ func getVerifyHeadPrefixPins(ctx context.Context, clientIds []server.Id, setting
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		for start := 0; start < len(clientIds); start += 512 {
-			chunk := clientIds[start:min(start+512, len(clientIds))]
+			marked := readVerifyProxiedEgress(ctx, r, clientIds[start:min(start+512, len(clientIds))])
+			chunk := slices.DeleteFunc(slices.Clone(clientIds[start:min(start+512, len(clientIds))]), func(clientId server.Id) bool {
+				return marked[clientId]
+			})
 			trailCmds := make([]*redis.StringCmd, len(chunk))
 			boardCmds := make([]*redis.StringCmd, len(chunk))
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {

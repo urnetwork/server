@@ -863,7 +863,7 @@ var logClasses = []logClass{
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
 		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
-		context:   "The sample retains normalized ownership, an allowlisted error type and SQLSTATE. A validated stack can also identify a finite provider-egress error class or the direct Redis caller. Unknown, malformed, oversized and excess-cardinality stacks still count in the aggregate.",
+		context:   "The sample retains normalized ownership, an allowlisted error type and SQLSTATE. A validated stack can also identify a finite provider-egress error class, the direct Redis caller and its operation, or the Redis adapter called by TakeClientCloseRequests in this sample. Unknown, malformed, oversized and excess-cardinality stacks still count in the aggregate.",
 		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. An ownership-admission wrapper alone leaves the business caller and cause unknown; inspect one bounded original structured stack and its error discriminator. A changed owner after parser correction is not recovery. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
 		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
 	},
@@ -1232,11 +1232,13 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner       string
-	errorType   string
-	sqlstate    string
-	errorClass  string
-	redisCaller string
+	owner          string
+	errorType      string
+	sqlstate       string
+	errorClass     string
+	redisCaller    string
+	redisOperation string
+	redisAdapter   string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
@@ -1316,11 +1318,11 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 	}
 	for index := 0; index < len(stack); index++ {
-		line := strings.TrimSpace(stack[index])
-		if !strings.HasPrefix(line, "github.com/urnetwork/") {
+		frame := strings.TrimSpace(stack[index])
+		if !strings.HasPrefix(frame, "github.com/urnetwork/") {
 			continue
 		}
-		match := panicLogFunctionRe.FindStringSubmatch(line)
+		match := panicLogFunctionRe.FindStringSubmatch(frame)
 		if len(match) != 3 || index+1 >= len(stack) || !panicLogSourceRe.MatchString(strings.TrimSpace(stack[index+1])) {
 			return observation
 		}
@@ -1354,8 +1356,13 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 		if len(owner) <= panicLogOwnerMaxBytes {
 			observation.owner = owner
-			if match[2] == "proxyAdmissionRedis" && (match[1] == "server/model" || match[1] == "server/v2026/model") {
-				observation.redisCaller = panicProxyAdmissionCaller(match[1], stack[index:])
+			if match[1] == "server/model" || match[1] == "server/v2026/model" {
+				switch match[2] {
+				case "proxyAdmissionRedis":
+					observation.redisCaller, observation.redisOperation = panicProxyAdmissionOperation(match[1], stack[index:])
+				case "TakeClientCloseRequests", "TakeClientCloseRequests.func1":
+					observation.redisAdapter = panicCloseRequestRedisAdapter(line, match[1], stack, index)
+				}
 			}
 		}
 		return observation
@@ -1363,27 +1370,66 @@ func parsePanicLogObservation(line string) panicLogObservation {
 	return observation
 }
 
-// The returned token is a direct caller in the same producer stack. Require
-// each source file, without admitting stack arguments, line numbers or paths.
-func panicProxyAdmissionCaller(module string, frames []string) string {
+// The direct caller identifies the Redis access. A plan lookup or flush also
+// requires its own contiguous application frames from this same stack.
+func panicProxyAdmissionOperation(module string, frames []string) (string, string) {
 	if len(frames) < 4 || !panicSourceHasFile(frames[1], "proxy_admission_model.go") {
-		return ""
+		return "", ""
 	}
 	caller := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[2]))
 	if len(caller) != 3 || caller[1] != module {
-		return ""
+		return "", ""
 	}
 	switch caller[2] {
 	case "GetProxyDeviceConfig":
 		if panicSourceHasFile(frames[3], "network_client_proxy_model.go") {
-			return caller[2]
+			return caller[2], "device_config_read"
 		}
 	case "getProNetworkCached", "setProNetworkCached":
 		if panicSourceHasFile(frames[3], "pro_model.go") {
-			return caller[2]
+			return caller[2], panicProxyPlanOperation(module, caller[2], frames[4:])
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// Each consumed pair must match both a fixed function and its source file.
+func panicProxyFrameIs(frames []string, module, function, file string) bool {
+	if len(frames) < 2 {
+		return false
+	}
+	match := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[0]))
+	return len(match) == 3 && match[1] == module && match[2] == function && panicSourceHasFile(frames[1], file)
+}
+
+// An interrupted entitlement lookup can belong to several application paths.
+// Only the concrete planner identifies feature-use accounting. Its immediate
+// flush lineage identifies the phase reached after markAll returned success.
+func panicProxyPlanOperation(module, caller string, frames []string) string {
+	if caller == "setProNetworkCached" {
+		for _, function := range []string{"storeProNetwork", "refreshProNetworkInConn", "refreshProNetwork"} {
+			if !panicProxyFrameIs(frames, module, function, "pro_model.go") {
+				return ""
+			}
+			frames = frames[2:]
+		}
+	}
+	const file = "proxy_feature_use_model.go"
+	// Older workers called IsProNetwork directly. Both forms require the
+	// same concrete planner as the immediately enclosing frame.
+	lookup := panicProxyFrameIs(frames, module, "lookupProNetwork", "pro_model.go") ||
+		panicProxyFrameIs(frames, module, "IsProNetwork", "pro_model.go")
+	if !lookup || !panicProxyFrameIs(frames[2:], module, "(*dbProxyFeatureUsePlans).plans", file) {
+		return ""
+	}
+	frames = frames[4:]
+	if panicProxyFrameIs(frames, module, "(*ProxyFeatureUses).countMarks.func1", file) &&
+		panicProxyFrameIs(frames[2:], strings.TrimSuffix(module, "/model"), "HandleError", "trace.go") &&
+		panicProxyFrameIs(frames[4:], module, "(*ProxyFeatureUses).countMarks", file) &&
+		panicProxyFrameIs(frames[6:], module, "(*ProxyFeatureUses).flush", file) {
+		return "feature_use_flush_plan"
+	}
+	return "feature_use_plan_lookup"
 }
 
 func panicSourceHasFile(line string, filename string) bool {
@@ -1410,6 +1456,12 @@ func panicLogSample(line string) string {
 	}
 	if observation.redisCaller != "" {
 		sample += " redis_caller=" + observation.redisCaller
+	}
+	if observation.redisOperation != "" {
+		sample += " redis_operation=" + observation.redisOperation
+	}
+	if observation.redisAdapter != "" {
+		sample += " redis_adapter=" + observation.redisAdapter
 	}
 	return sample
 }

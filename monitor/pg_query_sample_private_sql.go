@@ -121,10 +121,35 @@ func pgSampleParseSql(raw json.RawMessage, load pgSampleLoad, sample, trackQuery
 		ActivityBufferMaybeTruncated: sourceBytes >= float64(trackQuerySize-1)}, nil
 }
 
+// Fit optional host ownership into remaining space only after the original
+// source receipt and its private representatives receive their existing budget.
+func pgSampleEncodeReceipts(receipt *pgQuerySampleReceipt) ([]byte, []byte, error) {
+	transport := receipt.TransportObservation
+	if transport == nil || transport.HostPermitHolders == nil {
+		return pgSampleEncodeSourceReceipts(receipt)
+	}
+	// Both views share the final private coverage counts and companion hash.
+	base, baseTransport := *receipt, *transport
+	baseTransport.HostPermitHolders = nil
+	base.TransportObservation = &baseTransport
+	public, private, err := pgSampleEncodeSourceReceipts(&base)
+	if err != nil {
+		return nil, nil, err
+	}
+	withHolders, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(withHolders)+1+len(private) > pgSampleReceiptBytes {
+		return public, private, nil
+	}
+	return append(withHolders, '\n'), private, nil
+}
+
 // Keep the existing 256 KiB retention ceiling across both files. Deduplicate
 // identical representatives and prefer the retained load groups in their order.
 // A storage omission is explicit and never changes public load selection.
-func pgSampleEncodeReceipts(receipt *pgQuerySampleReceipt) ([]byte, []byte, error) {
+func pgSampleEncodeSourceReceipts(receipt *pgQuerySampleReceipt) ([]byte, []byte, error) {
 	fail := func() ([]byte, []byte, error) {
 		return nil, nil, errors.New("bounded sample evidence exceeds limit")
 	}

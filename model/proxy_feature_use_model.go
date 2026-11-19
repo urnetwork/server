@@ -594,16 +594,9 @@ func (self *dbProxyFeatureUsePlans) plans(ctx context.Context, proxyIds []server
 			return plan.pro, ok && now.Sub(plan.readTime) < self.settings.PlanCacheTtl
 		}()
 		if !ok {
-			if ctx.Err() == nil {
-				pro = IsProNetwork(ctx, networkId)
-			} else {
-				// A fresh process-local entitlement still gives an accurate label.
-				// Leave a cold network unknown without starting Redis or PostgreSQL.
-				entitlement, found := getProNetworkLocal(networkId)
-				if !found {
-					continue
-				}
-				pro = entitlement.pro
+			pro, ok = lookupProNetwork(ctx, networkId, true)
+			if !ok {
+				continue
 			}
 			func() {
 				self.stateLock.Lock()

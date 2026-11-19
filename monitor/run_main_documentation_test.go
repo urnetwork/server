@@ -168,7 +168,7 @@ func TestRunMainKeepsOnePrimaryLedgerWriter(t *testing.T) {
 	for _, required := range []string{
 		"The primary agent owns the append-only run ledger",
 		"The ledger has one writer: the primary agent",
-		"Sol Low and Sol Medium may prepare manifests; they do not append",
+		"Sol Low, Astra XHigh, and Astra Max may prepare manifests. The primary agent alone appends ledger records.",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
@@ -184,12 +184,16 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
 	for _, required := range []string{
-		"A `gpt-6.1-sol` agent at `low` reasoning (\"Sol Low\") owns monitor execution",
+		"A `gpt-6.2-sol` agent at `low` reasoning (\"Sol Low\") owns monitor execution",
 		"monitor-test gates",
 		"fact collection, initial triage, evidence-authority checks",
-		"A `gpt-6.1-sol` agent at `medium` reasoning (\"Sol Medium\") owns all",
-		"Sol Medium consumes Sol Low's initial",
-		"self-improvement fix to the probes, shared monitoring utilities, signal",
+		"source identity, and every verification gate",
+		"Sol Low returns independent gate manifests.",
+		"A `gpt-6.2-astra` agent at `xhigh` reasoning (\"Astra XHigh\") investigates and fixes production issues after triage.",
+		"Astra XHigh consumes Sol Low's initial alert/triage manifest",
+		"A `gpt-6.2-astra` agent at `max` reasoning (\"Astra Max\") improves the monitor binary and adds new signals.",
+		"Astra Max owns fixes to probes, shared monitoring utilities, the signal catalog, and this harness",
+		"Astra XHigh sends the evidence manifest to Astra Max.",
 		"`factury/monitor/alerts/`",
 		"Do not silently escalate to another model.",
 	} {
@@ -197,8 +201,10 @@ func TestRunMainAssignsRequestedMonitorModels(t *testing.T) {
 			t.Errorf("RUN-MAIN.md does not retain %q", required)
 		}
 	}
-	if strings.Contains(documentation, "gpt-5.6-terra") {
-		t.Fatal("RUN-MAIN.md still assigns the test and initial-triage role to Terra")
+	for _, retired := range []string{"gpt-5.6-terra", "gpt-6.1-sol", "Sol 6.1", "Sol Medium"} {
+		if strings.Contains(documentation, retired) {
+			t.Errorf("RUN-MAIN.md still names the retired role %q", retired)
+		}
 	}
 }
 
@@ -465,7 +471,7 @@ func TestReconciliationDocumentationDistinguishesVersionedScopeAuthority(t *test
 	t.Parallel()
 	for _, document := range []struct{ path, start string }{
 		{"RUN-MAIN.md", "For a two-reconciliation closure gate"},
-		{"MONITOR.md", "Every standing-log cadence also writes"},
+		{"MONITOR.md", "Every standing-log cadence writes coverage and activity"},
 	} {
 		content, err := os.ReadFile(document.path)
 		if err != nil {
