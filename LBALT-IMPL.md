@@ -519,10 +519,11 @@ As of 2026-11-19, `lbalt/integrate` at server a297487df and warp bdacae4. LBALT.
 - [x] network-namespace harness (warp `warpctl/lbalt_netns*_test.go`, 8 edge tests against real iptables, ip6tables, conntrack and ss): PASS on `lbalt/final-warp` in 93 s and on bdacae4 in 100 s, the first switch's wait included; the rollback keeps every block chain, and the harness's copy of the §2.3 table is checked against the workers'
 - [x] §4 consolidated, this checklist updated, and LBALT.md §11 written
 - [x] the owner's confirmation, 2026-11-19, of the final review's departures (LBALT.md §11.3 (a) to (h), recorded as amendments in its §6) and of the §4 line on the write bound's timing. The KeyUpdate-during-upload gap stays open, h3 keeps its 408, and the monitor's tls-expiry signal is the expiry alert (LBALT.md §11.6)
-- [ ] follow-ups started 2026-11-19 (owner), each on its own branch: the warp test-data scrub, the exchange drain bound, the pre-existing warpctl fixes, and D22 (b) (LBALT.md §11.6)
-  - [x] D22 (b), one QUIC transport per socket group, built on `feat/lbalt-d22b-quic-fanin-1119` (§8), not merged
+- [x] the exchange drain bound (server 0b75c1afa) and the five pre-existing warpctl fixes (warp d8a87f0), 2026-11-19 (LBALT.md §11.6)
+- [x] the warp test-data scrub (warp 7e53b30) and the production values in warp's code comments (warp fc6ee3a), 2026-11-19 (LBALT.md §11.6)
+- [x] D22 (b), one QUIC transport per socket group (§8), built on `feat/lbalt-d22b-quic-fanin-1119` and merged 2026-11-19
 - [ ] the code review (LBALT.md §11.7)
-- [ ] merge: origin/main is merged into `lbalt/integrate` (server 30b6935b7, 2026-11-19, no conflicts; its builds, vets and the affected non-DB suites pass). `lbalt/integrate` goes to main in both repos once the work in progress on the branch is committed and the whole tree is tested
+- [x] merge, 2026-11-19: origin/main into `lbalt/integrate` (server 30b6935b7), then `lbalt/integrate` into main in both repos (server a3f37e085, warp 6aaace2), verified on main: builds and vets, the unit and race suites, parity (257 cases), the DB suite (23 tests) and the netns harness
 - [ ] the owner's config:
   - services.yml: load the edited file with this warpctl first, then declare `services.connect.lb_alt: false` before any override (LBALT.md §11.3 (d)), and connect's `cores: 20` (D15)
   - monitor.yml: the `lbalt_status` and `public_udp` enrollment (LBALT.md §11.6)
@@ -637,7 +638,7 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 - `ConnGroup` is new vendored code on the packet path. A socket's removal races writes in flight; a write skips a closed socket. Its tests run under `-race`.
 - Replacing a transport runs only after a failure. A test drives it through a hook.
 - (b) doesn't help a flow that moves to another block, or one whose block restarts: those still reconnect after their idle timeout. HMARK hashes the source address alone (D10), so a rebinding that changes only the source port stays in its block.
-- Nothing here ran on Linux. GSO through a group has a Linux-only test (`TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket`), which darwin skips, and Linux's reuseport hash moving real flows between a group's sockets is untested anywhere; the tests move flows themselves. A Linux run of `GOFLAGS= go test -run '^TestUrnetwork' .` in `third_party/quic-go` would cover the first.
+- On Linux (2026-11-19), test binaries cross-compiled for linux/arm64 ran in an unprivileged ubuntu:24.04 container with only loopback: the vendored `TestUrnetwork*` tests, `TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket` included, and all 84 `^TestFront` tests passed, without `-race`. Linux's reuseport hash moving real flows between a group's sockets is still untested anywhere; the tests move flows themselves.
 
 ### 8.6 Tests
 

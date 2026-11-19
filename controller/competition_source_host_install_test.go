@@ -29,6 +29,21 @@ type competitionReviewedHostFixture struct {
 	Prospective []byte
 }
 
+func TestCompetitionEpochThreeHostBuildBaseRejectsUnboundProfile(t *testing.T) {
+	fixture := newCompetitionReviewedHostFixture(t)
+	review := server.RequireParseId("01a1f43d-6832-bad1-1fc9-182ce6e21d6e")
+	fixture.Intent.ReviewId = &review
+	fixture.Intent.TargetRoundId = server.RequireParseId("01a1f4d0-47c9-ac2d-ce45-55ef159a9b41")
+	fixture.Intent.TargetEpoch, fixture.Intent.SourceGeneration = 3, 2
+	fixture.Intent.Kind = "reviewed_source_promotion"
+	fixture.Intent.EvaluatedImageDigest = "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9"
+	fixture.Intent.EvaluatorImageDigest = "sha256:4eb3d0a38e0d5b2b895eb1abc517d4d141ad5a94d99101002e0fda32241d7180"
+	fixture.Profile.BaseImageId = "sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702"
+	if competitionEpochThreeHostBuildBase(fixture.Intent, fixture.Profile) != "" {
+		t.Fatal("an otherwise matching epoch-three intent accepted a substituted host profile")
+	}
+}
+
 // Complete positive evidence includes a qualified incumbent but explicitly
 // unqualified new-image runtime markers. The hardware reports are synthetic.
 func newCompetitionReviewedHostFixture(t *testing.T) competitionReviewedHostFixture {

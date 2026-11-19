@@ -250,19 +250,55 @@ func runStageReviewedSource(opts docopt.Opts) {
 	if err != nil || lock != "" {
 		fatalf("source stage requires host-only paths: %v", err)
 	}
-	root, origins, err := newSourceStage(ctx, stateDirectory, ".reviewed-source-", repositoriesRoot, "", current.Staging)
+	root := optString(opts, "--reuse-reviewed-stage", "")
+	reuse := root != ""
+	var origins map[string]string
+	if reuse {
+		err = validateRetainedReviewedStage(root, stateDirectory, approved.Patch)
+	} else {
+		root, origins, err = newSourceStage(ctx, stateDirectory, ".reviewed-source-", repositoriesRoot, "", current.Staging)
+	}
 	if err != nil {
 		fatalf("private source stage: %s", err)
 	}
 	patchPath := filepath.Join(root, "canonical.patch")
-	if err := writePrivateReviewFile(patchPath, approved.Patch); err != nil {
-		fatalf("source patch: %s", err)
+	if !reuse {
+		if err := writePrivateReviewFile(patchPath, approved.Patch); err != nil {
+			fatalf("source patch: %s", err)
+		}
 	}
 	proposal := &reviewedSourceProposal{Schema: 2, Staging: current.Staging, ReviewId: reviewId, JobId: approved.Review.Request.JobId, SubmittedAt: approved.SubmittedAt, ReviewDecisionDigest: approved.Review.RequestSha256, ReviewedAt: approved.Review.CreatedAt,
 		BaseSourceLockSha256: current.SourceLockSha256, Commits: map[string]string{}, StagedRoots: map[string]string{}, PatchPath: patchPath, PatchSha256: patch.Sha256, CandidatePathBase: approved.PatchPolicy.PathBase, EvaluatedImageDigest: approved.EvaluatedImageDigest, WinnerReviewPolicy: approved.WinnerReviewPolicy}
 	for _, repository := range sourceRepositoryNamesForMode(current.Staging) {
 		origin := origins[repository]
 		stagedRoot := filepath.Join(root, repository)
+		if reuse {
+			if err := validateRetainedReviewedStageRepository(stagedRoot, root); err != nil {
+				fatalf("retained source checkout: %s", err)
+			}
+			head, err := sourceGitText(ctx, stagedRoot, "rev-parse", "HEAD")
+			if err != nil {
+				fatalf("retained source head: %s", err)
+			}
+			state, err := sourceGitText(ctx, stagedRoot, "status", "--porcelain=v1", "--untracked-files=all")
+			if err != nil || state != "" {
+				fatalf("retained source checkout is not clean")
+			}
+			proposal.StagedRoots[repository], proposal.Commits[repository] = stagedRoot, head
+			if _, changed := repositoryPatches[repository]; changed {
+				if err := verifyReviewedStagedRepository(ctx, current, proposal, repository, approved.PatchPolicy); err != nil {
+					fatalf("retained exact approved source tree: %s", err)
+				}
+			} else if head != current.Commits[repository] {
+				fatalf("unchanged retained source differs from its frozen commit")
+			}
+			if repository == "server" {
+				if err := verifyFrozenSourceGraphForMode(ctx, stagedRoot, current.Commits[repository], current.Staging); err != nil {
+					fatalf("retained measured dependency graph: %s", err)
+				}
+			}
+			continue
+		}
 		if _, err := sourceGitNetworkText(ctx, root, "-c", "core.fsync=all", "clone", "--template=", "--quiet", "--no-checkout", origin, stagedRoot); err != nil {
 			fatalf("source clone: %s", err)
 		}
@@ -293,8 +329,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 			if err != nil {
 				fatalf("source commit identity: %s", err)
 			}
-			backend := &gitSourcePublicationBackend{patchPolicy: approved.PatchPolicy}
-			if err := backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: stagedRoot}, &sourcePublicationIntent{Staging: current.Staging, CandidatePathBase: approved.PatchPolicy.PathBase, ApprovedPatchPath: patchPath, ApprovedPatchSha256: patch.Sha256}); err != nil {
+			if err := verifyReviewedStagedRepository(ctx, current, proposal, repository, approved.PatchPolicy); err != nil {
 				fatalf("exact approved source tree: %s", err)
 			}
 		}
@@ -316,6 +351,7 @@ func runStageReviewedSource(opts docopt.Opts) {
 	defer buildCancel()
 	output, err := runSourceSupervisorProgram(buildCtx, optString(opts, "--build-command", ""), optString(opts, "--build-sha256", ""), reviewedSourceBuildRequest{
 		Operation: "isolated_reviewed_source_build", Proposal: proposal, SourceManifest: imageManifest, SourceGeneration: current.SourceGeneration + 1,
+		ExecutionBaseImageDigest: optString(opts, "--source-build-base-image", ""),
 		ConfigLocalDirectory: settings.ConfigLocalDirectory, VaultLocalDirectory: settings.VaultLocalDirectory, SandboxContract: "offline_evaluator_containment_v1",
 	}, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 	if err != nil {
@@ -353,6 +389,37 @@ func runStageReviewedSource(opts docopt.Opts) {
 		ReadyAt      time.Time `json:"ready_at"`
 	}{ProposalPath: proposalPath, Sha256: hex.EncodeToString(digest[:]), ReadyAt: proposal.ReadyAt})
 	fmt.Printf("%s\n", result)
+}
+
+func verifyReviewedStagedRepository(ctx context.Context, current *model.CompetitionSourceActivation, proposal *reviewedSourceProposal, repository string, policy controller.PatchPolicy) error {
+	backend := &gitSourcePublicationBackend{patchPolicy: policy}
+	return backend.Verify(ctx, sourcePublicationRef{Repository: repository, Branch: sourceBranch(current.Staging), ExpectedCommit: current.Commits[repository], Commit: proposal.Commits[repository], StagedRoot: proposal.StagedRoots[repository]}, &sourcePublicationIntent{Staging: current.Staging, CandidatePathBase: proposal.CandidatePathBase, ApprovedPatchPath: proposal.PatchPath, ApprovedPatchSha256: proposal.PatchSha256})
+}
+
+func validateRetainedReviewedStage(root, parent string, approved []byte) error {
+	if !strings.HasPrefix(filepath.Base(root), ".reviewed-source-") {
+		return errors.New("retained checkout is not a reviewed stage")
+	}
+	if err := validateRetainedReviewedStageRepository(root, parent); err != nil {
+		return err
+	}
+	content, err := readSourceFile(filepath.Join(root, "canonical.patch"))
+	if err != nil || !bytes.Equal(content, approved) {
+		return errors.New("retained checkout does not carry the exact approved patch")
+	}
+	return nil
+}
+
+func validateRetainedReviewedStageRepository(root, parent string) error {
+	if !filepath.IsAbs(root) || filepath.Dir(root) != parent {
+		return errors.New("retained checkout must be an immediate child of the private stage")
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	info, statErr := os.Lstat(root)
+	if err != nil || statErr != nil || resolved != root || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("retained checkout path is not private and canonical")
+	}
+	return nil
 }
 
 // Copies authenticated patch bytes into the activation's private recovery root.

@@ -14,7 +14,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docopt/docopt-go"
 )
+
+func TestSourceHostQualificationRecoveryCLI(t *testing.T) {
+	parser := &docopt.Parser{HelpHandler: docopt.NoHelpHandler}
+	for _, args := range [][]string{
+		{"stage-reviewed-source", "--review-id=id", "--state-dir=/state", "--build-command=/build", "--build-sha256=digest"},
+		{"source-build-broker", "--build-settings=/settings", "--build-settings-sha256=digest", "--recover-host-qualification=digest", "--replay-qualifier=/qualifier", "--replay-qualifier-sha256=digest"},
+		{"source-build-broker", "--build-settings=/settings", "--build-settings-sha256=digest", "--resume-host-qualification=digest", "--replay-qualifier=/qualifier", "--replay-qualifier-sha256=digest"},
+		{"source-qualify-build", "--qualification-settings=/settings", "--qualification-settings-sha256=digest", "--retained-test-evidence-only"},
+	} {
+		opts, err := parser.ParseArgs(simulationUsage(), args, "test")
+		if err != nil || !optBool(opts, args[0]) {
+			t.Fatalf("source recovery CLI cannot parse %s: %v", args[0], err)
+		}
+		if args[0] == "source-qualify-build" && !optBool(opts, "--retained-test-evidence-only") {
+			t.Fatal("source qualification lost replay-only mode")
+		}
+	}
+}
 
 type sourceBuildAttemptFixture struct {
 	Request       reviewedSourceBuildRequest
@@ -232,6 +252,66 @@ func TestSourceBuildAttemptExpiredOriginalDeadlineCannotBeExtended(t *testing.T)
 	}
 	if receipt, err := executeJournaledSourceBuildBroker(context.Background(), fixture.Request, fixture.Settings, fixture.docker, fixture.pipeline, qualify); !errors.Is(err, context.DeadlineExceeded) || receipt != nil || fixture.PipelineCount != 1 || fixture.QualifyCount != 1 {
 		t.Fatal("restart reset the expired original deadline", err)
+	}
+}
+
+func TestSourceHostQualificationRecoveryRequiresEvidenceAndConsumesOnce(t *testing.T) {
+	fixture := newSourceBuildAttemptFixture(t)
+	root := fixture.Settings.Sandbox.StateDirectory
+	owner := strings.Repeat("a", 64)
+	dir := filepath.Join(root, ".attempts", "attempt")
+	ownerDir := filepath.Join(root, owner)
+	write := func(base, name string, content any) {
+		t.Helper()
+		path := filepath.Join(base, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writePrivateReviewFile(path, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Unix(300, 0).UTC()
+	prior := sourceBuildAttemptReservation{Schema: 1, RequestSha256: strings.Repeat("b", 64), Owner: owner, StartedAt: time.Unix(100, 0).UTC(), Deadline: time.Unix(200, 0).UTC()}
+	write(dir, "pipeline.json", sourceBuildPipelineObservation{Artifacts: &sourceBuildArtifacts{Directory: ownerDir}})
+	write(ownerDir, "independent-test-model-evidence.json", sourceTestModelEvidence{
+		Passed: true, Execution: sourceTestExecution{TestCount: 70},
+		Members: []sourceTestSnowMemberEvidence{{Name: "qwen", Passed: true}, {Name: "gemma", Passed: true}},
+	})
+	for _, file := range []string{"independent-test-journal/observation.json", "independent-model-journal/snow-qwen-observation.json", "independent-test-containment.json"} {
+		write(ownerDir, file, map[string]int{"schema": 1})
+	}
+	if err := reserveSourceHostQualificationRecovery(dir, fixture.Settings, prior, now); err == nil {
+		t.Fatal("missing Gemma observation authorized recovery")
+	}
+	write(ownerDir, "independent-model-journal/snow-gemma-observation.json", map[string]int{"schema": 1})
+	live := time.Unix(150, 0).UTC()
+	liveName := "host-qualification-live-resume.json"
+	if err := recordSourceHostQualificationRecovery(dir, fixture.Settings, prior, live, prior.Deadline, liveName); err != nil {
+		t.Fatal(err)
+	}
+	var resumed sourceBuildAttemptReservation
+	if err := readSourceTestRecord(filepath.Join(dir, liveName), fixture.Settings.MaximumRequestBytes, &resumed); err != nil ||
+		resumed.Owner != owner || resumed.RequestSha256 != prior.RequestSha256 || !resumed.Deadline.Equal(prior.Deadline) {
+		t.Fatal("live replay extended its original deadline or changed its owner", err)
+	}
+	if err := recordSourceHostQualificationRecovery(dir, fixture.Settings, prior, live.Add(time.Second), prior.Deadline, liveName); !errors.Is(err, os.ErrExist) {
+		t.Fatal("second live replay was not rejected", err)
+	}
+	if err := reserveSourceHostQualificationRecovery(dir, fixture.Settings, prior, now); err != nil {
+		t.Fatal(err)
+	}
+	var recovered sourceBuildAttemptReservation
+	if err := readSourceTestRecord(filepath.Join(dir, "host-qualification-recovery.json"), fixture.Settings.MaximumRequestBytes, &recovered); err != nil ||
+		recovered.Owner != owner || recovered.RequestSha256 != prior.RequestSha256 || !recovered.Deadline.Equal(now.Add(5*time.Minute)) {
+		t.Fatal("recovery did not bind its own bounded window and exact original owner", err)
+	}
+	if err := reserveSourceHostQualificationRecovery(dir, fixture.Settings, prior, now.Add(time.Second)); !errors.Is(err, os.ErrExist) {
+		t.Fatal("second source qualification recovery was not rejected", err)
 	}
 }
 

@@ -44,25 +44,65 @@ func defaultCompetitionQualificationSourceSettings() competitionQualificationSou
 // These independent root-provisioned pins are not accepted through the
 // supervisor request. The bomb report must belong to the current Linux boot.
 type CompetitionHostQualificationConfig struct {
-	Schema             int    `json:"schema"`
-	Environment        string `json:"environment"`
-	CompetitionId      string `json:"competition_id"`
-	SeasonId           string `json:"season_id"`
-	Staging            bool   `json:"staging"`
-	HostConfig         string `json:"host_config"`
-	StateDirectory     string `json:"state_directory"`
-	PromotionCommand   string `json:"promotion_command"`
-	PromotionSha256    string `json:"promotion_sha256"`
-	ResourceBombReport string `json:"resource_bomb_report"`
-	ResourceBombSha256 string `json:"resource_bomb_sha256"`
-	ResourceBombBootId string `json:"resource_bomb_boot_id"`
-	WorkerCommand      string `json:"worker_command"`
-	WorkerSha256       string `json:"worker_sha256"`
-	WorkerImageDigest  string `json:"worker_image_digest"`
+	Schema                    int    `json:"schema"`
+	Environment               string `json:"environment"`
+	CompetitionId             string `json:"competition_id"`
+	SeasonId                  string `json:"season_id"`
+	Staging                   bool   `json:"staging"`
+	HostConfig                string `json:"host_config"`
+	HostCheckCommand          string `json:"host_check_command,omitempty"`
+	HostCheckSha256           string `json:"host_check_sha256,omitempty"`
+	EvaluatorCommand          string `json:"evaluator_command,omitempty"`
+	EvaluatorDockerfileSha256 string `json:"evaluator_dockerfile_sha256,omitempty"`
+	StateDirectory            string `json:"state_directory"`
+	PromotionCommand          string `json:"promotion_command"`
+	PromotionSha256           string `json:"promotion_sha256"`
+	ResourceBombReport        string `json:"resource_bomb_report"`
+	ResourceBombSha256        string `json:"resource_bomb_sha256"`
+	ResourceBombBootId        string `json:"resource_bomb_boot_id"`
+	WorkerCommand             string `json:"worker_command"`
+	WorkerSha256              string `json:"worker_sha256"`
+	WorkerImageDigest         string `json:"worker_image_digest"`
 	// Optional deployment restriction; retained evidence always records the
 	// independently observed API identity for this exact source intent.
 	ApiImageDigest              string `json:"api_image_digest"`
 	ReviewedBuildStateDirectory string `json:"reviewed_build_state_directory,omitempty"`
+}
+
+// ConfigureCompetitionReadinessHost binds a local worker probe to the same
+// protected host record that the qualification broker promotes.
+func ConfigureCompetitionReadinessHost(settings *Settings, path, digest string) error {
+	if err := competitionQualificationRootPath(path, false); err != nil {
+		return err
+	}
+	actual, _, err := hashRegularFile(path)
+	if err != nil || actual != digest || !sha256Pattern.MatchString(digest) {
+		return errors.New("readiness host configuration failed authentication")
+	}
+	config, err := LoadCompetitionHostQualificationConfig(path)
+	if err != nil {
+		return err
+	}
+	image, err := runtimeImageDigest()
+	if err != nil {
+		return err
+	}
+	if config.Schema != 1 || config.Environment != settings.AutomationPolicy.Environment ||
+		config.CompetitionId != settings.CompetitionId || config.SeasonId != settings.AutomationPolicy.SeasonId ||
+		config.Staging != settings.AutomationPolicy.Staging || config.WorkerImageDigest != image {
+		return errors.New("readiness host configuration is outside the worker runtime scope")
+	}
+	if err := validatePinnedCommand(config.HostCheckCommand, config.HostCheckSha256, "readiness host checker"); err != nil {
+		return err
+	}
+	if err := competitionQualificationRootPath(config.HostCheckCommand, false); err != nil {
+		return err
+	}
+	if err := competitionQualificationRootPath(config.HostConfig, false); err != nil {
+		return err
+	}
+	settings.readinessHostConfig = config
+	return nil
 }
 
 // A successful result identifies retained proof, not a worker readiness
@@ -272,9 +312,6 @@ func validateCompetitionQualificationConfig(settings *Settings, config Competiti
 			return err
 		}
 	}
-	if config.HostConfig != "/etc/urnetwork/competition-host.json" {
-		return errors.New("qualification must update the host configuration actually read by self-check")
-	}
 	if err := competitionQualificationRootPath(config.StateDirectory, true); err != nil {
 		return err
 	}
@@ -283,6 +320,19 @@ func validateCompetitionQualificationConfig(settings *Settings, config Competiti
 		return errors.New("current-boot resource-bomb evidence failed authentication")
 	}
 	return nil
+}
+
+// Audit the exact protected file this broker promotes. Never let the check
+// silently fall back to a different host role's default record.
+func qualificationHostSelfCheck(ctx context.Context, settings *Settings, path string) (HostSelfCheck, error) {
+	if err := competitionQualificationRootPath(path, false); err != nil {
+		return HostSelfCheck{}, err
+	}
+	args := []string{"--json"}
+	if path != "/etc/urnetwork/competition-host.json" {
+		args = append(args, "--config", path)
+	}
+	return runCompetitionHostSelfCheck(ctx, settings, args, defaultCompetitionSourceHostInstallSettings().ProbeTimeout)
 }
 
 // The whole host configuration stays intact; this reads only the identity
@@ -791,6 +841,36 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err != nil {
 		return nil, err
 	}
+	// A host-local qualification checker can audit a separately provisioned
+	// host record without changing the shared scoring configuration.
+	if config.HostCheckCommand != "" || config.HostCheckSha256 != "" {
+		if err := validatePinnedCommand(config.HostCheckCommand, config.HostCheckSha256, "qualification host checker"); err != nil {
+			return nil, err
+		}
+		settingsCopy := *settings
+		settingsCopy.SelfCheckCommand = config.HostCheckCommand
+		settingsCopy.SelfCheckCommandSha256 = config.HostCheckSha256
+		settings = &settingsCopy
+	}
+	// Allow the same pinned evaluator script from a separately qualified
+	// release with a corrected offline builder. Bind its Dockerfile as well
+	// as the script bytes; the scoring and source policy do not move.
+	if config.EvaluatorCommand != "" || config.EvaluatorDockerfileSha256 != "" {
+		if err := validatePinnedCommand(config.EvaluatorCommand, settings.EvaluatorCommandSha256, "qualification evaluator"); err != nil {
+			return nil, err
+		}
+		dockerfile := filepath.Join(filepath.Dir(config.EvaluatorCommand), "Dockerfile.submission")
+		if err := competitionQualificationRootPath(dockerfile, false); err != nil {
+			return nil, err
+		}
+		actual, _, err := hashRegularFile(dockerfile)
+		if err != nil || !sha256Pattern.MatchString(config.EvaluatorDockerfileSha256) || actual != config.EvaluatorDockerfileSha256 {
+			return nil, errors.New("qualification evaluator Dockerfile failed authentication")
+		}
+		settingsCopy := *settings
+		settingsCopy.EvaluatorCommand = config.EvaluatorCommand
+		settings = &settingsCopy
+	}
 	bootBytes, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return nil, err
@@ -849,14 +929,14 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 				return
 			case <-time.After(5 * time.Second):
 			}
-			probeCtx, cancel := context.WithTimeout(operationCtx, 5*time.Second)
 			// Observe authority without contending with the synchronous source
 			// fence or repeatedly transporting its immutable manifest.
-			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
-			if err == nil {
-				err = checkCompetitionQualificationSlot(probeCtx, owner)
-			}
-			cancel()
+			err := checkCompetitionPreparationLivenessWithRetry(operationCtx, func(ctx context.Context) error {
+				if err := checkCompetitionPreparationLiveness(ctx, settings, request); err != nil {
+					return err
+				}
+				return checkCompetitionQualificationSlot(ctx, owner)
+			})
 			if err != nil {
 				stop(err)
 				return
@@ -880,7 +960,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 		digest := sha256.Sum256(markerBytes)
 		if decodeCompetitionPreparationJson(bytes.NewReader(markerBytes), 64*1024, &marker) == nil &&
 			competitionQualificationMarkerMatches(marker, intent, profileDigest, bootId, settings.RetainUntil) && hex.EncodeToString(digest[:]) == hostConfig.RebaselineManifestSha256 {
-			if host, checkErr := (CommandEvaluator{}).SelfCheck(ctx, settings); checkErr == nil && sourceWorkerHostReady(host, settings, intent) {
+			if host, checkErr := qualificationHostSelfCheck(ctx, settings, config.HostConfig); checkErr == nil && sourceWorkerHostReady(host, settings, intent) {
 				if err := readCompetitionQualificationReceipt(ctx, settings, marker.Receipt); err != nil {
 					return nil, err
 				}
@@ -965,7 +1045,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	exitCode, runErr := runContainedCommand(ctx, directory, settings.EvaluatorCommand, []string{"--request", requestPath, "--result", filepath.Join(directory, "worker-result.json")}, &boundedBuffer{limit: 1024 * 1024}, stderr)
 	closeErr := stderr.Close()
 	if runErr != nil || closeErr != nil || exitCode != 0 {
-		return nil, fmt.Errorf("host-readiness evaluator did not complete; restricted evidence retained: %w", errors.Join(runErr, closeErr, fmt.Errorf("exit %d", exitCode)))
+		return nil, fmt.Errorf("host-readiness evaluator did not complete; restricted evidence retained: %w", errors.Join(context.Cause(ctx), runErr, closeErr, fmt.Errorf("exit %d", exitCode)))
 	}
 	afterRequest, err := readRegularFile(requestPath, 2*1024*1024)
 	if err != nil || !bytes.Equal(afterRequest, requestBytes) {
@@ -1018,7 +1098,7 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 	if err := replaceCompetitionQualificationFile(config.HostConfig, configBytes); err != nil {
 		return nil, err
 	}
-	host, err := (CommandEvaluator{}).SelfCheck(ctx, settings)
+	host, err := qualificationHostSelfCheck(ctx, settings, config.HostConfig)
 	if err != nil || !sourceWorkerHostReady(host, settings, intent) {
 		return nil, errors.New("promoted host does not pass exact-round live self-check")
 	}

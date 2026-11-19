@@ -28,7 +28,7 @@ func prospectiveSourceHostConfig(content []byte, request reviewedSourceBuildRequ
 	if err := validateSourceBuildRequest(request); err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(artifacts.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(artifacts.ImageId, "sha256:")) || artifacts.ImageId == request.Proposal.EvaluatedImageDigest ||
+	if !strings.HasPrefix(artifacts.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(artifacts.ImageId, "sha256:")) || artifacts.ImageId == sourceBuildBaseImage(request) ||
 		rejectWinnerReviewCaseAliases(content) != nil {
 		return nil, errors.New("prospective host configuration needs a distinct exact reviewed image and canonical fields")
 	}
@@ -44,7 +44,7 @@ func prospectiveSourceHostConfig(content []byte, request reviewedSourceBuildRequ
 		VaultLocalSha256     string `json:"vault_local_sha256"`
 	}
 	if json.Unmarshal(content, &fields) != nil || json.Unmarshal(content, &current) != nil || current.Schema != 1 || current.HardwareId == "" ||
-		current.ImageDigest != request.Proposal.EvaluatedImageDigest || !validSha256(current.QualificationSha256) ||
+		current.ImageDigest != sourceBuildBaseImage(request) || !validSha256(current.QualificationSha256) ||
 		current.ConfigLocalDirectory != request.ConfigLocalDirectory || current.VaultLocalDirectory != request.VaultLocalDirectory ||
 		!validSha256(current.ConfigLocalSha256) || !validSha256(current.VaultLocalSha256) {
 		return nil, errors.New("incumbent host configuration does not bind the exact evaluated image and direct local leaves")
@@ -81,7 +81,7 @@ func prospectiveSourceHostProfile(request reviewedSourceBuildRequest, artifacts 
 		return nil, err
 	}
 	if config == nil || beforeBoot == "" || beforeBoot != afterBoot || !sourceHostPhysicalControlsReady(incumbent, config.HardwareId) ||
-		!sourceHostPhysicalControlsReady(prospective, config.HardwareId) || incumbent.ImageDigest != request.Proposal.EvaluatedImageDigest ||
+		!sourceHostPhysicalControlsReady(prospective, config.HardwareId) || incumbent.ImageDigest != sourceBuildBaseImage(request) ||
 		prospective.ImageDigest != artifacts.ImageId || prospective.ImageDigest == incumbent.ImageDigest ||
 		!validSha256(config.BaseQualificationSha256) || incumbent.QualificationSha256 != config.BaseQualificationSha256 ||
 		!validSha256(prospective.QualificationSha256) || prospective.QualificationSha256 == incumbent.QualificationSha256 ||

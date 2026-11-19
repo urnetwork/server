@@ -147,6 +147,9 @@ func executeJournaledSourceTest(ctx context.Context, directory string, plan sour
 	var reservation sourceTestReservation
 	owned := false
 	if err := readSourceTestRecord(reservationPath, settings.MaximumRecordBytes, &reservation); errors.Is(err, os.ErrNotExist) {
+		if retainedSourceQualificationOnly(ctx) {
+			return nil, errors.New("host qualification recovery cannot execute a new test")
+		}
 		if _, err := os.Lstat(outcomePath); !errors.Is(err, os.ErrNotExist) {
 			return nil, errors.New("independent test observation has no reservation; reconcile evidence")
 		}
