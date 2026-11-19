@@ -96,6 +96,17 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 		}
 	}
 	n, err := self.body.Read(p)
+	if err == nil && 0 < self.readTimeout && self.setReadDeadline != nil {
+		// the timeout bounds the wait for the client only, as nginx's read
+		// timer runs only while it waits on the client; an h2 stream's
+		// deadline would fail its body when it passed, a read pending or not,
+		// while the request's writer waits on the block. An interrupt's past
+		// deadline stays.
+		self.setReadDeadline(time.Time{})
+		if self.interrupted.Load() {
+			self.setReadDeadline(time.Unix(1, 0))
+		}
+	}
 	self.readBytes += int64(n)
 	if 0 < self.maxBytes && self.maxBytes < self.readBytes {
 		self.fail(&bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})

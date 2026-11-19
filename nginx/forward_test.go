@@ -724,6 +724,74 @@ func TestForwardBodyTimeoutResetsTheH2Stream(t *testing.T) {
 	}
 }
 
+// A streamed body's client_body_timeout bounds only the wait for the
+// client, as nginx's read timer runs only while it waits on the client: a
+// block slow to take the body, which holds back the front's next read of the
+// client, doesn't time out a client that sent what it had. On h2, Go's
+// server fails a stream's body once its read deadline passes, a read pending
+// or not, so each read's deadline is cleared once the read returns. The
+// block takes nothing of the body for three of the client's timeouts.
+func TestForwardStreamedBodyTimeoutWaitsOnlyForTheClient(t *testing.T) {
+	const clientBodyTimeout = 100 * time.Millisecond
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("streamed-timeout-client-only"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testForwardFrontSettings())
+	heldConns := make(chan *holdMarkedWriteConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		holdConn := newHoldMarkedWriteConn(t, conn, []byte("first"))
+		heldConns <- holdConn
+		return holdConn
+	})
+	front := newTestForwardH2Front(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		options.clientBodyTimeout = clientBodyTimeout
+		return options
+	})
+	clientConn := front.h2ClientConn(t)
+	bodyReader, bodyWriter := io.Pipe()
+	defer bodyWriter.Close()
+	go io.WriteString(bodyWriter, "first")
+	request, _ := http.NewRequestWithContext(testContext(t), http.MethodPost, front.url("/upload"), bodyReader)
+	responses := make(chan string, 1)
+	go func() {
+		response, err := clientConn.RoundTrip(request)
+		if err != nil {
+			responses <- err.Error()
+			return
+		}
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		responses <- strconv.Itoa(response.StatusCode) + " " + string(body)
+	}()
+	holdConn := receiveBounded(t, heldConns, "dial")
+	upstreamConn, _, upstreamRequest := raw.accept(t)
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	waitClosed(t, holdConn.held, "the held write of the body's start")
+	// the time under test: the block takes nothing past the timeout
+	time.Sleep(3 * clientBodyTimeout)
+	// the client sends the rest while the write still holds
+	go func() {
+		io.WriteString(bodyWriter, "second")
+		bodyWriter.Close()
+	}()
+	holdConn.release()
+
+	readExactly(t, upstreamRequest.Body, "first")
+	readExactly(t, upstreamRequest.Body, "second")
+	if rest, err := io.ReadAll(upstreamRequest.Body); err != nil || len(rest) != 0 {
+		t.Fatalf("the block read %q %v past the body, want its end", rest, err)
+	}
+	io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	if response := receiveBounded(t, responses, "response"); response != "200 ok" {
+		t.Errorf("response %q, want the block's 200", response)
+	}
+	if recovered := front.waitServed(t); recovered != nil {
+		t.Errorf("serveHttp ended with %v", recovered)
+	}
+}
+
 // A websocket service's requests carry Connection: upgrade, and the client's
 // Upgrade only when it sent one, as nginx's websocket locations do.
 func TestForwardWebsocketServiceHeaders(t *testing.T) {

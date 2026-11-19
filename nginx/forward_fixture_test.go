@@ -7,6 +7,7 @@ package nginx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"io"
@@ -498,6 +499,50 @@ func (self *holdWriteConn) Close() error {
 	self.closeOnce.Do(func() {
 		close(self.closed)
 	})
+	self.release()
+	return self.Conn.Close()
+}
+
+// A dialed connection whose first write carrying marker holds before it
+// writes, as a write to a block that stopped reading blocks, until released
+// or closed. held is closed when the hold starts.
+type holdMarkedWriteConn struct {
+	net.Conn
+	marker   []byte
+	armed    atomic.Bool
+	held     chan struct{}
+	released chan struct{}
+	release  func()
+}
+
+// A connection over conn whose first write of marker holds. The hold ends
+// when the test does, at the latest.
+func newHoldMarkedWriteConn(t *testing.T, conn net.Conn, marker []byte) *holdMarkedWriteConn {
+	holdConn := &holdMarkedWriteConn{
+		Conn:     conn,
+		marker:   marker,
+		held:     make(chan struct{}),
+		released: make(chan struct{}),
+	}
+	holdConn.release = sync.OnceFunc(func() {
+		close(holdConn.released)
+	})
+	holdConn.armed.Store(true)
+	t.Cleanup(holdConn.release)
+	return holdConn
+}
+
+// Holds the first write of the marker until released, then writes p.
+func (self *holdMarkedWriteConn) Write(p []byte) (int, error) {
+	if bytes.Contains(p, self.marker) && self.armed.CompareAndSwap(true, false) {
+		close(self.held)
+		<-self.released
+	}
+	return self.Conn.Write(p)
+}
+
+// Closes the connection, which ends a held write.
+func (self *holdMarkedWriteConn) Close() error {
 	self.release()
 	return self.Conn.Close()
 }
