@@ -170,3 +170,21 @@ func TestFrontE2eForwardsTheUriNginxWouldSend(t *testing.T) {
 		t.Errorf("connect got %v, want /y/z?w", connectRequests)
 	}
 }
+
+// Two Host headers on h1 are a 400, as nginx answers them: Go's server
+// refuses the head itself, so neither a block nor connect sees the request.
+func TestFrontE2eRefusesTwoHostHeaders(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	eth1 := e2e.iface(t, "eth1")
+	rawConn := e2e.dialRaw(t, eth1.httpsAddr, "web.service.example")
+	response, _ := rawConn.exchange(t, "GET / HTTP/1.1", "Host: web.service.example", "Host: api.service.example")
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("two Host headers: status %d, want 400", response.StatusCode)
+	}
+	if requests := e2e.requestsSince(map[string]int{}); len(requests) != 0 {
+		t.Errorf("blocks got %d requests with two Host headers, want none", len(requests))
+	}
+	if connectRequests := e2e.connectHandler.recorded(); len(connectRequests) != 0 {
+		t.Errorf("connect got %d requests with two Host headers, want none", len(connectRequests))
+	}
+}
