@@ -519,7 +519,29 @@ var parityAcceptances = []*parityAcceptance{
 			}
 			_, _, isResponse := parityResponseKey(difference.key)
 			_, _, isUpstream := parityUpstreamKey(difference.key)
-			return isResponse || isUpstream || difference.key == "upstream.count"
+			if !isResponse && !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// what nothing smuggled looks like: each request the client sent
+			// reached an upstream once, as its own sequence, with its body
+			// re-framed by its length, not by the Content-Length beside the
+			// chunks and not as the chunks' raw bytes
+			sequences := slices.Sorted(maps.Keys(check.front.sequenceRequests))
+			if parityValue(check.front, "upstream.count") != strconv.Itoa(len(sequences)) {
+				return false
+			}
+			for i, sequence := range sequences {
+				request := check.front.sequenceRequests[sequence]
+				prefix := "upstream[" + strconv.Itoa(i) + "]."
+				if parityValue(check.front, prefix+"sequence") != strconv.Itoa(sequence) ||
+					parityValue(check.front, prefix+"method") != request.method ||
+					parityValue(check.front, prefix+"uri") != request.target ||
+					parityValue(check.front, prefix+"body") != parityValueOfBytes(request.body) ||
+					parityValue(check.front, prefix+"framing") != "length "+strconv.Itoa(len(request.body)) {
+					return false
+				}
+			}
+			return true
 		},
 	},
 	{

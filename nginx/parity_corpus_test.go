@@ -623,6 +623,10 @@ func parityCorpus() []*parityCase {
 		}
 		return lines
 	}
+	// a chunked body beside a Content-Length, which nginx refuses
+	contentLengthAndChunked := parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Content-Length", "5"}, [2]string{"Transfer-Encoding", "chunked"})
+	contentLengthAndChunkedKeptAlive := *contentLengthAndChunked
+	contentLengthAndChunkedKeptAlive.keepalive = true
 
 	return []*parityCase{
 		// timeouts, in the background: nginx's client_body_timeout is 15 s,
@@ -881,7 +885,15 @@ func parityCorpus() []*parityCase {
 		{name: "limits/body-empty-declared", request: parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte{}, false)},
 		{name: "limits/body-on-a-get", request: parityWithBody(parityGet(parityApiName, parityApiName, "/hello"), http.MethodGet, parityBody(20), false)},
 		{name: "limits/body-over-h2", request: parityOverH2(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, parityBody(3000), false)), scenario: parityEchoScenario},
-		{name: "limits/content-length-and-chunked", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Content-Length", "5"}, [2]string{"Transfer-Encoding", "chunked"}), tags: []string{"content-length-beside-chunked"}},
+		{name: "limits/content-length-and-chunked", request: contentLengthAndChunked, tags: []string{"content-length-beside-chunked"}},
+		// a second request on the connection after it reaches the upstream
+		// as its own only where the body was read by its chunks
+		{
+			name:       "limits/content-length-and-chunked-then-another-request",
+			run:        paritySendKeepalive(&contentLengthAndChunkedKeptAlive, parityGet(parityApiName, parityApiName, "/two")),
+			tags:       []string{"content-length-beside-chunked"},
+			concurrent: true,
+		},
 		{name: "limits/transfer-encoding-not-chunked-last", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Transfer-Encoding", "gzip, chunked"})},
 		{name: "limits/two-content-lengths", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "6"})},
 		{name: "limits/head-method", request: parityWith(api, http.MethodHead)},

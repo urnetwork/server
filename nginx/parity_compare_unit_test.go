@@ -119,6 +119,41 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 		}
 	}
 	http10 := &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodGet, target: "/hello", host: parityApiName, proto: "HTTP/1.0"}
+	// a chunked body beside a Content-Length, alone and then followed by a
+	// second request on its connection
+	chunkedBesideLength := parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Content-Length", "5"}, [2]string{"Transfer-Encoding", "chunked"})
+	chunkedBesideLengthKeptAlive := *chunkedBesideLength
+	chunkedBesideLengthKeptAlive.keepalive = true
+	secondRequest := parityGet(parityApiName, parityApiName, "/two")
+	// one upstream attempt as the front's observation records it
+	type forwardedAttempt struct {
+		sequence int
+		method   string
+		uri      string
+		body     string
+		framing  string
+	}
+	// the front's observation of a case its upstreams answered 200
+	forwarded := func(attempts ...forwardedAttempt) [][2]string {
+		keyValues := [][2]string{
+			{"response[0].status", "200"},
+			{"upstream.count", strconv.Itoa(len(attempts))},
+		}
+		for i, attempt := range attempts {
+			prefix := "upstream[" + strconv.Itoa(i) + "]."
+			keyValues = append(
+				keyValues,
+				[2]string{prefix + "sequence", strconv.Itoa(attempt.sequence)},
+				[2]string{prefix + "method", attempt.method},
+				[2]string{prefix + "uri", attempt.uri},
+				[2]string{prefix + "body", strconv.Quote(attempt.body)},
+				[2]string{prefix + "framing", attempt.framing},
+			)
+		}
+		return keyValues
+	}
+	reframed := forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "hello", framing: "length 5"}
+	followed := forwardedAttempt{sequence: 1, method: http.MethodGet, uri: "/two", body: "", framing: "length 0"}
 	cases := []struct {
 		name       string
 		parityCase *parityCase
@@ -559,6 +594,89 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			nginx:       longSniRefused,
 			front:       longSniRouted(parityLbName, parityWebName),
 			difference:  parityDifference{key: "upstream[0].host", nginx: parityAbsent, front: parityWebName},
+			wantUnnamed: true,
+		},
+		{
+			name:         "the front's answer to a chunked body beside a Content-Length, which nginx refuses",
+			parityCase:   &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:     []*parityRequest{chunkedBesideLength},
+			nginx:        [][2]string{{"response[0].status", "400"}},
+			front:        forwarded(reframed),
+			difference:   parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantId:       "content-length-beside-chunked",
+			wantProposed: true,
+		},
+		{
+			name:         "the body it forwarded, re-framed by its length",
+			parityCase:   &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:     []*parityRequest{chunkedBesideLength},
+			nginx:        [][2]string{{"response[0].status", "400"}},
+			front:        forwarded(reframed),
+			difference:   parityDifference{key: "upstream[0].body", nginx: parityAbsent, front: `"hello"`},
+			wantId:       "content-length-beside-chunked",
+			wantProposed: true,
+		},
+		{
+			name:        "a chunked body forwarded as its raw chunks",
+			parityCase:  &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:    []*parityRequest{chunkedBesideLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "5\r\nhello\r\n0\r\n\r\n", framing: "length 15"}),
+			difference:  parityDifference{key: "upstream[0].body", nginx: parityAbsent, front: `"5\r\nhello\r\n0\r\n\r\n"`},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a chunked body framed by the Content-Length beside it",
+			parityCase:  &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:    []*parityRequest{chunkedBesideLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "5\r\nhe", framing: "length 5"}),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a chunked body forwarded still chunked",
+			parityCase:  &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:    []*parityRequest{chunkedBesideLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "hello", framing: "chunked"}),
+			difference:  parityDifference{key: "upstream[0].framing", nginx: parityAbsent, front: "chunked"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a second upstream request out of the one the client sent",
+			parityCase:  &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:    []*parityRequest{chunkedBesideLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwarded(reframed, reframed),
+			difference:  parityDifference{key: "upstream.count", nginx: "0", front: "2"},
+			wantUnnamed: true,
+		},
+		{
+			name:         "the next request on the connection, reaching the upstream as its own",
+			parityCase:   &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:     []*parityRequest{&chunkedBesideLengthKeptAlive, secondRequest},
+			nginx:        [][2]string{{"response[0].status", "400"}, {"response[1].error", "eof"}},
+			front:        append(forwarded(reframed, followed), [2]string{"response[1].status", "200"}),
+			difference:   parityDifference{key: "response[1].error", nginx: "eof", front: parityAbsent},
+			wantId:       "content-length-beside-chunked",
+			wantProposed: true,
+		},
+		{
+			name:        "a next request the upstream never saw as its own",
+			parityCase:  &parityCase{name: "unit", tags: []string{"content-length-beside-chunked"}},
+			requests:    []*parityRequest{&chunkedBesideLengthKeptAlive, secondRequest},
+			nginx:       [][2]string{{"response[0].status", "400"}, {"response[1].error", "eof"}},
+			front:       append(forwarded(reframed), [2]string{"response[1].status", "400"}),
+			difference:  parityDifference{key: "response[1].status", nginx: parityAbsent, front: "400"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a body beside a Content-Length in a case not written for it",
+			requests:    []*parityRequest{chunkedBesideLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwarded(reframed),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
 			wantUnnamed: true,
 		},
 		{
