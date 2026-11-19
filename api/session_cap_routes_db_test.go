@@ -173,7 +173,9 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 		// a verify code as the send stores one; the send's own limits (codes
 		// per address and per account) are not what this test is about
 		newCode := func() string {
-			code := strings.ToLower(strings.ReplaceAll(server.NewId().String(), "-", "")[:8])
+			// the id's random tail (its head is its time)
+			id := strings.ReplaceAll(server.NewId().String(), "-", "")
+			code := strings.ToLower(id[len(id)-10:])
 			server.Db(ctx, func(conn server.PgConn) {
 				_, err := conn.Exec(ctx, `INSERT INTO user_auth_verify (user_auth_verify_id, user_id, verify_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.userId, code)
 				server.Raise(err)
