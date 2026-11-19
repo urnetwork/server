@@ -33,18 +33,21 @@ package nginx
 //
 // Go's servers refuse part of this first, with their own statuses: an h1
 // head over the server's MaxHeaderBytes or MaxHeaderValueCount (431), a
-// missing, malformed or repeated Host on h1 (400, as nginx answers a repeated
-// one), an h2 or h3 head over its header list limit. Go's h1 server also
-// merges repeated identical Content-Length lines, answers a repeated
-// Transfer-Encoding 501 and an Expect other than 100-continue 417, and drops
-// the Transfer-Encoding of an HTTP/1.0 request, none of which the handler
-// sees, where nginx answers 400 to the first, second and last and ignores
-// the Expect (LBALT-IMPL.md §4). So
+// missing, malformed or repeated Host on h1 (400, as nginx answers a
+// repeated one), an h2 or h3 head over its header list limit. So
 // Front.ConfigureServer sets MaxHeaderBytes to a multiple of
 // MaxRequestHeadersTotalBytes, and MaxHeaderValueCount to a multiple of
 // MaxRequestHeaderLines, twice by default
 // (HttpSettings.ServerHeaderBytesMultiple, ServerHeaderLinesMultiple), for
 // the handler to apply nginx's statuses within that.
+//
+// Go's h1 server also rewrites some heads before the handler sees them,
+// which the handler can't refuse as nginx does (LBALT-IMPL.md §4): it merges
+// repeated identical Content-Length lines, drops the Transfer-Encoding of an
+// HTTP/1.0 request and unfolds an obs-folded line, each of which nginx
+// answers 400; it answers a repeated Transfer-Encoding 501, which nginx
+// answers 400; and an Expect other than 100-continue 417, which nginx
+// ignores.
 
 import (
 	"net/http"
