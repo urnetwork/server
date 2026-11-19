@@ -10,7 +10,8 @@ package connect_test
 //   - a real api server (the full api.Routes()) used by the clients for
 //     out-of-band control (contract setup) via connect.NewApiOutOfBandControl
 //   - two real connect.Clients with production-default settings, one platform
-//     transport each (H1 websocket), client A homed on perf0 and B on perf1
+//     transport each (H1+, the urnetwork-framer/1 upgrade, pinned, and checked
+//     after the first message), client A homed on perf0 and B on perf1
 //
 // Phases, each reported with "[perf]" lines:
 //
@@ -349,7 +350,7 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 
 	// ---- clients with the real api for out-of-band control --------------------
 
-	newPeerClient := func(p *peer, wsPort int) (*connect.Client, *connect.PlatformTransport) {
+	newPeerClient := func(p *peer, wsPort int) (*connect.Client, *connect.PlatformTransport, *connect.H1ConnectionStats) {
 		strategySettings := connect.DefaultClientStrategySettings()
 		strategySettings.EnableResilient = false
 		clientStrategy := connect.NewClientStrategy(ctx, strategySettings)
@@ -363,9 +364,13 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			AppVersion: "0.0.0",
 		}
 		// the phases measure H1+, pinned, which is the platform transport's
-		// default; the carrier cases below measure the websocket apart
+		// default. A refused upgrade falls back to the websocket unseen, so
+		// the first message checks what each client negotiated. The carrier
+		// cases below measure the websocket apart.
+		h1Stats := &connect.H1ConnectionStats{}
 		transportSettings := connect.DefaultPlatformTransportSettings()
 		transportSettings.EnableH1Plus = true
+		transportSettings.H1ConnectionStats = h1Stats
 		transport := connect.NewPlatformTransportWithTargetMode(
 			ctx,
 			clientStrategy,
@@ -375,11 +380,11 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			connect.TransportModeH1,
 			transportSettings,
 		)
-		return client, transport
+		return client, transport, h1Stats
 	}
 
-	clientA, transportA := newPeerClient(peerA, wsPort0)
-	clientB, transportB := newPeerClient(peerB, wsPort1)
+	clientA, transportA, h1StatsA := newPeerClient(peerA, wsPort0)
+	clientB, transportB, h1StatsB := newPeerClient(peerB, wsPort1)
 
 	defer func() {
 		clientA.Close()
@@ -577,6 +582,12 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	pingContent := perfRandContent(32)
 	firstRtt := pingPong(0, pingContent, nil, nil)
 	fmt.Printf("[perf]first message rtt = %s (includes contract bootstrap)\n", firstRtt)
+	// each client carries the phases on the H1+ they pin, not the websocket
+	for _, h1Stats := range []*connect.H1ConnectionStats{h1StatsA, h1StatsB} {
+		if h1Snapshot := h1Stats.Snapshot(); h1Snapshot.H1PlusConnectionCount != 1 || h1Snapshot.WebSocketConnectionCount != 0 {
+			t.Fatalf("[perf]a client negotiated %+v, want one H1+ connection", h1Snapshot)
+		}
+	}
 
 	// ---- phase 2: ping-pong latency --------------------------------------------
 
@@ -937,7 +948,7 @@ func perfDrain(messages chan *perfReceivedMessage) {
 //
 //   - direct: the websocket and the urnetwork-framer/1 upgrade (H1+) on
 //     connect's plain H1 port, each pinned. The harness above runs H1+, the
-//     platform transport's default, and pins it.
+//     platform transport's default, pins it and checks it.
 //   - lb_alt: the websocket, H1+, raw QUIC and QUIC under whodis through the
 //     public sockets of connect's lb_alt front (Testing_NewLbAltFront), TLS
 //     terminated in connect.
