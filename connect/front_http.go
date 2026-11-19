@@ -98,9 +98,11 @@ func (self *frontTcpRun) close() {
 // timeout, which covers the TLS handshake, request line and headers; the
 // idle timeout; header bytes of twice nginx's header buffers, within which
 // the nginx front's handlers apply nginx's own limits; the h2 stream limit;
-// and keepalive_requests and keepalive_time per connection. Nothing bounds a
-// whole request or response here: bodies, uploads, websockets and streamed
-// responses keep the per-read and per-write timeouts the nginx front applies.
+// the h2 write byte timeout, send_timeout, which closes an h2 connection
+// whose frame write stays blocked on the socket; and keepalive_requests and
+// keepalive_time per connection. Nothing bounds a whole request or response
+// here: bodies, uploads, websockets and streamed responses keep the
+// per-read and per-write timeouts the nginx front applies.
 //
 // A parity difference (LBALT-IMPL.md §4): net/http reads at most the header
 // bytes, twice nginx's 64 KiB of buffers by default, plus its own 4 KiB
@@ -215,10 +217,12 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // that error, whatever deadline is set after it (LBALT-IMPL.md §7). The
 // stream is cut mid-record then, and nginx sends nothing more on a
 // connection whose send_timeout passed. The later write that matters is
-// TLS's: when the nginx front's send_timeout cuts a blocked h1 write, net/http
-// closes the tls.Conn, which first sends close_notify under a write deadline
-// of its own, 5 s, so a client that stopped reading would hold the handler,
-// and its limit slot, that much longer.
+// TLS's: when the nginx front's send_timeout cuts a blocked h1 write, or the
+// h2 server's write byte timeout, which is send_timeout, cuts a blocked
+// frame write, net/http closes the tls.Conn, which first sends close_notify
+// under a write deadline of its own, 5 s. A client that stopped reading
+// would hold the handler and its limit slot that much longer, and on h2 the
+// connection's serving goroutine, which makes that close.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer

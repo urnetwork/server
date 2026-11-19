@@ -22,13 +22,16 @@ package nginx
 //     informational head, and cleared when the call returns. A response
 //     idle between two writes has none, which matters on h2, where Go's
 //     server resets a stream whose deadline passes even with no write
-//     pending, and a client that stops reading has the write cut. The
-//     deadline is armed again as the handler returns, for what the server
-//     writes then (the rest of the buffered body, and on h1 the end of the
-//     response); Go's h1 server clears it after the request, and its h2
-//     server stops it when the stream closes. On h1 the first read of the
-//     body arms it too, for the 100 Continue Go's server writes then. A
-//     hijack clears it, so the tunnel's owner starts with none;
+//     pending, and a client that stops reading has the write cut. On h2 a
+//     frame write blocked on the socket itself is cut by the server's write
+//     byte timeout instead (Front.ConfigureServer), since a stream's reset
+//     waits behind it. The deadline is armed again as the handler returns,
+//     for what the server writes then (the rest of the buffered body, and
+//     on h1 the end of the response); Go's h1 server clears it after the
+//     request, and its h2 server stops it when the stream closes. On h1 the
+//     first read of the body arms it too, for the 100 Continue Go's server
+//     writes then. A hijack clears it, so the tunnel's owner starts with
+//     none;
 //   - records the status, the time of the head and the bytes for the
 //     metrics and the access log.
 //

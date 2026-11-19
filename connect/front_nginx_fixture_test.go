@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -240,26 +241,7 @@ func (self *testFrontH2Client) readFrame() http2.Frame {
 // ends. The response's status.
 func (self *testFrontH2Client) get(authority string, path string) string {
 	self.t.Helper()
-	streamId := self.nextStreamId
-	self.nextStreamId += 2
-	self.headerBlock.Reset()
-	for _, field := range []hpack.HeaderField{
-		{Name: ":method", Value: "GET"},
-		{Name: ":scheme", Value: "https"},
-		{Name: ":authority", Value: authority},
-		{Name: ":path", Value: path},
-	} {
-		self.encoder.WriteField(field)
-	}
-	err := self.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      streamId,
-		BlockFragment: self.headerBlock.Bytes(),
-		EndStream:     true,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		self.t.Fatalf("stream %d: %v", streamId, err)
-	}
+	streamId := self.startGet(authority, path)
 	status := ""
 	for {
 		switch frame := self.readFrame().(type) {
@@ -281,6 +263,74 @@ func (self *testFrontH2Client) get(authority string, path string) string {
 				self.t.Fatalf("stream %d was reset: %s", streamId, frame.ErrCode)
 			}
 		}
+	}
+}
+
+// Opens a new stream that GETs path at authority, sending no body. The
+// stream's id.
+func (self *testFrontH2Client) startGet(authority string, path string) uint32 {
+	self.t.Helper()
+	streamId := self.nextStreamId
+	self.nextStreamId += 2
+	self.headerBlock.Reset()
+	for _, field := range []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: authority},
+		{Name: ":path", Value: path},
+	} {
+		self.encoder.WriteField(field)
+	}
+	err := self.framer.WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      streamId,
+		BlockFragment: self.headerBlock.Bytes(),
+		EndStream:     true,
+		EndHeaders:    true,
+	})
+	if err != nil {
+		self.t.Fatalf("stream %d: %v", streamId, err)
+	}
+	return streamId
+}
+
+// Reads frames until the response head of streamId. Its status.
+func (self *testFrontH2Client) readResponseHead(streamId uint32) string {
+	self.t.Helper()
+	for {
+		switch frame := self.readFrame().(type) {
+		case nil:
+			self.t.Fatalf("the connection closed before stream %d's response head", streamId)
+		case *http2.MetaHeadersFrame:
+			if frame.StreamID == streamId {
+				return frame.PseudoValue("status")
+			}
+		case *http2.RSTStreamFrame:
+			if frame.StreamID == streamId {
+				self.t.Fatalf("stream %d was reset: %s", streamId, frame.ErrCode)
+			}
+		}
+	}
+}
+
+// A connection's flow-control window when it opens, before any
+// WINDOW_UPDATE (RFC 9113, section 6.9.2).
+const testFrontH2InitialWindowBytes = 65535
+
+// Opens the client's flow-control windows, the connection's and every
+// stream's, to the largest h2 allows, far beyond any socket buffer, so the
+// server's writes to a client that stops reading block on the socket, never
+// on flow control.
+func (self *testFrontH2Client) openWindows() {
+	self.t.Helper()
+	err := self.framer.WriteSettings(http2.Setting{
+		ID:  http2.SettingInitialWindowSize,
+		Val: math.MaxInt32,
+	})
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	if err := self.framer.WriteWindowUpdate(0, math.MaxInt32-testFrontH2InitialWindowBytes); err != nil {
+		self.t.Fatal(err)
 	}
 }
 

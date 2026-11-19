@@ -1,9 +1,10 @@
 package nginx
 
 // Tests of the front's public TCP servers (front_server.go): the fields
-// ConfigureServer sets, and nginx's keepalive_requests and keepalive_time
-// over real h1 and h2 servers. The h2 tests read frames directly, so the
-// GOAWAY and the connection's close are seen as the client sees them. The
+// ConfigureServer sets, nginx's keepalive_requests and keepalive_time over
+// real h1 and h2 servers, and send_timeout on an h2 connection whose client
+// stops reading. The h2 tests read frames directly, so the GOAWAY and the
+// connection's close are seen as the client sees them. The keepalive
 // requests go to the lb status route on an lb name, which no limit charges.
 
 import (
@@ -15,11 +16,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -191,26 +196,7 @@ func (self *testServerH2Client) readFrame() http2.Frame {
 // ends. The response's status.
 func (self *testServerH2Client) get(authority string, path string) string {
 	self.t.Helper()
-	streamId := self.nextStreamId
-	self.nextStreamId += 2
-	self.headerBlock.Reset()
-	for _, field := range []hpack.HeaderField{
-		{Name: ":method", Value: "GET"},
-		{Name: ":scheme", Value: "https"},
-		{Name: ":authority", Value: authority},
-		{Name: ":path", Value: path},
-	} {
-		self.encoder.WriteField(field)
-	}
-	err := self.framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      streamId,
-		BlockFragment: self.headerBlock.Bytes(),
-		EndStream:     true,
-		EndHeaders:    true,
-	})
-	if err != nil {
-		self.t.Fatalf("stream %d: %v", streamId, err)
-	}
+	streamId := self.startGet(authority, path)
 	status := ""
 	for {
 		switch frame := self.readFrame().(type) {
@@ -235,6 +221,52 @@ func (self *testServerH2Client) get(authority string, path string) string {
 	}
 }
 
+// Reads frames until the response head of streamId. Its status.
+func (self *testServerH2Client) readResponseHead(streamId uint32) string {
+	self.t.Helper()
+	for {
+		switch frame := self.readFrame().(type) {
+		case nil:
+			self.t.Fatalf("the connection closed before stream %d's response head", streamId)
+		case *http2.MetaHeadersFrame:
+			if frame.StreamID == streamId {
+				return frame.PseudoValue("status")
+			}
+		case *http2.RSTStreamFrame:
+			if frame.StreamID == streamId {
+				self.t.Fatalf("stream %d was reset: %s", streamId, frame.ErrCode)
+			}
+		}
+	}
+}
+
+// Opens a new stream that GETs path at authority, sending no body. The
+// stream's id.
+func (self *testServerH2Client) startGet(authority string, path string) uint32 {
+	self.t.Helper()
+	streamId := self.nextStreamId
+	self.nextStreamId += 2
+	self.headerBlock.Reset()
+	for _, field := range []hpack.HeaderField{
+		{Name: ":method", Value: "GET"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: authority},
+		{Name: ":path", Value: path},
+	} {
+		self.encoder.WriteField(field)
+	}
+	err := self.framer.WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      streamId,
+		BlockFragment: self.headerBlock.Bytes(),
+		EndStream:     true,
+		EndHeaders:    true,
+	})
+	if err != nil {
+		self.t.Fatalf("stream %d: %v", streamId, err)
+	}
+	return streamId
+}
+
 // Reads frames until the server closes the connection, and reports whether
 // it sent a GOAWAY first, and its last stream and code.
 func (self *testServerH2Client) readToClose() (goAwayReceived bool, lastStreamId uint32, errCode http2.ErrCode) {
@@ -249,12 +281,137 @@ func testServerH2StreamId(n int) uint32 {
 	return uint32(2*n - 1)
 }
 
+// A connection's flow-control window when it opens, before any
+// WINDOW_UPDATE (RFC 9113, section 6.9.2).
+const testServerH2InitialWindowBytes = 65535
+
+// Opens the client's flow-control windows, the connection's and every
+// stream's, to the largest h2 allows, far beyond any socket buffer, so the
+// server's writes to a client that stops reading block on the socket, never
+// on flow control.
+func (self *testServerH2Client) openWindows() {
+	self.t.Helper()
+	err := self.framer.WriteSettings(http2.Setting{
+		ID:  http2.SettingInitialWindowSize,
+		Val: math.MaxInt32,
+	})
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	if err := self.framer.WriteWindowUpdate(0, math.MaxInt32-testServerH2InitialWindowBytes); err != nil {
+		self.t.Fatal(err)
+	}
+}
+
+// A listener that reports each connection it accepts, wrapped so a test can
+// stall it.
+type testServerStallingListener struct {
+	net.Listener
+	accepted chan *testServerStallingConn
+}
+
+// Accepts the next connection and reports it, when accepted has room.
+func (self *testServerStallingListener) Accept() (net.Conn, error) {
+	conn, err := self.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	stallingConn := &testServerStallingConn{
+		Conn:   conn,
+		closed: make(chan struct{}),
+	}
+	select {
+	case self.accepted <- stallingConn:
+	default:
+	}
+	return stallingConn, nil
+}
+
+// A server connection whose writes, once it is stalled, wait out their
+// deadline and fail with its error, as a write does to a client that stopped
+// reading once the socket's buffers are full, whatever the kernel's buffer
+// sizes; a write with no deadline waits for the close. Once a write has
+// failed on its deadline, every later write fails at once, as on connect's
+// public sockets (connect/front_http.go, frontTrackedConn), so crypto/tls's
+// close_notify doesn't wait out a deadline of its own. Safe for concurrent
+// use as a net.Conn is.
+type testServerStallingConn struct {
+	net.Conn
+	stalled       atomic.Bool
+	writeTimedOut atomic.Bool
+	closed        chan struct{}
+	closeOnce     sync.Once
+
+	stateLock     sync.Mutex
+	writeDeadline time.Time
+}
+
+// See net.Conn.
+func (self *testServerStallingConn) SetDeadline(deadline time.Time) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.writeDeadline = deadline
+	}()
+	return self.Conn.SetDeadline(deadline)
+}
+
+// See net.Conn.
+func (self *testServerStallingConn) SetWriteDeadline(deadline time.Time) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.writeDeadline = deadline
+	}()
+	return self.Conn.SetWriteDeadline(deadline)
+}
+
+// Writes p, or once stalled waits for the write deadline, or the close, and
+// fails. After a write failed on its deadline, fails at once.
+func (self *testServerStallingConn) Write(p []byte) (int, error) {
+	if self.writeTimedOut.Load() {
+		return 0, os.ErrDeadlineExceeded
+	}
+	if !self.stalled.Load() {
+		n, err := self.Conn.Write(p)
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			self.writeTimedOut.Store(true)
+		}
+		return n, err
+	}
+	writeDeadline := func() time.Time {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.writeDeadline
+	}()
+	var expired <-chan time.Time
+	if !writeDeadline.IsZero() {
+		expired = time.After(time.Until(writeDeadline))
+	}
+	select {
+	case <-expired:
+		self.writeTimedOut.Store(true)
+		return 0, os.ErrDeadlineExceeded
+	case <-self.closed:
+		return 0, net.ErrClosed
+	}
+}
+
+// See net.Conn.
+func (self *testServerStallingConn) Close() error {
+	self.closeOnce.Do(func() {
+		close(self.closed)
+	})
+	return self.Conn.Close()
+}
+
 // ConfigureServer sets every field that derives from HttpSettings and
 // nothing the caller owns: Handler, ErrorLog and BaseContext stay, no
 // TLSConfig, ReadTimeout or WriteTimeout is set, a ConnContext already set
 // still runs ahead of the front's, and an HTTP2 config the caller set keeps
-// its other fields without being written. Non-positive settings leave Go's
-// defaults.
+// its other fields without being written. The h2 config carries the stream
+// limit and the write byte timeout, SendTimeout, and is set when either is.
+// Non-positive settings leave Go's defaults.
 func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	httpSettings := testFront.front.settings.Http
@@ -286,10 +443,13 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	if want := 2 * httpSettings.MaxRequestHeadersTotalBytes; httpServer.MaxHeaderBytes != want {
 		t.Errorf("MaxHeaderBytes %d, want twice MaxRequestHeadersTotalBytes, %d", httpServer.MaxHeaderBytes, want)
 	}
-	if httpServer.HTTP2 == nil || httpServer.HTTP2.MaxConcurrentStreams != httpSettings.Http2MaxConcurrentStreams || httpServer.HTTP2.MaxReceiveBufferPerConnection != 1024*1024 {
-		t.Errorf("HTTP2 %+v, want the stream limit %d with the caller's receive buffer", httpServer.HTTP2, httpSettings.Http2MaxConcurrentStreams)
+	if httpServer.HTTP2 == nil ||
+		httpServer.HTTP2.MaxConcurrentStreams != httpSettings.Http2MaxConcurrentStreams ||
+		httpServer.HTTP2.WriteByteTimeout != httpSettings.SendTimeout ||
+		httpServer.HTTP2.MaxReceiveBufferPerConnection != 1024*1024 {
+		t.Errorf("HTTP2 %+v, want the stream limit %d and the write byte timeout %s with the caller's receive buffer", httpServer.HTTP2, httpSettings.Http2MaxConcurrentStreams, httpSettings.SendTimeout)
 	}
-	if callerHttp2Config.MaxConcurrentStreams != 0 {
+	if callerHttp2Config.MaxConcurrentStreams != 0 || callerHttp2Config.WriteByteTimeout != 0 {
 		t.Error("the caller's HTTP2 config was written")
 	}
 	if !httpServer.DisableGeneralOptionsHandler {
@@ -313,11 +473,22 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	zeroSettings.Http.ClientHeaderTimeout = 0
 	zeroSettings.Http.MaxRequestHeadersTotalBytes = 0
 	zeroSettings.Http.Http2MaxConcurrentStreams = 0
+	zeroSettings.Http.SendTimeout = 0
 	zeroFront := newTestFront(t, loadTestRouteTable(t), zeroSettings)
 	zeroServer := &http.Server{}
 	zeroFront.front.ConfigureServer(zeroServer)
 	if zeroServer.ReadHeaderTimeout != 0 || zeroServer.MaxHeaderBytes != 0 || zeroServer.HTTP2 != nil {
 		t.Errorf("non-positive settings set ReadHeaderTimeout %s, MaxHeaderBytes %d, HTTP2 %+v", zeroServer.ReadHeaderTimeout, zeroServer.MaxHeaderBytes, zeroServer.HTTP2)
+	}
+
+	// a send timeout alone still bounds h2's writes, under Go's stream limit
+	sendTimeoutSettings := testFrontSettings()
+	sendTimeoutSettings.Http.Http2MaxConcurrentStreams = 0
+	sendTimeoutFront := newTestFront(t, loadTestRouteTable(t), sendTimeoutSettings)
+	sendTimeoutServer := &http.Server{}
+	sendTimeoutFront.front.ConfigureServer(sendTimeoutServer)
+	if sendTimeoutServer.HTTP2 == nil || sendTimeoutServer.HTTP2.WriteByteTimeout != sendTimeoutSettings.Http.SendTimeout || sendTimeoutServer.HTTP2.MaxConcurrentStreams != 0 {
+		t.Errorf("HTTP2 %+v with no stream limit, want only the write byte timeout %s", sendTimeoutServer.HTTP2, sendTimeoutSettings.Http.SendTimeout)
 	}
 }
 
@@ -520,6 +691,99 @@ func TestFrontConfigureServerLetsTheFrontAnswerHeadsWithinTwiceTheBuffers(t *tes
 	for _, c := range cases {
 		if statusCode := statusWithHeaders(c.fillCount); statusCode != c.statusCode {
 			t.Errorf("%d KiB of headers: status %d, want %d", c.fillCount, statusCode, c.statusCode)
+		}
+	}
+}
+
+// Over h2, a client that stops reading at the socket while its flow-control
+// windows stay open has its connection closed once a frame write has been
+// blocked for SendTimeout, so the handler's write fails then, as nginx
+// closes an h2 connection whose output stays blocked past send_timeout. A
+// stream's own deadline can't do it: its reset waits behind the blocked
+// write. The client stops reading once it has the response head, and the
+// handler writes only after that; the connection stalls then, so every
+// write to it waits out its deadline. The connection fails its writes after
+// a timed-out one, as connect's public sockets do, so the bound is well
+// under crypto/tls's 5 s close_notify deadline.
+func TestFrontConfigureServerClosesAnH2ConnectionWhoseClientStopsReading(t *testing.T) {
+	const sendTimeout = 200 * time.Millisecond
+	const releaseBound = 3 * time.Second
+	settings := testFrontSettings()
+	settings.Http.SendTimeout = sendTimeout
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	type cut struct {
+		err     error
+		blocked time.Duration
+	}
+	stalled := make(chan struct{})
+	cuts := make(chan cut, 1)
+	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
+		w.WriteHeader(http.StatusOK)
+		http.NewResponseController(w).Flush()
+		select {
+		case <-stalled:
+		case <-r.Context().Done():
+			return
+		}
+		chunk := make([]byte, 16*1024)
+		// at most 1 GiB, far past any buffer, so a write never cut still
+		// ends
+		for range 64 * 1024 {
+			writeStart := time.Now()
+			if _, err := w.Write(chunk); err != nil {
+				cuts <- cut{
+					err:     err,
+					blocked: time.Since(writeStart),
+				}
+				return
+			}
+		}
+		cuts <- cut{}
+	}
+	accepted := make(chan *testServerStallingConn, 4)
+	server := httptest.NewUnstartedServer(testFront.front.HttpsHandler("eth1"))
+	testFront.front.ConfigureServer(server.Config)
+	server.EnableHTTP2 = true
+	server.Listener = &testServerStallingListener{
+		Listener: server.Listener,
+		accepted: accepted,
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	client := dialTestServerH2Client(t, server.Listener.Addr().String())
+	client.openWindows()
+
+	streamId := client.startGet("api.service.example", "/download")
+	if status := client.readResponseHead(streamId); status != strconv.Itoa(http.StatusOK) {
+		t.Fatalf("the download: status %s", status)
+	}
+	select {
+	case conn := <-accepted:
+		conn.stalled.Store(true)
+	default:
+		t.Fatal("no connection was accepted")
+	}
+	close(stalled)
+	select {
+	case cutWrite := <-cuts:
+		if cutWrite.err == nil {
+			t.Fatal("1 GiB was written to a client that reads nothing")
+		}
+		if cutWrite.blocked < sendTimeout || releaseBound <= cutWrite.blocked {
+			t.Fatalf("the cut write returned after %s, want SendTimeout %s or a little more", cutWrite.blocked, sendTimeout)
+		}
+	case <-time.After(releaseBound):
+		t.Fatalf("after %s the handler's write to a client that reads nothing is still blocked", releaseBound)
+	}
+	// the server closed the connection: past what it sent before the stall,
+	// the client finds the connection's end, and no read deadline
+	for {
+		if _, err := client.framer.ReadFrame(); err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				t.Fatalf("the connection is still open after the cut: %v", err)
+			}
+			break
 		}
 	}
 }

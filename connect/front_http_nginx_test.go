@@ -6,7 +6,8 @@ package connect
 // public sockets and the real nginx front, nginx's keepalive_requests and
 // keepalive_time close connections on h1 and h2, on the lb status route of
 // an lb name, which no limit charges; and a client that stops reading over
-// TLS is cut at send_timeout without close_notify holding its handler.
+// TLS, on h1 or h2, is cut at send_timeout without close_notify holding its
+// handler.
 
 import (
 	"bufio"
@@ -16,6 +17,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"slices"
 	"strconv"
@@ -25,6 +27,8 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+
+	"github.com/urnetwork/server/nginx"
 )
 
 // connect sets only its own fields on each public server, the handler, the
@@ -332,6 +336,153 @@ func TestFrontHttpsSendTimeoutReleasesTheHandlerOfAClientThatStopsReading(t *tes
 	}
 	if cutWrite.err == nil || cutWrite.blocked < sendTimeout || releaseBound <= cutWrite.blocked {
 		t.Fatalf("the cut write returned %v after %s, want an error after SendTimeout %s, well under close_notify's 5 s", cutWrite.err, cutWrite.blocked, sendTimeout)
+	}
+
+	// the slot goes as the handler returns
+	releaseDeadline := time.Now().Add(releaseBound)
+	for {
+		response := request("/ok")
+		response.Body.Close()
+		if response.StatusCode == http.StatusOK {
+			break
+		}
+		if response.StatusCode != http.StatusTooManyRequests || releaseDeadline.Before(time.Now()) {
+			t.Fatalf("the next request = %d, want 200 once the cut handler's slot is let go", response.StatusCode)
+		}
+	}
+}
+
+// Over h2, on a forwarded name, a client that stops reading at the socket
+// while its flow-control windows stay open has its connection closed at
+// send_timeout through connect's public sockets (LBALT-IMPL.md §7): the
+// nginx front sets the h2 server's write byte timeout, and the public
+// connection fails the close_notify crypto/tls sends next at once. The
+// forwarded request lets go of its block's connection and its limit slot
+// within about SendTimeout, where a stream's own deadline couldn't, since
+// its reset waits behind the blocked write. The block sends its response
+// head, and its body only once the client has the head and has stopped
+// reading; the client's connection stalls then, so every write to it waits
+// out its deadline.
+func TestFrontHttpsSendTimeoutClosesAnH2ConnectionWhoseClientStopsReading(t *testing.T) {
+	const sendTimeout = 100 * time.Millisecond
+	// far under crypto/tls's 5 s close_notify deadline
+	const releaseBound = 3 * time.Second
+	type cut struct {
+		err     error
+		blocked time.Duration
+	}
+	stalled := make(chan struct{})
+	upstreamCuts := make(chan cut, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		http.NewResponseController(w).Flush()
+		select {
+		case <-stalled:
+		case <-r.Context().Done():
+			return
+		}
+		chunk := make([]byte, 16*1024)
+		writeStart := time.Now()
+		// at most 1 GiB, far past any buffer, so a body never cut still ends
+		for range 64 * 1024 {
+			if _, err := w.Write(chunk); err != nil {
+				upstreamCuts <- cut{
+					err:     err,
+					blocked: time.Since(writeStart),
+				}
+				return
+			}
+		}
+		upstreamCuts <- cut{}
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamPort := upstream.Listener.Addr().(*net.TCPAddr).Port
+	connectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	})
+	accepted := make(chan *testFrontStallingConn, 16)
+	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.SendTimeout = sendTimeout
+		// one request in flight per address, so a held slot refuses the next
+		for _, routeInterface := range env.routeTable.Interfaces {
+			routeInterface.RateLimit.NetConnections = 1
+		}
+		// the forwarded service's one block on loopback; a parsed route table
+		// refuses the services bridge on an interface's address, as the
+		// test's 127.0.0.1 is, so it is set after the parse
+		env.routeTable.Upstream.Ipv4 = "127.0.0.1"
+		forwardedService, ok := env.routeTable.Service("mcp")
+		if !ok {
+			t.Fatal("the route fixture has no mcp service")
+		}
+		forwardedService.Blocks = []*nginx.RouteBlock{
+			{Name: "g1", Weight: 1, Port: upstreamPort},
+		}
+		listen := env.settings.Listen
+		env.settings.Listen = func(network string, address string) (net.Listener, error) {
+			listener, err := listen(network, address)
+			if err != nil {
+				return listener, err
+			}
+			return &testFrontStallingListener{
+				Listener: listener,
+				accepted: accepted,
+			}, nil
+		}
+	}, connectHandler)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	request := func(path string) *http.Response {
+		t.Helper()
+		tlsConn, err := tls.Dial("tcp", env.bindAddress(address, frontPortHttps), env.clientTlsConfig(testFrontConnectName, []string{"http/1.1"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			tlsConn.Close()
+		})
+		tlsConn.SetDeadline(time.Now().Add(testFrontProgressTimeout))
+		fmt.Fprintf(tlsConn, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", path, testFrontConnectName)
+		response, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	client := env.dialH2Client(env.bindAddress(address, frontPortHttps), testFrontForwardedName)
+	client.openWindows()
+	streamId := client.startGet(testFrontForwardedName, "/download")
+	if status := client.readResponseHead(streamId); status != strconv.Itoa(http.StatusOK) {
+		t.Fatalf("the download: status %s", status)
+	}
+	select {
+	case conn := <-accepted:
+		conn.stalled.Store(true)
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("no connection was accepted")
+	}
+	close(stalled)
+	select {
+	case upstreamCut := <-upstreamCuts:
+		if upstreamCut.err == nil {
+			t.Fatal("1 GiB was relayed to a client that reads nothing")
+		}
+		if releaseBound <= upstreamCut.blocked {
+			t.Fatalf("the block's connection was cut after %s, want about SendTimeout %s", upstreamCut.blocked, sendTimeout)
+		}
+	case <-time.After(releaseBound):
+		t.Fatalf("after %s the response to a client that reads nothing still holds its block's connection", releaseBound)
+	}
+	// past what the server sent before the stall, the client finds its
+	// connection's end, and no read deadline
+	for {
+		if _, err := client.framer.ReadFrame(); err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				t.Fatalf("the connection is still open after the cut: %v", err)
+			}
+			break
+		}
 	}
 
 	// the slot goes as the handler returns

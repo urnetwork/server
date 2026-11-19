@@ -17,10 +17,11 @@ import (
 // the access log themselves. Front.ConfigureServer sets the rest on each
 // public server (front_server.go): its ReadHeaderTimeout is
 // ClientHeaderTimeout, its IdleTimeout KeepaliveTimeout, its
-// HTTP2.MaxConcurrentStreams Http2MaxConcurrentStreams, and its
-// MaxHeaderBytes twice MaxRequestHeadersTotalBytes, so the handler sees every
-// head nginx would answer with a 414 or 400 instead of Go answering 431. It
-// sets no WriteTimeout, which would cut a stream SendTimeout lets live.
+// HTTP2.MaxConcurrentStreams Http2MaxConcurrentStreams, its
+// HTTP2.WriteByteTimeout SendTimeout, and its MaxHeaderBytes twice
+// MaxRequestHeadersTotalBytes, so the handler sees every head nginx would
+// answer with a 414 or 400 instead of Go answering 431. It sets no
+// WriteTimeout, which would cut a stream SendTimeout lets live.
 // KeepaliveRequests and KeepaliveTime, which Go's server lacks, are applied
 // per connection, from state ConfigureServer attaches. Of nginx's lingering
 // close, LingeringTimeout bounds the reads Go's server makes of an unread
@@ -47,8 +48,11 @@ type HttpSettings struct {
 	// the longest a write to a client may stay blocked: nginx's
 	// `send_timeout 30s`, which runs only while a write waits on the client,
 	// so a response may go quiet between two writes for as long as its
-	// upstream does. A write blocked past it closes the connection, or on h2
-	// resets the stream. Non-positive means no bound.
+	// upstream does. A write blocked past it closes the connection on h1. On
+	// h2 it resets the stream, and a frame write blocked on the socket past
+	// it, which no reset can get past, closes the connection and so every
+	// stream on it, as nginx does (Front.ConfigureServer). Non-positive means
+	// no bound.
 	SendTimeout time.Duration
 	// the longest request line in bytes, one of nginx's
 	// `large_client_header_buffers 8 8k`. A longer one is a 414. Non-positive

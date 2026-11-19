@@ -56,6 +56,12 @@ type frontConnection struct {
 //     answer nginx's 400 and 414 for every head within that, and Go's 431
 //     answers only beyond it;
 //   - the h2 stream limit is Http2MaxConcurrentStreams;
+//   - the h2 write byte timeout is SendTimeout, so an h2 connection whose
+//     frame write stays blocked on the socket that long is closed, which
+//     ends every stream on it, as nginx closes an h2 connection whose output
+//     stays blocked past send_timeout (ngx_http_v2_write_handler). The
+//     handlers' own deadline can't: on h2 it resets only the stream, and the
+//     reset waits behind the blocked write;
 //   - DisableGeneralOptionsHandler, so `OPTIONS *` reaches the handler;
 //   - ConnContext gives each connection the state for KeepaliveRequests and
 //     KeepaliveTime, after any ConnContext the server already has.
@@ -66,6 +72,12 @@ type frontConnection struct {
 // each read and write themselves. TLSConfig is left alone too: connect
 // serves TLS through tls.NewListener with the front's one long-lived config,
 // which net/http would otherwise write to.
+//
+// When a write times out over TLS, the server closes the connection, and
+// crypto/tls first tries close_notify under a 5 s deadline of its own; the
+// handler's write returns only after that close. Connect's public sockets
+// fail that write at once (LBALT-IMPL.md §7); on a plain socket the close,
+// and with it the handler, waits out those 5 s.
 func (self *Front) ConfigureServer(httpServer *http.Server) {
 	httpSettings := self.settings.Http
 	if 0 < httpSettings.ClientHeaderTimeout {
@@ -79,13 +91,18 @@ func (self *Front) ConfigureServer(httpServer *http.Server) {
 	if 0 < httpSettings.MaxRequestHeadersTotalBytes {
 		httpServer.MaxHeaderBytes = configureServerHeaderBytesMultiple * httpSettings.MaxRequestHeadersTotalBytes
 	}
-	if 0 < httpSettings.Http2MaxConcurrentStreams {
+	if 0 < httpSettings.Http2MaxConcurrentStreams || 0 < httpSettings.SendTimeout {
 		// a copy, so a config the caller shares is never written
 		http2Config := http.HTTP2Config{}
 		if httpServer.HTTP2 != nil {
 			http2Config = *httpServer.HTTP2
 		}
-		http2Config.MaxConcurrentStreams = httpSettings.Http2MaxConcurrentStreams
+		if 0 < httpSettings.Http2MaxConcurrentStreams {
+			http2Config.MaxConcurrentStreams = httpSettings.Http2MaxConcurrentStreams
+		}
+		if 0 < httpSettings.SendTimeout {
+			http2Config.WriteByteTimeout = httpSettings.SendTimeout
+		}
 		httpServer.HTTP2 = &http2Config
 	}
 	httpServer.DisableGeneralOptionsHandler = true
