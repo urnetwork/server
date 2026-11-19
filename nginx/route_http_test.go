@@ -256,6 +256,77 @@ func TestRouteHttpUnknownAuthorityGetsTheDefaultServer(t *testing.T) {
 	}
 }
 
+// A path no location of its server matches is answered as nginx's static
+// module answers it: a 405 to any method but GET, HEAD and POST, before it
+// looks for a file, and a 404 to those, for the lb's names, the default
+// server of an unknown name and a service's path outside its prefixes, a
+// trailing slash included, as the index module declines the same methods.
+// Each is charged to the limits, which run first, and carries no added
+// headers. On h3, alt's 404 answers every method of an api path outside its
+// prefixes.
+func TestRouteHttpUnmatchedPathAnswersByMethod(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	testRouteService(t, routeTable, "api").RoutePrefixes = []string{"/svc-hidden"}
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	httpsHandler := testFront.front.HttpsHandler("eth1")
+	h3Handler := testFront.front.H3ApiHandler("eth1")
+
+	for _, host := range []string{"test-lb.service.example", "unknown.example", "api.service.example"} {
+		for _, target := range []string{"/hello", "/hello/"} {
+			for _, c := range []struct {
+				method string
+				want   int
+			}{
+				{method: http.MethodGet, want: http.StatusNotFound},
+				{method: http.MethodHead, want: http.StatusNotFound},
+				{method: http.MethodPost, want: http.StatusNotFound},
+				{method: http.MethodPut, want: http.StatusMethodNotAllowed},
+				{method: http.MethodDelete, want: http.StatusMethodNotAllowed},
+				{method: http.MethodPatch, want: http.StatusMethodNotAllowed},
+				{method: http.MethodOptions, want: http.StatusMethodNotAllowed},
+				{method: "PROPFIND", want: http.StatusMethodNotAllowed},
+			} {
+				r := newTestRequest(c.method, host, target, true)
+				r.Header.Set("Origin", "https://app.example.com")
+				response := serveTestRequest(httpsHandler, r)
+				if response.Code != c.want {
+					t.Errorf("%s %s%s = %d, want %d", c.method, host, target, response.Code, c.want)
+				}
+				checkNoAddedHeaders(t, c.method+" "+host+target, response.Header())
+			}
+		}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodOptions} {
+		response := serveTestRequest(h3Handler, asTestProtocol(newTestRequest(method, "api.service.example", "/hello", true), 3))
+		if response.Code != http.StatusNotFound {
+			t.Errorf("h3 %s api.service.example/hello = %d, want alt's 404", method, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != 0 {
+		t.Errorf("an unmatched path reached the api %d times", len(forwards))
+	}
+	if refusals := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request")); refusals != 0 {
+		t.Fatalf("%v requests refused by the limits before the check", refusals)
+	}
+
+	// charged to the limits, which run before the content
+	limitedSettings := testFrontSettings()
+	limitedRouteTable := loadTestRouteTable(t)
+	limitedFront := newTestFront(t, limitedRouteTable, limitedSettings)
+	limitedHandler := limitedFront.front.HttpsHandler("eth1")
+	statuses := map[int]int{}
+	for range 1000 {
+		response := serveTestRequest(limitedHandler, newTestRequest(http.MethodPut, "test-lb.service.example", "/hello", true))
+		statuses[response.Code] += 1
+		if response.Code == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if statuses[http.StatusTooManyRequests] != 1 || statuses[http.StatusMethodNotAllowed] == 0 {
+		t.Errorf("unmatched PUTs from one client answered %v, want 405s until a 429", statuses)
+	}
+}
+
 // A service that isn't exposed has no server (LBALT-IMPL.md §7): through the
 // production matcher, its names and its redirect alias reach the default
 // server, the first lb name's, on TCP 443 and the default deny on TCP 80,

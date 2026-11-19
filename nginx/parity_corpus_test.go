@@ -670,6 +670,12 @@ func parityCorpus() []*parityCase {
 		{name: "lb/status-case-variant", request: parityGet(parityLbName, parityLbName, strings.ToUpper(parityLbPrefix)+"/STATUS")},
 		{name: "lb/status-trailing-slash", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/status/")},
 		{name: "lb/root", request: parityGet(parityLbName, parityLbName, "/")},
+		// no location: nginx's static module answers 405 to a method but
+		// GET, HEAD and POST, the index module declining it on a trailing
+		// slash
+		{name: "lb/root-put", request: parityWith(parityGet(parityLbName, parityLbName, "/"), http.MethodPut)},
+		{name: "lb/other-path-delete", request: parityWith(parityGet(parityLbName, parityLbName, "/hello"), http.MethodDelete)},
+		{name: "lb/unknown-host-patch", request: parityWith(parityGet(parityUnknownName, parityUnknownName, "/hello"), http.MethodPatch)},
 		{name: "lb/by-service", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/hello?a=b&c")},
 		{name: "lb/by-service-status", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/status")},
 		{name: "lb/by-service-unexposed-worker", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/worker/jobs")},
@@ -730,6 +736,7 @@ func parityCorpus() []*parityCase {
 		{name: "status/web", request: parityGet(parityWebName, parityWebName, "/status")},
 		{name: "status/relay-status-none", request: parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/status")},
 		{name: "status/relay-outside-its-prefix", request: parityGet(parityRelayName, parityRelayName, "/status")},
+		{name: "status/relay-outside-its-prefix-options", request: parityWith(parityGet(parityRelayName, parityRelayName, "/x"), http.MethodOptions, [2]string{"Origin", parityAllowedOrigin})},
 
 		// CORS, Vary: Origin and frame options
 		{name: "cors/allowed-origin", request: parityWith(api, "", [2]string{"Origin", parityAllowedOrigin})},

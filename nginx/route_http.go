@@ -15,8 +15,10 @@ package nginx
 //     json (§2.6); `p/by/service/<svc>/` forwards to an lb_exposed service
 //     with the matched part replaced by /, and `p/by/b/<svc>/<block>/` to
 //     that block only; the services' route_request_bodies have exact
-//     locations under both. Anything else is a 404. No CORS, security
-//     headers, route zones or /status deny.
+//     locations under both. Anything else has no location: a 404, or a 405
+//     to a method other than GET, HEAD and POST, as nginx's static module
+//     answers it, which a service's path outside its prefixes gets too. No
+//     CORS, security headers, route zones or /status deny.
 //   - lb names, TCP 80: `= p/status` and `= p/by/b/<svc>/<block>/status` for
 //     every service, then a 301 to https for everything else. Route53's
 //     health check needs that 200, not a redirect.
@@ -644,7 +646,20 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 
 	// access and content
 	if location == nil {
-		exchange.respondError(http.StatusNotFound)
+		// a server with no location for the path: nginx's static module
+		// answers it, 405 to a method other than GET, HEAD and POST before
+		// it looks for a file (ngx_http_static_handler; the index module
+		// declines the same methods), and 404 for the file the lb's empty
+		// root never has. alt answered an unknown h3 path 404 whatever the
+		// method
+		switch {
+		case self.scheme == routeHttpSchemeH3Api:
+			exchange.respondError(http.StatusNotFound)
+		case r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost:
+			exchange.respondError(http.StatusNotFound)
+		default:
+			exchange.respondError(http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	switch location.kind {
