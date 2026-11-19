@@ -656,6 +656,38 @@ func TestPublicUdpConnectApiFrontBoundsTheHelloBody(t *testing.T) {
 	}
 }
 
+// The /hello response header is read through its bound too: an answer of the
+// api's shape whose header block runs past it never completes, while the same
+// answer under the default bound does, so only the bound refused it. No
+// header text is retained.
+func TestPublicUdpConnectApiFrontBoundsTheHelloHeader(t *testing.T) {
+	const marker = "synthetic-header-marker"
+	recorder := &publicUdpTestApiRecorder{}
+	hello := recorder.hello()
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Synthetic-Padding", marker+strings.Repeat("p", 4*1024))
+		hello.ServeHTTP(w, r)
+	})
+	bounded := DefaultPublicUdpApiRequestSettings()
+	bounded.ResponseHeaderByteLimit = 1024
+	request := publicUdpTestConnectApiRequest("ipv4", "quic")
+	observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, apiRequestSettings: bounded})
+	if err == nil || !observed.ApplicationRequested || observed.ApplicationComplete || observed.ApplicationStatus != 0 ||
+		observed.Failure != PublicUdpFailureApplication || !observed.HandshakeComplete || !observed.TlsVerified {
+		t.Fatalf("a header past its bound gave %+v err=%v", observed, err)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", observed), marker) || strings.Contains(err.Error(), marker) {
+		t.Fatalf("a diagnostic carried the header: %+v err=%v", observed, err)
+	}
+	if len(recorder.requests()) != 1 {
+		t.Fatalf("the api saw %d requests", len(recorder.requests()))
+	}
+	observed, err = publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api})
+	if err != nil || !observed.ApplicationComplete || observed.Failure != PublicUdpFailureNone {
+		t.Fatalf("the same answer under the default bound gave %+v err=%v", observed, err)
+	}
+}
+
 // The api request rides the attempt's own context: canceling the attempt
 // while the api holds the request returns the cancellation at once, with the
 // failure standing and the socket closed. The handler's entry is the barrier.

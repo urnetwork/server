@@ -343,7 +343,29 @@ func observePublicUdp(
 		}
 		return observation, errors.New("public UDP api response incomplete")
 	}
-	observation.ApplicationBodyValid = len(body) <= apiRequestSettings.ResponseBodyByteLimit && publicUdpApiResponseValid(body, request.Family)
+	// The api's shape: one JSON object whose client_address is an address and
+	// port of the probed family, as the api renders the peer its ingress saw.
+	// The address is the observer's own, read only for its shape and never
+	// retained.
+	apiResponseValid := func() bool {
+		if apiRequestSettings.ResponseBodyByteLimit < len(body) {
+			return false
+		}
+		fields := map[string]json.RawMessage{}
+		if json.Unmarshal(body, &fields) != nil || fields == nil {
+			return false
+		}
+		var clientAddress string
+		if json.Unmarshal(fields["client_address"], &clientAddress) != nil {
+			return false
+		}
+		addrPort, err := netip.ParseAddrPort(clientAddress)
+		if err != nil || addrPort.Addr().Zone() != "" || addrPort.Port() == 0 {
+			return false
+		}
+		return addrPort.Addr().Is4() == (request.Family == "ipv4")
+	}
+	observation.ApplicationBodyValid = apiResponseValid()
 	observation.ApplicationComplete = response.StatusCode == http.StatusOK && observation.ApplicationContentTypeJson && observation.ApplicationBodyValid
 	if observation.ApplicationComplete {
 		observation.Failure = PublicUdpFailureNone
@@ -366,24 +388,4 @@ func publicUdpJsonContentType(header http.Header) bool {
 		}
 	}
 	return true
-}
-
-// Whether a /hello body has the api's shape: one JSON object whose
-// client_address is an address and port of the probed family, as the api
-// renders the peer its ingress saw. The address is the observer's own and is
-// read only for its shape, never retained.
-func publicUdpApiResponseValid(body []byte, family string) bool {
-	fields := map[string]json.RawMessage{}
-	if json.Unmarshal(body, &fields) != nil || fields == nil {
-		return false
-	}
-	var clientAddress string
-	if json.Unmarshal(fields["client_address"], &clientAddress) != nil {
-		return false
-	}
-	addrPort, err := netip.ParseAddrPort(clientAddress)
-	if err != nil || addrPort.Addr().Zone() != "" || addrPort.Port() == 0 {
-		return false
-	}
-	return addrPort.Addr().Is4() == (family == "ipv4")
 }
