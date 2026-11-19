@@ -2,14 +2,21 @@ package nginx
 
 // Certificate store tests: each rule of the findLatestTls port, with
 // placeholder files, since the lookup reads only names; then the store's
-// checks over generated certificates, each refusal naming the server name.
+// checks over generated certificates, each refusal naming the server name,
+// and the leaves it serves though they aren't valid now, as nginx does.
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // <vault>/<env>, <vault>/all and <vault>, the homes LoadCertificateStore
@@ -381,6 +388,20 @@ func TestCertificateStoreEarliestExpiry(t *testing.T) {
 	}
 }
 
+// NewFront reports its store's earliest expiry in the front's certificate
+// expiry metric, a lapsed NotAfter included, so an alert can lead a lapse
+// the store serves rather than refuses.
+func TestNewFrontReportsTheEarliestCertificateExpiry(t *testing.T) {
+	now := time.Now()
+	vault := newTestTlsVault(t)
+	lapsed := vault.authority.issue(t, []string{"*.other.example"}, now.Add(-48*time.Hour), now.Add(-time.Hour))
+	writeTestTlsPair(t, vault.envHome(), "2026.10.17", "star.other.example", lapsed)
+	front := newTestCloseFront(t, vault.routeTable, vault.load(t), testFrontSettings())
+	if got, want := testutil.ToFloat64(front.metrics.certificateExpiry), float64(lapsed.leaf.NotAfter.Unix()); got != want {
+		t.Fatalf("the certificate expiry metric is %v, want the lapsed NotAfter %v", got, want)
+	}
+}
+
 // Loads the fixture vault after change edits it, and returns the refusal.
 func loadChangedTestTlsVault(t *testing.T, change func(vault *testTlsVault)) error {
 	t.Helper()
@@ -485,20 +506,110 @@ func TestLoadCertificateStoreRefusesAKeyThatDoesntMatch(t *testing.T) {
 	checkTestTlsRefusal(t, err, "api.service.example", "private key does not match public key")
 }
 
-// A leaf that has expired, or isn't valid yet, is refused by name.
-func TestLoadCertificateStoreRefusesALeafNotValidNow(t *testing.T) {
+// A leaf that has expired, or isn't valid yet, loads and serves its names,
+// as nginx loads and serves it: only those names' clients fail to verify it,
+// while every other name verifies, so one lapsed pair never stops the whole
+// store. The earliest expiry shows a lapsed NotAfter, and NotValidNames
+// lists the names of such a leaf. That holds for a lapsed pair in a name's
+// own directory too, which findLatestTls picks over a valid star.<parent>,
+// as warpctl picks it.
+func TestLoadCertificateStoreServesALeafNotValidNow(t *testing.T) {
 	now := time.Now()
-	err := loadChangedTestTlsVault(t, func(vault *testTlsVault) {
-		pair := vault.authority.issue(t, []string{"*.other.example"}, now.Add(-48*time.Hour), now.Add(-time.Hour))
-		writeTestTlsPair(t, vault.envHome(), "2026.10.17", "star.other.example", pair)
-	})
-	checkTestTlsRefusal(t, err, "test-lb.other.example", "expired at")
+	for _, c := range []struct {
+		name    string
+		dirName string
+		pair    func(vault *testTlsVault) *testTlsPair
+		// the served names the pair serves
+		wantNotValidNames []string
+		wantExpired       bool
+	}{
+		{
+			name:    "expired",
+			dirName: "star.other.example",
+			pair: func(vault *testTlsVault) *testTlsPair {
+				return vault.authority.issue(t, []string{"*.other.example"}, now.Add(-48*time.Hour), now.Add(-time.Hour))
+			},
+			wantNotValidNames: []string{"test-api.other.example", "test-connect.other.example", "test-lb.other.example", "test-mcp.other.example"},
+			wantExpired:       true,
+		},
+		{
+			name:    "not yet valid",
+			dirName: "star.other.example",
+			pair: func(vault *testTlsVault) *testTlsPair {
+				return vault.authority.issue(t, []string{"*.other.example"}, now.Add(time.Hour), now.Add(48*time.Hour))
+			},
+			wantNotValidNames: []string{"test-api.other.example", "test-connect.other.example", "test-lb.other.example", "test-mcp.other.example"},
+		},
+		{
+			name:    "an expired exact pair beside a valid wildcard",
+			dirName: "old-api.service.example",
+			pair: func(vault *testTlsVault) *testTlsPair {
+				return vault.authority.issue(t, []string{"old-api.service.example"}, now.Add(-48*time.Hour), now.Add(-time.Hour))
+			},
+			wantNotValidNames: []string{"old-api.service.example"},
+			wantExpired:       true,
+		},
+	} {
+		vault := newTestTlsVault(t)
+		pair := c.pair(vault)
+		writeTestTlsPair(t, vault.envHome(), "2026.10.17", c.dirName, pair)
+		certificateStore, err := LoadCertificateStore(vault.vaultDir, vault.env, vault.routeTable)
+		if err != nil {
+			t.Errorf("%s: the store refused the leaf: %v", c.name, err)
+			continue
+		}
+		if got := certificateStore.NotValidNames(now); !slices.Equal(got, c.wantNotValidNames) {
+			t.Errorf("%s: NotValidNames() = %v, want %v", c.name, got, c.wantNotValidNames)
+		}
+		if c.wantExpired && !certificateStore.EarliestExpiry().Equal(pair.leaf.NotAfter) {
+			t.Errorf("%s: EarliestExpiry() = %s, want the lapsed %s", c.name, certificateStore.EarliestExpiry(), pair.leaf.NotAfter)
+		}
 
-	err = loadChangedTestTlsVault(t, func(vault *testTlsVault) {
-		pair := vault.authority.issue(t, []string{"*.other.example"}, now.Add(time.Hour), now.Add(48*time.Hour))
-		writeTestTlsPair(t, vault.envHome(), "2026.10.17", "star.other.example", pair)
-	})
-	checkTestTlsRefusal(t, err, "test-lb.other.example", "is not valid until")
+		tlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), vault.routeTable.Lb.Names[0], DefaultTlsSettings())
+		listener := listenTestTls(t, tlsConfig)
+		for _, serverName := range []string{c.wantNotValidNames[0], "test-api.service.example", "test-lb.service.example"} {
+			_, err := listener.exchange(t, &tls.Config{
+				ServerName: serverName,
+				RootCAs:    vault.authority.pool(),
+				NextProtos: []string{"h2", "http/1.1"},
+			})
+			var invalidError x509.CertificateInvalidError
+			if serverName == c.wantNotValidNames[0] {
+				if !errors.As(err, &invalidError) || invalidError.Reason != x509.Expired {
+					t.Errorf("%s: a client of %s got %v, want its certificate's validity refused", c.name, serverName, err)
+				}
+			} else if err != nil {
+				t.Errorf("%s: a client of %s, whose leaf is valid, got %v", c.name, serverName, err)
+			}
+		}
+	}
+}
+
+// A served name's leaf is listed while it isn't valid, and only then: at its
+// NotBefore and its NotAfter it is valid, as crypto/x509 verifies it.
+func TestCertificateStoreNotValidNamesFollowsTheValidityWindow(t *testing.T) {
+	vault := newTestTlsVault(t)
+	certificateStore := vault.load(t)
+	leaf := vault.dirPairs["test-lb.service.example"].leaf
+	for _, c := range []struct {
+		at   time.Time
+		want []string
+	}{
+		{at: leaf.NotBefore.Add(-time.Second), want: []string{"test-lb.service.example"}},
+		{at: leaf.NotBefore, want: []string{}},
+		{at: leaf.NotAfter, want: []string{}},
+		{at: leaf.NotAfter.Add(time.Second), want: []string{"test-lb.service.example"}},
+	} {
+		notValidNames := []string{}
+		for _, name := range certificateStore.NotValidNames(c.at) {
+			if name == "test-lb.service.example" {
+				notValidNames = append(notValidNames, name)
+			}
+		}
+		if !slices.Equal(notValidNames, c.want) {
+			t.Errorf("at %s: NotValidNames lists %v of test-lb.service.example's names, want %v", c.at, notValidNames, c.want)
+		}
+	}
 }
 
 // An env that isn't one directory name is refused: it would name the vault
