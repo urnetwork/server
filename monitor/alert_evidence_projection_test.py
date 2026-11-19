@@ -21,6 +21,25 @@ def alert(owner='server/controller.ConnectControlFrames', sqlstate='unknown', er
 
 
 class EvidenceProjectionControls(unittest.TestCase):
+    def test_operation_requires_compatible_owner_and_caller_in_its_evidence(self):
+        owner = 'server/model.proxyAdmissionRedis'
+        for caller, operation in [
+                ('GetProxyDeviceConfig', 'device_config_read'),
+                ('getProNetworkCached', 'feature_use_plan_lookup'),
+                ('setProNetworkCached', 'feature_use_flush_plan')]:
+            suffix = (' redis_caller=' + caller + ' redis_operation=' + operation).encode()
+            raw = alert(owner=owner).replace(b' sqlstate=unknown\n', b' sqlstate=unknown' + suffix + b'\n')
+            projected = MODULE.project_alert(raw)
+            self.assertEqual(projected.get('observed_redis_operation'), operation)
+            self.assertEqual(projected['observed_redis_caller'], caller)
+            for bad in (raw.replace(owner.encode(), b'server.Other'),
+                        raw.replace(b'redis_caller=' + caller.encode() + b' ', b''),
+                        raw.replace(operation.encode(), b'private_value')):
+                self.assertEqual(MODULE.project_alert(bad).get('observed_redis_operation'), 'unknown')
+        wrong = raw.replace(b'redis_caller=setProNetworkCached', b'redis_caller=GetProxyDeviceConfig')
+        self.assertEqual(MODULE.project_alert(wrong).get('observed_redis_operation'), 'unknown')
+        self.assertEqual(MODULE.project_alert(alert(owner=owner) + suffix).get('observed_redis_operation'), 'unknown')
+
     def test_direct_redis_caller_requires_own_producer_sample(self):
         owner = 'server/v2026/model.proxyAdmissionRedis'
         raw = alert(owner=owner, error_type='context.deadlineExceededError')

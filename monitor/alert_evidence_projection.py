@@ -17,7 +17,8 @@ PROJECTION = re.compile(
     r'error_type=(?P<error_type>[A-Za-z0-9_.*]+) '
     r'sqlstate=(?P<sqlstate>unknown|[0-9A-Z]{5})'
     r'(?: error_class=[A-Za-z0-9_]+)?'
-    r'(?: redis_caller=(?P<redis_caller>GetProxyDeviceConfig|getProNetworkCached|setProNetworkCached))?\s*$'
+    r'(?: redis_caller=(?P<redis_caller>GetProxyDeviceConfig|getProNetworkCached|setProNetworkCached))?'
+    r'(?: redis_operation=(?P<redis_operation>device_config_read|feature_use_plan_lookup|feature_use_flush_plan))?\s*$'
 )
 
 
@@ -49,9 +50,16 @@ def project_alert(raw):
                 fields['byte_start'] = offset
                 fields['byte_end'] = offset + len(line.encode('utf-8'))
                 fields['line_sha256'] = hashlib.sha256(line.encode('utf-8')).hexdigest()
-                if not fields['redis_caller'] or fields['owner'] in (
+                caller = fields['redis_caller']
+                operation = fields['redis_operation']
+                valid_owner = not caller or fields['owner'] in (
                     'server/model.proxyAdmissionRedis', 'server/v2026/model.proxyAdmissionRedis'
-                ):
+                )
+                valid_operation = (not operation or
+                                   caller == 'GetProxyDeviceConfig' and operation == 'device_config_read' or
+                                   caller in ('getProNetworkCached', 'setProNetworkCached') and
+                                   operation in ('feature_use_plan_lookup', 'feature_use_flush_plan'))
+                if valid_owner and valid_operation:
                     matches.append(fields)
         offset += len(line.encode('utf-8'))
     result = {
@@ -59,6 +67,7 @@ def project_alert(raw):
         'observed_function': 'unknown',
         'observed_error_type': 'unknown',
         'observed_redis_caller': 'unknown',
+        'observed_redis_operation': 'unknown',
         'observed_sqlstate': 'unknown',
         'producer_provenance': None,
         'guidance_used_as_observation': False,
@@ -74,6 +83,7 @@ def project_alert(raw):
         observed_function=value['owner'],
         observed_error_type=value['error_type'],
         observed_redis_caller=value['redis_caller'] or 'unknown',
+        observed_redis_operation=value['redis_operation'] or 'unknown',
         observed_sqlstate=value['sqlstate'],
         producer_provenance={key: value[key] for key in
                              ['section', 'producer_field', 'byte_start', 'byte_end', 'line_sha256']},
@@ -124,7 +134,8 @@ def main():
     if reason is not None:
         result = dict(status='cannot_observe', reason=reason,
                       observed_function='unknown', observed_error_type='unknown',
-                      observed_sqlstate='unknown', observed_redis_caller='unknown', producer_provenance=None,
+                      observed_sqlstate='unknown', observed_redis_caller='unknown',
+                      observed_redis_operation='unknown', producer_provenance=None,
                       guidance_used_as_observation=False,
                       generated_meaning_used_as_observation=False,
                       shared_cause_established=False)

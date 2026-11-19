@@ -1232,11 +1232,12 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner       string
-	errorType   string
-	sqlstate    string
-	errorClass  string
-	redisCaller string
+	owner          string
+	errorType      string
+	sqlstate       string
+	errorClass     string
+	redisCaller    string
+	redisOperation string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
@@ -1355,7 +1356,7 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		if len(owner) <= panicLogOwnerMaxBytes {
 			observation.owner = owner
 			if match[2] == "proxyAdmissionRedis" && (match[1] == "server/model" || match[1] == "server/v2026/model") {
-				observation.redisCaller = panicProxyAdmissionCaller(match[1], stack[index:])
+				observation.redisCaller, observation.redisOperation = panicProxyAdmissionOperation(match[1], stack[index:])
 			}
 		}
 		return observation
@@ -1363,27 +1364,63 @@ func parsePanicLogObservation(line string) panicLogObservation {
 	return observation
 }
 
-// The returned token is a direct caller in the same producer stack. Require
-// each source file, without admitting stack arguments, line numbers or paths.
-func panicProxyAdmissionCaller(module string, frames []string) string {
+// The direct caller identifies the Redis access. A plan lookup or flush also
+// requires its own contiguous application frames from this same stack.
+func panicProxyAdmissionOperation(module string, frames []string) (string, string) {
 	if len(frames) < 4 || !panicSourceHasFile(frames[1], "proxy_admission_model.go") {
-		return ""
+		return "", ""
 	}
 	caller := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[2]))
 	if len(caller) != 3 || caller[1] != module {
-		return ""
+		return "", ""
 	}
 	switch caller[2] {
 	case "GetProxyDeviceConfig":
 		if panicSourceHasFile(frames[3], "network_client_proxy_model.go") {
-			return caller[2]
+			return caller[2], "device_config_read"
 		}
 	case "getProNetworkCached", "setProNetworkCached":
 		if panicSourceHasFile(frames[3], "pro_model.go") {
-			return caller[2]
+			return caller[2], panicProxyPlanOperation(module, caller[2], frames[4:])
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// Each consumed pair must match both a fixed function and its source file.
+func panicProxyFrameIs(frames []string, module, function, file string) bool {
+	if len(frames) < 2 {
+		return false
+	}
+	match := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[0]))
+	return len(match) == 3 && match[1] == module && match[2] == function && panicSourceHasFile(frames[1], file)
+}
+
+// An interrupted lookup can belong to several paths through IsProNetwork.
+// Only the concrete planner identifies feature-use accounting. Its immediate
+// flush lineage identifies the phase reached after markAll returned success.
+func panicProxyPlanOperation(module, caller string, frames []string) string {
+	if caller == "setProNetworkCached" {
+		for _, function := range []string{"storeProNetwork", "refreshProNetworkInConn", "refreshProNetwork"} {
+			if !panicProxyFrameIs(frames, module, function, "pro_model.go") {
+				return ""
+			}
+			frames = frames[2:]
+		}
+	}
+	const file = "proxy_feature_use_model.go"
+	if !panicProxyFrameIs(frames, module, "IsProNetwork", "pro_model.go") ||
+		!panicProxyFrameIs(frames[2:], module, "(*dbProxyFeatureUsePlans).plans", file) {
+		return ""
+	}
+	frames = frames[4:]
+	if panicProxyFrameIs(frames, module, "(*ProxyFeatureUses).countMarks.func1", file) &&
+		panicProxyFrameIs(frames[2:], strings.TrimSuffix(module, "/model"), "HandleError", "trace.go") &&
+		panicProxyFrameIs(frames[4:], module, "(*ProxyFeatureUses).countMarks", file) &&
+		panicProxyFrameIs(frames[6:], module, "(*ProxyFeatureUses).flush", file) {
+		return "feature_use_flush_plan"
+	}
+	return "feature_use_plan_lookup"
 }
 
 func panicSourceHasFile(line string, filename string) bool {
@@ -1410,6 +1447,9 @@ func panicLogSample(line string) string {
 	}
 	if observation.redisCaller != "" {
 		sample += " redis_caller=" + observation.redisCaller
+	}
+	if observation.redisOperation != "" {
+		sample += " redis_operation=" + observation.redisOperation
 	}
 	return sample
 }

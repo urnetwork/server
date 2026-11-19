@@ -3026,7 +3026,7 @@ that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
-error class or direct Redis caller described below. Raw errors, stack arguments,
+error class or Redis caller and operation described below. Raw errors, stack arguments,
 source paths and line numbers, endpoints and identities stay private. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -3042,6 +3042,16 @@ exact standard-library sentinel representation. Error text alone cannot
 identify that type. Neither field establishes the selected pool, remaining
 budget, downstream latency or request outcome. Each applies only to the
 first diagnostic in its own bucket.
+The optional `redis_operation` field records where that diagnostic arose.
+`device_config_read` requires the direct device configuration reader.
+`feature_use_plan_lookup` requires the continuous source frames from the
+entitlement read or cache write through `IsProNetwork` to the concrete
+feature-use planner. `feature_use_flush_plan` additionally requires the
+planner's direct call from `countMarks`, its recovery boundary and the
+enclosing `flush`. In this source, `flush` reaches that call after the mark
+store acknowledges the write. A shorter stack can retain the direct caller
+or planner alone. The request decision, metric label and completed flush count
+require their own evidence.
 The optional `[legacy_registration_db]` annotation accompanies only a returned
 failed acquisition in close-owner registration. It leaves the original
 `Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner
