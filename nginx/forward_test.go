@@ -826,6 +826,111 @@ func TestForwardStreamedBodyTimeoutEndsTheRequest(t *testing.T) {
 	checkStoreEmpty(t, bodyStore)
 }
 
+// A client body whose failed read returns to the front only once the test
+// lets it, as to a request's writer descheduled right after Go's server
+// failed the read. The read itself fails as the body underneath does: past
+// its deadline, Go's HTTP/1.1 server cancels the request inside the read.
+type lateFailureBody struct {
+	body    io.ReadCloser
+	failed  chan struct{}
+	release chan struct{}
+}
+
+// Reads through, and holds a failure until released.
+func (self *lateFailureBody) Read(p []byte) (int, error) {
+	n, err := self.body.Read(p)
+	if err != nil && err != io.EOF {
+		self.failed <- struct{}{}
+		<-self.release
+	}
+	return n, err
+}
+
+// Closes the body underneath.
+func (self *lateFailureBody) Close() error {
+	return self.body.Close()
+}
+
+// A streamed body whose read times out on h1 ends the request with no
+// response, or cuts the response being relayed, and the timeout is counted,
+// though the failure reaches the request's writer only after the exchange
+// interrupted the body. Go's server cancels the request inside the timed out
+// read, the cut that cancellation makes ends the wait for the block's head,
+// or the relay's copy, and that interrupts the body before the read returns:
+// the read is still the client's, its own deadline having passed, and the
+// relay counts it only once the write has ended. The read returns only once
+// the test has seen the interrupt's past deadline.
+func TestForwardStreamedBodyTimeoutReturningLateIsCounted(t *testing.T) {
+	for _, relayed := range []bool{false, true} {
+		serviceName := testServiceName("streamed-timeout-late")
+		raw := newRawUpstream(t)
+		group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+			{name: "g1", weight: 1, port: raw.port},
+		}), testForwardFrontSettings())
+		body := &lateFailureBody{
+			failed:  make(chan struct{}, 1),
+			release: make(chan struct{}),
+		}
+		releaseOnce := sync.OnceFunc(func() { close(body.release) })
+		// a failed test lets the read go
+		defer releaseOnce()
+		writers := make(chan *pastReadDeadlineWriter, 1)
+		front := newTestForwardFrontWrapping(t, group, func(w http.ResponseWriter) http.ResponseWriter {
+			writer := newPastReadDeadlineWriter(w)
+			writers <- writer
+			return writer
+		}, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			options.clientBodyTimeout = 50 * time.Millisecond
+			body.body = r.Body
+			r.Body = body
+			return options
+		})
+		clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial front: %v", err)
+		}
+		defer clientConn.Close()
+		io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 100\r\n\r\nfirst-ten!")
+		writer := receiveBounded(t, writers, "the request's writer")
+		upstreamConn, _, request := raw.accept(t)
+		upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		readExactly(t, request.Body, "first-ten!")
+		clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		clientReader := bufio.NewReader(clientConn)
+		var response *http.Response
+		if relayed {
+			io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n")
+			response, err = http.ReadResponse(clientReader, nil)
+			if err != nil || response.StatusCode != http.StatusOK {
+				t.Fatalf("relayed %v: response %v %v, want the block's 200", relayed, response, err)
+			}
+			readExactly(t, response.Body, "first")
+		}
+
+		// the client sends no more: its read times out, and the exchange
+		// interrupts the body before the failure returns
+		receiveBounded(t, body.failed, "the timed out read")
+		receiveBounded(t, writer.pastDeadlines, "the interrupt")
+		releaseOnce()
+		if relayed {
+			if rest, err := io.ReadAll(response.Body); !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Errorf("relayed %v: the response ended with %q more and %v, want it cut short", relayed, rest, err)
+			}
+		} else if answered, err := io.ReadAll(clientReader); len(answered) != 0 || (err != nil && !isClosedError(err)) {
+			t.Errorf("relayed %v: the stalled body was answered %q %v, want the connection closed with nothing written", relayed, answered, err)
+		}
+		if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+			t.Errorf("relayed %v: serveHttp ended with %v, want http.ErrAbortHandler", relayed, recovered)
+		}
+		if count := bodyRefusalCount(serviceName, bodyRefusalTimeout); count != 1 {
+			t.Errorf("relayed %v: %v timeout refusals counted, want 1", relayed, count)
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
 // A client body that passes its first bytes, then fails its next read when
 // the test says, with the error given: a read past its deadline, as Go's
 // server reports one, or a broken body. The read that fails signals as it

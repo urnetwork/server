@@ -199,16 +199,23 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 		return n, io.EOF
 	}
 	if err != nil {
-		self.fail(bodyReadRefusal(self.ctx, err))
+		refusal := bodyReadRefusal(self.ctx, err)
+		// the interrupt's past deadline ends a pending read at once, before
+		// the read's own deadline. A read whose own deadline passed timed out
+		// on the client's side, though an interrupt came before the failure
+		// returned here: on h1, Go's server cancels the request inside the
+		// timed out read, and that cancellation is what makes the exchange
+		// interrupt the body.
+		interruptCaused := refusal.reason == bodyRefusalTimeout && self.interrupted.Load() && (readDeadline.IsZero() || time.Now().Before(readDeadline))
+		if !interruptCaused {
+			self.fail(refusal)
+		}
 	}
 	return n, err
 }
 
-// Keeps the first client-side failure, unless the read was interrupted.
+// Keeps the first client-side failure.
 func (self *forwardStreamedBody) fail(refusal *bodyRefusal) {
-	if self.interrupted.Load() {
-		return
-	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.refusal == nil {

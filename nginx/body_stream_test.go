@@ -1,13 +1,16 @@
 package nginx
 
 // Tests of a streamed body on its own: what its first read keeps for a retry
-// (D7, D19).
+// (D7, D19), and which failures it keeps as the client's.
 
 import (
 	"bytes"
 	"io"
+	"os"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
+	"time"
 )
 
 // A streamed body's first read keeps a declared body it returns whole, as
@@ -72,5 +75,73 @@ func TestStreamedBodyFirstReadKeepsAWholeBody(t *testing.T) {
 		if spyFiles.count() != 0 {
 			t.Errorf("%s: %d spill files created, want none", c.name, spyFiles.count())
 		}
+	}
+}
+
+// A client body read that waits on the test, then fails with a timeout, as
+// a read past its deadline fails.
+type heldTimeoutReader struct {
+	waiting chan struct{}
+	fail    chan struct{}
+}
+
+// Signals that it waits, then fails once the test lets it.
+func (self *heldTimeoutReader) Read(p []byte) (int, error) {
+	self.waiting <- struct{}{}
+	<-self.fail
+	return 0, os.ErrDeadlineExceeded
+}
+
+// A read whose own client_body_timeout passed timed out on the client's
+// side, though the body was interrupted before the failure returned to it,
+// as on h1, where Go's server cancels the request inside the timed out read
+// and the exchange interrupts the body on that cancellation. A read the
+// interrupt's past deadline ended before its own isn't the client's. In a
+// synctest bubble, so time passes only as the test says.
+func TestStreamedBodyTimeoutBeforeAnInterruptIsTheClients(t *testing.T) {
+	const readTimeout = 50 * time.Millisecond
+	for _, c := range []struct {
+		name string
+		// when the interrupt comes, after the read began
+		interruptAfter time.Duration
+		wantRefusal    bool
+	}{
+		{name: "the read's own deadline passed", interruptAfter: 2 * readTimeout, wantRefusal: true},
+		{name: "the interrupt came first", interruptAfter: readTimeout / 2, wantRefusal: false},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			reader := &heldTimeoutReader{
+				waiting: make(chan struct{}),
+				fail:    make(chan struct{}),
+			}
+			deadlines := make(chan time.Time, 8)
+			streamedBody := newForwardStreamedBody(t.Context(), reader, 100, 0, readTimeout, func(deadline time.Time) error {
+				deadlines <- deadline
+				return nil
+			}, nil)
+			readErrs := make(chan error, 1)
+			go func() {
+				_, err := streamedBody.Read(make([]byte, 100))
+				readErrs <- err
+			}()
+			<-reader.waiting
+			time.Sleep(c.interruptAfter)
+			streamedBody.interrupt()
+			// the failure returns to the body only after the interrupt
+			close(reader.fail)
+			if err := <-readErrs; err != os.ErrDeadlineExceeded {
+				t.Errorf("%s: the read ended with %v", c.name, err)
+			}
+			refusal := streamedBody.failure()
+			if c.wantRefusal && (refusal == nil || refusal.reason != bodyRefusalTimeout) {
+				t.Errorf("%s: the body's failure is %v, want the client's timeout", c.name, refusal)
+			}
+			if !c.wantRefusal && refusal != nil {
+				t.Errorf("%s: the body's failure is %v, want none of the client's", c.name, refusal)
+			}
+			if armed := <-deadlines; armed.IsZero() {
+				t.Errorf("%s: the read armed no deadline", c.name)
+			}
+		})
 	}
 }

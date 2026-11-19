@@ -532,6 +532,11 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 		exchange.stopCancelHook()
 	})
 	if clientErr != nil || upstreamErr != nil {
+		// the request's write ends first, so a streamed body's failure is in
+		// before it is counted: on h1, Go's server cancels the request inside
+		// the client's timed out read, and the cut that cancellation makes
+		// can fail this copy before that read returns to the write
+		exchange.finish(false)
 		if streamedBody := exchange.request.streamedBody; streamedBody != nil {
 			if refusal := streamedBody.failure(); refusal != nil {
 				forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
