@@ -6,13 +6,17 @@ package main
 // tlsedge_split_t3_test.go's split: real nginx, warp's lb process with lbmap, the dns API on Postgres and tlsedge.
 //
 //   - FS-122's window clause: three adds and a remove inside one load window load in one reload, lbmap reporting the
-//     newest version and none between, each added host routing and the removed one not.
+//     newest version and none between, each added host routing and the removed one not, and each added host ready
+//     once that reload's version passes its route probes.
 //   - FS-42's M6 step: custom hosts added or removed after the dump leave or return to the map the restore regenerates
 //     (DnsRaiseCustomHostMapForRestore, 2^24 above), lbmap loads it, the hosts route as the restored rows say, the
-//     restore lists each, and each stays pending until every interface is current for the restore's version: here
-//     every one, since no dns edge's route probe passes on this stack.
+//     restore lists each, and each stays pending until every interface is current for the restore's version: on two lb
+//     interfaces, one stopped across the loss, every host stands at the restore's version with no ready time, then
+//     pending naming the stopped one alone while the other passes its probes, and ready once the stopped one starts on
+//     the restore's version and passes its own.
 //
-// The tests step on lbmap's applied reports; lbmap's own load window is the only wait, a real one inside the lb.
+// The tests step on lbmap's applied reports; lbmap's own load window is the only wait, a real one inside the lb. The
+// route probes are tlsedge_map_stale_t3_test.go's edge stand-in.
 
 import (
 	"crypto/rand"
@@ -55,7 +59,7 @@ func TestT3Fs122ChangesInsideOneWindowLoadInOneReload(t *testing.T) {
 		}
 		last = world.unmapCustomHost(hosts[0])
 		world.reloadNames()
-		split.reports.await(t, last)
+		split.awaitLoaded(last)
 		for _, reported := range split.reports.reported() {
 			if first < reported && reported < last {
 				t.Fatalf("lbmap reported %d between %d and %d: the window's changes took more than one reload", reported, first, last)
@@ -68,6 +72,11 @@ func TestT3Fs122ChangesInsideOneWindowLoadInOneReload(t *testing.T) {
 		}
 		if !split.reachesPlatform(hosts[0]) {
 			t.Error("the host removed inside the window still routed")
+		}
+		// the one reload's version passes its probes, and each host it added is ready at it
+		split.api.probeRound(t, world, []*t3Split{split})
+		for _, host := range hosts[1:] {
+			t3SplitAwaitReady(t, world, host)
 		}
 	})
 }
@@ -129,21 +138,33 @@ func TestT3Fs42CustomHostsAfterTheDumpLeaveOrReturnToTheRestoredMap(t *testing.T
 	env.Run(t, func(t testing.TB) {
 		world := newT3EdgeWorld(t, nil)
 		kept, returned, left := t3CustomHost(t, "app"), t3CustomHost(t, "shop"), t3CustomHost(t, "docs")
+		hosts := []string{kept, returned, left}
+		interfaces := []string{"edge-1-eth0", "edge-2-eth0"}
+		api := newT3SplitApi(t, world, interfaces)
 		world.mapCustomHost(kept)
 		version := world.mapCustomHost(returned)
 		world.reloadNames()
-		split := newT3Split(t, world, []string{kept, returned, left})
+		split := newT3SplitOn(t, world, api, interfaces[0], hosts)
+		lagging := newT3SplitOn(t, world, api, interfaces[1], hosts)
 		split.startLb(version)
+		lagging.startLb(version)
+		splits := []*t3Split{split, lagging}
+		api.probeRound(t, world, splits)
+		t3SplitAwaitReady(t, world, kept)
+		t3SplitAwaitReady(t, world, returned)
 		dump := t3DumpCustomHosts(t, world)
 
-		// after the dump: one host added, one removed, each loaded
+		// after the dump: one host added, one removed, each loaded on both interfaces
 		world.mapCustomHost(left)
 		version = world.unmapCustomHost(returned)
 		world.reloadNames()
-		split.reports.await(t, version)
+		split.awaitLoaded(version)
+		lagging.awaitLoaded(version)
 		if !split.reachesDevice(left, []string{"h2"}, split.customPool) || !split.reachesPlatform(returned) {
 			t.Fatal("the changes after the dump did not load")
 		}
+		// one interface's lb is down across the loss
+		lagging.stopLb()
 
 		// Postgres lost and restored from the dump; the restore regenerates the map above every version
 		t3RestoreCustomHosts(t, world, dump)
@@ -169,7 +190,7 @@ func TestT3Fs42CustomHostsAfterTheDumpLeaveOrReturnToTheRestoredMap(t *testing.T
 			}
 		}
 		world.reloadNames()
-		split.reports.await(t, restored)
+		split.awaitLoaded(restored)
 		if !split.reachesDevice(kept, []string{"h2"}, split.customPool) || !split.reachesDevice(returned, []string{"h2"}, split.customPool) {
 			t.Fatal("a host the dump holds did not route at the restore's version")
 		}
@@ -188,5 +209,21 @@ func TestT3Fs42CustomHostsAfterTheDumpLeaveOrReturnToTheRestoredMap(t *testing.T
 		if len(readiness) != 2 {
 			t.Fatalf("%d hosts after the restore", len(readiness))
 		}
+
+		// the running interface passes its probes at the restore's version: each host stays pending, naming the other
+		api.probeRound(t, world, []*t3Split{split})
+		for _, host := range []string{kept, returned} {
+			if row := t3SplitReadiness(t, world, host); row.ReadyTime != nil || !slices.Equal(row.PendingInterfaces, []string{interfaces[1]}) {
+				t.Fatalf("%s with one interface current for the restore: %+v", host, row)
+			}
+		}
+		// the other starts on the restore's version and passes its own: every interface is current, each host ready
+		lagging.startLb(restored)
+		if !lagging.reachesDevice(returned, []string{"h2"}, lagging.customPool) || !lagging.reachesPlatform(left) {
+			t.Fatal("the restarted interface does not route the restored map")
+		}
+		api.probeRound(t, world, splits)
+		t3SplitAwaitReady(t, world, kept)
+		t3SplitAwaitReady(t, world, returned)
 	})
 }
