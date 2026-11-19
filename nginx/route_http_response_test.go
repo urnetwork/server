@@ -8,11 +8,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // The CORS headers a response must have: the echoed or wildcard origin, or
@@ -395,6 +398,94 @@ func TestRouteHttpBeginDrainRefusesNewUpgrades(t *testing.T) {
 	}
 }
 
+// A response writer that records the write deadlines set on it, as an h1
+// server's writer takes them for its connection.
+type testDeadlineResponseWriter struct {
+	*httptest.ResponseRecorder
+	writeDeadlines []time.Time
+}
+
+// See http.ResponseController.
+func (self *testDeadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	self.writeDeadlines = append(self.writeDeadlines, deadline)
+	return nil
+}
+
+// A connection that records the write deadlines set on it.
+type testDeadlineConn struct {
+	net.Conn
+	writeDeadlines []time.Time
+}
+
+// See net.Conn.
+func (self *testDeadlineConn) SetWriteDeadline(deadline time.Time) error {
+	self.writeDeadlines = append(self.writeDeadlines, deadline)
+	return self.Conn.SetWriteDeadline(deadline)
+}
+
+// send_timeout: the client write deadline moves to SendTimeout from now when
+// an h1 request starts, at the head and before every write and flush, so it
+// bounds the wait between two writes and never the whole response; a hijack
+// clears it for the tunnel's owner; a zero SendTimeout sets none.
+func TestRouteHttpSendTimeoutBoundsEachWrite(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Http.SendTimeout = 30 * time.Second
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
+		w.WriteHeader(http.StatusOK)
+		for range 3 {
+			io.WriteString(w, "chunk")
+			http.NewResponseController(w).Flush()
+		}
+	}
+	handler := testFront.front.HttpsHandler("eth1")
+
+	before := time.Now()
+	writer := &testDeadlineResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+	}
+	handler.ServeHTTP(writer, newTestRequest("GET", "api.service.example", "/v1", true))
+	after := time.Now()
+	// the start, the head, and a write and a flush per chunk
+	if len(writer.writeDeadlines) != 2+2*3 {
+		t.Fatalf("%d write deadlines, want 8: %v", len(writer.writeDeadlines), writer.writeDeadlines)
+	}
+	for _, deadline := range writer.writeDeadlines {
+		if deadline.Before(before.Add(30*time.Second)) || after.Add(30*time.Second).Before(deadline) {
+			t.Errorf("write deadline %s, want SendTimeout from the write", deadline)
+		}
+	}
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	deadlineConn := &testDeadlineConn{
+		Conn: serverConn,
+	}
+	testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}
+	handler.ServeHTTP(&testHijackResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		conn:             deadlineConn,
+	}, newTestRequest("GET", "connect.service.example", "/", true))
+	if len(deadlineConn.writeDeadlines) != 1 || !deadlineConn.writeDeadlines[0].IsZero() {
+		t.Errorf("the hijacked connection's write deadlines %v, want one clear", deadlineConn.writeDeadlines)
+	}
+
+	settings.Http.SendTimeout = 0
+	writer = &testDeadlineResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+	}
+	handler.ServeHTTP(writer, newTestRequest("GET", "api.service.example", "/v1", true))
+	if len(writer.writeDeadlines) != 0 {
+		t.Errorf("SendTimeout 0 set %d write deadlines", len(writer.writeDeadlines))
+	}
+}
+
 // The access log never holds a client address, from the peer or a header,
 // or a hidden route prefix, wherever the client put it; it honors
 // no_access_log and no_success_access_log, and samples.
@@ -443,6 +534,8 @@ func TestRouteHttpAccessLogKeepsAddressesAndPrefixesOut(t *testing.T) {
 	}
 	before := len(testFront.accessLog.writtenLines())
 	send(https, "198.51.100.72:1", "mcp.service.example", "/mcp-hidden/x", true)
+	// refused before routing, but the host is still known
+	serveTestRequest(https, newTestRequestFrom("198.51.100.72:1", "TRACE", "MCP.service.example:443", "/", true))
 	send(https, "198.51.100.72:1", "api.service.example", "/hello", true)
 	send(https, "198.51.100.72:1", "test-api.other.example", "/connect/control", true)
 	if after := len(testFront.accessLog.writtenLines()); after != before {

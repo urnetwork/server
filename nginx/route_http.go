@@ -84,6 +84,10 @@ const (
 // The in-process block label, for connect's own names.
 const routeHttpInProcessBlock = "local"
 
+// The services.yml status mode that denies /status on a service's names and
+// exempts its lb status paths from the limits.
+const routeServiceStatusStandard = "standard"
+
 // One location of a server, as the generator declares it. Read-only once
 // built.
 type routeHttpLocation struct {
@@ -153,14 +157,17 @@ func routeUpstreamTarget(path string, args string) string {
 
 // The locations of one server. Read-only once built.
 type routeHttpServer struct {
+	// the service whose names the server serves; nil for the lb's servers
+	service        *routeHttpService
 	exactLocations map[string]*routeHttpLocation
 	// the longest prefix first
 	prefixLocations []*routeHttpLocation
 }
 
-// An empty server.
-func newRouteHttpServer() *routeHttpServer {
+// An empty server of a service's names, or of the lb's for nil.
+func newRouteHttpServer(service *routeHttpService) *routeHttpServer {
 	return &routeHttpServer{
+		service:         service,
 		exactLocations:  map[string]*routeHttpLocation{},
 		prefixLocations: []*routeHttpLocation{},
 	}
@@ -235,8 +242,6 @@ type routeHttpTable struct {
 	// p/by/b/<svc>/<block>/status for lb_exposed standard-status services
 	limitExemptLbPaths map[string]bool
 	services           map[string]*routeHttpService
-	connectServiceName string
-	apiServiceName     string
 	noAccessLogHosts   map[string]bool
 	// every hidden route prefix, without its leading /, to keep out of logs
 	secretPrefixes []string
@@ -248,13 +253,11 @@ func newRouteHttpTable(routeTable *RouteTable, serviceForwarders map[string]serv
 	routes := &routeHttpTable{
 		lbNames:            map[string]bool{},
 		defaultLbName:      routeTable.Lb.Names[0],
-		lbHttpsServer:      newRouteHttpServer(),
-		lbHttpServer:       newRouteHttpServer(),
-		defaultHttpServer:  newRouteHttpServer(),
+		lbHttpsServer:      newRouteHttpServer(nil),
+		lbHttpServer:       newRouteHttpServer(nil),
+		defaultHttpServer:  newRouteHttpServer(nil),
 		limitExemptLbPaths: map[string]bool{},
 		services:           map[string]*routeHttpService{},
-		connectServiceName: routeTable.Front.ConnectService,
-		apiServiceName:     routeTable.Front.ApiService,
 		noAccessLogHosts:   map[string]bool{},
 		secretPrefixes:     []string{},
 	}
@@ -338,7 +341,7 @@ func newRouteHttpTable(routeTable *RouteTable, serviceForwarders map[string]serv
 // names.
 func newRouteHttpServiceServer(routeService *routeHttpService, inProcess bool) *routeHttpServer {
 	service := routeService.service
-	server := newRouteHttpServer()
+	server := newRouteHttpServer(routeService)
 
 	// the route_rate_limits, then the route_request_bodies of other paths;
 	// a path in both is one location with both
@@ -371,7 +374,7 @@ func newRouteHttpServiceServer(routeService *routeHttpService, inProcess bool) *
 	}
 
 	for _, routePrefix := range service.RoutePrefixes {
-		if service.Status == "standard" {
+		if service.Status == routeServiceStatusStandard {
 			server.addExact(&routeHttpLocation{
 				kind:  routeHttpLocationDeny,
 				match: routePrefix + "/status",
@@ -436,7 +439,7 @@ func addLbRoutes(routes *routeHttpTable, routeTable *RouteTable, lbRoutePrefix s
 		if !service.LbExposed {
 			continue
 		}
-		if service.Status == "standard" {
+		if service.Status == routeServiceStatusStandard {
 			routes.limitExemptLbPaths[lbRoutePrefix+"/by/service/"+service.Name+"/status"] = true
 			for _, block := range service.Blocks {
 				routes.limitExemptLbPaths[lbRoutePrefix+"/by/b/"+service.Name+"/"+block.Name+"/status"] = true
@@ -510,6 +513,7 @@ func (self *routeHttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		startTime:      self.front.now(),
 	}
 	defer exchange.end()
+	exchange.response.start()
 	self.serve(exchange, r)
 	exchange.response.finish()
 }
@@ -581,8 +585,15 @@ func (self *routeHttpHandler) serve(exchange *routeHttpExchange, r *http.Request
 func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http.Request, request *routeRequest, host string, server *routeHttpServer) {
 	routes := self.front.routes
 	location := server.find(request.uri.path)
+	// the service the request is for, for the metrics and the access log,
+	// whether the front or the service answers it
+	if server.service != nil {
+		exchange.serviceName = server.service.service.Name
+	}
+	if location != nil && location.service != nil {
+		exchange.serviceName = location.service.service.Name
+	}
 	if location != nil {
-		exchange.location = location
 		if location.serviceHeaders {
 			exchange.response.headers.security = true
 			exchange.response.headers.cors = location.service.cors
@@ -652,7 +663,6 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Request, request *routeRequest, host string, location *routeHttpLocation) {
 	routeService := location.service
 	upstreamTarget, streamed := location.upstream(request)
-	exchange.serviceName = routeService.service.Name
 	if location.blockName != "" {
 		exchange.response.upstreamBlock = location.blockName
 	}
@@ -752,9 +762,8 @@ type routeHttpExchange struct {
 	startTime      time.Time
 	// set once the request is validated
 	request *routeRequest
-	// the matched location, when there is one
-	location *routeHttpLocation
-	// the routed service, when a proxy location served the request
+	// the service the request is for: its names' server's, or an lb
+	// route's; empty when it is for the front itself
 	serviceName string
 }
 

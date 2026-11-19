@@ -339,10 +339,11 @@ func TestFrontDrainDeadlineCutsWhatOutlivedTheDrain(t *testing.T) {
 	}
 }
 
-// The request counter's labels: the routed service and the block that
-// answered, as the forwarder names it or as the location fixes it, only
-// from the route table; "local" for connect in-process; "-" for the front's
-// own answers and for a block the service doesn't have.
+// The request counter's labels: the service the request is for, the front's
+// own answers on its names included, and the block that answered, as the
+// forwarder names it or as the location fixes it, only from the route table;
+// "local" for connect in-process; "-" for the lb's own routes and for a
+// block the service doesn't have.
 func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
@@ -362,6 +363,8 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 	serveTestRequest(handler, newTestRequest("GET", "test-lb.service.example", "/nope", true))
 	// a per-block lb route names its block, whatever the forwarder records
 	serveTestRequest(handler, newTestRequest("GET", "test-lb.service.example", "/hidden-example/by/b/mcp/g1/x", true))
+	// the front's own answer on a service's names is that service's
+	serveTestRequest(handler, newTestRequest("GET", "api.service.example", "/status", true))
 
 	for _, c := range []struct {
 		labels []string
@@ -374,6 +377,7 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 		{labels: []string{"-", "h1", "2xx", "-"}, count: 1},
 		{labels: []string{"-", "h1", "4xx", "-"}, count: 1},
 		{labels: []string{"mcp", "h1", "2xx", "g1"}, count: 1},
+		{labels: []string{"api", "h1", "4xx", "-"}, count: 1},
 	} {
 		if count := testCounterValue(t, testFront.metrics.requests.WithLabelValues(c.labels...)); count != c.count {
 			t.Errorf("requests_total%v = %v, want %v", c.labels, count, c.count)

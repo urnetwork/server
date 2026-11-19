@@ -41,7 +41,7 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "requests_total",
-			Help:      "Requests the lb_alt front answered, by routed service (- for the front's own answers), protocol, status class and upstream block (local for connect in-process, - for none)",
+			Help:      "Requests the lb_alt front answered, by the service they are for (- for the lb's own routes and unknown names), protocol, status class and upstream block (local for connect in-process, - for none)",
 		}, labels),
 		responseHeaderSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: "urnetwork",
@@ -150,10 +150,15 @@ func (self *Front) observe(exchange *routeHttpExchange) {
 	if request != nil {
 		host = request.host
 		path = request.uri.path
-		if self.routes.noAccessLogHosts[request.host] {
-			// a privacy promise: no line at all
-			return
-		}
+	} else if normalizedHost, ok := self.names.normalizeHost(host); ok {
+		// a refused request still names its host, as nginx's $host does
+		host = normalizedHost
+	}
+	if self.routes.noAccessLogHosts[host] {
+		// a privacy promise: no line at all
+		return
+	}
+	if request != nil {
 		if routeService, ok := self.routes.services[exchange.serviceName]; ok &&
 			200 <= response.statusCode && response.statusCode < 300 &&
 			routeService.exactNames[request.host] &&

@@ -15,6 +15,13 @@ package nginx
 //     later client whose Accept-Encoding offers gzip and whose request has
 //     no Via, never for HEAD. The Content-Length and Accept-Ranges go, a
 //     strong ETag turns weak, and no Vary is added;
+//   - bounds each write to the client by HttpSettings.SendTimeout, nginx's
+//     send_timeout: the write deadline moves before the head, every write
+//     and every flush, so it holds between two writes, and a client that
+//     stops reading for that long has its connection closed. On h1 the
+//     deadline is the connection's, so it is also set when a request
+//     starts, before anything Go's server writes for it (a 100 Continue),
+//     and cleared on a hijack, so the tunnel's owner starts with none;
 //   - records the status, the time of the head and the bytes for the
 //     metrics and the access log.
 //
@@ -149,6 +156,9 @@ func (self *responseState) writeHeader(statusCode int) {
 	self.wroteHeader = true
 	self.statusCode = statusCode
 	self.headerTime = self.front.now()
+	// Go's server writes the head with the first body bytes, or after the
+	// handler returns
+	self.extendWriteDeadline()
 
 	header := self.w.Header()
 	self.headers.apply(header, statusCode)
@@ -183,6 +193,7 @@ func (self *responseState) write(data []byte) (int, error) {
 
 // Writes bytes to the client as they are, counting them.
 func (self *responseState) writeBody(data []byte) (int, error) {
+	self.extendWriteDeadline()
 	n, err := self.w.Write(data)
 	self.bodyBytes += int64(n)
 	return n, err
@@ -204,7 +215,28 @@ func (self *responseState) flush() error {
 			return err
 		}
 	}
+	self.extendWriteDeadline()
 	return http.NewResponseController(self.w).Flush()
+}
+
+// Moves the client write deadline to SendTimeout from now. A writer that
+// can't take a deadline is left as it is. The deadline is real time, as the
+// connection's are.
+func (self *responseState) extendWriteDeadline() {
+	sendTimeout := self.front.settings.Http.SendTimeout
+	if sendTimeout <= 0 {
+		return
+	}
+	http.NewResponseController(self.w).SetWriteDeadline(time.Now().Add(sendTimeout))
+}
+
+// Sets the write deadline of an h1 request before Go's server writes
+// anything for it: the deadline is the connection's, and the last response
+// on it left one that may have passed.
+func (self *responseState) start() {
+	if self.r.ProtoMajor == 1 {
+		self.extendWriteDeadline()
+	}
 }
 
 // Hijacks the client connection: the location's headers go into the header
@@ -221,6 +253,10 @@ func (self *responseState) hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, readWriter, err := hijacker.Hijack()
 	if err != nil {
 		return nil, nil, err
+	}
+	if 0 < self.front.settings.Http.SendTimeout {
+		// the tunnel's owner sets its own
+		conn.SetWriteDeadline(time.Time{})
 	}
 	self.hijacked = true
 	if !self.wroteHeader {
