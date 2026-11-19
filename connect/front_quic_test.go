@@ -182,6 +182,7 @@ type testFrontSilentSource struct {
 	retryOnce  sync.Once
 }
 
+// Reads and drops every datagram while not delivering, noting a Retry.
 func (self *testFrontSilentSource) ReadFrom(p []byte) (int, net.Addr, error) {
 	for {
 		n, addr, err := self.PacketConn.ReadFrom(p)
@@ -264,6 +265,8 @@ type testFrontProxyPrefixConn struct {
 	header []byte
 }
 
+// Prefixes packetConn's datagrams with a PROXY v2 udp-over-ipv4 header from
+// source to destination.
 func newTestFrontProxyPrefixConn(packetConn net.PacketConn, source netip.AddrPort, destination netip.AddrPort) *testFrontProxyPrefixConn {
 	header := []byte{
 		// the v2 signature, then version 2 PROXY, then udp over ipv4
@@ -282,6 +285,7 @@ func newTestFrontProxyPrefixConn(packetConn net.PacketConn, source netip.AddrPor
 	}
 }
 
+// Writes the header and the datagram as one datagram.
 func (self *testFrontProxyPrefixConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	if _, err := self.PacketConn.WriteTo(append(slices.Clone(self.header), p...), addr); err != nil {
 		return 0, err
@@ -410,6 +414,7 @@ type testFrontSessionCache struct {
 	stored chan struct{}
 }
 
+// tls.ClientSessionCache
 func (self *testFrontSessionCache) Put(sessionKey string, state *tls.ClientSessionState) {
 	self.ClientSessionCache.Put(sessionKey, state)
 	if state != nil {

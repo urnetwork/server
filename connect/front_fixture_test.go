@@ -73,6 +73,7 @@ type testFrontIdentity struct {
 	roots       *x509.CertPool
 }
 
+// Generates the authority and the leaf for names.
 func newTestFrontIdentity(t testing.TB, names []string) *testFrontIdentity {
 	t.Helper()
 	notBefore := time.Now().Add(-time.Hour)
@@ -287,6 +288,7 @@ type testFront struct {
 	events       []string
 }
 
+// A fake front for the route table's names, serving identity.
 func newTestFront(routeTable *nginx.RouteTable, identity *testFrontIdentity) *testFront {
 	front := &testFront{
 		identity:         identity,
@@ -347,18 +349,21 @@ func newTestFront(routeTable *nginx.RouteTable, identity *testFrontIdentity) *te
 	return front
 }
 
+// Records one call the front saw.
 func (self *testFront) record(event string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.events = append(self.events, event)
 }
 
+// The calls the front saw, in order.
 func (self *testFront) recordedEvents() []string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return slices.Clone(self.events)
 }
 
+// nginxFront
 func (self *testFront) ClassifyName(name string) nginx.NameClass {
 	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	if nameClass, ok := self.nameClasses[name]; ok {
@@ -372,14 +377,17 @@ func (self *testFront) ClassifyName(name string) nginx.NameClass {
 	return nginx.NameClassUnknown
 }
 
+// nginxFront
 func (self *testFront) TlsConfig() *tls.Config {
 	return self.tlsConfig
 }
 
+// nginxFront
 func (self *testFront) QuicTlsConfig() *tls.Config {
 	return self.quicTlsConfig
 }
 
+// nginxFront
 func (self *testFront) HttpsHandler(interfaceName string) http.Handler {
 	if self.httpsHandler != nil {
 		return self.httpsHandler(interfaceName)
@@ -393,6 +401,7 @@ func (self *testFront) HttpsHandler(interfaceName string) http.Handler {
 	})
 }
 
+// nginxFront
 func (self *testFront) HttpHandler(interfaceName string) http.Handler {
 	if self.httpHandler != nil {
 		return self.httpHandler(interfaceName)
@@ -402,6 +411,7 @@ func (self *testFront) HttpHandler(interfaceName string) http.Handler {
 	})
 }
 
+// nginxFront
 func (self *testFront) H3ApiHandler(interfaceName string) http.Handler {
 	if self.h3ApiHandler != nil {
 		return self.h3ApiHandler(interfaceName)
@@ -411,6 +421,7 @@ func (self *testFront) H3ApiHandler(interfaceName string) http.Handler {
 	})
 }
 
+// nginxFront
 func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Addr) (func(), bool) {
 	key := interfaceName + " " + addr.String()
 	admitted := func() bool {
@@ -446,10 +457,12 @@ func (self *testFront) acquired() []string {
 	return slices.Clone(self.acquiredKeys)
 }
 
+// nginxFront
 func (self *testFront) BeginDrain() {
 	self.record("front begin drain")
 }
 
+// nginxFront
 func (self *testFront) Close() error {
 	self.record("front close")
 	return nil
@@ -478,6 +491,7 @@ type testFrontConnectQuic struct {
 	transportConns []net.PacketConn
 }
 
+// A fake with no handshake limit and no tracer.
 func newTestFrontConnectQuic() *testFrontConnectQuic {
 	return &testFrontConnectQuic{
 		counted: make(chan struct{}, 64),
@@ -486,6 +500,7 @@ func newTestFrontConnectQuic() *testFrontConnectQuic {
 	}
 }
 
+// frontConnectQuic
 func (self *testFrontConnectQuic) HandleQuicConn(conn *quic.Conn, carrier ResidentCarrier) bool {
 	self.handled <- testFrontHandledQuic{conn: conn, carrier: carrier}
 	select {
@@ -496,6 +511,7 @@ func (self *testFrontConnectQuic) HandleQuicConn(conn *quic.Conn, carrier Reside
 	return true
 }
 
+// frontConnectQuic
 func (self *testFrontConnectQuic) NewQuicTransport(conn net.PacketConn) *quic.Transport {
 	func() {
 		self.stateLock.Lock()
@@ -523,6 +539,7 @@ func (self *testFrontConnectQuic) builtTransportConns() []net.PacketConn {
 	return slices.Clone(self.transportConns)
 }
 
+// frontConnectQuic
 func (self *testFrontConnectQuic) NewQuicConfig() *quic.Config {
 	return &quic.Config{
 		HandshakeIdleTimeout: testFrontProgressTimeout,
@@ -556,6 +573,7 @@ type testFrontBindHold struct {
 	releaseOnce sync.Once
 }
 
+// Binds that record and never fail or hold until told to.
 func newTestFrontBinds() *testFrontBinds {
 	return &testFrontBinds{
 		boundCount:  connect.NewMonitorValue(0),
@@ -616,6 +634,7 @@ func (self *testFrontBinds) beforeBind(network string, address string) error {
 	return nil
 }
 
+// FrontServerSettings.ListenPacket
 func (self *testFrontBinds) listenPacket(network string, address string) (net.PacketConn, error) {
 	if err := self.beforeBind(network, address); err != nil {
 		return nil, err
@@ -635,6 +654,7 @@ func (self *testFrontBinds) listenPacket(network string, address string) (net.Pa
 	return packetConn, nil
 }
 
+// FrontServerSettings.Listen
 func (self *testFrontBinds) listen(network string, address string) (net.Listener, error) {
 	if err := self.beforeBind(network, address); err != nil {
 		return nil, err
@@ -742,8 +762,6 @@ type testFrontEnv struct {
 	settings    *FrontServerSettings
 	frontServer *frontServer
 	dispatched  chan testFrontDispatch
-	// when set, the dispatch observer waits on it after recording
-	dispatchHold chan struct{}
 }
 
 // The certificate expiry the fixture reports.
@@ -787,9 +805,6 @@ func newUnstartedTestFrontEnv(t testing.TB, mutate func(env *testFrontEnv)) *tes
 		select {
 		case env.dispatched <- testFrontDispatch{serverName: serverName, nameClass: nameClass}:
 		default:
-		}
-		if env.dispatchHold != nil {
-			<-env.dispatchHold
 		}
 	}
 	if mutate != nil {

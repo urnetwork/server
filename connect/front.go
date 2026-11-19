@@ -149,6 +149,8 @@ func (self frontSocketKey) labels() []string {
 	return []string{self.interfaceName, self.family, self.protocol, self.portKind}
 }
 
+// The socket in logs: interface, family, protocol, port kind and index, with
+// no address.
 func (self frontSocketKey) String() string {
 	return fmt.Sprintf("%s/%s/%s/%s#%d", self.interfaceName, self.family, self.protocol, self.portKind, self.index)
 }
@@ -339,25 +341,25 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 	quicConfig.Allow0RTT = false
 	self.quicConfig = quicConfig
 
-	interfaceHttpsServers := map[string]*http.Server{}
-	interfaceHttpServers := map[string]*http.Server{}
-	interfaceApiHandlers := map[string]http.Handler{}
+	interfaceNameHttpsServers := map[string]*http.Server{}
+	interfaceNameHttpServers := map[string]*http.Server{}
+	interfaceNameApiHandlers := map[string]http.Handler{}
 	for _, routeInterface := range self.routeTable.Interfaces {
 		httpsServer := self.newHttpServer(front.HttpsHandler(routeInterface.Name), frontPortHttps)
 		httpServer := self.newHttpServer(front.HttpHandler(routeInterface.Name), frontPortHttp)
-		interfaceHttpsServers[routeInterface.Name] = httpsServer
-		interfaceHttpServers[routeInterface.Name] = httpServer
-		interfaceApiHandlers[routeInterface.Name] = front.H3ApiHandler(routeInterface.Name)
+		interfaceNameHttpsServers[routeInterface.Name] = httpsServer
+		interfaceNameHttpServers[routeInterface.Name] = httpServer
+		interfaceNameApiHandlers[routeInterface.Name] = front.H3ApiHandler(routeInterface.Name)
 		self.httpServers = append(self.httpServers, httpsServer, httpServer)
 	}
 	for _, socket := range self.sockets {
 		switch socket.key.portKind {
 		case frontPortHttps:
-			socket.httpServer = interfaceHttpsServers[socket.key.interfaceName]
+			socket.httpServer = interfaceNameHttpsServers[socket.key.interfaceName]
 		case frontPortHttp:
-			socket.httpServer = interfaceHttpServers[socket.key.interfaceName]
+			socket.httpServer = interfaceNameHttpServers[socket.key.interfaceName]
 		default:
-			socket.apiHandler = interfaceApiHandlers[socket.key.interfaceName]
+			socket.apiHandler = interfaceNameApiHandlers[socket.key.interfaceName]
 		}
 	}
 
@@ -434,6 +436,7 @@ func (self *frontServer) socketsStopped() bool {
 	return self.socketsStoppedWithLock()
 }
 
+// As socketsStopped, under stateLock.
 func (self *frontServer) socketsStoppedWithLock() bool {
 	return self.closing || self.draining || self.ctx.Err() != nil
 }

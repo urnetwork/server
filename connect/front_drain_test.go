@@ -75,6 +75,7 @@ type testFrontConnectionTrace struct {
 	releaseOnce sync.Once
 }
 
+// A trace that holds closing connections only when holding.
 func newTestFrontConnectionTrace(holding bool) *testFrontConnectionTrace {
 	return &testFrontConnectionTrace{
 		goaways: connect.NewMonitorValue(0),
@@ -88,6 +89,7 @@ func (self *testFrontConnectionTrace) tracer(context.Context, bool, quic.Connect
 	return self
 }
 
+// qlogwriter.Trace
 func (self *testFrontConnectionTrace) AddProducer() qlogwriter.Recorder {
 	return self
 }
@@ -97,6 +99,8 @@ func (self *testFrontConnectionTrace) SupportsSchemas(schema string) bool {
 	return schema == http3qlog.EventSchema
 }
 
+// qlogwriter.Recorder: counts GOAWAYs, and holds a closing connection while
+// holding.
 func (self *testFrontConnectionTrace) RecordEvent(event qlogwriter.Event) {
 	switch event := event.(type) {
 	case http3qlog.FrameCreated:
@@ -113,10 +117,12 @@ func (self *testFrontConnectionTrace) RecordEvent(event qlogwriter.Event) {
 	}
 }
 
+// qlogwriter.Recorder
 func (self *testFrontConnectionTrace) Close() error {
 	return nil
 }
 
+// Lets every held connection finish closing.
 func (self *testFrontConnectionTrace) Release() {
 	self.releaseOnce.Do(func() {
 		close(self.release)
@@ -374,6 +380,8 @@ func testFrontEchoHandler(interfaceName string) http.Handler {
 	})
 }
 
+// Opens a TLS connection to eth1's https socket and hijacks it into the
+// echo handler's /upgrade.
 func (self *testFrontEnv) dialHijacked(serverName string) *testFrontHijackedConn {
 	self.t.Helper()
 	address, _ := self.address(testFrontInterfaceA, frontFamilyIpv4)
@@ -399,6 +407,7 @@ func (self *testFrontEnv) dialHijacked(serverName string) *testFrontHijackedConn
 	}
 }
 
+// Sends one line and reads it back.
 func (self *testFrontHijackedConn) echo(text string) {
 	self.t.Helper()
 	fmt.Fprintf(self.tlsConn, "%s\n", text)

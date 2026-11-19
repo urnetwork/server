@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // The front's readiness headers with the latch ok and the rest of connect
@@ -41,18 +43,21 @@ type testFrontRestartWaits struct {
 	waits     map[frontSocketKey][]time.Duration
 }
 
+// An empty record.
 func newTestFrontRestartWaits() *testFrontRestartWaits {
 	return &testFrontRestartWaits{
 		waits: map[frontSocketKey][]time.Duration{},
 	}
 }
 
+// FrontServerSettings.restartWaitObserverForTest
 func (self *testFrontRestartWaits) observe(key frontSocketKey, wait time.Duration) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.waits[key] = append(self.waits[key], wait)
 }
 
+// The waits observed for one socket, in order.
 func (self *testFrontRestartWaits) of(key frontSocketKey) []time.Duration {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -425,4 +430,49 @@ func countTcpSockets(env *testFrontEnv) int {
 		}
 	}
 	return count
+}
+
+// The socket gauges count each group's sockets up, and a lost socket counts
+// one restart, by interface, family, protocol and port kind, never by
+// address.
+func TestFrontSocketMetricsCountSocketsAndRestarts(t *testing.T) {
+	env := newUnstartedTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.SocketRestartInitialDelay = time.Hour
+	})
+	labels := []string{testFrontInterfaceA, frontFamilyIpv4, frontProtocolUdp, frontPortQuic}
+	upGauge := frontSocketsUpGauge.WithLabelValues(labels...)
+	restartCounter := frontSocketRestartsCounter.WithLabelValues(labels...)
+	upBefore := testutil.ToFloat64(upGauge)
+	restartsBefore := testutil.ToFloat64(restartCounter)
+	if err := env.frontServer.start(env.ctx, env.front, env.connectQuic); err != nil {
+		t.Fatal(err)
+	}
+	socketsPerPort := float64(env.settings.SocketsPerPort)
+	if up := testutil.ToFloat64(upGauge) - upBefore; up != socketsPerPort {
+		t.Fatalf("%v sockets up for %v, want %v", up, labels, socketsPerPort)
+	}
+
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	bindAddress := env.bindAddress(address, frontPortQuic)
+	started, release := env.binds.holdNext(bindAddress)
+	defer release()
+	env.binds.boundPacketConns(bindAddress)[0].Close()
+	testFrontWait(t, started, "the lost socket's re-creation")
+	if up := testutil.ToFloat64(upGauge) - upBefore; up != socketsPerPort-1 {
+		t.Fatalf("%v sockets up with one lost, want %v", up, socketsPerPort-1)
+	}
+	if restarts := testutil.ToFloat64(restartCounter) - restartsBefore; restarts != 1 {
+		t.Fatalf("%v restarts counted for one loss", restarts)
+	}
+	release()
+	env.binds.waitPacketConns(t, bindAddress, env.settings.SocketsPerPort+1)
+	env.waitSocketsUp(len(env.frontServer.sockets))
+	if up := testutil.ToFloat64(upGauge) - upBefore; up != socketsPerPort {
+		t.Fatalf("%v sockets up after the re-creation, want %v", up, socketsPerPort)
+	}
+
+	env.frontServer.close()
+	if up := testutil.ToFloat64(upGauge) - upBefore; up != 0 {
+		t.Fatalf("%v sockets still counted up after the close", up)
+	}
 }

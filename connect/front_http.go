@@ -215,6 +215,7 @@ type frontTrackedConn struct {
 	closeOnce   sync.Once
 }
 
+// Closes the socket and leaves the tracked set, once.
 func (self *frontTrackedConn) Close() error {
 	err := self.Conn.Close()
 	self.closeOnce.Do(func() {
@@ -230,6 +231,7 @@ type frontHttpErrorLog struct {
 	portKind string
 }
 
+// Counts one message by its kind, logging only a panic, scrubbed.
 func (self *frontHttpErrorLog) Write(message []byte) (int, error) {
 	text := string(message)
 	kind := frontHttpErrorOther
