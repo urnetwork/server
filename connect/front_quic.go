@@ -188,8 +188,8 @@ func (self *frontQuicRun) dispatch(conn *quic.Conn) {
 	default:
 		self.refuseUnknownName(conn)
 	}
-	// a connection the dispatch left open, such as one whose name never
-	// arrived, closes before its window is returned
+	// every path above closed the connection already, and a second close is
+	// a no-op: the window is returned only once nothing can draw on it
 	conn.CloseWithError(0, "")
 }
 
