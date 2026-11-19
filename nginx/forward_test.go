@@ -582,6 +582,60 @@ func TestForwardStreamedBodyOnH2Streams(t *testing.T) {
 	}
 }
 
+// A declared empty body on a streamed route has nothing to stream, so its
+// block's 503 is retried, and each block gets Content-Length: 0, as nginx
+// buffers it: on h1, and on h2 for a POST whose HEADERS frame ends its
+// stream, as Go's client and browsers send an empty POST
+// (ngx_http_v2_read_request_body finds stream->in_closed).
+func TestForwardStreamedEmptyBodyIsRetried(t *testing.T) {
+	for _, h2 := range []bool{false, true} {
+		serviceName := testServiceName("streamed-empty")
+		busy := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		})
+		live := newRecordingUpstream(t, "g2", nil)
+		group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+			{name: "g1", weight: 1, port: busy.port},
+			{name: "g2", weight: 1, port: live.port},
+		}), testForwardFrontSettings())
+		options := func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			return options
+		}
+		var response *http.Response
+		var responseBody []byte
+		if h2 {
+			front := newTestForwardH2Front(t, group, options)
+			request, _ := http.NewRequest(http.MethodPost, front.url("/mcp"), http.NoBody)
+			var err error
+			response, err = front.server.Client().Do(request)
+			if err != nil {
+				t.Fatalf("h2 request: %v", err)
+			}
+			responseBody, _ = io.ReadAll(response.Body)
+			response.Body.Close()
+			front.waitServed(t)
+			if response.ProtoMajor != 2 {
+				t.Fatalf("the request went over HTTP/%d, want h2", response.ProtoMajor)
+			}
+		} else {
+			front := newTestForwardFront(t, group, options)
+			response, responseBody = rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 0\r\n\r\n")
+			front.waitServed(t)
+		}
+		if response.StatusCode != http.StatusOK || string(responseBody) != "g2" || retryCount(serviceName, "http_503") != 1 {
+			t.Fatalf("h2 %v: %d %q, retries %v, want g2's answer after one retry", h2, response.StatusCode, responseBody, retryCount(serviceName, "http_503"))
+		}
+		for _, recorded := range []*recordedRequest{busy.recorded()[0], live.recorded()[0]} {
+			if got := recorded.header.Values(contentLengthHeader); !reflect.DeepEqual(got, []string{"0"}) || len(recorded.transferEncoding) != 0 || len(recorded.body) != 0 {
+				t.Errorf("h2 %v: %s got Content-Length %v, %v and %d bytes, want an empty body of length 0", h2, recorded.block, got, recorded.transferEncoding, len(recorded.body))
+			}
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
 // A body that waits for 100 Continue streams, as nginx streams it: nginx
 // sends its 100 Continue and reads at once, before the client can have sent
 // any of the body, so the first read keeps nothing, and its block's 503 is

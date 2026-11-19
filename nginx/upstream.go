@@ -15,7 +15,9 @@ package nginx
 //   - never for a per-block lb route, which reports its block's own result;
 //   - never for a streamed body once its request began going upstream,
 //     unless its first read returned it whole and it was kept, as nginx
-//     buffers a body its first pass reads whole (body_stream.go);
+//     buffers a body its first pass reads whole (body_stream.go); a declared
+//     empty body on a streamed route has nothing to stream, so it is retried
+//     too;
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
 //     isn't an attempt, as nginx's tries++ for a cached connection isn't.
@@ -197,7 +199,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			return
 		}
 		switch {
-		case options.streamed:
+		case options.streamed && r.ContentLength != 0:
 			// a body its first read returns whole is kept for a retry, as
 			// nginx buffers a body its first pass reads whole: an h1 body of
 			// declared length, not one that waits for 100 Continue, which
@@ -226,6 +228,14 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			} else {
 				request.bodyFraming = forwardBodyFraming{chunked: true}
 			}
+		case options.streamed:
+			// a declared empty body is whole before any read, so it goes with
+			// Content-Length: 0 and is retried, as nginx buffers it on h1
+			// (rb->rest == 0) and on h2 when the HEADERS frame ends the
+			// stream (stream->in_closed), as clients send an empty POST. Its
+			// end isn't waited for: on h2, nginx streams one whose stream
+			// ends later, so the front retries what nginx wouldn't there.
+			request.bodyFraming = forwardBodyFraming{known: true, length: 0}
 		default:
 			storedBody, refusal := self.bodyStore.read(ctx, r.Body, bodyReadOptions{
 				declaredLength:  r.ContentLength,
