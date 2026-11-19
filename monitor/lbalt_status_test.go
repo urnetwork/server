@@ -368,6 +368,27 @@ func TestLbAltStatusRequestsRefuseAnIncompleteMatrix(t *testing.T) {
 			},
 			reason: "duplicate-path",
 		},
+		{
+			name: "no attempt timeout",
+			mutate: func(_ *LbAltStatusSettings, _ *SignalSettings, probeSettings *LbAltStatusProbeSettings) {
+				probeSettings.AttemptTimeout = 0
+			},
+			reason: "probe-settings",
+		},
+		{
+			name: "a negative attempt timeout",
+			mutate: func(_ *LbAltStatusSettings, _ *SignalSettings, probeSettings *LbAltStatusProbeSettings) {
+				probeSettings.AttemptTimeout = -time.Second
+			},
+			reason: "probe-settings",
+		},
+		{
+			name: "an unbounded body",
+			mutate: func(_ *LbAltStatusSettings, _ *SignalSettings, probeSettings *LbAltStatusProbeSettings) {
+				probeSettings.ResponseBodyByteLimit = 0
+			},
+			reason: "probe-settings",
+		},
 	}
 	for _, c := range cases {
 		settings := lbAltStatusTestSettings()
@@ -377,6 +398,30 @@ func TestLbAltStatusRequestsRefuseAnIncompleteMatrix(t *testing.T) {
 		requests, reason := lbAltStatusRequests(settings, probeSettings, configFromSignalSettings(signalSettings))
 		if reason != c.reason || requests != nil {
 			t.Errorf("%s: reason %q with %d requests, want %q and none", c.name, reason, len(requests), c.reason)
+		}
+	}
+	cfg := configFromSignalSettings(lbAltStatusTestSignalSettings(&syntheticSource{}))
+	if requests, reason := lbAltStatusRequests(lbAltStatusTestSettings(), nil, cfg); reason != "probe-settings" || requests != nil {
+		t.Errorf("no probe settings: reason %q with %d requests", reason, len(requests))
+	}
+}
+
+// A pass runs at its settings' cadence, and at the default's when that is not
+// positive, since the scheduler cannot run a non-positive interval.
+func TestLbAltStatusCadenceTakesTheDefaultWhenNotPositive(t *testing.T) {
+	defaultCadence := DefaultLbAltStatusProbeSettings().Cadence
+	cases := []struct {
+		settings *LbAltStatusProbeSettings
+		cadence  time.Duration
+	}{
+		{settings: &LbAltStatusProbeSettings{Cadence: 30 * time.Second}, cadence: 30 * time.Second},
+		{settings: &LbAltStatusProbeSettings{Cadence: 0}, cadence: defaultCadence},
+		{settings: &LbAltStatusProbeSettings{Cadence: -time.Minute}, cadence: defaultCadence},
+		{settings: nil, cadence: defaultCadence},
+	}
+	for _, c := range cases {
+		if cadence := (lbAltStatusProbe{settings: c.settings}).cadence(); cadence != c.cadence || cadence <= 0 {
+			t.Errorf("settings %+v gave a cadence of %s, want %s", c.settings, cadence, c.cadence)
 		}
 	}
 }

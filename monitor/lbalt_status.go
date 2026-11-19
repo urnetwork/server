@@ -26,9 +26,12 @@
 // request path; observations and verdicts hold fixed domains, flags and
 // counts, errors are fixed text, and nothing here logs.
 //
-// A signal runs it: lbAltStatusRequests validates the matrix,
-// lbAltStatusProbe.observe runs the attempts, and each result carries its fixed
-// verdict (lbAltStatusEvaluate).
+// lbAltStatusRequests validates the matrix, lbAltStatusProbe.observe runs the
+// attempts, and each result carries its fixed verdict (lbAltStatusEvaluate).
+// Nothing schedules a pass yet. That needs a signal registered in NewSignals
+// with its classes in SIGNALS.md, and monitor.yml lbalt_status and services.yml
+// lb_hidden_prefixes carried through SignalSettings and monitorConfig
+// (lbAltStatusSettingsFromNode, cloneLbAltStatusSettings).
 package monitor
 
 import (
@@ -95,22 +98,28 @@ type LbAltStatusTargetSettings struct {
 type LbAltStatusProbeSettings struct {
 	// Between passes. Route53 checks every 10 s already; this probe adds what
 	// Route53 cannot see, at the cadence of the monitor's other public probes.
+	// Non-positive takes the default, since the scheduler cannot run a
+	// non-positive interval.
 	Cadence time.Duration
 	// Bound on one attempt: the TCP connect, the TLS handshake on 443, the
-	// request and the whole response, as the other public probes' 5 s.
+	// request and the whole response, as the other public probes' 5 s. Must
+	// be positive: a non-positive bound would expire every attempt at its
+	// start, so the matrix and the transport refuse it before any dial.
 	AttemptTimeout time.Duration
 	// Attempts in flight at once. Non-positive runs one at a time.
 	WorkerCount int
 	// The largest declared target count, one lb interface each. Main has ten
-	// lb interfaces.
+	// lb interfaces. Non-positive refuses every matrix.
 	MaxTargetCount int
 	// The largest declared block count. Connect runs five blocks per host.
+	// Non-positive refuses every matrix.
 	MaxBlockCount int
 	// Bytes of response header accepted. A status answer carries a few
 	// hundred. Non-positive takes the net/http default.
 	ResponseHeaderByteLimit int
 	// Bytes of response body read before the answer counts as too large. A
-	// status body is under 256 bytes. Must be positive.
+	// status body is under 256 bytes. Must be positive: the matrix and the
+	// transport refuse a non-positive bound before any dial.
 	ResponseBodyByteLimit int
 }
 
@@ -154,9 +163,10 @@ type LbAltStatusFailure string
 const (
 	LbAltStatusFailureNone   LbAltStatusFailure = ""
 	LbAltStatusFailureSource LbAltStatusFailure = "source-unavailable"
-	// the monitor host has no route to the pin's family
+	// the monitor host has no route or address in the pin's family
 	LbAltStatusFailureRoute LbAltStatusFailure = "observer-route-unavailable"
-	// the connection to the pin was refused or failed
+	// the connection to the pin was refused or failed, a router's host
+	// unreachable included
 	LbAltStatusFailureConnect LbAltStatusFailure = "connect-failed"
 	// the attempt deadline passed before the whole response arrived
 	LbAltStatusFailureTimeout LbAltStatusFailure = "timeout"
@@ -249,14 +259,22 @@ type lbAltStatusResult struct {
 	verdict     lbAltStatusVerdict
 }
 
-// Runs the attempts of one pass. A signal gives it an identity, a cadence and
-// findings.
+// Runs the attempts of one pass at its settings' cadence. A signal gives it an
+// identity and findings.
 type lbAltStatusProbe struct {
 	// nil takes the defaults
 	settings *LbAltStatusProbeSettings
 	// Local deterministic deadline controls may replace context construction,
 	// never the protocol or source. Production uses the attempt timeout.
 	attemptContext func(context.Context) (context.Context, context.CancelFunc)
+}
+
+// The settings' cadence, or the default's when it is not positive.
+func (self lbAltStatusProbe) cadence() time.Duration {
+	if self.settings != nil && 0 < self.settings.Cadence {
+		return self.settings.Cadence
+	}
+	return DefaultLbAltStatusProbeSettings().Cadence
 }
 
 // Reads the monitor.yml lbalt_status block. An absent block is off; a present
@@ -339,9 +357,14 @@ func lbAltStatusTuple(request LbAltStatusRequest) string {
 
 // Validates the complete declared matrix against the inventory before any
 // connection, and expands each target family into its lb route and one block
-// route per block, in a fixed order. The reason is a fixed domain, never an
+// route per block, in a fixed order. Probe settings without a positive
+// attempt timeout or body bound refuse the matrix too, since every attempt
+// under them would fail at its start. The reason is a fixed domain, never an
 // input value.
 func lbAltStatusRequests(settings LbAltStatusSettings, probeSettings *LbAltStatusProbeSettings, cfg *monitorConfig) ([]LbAltStatusRequest, string) {
+	if probeSettings == nil || probeSettings.AttemptTimeout <= 0 || probeSettings.ResponseBodyByteLimit <= 0 {
+		return nil, "probe-settings"
+	}
 	if settings.Invalid || settings.ExpectedTargets < 1 || settings.ExpectedTargets > probeSettings.MaxTargetCount ||
 		len(settings.Targets) != settings.ExpectedTargets {
 		return nil, "target-denominator"

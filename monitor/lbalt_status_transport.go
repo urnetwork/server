@@ -22,16 +22,23 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // warpctl's status error rule (docker.go IsError)
 var lbAltStatusErrorPattern = regexp.MustCompile(`^(?i)error(\s|:)`)
 
 // The native adapter: one attempt under the attempt timeout, or the runner's
-// command timeout when that is shorter.
+// command timeout when that is shorter. Missing settings, or a non-positive
+// attempt timeout, expire the attempt at its start, and the transport refuses
+// them as configuration before it reads that context.
 func (self *runner) lbAltStatus(ctx context.Context, request LbAltStatusRequest, settings *LbAltStatusProbeSettings) (LbAltStatusObservation, error) {
-	timeout := settings.AttemptTimeout
-	if self.cfg.commandTimeout > 0 && self.cfg.commandTimeout < timeout {
+	var timeout time.Duration
+	if settings != nil {
+		timeout = settings.AttemptTimeout
+	}
+	if 0 < self.cfg.commandTimeout && self.cfg.commandTimeout < timeout {
 		timeout = self.cfg.commandTimeout
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -51,6 +58,12 @@ func observeLbAltStatus(
 ) (observation LbAltStatusObservation, resultErr error) {
 	observation.AttemptId = request.AttemptId
 	observation.RequestedTuple = lbAltStatusTuple(request)
+	// Before the context: a non-positive attempt timeout expires the attempt
+	// at its start, which is a configuration fact and never a timeout.
+	if settings == nil || settings.AttemptTimeout <= 0 || settings.ResponseBodyByteLimit <= 0 {
+		observation.Failure = LbAltStatusFailureConfiguration
+		return observation, errors.New("lb status probe settings invalid")
+	}
 	if err := ctx.Err(); err != nil {
 		return observation, err
 	}
@@ -67,8 +80,7 @@ func observeLbAltStatus(
 	}
 	if err != nil || scheme == "" || request.AttemptId == "" || !publicUdpServerName(request.ServerName) ||
 		(request.Family != "ipv4" && request.Family != "ipv6") || (request.Family == "ipv4") != pin.Addr().Is4() ||
-		routePrefix == request.Path || !lbAltStatusRoutePrefixValid(routePrefix) ||
-		settings == nil || settings.ResponseBodyByteLimit <= 0 {
+		routePrefix == request.Path || !lbAltStatusRoutePrefixValid(routePrefix) {
 		observation.Failure = LbAltStatusFailureConfiguration
 		return observation, errors.New("lb status request authority invalid")
 	}
@@ -126,10 +138,30 @@ func observeLbAltStatus(
 		observation.FreshConnection = connected && dials == 1
 		return connected
 	}
-	// a broken exchange keeps its fixed failure, and only cancellation or
-	// expiry of the attempt itself replaces the fixed error
+	// A broken exchange keeps its fixed failure, and only cancellation or
+	// expiry of the attempt itself replaces the fixed error. Whether a dial
+	// connected tells a refused or unrouted connection apart from an exchange
+	// that broke after it was made.
 	incomplete := func(err error, text string) (LbAltStatusObservation, error) {
-		observation.Failure = lbAltStatusFailureOf(err, readConnection())
+		connected := readConnection()
+		var certificateErr *tls.CertificateVerificationError
+		var timeoutErr net.Error
+		switch {
+		case errors.As(err, &certificateErr):
+			observation.Failure = LbAltStatusFailureTls
+		case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeoutErr) && timeoutErr.Timeout():
+			observation.Failure = LbAltStatusFailureTimeout
+		case connected:
+			observation.Failure = LbAltStatusFailureRequest
+		case errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT):
+			// The monitor host has no route or address in the pin's family.
+			// EHOSTUNREACH is not one of these: a TCP connect also reports a
+			// router's ICMP host unreachable with it, as for a down edge
+			// interface, so it stays a connect failure on the path.
+			observation.Failure = LbAltStatusFailureRoute
+		default:
+			observation.Failure = LbAltStatusFailureConnect
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return observation, ctxErr
 		}
@@ -152,7 +184,18 @@ func observeLbAltStatus(
 		observation.TlsVerified = response.TLS != nil && response.TLS.HandshakeComplete && 0 < len(response.TLS.VerifiedChains)
 	}
 	observation.JsonContentType = publicUdpJsonContentType(response.Header)
-	observation.FrontReadiness = lbAltStatusFrontReadinessOf(response.Header)
+	// X-UR-Front-Ready as a fixed domain: one "1" or one "0", or absent
+	frontReadyValues := response.Header.Values(lbAltStatusFrontReadyHeader)
+	switch {
+	case len(frontReadyValues) == 0:
+		observation.FrontReadiness = LbAltStatusFrontReadinessAbsent
+	case len(frontReadyValues) == 1 && frontReadyValues[0] == "1":
+		observation.FrontReadiness = LbAltStatusFrontReadinessReady
+	case len(frontReadyValues) == 1 && frontReadyValues[0] == "0":
+		observation.FrontReadiness = LbAltStatusFrontReadinessNotReady
+	default:
+		observation.FrontReadiness = LbAltStatusFrontReadinessInvalid
+	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, int64(settings.ResponseBodyByteLimit)+1))
 	if err != nil {
 		return incomplete(err, "lb status response incomplete")
@@ -195,38 +238,4 @@ func observeLbAltStatus(
 		statusBody.Service != nil && *statusBody.Service == request.Service &&
 		statusBody.Block != nil && *statusBody.Block == request.Block
 	return observation, nil
-}
-
-// The fixed failure of an exchange that broke. connected tells a refused or
-// unrouted connection apart from an exchange that broke after it was made.
-func lbAltStatusFailureOf(err error, connected bool) LbAltStatusFailure {
-	var certificateErr *tls.CertificateVerificationError
-	var timeoutErr net.Error
-	switch {
-	case errors.As(err, &certificateErr):
-		return LbAltStatusFailureTls
-	case errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeoutErr) && timeoutErr.Timeout():
-		return LbAltStatusFailureTimeout
-	case !connected && publicUdpRouteError(err):
-		return LbAltStatusFailureRoute
-	case !connected:
-		return LbAltStatusFailureConnect
-	default:
-		return LbAltStatusFailureRequest
-	}
-}
-
-// X-UR-Front-Ready as a fixed domain: one "1" or one "0", or absent.
-func lbAltStatusFrontReadinessOf(header http.Header) LbAltStatusFrontReadiness {
-	values := header.Values(lbAltStatusFrontReadyHeader)
-	switch {
-	case len(values) == 0:
-		return LbAltStatusFrontReadinessAbsent
-	case len(values) == 1 && values[0] == "1":
-		return LbAltStatusFrontReadinessReady
-	case len(values) == 1 && values[0] == "0":
-		return LbAltStatusFrontReadinessNotReady
-	default:
-		return LbAltStatusFrontReadinessInvalid
-	}
 }

@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -324,6 +325,37 @@ func TestLbAltStatusBodyPastItsBoundFails(t *testing.T) {
 	}
 }
 
+// The response header is read through its bound too: past it the exchange is
+// a path failure with fixed text, while the same answer under the default
+// bound is healthy, so only the bound refused it. No header text reaches a
+// diagnostic.
+func TestLbAltStatusResponseHeaderPastItsBoundFails(t *testing.T) {
+	const marker = "synthetic-header-marker"
+	front := &lbAltStatusTestFront{answer: func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Synthetic-Padding", marker+strings.Repeat("p", 4*1024))
+		lbAltStatusTestHealthyAnswer(w, r)
+	}}
+	server, _ := lbAltStatusTestServer(t, front, false)
+	request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, "")
+	bounded := DefaultLbAltStatusProbeSettings()
+	bounded.ResponseHeaderByteLimit = 1024
+	observed, err, dialer := lbAltStatusTestObserve(t, context.Background(), request, server, nil, bounded)
+	verdict := lbAltStatusEvaluate(request, observed, err, bounded)
+	if err == nil || observed.Failure != LbAltStatusFailureRequest || observed.StatusCode != 0 || !observed.FreshConnection ||
+		dialer.dialCount() != 1 || verdict != (lbAltStatusVerdict{path: true, reason: "request-failed"}) {
+		t.Fatalf("a header past its bound gave %+v %+v err=%v", observed, verdict, err)
+	}
+	for _, text := range []string{fmt.Sprintf("%+v", observed), fmt.Sprintf("%+v", verdict), err.Error()} {
+		if strings.Contains(text, marker) || strings.Contains(text, lbAltStatusTestPrefix) {
+			t.Fatalf("a diagnostic carried the header or the prefix: %s", text)
+		}
+	}
+	observed, err, _ = lbAltStatusTestObserve(t, context.Background(), request, server, nil, DefaultLbAltStatusProbeSettings())
+	if verdict := lbAltStatusEvaluate(request, observed, err, DefaultLbAltStatusProbeSettings()); err != nil || !verdict.healthy {
+		t.Fatalf("the same answer under the default bound gave %+v %+v err=%v", observed, verdict, err)
+	}
+}
+
 // Every block is probed through its own hidden route on 443, over TLS
 // verified for the lb name, which is also the SNI and the Host, and each
 // block's own answer is healthy.
@@ -416,8 +448,10 @@ func TestLbAltStatusUnverifiedCertificateIsUnknown(t *testing.T) {
 	}
 }
 
-// A refused connection is a path failure; a missing route on the monitor host
-// is unknown; an exchange the front breaks after accepting is a path failure.
+// A refused connection is a path failure, and so is a host a router reports
+// unreachable, as for a down edge interface; a missing route, address or
+// family on the monitor host is unknown; an exchange the front breaks after
+// accepting is a path failure.
 func TestLbAltStatusConnectionFailuresAreClassified(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -425,8 +459,18 @@ func TestLbAltStatusConnectionFailuresAreClassified(t *testing.T) {
 		verdict lbAltStatusVerdict
 	}{
 		{name: "a refused connection", dialErr: &net.OpError{Op: "dial", Net: "tcp4", Err: syscall.ECONNREFUSED}, verdict: lbAltStatusVerdict{path: true, reason: "connect-failed"}},
+		{
+			name:    "an unreachable host",
+			dialErr: &net.OpError{Op: "dial", Net: "tcp6", Err: os.NewSyscallError("connect", syscall.EHOSTUNREACH)},
+			verdict: lbAltStatusVerdict{path: true, reason: "connect-failed"},
+		},
 		{name: "no route", dialErr: &net.OpError{Op: "dial", Net: "tcp6", Err: syscall.ENETUNREACH}, verdict: lbAltStatusVerdict{reason: "observer-route-unavailable"}},
 		{name: "no address", dialErr: &net.OpError{Op: "dial", Net: "tcp6", Err: syscall.EADDRNOTAVAIL}, verdict: lbAltStatusVerdict{reason: "observer-route-unavailable"}},
+		{
+			name:    "no family",
+			dialErr: &net.OpError{Op: "dial", Net: "tcp6", Err: os.NewSyscallError("socket", syscall.EAFNOSUPPORT)},
+			verdict: lbAltStatusVerdict{reason: "observer-route-unavailable"},
+		},
 	}
 	for _, c := range cases {
 		request := lbAltStatusTestRequest(t, "ipv6", lbAltStatusRouteLb, "")
@@ -558,13 +602,17 @@ func TestLbAltStatusDiagnosticsKeepThePrefixAndClientAddressPrivate(t *testing.T
 
 // A request outside the transport's authority never dials: a route on the
 // other port, a path that is not its route's, a family its address lacks, a
-// missing attempt id or an unbounded body.
+// missing attempt id, an unbounded body or an attempt with no positive bound.
 func TestLbAltStatusTransportRefusesARequestOutsideItsAuthority(t *testing.T) {
 	lbRequest := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, "")
 	blockRequest := lbAltStatusTestRequest(t, "ipv6", lbAltStatusRouteBlock, "g1")
 	bounded := DefaultLbAltStatusProbeSettings()
 	unbounded := DefaultLbAltStatusProbeSettings()
 	unbounded.ResponseBodyByteLimit = 0
+	untimed := DefaultLbAltStatusProbeSettings()
+	untimed.AttemptTimeout = 0
+	negativelyTimed := DefaultLbAltStatusProbeSettings()
+	negativelyTimed.AttemptTimeout = -time.Second
 	cases := []struct {
 		name     string
 		request  LbAltStatusRequest
@@ -587,6 +635,8 @@ func TestLbAltStatusTransportRefusesARequestOutsideItsAuthority(t *testing.T) {
 		{name: "an uppercase lb name", request: lbRequest, mutate: func(request *LbAltStatusRequest) { request.ServerName = "Synthetic-lb.edge.example" }, settings: bounded},
 		{name: "no attempt id", request: lbRequest, mutate: func(request *LbAltStatusRequest) { request.AttemptId = "" }, settings: bounded},
 		{name: "an unbounded body", request: lbRequest, mutate: func(*LbAltStatusRequest) {}, settings: unbounded},
+		{name: "no attempt timeout", request: blockRequest, mutate: func(*LbAltStatusRequest) {}, settings: untimed},
+		{name: "a negative attempt timeout", request: lbRequest, mutate: func(*LbAltStatusRequest) {}, settings: negativelyTimed},
 		{name: "no settings", request: lbRequest, mutate: func(*LbAltStatusRequest) {}, settings: nil},
 	}
 	for _, c := range cases {
@@ -599,6 +649,26 @@ func TestLbAltStatusTransportRefusesARequestOutsideItsAuthority(t *testing.T) {
 		}, nil)
 		if err == nil || dials != 0 || observed.Failure != LbAltStatusFailureConfiguration || observed.Dialed {
 			t.Errorf("%s: dials=%d failure=%s err=%v", c.name, dials, observed.Failure, err)
+		}
+	}
+}
+
+// The native adapter refuses settings with no positive attempt timeout, and
+// missing settings, as configuration before any dial. Such a timeout expires
+// the attempt's context at its start, which is no timeout of the path.
+func TestLbAltStatusNativeAdapterRefusesAnAttemptWithNoPositiveBound(t *testing.T) {
+	untimed := DefaultLbAltStatusProbeSettings()
+	untimed.AttemptTimeout = 0
+	negativelyTimed := DefaultLbAltStatusProbeSettings()
+	negativelyTimed.AttemptTimeout = -time.Second
+	native := &runner{cfg: &monitorConfig{commandTimeout: time.Minute}}
+	for index, settings := range []*LbAltStatusProbeSettings{untimed, negativelyTimed, nil} {
+		request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, "")
+		observed, err := native.lbAltStatus(context.Background(), request, settings)
+		verdict := lbAltStatusEvaluate(request, observed, err, DefaultLbAltStatusProbeSettings())
+		if err == nil || observed.Failure != LbAltStatusFailureConfiguration || observed.Dialed ||
+			verdict != (lbAltStatusVerdict{reason: "configuration-invalid"}) {
+			t.Errorf("settings %d: %+v gave %+v err=%v", index, observed, verdict, err)
 		}
 	}
 }
