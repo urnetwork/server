@@ -93,8 +93,8 @@ func sessionKindLabel(class string) string {
 // decision 6), and the retained marker cap.
 type SessionCapPolicy struct {
 	// The most live sessions of a network the cap counts: every live session
-	// except the client sessions whose client provides publicly. Zero or less
-	// is no cap.
+	// except the client sessions whose client is exempt from the client caps
+	// (ClientCapExemptUntilInTx). Zero or less is no cap.
 	Live int
 	// The most retained revocation markers of a network: revoked sessions
 	// whose horizon has not ended. Zero or less is no cap.
@@ -136,27 +136,41 @@ func Testing_SetSessionCapPolicy(policy SessionCapPolicy) func() {
 	return func() { sessionCapPolicyOverride.Store(old) }
 }
 
-// Whether a client provides publicly (model's one provider predicate,
-// ClientProvidesPubliclyInTx). A top-level client's own session is excluded
-// from the session cap while it does.
-type ClientProvideEnabledInTx func(ctx context.Context, tx server.PgTx, clientId server.Id) (bool, error)
+// When a top-level client's exemption from the client caps ends, or the zero
+// time when it is not exempt now (model's one predicate,
+// ClientCapExemptUntil, owner decision 2026-11-18: declared provide intent,
+// pending or qualified, with a live intent presence; or a provider install
+// not yet connected). A top-level client's own session is excluded from the
+// session cap until then.
+type ClientCapExemptUntilInTx func(ctx context.Context, tx server.PgTx, networkId server.Id, clientId server.Id) (time.Time, error)
 
-var clientProvideEnabledInTx atomic.Pointer[ClientProvideEnabledInTx]
+var clientCapExemptUntilInTx atomic.Pointer[ClientCapExemptUntilInTx]
 
-// SetClientProvideEnabledInTx sets the provider predicate mints read. model
-// registers it at init; without one no session is provider-exempt.
-func SetClientProvideEnabledInTx(predicate ClientProvideEnabledInTx) {
-	clientProvideEnabledInTx.Store(&predicate)
+// SetClientCapExemptUntilInTx sets the exemption mints read. model registers
+// it at init; without one no session is exempt.
+func SetClientCapExemptUntilInTx(predicate ClientCapExemptUntilInTx) {
+	clientCapExemptUntilInTx.Store(&predicate)
 }
 
 // The exemption a mint asks for (the mint script's exempt argument): the
-// top-level client minting its own session decides it; any other mint keeps
-// what the session has.
+// top-level client minting its own session decides it, as the decimal unix
+// milli its exemption ends at, or sessionExemptNo; any other mint keeps what
+// the session has. The session's entry in the exempt index (xz) is scored by
+// the first of that end and the session's acceptance horizon, so the
+// exemption lapses on its own when nothing renews it.
 const (
 	sessionExemptKeep = "keep"
-	sessionExemptYes  = "1"
 	sessionExemptNo   = "0"
 )
+
+// The mint and exempt scripts' argument for an exemption ending at exemptUntil
+// (the zero time: none).
+func sessionExemptArg(exemptUntil time.Time) string {
+	if exemptUntil.IsZero() {
+		return sessionExemptNo
+	}
+	return strconv.FormatInt(exemptUntil.UnixMilli(), 10)
+}
 
 // The exemption a client credential's mint sets, read in its transaction. Only
 // the top-level client decides: a child carries its root's session.
@@ -164,18 +178,15 @@ func sessionMintExemption(ctx context.Context, tx server.PgTx, credential *ByJwt
 	if credential.ClientId == nil || credential.RootClientId == nil || *credential.ClientId != *credential.RootClientId {
 		return sessionExemptKeep, nil
 	}
-	predicate := clientProvideEnabledInTx.Load()
+	predicate := clientCapExemptUntilInTx.Load()
 	if predicate == nil {
 		return sessionExemptNo, nil
 	}
-	enabled, err := (*predicate)(ctx, tx, *credential.ClientId)
+	exemptUntil, err := (*predicate)(ctx, tx, credential.NetworkId, *credential.ClientId)
 	if err != nil {
 		return "", err
 	}
-	if enabled {
-		return sessionExemptYes, nil
-	}
-	return sessionExemptNo, nil
+	return sessionExemptArg(exemptUntil), nil
 }
 
 // Counts a mint the cap refused, or would have.
@@ -258,32 +269,31 @@ func FreeClientSessions(ctx context.Context, networkId server.Id, sessionIds []s
 	return freed, nil
 }
 
-// Sets whether a live client session is provider-exempt from the cap. Only a
-// live, unrevoked client session changes. KEYS: the shared keys, then s: and
-// r: of the session; ARGV[3] the session, ARGV[4] '1' exempt or '0'.
+// Sets until when a live client session is exempt from the cap (its
+// client's exemption from the client caps). Only a live, unrevoked client
+// session changes. KEYS: the shared keys, then s: and r: of the session;
+// ARGV[3] the session, ARGV[4] the exemption's end in unix milli, or '0'.
 const sessionExemptLua = sessionLuaCommon + `
 local sid=ARGV[3];local S,R=KEYS[SHARED+1],KEYS[SHARED+2]
 local accept=redis.call('ZSCORE',KEYS[1],sid)
 if not accept or tonumber(accept)<=now or redis.call('EXISTS',R)==1 then return '{"changed":0}' end
 if not clientclass[redis.call('HGET',S,'class')] or redis.call('HGET',S,'network')=='1' then return '{"changed":0}' end
+local exemptuntil=tonumber(ARGV[4]) or 0
 local updated=0
-if ARGV[4]=='1' then updated=redis.call('ZADD',KEYS[5],accept,sid) else updated=redis.call('ZREM',KEYS[5],sid) end
+if exemptuntil>now then updated=redis.call('ZADD',KEYS[5],math.min(exemptuntil,tonumber(accept)),sid) else updated=redis.call('ZREM',KEYS[5],sid) end
 local maximum=redis.call('ZREVRANGE',KEYS[2],0,0,'WITHSCORES')
 extend(KEYS[5],tonumber(maximum[2]) or tonumber(accept))
 return '{"changed":'..updated..'}'
 `
 
-// UpdateSessionProvideExemption records a top-level client's change of
-// provide state on its own client session (the provider exemption a mint sets
-// otherwise only at the session's next mint). Best effort: a failure leaves
-// the exemption to the session's next mint.
-func UpdateSessionProvideExemption(ctx context.Context, networkId, sessionId server.Id, exempt bool) error {
-	value := sessionExemptNo
-	if exempt {
-		value = sessionExemptYes
-	}
+// UpdateSessionCapExemption records a top-level client's exemption from the
+// client caps on its own client session, until exemptUntil (the zero time:
+// not exempt), after a write of the client's intent state
+// (model.mirrorClientCapSessionExemption). A mint of the client records it
+// too.
+func UpdateSessionCapExemption(ctx context.Context, networkId, sessionId server.Id, exemptUntil time.Time) error {
 	keys := append(sessionSharedKeys(networkId), SessionKey(networkId, "s:"+sessionId.String()), SessionMarkerKey(networkId, sessionId))
-	return sessionEval(ctx, sessionExemptLua, keys, []any{server.NowUtc().UnixMilli(), server.NewId().String(), sessionId.String(), value}, nil)
+	return sessionEval(ctx, sessionExemptLua, keys, []any{server.NowUtc().UnixMilli(), server.NewId().String(), sessionId.String(), sessionExemptArg(exemptUntil)}, nil)
 }
 
 // How many networks one pipeline of a sample pass reads.

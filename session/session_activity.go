@@ -65,7 +65,7 @@ func (self *ClientSession) LastUsedObservation(now time.Time) *SessionLastUsed {
 	if info.DeviceType == "" {
 		info = UnknownClientInfo()
 	}
-	observation := &SessionLastUsed{UnixTime: now.Unix(), DeviceType: info.DeviceType, AppVersion: info.AppVersion}
+	observation := &SessionLastUsed{UnixTime: now.Unix(), DeviceType: info.DeviceType, AppVersion: info.AppVersion, Distribution: info.Distribution}
 	if ip, _, err := self.ParseClientIpPort(); err == nil {
 		if place, err := server.GetIpInfo(ip); err == nil && place != nil {
 			observation.City = place.City

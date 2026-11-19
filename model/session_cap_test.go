@@ -38,15 +38,3 @@ func TestSessionCapPolicyFollowsPro(t *testing.T) {
 	connect.AssertEqual(t, 0, (&ProConfig{}).SessionCapPolicy().Live)
 	connect.AssertEqual(t, 0, (&ProConfig{MaxSessions: -1}).SessionCapPolicy().Live)
 }
-
-// One predicate tells a provider apart for both client caps: a registered
-// Public provide key. Stream alone, which every client registers for its
-// return traffic, never does.
-func TestProvideKeysProvidePubliclyIsThePublicKey(t *testing.T) {
-	key := []byte{1}
-	connect.AssertEqual(t, false, provideKeysProvidePublicly(map[ProvideMode][]byte{}))
-	connect.AssertEqual(t, false, provideKeysProvidePublicly(map[ProvideMode][]byte{ProvideModeStream: key}))
-	connect.AssertEqual(t, false, provideKeysProvidePublicly(map[ProvideMode][]byte{ProvideModeStream: key, ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key}))
-	connect.AssertEqual(t, true, provideKeysProvidePublicly(map[ProvideMode][]byte{ProvideModeStream: key, ProvideModePublic: key}))
-	connect.AssertEqual(t, `EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = $1 AND provide_key.provide_mode = ANY('{3}'::int[]))`, clientProvidesPubliclySql("$1"))
-}
