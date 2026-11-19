@@ -142,6 +142,13 @@ func runWithDependencies(
 	if err := validateRunListenIPv4(options, listenIPv4); err != nil {
 		return err
 	}
+	// the lb_alt front (LBALT-IMPL.md §2.8): its route file and every
+	// certificate load before /status first answers, and a failure fails the
+	// start. Without WARP_LBALT_ROUTE_FILE it is nil and nothing changes.
+	publicFront, frontErr := newFrontServerFromEnv()
+	if frontErr != nil {
+		return fmt.Errorf("load the lb_alt front: %w", frontErr)
+	}
 	ConfigureMessagePools()
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -151,7 +158,7 @@ func runWithDependencies(
 	stopStartup := context.AfterFunc(ctx, cancel)
 	defer stopStartup()
 	routes := []*router.Route{}
-	statusHandler := options.WarpStatus.Handler
+	statusHandler := frontStatusHandler(publicFront, options.WarpStatus)
 	var exchange *Exchange
 	if err := readiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
@@ -186,9 +193,9 @@ func runWithDependencies(
 			return fmt.Errorf("initialize Connect ingress: %w", err)
 		}
 		statusHandler = func(w http.ResponseWriter, r *http.Request) {
-			connectRouter.statusWithWarpStatus(w, r, options.WarpStatus)
+			connectRouter.statusWithWarpStatus(w, r, options.WarpStatus, publicFront)
 		}
-		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
+		routes = append(routes, newConnectRoutes(connectRouter.Connect)...)
 		privateProfile, privateProfileErr := startPrivateHeapProfile(runCtx, options.PrivateHeapProfileTarget, exchange, connectRouter.connectHandler)
 		if privateProfileErr != nil {
 			// Optional diagnostics must not gate serving or expose private paths.
@@ -196,6 +203,14 @@ func runWithDependencies(
 		}
 		defer privateProfile.Close()
 		server.Warmup(connectWarmupTargets()...)
+		if publicFront != nil {
+			// every public socket is bound before the private listener below
+			// first answers /status
+			if err := publicFront.startWithRouter(runCtx, connectRouter); err != nil {
+				return fmt.Errorf("start the lb_alt front: %w", err)
+			}
+			defer publicFront.close()
+		}
 		// Only admitted candidates publish a process-identity metrics cohort.
 		flushStats = startStatsPusher(runCtx)
 	}
@@ -203,18 +218,31 @@ func runWithDependencies(
 	stopStartup()
 
 	draining := make(chan struct{})
+	drainDone := make(chan struct{})
 	go func() {
+		defer close(drainDone)
 		select {
 		case <-ctx.Done():
-			options.WarpStatus.SetDrainingIfReady()
-			if exchange != nil {
-				exchange.Drain()
-			}
-			cancel()
+			// D12's order, with the front draining alongside the exchange
+			// while its transports can still send (front_drain.go)
+			drainConnect(options.WarpStatus, publicFront, func() {
+				if exchange != nil {
+					timeout := exchange.settings.DrainAllTimeout
+					if publicFront != nil {
+						if frontTimeout := publicFront.settings.drainDeadlineTimeout(); 0 < frontTimeout {
+							timeout = min(timeout, frontTimeout)
+						}
+					}
+					exchange.drainFor(timeout)
+				}
+			}, cancel)
 		case <-draining:
 		}
 	}()
-	defer close(draining)
+	defer func() {
+		close(draining)
+		<-drainDone
+	}()
 
 	go server.HandleError(func() {
 		for {

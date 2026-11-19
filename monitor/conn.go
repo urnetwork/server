@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -228,6 +229,8 @@ type monitorConfig struct {
 	pgQuerySampleUntil      time.Time
 	pgQuerySampleContinuous bool
 	publicUdp               PublicUdpSettings
+	// the lb status enrollment (§16.10), with the services.yml route prefix
+	lbAltStatus LbAltStatusSettings
 	// the operator's observer overlay route contract (§1.7)
 	observerOverlay ObserverOverlaySettings
 
@@ -359,6 +362,14 @@ type runner struct {
 	// the TLS configuration of DoH questions (dnsDohTxt); nil verifies against
 	// the system roots. Only tests set it, to trust an in-process DoH server.
 	dohTLSConfig *tls.Config
+	// dials the pin of an lb status attempt (lbAltStatus); nil is a fresh
+	// net.Dialer's. Only tests set it, to stand a loopback server in for the
+	// pin and see the deadline the dial runs under.
+	lbAltStatusDial func(ctx context.Context, network string, address string) (net.Conn, error)
+	// opens the socket of a public UDP attempt (publicUdp); nil is a fresh
+	// net.ListenConfig's. Only tests set it, to see the deadline the socket
+	// is opened under.
+	publicUdpListen func(ctx context.Context, network string, address string) (net.PacketConn, error)
 }
 
 func newRunner(cfg *monitorConfig) *runner {

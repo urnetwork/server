@@ -2384,11 +2384,16 @@ func (self *Exchange) drainClientCountLocked() int {
 //
 // The whole drain is bounded by `DrainAllTimeout`.
 func (self *Exchange) Drain() {
+	self.drainFor(self.settings.DrainAllTimeout)
+}
+
+// Uses the caller's shutdown budget for migrations and the straggler sweep.
+func (self *Exchange) drainFor(timeout time.Duration) {
 	self.draining.Store(true)
 	if self.settings.EnableDrainCoordination {
 		self.wakeResidentWaiters()
 	}
-	drainEndTime := time.Now().Add(self.settings.DrainAllTimeout)
+	drainEndTime := time.Now().Add(timeout)
 
 	residents, connectionOnlyClientIds := func() ([]*Resident, []server.Id) {
 		self.stateLock.Lock()

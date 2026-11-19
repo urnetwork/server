@@ -1,0 +1,420 @@
+{
+  "schema_version": 1,
+  "env": "test",
+  "host": "edge-a.example",
+  "generation": "test-connect-g1-parity",
+  "domains": [
+    "service.example",
+    "other.example"
+  ],
+  "upstream": {
+    "host": "warpservices",
+    "ipv4": "192.0.2.1"
+  },
+  "lb": {
+    "names": [
+      "test-lb.service.example",
+      "test-lb.other.example"
+    ],
+    "route_prefixes": [
+      "/hidden-parity"
+    ]
+  },
+  "no_access_log": [
+    "quiet.service.example"
+  ],
+  "interfaces": [
+    {
+      "name": "eth1",
+      "block": "edge-a.example-eth1",
+      "lb_alt": true,
+      "ipv4": "198.51.100.1",
+      "ipv6": "2001:db8:1::1",
+      "rate_limit": {
+        "requests_per_minute": 1,
+        "burst": 9,
+        "net_connections": 3,
+        "exclude_subnets": [
+          "2001:db8:c::/48",
+          "203.0.113.0/24"
+        ]
+      }
+    }
+  ],
+  "listen": {
+    "http_port": 7080,
+    "https_port": 7443,
+    "quic_port": 7443,
+    "whodis_port": 7453
+  },
+  "front": {
+    "connect_service": "connect",
+    "api_service": "api",
+    "whodis_tlds": [
+      "whodis.example."
+    ]
+  },
+  "services": [
+    {
+      "name": "api",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "api.service.example",
+        "test-api.other.example",
+        "test-api.service.example"
+      ],
+      "redirect_aliases": [
+        {
+          "name": "old-api.service.example",
+          "target": "api.service.example"
+        }
+      ],
+      "cors_origins": [
+        "https://app.service.example",
+        "https://console.service.example"
+      ],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [
+        {
+          "path": "/connect/control",
+          "requests_per_minute": 1,
+          "burst": 3
+        }
+      ],
+      "route_request_bodies": [
+        {
+          "path": "/sn/attempt-artifact",
+          "client_body_buffer_size": 65536,
+          "client_body_timeout_seconds": 20
+        }
+      ],
+      "no_success_access_log": [
+        "/hello"
+      ],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7004
+        },
+        {
+          "name": "g2",
+          "weight": 1,
+          "port": 7005
+        }
+      ]
+    },
+    {
+      "name": "connect",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "*.connect.service.example",
+        "connect.service.example",
+        "test-connect.other.example",
+        "test-connect.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": true,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 0,
+        "requests": 0,
+        "time_seconds": 0,
+        "timeout_seconds": 0
+      },
+      "blocks": [
+        {
+          "name": "beta",
+          "weight": 1,
+          "port": 7006
+        },
+        {
+          "name": "g1",
+          "weight": 3,
+          "port": 7009
+        }
+      ]
+    },
+    {
+      "name": "mcp",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "mcp.service.example",
+        "test-mcp.other.example",
+        "test-mcp.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [
+        "https://app.service.example",
+        "https://console.service.example"
+      ],
+      "websocket": false,
+      "streamable": true,
+      "streamable_paths": [],
+      "stateful": true,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "beta",
+          "weight": 1,
+          "port": 7012
+        },
+        {
+          "name": "g1",
+          "weight": 24,
+          "port": 7013
+        },
+        {
+          "name": "g2",
+          "weight": 25,
+          "port": 7014
+        },
+        {
+          "name": "g3",
+          "weight": 25,
+          "port": 7015
+        },
+        {
+          "name": "g4",
+          "weight": 25,
+          "port": 7016
+        }
+      ]
+    },
+    {
+      "name": "pool",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "pool.service.example",
+        "test-pool.other.example",
+        "test-pool.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "beta",
+          "weight": 1,
+          "port": 7017
+        },
+        {
+          "name": "g1",
+          "weight": 2,
+          "port": 7018
+        },
+        {
+          "name": "g2",
+          "weight": 3,
+          "port": 7019
+        }
+      ]
+    },
+    {
+      "name": "relay",
+      "exposed": true,
+      "lb_exposed": false,
+      "status": "none",
+      "names": [
+        "relay.service.example",
+        "test-relay.other.example",
+        "test-relay.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": true,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        "/relay-prefix"
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7020
+        }
+      ]
+    },
+    {
+      "name": "web",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "exact.wild.service.example",
+        "quiet.service.example",
+        "test-web.other.example",
+        "test-web.service.example",
+        "web.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [
+        "*"
+      ],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [
+        "/stream/.*"
+      ],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7021
+        }
+      ]
+    },
+    {
+      "name": "wild",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "*.wild.service.example",
+        "test-wild.other.example",
+        "test-wild.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7022
+        }
+      ]
+    },
+    {
+      "name": "worker",
+      "exposed": false,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7023
+        },
+        {
+          "name": "g2",
+          "weight": 1,
+          "port": 7024
+        }
+      ]
+    }
+  ]
+}

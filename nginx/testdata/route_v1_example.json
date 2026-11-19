@@ -1,0 +1,218 @@
+{
+  "schema_version": 1,
+  "env": "test",
+  "host": "edge-a.example",
+  "generation": "test-connect-g1-0123456789abcdef",
+  "domains": [
+    "service.example",
+    "other.example"
+  ],
+  "upstream": {
+    "host": "warpservices",
+    "ipv4": "192.0.2.1"
+  },
+  "lb": {
+    "names": [
+      "test-lb.service.example",
+      "test-lb.other.example"
+    ],
+    "route_prefixes": [
+      "/hidden-example"
+    ]
+  },
+  "no_access_log": [
+    "quiet.service.example"
+  ],
+  "interfaces": [
+    {
+      "name": "eth1",
+      "block": "edge-a.example-eth1",
+      "lb_alt": true,
+      "ipv4": "198.51.100.1",
+      "ipv6": "2001:db8:1::1",
+      "rate_limit": {
+        "requests_per_minute": 450,
+        "burst": 150,
+        "net_connections": 50,
+        "exclude_subnets": [
+          "10.0.0.0/8",
+          "172.16.0.0/12"
+        ]
+      }
+    },
+    {
+      "name": "eth2",
+      "block": "edge-a.example-eth2",
+      "lb_alt": false,
+      "ipv4": "198.51.100.2",
+      "ipv6": "",
+      "rate_limit": {
+        "requests_per_minute": 450,
+        "burst": 150,
+        "net_connections": 50,
+        "exclude_subnets": [
+          "10.0.0.0/8",
+          "172.16.0.0/12"
+        ]
+      }
+    }
+  ],
+  "listen": {
+    "http_port": 7080,
+    "https_port": 7443,
+    "quic_port": 7443,
+    "whodis_port": 7453
+  },
+  "front": {
+    "connect_service": "connect",
+    "api_service": "api",
+    "whodis_tlds": [
+      "whodis.example."
+    ]
+  },
+  "services": [
+    {
+      "name": "api",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "api.service.example",
+        "test-api.other.example",
+        "test-api.service.example"
+      ],
+      "redirect_aliases": [
+        {
+          "name": "old-api.service.example",
+          "target": "api.service.example"
+        }
+      ],
+      "cors_origins": [
+        "https://app.service.example"
+      ],
+      "websocket": false,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [
+        {
+          "path": "/connect/control",
+          "requests_per_minute": 12000,
+          "burst": 6000
+        }
+      ],
+      "route_request_bodies": [
+        {
+          "path": "/upload/artifact",
+          "client_body_buffer_size": 65536,
+          "client_body_timeout_seconds": 60
+        }
+      ],
+      "no_success_access_log": [
+        "/connect/control",
+        "/hello"
+      ],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7101
+        },
+        {
+          "name": "g2",
+          "weight": 1,
+          "port": 7102
+        }
+      ]
+    },
+    {
+      "name": "connect",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "*.connect.service.example",
+        "connect.service.example",
+        "test-connect.other.example",
+        "test-connect.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [],
+      "websocket": true,
+      "streamable": false,
+      "streamable_paths": [],
+      "stateful": false,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "beta",
+          "weight": 1,
+          "port": 7201
+        },
+        {
+          "name": "g1",
+          "weight": 3,
+          "port": 7202
+        }
+      ]
+    },
+    {
+      "name": "mcp",
+      "exposed": true,
+      "lb_exposed": true,
+      "status": "standard",
+      "names": [
+        "mcp.service.example",
+        "test-mcp.other.example",
+        "test-mcp.service.example"
+      ],
+      "redirect_aliases": [],
+      "cors_origins": [
+        "https://app.service.example"
+      ],
+      "websocket": false,
+      "streamable": true,
+      "streamable_paths": [],
+      "stateful": true,
+      "route_prefixes": [
+        ""
+      ],
+      "route_rate_limits": [],
+      "route_request_bodies": [],
+      "no_success_access_log": [],
+      "keepalive": {
+        "connections": 1024,
+        "requests": 8192,
+        "time_seconds": 900,
+        "timeout_seconds": 60
+      },
+      "blocks": [
+        {
+          "name": "g1",
+          "weight": 1,
+          "port": 7301
+        }
+      ]
+    }
+  ]
+}

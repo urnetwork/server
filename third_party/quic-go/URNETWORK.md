@@ -2,12 +2,15 @@
 
 This directory is the unmodified source distribution of
 `github.com/quic-go/quic-go v0.61.0` (module zip
-`h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=`), except for the narrowly
-scoped change in `connection.go`, the added `urnetwork_conn_timer_test.go`,
-and the removed upstream `.github/` directory. The upstream MIT license and
-source headers are preserved.
+`h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=`), except for three narrowly
+scoped changes, in `connection.go`, in `http3/server.go`, and in
+`http3/server.go` with `http3/server_conn.go`, the added
+`urnetwork_conn_timer_test.go`, `http3/urnetwork_graceful_goaway_test.go` and
+`http3/urnetwork_read_header_timeout_test.go`, and the removed upstream
+`.github/` directory. The upstream MIT license and source headers are
+preserved.
 
-## The change
+## The run loop timer
 
 A connection's run loop calls `maybeResetTimer` on each iteration, and
 upstream re-arms the loop's timer with `c.timer.Reset(monotime.Until(deadline))`
@@ -35,7 +38,7 @@ The change, all in `connection.go`:
 
 No deadline computation, wake-up condition or timer instant changes.
 
-## Tests
+### Tests
 
 `urnetwork_conn_timer_test.go`, run with `go test -run '^TestUrnetwork' .` in
 this directory:
@@ -50,6 +53,99 @@ this directory:
 The upstream suite passes: `go test -short .` here ran 742 tests with this
 change.
 
-Every main module that wants the change must replace
+## One GOAWAY per connection in a graceful http3 shutdown
+
+`Server.handleConn` accepts a connection's request streams on the server's
+grace context until a graceful shutdown (`Shutdown`) cancels it. The accept
+then fails, and the loop's graceful branch starts a goroutine that writes a
+GOAWAY on the control stream and switches the accept to the server's close
+context, so later streams are refused while the requests in flight finish.
+
+quic-go closes a closing connection's streams before it cancels the
+connection's context. Between the two, an accept fails at once while the
+connection's context and the close context are both live, and upstream's loop
+took the graceful branch again on every pass: another GOAWAY writer each time,
+for as long as the window stayed open. Every connection that closes during a
+graceful shutdown passes through that window: the client closing after the
+GOAWAY, the idle timeout, or a transport destroyed under it. The window stays
+open while the transport's close holds its mutex over its destroy fan-out, and
+while every core is busy, which the spinning loops make worse. URnetwork's alt
+had an exit burst of at least 700k goroutines this way (10-24 to 10-26), and
+the connect front's drain (server LBALT.md D12) shuts each api connection down
+gracefully while its transport is live.
+
+The change, in `http3/server.go`: once the graceful branch has run, so the
+GOAWAY was sent and the accept waits on the close context, an accept failure
+with the close context live can only be the connection closing, and the loop
+ends as it does once the connection's context is canceled, with the same error
+classification. A second GOAWAY is never created. Nothing changes before a
+graceful shutdown, or for a close of the server.
+
+### Tests
+
+`http3/urnetwork_graceful_goaway_test.go`, run with
+`go test -run '^TestUrnetwork' ./http3/` in this directory. A server recorder
+holds the connection inside its close window (quic-go records the close between
+closing the streams and canceling the context) and counts the GOAWAYs the
+server creates. After a graceful shutdown's GOAWAY, the client closes its
+connection in one test and the server's transport loses its socket in the
+other. `ServeQUICConn` must return while the window is held, with one GOAWAY;
+upstream's loop creates a second one at once and never returns while held.
+
+The upstream http3 suite passes with this change: `go test -short ./http3/...`
+here, under `GOFLAGS=-trimpath`, skipping the six tests that read source paths
+at run time (`TestErrorCodes`, `TestServerAltSvcFromUnixSocket`,
+`TestServerClosing`, `TestServerConcurrentServeAndClose`,
+`TestServerImmediateGracefulShutdown`, `TestServerListenAndServeErrors`).
+
+## The header phase of an http3 request stream
+
+`RawServerConn.handleRequestStream` stops the connection's idle timer when a
+request stream starts, parses the stream's first frame, and reads the
+HEADERS frame's field section into a buffer of the length the frame
+announces, up to `MaxHeaderBytes`. Upstream did both with no deadline. A
+stream that announced a length and sent nothing more held its goroutine and
+that buffer, and with the idle timer stopped its connection too, for as long
+as the peer acked the connection's PINGs, which the connect front's public
+QUIC config sends, so the QUIC idle timeout never fired either. An
+unauthenticated address could pin about 7 MiB and 100 goroutines per api
+connection to the front this way (server LBALT final review).
+
+The change, in `http3/server.go` and `http3/server_conn.go`:
+
+- `Server.ReadHeaderTimeout`, passed to each `RawServerConn`. When positive,
+  a request stream's read deadline is set to the stream's start plus the
+  timeout before its first frame is parsed, and cleared once the request is
+  parsed, before the handler runs, which bounds its own reads of the body. A
+  stream past it takes the existing `H3_REQUEST_INCOMPLETE` path, its
+  goroutine ends, and with no stream left the idle timer re-arms. The bound
+  also covers unknown frames skipped before the HEADERS frame.
+- `readHeaderBlock` reads the field section through an `io.LimitReader` of
+  the announced length with `io.ReadAll`, so the buffer grows with the bytes
+  that arrive, at most about twice what was received, rather than taking the
+  announced length up front. A stream that ends first is
+  `io.ErrUnexpectedEOF`, on the same error path as before.
+
+With `ReadHeaderTimeout` unset, only the read of the field section changes.
+
+### Tests
+
+`http3/urnetwork_read_header_timeout_test.go`, run with
+`go test -run '^TestUrnetwork' ./http3/` in this directory:
+
+- a stream that sends only a HEADERS frame's type and announced length is
+  reset with `H3_REQUEST_INCOMPLETE` once `ReadHeaderTimeout` passes, and its
+  handler never runs; upstream never resets it;
+- a handler that reads its body only after waiting out `ReadHeaderTimeout`
+  still reads it whole, so the deadline ends with the parsed request;
+- a field section announcing 64 KiB of which ten bytes arrive never asks for a
+  read larger than 4 KiB, where upstream asked for 64 KiB at once; a whole
+  section is read exactly, and a stream that ends first is an error.
+
+The upstream http3 suite passes with this change: `go test -count=1
+./http3/...` here, with no `-trimpath`, since some of its tests read source
+paths at run time.
+
+Every main module that wants these changes must replace
 `github.com/quic-go/quic-go` with this directory; Go does not inherit
 replacements. The server module does.

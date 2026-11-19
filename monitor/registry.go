@@ -178,6 +178,7 @@ func NewSignals() []Signal {
 		NewIdentityChurnSignal(),
 		NewKeyPublicationSignal(),
 		NewPublicUdpSignal(),
+		NewLbAltStatusSignal(),
 		NewSubtensorSignal(),
 		NewSubtensorConvergenceSignal(),
 		NewPointsReadinessSignal(),

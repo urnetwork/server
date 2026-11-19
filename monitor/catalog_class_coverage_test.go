@@ -23,6 +23,11 @@ func TestEveryFixedProductionAlertClassIsCataloged(t *testing.T) {
 		t.Fatal("cannot locate monitor package")
 	}
 	directory := filepath.Dir(currentFile)
+	// A -trimpath build records the import path, not a file path. go test
+	// runs in the package directory, which is then the working directory.
+	if !filepath.IsAbs(directory) {
+		directory = "."
+	}
 	catalogBytes, err := os.ReadFile(filepath.Join(directory, "SIGNALS.md"))
 	if err != nil {
 		t.Fatal(err)
