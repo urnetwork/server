@@ -224,6 +224,9 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // under a write deadline of its own, 5 s. A client that stopped reading
 // would hold the handler and its limit slot that much longer, and on h2 the
 // connection's serving goroutine, which makes that close.
+//
+// It passes net/http's half-close to the socket (CloseWrite), which
+// embedding net.Conn would hide.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer
@@ -242,6 +245,20 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 		self.writeTimeoutErr.CompareAndSwap(nil, &err)
 	}
 	return n, err
+}
+
+// Closes the socket's write side, when it has one. net/http's h1 server
+// half-closes a connection it ends with the request's body unread, then waits
+// 500 ms before the close (closeWriteAndWait), so a client still sending
+// reads the answer and the FIN before the close resets the connection; on
+// port 80 this is that FIN. Under TLS nothing calls it: crypto/tls's own
+// CloseWrite is a close_notify.
+func (self *frontTrackedConn) CloseWrite() error {
+	closeWriter, ok := self.Conn.(interface{ CloseWrite() error })
+	if !ok {
+		return nil
+	}
+	return closeWriter.CloseWrite()
 }
 
 // Closes the socket and leaves the tracked set, once.

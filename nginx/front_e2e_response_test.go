@@ -3,10 +3,14 @@ package nginx
 // End-to-end tests of what the front answers itself, and adds to what it
 // relays: CORS and the security headers, the hidden per-block lb routes, the
 // lb status json on TCP 80 and 443, port 80's redirects, redirect aliases,
-// and the /status deny on service names.
+// the /status deny on service names, and gzip's head on a HEAD.
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"net/http"
+	"slices"
 	"testing"
 )
 
@@ -253,5 +257,81 @@ func TestFrontE2eDeniesStatusOnServiceNames(t *testing.T) {
 		if c.status == http.StatusForbidden && reached != 0 || c.status == http.StatusOK && reached != 1 {
 			t.Errorf("%s%s: reached a handler %d times", c.sni, c.target, reached)
 		}
+	}
+}
+
+// A HEAD of a text/html page, from a client that accepts gzip, gets the head
+// nginx's gzip gives a GET of it, over h1 and h2, though the block answered
+// the HEAD with the page's Content-Length: Content-Encoding: gzip, a weak
+// ETag, no Content-Length and no Accept-Ranges, and no body. nginx marks a
+// HEAD header-only only after its gzip header filter has run.
+func TestFrontE2eGzipsAHeadAsAGet(t *testing.T) {
+	const html = "<html><body>" + "a page of text that compresses " + "a page of text that compresses" + "</body></html>"
+	e2e := newE2eFront(t, nil, nil)
+	e2e.setServiceHandler(t, "api", func(w http.ResponseWriter, r *http.Request, request *e2eUpstreamRequest) {
+		header := w.Header()
+		header.Set("Content-Type", "text/html; charset=utf-8")
+		header.Set("ETag", `"e2e-page"`)
+		header.Set("Accept-Ranges", "bytes")
+		// the block's server counts the page's length into its HEAD's
+		// Content-Length, and sends no body
+		io.WriteString(w, html)
+	})
+	eth1 := e2e.iface(t, "eth1")
+	h1Client := e2e.newH1Client(t, eth1.httpsAddr, "api.service.example")
+	h2ClientConn, _ := e2e.newH2ClientConn(t, eth1.httpsAddr, "api.service.example")
+
+	for _, protocol := range []string{"h1", "h2"} {
+		for _, method := range []string{"HEAD", "GET"} {
+			request := newE2eRequest(t, method, "https://api.service.example/page", nil)
+			request.Header.Set("Accept-Encoding", "gzip")
+			var response *http.Response
+			var body []byte
+			if protocol == "h1" {
+				response, body = e2eDo(t, h1Client, request)
+			} else {
+				response, body = e2eRoundTripH2(t, h2ClientConn, request)
+			}
+			what := protocol + " " + method
+			header := response.Header
+			if response.StatusCode != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
+				t.Errorf("%s = %d, Content-Encoding %q; want 200 gzipped", what, response.StatusCode, header.Get("Content-Encoding"))
+				continue
+			}
+			if values := header.Values("Content-Length"); len(values) != 0 {
+				t.Errorf("%s: Content-Length %q, want none", what, values)
+			}
+			if values := header.Values("Accept-Ranges"); len(values) != 0 {
+				t.Errorf("%s: Accept-Ranges %q, want none", what, values)
+			}
+			if etag := header.Get("ETag"); etag != `W/"e2e-page"` {
+				t.Errorf("%s: ETag %q, want it weak", what, etag)
+			}
+			if values := header.Values("Vary"); slices.Contains(values, "Accept-Encoding") {
+				t.Errorf("%s: Vary %q, which nginx's gzip_vary off doesn't add", what, values)
+			}
+			if method == "HEAD" {
+				if len(body) != 0 || len(response.TransferEncoding) != 0 {
+					t.Errorf("%s: body %q, Transfer-Encoding %q; want neither", what, body, response.TransferEncoding)
+				}
+				continue
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			if page, err := io.ReadAll(reader); err != nil || string(page) != html {
+				t.Errorf("%s: decompressed %q, %v; want the page", what, page, err)
+			}
+		}
+	}
+	heads := 0
+	for _, request := range e2e.serviceRequests("api") {
+		if request.method == "HEAD" {
+			heads += 1
+		}
+	}
+	if heads != 2 {
+		t.Errorf("the blocks got %d HEADs, want 2, one per protocol", heads)
 	}
 }

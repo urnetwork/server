@@ -129,6 +129,62 @@ func TestFrontHttpsKeepaliveTimeClosesTheConnectionOverH2(t *testing.T) {
 	}
 }
 
+// Through connect's port 80 and the real nginx front, an answer that ends
+// the connection while the client is still sending the body it declared,
+// here the default server's 403 to a client that asked to close, is
+// followed at once by a FIN: net/http half-closes ahead of the wait it makes
+// before the close, and the tracked connection passes that to the socket.
+// The client reads the whole answer, then the end of the server's side, not
+// the reset the close brings.
+func TestFrontHttpHalfClosesAConnectionItEndsOverAnUnreadBody(t *testing.T) {
+	env := newTestNginxFrontEnv(t, nil, http.NotFoundHandler())
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := net.Dial("tcp", env.bindAddress(address, frontPortHttp))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bounds a broken test, never a passing one
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	const contentLength = 16 * 1024 * 1024
+	chunk := make([]byte, 32*1024)
+	// the head and the body's first bytes at once, so some of the body is
+	// unread when the server closes
+	head := fmt.Sprintf("POST /upload HTTP/1.1\r\nHost: unknown.example\r\nConnection: close\r\nContent-Length: %d\r\n\r\n", contentLength)
+	if _, err := conn.Write(append([]byte(head), chunk...)); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for written := len(chunk); written < contentLength; {
+			n, err := conn.Write(chunk)
+			written += n
+			if err != nil {
+				return
+			}
+		}
+	}()
+	defer func() {
+		// ends a write the server left blocked
+		conn.Close()
+		<-writerDone
+	}()
+
+	reader := bufio.NewReader(conn)
+	response, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusForbidden || string(body) != http.StatusText(http.StatusForbidden)+"\n" || !response.Close {
+		t.Fatalf("= %d %q, closing %t, %v; want the default server's 403, closing", response.StatusCode, body, response.Close, err)
+	}
+	if _, err := reader.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Fatalf("after the answer, %v; want the server's FIN", err)
+	}
+}
+
 // Once a write to a public tcp connection fails on its deadline, every later
 // write fails at once with that error, whatever deadline is set after it,
 // even with a reader ready: the connection is cut mid-write, and the

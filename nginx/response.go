@@ -14,8 +14,12 @@ package nginx
 //     upstream didn't encode, for statuses 200, 403 and 404, of unknown
 //     length or at least HttpSettings.GzipMinLength bytes, to an HTTP/1.1 or
 //     later client whose Accept-Encoding offers gzip and whose request has
-//     no Via, never for HEAD. The Content-Length and Accept-Ranges go, a
-//     strong ETag turns weak, and no Vary is added;
+//     no Via. The Content-Length and Accept-Ranges go, and the server adds
+//     no length of its own, a strong ETag turns weak, and no Vary is added,
+//     as gzip_vary is off. A HEAD is decided as a GET and gets the same
+//     head, with nothing compressed: nginx marks a HEAD header-only in its
+//     last header filter, after gzip's has run (ngx_http_header_filter,
+//     ngx_http_v2_header_filter);
 //   - bounds each write to the client by HttpSettings.SendTimeout, as
 //     nginx's send_timeout bounds a write only while it is blocked: the
 //     write deadline is armed just before each write, flush and
@@ -32,6 +36,10 @@ package nginx
 //     first read of the body arms it too, for the 100 Continue Go's server
 //     writes then. A hijack clears it, so the tunnel's owner starts with
 //     none;
+//   - on h1, has a response that ends its connection while the request's
+//     body is unread end it with Go's half-close and its wait, so a client
+//     still sending the body reads the answer before the close resets the
+//     connection (finish);
 //   - records the status, the time of the head and the bytes for the
 //     metrics and the access log.
 //
@@ -93,7 +101,8 @@ func (self *responseSlot) releaseHold() {
 // One request's response. Its methods run on the request's handler
 // goroutine, as an http.ResponseWriter's do. A hijacked connection's close,
 // which can run elsewhere, touches only the slot and the front's tracking,
-// and the first read of an h1 body, which can too, only the write deadline.
+// and a read of an h1 body, which can too, only the write deadline and the
+// body's own state.
 type responseState struct {
 	front *Front
 	w     http.ResponseWriter
@@ -106,6 +115,13 @@ type responseState struct {
 	// the request is its connection's last (Front.lastRequestOnConnection),
 	// so its head closes the connection, as the drain's heads do
 	closesConnection bool
+	// the h1 request body, as the handlers read it; nil on h2 and h3, and
+	// for a request without one
+	requestBody *responseRequestBody
+	// on h1, the connection ends after the response: its head says
+	// Connection: close, the client asked to close, or keepalives are off.
+	// Set with the head
+	endsConnection bool
 	// the limit slot, once the request has one
 	slot *responseSlot
 
@@ -187,6 +203,11 @@ func (self *responseState) writeHeader(statusCode int) {
 			header.Set("Connection", "close")
 		}
 	}
+	if self.r.ProtoMajor == 1 {
+		// as Go's h1 server decides to close after the response; r.Close is
+		// a Connection: close, or HTTP/1.0 without keep-alive
+		self.endsConnection = header.Get("Connection") == "close" || self.r.Close || self.front.settings.Http.KeepaliveTimeout <= 0
+	}
 	if self.gzips(statusCode) {
 		self.startGzip()
 	}
@@ -261,42 +282,55 @@ func (self *responseState) clearWriteDeadline() {
 	self.controller.SetWriteDeadline(time.Time{})
 }
 
-// On h1, has the first read of a request body arm the write deadline: Go's
-// server writes the 100 Continue a request may expect then, and only before
-// any response write, so the deadline stays armed after it. h1 allows that,
+// On h1, wraps a request body so the response knows whether it was read
+// whole (finish), and so its first read arms the write deadline: Go's server
+// writes the 100 Continue a request may expect then, and only before any
+// response write, so the deadline stays armed after it. h1 allows that,
 // since a connection's deadline fails only a write pending or started once
 // it passes, and every later write arms its own. A bodiless request needs
-// none.
+// neither.
 func (self *responseState) start() {
-	if self.r.ProtoMajor != 1 || self.front.settings.Http.SendTimeout <= 0 {
+	if self.r.ProtoMajor != 1 || self.r.Body == nil || self.r.Body == http.NoBody {
 		return
 	}
-	if self.r.Body == nil || self.r.Body == http.NoBody {
-		return
-	}
-	self.r.Body = &responseContinueBody{
+	self.requestBody = &responseRequestBody{
 		ReadCloser: self.r.Body,
 		state:      self,
 	}
+	self.r.Body = self.requestBody
+}
+
+// Whether the h1 request has a body its handlers left unread, wholly or in
+// part. False on h2 and h3, and for a request without a body.
+func (self *responseState) requestBodyUnread() bool {
+	return self.requestBody != nil && !self.requestBody.readWhole.Load()
 }
 
 // An h1 request body whose first read arms the client write deadline, for
-// the 100 Continue (responseState.start). Read by one goroutine at a time,
-// as a request body is; that goroutine may differ from the handler's, so
-// the read touches only the deadline.
-type responseContinueBody struct {
+// the 100 Continue, and which notes when it has been read whole
+// (responseState.start). Read by one goroutine at a time, as a request body
+// is; that goroutine may differ from the handler's, so the read touches only
+// the deadline and the body's own state, and whether it was read whole is
+// atomic, for the handler to look at while a reader may still run.
+type responseRequestBody struct {
 	io.ReadCloser
 	state       *responseState
 	readStarted bool
+	// a read has returned io.EOF
+	readWhole atomic.Bool
 }
 
 // See io.Reader.
-func (self *responseContinueBody) Read(data []byte) (int, error) {
+func (self *responseRequestBody) Read(data []byte) (int, error) {
 	if !self.readStarted {
 		self.readStarted = true
 		self.state.armWriteDeadline()
 	}
-	return self.ReadCloser.Read(data)
+	n, err := self.ReadCloser.Read(data)
+	if err == io.EOF {
+		self.readWhole.Store(true)
+	}
+	return n, err
 }
 
 // Hijacks the client connection: the location's headers go into the header
@@ -349,6 +383,25 @@ var errResponseFrontCut = errors.New("lbalt front: closed")
 // however long the response was idle. An h2 stream that has already closed,
 // whose request context is done, gets none, since a deadline set on a
 // closed h2 stream would still fire later, with a stray reset.
+//
+// On h1, a response that ends its connection while the request's body is
+// unread is marked as one whose body ran over a limit: http.MaxBytesReader
+// at 0 bytes, over a byte of the front's own rather than the socket, so
+// nothing waits on the client. Go's server ends such a connection with a
+// half-close, then rstAvoidanceDelay, 500 ms, before the close
+// (closeWriteAndWait), so a client still sending its body has read the
+// answer by the time the close resets the connection. Unmarked, it does that
+// only when more than 256 KiB of the body is left, a declared body's rest
+// unread or a chunked one's once 256 KiB of it is read, or when that read
+// fails. When the client itself asked to close, it reads none of a declared
+// body and closes at once, and a client that is still writing, such as Go's
+// own, can report the reset in place of the answer; and a smaller body it
+// reads whole after the answer, then closes at once over a pipelined request
+// still arriving. Only the server's own writer can be marked. h2 and h3 need
+// none: an h2 answer ends its stream and resets the request's side with
+// NO_ERROR while the server reads on, and the vendored http3 stops the
+// request's side with H3_NO_ERROR, so neither closes a connection over an
+// unread body.
 func (self *responseState) finish() {
 	if self.hijacked || self.finished {
 		return
@@ -362,13 +415,18 @@ func (self *responseState) finish() {
 		self.gzipWriter = nil
 	}
 	self.finished = true
+	if self.endsConnection && self.requestBodyUnread() {
+		limitReader := http.MaxBytesReader(self.w, io.NopCloser(strings.NewReader("x")), 0)
+		limitReader.Read(make([]byte, 1))
+	}
 	if self.r.ProtoMajor != 2 || self.r.Context().Err() == nil {
 		self.armWriteDeadline()
 	}
 }
 
 // Whether nginx's gzip compresses this response (ngx_http_gzip_header_filter
-// and ngx_http_gzip_ok with nginx's defaults).
+// and ngx_http_gzip_ok with nginx's defaults). A HEAD is decided as a GET,
+// since nginx's header_only, which the filter checks, is set only later.
 func (self *responseState) gzips(statusCode int) bool {
 	httpSettings := self.front.settings.Http
 	if httpSettings.GzipLevel <= 0 {
@@ -379,7 +437,8 @@ func (self *responseState) gzips(statusCode int) bool {
 	default:
 		return false
 	}
-	if self.r.Method == http.MethodHead || !self.r.ProtoAtLeast(1, 1) {
+	// gzip_http_version 1.1
+	if !self.r.ProtoAtLeast(1, 1) {
 		return false
 	}
 	// gzip_proxied off
@@ -406,10 +465,16 @@ func (self *responseState) gzips(statusCode int) bool {
 	return true
 }
 
-// Starts the gzip stream, changing the head as nginx's gzip filter does.
+// Starts the gzip stream, changing the head as nginx's gzip filter does. The
+// Content-Length is set to nil, which Go's h1, h2 and h3 servers take as one
+// the handler suppressed, so none of them adds its own: on a GET, from the
+// compressed bytes of a handler that returns before the head is written,
+// where nginx sends no length; on a HEAD, from body bytes the handler wrote
+// anyway, or on h3 as 0. A HEAD gets the head alone, with no body to
+// compress.
 func (self *responseState) startGzip() {
 	header := self.w.Header()
-	header.Del("Content-Length")
+	header["Content-Length"] = nil
 	header.Del("Accept-Ranges")
 	// ngx_http_weak_etag
 	if etag := header.Get("ETag"); etag != "" {
@@ -422,6 +487,9 @@ func (self *responseState) startGzip() {
 		}
 	}
 	header.Set("Content-Encoding", "gzip")
+	if self.r.Method == http.MethodHead {
+		return
+	}
 	gzipWriter := self.front.gzipWriters.Get().(*gzip.Writer)
 	gzipWriter.Reset(&responseBodyWriter{
 		state: self,
