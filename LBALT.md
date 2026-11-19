@@ -9,9 +9,16 @@ The §7 measurements were taken 2026-11-18 (§7.1). The owner confirmed the thre
 - a 256 MiB body-buffer budget per connect process (D7);
 - N = 4 sockets per port in each block (D10).
 
-No design question is open. D6c was revised on 2026-11-18 to Go's default per-process session tickets.
+D6c was revised on 2026-11-18 to Go's default per-process session tickets.
 
-The last check, M7's HMARK test, passed on edge-4 on 2026-11-18 (§7.1). Nothing remains before implementation.
+M7's HMARK test passed on edge-4 on 2026-11-18 (§7.1). It shows that HMARK selects buckets; the end-to-end return path is still to be tested (§4.7).
+
+**Review** ([LBALT-REVIEW.md](LBALT-REVIEW.md), 2026-11-18, of this doc at 2c9e30d7f).
+- Proceed with the front and the nginx comparison harness (§8 steps 1–2).
+- Hold the first public cutover for Gate A (§8 step 4).
+- Hold the `alt.*` move for Gate B (§8 step 6).
+- Its findings are folded into §3, §4 (new §4.6 and §4.7), the decisions they qualify, and §8–§9. Each is marked "review".
+- **Open:** it raised three questions that need owner decisions, D20–D22 (§6 G).
 
 Terms used here:
 - **interface**: an lb interface, meaning one public address on an edge host.
@@ -44,6 +51,7 @@ Alt's clients dial the `alt.*` names, which resolve to the proxy hosts today. Af
   Measured 2026-11-18 (§7.1): the UDP hop's kernel-level loss is under 0.001%. About 96% of connect's clients are on H1 over TCP, where nginx terminates TLS and copies every byte. Most of the win is therefore on the H1 path, which the single cutover (D1) moves together with UDP.
 - **Memory.** alt holds 6.4–6.9 GiB per proxy host (CPUOPT4.md:1274, CPUOPT6.md:1582-1585, 2021). fireside's minimum available memory is 9.0 GB, and the proxies there were OOM-killed on 10-23 and 10-25. Alt does not fit as designed.
 - **One fewer service.** Alt duplicated connect, since it was a full connect node, and added the api router on top. The edges already run both.
+- **Independent deploys** (review). Forwarding api requests to the existing api block ports keeps api deploys independent of connect, unlike alt's embedded api router.
 
 ## 3. Today
 
@@ -53,23 +61,30 @@ Alt's clients dial the `alt.*` names, which resolve to the proxy hosts today. Af
 - There are 10 lb interfaces on the four services hosts: edge-0 ×3, edge-1 ×3, edge-3 ×2, edge-4 ×2 (`../vault/main/services.yml` v26, `lb.interfaces`). Each runs its own nginx lb block.
 - Every container uses host networking (`--host_networking=yes`). Each lb binds its interface docker network's bridge address, and the public address is DNATed to it. Replies leave through the interface's route table, picked by `ip rule from <interface docker subnet>` (`../warp/warpctl/run.go:26-45`).
 - Each services host runs five connect blocks (beta 1, g1 24, g2 25, g3 25, g4 25). Each has `cores: 16`, which sets GOMAXPROCS 16, and binds the `warpservices` bridge address.
+- The ten interfaces have ten public IPv4 addresses and eight public IPv6 addresses. Edge-0 `eno3np2` and edge-1 `eno4` have IPv4 only (services.yml, `lb.interfaces`; review).
 
 **TLS and upstreams**
 - TLS ends only in `http{}` server blocks. Each hostname proxies HTTP/1.1 to `service-block-<svc>`.
 - The upstream servers are `warpservices:<block external port>`, weighted by block weight. The external port is stable; warpctl DNATs it to the block's current container.
-- Balancing is `least_conn`, or `hash $remote_addr consistent` for stateful services (mcp).
+- Balancing is `least_conn`, or `hash $remote_addr consistent` for stateful services (mcp). That is nginx's weighted Ketama ring.
 
 **Request headers** (`addProxyRequestHeaders`, `../warp/warpctl/config.go:2504-2522`)
 - `X-UR-Forwarded-For` is overwritten with `addr:port`, IPv6 bracketed (config.go:1390-1395).
 - `X-Forwarded-For` and `X-Forwarded-Source-Port` are cleared.
-- `Host` and `Early-Data` are set.
+- `Host` is set to nginx's normalized `$host`, which carries no port. `Early-Data` is set from `$ssl_early_data`, which is always empty, because nginx sets `ssl_early_data off` (config.go:1336).
 - `X-UR-Request-Buffering` is `off` on streamed routes and cleared elsewhere.
 - Websocket services (connect, gossip, grafana) get `Upgrade` and `Connection: upgrade`, 60 s read and send timeouts, and no buffering (config.go:2526-2539).
 
 **Retries**
 - `proxy_next_upstream error timeout http_503 non_idempotent; proxy_next_upstream_tries 2` (config.go:1358-1359).
 - Retries work because request bodies are buffered: `proxy_request_buffering on`, `client_max_body_size 16m`, 64 KiB in memory and the rest on disk.
-- The api drain's readiness latch depends on the 503 retry.
+- Corrected by the review: a draining api never answers 503 (api/run.go:144, :251; http_drain.go:212-226).
+  - On SIGTERM it marks its status as draining.
+  - For 10 s it keeps accepting and serving, with `Connection: close` on HTTP/1 responses.
+  - Then a 60 s `Shutdown` closes the listener.
+
+  The ordinary retry case is therefore a stale pooled connection or a refused dial.
+- 502 is deliberately not retried: a retried application 502 once ran a password reset twice (../warp/warpctl/config_retry_test.go). `non_idempotent` with `timeout` can still resend a slow POST to a sibling block.
 
 **Limits**
 - Per client address: `limit_req` 450 r/min with burst 150 nodelay, and `limit_conn` 50. Both answer 429.
@@ -89,6 +104,11 @@ Alt's clients dial the `alt.*` names, which resolve to the proxy hosts today. Af
 - Each stream server sets `proxy_protocol v2; proxy_timeout 30s; proxy_requests 0`, with weighted `least_conn` across the connect blocks (config.go:2734-2845).
 - There are no TCP stream ports.
 - Because UDP 443 is a connect stream, nginx serves no h3 and sends no Alt-Svc (`hasUdp443Stream`, config.go:990).
+- **4053 is private on nginx interfaces** (review).
+  - warpctl deliberately keeps the target of `53 → 4053` private (`publicPortServiceTargets`, ../warp/warpctl/run.go:3210).
+  - The VyOS generator leaves 4053 out for plain lb interfaces (vyos.go:346), and opens it for transparent alt interfaces. It generates rules only for interfaces with a `router:` entry: edge-3, edge-4, fireside and crisp. Edge-0 and edge-1 have none, so their router rules are kept outside the generator.
+  - An alt host publishes both 53 and 4053.
+  - Shipped clients (since v2026.9.13) try 4053 as a second whodis port when their alt URL names no port (../connect/net_alt.go:173). So a working socket and a successful UDP 53 probe can coexist with a broken client fallback.
 
 **Certificates and health**
 - `findLatestTls` (config.go) takes the highest semver under `vault/{env,all}/tls/<ver>/<name>/`, then `star.<parent>`, then the parent.
@@ -123,6 +143,8 @@ Design: `../connect/EXTENDER.md` §L.
   - the api front gets a token bucket and a per-address concurrency cap;
   - connect gets a per-address connection cap, refused with 0x1001.
 - **Headers.** Forwarding headers come from `router.SetIngressHeaders` (alt/ingress.go). No PROXY protocol.
+- **Shutdown** (review). Alt closes HTTP/3 with a bounded close (alt/alt.go:510-519). A graceful shutdown started while the QUIC transport was being destroyed once produced an exit burst of at least 700k goroutines, one GOAWAY writer per pass.
+- **Readiness** (review). Alt records one readiness boolean per transport and address (alt/alt.go:116-128).
 
 ### 3.4 Connect listeners
 
@@ -132,6 +154,12 @@ Design: `../connect/EXTENDER.md` §L.
 - **H1 takes the client address from `X-UR-Forwarded-For`** with no trusted-peer check, and logs at error level on a repeated or malformed value (session/client_session.go:134-180). Safety relies on block ports being unreachable from clients.
 - **QUIC TLS** comes from tls.go and is gated by `tls.yml allowed_hosts`, which lists only ur.network and bringyour.com names (tls.go:58-72). There is no reload.
 - **Readiness.** `/status` returns `X-UR-Connect-Listeners-Ready: 1` and `X-UR-Connect-UDP-Listeners` (connect/connect_router.go:150-170). An lb with UDP streams polls every connect block for these before its cutover.
+- **Carriers** (review).
+  - The H1 path also supports the `urnetwork-framer/1` upgrade, H1+ (connect/transport.go:1554).
+  - On UDP, connect is raw QUIC and may offer no ALPN, while api requests use `h3` (alt/alt.go:356).
+  - The QUIC config alt inherits sets `Allow0RTT: true` (connect/transport.go:858).
+- **Private paths** (review). warpctl's candidate status poll uses the private HTTP port (../warp/warpctl/run.go:2315), and the exchange has its own internal sockets (connect/resident.go:1515-1525).
+- **Shutdown** (review). Connect sets its status to draining, calls `exchange.Drain()`, and then cancels its serving context (connect/run.go:208-212).
 
 ### 3.5 How clients reach alt
 
@@ -158,44 +186,63 @@ This section assembles the decisions recorded in §6.
 
 No name gets an Alt-Svc header, so browsers keep using TCP for web, mmm and app.
 
+**Public port list** (review).
+- lb_alt interfaces get one explicit public port list: TCP 80 and 443, and UDP 443, 53 and 4053.
+- Both the host rules and the VyOS generator consume that list. The generator covers edge-3 and edge-4. Edge-0 and edge-1 have no `router:` entry (§3.1), so their 4053 rules are set and tested outside it.
+- Unlike on an nginx interface (§3.1), 4053 is published at the host and at the router.
+- Tests run a whodis exchange on both 53 and 4053 and check the public reply address and port, in each address family. nginx interfaces keep their legacy test that the forward target stays private.
+
 ### 4.2 Forwarding
 
 - **Request contract.** The forwarder copies nginx's (§3.1):
   - it overwrites `X-UR-Forwarded-For` from the accepted socket;
-  - it removes client-sent `X-Forwarded-For`, `X-Forwarded-Source-Port`, `X-UR-Request-Buffering` and `Early-Data`;
-  - it preserves `Host`;
+  - it removes client-sent `X-Forwarded-For`, `X-Forwarded-Source-Port`, `X-UR-Request-Buffering` and `Early-Data`. The shared header helper leaves `Early-Data` in place today (router/ingress.go:93-110), so the front applies the rewrite once, with it removed (review). No server code reads `Early-Data` today, so removing it is defense in depth;
+  - it sets `Host` to the normalized authority with no port, as nginx's `$host` does. A Go proxy that copies `Request.Host` can keep a port (review);
   - it handles websocket upgrade and streamed bodies per service.
+- **Routing after TLS** (review; D9).
+  - SNI picks the certificate. The request's authority picks the route: `Host` on h1, and each stream's own authority on h2 and h3.
+  - Names match with nginx's server-name semantics. An nginx wildcard can match several labels, while alt's matcher accepts one (alt/hosts.go:118-120).
+  - The pinned nginx image settles routing and default-host behavior in the parity harness (§8 step 2).
 - **Upstreams** are the same stable `warpservices:<block external port>` targets nginx uses, with:
   - the same block weights;
-  - `least_conn`, or a consistent hash on client address for stateful services;
-  - one retry on connect error, timeout or 503, using buffered bodies;
+  - `least_conn`, or, for stateful services, nginx's weighted Ketama ring on the client address. The ring is reproduced exactly, so a mixed rollout doesn't remap clients (review);
+  - retries as D7 specifies: at most two attempts, on distinct eligible blocks, before any response reaches the client;
   - keepalive pools per upstream block.
 - **Limits and response headers** match nginx (§3.1). The token bucket and per-address caps come from alt/rate_limit.go.
 - **No stream forwarding (decided, D4).** The front forwards only HTTP. There is no raw TCP or UDP forwarding and no PROXY protocol; connect's own UDP ports are served in-process.
 
 ### 4.3 Networking (warpctl)
 
-- **The lb unit of an lb_alt interface is routing-only**, like a transparent unit: route table, ip rules, MASQUERADE, and the public DNAT split for TCP and UDP. No nginx runs for that interface (D1).
+- **The lb unit of an lb_alt interface is routing-only**, like a transparent unit: route table, ip rules, MASQUERADE, and the public DNAT split for TCP and UDP. No nginx runs for that interface (D1). Unlike a transparent interface, an lb_alt interface stays in DNS and in the edge inventory (§4.6).
 - **Each connect block binds every lb interface network's bridge address on its host**, IPv4 and IPv6, at its allocated ports. Replies leave with that network's source address, and the existing ip rules route them (D11).
 - **Public flows are split across the host's connect blocks by a hash of the source address**, weighted by block weight.
   - Each block owns a chain that holds only the DNAT to its current port. The block's own deploy switches that chain.
   - Conntrack keeps existing flows on the draining container, as it does today (D10).
 - **SO_REUSEPORT is used only within a block.** Each block opens several sockets per address and port, for both UDP and TCP, for receive parallelism. Blocks never share a reuseport group (D10).
-- **A block's DNAT switch waits for readiness.** Every public listener on every interface address must be up first (D13).
+- **A block's DNAT switch waits for readiness of the same generation.** Every public listener on every interface address must be up first, with all of its sockets counted (D13, §4.7).
 
 ### 4.4 Security requirements
 
 These are not open questions; each must hold before connect is exposed directly.
 
 1. **The PROXY reader is off on every interface-bound socket.** It trusts the first header from any new source, so leaving it on would let any client claim any address.
-   - During the cutover, conntrack-pinned flows still arrive through nginx with PROXY headers. They reach the existing listener on the `warpservices` address, which only nginx can reach.
-   - That listener keeps the reader on until the old flows drain, then goes away.
-2. **Client-sent ingress headers are removed on interface-bound listeners.** This covers `X-UR-Forwarded-For`, `X-UR-Request-Buffering`, `X-Forwarded-For`, `X-Forwarded-Source-Port` and `Early-Data`. They are removed before in-process handling and before forwarding. Connect's own H1 path trusts `X-UR-Forwarded-For` and logs malformed values at error level.
+   - The trusted listeners on the `warpservices` address keep it. nginx streams to them with PROXY v2 for as long as any interface on the host is on nginx, and again after a rollback (§4.6).
+   - Corrected by the review: they stay for the blocks' whole lifetime, not only until a cutover's old flows drain.
+   - The public front binds only its declared interface addresses. The host and router rules keep client traffic off the trusted ports.
+2. **Client-sent ingress headers are removed on interface-bound listeners.** This covers `X-UR-Forwarded-For`, `X-UR-Request-Buffering`, `X-Forwarded-For`, `X-Forwarded-Source-Port` and `Early-Data`.
+   - They are removed before in-process handling and before forwarding. Connect's own H1 path trusts `X-UR-Forwarded-For` and logs malformed values at error level.
+   - Public HTTP ingress headers are derived from the accepted peer.
+   - The shared helper leaves `Early-Data` in place today, which the front fixes (§4.2).
 3. **`/status` stays unreachable on public service names.** nginx denies it today and alt returns 404.
 4. **Alt's ingress hardening applies to connect's public listeners.** That means:
-   - the shared handshake limit;
+   - one handshake admission limit, shared across all of a block's sockets;
    - the 0x1000 and 0x1001 refusals;
-   - whatever fix set alt's rollback floor at 1088438700 (older builds die to a small unauthenticated UDP burst).
+   - the fix behind alt's rollback floor at 1088438700 (older builds die to a small unauthenticated UDP burst).
+     - That fix is connect `6203a4e8` (../connect/EXTENDER-ACTIVATION.md:390). Before it, a lost listener ended the alt process.
+     - The fix keeps the listener up: packet translation survives a datagram it can't write (transport_pt_server_failure_test.go).
+     - The extender's carriers likewise each recover on their own.
+     - D13 and D22 carry the requirement into the front: losing a socket must not end the process.
+   - early data refused in the public QUIC config. The config alt inherits sets `Allow0RTT: true` (§3.4), so D9's "early data off" must be set explicitly there (review).
 5. **Connect loads the private key of every fronted name.** Connect already mounts the vault read-only, so it can already read those keys; what's new is that the process holds them in memory.
 
 ### 4.5 Code layout
@@ -216,7 +263,52 @@ alt/ingress.go's header handling folds into the `server/nginx` request contract.
 
 The api router is not embedded. Api h3 requests are forwarded to api blocks through `server/nginx`, so the front carries none of alt's api memory.
 
-After §8 step 5, the alt service, its binary and its config are deleted.
+After §8 step 8, the alt service, its binary and its config are deleted.
+
+### 4.6 Handing an interface between nginx and connect (review)
+
+- D1 moves new TCP and UDP flows together, while conntrack keeps delivering existing flows to their original owner.
+- Meanwhile nginx on a neighbouring interface keeps creating new plaintext H1 and PROXY-v2 UDP flows to the same five connect blocks. It does so for as long as any interface on the host is on nginx, and again after any rollback (D18).
+- So:
+  - Compatible connect blocks start on generation-specific ports while nginx still owns ingress.
+  - The trusted services-bridge listeners stay, for every nginx dependency, for the blocks' whole lifetime: H1, and UDP with the PROXY reader.
+  - The private status port (the readiness poll and the hidden per-block routes) and the exchange's own internal sockets also stay for their whole lifetime. Removing any of them when the first interface drains would break the neighbouring interface and a later rollback.
+- The public front:
+  - binds only its declared interface addresses;
+  - turns PROXY decoding off on public UDP;
+  - derives public HTTP ingress headers from the accepted peer.
+
+  The host and router rules must keep client traffic off the trusted ports.
+- Switching an interface:
+  1. probe the new owner's private status (§4.7);
+  2. switch new flows;
+  3. keep the old owner alive through its drain.
+
+  Rollback runs the same steps in reverse.
+- **lb_alt interfaces stay in DNS and in the edge (mover) inventory.** The existing `transparent` flag takes an interface out of the weighted lb set (../warp/warpctl/dns.go:202, services_lb_inventory.go:88), so lb_alt cannot reuse it. The lb unit is routing-only like a transparent unit, but the interface keeps its DNS weight and its health check.
+
+### 4.7 Generations, readiness and chains (review)
+
+- **Ownership.**
+  - Today's port allocator checks one bridge address per family, plus the wildcard and loopback addresses. It records occupancy by port number alone, lumping TCP, UDP and both families together (../warp/warpctl/run.go:1701-1771). UDP conntrack cleanup uses that occupancy and the selected bridge's reply address (run.go:1906-1960).
+  - With several bridges and SO_REUSEPORT, a successful bind no longer proves that a generation owns a port. A stale port, or a cleanup that runs early, can send a repeat dial to a dead target or interrupt a live drain.
+  - So the allocator records (bridge, protocol, port) per generation, and cleanup touches only the tuples of a retired generation.
+- **Readiness.** warpctl probes the candidate on its private allocated port and requires:
+  - the generation;
+  - the route-file version or digest;
+  - an explicit ready state. Today warpctl's status check fails only on an `error` prefix (../warp/warpctl/docker.go:679), so a block reporting `draining` (router/warp_handlers.go:92) passes it. Draining must never count as ready;
+  - the full expected listener set: four sockets for each required address, protocol and port.
+
+  Alt records one readiness boolean per transport and address (alt/alt.go:116-128), which would collapse four sockets into one entry, so the front registers each socket on its own. A socket lost after promotion behaves as D22 decides.
+- **Chains.**
+  - Complete replacement chains are built before an entry jump switches.
+  - The design names the writer of each chain: the lb unit writes the HMARK rule and the interface's split chain, and each block writes its own DNAT chain.
+  - The hash seed and range ordering are stable.
+  - The design says how a restarted worker recovers from an interruption between the IPv4 and IPv6 families.
+  - The last working targets stay in place until the replacement is complete.
+  - On a loss, only the missing ranges move, to ready blocks by weight.
+  - If every target is down, the interface fails its health check, so Route53 withdraws it.
+- **Return path.** M7 showed that HMARK selects buckets, using loopback flows and one IPv6 source. The end-to-end return path is tested in a two-interface network namespace (§9): replies leave with the original public source, and routing marks on unrelated traffic are untouched.
 
 ## 5. Packet paths
 
@@ -244,6 +336,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Phase 2 carries the whole nginx-parity surface: certificates for seven domains, CORS and HSTS, redirects, limits, retries, body buffering, websocket and streamed routes, and the lb routes. It can be shadow-tested against nginx before it takes traffic.
   - Splitting one address between an lb on TCP and a block on UDP already exists on transparent interfaces.
 - **Decision (owner, 2026-11-18):** (a), one cutover. On each lb_alt interface, connect takes TCP and UDP together and nginx stops. The nginx-parity work (§8 step 2) has to pass before any traffic moves.
+- Amended by the review: the first public cutover also waits for Gate A (§8 step 4). In particular, a client must be able to use both whodis ports, and keep an established session through a deploy and through a rollback.
 
 **D2. The setting.**
 - (a) `services.connect.lb_alt: true` only, turning on every edge interface at once.
@@ -254,12 +347,16 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - a host with lb_alt interfaces and no blocks of that service;
   - on an lb_alt interface, any TCP stream mapping, or a UDP stream mapping to a service other than connect (D4).
 - **Decision (owner, 2026-11-18):** (b). `services.connect.lb_alt: true` is the end state, and `lb.interfaces.<host>.<iface>.lb_alt` overrides it per interface for the canary and for single-interface rollback. The validation above applies.
+- Amended by the review:
+  - Tests cover all three override cases: no interface override; `true` under a disabled service default; and `false` under an enabled default, which is the rollback switch.
+  - An lb_alt interface stays in DNS and in the edge inventory, unlike a transparent one (§4.6).
 
 **D3. Names and protocols served.**
 - The proposal is the §4.1 table: every fronted name on TCP, h3 and whodis for connect and api names only, and no Alt-Svc.
 - Alternative: h3 for every name, with Alt-Svc. That moves browser traffic for web, mmm and app onto QUIC through connect.
 - Recommendation: §4.1 as written. It matches alt on UDP and nginx on TCP.
 - **Decision (owner, 2026-11-18):** §4.1 as written. h3 and whodis serve connect and api names only, everything else on QUIC is refused with 0x1000, and no name gets an Alt-Svc header.
+- Amended by the review: on h3, each forwarded request's authority must also be one of the api names that D3 admits. A connection whose SNI is an api name cannot carry a request for another service.
 
 ### B. Front and forwarding
 
@@ -308,6 +405,17 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - With early data off (D9), a TLS 1.3 or QUIC resumption takes one round trip, the same as a full handshake. Resumption saves the certificate and signature CPU, under a core per host at peak (§7.1, M2), and only TLS 1.2 clients save a round trip.
   - A static shared secret would add a lasting exposure. If it leaked, recorded TLS 1.2 sessions that received tickets could be decrypted.
 - **OCSP stapling.** nginx sets `ssl_stapling on`, but no certificate in `vault/all/tls/2026.10.16` carries an OCSP responder URL: they are Let's Encrypt certificates. Stapling does nothing today, and the front needs none.
+- Amended by the review (certificates and config revisions):
+  - The route file is immutable and schema-versioned. A block loads it, with complete and matching certificate and key pairs, before it reports ready.
+  - Upstream targets named by an older route file stay until the last block using that file has drained.
+  - Validation checks SAN coverage for aliases, the parent fallback and wildcard names.
+  - Private status reports the config revision and the earliest certificate expiry.
+  - Rotation and rollback are rehearsed before the 2027-01-15 expiry.
+    - Today the lb image holds only the generated config, whose certificate paths are pinned to the version found at image build (../warp/lb/Dockerfile:107; ../warp/warpctl/config.go:955).
+    - Both the certificates and the keys come from the read-only vault mount (../warp/warpctl/run.go:2106-2113).
+  - D6c: Go's automatic ticket keys belong to the listener's `tls.Config`. A config returned by `GetConfigForClient` uses the original's keys unless it sets its own (crypto/tls common.go), and the vendored quic-go uses the listener's config without cloning it.
+    - So the ticket scope is one long-lived config shared by every socket of the block. A ticket from one block or host still can't resume on another.
+    - Tests verify resumption across sockets within one block.
 
 **D7. Retries and body buffering.**
 - nginx buffers every body that isn't streamed (16 MiB cap, 64 KiB in memory, the rest on disk). That lets it retry a 503 or a connect failure on another block, including for non-idempotent requests.
@@ -318,15 +426,29 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - **Decision (owner, 2026-11-18):** (a). Bodies are buffered in memory up to 16 MiB each, under a process-wide byte budget sized from M2. Over the budget, connect answers 503 before reading the body. There is one retry on connect error, timeout or 503 (non-idempotent included), on another block. Streamed routes pass through unbuffered.
   - Sized from §7.1, confirmed (owner, 2026-11-18): a 256 MiB budget per connect process, room for 16 concurrent 16 MiB bodies. The measured load is a mean body of 74 bytes and at most 4.3k api requests in flight fleet-wide, which needs under 1 MiB. Grafana pushes and the validators' artifact uploads fit too (§7.1, M2).
   - Amended by D19 (owner, 2026-11-18): only the first 64 KiB of each body is held in memory under the budget, and the rest goes to a temp file, as nginx does.
+- Corrected by the review: the recommendation's reason for rejecting (c) was wrong. A draining api never answers 503. It serves for 10 s with `Connection: close`, then closes its listener (§3.1), so the ordinary retry case is a stale pooled connection or a refused dial. The decision stands, with this specification:
+  - At most two upstream attempts, on distinct eligible blocks, and only before any response has reached the client.
+  - Retried: a connect error, a timeout and an upstream 503. Not retried: 500, 502 and 504, or a partial response. A retried 502 once ran a password reset twice.
+  - A block-specific request reports the named block's own result, and is never retried elsewhere.
+  - A streamed body becomes ineligible for retry once forwarding begins.
+  - Go's transport can retry on its own, so tests count attempts at a recording upstream (§9).
+  - A timeout after a POST reached the first block can still run it twice. nginx does the same today under `non_idempotent`, and that stays accepted.
 
 **D8. Limits.**
-- nginx's per-address limits are kept per interface process. With the source-address hash split (D10), an address always lands on one block per interface, so per-block buckets reproduce per-interface limits exactly.
+- nginx's per-address limits are kept per interface process. With the source-address hash split (D10), an address always lands on one block per interface, so per-block buckets reproduce per-interface limits exactly. (Corrected below: one block serves several interfaces.)
 - Recommendation:
   - Use alt/rate_limit.go semantics: a burst+1 nodelay token bucket, per-address concurrency, and 429.
   - Take the numbers and route zones from services.yml, and apply them to forwarded routes and to connect's own H1.
   - QUIC connect keeps alt's per-address connection cap.
   - Keep nginx's timeouts and the 16 MiB body cap.
 - **Decision (owner, 2026-11-18):** as recommended. alt/rate_limit.go semantics, with nginx's numbers and route zones from services.yml. The limits apply to forwarded routes and to connect's own H1; QUIC connect keeps alt's per-address connection cap. nginx's timeouts and body cap carry over.
+- Corrected by the review: a block serves two or three interfaces.
+  - A process-wide bucket per address would let independent interfaces use up each other's quota, which nginx's per-interface zones never allow: there is one nginx config per lb block, with zones keyed on `$binary_remote_addr` (../warp/warpctl/config.go:1168-1172, 1718-1744). Alt keys its state by address alone (alt/rate_limit.go:163). So:
+  - The shared request and concurrency zones are keyed by ingress interface and normalized client IP.
+  - Route buckets are scoped to the service and the matched route within that interface.
+  - The lb status exemptions, `exclude_subnets` and per-stream accounting on h2 and h3 carry over.
+  - An upgraded connection holds its concurrency slot until the tunnel closes.
+  - During a deploy overlap, the draining generation counts its own sessions, so a client may briefly have up to twice its limit. The same happens today when a new lb container starts with fresh zones.
 
 **D9. Default server, ALPN, early data.**
 - **No or unknown SNI on TCP.** nginx answers with the lb name's certificate and the lb routes. Recommendation: do the same. On QUIC, refuse, as alt does.
@@ -338,6 +460,12 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - No or unknown SNI on TCP gets the lb name's certificate and routes; on QUIC it is refused with 0x1000.
   - ALPN is h2 and http/1.1 for forwarded names, and http/1.1 only for connect names.
   - Early data stays off.
+- Amended by the review:
+  - Routing after TLS follows §4.2. SNI picks the certificate and the authority picks the route, with nginx's server-name semantics, settled against the pinned nginx image.
+  - Connect names keep both H1 carriers: the websocket and the `urnetwork-framer/1` upgrade (H1+).
+  - Raw-QUIC connect may offer no ALPN, while api requests use `h3`. As in alt, dispatch picks the front by SNI (alt/alt.go:399-405). ALPN keeps alt's handling, which offers the intersection with `[h3]` (alt.go:356-388), so connect without ALPN still gets through.
+  - "Early data off" means the public QUIC config sets `Allow0RTT: false` and TLS refuses early data. Waiting for the handshake to complete before dispatch is a separate control. A resumed session must report `Used0RTT == false` (§9).
+  - Real client code exercises WebSocket, H1+, raw QUIC and API h3 before the first cutover (Gate A).
 
 ### C. Networking and deploy
 
@@ -404,6 +532,17 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - At drain start, close idle client keepalive connections. After each in-flight request, send `Connection: close`, h2 GOAWAY or h3 GOAWAY.
   - In-flight requests finish.
   - Forwarded websockets stay until they close or the 60 m drain timeout ends.
+- Amended by the review: on HTTP/3 the order matters.
+  - Today connect sets its status to draining, calls `exchange.Drain()`, and then cancels its serving context, and alt's teardown closes its QUIC transport. A graceful HTTP/3 shutdown during that teardown once produced an exit burst of at least 700k goroutines, which is why alt bounds its close (§3.3).
+  - So after the DNAT switch, the old generation starts draining its HTTP front while its transports can still send:
+    - it stops admitting new HTTP work;
+    - it closes idle H1;
+    - it sends an h2 or h3 GOAWAY once per connection.
+
+    Accepted requests finish alongside the resident drain.
+  - Hijacked H1 connections, and both sides of forwarded websockets, are tracked through the deadline.
+  - A forced transport close has a bounded completion path.
+  - Tests: alt's shutdown regressions, plus an in-flight h3 response, a new stream during drain and an established websocket (§9).
 
 **D13. Readiness and holes in the split.**
 - Recommendation:
@@ -417,6 +556,17 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - **Decision (owner, 2026-11-18):** as recommended.
   - Connect's `/status` names every TCP and UDP listener per address, and warpctl switches a block's chain only when all of them are up.
   - On its 30 s reconcile, the lb unit gives an orphaned bucket range to the other live blocks, and returns it when the block is live again.
+- Amended by the review:
+  - Readiness and DNAT refer to the same generation. The candidate is probed on its private port for:
+    - its generation;
+    - its route-file digest;
+    - an explicit ready state;
+    - its full socket set (§4.7).
+  - Losing a socket never ends the process, as connect `6203a4e8` made it for alt. A lost carrier is rebuilt on its own, as the extender rebuilds a lost UDP carrier (§4.4).
+    - The extender's listener-loss test (`TestExtenderRebuildsALostUdpCarrier`) is adapted to the front: sibling carriers keep serving.
+    - Readiness reports the missing socket until it recovers.
+  - A UDP socket lost after promotion is D22.
+  - Reassignment moves only the missing ranges, to ready blocks by weight. If every block behind an interface is down, the interface fails its health check (§4.7).
 
 ### D. Alt removal
 
@@ -435,6 +585,12 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - `alt.*` becomes a DNS-only alias of connect on every edge lb_alt interface, per address family, with the interfaces' DNS weights. Shipped clients need no change.
   - The separate proxy-host addresses are given up.
   - Removal follows the order above.
+- Amended by the review: the DNS handover, which Gate B checks (§8 step 6).
+  - Today the generator emits host-pinned alt records and rejects conflicting definitions of the same name (../warp/warpctl/dns.go:263, 373-427). Config load refuses `dns_aliases` on an exposed service (../warp/services/routers.go:692).
+  - So each alt record has exactly one DNS owner during the handover, while alt can still answer clients that cached proxy addresses.
+  - The complete record sets are compared before and after, and DNS-only names stay out of TLS and HTTP route generation.
+  - Clients that lose reachability once both names share edge addresses also drop out of the old-host counters. So successful extender activations are tracked by carrier and family.
+  - Rollback after the move is D20.
 
 ### E. Operations
 
@@ -453,12 +609,17 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
     - That makes 100 Go threads per host, up from 80.
   - Revisit after the beta canary measures Go TLS's cost against nginx's.
   - Caveat: the hosts peak at 80–88% busy. Moving nginx's work into connect is at best CPU-neutral for the host, so this doesn't add host headroom.
+  - Amended by the review: `cores: 20` raises GOMAXPROCS on hosts that are already that busy. Before the cutover expands past the canary interface, observe a busy period and a complete deploy, drain and rollback, and check CPU and scheduler delay against §8 step 7's thresholds.
 
 **D16. Blast radius.**
 - A connect regression or crash now takes down its share of every fronted service on that host, not only connect.
 - Every connect release also redeploys the front for api, web, mmm and the rest.
 - Recommendation: accept this, and use beta as the canary for front changes too. Don't add a separate front process, since that is the hop this project removes.
 - **Decision (owner, 2026-11-18):** accepted. The front stays in connect, and beta (a fixed 1% of client addresses) is the canary for front changes too.
+- Amended by the review: beta is the canary for later front releases, but the first interface switch sends new traffic to all five blocks at once.
+  - Qualify beta with pinned test traffic before that switch.
+  - Then compare the switched interface with an nginx control interface over the same interval (§8 steps 4–5).
+  - Measure each block's actual traffic share and skew. One hash bucket can hold a large NAT.
 
 **D17. Observability.**
 - Open question: does anything use nginx's access logs today, such as dashboards, monitor probes or abuse investigation?
@@ -471,6 +632,10 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Bounded counters and latency histograms by service, protocol, status class and upstream block.
   - No per-request logs at the default level, and an optional sampled access log at V(1).
   - The lb names' status routes are kept. Route53 depends on them: it health-checks every interface address, IPv4 and IPv6, with a GET of the lb status route on TCP 80 and the `<env>-lb.<domain>` Host (../warp/warpctl/dns_route53.go:113-138, dns.go:582-588). That answer decides each interface's DNS membership.
+- Amended by the review:
+  - Route53 also counts a 3xx as healthy, so an accidental HTTPS redirect on port 80 would look healthy. The port-80 status route must answer 200 with the expected status JSON, and tests check exactly that.
+  - Probe individual blocks as well as the public address. One probe source lands in one hash bucket, so it only ever sees one block.
+  - The monitor today rejects a target with service `connect` and front `api`, in both validation and transport code, and its probe ends at the handshake (monitor/public_udp.go:148, public_udp_transport.go:177). Update both, and exercise an api request such as `/hello` over the new path.
 
 **D18. Rollback.**
 - Recommendation:
@@ -478,6 +643,12 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Keep building the lb image every release, with its tests green, until the cutover has soaked.
   - After that, nginx config generation stays for environments without lb_alt.
 - **Decision (owner, 2026-11-18):** as recommended. Setting `lb_alt: false` on an interface moves it back to nginx with the deploy-style cutover. The lb image keeps being built every release, with its tests green, until the cutover has soaked on all ten interfaces.
+- Amended by the review: D14 and D18 share one rollback procedure.
+  - A restored nginx interface answers its TCP 80 health check while its UDP goes to nginx's connect-only stream.
+  - So after the `alt.*` move, a client that cached that address loses API over QUIC and whodis there (D20).
+  - Rollback follows §4.6's order in reverse.
+  - Keep an operable alt deployment and its router rules through the post-DNS soak, and a tested nginx image with usable certificates through the rollback window.
+  - Rehearse rollback with clients pinned to the old proxy address and to the new edge address (Gate B).
 
 ### F. Found while checking the measurements
 
@@ -497,6 +668,52 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - **Decision (owner, 2026-11-18):** (a), nginx's split.
   - Each body keeps its first 64 KiB in memory under the 256 MiB process budget. The rest goes to a temp file in the container, which is removed when the request ends.
   - A retry re-reads the body from memory and the file. Over the budget, connect answers 503 before reading the body, as D7 says.
+  - Amended by the review: the temp files need their own caps (D21).
+
+### G. Raised by the review (LBALT-REVIEW.md, 2026-11-18)
+
+Open: each needs an owner decision.
+
+**D20. Rolling an interface back after `alt.*` moves.**
+- After D14, clients cache edge addresses for `alt.*`. Suppose an interface then rolls back to nginx (D18).
+  - Its TCP 80 health check passes, but its UDP goes to nginx's connect-only stream.
+  - A client that cached that address loses API over plain QUIC and over whodis there. DNS withdrawal helps only once the client looks up another address.
+  - nginx interfaces don't publish UDP 4053 today (§4.1), so the client's second whodis port fails too.
+- (a) A PROXY-aware private backend.
+  - Connect's trusted UDP listeners, which nginx streams to with PROXY v2, also dispatch API h3 by SNI, as the public front does.
+  - The nginx path publishes UDP 4053.
+  - Rollback then keeps API over QUIC and both whodis ports.
+- (b) No interface rollback once `alt.*` has moved. Withdraw the interface from DNS instead, and accept the gap for clients with a cached address.
+- (c) Keep `alt.*` on the proxy hosts until every interface has soaked, with alt deployable until then.
+- Recommendation: (a).
+  - The dispatch is the front's own code on a second listener.
+  - It makes D18's single-interface rollback safe after D14.
+  - Gate B (§8) rehearses rollback whichever option is chosen.
+
+**D21. Caps on D19's temp-file spill.**
+- With no cap, 4,096 in-memory 64 KiB prefixes can come with up to 63.75 GiB of temp data per process, at the 16 MiB request cap.
+- Measured 2026-11-18: the Docker root is on the root ext4 filesystem of each services edge, with 1,352 GiB (edge-1) to 3,058 GiB (edge-4) free. The measured need is under 70 MB fleet-wide (M2, artifact uploads).
+- Proposal: 4 GiB and 1,024 files per connect process.
+  - With two generations of five blocks overlapping in a deploy, that is at most 40 GiB per host, under 3% of the smallest edge's free space.
+  - One address can claim at most 800 MiB (50 requests × 16 MiB), so filling one block's spill takes six addresses.
+- Specified by the review, whatever the numbers:
+  - A body of unknown length reserves before its first read.
+  - A body that crosses 16 MiB is answered with 413 at that point.
+  - A local capacity refusal is a 503 counted apart from upstream 503s, and only an upstream 503 can be retried.
+
+**D22. A UDP socket lost after promotion.**
+- D10 gives each block N = 4 SO_REUSEPORT UDP sockets per (address, port), each with its own quic-go transport.
+- The kernel maps each 4-tuple to a socket by a hash scaled by the group size. When a socket exits, or comes back, the size changes, so most flows move to a transport that doesn't know their connection IDs.
+- The front must survive a lost socket and rebuild it (§4.4, D13). In a reuseport group, a rebuild changes the group size again.
+- (a) Keep one transport per socket.
+  - On loss, re-create the socket at once, and accept one reconnect wave for that block's QUIC clients.
+  - The endpoint reports not ready until the socket is back.
+- (b) Feed an endpoint's N sockets into one quic-go transport through a fan-in packet conn. A flow that moves between sockets then still finds its connection, which also makes NAT rebinding within a block harmless.
+  - Cost: quic-go's per-socket features, GSO and ECN through the OOB conn, need care in the wrapper.
+- (c) Steer by connection ID with an eBPF reuseport program. That is out of scope (§10).
+- Recommendation: (a) for the cutover, with (b) as a follow-up if the canary shows rebinding or socket-loss resets.
+  - Losing a socket after promotion is rare.
+  - QUIC carries about 4% of connect's clients (M4), and a reconnect wave touches only one block's share of them.
 
 ## 7. Measurements before deciding
 
@@ -551,6 +768,9 @@ Host CPU was 54–79% busy at sample time. The 7-day peak is 80–88%.
 - **Other drops.** PROXY-reader drops (`urnetwork_connect_pp_dropped_packets_total`): 38 in 7 days, all `missing_header`. UDP `NoPorts`: about 0/s.
 - **QUIC versus H1.** QUIC is a small share of connect's clients: about 9.3k nginx UDP pseudo-sessions fleet-wide, against 267k connected clients (the gauge counts H1 carriers). That puts about 96% of connect's clients on H1 over TCP, where nginx terminates TLS and copies every byte.
 - **No end-to-end metric.** Connect exports no QUIC loss or RTT metric, so the latency win can only be measured end to end. The beta block is the place to measure it.
+- **Not measured** (review): application latency, and the exact client mix by carrier.
+  - The perf harness (connect/connect_perf_test.go) dials a plaintext loopback URL in H1 mode.
+  - Before the switch, it pins WebSocket and H1+ separately, adds QUIC and whodis cases, and records an nginx baseline (§8 step 4).
 
 **M5. Alt.**
 - Load: 91 req/s, mostly `/hello` (42/s) and `/connect/control` (37/s); 154 KB/s of h3 datagrams in; 0.3 cores per proxy host.
@@ -572,6 +792,7 @@ Host CPU was 54–79% busy at sample time. The 7-day peak is 80–88%.
   - IPv6: all flows from the one source landed in one bucket. With the source port added to the hash, 200 flows hit 88 buckets.
   - No iptables rule on edge-4 sets or matches a mark. Its route rules (fwmark `0x66` and `0x67`, full mask) select none of the test marks.
   - An earlier dry run, in a container on kernel 7.0.14, gave an identical IPv4 split (376 of 800 flows to port A, 88 buckets hit). That fits a hash that depends only on the seed and the address, not on the kernel.
+  - Scope (review): this used loopback flows and one IPv6 source. It shows that HMARK selects buckets, not the end-to-end return path, which the two-interface network-namespace harness tests (§4.7, §9).
 
 **Certificate expiry.** Every certificate in `vault/all/tls/2026.10.16` expires 2027-01-15. Under D6b, the next set must land and connect blocks must redeploy before then.
 
@@ -579,7 +800,7 @@ Host CPU was 54–79% busy at sample time. The 7-day peak is 80–88%.
 
 One cutover per interface (D1).
 
-**0. Measure.** Decisions are recorded in §6. Measurements M1–M7 were taken 2026-11-18 (§7.1), and the owner confirmed the values they sized. The HMARK test passed on edge-4 (M7), so warpctl can rely on HMARK in step 3.
+**0. Measure.** Decisions are recorded in §6. Measurements M1–M7 were taken 2026-11-18 (§7.1), and the owner confirmed the values they sized. The HMARK test passed on edge-4 (M7), so warpctl can rely on HMARK for bucket selection in step 3. The return path is tested by the network-namespace harness (§4.7).
 
 **1. The front: `server/nginx` and connect (§4.5).** Starting from alt's code:
 - TLS for every fronted name;
@@ -590,21 +811,74 @@ One cutover per interface (D1).
 - the lb routes and port 80;
 - per-interface, dual-stack listeners;
 - the PROXY reader off on interface-bound sockets;
-- extended readiness.
+- extended readiness;
+- the H1+ upgrade beside the websocket on connect names, and a public QUIC config that refuses early data (D9);
+- an HTTP drain that starts while the transports can still send (D12).
 
-**2. Parity harness, before any traffic.** Send the same requests to the lb image and to the front, both generated from the same services config. Diff the status, the response headers, and the headers the upstream receives.
+**2. Parity harness, before any traffic.** Send the same requests to the lb image and to the front, both generated from the same services config. Diff the status, the response headers, and the headers the upstream receives. From the review:
+- Generate the route file and the nginx config from one fixture, and run the pinned lb image beside the front.
+- Use recording upstreams for requests with side effects. Compare the URI and query, the bytes in both directions, the headers and the attempt count.
+- Cover:
+  - the hidden per-block routes and redirects;
+  - CORS preflight and errors, `Vary: Origin`, and CSP-dependent frame options;
+  - streaming;
+  - the TCP service-name `/status` denial, and alt's API h3 `/status` 404.
+- Routing after TLS (D9):
+  - missing SNI with a known Host;
+  - a known SNI with a different known authority;
+  - two authorities on one h2 connection;
+  - exact versus wildcard names.
+
+  Assert the selected certificate, the upstream, the forwarded Host and access to status routes.
+- Upstream choice:
+  - Hold requests open to check weighted `least_conn` under known load.
+  - For mcp, compare the chosen backend with nginx's weighted Ketama ring on fixed IPv4 and IPv6 client addresses. A different consistent hash can be stable on its own and still remap clients during a mixed rollout.
+- Timeouts: an upload that keeps progressing past the idle timeout, and a stalled one on the artifact route's 60 s override.
 
 **3. warpctl: lb_alt mode.**
-- routing-only lb units;
-- the hash split for TCP and UDP, and block-owned chains;
-- multi-block validation;
-- readiness gating.
+- routing-only lb units that keep their interface in DNS and in the edge inventory (§4.6);
+- one public port list for lb_alt interfaces, consumed by both the host rules and the VyOS generator, with UDP 4053 published (§4.1);
+- the hash split for TCP and UDP, and block-owned chains, built complete before an entry jump switches (§4.7);
+- generation-owned ports, and readiness on the candidate's private status port (§4.7);
+- multi-block validation.
 
-**4. Canary.** Before the first cutover, connect's `cores` goes to 20 on every block (D15). Then cut over one interface with a low DNS weight, TCP and UDP together, then all ten.
+**4. Gate A: before the first public cutover** (review). Each item has tests in §9.
+1. UDP 4053 is published on the host and at the router. A whodis exchange succeeds on both 53 and 4053 in each address family, with the right public reply address and port (§4.1).
+2. A host with one interface in each mode keeps an established connection through each direction of the switch, while fresh sessions succeed on both interfaces (§4.6).
+3. Readiness and DNAT refer to the same generation, and the two-interface network-namespace harness passes (§4.7).
+4. The HTTP/3 drain ordering passes alt's shutdown regressions and the new in-flight cases (D12).
+5. Request routing after TLS matches nginx. Real client code passes on WebSocket, H1+, raw QUIC and API h3 (D9).
+6. Retries, body storage and limits pass at their scopes (D7, D8, D19, D21).
+7. Beta is qualified with pinned test traffic before the switch (D16), and an nginx-path baseline exists for every step 7 metric.
 
-**5. Alt.** Move `alt.*` (D14), then remove alt.
+**5. Canary.** Before the first cutover, connect's `cores` goes to 20 on every block (D15).
+- Cut over one low-weight dual-stack interface first, TCP and UDP together. Edge-0 `eno3np2` and edge-1 `eno4` have IPv4 only, so the first switch avoids them.
+- Compare that interface with an nginx control interface over the same interval.
+- Then switch the rest one interface at a time. Each next interface waits until step 7's thresholds have held through a busy period and a complete deploy, drain and rollback.
 
-**6. Soak.** Then stop building the lb image for main.
+**6. Gate B: before moving `alt.*` DNS** (review; D14, D18, D20).
+- Rehearse interface rollback with one client pinned to the old proxy address and one pinned to the new edge address. A client that cached the edge address must keep API over plain QUIC and whodis (D20).
+- Each alt record has one DNS owner during the handover, while alt can still answer clients that cached the proxy addresses.
+- Compare the complete record sets before and after:
+  - the implicit `<env>-alt` names and the bare aliases;
+  - the A-only `-v4` and AAAA-only `-v6` names;
+  - weights and health membership.
+- DNS-only names stay out of TLS and HTTP route generation.
+- Track successful extender activations by carrier and family, alongside the fall in old-host traffic. Clients that lose reachability once both names share edge addresses also drop out of the old counters, so a fall alone proves nothing.
+- Keep an operable alt deployment and its router rules through the post-DNS soak. Keep a tested nginx image with usable certificates for the rollback window.
+
+**7. Promotion evidence** (review). Set numerical promotion and rollback thresholds from the step 4 baselines, for:
+- H1 and H1+ upgrade success, and p99 application RTT;
+- QUIC and whodis success and RTT;
+- forwarded 5xx and retries;
+- CPU, scheduler delay, socket drops and spill usage;
+- each block's actual traffic share and skew, especially behind large NATs.
+
+Include a reconnect wave with full and resumed handshakes.
+
+**8. Alt.** Move `alt.*` after Gate B (D14), then remove alt after the soak.
+
+**9. Soak.** Then stop building the lb image for main.
 
 ## 9. Tests (outline)
 
@@ -620,6 +894,58 @@ Every path above gets a test that fails without the change:
 - a drain closes keepalive connections and keeps websockets;
 - the warpctl iptables split, block cutover, bucket fallback, ownership validation and rollback, in the style of `../warp/warpctl/run_test.go`;
 - the connect perf harness (connect/connect_perf_test.go), direct and through nginx, for M4.
+
+From the review:
+- **Port contract.**
+  - TCP 80 and 443 and UDP 443, 53 and 4053 work through the generated host and router rules.
+  - A whodis exchange works on both 53 and 4053, with the public reply address and port checked.
+  - The family matrix comes from the inventory: ten public IPv4 addresses and eight IPv6.
+  - The legacy test that the forward target stays private still holds on nginx interfaces.
+- **Handover.**
+  - A host with one interface in each mode.
+  - Established connections held through each direction of the switch.
+  - D2's three override cases: no override; `true` under a disabled service default; `false` under an enabled default, which is the rollback switch.
+- **Generations and chains**, in a Linux network namespace with two interfaces:
+  - a block promotion concurrent with an lb reconcile;
+  - block loss and return;
+  - stale UDP tuples;
+  - an interrupted rollback.
+
+  Check traffic both ways, the original public source on replies, and the routing marks on unrelated traffic.
+- **Readiness.** Four sockets are counted per (address, protocol, port). `draining` is never ready. A socket lost after promotion behaves as D22 says.
+- **Drain.**
+  - Alt's shutdown regressions (alt/alt_close_test.go).
+  - An in-flight h3 response, a new stream during drain, and an established websocket. The old response completes, a fresh dial reaches the new generation, and the deadline releases the old sockets.
+- **Carriers.**
+  - WebSocket, H1+, raw QUIC and API h3 with real client code: authentication, a bidirectional exchange, whodis on both ports, and the existing refusals.
+  - A resumed QUIC session reports `Used0RTT == false`.
+  - One handshake admission limit across all sockets.
+  - The extender's listener-loss test (`TestExtenderRebuildsALostUdpCarrier`, ../connect/extender/extender_carrier_resilience_test.go), adapted to the front: sibling carriers keep serving, and readiness shows the missing socket until it recovers.
+  - Alt's survival of a datagram it can't write (transport_pt_server_failure_test.go) carries over.
+- **Retries.**
+  - A buffered POST across an api drain.
+  - A 503 replayed byte for byte.
+  - Application 500, 502 and 504 are not retried, and neither is a partial response.
+  - Attempts are counted at a recording upstream, including any automatic retry by Go's transport.
+  - A block-specific status request reports that block.
+- **Body storage.**
+  - The 64 KiB and 16 MiB boundaries, and 413 as a body crosses 16 MiB.
+  - Unknown-length bodies.
+  - Cancellation during spill or replay, and failed writes under a small injected quota.
+  - Every exit releases bytes, descriptors and files, and a local 503 is told apart from an upstream 503.
+- **Limits.**
+  - One source across two interfaces, two services, two reuseport sockets and a deploy overlap.
+  - The lb status exemptions and excluded subnets.
+  - Per-stream accounting on h2 and h3, and upgrade concurrency held until the tunnel closes.
+- **TLS.**
+  - Resumption across sockets within one block (D6c).
+  - SAN coverage for aliases, parent fallback and wildcards.
+  - The route file and every certificate are loaded before readiness.
+- **Monitor.**
+  - Port 80 returns 200 and the expected status JSON, not a 3xx.
+  - Individual blocks are probed as well as the public address.
+  - A target with service `connect` and front `api` is accepted, and its probe completes `/hello`.
+- **Performance.** The perf harness pins WebSocket and H1+ separately, adds QUIC and whodis cases, and has an nginx baseline.
 
 ## 10. Not in scope
 
