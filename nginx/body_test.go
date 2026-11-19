@@ -5,7 +5,6 @@ package nginx
 // release on every exit, directly and through a group.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -594,8 +593,10 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 }
 
 // Through a group: a declared length over the limit is a 413 before any
-// read or upstream; a stall between body reads is a 408; neither reaches a
-// block, and neither holds anything after.
+// read or upstream. A stall between body reads gets no response at all, as
+// nginx terminates a request whose body timed out: the handler aborts, and
+// Go's server closes the connection with nothing written. Neither reaches a
+// block, both are counted, and neither holds anything after.
 func TestForwardBodyLimitAndTimeout(t *testing.T) {
 	serviceName := testServiceName("body-limit-timeout")
 	upstream := newRecordingUpstream(t, "g1", nil)
@@ -619,12 +620,15 @@ func TestForwardBodyLimitAndTimeout(t *testing.T) {
 	}
 	defer conn.Close()
 	io.WriteString(conn, "POST /upload HTTP/1.1\r\nHost: upload.service.example\r\nContent-Length: 100\r\n\r\nonly ten b")
-	stalled, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil || stalled.StatusCode != http.StatusRequestTimeout {
-		t.Fatalf("stalled body: %v %v, want 408", stalled, err)
+	// a bound, so a held connection fails the read rather than hangs it
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if answered, err := io.ReadAll(conn); len(answered) != 0 || (err != nil && !isClosedError(err)) {
+		t.Fatalf("the stalled body was answered %q %v, want the connection closed with nothing written", answered, err)
 	}
 	front.waitServed(t)
-	front.waitServed(t)
+	if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+		t.Errorf("the stalled body's serveHttp ended with %v, want http.ErrAbortHandler", recovered)
+	}
 	if len(upstream.recorded()) != 0 {
 		t.Errorf("a refused body reached the block")
 	}

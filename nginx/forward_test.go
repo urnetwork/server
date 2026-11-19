@@ -7,18 +7,22 @@ package nginx
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // Sends raw request bytes to the front and reads the final response,
@@ -315,6 +319,215 @@ func TestForwardStreamedRouteHeaders(t *testing.T) {
 	}
 	if recorded[1].contentLength != 3 || len(recorded[1].transferEncoding) != 0 || string(recorded[1].body) != "xyz" {
 		t.Errorf("declared length sent as %d %v %q, want 3 xyz", recorded[1].contentLength, recorded[1].transferEncoding, recorded[1].body)
+	}
+}
+
+// A streamed body that stalls past client_body_timeout before its block
+// answers gets no response, as nginx terminates the request
+// (ngx_http_upstream_read_request_handler): the block's request, which has
+// the body's start, is cut, the client's connection closes with nothing
+// written, and the refusal is counted.
+func TestForwardStreamedBodyTimeoutEndsTheRequest(t *testing.T) {
+	serviceName := testServiceName("streamed-timeout")
+	raw := newRawUpstream(t)
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		options.clientBodyTimeout = 50 * time.Millisecond
+		return options
+	})
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 100\r\n\r\nfirst-ten!")
+
+	upstreamConn, _, request := raw.accept(t)
+	// a bound, so a request held open fails the read rather than hangs it
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	readExactly(t, request.Body, "first-ten!")
+	// the client sends no more
+	if rest, err := io.ReadAll(request.Body); err == nil {
+		t.Errorf("the block read its request whole, %q more, want it cut", rest)
+	}
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if answered, err := io.ReadAll(clientConn); len(answered) != 0 || (err != nil && !isClosedError(err)) {
+		t.Errorf("the stalled body was answered %q %v, want the connection closed with nothing written", answered, err)
+	}
+	if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+		t.Errorf("serveHttp ended with %v, want http.ErrAbortHandler", recovered)
+	}
+	if bodyRefusalCount(serviceName, bodyRefusalTimeout) != 1 || attemptCount(serviceName, "g1", "client") != 1 {
+		t.Errorf("refusals %v, client attempts %v, want the timeout counted once", bodyRefusalCount(serviceName, bodyRefusalTimeout), attemptCount(serviceName, "g1", "client"))
+	}
+	checkStoreEmpty(t, bodyStore)
+}
+
+// A client body that passes its first bytes, then fails its next read when
+// the test says, with the error given: a read past its deadline, as Go's
+// server reports one, or a broken body. The read that fails signals as it
+// waits. Read by one goroutine at a time, as a request body is.
+type failingBody struct {
+	body      io.ReadCloser
+	passBytes int
+	err       error
+	waiting   chan struct{}
+	fail      chan struct{}
+	readBytes int
+}
+
+// Passes the first bytes through, then waits for the test and fails.
+func (self *failingBody) Read(p []byte) (int, error) {
+	if self.readBytes < self.passBytes {
+		n, err := self.body.Read(p[:min(len(p), self.passBytes-self.readBytes)])
+		self.readBytes += n
+		return n, err
+	}
+	self.waiting <- struct{}{}
+	<-self.fail
+	return 0, self.err
+}
+
+// Closes the body underneath.
+func (self *failingBody) Close() error {
+	return self.body.Close()
+}
+
+// A streamed body that fails on the client's side while its block's response
+// is relayed ends that response too, as nginx ends the request: a body that
+// stalled past client_body_timeout terminates it, and a broken one ends it
+// short of its last bytes. The block's connection is cut, the client's
+// response stops before its end, and the refusal is counted by its reason.
+// The client's body fails when the test lets it, once the client has read
+// the head and the first part, so the order is fixed.
+func TestForwardStreamedBodyFailureCutsTheRelayedResponse(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		err        error
+		wantReason string
+	}{
+		{name: "timed out", err: os.ErrDeadlineExceeded, wantReason: bodyRefusalTimeout},
+		{name: "broken", err: io.ErrUnexpectedEOF, wantReason: bodyRefusalIncomplete},
+	} {
+		serviceName := testServiceName("streamed-failure-relayed")
+		raw := newRawUpstream(t)
+		group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+			{name: "g1", weight: 1, port: raw.port},
+		}), testForwardFrontSettings())
+		body := &failingBody{
+			passBytes: 10,
+			err:       c.err,
+			waiting:   make(chan struct{}, 1),
+			fail:      make(chan struct{}),
+		}
+		failOnce := sync.OnceFunc(func() { close(body.fail) })
+		// a failed test lets the read go
+		defer failOnce()
+		front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			body.body = r.Body
+			r.Body = body
+			return options
+		})
+		clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial front: %v", err)
+		}
+		defer clientConn.Close()
+		io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 100\r\n\r\nfirst-ten!")
+
+		upstreamConn, _, request := raw.accept(t)
+		upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		readExactly(t, request.Body, "first-ten!")
+		// the block answers before the body is whole, and keeps its response
+		// open
+		io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n")
+		clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: response %v %v, want the block's 200", c.name, response, err)
+		}
+		readExactly(t, response.Body, "first")
+		receiveBounded(t, body.waiting, "the client's next body read")
+		failOnce()
+
+		// each end sees its connection closed, neither its own read deadline
+		if rest, err := io.ReadAll(response.Body); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("%s: the response ended with %q more and %v, want it cut short", c.name, rest, err)
+		}
+		if rest, err := io.ReadAll(request.Body); !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("%s: the block's request ended with %q more and %v, want it cut short", c.name, rest, err)
+		}
+		if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+			t.Errorf("%s: serveHttp ended with %v, want http.ErrAbortHandler", c.name, recovered)
+		}
+		if bodyRefusalCount(serviceName, c.wantReason) != 1 {
+			t.Errorf("%s: the %s refusal was not counted", c.name, c.wantReason)
+		}
+	}
+}
+
+// On h2 a body that stalls past client_body_timeout resets its stream, and
+// only its stream, as nginx resets it: a buffered body read before any
+// block, and a streamed one its block has the start of. Go's server resets
+// with INTERNAL_ERROR, since it takes no code from a handler; nginx's is
+// PROTOCOL_ERROR. The connection serves the next stream.
+func TestForwardBodyTimeoutResetsTheH2Stream(t *testing.T) {
+	for _, streamed := range []bool{false, true} {
+		serviceName := testServiceName("h2-body-timeout")
+		upstream := newRecordingUpstream(t, "g1", nil)
+		group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+			{name: "g1", weight: 1, port: upstream.port},
+		}), testForwardFrontSettings())
+		front := newTestForwardH2Front(t, group, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = streamed
+			options.clientBodyTimeout = 50 * time.Millisecond
+			return options
+		})
+		clientConn := front.h2ClientConn(t)
+
+		bodyReader, bodyWriter := io.Pipe()
+		defer bodyWriter.Close()
+		go io.WriteString(bodyWriter, "first-ten!")
+		request, _ := http.NewRequestWithContext(testContext(t), http.MethodPost, front.url("/upload"), bodyReader)
+		response, err := clientConn.RoundTrip(request)
+		var streamError http2.StreamError
+		if !errors.As(err, &streamError) || streamError.Code != http2.ErrCodeInternal {
+			if response != nil {
+				response.Body.Close()
+			}
+			t.Fatalf("streamed %v: %v %v, want the stream reset with INTERNAL_ERROR", streamed, response, err)
+		}
+		if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+			t.Errorf("streamed %v: serveHttp ended with %v, want http.ErrAbortHandler", streamed, recovered)
+		}
+		if bodyRefusalCount(serviceName, bodyRefusalTimeout) != 1 {
+			t.Errorf("streamed %v: the timeout was not counted", streamed)
+		}
+
+		next, _ := http.NewRequestWithContext(testContext(t), http.MethodGet, front.url("/next"), nil)
+		nextResponse, err := clientConn.RoundTrip(next)
+		if err != nil {
+			t.Fatalf("streamed %v: the next stream: %v", streamed, err)
+		}
+		nextBody, _ := io.ReadAll(nextResponse.Body)
+		nextResponse.Body.Close()
+		front.waitServed(t)
+		if nextResponse.StatusCode != http.StatusOK || string(nextBody) != "g1" {
+			t.Errorf("streamed %v: the next stream got %d %q, want the block's answer on the same connection", streamed, nextResponse.StatusCode, nextBody)
+		}
+		for _, recorded := range upstream.recorded() {
+			if recorded.method == http.MethodPost && recorded.bodyErr == nil {
+				t.Errorf("streamed %v: the block got the stalled body whole", streamed)
+			}
+		}
+		checkStoreEmpty(t, bodyStore)
 	}
 }
 

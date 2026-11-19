@@ -41,8 +41,9 @@ type BodySettings struct {
 	SpillDir string
 	// the longest wait between two reads of a request body: nginx's
 	// `client_body_timeout 15s`. A route's client_body_timeout_seconds
-	// replaces it there. A stall past it is a 408. Non-positive means no
-	// bound beyond the request's own context.
+	// replaces it there. A stall past it ends the request with no response,
+	// as nginx ends it, or a 408 on h3. Non-positive means no bound beyond the
+	// request's own context.
 	ClientBodyTimeout time.Duration
 	// the scratch buffer one body read uses, in bytes, pooled per front; it
 	// bounds a single read, not what is held. Values below 1 mean 1.

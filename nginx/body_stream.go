@@ -5,7 +5,9 @@ package nginx
 // `proxy_request_buffering off` reads it. Nothing is held, so the memory
 // budget and the spill caps don't apply, but the body limit and
 // client_body_timeout between reads do. A body that began going upstream
-// can't be replayed, so it ends the request's retries (D7).
+// can't be replayed, so it ends the request's retries (D7). A read that
+// fails on the client's side ends the request, a response being relayed
+// included, as nginx ends it.
 
 import (
 	"context"

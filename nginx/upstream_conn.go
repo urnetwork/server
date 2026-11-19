@@ -552,10 +552,16 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	}
 	go func() {
 		err := exchange.writeRequest()
-		if err == nil {
+		switch {
+		case err == nil:
 			exchange.writeDone.Store(true)
 			upstreamConn.armRead()
-		} else if !exchange.headRead.Load() && !exchange.finishing.Load() {
+		case request.streamedBody != nil && request.streamedBody.failed():
+			// the client's body failed, which ends the request in nginx, a
+			// response it relays included: the cut ends the wait for the
+			// response head, or the relay's next read
+			upstreamConn.close()
+		case !exchange.headRead.Load() && !exchange.finishing.Load():
 			// the block can't answer a request it didn't get whole, so end
 			// the wait for its response head
 			exchange.writeCut.Store(true)

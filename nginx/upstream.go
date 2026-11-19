@@ -191,7 +191,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 	if forwardRequestHasBody(r) {
 		maxBodyBytes := self.settings.Body.MaxBodyBytes
 		if 0 < maxBodyBytes && maxBodyBytes < r.ContentLength {
-			self.refuse(w, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
+			self.refuse(w, r, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 			return
 		}
 		if options.streamed {
@@ -211,7 +211,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				setReadDeadline: setClientReadDeadline,
 			})
 			if refusal != nil {
-				self.refuse(w, responseController, refusal)
+				self.refuse(w, r, responseController, refusal)
 				return
 			}
 			defer storedBody.release()
@@ -220,7 +220,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
-	self.forward(ctx, w, responseController, request, &options)
+	self.forward(w, r, responseController, request, &options)
 }
 
 // Fills the options routing left zero with the defaults it would have set.
@@ -295,7 +295,8 @@ func (self *forwardAttempts) retry503Allowed(exchange *upstreamExchange) bool {
 
 // Runs the attempts and relays the final response, or answers the front's
 // own error.
-func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, responseController *http.ResponseController, request *upstreamRequest, options *forwardOptions) {
+func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, request *upstreamRequest, options *forwardOptions) {
+	ctx := r.Context()
 	triedBlocks := make([]bool, len(self.blocks))
 	var ringWalk *upstreamRingWalk
 	if self.ring != nil && options.blockName == "" {
@@ -332,7 +333,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 		case upstreamFailureClient:
 			if request.streamedBody != nil {
 				if refusal := request.streamedBody.failure(); refusal != nil {
-					self.refuse(w, responseController, refusal)
+					self.refuse(w, r, responseController, refusal)
 					return
 				}
 			}
@@ -440,7 +441,12 @@ func (self *upstreamGroup) attempt(ctx context.Context, block *upstreamBlock, re
 // Relays the final response: its head at once, then its body as it arrives,
 // each read written and flushed, as nginx's `proxy_buffering off` sends it. A
 // 101 becomes a tunnel. A body the block cuts short, or the client stops
-// taking, aborts the response.
+// taking, aborts the response. So does a streamed request body that fails on
+// the client's side while the response is relayed, a stall past
+// client_body_timeout included: the exchange cuts the block's side then, as
+// nginx ends the request (ngx_http_upstream_finalize_request terminates one
+// whose body timed out, and ends one with a broken body without its last
+// bytes), and the refusal is counted, as one before the response head is.
 func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http.ResponseController, block *upstreamBlock, exchange *upstreamExchange, options *forwardOptions) {
 	// the block that answered labels the request's metrics and access log
 	// line (D17)
@@ -473,6 +479,11 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 		exchange.stopCancelHook()
 	})
 	if clientErr != nil || upstreamErr != nil {
+		if streamedBody := exchange.request.streamedBody; streamedBody != nil {
+			if refusal := streamedBody.failure(); refusal != nil {
+				forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
+			}
+		}
 		// a truncated response must not look complete to the client
 		panic(http.ErrAbortHandler)
 	}
@@ -519,17 +530,34 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 // Answers a body refusal and counts it. A client that went away gets
 // nothing.
 //
-// The body may be partly unread. Go's server reads up to 256 KiB of what
-// remains before it writes the answer, so that read is bounded first by
-// HttpSettings.LingeringTimeout, nginx's lingering_timeout, or cut at once
-// when that is non-positive. A timed out read's deadline has already passed
-// and stays, so its 408 goes out at once.
-func (self *upstreamGroup) refuse(w http.ResponseWriter, responseController *http.ResponseController, refusal *bodyRefusal) {
+// Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
+// finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,
+// before it reaches a block (ngx_http_read_client_request_body_handler) or
+// while it streams (ngx_http_upstream_read_request_handler), and
+// ngx_http_finalize_request terminates such a request with no response. So
+// the handler aborts with http.ErrAbortHandler: Go's h1 server closes the
+// connection, as nginx does, and its h2 server resets the stream, which
+// nginx resets too. Unlike nginx, Go's h1 server sends TLS's close_notify
+// first, where nginx's quiet shutdown after a timeout sends none, and its h2
+// reset is INTERNAL_ERROR, where nginx's is PROTOCOL_ERROR, since Go's
+// server takes no reset code from a handler. h3, which nginx doesn't serve
+// here, still gets the 408. A timed out read's deadline has passed and
+// stays, so nothing waits on the client after it.
+//
+// Any other refused body may be partly unread. Go's server reads up to 256
+// KiB of what remains before it writes the answer, so that read is bounded
+// first by HttpSettings.LingeringTimeout, nginx's lingering_timeout, or cut
+// at once when that is non-positive.
+func (self *upstreamGroup) refuse(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, refusal *bodyRefusal) {
 	forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
 	if refusal.status == 0 {
 		return
 	}
-	if refusal.reason != bodyRefusalTimeout {
+	if refusal.reason == bodyRefusalTimeout {
+		if r.ProtoMajor != 3 {
+			panic(http.ErrAbortHandler)
+		}
+	} else {
 		lingeringDeadline := time.Unix(1, 0)
 		if lingeringTimeout := self.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
 			lingeringDeadline = time.Now().Add(lingeringTimeout)

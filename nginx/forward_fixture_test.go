@@ -8,6 +8,7 @@ package nginx
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"golang.org/x/net/http2"
 )
 
 // One request as a recording upstream saw it.
@@ -264,6 +266,51 @@ func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *htt
 	}))
 	t.Cleanup(front.server.Close)
 	return front
+}
+
+// A front over a group that serves h2 over TLS, as the public TCP 443 does,
+// closed when the test ends. Its server's Client speaks h2 to it.
+func newTestForwardH2Front(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testForwardFront {
+	front := &testForwardFront{
+		group:   group,
+		options: options,
+		served:  make(chan any, 1024),
+	}
+	front.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			recovered := recover()
+			front.served <- recovered
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
+		front.group.serveHttp(w, r, front.options(r))
+	}))
+	front.server.EnableHTTP2 = true
+	front.server.StartTLS()
+	t.Cleanup(front.server.Close)
+	return front
+}
+
+// One h2 connection to an h2 front, through golang.org/x/net/http2's client,
+// so a test sees the stream errors the front's server sends and can send
+// the next stream on the same connection. It closes when the test ends.
+func (self *testForwardFront) h2ClientConn(t *testing.T) *http2.ClientConn {
+	tlsConfig := self.server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig.NextProtos = []string{"h2"}
+	tlsConn, err := tls.Dial("tcp", self.server.Listener.Addr().String(), tlsConfig)
+	if err != nil {
+		t.Fatalf("dial h2 front: %v", err)
+	}
+	clientConn, err := (&http2.Transport{}).NewClientConn(tlsConn)
+	if err != nil {
+		tlsConn.Close()
+		t.Fatalf("h2 client connection: %v", err)
+	}
+	t.Cleanup(func() {
+		clientConn.Close()
+	})
+	return clientConn
 }
 
 // The default options of a test request: a documentation ipv4 client.
