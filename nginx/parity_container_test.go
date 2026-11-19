@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -61,9 +62,15 @@ const (
 	parityStatusJsonDir = "/srv/warp/status"
 )
 
-// Runs the corpus against nginx and the front, inside the parity container.
+// Runs the corpus against nginx and the front, inside the parity container,
+// and skips with the reason anywhere else.
 func TestNginxParityContainer(t *testing.T) {
-	parityInContainer(t)
+	if os.Getenv(parityContainerEnvName) != "1" {
+		t.Skipf("runs only inside the parity harness's container; see TestNginxParity (%s=1)", parityHostEnvName)
+	}
+	if runtime.GOOS != "linux" {
+		t.Skipf("the parity container is linux, not %s", runtime.GOOS)
+	}
 	harness := newParityHarness(t, defaultParityHarnessSettings())
 	defer harness.close()
 	harness.runCorpus(parityCorpus())
@@ -129,7 +136,14 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 		httpsPort: routeTable.Listen.HttpsPort,
 	}
 
-	for _, addr := range append([]netip.Addr{interfaceIpv4, interfaceIpv6, upstreamIpv4}, parityClientAddrs()...) {
+	// the interface's and the upstream's addresses, and every client address
+	// the corpus uses
+	addrs := []netip.Addr{interfaceIpv4, interfaceIpv6, upstreamIpv4, parityClientIpv4, parityClientIpv6, parityLimitClientIpv6}
+	addrs = append(addrs, parityRingClients()...)
+	for i := range parityLimitClientCount {
+		addrs = append(addrs, parityLimitClient(i))
+	}
+	for _, addr := range addrs {
 		if err := addParityLoopbackAddr(addr); err != nil {
 			t.Fatal(err)
 		}
@@ -139,7 +153,76 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeParityCertificates(string(nginxConfig), settings); err != nil {
+	// a certificate and key at every path the nginx config names, for the
+	// name its directory is for: the name itself, or `*.<base>` for a
+	// `star.<base>` directory. Each is self-signed with that name as its
+	// common name, so a client can tell which one a server presented.
+	writeCertificates := func() error {
+		certificateRegexp := regexp.MustCompile(`(?m)^\s*ssl_certificate\s+(\S+);`)
+		keyRegexp := regexp.MustCompile(`(?m)^\s*ssl_certificate_key\s+(\S+);`)
+		dirKeyPaths := map[string]string{}
+		for _, match := range keyRegexp.FindAllStringSubmatch(string(nginxConfig), -1) {
+			dirKeyPaths[filepath.Dir(match[1])] = match[1]
+		}
+		writtenDirs := map[string]bool{}
+		for _, match := range certificateRegexp.FindAllStringSubmatch(string(nginxConfig), -1) {
+			certificatePath := match[1]
+			dir := filepath.Dir(certificatePath)
+			if writtenDirs[dir] {
+				continue
+			}
+			keyPath, ok := dirKeyPaths[dir]
+			if !ok {
+				return fmt.Errorf("the nginx config names no key beside %s", certificatePath)
+			}
+			name := filepath.Base(dir)
+			dnsName := name
+			if base, ok := strings.CutPrefix(name, "star."); ok {
+				dnsName = "*." + base
+			}
+			key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			if err != nil {
+				return err
+			}
+			serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), parityCertificateSerialBits))
+			if err != nil {
+				return err
+			}
+			now := time.Now()
+			template := &x509.Certificate{
+				SerialNumber: serialNumber,
+				Subject:      pkix.Name{CommonName: name},
+				DNSNames:     []string{dnsName},
+				NotBefore:    now.Add(-settings.CertificateBackdate),
+				NotAfter:     now.Add(settings.CertificateLifetime),
+				KeyUsage:     x509.KeyUsageDigitalSignature,
+				ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			}
+			certificateDer, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+			if err != nil {
+				return err
+			}
+			keyDer, err := x509.MarshalECPrivateKey(key)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(certificatePath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDer}), 0644); err != nil {
+				return err
+			}
+			if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDer}), 0600); err != nil {
+				return err
+			}
+			writtenDirs[dir] = true
+		}
+		if len(writtenDirs) == 0 {
+			return fmt.Errorf("the nginx config names no certificate")
+		}
+		return nil
+	}
+	if err := writeCertificates(); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(parityStatusJsonDir, 0755); err != nil {
@@ -306,76 +389,6 @@ func (self *parityHarness) close() {
 		}
 	}
 	self.cancel()
-}
-
-// Generates a certificate and key at every path the nginx config names, for
-// the name its directory is for: the name itself, or `*.<base>` for a
-// `star.<base>` directory. Each is self-signed with that name as its common
-// name, so a client can tell which one a server presented.
-func writeParityCertificates(nginxConfig string, settings *parityHarnessSettings) error {
-	certificateRegexp := regexp.MustCompile(`(?m)^\s*ssl_certificate\s+(\S+);`)
-	keyRegexp := regexp.MustCompile(`(?m)^\s*ssl_certificate_key\s+(\S+);`)
-	dirKeyPaths := map[string]string{}
-	for _, match := range keyRegexp.FindAllStringSubmatch(nginxConfig, -1) {
-		dirKeyPaths[filepath.Dir(match[1])] = match[1]
-	}
-	writtenDirs := map[string]bool{}
-	for _, match := range certificateRegexp.FindAllStringSubmatch(nginxConfig, -1) {
-		certificatePath := match[1]
-		dir := filepath.Dir(certificatePath)
-		if writtenDirs[dir] {
-			continue
-		}
-		keyPath, ok := dirKeyPaths[dir]
-		if !ok {
-			return fmt.Errorf("the nginx config names no key beside %s", certificatePath)
-		}
-		name := filepath.Base(dir)
-		dnsName := name
-		if base, ok := strings.CutPrefix(name, "star."); ok {
-			dnsName = "*." + base
-		}
-		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return err
-		}
-		serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), parityCertificateSerialBits))
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		template := &x509.Certificate{
-			SerialNumber: serialNumber,
-			Subject:      pkix.Name{CommonName: name},
-			DNSNames:     []string{dnsName},
-			NotBefore:    now.Add(-settings.CertificateBackdate),
-			NotAfter:     now.Add(settings.CertificateLifetime),
-			KeyUsage:     x509.KeyUsageDigitalSignature,
-			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		}
-		certificateDer, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-		if err != nil {
-			return err
-		}
-		keyDer, err := x509.MarshalECPrivateKey(key)
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return err
-		}
-		if err := os.WriteFile(certificatePath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDer}), 0644); err != nil {
-			return err
-		}
-		if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDer}), 0600); err != nil {
-			return err
-		}
-		writtenDirs[dir] = true
-	}
-	if len(writtenDirs) == 0 {
-		return fmt.Errorf("the nginx config names no certificate")
-	}
-	return nil
 }
 
 // A writer that keeps only its last bytes. Safe for concurrent use.

@@ -781,6 +781,72 @@ func TestParityStatusesScenarioNumbersEachRequestsAttempts(t *testing.T) {
 	}
 }
 
+// A streamed-body scenario records each body as it was sent, one shorter
+// than its first bytes included, echoes it, and fires "upstream-got-first"
+// only once it has the first bytes; another scenario reading the body after
+// it reads nothing more.
+func TestParityStreamRequestScenarioRecordsTheBodyAsSent(t *testing.T) {
+	recorder := newParityRecorder(defaultParityHarnessSettings())
+	recorder.setScenario("stream/unit", parityStreamRequestScenario)
+	recorder.setScenario("retry/unit", func(exchange *parityUpstreamExchange) {
+		exchange.readStreamedBody()
+		parityStatusesScenario(http.StatusOK)(exchange)
+	})
+	handler := recorder.handler("mcp", "g1")
+	send := func(caseKey string, sequence int, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+		request.Header.Set(parityCaseHeader, caseKey)
+		request.Header.Set(paritySequenceHeader, strconv.Itoa(sequence))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	firstFired := func(caseKey string) bool {
+		recorder.stateLock.Lock()
+		defer recorder.stateLock.Unlock()
+		return recorder.firedBarrierNames[caseKey+"/upstream-got-first"]
+	}
+
+	shortBody := "short"
+	if response := send("front/stream/unit", 0, shortBody); response.Body.String() != shortBody {
+		t.Errorf("echoed %q, want %q", response.Body.String(), shortBody)
+	}
+	if firstFired("front/stream/unit") {
+		t.Error("a body shorter than the first bytes fired upstream-got-first")
+	}
+	longBody := string(parityBody(3 * parityStreamFirstBytes))
+	if response := send("front/stream/unit", 1, longBody); response.Body.String() != longBody {
+		t.Errorf("echoed %q, want %q", response.Body.String(), longBody)
+	}
+	if !firstFired("front/stream/unit") {
+		t.Error("a body past the first bytes did not fire upstream-got-first")
+	}
+	send("front/retry/unit", 0, longBody)
+
+	for _, c := range []struct {
+		caseKey string
+		bodies  []string
+	}{
+		{caseKey: "front/stream/unit", bodies: []string{shortBody, longBody}},
+		{caseKey: "front/retry/unit", bodies: []string{longBody}},
+	} {
+		attempts := recorder.attempts(c.caseKey)
+		if len(attempts) != len(c.bodies) {
+			t.Fatalf("%s: recorded %d attempts, want %d", c.caseKey, len(attempts), len(c.bodies))
+		}
+		for i, attempt := range attempts {
+			if string(attempt.body) != c.bodies[i] {
+				t.Errorf("%s: attempt %d recorded body %q, want %q", c.caseKey, i, attempt.body, c.bodies[i])
+			}
+			// a short body ends inside the first bytes, which the reader
+			// reports as it would a body cut short
+			if parityStreamFirstBytes <= len(c.bodies[i]) && attempt.bodyError != "" {
+				t.Errorf("%s: attempt %d recorded body error %q", c.caseKey, i, attempt.bodyError)
+			}
+		}
+	}
+}
+
 // Each timeout case straddles the timeout it is for, at the values nginx's
 // config sets, as the front's defaults and the fixture's route file carry
 // them: what should pass waits under its timeout, and what should end the

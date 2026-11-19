@@ -127,16 +127,6 @@ const (
 	parityConnectionLimitCount = 3
 )
 
-// Every client address the corpus uses, for the container's loopback.
-func parityClientAddrs() []netip.Addr {
-	addrs := []netip.Addr{parityClientIpv4, parityClientIpv6, parityLimitClientIpv6}
-	addrs = append(addrs, parityRingClients()...)
-	for i := range parityLimitClientCount {
-		addrs = append(addrs, parityLimitClient(i))
-	}
-	return addrs
-}
-
 // A GET over TLS with the given server name and Host.
 func parityGet(sni string, host string, target string) *parityRequest {
 	return &parityRequest{
@@ -197,27 +187,6 @@ func paritySendRepeated(request *parityRequest, count int) func(run *parityCaseR
 	return func(run *parityCaseRun) {
 		for range count {
 			run.send(request)
-		}
-	}
-}
-
-// Sends several requests on one h2 connection, one after another, each
-// response read before the next request.
-func paritySendH2Sequence(requests ...*parityRequest) func(run *parityCaseRun) {
-	return func(run *parityCaseRun) {
-		first := run.sequence()
-		conn, err := run.dial(requests[0], first)
-		if err != nil {
-			return
-		}
-		defer conn.close()
-		for i, request := range requests {
-			sequence := first
-			if 0 < i {
-				sequence = run.sequence()
-			}
-			response, err := conn.roundTripH2(request, sequence)
-			run.recordResponse(sequence, response, err)
 		}
 	}
 }
@@ -458,22 +427,6 @@ func parityHold(run *parityCaseRun, request *parityRequest, count int, done *syn
 	}
 }
 
-// Weighted least_conn under held requests: pool's blocks (beta 1, g1 2,
-// g2 3) take requests that are never released until the end, so each choice
-// sees the load the earlier ones left. In between, two requests held on the
-// lb's per-block route of g2 show whether that load counts: nginx keeps the
-// per-block upstream's connection counts apart from the service's.
-func parityLeastConn(run *parityCaseRun) {
-	var done sync.WaitGroup
-	aggregate := parityGet(parityPoolName, parityPoolName, "/hold")
-	perBlock := parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/b/pool/g2/hold")
-	parityHold(run, aggregate, 8, &done)
-	parityHold(run, perBlock, 2, &done)
-	parityHold(run, aggregate, 6, &done)
-	run.fire("release")
-	done.Wait()
-}
-
 // Sends one request from each ring client, so each one's block is
 // compared.
 func parityRing(request *parityRequest, clients []netip.Addr) func(run *parityCaseRun) {
@@ -481,83 +434,6 @@ func parityRing(request *parityRequest, clients []netip.Addr) func(run *parityCa
 		for _, client := range clients {
 			run.send(parityFrom(request, client))
 		}
-	}
-}
-
-// Holds as many requests as the interface's connection limit allows, then
-// sends one more, which nginx refuses with 429, and releases them.
-func parityConnectionLimit(clientAddr netip.Addr, limit int) func(run *parityCaseRun) {
-	return func(run *parityCaseRun) {
-		var done sync.WaitGroup
-		request := parityFrom(parityGet(parityApiName, parityApiName, "/hold"), clientAddr)
-		parityHold(run, request, limit, &done)
-		run.send(request)
-		run.fire("release")
-		done.Wait()
-	}
-}
-
-// Holds as many requests as the connection limit allows as streams of one
-// h2 connection, then sends one more stream, which nginx refuses with 429:
-// each stream counts against the address's connections.
-func parityConnectionLimitOverH2(clientAddr netip.Addr, limit int) func(run *parityCaseRun) {
-	return func(run *parityCaseRun) {
-		request := parityOverH2(parityFrom(parityGet(parityApiName, parityApiName, "/hold"), clientAddr))
-		first := run.sequence()
-		conn, err := run.dial(request, first)
-		if err != nil {
-			return
-		}
-		defer conn.close()
-		if _, err := conn.h2(); err != nil {
-			run.fact("h2", parityErrorClass(err))
-			return
-		}
-		var done sync.WaitGroup
-		for i := range limit {
-			sequence := first
-			if 0 < i {
-				sequence = run.sequence()
-			}
-			done.Add(1)
-			go func() {
-				defer done.Done()
-				response, err := conn.roundTripH2(request, sequence)
-				run.recordResponse(sequence, response, err)
-			}()
-			arrived := run.wait("arrived/"+strconv.Itoa(sequence), run.harness.settings.BarrierTimeout)
-			run.fact("held stream "+strconv.Itoa(sequence)+" arrived", strconv.FormatBool(arrived))
-		}
-		sequence := run.sequence()
-		response, err := conn.roundTripH2(request, sequence)
-		run.recordResponse(sequence, response, err)
-		run.fire("release")
-		done.Wait()
-	}
-}
-
-// Opens as many forwarded websocket tunnels as the connection limit allows,
-// then sends a plain request while they are open, which nginx refuses with
-// 429: an upgraded request holds its connection until the tunnel closes.
-func parityConnectionLimitWithTunnels(clientAddr netip.Addr, limit int, websocketHeaders [][2]string) func(run *parityCaseRun) {
-	return func(run *parityCaseRun) {
-		tunnel := parityFrom(parityWith(parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/ws"), "", websocketHeaders...), clientAddr)
-		for range limit {
-			sequence := run.sequence()
-			conn, err := run.dial(tunnel, sequence)
-			if err != nil {
-				return
-			}
-			defer conn.close()
-			conn.writeH1(tunnel, sequence)
-			response, err := conn.readH1Response(tunnel.method)
-			if err != nil {
-				run.recordResponse(sequence, nil, err)
-				continue
-			}
-			run.recordResponseHead(sequence, response)
-		}
-		run.send(parityFrom(parityGet(parityApiName, parityApiName, "/hello"), clientAddr))
 	}
 }
 
@@ -734,12 +610,30 @@ func parityCorpus() []*parityCase {
 		{name: "tls/tls12-suite-connect-name", request: &parityRequest{scheme: "https", sni: parityConnectName, maxTlsVersion: tls.VersionTLS12, recordCipher: true, method: http.MethodGet, target: "/hello", host: parityConnectName}, tags: []string{"tls-suites"}},
 		{
 			name: "tls/h2-two-authorities-on-one-connection",
-			run: paritySendH2Sequence(
-				parityOverH2(parityGet(parityApiName, parityApiName, "/one")),
-				parityOverH2(parityGet(parityApiName, parityWebName, "/two")),
-				parityOverH2(parityGet(parityApiName, parityLbName, parityLbPrefix+"/status")),
-				parityOverH2(parityGet(parityApiName, parityUnknownName, "/four")),
-			),
+			// one after another on one h2 connection, each response read
+			// before the next request
+			run: func(run *parityCaseRun) {
+				requests := []*parityRequest{
+					parityOverH2(parityGet(parityApiName, parityApiName, "/one")),
+					parityOverH2(parityGet(parityApiName, parityWebName, "/two")),
+					parityOverH2(parityGet(parityApiName, parityLbName, parityLbPrefix+"/status")),
+					parityOverH2(parityGet(parityApiName, parityUnknownName, "/four")),
+				}
+				first := run.sequence()
+				conn, err := run.dial(requests[0], first)
+				if err != nil {
+					return
+				}
+				defer conn.close()
+				for i, request := range requests {
+					sequence := first
+					if 0 < i {
+						sequence = run.sequence()
+					}
+					response, err := conn.roundTripH2(request, sequence)
+					run.recordResponse(sequence, response, err)
+				}
+			},
 			tags: []string{"lb-status"},
 		},
 		{
@@ -871,7 +765,27 @@ func parityCorpus() []*parityCase {
 		{name: "websocket/upgrade-to-a-plain-service", request: parityWith(api, "", websocketHeaders...)},
 
 		// upstream choice
-		{name: "balance/least-conn-under-held-requests", run: parityLeastConn, scenario: parityHoldScenario, compareBlocks: true},
+		// weighted least_conn under held requests: pool's blocks (beta 1, g1
+		// 2, g2 3) take requests that are never released until the end, so
+		// each choice sees the load the earlier ones left. In between, two
+		// requests held on the lb's per-block route of g2 show whether that
+		// load counts: nginx keeps the per-block upstream's connection counts
+		// apart from the service's.
+		{
+			name: "balance/least-conn-under-held-requests",
+			run: func(run *parityCaseRun) {
+				var done sync.WaitGroup
+				aggregate := parityGet(parityPoolName, parityPoolName, "/hold")
+				perBlock := parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/b/pool/g2/hold")
+				parityHold(run, aggregate, 8, &done)
+				parityHold(run, perBlock, 2, &done)
+				parityHold(run, aggregate, 6, &done)
+				run.fire("release")
+				done.Wait()
+			},
+			scenario:      parityHoldScenario,
+			compareBlocks: true,
+		},
 		{name: "balance/ketama-ipv4-and-ipv6", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()), compareBlocks: true},
 		{name: "balance/ketama-retry-walk", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()[:4]), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
 		{name: "balance/ketama-retry-walk-ipv6", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()[24:28]), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
@@ -888,10 +802,34 @@ func parityCorpus() []*parityCase {
 		{name: "retry/503-chunked-body", request: parityWithBody(api, http.MethodPost, parityBody(3000), true), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK)},
 		{name: "retry/503-streamed-get", request: parityGet(parityMcpName, parityMcpName, "/mcp"), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
 		{name: "retry/503-streamed-post-sent-whole", request: parityWithBody(parityGet(parityMcpName, parityMcpName, "/mcp"), http.MethodPost, parityBody(500), false), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
-		{name: "retry/503-streamed-post-in-flight", run: paritySendStreamedRequest(parityWithBody(parityGet(parityMcpName, parityMcpName, "/mcp"), http.MethodPost, parityBody(100), false)), scenario: parityStreamRequestStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
+		{
+			name: "retry/503-streamed-post-in-flight",
+			run:  paritySendStreamedRequest(parityWithBody(parityGet(parityMcpName, parityMcpName, "/mcp"), http.MethodPost, parityBody(100), false)),
+			// the body read as it streams, then 503 and 200
+			scenario: func(exchange *parityUpstreamExchange) {
+				exchange.readStreamedBody()
+				parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK)(exchange)
+			},
+			compareBlocks: true,
+		},
 		{name: "retry/503-single-block-service", request: parityGet(parityWebName, parityWebName, "/page"), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK)},
 		{name: "retry/large-response-head", request: api, scenario: parityLargeResponseHeadScenario},
-		{name: "retry/partial-response", request: api, scenario: parityPartialScenario},
+		{
+			name:    "retry/partial-response",
+			request: api,
+			// a head promising 100 body bytes, 10 of them, and a cut
+			// connection
+			scenario: func(exchange *parityUpstreamExchange) {
+				exchange.readBody()
+				exchange.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				exchange.w.Header().Set("Content-Length", "100")
+				exchange.answered(http.StatusOK)
+				exchange.w.WriteHeader(http.StatusOK)
+				io.WriteString(exchange.w, "0123456789")
+				http.NewResponseController(exchange.w).Flush()
+				panic(http.ErrAbortHandler)
+			},
+		},
 
 		// header limits, methods, header names and bodies
 		{name: "limits/request-line-at-8k", request: parityGet(parityApiName, parityApiName, "/"+strings.Repeat("a", 8*1024-len("GET / HTTP/1.1\r\n")))},
@@ -1033,8 +971,92 @@ func parityCorpus() []*parityCase {
 		{name: "limit/lb-block-status-exempt", run: paritySendRepeated(parityFrom(parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/b/api/g1/status"), nextLimitClient()), paritySharedAdmitted+2)},
 		{name: "limit/lb-status-on-a-service-name-charged", run: paritySendRepeated(parityFrom(parityGet(parityApiName, parityApiName, parityLbPrefix+"/status"), nextLimitClient()), paritySharedAdmitted+2)},
 		{name: "limit/in-process-charged", run: paritySendRepeated(parityFrom(parityGet(parityConnectName, parityConnectName, "/hello"), nextLimitClient()), paritySharedAdmitted+2)},
-		{name: "limit/connections", run: parityConnectionLimit(nextLimitClient(), parityConnectionLimitCount), scenario: parityHoldScenario},
-		{name: "limit/connections-per-h2-stream", run: parityConnectionLimitOverH2(nextLimitClient(), parityConnectionLimitCount), scenario: parityHoldScenario},
-		{name: "limit/connections-held-by-tunnels", run: parityConnectionLimitWithTunnels(nextLimitClient(), parityConnectionLimitCount, websocketHeaders), scenario: parityWebsocketScenario},
+		// as many requests held as the interface's connection limit allows,
+		// then one more, which nginx refuses with 429
+		{
+			name: "limit/connections",
+			run: func() func(run *parityCaseRun) {
+				request := parityFrom(parityGet(parityApiName, parityApiName, "/hold"), nextLimitClient())
+				return func(run *parityCaseRun) {
+					var done sync.WaitGroup
+					parityHold(run, request, parityConnectionLimitCount, &done)
+					run.send(request)
+					run.fire("release")
+					done.Wait()
+				}
+			}(),
+			scenario: parityHoldScenario,
+		},
+		// the same as streams of one h2 connection: each stream counts
+		// against the address's connections
+		{
+			name: "limit/connections-per-h2-stream",
+			run: func() func(run *parityCaseRun) {
+				request := parityOverH2(parityFrom(parityGet(parityApiName, parityApiName, "/hold"), nextLimitClient()))
+				return func(run *parityCaseRun) {
+					first := run.sequence()
+					conn, err := run.dial(request, first)
+					if err != nil {
+						return
+					}
+					defer conn.close()
+					if _, err := conn.h2(); err != nil {
+						run.fact("h2", parityErrorClass(err))
+						return
+					}
+					var done sync.WaitGroup
+					for i := range parityConnectionLimitCount {
+						sequence := first
+						if 0 < i {
+							sequence = run.sequence()
+						}
+						done.Add(1)
+						go func() {
+							defer done.Done()
+							response, err := conn.roundTripH2(request, sequence)
+							run.recordResponse(sequence, response, err)
+						}()
+						arrived := run.wait("arrived/"+strconv.Itoa(sequence), run.harness.settings.BarrierTimeout)
+						run.fact("held stream "+strconv.Itoa(sequence)+" arrived", strconv.FormatBool(arrived))
+					}
+					sequence := run.sequence()
+					response, err := conn.roundTripH2(request, sequence)
+					run.recordResponse(sequence, response, err)
+					run.fire("release")
+					done.Wait()
+				}
+			}(),
+			scenario: parityHoldScenario,
+		},
+		// as many forwarded websocket tunnels open as the connection limit
+		// allows, then a plain request, which nginx refuses with 429: an
+		// upgraded request holds its connection until the tunnel closes
+		{
+			name: "limit/connections-held-by-tunnels",
+			run: func() func(run *parityCaseRun) {
+				clientAddr := nextLimitClient()
+				tunnel := parityFrom(parityWith(parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/ws"), "", websocketHeaders...), clientAddr)
+				plain := parityFrom(parityGet(parityApiName, parityApiName, "/hello"), clientAddr)
+				return func(run *parityCaseRun) {
+					for range parityConnectionLimitCount {
+						sequence := run.sequence()
+						conn, err := run.dial(tunnel, sequence)
+						if err != nil {
+							return
+						}
+						defer conn.close()
+						conn.writeH1(tunnel, sequence)
+						response, err := conn.readH1Response(tunnel.method)
+						if err != nil {
+							run.recordResponse(sequence, nil, err)
+							continue
+						}
+						run.recordResponseHead(sequence, response)
+					}
+					run.send(plain)
+				}
+			}(),
+			scenario: parityWebsocketScenario,
+		},
 	}
 }

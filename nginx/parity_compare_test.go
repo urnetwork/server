@@ -204,29 +204,6 @@ var paritySecurityHeaderFields = []string{
 	"header.X-Xss-Protection",
 }
 
-// Whether two lb status bodies differ only by the front's "front":"lbalt"
-// (LBALT-IMPL.md §2.6).
-func parityLbStatusBodiesMatch(nginxBody string, frontBody string) bool {
-	nginxJson, err := strconv.Unquote(nginxBody)
-	if err != nil {
-		return false
-	}
-	frontJson, err := strconv.Unquote(frontBody)
-	if err != nil {
-		return false
-	}
-	nginxStatus := map[string]any{}
-	frontStatus := map[string]any{}
-	if json.Unmarshal([]byte(nginxJson), &nginxStatus) != nil || json.Unmarshal([]byte(frontJson), &frontStatus) != nil {
-		return false
-	}
-	if frontStatus["front"] != "lbalt" {
-		return false
-	}
-	delete(frontStatus, "front")
-	return maps.Equal(nginxStatus, frontStatus)
-}
-
 // The accepted differences.
 var parityAcceptances = []*parityAcceptance{
 	{
@@ -282,7 +259,28 @@ var parityAcceptances = []*parityAcceptance{
 			if !ok || !check.hasTag("lb-status") || !check.isLbStatusRequest(sequence) {
 				return false
 			}
-			if !parityLbStatusBodiesMatch(parityResponseValue(check.nginx, sequence, "body"), parityResponseValue(check.front, sequence, "body")) {
+			// the two bodies differ only by the front's "front":"lbalt"
+			bodiesMatch := func() bool {
+				nginxJson, err := strconv.Unquote(parityResponseValue(check.nginx, sequence, "body"))
+				if err != nil {
+					return false
+				}
+				frontJson, err := strconv.Unquote(parityResponseValue(check.front, sequence, "body"))
+				if err != nil {
+					return false
+				}
+				nginxStatus := map[string]any{}
+				frontStatus := map[string]any{}
+				if json.Unmarshal([]byte(nginxJson), &nginxStatus) != nil || json.Unmarshal([]byte(frontJson), &frontStatus) != nil {
+					return false
+				}
+				if frontStatus["front"] != "lbalt" {
+					return false
+				}
+				delete(frontStatus, "front")
+				return maps.Equal(nginxStatus, frontStatus)
+			}
+			if !bodiesMatch() {
 				return false
 			}
 			switch field {

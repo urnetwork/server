@@ -50,7 +50,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -332,16 +331,4 @@ func parseParityDfAvailable(dfOutput string) (uint64, error) {
 		return 0, fmt.Errorf("df printed an unexpected line: %q", lines[len(lines)-1])
 	}
 	return strconv.ParseUint(fields[3], 10, 64)
-}
-
-// Whether the harness runs inside its container; the in-container test skips
-// with the reason otherwise.
-func parityInContainer(t *testing.T) {
-	t.Helper()
-	if os.Getenv(parityContainerEnvName) != "1" {
-		t.Skipf("runs only inside the parity harness's container; see TestNginxParity (%s=1)", parityHostEnvName)
-	}
-	if runtime.GOOS != "linux" {
-		t.Skipf("the parity container is linux, not %s", runtime.GOOS)
-	}
 }

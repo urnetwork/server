@@ -438,25 +438,24 @@ func (self *parityConn) h1Head(request *parityRequest, sequence int) []byte {
 	return request.h1Head(self.run.caseKey, sequence)
 }
 
-// The body of an h1 request as written, chunked when the request is.
-func parityH1Body(request *parityRequest) []byte {
-	if !request.chunked || request.body == nil {
-		return request.body
-	}
-	body := &bytes.Buffer{}
-	if 0 < len(request.body) {
-		fmt.Fprintf(body, "%x\r\n", len(request.body))
-		body.Write(request.body)
-		body.WriteString("\r\n")
-	}
-	body.WriteString("0\r\n\r\n")
-	return body.Bytes()
-}
-
 // Writes an h1 request in the background, so a response that comes before
 // the whole body was written is still read.
 func (self *parityConn) writeH1(request *parityRequest, sequence int) {
-	message := append(self.h1Head(request, sequence), parityH1Body(request)...)
+	// the body as written, chunked when the request is
+	body := func() []byte {
+		if !request.chunked || request.body == nil {
+			return request.body
+		}
+		chunkedBody := &bytes.Buffer{}
+		if 0 < len(request.body) {
+			fmt.Fprintf(chunkedBody, "%x\r\n", len(request.body))
+			chunkedBody.Write(request.body)
+			chunkedBody.WriteString("\r\n")
+		}
+		chunkedBody.WriteString("0\r\n\r\n")
+		return chunkedBody.Bytes()
+	}()
+	message := append(self.h1Head(request, sequence), body...)
 	self.writeDone = make(chan error, 1)
 	go func() {
 		_, err := self.conn.Write(message)
@@ -642,7 +641,14 @@ func (self *parityCaseRun) recordResponse(sequence int, response *http.Response,
 	}
 	// a HEAD's gzip has no body to decode
 	if response.Header.Get("Content-Encoding") == "gzip" && 0 < len(body) {
-		decoded, err := parityGunzip(body)
+		decoded, err := func() ([]byte, error) {
+			reader, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			defer reader.Close()
+			return io.ReadAll(reader)
+		}()
 		if err != nil {
 			self.observation.set(prefix+"body.decoded", "invalid gzip: "+err.Error())
 		} else {
@@ -680,16 +686,6 @@ func (self *parityCaseRun) recordResponseHead(sequence int, response *http.Respo
 		framing = "length " + strconv.FormatInt(response.ContentLength, 10)
 	}
 	self.observation.set(prefix+"framing", framing)
-}
-
-// The decoded bytes of a gzip body.
-func parityGunzip(body []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer reader.Close()
-	return io.ReadAll(reader)
 }
 
 // Adds the upstream attempts of the case to the observation, once every

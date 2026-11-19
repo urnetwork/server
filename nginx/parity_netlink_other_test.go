@@ -3,7 +3,7 @@
 package nginx_test
 
 // The parity container is linux; elsewhere the harness's in-container test
-// skips before it would add an address (parityInContainer).
+// skips before it would add an address (TestNginxParityContainer).
 
 import (
 	"errors"

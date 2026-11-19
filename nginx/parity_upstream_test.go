@@ -61,10 +61,16 @@ type parityUpstreamExchange struct {
 	attemptNumber int
 	w             http.ResponseWriter
 	r             *http.Request
+	// whether the request body was read into the attempt
+	bodyRead bool
 }
 
-// Reads the request body into the attempt.
+// Reads the request body into the attempt, once.
 func (self *parityUpstreamExchange) readBody() {
+	if self.bodyRead {
+		return
+	}
+	self.bodyRead = true
 	body, err := io.ReadAll(io.LimitReader(self.r.Body, self.recorder.settings.UpstreamMaxBodyBytes))
 	func() {
 		self.recorder.stateLock.Lock()
@@ -74,6 +80,31 @@ func (self *parityUpstreamExchange) readBody() {
 			self.attempt.bodyError = err.Error()
 		}
 	}()
+}
+
+// Reads the request body into the attempt as a streamed one: its first
+// parityStreamFirstBytes, then fires "upstream-got-first", then the rest.
+// Returns the body.
+func (self *parityUpstreamExchange) readStreamedBody() []byte {
+	self.bodyRead = true
+	first := make([]byte, parityStreamFirstBytes)
+	n, err := io.ReadFull(self.r.Body, first)
+	if err == nil {
+		self.recorder.fire(self.barrier("upstream-got-first"))
+	}
+	rest, restErr := io.ReadAll(io.LimitReader(self.r.Body, self.recorder.settings.UpstreamMaxBodyBytes))
+	body := append(first[:n], rest...)
+	func() {
+		self.recorder.stateLock.Lock()
+		defer self.recorder.stateLock.Unlock()
+		self.attempt.body = body
+		if err != nil {
+			self.attempt.bodyError = err.Error()
+		} else if restErr != nil {
+			self.attempt.bodyError = restErr.Error()
+		}
+	}()
+	return body
 }
 
 // Records the status the scenario answers.
@@ -166,26 +197,9 @@ func parityStreamResponseScenario(exchange *parityUpstreamExchange) {
 	}
 }
 
-// Reads the first parityStreamFirstBytes of the body, fires
-// "upstream-got-first", reads the rest and echoes the whole body.
+// Reads the body as a streamed one and echoes it.
 func parityStreamRequestScenario(exchange *parityUpstreamExchange) {
-	first := make([]byte, parityStreamFirstBytes)
-	_, err := io.ReadFull(exchange.r.Body, first)
-	if err == nil {
-		exchange.recorder.fire(exchange.barrier("upstream-got-first"))
-	}
-	rest, restErr := io.ReadAll(io.LimitReader(exchange.r.Body, exchange.recorder.settings.UpstreamMaxBodyBytes))
-	body := append(first, rest...)
-	func() {
-		exchange.recorder.stateLock.Lock()
-		defer exchange.recorder.stateLock.Unlock()
-		exchange.attempt.body = body
-		if err != nil {
-			exchange.attempt.bodyError = err.Error()
-		} else if restErr != nil {
-			exchange.attempt.bodyError = restErr.Error()
-		}
-	}()
+	body := exchange.readStreamedBody()
 	exchange.w.Header().Set("Content-Type", "application/octet-stream")
 	exchange.answered(http.StatusOK)
 	exchange.w.WriteHeader(http.StatusOK)
@@ -197,35 +211,6 @@ const parityEchoBufferBytes = 1024
 
 // The bytes the request streaming cases send before they wait.
 const parityStreamFirstBytes = 10
-
-// Reads a body as parityStreamRequestScenario does, its first bytes before
-// the client sends the rest, then answers each attempt of a request with its
-// status in order, the last repeating.
-func parityStreamRequestStatusesScenario(statuses ...int) parityScenario {
-	return func(exchange *parityUpstreamExchange) {
-		first := make([]byte, parityStreamFirstBytes)
-		_, err := io.ReadFull(exchange.r.Body, first)
-		if err == nil {
-			exchange.recorder.fire(exchange.barrier("upstream-got-first"))
-		}
-		rest, restErr := io.ReadAll(io.LimitReader(exchange.r.Body, exchange.recorder.settings.UpstreamMaxBodyBytes))
-		func() {
-			exchange.recorder.stateLock.Lock()
-			defer exchange.recorder.stateLock.Unlock()
-			exchange.attempt.body = append(first, rest...)
-			if err != nil {
-				exchange.attempt.bodyError = err.Error()
-			} else if restErr != nil {
-				exchange.attempt.bodyError = restErr.Error()
-			}
-		}()
-		status := statuses[min(exchange.attemptNumber, len(statuses))-1]
-		exchange.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		exchange.answered(status)
-		exchange.w.WriteHeader(status)
-		io.WriteString(exchange.w, "upstream "+exchange.attempt.service+" "+strconv.Itoa(status)+"\n")
-	}
-}
 
 // Holds the attempt until the client releases it: it fires
 // "arrived/<sequence>" and waits for "release/<sequence>" or "release", then
@@ -252,19 +237,6 @@ func parityLargeResponseHeadScenario(exchange *parityUpstreamExchange) {
 		},
 		parityUpstreamBody(exchange.attempt.service),
 	)
-}
-
-// Sends a head promising 100 body bytes, 10 of them, and cuts the
-// connection.
-func parityPartialScenario(exchange *parityUpstreamExchange) {
-	exchange.readBody()
-	exchange.w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	exchange.w.Header().Set("Content-Length", "100")
-	exchange.answered(http.StatusOK)
-	exchange.w.WriteHeader(http.StatusOK)
-	io.WriteString(exchange.w, "0123456789")
-	http.NewResponseController(exchange.w).Flush()
-	panic(http.ErrAbortHandler)
 }
 
 // Switches protocols when the request asks to, as a websocket upstream does,
