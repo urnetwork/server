@@ -13,9 +13,9 @@ import (
 	"time"
 )
 
-// NewPublicUdpSignal implements SIGNALS.md §16.9. Enrollment is explicit.
-// A successful check proves an exact authenticated transport return path, and
-// for a connect api front also one /hello the api answered through it.
+// SIGNALS.md §16.9 (`public-udp`). Enrollment is explicit. A successful check
+// proves an exact authenticated transport return path, and for a connect api
+// front also one /hello the api answered through it.
 func NewPublicUdpSignal() Signal {
 	return &signalAdapter{number: "16.9", key: "public-udp", name: "Exact public UDP/QUIC return path", probe: publicUdpProbe{settings: DefaultPublicUdpProbeSettings()}}
 }
@@ -129,10 +129,12 @@ func publicUdpPathFinding(request PublicUdpRequest, class string) finding {
 	mechanism := "A fresh bounded socket sends protocol-appropriate QUIC to the pinned public tuple. Exact wire-source filtering precedes any DNS translation, and normal TLS certificate/SNI verification is required. Connect H3 is custom QUIC, not HTTP/3; an api front, Alt's or connect's lb_alt front, negotiates h3."
 	baseline := "The enrolled family/carrier completes a fresh authenticated handshake with positive sent/received wire evidence from the exact requested address and port."
 	contextText := "This proves the selected transport path only, not provider authentication, API/application success, egress delivery or the exact DNAT generation. An explicitly published Alt direct UDP port is not a Connect-private listener leak. Explicit enrollment is not an exhaustive dynamic fleet census."
+	verify := "Require a later fresh authenticated handshake from the exact requested tuple on every admitted configured family. Missing capability, missing family route, cancellation or partial inventory remains unknown, never recovery."
 	if publicUdpCompletesApiRequest(request) {
 		mechanism += " Connect's api front forwards api requests to the api blocks, so its handshake proves nothing about the api behind it: the same attempt then sends one unauthenticated GET /hello over HTTP/3 and requires the api's answer."
 		baseline += " The front then answers /hello with 200 and a JSON object in the api's shape for the probed family."
 		contextText = "This proves the selected transport path and one unauthenticated /hello answered through the front by an api block, not provider authentication, authenticated API success, egress delivery or the exact DNAT generation. Explicit enrollment is not an exhaustive dynamic fleet census."
+		verify = "Require a later fresh authenticated handshake from the exact requested tuple on every admitted configured family, and then a /hello that completes with 200 and the api's JSON shape, which public-udp-application tracks. Missing capability, missing family route, cancellation or partial inventory remains unknown, never recovery."
 	}
 	return finding{
 		// Healthy resolution matches target independently of frame. Keep each
@@ -146,7 +148,7 @@ func publicUdpPathFinding(request PublicUdpRequest, class string) finding {
 		evidence:  "Only fixed status, an HTTP status code and bounded packet counts are retained. Pinned addresses, TLS names, DNS suffixes, packet bytes, response bodies, attempt correlation tokens and raw errors are private. Unsolicited or mismatched datagrams alone cannot identify an SNAT fault.",
 		context:   contextText,
 		action:    "Correlate this exact private family/carrier with its enrollment, observer route, certificate authority and admitted remote listener before attributing a router or NAT cause. Do not contact excluded/shared endpoints or substitute DNS, ping, TCP, HTTPS or a static permit as proof.",
-		verify:    "Require a later fresh authenticated handshake from the exact requested tuple on every admitted configured family. Missing capability, missing family route, cancellation or partial inventory remains unknown, never recovery.",
+		verify:    verify,
 		playbook:  "SIGNALS.md §16.9 and §14.5",
 	}
 }

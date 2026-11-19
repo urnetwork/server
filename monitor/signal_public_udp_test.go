@@ -738,8 +738,8 @@ func TestPublicUdpHandshakeOnlyFrontCarriesNoApplicationEvidence(t *testing.T) {
 	}
 }
 
-// A connect api row's texts describe its /hello, and no row's mechanism
-// still says only Alt's api front negotiates h3.
+// A connect api row's texts describe its /hello, its verify step among them,
+// and no row's mechanism still says only Alt's api front negotiates h3.
 func TestPublicUdpFindingTextsDescribeTheHello(t *testing.T) {
 	apiRequest := PublicUdpRequest{Host: "edge-synthetic", Target: "synthetic", Family: "ipv4", Service: "connect", Front: "api", Carrier: "quic"}
 	handshakeRequest := apiRequest
@@ -752,6 +752,17 @@ func TestPublicUdpFindingTextsDescribeTheHello(t *testing.T) {
 	}
 	if strings.Contains(handshakeFinding.mechanism, "/hello") || !strings.Contains(handshakeFinding.context, "transport path only") {
 		t.Fatalf("a handshake-only row's texts claim a /hello: %+v", handshakeFinding)
+	}
+	// the path and observation findings of a connect api row both carry it
+	for _, result := range []finding{apiFinding, publicUdpUnknown(apiRequest, "source-unavailable")} {
+		if !strings.Contains(result.verify, "then a /hello that completes with 200 and the api's JSON shape") {
+			t.Fatalf("a connect api row's %s verify omits its /hello: %s", result.class, result.verify)
+		}
+	}
+	for _, result := range []finding{handshakeFinding, publicUdpUnknown(handshakeRequest, "source-unavailable")} {
+		if strings.Contains(result.verify, "/hello") {
+			t.Fatalf("a handshake-only row's %s verify asks for a /hello: %s", result.class, result.verify)
+		}
 	}
 	for _, text := range []string{apiFinding.mechanism, handshakeFinding.mechanism} {
 		if strings.Contains(text, "only an enrolled Alt API front") {
