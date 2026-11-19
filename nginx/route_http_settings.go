@@ -28,10 +28,15 @@ import (
 //
 // Of nginx's lingering close only LingeringTimeout applies: Go's h1 server
 // has no lingering_time. nginx answers a request whose body is unread at
-// once, then reads and discards the body for up to lingering_time, 30 s.
-// Go's reads up to 256 KiB of it before the answer, which LingeringTimeout
-// bounds; when more is left, or that read is cut, it closes the connection
-// 500 ms after the answer, reading nothing more (LBALT-IMPL.md §4).
+// once, then reads and discards the body for up to lingering_time, 30 s,
+// each read waiting at most lingering_timeout. Go's reads up to 256 KiB of
+// it, which LingeringTimeout bounds: before an answer that keeps the
+// connection, after one that closes it. When more is left, or that read is
+// cut, or the client asked to close, the connection closes with the body
+// unread: Go half-closes it and closes it 500 ms later, reading nothing
+// more, which the front has it do in every such case (responseState.finish),
+// so a client still sending reads the answer first. One still sending after
+// those 500 ms gets a reset (LBALT-IMPL.md §4).
 type HttpSettings struct {
 	// how long a new connection has for its TLS handshake, request line and
 	// headers, and a keepalive connection for a request's headers once they
@@ -84,8 +89,9 @@ type HttpSettings struct {
 	// address's concurrency limit (D8). Non-positive leaves Go's default.
 	Http2MaxConcurrentStreams int
 	// on h1, the longest Go's server may spend reading a body the request
-	// left unread before an early answer, the front's own or the forwarder's
-	// refusal: nginx's default `lingering_timeout 5s`, its bound on each
+	// left unread for an early answer, the front's own or the forwarder's
+	// refusal, before the answer or, when it closes the connection, after
+	// it: nginx's default `lingering_timeout 5s`, its bound on each
 	// lingering read. A read it cuts has the connection closed after the
 	// answer. Non-positive cuts that read at once.
 	LingeringTimeout time.Duration

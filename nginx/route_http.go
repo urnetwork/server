@@ -780,13 +780,15 @@ func (self *routeHttpExchange) writer() http.ResponseWriter {
 }
 
 // Before the front writes an answer of its own on h1, bounds the read Go's
-// server makes then of a body the request left unread, at most 256 KiB, by
+// server makes of a body the request left unread, at most 256 KiB, by
 // HttpSettings.LingeringTimeout, nginx's lingering_timeout, as the
-// forwarder's refusals are bounded (upstreamGroup.refuse). Unbounded, a
-// client that stops sending its body would hold the answer, the request's
-// slot and the connection for as long as it stays connected. A read cut by
-// the bound has Go's server close the connection after the answer. h2 and h3
-// answer without reading.
+// forwarder's refusals are bounded (upstreamGroup.refuse): before an answer
+// that keeps the connection, after one that closes it. Unbounded, a client
+// that stops sending its body would hold the answer, the request's slot and
+// the connection for as long as it stays connected. A read cut by the bound
+// has Go's server close the connection after the answer, with the half-close
+// and wait of any connection that closes with the body unread
+// (responseState.finish). h2 and h3 answer without reading.
 func (self *routeHttpExchange) boundUnreadBody() {
 	if self.r.ProtoMajor != 1 || self.r.ContentLength == 0 {
 		return
