@@ -38,7 +38,19 @@ type MailEnableResult struct {
 // POST /mail/enable: an empty body. Turns mail on for the bearer's network:
 // its mail_network row and §12's mail records, the wildcard MX included, in
 // one transaction, then its {mxr_} routes (model.EnableMail). network_verified
-// is not asked. Idempotent.
+// is not asked of mail itself. Idempotent.
+//
+// Its MTA-STS step (§15.5, §13.9; owner decision 96; MAIL-M8-08): the same
+// transaction turns on the network's MTA-STS publish, whose two halves are the
+// mail_network row, which §13.9's ValidateListen asks before any receiver
+// registers tls/443/mta-sts, and §12.7's _mta-sts, whose id is that of the
+// text each certified receiver's sidecar.MailMtaStsHandler serves. Only a
+// verified network's receivers are admitted to serve it: ValidateListen asks
+// network_verified at each registration. Whether _mta-sts should wait for
+// network_verified and for every receiver's §13 certificate is
+// questions/mail-m8-05-mta-sts-record-gate.md's: until answered it stands with
+// mail on, as DNS-M8-01 writes it, and a sender that can fetch no policy
+// delivers as if none were published (RFC 8461 §3.3).
 func MailEnable(w http.ResponseWriter, r *http.Request) {
 	if !mailRoutesOpen() {
 		server.WriteGateClosed(w, 0)
