@@ -30,9 +30,15 @@
 // forwarded as plaintext HTTP/1.1 to its service's blocks, with nginx's
 // request contract (§4.2).
 //
-// Ownership: the package keeps no process-wide state. Every budget, pool and
-// limit belongs to one Front and the FrontSettings it was built with, and
-// Close releases them.
+// Ownership: every budget, pool and limit belongs to one Front and the
+// FrontSettings it was built with, and Close releases them. The one
+// process-wide state is the package's Prometheus collectors, registered once
+// with the default registerer, as the router's are: the front's request,
+// latency and limit refusal families (route_http_metrics.go) and the
+// forwarder's attempt, retry, error, body refusal, tunnel and body storage
+// families (upstream_metrics.go). Fronts in one process add to the same
+// series, so a process should hold one Front at a time, as connect does;
+// labels come only from route tables and closed sets.
 //
 // Goroutine safety: package-level functions are safe for concurrent use. A
 // RouteTable and a CertificateStore are read-only once loaded, so concurrent

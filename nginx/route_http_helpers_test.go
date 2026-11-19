@@ -52,7 +52,7 @@ func testRouteInterface(t *testing.T, routeTable *RouteTable, name string) *Rout
 // Host normalization and name matching with nginx's semantics, standing in
 // for s-tls's: lowercase, no port, one trailing dot removed; an exact name
 // first, then the longest leading wildcard, which matches one or more
-// labels.
+// labels; a service that isn't exposed serves no name.
 type testFrontNames struct {
 	exactNameMatches    map[string]nameMatch
 	wildcardNameMatches map[string]nameMatch
@@ -71,6 +71,9 @@ func newTestFrontNames(routeTable *RouteTable) *testFrontNames {
 		}
 	}
 	for _, service := range routeTable.Services {
+		if !service.Exposed {
+			continue
+		}
 		class := NameClassForwarded
 		switch service.Name {
 		case routeTable.Front.ConnectService:
@@ -251,6 +254,8 @@ func (self *testConnectHandler) recordedRequests() []*testConnectRequest {
 // A body store that counts its closes.
 type testBodyStore struct {
 	closeErr error
+	// runs inside close, when set
+	closeHook func()
 
 	stateLock  sync.Mutex
 	closeCount int
@@ -258,9 +263,14 @@ type testBodyStore struct {
 
 // See frontBodyStore.
 func (self *testBodyStore) close() error {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.closeCount += 1
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.closeCount += 1
+	}()
+	if self.closeHook != nil {
+		self.closeHook()
+	}
 	return self.closeErr
 }
 
@@ -339,6 +349,13 @@ type testFront struct {
 // test ends.
 func newTestFront(t *testing.T, routeTable *RouteTable, settings *FrontSettings) *testFront {
 	t.Helper()
+	return newTestFrontWithNames(t, routeTable, settings, newTestFrontNames(routeTable))
+}
+
+// As newTestFront, normalizing and matching names through names, such as the
+// production matcher (matcherFrontNames).
+func newTestFrontWithNames(t *testing.T, routeTable *RouteTable, settings *FrontSettings, names frontNames) *testFront {
+	t.Helper()
 	testFront := &testFront{
 		routeTable:     routeTable,
 		forwarders:     map[string]*testServiceForwarder{},
@@ -355,7 +372,7 @@ func newTestFront(t *testing.T, routeTable *RouteTable, settings *FrontSettings)
 		serviceForwarders[service.Name] = forwarder
 	}
 	front, err := newFront(t.Context(), routeTable, "test-revision", &frontDependencies{
-		names:             newTestFrontNames(routeTable),
+		names:             names,
 		serviceForwarders: serviceForwarders,
 		tlsConfig:         &tls.Config{},
 		quicTlsConfig:     &tls.Config{},

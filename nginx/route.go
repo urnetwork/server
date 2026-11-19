@@ -360,8 +360,11 @@ func (self *RouteTable) ApiService() *RouteService {
 
 // Every name the front serves, each once, and each needing a certificate:
 // the lb names first, in their order (the first is the TCP default server),
-// then every service's names and every redirect alias name, sorted. A new
-// slice on every call.
+// then every exposed service's names and redirect alias names, sorted. A
+// service that isn't exposed serves none of them, as nginx emits no server
+// block for it and warpctl requests no certificate for it (LBALT-IMPL.md
+// §7); the table still lists it for the hidden lb routes. A new slice on
+// every call.
 func (self *RouteTable) ServedNames() []string {
 	seenNames := map[string]bool{}
 	servedNames := []string{}
@@ -379,6 +382,9 @@ func (self *RouteTable) ServedNames() []string {
 		}
 	}
 	for _, service := range self.Services {
+		if !service.Exposed {
+			continue
+		}
 		for _, name := range service.Names {
 			addOtherName(name)
 		}

@@ -5,15 +5,24 @@ package connect
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/nginx"
 	"github.com/urnetwork/server/router"
 )
 
@@ -119,5 +128,99 @@ func TestLbAltRouteFileOfAnotherBlockFailsTheLoad(t *testing.T) {
 	}
 	if _, err := loadFront(filepath.Join(t.TempDir(), "absent.json"), "", "test", vaultDir); err == nil {
 		t.Fatal("an absent route file loaded")
+	}
+}
+
+// connect's lb_alt start from the environment warpctl gives a block, to the
+// real nginx front, with no Postgres or Redis: the route file loads from
+// WARP_LBALT_ROUTE_FILE and matches WARP_GENERATION and WARP_ENV; the
+// certificates load from the vault home, here in a host's flat layout, the
+// one a block's container sees at its vault mount; the front starts on
+// every public socket and answers the lb status route with WARP_VERSION;
+// and the private /status reports the file's generation and revision and
+// the earliest certificate expiry, ready with every socket up.
+//
+// warpctl gives a block's container neither WARP_HOME nor WARP_VAULT_HOME
+// and mounts the host's vault at /srv/warp/vault, so the vault home is the
+// one under the default WARP_HOME. Here WARP_VAULT_HOME is cleared, so the
+// vault is found only that way, under a temporary WARP_HOME.
+func TestLbAltStartServesTheRealFrontFromTheEnv(t *testing.T) {
+	routeFile := newTestFrontRouteFile(t)
+	routeTable, err := nginx.ParseRouteTable(routeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeFilePath := filepath.Join(t.TempDir(), "route.json")
+	if err := os.WriteFile(routeFilePath, routeFile, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	identity := newTestFrontIdentity(t, routeTable.ServedNames())
+	// warpctl's vault mount (warpctl/run.go) is the vault home under the
+	// default WARP_HOME
+	if vaultMount := filepath.Join(server.DefaultWarpHome, "vault"); vaultMount != "/srv/warp/vault" {
+		t.Fatalf("the default vault home %s is not warpctl's vault mount", vaultMount)
+	}
+	warpHome := t.TempDir()
+	writeTestFrontVault(t, filepath.Join(warpHome, "vault"), routeTable, identity)
+	t.Setenv(frontRouteFileEnvName, routeFilePath)
+	t.Setenv(frontGenerationEnvName, routeTable.Generation)
+	t.Setenv("WARP_ENV", routeTable.Env)
+	t.Setenv("WARP_HOME", warpHome)
+	t.Setenv("WARP_VAULT_HOME", "")
+	t.Setenv("WARP_VERSION", "0.0.0-test")
+
+	publicFront, err := newFrontServerFromEnv()
+	if err != nil || publicFront == nil {
+		t.Fatalf("the front from the env = %v, %v", publicFront, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := publicFront.startWithConnect(ctx, http.NotFoundHandler(), newTestFrontConnectQuic()); err != nil {
+		t.Fatal(err)
+	}
+	defer publicFront.close()
+
+	lbName := routeTable.Lb.Names[0]
+	httpsAddress := netip.AddrPortFrom(netip.MustParseAddr(routeTable.Interfaces[0].Ipv4), uint16(routeTable.Listen.HttpsPort)).String()
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			RootCAs: identity.roots,
+		},
+		DialContext: func(ctx context.Context, network string, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{}
+			return dialer.DialContext(ctx, "tcp", httpsAddress)
+		},
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   testFrontProgressTimeout,
+	}
+	response, err := client.Get("https://" + lbName + routeTable.Lb.RoutePrefixes[0] + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if want := `{"version":"0.0.0-test","status":"ok","front":"lbalt"}` + "\n"; err != nil || response.StatusCode != http.StatusOK || string(body) != want {
+		t.Fatalf("the lb status = %d %q, %v; want the real front's %q", response.StatusCode, body, err, want)
+	}
+
+	leaf, err := x509.ParseCertificate(identity.certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(routeFile)
+	header := http.Header{}
+	publicFront.writeStatusHeaders(header, frontReadyLatchStatus, true)
+	for name, want := range map[string]string{
+		frontGenerationHeader:    routeTable.Generation,
+		frontRouteRevisionHeader: hex.EncodeToString(digest[:]),
+		frontReadyHeader:         "1",
+		frontCertExpiryHeader:    leaf.NotAfter.UTC().Format(time.RFC3339),
+	} {
+		if got := header.Get(name); got != want {
+			t.Errorf("%s: %q, want %q", name, got, want)
+		}
 	}
 }

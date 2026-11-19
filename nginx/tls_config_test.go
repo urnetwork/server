@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"slices"
 	"testing"
+	"time"
 )
 
 // A served SNI gets its own certificate, and ALPN by class: http/1.1 for
@@ -350,5 +351,64 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 	}
 	if _, err := noDefaultTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "test-api.service.example"}); err != nil {
 		t.Fatalf("a served name lost its config with the default server: %v", err)
+	}
+}
+
+// A service that isn't exposed is served as unknown names, even when the
+// vault holds certificates for them (LBALT-IMPL.md §7): its names and
+// redirect aliases get the default server's certificate on TCP and fail the
+// handshake on QUIC, and a name under its wildcard gets the exposed connect
+// wildcard's certificate instead.
+func TestTlsConfigsServeAnUnexposedServiceAsUnknown(t *testing.T) {
+	vault := newTestTlsVault(t)
+	for dirName, dnsName := range map[string]string{
+		"mcp.hidden.example":              "mcp.hidden.example",
+		"old-mcp.hidden.example":          "old-mcp.hidden.example",
+		"star.g1.connect.service.example": "*.g1.connect.service.example",
+	} {
+		pair := vault.authority.issueValid(t, 30*24*time.Hour, dnsName)
+		vault.dirPairs[dirName] = pair
+		writeTestTlsPair(t, vault.envHome(), testTlsVersion, dirName, pair)
+	}
+	vault.routeTable = newTestUnexposedRouteTable(t)
+	tlsConfig, quicTlsConfig := vault.newTlsConfigs(t, DefaultTlsSettings())
+	tlsListener := listenTestTls(t, tlsConfig)
+	quicListener := listenTestQuic(t, quicTlsConfig)
+
+	cases := []struct {
+		serverName  string
+		wantDirName string
+		// whether a QUIC handshake completes, with the same certificate
+		quicServed bool
+	}{
+		{serverName: "mcp.hidden.example", wantDirName: "test-lb.service.example", quicServed: false},
+		{serverName: "old-mcp.hidden.example", wantDirName: "test-lb.service.example", quicServed: false},
+		{serverName: "x.g1.connect.service.example", wantDirName: "star.connect.service.example", quicServed: true},
+	}
+	for _, c := range cases {
+		state, err := tlsListener.exchange(t, &tls.Config{
+			ServerName:         c.serverName,
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h2", "http/1.1"},
+		})
+		if err != nil {
+			t.Errorf("tcp sni %q: %v", c.serverName, err)
+		} else if !state.PeerCertificates[0].Equal(vault.dirPairs[c.wantDirName].leaf) {
+			t.Errorf("tcp sni %q got the leaf for %v, want %s's", c.serverName, state.PeerCertificates[0].DNSNames, c.wantDirName)
+		}
+
+		quicState, err := quicListener.exchange(t, &tls.Config{
+			ServerName:         c.serverName,
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h3"},
+		}, nil)
+		switch {
+		case !c.quicServed && err == nil:
+			t.Errorf("quic sni %q completed a handshake with the leaf for %v, want none", c.serverName, quicState.TLS.PeerCertificates[0].DNSNames)
+		case c.quicServed && err != nil:
+			t.Errorf("quic sni %q: %v", c.serverName, err)
+		case c.quicServed && !quicState.TLS.PeerCertificates[0].Equal(vault.dirPairs[c.wantDirName].leaf):
+			t.Errorf("quic sni %q got the leaf for %v, want %s's", c.serverName, quicState.TLS.PeerCertificates[0].DNSNames, c.wantDirName)
+		}
 	}
 }

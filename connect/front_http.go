@@ -13,7 +13,9 @@ package connect
 // Every accepted connection is tracked from its accept to its close, under
 // TLS and through a hijack, so the drain can wait for the websockets and H1+
 // tunnels http.Server forgets once hijacked, and the forced close can cut
-// them (D12).
+// them (D12). Once a write to one fails on its deadline, every later write
+// fails at once, so TLS's close_notify can't hold a handler on a client that
+// stopped reading (frontTrackedConn).
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
@@ -26,8 +28,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/urnetwork/glog"
 )
@@ -87,29 +91,29 @@ func (self *frontTcpRun) close() {
 	self.listener.Close()
 }
 
-// A server for one interface's port. Its limits are nginx's client limits
-// (nginx.HttpSettings): the header timeout covers the TLS handshake, request
-// line and headers; the idle timeout is the keepalive timeout; the header
-// bytes are the total of nginx's header buffers, within which the nginx
-// front's handlers apply the finer per-line limits. Nothing bounds a whole
-// request or response here: bodies, uploads, websockets and streamed
-// responses keep the per-read and per-write timeouts the nginx front applies.
+// A server for one interface's port. connect sets what is its own: the
+// handler, the error log that counts and the serving context. The nginx
+// front sets the rest from its HttpSettings (nginx.Front.ConfigureServer,
+// LBALT-IMPL.md §7), as the parity harness's servers get them: the header
+// timeout, which covers the TLS handshake, request line and headers; the
+// idle timeout; header bytes of a multiple of nginx's header buffers, twice
+// by default, within which the nginx front's handlers apply nginx's own
+// limits; the h2 stream limit; the h2 write byte timeout, send_timeout,
+// which closes an h2 connection whose frame write stays blocked on the
+// socket; and keepalive_requests and keepalive_time per connection. Nothing
+// bounds a whole request or response here: bodies, uploads, websockets and
+// streamed responses keep the per-read and per-write timeouts the nginx
+// front applies.
 //
 // A parity difference (LBALT-IMPL.md §4): net/http reads at most the header
-// bytes, 64 KiB by default, plus its own 4 KiB slack before the handler, so
-// an HTTP/1.1 request line and headers over that in all, about 68 KiB, are
-// answered 431 by net/http and never reach the nginx front, where nginx
-// answers 400, or 414 for a long request line. Under that size the nginx
-// front answers nginx's codes.
+// bytes, twice nginx's 64 KiB of buffers by default, plus its own 4 KiB
+// slack before the handler, so an HTTP/1.1 request line and headers over
+// that in all, about 132 KiB, are answered 431 by net/http and never reach
+// the nginx front, where nginx answers 400, or 414 for a long request line.
+// Under that size the nginx front answers nginx's codes.
 func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *http.Server {
-	httpSettings := self.settings.Front.Http
 	httpServer := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: httpSettings.ClientHeaderTimeout,
-		IdleTimeout:       httpSettings.KeepaliveTimeout,
-		MaxHeaderBytes:    httpSettings.MaxRequestHeadersTotalBytes,
-		// every request, `OPTIONS *` included, is the nginx front's to answer
-		DisableGeneralOptionsHandler: true,
+		Handler: handler,
 		ErrorLog: log.New(&frontHttpErrorLog{
 			portKind: portKind,
 			observer: self.settings.httpErrorObserverForTest,
@@ -119,15 +123,7 @@ func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *h
 			return self.ctx
 		},
 	}
-	if 0 < httpSettings.Http2MaxConcurrentStreams {
-		httpServer.HTTP2 = &http.HTTP2Config{
-			MaxConcurrentStreams: httpSettings.Http2MaxConcurrentStreams,
-		}
-	}
-	if httpSettings.KeepaliveTimeout <= 0 {
-		// nginx's `keepalive_timeout 0`: one request per connection
-		httpServer.SetKeepAlivesEnabled(false)
-	}
+	self.front.ConfigureServer(httpServer)
 	return httpServer
 }
 
@@ -217,10 +213,35 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // One accepted public tcp connection, the raw socket below any TLS. It leaves
 // the tracked set on its first close, whoever closes it: net/http, a hijacker
 // or the forced close.
+//
+// Once a write fails on its deadline, every later write fails at once with
+// that error, whatever deadline is set after it (LBALT-IMPL.md §7). The
+// stream is cut mid-record then, and nginx sends nothing more on a
+// connection whose send_timeout passed. The later write that matters is
+// TLS's: when the nginx front's send_timeout cuts a blocked h1 write, or the
+// h2 server's write byte timeout, which is send_timeout, cuts a blocked
+// frame write, net/http closes the tls.Conn, which first sends close_notify
+// under a write deadline of its own, 5 s. A client that stopped reading
+// would hold the handler and its limit slot that much longer, and on h2 the
+// connection's serving goroutine, which makes that close.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer
 	closeOnce   sync.Once
+	// the error of the first write that failed on its deadline, once one has
+	writeTimeoutErr atomic.Pointer[error]
+}
+
+// Writes p, or, after a write has failed on its deadline, fails at once.
+func (self *frontTrackedConn) Write(p []byte) (int, error) {
+	if writeTimeoutErr := self.writeTimeoutErr.Load(); writeTimeoutErr != nil {
+		return 0, *writeTimeoutErr
+	}
+	n, err := self.Conn.Write(p)
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		self.writeTimeoutErr.CompareAndSwap(nil, &err)
+	}
+	return n, err
 }
 
 // Closes the socket and leaves the tracked set, once.

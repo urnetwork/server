@@ -14,10 +14,12 @@ package nginx
 // client connections (h1 Connection: close, which Go's h2 server turns into
 // a GOAWAY), and arms the drain deadline, HttpSettings.DrainTimeout, after
 // which whatever outlived the drain is cut: hijacked connections, the
-// forwarders' requests and the body store's spill. Close cuts at once if the
-// deadline hasn't, waits at most HttpSettings.ForcedCloseTimeout for the cut
-// to complete, and ends the front's goroutines. Connect sends the server
-// level GOAWAYs and closes idle keepalive connections itself (§2.8).
+// forwarders' requests and tunnels, and the body store's spill. BeginDrain
+// never blocks. Close cuts at once if the deadline hasn't, waits at most
+// HttpSettings.ForcedCloseTimeout for the cut to complete, and ends the
+// front's goroutines; it is safe while handlers still run, which then fail
+// on what was cut, and later requests are answered 503. Connect sends the
+// server level GOAWAYs and closes idle keepalive connections itself (§2.8).
 
 import (
 	"compress/gzip"
@@ -350,10 +352,9 @@ func (self *Front) QuicTlsConfig() *tls.Config {
 // redirects, the /status deny and the added response headers. It expects
 // r.RemoteAddr to be the accepted peer and r.TLS to be set.
 //
-// The handler applies nginx's header limits itself, so the server must let
-// such heads through: MaxHeaderBytes above HttpSettings'
-// MaxRequestHeadersTotalBytes. An interface the route table doesn't list
-// gets a handler that answers 503.
+// The handler applies nginx's header limits itself, and its keepalive_requests
+// and keepalive_time, on a server ConfigureServer has set up. An interface
+// the route table doesn't list gets a handler that answers 503.
 func (self *Front) HttpsHandler(interfaceName string) http.Handler {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
@@ -496,8 +497,12 @@ func (self *Front) Close() error {
 }
 
 // Cuts whatever outlived the drain, once, in the background: the hijacked
-// connections, then each forwarder's requests and pools, then the body
-// store. cutDone closes when it completes, and cutErr is final then.
+// connections, each forwarder's requests, pools and tunnels, and the body
+// store, all at once. A close can block, a TLS close_notify to a client that
+// stopped reading for one, so each runs on its own and none waits on
+// another: the forwarders cut the upstream sides of forwarded websockets
+// however long a client side takes. cutDone closes when every close has
+// returned, and cutErr is final then.
 func (self *Front) cut() {
 	started := func() bool {
 		self.stateLock.Lock()
@@ -522,18 +527,28 @@ func (self *Front) cut() {
 			}
 			return hijackedConns
 		}()
+		// a panicking close ends only its own goroutine
+		var closes sync.WaitGroup
 		for _, hijackedConn := range hijackedConns {
-			hijackedConn.Close()
-		}
-		// one panicking close must not keep the others from running
-		for _, serviceForwarder := range self.serviceForwarders {
-			server.HandleError(serviceForwarder.close)
-		}
-		if self.bodyStore != nil {
-			server.HandleError(func() {
-				self.cutErr = self.bodyStore.close()
+			closes.Go(func() {
+				server.HandleError(func() {
+					hijackedConn.Close()
+				})
 			})
 		}
+		for _, serviceForwarder := range self.serviceForwarders {
+			closes.Go(func() {
+				server.HandleError(serviceForwarder.close)
+			})
+		}
+		if self.bodyStore != nil {
+			closes.Go(func() {
+				server.HandleError(func() {
+					self.cutErr = self.bodyStore.close()
+				})
+			})
+		}
+		closes.Wait()
 	})
 }
 

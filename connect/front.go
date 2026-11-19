@@ -70,6 +70,7 @@ type nginxFront interface {
 	HttpHandler(interfaceName string) http.Handler
 	H3ApiHandler(interfaceName string) http.Handler
 	AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool)
+	ConfigureServer(httpServer *http.Server)
 	BeginDrain()
 	Close() error
 }
@@ -294,11 +295,19 @@ func newFrontSockets(routeTable *nginx.RouteTable, socketsPerPort int) ([]*front
 	return sockets, nil
 }
 
-// Builds the nginx front around connect's router and starts the server. The
-// H1 Connect handler serves connect names in-process; the nginx front applies
-// the ingress rewrite and the D8 limits around it. A failure releases what was
-// built.
+// Builds the nginx front around connect's router and starts the server: the
+// router's H1 Connect handler serves connect names in-process, and its
+// ConnectHandler their QUIC.
 func (self *frontServer) startWithRouter(ctx context.Context, connectRouter *ConnectRouter) error {
+	return self.startWithConnect(ctx, http.HandlerFunc(connectRouter.Connect), connectRouter.ConnectHandler())
+}
+
+// Builds the nginx front from the loaded route table and certificates, with
+// WARP_VERSION for its lb status route, and starts the server.
+// connectHandler serves connect names in-process, with the nginx front's
+// ingress rewrite and D8 limits around it, and connectQuic serves their
+// QUIC. A failure releases what was built.
+func (self *frontServer) startWithConnect(ctx context.Context, connectHandler http.Handler, connectQuic frontConnectQuic) error {
 	version, err := server.Version()
 	if err != nil {
 		return err
@@ -308,14 +317,14 @@ func (self *frontServer) startWithRouter(ctx context.Context, connectRouter *Con
 		self.routeTable,
 		self.revision,
 		self.certificateStore,
-		http.HandlerFunc(connectRouter.Connect),
+		connectHandler,
 		version,
 		self.settings.Front,
 	)
 	if err != nil {
 		return fmt.Errorf("build the nginx front: %w", err)
 	}
-	if err := self.start(ctx, front, connectRouter.ConnectHandler()); err != nil {
+	if err := self.start(ctx, front, connectQuic); err != nil {
 		front.Close()
 		return err
 	}

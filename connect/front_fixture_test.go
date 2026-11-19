@@ -2,9 +2,11 @@ package connect
 
 // Fixtures of the lb_alt front's tests: a synthetic route table on loopback
 // interfaces, a fake nginx front with generated certificates, a fake of
-// connect's QUIC handler, recording binds and clients. Nothing here reaches
-// Postgres or Redis: the front's sockets, dispatch, readiness and drain are
-// all in-process.
+// connect's QUIC handler, recording binds and clients. The fake hands the
+// public servers to a real nginx front to configure, and tests that need the
+// nginx front's handlers too start with the real one
+// (front_nginx_fixture_test.go). Nothing here reaches Postgres or Redis: the
+// front's sockets, dispatch, readiness and drain are all in-process.
 
 import (
 	"context"
@@ -201,6 +203,19 @@ func testFrontFreePorts(t testing.TB, addresses []netip.Addr, count int) []int {
 // revision of its bytes.
 func newTestFrontRouteTable(t testing.TB) (*nginx.RouteTable, string) {
 	t.Helper()
+	encoded := newTestFrontRouteFile(t)
+	parsed, err := nginx.ParseRouteTable(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	return parsed, hex.EncodeToString(digest[:])
+}
+
+// The bytes of a route file of the shared fixture with the test interfaces
+// on loopback and free listen ports, as warpctl writes one.
+func newTestFrontRouteFile(t testing.TB) []byte {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "nginx", "testdata", "route_v1_example.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -252,13 +267,7 @@ func newTestFrontRouteTable(t testing.TB) (*nginx.RouteTable, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded = append(encoded, '\n')
-	parsed, err := nginx.ParseRouteTable(encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(encoded)
-	return parsed, hex.EncodeToString(digest[:])
+	return append(encoded, '\n')
 }
 
 // A fake nginx front: name classes from the route table with nginx's
@@ -281,12 +290,18 @@ type testFront struct {
 
 	// signaled after each release of an admitted QUIC connection
 	released chan struct{}
+	// a real nginx front over the same route table and settings, which
+	// configures the public servers as in production, so they get nginx's
+	// limits
+	configuringFront *nginx.Front
 
 	stateLock        sync.Mutex
 	connectionCounts map[string]int
 	// "<interface> <address>" of every AcquireQuicConnection
 	acquiredKeys []string
 	events       []string
+	// every server ConfigureServer was given, in order
+	configuredServers []*http.Server
 }
 
 // A fake front for the route table's names, serving identity.
@@ -456,6 +471,24 @@ func (self *testFront) acquired() []string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return slices.Clone(self.acquiredKeys)
+}
+
+// nginxFront: the real front's configuration, recorded apart from the
+// events
+func (self *testFront) ConfigureServer(httpServer *http.Server) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.configuredServers = append(self.configuredServers, httpServer)
+	}()
+	self.configuringFront.ConfigureServer(httpServer)
+}
+
+// Every server ConfigureServer was given, in order.
+func (self *testFront) recordedConfiguredServers() []*http.Server {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.configuredServers)
 }
 
 // nginxFront
@@ -851,10 +884,13 @@ func newUnstartedTestFrontEnv(t testing.TB, mutate func(env *testFrontEnv)) *tes
 	if mutate != nil {
 		mutate(env)
 	}
+	certificateStore := loadTestFrontCertificateStore(t, routeTable, identity)
+	env.front.configuringFront = newTestNginxFront(t, env, certificateStore, http.NotFoundHandler())
 	frontServer, err := newFrontServer(&frontLoad{
 		routeTable:        routeTable,
 		revision:          revision,
 		generation:        routeTable.Generation,
+		certificateStore:  certificateStore,
 		certificateExpiry: testFrontCertificateExpiry,
 	}, settings)
 	if err != nil {

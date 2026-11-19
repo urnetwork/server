@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // NewFront refuses a missing route table, certificate store, connect
@@ -381,6 +382,65 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 	} {
 		if count := testCounterValue(t, testFront.metrics.requests.WithLabelValues(c.labels...)); count != c.count {
 			t.Errorf("requests_total%v = %v, want %v", c.labels, count, c.count)
+		}
+	}
+}
+
+// The count and sum of one label set of the latency histogram.
+func testResponseHeaderSeconds(t *testing.T, metrics *frontMetrics, labels ...string) (uint64, float64) {
+	t.Helper()
+	metric := &dto.Metric{}
+	if err := metrics.responseHeaderSeconds.WithLabelValues(labels...).(prometheus.Histogram).Write(metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetHistogram().GetSampleCount(), metric.GetHistogram().GetSampleSum()
+}
+
+// D17's latency histogram observes every request once, under the requests
+// counter's bounded labels (service, protocol, status class and block),
+// from the request's arrival to its response head, or to the hijack of an
+// upgrade: time before the head counts, and a body or a tunnel after it
+// doesn't.
+func TestFrontResponseHeaderSecondsTimesEachRequestToItsHead(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
+		w.(upstreamBlockRecorder).recordUpstreamBlock("g2")
+		testFront.clock.advance(3 * time.Second)
+		w.WriteHeader(http.StatusOK)
+		testFront.clock.advance(time.Minute)
+		io.WriteString(w, "body")
+	}
+	testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+		testFront.clock.advance(2 * time.Second)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		testFront.clock.advance(time.Minute)
+		conn.Close()
+	}
+	handler := testFront.front.HttpsHandler("eth1")
+	serveTestRequest(handler, newTestRequest("GET", "api.service.example", "/v1", true))
+	serveTestRequest(handler, asTestProtocol(newTestRequest("GET", "test-lb.service.example", "/nope", true), 2))
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	handler.ServeHTTP(&testHijackResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		conn:             serverConn,
+	}, newTestRequest("GET", "connect.service.example", "/", true))
+
+	for _, c := range []struct {
+		labels []string
+		sum    float64
+	}{
+		{labels: []string{"api", "h1", "2xx", "g2"}, sum: 3},
+		{labels: []string{"-", "h2", "4xx", "-"}, sum: 0},
+		{labels: []string{"connect", "h1", "1xx", "local"}, sum: 2},
+	} {
+		count, sum := testResponseHeaderSeconds(t, testFront.metrics, c.labels...)
+		if count != 1 || sum != c.sum {
+			t.Errorf("response_header_seconds%v: %d observations summing %v s, want 1 of %v s", c.labels, count, sum, c.sum)
 		}
 	}
 }

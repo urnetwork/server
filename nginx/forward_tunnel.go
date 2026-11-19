@@ -115,9 +115,6 @@ func (self *upstreamGroup) tunnel(w http.ResponseWriter, responseController *htt
 	if err := clientReadWriter.Writer.Flush(); err != nil {
 		return
 	}
-	if options.tunnelOpened != nil {
-		options.tunnelOpened()
-	}
 
 	// bytes either side sent ahead of the switch are in its reader
 	pipe := func(dst net.Conn, src *bufio.Reader, writeTimeout time.Duration) {

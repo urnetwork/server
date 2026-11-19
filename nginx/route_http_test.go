@@ -138,6 +138,7 @@ func TestRouteHttpLbRoutesForwardWithThePrefixStripped(t *testing.T) {
 		want := forwardOptions{
 			interfaceName:        "eth1",
 			clientAddrPort:       forward.options.clientAddrPort,
+			host:                 "test-lb.service.example",
 			blockName:            c.blockName,
 			upstreamPath:         c.upstreamPath,
 			streamed:             c.streamed,
@@ -146,11 +147,8 @@ func TestRouteHttpLbRoutesForwardWithThePrefixStripped(t *testing.T) {
 			clientBodyBufferSize: c.clientBodyBufferSize,
 			readTimeout:          readTimeout,
 		}
-		// the tunnel hook is checked by the tunnel tests, not here
-		options := forward.options
-		options.tunnelOpened = nil
-		if !reflect.DeepEqual(options, want) {
-			t.Errorf("%s: options %+v, want %+v", c.target, options, want)
+		if !reflect.DeepEqual(forward.options, want) {
+			t.Errorf("%s: options %+v, want %+v", c.target, forward.options, want)
 		}
 		if forward.host != "test-lb.service.example" {
 			t.Errorf("%s: Host %q, want the lb name", c.target, forward.host)
@@ -240,10 +238,10 @@ func TestRouteHttpUnknownAuthorityGetsTheDefaultServer(t *testing.T) {
 	if response := serveTestRequest(handler, newTestRequest("GET", "unknown.example", "/v1/x", true)); response.Code != http.StatusNotFound {
 		t.Fatalf("unknown authority, a service path = %d, want the default server's 404", response.Code)
 	}
-	serveTestRequest(handler, newTestRequest("GET", "unknown.example", "/hidden-example/by/service/api/x", true))
+	serveTestRequest(handler, newTestRequest("GET", "UNKNOWN.example:443", "/hidden-example/by/service/api/x", true))
 	forwards := testFront.forwarders["api"].recordedForwards()
-	if len(forwards) != 1 || forwards[0].host != "unknown.example" {
-		t.Fatalf("unknown authority forwarded with Host %v, want the request's own", forwards)
+	if len(forwards) != 1 || forwards[0].host != "unknown.example" || forwards[0].options.host != "unknown.example" {
+		t.Fatalf("unknown authority forwarded with Host %v, want the request's own, normalized", forwards)
 	}
 
 	noHost := newTestRequest("GET", "", "/hidden-example/by/service/api/y", true)
@@ -253,8 +251,39 @@ func TestRouteHttpUnknownAuthorityGetsTheDefaultServer(t *testing.T) {
 		t.Fatalf("HTTP/1.0 without a host = %d, want the default server", response.Code)
 	}
 	forwards = testFront.forwarders["api"].recordedForwards()
-	if forwards[len(forwards)-1].host != "test-lb.service.example" {
-		t.Errorf("no host forwarded with Host %q, want the default server's name", forwards[len(forwards)-1].host)
+	if forward := forwards[len(forwards)-1]; forward.host != "test-lb.service.example" || forward.options.host != "test-lb.service.example" {
+		t.Errorf("no host forwarded with Host %q, routed host %q, want the default server's name", forward.host, forward.options.host)
+	}
+}
+
+// A service that isn't exposed has no server (LBALT-IMPL.md §7): through the
+// production matcher, its names and its redirect alias reach the default
+// server, the first lb name's, on TCP 443 and the default deny on TCP 80,
+// never the service or its 301, and classify as unknown names.
+func TestRouteHttpUnexposedServiceNamesGetTheDefaultServer(t *testing.T) {
+	routeTable := newTestUnexposedRouteTable(t)
+	testFront := newTestFrontWithNames(t, routeTable, testFrontSettings(), &matcherFrontNames{
+		matcher: newNameMatcher(routeTable),
+	})
+	httpsHandler := testFront.front.HttpsHandler("eth1")
+	httpHandler := testFront.front.HttpHandler("eth1")
+	for _, host := range []string{"mcp.hidden.example", "old-mcp.hidden.example"} {
+		if nameClass := testFront.front.ClassifyName(host); nameClass != NameClassUnknown {
+			t.Errorf("ClassifyName(%q) = %s, want unknown", host, nameClass)
+		}
+		response := serveTestRequest(httpsHandler, newTestRequest("GET", host, "/hidden-example/status", true))
+		if response.Code != http.StatusOK || response.Body.String() != testLbStatusBody {
+			t.Errorf("%s, lb status = %d %q, want the default server's status json", host, response.Code, response.Body.String())
+		}
+		if response := serveTestRequest(httpsHandler, newTestRequest("GET", host, "/v1", true)); response.Code != http.StatusNotFound {
+			t.Errorf("%s, a service path = %d, want the default server's 404", host, response.Code)
+		}
+		if response := serveTestRequest(httpHandler, newTestRequest("GET", host, "/v1", false)); response.Code != http.StatusForbidden {
+			t.Errorf("%s on port 80 = %d, want the default server's deny", host, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["mcp"].recordedForwards(); len(forwards) != 0 {
+		t.Errorf("the unexposed mcp got %d forwards", len(forwards))
 	}
 }
 

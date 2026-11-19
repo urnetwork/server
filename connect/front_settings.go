@@ -19,10 +19,11 @@ import (
 // How connect binds, supervises and drains its public sockets. Read-only once
 // the front server is built.
 type FrontServerSettings struct {
-	// the nginx front's settings, passed to nginx.NewFront. Http also bounds
-	// the public servers here: ClientHeaderTimeout, KeepaliveTimeout and the
-	// header limits on every HTTP server, DrainTimeout less DrainStopReserve
-	// on the drain, and ForcedCloseTimeout on the forced close that ends it.
+	// the nginx front's settings, passed to nginx.NewFront, which applies Http
+	// to every public HTTP server (nginx.Front.ConfigureServer). Http also
+	// bounds the rest here: KeepaliveTimeout and MaxRequestHeadersTotalBytes on
+	// the h3 api servers, DrainTimeout less DrainStopReserve on the drain, and
+	// ForcedCloseTimeout on the forced close that ends it.
 	Front *nginx.FrontSettings
 	// SO_REUSEPORT sockets bound for each (interface address, protocol,
 	// port), for receive parallelism within the block: N = 4 (D10, confirmed
