@@ -6637,8 +6637,14 @@ func FindProviders2(
 		// highest first, then the speed-mode performance adjustment, each
 		// facet in the request's preference order; with rank_measured_first,
 		// a draw weighted by that key within each evidence rank
-		// (selectOnlineClientScores).
+		// (selectOnlineClientScores). With online_fallback_spread (the
+		// default), each rank's providers with a latency test are lent
+		// nearest first, their latency raised by the callers recently lent
+		// them (selectOnlineClientScoresBySpread).
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
+			if requestSettings.OnlineFallbackSpread {
+				return selectOnlineClientScoresBySpread(candidateClientScores, facets, n, evidence, onlineFallbackSpreadLendings, time.Now(), mathrand.Float64)
+			}
 			return selectOnlineClientScores(candidateClientScores, facets, n, evidence, mathrand.Float64)
 		}
 

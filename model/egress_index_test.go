@@ -201,6 +201,7 @@ func TestEgressIndexSettingsDefaults(t *testing.T) {
 	assert.Equal(t, ClientScoreCutoffTier+settings.BackfillTierOffset+MaxClientTierDemerit < 2*settings.BackfillTierOffset, true)
 	assert.Equal(t, settings.MaxIndex(), 6)
 	assert.Equal(t, settings.RequestSettingsMaxAge, time.Minute)
+	assert.Equal(t, settings.OnlineFallbackSpread, true)
 }
 
 // provider.yml overrides every setting it names, keeps the default of every
@@ -227,6 +228,7 @@ egress_index:
   min_scored_loads: 20
   country_gate: false
   backfill_tier_offset: 5
+  online_fallback_spread: false
 `)
 	assert.Equal(t, overridden.ClassWeights, map[string]int{"dns": 3, "connectivity": 1, "cdn": 1, "site": 1, "video": 2})
 	assert.Equal(t, overridden.DefaultClassWeight, 2)
@@ -237,6 +239,7 @@ egress_index:
 	assert.Equal(t, overridden.MinScoredLoads, 20)
 	assert.Equal(t, overridden.CountryGate, false)
 	assert.Equal(t, overridden.BackfillTierOffset, 5)
+	assert.Equal(t, overridden.OnlineFallbackSpread, false)
 	assert.Equal(t, overridden.MaxIndex(), 9)
 
 	// out of range: each keeps its default

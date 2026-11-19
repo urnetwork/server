@@ -203,6 +203,25 @@ func isSpeedTestProbe(message []byte, testId uint32) bool {
 	return clientconnect.IsTransportSpeedTestProbe(message, testId)
 }
 
+// Counts one echoed probe of the running test and reports whether the message
+// was one. A counted probe has done its work. Its first byte is a zero
+// protobuf tag, which cannot begin a Transfer frame
+// (clientconnect.SetTransportSpeedTestProbeHeader), so the resident could
+// only fail to decode it: the caller ends it at the edge instead of carrying
+// it through the admission queue, the exchange hop and the resident's receive
+// loop. The reader then does not wait for room in that queue on a probe, so
+// the rate a test measures no longer includes that wait. Every other frame
+// that arrives during a test continues to the resident: the client's own
+// traffic and, from a client that echoes everything it receives, the echo of
+// a platform user frame.
+func countSpeedTestProbeEcho(speedTest *SpeedTest, message []byte) bool {
+	if speedTest == nil || !isSpeedTestProbe(message, speedTest.TestId) {
+		return false
+	}
+	speedTest.TotalByteCount += model.ByteCount(len(message))
+	return true
+}
+
 func DefaultTestConfig() *TestConfig {
 	return &TestConfig{
 		MaxLatencyCount: 2,

@@ -475,6 +475,11 @@ func TestConnectH1SpeedTestCountsOnlyEchoedProbes(t *testing.T) {
 			return len(message) == 5 && message[0] == control
 		}
 
+		exchangeDataFrames := func() float64 {
+			return testingCounterValue(exchangeIOCollectorsByLabel[exchangeIODirectionSent][exchangeIOFrameKindData].frames)
+		}
+		exchangeDataFramesBefore := exchangeDataFrames()
+
 		announce.nextSpeed()
 
 		// the start control comes back, then the client's own traffic and the
@@ -491,6 +496,8 @@ func TestConnectH1SpeedTestCountsOnlyEchoedProbes(t *testing.T) {
 		write(firstWire)
 		write(platformWire)
 		probeByteCount := 0
+		probeCount := 0
+		var firstProbe []byte
 		for {
 			message := read()
 			if isControl(message, clientconnect.TransportControlSpeedStop) {
@@ -503,6 +510,12 @@ func TestConnectH1SpeedTestCountsOnlyEchoedProbes(t *testing.T) {
 				write(message)
 				if isSpeedTestProbe(message, testId) {
 					probeByteCount += len(message)
+					probeCount += 1
+					if firstProbe == nil {
+						firstProbe = bytes.Clone(message)
+					} else if bytes.Equal(firstProbe, message) {
+						t.Fatal("the platform wrote the same probe twice")
+					}
 				}
 			}
 		}
@@ -534,6 +547,12 @@ func TestConnectH1SpeedTestCountsOnlyEchoedProbes(t *testing.T) {
 		}
 		if probeByteCount != int(speedTotalByteCount) {
 			t.Fatalf("the platform wrote %d bytes of probes of test %d, want %d", probeByteCount, testId, speedTotalByteCount)
+		}
+		// every probe was echoed and counted, and none of them crossed the
+		// exchange hop to the resident: what crossed is this test's handful of
+		// client frames and their acknowledgements
+		if crossed := int(exchangeDataFrames() - exchangeDataFramesBefore); probeCount/4 <= crossed {
+			t.Fatalf("%d data frames crossed the exchange hop during a test of %d echoed probes", crossed, probeCount)
 		}
 	})
 }

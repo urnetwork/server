@@ -16,7 +16,6 @@ import (
 	"time"
 	// "runtime/debug"
 	"encoding/binary"
-	mathrand "math/rand"
 	"sort"
 	"strconv"
 	"sync"
@@ -1953,12 +1952,19 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.MessagePoolReturn(message)
 						continue
 					}
-					// during a speed test only the test's echoed probes count.
-					// The client also echoes the user frames written between
-					// the probes, and keeps sending its own; every frame still
-					// continues to the resident, so the test runs in parallel.
-					if speedTest != nil && isSpeedTestProbe(message, speedTest.TestId) {
-						speedTest.TotalByteCount += model.ByteCount(len(message))
+					// during a speed test only the test's echoed probes count,
+					// and a counted probe ends here (countSpeedTestProbeEcho).
+					// The client keeps sending its own frames, and one that
+					// echoes everything it receives also returns the user
+					// frames written between the probes; every such frame
+					// still continues to the resident, so the test runs in
+					// parallel. A default test is 512 probes, and a slow
+					// uplink returns them one at a time.
+					if countSpeedTestProbeEcho(speedTest, message) {
+						// it proves the connection alive like any other message
+						pingTracker.Receive()
+						connect.MessagePoolReturn(message)
+						continue
 					}
 
 					pingTracker.Receive()
@@ -2059,6 +2065,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			var speedTestId uint32
 			speedTestChunksRemaining := 0
 			chunk := make([]byte, speedTestProbeByteCount)
+			// made for this writer's first test (newSpeedTestFiller)
+			var filler *speedTestFiller
 
 			// reusable ping timer (hot-path timer reuse): the slow select arms a
 			// timer each iteration user traffic is briefly idle between bursts.
@@ -2082,7 +2090,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					default:
 					}
-					mathrand.Read(chunk)
+					if filler == nil {
+						filler = newSpeedTestFiller()
+					}
+					filler.Read(chunk)
 					setSpeedTestProbeHeader(chunk, speedTestId)
 					chunkCopy := connect.MessagePoolCopy(chunk)
 					if write(chunkCopy, true) != nil {

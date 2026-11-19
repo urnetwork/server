@@ -106,6 +106,14 @@ type EgressIndexSettings struct {
 	// process's value. False, the default, is the order before it.
 	// `rank_measured_first` in the block.
 	RankMeasuredFirst bool
+	// Whether the Online fallback lends the nearest providers and spreads its
+	// answers over them (selectOnlineClientScoresBySpread): within each facet
+	// and evidence rank, the providers with a latency test inside the speed
+	// cutoffs are lent cheapest first, by their one-way latency raised by the
+	// callers this process recently lent them, and the rest follow in the
+	// fallback's order. Off, every answer takes the same best-ordered
+	// providers. `online_fallback_spread` in the block.
+	OnlineFallbackSpread bool
 	// how old the settings a request path reads may be. The passes read
 	// provider.yml on every call; a request path runs far too often to read
 	// and parse a file each time.
@@ -195,6 +203,7 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		CountryGate:           true,
 		BackfillTierOffset:    ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
 		RequestSettingsMaxAge: time.Minute,
+		OnlineFallbackSpread:  true,
 		// The floor is pending the owner's confirmation. Measured on
 		// 2026-10-13, it exempts the countries whose probe failed
 		// structurally (VN 0.03, JP 0.24, RU 0.25, TW 0.27, ZA and IN 0.35)
@@ -231,6 +240,7 @@ type egressIndexSettingsBlock struct {
 	CountryGate          *bool          `yaml:"country_gate"`
 	BackfillTierOffset   *int           `yaml:"backfill_tier_offset"`
 	RankMeasuredFirst    *bool          `yaml:"rank_measured_first"`
+	OnlineFallbackSpread *bool          `yaml:"online_fallback_spread"`
 }
 
 // The defaults with the overrides of provider.yml, read on every call like the
@@ -523,6 +533,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	}
 	if overrides.RankMeasuredFirst != nil {
 		settings.RankMeasuredFirst = *overrides.RankMeasuredFirst
+	}
+	if overrides.OnlineFallbackSpread != nil {
+		settings.OnlineFallbackSpread = *overrides.OnlineFallbackSpread
 	}
 	return settings, modernGateFailure
 }

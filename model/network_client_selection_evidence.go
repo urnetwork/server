@@ -28,6 +28,7 @@ import (
 	"math"
 	mathrand "math/rand"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -349,6 +350,216 @@ func selectOnlineClientScores(
 			}
 		}
 	}
+	return clientIds
+}
+
+// The Online fallback by load (OnlineFallbackSpread).
+//
+// The fallback's order is the same for every caller. Providers nothing has
+// probed tie on reliability and URL weight, and the speed adjustment then
+// orders them the same way each time, so every answer lends the same few
+// providers, whatever their latency, and each of those carries all of the
+// location's fallback callers. Their connections' own latency tests
+// (connect/transport_announce.go) already measure what matters most to a
+// caller: the minimum relative latency, twice the one-way latency. A caller's
+// transfers pay it on every round of a window, so a provider twice as far
+// away moves the caller's data about half as fast.
+//
+// selectOnlineClientScoresBySpread lends the nearest providers instead, while
+// sharing them out. One more caller costs a provider its one-way latency plus
+// a small per-message overhead, divided by its reliability and URL weight,
+// and raised by the callers this process recently lent it: each counts as a
+// small share of a concurrent transfer (onlineFallbackSpreadActiveShare),
+// since a caller is transferring for only a small part of its session. Each
+// answer counts against the providers it lists, so successive callers fill
+// the nearest providers a few at a time before moving to farther ones instead
+// of all landing on the same few. The family preference and the evidence
+// ranks keep their order; within each rank, the providers without a latency
+// test, or past the speed cutoffs (which already set aside the providers
+// measured too slow), follow the ranked ones in the fallback's order.
+
+// The per-message overhead a lent provider's cost adds to its one-way latency.
+const onlineFallbackSpreadOverheadMillis = 2.0
+
+// How much of a concurrent transfer one recent lending counts as in a
+// provider's cost. A caller keeps its providers for its session but spends
+// only a small part of it transferring, so a near provider can take many
+// callers before sharing it slows them more than a farther provider's latency
+// would.
+const onlineFallbackSpreadActiveShare = 0.05
+
+// How long a lending keeps counting against a provider: half of it after
+// this. A caller keeps the providers it attached to for its session.
+const onlineFallbackLendingHalfLife = 30 * time.Minute
+
+// Past this many providers, an answer drops the lendings decayed below the
+// prune value.
+const onlineFallbackLendingMaxEntries = 1 << 16
+const onlineFallbackLendingPruneValue = 1e-3
+
+// This process's recent Online fallback lendings. Each answer adds
+// 1/len(answer) to every provider it lists, the share of one caller each can
+// expect, decayed with halfLife. In memory and per process: a restart starts
+// afresh, and several processes each spread their own callers.
+type onlineFallbackLendings struct {
+	lock     sync.Mutex
+	halfLife time.Duration
+	entries  map[server.Id]onlineFallbackLending
+	// the entry count past which the next answer prunes: at least
+	// onlineFallbackLendingMaxEntries, and twice what the last prune kept, so
+	// a prune that keeps most entries is not repeated on every answer
+	pruneCount int
+}
+
+type onlineFallbackLending struct {
+	value float64
+	time  time.Time
+}
+
+func newOnlineFallbackLendings(halfLife time.Duration) *onlineFallbackLendings {
+	return &onlineFallbackLendings{
+		halfLife:   halfLife,
+		entries:    map[server.Id]onlineFallbackLending{},
+		pruneCount: onlineFallbackLendingMaxEntries,
+	}
+}
+
+var onlineFallbackSpreadLendings = newOnlineFallbackLendings(onlineFallbackLendingHalfLife)
+
+// must be called with lock
+func (self *onlineFallbackLendings) valueWithLock(clientId server.Id, now time.Time) float64 {
+	entry, ok := self.entries[clientId]
+	if !ok {
+		return 0
+	}
+	if elapsed := now.Sub(entry.time); 0 < elapsed && 0 < self.halfLife {
+		return entry.value * math.Exp2(-float64(elapsed)/float64(self.halfLife))
+	}
+	return entry.value
+}
+
+// The decayed lendings of the providers, in their order.
+func (self *onlineFallbackLendings) values(clientIds []server.Id, now time.Time) []float64 {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	values := make([]float64, len(clientIds))
+	for i, clientId := range clientIds {
+		values[i] = self.valueWithLock(clientId, now)
+	}
+	return values
+}
+
+// Counts one answer against the providers it lists.
+func (self *onlineFallbackLendings) add(clientIds []server.Id, now time.Time) {
+	if len(clientIds) == 0 {
+		return
+	}
+	share := 1 / float64(len(clientIds))
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	for _, clientId := range clientIds {
+		self.entries[clientId] = onlineFallbackLending{
+			value: self.valueWithLock(clientId, now) + share,
+			time:  now,
+		}
+	}
+	if self.pruneCount < len(self.entries) {
+		for clientId := range self.entries {
+			if self.valueWithLock(clientId, now) < onlineFallbackLendingPruneValue {
+				delete(self.entries, clientId)
+			}
+		}
+		self.pruneCount = max(onlineFallbackLendingMaxEntries, 2*len(self.entries))
+	}
+}
+
+// What one more caller costs the provider before its lendings, in weighted
+// milliseconds; false unless a latency test measured it, it is inside the
+// speed cutoffs and its weight is positive.
+func onlineFallbackSpreadCost(clientScore *ClientScore) (float64, bool) {
+	if !clientScore.HasLatencyTest || ClientScoreCutoffTier <= clientScore.Tiers[RankModeSpeed] {
+		return 0, false
+	}
+	weight := clientScore.ReliabilityWeight * onlineFallbackUrlWeight(clientScore)
+	if weight <= 0 {
+		return 0, false
+	}
+	oneWayMillis := float64(max(0, clientScore.MinRelativeLatencyMillis)) / 2
+	return (oneWayMillis + onlineFallbackSpreadOverheadMillis) / weight, true
+}
+
+// Takes up to n of the online bucket like selectOnlineClientScores -- each
+// facet in the request's preference order, each evidence rank of a facet best
+// first -- but lends each rank's measured providers by their spread cost,
+// onlineFallbackSpreadCost times one plus onlineFallbackSpreadActiveShare of
+// their lendings, cheapest first and ties in random order. The rest of the
+// rank follow in the fallback's order. The answer counts against the
+// providers it lists.
+func selectOnlineClientScoresBySpread(
+	candidateClientScores map[server.Id]*ClientScore,
+	facets []ipFamilyFacet,
+	n int,
+	evidence func(*ClientScore) clientScoreEvidenceRank,
+	lendings *onlineFallbackLendings,
+	now time.Time,
+	uniform func() float64,
+) []server.Id {
+	type rankedClientId struct {
+		clientId server.Id
+		cost     float64
+		tie      float64
+	}
+	clientIds := []server.Id{}
+	for _, facet := range facets {
+		if n <= len(clientIds) {
+			break
+		}
+		facetClientIds := clientScoreFacetClientIds(candidateClientScores, facet)
+		for _, groupClientIds := range clientScoreEvidenceGroups(facetClientIds, candidateClientScores, evidence) {
+			remainingCount := n - len(clientIds)
+			if remainingCount <= 0 {
+				break
+			}
+			// in id order, so a given source breaks the same ties whatever
+			// order the candidates come in
+			slices.SortFunc(groupClientIds, func(a server.Id, b server.Id) int {
+				return a.Cmp(b)
+			})
+			measuredClientIds := []server.Id{}
+			costs := []float64{}
+			restClientScores := map[server.Id]*ClientScore{}
+			for _, clientId := range groupClientIds {
+				if cost, ok := onlineFallbackSpreadCost(candidateClientScores[clientId]); ok {
+					measuredClientIds = append(measuredClientIds, clientId)
+					costs = append(costs, cost)
+				} else {
+					restClientScores[clientId] = candidateClientScores[clientId]
+				}
+			}
+			lent := lendings.values(measuredClientIds, now)
+			ranked := make([]rankedClientId, len(measuredClientIds))
+			for i, clientId := range measuredClientIds {
+				ranked[i] = rankedClientId{
+					clientId: clientId,
+					cost:     (1 + onlineFallbackSpreadActiveShare*lent[i]) * costs[i],
+					tie:      uniform(),
+				}
+			}
+			slices.SortFunc(ranked, func(a rankedClientId, b rankedClientId) int {
+				if c := cmp.Compare(a.cost, b.cost); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.tie, b.tie)
+			})
+			for _, r := range ranked[:min(remainingCount, len(ranked))] {
+				clientIds = append(clientIds, r.clientId)
+			}
+			if remainingCount := n - len(clientIds); 0 < remainingCount && 0 < len(restClientScores) {
+				clientIds = append(clientIds, selectOnlineClientScores(restClientScores, []ipFamilyFacet{facet}, remainingCount, evidence, uniform)...)
+			}
+		}
+	}
+	lendings.add(clientIds, now)
 	return clientIds
 }
 

@@ -841,3 +841,165 @@ func TestEgressIndexSettingsRankMeasuredFirst(t *testing.T) {
 	// only the block's key counts
 	assert.Equal(t, load("rank_measured_first: true\n").RankMeasuredFirst, false)
 }
+
+// A provider for the spread tests: online, neutral weights, v4-only unless
+// families says otherwise, measured by both connection tests at the one-way
+// latency and speed given, or untested when the latency is negative.
+func spreadTestScore(i int, oneWayMillis int, bytesPerSecond ByteCount, families uint8) *ClientScore {
+	score := &ClientScore{
+		ClientId:                     evidenceTestFixedId(1000 + i),
+		ReliabilityWeight:            1,
+		IndependentReliabilityWeight: 1,
+		Online:                       true,
+		IpFamilies:                   families,
+		Tiers:                        map[string]int{RankModeQuality: 0, RankModeSpeed: 0},
+		Scores:                       map[string]int{RankModeQuality: 0, RankModeSpeed: 0},
+	}
+	if oneWayMillis < 0 {
+		score.Tiers[RankModeSpeed] = 2
+		return score
+	}
+	score.HasLatencyTest = true
+	score.HasSpeedTest = true
+	score.MinRelativeLatencyMillis = 2 * oneWayMillis
+	score.MaxBytesPerSecond = bytesPerSecond
+	return score
+}
+
+// The nearest measured providers are lent first: by one-way latency plus the
+// overhead, whether or not a speed test measured them. The untested and those
+// past the speed cutoffs follow in the fallback's order.
+func TestOnlineFallbackSpreadLendsCheapestFirst(t *testing.T) {
+	pool := map[server.Id]*ClientScore{}
+	names := map[server.Id]string{}
+	add := func(name string, score *ClientScore) {
+		pool[score.ClientId] = score
+		names[score.ClientId] = name
+	}
+	add("slow", spreadTestScore(0, 40, 5*Mib, ClientScoreIpFamilyV4))
+	add("fast", spreadTestScore(1, 2, 50*Mib, ClientScoreIpFamilyV4))
+	add("medium", spreadTestScore(2, 10, 20*Mib, ClientScoreIpFamilyV4))
+	add("untested", spreadTestScore(3, -1, 0, ClientScoreIpFamilyV4))
+	cutoff := spreadTestScore(4, 1, 100*Mib, ClientScoreIpFamilyV4)
+	cutoff.Tiers[RankModeSpeed] = ClientScoreCutoffTier
+	add("cutoff", cutoff)
+	noSpeedTest := spreadTestScore(5, 4, 0, ClientScoreIpFamilyV4)
+	noSpeedTest.HasSpeedTest = false
+	add("no_speed_test", noSpeedTest)
+	facets, err := ipFamilyFacetsForFilter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	lent := evidenceTestNames(selectOnlineClientScoresBySpread(pool, facets, 3, nil, newOnlineFallbackLendings(time.Hour), now, evidenceTestUniform(1)), names)
+	assert.Equal(t, lent, []string{"fast", "no_speed_test", "medium"})
+	lent = evidenceTestNames(selectOnlineClientScoresBySpread(pool, facets, 6, nil, newOnlineFallbackLendings(time.Hour), now, evidenceTestUniform(1)), names)
+	assert.Equal(t, lent, []string{"fast", "no_speed_test", "medium", "slow", "untested", "cutoff"})
+
+	fast, _ := onlineFallbackSpreadCost(pool[evidenceTestFixedId(1001)])
+	assert.Equal(t, math.Abs(fast-(2+onlineFallbackSpreadOverheadMillis)) < 1e-9, true)
+	for _, name := range []string{"untested", "cutoff"} {
+		for clientId, n := range names {
+			if n == name {
+				if _, ok := onlineFallbackSpreadCost(pool[clientId]); ok {
+					t.Fatalf("%s provider has a spread cost", name)
+				}
+			}
+		}
+	}
+}
+
+// Successive answers fill the nearer provider first and share the callers
+// out as its lendings raise its cost: the costs settle where (1 + share x
+// lendings) x cost is equal for both.
+func TestOnlineFallbackSpreadSharesCallersByCost(t *testing.T) {
+	// one-way latencies of 0 and 10 ms: costs of 2 and 12 ms
+	cheap := spreadTestScore(0, 0, 50*Mib, ClientScoreIpFamilyV4)
+	dear := spreadTestScore(1, 10, 50*Mib, ClientScoreIpFamilyV4)
+	cheapCost, _ := onlineFallbackSpreadCost(cheap)
+	dearCost, _ := onlineFallbackSpreadCost(dear)
+	if math.Abs(cheapCost-2) > 1e-9 || math.Abs(dearCost-12) > 1e-9 {
+		t.Fatalf("costs %f and %f, want 2 and 12", cheapCost, dearCost)
+	}
+	pool := map[server.Id]*ClientScore{cheap.ClientId: cheap, dear.ClientId: dear}
+	facets, err := ipFamilyFacetsForFilter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lendings := newOnlineFallbackLendings(time.Hour)
+	now := time.Now()
+	uniform := evidenceTestUniform(1)
+	counts := map[server.Id]int{}
+	for range 300 {
+		answer := selectOnlineClientScoresBySpread(pool, facets, 1, nil, lendings, now, uniform)
+		if len(answer) != 1 {
+			t.Fatalf("answer %v", answer)
+		}
+		counts[answer[0]] += 1
+	}
+	share := float64(counts[cheap.ClientId]) / 300
+	// (1 + a l) c equal for both, with l_cheap + l_dear = 300
+	a := onlineFallbackSpreadActiveShare
+	want := (dearCost - cheapCost + a*dearCost*300) / (a * (cheapCost + dearCost)) / 300
+	if math.Abs(share-want) > 0.01 {
+		t.Fatalf("cheap provider lent %d of 300 (%.3f), want %.3f", counts[cheap.ClientId], share, want)
+	}
+	// an answer of two lists both, each counting half a caller
+	lendings = newOnlineFallbackLendings(time.Hour)
+	assert.Equal(t, len(selectOnlineClientScoresBySpread(pool, facets, 2, nil, lendings, now, uniform)), 2)
+	assert.Equal(t, lendings.values([]server.Id{cheap.ClientId, dear.ClientId}, now), []float64{0.5, 0.5})
+}
+
+// The family preference stays ahead of cost: a v4-capable request takes the
+// dualstack providers first, then tops up from the v4-only ones.
+func TestOnlineFallbackSpreadKeepsTheFamilyPreference(t *testing.T) {
+	dualstack := spreadTestScore(0, 30, 5*Mib, ClientScoreIpFamilyV4|ClientScoreIpFamilyV6)
+	v4 := spreadTestScore(1, 2, 50*Mib, ClientScoreIpFamilyV4)
+	pool := map[server.Id]*ClientScore{dualstack.ClientId: dualstack, v4.ClientId: v4}
+	facets, err := ipFamilyFacetsForFilter("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer := selectOnlineClientScoresBySpread(pool, facets, 2, nil, newOnlineFallbackLendings(time.Hour), time.Now(), evidenceTestUniform(1))
+	assert.Equal(t, answer, []server.Id{dualstack.ClientId, v4.ClientId})
+}
+
+// A lending counts in full when made and half after the half-life.
+func TestOnlineFallbackLendingsDecay(t *testing.T) {
+	lendings := newOnlineFallbackLendings(30 * time.Minute)
+	clientId := evidenceTestFixedId(7)
+	now := time.Now()
+	lendings.add([]server.Id{clientId}, now)
+	assert.Equal(t, lendings.values([]server.Id{clientId}, now), []float64{1})
+	half := lendings.values([]server.Id{clientId}, now.Add(30*time.Minute))[0]
+	if math.Abs(half-0.5) > 1e-9 {
+		t.Fatalf("after one half-life %f, want 0.5", half)
+	}
+	lendings.add([]server.Id{clientId}, now.Add(30*time.Minute))
+	if value := lendings.values([]server.Id{clientId}, now.Add(30*time.Minute))[0]; math.Abs(value-1.5) > 1e-9 {
+		t.Fatalf("decayed lending plus one %f, want 1.5", value)
+	}
+}
+
+// Past the tracked maximum, an answer drops the lendings that have decayed
+// away. A prune that keeps most of them doubles the count the next one waits
+// for, so it does not rescan on every answer.
+func TestOnlineFallbackLendingsPrune(t *testing.T) {
+	lendings := newOnlineFallbackLendings(time.Minute)
+	start := time.Now()
+	for i := 0; i <= onlineFallbackLendingMaxEntries; i += 1 {
+		lendings.add([]server.Id{server.NewId()}, start)
+	}
+	// nothing had decayed: all kept, and the next prune waits for twice as many
+	assert.Equal(t, len(lendings.entries), onlineFallbackLendingMaxEntries+1)
+	assert.Equal(t, lendings.pruneCount, 2*(onlineFallbackLendingMaxEntries+1))
+
+	// twenty half-lives on, the earlier lendings are below the prune value
+	lendings.pruneCount = onlineFallbackLendingMaxEntries
+	later := start.Add(20 * time.Minute)
+	fresh := server.NewId()
+	lendings.add([]server.Id{fresh}, later)
+	assert.Equal(t, len(lendings.entries), 1)
+	assert.Equal(t, lendings.values([]server.Id{fresh}, later), []float64{1})
+	assert.Equal(t, lendings.pruneCount, onlineFallbackLendingMaxEntries)
+}
