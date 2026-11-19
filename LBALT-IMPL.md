@@ -556,3 +556,83 @@ warp:
   - a service named `lba` or `lbt`, or starting with `lba-` or `lbt-` (final review), whose block chains would read as an interface's split chain or the split's block chains.
 
 Monitor: the lb status probe is a registered signal, with its classes in SIGNALS.md and its settings read from monitor.yml. A failed `/hello` on the public UDP signal has its own finding.
+
+## 8. D22 (b): one QUIC transport per socket group
+
+Started 2026-11-19 by the owner, ahead of canary evidence (LBALT.md D22, §11.6), on `feat/lbalt-d22b-quic-fanin-1119` from main a3f37e085. A group is the N = 4 SO_REUSEPORT udp sockets of one interface, family and udp port kind (quic or whodis).
+
+### 8.1 The problem
+
+- D10 gives each block N = 4 SO_REUSEPORT udp sockets per (interface address, port), and the front gave each socket its own quic-go transport.
+- The kernel delivers each datagram to one socket of the group, by a hash of its 4-tuple scaled by the group's size. When a socket is lost or re-created, the size changes and most of the group's flows move. When a client's NAT rebinds, its flow moves.
+- Under D22 (a), a moved flow reaches a transport that doesn't hold its connection IDs. That transport has no reset key, so it stays silent, and the client reconnects after its idle timeout, about 20 s.
+- (b) feeds every socket of a group into one transport, so a moved flow still finds its connection.
+
+### 8.2 Options
+
+1. A plain `net.PacketConn` fan-in over the sockets, handed to quic-go as the transport's conn. quic-go wraps a conn that isn't OOB-capable as a basic conn: one datagram per read, no ECN, no DF bit (so no path MTU discovery), no GSO. That loss is the cost D22 names.
+2. An OOB-capable fan-in outside quic-go. It would implement `OOBCapablePacketConn`, and the unexported `batchConn` so that quic-go's oob conn reads through the wrapper's `ReadBatch`. But quic-go configures a socket through `SyscallConn().Control` when it wraps it (ECN and packet info reception, DF, the GSO probe), so the wrapper's `Control` would have to reach every socket and replay quic-go's closures on each socket that joins later. It rests on an undocumented interface check and on replayed closures. Rejected.
+3. Multi-socket support in the vendored quic-go: one conn type that `Transport` reads as its raw conn, over several sockets, each wrapped by quic-go's own `wrapConn`. **Chosen** for the quic port (§8.3).
+4. Per-socket transports that share one connection-ID table. Each keeps its own listen loop, but `packetHandlerMap` and every connection's send conn change: a connection writes through the socket it started on, so it would still end with that socket. Larger and riskier than 3.
+5. eBPF steering by connection ID: out of scope (LBALT.md §10, D22 (c)).
+
+Whodis doesn't need 3: its transport reads the decode53 translation, which isn't OOB-capable, so quic-go already treats it as a basic conn. It gets one translation per group over a plain fan-in of the group's sockets (§8.4).
+
+### 8.3 The vendored `ConnGroup`
+
+`third_party/quic-go/urnetwork_conn_group.go`, a new file; no upstream file changes.
+
+- `quic.NewConnGroup(localAddr)` returns the conn of one `Transport`. `ConnGroup.Add(conn)` wraps a socket as `Transport.init` wraps the conn it is given, and starts reading it.
+- The `ConnGroupMember` that `Add` returns reports when its socket stops (`Done`, `Err`), and `Close` takes the socket out of the group and closes it. `ConnGroup.Close` closes every socket.
+- `ConnGroup` implements quic-go's unexported `rawConn`, so `Transport.init` uses it as it is, and `net.PacketConn`.
+
+**Reads.**
+- Each socket has a reader goroutine running quic-go's own read for that socket. For a `*net.UDPConn` that is the oob conn's batched read: recvmmsg, 8 datagrams a call on Linux, with ECN bits and packet info taken from the control messages.
+- Each packet goes into one queue of 256 packets. The transport's single listen loop reads the queue, as it read one socket. A full queue makes the readers wait, so a socket's receive buffer absorbs a burst, as when the listen loop is slow to read a lone socket.
+- A socket's read failure ends only its reader. The socket leaves the group's write set at once, and its member's `Done` closes with the error. The transport never sees the failure. Temporary errors are retried, as `Transport.listen` retries them.
+- `Transport.Close` stops the listen loop with a read deadline in the past, as on a socket. The group implements read deadlines over its queue and stays open; the front closes it after the transport.
+- The cost is one channel handoff a datagram, and one listen goroutine for the group where each socket had one. A block's QUIC load is a few thousand datagrams/s (LBALT.md D10, §7.1), and the listen loop's work per datagram (a connection-id lookup and a queue push) is well under a microsecond. §8.7 measures it.
+
+**Writes: which socket sends.**
+- Every socket of a group is bound to the same address and port, so any of them sends the same datagram: the same source address and port, hence the same conntrack entry and the same reply mapping through the block's DNAT.
+- A write leaves through the live socket picked by a hash of its destination address and port, seeded per group. While the group's sockets stay the same, one flow's datagrams leave through one socket: a qdisc such as fq classifies by socket, and could reorder one flow across sockets. The flows spread over the sockets' send buffers, as the per-socket transports spread them.
+- When a socket leaves or joins, some flows change socket, once; at most a reordering.
+- A socket closed between the pick and the write (`net.ErrClosed`) is skipped for the next live one. With no live socket, the datagram is dropped as the network drops one, and QUIC's loss recovery sends it again: quic-go ends a connection on any send error but EMSGSIZE. After `ConnGroup.Close`, writes fail with `net.ErrClosed`.
+- Every other error passes through unchanged: EMSGSIZE, for path MTU discovery; GSO's EIO, after which quic-go sends that connection's batches one datagram at a time; and the first write's EPERM, which quic-go retries.
+
+**GSO, ECN and packet info.**
+- Each socket gets what a lone socket handed to a `Transport` gets: 7 MiB buffers, the DF bit, `IP_RECVTOS` and `IPV6_RECVTCLASS`, packet info only on a wildcard bind (the front binds exact addresses, so none), batched reads, and the GSO probe.
+- `QUIC_GO_DISABLE_GSO` and `QUIC_GO_DISABLE_ECN` still apply; each socket reads them when it is wrapped.
+- The group's capabilities (DF, GSO, ECN) are those of its first socket. A later socket whose capabilities differ is refused, and its re-creation backs off. A connection reads ECN and DF when it starts and GSO on every send, so the capabilities must not change under it, and every socket a GSO batch can reach must support GSO. A group's sockets are alike, so in practice none is refused.
+
+### 8.4 The front
+
+- Each udp group has a `frontQuicGroup`: its N sockets in the inventory, and its current transport, a `frontQuicRun`. The run holds the group's fan-in (a `ConnGroup` on the quic port; the whodis fan-in and the decode53 translation over it on the whodis port), the transport from `ConnectHandler.NewQuicTransport`, its listener, and the h3 servers of its api connections.
+- On the quic port the transport reads the `ConnGroup`, so every socket keeps GSO, ECN, DF and batched reads.
+- On the whodis port, `frontWhodisFanIn` reads each socket with a plain read of up to 64 KiB, as the translation read its socket, and writes through one live socket picked as in §8.3. One translation per group sits over it, and the transport over the translation, as one sat over each socket before. Buffer sizes still pass through the translation, now to every socket of the group, and still no DF or ECN. One translation now holds the pump state of every query its group receives, so an answer can use a query's id whichever socket the query reached; with a translation per socket, an answer sent through another socket had none.
+- Dispatch is unchanged, per transport: name classes; the handshake admission limit, through `NewQuicTransport`; the per-address cap (0x1001); 0x1000 for other served names; the h3 header timeout; `Allow0RTT = false`; the carrier by port kind.
+- Stateless resets are unchanged. No transport has a `StatelessResetKey`, so none sends a reset, and each transport, now one per group, keeps quic-go's random per-transport token key; no key is shared. A packet of a group's connection reaches it from any socket of the group, and one that reaches another group's transport finds no key there.
+
+**Socket loss and re-creation.**
+- Per-socket supervision is unchanged (`superviseSocket`). A udp socket's run is its membership in its group (`frontQuicSocketRun`): `serve` waits until the socket stops, and `close` takes it out of its group and closes it. A re-created socket joins its group's current transport.
+- A socket's loss costs no connection: its flows move to the group's other sockets and reach the same transport. On Linux the group's size still changes twice, now harmlessly.
+- During the drain a lost socket stays lost, as before, and the group's other sockets carry its flows.
+
+**Transport loss and replacement.**
+- Each group's transport has its own supervisor (`superviseQuicTransport`), counted with the sockets'. Its accept loop ends when the front closes. It can also end when the transport fails under it: on the whodis port, when the translation ends, as a panic in one of its workers ends it. On the quic port nothing but the front's own close ends it.
+- A transport that ends while the front serves is replaced. A new `frontQuicRun` is opened, at once after a healthy run, else after the sockets' backoff, and installed; then the old run is closed in the close order. Closing its fan-in closes its sockets, which are lost and re-created into the new transport. Its connections end, as a lost socket's did under (a).
+- During the drain or a close, a transport that ends is closed, not replaced.
+
+**Readiness** is unchanged: each socket counts on its own, up from its bind and join until its loss.
+
+**Drain and close** keep §2.8's order.
+- `beginDrain` gives each group's transport the drain once: the graceful h3 shutdown of its api connections.
+- The forced close cancels the serving context. Each transport's accept loop returns, and its supervisor closes it: the listener, the h3 servers (bounded by ForcedCloseTimeout), the transport, the translation, then the fan-in and its sockets. A socket's run ends only once its group's transport has closed, so the h3 servers' CONNECTION_CLOSE frames still leave through live sockets. Every path to a transport's close goes through `frontQuicRun.close`.
+
+### 8.5 Risks
+
+- One listen goroutine per group handles the datagrams of all N sockets, where each socket's transport had one. At a block's load that is far from a core. If it ever binds, the next step is a listen loop per socket inside `Transport`, a larger vendored change.
+- One translation per whodis group: its encode and decode run on one pair of goroutines per group, not N.
+- `ConnGroup` is new vendored code on the packet path. A socket's removal races writes in flight; a write skips a closed socket. Its tests run under `-race`.
+- Replacing a transport runs only after a failure. A test drives it through a hook.
+- (b) doesn't help a flow that moves to another block, or one whose block restarts: those still reconnect after their idle timeout. HMARK hashes the source address alone (D10), so a rebinding that changes only the source port stays in its block.
