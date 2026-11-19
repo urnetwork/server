@@ -24,10 +24,11 @@ package connect
 // front's limits: the cap bounds how many one address holds, and the h3
 // server resets a request stream whose HEADERS don't arrive within the
 // client header timeout, reading them into a buffer that grows with what
-// arrives (third_party/quic-go/URNETWORK.md). Without both, an address
-// could hold any number of connections, each with up to a hundred streams
-// that never send their headers, for as long as its client acks the
-// public config's PINGs, which keep the QUIC idle timeout from ever firing.
+// arrives (third_party/quic-go/URNETWORK.md). Without the cap, an address
+// could hold any number of connections; without the timeout, each could
+// hold up to a hundred streams that never send their headers, for as long as
+// its client acks the public config's PINGs, which keep the QUIC idle
+// timeout from ever firing.
 //
 // Each api connection gets an http3.Server of its own. The drain shuts each
 // down gracefully while its transport can still send, which sends one GOAWAY
