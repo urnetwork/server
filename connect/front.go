@@ -39,7 +39,10 @@ package connect
 // results.
 //
 // Goroutine safety: a frontServer's methods are safe for concurrent use,
-// except that start runs at most once.
+// except that start runs at most once, and beginDrain and close act only once
+// start has published the front as started: one called before that returns
+// doing nothing, and the sockets start then serves wait for a later close or
+// the end of start's context.
 
 import (
 	"context"
@@ -387,6 +390,10 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 		}
 		runs = append(runs, run)
 	}
+	// every supervisor is counted before the front reads as started, so a
+	// close that finds it started waits for every run, even one whose
+	// supervisor has yet to start
+	self.supervisors.Add(len(self.sockets))
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -395,8 +402,10 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 		}
 		self.started = true
 	}()
+	if self.settings.startedObserverForTest != nil {
+		self.settings.startedObserverForTest()
+	}
 	for i, socket := range self.sockets {
-		self.supervisors.Add(1)
 		go self.superviseSocket(socket, runs[i])
 	}
 	// the process's cancel without a drain, such as a confirmed handler

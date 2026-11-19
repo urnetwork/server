@@ -936,6 +936,43 @@ func TestFrontCloseBoundsAStuckApiRequest(t *testing.T) {
 	}
 }
 
+// A close that finds the front started waits for every socket's supervisor,
+// even one start has yet to run, since start counts the supervisors before
+// the front reads as started. The close runs on start's own goroutine in the
+// moment between the two, so no supervisor can run before the close's
+// bounded wait for the sockets ends, and the close reports them as not
+// closed in time; a close that counted none would return at once with
+// nothing to report. Once start goes on, every socket is released.
+func TestFrontCloseRacingStartWaitsForEverySupervisor(t *testing.T) {
+	reports := make(chan string, 4)
+	closed := false
+	env := newUnstartedTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ForcedCloseTimeout = 100 * time.Millisecond
+		env.settings.forcedCloseReportObserverForTest = func(step string) {
+			reports <- step
+		}
+		env.settings.startedObserverForTest = func() {
+			env.frontServer.close()
+			closed = true
+		}
+	})
+	if err := env.frontServer.start(env.ctx, env.front, env.connectQuic); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("start never read as started")
+	}
+	select {
+	case step := <-reports:
+		if step != "sockets" {
+			t.Fatalf("the close reported the %s, want the sockets", step)
+		}
+	default:
+		t.Fatal("the close found no supervisor to wait for")
+	}
+	env.waitSocketsUp(0)
+}
+
 // The old alt's exit burst (10-24 to 10-26) cannot come back: the drain
 // shuts each api connection down gracefully while its transport is live,
 // and the forced close then closes every h3 server before its transport. An
