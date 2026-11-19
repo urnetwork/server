@@ -13,7 +13,9 @@ package connect
 // Every accepted connection is tracked from its accept to its close, under
 // TLS and through a hijack, so the drain can wait for the websockets and H1+
 // tunnels http.Server forgets once hijacked, and the forced close can cut
-// them (D12).
+// them (D12). Once a write to one fails on its deadline, every later write
+// fails at once, so TLS's close_notify can't hold a handler on a client that
+// stopped reading (frontTrackedConn).
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
@@ -26,8 +28,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/urnetwork/glog"
 )
@@ -206,10 +210,33 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // One accepted public tcp connection, the raw socket below any TLS. It leaves
 // the tracked set on its first close, whoever closes it: net/http, a hijacker
 // or the forced close.
+//
+// Once a write fails on its deadline, every later write fails at once with
+// that error, whatever deadline is set after it (LBALT-IMPL.md §7). The
+// stream is cut mid-record then, and nginx sends nothing more on a
+// connection whose send_timeout passed. The later write that matters is
+// TLS's: when the nginx front's send_timeout cuts a blocked h1 write, net/http
+// closes the tls.Conn, which first sends close_notify under a write deadline
+// of its own, 5 s, so a client that stopped reading would hold the handler,
+// and its limit slot, that much longer.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer
 	closeOnce   sync.Once
+	// the error of the first write that failed on its deadline, once one has
+	writeTimeoutErr atomic.Pointer[error]
+}
+
+// Writes p, or fails at once once a write has failed on its deadline.
+func (self *frontTrackedConn) Write(p []byte) (int, error) {
+	if writeTimeoutErr := self.writeTimeoutErr.Load(); writeTimeoutErr != nil {
+		return 0, *writeTimeoutErr
+	}
+	n, err := self.Conn.Write(p)
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		self.writeTimeoutErr.CompareAndSwap(nil, &err)
+	}
+	return n, err
 }
 
 // Closes the socket and leaves the tracked set, once.

@@ -312,6 +312,10 @@ func TestRouteHttpSendTimeoutLetsAQuietResponseLive(t *testing.T) {
 // h1 runs without TLS: over TLS, Go's h1 server closes the connection when
 // the write fails, and crypto/tls then spends up to 5 s more sending
 // close_notify to the client that isn't reading before the write returns.
+// Connect's public sockets fail that close_notify at once, since a write
+// there failed on its deadline (connect/front_http.go, frontTrackedConn), and
+// connect's TestFrontHttpsSendTimeoutReleasesTheHandlerOfAClientThatStopsReading
+// covers the TLS case through them; this test's server has plain sockets.
 func TestRouteHttpSendTimeoutCutsAWriteTheClientStopsReading(t *testing.T) {
 	const sendTimeout = 100 * time.Millisecond
 	for _, enableHttp2 := range []bool{false, true} {
