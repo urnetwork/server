@@ -139,6 +139,11 @@ func TestLbAltRouteFileOfAnotherBlockFailsTheLoad(t *testing.T) {
 // every public socket and answers the lb status route with WARP_VERSION;
 // and the private /status reports the file's generation and revision and
 // the earliest certificate expiry, ready with every socket up.
+//
+// warpctl gives a block's container neither WARP_HOME nor WARP_VAULT_HOME
+// and mounts the host's vault at /srv/warp/vault, so the vault home is the
+// one under the default WARP_HOME. Here WARP_VAULT_HOME is cleared, so the
+// vault is found only that way, under a temporary WARP_HOME.
 func TestLbAltStartServesTheRealFrontFromTheEnv(t *testing.T) {
 	routeFile := newTestFrontRouteFile(t)
 	routeTable, err := nginx.ParseRouteTable(routeFile)
@@ -150,12 +155,18 @@ func TestLbAltStartServesTheRealFrontFromTheEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity := newTestFrontIdentity(t, routeTable.ServedNames())
-	vaultDir := t.TempDir()
-	writeTestFrontVault(t, vaultDir, routeTable, identity)
+	// warpctl's vault mount (warpctl/run.go) is the vault home under the
+	// default WARP_HOME
+	if vaultMount := filepath.Join(server.DefaultWarpHome, "vault"); vaultMount != "/srv/warp/vault" {
+		t.Fatalf("the default vault home %s is not warpctl's vault mount", vaultMount)
+	}
+	warpHome := t.TempDir()
+	writeTestFrontVault(t, filepath.Join(warpHome, "vault"), routeTable, identity)
 	t.Setenv(frontRouteFileEnvName, routeFilePath)
 	t.Setenv(frontGenerationEnvName, routeTable.Generation)
 	t.Setenv("WARP_ENV", routeTable.Env)
-	t.Setenv("WARP_VAULT_HOME", vaultDir)
+	t.Setenv("WARP_HOME", warpHome)
+	t.Setenv("WARP_VAULT_HOME", "")
 	t.Setenv("WARP_VERSION", "0.0.0-test")
 
 	publicFront, err := newFrontServerFromEnv()
