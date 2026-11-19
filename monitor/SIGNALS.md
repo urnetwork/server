@@ -3026,7 +3026,7 @@ that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
-error class or Redis caller and operation described below. Raw errors, stack arguments,
+error class, Redis caller and operation, or Redis adapter described below. Raw errors, stack arguments,
 source paths and line numbers, endpoints and identities stay private. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -3052,6 +3052,20 @@ enclosing `flush`. In this source, `flush` reaches that call after the mark
 store acknowledges the write. A shorter stack can retain the direct caller
 or planner alone. The request decision, metric label and completed flush count
 require their own evidence.
+For a `TakeClientCloseRequests` owner, the optional `redis_adapter` is
+`Redis` or `RedisDoOnce`. The named adapter in `redis.go` must be followed
+immediately by the named taker in `client_close_model.go` from the same
+ordinary or versioned Server module. If the selected frame is the taker's
+SPOP callback, its contiguous `redisWithClient.func1`, `redisWithClient` and
+matching adapter `.func1` frames must lead to that same pair. A missing
+source pair, another selected owner, an unfamiliar bridge, or competing
+adapter or taker frames leaves the field absent. The field identifies the
+adapter in that bucket's first exemplar. Command dispatch, mutation, reply,
+effective retries, initiating failure and close completion each require
+independent evidence. At 08:44 UTC on 2026-11-19, the Connect aggregate and
+taker alerts each reported 467 lines/minute. Their retained samples leave
+the adapter, error type and SQLSTATE unknown.
+
 The optional `[legacy_registration_db]` annotation accompanies only a returned
 failed acquisition in close-owner registration. It leaves the original
 `Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner

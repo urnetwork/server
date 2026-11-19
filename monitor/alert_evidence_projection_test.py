@@ -21,6 +21,32 @@ def alert(owner='server/controller.ConnectControlFrames', sqlstate='unknown', er
 
 
 class EvidenceProjectionControls(unittest.TestCase):
+    def test_close_request_adapter_requires_its_own_finite_evidence_sample(self):
+        for module in ('server', 'server/v2026'):
+            owner = module + '/model.TakeClientCloseRequests'
+            old = alert(owner=owner)
+            self.assertEqual(MODULE.project_alert(old).get('observed_redis_adapter'), 'unknown')
+            for adapter in ('Redis', 'RedisDoOnce'):
+                suffix = (' redis_adapter=' + adapter).encode()
+                qualified = old.replace(b' sqlstate=unknown\n', b' sqlstate=unknown' + suffix + b'\n')
+                sample = next(line for line in qualified.splitlines(keepends=True) if line.startswith(b'sample:'))
+                observed = MODULE.project_alert(qualified)
+                self.assertEqual(observed['observed_function'], owner)
+                self.assertEqual(observed['observed_redis_adapter'], adapter)
+                self.assertEqual(observed['observed_error_type'], 'unknown')
+                self.assertEqual(observed['observed_sqlstate'], 'unknown')
+                self.assertEqual(MODULE.project_alert(old + suffix)['observed_redis_adapter'], 'unknown')
+                for invalid in (
+                    qualified.replace(owner.encode(), b'server/model.Other'),
+                    qualified.replace(suffix, b' redis_adapter=private_value'),
+                    qualified.replace(suffix, suffix + suffix),
+                    qualified.replace(suffix, b' error_class=provider_egress_refresh_busy' + suffix),
+                    qualified.replace(suffix, b' redis_caller=GetProxyDeviceConfig' + suffix),
+                    qualified.replace(sample, sample + sample),
+                    qualified.replace(sample, sample + sample.replace(suffix, b' redis_adapter=private_value')),
+                ):
+                    self.assertEqual(MODULE.project_alert(invalid)['status'], 'cannot_observe')
+
     def test_operation_requires_compatible_owner_and_caller_in_its_evidence(self):
         owner = 'server/model.proxyAdmissionRedis'
         for caller, operation in [

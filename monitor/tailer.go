@@ -863,7 +863,7 @@ var logClasses = []logClass{
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
 		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
-		context:   "The sample retains normalized ownership, an allowlisted error type and SQLSTATE. A validated stack can also identify a finite provider-egress error class or the direct Redis caller. Unknown, malformed, oversized and excess-cardinality stacks still count in the aggregate.",
+		context:   "The sample retains normalized ownership, an allowlisted error type and SQLSTATE. A validated stack can also identify a finite provider-egress error class, the direct Redis caller and its operation, or the Redis adapter called by TakeClientCloseRequests in this sample. Unknown, malformed, oversized and excess-cardinality stacks still count in the aggregate.",
 		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. An ownership-admission wrapper alone leaves the business caller and cause unknown; inspect one bounded original structured stack and its error discriminator. A changed owner after parser correction is not recovery. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
 		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
 	},
@@ -1238,6 +1238,7 @@ type panicLogObservation struct {
 	errorClass     string
 	redisCaller    string
 	redisOperation string
+	redisAdapter   string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
@@ -1317,11 +1318,11 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 	}
 	for index := 0; index < len(stack); index++ {
-		line := strings.TrimSpace(stack[index])
-		if !strings.HasPrefix(line, "github.com/urnetwork/") {
+		frame := strings.TrimSpace(stack[index])
+		if !strings.HasPrefix(frame, "github.com/urnetwork/") {
 			continue
 		}
-		match := panicLogFunctionRe.FindStringSubmatch(line)
+		match := panicLogFunctionRe.FindStringSubmatch(frame)
 		if len(match) != 3 || index+1 >= len(stack) || !panicLogSourceRe.MatchString(strings.TrimSpace(stack[index+1])) {
 			return observation
 		}
@@ -1355,8 +1356,13 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 		if len(owner) <= panicLogOwnerMaxBytes {
 			observation.owner = owner
-			if match[2] == "proxyAdmissionRedis" && (match[1] == "server/model" || match[1] == "server/v2026/model") {
-				observation.redisCaller, observation.redisOperation = panicProxyAdmissionOperation(match[1], stack[index:])
+			if match[1] == "server/model" || match[1] == "server/v2026/model" {
+				switch match[2] {
+				case "proxyAdmissionRedis":
+					observation.redisCaller, observation.redisOperation = panicProxyAdmissionOperation(match[1], stack[index:])
+				case "TakeClientCloseRequests", "TakeClientCloseRequests.func1":
+					observation.redisAdapter = panicCloseRequestRedisAdapter(line, match[1], stack, index)
+				}
 			}
 		}
 		return observation
@@ -1450,6 +1456,9 @@ func panicLogSample(line string) string {
 	}
 	if observation.redisOperation != "" {
 		sample += " redis_operation=" + observation.redisOperation
+	}
+	if observation.redisAdapter != "" {
+		sample += " redis_adapter=" + observation.redisAdapter
 	}
 	return sample
 }
