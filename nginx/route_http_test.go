@@ -990,6 +990,33 @@ func TestRouteHttpRefusesARepeatedHeaderNginxKeepsOnce(t *testing.T) {
 	}
 }
 
+// An h2 Content-Length that isn't a decimal length is nginx's 400, though
+// Go's h2 server reads it as 0 and keeps it; a decimal one, leading zeros
+// included, is forwarded.
+func TestRouteHttpRefusesAnH2ContentLengthNginxCantParse(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	forwardCount := 0
+	for _, contentLength := range []string{"0", "00"} {
+		r := asTestProtocol(newTestRequest("POST", "api.service.example", "/v1", true), 2)
+		r.Header.Set("Content-Length", contentLength)
+		if response := serveTestRequest(handler, r); response.Code != http.StatusOK {
+			t.Errorf("h2 Content-Length %q = %d, want it forwarded", contentLength, response.Code)
+		}
+		forwardCount += 1
+	}
+	for _, contentLength := range []string{"abc", "-1", "+1", "1 ", "0x10", "", "99999999999999999999"} {
+		r := asTestProtocol(newTestRequest("POST", "api.service.example", "/v1", true), 2)
+		r.Header.Set("Content-Length", contentLength)
+		if response := serveTestRequest(handler, r); response.Code != http.StatusBadRequest {
+			t.Errorf("h2 Content-Length %q = %d, want 400", contentLength, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != forwardCount {
+		t.Errorf("%d requests forwarded, want the %d with a decimal Content-Length", len(forwards), forwardCount)
+	}
+}
+
 // nginx's request validation, before any server: a method outside
 // [A-Z_-]+, an invalid Host, TRACE and CONNECT, a request line or headers
 // over the limits, a target nginx can't parse, and an h2 or h3 :authority

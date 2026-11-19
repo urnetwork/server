@@ -31,6 +31,7 @@ package nginx
 //   - a second line of a header nginx keeps once is a 400
 //     (ngx_http_process_unique_header_line), and so is a second Host field
 //     on h2 and h3 (ngx_http_process_host);
+//   - on h2, a Content-Length that isn't a decimal length is a 400;
 //   - on h2 and h3, a Host header that differs from :authority is a 400, and
 //     neither is a 400;
 //   - the host is valid, as nginx's $host normalization decides
@@ -66,6 +67,7 @@ package nginx
 import (
 	"net/http"
 	"net/netip"
+	"strconv"
 )
 
 // The request headers nginx keeps once, answering a second line with 400
@@ -198,6 +200,17 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 	for _, name := range routeRequestUniqueHeaders {
 		if 1 < len(r.Header[name]) {
 			return nil, http.StatusBadRequest
+		}
+	}
+
+	if r.ProtoMajor == 2 {
+		// Go's h2 server reads a Content-Length it can't parse as 0 and keeps
+		// it, where nginx answers 400 (ngx_http_v2_run_request); Go's h1
+		// server and the vendored http3 refuse one before the handler
+		for _, contentLength := range r.Header.Values("Content-Length") {
+			if _, err := strconv.ParseUint(contentLength, 10, 63); err != nil {
+				return nil, http.StatusBadRequest
+			}
 		}
 	}
 
