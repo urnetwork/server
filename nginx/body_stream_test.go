@@ -100,16 +100,16 @@ func (self *heldTimeoutReader) Read(p []byte) (int, error) {
 // synctest bubble, so time passes only as the test says.
 func TestStreamedBodyTimeoutBeforeAnInterruptIsTheClients(t *testing.T) {
 	const readTimeout = 50 * time.Millisecond
-	for _, c := range []struct {
-		name string
-		// when the interrupt comes, after the read began
-		interruptAfter time.Duration
-		wantRefusal    bool
-	}{
-		{name: "the read's own deadline passed", interruptAfter: 2 * readTimeout, wantRefusal: true},
-		{name: "the interrupt came first", interruptAfter: readTimeout / 2, wantRefusal: false},
-	} {
-		synctest.Test(t, func(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, c := range []struct {
+			name string
+			// when the interrupt comes, after the read began
+			interruptAfter time.Duration
+			wantRefusal    bool
+		}{
+			{name: "the read's own deadline passed", interruptAfter: 2 * readTimeout, wantRefusal: true},
+			{name: "the interrupt came first", interruptAfter: readTimeout / 2, wantRefusal: false},
+		} {
 			reader := &heldTimeoutReader{
 				waiting: make(chan struct{}),
 				fail:    make(chan struct{}),
@@ -142,6 +142,6 @@ func TestStreamedBodyTimeoutBeforeAnInterruptIsTheClients(t *testing.T) {
 			if armed := <-deadlines; armed.IsZero() {
 				t.Errorf("%s: the read armed no deadline", c.name)
 			}
-		})
-	}
+		}
+	})
 }
