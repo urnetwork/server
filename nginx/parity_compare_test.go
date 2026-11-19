@@ -445,13 +445,11 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 
-	// proposed by this harness for LBALT-IMPL §4 (parity_additions in its
-	// report); until the owner accepts them they fail the run like any other
-	// difference
+	// proposed by this harness (parity_additions in its report) and accepted
+	// into LBALT-IMPL §4 at integration
 	{
-		id:       "keepalive-connection-header",
-		source:   "proposed: nginx sends Connection: keep-alive on a persistent HTTP/1.1 response, which Go's server leaves implicit",
-		proposed: true,
+		id:     "keepalive-connection-header",
+		source: "LBALT-IMPL §4: nginx sends Connection: keep-alive on a persistent HTTP/1.1 response, which Go's server leaves implicit",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			sequence, field, ok := parityResponseKey(difference.key)
 			return ok && field == "header.Connection" && difference.nginx == "keep-alive" && difference.front == parityAbsent &&
@@ -459,9 +457,8 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
-		id:       "http10-status-line",
-		source:   "proposed: Go's server answers an HTTP/1.0 request with an HTTP/1.0 status line, where nginx's is HTTP/1.1",
-		proposed: true,
+		id:     "http10-status-line",
+		source: "LBALT-IMPL §4: Go's server answers an HTTP/1.0 request with an HTTP/1.0 status line, where nginx's is HTTP/1.1",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			sequence, field, ok := parityResponseKey(difference.key)
 			if !ok || field != "proto" || difference.nginx != "HTTP/1.1" || difference.front != "HTTP/1.0" {
@@ -472,9 +469,8 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
-		id:       "tls-suite-choice",
-		source:   "proposed: within nginx's suites, Go chooses AES-128-GCM where OpenSSL under ssl_prefer_server_ciphers chooses AES-256-GCM; crypto/tls ignores a server's suite order and has no TLS 1.3 suite setting",
-		proposed: true,
+		id:     "tls-suite-choice",
+		source: "LBALT-IMPL §4: within nginx's suites, Go chooses AES-128-GCM where OpenSSL under ssl_prefer_server_ciphers chooses AES-256-GCM; crypto/tls ignores a server's suite order and has no TLS 1.3 suite setting",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			_, field, ok := parityConnKey(difference.key)
 			if !ok || field != "tls.cipher" || !check.hasTag("tls-suites") {
@@ -485,9 +481,8 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
-		id:       "long-sni-default-certificate",
-		source:   "proposed, as s-tls chose (its fix report): an SNI over 255 bytes gets the default server's certificate and routes by Host, where OpenSSL refuses the handshake with unrecognized_name",
-		proposed: true,
+		id:     "long-sni-default-certificate",
+		source: "LBALT-IMPL §4, as s-tls chose: an SNI over 255 bytes gets the default server's certificate and routes by Host, where OpenSSL refuses the handshake with unrecognized_name",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			if !check.hasTag("long-sni") || parityValue(check.nginx, "conn[0].tls.error") != "tls: unrecognized name" || parityValue(check.front, "conn[0].tls.certificate") != parityLbName {
 				return false
@@ -508,9 +503,8 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
-		id:       "content-length-beside-chunked",
-		source:   "proposed: Go's server reads a request with both Content-Length and Transfer-Encoding: chunked as chunked and drops the Content-Length before the handler sees it (RFC 9112 §6.3), and the front forwards the body re-framed, where nginx answers 400",
-		proposed: true,
+		id:     "content-length-beside-chunked",
+		source: "LBALT-IMPL §4: Go's server reads a request with both Content-Length and Transfer-Encoding: chunked as chunked and drops the Content-Length before the handler sees it (RFC 9112 §6.3), and the front forwards the body re-framed, where nginx answers 400",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			if !check.hasTag("content-length-beside-chunked") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
 				return false
@@ -543,9 +537,8 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
-		id:       "in-process-hop-by-hop",
-		source:   "proposed: connect's in-process handler sees the client's own Connection header, where a connect block behind nginx sees nginx's keep-alive and upgrade, and writes its own 101 head",
-		proposed: true,
+		id:     "in-process-hop-by-hop",
+		source: "LBALT-IMPL §4: connect's in-process handler sees the client's own Connection header, where a connect block behind nginx sees nginx's keep-alive and upgrade, and writes its own 101 head",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			if index, field, ok := parityUpstreamKey(difference.key); ok {
 				attemptIndex, _ := strconv.Atoi(index)
