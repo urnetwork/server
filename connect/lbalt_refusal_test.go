@@ -25,20 +25,51 @@ import (
 	"github.com/urnetwork/server/nginx"
 )
 
+// One connection the front dispatched, with the class of its server name.
+type testLbAltDispatch struct {
+	serverName string
+	nameClass  nginx.NameClass
+}
+
 // Every served name that is neither connect's nor the api's, a forwarded
 // service's, an lb name and a redirect alias, completes its handshake on the
 // quic and whodis sockets of both families and is closed with 0x1000, and
-// the code arrives. Connect's handler never sees one: no client has a
-// resident.
+// the code arrives. Connect's handler never sees one: the front dispatches
+// each by its own class, and only the connect class goes to the handler. The
+// dispatch is observed before the close it leads to, so each one is known by
+// the time its client reads the code.
 func TestLbAltQuicRefusesOtherServedNamesWithUnknownServerName(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		env := newTestLbAltEnv(t, nil)
-		serverNames := []string{testLbAltForwardedName, env.routeTable.Lb.Names[0], testLbAltRedirectName}
+		dispatches := make(chan testLbAltDispatch, 64)
+		env := newTestLbAltEnv(t, &testLbAltEnvSettings{
+			frontSettings: func(settings *FrontServerSettings) {
+				settings.dispatchObserverForTest = func(serverName string, nameClass nginx.NameClass) {
+					select {
+					case dispatches <- testLbAltDispatch{serverName: serverName, nameClass: nameClass}:
+					default:
+					}
+				}
+			},
+		})
+		serverNameClasses := []testLbAltDispatch{
+			{serverName: testLbAltForwardedName, nameClass: nginx.NameClassForwarded},
+			{serverName: env.routeTable.Lb.Names[0], nameClass: nginx.NameClassLb},
+			{serverName: testLbAltRedirectName, nameClass: nginx.NameClassRedirect},
+		}
 		for _, interfaceAddress := range env.interfaceAddresses() {
 			for _, portKind := range []string{frontPortQuic, frontPortWhodis} {
-				for _, serverName := range serverNames {
+				for _, serverNameClass := range serverNameClasses {
+					serverName := serverNameClass.serverName
 					conn, err := env.dialQuic(interfaceAddress.address, portKind, serverName, []string{http3.NextProtoH3})
 					quicClose := testLbAltCloseOf(conn, err)
+					select {
+					case dispatch := <-dispatches:
+						if dispatch != serverNameClass {
+							t.Fatalf("%s %s %s: dispatched %+v, want %+v", interfaceAddress.address, portKind, serverName, dispatch, serverNameClass)
+						}
+					default:
+						t.Fatalf("%s %s %s: closed %+v before any dispatch", interfaceAddress.address, portKind, serverName, quicClose)
+					}
 					if !quicClose.applicationArrived || quicClose.applicationCode != frontQuicErrorCodeUnknownServerName {
 						t.Fatalf("%s %s %s: closed %+v, want 0x1000 to arrive", interfaceAddress.address, portKind, serverName, quicClose)
 					}
@@ -47,9 +78,6 @@ func TestLbAltQuicRefusesOtherServedNamesWithUnknownServerName(t *testing.T) {
 					}
 				}
 			}
-		}
-		if candidates := env.exchange.ResidentMoveCandidates(); len(candidates) != 0 {
-			t.Fatalf("a refused connection reached connect: %d residents", len(candidates))
 		}
 	})
 }
