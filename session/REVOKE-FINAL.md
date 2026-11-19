@@ -421,9 +421,12 @@ The reason was load. On 2026-10-26 the per-check SQL state query cost about 17k 
 | Revocation | Record write |
 |---|---|
 | client deactivation, including the abandoned top-level mark and the stale-child reap | tombstone `c:`, plus `r:` for a root |
-| session enforcement | `s:` in all 64 shards, before the operation is enforced and before a status read reports an applied receipt |
-| password reset | `n:cred` in every shard of the user's networks |
+| session enforcement of a single revoke or a revoke of the other sessions | `s:` for every target in all 64 shards, before the operation is enforced and before a status read reports an applied receipt |
+| session enforcement of a reset or a deletion | none: the `n:cred` or `n:del` its own transaction wrote refuses every target, since each credential of a session carries its session's lineage time and a reset retires only sessions created before its cutoff |
+| password reset and sign-out-all | `n:cred` in every shard of the user's networks |
 | network deletion | `n:del` in every shard |
+
+A network credential reads its session's tombstone in the session's own shard, but each client credential carrying the session reads it in its root client's shard, and nothing records which roots a session's credentials used, so a single or other-sessions revoke writes all 64 shards. A `n:cred` or `n:del` refusal is confirmed by the SQL state query before it refuses, so a leftover of an uncommitted change is overruled (counted as the outcome `record_overruled`); if SQL cannot answer, the refusal stands.
 
 A commit that fails after its write is a spurious revocation, never a missed one. Tombstones live ten minutes. After that the absent field sends checks to SQL, which already refuses.
 
@@ -439,7 +442,7 @@ The implementation is `session/revocation_record.go`. Its guard is `model/revoca
 
 On 2026-11-18 the owner handed the remaining session work to operations. After a new code review and a measurement of real demand, the owner decided the questions below, one at a time. Where this note differs from the sections above, this note is the plan; those sections stay as the record of the earlier decisions.
 
-Status: decided, with implementation in progress. Nothing in this note is deployed yet.
+Status: decided and implemented, merged to main on 2026-11-19. Not deployed: `session_creation_enabled` stays off and `enforce_session_cap` ships false until the owner's go.
 
 Scope, from the owner:
 - Redis stays as deployed, with no replica or persistence work.
@@ -462,7 +465,7 @@ Measured across the fleet on 2026-11-18, with sessions modelled as §5 specifies
    - A credential revoked during the failure keeps working until Redis answers again.
    - Leases keep the 2026-10-11 rule: no answer, no retirement.
    - A missing field still falls back to SQL as §14 describes. Only an unreachable Redis changes.
-   - If Redis is unreachable at mint, the mint issues an untagged credential, as before sessions, rather than a tagged session that nobody can list or revoke. The credential gets its session at its next refresh.
+   - If Redis is unreachable at mint, the mint issues an untagged credential, as before sessions, rather than a tagged session that nobody can list or revoke. The credential gets its session at its next refresh. A mint that carries an existing session is the exception (decision 9).
 4. **Hosted proxies survive password reset and sign-out.** This amends §6.
    - A password reset, revoke-other-sessions and sign-out-all retire sign-in sessions, auth-code sessions and per-client legacy lineages, but not hosted-proxy sessions.
    - A hosted proxy stops only when it is deleted or its own session is revoked. It never re-bootstraps after its own session is revoked.
@@ -472,19 +475,25 @@ Measured across the fleet on 2026-11-18, with sessions modelled as §5 specifies
    - The capacity limit stays unenforced (decision 6).
 6. **Capacity.** This replaces §4's default limits and §9's 1,000-row bound.
    - **What counts:** every live session (sign-in, auth code, hosted proxy, API-key client, adopted device, per-client legacy lineage), except sessions owned by a client with provide enabled.
-   - **Provide enabled** means public or stream provide mode, the same rule the concurrent-client limit uses. Provider clients are excluded from both the session limit and the concurrent-client limit.
+   - **Provide enabled** means exactly what the concurrent-client limit exempts (the owner's final answer the same day, replacing an earlier "public or stream" that rested on a wrong reading of that limit's rule): a top-level client that declared provide intent, while its qualification (a registered Public provide key, a passing egress probe and the 12-hour reliability floor) is pending or qualified and its intent connection is live, and a provider install for its first six minutes. One function decides both limits, so the concurrent-client limit is unchanged. An app with only a Stream key, a hosted proxy, and a network-only or friends-and-family provider count.
    - **The limit:** 5,000 live sessions per network, set in config `all/pro.yml` next to `enforce_concurrent_clients`. Its enforcement switch ships off. The owner: "The pro.yml session cap should still be not enforced until the next release goes out. Turning it on should be one config change."
    - **While the switch is off,** no mint is refused for the live limit or the retained-ID limit. Every would-be refusal is counted, so the switch can be judged on real numbers.
    - **Removing a client** deletes the sessions that client alone owns, without a retained tombstone, because the client-active check already refuses their credentials. That holds on every removal path, including the 30-day idle reap. Removing a client never ends a sign-in or auth-code session that other clients may share.
-   - **The 10,000 retained-ID limit** is re-evaluated with the implementation, since frees no longer leave tombstones.
+   - **The 10,000 retained-ID limit** stays, counting retained markers only (held minus live), and like the live limit it refuses only once the switch is on. Frees write no marker, so only revocations add to it.
 7. **At the limit, once enforced: refuse.**
-   - A new session over the limit gets `409 session_limit_reached`, with a message that points to Settings → Sessions.
-   - Existing-session refresh stays allowed (§4).
+   - A new session over the limit gets `409 session_limit_reached`, with a message that points to Account → Sessions, the apps' path (the owner's question said Settings → Sessions).
+   - Refreshing a tagged session stays allowed (§4). A legacy token's first renewal starts its session, so at an enforced limit it is refused; the owner decides that case before the switch flips.
    - Nothing is evicted.
 8. **Lifetime unchanged.** §2 stands: `credential_accept_until = exp + 60 days + clockLeeway`, about 90 days after the last refresh.
+9. **A mint that carries a session during a Redis outage signs it unextended** (accepted the same evening). This covers a refresh, and a client minted under a tagged credential, such as a hosted proxy's child or an app's client.
+   - The token carries the same session and the same lineage time, and expires no later than the credential it was minted from. Redis is unchanged, so every revocation of the session still outlives the token.
+   - It is counted, and the next refresh after Redis answers extends the session.
+   - A presented credential already past its `exp`, a hosted proxy's own mint on its stored binding and an API-key reissue onto a client's stored session still answer 503.
+10. **The browser extension signs in with a session of its own** (accepted the same evening). ur.io creates a one-use sign-in code and the extension redeems it, an independent session by decision 2. Signing out of ur.io no longer signs the extension out. An install that still holds ur.io's token moves to its own session by itself at its next start; a failure keeps the old token and retries with backoff, and ur.io's session is left alone.
 
 ### API and apps
-- `GET /network/sessions` adds `kind` (`signin`, `code`, `client`) and, for client sessions, `client_kind` (`hosted_proxy`, `api_key`, `device`, `legacy`), with cursor paging.
+- `GET /network/sessions` adds `session_kind` (`signin`, `code`, `client`; `kind` stays the mint kind the shipped apps label with) and, for client sessions, `client_kind` (`hosted_proxy`, `api_key`, `device`, `legacy`), `provider` (excluded from the limit), the network's `counts`, `last_used.distribution`, and cursor paging (`cursor`, `limit` up to 1,000, `next_cursor`), with optional `session_kind` and `client_kind` filters. The first page lists sign-ins first.
+- `POST /auth/verify` takes an optional bearer: a signed-in caller verifying a sign-in method of its own network renews its own session instead of starting one. The verification and its session commit together, so a refusal leaves the code unused.
 - The apps list device sign-ins first, and group hosted proxies and API clients in collapsed sections.
 - The SDK maps `session_limit_reached` to a typed error, and every app shows it with a path to the Sessions screen.
 
@@ -497,6 +506,9 @@ Measured across the fleet on 2026-11-18, with sessions modelled as §5 specifies
 | `urnetwork_session_cap_refused_total` | `kind`, `cap` | Mints refused at the enforced limit (decision 7) |
 | `urnetwork_session_freed_on_removal_total` | `path` | Client-owned sessions freed by a client removal (decision 6) |
 | `urnetwork_session_live_per_network` | none | Histogram of live sessions per network. Each sampling pass observes every network with a live set once, on a fixed period. |
+| `urnetwork_session_live_sample_passes_total` | `outcome` (complete or partial) | The sampling passes, to divide the histogram's observations by |
+| `urnetwork_session_mint_unextended_total` | `kind` | Mints of an existing session signed unextended during a Redis outage (decision 9) |
+| `urnetwork_session_operation_recovery_failures_total` | none | Pending session operations a recovery pass could not advance |
 
 `kind` is the session kind (`signin`, `code`, `client`).
 

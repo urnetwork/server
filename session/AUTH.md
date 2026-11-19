@@ -188,6 +188,7 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 - It re-reads the name and Pro, and keeps guest mode, roles, principal and `create_time`.
 - While the gates are off, it renews expired and legacy no-`exp` tokens too, which moves the installed base onto renewable tokens.
 - Outcomes count in `urnetwork_auth_network_refreshes_total{outcome}`.
+- If Redis does not register a tagged token's renewal within the mint budget, the refresh still answers: the new token carries the same session, is not extended, and expires no later than the presented token (owner decision 9, 2026-11-18, REVOKE-FINAL.md §15). It counts in `urnetwork_session_mint_unextended_total{kind}`. A presented token already past its `exp` gets nothing from that and answers 503.
 
 **Answers.** A refresh answers 200 with `{"by_jwt": …}` or `{"error": {"message": …}}` for a refusal of the request's kind; 401 when the credential is rejected; 403 for a client token on a Network route.
 
@@ -202,10 +203,10 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
   - This holds on every removal path, the 30-day idle reap included.
   - A removal never ends a sign-in or auth-code session, which other clients may share.
 - **Sessions.** These routes are Network class: `GET /network/sessions`, `POST /network/revoke-session`, `POST /network/revoke-other-sessions` and `GET /network/session-operations/…`. Revoking writes a Redis marker that every check reads. See REVOKE-OPERATIONS.md.
-- **Session limit.** A network holds at most 5,000 live sessions, set in config `all/pro.yml`. Sessions owned by a client with public or stream provide mode do not count.
+- **Session limit.** A network holds at most 5,000 live sessions, set in config `all/pro.yml`. A top-level client's own session does not count while the concurrent-client limit exempts the client: it declared provide intent, its qualification (a registered Public provide key, a passing egress probe and the 12-hour reliability floor) is pending or qualified, and its intent connection is live; a provider install also counts out for its first six minutes. Both limits use one rule (`intent_exempt_until`). An app with only a Stream key, a hosted proxy, and a network-only or friends-and-family provider count.
   - While `all/pro.yml` `enforce_session_cap` is false, as shipped, nothing is refused. Each would-be refusal is counted in `urnetwork_session_cap_would_refuse_total`.
-  - Once it is true, a new session over the limit gets 409 `session_limit_reached`, with a message that points to Settings → Sessions.
-  - Refreshing an existing session is never refused, and no session is evicted.
+  - Once it is true, a new session over the limit gets 409 `session_limit_reached`, with a message that points to Account → Sessions, the apps' path.
+  - Refreshing a tagged session is never refused, and no session is evicted. A legacy token's first renewal starts its session, so at an enforced limit it is refused; the owner decides that case before the switch flips.
 - **API keys.** Removing a key stops it at its next request.
 - **No per-token deny list.** Apart from session markers, a JWT stays valid until expiry, a password reset, or its client's removal.
 
@@ -238,9 +239,11 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 | `reject_missing_expiration` | false | Once per process | Tokens without `exp` (pre-hardening) are accepted |
 | `reject_expired` | false | Once per process | Expired tokens are accepted (except a tagged token past its horizon) |
 | `revocation_record_enabled` | true, since 2026-10-27 | Once per process | Tagged credentials are checked against the Redis revocation record (§3). Writers write the record either way |
-| `session_creation_enabled` | absent (false) | On every mint | New mints carry no `session_id`. Tagged tokens are still enforced |
+| `session_creation_enabled` | absent (false) | At most every 5 s | New mints carry no `session_id`. Tagged tokens are still enforced |
 
-The three flags read once per process need a restart to flip. `session_creation_enabled` is read on every mint, so it flips on each host as soon as the vault delivery reaches it, with no restart. The fleet follows the delivery, with no per-block canary.
+The three flags read once per process need a restart to flip. `session_creation_enabled` is read at most every 5 s, and a failed read keeps the last value, so it flips on each host within 5 s of the vault delivery reaching it, with no restart. The fleet follows the delivery, with no per-block canary.
+
+Config `all/pro.yml` holds the session limit beside the concurrent-client limit: `max_sessions` (5,000) and `enforce_session_cap` (false). Both are read once per process, like `enforce_concurrent_clients`, so the switch reaches each service at its next restart after the config release.
 
 **Before turning on `reject_expired`:**
 

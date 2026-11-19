@@ -14,12 +14,12 @@ Session/root-tagged credentials require `exp`. Normal expiry is 30 days; the fle
 
 **The session limit (decisions 6 and 7).**
 - A network holds at most 5,000 live sessions, set in config `all/pro.yml` next to `enforce_concurrent_clients`.
-- Sessions owned by a client with public or stream provide mode do not count. That is the same rule that keeps provider clients out of the concurrent-client limit.
+- A top-level client's own session does not count while the concurrent-client limit exempts the client: it declared provide intent, its qualification (a registered Public provide key, a passing egress probe and the 12-hour reliability floor) is pending or qualified, and its intent connection is live; a provider install also counts out for its first six minutes. Both limits use one rule (`intent_exempt_until`). An app with only a Stream key, a hosted proxy, and a network-only or friends-and-family provider count.
 - `enforce_session_cap` in the same file ships false. While it is false, no mint is refused for the live limit or the retained-identity limit. Each would-be refusal counts in `urnetwork_session_cap_would_refuse_total{kind,cap}`, by session kind (`signin`, `code`, `client`) and cap (`live`, `retained`).
 - Turning enforcement on is that one config change.
-- Once enforced, a new session over the limit gets 409 `session_limit_reached`, pointing to Settings → Sessions, and counts in `urnetwork_session_cap_refused_total{kind,cap}`. At the retained-identity limit the code is `session_retention_limit_reached`.
-- Nothing is evicted and no marker is shortened. Existing session refresh remains possible.
-- The retained-identity limit is re-evaluated with the implementation, since frees leave no marker.
+- Once enforced, a new session over the limit gets 409 `session_limit_reached`, pointing to Account → Sessions, and counts in `urnetwork_session_cap_refused_total{kind,cap}`. At the retained-identity limit the code is `session_retention_limit_reached`.
+- Nothing is evicted and no marker is shortened. Refreshing a tagged session remains possible. A legacy token's first renewal starts its session, so at an enforced limit it is refused; the owner decides that case before the switch flips.
+- The retained-identity limit stays at 10,000 per network and counts retained markers only (held minus live). It too refuses only while `enforce_session_cap` is true. Frees write no marker, so only revocations add to it.
 
 **Removal frees (decision 6).**
 - Removing a client deletes the sessions it alone owns from the live set: a hosted proxy, an API-key client, an adopted device or a per-client legacy lineage.
@@ -58,6 +58,10 @@ The authentication Redis client has a normal pool, no preflight PING and no hidd
   - So no tagged session exists that nobody can list or revoke.
   - It counts in `urnetwork_session_mint_untagged_total{kind}`.
   - The credential is outside session revocation, but client removal and password reset still end it. It gets its session at its next refresh.
+- A mint that carries an existing session signs on that session without extending it when Redis does not register it within its budget (decision 9). That covers a refresh, and a client minted under a tagged credential, such as a hosted proxy's child or an app's client.
+  - The token keeps the session and expires no later than the presented credential, so every revocation of the session still outlives it.
+  - It counts in `urnetwork_session_mint_unextended_total{kind}`. The next refresh after Redis answers extends the session.
+  - Still 503: a presented credential already past its `exp`, a hosted proxy's own mint on its stored binding, and an API-key reissue onto a client's stored session.
 - Revocation writes still need Redis. A removal, reset, deletion or session revoke that cannot write its record fails and is retried (REVOKE-FINAL.md §14).
 - Leases keep the 2026-10-11 rule below: no answer, no retirement.
 
@@ -101,6 +105,8 @@ Monitor bounded-label metrics:
 | `urnetwork_taskworker_executions_total{task="work.MaintainNetworkSessions"}` | About 62 successful runs a minute. SessionMaintenanceStalled warns under 32 for 10 minutes; SessionMaintenanceFailing warns over 1 failure a minute for 10 minutes. One lost shard is below what the rate shows; the monitor's task checks see it. |
 | `urnetwork_session_check_unavailable_total{path,credential}` | Credentials accepted unchecked (decision 3). SessionChecksUnchecked warns above 5% of a service's record checks held for 10 minutes; SessionChecksUncheckedSevere pages above 25% held for 5 minutes. Find the unreachable node: Redis pool timeouts, the logged pool dial failures, RedisNodeDown. |
 | `urnetwork_session_mint_untagged_total{kind}` | Mints issued untagged (decision 3). SessionMintsUntagged warns above 1% of a service's mints held for 10 minutes. The credentials heal at their next refresh; fix Redis. |
+| `urnetwork_session_mint_unextended_total{kind}` | Mints of an existing session signed unextended (decision 9). They rise with the untagged mints in an outage; the next refresh extends. |
+| `urnetwork_session_operation_recovery_failures_total` | Pending session operations a recovery pass could not advance. Each is retried in its turn, behind the others; a steady rise is one operation failing every pass. |
 | `urnetwork_session_cap_would_refuse_total{kind,cap}` | Would-be refusals while `enforce_session_cap` is off. Review the daily count by kind before flipping the switch. |
 | `urnetwork_session_cap_refused_total{kind,cap}` | Refusals at the enforced limit. A rise after the flip is networks at 5,000; a refusal is never an eviction. |
 | `urnetwork_session_freed_on_removal_total{path}` | Client sessions freed by removal. A removal path that frees nothing while it removes session-owning clients leaves sessions counted toward the limit until their horizon. |
@@ -155,7 +161,7 @@ The owner decided on 2026-10-26 that Redis becomes the authority (REVOKE-FINAL.m
 - `urnetwork_session_revocation_record_writes_total{kind,outcome}`: a `failure` is a revocation that did not commit. A `stale` projection is harmless; it only leaves the next check to SQL.
 
 **Failure modes.**
-- **Redis down.** Tagged checks accept the credential unchecked and count it, and mints issue untagged credentials (decision 3). Removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
+- **Redis down.** Tagged checks accept the credential unchecked and count it, mints that start a session issue untagged credentials (decision 3), and mints that carry a session sign on it unextended (decision 9). Removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
 - **Redis data loss.** Checks miss and the SQL fallback rebuilds the record. Watch the miss rate spike; no acceptance is lost.
 - **Redis restart from an older snapshot.** Redis runs on RDB snapshots without an append-only file, so a crashed node can come back with an older copy of its keys. That is a rollback, not a loss.
   - A tombstone written after the node's last save is lost, and the positive field it replaced comes back.
