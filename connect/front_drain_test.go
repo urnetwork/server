@@ -25,6 +25,7 @@ import (
 	http3qlog "github.com/quic-go/quic-go/http3/qlog"
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/quic-go/quic-go/quicvarint"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
@@ -971,6 +972,78 @@ func TestFrontCloseRacingStartWaitsForEverySupervisor(t *testing.T) {
 		t.Fatal("the close found no supervisor to wait for")
 	}
 	env.waitSocketsUp(0)
+}
+
+// The drain is not held by an api request stream whose HEADERS never
+// arrive: the stream is reset at the client header timeout, its connection
+// then idles out at the keepalive timeout under the drain's graceful
+// shutdown, and the drain ends long before its deadline. A request on a
+// later stream of the same connection is the barrier that the pending
+// stream was accepted first, since quic-go accepts a connection's streams in
+// order of their ids. Both are written raw, since an http3 client closes a
+// connection itself once a GOAWAY finds it without a request of its own.
+func TestFrontDrainEndsDespiteAnApiStreamWhoseHeadersNeverArrive(t *testing.T) {
+	served := make(chan struct{}, 1)
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ClientHeaderTimeout = 200 * time.Millisecond
+		env.settings.Front.Http.KeepaliveTimeout = 200 * time.Millisecond
+		env.front.h3ApiHandler = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case served <- struct{}{}:
+				default:
+				}
+			})
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+
+	pending, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a HEADERS frame's type and announced length, and nothing of its
+	// field section
+	frameHead := quicvarint.Append(nil, 0x1)
+	frameHead = quicvarint.Append(frameHead, 64)
+	if _, err := pending.Write(frameHead); err != nil {
+		t.Fatal(err)
+	}
+	// a complete GET / on a later stream, its field section encoded with
+	// QPACK's static table alone (RFC 9204 §4.5, Appendix A): no dynamic
+	// table, then :method GET, :scheme https and :path / indexed, and
+	// :authority as a literal with a static name reference
+	fieldSection := []byte{0x00, 0x00, 0xc0 | 17, 0xc0 | 23, 0xc0 | 1, 0x50, byte(len(testFrontApiName))}
+	fieldSection = append(fieldSection, testFrontApiName...)
+	headersFrame := quicvarint.Append(nil, 0x1)
+	headersFrame = quicvarint.Append(headersFrame, uint64(len(fieldSection)))
+	headersFrame = append(headersFrame, fieldSection...)
+	barrier, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := barrier.Write(headersFrame); err != nil {
+		t.Fatal(err)
+	}
+	barrier.Close()
+	testFrontWait(t, served, "the later stream's request")
+
+	env.frontServer.beginDrain()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		env.frontServer.waitDrained()
+	}()
+	testFrontWait(t, drained, "the drain's end once the pending stream was reset and its connection idled out")
+	if openCount := env.frontServer.openCount.Value(); openCount != 0 {
+		t.Fatalf("the drain ended with %d connections open", openCount)
+	}
 }
 
 // The old alt's exit burst (10-24 to 10-26) cannot come back: the drain
