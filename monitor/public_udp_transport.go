@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -165,19 +166,37 @@ func publicUdpRouteError(err error) bool {
 		errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)
 }
 
-// The native adapter: one attempt on a fresh system socket, within the
-// runner's command timeout when one is set. The transport bounds the attempt
-// by the settings' own timeout, so the shorter of the two applies.
+// The native adapter: one attempt on a fresh system socket, or the runner's
+// test socket, verified against the system roots, within the runner's
+// command timeout. It only delegates, so its bounds are
+// observePublicUdpWithin's.
 func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest, settings *PublicUdpProbeSettings) (PublicUdpObservation, error) {
-	if 0 < self.cfg.commandTimeout {
+	listen := self.publicUdpListen
+	if listen == nil {
+		listen = (&net.ListenConfig{}).ListenPacket
+	}
+	return observePublicUdpWithin(ctx, self.cfg.commandTimeout, request, settings, listen, nil)
+}
+
+// One attempt within a command timeout, when it is positive; a non-positive
+// one caps nothing. The transport bounds the attempt by the settings' own
+// timeout as well, so the shorter of the two applies: a tuned attempt timeout
+// reaches the attempt up to the command timeout. The socket and the roots are
+// the transport's seams.
+func observePublicUdpWithin(
+	ctx context.Context,
+	commandTimeout time.Duration,
+	request PublicUdpRequest,
+	settings *PublicUdpProbeSettings,
+	listen func(context.Context, string, string) (net.PacketConn, error),
+	roots *x509.CertPool,
+) (PublicUdpObservation, error) {
+	if 0 < commandTimeout {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, self.cfg.commandTimeout)
+		ctx, cancel = context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
 	}
-	listen := func(ctx context.Context, network string, address string) (net.PacketConn, error) {
-		return (&net.ListenConfig{}).ListenPacket(ctx, network, address)
-	}
-	return observePublicUdp(ctx, request, settings, listen, nil)
+	return observePublicUdp(ctx, request, settings, listen, roots)
 }
 
 // The QUIC configuration of one attempt. The handshake and idle timeouts are

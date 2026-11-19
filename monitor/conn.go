@@ -343,6 +343,10 @@ type runner struct {
 	// net.Dialer's. Only tests set it, to stand a loopback server in for the
 	// pin and see the deadline the dial runs under.
 	lbAltStatusDial func(ctx context.Context, network string, address string) (net.Conn, error)
+	// opens the socket of a public UDP attempt (publicUdp); nil is a fresh
+	// net.ListenConfig's. Only tests set it, to see the deadline the socket
+	// is opened under.
+	publicUdpListen func(ctx context.Context, network string, address string) (net.PacketConn, error)
 }
 
 func newRunner(cfg *monitorConfig) *runner {
