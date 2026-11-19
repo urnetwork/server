@@ -13,6 +13,13 @@ import (
 	"time"
 )
 
+type retainedSourceQualificationKey struct{}
+
+func retainedSourceQualificationOnly(ctx context.Context) bool {
+	enabled, _ := ctx.Value(retainedSourceQualificationKey{}).(bool)
+	return enabled
+}
+
 type sourceTestModelReservation struct {
 	Schema         int       `json:"schema"`
 	PlanSha256     string    `json:"plan_sha256"`
@@ -93,6 +100,9 @@ func sourceTestModelJournalContext(ctx context.Context, plan sourceTestPlan, set
 	var reservation sourceTestModelReservation
 	limit := sourceTestProviderRecordLimit(settings)
 	if err := readSourceTestRecord(path, limit, &reservation); errors.Is(err, os.ErrNotExist) {
+		if retainedSourceQualificationOnly(ctx) {
+			return nil, nil, errors.New("host qualification recovery requires the original model plan")
+		}
 		// A missing plan cannot reset authority while any phase evidence exists.
 		for _, phase := range []string{"invocation", "completion", "snow-qwen", "snow-gemma", "snow-muse"} {
 			for _, suffix := range []string{"-reservation.json", "-observation.json"} {
@@ -124,6 +134,10 @@ func sourceTestModelJournalContext(ctx context.Context, plan sourceTestPlan, set
 	if reservation.Schema != 1 || reservation.PlanSha256 != planSha || reservation.SettingsSha256 != settingsSha || reservation.StartedAt.IsZero() || !reservation.StartedAt.Before(reservation.Deadline) {
 		return nil, nil, errors.New("independent model retry changed its original plan or policy")
 	}
+	if retainedSourceQualificationOnly(ctx) {
+		replay, cancel := context.WithCancel(ctx)
+		return replay, cancel, nil
+	}
 	bounded, cancel := context.WithDeadline(ctx, reservation.Deadline)
 	if err := bounded.Err(); err != nil {
 		cancel()
@@ -149,6 +163,9 @@ func journalSourceTestProviderStream(ctx context.Context, phase string, payload 
 		return nil, errors.New("independent provider journal phase is invalid")
 	}
 	if settings.ResponseJournalDirectory == "" {
+		if retainedSourceQualificationOnly(ctx) {
+			return nil, errors.New("host qualification recovery requires retained provider evidence")
+		}
 		return send()
 	}
 	if err := ctx.Err(); err != nil {
@@ -162,6 +179,9 @@ func journalSourceTestProviderStream(ctx context.Context, phase string, payload 
 	var reservation sourceTestProviderReservation
 	owned := false
 	if err := readSourceTestRecord(reservationPath, limit, &reservation); errors.Is(err, os.ErrNotExist) {
+		if retainedSourceQualificationOnly(ctx) {
+			return nil, errors.New("host qualification recovery cannot dispatch a model")
+		}
 		if _, err := os.Lstat(observationPath); !errors.Is(err, os.ErrNotExist) {
 			return nil, errors.New("independent provider observation has no dispatch reservation")
 		}

@@ -83,7 +83,7 @@ func verifySourceBuildAttemptArtifacts(ctx context.Context, owner string, artifa
 // marker. An unfinished durable pipeline reservation still requires explicit
 // reconciliation after that lock is released; its disappearance is not a pass.
 func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSourceBuildRequest, settings sourceBuildBrokerSettings, docker sourceBuildDocker,
-	pipeline sourceBuildPipelineFunc, qualify sourceBuildQualificationFunc) (*reviewedSourceBuildReceipt, error) {
+	pipeline sourceBuildPipelineFunc, qualify sourceBuildQualificationFunc, recoveryPins ...string) (*reviewedSourceBuildReceipt, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -93,6 +93,12 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 	digest, err := sourceBuildAttemptDigest(request, settings)
 	if err != nil {
 		return nil, err
+	}
+	recovery := len(recoveryPins) > 0 && recoveryPins[0] != ""
+	replayCorrection := len(recoveryPins) == 2 && recoveryPins[1] == "retained-replay"
+	liveReplay := len(recoveryPins) == 2 && recoveryPins[1] == "live-retained-replay"
+	if (len(recoveryPins) > 1 && (!recovery || (!replayCorrection && !liveReplay))) || (recovery && recoveryPins[0] != digest) {
+		return nil, errors.New("host qualification recovery does not match the exact retained request")
 	}
 	state := settings.Sandbox.StateDirectory
 	canonical, err := filepath.EvalSymlinks(state)
@@ -139,6 +145,9 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 	var reservation sourceBuildAttemptReservation
 	fresh := false
 	if err := readSourceTestRecord(reservationPath, settings.MaximumRequestBytes, &reservation); errors.Is(err, os.ErrNotExist) {
+		if recovery {
+			return nil, errors.New("host qualification recovery requires an existing reservation")
+		}
 		for _, name := range []string{"pipeline.json", "qualified-build-receipt.json"} {
 			if _, err := os.Lstat(filepath.Join(directory, name)); !errors.Is(err, os.ErrNotExist) {
 				return nil, errors.New("source build evidence has no original reservation")
@@ -168,8 +177,28 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 	if reservation.Schema != 1 || reservation.RequestSha256 != digest || !validSha256(reservation.Owner) || reservation.StartedAt.IsZero() || !reservation.StartedAt.Before(reservation.Deadline) {
 		return nil, errors.New("source build retry changed its original reviewed request or settings")
 	}
-	// No stage is allowed a new budget after process replacement.
-	ctx, cancel := context.WithDeadline(ctx, reservation.Deadline)
+	// Ordinary replacement retains the original budget; the explicit
+	// recovery has a separate append-only, host-qualification-only budget.
+	deadline := reservation.Deadline
+	if recovery {
+		now := time.Now().UTC()
+		if liveReplay {
+			if !now.Before(deadline) {
+				return nil, errors.New("live host qualification resume requires an unexpired reservation")
+			}
+			if err := recordSourceHostQualificationRecovery(directory, settings, reservation, now, deadline, "host-qualification-live-resume.json"); err != nil {
+				return nil, err
+			}
+		} else if now.Before(deadline) {
+			return nil, errors.New("host qualification recovery requires an expired reservation")
+		} else {
+			if err := reserveSourceHostQualificationRecovery(directory, settings, reservation, now, replayCorrection); err != nil {
+				return nil, err
+			}
+			deadline = now.Add(5 * time.Minute)
+		}
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -233,4 +262,59 @@ func executeJournaledSourceBuildBroker(ctx context.Context, request reviewedSour
 		return receipt, publishSourceTestRecord(path, content)
 	}
 	return executeSourceBuildBroker(ctx, request, reservation.Owner, settings, docker, retainedPipeline, retainedQualify)
+}
+
+// A recovery cannot rerun the pipeline or create any of its input evidence.
+// The qualifier still authenticates the existing journals, binary and image.
+func reserveSourceHostQualificationRecovery(directory string, settings sourceBuildBrokerSettings, reservation sourceBuildAttemptReservation, now time.Time, replayCorrection ...bool) error {
+	name := "host-qualification-recovery.json"
+	if len(replayCorrection) == 1 && replayCorrection[0] {
+		var prior sourceBuildAttemptReservation
+		if err := readSourceTestRecord(filepath.Join(directory, name), settings.MaximumRequestBytes, &prior); err != nil {
+			return err
+		}
+		if prior.Schema != 1 || prior.RequestSha256 != reservation.RequestSha256 || prior.Owner != reservation.Owner ||
+			prior.StartedAt.Before(reservation.Deadline) || !prior.Deadline.Equal(prior.StartedAt.Add(5*time.Minute)) {
+			return errors.New("retained replay correction lacks its exact original recovery reservation")
+		}
+		name = "host-qualification-replay-recovery.json"
+	}
+	return recordSourceHostQualificationRecovery(directory, settings, reservation, now, now.Add(5*time.Minute), name)
+}
+
+func recordSourceHostQualificationRecovery(directory string, settings sourceBuildBrokerSettings, reservation sourceBuildAttemptReservation, now, deadline time.Time, name string) error {
+	var observation sourceBuildPipelineObservation
+	if err := readSourceTestRecord(filepath.Join(directory, "pipeline.json"), settings.MaximumRequestBytes, &observation); err != nil {
+		return err
+	}
+	ownerDir := filepath.Join(settings.Sandbox.StateDirectory, reservation.Owner)
+	if observation.PrivateError != "" || observation.Artifacts == nil || observation.Artifacts.Directory != ownerDir {
+		return errors.New("host qualification recovery lacks a successful retained pipeline")
+	}
+	var tests sourceTestModelEvidence
+	if err := readSourceTestRecord(filepath.Join(ownerDir, "independent-test-model-evidence.json"), settings.MaximumRequestBytes, &tests); err != nil {
+		return err
+	}
+	if !tests.Passed || tests.Execution.ExitCode != 0 || tests.Execution.TestCount <= 0 || len(tests.Members) != 2 {
+		return errors.New("host qualification recovery requires passing native and dual-model evidence")
+	}
+	models := map[string]bool{"qwen": false, "gemma": false}
+	for _, member := range tests.Members {
+		if seen, expected := models[member.Name]; !member.Passed || !expected || seen {
+			return errors.New("host qualification recovery requires the exact passing model observations")
+		}
+		models[member.Name] = true
+	}
+	for _, path := range []string{"independent-test-journal/observation.json", "independent-model-journal/snow-qwen-observation.json", "independent-model-journal/snow-gemma-observation.json", "independent-test-containment.json"} {
+		info, err := os.Lstat(filepath.Join(ownerDir, path))
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() == 0 {
+			return errors.New("host qualification recovery is missing retained private evidence")
+		}
+	}
+	recovery := sourceBuildAttemptReservation{Schema: 1, RequestSha256: reservation.RequestSha256, Owner: reservation.Owner, StartedAt: now, Deadline: deadline}
+	content, err := json.Marshal(recovery)
+	if err != nil {
+		return err
+	}
+	return publishSourceTestRecord(filepath.Join(directory, name), content)
 }

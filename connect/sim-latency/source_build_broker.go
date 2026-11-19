@@ -138,9 +138,28 @@ func runSourceBuildBroker(opts docopt.Opts) {
 	if err := decodeStrictJSONBytes(input, &request, "reviewed source build request"); err != nil {
 		fatalf("source build request: %s", err)
 	}
+	recovery := []string{optString(opts, "--recover-host-qualification", "")}
+	resume := optString(opts, "--resume-host-qualification", "")
+	if resume != "" && recovery[0] != "" {
+		fatalf("live host qualification resume and expired recovery are mutually exclusive")
+	}
+	qualificationCommand, qualificationSha := settings.QualificationCommand, settings.QualificationSha256
+	if path, digest := optString(opts, "--replay-qualifier", ""), optString(opts, "--replay-qualifier-sha256", ""); path != "" || digest != "" {
+		if (recovery[0] == "" && resume == "") || verifySourceSupervisorProgram(path, digest) != nil {
+			fatalf("retained replay requires exact recovery authority and a pinned qualifier")
+		}
+		qualificationCommand, qualificationSha = path, digest
+		if resume != "" {
+			recovery = []string{resume, "live-retained-replay"}
+		} else {
+			recovery = append(recovery, "retained-replay")
+		}
+	} else if resume != "" {
+		fatalf("live host qualification resume requires a pinned replay qualifier")
+	}
 	qualify := func(ctx context.Context, qualification sourceBuildQualificationRequest) (reviewedSourceBuildReceipt, error) {
 		var receipt reviewedSourceBuildReceipt
-		output, err := runSourceSupervisorProgram(ctx, settings.QualificationCommand, settings.QualificationSha256, qualification,
+		output, err := runSourceSupervisorProgram(ctx, qualificationCommand, qualificationSha, qualification,
 			[]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 		if err != nil {
 			return receipt, err
@@ -149,7 +168,7 @@ func runSourceBuildBroker(opts docopt.Opts) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	receipt, err := executeJournaledSourceBuildBroker(ctx, request, settings, runSourceBuildDocker, executeSourceBuildPipeline, qualify)
+	receipt, err := executeJournaledSourceBuildBroker(ctx, request, settings, runSourceBuildDocker, executeSourceBuildPipeline, qualify, recovery...)
 	if err != nil {
 		fatalf("source build broker: %s", err)
 	}

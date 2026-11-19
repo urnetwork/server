@@ -38,6 +38,24 @@ type competitionSourceHostBuildIdentity struct {
 	AttemptKey      string
 }
 
+// The approved epoch-three recovery was built on the Go security-hotfix image,
+// while the sealed epoch-two score retains its original evaluated image.
+func competitionEpochThreeHostBuildBase(intent *model.CompetitionSourceActivation, profile CompetitionProspectiveHostProfile) string {
+	if intent == nil || intent.Staging || intent.TargetEpoch != 3 || intent.SourceGeneration != 2 ||
+		intent.Kind != "reviewed_source_promotion" || intent.TrustedInstrument != nil || intent.ReviewId == nil ||
+		intent.ReviewId.String() != "01a1f43d-6832-bad1-1fc9-182ce6e21d6e" ||
+		intent.TargetRoundId.String() != "01a1f4d0-47c9-ac2d-ce45-55ef159a9b41" ||
+		intent.EvaluatedImageDigest != "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9" ||
+		intent.EvaluatorImageDigest != "sha256:4eb3d0a38e0d5b2b895eb1abc517d4d141ad5a94d99101002e0fda32241d7180" {
+		return ""
+	}
+	content, err := json.Marshal(profile)
+	if err != nil || fmt.Sprintf("%x", sha256.Sum256(content)) != "ee75d7a61951b22be616cfb63ad2247385cb1f36ea93eb70dcf9c4a4fd1a8ca6" {
+		return ""
+	}
+	return "sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702"
+}
+
 // Reviewed builds retain their exact review identity. An instrument transition
 // uses only its validated configured approval, final lock and original image.
 func competitionHostInstallBuildIdentity(settings *Settings, intent *model.CompetitionSourceActivation) (*competitionSourceHostBuildIdentity, error) {
@@ -74,6 +92,9 @@ func competitionReviewedHostInstallContent(settings *Settings, intent *model.Com
 	build, err := competitionHostInstallBuildIdentity(settings, intent)
 	if err != nil {
 		return nil, err
+	}
+	if base := competitionEpochThreeHostBuildBase(intent, profile); base != "" {
+		build.BaseImageDigest = base
 	}
 	if build.BaseImageDigest == intent.EvaluatorImageDigest || bootId == "" ||
 		intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 {

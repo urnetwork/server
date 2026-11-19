@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +15,47 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSourceTestModelJournalExpiredHostRecoveryIsReplayOnly(t *testing.T) {
+	fixture, settings := journaledSourceTestModelFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	_, closePlan, err := sourceTestModelJournalContext(ctx, fixture.Plan, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closePlan()
+	path := filepath.Join(settings.ResponseJournalDirectory, "plan.json")
+	var plan sourceTestModelReservation
+	if err := readSourceTestRecord(path, sourceTestProviderRecordLimit(settings), &plan); err != nil {
+		t.Fatal(err)
+	}
+	plan.StartedAt, plan.Deadline = time.Unix(100, 0).UTC(), time.Unix(200, 0).UTC()
+	content, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateReviewFile(path, content); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sourceTestModelJournalContext(ctx, fixture.Plan, settings); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("ordinary execution bypassed the expired model deadline", err)
+	}
+	replay, closeReplay, err := sourceTestModelJournalContext(context.WithValue(ctx, retainedSourceQualificationKey{}, true), fixture.Plan, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeReplay()
+	if _, err := journalSourceTestProviderStream(replay, "invocation", []byte("synthetic request"), settings, func() ([]byte, error) {
+		t.Fatal("host-only recovery dispatched a new provider request")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("missing historical provider record was accepted")
+	}
+}
 
 // Both model and execution journals bind the same private image/owner plan.
 func journaledSourceTestModelFixture(t *testing.T) (sourceTestJournalFixture, sourceTestModelSettings) {
