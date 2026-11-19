@@ -190,6 +190,17 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 	http11Chunked := *http10Chunked
 	http11Chunked.proto = ""
 	http10Refused := [][2]string{{"response[0].status", "400"}, {"response[1].error", "eof"}}
+	// a POST that sends its length twice, over h1 and as h2 fields, its
+	// near misses, and the front's forward of a body, framed by a length
+	upload := parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false)
+	identicalLengths := parityWith(upload, "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "5"})
+	identicalLengthFields := parityWith(parityOverH2(parityGet(parityApiName, parityApiName, "/upload")), http.MethodPost, [2]string{"content-length", "0"}, [2]string{"content-length", "0"})
+	differentLengths := parityWith(upload, "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "6"})
+	oneLength := parityWith(upload, "", [2]string{"Content-Length", "5"})
+	repeatedLengthCase := &parityCase{name: "unit", tags: []string{"repeated-identical-content-length"}}
+	forwardedLength := func(contentLength string, attempts ...forwardedAttempt) [][2]string {
+		return append(forwarded(attempts...), [2]string{"upstream[0].header.Content-Length", contentLength})
+	}
 	cases := []struct {
 		name       string
 		parityCase *parityCase
@@ -807,6 +818,104 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			requests:    []*parityRequest{http10Chunked, innerRequest},
 			nginx:       http10Refused,
 			front:       append(forwarded(bodiless, inner), [2]string{"response[1].status", "200"}),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the front's answer to two identical Content-Length lines, which nginx refuses",
+			parityCase: repeatedLengthCase,
+			requests:   []*parityRequest{identicalLengths},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedLength("5", reframed),
+			difference: parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantId:     "repeated-identical-content-length",
+		},
+		{
+			name:       "the one Content-Length it forwarded",
+			parityCase: repeatedLengthCase,
+			requests:   []*parityRequest{identicalLengths},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedLength("5", reframed),
+			difference: parityDifference{key: "upstream[0].header.Content-Length", nginx: parityAbsent, front: "5"},
+			wantId:     "repeated-identical-content-length",
+		},
+		{
+			name:       "the upstream attempt for two identical content-length fields over h2",
+			parityCase: repeatedLengthCase,
+			requests:   []*parityRequest{identicalLengthFields},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedLength("0", bodiless),
+			difference: parityDifference{key: "upstream.count", nginx: "0", front: "1"},
+			wantId:     "repeated-identical-content-length",
+		},
+		{
+			name:        "two different Content-Length lines the front forwarded",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{differentLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", reframed),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "one Content-Length line nginx refused",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{oneLength},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", reframed),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "the body forwarded short of its length",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "hell", framing: "length 5"}),
+			difference:  parityDifference{key: "upstream[0].body", nginx: parityAbsent, front: `"hell"`},
+			wantUnnamed: true,
+		},
+		{
+			name:        "the body framed by another length",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("6", forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "hello", framing: "length 6"}),
+			difference:  parityDifference{key: "upstream[0].framing", nginx: parityAbsent, front: "length 6"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "both Content-Length lines forwarded",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5 | 5", reframed),
+			difference:  parityDifference{key: "upstream[0].header.Content-Length", nginx: parityAbsent, front: "5 | 5"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "the request forwarded twice",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", reframed, reframed),
+			difference:  parityDifference{key: "upstream.count", nginx: "0", front: "2"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a connection key of the case",
+			parityCase:  repeatedLengthCase,
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", reframed),
+			difference:  parityDifference{key: "conn[0].tls.version", nginx: "TLS 1.3", front: "TLS 1.2"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "two identical Content-Length lines in a case not written for it",
+			requests:    []*parityRequest{identicalLengths},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedLength("5", reframed),
 			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
 			wantUnnamed: true,
 		},

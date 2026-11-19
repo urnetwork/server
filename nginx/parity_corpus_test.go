@@ -911,6 +911,38 @@ func parityCorpus() []*parityCase {
 		},
 		{name: "limits/transfer-encoding-not-chunked-last", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Transfer-Encoding", "gzip, chunked"})},
 		{name: "limits/two-content-lengths", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "6"})},
+		// two identical Content-Length lines, and two identical h2 fields,
+		// which Go's servers merge into one before the handler
+		{
+			name:    "limits/two-identical-content-lengths",
+			request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "5"}),
+			tags:    []string{"repeated-identical-content-length"},
+		},
+		{
+			name: "limits/two-identical-content-length-fields-over-h2",
+			// through a raw framer, since x/net's client sends one
+			// content-length of its own, with the request recorded, so the
+			// acceptance sees what was sent
+			run: func(run *parityCaseRun) {
+				request := parityWith(parityOverH2(parityGet(parityApiName, parityApiName, "/upload")), http.MethodPost, [2]string{"content-length", "0"}, [2]string{"content-length", "0"})
+				sequence := run.sequence()
+				conn, err := run.dial(request, sequence)
+				if err != nil {
+					return
+				}
+				defer conn.close()
+				if conn.negotiatedProtocol() != "h2" {
+					run.fact("h2", "not negotiated")
+					return
+				}
+				run.recordRequest(sequence, request)
+				fields := append([][2]string{{":method", request.method}, {":scheme", "https"}, {":authority", request.host}, {":path", request.target}}, request.headers...)
+				fields = append(fields, [2]string{strings.ToLower(parityCaseHeader), run.caseKey}, [2]string{strings.ToLower(paritySequenceHeader), strconv.Itoa(sequence)})
+				response, err := conn.rawH2(fields)
+				run.recordResponse(sequence, response, err)
+			},
+			tags: []string{"repeated-identical-content-length"},
+		},
 		// a second line of a header nginx keeps once is a 400
 		{name: "limits/two-authorization-headers", request: parityWith(api, "", [2]string{"Authorization", "Bearer one"}, [2]string{"Authorization", "Bearer two"})},
 		{name: "limits/two-if-none-match-headers", request: parityWith(api, "", [2]string{"If-None-Match", `"one"`}, [2]string{"If-None-Match", `"two"`})},

@@ -48,13 +48,17 @@ package nginx
 // (HttpSettings.ServerHeaderBytesMultiple, ServerHeaderLinesMultiple), for
 // the handler to apply nginx's statuses within that.
 //
-// Go's h1 server also rewrites some heads before the handler sees them,
-// which the handler can't refuse as nginx does (LBALT-IMPL.md §4): it merges
-// repeated identical Content-Length lines, drops the Transfer-Encoding of an
-// HTTP/1.0 request and unfolds an obs-folded line, each of which nginx
-// answers 400; it answers a repeated Transfer-Encoding 501, which nginx
-// answers 400; and an Expect other than 100-continue 417, which nginx
-// ignores.
+// Go's servers also rewrite some heads before the handler sees them, which
+// the handler can't refuse as nginx does (LBALT-IMPL.md §4). Go's h1 and h2
+// servers and the vendored http3 merge repeated identical Content-Length
+// values into one (net/http's fixLength, the h2 server's
+// newWriterAndRequest, http3's parseHeaders), where nginx answers a second
+// Content-Length 400 on h1 and h2 alike (ngx_http_process_unique_header_line),
+// and the front forwards the request framed by that one length. Go's h1
+// server also drops the Transfer-Encoding of an HTTP/1.0 request and unfolds
+// an obs-folded line, each of which nginx answers 400; it answers a repeated
+// Transfer-Encoding 501, which nginx answers 400; and an Expect other than
+// 100-continue 417, which nginx ignores.
 
 import (
 	"net/http"
@@ -63,8 +67,9 @@ import (
 
 // The request headers nginx keeps once, answering a second line with 400
 // (ngx_http_headers_in's ngx_http_process_unique_header_line). Go's servers
-// merge or refuse a repeated Content-Length and take Transfer-Encoding out of
-// the header map, so those two never repeat here. Keys are canonical.
+// merge or refuse a repeated Content-Length, and Go's h1 server takes
+// Transfer-Encoding out of the header map, which the h2 server and the
+// vendored http3 refuse, so those two never repeat here. Keys are canonical.
 var routeRequestUniqueHeaders = []string{
 	"If-Modified-Since",
 	"If-Unmodified-Since",
