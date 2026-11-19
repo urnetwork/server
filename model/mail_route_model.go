@@ -502,7 +502,9 @@ func projectMailRoutesPass(ctx context.Context, root string, cursor *MailRouteCu
 // and its create_time and writes no record. A restoring root answers
 // dnsservice.ErrDnsRestoring and a suspended zone ErrDnsZoneSuspended, with
 // nothing written; a binary without MG2, MG5 and MG7 answers ErrMailUnlinked.
-// The M8 MTA-STS publish joins this transaction with SMTP's task.
+// The M8 MTA-STS publish is in this transaction (MAIL-M8-08): the row §13.9's
+// ValidateListen asks before a receiver serves the policy, and §12.7's
+// _mta-sts among the mail records, the id of the policy the receivers serve.
 func EnableMail(ctx context.Context, networkId server.Id, root string) (*MailNetwork, error) {
 	if !mailRouteLinked() {
 		return nil, ErrMailUnlinked

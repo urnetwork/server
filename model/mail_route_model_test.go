@@ -13,6 +13,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"slices"
 	"strings"
@@ -128,6 +130,41 @@ func TestMailEnableRoutesTheNetworkWithinOneProjection(t *testing.T) {
 		}
 		if after, err := GetDnsRootState(ctx, root); err != nil || after.Serial != state.Serial {
 			t.Fatalf("enabling again wrote records: %v", err)
+		}
+	})
+}
+
+// POST /mail/enable's MTA-STS step (MAIL-M8-08; §15.5, §12.7): the enable's
+// own transaction writes _mta-sts with the id of exactly the text a receiver's
+// sidecar.MailMtaStsHandler serves for the label's mta-sts host, so a sender
+// that fetches the policy holds the version the record names.
+func TestMailEnablePublishesTheReceiversMtaStsPolicyId(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, apex := testDnsNetwork(t, ctx, root)
+		if _, err := EnableMail(ctx, networkId, root); err != nil {
+			t.Fatal(err)
+		}
+		zone := strings.TrimSuffix(apex, ".")
+		handler := sidecar.NewMailMtaStsHandler(func() []string { return []string{zone} }, nil)
+		request := httptest.NewRequest(http.MethodGet, "https://mta-sts."+zone+"/.well-known/mta-sts.txt", nil)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("the receivers' handler answered %d", recorder.Code)
+		}
+		want := `"v=STSv1; id=` + sidecar.MtaStsPolicyId(recorder.Body.String(), nil) + `"`
+		published := []string{}
+		server.Db(ctx, func(conn server.PgConn) {
+			for _, row := range getDnsZoneRowsInTx(ctx, conn, root, networkId) {
+				if row.set.Owner == "_mta-sts."+dns.CanonicalName(apex) && row.set.Type == dns.TypeTXT {
+					published = append(published, row.set.Rdata...)
+				}
+			}
+		})
+		if len(published) != 1 || published[0] != want {
+			t.Errorf("_mta-sts holds %v, want %s", published, want)
 		}
 	})
 }
