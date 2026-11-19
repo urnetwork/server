@@ -2,11 +2,12 @@ package main
 
 // The server tests a gate's sweep names for an FS case in place of the convention's sidecart3 test (owner decision
 // 548; QD-1081): FS-54's and FS-55's OPS tests, the T3 tests in evshost, FS-5's, FS-73's, FS-72's rollback case's
-// and M2's (gate_m2_out.go), and M3's restores, FS-25's api legs and FS-50's monitor tests (gate_m3.go); and the
-// convention's own sidecart3 entries wherever their package declares the test (QD-1085). A row whose test is
-// renamed, or whose file's build tags drift from the entry's, reads missing at the gate, never pass. This test fails
-// first: each test must be declared in its package, in a file that go test builds on this host with the entry's
-// tags. A convention entry whose test nobody has written yet is left out, since it reads missing by design.
+// and M2's (gate_m2_out.go), M3's restores, FS-25's api legs and FS-50's monitor tests (gate_m3.go), and M4's bridge
+// rows in controller and FS-37's clauses in taskworker/work (gate_m4.go); and the convention's own sidecart3 entries
+// wherever their package declares the test (QD-1085). A row whose test is renamed, or whose file's build tags drift
+// from the entry's, reads missing at the gate, never pass. This test fails first: each test must be declared in its
+// package, in a file that go test builds on this host with the entry's tags. A convention entry whose test nobody has
+// written yet is left out, since it reads missing by design.
 
 import (
 	"go/ast"
@@ -115,6 +116,12 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"M3 FS-50 ./monitor TestPageClassAt0200PagesTheSecondPersonAt30MinutesNotBefore",
 		"M3 FS-98's cli ./sidecart3 TestFs98CliOnT3",
 		"M4 FS-19's grant ./sidecart3 TestFs19GrantOnT3",
+		"M4 FS-21 ./sidecart3 TestFs21OnT3",
+		"M4 FS-37 ./taskworker/work TestFs37PageKilledWithNoUnloadReapsOnceOnT3",
+		"M4 FS-37 ./taskworker/work TestFs37ReapJobRunsTheReapOnT3",
+		"M4 FS-38 ./controller TestFs38OnT3",
+		"M4 FS-38's forged ./controller TestFs38ForgedOnT3",
+		"M4 FS-56 ./controller TestFs56OnT3",
 		"M10 FS-73 ./evshost TestFs73OnT3",
 		"M10 FS-72's rollback ./evshost TestFs72RollbackOnT3",
 		"every FS-55 ./local/fs55 TestFs55OnServerBinaries",
