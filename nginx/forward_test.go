@@ -6,6 +6,7 @@ package nginx
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"net"
 	"net/http"
@@ -13,7 +14,9 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // Sends raw request bytes to the front and reads the final response,
@@ -468,6 +471,9 @@ func TestForwardTarget(t *testing.T) {
 // unbuffered, so a client of a streaming response sees it at once.
 func TestForwardResponseHeadSentBeforeBody(t *testing.T) {
 	release := make(chan struct{})
+	// held handlers end on any exit, so the servers' cleanup never waits
+	releaseHeld := sync.OnceFunc(func() { close(release) })
+	defer releaseHeld()
 	upstream := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -489,10 +495,87 @@ func TestForwardResponseHeadSentBeforeBody(t *testing.T) {
 	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("head %d %v", response.StatusCode, response.Header)
 	}
-	close(release)
+	releaseHeld()
 	body, err := io.ReadAll(response.Body)
 	if err != nil || string(body) != "data: late\n\n" {
 		t.Errorf("body %q %v", body, err)
 	}
 	front.waitServed(t)
+}
+
+// The read timeout is armed only once the request is sent whole, as nginx
+// arms proxy_read_timeout: an upload the block takes in longer than the
+// timeout still gets its answer. The hold is the subject here, so the test
+// waits out several read timeouts while the block stops reading.
+func TestForwardReadTimeoutArmsAfterRequestSent(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Forward.ProxyReadTimeout = 100 * time.Millisecond
+	gotPart := make(chan struct{})
+	release := make(chan struct{})
+	// held handlers end on any exit, so the servers' cleanup never waits
+	releaseHeld := sync.OnceFunc(func() { close(release) })
+	defer releaseHeld()
+	upstream := newRecordingUpstream(t, "g1", nil)
+	upstream.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadFull(r.Body, make([]byte, 1024))
+		close(gotPart)
+		<-release
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "done")
+	})
+	serviceName := testServiceName("read-timeout-armed")
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), settings)
+	front := newTestFront(t, group, testForwardOptions)
+	type result struct {
+		response *http.Response
+		body     []byte
+		err      error
+	}
+	results := make(chan result, 1)
+	go func() {
+		// the body limit, more than loopback buffers hold, so the request
+		// is still being sent while the block holds
+		request, _ := http.NewRequest(http.MethodPost, front.url("/upload"), bytes.NewReader(testBodyBytes(16*1024*1024)))
+		response, body, err := testDo(t, request)
+		results <- result{response: response, body: body, err: err}
+	}()
+	<-gotPart
+	time.Sleep(3 * settings.Forward.ProxyReadTimeout)
+	releaseHeld()
+	got := <-results
+	if got.err != nil || got.response.StatusCode != http.StatusOK || string(got.body) != "done" {
+		t.Fatalf("slow upload: %v %q %v, want 200", got.response, got.body, got.err)
+	}
+	if attemptCount(serviceName, "g1", "timeout") != 0 {
+		t.Errorf("the read timed out while the request was being sent")
+	}
+}
+
+// A known length passes as Content-Length, a HEAD's included, but a status
+// that can't carry a body gets none.
+func TestForwardResponseContentLength(t *testing.T) {
+	cases := []struct {
+		status        int
+		contentLength int64
+		want          string
+	}{
+		{status: http.StatusOK, contentLength: 5, want: "5"},
+		{status: http.StatusOK, contentLength: -1, want: ""},
+		{status: http.StatusNoContent, contentLength: 0, want: ""},
+		{status: http.StatusNotModified, contentLength: 0, want: ""},
+		{status: http.StatusSwitchingProtocols, contentLength: 0, want: ""},
+	}
+	for _, c := range cases {
+		header := http.Header{}
+		forwardResponseHeaders(header, &http.Response{
+			StatusCode:    c.status,
+			ContentLength: c.contentLength,
+			Header:        http.Header{contentLengthHeader: {"1234"}},
+		})
+		if got := header.Get(contentLengthHeader); got != c.want {
+			t.Errorf("status %d length %d: Content-Length %q, want %q", c.status, c.contentLength, got, c.want)
+		}
+	}
 }

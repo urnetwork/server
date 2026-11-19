@@ -296,8 +296,14 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 			if request.streamedBody != nil {
 				if refusal := request.streamedBody.failure(); refusal != nil {
 					self.refuse(w, responseController, refusal)
+					return
 				}
 			}
+			// the client went away, nginx's 499, which nobody sees. A
+			// handler that wrote nothing would answer 200 to a client still
+			// there, should the context end for another reason, so answer
+			// 502, uncounted.
+			writeForwardError(w, http.StatusBadGateway)
 			return
 		case upstreamFailureError, upstreamFailureTimeout:
 			if retryAllowed() {

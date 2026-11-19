@@ -431,7 +431,8 @@ func forwardRequestHead(r *http.Request, options *forwardOptions, upgrade bool, 
 
 // Copies an upstream response's headers into the client's, after any the
 // front set already, leaving out the hidden and framing headers. A known
-// body length passes as Content-Length.
+// body length passes as Content-Length, a HEAD's included; a status that
+// can't carry a body (1xx, 204, 304) gets none.
 func forwardResponseHeaders(clientHeader http.Header, response *http.Response) {
 	for name, values := range response.Header {
 		if forwardHiddenResponseHeaders[http.CanonicalHeaderKey(name)] {
@@ -439,7 +440,10 @@ func forwardResponseHeaders(clientHeader http.Header, response *http.Response) {
 		}
 		clientHeader[name] = append(clientHeader[name], values...)
 	}
-	if 0 <= response.ContentLength {
+	noBodyStatus := response.StatusCode < http.StatusOK ||
+		response.StatusCode == http.StatusNoContent ||
+		response.StatusCode == http.StatusNotModified
+	if 0 <= response.ContentLength && !noBodyStatus {
 		clientHeader.Set(contentLengthHeader, strconv.FormatInt(response.ContentLength, 10))
 	}
 }

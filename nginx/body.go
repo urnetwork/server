@@ -478,17 +478,17 @@ func (self *storedBodyReader) Read(p []byte) (int, error) {
 	if released {
 		return 0, errBodyReleased
 	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if self.offset < int64(len(prefix)) {
 		n := copy(p, prefix[self.offset:])
 		self.offset += int64(n)
 		return n, nil
 	}
 	fileOffset := self.offset - int64(len(prefix))
-	if fileSize <= fileOffset || len(p) == 0 {
-		if fileSize <= fileOffset {
-			return 0, io.EOF
-		}
-		return 0, nil
+	if fileSize <= fileOffset {
+		return 0, io.EOF
 	}
 	p = p[:min(int64(len(p)), fileSize-fileOffset)]
 	n, err := file.ReadAt(p, fileOffset)

@@ -435,7 +435,6 @@ func referenceLeastConn(peers []*referencePeer) int {
 // released.
 func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 	weights := []int{1, 2, 3}
-	upstreams := []*recordingUpstream{}
 	releases := []chan struct{}{}
 	testBlocks := []testBlock{}
 	peers := []*referencePeer{}
@@ -448,13 +447,18 @@ func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 			io.WriteString(w, recorded.block)
 		})
 		upstream.arrivals = arrivals
-		upstreams = append(upstreams, upstream)
 		releases = append(releases, release)
 		testBlocks = append(testBlocks, testBlock{name: name, weight: weight, port: upstream.port})
 		peers = append(peers, &referencePeer{name: name, weight: weight})
 	}
 	group, _ := newTestGroup(t, testRouteService("least-conn", testBlocks), testFrontSettings())
 	front := newTestFront(t, group, testForwardOptions)
+	// held handlers end on any exit, so the servers' cleanup never waits
+	defer func() {
+		for _, release := range releases {
+			close(release)
+		}
+	}()
 
 	send := func() string {
 		go func() {
@@ -484,11 +488,6 @@ func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 	release(0)
 	for i := range 6 {
 		check(fmt.Sprintf("after release %d", i))
-	}
-	for i, release := range releases {
-		for range len(upstreams[i].recorded()) {
-			release <- struct{}{}
-		}
 	}
 }
 
@@ -527,6 +526,8 @@ func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
 	settings := testFrontSettings()
 	settings.Forward.MaxBlockActiveRequests = 1
 	release := make(chan struct{})
+	// held handlers end on any exit, so the servers' cleanup never waits
+	defer close(release)
 	arrivals := make(chan *recordedRequest)
 	handler := func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 		<-release
@@ -560,5 +561,4 @@ func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
 	if forwardErrorCount(serviceName, http.StatusBadGateway) != 1 {
 		t.Errorf("the 502 was not counted")
 	}
-	close(release)
 }

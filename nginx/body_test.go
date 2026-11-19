@@ -539,6 +539,9 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 	settings.Body.MemoryBudgetBytes = settings.Body.MemoryPrefixBytes
 	serviceName := testServiceName("body-budget")
 	release := make(chan struct{})
+	// held handlers end on any exit, so the servers' cleanup never waits
+	releaseHeld := sync.OnceFunc(func() { close(release) })
+	defer releaseHeld()
 	arrivals := make(chan *recordedRequest)
 	upstream := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 		<-release
@@ -571,7 +574,7 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 	if len(other.recorded()) != 0 || attemptCount(serviceName, "g2", "response") != 0 || retryCount(serviceName, "http_503") != 0 {
 		t.Errorf("a local 503 reached a block or was retried")
 	}
-	close(release)
+	releaseHeld()
 	if response := <-heldResponses; response == nil || response.StatusCode != http.StatusOK {
 		t.Errorf("held request: %v", response)
 	}

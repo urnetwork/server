@@ -476,3 +476,37 @@ func TestRetryBufferedPostAcrossBlockShutdown(t *testing.T) {
 		t.Errorf("g2 got a different body")
 	}
 }
+
+// A malformed response head that arrives while the request body is still
+// being written is the block's invalid header, never retried: cutting the
+// connection to end the write must not make the write's failure the cause.
+func TestRetryNeverOnEarlyInvalidHead(t *testing.T) {
+	serviceName := testServiceName("retry-early-invalid")
+	raw := newRawUpstream(t)
+	other := newRecordingUpstream(t, "g2", nil)
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: other.port},
+	}), testFrontSettings())
+	front := newTestFront(t, group, testForwardOptions)
+	responses := make(chan *http.Response, 1)
+	go func() {
+		// more than loopback buffers hold, so the write is still going
+		request, _ := http.NewRequest(http.MethodPost, front.url("/"), bytes.NewReader(testBodyBytes(16*1024*1024)))
+		response, _, _ := testDo(t, request)
+		responses <- response
+	}()
+	conn, _, _ := raw.accept(t)
+	// the block answers without reading the body
+	io.WriteString(conn, "NOT-HTTP\r\n\r\n")
+	if response := <-responses; response == nil || response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("early invalid head: %v, want 502", response)
+	}
+	if len(other.recorded()) != 0 || retryCount(serviceName, "error") != 0 {
+		t.Errorf("an invalid head was retried")
+	}
+	if attemptCount(serviceName, "g1", "invalid_header") != 1 {
+		t.Errorf("the attempt was counted as %v error, %v invalid_header",
+			attemptCount(serviceName, "g1", "error"), attemptCount(serviceName, "g1", "invalid_header"))
+	}
+}

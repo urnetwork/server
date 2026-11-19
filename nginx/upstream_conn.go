@@ -13,7 +13,9 @@ package nginx
 //     attempt, as nginx's tries++ for a cached connection's error isn't;
 //   - timeouts are native socket deadlines set before each read and each
 //     write, as nginx's proxy_read_timeout and proxy_send_timeout bound the
-//     wait between two operations, and they are per request;
+//     wait between two operations, and they are per request; reads are
+//     bounded from when the request was sent whole, or a response head
+//     arrived, as nginx arms its read timer then;
 //   - the response head is limited as nginx's proxy_buffer_size limits it,
 //     every head of the attempt together, an informational one included.
 //
@@ -83,6 +85,11 @@ type upstreamConnection struct {
 	// the current exchange's per-operation timeouts; non-positive means none
 	readTimeout  time.Duration
 	writeTimeout time.Duration
+	// whether reads are bounded by readTimeout yet: from when the request
+	// was written whole, or its response head read, as nginx arms
+	// proxy_read_timeout only once the request is sent. Before that the
+	// write's own timeout bounds a stalled block.
+	readArmed atomic.Bool
 	// head bytes the current exchange may still read; negative means no
 	// limit
 	headBytesLeft int64
@@ -320,7 +327,7 @@ func (self *upstreamConnection) Read(p []byte) (int, error) {
 			p = p[:self.headBytesLeft]
 		}
 	}
-	if 0 < self.readTimeout {
+	if 0 < self.readTimeout && self.readArmed.Load() {
 		self.conn.SetReadDeadline(time.Now().Add(self.readTimeout))
 	}
 	n, err := self.conn.Read(p)
@@ -331,6 +338,18 @@ func (self *upstreamConnection) Read(p []byte) (int, error) {
 		self.readErr = err
 	}
 	return n, err
+}
+
+// Starts bounding reads by the read timeout, a pending read included. A
+// read that saw the connection unarmed has no deadline, so arming sets one
+// under it; a read after arming sets its own.
+func (self *upstreamConnection) armRead() {
+	if self.readArmed.Swap(true) {
+		return
+	}
+	if 0 < self.readTimeout {
+		self.conn.SetReadDeadline(time.Now().Add(self.readTimeout))
+	}
 }
 
 // Writes to the block under the exchange's send timeout, counting what the
@@ -437,6 +456,9 @@ type upstreamExchange struct {
 	// set when the write failed first and cut the connection, so the read
 	// that then fails is classified by the write's error
 	writeCut atomic.Bool
+	// set by finish before it cuts the connection itself, so the write that
+	// then fails isn't taken for the cause
+	finishing atomic.Bool
 	// set when the request was written whole, just before the result is sent
 	writeDone atomic.Bool
 	// stops the cancellation hook; false when it already ran
@@ -459,6 +481,9 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	upstreamConn.writeTimeout = request.writeTimeout
 	upstreamConn.readErr = nil
 	upstreamConn.writtenBytes.Store(0)
+	upstreamConn.readArmed.Store(false)
+	// a pooled connection keeps its last exchange's deadlines
+	upstreamConn.conn.SetDeadline(time.Time{})
 	if maxHeadBytes := self.settings.Forward.MaxUpstreamResponseHeaderBytes; 0 < maxHeadBytes {
 		upstreamConn.headBytesLeft = int64(maxHeadBytes)
 	} else {
@@ -477,7 +502,8 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		err := exchange.writeRequest()
 		if err == nil {
 			exchange.writeDone.Store(true)
-		} else if !exchange.headRead.Load() {
+			upstreamConn.armRead()
+		} else if !exchange.headRead.Load() && !exchange.finishing.Load() {
 			// the block can't answer a request it didn't get whole, so end
 			// the wait for its response head
 			exchange.writeCut.Store(true)
@@ -514,6 +540,9 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	}
 	upstreamConn.headBytesLeft = -1
 	exchange.headRead.Store(true)
+	// the body's reads are bounded whether or not the request is still
+	// streaming up, as nginx bounds a response it relays
+	upstreamConn.armRead()
 	exchange.response = response
 	return exchange, upstreamFailureNone, false
 }
@@ -638,6 +667,7 @@ func (self *upstreamExchange) finish(reusable bool) {
 			// was written whole: the block won't read the rest, so cut the
 			// connection and stop the body
 			reusable = false
+			self.finishing.Store(true)
 			self.conn.close()
 			if self.request.streamedBody != nil {
 				self.stopBody()
