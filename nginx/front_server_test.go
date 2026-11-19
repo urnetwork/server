@@ -240,19 +240,20 @@ func (self *testServerH2Client) readResponseHead(streamId uint32) string {
 	}
 }
 
-// Opens a new stream that GETs path at authority, sending no body. The
-// stream's id.
-func (self *testServerH2Client) startGet(authority string, path string) uint32 {
+// Opens a new stream that GETs path at authority, with extraFields after
+// the pseudo-headers, sending no body. The stream's id.
+func (self *testServerH2Client) startGet(authority string, path string, extraFields ...hpack.HeaderField) uint32 {
 	self.t.Helper()
 	streamId := self.nextStreamId
 	self.nextStreamId += 2
 	self.headerBlock.Reset()
-	for _, field := range []hpack.HeaderField{
+	fields := []hpack.HeaderField{
 		{Name: ":method", Value: "GET"},
 		{Name: ":scheme", Value: "https"},
 		{Name: ":authority", Value: authority},
 		{Name: ":path", Value: path},
-	} {
+	}
+	for _, field := range append(fields, extraFields...) {
 		self.encoder.WriteField(field)
 	}
 	err := self.framer.WriteHeaders(http2.HeadersFrameParam{
@@ -595,6 +596,37 @@ func TestFrontKeepaliveRequestsCloseTheConnectionOverH2(t *testing.T) {
 	goAwayReceived, lastStreamId, errCode := client.readToClose()
 	if !goAwayReceived || lastStreamId != testServerH2StreamId(1000) || errCode != http2.ErrCodeNo {
 		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testServerH2StreamId(1000))
+	}
+}
+
+// Over h2, a stream Go's server answers itself, here its 400 to a
+// connection-specific header, never reaches the front's handlers, so it
+// doesn't count toward keepalive_requests and leaves the connection open,
+// where nginx counts every stream (LBALT-IMPL.md §4): with a limit of 2,
+// the GOAWAY follows the second stream the front served, the connection's
+// third, not its second.
+func TestFrontKeepaliveRequestsOverH2CountOnlyTheStreamsTheFrontServes(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Http.KeepaliveRequests = 2
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	server := newTestConfiguredServer(t, testFront, true)
+	client := dialTestServerH2Client(t, server.Listener.Addr().String())
+
+	streamId := client.startGet("test-lb.service.example", "/hidden-example/status", hpack.HeaderField{
+		Name:  "connection",
+		Value: "keep-alive",
+	})
+	if status := client.readResponseHead(streamId); status != strconv.Itoa(http.StatusBadRequest) {
+		t.Fatalf("a stream with a connection-specific header: status %s, want Go's 400", status)
+	}
+	for i := 2; i <= 3; i += 1 {
+		if status := client.get("test-lb.service.example", "/hidden-example/status"); status != strconv.Itoa(http.StatusOK) {
+			t.Fatalf("stream %d: status %s", i, status)
+		}
+	}
+	goAwayReceived, lastStreamId, errCode := client.readToClose()
+	if !goAwayReceived || lastStreamId != testServerH2StreamId(3) || errCode != http2.ErrCodeNo {
+		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testServerH2StreamId(3))
 	}
 }
 

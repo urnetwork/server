@@ -119,6 +119,13 @@ func (self *Front) ConfigureServer(httpServer *http.Server) {
 // ConfigureServer turns keepalives off then, which Go's h1 server applies to
 // each response and its h2 server once the connection is idle.
 //
+// Only requests that reach the front's handlers count. On h1 the ones Go's
+// server answers itself, such as its 431 and 400, close the connection
+// anyway. On h2 they don't: a stream Go's server answers itself, 431 to a
+// header list over its limit or 400 to a connection-specific header, or
+// resets for a malformed head, is not counted and leaves the connection
+// open, where nginx counts every stream (LBALT-IMPL.md §4).
+//
 // False for a request whose connection ConfigureServer didn't set up, such
 // as an h3 one.
 func (self *Front) lastRequestOnConnection(r *http.Request) bool {
