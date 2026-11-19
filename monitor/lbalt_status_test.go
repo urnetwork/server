@@ -666,7 +666,8 @@ func TestLbAltStatusMissingSourceCapabilityIsUnknown(t *testing.T) {
 
 // The shared host-scope guard runs before the transport: an excluded host is
 // never contacted, and neither is an address shared with a paused owner, while
-// the host's other addresses still are.
+// the host's other addresses still are. Each withheld attempt reads
+// scope-excluded, never forged or contradictory evidence.
 func TestLbAltStatusExcludedHostAndSharedPausedEndpointMakeNoCall(t *testing.T) {
 	for _, shared := range []bool{false, true} {
 		var stateLock sync.Mutex
@@ -697,7 +698,8 @@ func TestLbAltStatusExcludedHostAndSharedPausedEndpointMakeNoCall(t *testing.T) 
 			t.Fatalf("shared=%t: the transport saw %v, want %v", shared, addresses, want)
 		}
 		for _, result := range results {
-			if _, admitted := want[result.request.Address]; result.verdict.healthy != admitted {
+			_, admitted := want[result.request.Address]
+			if result.verdict.healthy != admitted || !admitted && result.verdict != (lbAltStatusVerdict{reason: "scope-excluded"}) {
 				t.Fatalf("shared=%t: %s gave %+v", shared, result.request.Address, result.verdict)
 			}
 		}

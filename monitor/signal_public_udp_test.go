@@ -250,6 +250,13 @@ func TestPublicUdpExcludedAndSharedPausedEndpointMakesNoCall(t *testing.T) {
 			t.Fatal("an excluded or shared paused endpoint reached transport")
 		}
 		requireAlertClass(t, alerts, "monitor-host-scope-partial")
+		if shared {
+			// the enabled row's own host is kept, and its withheld attempt is
+			// unknown as scope-excluded, never forged evidence
+			if observation := requireAlertClass(t, alerts, "public-udp-observation"); observation.Observed != "verified=false reason=scope-excluded" {
+				t.Fatalf("a withheld attempt reported %q", observation.Observed)
+			}
+		}
 	}
 }
 

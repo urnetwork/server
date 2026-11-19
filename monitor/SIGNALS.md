@@ -42419,8 +42419,10 @@ Reasons are fixed domains. `public-udp-inventory` reports
 reports `result=application-failed` with `application_status` (0 when no answer
 arrived), `application_json`, `application_body_valid` and bounded packet
 counts. `public-udp-observation` reports `verified=false reason=` one of
-`source-unavailable`, `attempt-authority-unavailable`,
-`observation-authority-invalid`, `observer-route-unavailable`,
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observer-route-unavailable`,
 `socket-unavailable`, `tls-authentication-unverified`, `wire-budget-exhausted`,
 `configuration-invalid`, `handshake-outcome-unverified`,
 `application-outcome-unverified` or `authenticated-exact-return-unverified`.
@@ -42633,8 +42635,10 @@ or `invalid`, and the reason is one of:
   route answered by another block, or by a front that is not ready.
 
 `lbalt-status-observation` reports `verified=false reason=` one of
-`source-unavailable`, `attempt-authority-unavailable`,
-`observation-authority-invalid`, `observation-incomplete` (no response, an
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observation-incomplete` (no response, an
 unverified 443 answer, a reused connection, or an attempt error or expiry),
 `observer-route-unavailable` (the monitor host has no route or address in the
 family), `tls-authentication-unverified` or `configuration-invalid`.

@@ -171,6 +171,11 @@ func publicUdpUnknown(request PublicUdpRequest, reason string) finding {
 // reached the api.
 func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservation, err error, settings *PublicUdpProbeSettings) []finding {
 	unknown := func(reason string) []finding { return []finding{publicUdpUnknown(request, reason)} }
+	// the host scope withheld the attempt, since a paused or excluded owner
+	// shares its address: no evidence either way, and none forged
+	if hostScopeOnlyError(err) {
+		return unknown("scope-excluded")
+	}
 	if observation.Failure == PublicUdpFailureSource {
 		return unknown("source-unavailable")
 	}

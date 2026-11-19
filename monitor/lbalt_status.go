@@ -543,7 +543,7 @@ func (self lbAltStatusProbe) observe(ctx context.Context, transport probeRunner,
 }
 
 // Gives one attempt its fixed verdict. The reasons are a closed set:
-// source-unavailable, attempt-authority-unavailable,
+// scope-excluded, source-unavailable, attempt-authority-unavailable,
 // observation-authority-invalid, observation-incomplete, the failure domains,
 // redirect, http-status, content-type, body-invalid, status-not-ok,
 // block-mismatch, front-not-ready, front-readiness-invalid and healthy.
@@ -553,6 +553,11 @@ func lbAltStatusEvaluate(request LbAltStatusRequest, observation LbAltStatusObse
 	}
 	path := func(reason string) lbAltStatusVerdict {
 		return lbAltStatusVerdict{path: true, reason: reason}
+	}
+	// the host scope withheld the attempt, since a paused or excluded owner
+	// shares its address: no evidence either way, and none forged
+	if hostScopeOnlyError(err) {
+		return unknown("scope-excluded")
 	}
 	if observation.Failure == LbAltStatusFailureSource {
 		return unknown(string(LbAltStatusFailureSource))
