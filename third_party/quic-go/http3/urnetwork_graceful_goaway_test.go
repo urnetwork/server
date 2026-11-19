@@ -41,6 +41,7 @@ type urnetworkCloseWindowRecorder struct {
 	releaseOnce  sync.Once
 }
 
+// A recorder that has seen no GOAWAY and holds nothing yet.
 func newUrnetworkCloseWindowRecorder() *urnetworkCloseWindowRecorder {
 	return &urnetworkCloseWindowRecorder{
 		firstGoaway:  make(chan struct{}),
@@ -50,28 +51,31 @@ func newUrnetworkCloseWindowRecorder() *urnetworkCloseWindowRecorder {
 	}
 }
 
-func (r *urnetworkCloseWindowRecorder) RecordEvent(ev qlogwriter.Event) {
+// qlogwriter.Recorder: counts the GOAWAYs created, and holds the closing
+// connection's record until released.
+func (self *urnetworkCloseWindowRecorder) RecordEvent(ev qlogwriter.Event) {
 	switch ev := ev.(type) {
 	case qlog.FrameCreated:
 		if _, ok := ev.Frame.Frame.(qlog.GoAwayFrame); ok {
-			switch r.goaways.Add(1) {
+			switch self.goaways.Add(1) {
 			case 1:
-				close(r.firstGoaway)
+				close(self.firstGoaway)
 			case 2:
-				close(r.secondGoaway)
+				close(self.secondGoaway)
 			}
 		}
 	case quicqlog.ConnectionClosed:
-		r.heldOnce.Do(func() { close(r.held) })
-		<-r.release
+		self.heldOnce.Do(func() { close(self.held) })
+		<-self.release
 	}
 }
 
-func (r *urnetworkCloseWindowRecorder) Close() error { return nil }
+// qlogwriter.Recorder
+func (self *urnetworkCloseWindowRecorder) Close() error { return nil }
 
 // Lets the held connection finish closing.
-func (r *urnetworkCloseWindowRecorder) Release() {
-	r.releaseOnce.Do(func() { close(r.release) })
+func (self *urnetworkCloseWindowRecorder) Release() {
+	self.releaseOnce.Do(func() { close(self.release) })
 }
 
 // Serves serverConn, waits for its SETTINGS, starts a graceful shutdown and
