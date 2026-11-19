@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // <vault>/<env>, <vault>/all and <vault>, the homes LoadCertificateStore
@@ -390,16 +390,50 @@ func TestCertificateStoreEarliestExpiry(t *testing.T) {
 
 // NewFront reports its store's earliest expiry in the front's certificate
 // expiry metric, a lapsed NotAfter included, so an alert can lead a lapse
-// the store serves rather than refuses.
+// the store serves rather than refuses. It is the one value the process's
+// registry, which every service pushes, exports.
 func TestNewFrontReportsTheEarliestCertificateExpiry(t *testing.T) {
 	now := time.Now()
 	vault := newTestTlsVault(t)
 	lapsed := vault.authority.issue(t, []string{"*.other.example"}, now.Add(-48*time.Hour), now.Add(-time.Hour))
 	writeTestTlsPair(t, vault.envHome(), "2026.10.17", "star.other.example", lapsed)
-	front := newTestCloseFront(t, vault.routeTable, vault.load(t), testFrontSettings())
-	if got, want := testutil.ToFloat64(front.metrics.certificateExpiry), float64(lapsed.leaf.NotAfter.Unix()); got != want {
-		t.Fatalf("the certificate expiry metric is %v, want the lapsed NotAfter %v", got, want)
+	newTestCloseFront(t, vault.routeTable, vault.load(t), testFrontSettings())
+	values := testCertificateExpiryValues(t, prometheus.DefaultGatherer)
+	if want := float64(lapsed.leaf.NotAfter.Unix()); len(values) != 1 || values[0] != want {
+		t.Fatalf("the certificate expiry metric is %v, want the lapsed NotAfter %v", values, want)
 	}
+}
+
+// A process that builds no front, as a connect block not on lb_alt, exports
+// no certificate expiry, where a 0 would read to an expiry alert as a
+// certificate that lapsed in 1970: the front's metrics, as the process
+// registers them, have no expiry value until NewFront sets one.
+func TestFrontMetricsExportNoCertificateExpiryWithoutAFront(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	newFrontMetrics(registry)
+	if values := testCertificateExpiryValues(t, registry); len(values) != 0 {
+		t.Fatalf("with no front the certificate expiry metric is %v, want no value", values)
+	}
+}
+
+// The values of the front's certificate expiry metric that a gatherer
+// exports.
+func testCertificateExpiryValues(t *testing.T, gatherer prometheus.Gatherer) []float64 {
+	t.Helper()
+	families, err := gatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []float64{}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_front_certificate_expiry_timestamp_seconds" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			values = append(values, metric.GetGauge().GetValue())
+		}
+	}
+	return values
 }
 
 // Loads the fixture vault after change edits it, and returns the refusal.

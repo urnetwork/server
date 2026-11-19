@@ -224,7 +224,7 @@ func NewFront(ctx context.Context, routeTable *RouteTable, revision string, cert
 		bodyStore.close()
 		return nil, err
 	}
-	front.metrics.certificateExpiry.Set(float64(certificateStore.EarliestExpiry().Unix()))
+	front.metrics.certificateExpiry.WithLabelValues().Set(float64(certificateStore.EarliestExpiry().Unix()))
 	return front, nil
 }
 
