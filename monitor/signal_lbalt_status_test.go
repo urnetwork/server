@@ -266,6 +266,62 @@ func TestLbAltStatusSignalCancellationPublishesNothing(t *testing.T) {
 	}
 }
 
+// Every address the lb_alt probes contact is an owned endpoint of the host
+// whose lb interface it is, a paused host's included. So excluding or pausing
+// that host keeps every probe off the address, even a public UDP row
+// enrolled under another host, while the host's other addresses are probed.
+func TestLbAltProbeAddressesAreOwnedByTheirLbInterfaceHost(t *testing.T) {
+	lbAltSource, lbAltCalls := lbAltStatusTestSignalSource(nil)
+	settings := lbAltStatusTestEnrolledSettings(lbAltSource)
+	env, err := newProbeEnv(func() SignalSettings {
+		scoped := settings
+		scoped.ExcludedHosts = []string{"pg-1"}
+		return scoped
+	}())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, ok := env.runner.(*hostScopeRunner)
+	if !ok {
+		t.Fatal("an exclusion did not arm the host scope")
+	}
+	for _, request := range lbAltStatusTestRequests(t, env.cfg) {
+		if !slices.Contains(scoped.endpointHostNames[normalizeHostScopeEndpoint(request.Address)], request.Host) {
+			t.Fatalf("%s is not an owned endpoint of %s", request.Address, request.Host)
+		}
+	}
+
+	// a paused host whose lb interface shares eth2's address
+	settings.disabledHosts = []HostSettings{{Name: "edge-paused", PublicLB: []PublicLBInterfaceSettings{{Interface: "eth1", IPv4Address: "198.51.100.11"}}}}
+	alerts, err := NewLbAltStatusSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+	if int(lbAltCalls.Load()) != 2*(1+len(lbAltStatusTestBlocks)) {
+		t.Fatalf("the lb status probe made %d calls, want eth1's two families only", lbAltCalls.Load())
+	}
+
+	// a public UDP row under another host, pinned to an excluded host's lb interface
+	var publicUdpCalls atomic.Int32
+	publicUdpSource := &publicUdpTestSource{syntheticSource: &syntheticSource{}, observe: func(_ context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
+		publicUdpCalls.Add(1)
+		return publicUdpTestHealthy(request), nil
+	}}
+	settings = lbAltStatusTestSignalSettings(publicUdpSource)
+	settings.Hosts = append(settings.Hosts, HostSettings{Name: "edge-other", Roles: []string{"edge"}})
+	settings.PublicUdp = PublicUdpSettings{Enabled: true, ExpectedTargets: 1, Targets: []PublicUdpTargetSettings{{
+		Name: "synthetic-stale-row", Host: "edge-other", Interface: "eth1", Service: "connect", Alias: "primary", Front: "api", Carrier: "quic",
+		Families: []string{"ipv4", "ipv6"}, IPv4Address: "198.51.100.10", IPv6Address: "2001:db8:10::10", Port: 443, ServerName: "api.synthetic.example",
+	}}}
+	settings.ExcludedHosts = []string{"edge-synthetic"}
+	alerts, err = NewPublicUdpSignal().Run(context.Background(), settings)
+	if err != nil || publicUdpCalls.Load() != 0 {
+		t.Fatalf("an excluded host's lb interface was contacted %d times: %v", publicUdpCalls.Load(), err)
+	}
+	requireAlertClass(t, alerts, "monitor-host-scope-partial")
+}
+
 // monitor.yml lbalt_status and services.yml lb_hidden_prefixes reach the
 // loaded settings, and from them the matrix: pinned to the inventory
 // addresses, under the first prefix, for the active blocks.
