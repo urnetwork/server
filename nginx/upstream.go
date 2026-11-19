@@ -248,8 +248,19 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				return
 			}
 			defer storedBody.release()
-			request.storedBody = storedBody
-			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
+			if r.ProtoMajor == 3 && r.ContentLength < 0 && storedBody.length() == 0 {
+				// the vendored http3 gives every request without a
+				// content-length a body of unknown length, an h3 GET's
+				// included. One whose stream ended with no data has none to
+				// frame, as nginx's h3 frames none for a stream it finds
+				// ended with its head (ngx_http_v3_process_request_header),
+				// so it goes like an h1 or h2 GET, and its memory goes back
+				// now rather than at its end
+				storedBody.release()
+			} else {
+				request.storedBody = storedBody
+				request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
+			}
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)

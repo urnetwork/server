@@ -120,3 +120,54 @@ func TestFrontE2eH3BodyEndingShortOfItsLengthIs400(t *testing.T) {
 		}
 	}
 }
+
+// An h3 GET, which the vendored http3 gives a body of unknown length ended
+// by its stream, goes to a buffered route's block with no framing, as the
+// same GET does over h1 and h2 and as nginx's h3 sends a request whose stream
+// ended with its head: no Content-Length and no Transfer-Encoding, and,
+// while the block holds it, nothing reserved in the body store. An h3 POST of
+// no declared length still goes with the length of what it sent.
+func TestFrontE2eH3BodilessRequestHasNoFraming(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	client := newE2eH3ApiClient(t, e2e)
+	hold := newE2eHold(t)
+	e2e.setServiceHandler(t, "api", func(w http.ResponseWriter, r *http.Request, request *e2eUpstreamRequest) {
+		if r.URL.Path == "/held" {
+			hold.wait(r)
+		}
+		io.WriteString(w, "answered")
+	})
+
+	responses := make(chan *http.Response, 1)
+	go func() {
+		response, err := client.Do(newE2eRequest(t, "GET", "https://api.service.example/held", nil))
+		if err != nil {
+			responses <- nil
+			return
+		}
+		response.Body.Close()
+		responses <- response
+	}()
+	held := e2e.awaitServiceRequests(t, "api", 1)[0]
+	if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+		t.Errorf("while the block holds the GET the store holds %d bytes, %d spilled in %d files, for %d bodies", memoryBytes, spillBytes, spillFiles, bodies)
+	}
+	hold.release()
+	if response := receiveE2e(t, responses, "the GET's response"); response == nil || response.ProtoMajor != 3 || response.StatusCode != http.StatusOK {
+		t.Fatalf("the h3 GET = %v, want the block's 200", response)
+	}
+	if contentLength, ok := held.header["Content-Length"]; ok || len(held.transferEncoding) != 0 {
+		t.Errorf("the block got the h3 GET with Content-Length %v, Transfer-Encoding %v, want no framing", contentLength, held.transferEncoding)
+	}
+
+	// a body the client didn't measure, so it declares no length
+	response, err := client.Do(newE2eRequest(t, "POST", "https://api.service.example/unmeasured", io.NopCloser(strings.NewReader("0123456789"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	posted := e2e.awaitServiceRequests(t, "api", 2)
+	if last := posted[len(posted)-1]; last.header.Get("Content-Length") != "10" || string(last.body) != "0123456789" {
+		t.Errorf("the h3 POST of no declared length reached the block with Content-Length %q and body %q", last.header.Get("Content-Length"), last.body)
+	}
+}
