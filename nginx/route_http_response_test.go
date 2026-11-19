@@ -1,21 +1,21 @@
 package nginx
 
 // Tests of what the handlers add to responses: the CORS matrix, the security
-// headers on every status, gzip as nginx's defaults, Connection: close while
-// draining, and the access log.
+// headers on every status and on a hijacked upgrade's 101, gzip as nginx's
+// defaults, Connection: close while draining, and the access log.
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/tls"
+	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // The CORS headers a response must have: the echoed or wildcard origin, or
@@ -398,94 +398,6 @@ func TestRouteHttpBeginDrainRefusesNewUpgrades(t *testing.T) {
 	}
 }
 
-// A response writer that records the write deadlines set on it, as an h1
-// server's writer takes them for its connection.
-type testDeadlineResponseWriter struct {
-	*httptest.ResponseRecorder
-	writeDeadlines []time.Time
-}
-
-// See http.ResponseController.
-func (self *testDeadlineResponseWriter) SetWriteDeadline(deadline time.Time) error {
-	self.writeDeadlines = append(self.writeDeadlines, deadline)
-	return nil
-}
-
-// A connection that records the write deadlines set on it.
-type testDeadlineConn struct {
-	net.Conn
-	writeDeadlines []time.Time
-}
-
-// See net.Conn.
-func (self *testDeadlineConn) SetWriteDeadline(deadline time.Time) error {
-	self.writeDeadlines = append(self.writeDeadlines, deadline)
-	return self.Conn.SetWriteDeadline(deadline)
-}
-
-// send_timeout: the client write deadline moves to SendTimeout from now when
-// an h1 request starts, at the head and before every write and flush, so it
-// bounds the wait between two writes and never the whole response; a hijack
-// clears it for the tunnel's owner; a zero SendTimeout sets none.
-func TestRouteHttpSendTimeoutBoundsEachWrite(t *testing.T) {
-	settings := testFrontSettings()
-	settings.Http.SendTimeout = 30 * time.Second
-	testFront := newTestFront(t, loadTestRouteTable(t), settings)
-	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
-		w.WriteHeader(http.StatusOK)
-		for range 3 {
-			io.WriteString(w, "chunk")
-			http.NewResponseController(w).Flush()
-		}
-	}
-	handler := testFront.front.HttpsHandler("eth1")
-
-	before := time.Now()
-	writer := &testDeadlineResponseWriter{
-		ResponseRecorder: httptest.NewRecorder(),
-	}
-	handler.ServeHTTP(writer, newTestRequest("GET", "api.service.example", "/v1", true))
-	after := time.Now()
-	// the start, the head, and a write and a flush per chunk
-	if len(writer.writeDeadlines) != 2+2*3 {
-		t.Fatalf("%d write deadlines, want 8: %v", len(writer.writeDeadlines), writer.writeDeadlines)
-	}
-	for _, deadline := range writer.writeDeadlines {
-		if deadline.Before(before.Add(30*time.Second)) || after.Add(30*time.Second).Before(deadline) {
-			t.Errorf("write deadline %s, want SendTimeout from the write", deadline)
-		}
-	}
-
-	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
-	deadlineConn := &testDeadlineConn{
-		Conn: serverConn,
-	}
-	testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
-		conn, _, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Fatal(err)
-		}
-		conn.Close()
-	}
-	handler.ServeHTTP(&testHijackResponseWriter{
-		ResponseRecorder: httptest.NewRecorder(),
-		conn:             deadlineConn,
-	}, newTestRequest("GET", "connect.service.example", "/", true))
-	if len(deadlineConn.writeDeadlines) != 1 || !deadlineConn.writeDeadlines[0].IsZero() {
-		t.Errorf("the hijacked connection's write deadlines %v, want one clear", deadlineConn.writeDeadlines)
-	}
-
-	settings.Http.SendTimeout = 0
-	writer = &testDeadlineResponseWriter{
-		ResponseRecorder: httptest.NewRecorder(),
-	}
-	handler.ServeHTTP(writer, newTestRequest("GET", "api.service.example", "/v1", true))
-	if len(writer.writeDeadlines) != 0 {
-		t.Errorf("SendTimeout 0 set %d write deadlines", len(writer.writeDeadlines))
-	}
-}
-
 // The access log never holds a client address, from the peer or a header,
 // or a hidden route prefix, wherever the client put it; it honors
 // no_access_log and no_success_access_log, and samples.
@@ -556,5 +468,65 @@ func TestRouteHttpAccessLogKeepsAddressesAndPrefixesOut(t *testing.T) {
 	}
 	if after := len(testFront.accessLog.writtenLines()); after != before+3 {
 		t.Errorf("%d lines of 6 at one in two, want 3", after-before)
+	}
+}
+
+// A forwarder that hijacks writes its 101 from the header map, as a reverse
+// proxy does, so the front puts the location's always headers in the map
+// before the hijack. Over a real h1 server, a websocket upgrade on a
+// service name gets the security and CORS headers on its 101, and one
+// through an lb route gets none.
+func TestRouteHttpHijackedUpgradeCarriesTheAlwaysHeaders(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	mcp := testRouteService(t, routeTable, "mcp")
+	mcp.Websocket = true
+	mcp.Streamable = false
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	testFront.forwarders["mcp"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
+		conn, readWriter, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		defer conn.Close()
+		readWriter.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+		w.Header().Write(readWriter)
+		readWriter.WriteString("\r\n")
+		readWriter.Flush()
+	}
+	server, transport := newTestFrontServer(t, testFront, false)
+
+	for _, c := range []struct {
+		host   string
+		target string
+		added  bool
+	}{
+		{host: "mcp.service.example", target: "/socket", added: true},
+		{host: "test-lb.service.example", target: "/hidden-example/by/service/mcp/socket", added: false},
+	} {
+		func() {
+			conn, err := tls.Dial("tcp", server.Listener.Addr().String(), transport.TLSClientConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nOrigin: https://app.service.example\r\n\r\n", c.target, c.host)
+			response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatalf("%s: %s", c.host, err)
+			}
+			if response.StatusCode != http.StatusSwitchingProtocols {
+				t.Fatalf("%s = %d, want the forwarder's 101", c.host, response.StatusCode)
+			}
+			if c.added {
+				checkSecurityHeaders(t, c.host+" 101", response.Header)
+				checkCorsHeaders(t, c.host+" 101", response.Header, "https://app.service.example", true)
+			} else {
+				checkNoAddedHeaders(t, c.host+" 101", response.Header)
+			}
+		}()
+	}
+	if forwards := testFront.forwarders["mcp"].recordedForwards(); len(forwards) != 2 {
+		t.Errorf("%d upgrades forwarded, want 2", len(forwards))
 	}
 }

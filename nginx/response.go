@@ -15,13 +15,19 @@ package nginx
 //     later client whose Accept-Encoding offers gzip and whose request has
 //     no Via, never for HEAD. The Content-Length and Accept-Ranges go, a
 //     strong ETag turns weak, and no Vary is added;
-//   - bounds each write to the client by HttpSettings.SendTimeout, nginx's
-//     send_timeout: the write deadline moves before the head, every write
-//     and every flush, so it holds between two writes, and a client that
-//     stops reading for that long has its connection closed. On h1 the
-//     deadline is the connection's, so it is also set when a request
-//     starts, before anything Go's server writes for it (a 100 Continue),
-//     and cleared on a hijack, so the tunnel's owner starts with none;
+//   - bounds each write to the client by HttpSettings.SendTimeout, as
+//     nginx's send_timeout bounds a write only while it is blocked: the
+//     write deadline is armed just before each write, flush and
+//     informational head, and cleared when the call returns. A response
+//     idle between two writes has none, which matters on h2, where Go's
+//     server resets a stream whose deadline passes even with no write
+//     pending, and a client that stops reading has the write cut. The
+//     deadline is armed again as the handler returns, for what the server
+//     writes then (the rest of the buffered body, and on h1 the end of the
+//     response); Go's h1 server clears it after the request, and its h2
+//     server stops it when the stream closes. On h1 the first read of the
+//     body arms it too, for the 100 Continue Go's server writes then. A
+//     hijack clears it, so the tunnel's owner starts with none;
 //   - records the status, the time of the head and the bytes for the
 //     metrics and the access log.
 //
@@ -82,11 +88,14 @@ func (self *responseSlot) releaseHold() {
 
 // One request's response. Its methods run on the request's handler
 // goroutine, as an http.ResponseWriter's do. A hijacked connection's close,
-// which can run elsewhere, touches only the slot and the front's tracking.
+// which can run elsewhere, touches only the slot and the front's tracking,
+// and the first read of an h1 body, which can too, only the write deadline.
 type responseState struct {
 	front *Front
 	w     http.ResponseWriter
 	r     *http.Request
+	// over w, for its write deadline and its flush
+	controller *http.ResponseController
 	// what the request's location adds, set by routing before the head is
 	// written
 	headers responseHeaders
@@ -110,9 +119,10 @@ type responseState struct {
 // The state of a new response over w.
 func newResponseState(front *Front, w http.ResponseWriter, r *http.Request) *responseState {
 	return &responseState{
-		front: front,
-		w:     w,
-		r:     r,
+		front:      front,
+		w:          w,
+		r:          r,
+		controller: http.NewResponseController(w),
 	}
 }
 
@@ -150,15 +160,17 @@ func (self *responseState) writeHeader(statusCode int) {
 		return
 	}
 	if http.StatusContinue <= statusCode && statusCode < http.StatusOK && statusCode != http.StatusSwitchingProtocols {
+		// the server writes an informational head at once
+		self.armWriteDeadline()
 		self.w.WriteHeader(statusCode)
+		self.clearWriteDeadline()
 		return
 	}
 	self.wroteHeader = true
 	self.statusCode = statusCode
 	self.headerTime = self.front.now()
-	// Go's server writes the head with the first body bytes, or after the
-	// handler returns
-	self.extendWriteDeadline()
+	// a final head is written with the first body bytes, or after the
+	// handler returns, so it takes no deadline of its own
 
 	header := self.w.Header()
 	self.headers.apply(header, statusCode)
@@ -193,8 +205,9 @@ func (self *responseState) write(data []byte) (int, error) {
 
 // Writes bytes to the client as they are, counting them.
 func (self *responseState) writeBody(data []byte) (int, error) {
-	self.extendWriteDeadline()
+	self.armWriteDeadline()
 	n, err := self.w.Write(data)
+	self.clearWriteDeadline()
 	self.bodyBytes += int64(n)
 	return n, err
 }
@@ -215,28 +228,68 @@ func (self *responseState) flush() error {
 			return err
 		}
 	}
-	self.extendWriteDeadline()
-	return http.NewResponseController(self.w).Flush()
+	self.armWriteDeadline()
+	err := self.controller.Flush()
+	self.clearWriteDeadline()
+	return err
 }
 
-// Moves the client write deadline to SendTimeout from now. A writer that
-// can't take a deadline is left as it is. The deadline is real time, as the
-// connection's are.
-func (self *responseState) extendWriteDeadline() {
+// Arms the client write deadline at SendTimeout from now, for a write about
+// to start. A writer that can't take a deadline is left as it is. The
+// deadline is real time, as the connection's are.
+func (self *responseState) armWriteDeadline() {
 	sendTimeout := self.front.settings.Http.SendTimeout
 	if sendTimeout <= 0 {
 		return
 	}
-	http.NewResponseController(self.w).SetWriteDeadline(time.Now().Add(sendTimeout))
+	self.controller.SetWriteDeadline(time.Now().Add(sendTimeout))
 }
 
-// Sets the write deadline of an h1 request before Go's server writes
-// anything for it: the deadline is the connection's, and the last response
-// on it left one that may have passed.
-func (self *responseState) start() {
-	if self.r.ProtoMajor == 1 {
-		self.extendWriteDeadline()
+// Clears the client write deadline once a write has returned, so the
+// response has none while it waits for its next write.
+func (self *responseState) clearWriteDeadline() {
+	if self.front.settings.Http.SendTimeout <= 0 {
+		return
 	}
+	self.controller.SetWriteDeadline(time.Time{})
+}
+
+// On h1, has the first read of a request body arm the write deadline: Go's
+// server writes the 100 Continue a request may expect then, and only before
+// any response write, so the deadline stays armed after it. h1 allows that,
+// since a connection's deadline fails only a write pending or started once
+// it passes, and every later write arms its own. A bodiless request needs
+// none.
+func (self *responseState) start() {
+	if self.r.ProtoMajor != 1 || self.front.settings.Http.SendTimeout <= 0 {
+		return
+	}
+	if self.r.Body == nil || self.r.Body == http.NoBody {
+		return
+	}
+	self.r.Body = &responseContinueBody{
+		ReadCloser: self.r.Body,
+		state:      self,
+	}
+}
+
+// An h1 request body whose first read arms the client write deadline, for
+// the 100 Continue (responseState.start). Read by one goroutine at a time,
+// as a request body is; that goroutine may differ from the handler's, so
+// the read touches only the deadline.
+type responseContinueBody struct {
+	io.ReadCloser
+	state       *responseState
+	readStarted bool
+}
+
+// See io.Reader.
+func (self *responseContinueBody) Read(data []byte) (int, error) {
+	if !self.readStarted {
+		self.readStarted = true
+		self.state.armWriteDeadline()
+	}
+	return self.ReadCloser.Read(data)
 }
 
 // Hijacks the client connection: the location's headers go into the header
@@ -283,7 +336,12 @@ func (self *responseState) hijack() (net.Conn, *bufio.ReadWriter, error) {
 var errResponseFrontCut = errors.New("lbalt front: closed")
 
 // Completes a response whose handler returned normally: an empty 200 when
-// nothing was written, and the end of the gzip stream.
+// nothing was written, and the end of the gzip stream. The server writes
+// the rest once the handler returns (what is still buffered, and on h1 the
+// end of the response), so the write deadline is armed for that, fresh
+// however long the response was idle. An h2 stream that has already closed,
+// whose request context is done, gets none, since a deadline set on a
+// closed h2 stream would still fire later, with a stray reset.
 func (self *responseState) finish() {
 	if self.hijacked || self.finished {
 		return
@@ -297,6 +355,9 @@ func (self *responseState) finish() {
 		self.gzipWriter = nil
 	}
 	self.finished = true
+	if self.r.ProtoMajor != 2 || self.r.Context().Err() == nil {
+		self.armWriteDeadline()
+	}
 }
 
 // Whether nginx's gzip compresses this response (ngx_http_gzip_header_filter
@@ -513,8 +574,9 @@ func (self *responseWriter) FlushError() error {
 	return self.state.flush()
 }
 
-// The server's writer, for http.ResponseController's deadlines and full
-// duplex. Writes through it skip the front's response handling.
+// The server's writer, for http.ResponseController's read deadline and full
+// duplex. Writes through it skip the front's response handling, and the
+// write deadline is the front's: each write arms and clears its own.
 func (self *responseWriter) Unwrap() http.ResponseWriter {
 	return self.state.w
 }

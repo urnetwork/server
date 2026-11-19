@@ -43,9 +43,11 @@ type HttpSettings struct {
 	// current request is its last: nginx's default `keepalive_time 1h`.
 	// Non-positive means no limit.
 	KeepaliveTime time.Duration
-	// the longest wait between two writes to a client: nginx's
-	// `send_timeout 30s`. A stall past it closes the connection. Non-positive
-	// means no bound.
+	// the longest a write to a client may stay blocked: nginx's
+	// `send_timeout 30s`, which runs only while a write waits on the client,
+	// so a response may go quiet between two writes for as long as its
+	// upstream does. A write blocked past it closes the connection, or on h2
+	// resets the stream. Non-positive means no bound.
 	SendTimeout time.Duration
 	// the longest request line in bytes, one of nginx's
 	// `large_client_header_buffers 8 8k`. A longer one is a 414. Non-positive
