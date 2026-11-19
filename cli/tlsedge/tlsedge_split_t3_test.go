@@ -47,6 +47,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -742,6 +744,58 @@ func (self *t3Split) startLb(version uint64) {
 	}
 }
 
+// The nginx master's children: its workers.
+func t3SplitWorkers(t testing.TB, masterPid int) []int {
+	t.Helper()
+	output, err := exec.Command("ps", "-Ao", "pid=,ppid=").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers := []int{}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		pid, pidErr := strconv.Atoi(fields[0])
+		ppid, ppidErr := strconv.Atoi(fields[1])
+		if pidErr == nil && ppidErr == nil && ppid == masterPid {
+			workers = append(workers, pid)
+		}
+	}
+	return workers
+}
+
+// Waits until the nginx master lbmap last reported runs one worker, none of old: a reload's handover done and the old
+// workers gone, which until then still take new connections by the map they loaded.
+func (self *t3Split) awaitSettled(old []int) {
+	t := self.world.t
+	t.Helper()
+	master := self.reports.lastMaster()
+	if master == nil {
+		t.Fatal("lbmap reported no nginx master")
+	}
+	guard := time.Now().Add(t3EdgeGuardTimeout)
+	for {
+		workers := t3SplitWorkers(t, master.Pid)
+		if len(workers) == 1 && !slices.Contains(old, workers[0]) {
+			return
+		}
+		if time.Now().After(guard) {
+			t.Fatalf("nginx still runs workers %v, of which %v are old", workers, old)
+		}
+		runtime.Gosched()
+	}
+}
+
+// Waits for lbmap's report of version, then for nginx's handover to the worker that loaded it, so the next connection
+// routes by that version.
+func (self *t3Split) awaitLoaded(version uint64) {
+	self.world.t.Helper()
+	self.reports.await(self.world.t, version)
+	self.awaitSettled(nil)
+}
+
 // Ends the lb and its nginx with their process group, at once: a drain is past what a test needs.
 func (self *t3Split) stopLb() {
 	command, exited, output := func() (*exec.Cmd, chan struct{}, *t3SplitOutput) {
@@ -953,7 +1007,7 @@ func TestT3Fs35CustomHostThroughTheRealSplitter(t *testing.T) {
 		// the removal withdraws the route at lbmap's next load
 		removed := world.unmapCustomHost(host)
 		world.reloadNames()
-		split.reports.await(t, removed)
+		split.awaitLoaded(removed)
 		if !split.reachesPlatform(host) {
 			t.Fatal("the removed host's hello did not reach the http branch")
 		}
@@ -1029,7 +1083,7 @@ func TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion(t *testing.T) {
 			t.Fatalf("lbmap reported %d versions with the API down", reported)
 		}
 		split.api.down.Store(false)
-		split.reports.await(t, version)
+		split.awaitLoaded(version)
 		if !split.reachesDevice(host, []string{"h2"}, split.customPool) {
 			t.Fatal("the host did not route once its version loaded")
 		}

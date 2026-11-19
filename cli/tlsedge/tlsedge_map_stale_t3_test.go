@@ -203,7 +203,7 @@ func TestT3Fs122AHostAddedWhileOneInterfaceIsDownStaysPendingNamingIt(t *testing
 		down.stopLb()
 		version = world.mapCustomHost(second)
 		world.reloadNames()
-		up.reports.await(t, version)
+		up.awaitLoaded(version)
 		if !up.reachesDevice(second, []string{"h2"}, up.customPool) {
 			t.Fatal("the running interface did not route the new host")
 		}
@@ -292,7 +292,7 @@ func TestT3Fs122AMapNginxRefusesKeepsTheHostPending(t *testing.T) {
 		if err := os.WriteFile(split.configPath, config, 0644); err != nil {
 			t.Fatal(err)
 		}
-		split.reports.await(t, refused)
+		split.awaitLoaded(refused)
 		if !split.reachesDevice(second, []string{"h2"}, split.customPool) {
 			t.Fatal("the host did not route once nginx -t passed")
 		}
@@ -303,8 +303,8 @@ func TestT3Fs122AMapNginxRefusesKeepsTheHostPending(t *testing.T) {
 
 // Has this interface's nginx run a map that drops host and keeps the rest, its version's probe name among them, as a
 // load gone wrong past lbmap's own checks would leave it: the map file rewritten through a rename, as lbmap writes it,
-// and the master lbmap last reported sent SIGHUP, lbmap told nothing. Returns once a hello for host reaches the http
-// branch through the split.
+// and the master lbmap last reported sent SIGHUP, lbmap told nothing. Returns once the master's old worker is gone, so
+// every new connection reads the new map.
 func (self *t3Split) dropFromMap(host string) {
 	t := self.world.t
 	t.Helper()
@@ -336,15 +336,13 @@ func (self *t3Split) dropFromMap(host string) {
 	if master == nil {
 		t.Fatal("lbmap reported no nginx master")
 	}
+	old := t3SplitWorkers(t, master.Pid)
 	if err := syscall.Kill(master.Pid, syscall.SIGHUP); err != nil {
 		t.Fatal(err)
 	}
-	guard := time.Now().Add(t3EdgeGuardTimeout)
-	for !self.reachesPlatform(host) {
-		if time.Now().After(guard) {
-			t.Fatalf("the dropped host still routes to tlsedge after the master's reload")
-		}
-		runtime.Gosched()
+	self.awaitSettled(old)
+	if !self.reachesPlatform(host) {
+		t.Fatalf("the dropped host still routes to tlsedge after the master's reload")
 	}
 }
 
@@ -377,7 +375,7 @@ func TestT3Fs122AnLbmapReportingAVersionItsNginxDidNotLoadStaysNotCurrent(t *tes
 		api.mute(t, liar.interfaceName)
 		secondVersion := world.mapCustomHost(second)
 		world.reloadNames()
-		honest.reports.await(t, secondVersion)
+		honest.awaitLoaded(secondVersion)
 		if !honest.reachesDevice(second, []string{"h2"}, honest.customPool) {
 			t.Fatal("the honest interface did not route the new host")
 		}
@@ -419,7 +417,7 @@ func TestT3Fs122AnLbmapReportingAVersionItsNginxDidNotLoadStaysNotCurrent(t *tes
 
 		// the liar's lbmap reaches the API again: its poll takes the report away, and it loads the version for real
 		api.unmute(liar.interfaceName)
-		liar.reports.await(t, secondVersion)
+		liar.awaitLoaded(secondVersion)
 		if !liar.reachesDevice(second, []string{"h2"}, liar.customPool) {
 			t.Fatal("the liar's interface did not route the host once it loaded the version")
 		}
@@ -457,8 +455,8 @@ func TestT3Fs122AMapThatDropsAnAddedHostFailsItsProbeUntilAReload(t *testing.T) 
 		// a host added, which both load; then the lossy interface's nginx runs a map without it
 		version = world.mapCustomHost(second)
 		world.reloadNames()
-		whole.reports.await(t, version)
-		lossy.reports.await(t, version)
+		whole.awaitLoaded(version)
+		lossy.awaitLoaded(version)
 		lossy.dropFromMap(second)
 		probeName := t3SplitProbeName(t, world, version)
 		for range 2 {
@@ -477,8 +475,8 @@ func TestT3Fs122AMapThatDropsAnAddedHostFailsItsProbeUntilAReload(t *testing.T) 
 		// lbmap's load of the next version writes the whole map again
 		version = world.mapCustomHost(third)
 		world.reloadNames()
-		whole.reports.await(t, version)
-		lossy.reports.await(t, version)
+		whole.awaitLoaded(version)
+		lossy.awaitLoaded(version)
 		if !lossy.reachesDevice(second, []string{"h2"}, lossy.customPool) {
 			t.Fatal("the reload left the dropped host out")
 		}
