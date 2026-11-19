@@ -1494,8 +1494,8 @@ func TestForwardHttp2Client(t *testing.T) {
 // A streamed body goes on to the block as it arrives, as nginx's
 // proxy_request_buffering off sends it: the block has the first part of a
 // declared and of a chunked body while the client still holds the rest. The
-// first pass read that part, and found the body not yet whole, so it streams
-// with no wait for the rest, framed as the client framed it.
+// body's first read returns that part, so nothing is kept, and the body
+// streams with no wait for the rest, framed as the client framed it.
 func TestForwardStreamedBodyPassesThrough(t *testing.T) {
 	cases := []struct {
 		framing     string
