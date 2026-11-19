@@ -2,13 +2,17 @@ package nginx
 
 // End-to-end tests of Front.Close (D12, D21): it releases what outlived the
 // drain, and when it reports the forced close complete, every spill file is
-// closed and its budget returned.
+// closed and its budget returned. The body store's close, which keeps that
+// promise for the spill files, is also held at its own layer.
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -50,10 +54,7 @@ func TestFrontE2eCloseNeverReportsASpillFileStillOpen(t *testing.T) {
 	settings.Http.ForcedCloseTimeout = 1 * time.Second
 	e2e := newE2eFront(t, settings, nil)
 	eth1 := e2e.iface(t, "eth1")
-	store, ok := e2e.front.bodyStore.(*bodyStore)
-	if !ok {
-		t.Fatalf("the front's body store is a %T, not NewFront's", e2e.front.bodyStore)
-	}
+	store := e2e.store(t)
 	closing := make(chan struct{})
 	proceed := make(chan struct{})
 	var proceedOnce sync.Once
@@ -96,6 +97,152 @@ func TestFrontE2eCloseNeverReportsASpillFileStillOpen(t *testing.T) {
 	if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
 		t.Errorf("once the release finished, the store holds %d bytes, %d spilled in %d files, for %d bodies", memoryBytes, spillBytes, spillFiles, bodies)
 	}
+}
+
+// Close never reports the forced close complete while a spill file is still
+// being created. A Close that comes in between the file's creation and its
+// body's record of it releases the body without seeing the file. It must
+// wait for the body's append, which finds the body released and closes the
+// file, and return the forced close's error at
+// HttpSettings.ForcedCloseTimeout if it can't, never nil with the file open
+// (D21). The request it cut short is a local 503 that reaches no block.
+//
+// The store's seam for spill files holds the creation once its file is
+// open, so Close comes in at that point.
+func TestFrontE2eCloseNeverReportsASpillFileBeingCreated(t *testing.T) {
+	settings := e2eFrontSettings(t)
+	// with a creation held, Close can only end at this bound
+	settings.Http.ForcedCloseTimeout = 1 * time.Second
+	e2e := newE2eFront(t, settings, nil)
+	eth1 := e2e.iface(t, "eth1")
+	store := e2e.store(t)
+	hold := newE2eHold(t)
+	createdFiles := make(chan *os.File, 1)
+	// set before any request reaches the store
+	store.createSpillFile = func() (bodySpillFile, error) {
+		file, err := store.createTempSpillFile()
+		if err != nil {
+			return nil, err
+		}
+		createdFiles <- file.(*os.File)
+		// the file is open, and its body hasn't recorded it
+		<-hold.released
+		return file, nil
+	}
+
+	client := e2e.newH1Client(t, eth1.httpsAddr, "web.service.example")
+	request := newE2eRequest(t, "POST", "https://web.service.example/spilling", bytes.NewReader(e2eBody(100*1024)))
+	requestCounts := e2e.requestCounts()
+	statuses := make(chan int, 1)
+	go func() {
+		response, err := client.Do(request)
+		if err != nil {
+			statuses <- 0
+			return
+		}
+		response.Body.Close()
+		statuses <- response.StatusCode
+	}()
+	spillFile := receiveE2e(t, createdFiles, "spill file")
+	spillFileClosed := func() bool {
+		_, err := spillFile.Stat()
+		return errors.Is(err, os.ErrClosed)
+	}
+
+	if err := e2e.front.Close(); err == nil && !spillFileClosed() {
+		t.Errorf("Close reported the forced close complete while a spill file being created was open")
+	}
+	hold.release()
+	waitE2eClosed(t, e2e.front.cutDone, "the forced close")
+	if !spillFileClosed() {
+		t.Errorf("the spill file is open after the forced close completed")
+	}
+	if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+		t.Errorf("after the forced close the store holds %d bytes, %d spilled in %d files, for %d bodies", memoryBytes, spillBytes, spillFiles, bodies)
+	}
+	if status := receiveE2e(t, statuses, "response"); status != http.StatusServiceUnavailable {
+		t.Errorf("the request whose body was spilling = %d, want the local 503", status)
+	}
+	if requests := e2e.requestsSince(requestCounts); len(requests) != 0 {
+		t.Errorf("the request whose body was spilling reached %v", e2eRequestServices(requests))
+	}
+}
+
+// The body store's close, which the forced close runs, returns only once
+// every spill file its bodies created is closed, one still being created
+// included. A close that releases a body while its append is creating the
+// file can't see the file: it waits for the append, which finds the body
+// released and closes the file, and the file stays counted against
+// SpillMaxFiles until then (D21). In a synctest bubble, so the close is seen
+// waiting rather than given time to return.
+func TestFrontE2eBodyStoreCloseWaitsForASpillFileBeingCreated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		settings := DefaultBodySettings()
+		settings.SpillDir = t.TempDir()
+		store := newBodyStore(settings)
+		created := make(chan struct{})
+		proceed := make(chan struct{})
+		var spillFile *os.File
+		store.createSpillFile = func() (bodySpillFile, error) {
+			file, err := store.createTempSpillFile()
+			if err != nil {
+				return nil, err
+			}
+			spillFile = file.(*os.File)
+			close(created)
+			// the file is open, and its body hasn't recorded it
+			<-proceed
+			return file, nil
+		}
+		refusals := make(chan *bodyRefusal, 1)
+		go func() {
+			body := e2eBody(int(settings.MemoryPrefixBytes) + 1000)
+			storedBody, refusal := store.read(t.Context(), bytes.NewReader(body), bodyReadOptions{
+				declaredLength: int64(len(body)),
+				prefixBytes:    settings.MemoryPrefixBytes,
+			})
+			if storedBody != nil {
+				storedBody.release()
+			}
+			refusals <- refusal
+		}()
+		<-created
+		spillFileClosed := func() bool {
+			_, err := spillFile.Stat()
+			return errors.Is(err, os.ErrClosed)
+		}
+
+		closeDone := make(chan struct{})
+		go func() {
+			store.close()
+			close(closeDone)
+		}()
+		// every other goroutine is durably blocked: the append at proceed,
+		// and the close returned or waiting for the append
+		synctest.Wait()
+		select {
+		case <-closeDone:
+			if !spillFileClosed() {
+				t.Errorf("the store's close returned while a spill file being created was open")
+			}
+		default:
+		}
+		if _, _, spillFiles, _ := store.usage(); spillFiles != 1 {
+			t.Errorf("with a spill file open, the store counts %d spill files, want 1", spillFiles)
+		}
+
+		close(proceed)
+		<-closeDone
+		if !spillFileClosed() {
+			t.Errorf("the store's close returned with the spill file open")
+		}
+		if refusal := <-refusals; refusal == nil || refusal.status != http.StatusServiceUnavailable || refusal.reason != bodyRefusalClosed {
+			t.Errorf("the body read the close cut short: %v, want refused as closed", refusal)
+		}
+		if memoryBytes, spillBytes, spillFiles, bodies := store.usage(); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+			t.Errorf("after the close the store holds %d bytes, %d spilled in %d files, for %d bodies", memoryBytes, spillBytes, spillFiles, bodies)
+		}
+	})
 }
 
 // Close releases what the front holds: its pooled upstream connections, the

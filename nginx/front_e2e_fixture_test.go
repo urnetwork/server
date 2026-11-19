@@ -773,15 +773,21 @@ func (self *e2eFront) setServiceHandler(t *testing.T, service string, handler fu
 	}
 }
 
-// What the front's body store holds now: reserved memory, spilled bytes,
-// spill files, and bodies not yet released.
-func (self *e2eFront) bodyUsage(t *testing.T) (memoryBytes int64, spillBytes int64, spillFiles int, bodies int) {
+// The front's body store, the one NewFront built.
+func (self *e2eFront) store(t *testing.T) *bodyStore {
 	t.Helper()
 	store, ok := self.front.bodyStore.(*bodyStore)
 	if !ok {
 		t.Fatalf("the front's body store is a %T, not NewFront's", self.front.bodyStore)
 	}
-	return store.usage()
+	return store
+}
+
+// What the front's body store holds now: reserved memory, spilled bytes,
+// spill files, and bodies not yet released.
+func (self *e2eFront) bodyUsage(t *testing.T) (memoryBytes int64, spillBytes int64, spillFiles int, bodies int) {
+	t.Helper()
+	return self.store(t).usage()
 }
 
 // The names left in the spill directory.
