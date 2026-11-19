@@ -17,10 +17,12 @@ package main
 //
 // FS-122 here: the version's route probe reaching tlsedge and no listener, an lb restarted with an old map file loading
 // the current version before it serves 443, and the dns API down at start leaving the split on no version until it
-// answers. What waits (TLS-M6-07's rest): FS-122's other clauses, an lbmap stopped and nginx -t refusing past 15 and 20
-// min on a fake clock, map-stale, three adds and a remove in one window, a restore, a false report and a dropped host;
-// FS-41's and FS-42's custom-host steps; 17.6's challenge routing and eligibility rows on T3; two lb interfaces. The
-// tests step on lbmap's own reports, never on a sleep; a real timer is only a guard.
+// answers. FS-122's other clauses are tlsedge_map_stale_t3_test.go's (two lb interfaces, an lbmap stopped, nginx -t
+// refusing, map-stale, a false report, a dropped host) and tlsedge_custom_host_t3_test.go's (one window's changes in
+// one reload), FS-42's custom-host step the latter's too, and 17.6's challenge-routing and eligibility rows and
+// FS-122's TLS-ALPN-01 clause tlsedge_custom_route_t3_test.go's. The tests step on lbmap's own reports, never on a
+// sleep; a real timer is only a guard. The dns API holds a long-poll 1 s, inside lbmap's 5 s poll timeout, so each
+// poll ends with the hold's answer, not a timeout lbmap would back off from.
 
 import (
 	"bufio"
@@ -237,6 +239,8 @@ type t3SplitApi struct {
 	url        string
 	bearer     string
 	edgeBearer string
+	// the block's own routes, behind none of the test's middleware
+	handler http.Handler
 	// by interface
 	reports map[string]*t3SplitReports
 	// while set, the API answers 503 to everything, as one that is down
@@ -244,6 +248,12 @@ type t3SplitApi struct {
 	// the device's certificate for each custom host, one for every split of the API, and what trusts them
 	custom     map[string]tls.Certificate
 	customPool *x509.CertPool
+
+	stateLock sync.Mutex
+	// interfaces whose lbmap the API answers 503, as one its lbmap cannot reach, and each interface's polls answered so
+	muted          map[string]bool
+	refusedPolls   map[string]int
+	refusedChanged chan struct{}
 }
 
 // The dns API over world's Postgres for the lb interfaces named, its hold on the wall clock, behind lbmap's bearer and
@@ -256,6 +266,9 @@ func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3Spl
 		reports:    map[string]*t3SplitReports{},
 		custom:     map[string]tls.Certificate{},
 		customPool: x509.NewCertPool(),
+		muted:          map[string]bool{},
+		refusedPolls:   map[string]int{},
+		refusedChanged: make(chan struct{}),
 	}
 	inventory := []dnsservice.DnsLbInterface{}
 	for _, name := range interfaces {
@@ -274,6 +287,10 @@ func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3Spl
 	dnsSettings.SignaturesPerSecond = 1000
 	dnsSettings.Tcp.ConnectionsPerSource = 2
 	dnsSettings.Rrl.ResponsesPerSecond = 2
+	// a long-poll held 1 s, inside lbmap's poll timeout below, so each poll ends with the hold's 204 rather than lbmap's
+	// timeout, which lbmap counts as a failure and backs off from, to 30 s; lbmap then sees a new version within the
+	// hold's second
+	dnsSettings.Map.HoldSeconds = 1
 	block, err := dnsservice.NewDnsApi(world.ctx, &apiHost, dnsSettings, sidecartest.NewFakeDnsStore(world.clock, nil), &dnsservice.DnsApiDeps{
 		Auth:           &t3SplitAuth{bearer: api.bearer, edgeBearer: api.edgeBearer},
 		Interfaces:     func() []dnsservice.DnsLbInterface { return inventory },
@@ -284,20 +301,26 @@ func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3Spl
 	}
 	t.Cleanup(block.Close)
 	handler := block.Handler()
+	api.handler = handler
 	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if api.down.Load() {
 			http.Error(writer, "down", http.StatusServiceUnavailable)
 			return
 		}
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/custom-host-map") && api.refusePoll(request.URL.Query().Get("interface")) {
+			http.Error(writer, "unreachable", http.StatusServiceUnavailable)
+			return
+		}
 		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/custom-host-map/applied") {
 			body, _ := io.ReadAll(request.Body)
-			report := &struct {
-				Interface string `json:"interface"`
-				Version   uint64 `json:"version"`
-			}{}
+			report := &dnsservice.DnsCustomHostMapReport{}
 			if json.Unmarshal(body, report) == nil {
+				if api.isMuted(report.Interface) {
+					http.Error(writer, "unreachable", http.StatusServiceUnavailable)
+					return
+				}
 				if reports, ok := api.reports[report.Interface]; ok {
-					defer reports.add(report.Version)
+					defer reports.add(report.Version, report.Master)
 				}
 			}
 			request.Body = io.NopCloser(bytes.NewReader(body))
@@ -309,19 +332,111 @@ func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3Spl
 	return api
 }
 
-// What lbmap reported, version by version.
+// Whether the API answers name's lbmap 503.
+func (self *t3SplitApi) isMuted(name string) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.muted[name]
+}
+
+// Whether name's lbmap's poll is to be answered 503, counting it if so.
+func (self *t3SplitApi) refusePoll(name string) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.muted[name] {
+		return false
+	}
+	self.refusedPolls[name] += 1
+	close(self.refusedChanged)
+	self.refusedChanged = make(chan struct{})
+	return true
+}
+
+// Has the API answer name's lbmap 503 from now on, its polls and reports alike, as an API that lbmap cannot reach,
+// while the interface's nginx serves on: lbmap keeps the map nginx runs and reports nothing. Returns once a poll begun
+// after the mute was refused, so no poll the API held from before it can still hand lbmap a version.
+func (self *t3SplitApi) mute(t testing.TB, name string) {
+	t.Helper()
+	refused := func() int {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.muted[name] = true
+		return self.refusedPolls[name]
+	}()
+	guard := time.After(t3EdgeGuardTimeout)
+	for {
+		changed := func() chan struct{} {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if refused < self.refusedPolls[name] {
+				return nil
+			}
+			return self.refusedChanged
+		}()
+		if changed == nil {
+			return
+		}
+		select {
+		case <-changed:
+		case <-guard:
+			t.Fatalf("%s's lbmap polled nothing after the mute", name)
+		}
+	}
+}
+
+// Lets name's lbmap reach the API again.
+func (self *t3SplitApi) unmute(name string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	delete(self.muted, name)
+}
+
+// Posts report to the block's applied route as an lbmap would, on lbmap's bearer and past the test's middleware, so a
+// muted interface's lbmap's silence holds and the report is not counted as lbmap's own.
+func (self *t3SplitApi) forgeReport(t testing.TB, report *dnsservice.DnsCustomHostMapReport) {
+	t.Helper()
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, dnsservice.DnsCustomHostMapAppliedPath, bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+self.bearer)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	self.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("the forged report answered %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+// What lbmap reported, version by version, and the nginx master its last report named.
 type t3SplitReports struct {
 	stateLock sync.Mutex
 	versions  []uint64
+	master    *dnsservice.DnsMapMaster
 	changed   chan struct{}
 }
 
-func (self *t3SplitReports) add(version uint64) {
+func (self *t3SplitReports) add(version uint64, master *dnsservice.DnsMapMaster) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.versions = append(self.versions, version)
+	if master != nil {
+		self.master = master
+	}
 	close(self.changed)
 	self.changed = make(chan struct{})
+}
+
+// The nginx master lbmap's last report named, nil before one did.
+func (self *t3SplitReports) lastMaster() *dnsservice.DnsMapMaster {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.master == nil {
+		return nil
+	}
+	master := *self.master
+	return &master
 }
 
 // Waits for a report of version or a later one.
@@ -362,8 +477,9 @@ type t3Split struct {
 	// the dns API, shared with the world's other splits, and this interface's name in its inventory
 	api           *t3SplitApi
 	interfaceName string
-	// the config the lb's nginx runs and lbmap's nginx -t reads
+	// the config the lb's nginx runs and lbmap's nginx -t reads, and the run directory lbmap writes the map into
 	configPath string
+	runDir     string
 	// the lb binary and the environment it runs in
 	lb  string
 	env []string
@@ -537,6 +653,7 @@ func newT3SplitOn(t testing.TB, world *t3EdgeWorld, api *t3SplitApi, interfaceNa
 		t.Fatal(err)
 	}
 	split.configPath = filepath.Join(prefixDir, interfaceName+".conf")
+	split.runDir = runDir
 	if err := os.WriteFile(split.configPath, config.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +669,7 @@ func newT3SplitOn(t testing.TB, world *t3EdgeWorld, api *t3SplitApi, interfaceNa
 		"WARP_LBMAP_LOAD_DELAY=0s",
 		"WARP_LBMAP_RELOAD_MIN_INTERVAL=0s",
 		"WARP_LBMAP_START_TIMEOUT=2s",
-		"WARP_LBMAP_POLL_TIMEOUT=1s",
+		"WARP_LBMAP_POLL_TIMEOUT=5s",
 		"WARP_LBMAP_POLL_MIN_INTERVAL=0s",
 	)
 	t.Cleanup(func() {
