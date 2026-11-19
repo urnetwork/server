@@ -12,6 +12,18 @@ import (
 )
 
 // How the front serves clients. Read-only once the front is built.
+//
+// The handlers apply the header limits, SendTimeout, the drain, gzip and
+// the access log themselves. The rest are the servers', so connect's: an
+// http.Server's ReadHeaderTimeout is ClientHeaderTimeout, its IdleTimeout
+// KeepaliveTimeout, and its HTTP2.MaxConcurrentStreams
+// Http2MaxConcurrentStreams. Its MaxHeaderBytes must be above
+// MaxRequestHeadersTotalBytes, twice it say, so the handler sees every head
+// nginx would answer with a 414 or 400 instead of Go answering 431; and it
+// sets no WriteTimeout, which would cut a stream SendTimeout lets live. Go's
+// server has no KeepaliveRequests or KeepaliveTime, nor nginx's lingering
+// close, so those need per-connection state connect's server would have to
+// provide.
 type HttpSettings struct {
 	// how long a new connection has for its TLS handshake, request line and
 	// headers, and a keepalive connection for a request's headers once they
@@ -31,9 +43,11 @@ type HttpSettings struct {
 	// current request is its last: nginx's default `keepalive_time 1h`.
 	// Non-positive means no limit.
 	KeepaliveTime time.Duration
-	// the longest wait between two writes to a client: nginx's
-	// `send_timeout 30s`. A stall past it closes the connection. Non-positive
-	// means no bound.
+	// the longest a write to a client may stay blocked: nginx's
+	// `send_timeout 30s`, which runs only while a write waits on the client,
+	// so a response may go quiet between two writes for as long as its
+	// upstream does. A write blocked past it closes the connection, or on h2
+	// resets the stream. Non-positive means no bound.
 	SendTimeout time.Duration
 	// the longest request line in bytes, one of nginx's
 	// `large_client_header_buffers 8 8k`. A longer one is a 414. Non-positive
@@ -76,6 +90,12 @@ type HttpSettings struct {
 	// the gzip compression level: nginx's default `gzip_comp_level 1`.
 	// Non-positive disables gzip.
 	GzipLevel int
+	// one request in this many is written to the access log, at glog's V(1)
+	// only (D17): nginx logged every request at the default level, and the
+	// lines served only ad hoc counts, which a sample answers. Hosts in
+	// no_access_log and successes on no_success_access_log paths are never
+	// written. Non-positive writes none.
+	AccessLogSampleInterval int
 }
 
 // A new instance on every call, with nginx's values.
@@ -96,5 +116,6 @@ func DefaultHttpSettings() *HttpSettings {
 		ForcedCloseTimeout:          30 * time.Second,
 		GzipMinLength:               20,
 		GzipLevel:                   1,
+		AccessLogSampleInterval:     100,
 	}
 }
