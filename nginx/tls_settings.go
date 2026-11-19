@@ -21,10 +21,13 @@ type TlsSettings struct {
 	MinVersion uint16
 	// the TLS 1.2 suites: ECDHE with AES-GCM, as nginx's `EECDH+AESGCM`. Go
 	// orders them itself, and TLS 1.3 suites are not configurable. Empty
-	// means Go's defaults, which add ChaCha20 suites nginx doesn't offer.
+	// means Go's defaults, which add the ChaCha20 and ECDHE CBC suites nginx
+	// doesn't offer.
 	CipherSuites []uint16
-	// the key exchange groups in preference order: X25519MLKEM768, then
-	// nginx's X25519, P-256 and P-384. Empty means Go's defaults.
+	// the key exchange groups a client may use: X25519MLKEM768 and nginx's
+	// X25519, P-256 and P-384. Go ignores the order and prefers them in its
+	// own, which is the order listed. Empty means Go's defaults, which add the
+	// other ML-KEM hybrids and P-521.
 	CurvePreferences []tls.CurveID
 }
 

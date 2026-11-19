@@ -3,19 +3,139 @@ package nginx
 // Host normalization and name matching with nginx's semantics (owner: s-tls).
 // The front matches the TLS SNI and each request's authority the same way:
 // the SNI picks the certificate, and the authority picks the route (§4.2,
-// D9).
+// D9). Both follow the pinned nginx (1.31.4): normalizeHost is
+// ngx_http_validate_host, which nginx applies to the SNI and to every Host,
+// and nameMatcher is ngx_http_find_virtual_server over the route table's
+// server names, which come in two forms only: exact, and a leading wildcard.
+//
+// nginx gives an invalid or unknown SNI the default server's certificate,
+// and an unknown Host the default server's routes; the callers here do the
+// same with a false result.
 
-// The host nginx's $host holds for an authority (ngx_http_validate_host):
-// lowercased, its :port removed, and one trailing dot removed; an IPv6
-// literal keeps its brackets. False, which nginx answers with a 400, for a
-// host that is empty after that, holds "..", or holds a '/', a NUL, a space
-// or another control character.
+import (
+	"strings"
+)
+
+// The host nginx's $host holds for an authority, by ngx_http_validate_host at
+// the pinned commit:
+//   - its :port is removed, and an IPv6 literal keeps its brackets;
+//   - one trailing dot is removed;
+//   - it is lowercased.
+//
+// False, which nginx answers with a 400 (and, for an SNI, with the default
+// server), for:
+//   - a host that is empty once its port and trailing dot are removed;
+//   - two dots in a row;
+//   - a byte nginx doesn't allow. A name allows letters, digits, '-', '.',
+//     '_', '~', '%' and the sub-delims !$&'()*+,;=, and an IPv6 literal the
+//     same less '%', plus ':';
+//   - an unterminated '[', or anything but a port after its ']';
+//   - a port that isn't digits up to 65535. An empty port is allowed.
+//
+// A leading dot is allowed, as nginx allows it.
 func normalizeHost(host string) (string, bool) {
-	panic("lbalt: not implemented")
+	// nginx's sw_host_start, sw_host, sw_host_ip_literal, sw_host_end and
+	// sw_port
+	type hostState int
+	const (
+		hostStateStart hostState = iota
+		hostStateName
+		hostStateIpLiteral
+		hostStateEnd
+		hostStatePort
+	)
+	// nginx's sub-delims, allowed in a name and in an IPv6 literal
+	isSubDelim := func(c byte) bool {
+		switch c {
+		case '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=':
+			return true
+		default:
+			return false
+		}
+	}
+
+	state := hostStateStart
+	// the last dot's index, as nginx's dot_pos, which starts past the end
+	dotIndex := len(host)
+	// the host's length without its port, as nginx's host_len
+	hostLength := len(host)
+	port := 0
+	for i := 0; i < len(host); i += 1 {
+		c := host[i]
+		switch state {
+		case hostStateStart:
+			if c == '[' {
+				state = hostStateIpLiteral
+				continue
+			}
+			state = hostStateName
+			fallthrough
+		case hostStateName:
+			switch {
+			case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+			case c == ':':
+				hostLength = i
+				state = hostStatePort
+			case c == '.':
+				if dotIndex == i-1 {
+					return "", false
+				}
+				dotIndex = i
+			case c == '-', c == '_', c == '~', c == '%', isSubDelim(c):
+			default:
+				return "", false
+			}
+		case hostStateIpLiteral:
+			switch {
+			case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+			case c == ':':
+			case c == ']':
+				hostLength = i + 1
+				state = hostStateEnd
+			case c == '.':
+				if dotIndex == i-1 {
+					return "", false
+				}
+				dotIndex = i
+			case c == '-', c == '_', c == '~', isSubDelim(c):
+			default:
+				return "", false
+			}
+		case hostStateEnd:
+			if c != ':' {
+				return "", false
+			}
+			state = hostStatePort
+		case hostStatePort:
+			if c < '0' || '9' < c {
+				return "", false
+			}
+			digit := int(c - '0')
+			// over 65535, checked as nginx does before the multiply
+			if 6553 <= port && (6553 < port || 5 < digit) {
+				return "", false
+			}
+			port = port*10 + digit
+		}
+	}
+	if state == hostStateIpLiteral {
+		return "", false
+	}
+	if dotIndex == hostLength-1 {
+		hostLength -= 1
+	}
+	if hostLength == 0 {
+		return "", false
+	}
+	// every byte left is ascii, so this is nginx's ngx_strlow
+	return strings.ToLower(host[:hostLength]), true
 }
 
 // What a served name routes to.
 type nameMatch struct {
+	// the served name that matched, as the route table writes it: the name
+	// itself, or the wildcard *.b.c that covers it
+	name string
 	// the owning service; nil for an lb name
 	service *RouteService
 	class   NameClass
@@ -26,12 +146,59 @@ type nameMatch struct {
 // The route table's served names, indexed for matching. Read-only once built,
 // so safe for concurrent use.
 type nameMatcher struct {
+	// the exact names
+	exactNameMatches map[string]nameMatch
+	// the leading wildcards, each *.b.c keyed by its base b.c
+	wildcardBaseMatches map[string]nameMatch
 }
 
-// Indexes every served name of a parsed table: the lb names, every service's
-// names and every redirect alias.
+// Indexes every served name of a parsed table, the set RouteTable.ServedNames
+// lists: the lb names (NameClassLb), every service's names (NameClassConnect
+// for front.connect_service, NameClassApi for front.api_service,
+// NameClassForwarded for the rest) and every redirect alias
+// (NameClassRedirect, with its target). A parsed table serves each name once.
 func newNameMatcher(routeTable *RouteTable) *nameMatcher {
-	panic("lbalt: not implemented")
+	matcher := &nameMatcher{
+		exactNameMatches:    map[string]nameMatch{},
+		wildcardBaseMatches: map[string]nameMatch{},
+	}
+	addName := func(name string, match nameMatch) {
+		match.name = name
+		if base, ok := strings.CutPrefix(name, "*."); ok {
+			matcher.wildcardBaseMatches[base] = match
+		} else {
+			matcher.exactNameMatches[name] = match
+		}
+	}
+
+	for _, name := range routeTable.Lb.Names {
+		addName(name, nameMatch{
+			class: NameClassLb,
+		})
+	}
+	for _, service := range routeTable.Services {
+		class := NameClassForwarded
+		switch service.Name {
+		case routeTable.Front.ConnectService:
+			class = NameClassConnect
+		case routeTable.Front.ApiService:
+			class = NameClassApi
+		}
+		for _, name := range service.Names {
+			addName(name, nameMatch{
+				service: service,
+				class:   class,
+			})
+		}
+		for _, redirectAlias := range service.RedirectAliases {
+			addName(redirectAlias.Name, nameMatch{
+				service:        service,
+				class:          NameClassRedirect,
+				redirectTarget: redirectAlias.Target,
+			})
+		}
+	}
+	return matcher
 }
 
 // Matches a normalized name as nginx's server_name does: an exact name first,
@@ -39,5 +206,33 @@ func newNameMatcher(routeTable *RouteTable) *nameMatcher {
 // one or more leading labels (a.b.c, x.a.b.c), never b.c itself. False for a
 // name the table doesn't serve.
 func (self *nameMatcher) match(name string) (nameMatch, bool) {
-	panic("lbalt: not implemented")
+	if match, ok := self.exactNameMatches[name]; ok {
+		return match, true
+	}
+	// each pass drops one more leading label, so the first base found is the
+	// longest wildcard's, as ngx_hash_find_wc_head finds the deepest
+	rest := name
+	for {
+		_, base, ok := strings.Cut(rest, ".")
+		if !ok {
+			return nameMatch{}, false
+		}
+		if match, ok := self.wildcardBaseMatches[base]; ok {
+			return match, true
+		}
+		rest = base
+	}
+}
+
+// Every served name's match, the exact names and the wildcards, in no set
+// order. A new slice on every call.
+func (self *nameMatcher) servedMatches() []nameMatch {
+	matches := make([]nameMatch, 0, len(self.exactNameMatches)+len(self.wildcardBaseMatches))
+	for _, match := range self.exactNameMatches {
+		matches = append(matches, match)
+	}
+	for _, match := range self.wildcardBaseMatches {
+		matches = append(matches, match)
+	}
+	return matches
 }
