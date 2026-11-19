@@ -53,7 +53,7 @@ type hostCommandLimiter struct {
 	limit int
 
 	mu    sync.Mutex
-	slots map[string]chan struct{}
+	slots map[string]*hostCommandSlots
 }
 
 func newHostCommandLimiter(limit int) *hostCommandLimiter {
@@ -62,15 +62,15 @@ func newHostCommandLimiter(limit int) *hostCommandLimiter {
 	}
 	return &hostCommandLimiter{
 		limit: limit,
-		slots: map[string]chan struct{}{},
+		slots: map[string]*hostCommandSlots{},
 	}
 }
 
-func (l *hostCommandLimiter) hostSlots(host string) chan struct{} {
+func (l *hostCommandLimiter) forHost(host string) *hostCommandSlots {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.slots == nil {
-		l.slots = map[string]chan struct{}{}
+		l.slots = map[string]*hostCommandSlots{}
 	}
 	slots := l.slots[host]
 	if slots == nil {
@@ -78,21 +78,44 @@ func (l *hostCommandLimiter) hostSlots(host string) chan struct{} {
 		if limit <= 0 {
 			limit = maxConcurrentRemoteCommandsPerHost
 		}
-		slots = make(chan struct{}, limit)
+		slots = &hostCommandSlots{permits: make(chan struct{}, limit)}
 		l.slots[host] = slots
 	}
 	return slots
 }
 
+// Existing capacity controls inspect the occupied slots of the actual semaphore.
+func (l *hostCommandLimiter) hostSlots(host string) chan struct{} {
+	return l.forHost(host).permits
+}
+
 func (l *hostCommandLimiter) acquire(ctx context.Context, host string) (func(), error) {
-	slots := l.hostSlots(host)
+	slots := l.forHost(host)
+	key := admissionSignalKey(ctx)
+	observation := pgSampleTransportFromContext(ctx)
+	var releaseStart uint64
+	if observation != nil {
+		slots.mu.Lock()
+		releaseStart = slots.released
+		observation.receipt.HostPermitHolders = &pgSampleHostPermitHolders{Schema: 1, AtRequest: slots.snapshotWithLock(0)}
+		slots.mu.Unlock()
+	}
 	select {
-	case slots <- struct{}{}:
+	case slots.permits <- struct{}{}:
+		slots.mu.Lock()
+		slots.finishPgObservationWithLock(observation, releaseStart, true)
+		holder := slots.rememberGrantWithLock(key)
+		slots.mu.Unlock()
 		var once sync.Once
 		return func() {
-			once.Do(func() { <-slots })
+			once.Do(func() { slots.release(holder) })
 		}, nil
 	case <-ctx.Done():
+		if observation != nil {
+			slots.mu.Lock()
+			slots.finishPgObservationWithLock(observation, releaseStart, false)
+			slots.mu.Unlock()
+		}
 		return nil, ctx.Err()
 	}
 }

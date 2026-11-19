@@ -5653,6 +5653,36 @@ admission and cleanup, and end before the alert handler or cadence wait. The
 inclusive 40-second owner, native 22-second minimum and global-four/host-two
 caps are unchanged; a lawful wait over 18 seconds can still prevent sampling.
 
+The optional private `host_permit_holders` schema1 records the watcher-local
+command semaphore for the exact address selected by the sampler (§2.1a).
+`at_request` captures other occupied permits just before the existing channel
+select. `at_return` captures them after that select and excludes the sampler's
+own grant. Each holds at most two code-owned catalog keys and distinct,
+address-local grant ordinals. A caller with no recognized scheduled key is
+`unknown`. The receipt keeps the count and last two exact releases between
+these observations, in release order. Each release belongs to the original
+command's once-only release closure. Commands sharing a key retain separate
+ordinals. No address, host name, argv, SQL, credential or external queue token
+enters the projection.
+
+`unique_release` requires a complete, initially full census, a sampler grant
+and exactly one release of an initially occupied permit. `multiple_releases`
+keeps individual release evidence and leaves the enabling release ambiguous.
+`no_release_required` records an initially available slot and no intervening
+release. `not_full_at_request` leaves a release from a partially occupied start
+unattributed. `not_granted` accompanies a canceled or expired acquisition.
+If a command acquired the channel before publishing its holder record, that
+snapshot reports `unavailable` and withholds the holder list. Unsupported
+capacity or exhausted counters withhold the affected evidence. Missing or
+legacy blocks leave ownership unknown. The original receipt and private SQL
+representatives take precedence at the combined 256 KiB storage limit.
+
+These snapshots include local descheduling and the command's full permit
+lifetime, including shared admission and cleanup. They establish neither a
+blocked syscall nor remote execution, database health, avoidable contention or
+the holder of an earlier uninstrumented turn. The existing host timing span,
+shared queue and native lifecycle each retain their own authority.
+
 New PG receipts optionally include fixed-schema `local_phase_timing` offsets
 in nanoseconds from the original monotonic run-slot request, or explicitly
 `sampler_observer_entry` when request timing is unavailable. Named aggregate

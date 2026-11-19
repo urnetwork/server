@@ -1532,6 +1532,12 @@ Global holder snapshots cannot partition shared SSH admission into recovery,
 queue-file locking, publication or capacity waiting. The shared span still
 measures that whole acquisition; do not assign its elapsed time to a subphase
 without evidence from that interval.
+For a watcher-local host permit wait, inspect the same receipt's optional
+`host_permit_holders`. Only a complete, initially full address with a single
+observed release and a sampler grant identifies the releaser. Multiple releases
+and unavailable snapshots leave attribution open. The permit covers shared
+admission and its cleanup as well as execution. Older receipts cannot establish
+which command released the address.
 For a started but incomplete sample, inspect the nullable completed-frame count
 and last remote progress boundary in its receipt. They survive native owner
 cancellation when complete nonce-matched records arrived. They cannot identify
