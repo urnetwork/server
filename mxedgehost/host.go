@@ -114,6 +114,9 @@ type HostPorts struct {
 	Status int
 	// TCP 25's, behind the lb's PROXY header: 25 in a block.
 	Smtp int
+	// The router's LAN listener's (D-SMTP-13), mxedge.yml's lan_port, behind the same PROXY header and reached only
+	// by its lan_sources: 0 opens none, and the platform role opens none.
+	Lan int
 }
 
 // The engine's MxEdgeDeps on host: tlsedgeservice's hello functions, §19.11's mxedge gate as host's gates
