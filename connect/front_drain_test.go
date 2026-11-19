@@ -141,11 +141,16 @@ func (self *testFrontConnectionTrace) waitGoaways(t testing.TB, count int) {
 }
 
 // drainConnect runs D12's order: the latch reads draining before the front
-// begins its drain; the exchange drains alongside, and finds the front
-// already draining with its QUIC transports live; only once the exchange is
-// drained does the forced close run; cancel is last.
+// begins its drain; the exchange drains alongside the front, starting while
+// the front still waits for a hijacked connection, and finds the front
+// draining with its transports live; only once both are drained does the
+// forced close run; cancel is last.
 func TestFrontDrainRunsInD12Order(t *testing.T) {
-	env := newTestFrontEnv(t, nil)
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.front.httpsHandler = testFrontEchoHandler
+	})
+	hijacked := env.dialHijacked(testFrontConnectName)
+	hijacked.echo("before")
 	udpSocketCount := 0
 	for _, socket := range env.frontServer.sockets {
 		if socket.key.protocol == frontProtocolUdp {
@@ -185,10 +190,16 @@ func TestFrontDrainRunsInD12Order(t *testing.T) {
 	if exchangeEntryUdpUp != udpSocketCount {
 		t.Fatalf("%d of %d QUIC sockets up during the exchange drain", exchangeEntryUdpUp, udpSocketCount)
 	}
+	// the front still waits for the hijacked connection, which still serves
+	hijacked.echo("during the exchange drain")
+	hijacked.tlsConn.Close()
 	select {
 	case <-canceled:
 		t.Fatal("canceled while the exchange drained")
 	default:
+	}
+	if events := env.front.recordedEvents(); slices.Contains(events, "front close") {
+		t.Fatalf("the front closed while the exchange drained: %v", events)
 	}
 
 	close(exchangeRelease)
