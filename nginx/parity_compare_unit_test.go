@@ -169,6 +169,27 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 	)
 	streamedOnward := forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: streamedTarget, body: "hello", framing: "chunked"})
 	followed := forwardedAttempt{sequence: 1, method: http.MethodGet, uri: "/two", body: "", framing: "length 0"}
+	// an api GET with a header line folded onto a second line, and the front's
+	// forward of it: the parts joined by a space, or as given
+	folded := parityWith(apiGet, "", [2]string{"X-Parity-Folded", "first\r\n second"})
+	forwardedFolded := func(attemptCount int, foldedValue string) [][2]string {
+		return [][2]string{
+			{"response[0].status", "200"},
+			{"upstream.count", strconv.Itoa(attemptCount)},
+			{"upstream[0].method", http.MethodGet},
+			{"upstream[0].uri", "/one"},
+			{"upstream[0].header.X-Parity-Folded", foldedValue},
+		}
+	}
+	// an HTTP/1.0 POST with Transfer-Encoding, then the request sent where
+	// its body would be
+	http10Chunked := &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodPost, target: "/upload", host: parityApiName, proto: "HTTP/1.0", keepalive: true, headers: [][2]string{{"Connection", "keep-alive"}, {"Transfer-Encoding", "chunked"}}}
+	innerRequest := parityGet(parityApiName, parityApiName, "/inner")
+	bodiless := forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "", framing: "length 0"}
+	inner := forwardedAttempt{sequence: 1, method: http.MethodGet, uri: "/inner", body: "", framing: "length 0"}
+	http11Chunked := *http10Chunked
+	http11Chunked.proto = ""
+	http10Refused := [][2]string{{"response[0].status", "400"}, {"response[1].error", "eof"}}
 	cases := []struct {
 		name       string
 		parityCase *parityCase
@@ -680,6 +701,112 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			requests:    []*parityRequest{chunkedBesideLength},
 			nginx:       [][2]string{{"response[0].status", "400"}},
 			front:       forwarded(reframed),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the front's answer to an obs-folded header line, which nginx refuses",
+			parityCase: &parityCase{name: "unit", tags: []string{"obs-fold"}},
+			requests:   []*parityRequest{folded},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedFolded(1, "first second"),
+			difference: parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantId:     "obs-fold",
+		},
+		{
+			name:       "the folded line's parts it forwarded joined",
+			parityCase: &parityCase{name: "unit", tags: []string{"obs-fold"}},
+			requests:   []*parityRequest{folded},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedFolded(1, "first second"),
+			difference: parityDifference{key: "upstream[0].header.X-Parity-Folded", nginx: parityAbsent, front: "first second"},
+			wantId:     "obs-fold",
+		},
+		{
+			name:        "a folded line forwarded with its line break",
+			parityCase:  &parityCase{name: "unit", tags: []string{"obs-fold"}},
+			requests:    []*parityRequest{folded},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedFolded(1, "first\r\n second"),
+			difference:  parityDifference{key: "upstream[0].header.X-Parity-Folded", nginx: parityAbsent, front: "first\r\n second"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a folded request forwarded twice",
+			parityCase:  &parityCase{name: "unit", tags: []string{"obs-fold"}},
+			requests:    []*parityRequest{folded},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedFolded(2, "first second"),
+			difference:  parityDifference{key: "upstream.count", nginx: "0", front: "2"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a request with no folded line that nginx refused",
+			parityCase:  &parityCase{name: "unit", tags: []string{"obs-fold"}},
+			requests:    []*parityRequest{apiGet},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedFolded(1, "first second"),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a folded line in a case not written for it",
+			requests:    []*parityRequest{folded},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedFolded(1, "first second"),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the front's answer to an HTTP/1.0 request with Transfer-Encoding, which nginx refuses",
+			parityCase: &parityCase{name: "unit", tags: []string{"http10-transfer-encoding"}},
+			requests:   []*parityRequest{http10Chunked, innerRequest},
+			nginx:      http10Refused,
+			front:      append(forwarded(bodiless, inner), [2]string{"response[1].status", "200"}),
+			difference: parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantId:     "http10-transfer-encoding",
+		},
+		{
+			name:       "the request where its body would be, reaching the upstream as its own",
+			parityCase: &parityCase{name: "unit", tags: []string{"http10-transfer-encoding"}},
+			requests:   []*parityRequest{http10Chunked, innerRequest},
+			nginx:      http10Refused,
+			front:      append(forwarded(bodiless, inner), [2]string{"response[1].status", "200"}),
+			difference: parityDifference{key: "response[1].error", nginx: "eof", front: parityAbsent},
+			wantId:     "http10-transfer-encoding",
+		},
+		{
+			name:        "the request where its body would be, forwarded as that body",
+			parityCase:  &parityCase{name: "unit", tags: []string{"http10-transfer-encoding"}},
+			requests:    []*parityRequest{http10Chunked, innerRequest},
+			nginx:       http10Refused,
+			front:       forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "GET /inner HTTP/1.1\r\n\r\n", framing: "length 23"}),
+			difference:  parityDifference{key: "upstream[0].body", nginx: parityAbsent, front: `"GET /inner HTTP/1.1\r\n\r\n"`},
+			wantUnnamed: true,
+		},
+		{
+			name:        "the HTTP/1.0 request forwarded chunked",
+			parityCase:  &parityCase{name: "unit", tags: []string{"http10-transfer-encoding"}},
+			requests:    []*parityRequest{http10Chunked, innerRequest},
+			nginx:       http10Refused,
+			front:       append(forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "", framing: "chunked"}, inner), [2]string{"response[1].status", "200"}),
+			difference:  parityDifference{key: "upstream[0].framing", nginx: parityAbsent, front: "chunked"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "an HTTP/1.1 request with Transfer-Encoding in the case",
+			parityCase:  &parityCase{name: "unit", tags: []string{"http10-transfer-encoding"}},
+			requests:    []*parityRequest{&http11Chunked, innerRequest},
+			nginx:       http10Refused,
+			front:       append(forwarded(bodiless, inner), [2]string{"response[1].status", "200"}),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "an HTTP/1.0 request with Transfer-Encoding in a case not written for it",
+			requests:    []*parityRequest{http10Chunked, innerRequest},
+			nginx:       http10Refused,
+			front:       append(forwarded(bodiless, inner), [2]string{"response[1].status", "200"}),
 			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
 			wantUnnamed: true,
 		},

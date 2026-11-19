@@ -921,6 +921,38 @@ func parityCorpus() []*parityCase {
 			}),
 		},
 		{name: "limits/head-method", request: parityWith(api, http.MethodHead)},
+		// a header line continued on a line that starts with a space, which
+		// Go's server unfolds
+		{name: "limits/obs-fold", request: parityWith(api, "", [2]string{"X-Parity-Folded", "first\r\n second"}), tags: []string{"obs-fold"}},
+		// an HTTP/1.0 request with Transfer-Encoding, which Go's server reads
+		// as bodiless, then a whole request where its body would be
+		{
+			name: "limits/http10-transfer-encoding",
+			run: func(run *parityCaseRun) {
+				http10Request := &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodPost, target: "/upload", host: parityApiName, proto: "HTTP/1.0", keepalive: true, headers: [][2]string{{"Connection", "keep-alive"}, {"Transfer-Encoding", "chunked"}}}
+				innerRequest := parityGet(parityApiName, parityApiName, "/inner")
+				http10Sequence := run.sequence()
+				conn, err := run.dial(http10Request, http10Sequence)
+				if err != nil {
+					return
+				}
+				defer conn.close()
+				innerSequence := run.sequence()
+				message := append(conn.h1Head(http10Request, http10Sequence), conn.h1Head(innerRequest, innerSequence)...)
+				if _, err := conn.conn.Write(message); err != nil {
+					run.recordResponse(http10Sequence, nil, err)
+					return
+				}
+				response, err := conn.readH1Response(http10Request.method)
+				run.recordResponse(http10Sequence, response, err)
+				if err != nil {
+					return
+				}
+				response, err = conn.readH1Response(innerRequest.method)
+				run.recordResponse(innerSequence, response, err)
+			},
+			tags: []string{"http10-transfer-encoding"},
+		},
 		{name: "limits/options-asterisk", request: parityWith(parityGet(parityApiName, parityApiName, "*"), http.MethodOptions)},
 
 		// gzip of text/html
