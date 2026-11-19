@@ -36,7 +36,7 @@ func publicUdpTestConnectApiSettings() PublicUdpSettings {
 // protocol-authority.
 func TestPublicUdpConnectApiTargetIsAccepted(t *testing.T) {
 	hosts := []*host{{name: "edge-synthetic"}}
-	requests, reason := publicUdpRequests(publicUdpTestConnectApiSettings(), hosts)
+	requests, reason := publicUdpRequests(publicUdpTestConnectApiSettings(), DefaultPublicUdpProbeSettings(), hosts)
 	if reason != "" {
 		t.Fatalf("a connect api target was refused: %s", reason)
 	}
@@ -74,7 +74,7 @@ func TestPublicUdpProtocolAuthorityAcceptsOnlyServedFronts(t *testing.T) {
 	for _, c := range cases {
 		settings := publicUdpTestConnectApiSettings()
 		settings.Targets[0].Service, settings.Targets[0].Front = c.service, c.front
-		requests, reason := publicUdpRequests(settings, hosts)
+		requests, reason := publicUdpRequests(settings, DefaultPublicUdpProbeSettings(), hosts)
 		if reason != c.reason || (reason == "") != (len(requests) == 2) {
 			t.Errorf("service %s front %s: reason %q with %d requests, want %q", c.service, c.front, reason, len(requests), c.reason)
 		}
