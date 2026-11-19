@@ -8,12 +8,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 )
 
-// NewPublicUdpSignal implements SIGNALS.md §16.9. Enrollment is explicit;
-// successful checks prove an exact authenticated transport return path only.
+// NewPublicUdpSignal implements SIGNALS.md §16.9. Enrollment is explicit.
+// A successful check proves an exact authenticated transport return path, and
+// for a connect api front also one /hello the api answered through it.
 func NewPublicUdpSignal() Signal {
 	return &signalAdapter{number: "16.9", key: "public-udp", name: "Exact public UDP/QUIC return path", probe: publicUdpProbe{settings: DefaultPublicUdpProbeSettings()}}
 }
@@ -121,7 +123,17 @@ func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	return findings, nil
 }
 
+// The base finding of one enrolled family row. A connect api row's texts
+// cover its /hello as well as its handshake.
 func publicUdpPathFinding(request PublicUdpRequest, class string) finding {
+	mechanism := "A fresh bounded socket sends protocol-appropriate QUIC to the pinned public tuple. Exact wire-source filtering precedes any DNS translation, and normal TLS certificate/SNI verification is required. Connect H3 is custom QUIC, not HTTP/3; an api front, Alt's or connect's lb_alt front, negotiates h3."
+	baseline := "The enrolled family/carrier completes a fresh authenticated handshake with positive sent/received wire evidence from the exact requested address and port."
+	contextText := "This proves the selected transport path only, not provider authentication, API/application success, egress delivery or the exact DNAT generation. An explicitly published Alt direct UDP port is not a Connect-private listener leak. Explicit enrollment is not an exhaustive dynamic fleet census."
+	if publicUdpCompletesApiRequest(request) {
+		mechanism += " Connect's api front forwards api requests to the api blocks, so its handshake proves nothing about the api behind it: the same attempt then sends one unauthenticated GET /hello over HTTP/3 and requires the api's answer."
+		baseline += " The front then answers /hello with 200 and a JSON object in the api's shape for the probed family."
+		contextText = "This proves the selected transport path and one unauthenticated /hello answered through the front by an api block, not provider authentication, authenticated API success, egress delivery or the exact DNAT generation. Explicit enrollment is not an exhaustive dynamic fleet census."
+	}
 	return finding{
 		// Healthy resolution matches target independently of frame. Keep each
 		// family/protocol in the target so one healthy path cannot clear another.
@@ -129,10 +141,10 @@ func publicUdpPathFinding(request PublicUdpRequest, class string) finding {
 		target:    request.Host + "/public-udp/" + request.Target + "/" + request.Family + "/" + request.Service + "/" + request.Front + "/" + request.Carrier,
 		frame:     "family=" + request.Family + " service=" + request.Service + " front=" + request.Front + " carrier=" + request.Carrier,
 		sustain:   1,
-		mechanism: "A fresh bounded socket sends protocol-appropriate QUIC to the pinned public tuple. Exact wire-source filtering precedes any DNS translation, and normal TLS certificate/SNI verification is required. Connect H3 is custom QUIC, not HTTP/3; only an enrolled Alt API front negotiates h3.",
-		baseline:  "The enrolled family/carrier completes a fresh authenticated handshake with positive sent/received wire evidence from the exact requested address and port.",
-		evidence:  "Only fixed status and bounded packet counts are retained. Pinned addresses, TLS names, DNS suffixes, packet bytes, attempt correlation tokens and raw errors are private. Unsolicited or mismatched datagrams alone cannot identify an SNAT fault.",
-		context:   "This proves the selected transport path only, not provider authentication, API/application success, egress delivery or the exact DNAT generation. An explicitly published Alt direct UDP port is not a Connect-private listener leak. Explicit enrollment is not an exhaustive dynamic fleet census.",
+		mechanism: mechanism,
+		baseline:  baseline,
+		evidence:  "Only fixed status, an HTTP status code and bounded packet counts are retained. Pinned addresses, TLS names, DNS suffixes, packet bytes, response bodies, attempt correlation tokens and raw errors are private. Unsolicited or mismatched datagrams alone cannot identify an SNAT fault.",
+		context:   contextText,
 		action:    "Correlate this exact private family/carrier with its enrollment, observer route, certificate authority and admitted remote listener before attributing a router or NAT cause. Do not contact excluded/shared endpoints or substitute DNS, ping, TCP, HTTPS or a static permit as proof.",
 		verify:    "Require a later fresh authenticated handshake from the exact requested tuple on every admitted configured family. Missing capability, missing family route, cancellation or partial inventory remains unknown, never recovery.",
 		playbook:  "SIGNALS.md §16.9 and §14.5",
@@ -147,20 +159,36 @@ func publicUdpUnknown(request PublicUdpRequest, reason string) finding {
 }
 
 // Evaluates one attempt against the pass's settings, the same bounds its
-// transport ran under.
+// transport ran under. A connect api row is healthy only when its /hello
+// completed with 200 and the api's answer; a failed /hello after an exact
+// authenticated handshake is its own application finding, and resolves no
+// other class of the row, since its result is not a complete one.
 func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservation, err error, settings *PublicUdpProbeSettings) []finding {
 	unknown := func(reason string) []finding { return []finding{publicUdpUnknown(request, reason)} }
 	if observation.Failure == PublicUdpFailureSource {
 		return unknown("source-unavailable")
 	}
+	apiRequest := publicUdpCompletesApiRequest(request)
 	if observation.AttemptId != request.AttemptId || observation.RequestedTuple != publicUdpTuple(request) ||
 		observation.SentPackets < 0 || observation.SentPackets > settings.MaxPacketCount ||
 		observation.ReceivedPackets < 0 || observation.ReceivedPackets > settings.MaxPacketCount ||
 		observation.UnexpectedPackets < 0 || observation.UnexpectedPackets > settings.MaxPacketCount-observation.ReceivedPackets ||
 		observation.SentBytes < 0 || observation.SentBytes > settings.MaxByteCount ||
-		observation.ReceivedBytes < 0 || observation.ReceivedBytes > settings.MaxByteCount {
+		observation.ReceivedBytes < 0 || observation.ReceivedBytes > settings.MaxByteCount ||
+		observation.ApplicationStatus != 0 && (observation.ApplicationStatus < 100 || 599 < observation.ApplicationStatus) ||
+		// a front that ends at its handshake never carries an api request
+		!apiRequest && (observation.ApplicationRequested || observation.ApplicationStatus != 0 || observation.ApplicationContentTypeJson ||
+			observation.ApplicationBodyValid || observation.ApplicationComplete) {
 		return unknown("observation-authority-invalid")
 	}
+	expectedProtocol := ""
+	if request.Front == "api" {
+		expectedProtocol = "h3"
+	}
+	// the complete authenticated exact return a request may ride on
+	transportVerified := observation.FreshSocket && observation.HandshakeComplete && observation.TlsVerified && observation.PeerTuple == observation.RequestedTuple &&
+		observation.NegotiatedProtocol == expectedProtocol && 0 < observation.SentPackets && 0 < observation.SentBytes &&
+		0 < observation.ReceivedPackets && 0 < observation.ReceivedBytes
 	switch observation.Failure {
 	case PublicUdpFailureNone:
 	case PublicUdpFailureRoute, PublicUdpFailureSocket, PublicUdpFailureTls, PublicUdpFailureBudget, PublicUdpFailureConfiguration:
@@ -174,20 +202,39 @@ func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservatio
 		pathFinding.symptom = "A bounded pinned public UDP/QUIC attempt sent traffic but did not complete its authenticated handshake."
 		pathFinding.observed = fmt.Sprintf("verified=false result=%s sent_packets=%d received_packets=%d ignored_unexpected_packets=%d", observation.Failure, observation.SentPackets, observation.ReceivedPackets, observation.UnexpectedPackets)
 		return []finding{pathFinding}
+	case PublicUdpFailureApplication:
+		// Only an exact authenticated handshake with a connect api front
+		// carries the request, so anything less is unknown, never a failure
+		// of the api behind the front.
+		if !apiRequest || !observation.ApplicationRequested || observation.ApplicationComplete || !transportVerified {
+			return unknown("application-outcome-unverified")
+		}
+		applicationFinding := publicUdpPathFinding(request, "public-udp-application")
+		applicationFinding.sustain = 2
+		applicationFinding.symptom = "A connect api front completed its authenticated handshake from the exact public tuple, but its /hello did not return the api's answer."
+		applicationFinding.observed = fmt.Sprintf(
+			"verified=false result=%s application_status=%d application_json=%t application_body_valid=%t sent_packets=%d received_packets=%d",
+			observation.Failure, observation.ApplicationStatus, observation.ApplicationContentTypeJson, observation.ApplicationBodyValid,
+			observation.SentPackets, observation.ReceivedPackets,
+		)
+		applicationFinding.action = "The authenticated QUIC path from the exact tuple works, so look behind it: check that connect's front on this interface routes the api name over h3 and that its api upstream blocks are ready, then read the api's own errors. An application_status of 0 means no answer arrived within the attempt bound; 502, 503 or 504 point at the front's forward to the api; any other status at the api. Do not treat this as a UDP, NAT or certificate fault."
+		applicationFinding.verify = "Require a later fresh attempt from the exact requested tuple whose /hello completes with 200 and the api's JSON shape on every admitted family. A handshake-only success, missing capability or cancellation remains unknown, never recovery."
+		return []finding{applicationFinding}
 	default:
 		return unknown("observation-authority-invalid")
 	}
-	expectedProtocol := ""
-	if request.Front == "api" {
-		expectedProtocol = "h3"
-	}
-	if err != nil || !observation.FreshSocket || !observation.HandshakeComplete || !observation.TlsVerified || observation.PeerTuple != observation.RequestedTuple ||
-		observation.NegotiatedProtocol != expectedProtocol || observation.SentPackets == 0 || observation.SentBytes == 0 ||
-		observation.ReceivedPackets == 0 || observation.ReceivedBytes == 0 {
+	if err != nil || !transportVerified {
 		return unknown("authenticated-exact-return-unverified")
 	}
+	if apiRequest && (!observation.ApplicationRequested || !observation.ApplicationComplete || observation.ApplicationStatus != http.StatusOK ||
+		!observation.ApplicationContentTypeJson || !observation.ApplicationBodyValid) {
+		return unknown("application-outcome-unverified")
+	}
 	findings := []finding{}
-	for _, class := range []string{"public-udp-path", "public-udp-observation"} {
+	for _, class := range []string{"public-udp-path", "public-udp-observation", "public-udp-application"} {
+		if class == "public-udp-application" && !apiRequest {
+			continue
+		}
 		finding := publicUdpPathFinding(request, class)
 		finding.healthy = true
 		findings = append(findings, finding)

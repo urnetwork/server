@@ -653,6 +653,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"proxy-transport-budget-isolation":                    incidentAlertClass,
 	"proxy-transport-preemption-churn":                    incidentAlertClass,
 	"proxy-udp-receive-drops":                             incidentAlertClass,
+	"public-udp-application":                              incidentAlertClass,
 	"public-udp-path":                                     incidentAlertClass,
 	"pubsub-conn-shape":                                   incidentAlertClass,
 	"pubsub-drops":                                        incidentAlertClass,

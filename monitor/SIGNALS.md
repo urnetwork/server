@@ -42329,8 +42329,9 @@ or service-port authority.
 Enrollment is explicit in `public_udp`: `enabled`, an independent
 `expected_targets` logical-row count, and `targets`. Each target names a stable
 nonsecret `name`, an existing enabled `host`, `interface`, `service`
-(`connect` or `alt`), `alias`, `front` (`connect` or Alt `api`), `carrier`
-(`quic`, `dns`, `dns-pump`), `families` (`ipv4`, `ipv6`), the exact configured
+(`connect` or `alt`), `alias`, `front` (`connect` or `api`, under either
+service: Alt serves both, and so does connect's lb_alt front, LBALT.md D3),
+`carrier` (`quic`, `dns`, `dns-pump`), `families` (`ipv4`, `ipv6`), the exact configured
 `ipv4_address` / `ipv6_address`, public `port`, TLS `server_name`, and an
 explicit canonical trailing-dot `dns_tld` only for the DNS carriers. No DNS
 resolver chooses a convenient address. Missing family pins, duplicate logical
@@ -42343,22 +42344,39 @@ with current desired service/alias intent before arming.
 Every declared family row gets a fresh bounded socket and private attempt
 correlation token. The native adapter performs QUIC `Dial`, not early-data
 admission. It uses the exact pinned numeric destination, correct SNI and normal
-certificate verification; only Alt's API front offers `h3`. Connect H3 is
-custom QUIC, not HTTP/3. DNS modes use the existing native packet-translation
-codec, not a generic UDP DNS query. A raw packet boundary below translation
-filters the complete source address and port before QUIC sees a datagram.
-Unexpected tuples are discarded and counted, never accepted as authenticated
-return evidence or treated alone as proof of an SNAT root cause.
+certificate verification. An `api` front offers `h3`, Alt's and connect's
+lb_alt front alike; Connect H3 is custom QUIC, not HTTP/3. DNS modes use the
+existing native packet-translation codec, not a generic UDP DNS query. A raw
+packet boundary below translation filters the complete source address and port
+before QUIC sees a datagram. Unexpected tuples are discarded and counted, never
+accepted as authenticated return evidence or treated alone as proof of an SNAT
+root cause.
+
+A row with service `connect` and front `api` then sends one `GET /hello` over
+HTTP/3 on the same connection, within the same attempt bound (LBALT.md D17).
+Connect's front forwards api requests to the api blocks, so its handshake
+proves nothing about the api behind it. Alt's `api` front embeds the api, and
+it and every `connect` front keep ending at the handshake. `/hello` needs no
+authentication and no database. Only a 200 whose every Content-Type is
+`application/json`, with a body that is one JSON object whose `client_address`
+is an address and port of the probed family, completes the request. The h3
+client lets the server open its control stream and both QPACK streams (RFC
+9114 §6.2, RFC 9204 §4.2), which the handshake-only rows never allow. The
+answer's header and body are bounded; the body, and the observer address it
+echoes, are never retained, only the HTTP status and fixed booleans.
 
 Healthy requires matching attempt and requested tuple, a fresh socket,
 completed authenticated handshake, expected negotiated protocol and positive
-bounded raw sent/received evidence from that exact peer. This proves only the
-transport return path. It does not prove provider authentication, API request
-success, application egress, client election or the serving DNAT generation;
-those layers remain separate §14.5 checks. No HTTP request, provider request,
-DNS lookup, SSH/router observation or credential enrollment is performed.
-Alt direct external UDP ports are evaluated as explicitly enrolled Alt paths,
-not misclassified as leaked Connect-private ports.
+bounded raw sent/received evidence from that exact peer, and for a connect
+`api` row also its completed `/hello`. A handshake-only row proves only the
+transport return path. A connect `api` row also proves one unauthenticated
+`/hello` answered through the front by an api block. Neither proves provider
+authentication, authenticated API success, application egress, client election
+or the serving DNAT generation; those layers remain separate §14.5 checks.
+Apart from that one `/hello`, no HTTP request is made, and no provider request,
+DNS lookup, SSH/router observation or credential enrollment either. Alt direct
+external UDP ports are evaluated as explicitly enrolled Alt paths, not
+misclassified as leaked Connect-private ports.
 
 The bounds are `PublicUdpProbeSettings` (`DefaultPublicUdpProbeSettings`): a
 five-minute cadence; at most 32 logical rows, which expand into 64 family
@@ -42383,12 +42401,37 @@ packet evidence.
 | --- | --- | --- |
 | `public-udp-inventory` | Declared matrix invalid or incomplete; no path contacted | WARN, 1; never automatic PAGE |
 | `public-udp-path` | A fresh correlated bounded attempt sent bytes but did not complete its authenticated QUIC handshake | WARN, 2 consecutive evaluations; no time-only PAGE |
-| `public-udp-observation` | Source capability, observer family route/socket, TLS authority, packet budget, correlation or complete authenticated evidence is missing/invalid | WARN, 1; never automatic PAGE |
+| `public-udp-application` | A connect `api` row completed its fresh, exact, authenticated handshake, but its `/hello` returned no valid api answer: a status other than 200, a Content-Type other than JSON, a body outside the api's shape or past its bound, or no answer within the attempt | WARN, 2 consecutive evaluations; no time-only PAGE |
+| `public-udp-observation` | Source capability, observer family route/socket, TLS authority, packet budget, correlation, application evidence (any from a handshake-only row, or a connect `api` row's without a completed request or verified handshake) or complete authenticated evidence is missing/invalid | WARN, 1; never automatic PAGE |
+
+Reasons are fixed domains. `public-udp-inventory` reports
+`inventory_complete=false reason=` one of `probe-settings`,
+`target-denominator`, `target-identity`, `path-identity`, `protocol-authority`,
+`codec-authority`, `family-denominator`, `family-address`, `duplicate-path` or
+`unprobed-family`. `public-udp-path` reports the `handshake-timeout` or
+`handshake-failed` result with bounded packet counts. `public-udp-application`
+reports `result=application-failed` with `application_status` (0 when no answer
+arrived), `application_json`, `application_body_valid` and bounded packet
+counts. `public-udp-observation` reports `verified=false reason=` one of
+`source-unavailable`, `attempt-authority-unavailable`,
+`observation-authority-invalid`, `observer-route-unavailable`,
+`socket-unavailable`, `tls-authentication-unverified`, `wire-budget-exhausted`,
+`configuration-invalid`, `handshake-outcome-unverified`,
+`application-outcome-unverified` or `authenticated-exact-return-unverified`.
+
+On `public-udp-application` the authenticated QUIC path from the exact tuple
+works, so look behind it: whether connect's front on that interface routes the
+api name over h3, whether its api upstream blocks are ready, then the api's own
+errors. Status 0 means no answer arrived within the attempt bound; 502, 503 or
+504 point at the front's forward to the api; any other status at the api. It
+is not a UDP, NAT or certificate fault.
 
 Configured sustain is not two-sample evidence by itself. Each family and
 protocol owns a distinct target, so healthy IPv4 cannot resolve failed IPv6.
 Only a fresh fully verified result supplies transport recovery; missing
-evidence and non-emission do not. Overall monitor cancellation joins workers
+evidence and non-emission do not. A connect `api` row with a failed `/hello`
+reports only `public-udp-application`; no class of the row resolves until a
+`/hello` completes. Overall monitor cancellation joins workers
 and publishes no partial findings. A per-attempt expired source cannot return
 late positive evidence as healthy. Alternate `SignalSettings.Source` must
 implement `PublicUdpSignalSource` explicitly and honor cancellation; absence
@@ -42404,7 +42447,13 @@ raw endpoints, TLS names, codec suffixes, packets, tokens and errors.
 Deterministic acceptance controls cover complete and partial enrollment,
 source absence, source/deadline cancellation, wrong attempts/tuples, protocol
 and TLS authority, per-family recovery isolation, exclusion/shared endpoint
-guards, privacy and bounded packet correlation. Native QUIC/TLS and all DNS
+guards, privacy and bounded packet correlation. The connect `api` controls run
+`/hello` over HTTP/3 on every carrier in both families against a recording
+synthetic api, and cover answers outside the api's shape, the header and body
+bounds, cancellation during the request, a failed `/hello` as its own finding,
+and health only with a completed request. The settings controls show one
+instance bounding the matrix, the worker pool, each attempt's deadline, the
+wire budgets and the validation of reported counts. Native QUIC/TLS and all DNS
 codec controls use a synthetic in-memory packet network and generated test
 certificates, not production probes. Runtime enrollment or deployment still
 requires the normal separately authorized settings and watcher workflow.
@@ -42464,10 +42513,11 @@ status/outcome/count aggregates and evidence hashes in alerts, never JWTs,
 provider identities or response bodies.
 
 This extension remains a detector/coverage requirement. The existing
-`public-udp` implementation still measures authenticated transport only;
-source documentation and local controls do not implement or activate these
-Alt application/generation checks, supply production enrollment, or close the
-user's incident.
+`public-udp` implementation still measures authenticated transport only on
+Alt's rows; its `/hello` covers connect's lb_alt api front, which forwards to
+the ordinary api blocks, not Alt's embedded api. Source documentation and local
+controls do not implement or activate these Alt application/generation checks,
+supply production enrollment, or close the user's incident.
 
 ## 17. Subtensor RPC gateway (snow)
 

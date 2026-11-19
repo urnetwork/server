@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,16 +36,25 @@ func publicUdpTestSettings(source SignalSource) SignalSettings {
 	return settings
 }
 
+// A complete healthy attempt; a connect api front's also completed /hello.
 func publicUdpTestHealthy(request PublicUdpRequest) PublicUdpObservation {
 	protocol := ""
 	if request.Front == "api" {
 		protocol = "h3"
 	}
-	return PublicUdpObservation{
+	observation := PublicUdpObservation{
 		AttemptId: request.AttemptId, RequestedTuple: publicUdpTuple(request), PeerTuple: publicUdpTuple(request),
 		FreshSocket: true, HandshakeComplete: true, TlsVerified: true, NegotiatedProtocol: protocol,
 		SentPackets: 2, SentBytes: 2400, ReceivedPackets: 2, ReceivedBytes: 2400,
 	}
+	if publicUdpCompletesApiRequest(request) {
+		observation.ApplicationRequested = true
+		observation.ApplicationStatus = http.StatusOK
+		observation.ApplicationContentTypeJson = true
+		observation.ApplicationBodyValid = true
+		observation.ApplicationComplete = true
+	}
+	return observation
 }
 
 func TestPublicUdpCompleteConfiguredMatrixAndFreshAttempts(t *testing.T) {
@@ -353,5 +364,219 @@ func TestPublicUdpLatePositiveSourceCannotOutliveAttemptAuthority(t *testing.T) 
 	}
 	if unknown != 2 {
 		t.Fatal("each expired attempt must retain its own unknown boundary")
+	}
+}
+
+// One connect api row in both families, the pair LBALT adds: connect's
+// lb_alt front serves the api names over h3 and forwards them to the api.
+func publicUdpTestConnectApiSignalSettings(source SignalSource) SignalSettings {
+	settings := publicUdpTestSettings(source)
+	target := &settings.PublicUdp.Targets[0]
+	target.Name, target.Front, target.ServerName = "synthetic-connect-api", "api", "api.synthetic.example"
+	return settings
+}
+
+// A failed /hello after an exact authenticated handshake is its own finding:
+// the application class, with the api's status, held for two evaluations.
+// It is neither an unknown observation nor recovery of any class of the row.
+func TestPublicUdpFailedHelloIsItsOwnApplicationFinding(t *testing.T) {
+	source := &publicUdpTestSource{syntheticSource: &syntheticSource{}, observe: func(_ context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
+		observed := publicUdpTestHealthy(request)
+		observed.ApplicationStatus, observed.ApplicationBodyValid, observed.ApplicationComplete = http.StatusServiceUnavailable, false, false
+		observed.Failure = PublicUdpFailureApplication
+		return observed, nil
+	}}
+	settings := publicUdpTestConnectApiSignalSettings(source)
+	alerts, err := NewPublicUdpSignal().Run(context.Background(), settings)
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("a failed /hello in both families gave %d alerts: %v", len(alerts), err)
+	}
+	for _, alert := range alerts {
+		if alert.Class != "public-udp-application" || alert.Sustain != 2 || alert.PageSustain != 0 {
+			t.Fatalf("a failed /hello was reported as %s with sustain %d", alert.Class, alert.Sustain)
+		}
+		if !strings.Contains(alert.Observed, "result=application-failed application_status=503") || !strings.Contains(alert.Mechanism, "/hello") {
+			t.Fatalf("the application finding lost its outcome: %s / %s", alert.Observed, alert.Mechanism)
+		}
+		requireAlertOmits(t, alert, "192.0.2.20", "2001:db8::20", "api.synthetic.example")
+	}
+	env, err := newProbeEnv(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := (publicUdpProbe{}).check(context.Background(), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range findings {
+		if result.healthy && result.class != "public-udp-inventory" {
+			t.Fatalf("a failed /hello resolved %s of its row", result.class)
+		}
+	}
+}
+
+// Only an exact authenticated handshake with a connect api front carries a
+// /hello, so an application failure without one, or from any other front,
+// is unknown rather than a failure of the api.
+func TestPublicUdpApplicationFailureNeedsAnExactAuthenticatedHandshake(t *testing.T) {
+	request := PublicUdpRequest{
+		AttemptId: "synthetic-attempt", Host: "edge-synthetic", Target: "synthetic", Family: "ipv4", Service: "connect", Front: "api", Carrier: "quic",
+		Address: "192.0.2.20", Port: 443, ServerName: "api.synthetic.example",
+	}
+	failed := func(request PublicUdpRequest) PublicUdpObservation {
+		observed := publicUdpTestHealthy(request)
+		observed.ApplicationRequested, observed.ApplicationStatus, observed.ApplicationComplete = true, 0, false
+		observed.ApplicationContentTypeJson, observed.ApplicationBodyValid = false, false
+		observed.Failure = PublicUdpFailureApplication
+		return observed
+	}
+	if findings := publicUdpFindings(request, failed(request), errors.New("synthetic"), DefaultPublicUdpProbeSettings()); len(findings) != 1 ||
+		findings[0].healthy || findings[0].class != "public-udp-application" || findings[0].sustain != 2 {
+		t.Fatalf("an unanswered /hello after a verified handshake gave %+v", findings)
+	}
+	altApi := request
+	altApi.Service = "alt"
+	cases := []struct {
+		name    string
+		request PublicUdpRequest
+		mutate  func(*PublicUdpObservation)
+		reason  string
+	}{
+		{name: "no request", request: request, mutate: func(observed *PublicUdpObservation) { observed.ApplicationRequested = false }, reason: "application-outcome-unverified"},
+		{name: "a completed request", request: request, mutate: func(observed *PublicUdpObservation) { observed.ApplicationComplete = true }, reason: "application-outcome-unverified"},
+		{name: "an unverified certificate", request: request, mutate: func(observed *PublicUdpObservation) { observed.TlsVerified = false }, reason: "application-outcome-unverified"},
+		{name: "an incomplete handshake", request: request, mutate: func(observed *PublicUdpObservation) { observed.HandshakeComplete = false }, reason: "application-outcome-unverified"},
+		{name: "another peer", request: request, mutate: func(observed *PublicUdpObservation) { observed.PeerTuple = "192.0.2.21:443" }, reason: "application-outcome-unverified"},
+		{name: "no h3", request: request, mutate: func(observed *PublicUdpObservation) { observed.NegotiatedProtocol = "" }, reason: "application-outcome-unverified"},
+		{name: "nothing received", request: request, mutate: func(observed *PublicUdpObservation) { observed.ReceivedPackets, observed.ReceivedBytes = 0, 0 }, reason: "application-outcome-unverified"},
+		{name: "a reused socket", request: request, mutate: func(observed *PublicUdpObservation) { observed.FreshSocket = false }, reason: "application-outcome-unverified"},
+		{name: "an impossible status", request: request, mutate: func(observed *PublicUdpObservation) { observed.ApplicationStatus = 700 }, reason: "observation-authority-invalid"},
+		{name: "alt's api front", request: altApi, mutate: func(*PublicUdpObservation) {}, reason: "observation-authority-invalid"},
+	}
+	for _, c := range cases {
+		observed := failed(c.request)
+		c.mutate(&observed)
+		findings := publicUdpFindings(c.request, observed, nil, DefaultPublicUdpProbeSettings())
+		if len(findings) != 1 || findings[0].healthy || findings[0].class != "public-udp-observation" || findings[0].observed != "verified=false reason="+c.reason {
+			t.Errorf("%s: %+v", c.name, findings)
+		}
+	}
+}
+
+// A connect api row is healthy only when its /hello completed with 200 and
+// the api's JSON shape, and then every class of the row resolves, its
+// application class included. A handshake alone is unknown, never health.
+func TestPublicUdpConnectApiHealthRequiresACompletedHello(t *testing.T) {
+	request := PublicUdpRequest{
+		AttemptId: "synthetic-attempt", Host: "edge-synthetic", Target: "synthetic", Family: "ipv6", Service: "connect", Front: "api", Carrier: "dns",
+		Address: "2001:db8::20", Port: 53, ServerName: "api.synthetic.example", DnsTld: "codec.synthetic.example.",
+	}
+	findings := publicUdpFindings(request, publicUdpTestHealthy(request), nil, DefaultPublicUdpProbeSettings())
+	classes := []string{}
+	for _, result := range findings {
+		if !result.healthy {
+			t.Fatalf("a completed /hello gave %s %s", result.class, result.observed)
+		}
+		classes = append(classes, result.class)
+	}
+	if strings.Join(classes, ",") != "public-udp-path,public-udp-observation,public-udp-application" {
+		t.Fatalf("a completed /hello resolved %v", classes)
+	}
+	for _, mutate := range []func(*PublicUdpObservation){
+		func(observed *PublicUdpObservation) {
+			observed.ApplicationRequested, observed.ApplicationStatus, observed.ApplicationComplete = false, 0, false
+			observed.ApplicationContentTypeJson, observed.ApplicationBodyValid = false, false
+		},
+		func(observed *PublicUdpObservation) { observed.ApplicationComplete = false },
+		func(observed *PublicUdpObservation) { observed.ApplicationStatus = http.StatusInternalServerError },
+		func(observed *PublicUdpObservation) { observed.ApplicationStatus = http.StatusNoContent },
+		func(observed *PublicUdpObservation) { observed.ApplicationContentTypeJson = false },
+		func(observed *PublicUdpObservation) { observed.ApplicationBodyValid = false },
+		func(observed *PublicUdpObservation) { observed.ApplicationRequested = false },
+	} {
+		observed := publicUdpTestHealthy(request)
+		mutate(&observed)
+		findings := publicUdpFindings(request, observed, nil, DefaultPublicUdpProbeSettings())
+		if len(findings) != 1 || findings[0].healthy || findings[0].observed != "verified=false reason=application-outcome-unverified" {
+			t.Fatalf("an incomplete /hello claimed health: %+v", findings)
+		}
+	}
+}
+
+// A front that ends at its handshake carries no application evidence, so a
+// source reporting some for it is not to be believed.
+func TestPublicUdpHandshakeOnlyFrontCarriesNoApplicationEvidence(t *testing.T) {
+	for _, path := range []struct{ service, front string }{{service: "connect", front: "connect"}, {service: "alt", front: "connect"}, {service: "alt", front: "api"}} {
+		request := PublicUdpRequest{
+			AttemptId: "synthetic-attempt", Host: "edge-synthetic", Target: "synthetic", Family: "ipv4", Service: path.service, Front: path.front, Carrier: "quic",
+			Address: "192.0.2.20", Port: 443, ServerName: "connect.synthetic.example",
+		}
+		if findings := publicUdpFindings(request, publicUdpTestHealthy(request), nil, DefaultPublicUdpProbeSettings()); len(findings) != 2 {
+			t.Fatalf("%s/%s: a verified handshake gave %d findings", path.service, path.front, len(findings))
+		}
+		for _, mutate := range []func(*PublicUdpObservation){
+			func(observed *PublicUdpObservation) { observed.ApplicationRequested = true },
+			func(observed *PublicUdpObservation) { observed.ApplicationStatus = http.StatusOK },
+			func(observed *PublicUdpObservation) { observed.ApplicationComplete = true },
+		} {
+			observed := publicUdpTestHealthy(request)
+			mutate(&observed)
+			findings := publicUdpFindings(request, observed, nil, DefaultPublicUdpProbeSettings())
+			if len(findings) != 1 || findings[0].healthy || findings[0].observed != "verified=false reason=observation-authority-invalid" {
+				t.Fatalf("%s/%s: application evidence from a handshake-only front gave %+v", path.service, path.front, findings)
+			}
+		}
+	}
+}
+
+// A connect api row's texts describe its /hello, and no row's mechanism
+// still says only Alt's api front negotiates h3.
+func TestPublicUdpFindingTextsDescribeTheHello(t *testing.T) {
+	apiRequest := PublicUdpRequest{Host: "edge-synthetic", Target: "synthetic", Family: "ipv4", Service: "connect", Front: "api", Carrier: "quic"}
+	handshakeRequest := apiRequest
+	handshakeRequest.Front = "connect"
+	apiFinding := publicUdpPathFinding(apiRequest, "public-udp-path")
+	handshakeFinding := publicUdpPathFinding(handshakeRequest, "public-udp-path")
+	if !strings.Contains(apiFinding.mechanism, "GET /hello") || !strings.Contains(apiFinding.baseline, "/hello") ||
+		!strings.Contains(apiFinding.context, "/hello answered through the front") || strings.Contains(apiFinding.context, "API/application success") {
+		t.Fatalf("a connect api row's texts do not describe its /hello: %+v", apiFinding)
+	}
+	if strings.Contains(handshakeFinding.mechanism, "/hello") || !strings.Contains(handshakeFinding.context, "transport path only") {
+		t.Fatalf("a handshake-only row's texts claim a /hello: %+v", handshakeFinding)
+	}
+	for _, text := range []string{apiFinding.mechanism, handshakeFinding.mechanism} {
+		if strings.Contains(text, "only an enrolled Alt API front") {
+			t.Fatalf("a mechanism still says only Alt's api front negotiates h3: %s", text)
+		}
+	}
+}
+
+// SIGNALS.md §16.9 describes the /hello: the application class, the
+// connect api pair, and no claim that no HTTP request is made.
+func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
+	catalog, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(catalog), "\n### 16.9 ")
+	if start < 0 {
+		t.Fatal("SIGNALS.md has no §16.9")
+	}
+	section := string(catalog[start+1:])
+	if end := strings.Index(section, "\n## "); 0 <= end {
+		section = section[:end]
+	}
+	if end := strings.Index(section[1:], "\n### "); 0 <= end {
+		section = section[:end+1]
+	}
+	for _, required := range []string{"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings"} {
+		if !strings.Contains(section, required) {
+			t.Errorf("§16.9 does not say %q", required)
+		}
+	}
+	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)"} {
+		if strings.Contains(section, stale) {
+			t.Errorf("§16.9 still says %q", stale)
+		}
 	}
 }
