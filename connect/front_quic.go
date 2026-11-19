@@ -1,24 +1,38 @@
 package connect
 
 // The front's udp sockets: QUIC on listen.quic_port, and whodis, the same
-// QUIC inside dns messages, on listen.whodis_port (LBALT-IMPL.md §2.8). This
-// is alt's dispatch (alt/alt.go), moved into connect:
+// QUIC inside dns messages, on listen.whodis_port (LBALT-IMPL.md §2.8, §8).
+// This is alt's dispatch (alt/alt.go), moved into connect:
 //
-//   - each socket has its own quic.Transport from connect's handler, so one
-//     unvalidated-handshake limit stands behind every socket of the block
-//     (§4.4.4), and listens with the nginx front's one QUIC TLS config and
-//     connect's QUIC config with early data refused (D9);
-//   - the bound socket is read directly: no PROXY reader, which would trust a
-//     header from any new source (§4.4.1). Whodis decodes it with decode53
-//     under the route table's tlds;
+//   - each group of SocketsPerPort sockets, one interface address and udp
+//     port, feeds one quic.Transport from connect's handler (D22 (b),
+//     LBALT-IMPL.md §8). The quic port's sockets feed it through a
+//     quic.ConnGroup, which reads and writes each socket through quic-go's
+//     own oob path, with batched reads, ECN, the DF bit and GSO. The whodis
+//     port's feed one decode53 translation, with the route table's tlds,
+//     through the whodis fan-in (front_whodis.go). So a flow the kernel
+//     moves to another socket of its group, when a socket is lost or
+//     re-created or a client's NAT rebinds, still reaches its connection;
+//   - one unvalidated-handshake limit stands behind every transport of the
+//     block (§4.4.4), and each listens with the nginx front's one QUIC TLS
+//     config and connect's QUIC config with early data refused (D9);
+//   - the bound sockets are read directly: no PROXY reader, which would trust
+//     a header from any new source (§4.4.1);
 //   - each accepted connection is dispatched by its server name: a connect
-//     name to connect's handler with the socket's carrier, an api name to an
-//     h3 server of the front's H3ApiHandler, each once the handshake proves
-//     the source's address and under the nginx front's per-address
+//     name to connect's handler with the transport's carrier, an api name to
+//     an h3 server of the front's H3ApiHandler, each once the handshake
+//     proves the source's address and under the nginx front's per-address
 //     connection cap (0x1001); any other served name closed with 0x1000. A
 //     name the front doesn't serve, or none, never reaches the dispatch: the
 //     nginx front's QUIC TLS config has no certificate for it, so its
 //     handshake fails, as alt's did.
+//
+// A socket's run is its place in its group (frontQuicSocketRun), supervised
+// like any socket (front_socket.go): a lost socket leaves its group, costing
+// no connection, and its re-creation joins the group's current transport.
+// Each group's transport (frontQuicRun) has a supervisor of its own, which
+// replaces a transport that ends while the front serves, and otherwise closes
+// it in the drain's order.
 //
 // An api connection is bounded before its first request reaches the nginx
 // front's limits: the cap bounds how many one address holds, and the h3
@@ -33,20 +47,23 @@ package connect
 // Each api connection gets an http3.Server of its own. The drain shuts each
 // down gracefully while its transport can still send, which sends one GOAWAY
 // and refuses new streams; every close then closes the servers before the
-// transport. Upstream http3's graceful accept loop spins, one GOAWAY writer per
-// pass, for as long as a connection is closed but not done, whether its client
-// closed it, its idle timeout did or its transport was destroyed: the old
-// alt's exit burst of 700k goroutines (LBALT.md §3.3, D12). The vendored http3
-// ends the loop there instead (third_party/quic-go/URNETWORK.md), so each api
-// connection gets one GOAWAY however it closes. With one server per connection
-// the bounded close of one stuck handler holds nothing else, and no connection
+// transport, and the transport before the group's sockets. Upstream http3's
+// graceful accept loop spins, one GOAWAY writer per pass, for as long as a
+// connection is closed but not done, whether its client closed it, its idle
+// timeout did or its transport was destroyed: the old alt's exit burst of
+// 700k goroutines (LBALT.md §3.3, D12). The vendored http3 ends the loop
+// there instead (third_party/quic-go/URNETWORK.md), so each api connection
+// gets one GOAWAY however it closes. With one server per connection the
+// bounded close of one stuck handler holds nothing else, and no connection
 // waits on another's server.
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -71,12 +88,65 @@ const (
 	frontQuicErrorCodeRateLimited quic.ApplicationErrorCode = 0x1001
 )
 
-// One bound public udp socket and the QUIC it serves.
+// One udp group: the SocketsPerPort sockets of one interface address and udp
+// port kind, and the transport they feed.
+type frontQuicGroup struct {
+	frontServer *frontServer
+	// its first socket's key: the group's interface, family, port kind,
+	// address and port
+	key frontSocketKey
+	// the interface's h3 api handler, set by start
+	apiHandler http.Handler
+
+	// the transport the group's sockets join, guarded by the front server's
+	// stateLock: set by start, and replaced when it is lost
+	run *frontQuicRun
+}
+
+// The group in logs: interface, family, protocol and port kind, with no
+// address.
+func (self *frontQuicGroup) String() string {
+	return fmt.Sprintf("%s/%s/%s/%s", self.key.interfaceName, self.key.family, self.key.protocol, self.key.portKind)
+}
+
+// The group's transport its sockets join now, or nil.
+func (self *frontQuicGroup) currentRun() *frontQuicRun {
+	self.frontServer.stateLock.Lock()
+	defer self.frontServer.stateLock.Unlock()
+	return self.run
+}
+
+// Adds a bound socket to the group's current transport.
+func (self *frontQuicGroup) join(packetConn net.PacketConn) (frontQuicGroupMember, error) {
+	run := self.currentRun()
+	if run == nil {
+		return nil, errors.New("the socket's group has no transport")
+	}
+	return run.join(packetConn)
+}
+
+// One socket's place in its group's transport: a *quic.ConnGroupMember on the
+// quic port, a *frontWhodisFanInMember on the whodis port.
+type frontQuicGroupMember interface {
+	// closed once the socket is no longer read: its read failed, or it or
+	// its group's fan-in was closed
+	Done() <-chan struct{}
+	// the read error that ended the socket, nil for one that was closed
+	Err() error
+	// takes the socket out of its group and closes it
+	Close() error
+}
+
+// One incarnation of a group's transport: the group's fan-in, whodis's
+// translation over it, the quic.Transport and its listener, and the h3
+// servers of its api connections.
 type frontQuicRun struct {
 	frontServer *frontServer
-	socket      *frontSocket
-	packetConn  net.PacketConn
-	// whodis's decode53 translation over packetConn, or nil
+	group       *frontQuicGroup
+	// the quic port's fan-in, or nil
+	connGroup *quic.ConnGroup
+	// the whodis port's fan-in, and the decode53 translation over it, or nil
+	whodisFanIn *frontWhodisFanIn
 	translation net.PacketConn
 	// the translation's lifetime, which ends after the transport's
 	translationCancel context.CancelFunc
@@ -91,8 +161,75 @@ type frontQuicRun struct {
 	closing  bool
 }
 
-// Binds one udp socket and listens for QUIC on it.
-func (self *frontServer) openQuicSocket(socket *frontSocket) (*frontQuicRun, error) {
+// Opens a group's transport, with no socket yet: each socket joins it once
+// bound.
+func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, error) {
+	localAddr := net.UDPAddrFromAddrPort(netip.AddrPortFrom(group.key.address, uint16(group.key.port)))
+	run := &frontQuicRun{
+		frontServer: self,
+		group:       group,
+		apiServers:  map[*http3.Server]bool{},
+	}
+	var servedConn net.PacketConn
+	if group.key.portKind == frontPortWhodis {
+		run.whodisFanIn = newFrontWhodisFanIn(localAddr, self.settings)
+		// the translation outlives the transport, so it can't end the
+		// transport under live connections: only close ends it
+		translationCtx, translationCancel := context.WithCancel(context.Background())
+		ptSettings := connect.DefaultPacketTranslationSettings()
+		ptSettings.DnsTlds = self.whodisTlds
+		translation, err := connect.NewPacketTranslation(
+			translationCtx,
+			connect.PacketTranslationModeDecode53,
+			run.whodisFanIn,
+			ptSettings,
+		)
+		if err != nil {
+			translationCancel()
+			run.whodisFanIn.Close()
+			return nil, err
+		}
+		run.translation = translation
+		run.translationCancel = translationCancel
+		servedConn = translation
+	} else {
+		run.connGroup = quic.NewConnGroup(localAddr)
+		servedConn = run.connGroup
+	}
+	run.quicTransport = self.connectQuic.NewQuicTransport(servedConn)
+	listener, err := run.quicTransport.ListenEarly(self.quicTlsConfig, self.quicConfig)
+	if err != nil {
+		run.quicTransport.Close()
+		run.closeFanIn()
+		return nil, err
+	}
+	run.listener = listener
+	return run, nil
+}
+
+// Adds a bound socket to the transport's fan-in.
+func (self *frontQuicRun) join(packetConn net.PacketConn) (frontQuicGroupMember, error) {
+	if self.whodisFanIn != nil {
+		member, err := self.whodisFanIn.add(packetConn)
+		if err != nil {
+			return nil, err
+		}
+		return member, nil
+	}
+	member, err := self.connGroup.Add(packetConn)
+	if err != nil {
+		return nil, err
+	}
+	return member, nil
+}
+
+// One bound public udp socket, read into its group's transport.
+type frontQuicSocketRun struct {
+	member frontQuicGroupMember
+}
+
+// Binds one udp socket and adds it to its group's transport.
+func (self *frontServer) openQuicSocket(socket *frontSocket) (*frontQuicSocketRun, error) {
 	listenPacket := self.settings.ListenPacket
 	if listenPacket == nil {
 		listenPacket = listenFrontPacket
@@ -108,52 +245,34 @@ func (self *frontServer) openQuicSocket(socket *frontSocket) (*frontQuicRun, err
 	if packetConn == nil {
 		return nil, errors.New("the listen returned no socket")
 	}
-
-	// the translation outlives the transport, so it can't end the transport
-	// under live connections: only close ends it
-	translationCtx, translationCancel := context.WithCancel(context.Background())
-	servedConn := packetConn
-	var translation net.PacketConn
-	if socket.key.portKind == frontPortWhodis {
-		ptSettings := connect.DefaultPacketTranslationSettings()
-		ptSettings.DnsTlds = self.whodisTlds
-		translation, err = connect.NewPacketTranslation(
-			translationCtx,
-			connect.PacketTranslationModeDecode53,
-			packetConn,
-			ptSettings,
-		)
-		if err != nil {
-			translationCancel()
-			packetConn.Close()
-			return nil, err
-		}
-		servedConn = translation
-	}
-	quicTransport := self.connectQuic.NewQuicTransport(servedConn)
-	listener, err := quicTransport.ListenEarly(self.quicTlsConfig, self.quicConfig)
+	member, err := socket.quicGroup.join(packetConn)
 	if err != nil {
-		quicTransport.Close()
-		translationCancel()
-		if translation != nil {
-			translation.Close()
-		}
 		packetConn.Close()
 		return nil, err
 	}
-	return &frontQuicRun{
-		frontServer:       self,
-		socket:            socket,
-		packetConn:        packetConn,
-		translation:       translation,
-		translationCancel: translationCancel,
-		quicTransport:     quicTransport,
-		listener:          listener,
-		apiServers:        map[*http3.Server]bool{},
+	return &frontQuicSocketRun{
+		member: member,
 	}, nil
 }
 
-// Accepts connections until the socket is lost or the front stops, each
+// Waits until the socket is no longer read: its reads failed, or its group's
+// transport closed and closed it. The connections its flows carried are its
+// transport's, not the socket's.
+func (self *frontQuicSocketRun) serve() error {
+	<-self.member.Done()
+	return self.member.Err()
+}
+
+// The drain is the group's transport's (frontQuicRun.beginDrain).
+func (self *frontQuicSocketRun) beginDrain(drainCtx context.Context) {
+}
+
+// Takes the socket out of its group and closes it.
+func (self *frontQuicSocketRun) close() {
+	self.member.Close()
+}
+
+// Accepts connections until the transport ends or the front stops, each
 // dispatched on its own goroutine.
 func (self *frontQuicRun) serve() error {
 	for {
@@ -167,10 +286,10 @@ func (self *frontQuicRun) serve() error {
 	}
 }
 
-// The carrier connect's resident sees for a connection of this socket
+// The carrier connect's resident sees for a connection of this transport
 // (MOVE.md §5.5).
 func (self *frontQuicRun) carrier() ResidentCarrier {
-	if self.socket.key.portKind == frontPortWhodis {
+	if self.group.key.portKind == frontPortWhodis {
 		return residentCarrierForQuicListener(connectListenerTransportH3Dns)
 	}
 	return residentCarrierForQuicListener(connectListenerTransportH3)
@@ -262,7 +381,7 @@ func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
 		return false
 	}
-	release, ok := self.frontServer.front.AcquireQuicConnection(self.socket.key.interfaceName, addrPort.Addr().Unmap())
+	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap())
 	if !ok {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")
@@ -272,7 +391,7 @@ func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
 	self.countConnection(frontQuicResultConnect)
 	if !self.frontServer.connectQuic.HandleQuicConn(conn, self.carrier()) {
 		if glog.V(1) {
-			glog.Infof("[front]connect closing, refused a %s connection on %s\n", self.socket.key.portKind, self.socket.key.interfaceName)
+			glog.Infof("[front]connect closing, refused a %s connection on %s\n", self.group.key.portKind, self.group.key.interfaceName)
 		}
 		return false
 	}
@@ -306,7 +425,7 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
 		return
 	}
-	release, ok := self.frontServer.front.AcquireQuicConnection(self.socket.key.interfaceName, addrPort.Addr().Unmap())
+	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap())
 	if !ok {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")
@@ -316,7 +435,7 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 	// the http3 server leaves a connection it served open, so the front closes
 	// what it accepted, before its slot is let go
 	defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
-	apiServer := self.frontServer.newApiServer(self.socket.apiHandler)
+	apiServer := self.frontServer.newApiServer(self.group.apiHandler)
 	if refusal := self.addApiServer(apiServer); refusal != "" {
 		self.countConnection(refusal)
 		return
@@ -325,15 +444,15 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 	self.countConnection(frontQuicResultApi)
 	if err := apiServer.ServeQUICConn(conn); err != nil {
 		if glog.V(1) {
-			glog.Infof("[front]api connection on %s/%s exited: %s\n", self.socket.key.interfaceName, self.socket.key.portKind, err)
+			glog.Infof("[front]api connection on %s/%s exited: %s\n", self.group.key.interfaceName, self.group.key.portKind, err)
 		}
 	}
 }
 
 // The h3 server of one api connection, with nginx's client limits: the
 // keepalive timeout as the h3 idle timeout, nginx's header buffers, and the
-// client header timeout as the bound on each request stream's HEADERS, as
-// the tcp servers' ReadHeaderTimeout bounds a request's headers there.
+// client header timeout as the bound on each request stream's HEADERS. The
+// public tcp listeners apply the same setting to h1 and h2 request headers.
 func (self *frontServer) newApiServer(handler http.Handler) *http3.Server {
 	httpSettings := self.settings.Front.Http
 	return &http3.Server{
@@ -410,10 +529,11 @@ func (self *frontQuicRun) beginDrain(drainCtx context.Context) {
 	}
 }
 
-// Releases the socket in the drain's order: no new connections; every api
+// Releases the transport in the drain's order: no new connections; every api
 // connection's server closed, bounded by ForcedCloseTimeout, so none is left
 // shutting down gracefully; then the transport, which destroys what is left;
-// then the translation and the socket.
+// then the translation, and last the fan-in, which closes the group's sockets,
+// so the servers' closes still leave through them.
 func (self *frontQuicRun) close() {
 	apiServers := func() []*http3.Server {
 		self.stateLock.Lock()
@@ -428,11 +548,21 @@ func (self *frontQuicRun) close() {
 	self.listener.Close()
 	closeFrontApiServers(apiServers, self.frontServer.settings.Front.Http.ForcedCloseTimeout)
 	self.quicTransport.Close()
-	self.translationCancel()
+	self.closeFanIn()
+}
+
+// Closes the translation, if any, then the fan-in and the group's sockets.
+func (self *frontQuicRun) closeFanIn() {
 	if self.translation != nil {
+		self.translationCancel()
 		self.translation.Close()
 	}
-	self.packetConn.Close()
+	if self.whodisFanIn != nil {
+		self.whodisFanIn.Close()
+	}
+	if self.connGroup != nil {
+		self.connGroup.Close()
+	}
 }
 
 // Closes api connections' servers together and waits for them at most
@@ -470,8 +600,8 @@ func closeFrontApiServers(apiServers []*http3.Server, timeout time.Duration) {
 
 // Counts one accepted connection's result.
 func (self *frontQuicRun) countConnection(result string) {
-	frontQuicConnectionsCounter.WithLabelValues(self.socket.key.portKind, result).Inc()
+	frontQuicConnectionsCounter.WithLabelValues(self.group.key.portKind, result).Inc()
 	if observer := self.frontServer.settings.connectionResultObserverForTest; observer != nil {
-		observer(self.socket.key.portKind, result)
+		observer(self.group.key.portKind, result)
 	}
 }

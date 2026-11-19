@@ -11,7 +11,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -275,7 +274,7 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 		}
 		httpsServer := newParityFrontHttpServer(ctx, front, front.HttpsHandler(routeInterface.Name), discardLog)
 		harness.httpServers = append(harness.httpServers, httpsServer)
-		go httpsServer.Serve(tls.NewListener(httpsListener, front.TlsConfig()))
+		go httpsServer.Serve(nginx.NewTlsListener(httpsListener, front.TlsConfig(), httpsServer.ReadHeaderTimeout))
 
 		httpListener, err := net.Listen("tcp", netip.AddrPortFrom(addr, uint16(routeTable.Listen.HttpPort)).String())
 		if err != nil {

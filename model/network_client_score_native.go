@@ -431,13 +431,21 @@ func readClientScoreNativeManifest(ctx context.Context, r server.RedisClient, ke
 }
 
 // readClientScoreNativeManifest of a snapshot whose manifest must list
-// exactly manifestFacets.
+// exactly manifestFacets. A pointer this process has read and verified before
+// is answered from memory (clientScoreNativeManifests), without a read; its
+// pages are still read with the slot's generation.
 func readClientScoreNativeManifestOf(ctx context.Context, r server.RedisClient, key, rawPointer string, manifestFacets []ipFamilyFacet) (*clientScoreNativeManifest, string, error) {
 	pointer, err := parseClientScoreNativePointer(rawPointer)
 	if err != nil {
 		return nil, "", err
 	}
 	slotKey := clientScoreNativeSlotKey(key, pointer.slot)
+	cacheKey := clientScoreNativeManifestCacheKey(key, rawPointer, manifestFacets)
+	if manifest, ok := clientScoreNativeManifests.get(cacheKey); ok {
+		clientScoreNativeManifestCacheHits.Inc()
+		return manifest, slotKey, nil
+	}
+	clientScoreNativeManifestCacheMisses.Inc()
 	values, err := r.HMGet(ctx, slotKey, "g", "m").Result()
 	if err != nil {
 		return nil, "", err
@@ -468,6 +476,8 @@ func readClientScoreNativeManifestOf(ctx context.Context, r server.RedisClient, 
 			}
 		}
 	}
+	// only a manifest that passed every check above is kept
+	clientScoreNativeManifests.put(cacheKey, manifest, int64(len(data))+clientScoreNativeManifestCacheEntryBytes)
 	return manifest, slotKey, nil
 }
 

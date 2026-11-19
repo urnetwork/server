@@ -98,9 +98,9 @@ func (self *frontServer) beginDrain() {
 		}
 		close(self.drainStarted)
 		quicRuns := []*frontQuicRun{}
-		for _, socket := range self.sockets {
-			if quicRun, ok := socket.run.(*frontQuicRun); ok {
-				quicRuns = append(quicRuns, quicRun)
+		for _, quicGroup := range self.quicGroups {
+			if quicGroup.run != nil {
+				quicRuns = append(quicRuns, quicGroup.run)
 			}
 		}
 		return quicRuns, self.drainCtx, true
@@ -157,10 +157,11 @@ func (self *frontServer) waitDrained() <-chan struct{} {
 }
 
 // The forced close, step 5 of drainConnect: everything the front holds is
-// released, each step bounded by ForcedCloseTimeout. Every supervisor
-// releases its socket in its run's order, so an h3 server always closes
-// before its transport. Safe to call more than once, and on a front that
-// never started.
+// released, each step bounded by ForcedCloseTimeout. Every udp group's
+// supervisor closes its transport in the run's order, so an h3 server always
+// closes before its transport and the transport before the group's sockets,
+// and every socket's supervisor then releases its socket. Safe to call more
+// than once, and on a front that never started.
 func (self *frontServer) close() {
 	if !self.isStarted() {
 		return
@@ -185,7 +186,8 @@ func (self *frontServer) close() {
 			})
 		}()
 
-		// every serve loop ends: QUIC accepts return
+		// every serve loop ends: QUIC accepts return, and each transport's
+		// supervisor closes it
 		self.cancel()
 		// every tcp connection's raw socket closes first, hijacked or not.
 		// http.Server.Close below closes each connection it still owns one

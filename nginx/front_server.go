@@ -41,7 +41,7 @@ type frontConnection struct {
 // Sets every field of a public TCP server that derives from HttpSettings, on
 // a server whose Handler is one of this front's (LBALT-IMPL.md §7):
 //   - ReadHeaderTimeout is ClientHeaderTimeout, which bounds the TLS handshake
-//     and the request line and headers;
+//     and h1 request head. NewTlsListener applies it to each h2 header block;
 //   - IdleTimeout is KeepaliveTimeout, and a non-positive one turns
 //     keepalives off, as nginx's keepalive_timeout 0 does;
 //   - MaxHeaderBytes is ServerHeaderBytesMultiple times
@@ -68,7 +68,7 @@ type frontConnection struct {
 // or response here, so ReadTimeout and WriteTimeout stay as the caller left
 // them, unset by connect: nginx has no such bound, and the handlers bound
 // each read and write themselves. TLSConfig is left alone too: connect
-// serves TLS through tls.NewListener with the front's one long-lived config,
+// serves TLS through NewTlsListener with the front's one long-lived config,
 // which net/http would otherwise write to.
 //
 // When a write times out over TLS, the server closes the connection, and

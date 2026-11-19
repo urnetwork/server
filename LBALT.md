@@ -1,6 +1,6 @@
 # LBALT: connect fronts the edge interfaces (`lb_alt`)
 
-Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4), with origin/main merged in; not merged to main or deployed, and nothing runs until services.yml declares `services.connect.lb_alt`. §11 holds the implementation notes for code review.
+Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4) and merged to main the same day (server a3f37e085, warp 6aaace2), with D22 (b) after; not deployed, and nothing runs until services.yml declares `services.connect.lb_alt`. §11 holds the implementation notes for code review.
 
 Questions D1–D22 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
 
@@ -736,6 +736,12 @@ All three were decided by the owner on 2026-11-18.
   - A lost socket is re-created at once, and that block's QUIC clients reconnect once.
   - The endpoint reports not ready until the socket is back.
   - (b) is the follow-up if the canary shows rebinding or socket-loss resets.
+- **Amended 2026-11-19 (owner): (b), started ahead of canary evidence.** Built on `feat/lbalt-d22b-quic-fanin-1119` and merged to main 2026-11-19 (LBALT-IMPL §8):
+  - Each group of N udp sockets, one interface address and udp port, feeds one quic-go transport. A flow the kernel moves between the group's sockets, when a socket is lost or re-created or a client's NAT rebinds, keeps its connection, so a lost socket no longer means a reconnect wave.
+  - The quic port's sockets join a vendored `quic.ConnGroup`, which keeps quic-go's batched reads, ECN, the DF bit and GSO on each socket (third_party/quic-go/URNETWORK.md). The whodis port's join a fan-in under one decode53 translation per group.
+  - A lost socket is still re-created at once, and the endpoint still reports not ready until it is back, but the loss costs no connection. Each group's transport has its own supervisor and is replaced if it ends while the front serves.
+  - Still no stateless reset key: each transport keeps quic-go's random per-transport token key and sends no reset.
+  - Measured with `TestConnectPerformanceCarriersLbAlt` on the darwin dev machine, before (a3f37e085) and after, in three interleaved pairs, each the best of its three runs (LBALT-IMPL §8.7): QUIC 5,399, 7,174 and 2,171 msg/s before against 7,810, 5,788 and 2,174 after, echo p50 0.63, 0.52 and 1.08 ms against 0.61, 0.61 and 0.84 ms, at load averages of 34 to 193 that rose through the rounds; whodis 16 to 19 msg/s and 54 to 65 ms either way. The pairs differ less than the runs inside one invocation (QUIC 3.1k to 7.8k msg/s), so nothing shows beyond the noise.
 
 ## 7. Measurements before deciding
 
@@ -1073,9 +1079,9 @@ Each heading names the decisions and sections it implements. D15 and D16 have no
 
 **Front: metrics and access log (D17).** `nginx/route_http_metrics.go:frontMetrics`: `urnetwork_front_requests_total`, `urnetwork_front_response_header_seconds` and `urnetwork_front_limit_refusals_total` by service, protocol, status class and block, and `urnetwork_front_certificate_expiry_timestamp_seconds` (`frontMetrics.certificateExpiry`), unset until `NewFront`; `Front.redact` (hidden prefixes as `<prefix>`); `glogFrontAccessLog`, one request in `AccessLogSampleInterval` at V(1). `connect/front_metrics.go`: the `urnetwork_connect_front_*` series; `connect/front_http.go:scrubFrontHttpPanic` keeps client addresses out of the servers' logs.
 
-**Connect: sockets (D10, D11, D22).** `connect/front.go:newFrontSockets` lists every interface, family and port kind, `SocketsPerPort` times; `frontServer.start` binds them all or fails, and sets `Allow0RTT = false`. `connect/front_settings.go:listenFront` and `listenFrontPacket` bind the exact bridge address with `server.SoReusePort`. `connect/front_socket.go:frontServer.superviseSocket` re-creates a lost socket at once, then after 100 ms doubling to 5 s (reset after 1 m healthy), never once draining. `connect/front.go:frontServer.startWithRouter` serves connect names in-process through `startWithConnectRoutes` and `connect/connect_router.go:newConnectRoutes`, which `run.go`'s private router mounts too (§11.3 (f)).
+**Connect: sockets (D10, D11, D22).** `connect/front.go:newFrontSockets` lists every interface, family and port kind, `SocketsPerPort` times, and `newFrontServer` makes each udp address and port's sockets a `frontQuicGroup` (D22 (b), LBALT-IMPL §8); `frontServer.start` opens every group's transport and binds every socket, or fails, and sets `Allow0RTT = false`. `connect/front_settings.go:listenFront` and `listenFrontPacket` bind the exact bridge address with `server.SoReusePort`. `connect/front_socket.go:frontServer.superviseSocket` re-creates a lost socket at once, then after 100 ms doubling to 5 s (reset after 1 m healthy), never once draining; a udp socket's run is its membership in its group (`connect/front_quic.go:frontQuicSocketRun`), so its loss costs no connection and its re-creation joins the group's transport. `frontServer.superviseQuicTransport` replaces a group's transport that ends while the front serves, with the same backoff, and closes it in the drain's order once the front stops. `connect/front.go:frontServer.startWithRouter` serves connect names in-process through `startWithConnectRoutes` and `connect/connect_router.go:newConnectRoutes`, which `run.go`'s private router mounts too (§11.3 (f)).
 
-**Connect: QUIC dispatch (D3, D9; §4.4).** `connect/front_quic.go:frontServer.openQuicSocket` reads the socket directly, with no PROXY reader; whodis goes through the connect module's `connect.NewPacketTranslation`, and the transport comes from `ConnectHandler.NewQuicTransport`, with the shared handshake limit. `frontQuicRun.dispatch`, by server name: `serveConnect` and `serveApi` charge the per-address cap after the handshake (0x1001), `serveApi` with an `http3.Server` per connection from `frontServer.newApiServer`; `refuseUnknownName` closes another served name with 0x1000. The header phase: `third_party/quic-go/http3/server.go:Server.ReadHeaderTimeout`, which `third_party/quic-go/http3/server_conn.go:RawServerConn.handleRequestStream` applies as `RawServerConn.readHeaderTimeout`, and `readHeaderBlock`.
+**Connect: QUIC dispatch (D3, D9; §4.4).** `connect/front_quic.go:frontServer.openQuicRun` opens one transport per udp group (D22 (b)), from `ConnectHandler.NewQuicTransport`, with the shared handshake limit. On the quic port it reads the group's `quic.ConnGroup` (`third_party/quic-go/urnetwork_conn_group.go`), whose sockets are the bound sockets themselves, each read and written through quic-go's oob path (batched reads, ECN, DF, GSO), with no PROXY reader; a write leaves through the live socket a hash of its destination picks. On the whodis port it reads the connect module's `connect.NewPacketTranslation` over `connect/front_whodis.go:frontWhodisFanIn`, which reads each socket whole and writes through one, so one translation per group holds every query's pump state. `frontQuicRun.dispatch`, by server name: `serveConnect` and `serveApi` charge the per-address cap after the handshake (0x1001), `serveApi` with an `http3.Server` per connection from `frontServer.newApiServer`; `refuseUnknownName` closes another served name with 0x1000. The header phase: `third_party/quic-go/http3/server.go:Server.ReadHeaderTimeout`, which `third_party/quic-go/http3/server_conn.go:RawServerConn.handleRequestStream` applies as `RawServerConn.readHeaderTimeout`, and `readHeaderBlock`.
 
 **Ingress headers (§4.4.2).** `nginx/forward.go:forwardSkippedRequestHeaders`; in-process, `routeHttpHandler.serveInProcess` calls `router.SetIngressHeaders` and deletes Early-Data, which `router/ingress.go` now clears for every caller.
 
@@ -1109,7 +1115,7 @@ Each with its reason. A departure that also makes the front differ from nginx is
 A count-only check found every env's services.yml loads, before the final review's load refusals. Only the lb_alt service's own `tcp_stream_ports` are refused (§5), so an lb-level stream port closes when its interface switches (§11.4).
 
 **At the integration merges.**
-- The shared QUIC stateless reset key (d7f3643a0) was reverted (a29d3cd2d), since sibling sockets sharing one key are reset oracles for each other (RFC 9000 §21.11): a flow moved by a socket loss or a NAT rebinding reconnects after its idle timeout, about 20 s (D22 (a)), and D22 (b), one transport per group behind a fan-in, is the follow-up.
+- The shared QUIC stateless reset key (d7f3643a0) was reverted (a29d3cd2d), since sibling sockets sharing one key are reset oracles for each other (RFC 9000 §21.11): a flow moved by a socket loss or a NAT rebinding reconnects after its idle timeout, about 20 s (D22 (a)), and D22 (b), one transport per group behind a fan-in, is the follow-up. D22 (b) is built (2026-11-19, LBALT-IMPL §8): a moved flow keeps its connection, and still no transport has a reset key, so each group's transport keeps quic-go's random per-transport token key and sends no reset.
 - A stored body's release waits for its releaser and for a spill file still being created, so `Front.Close` never reports done with one open; a forwarded request counts under the block that answered.
 - Accepted into LBALT-IMPL §4 (2ff1790c2, 85101757a): the implicit `Connection: keep-alive`, the HTTP/1.0 status line, Go's AES-128-GCM choice, the default certificate for an SNI over 255 bytes, Content-Length beside chunked, the client's hop-by-hop headers in-process, and a streamed chunked body sent chunked.
 - Go's h1 server refuses two Host headers with 400, as nginx does (4285c3007); the harness servers come from `Front.ConfigureServer` (6efe5fbad); the forced close reports only the steps not done (0e9138ed1); the netns harness requires a rollback to keep every block chain (cd6963a); the parity fixture's render is pinned to golden copies (4cb3677).
@@ -1212,7 +1218,7 @@ One list, from LBALT-IMPL §4, the units', round 2's and the final review's pari
   - in-process connect: nginx buffers connect's body under client_body_timeout and ends a stalled one with no response, where the front gives connect's own answer, with Connection: close, once lingering_timeout cuts the read.
 - keepalive_requests and keepalive_time on h2: Go sends the GOAWAY with the last stream's response head, nginx as that stream opens. With keepalive_timeout 0, Go's GOAWAY comes once the connection is idle, nginx's at the first stream; production uses 1 m.
 - keepalive_requests counts only requests that reach the front's handlers. On h1 those Go answers itself (431, 400, 501, 417) close the connection anyway; on h2 a stream Go answers or resets itself isn't counted and leaves the connection open.
-- A request in flight at the forced close can get a 502, where nginx closes with no response: the front's cut ends its forward while connect cuts the client's connection (`frontServer.closeTcpConns`, each QUIC run's close), neither waiting on the other, so the 502 reaches the client only when it is written first.
+- A request in flight at the forced close can get a 502, where nginx closes with no response: the front's cut ends its forward while connect cuts the client's connection (`frontServer.closeTcpConns`, each QUIC transport's close), neither waiting on the other, so the 502 reaches the client only when it is written first.
 - An h1 upgrade after the drain begins gets 503, any request the forwarder would tunnel included; nginx closes idle connections at SIGQUIT and never sees one.
 - The drain deadline is 58 m, against nginx's 60 m worker_shutdown_timeout (§11.3).
 - The listen backlog is Go's (somaxconn), where nginx used `backlog=65535`.
@@ -1247,6 +1253,8 @@ One list, from LBALT-IMPL §4, the units', round 2's and the final review's pari
 - netns: PASS, the eight edge tests, 99.6 s.
 - perf, the lb_alt path only (`TestConnectPerformanceCarriersLbAlt`, in the DB-backed run; the best of three runs, on a darwin dev machine at a load average near 38): websocket 181,733 msg/s, echo p50 0.37 ms; H1+ 158,201 msg/s, 0.42 ms; QUIC 8,741 msg/s, 0.56 ms; whodis 19 msg/s, 56.7 ms. `lbalt/s-car`'s run gave 155k, 179k, 8.2k and 18 msg/s, within the spread between runs (websocket's three: 182k, 154k, 91k). The direct and nginx paths weren't rerun.
 
+**D22 (b)** (`feat/lbalt-d22b-quic-fanin-1119`, 2026-11-19; LBALT-IMPL §8.6, §8.7), at load averages of 35 to 190 on the darwin dev machine: the vendored `TestUrnetworkConnGroup*` tests under `-race` and the upstream short suite (747 tests) pass, and both vets for the vendored package; connect `-race -run '^TestFront'` passes, 84 tests in 18.0 s, gofmt and both vets clean; DB `-run '^TestLbAlt'`, 20 tests, 350.1 s, `TestLbAltRebuildsALostUdpSocket` 10.8 s. On the front at a3f37e085 the new behavioral tests fail (the moved connection's request times out, the new client connects again, 16 transports for 4 groups); the tests of new internals fail under mutations that take their behavior out.
+
 **Results on the fix branches**, from the fixers' reports; the two server branches touch disjoint files and never ran each other's packages, and a297487df ran on neither.
 - `lbalt/final-nginx` at 7c492d5a9: gofmt and vet clean; `go test ./nginx/` 29.4 s, the race run below 49.7 s; parity at 0844460ac, "257 cases; 0 differences no entry names", 76.2 s (later commits comments only).
 - `lbalt/final-connect` at b1a1fce2d: connect `-race -run '^TestFront'` 15.6 s, monitor 8.2 s, router 0.8 s, the DB-backed LbAlt suite 376.8 s; vendored `./http3/...` ok at ceac2ee69, unchanged since.
@@ -1271,7 +1279,7 @@ go test -count=1 -run 'Ingress' ./router/
 server, database-backed (connect's `lbalt_*_test.go` and the perf harness, in `server.DefaultTestEnv`): the local PostgreSQL and Redis stack (`local/run-local.sh`), `test-env.sh` sourced from bash (zsh fails its authority check), and no `-trimpath` (it can't find the fixture vault):
 ```
 bash -c 'cd server && export WARP_HOME=<urnetwork home> GOCACHE=$WARP_HOME/.gocache && source ./test-env.sh && cd connect && go vet . && go test -count=1 -timeout 30m -run "LbAlt" .'
-#   320 to 380 s, TestLbAltRebuildsALostUdpSocket ~90 s of it (D22's idle-timeout reconnects)
+#   320 to 380 s; before D22 (b), TestLbAltRebuildsALostUdpSocket took ~90 s of it in idle-timeout reconnects, now ~11 to 22 s
 bash -c '<as above> && cd connect && WARP_TEST_ENV_FAIL_FAST=1 go test -count=1 -timeout 40m -v -run "TestConnectPerformance(Carriers|NoContract)" .'
 #   carriers ~3.2 min, no-contract ~40 s
 ```
@@ -1368,11 +1376,11 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The linger tests compare the server's wait with `e2eRstAvoidanceDelay`, a copy of Go's unexported 500 ms.
 
 **Open design items.**
-- D22 (b): a QUIC flow moved to a sibling socket reconnects only after its idle timeout, about 20 s. Started 2026-11-19 (owner).
+- D22 (b): built 2026-11-19 on `feat/lbalt-d22b-quic-fanin-1119` and merged (D22's amendment, LBALT-IMPL §8): a QUIC flow moved to a sibling socket keeps its connection. On Linux, cross-compiled test binaries in a container passed the vendored tests, GSO through a group included, and all 84 tests `-run '^TestFront'` selects, without `-race`. Left open: the kernel's reuseport hash moving real flows is untested, since the tests move flows themselves; each group's one listen loop takes the datagrams of all N sockets, which the darwin perf harness can't load (LBALT-IMPL §8.5).
 - Fixed after review. The front and resident drains share the 58-minute budget. At expiry `drainConnect` force-closes public connections and cancels serving, leaving the two-minute stop reserve for teardown. `TestFrontDrainDeadlineEndsServingWhileExchangeDrains` exercises a resident drain still in progress at that deadline.
 - D6's amendment that upstream targets named by an older route file stay until its last block drains has no code of its own: the targets are the blocks' stable external ports.
 - The 30 s chain refresh needs the committed generation in memory (`lbAltState.chainServicePorts`), so a worker restarted since its last deploy heals no chain until it deploys again.
-- A lost QUIC socket is re-created only once its run has closed, which waits up to ForcedCloseTimeout (30 s) for its api connections' h3 servers.
+- Resolved by D22 (b): a lost QUIC socket's run holds no h3 server any more, so it is re-created at once. A lost transport, which only a failed whodis translation ends, waits up to ForcedCloseTimeout (30 s) for its h3 servers before it closes, but its replacement is installed first, and its sockets were closed with the translation.
 
 **Not run against real iptables**, only the in-memory host: `convergeSplit`'s fallback rewrite; an HMARK rewrite after a public address or port change; a family's return past a retired nginx's DNAT; the worker loop itself, which `lbalt_wiring_test.go` drives; `pollLbAltReadiness`, which is HTTP only.
 
@@ -1383,10 +1391,15 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The per-block probe reaches each block's status through whichever block the monitor's source hashes to, so a block's own port-80 answer is seen only when that bucket maps to it; its 5 s attempt is looser than Route53's 4 s connect and 2 s response.
 - Older than lb_alt: a disabled enrollment counts as a complete run, so open incidents clear after two runs with it off.
 
-**Pre-existing issues**, each being fixed on its own branch (owner, 2026-11-19).
-- Production-like warp test data outside the lb_alt files: `warpctl/dns_test.go`'s `dnsFixtureWithDns` holds the production lb_hidden_prefixes value (on origin/main since 4c47dc4), `warpctl/testdata/services-vyos.yml`'s interface ids reach tests, goldens and VYOS.md, and `services/services_test.go`, `warpctl/run.go` and its tests hold production-looking names and addresses.
-- `config.go:portBlocksOf` panics on a port that is http in one version and stream in another, which load accepts (only the lb_alt service's 443 is guarded); the allocator can give a candidate ports a dead committed generation's nginx pool chain still targets; and a redirect failure after `cutover.commit()` on a block that binds no lb interface leaves the committed one unowned.
-- The startup orphan drain reads `routingTable.ipv6` on a goroutine while Run's routing reconcile can set it, and `run.go`'s `parseRoutingTable` panics on an lb interface with more than one global IPv6 address.
+**Pre-existing issues** (owner, 2026-11-19: fix them all).
+- Production-like warp test data outside the lb_alt files: `warpctl/dns_test.go`'s `dnsFixtureWithDns` holds the production lb_hidden_prefixes value (on origin/main since 4c47dc4), `warpctl/testdata/services-vyos.yml`'s interface ids reach tests, goldens and VYOS.md, and `services/services_test.go`, `warpctl/run.go` and its tests hold production-looking names and addresses. Scrubbed in warp 7e53b30 (tests, testdata, goldens and docs, cross-checked against every environment's services.yml) and fc6ee3a (production code comments), 2026-11-19; the alert rules and their mirror tests keep the domains they match, and the old values remain in history, where rotating the hidden prefixes is the owner's.
+- Fixed in warp d8a87f0 (`fix/warpctl-preexisting-1119`, 2026-11-19), each with a test that failed first:
+  - load refuses a port whose lb type would change between versions (`../warp/services/load.go:validatePortBlockLbTypes`), which `config.go:portBlocksOf` panicked on;
+  - the allocator skips ports the block's own chain still targets (`run.go:RunWorker.poolChainTargetPorts`), so a candidate never takes public traffic through a dead committed generation's rules before its readiness poll;
+  - a candidate whose redirect is refused after `cutover.commit()`, on a block that binds no lb interface, is stopped rather than left unowned;
+  - the routing table's late IPv6 address is read and set under a lock, ending the orphan drain's race with Run's routing reconcile;
+  - an lb interface with several global IPv6 addresses starts without IPv6, where `parseRoutingTable` panicked, and adopts the address once one remains.
+- Left by those fixes: a port that moves from tcp http to udp stream keeps its http lb type, and nginx still renders an http upstream for it (no panic); in a two-port pool whose committed generation died while its predecessor drains, a deploy waits for that drain; the REDIRECT chains of `--host_networking=no` blocks aren't read; and `parseDockerNetwork` still panics on a docker network with several global IPv6 addresses, where lb_alt's bridge parse takes the lowest.
 
 **Smaller items.**
 - The original nginx benchmark used a plaintext H1 hop. The `nginx_perf` baseline now terminates verified TLS for both WebSocket and H1+.
@@ -1397,7 +1410,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 
 **Owner actions not taken.**
 - Before declaring lb_alt, load the edited services.yml with this warpctl: every host where connect is placed with a front interface must pass the `-`, chain-length and keepalive rules, and should front the api. Then declare `services.connect.lb_alt: false` first (§11.3 (d)).
-- services.yml's lb_alt declarations, connect's `cores: 20` (D15) and the `alt.*` `dns_aliases` move (Gate B); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry. Nothing is merged to main or deployed.
+- services.yml's lb_alt declarations, connect's `cores: 20` (D15) and the `alt.*` `dns_aliases` move (Gate B); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry. Nothing is deployed.
 
 ### 11.7 Review focus
 

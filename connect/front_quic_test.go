@@ -383,7 +383,8 @@ func (self *testFrontProxyPrefixConn) WriteTo(p []byte, addr net.Addr) (int, err
 // datagrams with a PROXY v2 header claiming another address is not decoded,
 // so its handshake never completes and no connection is ever charged to the
 // claimed address, while a plain client on the same socket connects. The
-// transport reads the bound socket itself.
+// group's transport reads the bound socket itself, through the group's
+// quic.ConnGroup (TestFrontQuicGroupSocketsAreReadAsBound).
 func TestFrontPublicSocketIgnoresAProxyProtocolHeader(t *testing.T) {
 	env := newTestFrontEnv(t, nil)
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
@@ -416,18 +417,6 @@ func TestFrontPublicSocketIgnoresAProxyProtocolHeader(t *testing.T) {
 	}
 	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{testFrontInterfaceA + " 127.0.0.1"}) {
 		t.Fatalf("connections charged to %v, want only the plain client's", acquired)
-	}
-
-	// every quic socket's transport reads the bound socket itself, with no
-	// reader in between
-	transportConns := env.connectQuic.builtTransportConns()
-	for _, bindAddressText := range env.binds.bindAddresses() {
-		for _, packetConn := range env.binds.boundPacketConns(bindAddressText) {
-			isQuic := packetConn.LocalAddr().(*net.UDPAddr).Port == env.routeTable.Listen.QuicPort
-			if isQuic && !slices.Contains(transportConns, packetConn) {
-				t.Fatalf("the transport of %s does not read the bound socket", bindAddressText)
-			}
-		}
 	}
 }
 
