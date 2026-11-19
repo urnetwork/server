@@ -26,11 +26,12 @@ package nginx
 // Go's servers refuse part of this first, with their own statuses: an h1
 // head over the server's MaxHeaderBytes (431), a missing or malformed Host on
 // h1 (400), an h2 or h3 head over its header list limit. So
-// Front.ConfigureServer sets MaxHeaderBytes to twice
-// MaxRequestHeadersTotalBytes, for the handler to apply nginx's statuses
-// within that, and two Host headers on h1 reach the handler as the first,
-// since Go drops the header from the map; nginx refuses them with a 400
-// (LBALT-IMPL.md §4, reported).
+// Front.ConfigureServer sets MaxHeaderBytes to a multiple of
+// MaxRequestHeadersTotalBytes, twice by default
+// (HttpSettings.ServerHeaderBytesMultiple), for the handler to apply nginx's
+// statuses within that, and two Host headers on h1 reach the handler as the
+// first, since Go drops the header from the map; nginx refuses them with a
+// 400 (LBALT-IMPL.md §4, reported).
 
 import (
 	"net/http"

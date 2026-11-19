@@ -96,13 +96,14 @@ func (self *frontTcpRun) close() {
 // front sets the rest from its HttpSettings (nginx.Front.ConfigureServer,
 // LBALT-IMPL.md §7), as the parity harness's servers get them: the header
 // timeout, which covers the TLS handshake, request line and headers; the
-// idle timeout; header bytes of twice nginx's header buffers, within which
-// the nginx front's handlers apply nginx's own limits; the h2 stream limit;
-// the h2 write byte timeout, send_timeout, which closes an h2 connection
-// whose frame write stays blocked on the socket; and keepalive_requests and
-// keepalive_time per connection. Nothing bounds a whole request or response
-// here: bodies, uploads, websockets and streamed responses keep the
-// per-read and per-write timeouts the nginx front applies.
+// idle timeout; header bytes of a multiple of nginx's header buffers, twice
+// by default, within which the nginx front's handlers apply nginx's own
+// limits; the h2 stream limit; the h2 write byte timeout, send_timeout,
+// which closes an h2 connection whose frame write stays blocked on the
+// socket; and keepalive_requests and keepalive_time per connection. Nothing
+// bounds a whole request or response here: bodies, uploads, websockets and
+// streamed responses keep the per-read and per-write timeouts the nginx
+// front applies.
 //
 // A parity difference (LBALT-IMPL.md §4): net/http reads at most the header
 // bytes, twice nginx's 64 KiB of buffers by default, plus its own 4 KiB

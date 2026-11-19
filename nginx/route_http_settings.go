@@ -18,10 +18,11 @@ import (
 // public server (front_server.go): its ReadHeaderTimeout is
 // ClientHeaderTimeout, its IdleTimeout KeepaliveTimeout, its
 // HTTP2.MaxConcurrentStreams Http2MaxConcurrentStreams, its
-// HTTP2.WriteByteTimeout SendTimeout, and its MaxHeaderBytes twice
-// MaxRequestHeadersTotalBytes, so the handler sees every head nginx would
-// answer with a 414 or 400 instead of Go answering 431. It sets no
-// WriteTimeout, which would cut a stream SendTimeout lets live.
+// HTTP2.WriteByteTimeout SendTimeout, and its MaxHeaderBytes
+// ServerHeaderBytesMultiple times MaxRequestHeadersTotalBytes, so the
+// handler sees every head nginx would answer with a 414 or 400 instead of Go
+// answering 431. It sets no WriteTimeout, which would cut a stream
+// SendTimeout lets live.
 // KeepaliveRequests and KeepaliveTime, which Go's server lacks, are applied
 // per connection, from state ConfigureServer attaches. Of nginx's lingering
 // close, LingeringTimeout bounds the reads Go's server makes of an unread
@@ -65,6 +66,14 @@ type HttpSettings struct {
 	// 8 KiB buffers. More is a 400. nginx fills whole buffers, so it can
 	// refuse a header set a little under this. Non-positive means no limit.
 	MaxRequestHeadersTotalBytes int
+	// what a public server reads of a request line and headers before its
+	// handler sees them, its MaxHeaderBytes, as a multiple of
+	// MaxRequestHeadersTotalBytes: 2 (LBALT-IMPL.md §7). Within it the
+	// handlers answer nginx's own 400 and 414; only a head beyond it gets
+	// Go's 431, the band LBALT-IMPL.md §4 accepts. A multiple keeps the
+	// server's bound tied to nginx's buffers. Non-positive leaves Go's
+	// default, 1 MiB.
+	ServerHeaderBytesMultiple int
 	// concurrent streams on one h2 connection: nginx's default
 	// `http2_max_concurrent_streams 128`. Each stream counts against the
 	// address's concurrency limit (D8). Non-positive leaves Go's default.
@@ -114,6 +123,7 @@ func DefaultHttpSettings() *HttpSettings {
 		MaxRequestLineBytes:         8 * 1024,
 		MaxRequestHeaderBytes:       8 * 1024,
 		MaxRequestHeadersTotalBytes: 8 * 8 * 1024,
+		ServerHeaderBytesMultiple:   2,
 		Http2MaxConcurrentStreams:   128,
 		LingeringTime:               30 * time.Second,
 		LingeringTimeout:            5 * time.Second,

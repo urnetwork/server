@@ -48,7 +48,7 @@ func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 		}
 		if httpServer.ReadHeaderTimeout != httpSettings.ClientHeaderTimeout ||
 			httpServer.IdleTimeout != httpSettings.KeepaliveTimeout ||
-			httpServer.MaxHeaderBytes != 2*httpSettings.MaxRequestHeadersTotalBytes ||
+			httpServer.MaxHeaderBytes != httpSettings.ServerHeaderBytesMultiple*httpSettings.MaxRequestHeadersTotalBytes ||
 			httpServer.ConnContext == nil {
 			t.Fatalf("a public server's limits are not the nginx front's: header timeout %s, idle timeout %s, header bytes %d", httpServer.ReadHeaderTimeout, httpServer.IdleTimeout, httpServer.MaxHeaderBytes)
 		}

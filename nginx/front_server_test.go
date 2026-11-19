@@ -440,6 +440,10 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	if httpServer.IdleTimeout != httpSettings.KeepaliveTimeout {
 		t.Errorf("IdleTimeout %s, want KeepaliveTimeout %s", httpServer.IdleTimeout, httpSettings.KeepaliveTimeout)
 	}
+	// twice nginx's buffers, as LBALT-IMPL.md §7 decides
+	if httpSettings.ServerHeaderBytesMultiple != 2 {
+		t.Errorf("ServerHeaderBytesMultiple %d, want 2", httpSettings.ServerHeaderBytesMultiple)
+	}
 	if want := 2 * httpSettings.MaxRequestHeadersTotalBytes; httpServer.MaxHeaderBytes != want {
 		t.Errorf("MaxHeaderBytes %d, want twice MaxRequestHeadersTotalBytes, %d", httpServer.MaxHeaderBytes, want)
 	}
@@ -479,6 +483,19 @@ func TestFrontConfigureServerSetsTheHttpSettingsFields(t *testing.T) {
 	zeroFront.front.ConfigureServer(zeroServer)
 	if zeroServer.ReadHeaderTimeout != 0 || zeroServer.MaxHeaderBytes != 0 || zeroServer.HTTP2 != nil {
 		t.Errorf("non-positive settings set ReadHeaderTimeout %s, MaxHeaderBytes %d, HTTP2 %+v", zeroServer.ReadHeaderTimeout, zeroServer.MaxHeaderBytes, zeroServer.HTTP2)
+	}
+
+	// the server's header bytes follow the multiple, and a non-positive one
+	// leaves Go's default
+	for _, serverHeaderBytesMultiple := range []int{3, 0} {
+		multipleSettings := testFrontSettings()
+		multipleSettings.Http.ServerHeaderBytesMultiple = serverHeaderBytesMultiple
+		multipleFront := newTestFront(t, loadTestRouteTable(t), multipleSettings)
+		multipleServer := &http.Server{}
+		multipleFront.front.ConfigureServer(multipleServer)
+		if want := serverHeaderBytesMultiple * multipleSettings.Http.MaxRequestHeadersTotalBytes; multipleServer.MaxHeaderBytes != want {
+			t.Errorf("multiple %d: MaxHeaderBytes %d, want %d", serverHeaderBytesMultiple, multipleServer.MaxHeaderBytes, want)
+		}
 	}
 
 	// a send timeout alone still bounds h2's writes, under Go's stream limit

@@ -22,14 +22,6 @@ import (
 	"time"
 )
 
-// The multiple of HttpSettings.MaxRequestHeadersTotalBytes a public server
-// reads of a request line and headers before its handler sees them, its
-// MaxHeaderBytes (LBALT-IMPL.md §7). Up to twice nginx's header buffers the
-// handler answers nginx's own 400 and 414; only past that does Go's server
-// answer 431. Fixed by that decision as the edge of the parity band (§4), not
-// tuned.
-const configureServerHeaderBytesMultiple = 2
-
 // The context key of a connection's frontConnection.
 type frontConnectionContextKey struct{}
 
@@ -52,9 +44,10 @@ type frontConnection struct {
 //     and the request line and headers;
 //   - IdleTimeout is KeepaliveTimeout, and a non-positive one turns
 //     keepalives off, as nginx's keepalive_timeout 0 does;
-//   - MaxHeaderBytes is twice MaxRequestHeadersTotalBytes, so the handlers
-//     answer nginx's 400 and 414 for every head within that, and Go's 431
-//     answers only beyond it;
+//   - MaxHeaderBytes is ServerHeaderBytesMultiple times
+//     MaxRequestHeadersTotalBytes, twice by default, so the handlers answer
+//     nginx's 400 and 414 for every head within that, and Go's 431 answers
+//     only beyond it;
 //   - the h2 stream limit is Http2MaxConcurrentStreams;
 //   - the h2 write byte timeout is SendTimeout, so an h2 connection whose
 //     frame write stays blocked on the socket that long is closed, which
@@ -88,8 +81,8 @@ func (self *Front) ConfigureServer(httpServer *http.Server) {
 	} else {
 		httpServer.SetKeepAlivesEnabled(false)
 	}
-	if 0 < httpSettings.MaxRequestHeadersTotalBytes {
-		httpServer.MaxHeaderBytes = configureServerHeaderBytesMultiple * httpSettings.MaxRequestHeadersTotalBytes
+	if 0 < httpSettings.MaxRequestHeadersTotalBytes && 0 < httpSettings.ServerHeaderBytesMultiple {
+		httpServer.MaxHeaderBytes = httpSettings.ServerHeaderBytesMultiple * httpSettings.MaxRequestHeadersTotalBytes
 	}
 	if 0 < httpSettings.Http2MaxConcurrentStreams || 0 < httpSettings.SendTimeout {
 		// a copy, so a config the caller shares is never written
