@@ -64,12 +64,15 @@ type spySpillFiles struct {
 	files     []*spySpillFile
 }
 
+// One spy spill file: a real file in the test directory, its writes
+// counted against its spy's quota.
 type spySpillFile struct {
 	*os.File
 	files        *spySpillFiles
 	writtenBytes int64
 }
 
+// The failure a spy spill file's write returns past the quota.
 var errInjectedQuota = errors.New("injected quota exceeded")
 
 // Writes through to the file, or as much as the quota allows and then fails.
@@ -243,6 +246,7 @@ type gatedReader struct {
 	remainder []byte
 }
 
+// The failure a gated reader's read returns for a nil chunk.
 var errGatedReaderClosed = errors.New("client connection closed")
 
 // Hands out the rest of the current chunk, or waits for the next one.
@@ -277,14 +281,14 @@ func TestBodyStoreUnknownLengthReservesBeforeFirstRead(t *testing.T) {
 		})
 		results <- storedBody
 	}()
-	<-reader.waiting
+	receiveBounded(t, reader.waiting, "the body read")
 	if memoryBytes, _, _, bodies := bodyStore.usage(); memoryBytes != settings.MemoryPrefixBytes || bodies != 1 {
 		t.Errorf("before the first read: memory %d bodies %d, want the whole prefix reserved", memoryBytes, bodies)
 	}
 	reader.chunks <- []byte("ten bytes!")
-	<-reader.waiting
+	receiveBounded(t, reader.waiting, "the body read")
 	close(reader.chunks)
-	storedBody := <-results
+	storedBody := receiveBounded(t, results, "stored body")
 	if storedBody == nil || storedBody.length() != 10 {
 		t.Fatalf("stored %v", storedBody)
 	}
@@ -402,11 +406,11 @@ func TestBodyStoreCancellationDuringSpill(t *testing.T) {
 		})
 		results <- refusal
 	}()
-	<-reader.waiting
+	receiveBounded(t, reader.waiting, "the body read")
 	reader.chunks <- testBodyBytes(int(settings.MemoryPrefixBytes))
-	<-reader.waiting
+	receiveBounded(t, reader.waiting, "the body read")
 	reader.chunks <- testBodyBytes(500)
-	<-reader.waiting
+	receiveBounded(t, reader.waiting, "the body read")
 	// the body has spilled 500 bytes and is waiting for more
 	if _, spillBytes, spillFiles, _ := bodyStore.usage(); spillBytes != 500 || spillFiles != 1 {
 		t.Fatalf("spilled %d bytes in %d files before the cancel", spillBytes, spillFiles)
@@ -414,7 +418,7 @@ func TestBodyStoreCancellationDuringSpill(t *testing.T) {
 	cancel()
 	// the client's connection ends the pending read
 	reader.chunks <- nil
-	refusal := <-results
+	refusal := receiveBounded(t, results, "refusal")
 	if refusal == nil || refusal.status != 0 || refusal.reason != bodyRefusalCanceled {
 		t.Fatalf("canceled read: %v, want no answer", refusal)
 	}
@@ -567,7 +571,7 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 		response, _, _ := testDo(t, request)
 		heldResponses <- response
 	}()
-	<-arrivals
+	receiveBounded(t, arrivals, "arrival at g1")
 
 	request, _ := http.NewRequest(http.MethodPost, front.url("/refused"), bytes.NewReader([]byte("x")))
 	response, _, err := testDo(t, request)
@@ -581,7 +585,7 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 		t.Errorf("a local 503 reached a block or was retried")
 	}
 	releaseHeld()
-	if response := <-heldResponses; response == nil || response.StatusCode != http.StatusOK {
+	if response := receiveBounded(t, heldResponses, "held response"); response == nil || response.StatusCode != http.StatusOK {
 		t.Errorf("held request: %v", response)
 	}
 	front.waitServed(t)
@@ -666,7 +670,7 @@ func TestForwardCancellationDuringReplay(t *testing.T) {
 		t.Fatalf("during the replay: %d files %d bodies, want the spilled body held", spillFiles, bodies)
 	}
 	cancel()
-	if err := <-results; err == nil {
+	if err := receiveBounded(t, results, "result"); err == nil {
 		t.Errorf("the canceled request succeeded")
 	}
 	front.waitServed(t)

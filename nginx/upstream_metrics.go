@@ -21,6 +21,7 @@ const (
 	upstreamAttemptStaleRedo = "stale_redo"
 )
 
+// Every physical attempt, by service, block and result.
 var upstreamAttemptsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -31,6 +32,7 @@ var upstreamAttemptsCounter = prometheus.NewCounterVec(
 	[]string{"service", "block", "result"},
 )
 
+// Requests moved to another block, by service and the failure that moved them.
 var upstreamRetriesCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -41,6 +43,7 @@ var upstreamRetriesCounter = prometheus.NewCounterVec(
 	[]string{"service", "reason"},
 )
 
+// The front's own 502s and 504s, by service and status.
 var forwardErrorsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -51,6 +54,7 @@ var forwardErrorsCounter = prometheus.NewCounterVec(
 	[]string{"service", "status"},
 )
 
+// Requests refused over their body, by service and reason.
 var forwardBodyRefusalsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -61,6 +65,7 @@ var forwardBodyRefusalsCounter = prometheus.NewCounterVec(
 	[]string{"service", "reason"},
 )
 
+// Websocket tunnels open, by service.
 var forwardTunnelsGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -71,6 +76,7 @@ var forwardTunnelsGauge = prometheus.NewGaugeVec(
 	[]string{"service"},
 )
 
+// Body prefix memory reserved under the budget.
 var bodyMemoryBytesGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -80,6 +86,7 @@ var bodyMemoryBytesGauge = prometheus.NewGauge(
 	},
 )
 
+// Spilled body bytes reserved under the spill cap.
 var bodySpillBytesGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -89,6 +96,7 @@ var bodySpillBytesGauge = prometheus.NewGauge(
 	},
 )
 
+// Spill files open under the file cap.
 var bodySpillFilesGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",

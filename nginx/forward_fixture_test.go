@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -149,11 +150,27 @@ func closedPort(t *testing.T) int {
 }
 
 // Settings for tests: nginx's defaults, with the sweep off so no timer acts
-// on its own.
+// on its own, and a long wait for a request write that reports after its
+// response was read, as Go's tests lengthen maxWriteWaitBeforeConnReuse, so
+// a loaded scheduler never costs a test its pooled connection. Tests of
+// that wait order it through the group's waitAfter.
 func testFrontSettings() *FrontSettings {
 	settings := DefaultFrontSettings()
 	settings.Forward.KeepaliveSweepInterval = 0
+	settings.Forward.KeepaliveWriteWait = 30 * time.Second
 	return settings
+}
+
+// The pool's idle connections, the least recently used first. The test
+// fails unless there are want of them.
+func idleConnsOf(t *testing.T, pool *upstreamPool, want int) []*upstreamConnection {
+	t.Helper()
+	pool.stateLock.Lock()
+	defer pool.stateLock.Unlock()
+	if len(pool.idleConns) != want {
+		t.Fatalf("pool keeps %d connections, want %d", len(pool.idleConns), want)
+	}
+	return slices.Clone(pool.idleConns)
 }
 
 // A service of the route table with the given blocks and nginx's default
@@ -371,6 +388,95 @@ func (self *rawUpstream) accept(t *testing.T) (net.Conn, *bufio.Reader, *http.Re
 	case <-time.After(30 * time.Second):
 		t.Fatalf("no upstream connection")
 		return nil, nil, nil
+	}
+}
+
+// Makes the group wrap every connection it dials from now on, as wrap
+// returns it, given the address dialed.
+func wrapGroupDials(group *upstreamGroup, wrap func(conn net.Conn, address string) net.Conn) {
+	dialer := &net.Dialer{}
+	group.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return wrap(conn, address), nil
+	}
+}
+
+// A dialed connection whose first write sends its bytes, then holds before
+// it returns, as a write goroutine descheduled right after its last write
+// would: the block has the bytes, and the forwarder doesn't know yet. held
+// is closed when the hold starts; the hold ends on release or Close.
+type holdWriteConn struct {
+	net.Conn
+	armed     atomic.Bool
+	held      chan struct{}
+	released  chan struct{}
+	release   func()
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+// A connection over conn whose first write holds. The hold ends when the
+// test does, at the latest.
+func newHoldWriteConn(t *testing.T, conn net.Conn) *holdWriteConn {
+	holdConn := &holdWriteConn{
+		Conn:     conn,
+		held:     make(chan struct{}),
+		released: make(chan struct{}),
+		closed:   make(chan struct{}),
+	}
+	holdConn.release = sync.OnceFunc(func() {
+		close(holdConn.released)
+	})
+	holdConn.armed.Store(true)
+	t.Cleanup(holdConn.release)
+	return holdConn
+}
+
+// Writes p; the first write then holds until released.
+func (self *holdWriteConn) Write(p []byte) (int, error) {
+	n, err := self.Conn.Write(p)
+	if self.armed.CompareAndSwap(true, false) {
+		close(self.held)
+		<-self.released
+	}
+	return n, err
+}
+
+// Closes the connection, which ends a held write, as cutting a connection
+// ends a write blocked on it.
+func (self *holdWriteConn) Close() error {
+	self.closeOnce.Do(func() {
+		close(self.closed)
+	})
+	self.release()
+	return self.Conn.Close()
+}
+
+// Receives the next value from a channel, with a bound so a broken test
+// fails rather than hangs.
+func receiveBounded[T any](t *testing.T, values <-chan T, what string) T {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(30 * time.Second):
+		t.Fatalf("no %s", what)
+		var zero T
+		return zero
+	}
+}
+
+// Waits for a channel to close, with a bound so a broken test fails rather
+// than hangs.
+func waitClosed(t *testing.T, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("%s did not happen", what)
 	}
 }
 

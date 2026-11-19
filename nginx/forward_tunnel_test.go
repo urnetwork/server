@@ -227,7 +227,7 @@ func TestTunnelSwitchOnlyWhenAsked(t *testing.T) {
 	}()
 	upstreamConn, _, _ := fixture.raw.accept(t)
 	io.WriteString(upstreamConn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
-	if response := <-responses; response == nil || response.StatusCode != http.StatusBadGateway {
+	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("unasked switch: %v, want 502", response)
 	}
 	if attemptCount(fixture.serviceName, "g1", "invalid_header") != 1 {
@@ -243,10 +243,85 @@ func TestTunnelSwitchOnlyWhenAsked(t *testing.T) {
 	}()
 	upstreamConn, _, _ = fixture.raw.accept(t)
 	io.WriteString(upstreamConn, "HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n")
-	if response := <-responses; response == nil || response.StatusCode != http.StatusUpgradeRequired {
+	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("refused upgrade: %v, want the block's 426", response)
 	}
 	if fixture.tunnelsOpened.Load() != 0 {
 		t.Errorf("a tunnel opened without a switch")
+	}
+}
+
+// Writes 64 MiB, more than loopback buffers hold, to conn in a goroutine,
+// and sends the write's end on the channel returned: nil when it all went,
+// else the error that stopped it.
+func writeFlood(conn net.Conn) chan error {
+	flooded := make(chan error, 1)
+	go func() {
+		chunk := make([]byte, 64*1024)
+		var err error
+		for i := 0; err == nil && i < 1024; i += 1 {
+			_, err = conn.Write(chunk)
+		}
+		flooded <- err
+	}()
+	return flooded
+}
+
+// HttpSettings.SendTimeout bounds each write to a tunnel's client, nginx's
+// send_timeout on the client side: a client that reads keeps the tunnel
+// relaying past it, and one that stops reading is cut once it passes
+// without progress, while the block still sends and the idle bound is far
+// off.
+func TestTunnelSendTimeoutCutsStalledClient(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Http.SendTimeout = 200 * time.Millisecond
+	fixture := newTunnelFixture(t, "tunnel-client-stall", settings)
+	_, clientReader, upstreamConn, _ := fixture.open(t)
+	// twice the bound of traffic the client takes: every write gets its own
+	// bound, none left from an earlier one
+	for range 10 {
+		time.Sleep(settings.Http.SendTimeout / 5)
+		io.WriteString(upstreamConn, "t")
+		readExactly(t, clientReader, "t")
+	}
+	// the block sends without end; the client reads none of it
+	flooded := writeFlood(upstreamConn)
+	fixture.front.waitServed(t)
+	if err := receiveBounded(t, flooded, "end of the flood"); err == nil {
+		t.Errorf("the block's bytes were all taken for a client that read none of them")
+	}
+}
+
+// A tunnel whose block stops reading closes once
+// ForwardSettings.StreamTimeout passes without progress on its writes,
+// nginx's proxy_send_timeout on websocket routes, though bytes the other way
+// keep the idle bound from passing.
+func TestTunnelStreamTimeoutCutsStalledBlock(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Forward.StreamTimeout = 1 * time.Second
+	fixture := newTunnelFixture(t, "tunnel-block-stall", settings)
+	clientConn, clientReader, upstreamConn, _ := fixture.open(t)
+	// the block sends a byte at a time, well within the idle bound, and the
+	// client takes them
+	tickerDone := make(chan struct{})
+	defer close(tickerDone)
+	go func() {
+		for {
+			select {
+			case <-tickerDone:
+				return
+			case <-time.After(settings.Forward.StreamTimeout / 100):
+			}
+			if _, err := upstreamConn.Write([]byte("t")); err != nil {
+				return
+			}
+		}
+	}()
+	go io.Copy(io.Discard, clientReader)
+	// the client sends without end; the block reads none of it
+	flooded := writeFlood(clientConn)
+	fixture.front.waitServed(t)
+	if err := receiveBounded(t, flooded, "end of the flood"); err == nil {
+		t.Errorf("the client's bytes were all taken for a block that read none of them")
 	}
 }

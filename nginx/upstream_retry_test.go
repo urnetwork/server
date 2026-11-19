@@ -6,12 +6,14 @@ package nginx
 // a stale keepalive connection's redo included.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,7 +172,7 @@ func TestRetryNeverOnPartialResponse(t *testing.T) {
 	conn, _, _ := raw.accept(t)
 	io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial")
 	conn.Close()
-	got := <-results
+	got := receiveBounded(t, results, "result")
 	if got.response == nil || got.response.StatusCode != http.StatusOK || got.err == nil || string(got.body) != "partial" {
 		t.Fatalf("response %v %q %v, want a truncated 200", got.response, got.body, got.err)
 	}
@@ -243,7 +245,7 @@ func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 	}
 	// the block read the request, then closed without answering
 	conn.Close()
-	if response := <-responses; response == nil || response.StatusCode != http.StatusBadGateway {
+	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("sent streamed request: %v, want 502", response)
 	}
 	if len(other.recorded()) != 0 {
@@ -270,6 +272,7 @@ type faultConn struct {
 	failWrites atomic.Bool
 }
 
+// The failure a faultConn's writes return once set to fail.
 var errInjectedWrite = errors.New("injected write failure")
 
 // Fails with nothing written once failWrites is set.
@@ -388,13 +391,13 @@ func TestRetryFinalFailureMapping(t *testing.T) {
 type dialTimeoutError struct{}
 
 // The text net.Dialer's timeout carries.
-func (dialTimeoutError) Error() string { return "i/o timeout" }
+func (self dialTimeoutError) Error() string { return "i/o timeout" }
 
 // Always a timeout.
-func (dialTimeoutError) Timeout() bool { return true }
+func (self dialTimeoutError) Timeout() bool { return true }
 
 // Always temporary, as a timeout is.
-func (dialTimeoutError) Temporary() bool { return true }
+func (self dialTimeoutError) Temporary() bool { return true }
 
 // A timeout moves the request to another block; when that retry finds no
 // eligible block, the answer is nginx's "no live upstreams" 502, not the
@@ -428,7 +431,7 @@ func TestRetryAfterTimeoutWithNoLiveBlockIs502(t *testing.T) {
 		request, _ := http.NewRequest(http.MethodGet, front.url("/held"), nil)
 		testDo(t, request)
 	}()
-	if held := <-arrivals; held.requestUri != "/held" {
+	if held := receiveBounded(t, arrivals, "arrival at g2"); held.requestUri != "/held" {
 		t.Fatalf("g2 got %s first", held.requestUri)
 	}
 
@@ -505,7 +508,7 @@ func TestRetryNeverOnEarlyInvalidHead(t *testing.T) {
 	conn, _, _ := raw.accept(t)
 	// the block answers without reading the body
 	io.WriteString(conn, "NOT-HTTP\r\n\r\n")
-	if response := <-responses; response == nil || response.StatusCode != http.StatusBadGateway {
+	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("early invalid head: %v, want 502", response)
 	}
 	if len(other.recorded()) != 0 || retryCount(serviceName, "error") != 0 {
@@ -514,5 +517,291 @@ func TestRetryNeverOnEarlyInvalidHead(t *testing.T) {
 	if attemptCount(serviceName, "g1", "invalid_header") != 1 {
 		t.Errorf("the attempt was counted as %v error, %v invalid_header",
 			attemptCount(serviceName, "g1", "error"), attemptCount(serviceName, "g1", "invalid_header"))
+	}
+}
+
+// A block that stops reading a request body is a timeout once
+// ForwardSettings.ProxySendTimeout passes without progress, nginx's
+// proxy_send_timeout: D7 moves the request to another block, which gets the
+// whole body.
+func TestRetrySendTimeoutOnStalledBlock(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Forward.ProxySendTimeout = 200 * time.Millisecond
+	serviceName := testServiceName("retry-send-timeout")
+	raw := newRawUpstream(t)
+	live := newRecordingUpstream(t, "g2", nil)
+	// the first pick of two idle blocks of equal weight is the first
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: live.port},
+	}), settings)
+	front := newTestFront(t, group, testForwardOptions)
+	type result struct {
+		response *http.Response
+		body     []byte
+		err      error
+	}
+	results := make(chan result, 1)
+	// the body limit, more than loopback buffers hold
+	requestBody := testBodyBytes(16 * 1024 * 1024)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, front.url("/upload"), bytes.NewReader(requestBody))
+		response, body, err := testDo(t, request)
+		results <- result{response: response, body: body, err: err}
+	}()
+	// g1 takes the head and none of the body
+	raw.accept(t)
+	var got result
+	select {
+	case got = <-results:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("a request write the block stopped reading was never bounded")
+	}
+	if got.err != nil || got.response.StatusCode != http.StatusOK || string(got.body) != "g2" {
+		t.Fatalf("response %v %q %v, want g2's 200", got.response, got.body, got.err)
+	}
+	if !bytes.Equal(live.recorded()[0].body, requestBody) {
+		t.Errorf("g2 got a different body")
+	}
+	if attemptCount(serviceName, "g1", "timeout") != 1 || retryCount(serviceName, "timeout") != 1 {
+		t.Errorf("attempts: g1 timeout %v, retries %v; want the stalled send counted as a timeout and retried",
+			attemptCount(serviceName, "g1", "timeout"), retryCount(serviceName, "timeout"))
+	}
+
+	// with no other block, the stalled send is the front's 504
+	onlyServiceName := testServiceName("send-timeout-only")
+	onlyRaw := newRawUpstream(t)
+	onlyGroup, _ := newTestGroup(t, testRouteService(onlyServiceName, []testBlock{
+		{name: "g1", weight: 1, port: onlyRaw.port},
+	}), settings)
+	onlyFront := newTestFront(t, onlyGroup, testForwardOptions)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, onlyFront.url("/upload"), bytes.NewReader(requestBody))
+		response, body, err := testDo(t, request)
+		results <- result{response: response, body: body, err: err}
+	}()
+	onlyRaw.accept(t)
+	got = receiveBounded(t, results, "response")
+	if got.err != nil || got.response.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("response %v %v, want 504", got.response, got.err)
+	}
+	if attemptCount(onlyServiceName, "g1", "timeout") != 1 || forwardErrorCount(onlyServiceName, http.StatusGatewayTimeout) != 1 {
+		t.Errorf("want one timed out attempt and one 504")
+	}
+}
+
+// A client body that signals each read as it starts, so a test knows when
+// the front waits on the client.
+type signalingBody struct {
+	body  io.ReadCloser
+	reads chan struct{}
+}
+
+// Signals the read, then reads.
+func (self *signalingBody) Read(p []byte) (int, error) {
+	self.reads <- struct{}{}
+	return self.body.Read(p)
+}
+
+// Closes the body underneath.
+func (self *signalingBody) Close() error {
+	return self.body.Close()
+}
+
+// A block that fails while a streamed body is still arriving is the block's
+// error, a counted 502. Stopping the body fails the client's pending read,
+// which Go's server answers by canceling the request; that must not pass for
+// the client going away.
+func TestRetryStreamedUpstreamFailureIsUpstreamError(t *testing.T) {
+	serviceName := testServiceName("streamed-upstream-failure")
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testFrontSettings())
+	bodyReads := make(chan struct{}, 16)
+	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		// the front's reads of the client's body signal as they start
+		r.Body = &signalingBody{body: r.Body, reads: bodyReads}
+		return options
+	})
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 100\r\n\r\nfirst-ten!")
+
+	upstreamConn, _, request := raw.accept(t)
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	readExactly(t, request.Body, "first-ten!")
+	// the first read took the ten bytes; the second waits on the client
+	for range 2 {
+		select {
+		case <-bodyReads:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the front did not read on from the client")
+		}
+	}
+	// the block fails with the body still arriving
+	upstreamConn.Close()
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil || response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("response %v %v, want 502", response, err)
+	}
+	front.waitServed(t)
+	if attemptCount(serviceName, "g1", "error") != 1 || attemptCount(serviceName, "g1", "client") != 0 || forwardErrorCount(serviceName, http.StatusBadGateway) != 1 {
+		t.Errorf("attempts: error %v client %v, front 502s %v; want the block's error, counted",
+			attemptCount(serviceName, "g1", "error"), attemptCount(serviceName, "g1", "client"), forwardErrorCount(serviceName, http.StatusBadGateway))
+	}
+}
+
+// The 503 decision on a streamed body holds the body back from its exchange
+// before it decides, so a write poised to begin the body can't begin it
+// after the decision: the body never begins on the block that answered 503,
+// and stays whole for the retry. A body that began already ends the retries
+// and goes on undisturbed.
+func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testRouteService(testServiceName("retry-503-hold"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: closedPort(t)},
+	}), testFrontSettings())
+	dialedConns := make(chan *holdWriteConn, 2)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		holdConn := newHoldWriteConn(t, conn)
+		dialedConns <- holdConn
+		return holdConn
+	})
+	ctx := testContext(t)
+	type exchangeResult struct {
+		exchange *upstreamExchange
+		failure  upstreamFailure
+	}
+	// starts a streamed request of 8 bytes on g1, its block answering 503
+	// once the test lets it
+	start := func(body io.Reader) (*forwardStreamedBody, *upstreamRequest, *holdWriteConn, chan exchangeResult) {
+		streamedBody := newForwardStreamedBody(ctx, body, 8, 0, 0, nil)
+		request := &upstreamRequest{
+			head:         []byte("POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 8\r\n\r\n"),
+			method:       http.MethodPost,
+			bodyFraming:  forwardBodyFraming{known: true, length: 8},
+			streamedBody: streamedBody,
+		}
+		upstreamConn, err := group.blocks[0].pool.dial(ctx)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		results := make(chan exchangeResult, 1)
+		go func() {
+			exchange, failure, _ := group.exchange(ctx, upstreamConn, request)
+			results <- exchangeResult{exchange: exchange, failure: failure}
+		}()
+		return streamedBody, request, receiveBounded(t, dialedConns, "dial"), results
+	}
+	attemptsFor := func(request *upstreamRequest) *forwardAttempts {
+		return &forwardAttempts{
+			ctx:          ctx,
+			request:      request,
+			options:      &forwardOptions{},
+			attemptLimit: 2,
+			attemptCount: 1,
+		}
+	}
+	answer503 := func(conn net.Conn, results chan exchangeResult) *upstreamExchange {
+		io.WriteString(conn, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+		result := receiveBounded(t, results, "exchange")
+		if result.failure != upstreamFailureNone || result.exchange.response.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("exchange %v, want the block's 503", result.failure)
+		}
+		return result.exchange
+	}
+
+	// the write is held right after the head, before the body
+	streamedBody, request, holdConn, results := start(strings.NewReader("streamed"))
+	waitClosed(t, holdConn.held, "the held head write")
+	conn, _, _ := raw.accept(t)
+	exchange := answer503(conn, results)
+	if !attemptsFor(request).retry503Allowed(exchange) {
+		t.Fatalf("a 503 before the streamed body began was not retried")
+	}
+	// the write goes on only after the decision
+	holdConn.release()
+	if err := exchange.joinWrite(); !errors.Is(err, errBodyInterrupted) {
+		t.Errorf("the write ended with %v, want the body held back", err)
+	}
+	if streamedBody.began() {
+		t.Errorf("the body began on the block that answered 503, after the decision to retry it")
+	}
+	exchange.finish(false)
+
+	// the body began before the 503
+	reader := &gatedReader{chunks: make(chan []byte), waiting: make(chan struct{})}
+	streamedBody, request, holdConn, results = start(reader)
+	holdConn.release()
+	receiveBounded(t, reader.waiting, "the body read")
+	conn, _, upstreamRequest := raw.accept(t)
+	exchange = answer503(conn, results)
+	if attemptsFor(request).retry503Allowed(exchange) {
+		t.Errorf("a 503 after the streamed body began was retried")
+	}
+	reader.chunks <- []byte("streamed")
+	readExactly(t, upstreamRequest.Body, "streamed")
+	if err := exchange.joinWrite(); err != nil {
+		t.Errorf("the begun body's write ended with %v, want it whole", err)
+	}
+	exchange.finish(false)
+}
+
+// A 503 that comes before a streamed body began going to its block moves the
+// request to another block with the whole body, though the first block's
+// write is poised right before the body as the 503 is decided on.
+func TestRetry503BeforeStreamedBodyBeganMovesItWhole(t *testing.T) {
+	serviceName := testServiceName("retry-503-streamed")
+	raw := newRawUpstream(t)
+	live := newRecordingUpstream(t, "g2", nil)
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: live.port},
+	}), testFrontSettings())
+	rawAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(raw.port))
+	heldConns := make(chan *holdWriteConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		if address != rawAddress {
+			return conn
+		}
+		holdConn := newHoldWriteConn(t, conn)
+		heldConns <- holdConn
+		return holdConn
+	})
+	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		return options
+	})
+	responses := make(chan string, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, front.url("/mcp"), strings.NewReader("streamed"))
+		response, body, err := testDo(t, request)
+		if err != nil {
+			responses <- err.Error()
+			return
+		}
+		responses <- strconv.Itoa(response.StatusCode) + " " + string(body)
+	}()
+	holdConn := receiveBounded(t, heldConns, "dial to g1")
+	waitClosed(t, holdConn.held, "the held head write")
+	conn, _, _ := raw.accept(t)
+	// the retry cuts g1's connection, which lets its held write go on
+	io.WriteString(conn, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+	if response := receiveBounded(t, responses, "response"); response != "200 g2" {
+		t.Fatalf("response %q, want g2's 200", response)
+	}
+	if recorded := live.recorded(); len(recorded) != 1 || string(recorded[0].body) != "streamed" {
+		t.Errorf("g2 did not get the whole body")
+	}
+	if retryCount(serviceName, "http_503") != 1 {
+		t.Errorf("the 503 was not retried once")
 	}
 }

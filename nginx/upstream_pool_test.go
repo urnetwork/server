@@ -6,9 +6,11 @@ package nginx
 // closed before any request is written to it.
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -110,15 +112,10 @@ func TestUpstreamPoolEvictsLeastRecentlyUsed(t *testing.T) {
 			request, _ := http.NewRequest(http.MethodGet, front.url(path), nil)
 			testDo(t, request)
 		}()
-		return <-arrivals
+		return receiveBounded(t, arrivals, "arrival")
 	}
 	pooledConn := func() string {
-		pool.stateLock.Lock()
-		defer pool.stateLock.Unlock()
-		if len(pool.idleConns) != 1 {
-			t.Fatalf("pool keeps %d connections, want 1", len(pool.idleConns))
-		}
-		return pool.idleConns[0].conn.LocalAddr().String()
+		return idleConnsOf(t, pool, 1)[0].conn.LocalAddr().String()
 	}
 
 	// two connections, each holding one request
@@ -167,10 +164,11 @@ func TestUpstreamPoolIdleTimeoutAndKeepaliveTime(t *testing.T) {
 
 	sendAndWait(t, front, "/second")
 	// the pooled connection is past its keepalive time
+	oldConn := idleConnsOf(t, pool, 1)[0]
 	func() {
 		pool.stateLock.Lock()
 		defer pool.stateLock.Unlock()
-		pool.idleConns[0].dialTime = time.Now().Add(-time.Duration(service.Keepalive.TimeSeconds+1) * time.Second)
+		oldConn.dialTime = time.Now().Add(-time.Duration(service.Keepalive.TimeSeconds+1) * time.Second)
 	}()
 	sendAndWait(t, front, "/third")
 	sendAndWait(t, front, "/fourth")
@@ -211,11 +209,7 @@ func TestUpstreamPoolDropsClosedIdleConnection(t *testing.T) {
 	front := newTestFront(t, group, testForwardOptions)
 	pool := group.blocks[0].pool
 	sendAndWait(t, front, "/first")
-	pooledConn := func() net.Conn {
-		pool.stateLock.Lock()
-		defer pool.stateLock.Unlock()
-		return pool.idleConns[0].conn
-	}()
+	pooledConn := idleConnsOf(t, pool, 1)[0].conn
 	if !upstreamConnAlive(pooledConn) {
 		t.Fatalf("a live idle connection was taken for closed")
 	}
@@ -317,5 +311,274 @@ func TestUpstreamStatefulRetryWalksForward(t *testing.T) {
 	request, _ = http.NewRequest(http.MethodGet, front.url("/mcp"), nil)
 	if _, body, err := testDo(t, request); err != nil || string(body) != peers[secondPeer].name {
 		t.Errorf("second request reached %q %v", body, err)
+	}
+}
+
+// A dialed connection whose read deadline a test can make pass at once, as
+// if its time had come: it keeps the read deadline last set, and
+// passReadDeadline moves a set one into the past. Its raw descriptor is the
+// real socket's, so the pool's MSG_PEEK check sees what a real connection
+// would.
+type deadlineConn struct {
+	net.Conn
+
+	stateLock    sync.Mutex
+	readDeadline time.Time
+}
+
+// Keeps the read deadline, then sets both.
+func (self *deadlineConn) SetDeadline(deadline time.Time) error {
+	self.keepReadDeadline(deadline)
+	return self.Conn.SetDeadline(deadline)
+}
+
+// Keeps the read deadline, then sets it.
+func (self *deadlineConn) SetReadDeadline(deadline time.Time) error {
+	self.keepReadDeadline(deadline)
+	return self.Conn.SetReadDeadline(deadline)
+}
+
+// Records the read deadline last set.
+func (self *deadlineConn) keepReadDeadline(deadline time.Time) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.readDeadline = deadline
+}
+
+// Makes the read deadline last set pass now. With none set, nothing changes.
+func (self *deadlineConn) passReadDeadline() {
+	readDeadline := func() time.Time {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.readDeadline
+	}()
+	if !readDeadline.IsZero() {
+		self.Conn.SetReadDeadline(time.Unix(1, 0))
+	}
+}
+
+// The real socket's raw descriptor.
+func (self *deadlineConn) SyscallConn() (syscall.RawConn, error) {
+	return self.Conn.(syscall.Conn).SyscallConn()
+}
+
+// A pooled connection carries no deadline from its last exchange: idle past
+// that exchange's read timeout, within keepalive_timeout, it still serves
+// the next request, never dropped as dead by the MSG_PEEK check that takes
+// it from the pool.
+func TestUpstreamPoolKeepsConnectionPastItsReadDeadline(t *testing.T) {
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, _ := newTestGroup(t, testRouteService(testServiceName("pool-read-deadline"), []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), testFrontSettings())
+	dialedConns := make(chan *deadlineConn, 4)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		dialedConn := &deadlineConn{Conn: conn}
+		dialedConns <- dialedConn
+		return dialedConn
+	})
+	front := newTestFront(t, group, testForwardOptions)
+
+	sendAndWait(t, front, "/first")
+	// the time of any read deadline the first exchange left comes
+	receiveBounded(t, dialedConns, "dial").passReadDeadline()
+	sendAndWait(t, front, "/second")
+	if conns := requestConns(upstream); conns[0] != conns[1] {
+		t.Errorf("connections %v: the idle connection was dropped once its last exchange's read deadline passed", conns)
+	}
+	if len(dialedConns) != 0 {
+		t.Errorf("the second request dialed a new connection")
+	}
+}
+
+// The group's own sweep, every ForwardSettings.KeepaliveSweepInterval,
+// closes an idle connection past keepalive_timeout: the block sees it
+// close, and the pool is left empty.
+func TestUpstreamPoolSweepLoopClosesExpiredConnection(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Forward.KeepaliveSweepInterval = 10 * time.Millisecond
+	raw := newRawUpstream(t)
+	service := testRouteService(testServiceName("pool-sweep-loop"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	})
+	group, _ := newTestGroup(t, service, settings)
+	front := newTestFront(t, group, testForwardOptions)
+	go func() {
+		request, _ := http.NewRequest(http.MethodGet, front.url("/"), nil)
+		testDo(t, request)
+	}()
+	upstreamConn, upstreamReader, _ := raw.accept(t)
+	io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	front.waitServed(t)
+
+	pool := group.blocks[0].pool
+	idleConn := idleConnsOf(t, pool, 1)[0]
+	// its keepalive timeout has passed
+	func() {
+		pool.stateLock.Lock()
+		defer pool.stateLock.Unlock()
+		idleConn.idleTime = time.Now().Add(-time.Duration(service.Keepalive.TimeoutSeconds+1) * time.Second)
+	}()
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if n, err := upstreamReader.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the block read %d %v, want the sweep to close the expired connection", n, err)
+	}
+	if pool.idleCount() != 0 {
+		t.Errorf("the pool kept the expired connection")
+	}
+}
+
+// A response read whole before its request write reported doesn't cost the
+// connection: the block has the whole request, so the exchange waits for the
+// write to report, as Go's transport waits (wroteRequest), and pools the
+// connection, rather than cut it.
+func TestUpstreamFinishWaitsForLateWriteReport(t *testing.T) {
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, _ := newTestGroup(t, testRouteService(testServiceName("finish-write-wait"), []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), testFrontSettings())
+	dialedConns := make(chan *holdWriteConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		holdConn := newHoldWriteConn(t, conn)
+		dialedConns <- holdConn
+		return holdConn
+	})
+	waitStarted := make(chan struct{})
+	group.waitAfter = func(d time.Duration) <-chan time.Time {
+		close(waitStarted)
+		// never fires: only the write's report ends this wait
+		return nil
+	}
+	front := newTestFront(t, group, testForwardOptions)
+	responses := make(chan string, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodGet, front.url("/late-report"), nil)
+		response, body, err := testDo(t, request)
+		if err != nil {
+			responses <- err.Error()
+			return
+		}
+		responses <- strconv.Itoa(response.StatusCode) + " " + string(body)
+	}()
+
+	holdConn := receiveBounded(t, dialedConns, "dial")
+	// the request head is at the block; its write hasn't returned
+	waitClosed(t, holdConn.held, "the held write")
+	select {
+	case <-waitStarted:
+	case <-holdConn.closed:
+		t.Fatalf("the exchange cut a connection whose request the block had whole")
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the exchange neither waited for the write nor cut the connection")
+	}
+	holdConn.release()
+	if response := receiveBounded(t, responses, "response"); response != "200 g1" {
+		t.Fatalf("response %q, want 200 g1", response)
+	}
+	front.waitServed(t)
+	if idleConnsOf(t, group.blocks[0].pool, 1)[0].conn != holdConn {
+		t.Errorf("the pool kept another connection")
+	}
+}
+
+// A request write that doesn't report within ForwardSettings.KeepaliveWriteWait
+// costs only its connection: the response is relayed whole, the connection is
+// closed rather than pooled, and nothing waits on the write beyond the bound.
+func TestUpstreamFinishGivesUpOnWriteReportPastItsWait(t *testing.T) {
+	upstream := newRecordingUpstream(t, "g1", nil)
+	settings := testFrontSettings()
+	group, _ := newTestGroup(t, testRouteService(testServiceName("finish-write-give-up"), []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), settings)
+	dialedConns := make(chan *holdWriteConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		holdConn := newHoldWriteConn(t, conn)
+		dialedConns <- holdConn
+		return holdConn
+	})
+	waitDurations := make(chan time.Duration, 1)
+	group.waitAfter = func(d time.Duration) <-chan time.Time {
+		waitDurations <- d
+		// the wait's bound passes at once
+		passed := make(chan time.Time, 1)
+		passed <- time.Now()
+		return passed
+	}
+	front := newTestFront(t, group, testForwardOptions)
+	request, _ := http.NewRequest(http.MethodGet, front.url("/no-report"), nil)
+	response, body, err := testDo(t, request)
+	if err != nil || response.StatusCode != http.StatusOK || string(body) != "g1" {
+		t.Fatalf("response %v %q %v, want 200 g1", response, body, err)
+	}
+	front.waitServed(t)
+	if waitDuration := receiveBounded(t, waitDurations, "write wait"); waitDuration != settings.Forward.KeepaliveWriteWait {
+		t.Errorf("waited %v for the write, want KeepaliveWriteWait %v", waitDuration, settings.Forward.KeepaliveWriteWait)
+	}
+	holdConn := receiveBounded(t, dialedConns, "dial")
+	waitClosed(t, holdConn.closed, "closing the connection")
+	if group.blocks[0].pool.idleCount() != 0 {
+		t.Errorf("a connection whose write never reported was pooled")
+	}
+}
+
+// A response writer whose client goes away the moment the response's last
+// expected byte is written to it: the request is canceled, as Go's server
+// cancels it when a client that read a response of known length closes its
+// connection.
+type clientGoneWriter struct {
+	http.ResponseWriter
+	remainingBytes int
+	gone           context.CancelFunc
+}
+
+// Writes p, then cancels the request once the expected bytes are written.
+func (self *clientGoneWriter) Write(p []byte) (int, error) {
+	n, err := self.ResponseWriter.Write(p)
+	self.remainingBytes -= n
+	if self.remainingBytes <= 0 {
+		self.gone()
+	}
+	return n, err
+}
+
+// The writer underneath, for http.ResponseController.
+func (self *clientGoneWriter) Unwrap() http.ResponseWriter {
+	return self.ResponseWriter
+}
+
+// A client that goes away once it has the block's whole response, before
+// the handler returns, leaves the upstream connection pooled: the exchange
+// stops watching for the client once the response was read whole.
+func TestUpstreamPoolKeepsConnectionWhenClientLeavesAfterResponse(t *testing.T) {
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, _ := newTestGroup(t, testRouteService(testServiceName("pool-client-gone"), []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), testFrontSettings())
+	served := make(chan any, 1)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			served <- recover()
+		}()
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		goneWriter := &clientGoneWriter{
+			ResponseWriter: w,
+			remainingBytes: len("g1"),
+			gone:           cancel,
+		}
+		group.serveHttp(goneWriter, r.WithContext(ctx), testForwardOptions(r))
+	}))
+	defer front.Close()
+
+	request, _ := http.NewRequest(http.MethodGet, front.URL+"/", nil)
+	response, body, err := testDo(t, request)
+	if err != nil || response.StatusCode != http.StatusOK || string(body) != "g1" {
+		t.Fatalf("response %v %q %v, want 200 g1", response, body, err)
+	}
+	if recovered := receiveBounded(t, served, "the end of serveHttp"); recovered != nil {
+		t.Fatalf("serveHttp panicked: %v", recovered)
+	}
+	if group.blocks[0].pool.idleCount() != 1 {
+		t.Errorf("the connection of a whole response was not pooled after its client left")
 	}
 }

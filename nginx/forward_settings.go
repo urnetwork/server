@@ -48,11 +48,22 @@ type ForwardSettings struct {
 	// upstream has no max_conns. Non-positive means no cap.
 	MaxBlockActiveRequests int
 	// how often a service's idle upstream connections are checked against
-	// its keepalive timeout and time, and closed past them. nginx closes each
-	// one on its own timer, so this is the granularity of that bound.
-	// Non-positive disables the sweep, and an idle connection past its bounds
-	// is closed only when it is next taken from the pool.
+	// its keepalive timeout, and closed past it. nginx closes each one on its
+	// own timer, so this is the granularity of that bound. Keepalive time
+	// isn't swept: it is checked when a connection is returned, as nginx
+	// checks it after each request. Non-positive disables the sweep, and an
+	// idle connection past its timeout is closed only when it is next taken
+	// from the pool.
 	KeepaliveSweepInterval time.Duration
+	// how long an exchange whose response was read whole, and allows reuse,
+	// waits for its request write to report before it gives up on keeping
+	// the connection. The write has usually sent everything and only has to
+	// report, or the block is reading the rest of a body it answered early.
+	// Go's transport waits 50 ms (maxWriteWaitBeforeConnReuse); nginx decides
+	// on one thread and never has to. A write that doesn't report in time
+	// costs only the connection, which is closed. A streamed body the client
+	// is still sending is never waited for. Non-positive gives up at once.
+	KeepaliveWriteWait time.Duration
 	// the read buffer and the write buffer of each upstream connection, in
 	// bytes. A response head is limited by MaxUpstreamResponseHeaderBytes, not
 	// by this. Non-positive means bufio's default size.
@@ -75,6 +86,7 @@ func DefaultForwardSettings() *ForwardSettings {
 		MaxUpstreamResponseHeaderBytes: 4 * 1024,
 		MaxBlockActiveRequests:         32768,
 		KeepaliveSweepInterval:         1 * time.Second,
+		KeepaliveWriteWait:             50 * time.Millisecond,
 		UpstreamBufferBytes:            4 * 1024,
 		CopyBufferBytes:                32 * 1024,
 	}

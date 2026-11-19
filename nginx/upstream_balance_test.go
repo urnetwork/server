@@ -467,7 +467,7 @@ func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 			request, _ := http.NewRequest(http.MethodGet, front.url("/held"), nil)
 			testDo(t, request)
 		}()
-		return (<-arrivals).block
+		return receiveBounded(t, arrivals, "arrival").block
 	}
 	release := func(blockIndex int) {
 		releases[blockIndex] <- struct{}{}
@@ -550,7 +550,7 @@ func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
 			testDo(t, request)
 		}()
 	}
-	heldBlocks := []string{(<-arrivals).block, (<-arrivals).block}
+	heldBlocks := []string{receiveBounded(t, arrivals, "arrival").block, receiveBounded(t, arrivals, "arrival").block}
 	slices.Sort(heldBlocks)
 	if !slices.Equal(heldBlocks, []string{"g1", "g2"}) {
 		t.Fatalf("held requests went to %v, want one per block", heldBlocks)

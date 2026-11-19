@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -432,7 +433,7 @@ func TestForwardResponseHeadLimit(t *testing.T) {
 		}()
 		conn, _, _ := raw.accept(t)
 		io.WriteString(conn, headOfSize(c.headBytes)+"ok")
-		response := <-responses
+		response := receiveBounded(t, responses, "response")
 		if response == nil || response.StatusCode != c.wantStatus {
 			t.Fatalf("head of %d bytes: response %v, want %d", c.headBytes, response, c.wantStatus)
 		}
@@ -545,7 +546,7 @@ func TestForwardReadTimeoutArmsAfterRequestSent(t *testing.T) {
 	<-gotPart
 	time.Sleep(3 * settings.Forward.ProxyReadTimeout)
 	releaseHeld()
-	got := <-results
+	got := receiveBounded(t, results, "result")
 	if got.err != nil || got.response.StatusCode != http.StatusOK || string(got.body) != "done" {
 		t.Fatalf("slow upload: %v %q %v, want 200", got.response, got.body, got.err)
 	}
@@ -643,4 +644,128 @@ func TestForwardHttp2Client(t *testing.T) {
 		t.Errorf("streamed upstream request %v %q", recorded[1].transferEncoding, recorded[1].body)
 	}
 	checkStoreEmpty(t, bodyStore)
+}
+
+// A streamed body goes on to the block as it arrives, as nginx's
+// proxy_request_buffering off sends it: the block has the first part of a
+// declared and of a chunked body while the client still holds the rest.
+func TestForwardStreamedBodyPassesThrough(t *testing.T) {
+	cases := []struct {
+		framing   string
+		firstPart string
+		rest      string
+	}{
+		{framing: "Content-Length: 20", firstPart: "first-ten!", rest: "second-ten"},
+		{framing: "Transfer-Encoding: chunked", firstPart: "a\r\nfirst-ten!\r\n", rest: "a\r\nsecond-ten\r\n0\r\n\r\n"},
+	}
+	for _, c := range cases {
+		raw := newRawUpstream(t)
+		group, _ := newTestGroup(t, testRouteService(testServiceName("streamed-pass-through"), []testBlock{
+			{name: "g1", weight: 1, port: raw.port},
+		}), testFrontSettings())
+		front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			return options
+		})
+		clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial front: %v", err)
+		}
+		defer clientConn.Close()
+		io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\n"+c.framing+"\r\n\r\n"+c.firstPart)
+
+		upstreamConn, _, request := raw.accept(t)
+		// a bound, so a body held back fails the read rather than hangs it
+		upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		readExactly(t, request.Body, "first-ten!")
+		io.WriteString(clientConn, c.rest)
+		readExactly(t, request.Body, "second-ten")
+		if rest, err := io.ReadAll(request.Body); err != nil || len(rest) != 0 {
+			t.Fatalf("%s: the block read %q %v past the body", c.framing, rest, err)
+		}
+		io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: response %v %v, want 200", c.framing, response, err)
+		}
+		front.waitServed(t)
+	}
+}
+
+// A client that stops reading a relayed response is cut once
+// HttpSettings.SendTimeout passes without progress, nginx's send_timeout:
+// the handler aborts and the upstream connection is closed, rather than both
+// waiting on the client.
+func TestForwardSendTimeoutCutsStalledClient(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Http.SendTimeout = 200 * time.Millisecond
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testRouteService(testServiceName("send-timeout-client"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), settings)
+	front := newTestFront(t, group, testForwardOptions)
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "GET /download HTTP/1.1\r\nHost: download.service.example\r\n\r\n")
+
+	upstreamConn, _, _ := raw.accept(t)
+	// far more than loopback buffers hold, sent as fast as the front takes it
+	chunk := make([]byte, 64*1024)
+	chunkCount := 1024
+	upstreamErrs := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nContent-Length: "+strconv.Itoa(chunkCount*len(chunk))+"\r\n\r\n")
+		for i := 0; err == nil && i < chunkCount; i += 1 {
+			_, err = upstreamConn.Write(chunk)
+		}
+		upstreamErrs <- err
+	}()
+	// the client takes the head, then nothing more
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("response %v %v, want a 200 head", response, err)
+	}
+	if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+		t.Errorf("serveHttp ended with %v, want http.ErrAbortHandler", recovered)
+	}
+	if err := receiveBounded(t, upstreamErrs, "end of the block's writes"); err == nil {
+		t.Errorf("the block's whole response was taken for a client that read none of it")
+	}
+}
+
+// A body refused before it is read, here a local 503 over the memory budget,
+// is answered within HttpSettings.LingeringTimeout though the client stalls
+// mid-body: Go's server reads what remains of a body before it writes the
+// answer, and lingering_timeout bounds that read.
+func TestForwardRefusalAnswersWithinLingeringTimeout(t *testing.T) {
+	settings := testFrontSettings()
+	settings.Body.MemoryBudgetBytes = 1
+	settings.Http.LingeringTimeout = 200 * time.Millisecond
+	serviceName := testServiceName("refusal-lingering")
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), settings)
+	front := newTestFront(t, group, testForwardOptions)
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	// one chunk of a body of unknown length, then nothing more
+	io.WriteString(clientConn, "POST /upload HTTP/1.1\r\nHost: upload.service.example\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+	// a bound, so an answer held back fails the read rather than hangs it
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("response %v %v, want the local 503", response, err)
+	}
+	front.waitServed(t)
+	if bodyRefusalCount(serviceName, bodyRefusalMemoryBudget) != 1 || len(upstream.recorded()) != 0 {
+		t.Errorf("the refusal was not counted, or reached the block")
+	}
 }

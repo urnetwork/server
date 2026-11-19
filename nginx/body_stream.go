@@ -21,6 +21,8 @@ import (
 type forwardStreamedBody struct {
 	ctx  context.Context
 	body io.Reader
+	// the length the client declared, or -1 when unknown
+	declaredLength int64
 	// for a body of unknown length, BodySettings.MaxBodyBytes; non-positive
 	// means no limit. A declared length is checked before forwarding.
 	maxBytes        int64
@@ -28,6 +30,9 @@ type forwardStreamedBody struct {
 	setReadDeadline func(time.Time) error
 	readBytes       int64
 	beganForwarding atomic.Bool
+	// set once the client's body was read whole, its declared length or its
+	// end, before those last bytes go upstream
+	whole atomic.Bool
 	// set by interrupt before its past deadline, and checked by a read after
 	// its own deadline, so neither deadline can hide the other
 	interrupted atomic.Bool
@@ -36,16 +41,21 @@ type forwardStreamedBody struct {
 	refusal   *bodyRefusal
 }
 
-// A streamed body over the client's, read under its timeout through
-// setReadDeadline, and under maxBytes when its length is unknown.
-func newForwardStreamedBody(ctx context.Context, body io.Reader, maxBytes int64, readTimeout time.Duration, setReadDeadline func(time.Time) error) *forwardStreamedBody {
-	return &forwardStreamedBody{
+// A streamed body over the client's, of declaredLength or -1 when unknown,
+// read under its timeout through setReadDeadline, and under maxBytes when
+// its length is unknown.
+func newForwardStreamedBody(ctx context.Context, body io.Reader, declaredLength int64, maxBytes int64, readTimeout time.Duration, setReadDeadline func(time.Time) error) *forwardStreamedBody {
+	streamedBody := &forwardStreamedBody{
 		ctx:             ctx,
 		body:            body,
+		declaredLength:  declaredLength,
 		maxBytes:        maxBytes,
 		readTimeout:     readTimeout,
 		setReadDeadline: setReadDeadline,
 	}
+	// an empty body is whole before any read
+	streamedBody.whole.Store(declaredLength == 0)
+	return streamedBody
 }
 
 // Marks that the upstream request began: its head is on the wire and the
@@ -57,6 +67,12 @@ func (self *forwardStreamedBody) begin() {
 // Whether the upstream request began.
 func (self *forwardStreamedBody) began() bool {
 	return self.beganForwarding.Load()
+}
+
+// Whether the client's body was read whole, so all that is left of the
+// upstream request is its framing and the last flush.
+func (self *forwardStreamedBody) isWhole() bool {
+	return self.whole.Load()
 }
 
 // Reads the client's body under its timeout and limit. A failure on the
@@ -80,6 +96,11 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 	if 0 < self.maxBytes && self.maxBytes < self.readBytes {
 		self.fail(&bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 		return n, io.ErrUnexpectedEOF
+	}
+	// a declared length counts as the end: the request's writer reads no
+	// further than it, so it may never see the end itself
+	if err == io.EOF || (err == nil && 0 <= self.declaredLength && self.declaredLength <= self.readBytes) {
+		self.whole.Store(true)
 	}
 	if err == io.EOF {
 		if 0 < self.readTimeout && self.setReadDeadline != nil {

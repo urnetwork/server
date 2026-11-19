@@ -55,6 +55,10 @@ type upstreamGroup struct {
 	ring []upstreamRingPoint
 	// dials a block; tests replace it before use
 	dialContext func(ctx context.Context, network string, address string) (net.Conn, error)
+	// a channel that fires once a duration has passed, for the group's
+	// bounded waits: time.After; tests replace it before use to order their
+	// barriers
+	waitAfter   func(d time.Duration) <-chan time.Time
 	copyBuffers sync.Pool
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -64,6 +68,7 @@ type upstreamGroup struct {
 	tunnels   map[*forwardTunnel]bool
 }
 
+// A group is the forwarder routing hands a service's requests to.
 var _ serviceForwarder = (*upstreamGroup)(nil)
 
 // One block of the service.
@@ -108,6 +113,7 @@ func newUpstreamGroup(routeTable *RouteTable, service *RouteService, bodyStore *
 		blocks:          []*upstreamBlock{},
 		blockNameBlocks: map[string]*upstreamBlock{},
 		dialContext:     dialer.DialContext,
+		waitAfter:       time.After,
 		ctx:             ctx,
 		cancel:          cancel,
 		tunnels:         map[*forwardTunnel]bool{},
@@ -191,7 +197,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 		if options.streamed {
 			// the body keeps arriving while the response flows
 			responseController.EnableFullDuplex()
-			request.streamedBody = newForwardStreamedBody(ctx, r.Body, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
+			request.streamedBody = newForwardStreamedBody(ctx, r.Body, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
 			if 0 <= r.ContentLength {
 				request.bodyFraming = forwardBodyFraming{known: true, length: r.ContentLength}
 			} else {
@@ -254,6 +260,39 @@ func (self *upstreamGroup) attemptLimit(options *forwardOptions) int {
 	return max(min(self.settings.Forward.MaxUpstreamAttempts, self.balancedBlockCount), 1)
 }
 
+// One request's attempts under D7, kept by its forward goroutine.
+type forwardAttempts struct {
+	ctx     context.Context
+	request *upstreamRequest
+	options *forwardOptions
+	// attempts that may reach a block (attemptLimit)
+	attemptLimit int
+	// attempts made, the current one included
+	attemptCount int
+}
+
+// Whether the request may move to another block after a failed attempt:
+// attempts are left, the route names no block, the client is still there,
+// and a streamed body never began going upstream.
+func (self *forwardAttempts) retryAllowed() bool {
+	if self.options.blockName != "" || self.attemptLimit <= self.attemptCount || self.ctx.Err() != nil {
+		return false
+	}
+	return self.request.streamedBody == nil || !self.request.streamedBody.began()
+}
+
+// Whether the request may move to another block after exchange's 503. The
+// exchange is live, and its write may be about to begin a streamed body, so
+// the body is first held back from it under its gate's lock: a body held
+// back is whole for the retry, and one that began goes on, its 503 the
+// final answer.
+func (self *forwardAttempts) retry503Allowed(exchange *upstreamExchange) bool {
+	if !self.retryAllowed() {
+		return false
+	}
+	return self.request.streamedBody == nil || !exchange.holdBody()
+}
+
 // Runs the attempts and relays the final response, or answers the front's
 // own error.
 func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, responseController *http.ResponseController, request *upstreamRequest, options *forwardOptions) {
@@ -262,13 +301,11 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 	if self.ring != nil && options.blockName == "" {
 		ringWalk = newUpstreamRingWalk(nginxRemoteAddrText(options.clientAddrPort.Addr()))
 	}
-	attemptLimit := self.attemptLimit(options)
-	attempts := 0
-	retryAllowed := func() bool {
-		if options.blockName != "" || attemptLimit <= attempts || ctx.Err() != nil {
-			return false
-		}
-		return request.streamedBody == nil || !request.streamedBody.began()
+	attempts := &forwardAttempts{
+		ctx:          ctx,
+		request:      request,
+		options:      options,
+		attemptLimit: self.attemptLimit(options),
 	}
 	for {
 		block := self.selectBlock(options.blockName, triedBlocks, ringWalk)
@@ -278,10 +315,10 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 		triedBlocks[block.index] = true
-		attempts += 1
+		attempts.attemptCount += 1
 		exchange, failure := self.attempt(ctx, block, request)
 		if failure == upstreamFailureNone {
-			if exchange.response.StatusCode == http.StatusServiceUnavailable && retryAllowed() {
+			if exchange.response.StatusCode == http.StatusServiceUnavailable && attempts.retry503Allowed(exchange) {
 				exchange.finish(false)
 				self.releaseBlock(block, options)
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, upstreamAttemptHttp503).Inc()
@@ -306,7 +343,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 			writeForwardError(w, http.StatusBadGateway)
 			return
 		case upstreamFailureError, upstreamFailureTimeout:
-			if retryAllowed() {
+			if attempts.retryAllowed() {
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, failure.String()).Inc()
 				continue
 			}
@@ -427,7 +464,9 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 		// of a slow or streaming response isn't left waiting for it
 		responseController.Flush()
 	}
-	clientErr, upstreamErr := self.copyToClient(w, responseController, response.Body)
+	clientErr, upstreamErr := self.copyToClient(w, responseController, response.Body, func() {
+		exchange.stopCancelHook()
+	})
 	if clientErr != nil || upstreamErr != nil {
 		// a truncated response must not look complete to the client
 		panic(http.ErrAbortHandler)
@@ -436,9 +475,11 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 }
 
 // Copies a response body to the client, writing and flushing each read, with
-// HttpSettings.SendTimeout bounding each write, nginx's send_timeout. The
-// errors say which side failed.
-func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseController *http.ResponseController, body io.Reader) (clientErr error, upstreamErr error) {
+// HttpSettings.SendTimeout bounding each write, nginx's send_timeout. Once
+// the body's end is read, bodyEnded runs before the last bytes are written,
+// so a client that closes as soon as it has them finds the block's side
+// done. The errors say which side failed.
+func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseController *http.ResponseController, body io.Reader, bodyEnded func()) (clientErr error, upstreamErr error) {
 	sendTimeout := self.settings.Http.SendTimeout
 	if 0 < sendTimeout {
 		defer responseController.SetWriteDeadline(time.Time{})
@@ -447,6 +488,9 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 	defer self.copyBuffers.Put(copyBuffer)
 	for {
 		n, readErr := body.Read(*copyBuffer)
+		if readErr == io.EOF && bodyEnded != nil {
+			bodyEnded()
+		}
 		if 0 < n {
 			if 0 < sendTimeout {
 				responseController.SetWriteDeadline(time.Now().Add(sendTimeout))

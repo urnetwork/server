@@ -15,9 +15,19 @@ package nginx
 //     write, as nginx's proxy_read_timeout and proxy_send_timeout bound the
 //     wait between two operations, and they are per request; reads are
 //     bounded from when the request was sent whole, or a response head
-//     arrived, as nginx arms its read timer then;
+//     arrived, as nginx arms its read timer then. They end with their
+//     exchange: a pooled connection carries none;
+//   - a streamed body goes on as it arrives, each read written and flushed,
+//     as nginx's proxy_request_buffering off sends it;
 //   - the response head is limited as nginx's proxy_buffer_size limits it,
-//     every head of the attempt together, an informational one included.
+//     every head of the attempt together, an informational one included;
+//   - a connection is kept only when its response was read whole and its
+//     request written whole, as nginx keeps one only once request_body_sent
+//     (ngx_http_upstream_free_keepalive_peer). The write runs in its own
+//     goroutine, so a response can be read whole before the write reports;
+//     the exchange then waits ForwardSettings.KeepaliveWriteWait for it, as
+//     Go's transport waits (wroteRequest). A client that goes away once the
+//     response was read whole no longer cuts the connection.
 //
 // Pools follow nginx's upstream keepalive, kept per block for the process
 // (nginx keeps `keepalive` idle connections per worker for a whole upstream,
@@ -56,8 +66,9 @@ import (
 // The response head outgrew ForwardSettings.MaxUpstreamResponseHeaderBytes.
 var errUpstreamHeadTooLarge = errors.New("upstream response head too large")
 
-// A block's keepalive pool and the connections it has open. Safe for
-// concurrent use.
+// A block's keepalive pool and the connections it has open. A pooled
+// connection carries no deadline: its last exchange's end with it, so only
+// keepalive_timeout bounds it while idle. Safe for concurrent use.
 type upstreamPool struct {
 	group *upstreamGroup
 	block *upstreamBlock
@@ -120,7 +131,7 @@ func (self *upstreamPool) keepaliveEnabled() bool {
 // Whether an idle connection is past its keepalive timeout at now. Its
 // keepalive time is checked when it is returned, as nginx checks it after
 // each request, so an idle connection may serve one more request past it.
-func (self *upstreamPool) expired(upstreamConn *upstreamConnection, now time.Time) bool {
+func (self *upstreamPool) expiredWithLock(upstreamConn *upstreamConnection, now time.Time) bool {
 	keepalive := self.group.service.Keepalive
 	return time.Duration(keepalive.TimeoutSeconds)*time.Second <= now.Sub(upstreamConn.idleTime)
 }
@@ -139,7 +150,7 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 				upstreamConn := self.idleConns[n]
 				self.idleConns[n] = nil
 				self.idleConns = self.idleConns[:n]
-				if self.expired(upstreamConn, now) {
+				if self.expiredWithLock(upstreamConn, now) {
 					expiredConns = append(expiredConns, upstreamConn)
 					continue
 				}
@@ -211,6 +222,12 @@ func (self *upstreamPool) put(upstreamConn *upstreamConnection, reusable bool) {
 		now.Sub(upstreamConn.dialTime) <= time.Duration(keepalive.TimeSeconds)*time.Second &&
 		// bytes past the response are bytes nobody asked for
 		upstreamConn.reader.Buffered() == 0
+	if reusable {
+		// the exchange's deadlines end with it: a read deadline left to
+		// pass while the connection is idle would fail the MSG_PEEK check
+		// that next takes it, so keepalive_timeout would never be reached
+		upstreamConn.conn.SetDeadline(time.Time{})
+	}
 	evictedConn, kept := func() (*upstreamConnection, bool) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -250,7 +267,7 @@ func (self *upstreamPool) sweep(now time.Time) {
 		expiredConns := []*upstreamConnection{}
 		keptConns := self.idleConns[:0]
 		for _, upstreamConn := range self.idleConns {
-			if self.expired(upstreamConn, now) {
+			if self.expiredWithLock(upstreamConn, now) {
 				expiredConns = append(expiredConns, upstreamConn)
 			} else {
 				keptConns = append(keptConns, upstreamConn)
@@ -294,7 +311,9 @@ func (self *upstreamPool) idleCount() int {
 // Whether an idle connection is still usable: a non-blocking MSG_PEEK finds
 // nothing to read. End of stream, an error, or bytes the block sent unasked
 // mean it isn't (ngx_http_upstream_keepalive_close_handler). A connection
-// without a raw descriptor is assumed alive.
+// without a raw descriptor is assumed alive. A read deadline that has
+// passed fails the check as it fails any read, before the peek; a pooled
+// connection carries none.
 func upstreamConnAlive(conn net.Conn) bool {
 	syscallConn, ok := conn.(syscall.Conn)
 	if !ok {
@@ -374,6 +393,7 @@ func (self *upstreamConnection) close() {
 // How an attempt failed, in nginx's proxy_next_upstream terms.
 type upstreamFailure int
 
+// The failures; each one's String is its attempt result label.
 const (
 	upstreamFailureNone upstreamFailure = iota
 	// nginx's `error`: a refused or failed dial, a failed write, or a read
@@ -464,6 +484,11 @@ type upstreamExchange struct {
 	writeDone atomic.Bool
 	// stops the cancellation hook; false when it already ran
 	stopCancel func() bool
+	// the hook's end, kept by the exchange's own goroutine: whether it was
+	// stopped, at the response's end or at finish, and whether it had
+	// already run and cut the connection by then
+	cancelStopped bool
+	canceled      bool
 
 	// gates a streamed body: once stopped, the write may not begin reading
 	// it, and a body already begun is interrupted
@@ -483,8 +508,6 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	upstreamConn.readErr = nil
 	upstreamConn.writtenBytes.Store(0)
 	upstreamConn.readArmed.Store(false)
-	// a pooled connection keeps its last exchange's deadlines
-	upstreamConn.conn.SetDeadline(time.Time{})
 	if maxHeadBytes := self.settings.Forward.MaxUpstreamResponseHeaderBytes; 0 < maxHeadBytes {
 		upstreamConn.headBytesLeft = int64(maxHeadBytes)
 	} else {
@@ -519,11 +542,13 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		upstreamConn.readErr = nil
 	}
 	if err != nil {
+		// the client's side is read before finish stops a streamed body:
+		// stopping it fails the client's pending read, which Go's server
+		// answers by canceling the request, and that is the exchange's own
+		// doing, not the client going away
+		clientFailed := ctx.Err() != nil || (request.streamedBody != nil && request.streamedBody.failed())
 		exchange.finish(false)
-		if ctx.Err() != nil {
-			return nil, upstreamFailureClient, false
-		}
-		if request.streamedBody != nil && request.streamedBody.failed() {
+		if clientFailed {
 			return nil, upstreamFailureClient, false
 		}
 		nothingWritten = upstreamConn.writtenBytes.Load() == 0
@@ -570,6 +595,7 @@ func readUpstreamResponseHead(reader *bufio.Reader, method string) (*http.Respon
 }
 
 // Writes the request head and body to the connection and flushes it. A
+// stored body fills the connection's buffer, which goes out as it fills. A
 // streamed body's head is flushed before its first byte is read, so a
 // connection that fails that early never consumed any of the body.
 func (self *upstreamExchange) writeRequest() error {
@@ -578,10 +604,15 @@ func (self *upstreamExchange) writeRequest() error {
 	if _, err := writer.Write(request.head); err != nil {
 		return err
 	}
-	var body io.Reader
 	switch {
 	case request.storedBody != nil:
-		body = request.storedBody.newReader()
+		n, err := io.Copy(writer, io.LimitReader(request.storedBody.newReader(), request.bodyFraming.length))
+		if err != nil {
+			return err
+		}
+		if n < request.bodyFraming.length {
+			return io.ErrUnexpectedEOF
+		}
 	case request.streamedBody != nil:
 		if err := writer.Flush(); err != nil {
 			return err
@@ -589,31 +620,68 @@ func (self *upstreamExchange) writeRequest() error {
 		if !self.beginBody() {
 			return errBodyInterrupted
 		}
-		body = request.streamedBody
+		if err := self.writeStreamedBody(); err != nil {
+			return err
+		}
 	}
-	switch {
-	case body == nil:
-	case request.bodyFraming.known:
-		n, err := io.Copy(writer, io.LimitReader(body, request.bodyFraming.length))
+	return writer.Flush()
+}
+
+// Writes a streamed body on as it arrives, as nginx's
+// proxy_request_buffering off sends what it reads: each read is written and
+// flushed at once, so a client that sends part of its body and waits has
+// that part at the block. The body goes with its declared length, or in
+// chunks, the last chunk once the client's body ends.
+func (self *upstreamExchange) writeStreamedBody() error {
+	request := self.request
+	writer := self.conn.writer
+	group := self.conn.pool.group
+	copyBuffer := group.copyBuffers.Get().(*[]byte)
+	defer group.copyBuffers.Put(copyBuffer)
+	if request.bodyFraming.known {
+		flushWriter := &upstreamFlushWriter{
+			writer:  writer,
+			flusher: writer,
+		}
+		n, err := io.CopyBuffer(flushWriter, io.LimitReader(request.streamedBody, request.bodyFraming.length), *copyBuffer)
 		if err != nil {
 			return err
 		}
 		if n < request.bodyFraming.length {
 			return io.ErrUnexpectedEOF
 		}
-	case request.bodyFraming.chunked:
-		chunkedWriter := httputil.NewChunkedWriter(writer)
-		if _, err := io.Copy(chunkedWriter, body); err != nil {
-			return err
-		}
-		if err := chunkedWriter.Close(); err != nil {
-			return err
-		}
-		if _, err := writer.WriteString("\r\n"); err != nil {
-			return err
-		}
+		return nil
 	}
-	return writer.Flush()
+	chunkedWriter := httputil.NewChunkedWriter(writer)
+	flushWriter := &upstreamFlushWriter{
+		writer:  chunkedWriter,
+		flusher: writer,
+	}
+	if _, err := io.CopyBuffer(flushWriter, request.streamedBody, *copyBuffer); err != nil {
+		return err
+	}
+	if err := chunkedWriter.Close(); err != nil {
+		return err
+	}
+	_, err := writer.WriteString("\r\n")
+	return err
+}
+
+// Sends each write on to the block at once: through writer, the connection's
+// buffer or a chunked writer over it, then flusher, the connection's buffer,
+// flushed. Used by one request write at a time.
+type upstreamFlushWriter struct {
+	writer  io.Writer
+	flusher *bufio.Writer
+}
+
+// Writes p, then flushes it to the connection.
+func (self *upstreamFlushWriter) Write(p []byte) (int, error) {
+	n, err := self.writer.Write(p)
+	if err != nil {
+		return n, err
+	}
+	return n, self.flusher.Flush()
 }
 
 // Lets the write begin reading a streamed body, unless the exchange already
@@ -649,6 +717,61 @@ func (self *upstreamExchange) stopBody() {
 	}
 }
 
+// Keeps a streamed body from beginning on this exchange, unless it began
+// already, and reports whether it began. The decision is taken under the
+// gate's lock, so the write can't begin the body after it: a body kept back
+// stays whole for a retry, and one that began goes on undisturbed.
+func (self *upstreamExchange) holdBody() (began bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !self.bodyBegan {
+		self.bodyStopped = true
+	}
+	return self.bodyBegan
+}
+
+// Stops the cancellation hook, once the block's response is read whole or
+// the exchange finishes, and reports whether it had already run and cut the
+// connection. Go's server cancels a request when its client closes the
+// connection, which a client that read a response of known length may do
+// before the handler returns; once the block's whole response is read, that
+// must not cost the connection. Called from the exchange's own goroutine;
+// later calls report the first.
+func (self *upstreamExchange) stopCancelHook() (canceled bool) {
+	if !self.cancelStopped {
+		self.cancelStopped = true
+		self.canceled = !self.stopCancel()
+	}
+	return self.canceled
+}
+
+// Waits for a request write that hasn't reported, once a response that
+// allows reuse was read whole, and reports whether the write sent the whole
+// request, so the connection can be kept. Such a write has usually finished
+// and only has to report, or the block is reading the rest of a body it
+// answered early; ForwardSettings.KeepaliveWriteWait bounds the wait, as Go's
+// transport bounds it (wroteRequest), and a write still going then costs
+// only the connection. A streamed body the client is still sending isn't
+// waited for: the request won't be whole soon, and nginx keeps no
+// connection whose request it didn't send whole.
+func (self *upstreamExchange) awaitWrite() bool {
+	if self.request.streamedBody != nil && !self.request.streamedBody.isWhole() {
+		return false
+	}
+	group := self.conn.pool.group
+	writeWait := group.settings.Forward.KeepaliveWriteWait
+	if writeWait <= 0 {
+		return false
+	}
+	select {
+	case self.writeErr = <-self.writeResult:
+		self.writeJoined = true
+		return self.writeErr == nil
+	case <-group.waitAfter(writeWait):
+		return false
+	}
+}
+
 // Waits for the request write to end on its own, as a tunnel does before it
 // takes the connection over, and returns its error. The connection stays
 // out of the pool, and finish still decides its fate.
@@ -663,13 +786,21 @@ func (self *upstreamExchange) joinWrite() error {
 // Ends the exchange: unblocks and joins the request write, then puts the
 // connection back in its pool when reusable (the response was read to its
 // end and allows reuse), and the request was written whole and nothing cut
-// the connection; otherwise closes it. Safe to call more than once; only the
-// first call decides.
+// the connection; otherwise closes it. A reusable exchange whose write
+// hasn't reported waits for it within awaitWrite's bound before it cuts.
+// Safe to call more than once; only the first call decides.
 func (self *upstreamExchange) finish(reusable bool) {
 	if self.finished {
 		return
 	}
 	self.finished = true
+	if self.stopCancelHook() {
+		// the request was canceled and the connection cut
+		reusable = false
+	}
+	if reusable && !self.writeJoined && !self.writeDone.Load() {
+		reusable = self.awaitWrite()
+	}
 	if !self.writeJoined {
 		if !self.writeDone.Load() {
 			// the response ended, or the attempt failed, before the request
@@ -684,10 +815,6 @@ func (self *upstreamExchange) finish(reusable bool) {
 		}
 		self.writeErr = <-self.writeResult
 		self.writeJoined = true
-	}
-	if !self.stopCancel() {
-		// the request was canceled and the connection cut
-		reusable = false
 	}
 	if self.writeErr != nil {
 		reusable = false
