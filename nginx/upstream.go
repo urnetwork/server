@@ -20,9 +20,15 @@ package nginx
 //     too;
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
-//     isn't an attempt, as nginx's tries++ for a cached connection isn't.
-//     nginx then moves to another block; the front stays on the block it
-//     chose, as Go's transport does.
+//     isn't an attempt. nginx's rule is wider: any error on a cached
+//     connection costs no try, written or not (ngx_http_upstream_next's
+//     tries++ for u->peer.cached and NGX_HTTP_UPSTREAM_FT_ERROR), and with
+//     one server it redoes the request there. A failure after the write may
+//     have reached the block, so the front counts it as one of D7's attempts
+//     and moves only to another block: a single-block service, or a
+//     per-block lb route, answers that race with a 502 where nginx redoes the
+//     request (LBALT-IMPL.md §4). Where nginx moves a redo to another block,
+//     the front stays on the block it chose, as Go's transport does.
 //
 // With no attempt left, a connect error or a failed exchange is a 502 and a
 // timeout a 504, as nginx maps them; a retry that finds no eligible block is
@@ -183,9 +189,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 		return responseController.SetReadDeadline(deadline)
 	}
 
-	// nginx relays $http_upgrade on a websocket service, and tunnels when
-	// the block answers 101 to a request that had one; only HTTP/1.1 can
-	upgrade := options.websocket && r.ProtoMajor == 1 && r.Header.Get(upgradeHeader) != ""
+	upgrade := forwardUpgradeRequested(r, options.websocket)
 	request := &upstreamRequest{
 		method:       r.Method,
 		upgrade:      upgrade,
@@ -242,14 +246,24 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				prefixBytes:     options.clientBodyBufferSize,
 				readTimeout:     options.clientBodyTimeout,
 				setReadDeadline: setClientReadDeadline,
+				// the vendored http3 gives every request without a
+				// content-length a body of unknown length, an h3 GET's
+				// included. One whose stream ends with no data has none to
+				// frame, as nginx's h3 frames none for a stream it finds
+				// ended with its head (ngx_http_v3_process_request_header),
+				// so it goes like an h1 or h2 GET: unframed, with nothing
+				// reserved for it, so a full body budget doesn't refuse it
+				absentWhenEmpty: r.ProtoMajor == 3,
 			})
 			if refusal != nil {
 				self.refuse(w, r, responseController, refusal)
 				return
 			}
-			defer storedBody.release()
-			request.storedBody = storedBody
-			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
+			if storedBody != nil {
+				defer storedBody.release()
+				request.storedBody = storedBody
+				request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
+			}
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
@@ -389,12 +403,12 @@ func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, respo
 					return
 				}
 			}
-			// the client went away, nginx's 499, which nobody sees. A
-			// handler that wrote nothing would answer 200 to a client still
-			// there, should the context end for another reason, so answer
-			// 502, uncounted.
-			writeForwardError(w, http.StatusBadGateway)
-			return
+			// the request's context ended: its client went away, nginx's
+			// 499, which ngx_http_upstream_finalize_request terminates with
+			// nothing sent, or connect's forced close cut the server's
+			// connections. Either way no response goes out, and the request
+			// is recorded with none, not as one of the front's own 502s.
+			panic(http.ErrAbortHandler)
 		case upstreamFailureError, upstreamFailureTimeout:
 			if attempts.retryAllowed() {
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, failure.String()).Inc()
@@ -585,8 +599,15 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 	}
 }
 
-// Answers a body refusal and counts it. A client that went away gets
-// nothing.
+// Answers a body refusal and counts it.
+//
+// A client that went away gets no response, and the request is recorded with
+// none: the handler aborts with http.ErrAbortHandler, as nginx terminates a
+// request whose client connection failed (c->error, which
+// ngx_http_finalize_request answers with ngx_http_terminate_request), so the
+// front's default 200 for a handler that wrote nothing never goes out. On h1
+// a client that ends its body early is one: Go's server reports its closed
+// side by canceling the request.
 //
 // Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
 // finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,
@@ -609,7 +630,7 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 func (self *upstreamGroup) refuse(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, refusal *bodyRefusal) {
 	forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
 	if refusal.status == 0 {
-		return
+		panic(http.ErrAbortHandler)
 	}
 	if refusal.reason == bodyRefusalTimeout {
 		if r.ProtoMajor != 3 {

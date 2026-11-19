@@ -6,6 +6,7 @@ package nginx
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 )
 
@@ -119,6 +120,113 @@ func TestFrontE2eCapsConcurrencyPerInterfaceAndAddress(t *testing.T) {
 	for _, request := range web.recorded() {
 		if request.requestUri == "/same-address" {
 			t.Errorf("a refused request reached the block")
+		}
+	}
+}
+
+// A head of nginx's max_headers, 1000 lines, reaches the block over h1 and
+// h2, and one more line is the front's own 400, as nginx answers it: the
+// public servers parse twice that many lines (Front.ConfigureServer), where
+// Go's default 500 would answer 431 first.
+func TestFrontE2eServesNginxMaxHeadersLines(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	eth1 := e2e.iface(t, "eth1")
+	maxRequestHeaderLines := e2e.settings.Http.MaxRequestHeaderLines
+
+	// h1: the request line, Host, then the rest of the lines
+	for _, c := range []struct {
+		lineCount int
+		status    int
+	}{
+		{lineCount: maxRequestHeaderLines, status: http.StatusOK},
+		{lineCount: maxRequestHeaderLines + 1, status: http.StatusBadRequest},
+	} {
+		headLines := []string{"GET /lines-" + strconv.Itoa(c.lineCount) + " HTTP/1.1", "Host: api.service.example"}
+		for i := range c.lineCount - 1 {
+			headLines = append(headLines, "X-Line-"+strconv.Itoa(i)+": v")
+		}
+		requestCounts := e2e.requestCounts()
+		response, _ := e2e.dialRaw(t, eth1.httpsAddr, "api.service.example").exchange(t, headLines...)
+		if response.StatusCode != c.status {
+			t.Errorf("h1 with %d header lines = %d, want %d", c.lineCount, response.StatusCode, c.status)
+		}
+		if reached := len(e2e.requestsSince(requestCounts)) != 0; reached != (c.status == http.StatusOK) {
+			t.Errorf("h1 with %d header lines reached a block %t", c.lineCount, reached)
+		}
+	}
+
+	// h2: the pseudo-headers, then the regular fields
+	clientConn, _ := e2e.newH2ClientConn(t, eth1.httpsAddr, "api.service.example")
+	for _, c := range []struct {
+		lineCount int
+		status    int
+	}{
+		{lineCount: maxRequestHeaderLines, status: http.StatusOK},
+		{lineCount: maxRequestHeaderLines + 1, status: http.StatusBadRequest},
+	} {
+		request := newE2eRequest(t, "GET", "https://api.service.example/h2-lines-"+strconv.Itoa(c.lineCount), nil)
+		// the client adds no field of its own to a request with a
+		// User-Agent and an Accept-Encoding
+		request.Header.Set("User-Agent", "e2e")
+		request.Header.Set("Accept-Encoding", "identity")
+		for i := range c.lineCount - len(request.Header) {
+			request.Header.Set("X-Line-"+strconv.Itoa(i), "v")
+		}
+		requestCounts := e2e.requestCounts()
+		response, _ := e2eRoundTripH2(t, clientConn, request)
+		if response.StatusCode != c.status {
+			t.Errorf("h2 with %d header fields = %d, want %d", c.lineCount, response.StatusCode, c.status)
+		}
+		if reached := len(e2e.requestsSince(requestCounts)) != 0; reached != (c.status == http.StatusOK) {
+			t.Errorf("h2 with %d header fields reached a block %t", c.lineCount, reached)
+		}
+	}
+}
+
+// Go's h1 server makes up lines the max_headers count can't tell from the
+// client's, so a head of exactly nginx's 1000 lines with one is a 400 that
+// nginx, which counts only the lines it received, serves (LBALT-IMPL.md
+// §4): the Cache-Control: no-cache it adds beside a Pragma: no-cache sent
+// without one, and the Host of an HTTP/1.0 request in absolute form sent
+// without a Host line, which it takes from the target. A line fewer is
+// served, and the same heads with those lines sent by the client count as
+// nginx counts them.
+func TestFrontE2eCountsTheHeaderLinesGoAdds(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	eth1 := e2e.iface(t, "eth1")
+	maxRequestHeaderLines := e2e.settings.Http.MaxRequestHeaderLines
+	pragmaGet := "GET /pragma HTTP/1.1"
+	absoluteGet := "GET https://api.service.example/absolute HTTP/1.0"
+	host := "Host: api.service.example"
+	for _, c := range []struct {
+		name        string
+		requestLine string
+		// the lines the case is about, before the filler
+		headerLines []string
+		// the lines sent, the case's and the filler's
+		lineCount int
+		status    int
+	}{
+		{name: "pragma without cache-control", requestLine: pragmaGet, headerLines: []string{host, "Pragma: no-cache"}, lineCount: maxRequestHeaderLines, status: http.StatusBadRequest},
+		{name: "pragma without cache-control, a line fewer", requestLine: pragmaGet, headerLines: []string{host, "Pragma: no-cache"}, lineCount: maxRequestHeaderLines - 1, status: http.StatusOK},
+		{name: "another header in pragma's place", requestLine: pragmaGet, headerLines: []string{host, "X-Other: v"}, lineCount: maxRequestHeaderLines, status: http.StatusOK},
+		{name: "pragma with cache-control", requestLine: pragmaGet, headerLines: []string{host, "Pragma: no-cache", "Cache-Control: no-cache"}, lineCount: maxRequestHeaderLines, status: http.StatusOK},
+		{name: "pragma with cache-control, a line more", requestLine: pragmaGet, headerLines: []string{host, "Pragma: no-cache", "Cache-Control: no-cache"}, lineCount: maxRequestHeaderLines + 1, status: http.StatusBadRequest},
+		{name: "http/1.0 absolute form without host", requestLine: absoluteGet, lineCount: maxRequestHeaderLines, status: http.StatusBadRequest},
+		{name: "http/1.0 absolute form without host, a line fewer", requestLine: absoluteGet, lineCount: maxRequestHeaderLines - 1, status: http.StatusOK},
+		{name: "http/1.0 absolute form with host", requestLine: absoluteGet, headerLines: []string{host}, lineCount: maxRequestHeaderLines, status: http.StatusOK},
+	} {
+		headLines := append([]string{c.requestLine}, c.headerLines...)
+		for i := range c.lineCount - len(c.headerLines) {
+			headLines = append(headLines, "X-Line-"+strconv.Itoa(i)+": v")
+		}
+		requestCounts := e2e.requestCounts()
+		response, _ := e2e.dialRaw(t, eth1.httpsAddr, "api.service.example").exchange(t, headLines...)
+		if response.StatusCode != c.status {
+			t.Errorf("%s, %d lines = %d, want %d", c.name, c.lineCount, response.StatusCode, c.status)
+		}
+		if reached := len(e2e.requestsSince(requestCounts)) != 0; reached != (c.status == http.StatusOK) {
+			t.Errorf("%s, %d lines reached a block %t", c.name, c.lineCount, reached)
 		}
 	}
 }

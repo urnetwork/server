@@ -10,7 +10,9 @@ package nginx
 //     failed, even one the block may have read; here only a reused
 //     connection that failed before any request byte was written is redone,
 //     once, on a fresh connection to the same block, and the redo isn't an
-//     attempt, as nginx's tries++ for a cached connection's error isn't;
+//     attempt. nginx gives a cached connection's error a free try whether or
+//     not the request was written, where a failure after the write is one
+//     of D7's attempts here (upstream.go);
 //   - timeouts are native socket deadlines set before each read and each
 //     write, as nginx's proxy_read_timeout and proxy_send_timeout bound the
 //     wait between two operations, and they are per request; reads are

@@ -347,6 +347,74 @@ func TestStaleKeepaliveRedoIsNotAnAttempt(t *testing.T) {
 	}
 }
 
+// A reused keepalive connection that fails after the request was written,
+// as when a block closes it idle in the instant the request arrives, is one
+// of D7's attempts, since the block may have seen the request: it isn't
+// redone on the block, so a service with one block answers 502, where
+// nginx, which gives any error on a cached connection a free try, redoes it
+// there (LBALT-IMPL.md §4). The block sees the request once, and nothing
+// dials again.
+func TestStaleKeepaliveFailureAfterTheWriteIsAnAttempt(t *testing.T) {
+	serviceName := testServiceName("stale-after-write")
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testForwardFrontSettings())
+	var dialCount atomic.Int32
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		dialCount.Add(1)
+		return conn
+	})
+	front := newTestForwardFront(t, group, testForwardOptions)
+	type result struct {
+		response *http.Response
+		err      error
+	}
+	send := func(method string, path string, body string) <-chan result {
+		results := make(chan result, 1)
+		go func() {
+			request, _ := http.NewRequest(method, front.url(path), strings.NewReader(body))
+			response, _, err := testDo(t, request)
+			results <- result{response: response, err: err}
+		}()
+		return results
+	}
+
+	firstResults := send(http.MethodGet, "/one", "")
+	conn, reader, _ := raw.accept(t)
+	io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	if first := receiveBounded(t, firstResults, "the first response"); first.err != nil || first.response.StatusCode != http.StatusOK {
+		t.Fatalf("first request: %v %v", first.response, first.err)
+	}
+	front.waitServed(t)
+	if group.blocks[0].pool.idleCount() != 1 {
+		t.Fatalf("the first connection was not pooled")
+	}
+
+	secondResults := send(http.MethodPost, "/two", "two")
+	// the request reaches the block whole on the pooled connection, which
+	// the block then closes unanswered
+	second, err := http.ReadRequest(reader)
+	if err != nil {
+		t.Fatalf("the pooled connection carried no request: %v", err)
+	}
+	secondBody, _ := io.ReadAll(second.Body)
+	if second.RequestURI != "/two" || string(secondBody) != "two" {
+		t.Fatalf("the pooled connection carried %s %q", second.RequestURI, secondBody)
+	}
+	conn.Close()
+	if second := receiveBounded(t, secondResults, "the second response"); second.err != nil || second.response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("second request: %v %v, want the front's 502", second.response, second.err)
+	}
+	if dialCount.Load() != 1 {
+		t.Errorf("%d dials, want only the first", dialCount.Load())
+	}
+	if attemptCount(serviceName, "g1", "error") != 1 || attemptCount(serviceName, "g1", "stale_redo") != 0 || forwardErrorCount(serviceName, http.StatusBadGateway) != 1 {
+		t.Errorf("attempts: error %v, stale_redo %v, 502s %v; want 1, 0 and 1",
+			attemptCount(serviceName, "g1", "error"), attemptCount(serviceName, "g1", "stale_redo"), forwardErrorCount(serviceName, http.StatusBadGateway))
+	}
+}
+
 // With no attempt left, a connect error is a 502 and a timeout a 504, as
 // nginx maps them; each is counted as the front's own error.
 func TestRetryFinalFailureMapping(t *testing.T) {

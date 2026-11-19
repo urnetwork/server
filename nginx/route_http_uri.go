@@ -5,8 +5,11 @@ package nginx
 // location through the front as through the lb: //status and /%73tatus are
 // both /status, which a service name denies, while /status/ and /STATUS are
 // other paths. nginx parses the uri with ngx_http_parse_complex_uri, with
-// merge_slashes on (its default), and re-escapes it with ngx_escape_uri's
-// NGX_ESCAPE_URI set when it sends it upstream; both are ported here.
+// merge_slashes on (its default), and when it sends the uri upstream
+// re-escapes it with ngx_escape_uri's NGX_ESCAPE_URI set only when the
+// client's path held a %, its quoted_uri, or a rewrite changed it
+// (r->internal): otherwise the normalized path goes as it is, raw bytes
+// above 0x7f included (ngx_http_proxy_create_request). Both are ported here.
 
 import (
 	"strings"
@@ -20,6 +23,10 @@ type routeUri struct {
 	// $args: the raw query after the first ?, without a fragment. Empty
 	// when there is none.
 	args string
+	// the target's path held a %, before any ? or #: nginx's quoted_uri,
+	// which its parsers set at the path's first % (ngx_http_parse_request_line,
+	// ngx_http_parse_uri, ngx_http_parse_complex_uri's sw_quoted)
+	quoted bool
 }
 
 // Parses an origin-form request target (`/path?query`) as nginx does. The
@@ -44,6 +51,7 @@ func parseRouteUri(requestTarget string) (routeUri, bool) {
 
 	path := make([]byte, 0, len(requestTarget))
 	args := ""
+	quoted := false
 	state := stateUsual
 	quotedState := stateUsual
 	var decoded byte
@@ -188,6 +196,7 @@ scan:
 			}
 
 		case stateQuoted:
+			quoted = true
 			value, ok := hexValue(c)
 			if !ok {
 				return routeUri{}, false
@@ -229,19 +238,25 @@ scan:
 		}
 	}
 	return routeUri{
-		path: string(path),
-		args: args,
+		path:   string(path),
+		args:   args,
+		quoted: quoted,
 	}, true
 }
 
-// The path and query nginx sends upstream for a uri: the path re-escaped,
-// then ? and the args when there are any.
-func (self routeUri) upstreamTarget(path string) string {
-	escapedPath := escapeRouteUriPath(path)
-	if self.args == "" {
-		return escapedPath
+// The path and query nginx sends upstream for this uri's path, or a part of
+// it: the path re-escaped when the client's held a % or when rewritten, a
+// rewrite's r->internal, and otherwise as it is, then ? and the args when
+// there are any.
+func (self routeUri) upstreamTarget(path string, rewritten bool) string {
+	upstreamPath := path
+	if self.quoted || rewritten {
+		upstreamPath = escapeRouteUriPath(path)
 	}
-	return escapedPath + "?" + self.args
+	if self.args == "" {
+		return upstreamPath
+	}
+	return upstreamPath + "?" + self.args
 }
 
 // Percent-escapes what nginx's NGX_ESCAPE_URI escapes: control bytes, space,

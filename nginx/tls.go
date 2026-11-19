@@ -9,9 +9,16 @@ package nginx
 // <vault>/tls a host has, which xops merges from both. Each key must match
 // its certificate, as nginx requires too: OpenSSL's SSL_CTX_use_PrivateKey
 // checks the key against the certificate loaded before it ("key values
-// mismatch"), and nginx then refuses its configuration. The store checks two
-// things nginx never did: each certificate's SANs cover the name it serves,
-// and each leaf is valid now, between its NotBefore and NotAfter.
+// mismatch"), and nginx then refuses its configuration. The store checks one
+// thing nginx never did: each certificate's SANs cover the name it serves.
+//
+// A leaf outside its validity window is loaded and served all the same, as
+// nginx and warpctl load it: neither reads a NotAfter, so a lapsed pair
+// fails only its own names' clients. Refusing it would stop every connect
+// block of an lb_alt host at its next start over one name. The load logs
+// each such name instead, the front's certificate expiry metric and
+// X-UR-Front-Cert-Expiry show the earliest NotAfter, a lapsed one included,
+// and NotValidNames lists them.
 //
 // The two base configs are built once and shared by every socket of the
 // block, so Go's automatic per-process session ticket keys span all of them
@@ -35,6 +42,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
+	"github.com/urnetwork/glog"
 )
 
 // ALPN protocol ids (RFC 7301's registry).
@@ -73,11 +81,12 @@ type CertificateStore struct {
 //   - a leaf whose SANs cover the name. An exact name, found in its own
 //     directory, a star.<parent> one or its parent's, must verify as the
 //     leaf's host name. A wildcard *.x must be a SAN itself, since it serves
-//     every label under x;
-//   - a leaf valid now.
+//     every label under x.
 //
 // Any miss fails, naming the server name, so a block never reports ready
-// without every certificate. env names the vault's environment directory.
+// without every certificate. A leaf not valid now is no miss: it is loaded,
+// as nginx loads it, and logged at error level with its name and path. env
+// names the vault's environment directory.
 func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (*CertificateStore, error) {
 	if env == "" || env == "." || env == ".." || strings.ContainsAny(env, `/\`) {
 		return nil, fmt.Errorf("certificates: env %q is not a vault directory name", env)
@@ -90,14 +99,8 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 	}
 	now := time.Now()
 
-	// whether leaf is valid now and covers name, the server name it serves
-	checkServes := func(leaf *x509.Certificate, name string) error {
-		if now.Before(leaf.NotBefore) {
-			return fmt.Errorf("is not valid until %s", leaf.NotBefore.UTC().Format(time.RFC3339))
-		}
-		if now.After(leaf.NotAfter) {
-			return fmt.Errorf("expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
-		}
+	// whether leaf covers name, the server name it serves
+	checkCovers := func(leaf *x509.Certificate, name string) error {
 		if strings.HasPrefix(name, "*.") {
 			// only the wildcard SAN covers every label under the base: an
 			// exact SAN under it covers only itself
@@ -156,8 +159,17 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 		if err != nil {
 			return nil, fmt.Errorf("certificate for %s: %w", name, err)
 		}
-		if err := checkServes(certificate.Leaf, name); err != nil {
+		if err := checkCovers(certificate.Leaf, name); err != nil {
 			return nil, fmt.Errorf("certificate for %s: %s %w", name, tlsFiles.pemPath, err)
+		}
+		if !certificateValidAt(certificate.Leaf, now) {
+			glog.Errorf(
+				"[front]certificate for %s: %s is valid only from %s to %s, and serves as nginx would serve it\n",
+				name,
+				tlsFiles.pemPath,
+				certificate.Leaf.NotBefore.UTC().Format(time.RFC3339),
+				certificate.Leaf.NotAfter.UTC().Format(time.RFC3339),
+			)
 		}
 
 		certificateStore.nameCertificates[name] = certificate
@@ -173,9 +185,29 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 }
 
 // The earliest NotAfter of the loaded certificates, reported in
-// X-UR-Front-Cert-Expiry.
+// X-UR-Front-Cert-Expiry: in the past when a served name's leaf has lapsed.
 func (self *CertificateStore) EarliestExpiry() time.Time {
 	return self.earliestExpiry
+}
+
+// The served names, as the route table writes them, whose leaf isn't valid
+// at now, sorted: expired, or not yet valid. Their clients fail to verify
+// the certificate, as they would through nginx.
+func (self *CertificateStore) NotValidNames(now time.Time) []string {
+	notValidNames := []string{}
+	for name, certificate := range self.nameCertificates {
+		if !certificateValidAt(certificate.Leaf, now) {
+			notValidNames = append(notValidNames, name)
+		}
+	}
+	slices.Sort(notValidNames)
+	return notValidNames
+}
+
+// Whether a leaf is valid at now, within its NotBefore and NotAfter, both
+// included, as crypto/x509 verifies.
+func certificateValidAt(leaf *x509.Certificate, now time.Time) bool {
+	return !now.Before(leaf.NotBefore) && !now.After(leaf.NotAfter)
 }
 
 // The certificate for a served name as the route table writes it (a wildcard
@@ -337,9 +369,13 @@ func quicNegotiableNextProtos(offeredNextProtos []string) []string {
 // class (D9): http/1.1 only for connect names, whose websocket and H1+
 // carriers need it, and h2 then http/1.1 for the rest, as nginx prefers. A
 // missing, invalid or unknown SNI gets the default server, nginx's first lb
-// server: defaultName's certificate, with h2 and http/1.1. A client offering
-// protocols but none of these is refused with an alert, as nginx refuses it;
-// one offering none gets HTTP/1.1.
+// server: defaultName's certificate, with h2 and http/1.1. An SNI ending in a
+// dot is none of these: crypto/tls refuses its ClientHello with decode_error
+// before GetConfigForClient runs, where nginx drops the dot and serves the
+// name (RFC 6066 forbids the dot). A client offering protocols but none of
+// these is refused with an alert, as nginx refuses it, though nginx also
+// selects http/1.0 and http/0.9, which the front refuses; one offering none
+// gets HTTP/1.1.
 //
 // quicTlsConfig serves QUIC, and ports alt's tlsConfigForClient
 // (alt/alt.go:356-374): a served name gets its certificate, and the ALPN is

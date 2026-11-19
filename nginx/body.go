@@ -7,7 +7,12 @@ package nginx
 //     route's client_body_buffer_size or BodySettings.MemoryPrefixBytes), the
 //     whole prefix for a body of unknown length, reserved from the process's
 //     BodySettings.MemoryBudgetBytes before the first read (D7, D19). With no
-//     room, the front answers a local 503 before reading anything;
+//     room, the front answers a local 503 before reading anything. An h3
+//     request without a content-length reserves once its first bytes arrive
+//     instead, and a 503 comes after that read: the vendored http3 gives
+//     every such request a body of unknown length, a GET's included, and one
+//     whose stream ends first has no body, so it holds nothing
+//     (bodyReadOptions.absentWhenEmpty);
 //   - the bytes past the prefix go to one spill file in BodySettings.SpillDir,
 //     taken under BodySettings.SpillMaxFiles when the first such byte
 //     arrives, and reserved under BodySettings.SpillMaxBytes as bytes arrive
@@ -18,8 +23,13 @@ package nginx
 //     point;
 //   - a read that waits longer than client_body_timeout is nginx's
 //     NGX_HTTP_REQUEST_TIME_OUT, which ends the request with no response
-//     (upstreamGroup.refuse), and a client that ends its body early is a
-//     400;
+//     (upstreamGroup.refuse);
+//   - a client that goes away ends the request with no response too. On h1
+//     that includes one that ends its body early, since Go's server reports
+//     the closed side by canceling the request, as nginx terminates a
+//     request whose connection closed under its body. Elsewhere a body that
+//     ends early, on h2 or h3, or an h1 chunked body that breaks its framing,
+//     is a 400;
 //   - a stored body replays byte for byte, memory then file, once per
 //     attempt.
 //
@@ -148,13 +158,22 @@ type bodyReadOptions struct {
 	// sets the client's read deadline, as a ResponseController does. Nil, or
 	// one that fails, leaves reads bounded only by the request's context.
 	setReadDeadline func(time.Time) error
+	// a body of unknown length that ends before its first byte is no body:
+	// its memory prefix is reserved only once a read returns bytes, and read
+	// returns a nil body for one that ends first. For an h3 request without
+	// a content-length: the vendored http3 gives each a body of unknown
+	// length, a GET's included, and reports a stream that ended with its
+	// head only to a read. A declared length ignores it.
+	absentWhenEmpty bool
 }
 
 // Reads a whole body into the store, under the rules in the file comment.
-// On a refusal nothing stays reserved or open. The client's read deadline
-// is cleared when the body has been read whole, so nothing times out the
-// connection while the upstream answers; after a failed read it stays, so
-// the server closes the connection rather than wait on the client.
+// On a refusal nothing stays reserved or open, and a body that
+// absentWhenEmpty finds absent is a nil body with no refusal. The client's
+// read deadline is cleared when the body has been read whole, so nothing
+// times out the connection while the upstream answers; after a failed read
+// it stays, so the server closes the connection rather than wait on the
+// client.
 func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyReadOptions) (*storedBody, *bodyRefusal) {
 	maxBodyBytes := self.settings.MaxBodyBytes
 	if 0 < maxBodyBytes && maxBodyBytes < options.declaredLength {
@@ -164,16 +183,25 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 	if 0 <= options.declaredLength {
 		memoryReservedBytes = min(memoryReservedBytes, options.declaredLength)
 	}
-	storedBody, refusal := self.open(memoryReservedBytes, 0 <= options.declaredLength)
-	if refusal != nil {
-		return nil, refusal
-	}
+	var storedBody *storedBody
 	stored := false
 	defer func() {
-		if !stored {
+		if storedBody != nil && !stored {
 			storedBody.release()
 		}
 	}()
+	// registers the body with its prefix reserved: before the first read,
+	// or for a body that may be absent, before its first bytes are stored
+	open := func() *bodyRefusal {
+		var refusal *bodyRefusal
+		storedBody, refusal = self.open(memoryReservedBytes, 0 <= options.declaredLength)
+		return refusal
+	}
+	if !options.absentWhenEmpty || 0 <= options.declaredLength {
+		if refusal := open(); refusal != nil {
+			return nil, refusal
+		}
+	}
 
 	readBuffer := self.readBuffers.Get().(*[]byte)
 	defer self.readBuffers.Put(readBuffer)
@@ -186,6 +214,11 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 		}
 		n, err := body.Read(*readBuffer)
 		if 0 < n {
+			if storedBody == nil {
+				if refusal := open(); refusal != nil {
+					return nil, refusal
+				}
+			}
 			if refusal := storedBody.append((*readBuffer)[:n]); refusal != nil {
 				return nil, refusal
 			}
@@ -198,6 +231,13 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 			// to discard what remains of its body
 			return nil, bodyReadRefusal(ctx, err)
 		}
+	}
+	if 0 <= options.declaredLength && storedBody.length() != options.declaredLength {
+		// a body that ended short of its declared length, which Go's h1 and
+		// h2 servers report as a failed read, but the vendored http3 as the
+		// stream's end: RFC 9114 §4.1.2 makes such a request malformed, and
+		// nginx answers it 400 ("client prematurely closed stream")
+		return nil, &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
 	}
 	if 0 < options.readTimeout && options.setReadDeadline != nil {
 		// nothing reads the client again until its next request

@@ -73,8 +73,9 @@ type forwardOptions struct {
 	// whatever its weight. Empty means any eligible block of the service.
 	blockName string
 	// the path and query to send upstream, exactly: routing sets it to
-	// nginx's normalized URI, with a matched prefix replaced, re-escaped, and
-	// `?args`. Empty sends the request's escaped path and raw query.
+	// nginx's normalized URI, with a matched prefix replaced, re-escaped when
+	// the client's path held a % (routeUri.upstreamTarget), and `?args`. Empty
+	// sends the request's escaped path and raw query.
 	upstreamPath string
 	// the body streams through unbuffered, with X-UR-Request-Buffering: off,
 	// and is no longer eligible for a retry once forwarding begins, unless
@@ -110,10 +111,10 @@ type serviceForwarder interface {
 	// aborted by panicking with http.ErrAbortHandler, as
 	// httputil.ReverseProxy does, so the client sees a truncated response,
 	// never a complete one; so is a request whose body stalls past
-	// client_body_timeout on h1 or h2, which gets no response, as nginx gives
-	// none, and one whose streamed body fails on the client's side while the
-	// response is relayed. Callers' deferred cleanup runs and they must not
-	// recover it.
+	// client_body_timeout on h1 or h2, or whose client went away, which get
+	// no response, as nginx gives none, and one whose streamed body fails on
+	// the client's side while the response is relayed. Callers' deferred
+	// cleanup runs and they must not recover it.
 	serveHttp(w http.ResponseWriter, r *http.Request, options forwardOptions)
 	// releases the pools and cuts the tunnels; requests in flight end with
 	// their connections. A dial in flight ends with it, and it returns once
@@ -292,6 +293,16 @@ func forwardedForValue(clientAddrPort netip.AddrPort) string {
 	return addrText + ":" + port
 }
 
+// Whether a request to a service tunnels once its block answers 101: an h1
+// request with an Upgrade header to a websocket service. nginx relays
+// $http_upgrade there, with its own Connection: upgrade, and tunnels on the
+// block's 101 whatever the client's Connection header says
+// (ngx_http_proxy_process_header); only HTTP/1.1 can upgrade. The
+// drain refuses such a request by the same test (routeHttpHandler.serveProxy).
+func forwardUpgradeRequested(r *http.Request, websocket bool) bool {
+	return websocket && r.ProtoMajor == 1 && r.Header.Get(upgradeHeader) != ""
+}
+
 // The upstream Host: routing's normalized authority, or the request's Host
 // lowercased, without its port and one trailing dot, as nginx's $host is for
 // any host routing accepts.
@@ -359,7 +370,9 @@ type forwardBodyFraming struct {
 // Whether the client sent a body to frame: a declared length, Content-Length
 // zero included, or a body of unknown length. A request with neither, as a
 // GET, gets no framing headers, as nginx's $proxy_internal_body_length is
-// empty for it.
+// empty for it. On h3 every request without a content-length has a body of
+// unknown length, so a buffered route frames none, and reserves nothing, for
+// one whose stream ends with no data (upstreamGroup.serveHttp).
 func forwardRequestHasBody(r *http.Request) bool {
 	if r.ContentLength != 0 {
 		return true

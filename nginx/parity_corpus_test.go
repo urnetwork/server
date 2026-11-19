@@ -511,6 +511,17 @@ func parityCorpus() []*parityCase {
 		limitIndex += 1
 		return client
 	}
+	// count short header lines
+	shortHeaderLines := func(count int) [][2]string {
+		lines := [][2]string{}
+		for i := range count {
+			lines = append(lines, [2]string{"X-Parity-Line-" + strconv.Itoa(i), "v"})
+		}
+		return lines
+	}
+	// the lines an h1 GET carries besides its own: Host, the case's two,
+	// User-Agent and Connection
+	const parityGetOwnHeaderLines = 5
 	headLines := func(count int) [][2]string {
 		lines := [][2]string{}
 		for i := range count {
@@ -655,6 +666,12 @@ func parityCorpus() []*parityCase {
 			}),
 		},
 		{
+			name: "tls/h2-two-host-fields-equal-to-the-authority",
+			run: paritySendRawH2(parityApiName, [][2]string{
+				{":method", "GET"}, {":scheme", "https"}, {":authority", parityApiName}, {":path", "/hello"}, {"host", parityApiName}, {"host", parityApiName},
+			}),
+		},
+		{
 			name: "tls/h2-no-authority-no-host",
 			run: paritySendRawH2(parityApiName, [][2]string{
 				{":method", "GET"}, {":scheme", "https"}, {":path", "/hello"},
@@ -670,6 +687,12 @@ func parityCorpus() []*parityCase {
 		{name: "lb/status-case-variant", request: parityGet(parityLbName, parityLbName, strings.ToUpper(parityLbPrefix)+"/STATUS")},
 		{name: "lb/status-trailing-slash", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/status/")},
 		{name: "lb/root", request: parityGet(parityLbName, parityLbName, "/")},
+		// no location: nginx's static module answers 405 to a method but
+		// GET, HEAD and POST, the index module declining it on a trailing
+		// slash
+		{name: "lb/root-put", request: parityWith(parityGet(parityLbName, parityLbName, "/"), http.MethodPut)},
+		{name: "lb/other-path-delete", request: parityWith(parityGet(parityLbName, parityLbName, "/hello"), http.MethodDelete)},
+		{name: "lb/unknown-host-patch", request: parityWith(parityGet(parityUnknownName, parityUnknownName, "/hello"), http.MethodPatch)},
 		{name: "lb/by-service", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/hello?a=b&c")},
 		{name: "lb/by-service-status", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/status")},
 		{name: "lb/by-service-unexposed-worker", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/worker/jobs")},
@@ -730,6 +753,7 @@ func parityCorpus() []*parityCase {
 		{name: "status/web", request: parityGet(parityWebName, parityWebName, "/status")},
 		{name: "status/relay-status-none", request: parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/status")},
 		{name: "status/relay-outside-its-prefix", request: parityGet(parityRelayName, parityRelayName, "/status")},
+		{name: "status/relay-outside-its-prefix-options", request: parityWith(parityGet(parityRelayName, parityRelayName, "/x"), http.MethodOptions, [2]string{"Origin", parityAllowedOrigin})},
 
 		// CORS, Vary: Origin and frame options
 		{name: "cors/allowed-origin", request: parityWith(api, "", [2]string{"Origin", parityAllowedOrigin})},
@@ -856,6 +880,11 @@ func parityCorpus() []*parityCase {
 		{name: "limits/head-of-73k", request: parityWith(api, "", headLines(11)...)},
 		{name: "limits/head-of-139k", request: parityWith(api, "", headLines(21)...), tags: []string{"past-max-header-bytes"}},
 		{name: "limits/head-of-60k-over-h2", request: parityOverH2(parityWith(api, "", headLines(9)...))},
+		// nginx's max_headers: 1000 header lines, Host included, and one more
+		// is a 400
+		{name: "limits/header-lines-at-1000", request: parityWith(api, "", shortHeaderLines(1000-parityGetOwnHeaderLines)...)},
+		{name: "limits/header-lines-past-1000", request: parityWith(api, "", shortHeaderLines(1001-parityGetOwnHeaderLines)...)},
+		{name: "limits/header-lines-past-1000-with-ignored-names", request: parityWith(api, "", append(shortHeaderLines(1000-parityGetOwnHeaderLines), [2]string{"X_Parity_Ignored", "v"})...)},
 		{name: "limits/trace", request: parityWith(api, "TRACE")},
 		{name: "limits/trace-over-h2", request: parityOverH2(parityWith(api, "TRACE"))},
 		{name: "limits/lowercase-method", request: parityWith(api, "get")},
@@ -882,7 +911,80 @@ func parityCorpus() []*parityCase {
 		},
 		{name: "limits/transfer-encoding-not-chunked-last", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Transfer-Encoding", "gzip, chunked"})},
 		{name: "limits/two-content-lengths", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "6"})},
+		// two identical Content-Length lines, and two identical h2 fields,
+		// which Go's servers merge into one before the handler
+		{
+			name:    "limits/two-identical-content-lengths",
+			request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "5"}),
+			tags:    []string{"repeated-identical-content-length"},
+		},
+		{
+			name: "limits/two-identical-content-length-fields-over-h2",
+			// through a raw framer, since x/net's client sends one
+			// content-length of its own, with the request recorded, so the
+			// acceptance sees what was sent
+			run: func(run *parityCaseRun) {
+				request := parityWith(parityOverH2(parityGet(parityApiName, parityApiName, "/upload")), http.MethodPost, [2]string{"content-length", "0"}, [2]string{"content-length", "0"})
+				sequence := run.sequence()
+				conn, err := run.dial(request, sequence)
+				if err != nil {
+					return
+				}
+				defer conn.close()
+				if conn.negotiatedProtocol() != "h2" {
+					run.fact("h2", "not negotiated")
+					return
+				}
+				run.recordRequest(sequence, request)
+				fields := append([][2]string{{":method", request.method}, {":scheme", "https"}, {":authority", request.host}, {":path", request.target}}, request.headers...)
+				fields = append(fields, [2]string{strings.ToLower(parityCaseHeader), run.caseKey}, [2]string{strings.ToLower(paritySequenceHeader), strconv.Itoa(sequence)})
+				response, err := conn.rawH2(fields)
+				run.recordResponse(sequence, response, err)
+			},
+			tags: []string{"repeated-identical-content-length"},
+		},
+		// a second line of a header nginx keeps once is a 400
+		{name: "limits/two-authorization-headers", request: parityWith(api, "", [2]string{"Authorization", "Bearer one"}, [2]string{"Authorization", "Bearer two"})},
+		{name: "limits/two-if-none-match-headers", request: parityWith(api, "", [2]string{"If-None-Match", `"one"`}, [2]string{"If-None-Match", `"two"`})},
+		{
+			name: "limits/two-authorization-fields-over-h2",
+			run: paritySendRawH2(parityApiName, [][2]string{
+				{":method", "GET"}, {":scheme", "https"}, {":authority", parityApiName}, {":path", "/hello"}, {"authorization", "Bearer one"}, {"authorization", "Bearer two"},
+			}),
+		},
 		{name: "limits/head-method", request: parityWith(api, http.MethodHead)},
+		// a header line continued on a line that starts with a space, which
+		// Go's server unfolds
+		{name: "limits/obs-fold", request: parityWith(api, "", [2]string{"X-Parity-Folded", "first\r\n second"}), tags: []string{"obs-fold"}},
+		// an HTTP/1.0 request with Transfer-Encoding, which Go's server reads
+		// as bodiless, then a whole request where its body would be
+		{
+			name: "limits/http10-transfer-encoding",
+			run: func(run *parityCaseRun) {
+				http10Request := &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodPost, target: "/upload", host: parityApiName, proto: "HTTP/1.0", keepalive: true, headers: [][2]string{{"Connection", "keep-alive"}, {"Transfer-Encoding", "chunked"}}}
+				innerRequest := parityGet(parityApiName, parityApiName, "/inner")
+				http10Sequence := run.sequence()
+				conn, err := run.dial(http10Request, http10Sequence)
+				if err != nil {
+					return
+				}
+				defer conn.close()
+				innerSequence := run.sequence()
+				message := append(conn.h1Head(http10Request, http10Sequence), conn.h1Head(innerRequest, innerSequence)...)
+				if _, err := conn.conn.Write(message); err != nil {
+					run.recordResponse(http10Sequence, nil, err)
+					return
+				}
+				response, err := conn.readH1Response(http10Request.method)
+				run.recordResponse(http10Sequence, response, err)
+				if err != nil {
+					return
+				}
+				response, err = conn.readH1Response(innerRequest.method)
+				run.recordResponse(innerSequence, response, err)
+			},
+			tags: []string{"http10-transfer-encoding"},
+		},
 		{name: "limits/options-asterisk", request: parityWith(parityGet(parityApiName, parityApiName, "*"), http.MethodOptions)},
 
 		// gzip of text/html
@@ -899,6 +1001,11 @@ func parityCorpus() []*parityCase {
 		{name: "gzip/html-http10", request: &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodGet, target: "/hello", host: parityApiName, proto: "HTTP/1.0", headers: [][2]string{{"Accept-Encoding", "gzip"}}}, scenario: htmlScenario(http.StatusOK)},
 		{name: "gzip/html-over-h2", request: parityOverH2(parityWith(api, "", [2]string{"Accept-Encoding", "gzip"})), scenario: htmlScenario(http.StatusOK)},
 		{name: "gzip/plain-text", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/plain"}}, html)},
+		// nginx's type is the value before a ';' only when a charset
+		// follows it
+		{name: "gzip/html-with-another-parameter", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/html; foo=bar"}}, html)},
+		{name: "gzip/html-with-a-space-before-its-charset", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/html ; charset=utf-8"}}, html)},
+		{name: "gzip/html-with-an-uppercase-charset", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "TEXT/HTML;CHARSET=utf-8"}}, html)},
 		{name: "gzip/own-404-page", request: parityWith(parityGet(parityLbName, parityLbName, "/missing"), "", [2]string{"Accept-Encoding", "gzip"})},
 
 		// the ingress rewrite
@@ -918,6 +1025,12 @@ func parityCorpus() []*parityCase {
 		{name: "uri/above-the-root", request: parityGet(parityApiName, parityApiName, "/../a")},
 		{name: "uri/empty-query", request: parityGet(parityApiName, parityApiName, "/a?")},
 		{name: "uri/unicode-and-reserved", request: parityGet(parityApiName, parityApiName, "/caf%C3%A9;v=1/%20x?k=%E2%9C%93")},
+		// raw bytes above 0x7f with no % in the path go as received, the
+		// path normalized; beside a % they are escaped (quoted_uri)
+		{name: "uri/raw-utf8-without-a-percent", request: parityGet(parityApiName, parityApiName, "/a//caf\xc3\xa9/./x?k=%E2%9C%93")},
+		{name: "uri/raw-utf8-beside-a-percent", request: parityGet(parityApiName, parityApiName, "/caf\xc3\xa9/%20x")},
+		{name: "uri/raw-utf8-on-an-lb-route", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/caf\xc3\xa9")},
+		{name: "uri/raw-utf8-in-process", request: parityGet(parityConnectName, parityConnectName, "/caf\xc3\xa9/x")},
 		{name: "uri/lb-route-normalized", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api//x/../y%2Fz?q")},
 		{name: "uri/relay-prefix", request: parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/a?b")},
 		{name: "uri/in-process", request: parityGet(parityConnectName, parityConnectName, "/a//b/../c?d")},

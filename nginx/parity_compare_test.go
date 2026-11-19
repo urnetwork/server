@@ -537,6 +537,114 @@ var parityAcceptances = []*parityAcceptance{
 		},
 	},
 	{
+		id:     "obs-fold",
+		source: "LBALT-IMPL §4: Go's server unfolds an obs-folded header line into the value before it (net/textproto) before any handler runs, and the front forwards the joined value, where nginx answers a header line that starts with a space 400 (ngx_http_parse_header_line)",
+		match: func(check *parityCheck, difference *parityDifference) bool {
+			if !check.hasTag("obs-fold") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
+				return false
+			}
+			_, _, isResponse := parityResponseKey(difference.key)
+			_, _, isUpstream := parityUpstreamKey(difference.key)
+			if !isResponse && !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// the one request reached an upstream once, as sent, but for a
+			// folded line, whose parts went trimmed and joined by a space, as
+			// textproto joins them
+			request := check.sequenceRequest("0")
+			if request == nil || parityValue(check.front, "upstream.count") != "1" ||
+				parityValue(check.front, "upstream[0].method") != request.method ||
+				parityValue(check.front, "upstream[0].uri") != request.target {
+				return false
+			}
+			folded := false
+			for _, headerLine := range request.headers {
+				parts := strings.Split(headerLine[1], "\r\n")
+				for i, part := range parts {
+					parts[i] = strings.Trim(part, " \t")
+				}
+				folded = folded || 1 < len(parts)
+				if parityValue(check.front, "upstream[0].header."+http.CanonicalHeaderKey(headerLine[0])) != strings.Join(parts, " ") {
+					return false
+				}
+			}
+			return folded
+		},
+	},
+	{
+		id:     "http10-transfer-encoding",
+		source: "LBALT-IMPL §4: Go's server drops the Transfer-Encoding of an HTTP/1.0 request before any handler runs and reads the request as bodiless (net/http transfer.go, Issue 12785), so bytes sent as its body are the connection's next request, which the front forwards as its own, where nginx answers 400 (ngx_http_process_request_header); the front frames every request it forwards by its length, so no block reads one inside another",
+		match: func(check *parityCheck, difference *parityDifference) bool {
+			if !check.hasTag("http10-transfer-encoding") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
+				return false
+			}
+			_, _, isResponse := parityResponseKey(difference.key)
+			_, _, isUpstream := parityUpstreamKey(difference.key)
+			if !isResponse && !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// each request the front parsed reached an upstream once, as its
+			// own sequence, framed by its length: the HTTP/1.0 one with no
+			// body, then the one sent in its body's place
+			sequences := slices.Sorted(maps.Keys(check.front.sequenceRequests))
+			if len(sequences) < 2 || check.front.sequenceRequests[sequences[0]].proto != "HTTP/1.0" ||
+				parityValue(check.front, "upstream.count") != strconv.Itoa(len(sequences)) {
+				return false
+			}
+			for i, sequence := range sequences {
+				request := check.front.sequenceRequests[sequence]
+				prefix := "upstream[" + strconv.Itoa(i) + "]."
+				if parityValue(check.front, prefix+"sequence") != strconv.Itoa(sequence) ||
+					parityValue(check.front, prefix+"method") != request.method ||
+					parityValue(check.front, prefix+"uri") != request.target ||
+					parityValue(check.front, prefix+"body") != parityValueOfBytes(request.body) ||
+					parityValue(check.front, prefix+"framing") != "length "+strconv.Itoa(len(request.body)) {
+					return false
+				}
+			}
+			return true
+		},
+	},
+	{
+		id:     "repeated-identical-content-length",
+		source: "LBALT-IMPL §4: Go's h1 and h2 servers, and the vendored http3, merge repeated identical Content-Length values into one before any handler runs (net/http fixLength, the h2 server's newWriterAndRequest, http3 parseHeaders), and the front forwards the request framed by that one length, where nginx answers a second Content-Length 400 on h1 and h2 alike (ngx_http_process_unique_header_line)",
+		match: func(check *parityCheck, difference *parityDifference) bool {
+			if !check.hasTag("repeated-identical-content-length") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
+				return false
+			}
+			_, _, isResponse := parityResponseKey(difference.key)
+			_, _, isUpstream := parityUpstreamKey(difference.key)
+			if !isResponse && !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// the one request reached an upstream once, as sent, with every
+			// Content-Length it sent its body's length, and was framed by
+			// that one length
+			request := check.sequenceRequest("0")
+			if request == nil {
+				return false
+			}
+			length := strconv.Itoa(len(request.body))
+			contentLengthCount := 0
+			for _, headerLine := range request.headers {
+				if !strings.EqualFold(headerLine[0], "Content-Length") {
+					continue
+				}
+				if headerLine[1] != length {
+					return false
+				}
+				contentLengthCount += 1
+			}
+			return 2 <= contentLengthCount && parityValue(check.front, "upstream.count") == "1" &&
+				parityValue(check.front, "upstream[0].sequence") == "0" &&
+				parityValue(check.front, "upstream[0].method") == request.method &&
+				parityValue(check.front, "upstream[0].uri") == request.target &&
+				parityValue(check.front, "upstream[0].body") == parityValueOfBytes(request.body) &&
+				parityValue(check.front, "upstream[0].framing") == "length "+length &&
+				parityValue(check.front, "upstream[0].header.Content-Length") == length
+		},
+	},
+	{
 		id:     "in-process-hop-by-hop",
 		source: "LBALT-IMPL §4: connect's in-process handler sees the client's own Connection header, where a connect block behind nginx sees nginx's keep-alive and upgrade, and writes its own 101 head",
 		match: func(check *parityCheck, difference *parityDifference) bool {

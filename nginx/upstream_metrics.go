@@ -54,13 +54,13 @@ var forwardErrorsCounter = prometheus.NewCounterVec(
 	[]string{"service", "status"},
 )
 
-// Requests refused over their body, by service and reason.
+// Requests refused or ended over their body, by service and reason.
 var forwardBodyRefusalsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "lbalt",
 		Name:      "forward_body_refusals_total",
-		Help:      "Forwarded requests the front refused over their body before any upstream saw them, by service and reason; memory_budget, spill_bytes, spill_files, spill_error and closed are local 503s, counted apart from upstream 503s and never retried",
+		Help:      "Forwarded requests the front refused or ended over their body, by service and reason. A buffered body is refused before any block sees it; a streamed body's head has already gone to the block, and its failure may come while the response is relayed. canceled counts clients that went away mid-body, which get no response; memory_budget, spill_bytes, spill_files, spill_error and closed are local 503s, counted apart from upstream 503s and never retried",
 	},
 	[]string{"service", "reason"},
 )

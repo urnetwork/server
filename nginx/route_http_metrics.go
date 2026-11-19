@@ -2,9 +2,9 @@ package nginx
 
 // What the front records of its requests (owner: s-http; D17): bounded
 // counters and response-head latency histograms by service, protocol,
-// status class and upstream block, a counter of limit refusals by limit, and
-// an optional access log at V(1), sampled, that honors no_access_log and
-// no_success_access_log.
+// status class and upstream block, a counter of limit refusals by limit, the
+// earliest expiry of the certificates it serves, and an optional access log
+// at V(1), sampled, that honors no_access_log and no_success_access_log.
 //
 // No label or log line carries a client address or a hidden route prefix:
 // labels come from the route table or fixed sets, never from a request, and
@@ -31,6 +31,12 @@ type frontMetrics struct {
 	// upgrade, so a stream or a tunnel doesn't skew it
 	responseHeaderSeconds *prometheus.HistogramVec
 	limitRefusals         *prometheus.CounterVec
+	// the earliest NotAfter of the certificates the front serves
+	// (CertificateStore.EarliestExpiry), set when NewFront builds it. A
+	// vector without labels has no value until then, so a process that
+	// builds no front, as connect without a route file, exports none: a
+	// gauge's 0 would read as a certificate that lapsed in 1970
+	certificateExpiry *prometheus.GaugeVec
 }
 
 // Builds and registers one independent set of the front's metric families.
@@ -57,11 +63,18 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Name:      "limit_refusals_total",
 			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit: request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list",
 		}, []string{"limit"}),
+		certificateExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "certificate_expiry_timestamp_seconds",
+			Help:      "The earliest NotAfter of the certificates the lb_alt front serves, as a Unix time; in the past when a served name's certificate has lapsed, which the front serves all the same, as nginx does. Absent from a process that builds no front",
+		}, nil),
 	}
 	registerer.MustRegister(
 		metrics.requests,
 		metrics.responseHeaderSeconds,
 		metrics.limitRefusals,
+		metrics.certificateExpiry,
 	)
 	return metrics
 }

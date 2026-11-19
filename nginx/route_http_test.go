@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -253,6 +254,140 @@ func TestRouteHttpUnknownAuthorityGetsTheDefaultServer(t *testing.T) {
 	forwards = testFront.forwarders["api"].recordedForwards()
 	if forward := forwards[len(forwards)-1]; forward.host != "test-lb.service.example" || forward.options.host != "test-lb.service.example" {
 		t.Errorf("no host forwarded with Host %q, routed host %q, want the default server's name", forward.host, forward.options.host)
+	}
+}
+
+// A path no location of its server matches is answered as nginx's static
+// module answers it: a 405 to any method but GET, HEAD and POST, before it
+// looks for a file, and a 404 to those, for the lb's names, the default
+// server of an unknown name and a service's path outside its prefixes, a
+// trailing slash included, as the index module declines the same methods.
+// Each is charged to the limits, which run first, and carries no added
+// headers. On h3, alt's 404 answers every method of an api path outside its
+// prefixes.
+func TestRouteHttpUnmatchedPathAnswersByMethod(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	testRouteService(t, routeTable, "api").RoutePrefixes = []string{"/svc-hidden"}
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	httpsHandler := testFront.front.HttpsHandler("eth1")
+	h3Handler := testFront.front.H3ApiHandler("eth1")
+
+	for _, host := range []string{"test-lb.service.example", "unknown.example", "api.service.example"} {
+		for _, target := range []string{"/hello", "/hello/"} {
+			for _, c := range []struct {
+				method string
+				want   int
+			}{
+				{method: http.MethodGet, want: http.StatusNotFound},
+				{method: http.MethodHead, want: http.StatusNotFound},
+				{method: http.MethodPost, want: http.StatusNotFound},
+				{method: http.MethodPut, want: http.StatusMethodNotAllowed},
+				{method: http.MethodDelete, want: http.StatusMethodNotAllowed},
+				{method: http.MethodPatch, want: http.StatusMethodNotAllowed},
+				{method: http.MethodOptions, want: http.StatusMethodNotAllowed},
+				{method: "PROPFIND", want: http.StatusMethodNotAllowed},
+			} {
+				r := newTestRequest(c.method, host, target, true)
+				r.Header.Set("Origin", "https://app.example.com")
+				response := serveTestRequest(httpsHandler, r)
+				if response.Code != c.want {
+					t.Errorf("%s %s%s = %d, want %d", c.method, host, target, response.Code, c.want)
+				}
+				checkNoAddedHeaders(t, c.method+" "+host+target, response.Header())
+			}
+		}
+	}
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodOptions} {
+		response := serveTestRequest(h3Handler, asTestProtocol(newTestRequest(method, "api.service.example", "/hello", true), 3))
+		if response.Code != http.StatusNotFound {
+			t.Errorf("h3 %s api.service.example/hello = %d, want alt's 404", method, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != 0 {
+		t.Errorf("an unmatched path reached the api %d times", len(forwards))
+	}
+	if refusals := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request")); refusals != 0 {
+		t.Fatalf("%v requests refused by the limits before the check", refusals)
+	}
+
+	// charged to the limits, which run before the content
+	limitedSettings := testFrontSettings()
+	limitedRouteTable := loadTestRouteTable(t)
+	limitedFront := newTestFront(t, limitedRouteTable, limitedSettings)
+	limitedHandler := limitedFront.front.HttpsHandler("eth1")
+	statuses := map[int]int{}
+	for range 1000 {
+		response := serveTestRequest(limitedHandler, newTestRequest(http.MethodPut, "test-lb.service.example", "/hello", true))
+		statuses[response.Code] += 1
+		if response.Code == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if statuses[http.StatusTooManyRequests] != 1 || statuses[http.StatusMethodNotAllowed] == 0 {
+		t.Errorf("unmatched PUTs from one client answered %v, want 405s until a 429", statuses)
+	}
+}
+
+// The path routing sends upstream is re-escaped only when the client's path
+// held a %, as nginx's quoted_uri decides, or a rewrite changed it, as the
+// nested streamable location under a prefix does (r->internal): a path of
+// raw bytes above 0x7f goes as it was received, normalized, to a forwarded
+// service, on an lb route and to connect in-process, whose request target
+// and escaped path agree.
+func TestRouteHttpEscapesTheUpstreamPathOnlyAsNginx(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	mcp := testRouteService(t, routeTable, "mcp")
+	mcp.Streamable = false
+	mcp.RoutePrefixes = []string{"/svc-hidden"}
+	mcp.StreamablePaths = []string{"/stream/.*"}
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+
+	for _, c := range []struct {
+		host         string
+		target       string
+		service      string
+		upstreamPath string
+	}{
+		{host: "api.service.example", target: "/caf\xc3\xa9/x?q=%20", service: "api", upstreamPath: "/caf\xc3\xa9/x?q=%20"},
+		{host: "api.service.example", target: "/a//caf\xc3\xa9/./x", service: "api", upstreamPath: "/a/caf\xc3\xa9/x"},
+		{host: "api.service.example", target: "/caf%C3%A9/x", service: "api", upstreamPath: "/caf%C3%A9/x"},
+		{host: "api.service.example", target: "/caf\xc3\xa9/%20", service: "api", upstreamPath: "/caf%C3%A9/%20"},
+		{host: "test-lb.service.example", target: "/hidden-example/by/service/api/caf\xc3\xa9", service: "api", upstreamPath: "/caf\xc3\xa9"},
+		{host: "mcp.service.example", target: "/svc-hidden/other/caf\xc3\xa9", service: "mcp", upstreamPath: "/other/caf\xc3\xa9"},
+		{host: "mcp.service.example", target: "/svc-hidden/stream/caf\xc3\xa9", service: "mcp", upstreamPath: "/stream/caf%C3%A9"},
+	} {
+		response := serveTestRequest(handler, newTestRequest("GET", c.host, c.target, true))
+		if response.Code != http.StatusOK {
+			t.Errorf("%s %q = %d", c.host, c.target, response.Code)
+			continue
+		}
+		forwards := testFront.forwarders[c.service].recordedForwards()
+		if forward := forwards[len(forwards)-1]; forward.options.upstreamPath != c.upstreamPath {
+			t.Errorf("%s %q went upstream as %q, want %q", c.host, c.target, forward.options.upstreamPath, c.upstreamPath)
+		}
+	}
+
+	for _, c := range []struct {
+		target      string
+		requestUri  string
+		path        string
+		escapedPath string
+	}{
+		{target: "/caf\xc3\xa9/x?q", requestUri: "/caf\xc3\xa9/x?q", path: "/caf\xc3\xa9/x", escapedPath: "/caf%C3%A9/x"},
+		{target: "/caf%C3%A9/x", requestUri: "/caf%C3%A9/x", path: "/caf\xc3\xa9/x", escapedPath: "/caf%C3%A9/x"},
+		{target: "/a%20b", requestUri: "/a%20b", path: "/a b", escapedPath: "/a%20b"},
+	} {
+		var escapedPath string
+		testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+			escapedPath = r.URL.EscapedPath()
+		}
+		serveTestRequest(handler, newTestRequest("GET", "connect.service.example", c.target, true))
+		requests := testFront.connectHandler.recordedRequests()
+		request := requests[len(requests)-1]
+		if request.requestUri != c.requestUri || request.path != c.path || escapedPath != c.escapedPath {
+			t.Errorf("in-process %q: RequestURI %q, path %q, escaped %q; want %q, %q, %q", c.target, request.requestUri, request.path, escapedPath, c.requestUri, c.path, c.escapedPath)
+		}
 	}
 }
 
@@ -689,6 +824,169 @@ func TestRouteHttpH3ServesOnlyApiAuthorities(t *testing.T) {
 	}
 	if len(testFront.forwarders["mcp"].recordedForwards()) != 0 || len(testFront.connectHandler.recordedRequests()) != 0 {
 		t.Error("an h3 request reached a service other than the api")
+	}
+}
+
+// A request may carry nginx's max_headers, 1000 header lines, and one more
+// is a 400: on h1 every line Go's server left in the header map, and its
+// Host and Transfer-Encoding lines, which it took out; on h2 and h3 every
+// field but Cookie, which nginx merges uncounted, a Host field included.
+// Lines nginx ignores for their names don't count. The refused request is
+// never forwarded.
+func TestRouteHttpCountsHeaderLinesAsNginxMaxHeaders(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	maxRequestHeaderLines := testFront.front.settings.Http.MaxRequestHeaderLines
+	if maxRequestHeaderLines != 1000 {
+		t.Fatalf("MaxRequestHeaderLines %d, want nginx's max_headers 1000", maxRequestHeaderLines)
+	}
+	// a request whose header map holds lineCount lines of short headers
+	withLines := func(r *http.Request, lineCount int) *http.Request {
+		for i := range lineCount {
+			r.Header.Add("X-Line-"+strconv.Itoa(i%10), "v")
+		}
+		return r
+	}
+	cases := []struct {
+		name       string
+		request    func() *http.Request
+		statusCode int
+	}{
+		// Host is the 1000th line
+		{name: "h1 at the limit", request: func() *http.Request {
+			return withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+		}, statusCode: 200},
+		{name: "h1 past the limit", request: func() *http.Request {
+			return withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines)
+		}, statusCode: 400},
+		{name: "h1 chunked past the limit", request: func() *http.Request {
+			r := withLines(newTestRequest("POST", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+			r.TransferEncoding = []string{"chunked"}
+			return r
+		}, statusCode: 400},
+		{name: "h1 cookies past the limit", request: func() *http.Request {
+			r := withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-2)
+			r.Header.Add("Cookie", "a=1")
+			r.Header.Add("Cookie", "b=2")
+			return r
+		}, statusCode: 400},
+		{name: "h1 past the limit with lines nginx ignores", request: func() *http.Request {
+			r := withLines(newTestRequest("GET", "api.service.example", "/v1", true), maxRequestHeaderLines-1)
+			r.Header.Add("X_Ignored", "v")
+			r.Header.Add("X.Ignored", "v")
+			return r
+		}, statusCode: 200},
+		{name: "h2 at the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+		}, statusCode: 200},
+		{name: "h2 at the limit with a cookie", request: func() *http.Request {
+			r := withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+			r.Header.Add("Cookie", "a=1; b=2")
+			return r
+		}, statusCode: 200},
+		{name: "h2 past the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines+1)
+		}, statusCode: 400},
+		{name: "h2 past the limit with a Host field", request: func() *http.Request {
+			r := withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 2), maxRequestHeaderLines)
+			r.Header.Set("Host", "api.service.example")
+			return r
+		}, statusCode: 400},
+		{name: "h3 past the limit", request: func() *http.Request {
+			return withLines(asTestProtocol(newTestRequest("GET", "api.service.example", "/v1", true), 3), maxRequestHeaderLines+1)
+		}, statusCode: 400},
+	}
+	forwardCount := 0
+	for _, c := range cases {
+		response := serveTestRequest(handler, c.request())
+		if response.Code != c.statusCode {
+			t.Errorf("%s = %d, want %d", c.name, response.Code, c.statusCode)
+		}
+		if c.statusCode == http.StatusOK {
+			forwardCount += 1
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != forwardCount {
+		t.Errorf("%d requests forwarded, want the %d under the limit", len(forwards), forwardCount)
+	}
+
+	unlimitedSettings := testFrontSettings()
+	unlimitedSettings.Http.MaxRequestHeaderLines = 0
+	unlimitedFront := newTestFront(t, loadTestRouteTable(t), unlimitedSettings)
+	if response := serveTestRequest(unlimitedFront.front.HttpsHandler("eth1"), withLines(newTestRequest("GET", "api.service.example", "/v1", true), 5000)); response.Code != http.StatusOK {
+		t.Errorf("with no line limit, 5000 lines = %d", response.Code)
+	}
+}
+
+// A second line of a header nginx keeps once is a 400, on h1, h2 and h3, as
+// nginx answers it (ngx_http_process_unique_header_line), and so is a second
+// Host field on h2 and h3, though both equal :authority. One line of each,
+// and a repeat of any other header, passes. A refused request is never
+// forwarded.
+func TestRouteHttpRefusesARepeatedHeaderNginxKeepsOnce(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	uniqueHeaderValues := map[string]string{
+		"Authorization":       "Bearer one",
+		"Proxy-Authorization": "Basic one",
+		"Content-Range":       "bytes 0-1/2",
+		"Expect":              "100-continue",
+		"If-Match":            `"one"`,
+		"If-None-Match":       `"one"`,
+		"If-Modified-Since":   "Mon, 02 Jan 2006 15:04:05 GMT",
+		"If-Unmodified-Since": "Mon, 02 Jan 2006 15:04:05 GMT",
+		"If-Range":            `"one"`,
+	}
+	forwardCount := 0
+	for _, protoMajor := range []int{1, 2, 3} {
+		newRequest := func() *http.Request {
+			r := newTestRequest("GET", "api.service.example", "/v1", true)
+			if protoMajor != 1 {
+				r = asTestProtocol(r, protoMajor)
+			}
+			return r
+		}
+		for name, value := range uniqueHeaderValues {
+			once := newRequest()
+			once.Header.Add(name, value)
+			if response := serveTestRequest(handler, once); response.Code != http.StatusOK {
+				t.Errorf("h%d one %s line = %d, want it forwarded", protoMajor, name, response.Code)
+			}
+			forwardCount += 1
+			twice := newRequest()
+			twice.Header.Add(name, value)
+			twice.Header.Add(name, value)
+			if response := serveTestRequest(handler, twice); response.Code != http.StatusBadRequest {
+				t.Errorf("h%d two %s lines = %d, want 400", protoMajor, name, response.Code)
+			}
+		}
+		repeated := newRequest()
+		repeated.Header.Add("Accept", "text/plain")
+		repeated.Header.Add("Accept", "text/html")
+		repeated.Header.Add("Cache-Control", "no-cache")
+		repeated.Header.Add("Cache-Control", "no-store")
+		if response := serveTestRequest(handler, repeated); response.Code != http.StatusOK {
+			t.Errorf("h%d repeated Accept and Cache-Control = %d, want it forwarded", protoMajor, response.Code)
+		}
+		forwardCount += 1
+		if protoMajor == 1 {
+			continue
+		}
+		host := newRequest()
+		host.Header.Add("Host", "api.service.example")
+		if response := serveTestRequest(handler, host); response.Code != http.StatusOK {
+			t.Errorf("h%d one Host equal to :authority = %d, want it forwarded", protoMajor, response.Code)
+		}
+		forwardCount += 1
+		hosts := newRequest()
+		hosts.Header.Add("Host", "api.service.example")
+		hosts.Header.Add("Host", "api.service.example")
+		if response := serveTestRequest(handler, hosts); response.Code != http.StatusBadRequest {
+			t.Errorf("h%d two Host fields equal to :authority = %d, want 400", protoMajor, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != forwardCount {
+		t.Errorf("%d requests forwarded, want the %d with no repeat", len(forwards), forwardCount)
 	}
 }
 

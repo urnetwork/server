@@ -8,6 +8,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 // The forwarding headers a client may try to set, which the front never
@@ -186,5 +190,64 @@ func TestFrontE2eRefusesTwoHostHeaders(t *testing.T) {
 	}
 	if connectRequests := e2e.connectHandler.recorded(); len(connectRequests) != 0 {
 		t.Errorf("connect got %d requests with two Host headers, want none", len(connectRequests))
+	}
+}
+
+// Go's h1 and h2 servers merge two identical Content-Length values into one
+// before the handler, which nginx answers 400 (LBALT-IMPL.md §4), and the
+// front forwards the request framed by that one length, so the block reads
+// no other. Two different values are refused before the handler, on h1
+// with nginx's 400.
+func TestFrontE2eForwardsTwoIdenticalContentLengthsAsOne(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	eth1 := e2e.iface(t, "eth1")
+
+	response, _ := e2e.dialRaw(t, eth1.httpsAddr, "api.service.example").exchange(t, "POST /h1-lengths HTTP/1.1", "Host: api.service.example", "Content-Length: 0", "Content-Length: 0")
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("h1 with two identical Content-Length lines = %d, want the block's 200", response.StatusCode)
+	}
+
+	h2Framer := e2e.dialH2Framer(t, eth1.httpsAddr, "api.service.example")
+	h2Framer.encodeBuffer.Reset()
+	for _, headerField := range []hpack.HeaderField{
+		{Name: ":method", Value: "POST"},
+		{Name: ":scheme", Value: "https"},
+		{Name: ":authority", Value: "api.service.example"},
+		{Name: ":path", Value: "/h2-lengths"},
+		{Name: "content-length", Value: "0"},
+		{Name: "content-length", Value: "0"},
+	} {
+		if err := h2Framer.encoder.WriteField(headerField); err != nil {
+			t.Fatal(err)
+		}
+	}
+	streamId := h2Framer.nextStreamId
+	h2Framer.nextStreamId += 2
+	h2Framer.conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
+	if err := h2Framer.framer.WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      streamId,
+		BlockFragment: h2Framer.encodeBuffer.Bytes(),
+		EndStream:     true,
+		EndHeaders:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _ := h2Framer.await(t, streamId, false); status != "200" {
+		t.Errorf("h2 with two identical content-length fields = %s, want the block's 200", status)
+	}
+
+	for _, request := range e2e.awaitServiceRequests(t, "api", 2) {
+		if contentLengths := request.header.Values("Content-Length"); request.method != http.MethodPost || len(contentLengths) != 1 || contentLengths[0] != "0" {
+			t.Errorf("the block got %s %s with Content-Length %q, want a POST framed by one length, 0", request.method, request.requestUri, contentLengths)
+		}
+	}
+
+	requestCounts := e2e.requestCounts()
+	response, _ = e2e.dialRaw(t, eth1.httpsAddr, "api.service.example").exchange(t, "POST /h1-different-lengths HTTP/1.1", "Host: api.service.example", "Content-Length: 0", "Content-Length: 1")
+	if response.StatusCode != http.StatusBadRequest {
+		t.Errorf("h1 with two different Content-Length lines = %d, want 400", response.StatusCode)
+	}
+	if requests := e2e.requestsSince(requestCounts); len(requests) != 0 {
+		t.Errorf("two different Content-Length lines reached a block: %d requests", len(requests))
 	}
 }

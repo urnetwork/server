@@ -15,8 +15,10 @@ package nginx
 //     json (§2.6); `p/by/service/<svc>/` forwards to an lb_exposed service
 //     with the matched part replaced by /, and `p/by/b/<svc>/<block>/` to
 //     that block only; the services' route_request_bodies have exact
-//     locations under both. Anything else is a 404. No CORS, security
-//     headers, route zones or /status deny.
+//     locations under both. Anything else has no location: a 404, or a 405
+//     to a method other than GET, HEAD and POST, as nginx's static module
+//     answers it, which a service's path outside its prefixes gets too. No
+//     CORS, security headers, route zones or /status deny.
 //   - lb names, TCP 80: `= p/status` and `= p/by/b/<svc>/<block>/status` for
 //     every service, then a 301 to https for everything else. Route53's
 //     health check needs that 200, not a redirect.
@@ -134,9 +136,10 @@ func (self *routeHttpLocation) upstream(request *routeRequest) (string, bool) {
 			// nginx sends the client's own target
 			return request.requestUri, true
 		}
-		return request.uri.upstreamTarget(rest), true
+		// its rewrite takes the prefix off, which escapes the rest
+		return request.uri.upstreamTarget(rest, true), true
 	}
-	return request.uri.upstreamTarget(rest), self.streamed
+	return request.uri.upstreamTarget(rest, false), self.streamed
 }
 
 // The decoded path of what upstream gets, for the in-process handler.
@@ -644,7 +647,20 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 
 	// access and content
 	if location == nil {
-		exchange.respondError(http.StatusNotFound)
+		// a server with no location for the path: nginx's static module
+		// answers it, 405 to a method other than GET, HEAD and POST before
+		// it looks for a file (ngx_http_static_handler; the index module
+		// declines the same methods), and 404 for the file the lb's empty
+		// root never has. alt answered an unknown h3 path 404 whatever the
+		// method
+		switch {
+		case self.scheme == routeHttpSchemeH3Api:
+			exchange.respondError(http.StatusNotFound)
+		case r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost:
+			exchange.respondError(http.StatusNotFound)
+		default:
+			exchange.respondError(http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	switch location.kind {
@@ -675,8 +691,13 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 	// nginx's `proxy_set_header Host $host`
 	r.Host = host
 
-	if self.front.Draining() && routeHttpUpgradeRequested(r) {
-		// a new tunnel would hold this generation for the whole drain
+	// a new tunnel would hold this generation for the whole drain: one to
+	// connect in-process, whose upgrades need the Connection token as
+	// connect checks them, and one the forwarder would open, which needs
+	// only an Upgrade header, as nginx's tunnel does
+	upgradeRequested := routeHttpUpgradeRequested(r) ||
+		(!location.inProcess && forwardUpgradeRequested(r, routeService.service.Websocket))
+	if self.front.Draining() && upgradeRequested {
 		exchange.respondError(http.StatusServiceUnavailable)
 		return
 	}
@@ -738,7 +759,9 @@ func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *htt
 		Path:     path,
 		RawQuery: request.uri.args,
 	}
-	if escapedPath := escapeRouteUriPath(path); escapedPath != path {
+	// the path as the request target carries it, escaped as nginx would
+	// send it, so EscapedPath agrees with RequestURI
+	if escapedPath, _, _ := strings.Cut(upstreamTarget, "?"); escapedPath != path {
 		upstreamUrl.RawPath = escapedPath
 	}
 	r.URL = upstreamUrl
