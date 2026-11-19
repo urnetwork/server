@@ -622,9 +622,15 @@ func TestPublicUdpConnectApiFrontRefusesAnswersOutsideTheApiShape(t *testing.T) 
 		if strings.Contains(fmt.Sprintf("%+v", observed), bodyAddress) {
 			t.Errorf("%s: the observation retained the address in the body", c.name)
 		}
+		// the verified handshake resolves the row's path, never its application
 		findings := publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings())
-		if len(findings) != 1 || findings[0].healthy {
-			t.Errorf("%s: an invalid api answer established health", c.name)
+		if len(findings) == 0 || findings[0].healthy || findings[0].class != "public-udp-application" {
+			t.Errorf("%s: an invalid api answer was not an application failure: %+v", c.name, findings)
+		}
+		for _, result := range findings[1:] {
+			if !result.healthy || result.class == "public-udp-application" {
+				t.Errorf("%s: an invalid api answer established health: %s healthy=%t", c.name, result.class, result.healthy)
+			}
 		}
 	}
 }

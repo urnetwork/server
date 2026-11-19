@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -378,7 +381,9 @@ func publicUdpTestConnectApiSignalSettings(source SignalSource) SignalSettings {
 
 // A failed /hello after an exact authenticated handshake is its own finding:
 // the application class, with the api's status, held for two evaluations.
-// It is neither an unknown observation nor recovery of any class of the row.
+// It is not an unknown observation, and it does not resolve the application
+// class; the handshake it rode on does resolve the row's path and
+// observation classes, each family on its own target.
 func TestPublicUdpFailedHelloIsItsOwnApplicationFinding(t *testing.T) {
 	source := &publicUdpTestSource{syntheticSource: &syntheticSource{}, observe: func(_ context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
 		observed := publicUdpTestHealthy(request)
@@ -408,9 +413,27 @@ func TestPublicUdpFailedHelloIsItsOwnApplicationFinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	failedTargets := map[string]bool{}
+	for _, result := range findings {
+		if !result.healthy {
+			failedTargets[result.target] = true
+		}
+	}
+	resolvedTargetClasses := map[string][]string{}
 	for _, result := range findings {
 		if result.healthy && result.class != "public-udp-inventory" {
-			t.Fatalf("a failed /hello resolved %s of its row", result.class)
+			if !failedTargets[result.target] {
+				t.Fatalf("%s resolved on %s, which no failed /hello names", result.class, result.target)
+			}
+			resolvedTargetClasses[result.target] = append(resolvedTargetClasses[result.target], result.class)
+		}
+	}
+	if len(failedTargets) != 2 || len(resolvedTargetClasses) != 2 {
+		t.Fatalf("failed /hellos on %d targets resolved %d of them", len(failedTargets), len(resolvedTargetClasses))
+	}
+	for target, classes := range resolvedTargetClasses {
+		if strings.Join(classes, ",") != "public-udp-path,public-udp-observation" {
+			t.Fatalf("a failed /hello on %s resolved %v", target, classes)
 		}
 	}
 }
@@ -430,8 +453,9 @@ func TestPublicUdpApplicationFailureNeedsAnExactAuthenticatedHandshake(t *testin
 		observed.Failure = PublicUdpFailureApplication
 		return observed
 	}
-	if findings := publicUdpFindings(request, failed(request), errors.New("synthetic"), DefaultPublicUdpProbeSettings()); len(findings) != 1 ||
-		findings[0].healthy || findings[0].class != "public-udp-application" || findings[0].sustain != 2 {
+	if findings := publicUdpFindings(request, failed(request), errors.New("synthetic"), DefaultPublicUdpProbeSettings()); len(findings) != 3 ||
+		findings[0].healthy || findings[0].class != "public-udp-application" || findings[0].sustain != 2 ||
+		!findings[1].healthy || findings[1].class != "public-udp-path" || !findings[2].healthy || findings[2].class != "public-udp-observation" {
 		t.Fatalf("an unanswered /hello after a verified handshake gave %+v", findings)
 	}
 	altApi := request
@@ -459,6 +483,191 @@ func TestPublicUdpApplicationFailureNeedsAnExactAuthenticatedHandshake(t *testin
 		findings := publicUdpFindings(c.request, observed, nil, DefaultPublicUdpProbeSettings())
 		if len(findings) != 1 || findings[0].healthy || findings[0].class != "public-udp-observation" || findings[0].observed != "verified=false reason="+c.reason {
 			t.Errorf("%s: %+v", c.name, findings)
+		}
+	}
+}
+
+// A row's observation in one mode: a completed attempt ("healthy"), a /hello
+// the api answered 503 after a verified handshake ("application"), or a
+// handshake that timed out after sending, so that no /hello was sent
+// ("handshake").
+func publicUdpTestModeObservation(request PublicUdpRequest, mode string) PublicUdpObservation {
+	observed := publicUdpTestHealthy(request)
+	switch mode {
+	case "application":
+		observed.ApplicationStatus, observed.ApplicationBodyValid, observed.ApplicationComplete = http.StatusServiceUnavailable, false, false
+		observed.Failure = PublicUdpFailureApplication
+	case "handshake":
+		observed.HandshakeComplete, observed.TlsVerified, observed.NegotiatedProtocol = false, false, ""
+		observed.PeerTuple, observed.ReceivedPackets, observed.ReceivedBytes = "", 0, 0
+		observed.ApplicationRequested, observed.ApplicationStatus, observed.ApplicationContentTypeJson = false, 0, false
+		observed.ApplicationBodyValid, observed.ApplicationComplete = false, false
+		observed.Failure = PublicUdpFailureTimeout
+	}
+	return observed
+}
+
+// A failed handshake sends no /hello, so on a connect api row it also holds
+// the row's application class: a silent hold on that row's own target, which
+// reaches the run's clear holds and raises nothing. A handshake-only row has
+// no application class to hold.
+func TestPublicUdpFailedHandshakeHoldsTheApplicationClass(t *testing.T) {
+	for _, path := range []struct {
+		service string
+		front   string
+		holds   bool
+	}{
+		{service: "connect", front: "api", holds: true},
+		{service: "connect", front: "connect", holds: false},
+		{service: "alt", front: "api", holds: false},
+		{service: "alt", front: "connect", holds: false},
+	} {
+		for _, failure := range []PublicUdpFailure{PublicUdpFailureTimeout, PublicUdpFailureHandshake} {
+			request := PublicUdpRequest{
+				AttemptId: "synthetic-attempt", Host: "edge-synthetic", Target: "synthetic", Family: "ipv6", Service: path.service, Front: path.front, Carrier: "quic",
+				Address: "2001:db8::20", Port: 443, ServerName: "api.synthetic.example",
+			}
+			observed := publicUdpTestModeObservation(request, "handshake")
+			observed.Failure = failure
+			findings := publicUdpFindings(request, observed, errors.New("synthetic"), DefaultPublicUdpProbeSettings())
+			if len(findings) == 0 || findings[0].healthy || findings[0].clearHold || findings[0].class != "public-udp-path" || findings[0].sustain != 2 {
+				t.Fatalf("%s/%s %s: a failed handshake gave %+v", path.service, path.front, failure, findings)
+			}
+			holds := findings[1:]
+			if !path.holds {
+				if len(holds) != 0 {
+					t.Fatalf("%s/%s %s: a handshake-only row held %+v", path.service, path.front, failure, holds)
+				}
+				continue
+			}
+			want := finding{probeId: "public/udp", class: "public-udp-application", target: findings[0].target, clearHold: true}
+			if len(holds) != 1 || !reflect.DeepEqual(holds[0], want) {
+				t.Fatalf("%s/%s %s: a failed handshake held %+v, want %+v", path.service, path.front, failure, holds, want)
+			}
+		}
+	}
+
+	source := &publicUdpTestSource{syntheticSource: &syntheticSource{}, observe: func(_ context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
+		return publicUdpTestModeObservation(request, "handshake"), nil
+	}}
+	observation := &signalClearHoldObservation{}
+	ctx := context.WithValue(context.Background(), signalClearHoldContextKey{}, observation)
+	alerts, err := NewPublicUdpSignal().Run(ctx, publicUdpTestConnectApiSignalSettings(source))
+	if err != nil || len(alerts) != 2 {
+		t.Fatalf("failed handshakes in both families gave %d alerts: %v", len(alerts), err)
+	}
+	heldTargets := []string{}
+	for _, hold := range observation.snapshot(false) {
+		if hold.SignalId != "public/udp" || hold.Class != "public-udp-application" {
+			t.Fatalf("a failed handshake held %+v", hold)
+		}
+		heldTargets = append(heldTargets, hold.Target)
+	}
+	for _, alert := range alerts {
+		if alert.Class != "public-udp-path" || !slices.Contains(heldTargets, alert.Target) {
+			t.Fatalf("the hold missed the target of %s %s: held %v", alert.Class, alert.Target, heldTargets)
+		}
+	}
+	if len(heldTargets) != 2 {
+		t.Fatalf("failed handshakes in both families held %v", heldTargets)
+	}
+}
+
+// Runs the connect api row of publicUdpTestConnectApiSignalSettings, in both
+// families, through the run loop, the cadence gate and a Slack notifier, one
+// mode per run (publicUdpTestModeObservation). After each run it counts the
+// row's families with an open incident of each class, and it returns those
+// counts with the posts once the notifier has drained.
+func publicUdpTestConnectApiIncidents(t *testing.T, modes []string) ([]map[string]int, []string) {
+	t.Helper()
+	var run atomic.Int32
+	source := &publicUdpTestSource{syntheticSource: &syntheticSource{}, observe: func(_ context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
+		return publicUdpTestModeObservation(request, modes[run.Load()]), nil
+	}}
+	settings := publicUdpTestConnectApiSignalSettings(source)
+	webhook, url := newFakeSlackWebhook(t)
+	harness := newSlackTestHarness()
+	notifier := NewSlackAlertNotifier(harness.settings(url))
+	t.Cleanup(func() { closeSlackNotifier(t, notifier) })
+	openClassCounts := func() map[string]int {
+		notifier.stateLock.Lock()
+		defer notifier.stateLock.Unlock()
+		classCounts := map[string]int{}
+		for _, class := range []string{"public-udp-path", "public-udp-observation", "public-udp-application"} {
+			for _, family := range []string{"ipv4", "ipv6"} {
+				target := publicUdpPathFinding(PublicUdpRequest{Host: "edge-synthetic", Target: "synthetic-connect-api", Family: family, Service: "connect", Front: "api", Carrier: "quic"}, class).target
+				if _, open := notifier.keyIncidents[slackIncidentKey(Alert{SignalID: "public/udp", Class: class, Target: target})]; open {
+					classCounts[class]++
+				}
+			}
+		}
+		return classCounts
+	}
+	runClassCounts := []map[string]int{}
+	postSignalRunsThroughTheGate(t, NewPublicUdpSignal(), settings, len(modes), func(next int) {
+		if 0 < next {
+			runClassCounts = append(runClassCounts, openClassCounts())
+			// past the notifier's per-minute message cap
+			harness.advance(time.Minute)
+		}
+		run.Store(int32(next))
+	}, notifier)
+	runClassCounts = append(runClassCounts, openClassCounts())
+	closeSlackNotifier(t, notifier)
+	return runClassCounts, webhook.posted()
+}
+
+// A failed handshake sends no /hello, so it gives an open application
+// incident no absence credit: through the run loop, the cadence gate and the
+// notifier, the incident stays open across failed handshakes, which also
+// restart its streak, and clears only after two runs whose /hello completed,
+// once per family.
+func TestPublicUdpApplicationIncidentClearsOnlyOnACompletedHello(t *testing.T) {
+	modes := []string{"application", "application", "handshake", "handshake", "healthy", "handshake", "healthy", "healthy"}
+	want := []map[string]int{
+		{},
+		{"public-udp-application": 2},
+		{"public-udp-application": 2},
+		{"public-udp-application": 2, "public-udp-path": 2},
+		{"public-udp-application": 2, "public-udp-path": 2},
+		{"public-udp-application": 2, "public-udp-path": 2},
+		{"public-udp-application": 2, "public-udp-path": 2},
+		{},
+	}
+	runClassCounts, posts := publicUdpTestConnectApiIncidents(t, modes)
+	for index := range modes {
+		if !maps.Equal(runClassCounts[index], want[index]) {
+			t.Errorf("after run %d (%s) the open incidents were %v, want %v", index+1, modes[index], runClassCounts[index], want[index])
+		}
+	}
+	for _, class := range []string{"public-udp-application", "public-udp-path"} {
+		for _, family := range []string{"ipv4", "ipv6"} {
+			identity := class + " · edge-synthetic/public-udp/synthetic-connect-api/" + family + "/connect/api/quic"
+			if raised, cleared := countSlackPosts(posts, "[WARN] raised", identity), countSlackPosts(posts, "[CLEARED]", identity); raised != 1 || cleared != 1 {
+				t.Errorf("%s was raised %d times and cleared %d times", identity, raised, cleared)
+			}
+		}
+	}
+}
+
+// A failed /hello after a verified handshake is a verified transport result:
+// through the run loop, the cadence gate and the notifier, an open path
+// incident clears while /hello still fails, and the application incident
+// that failure raises clears only after /hello completes.
+func TestPublicUdpPathIncidentClearsOnAVerifiedHandshake(t *testing.T) {
+	modes := []string{"handshake", "handshake", "application", "application", "healthy", "healthy"}
+	want := []map[string]int{
+		{},
+		{"public-udp-path": 2},
+		{"public-udp-path": 2},
+		{"public-udp-application": 2},
+		{"public-udp-application": 2},
+		{},
+	}
+	runClassCounts, _ := publicUdpTestConnectApiIncidents(t, modes)
+	for index := range modes {
+		if !maps.Equal(runClassCounts[index], want[index]) {
+			t.Errorf("after run %d (%s) the open incidents were %v, want %v", index+1, modes[index], runClassCounts[index], want[index])
 		}
 	}
 }
@@ -552,7 +761,8 @@ func TestPublicUdpFindingTextsDescribeTheHello(t *testing.T) {
 }
 
 // SIGNALS.md §16.9 describes the /hello: the application class, the
-// connect api pair, and no claim that no HTTP request is made.
+// connect api pair, how the row's classes clear, and no claim that no HTTP
+// request is made.
 func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 	catalog, err := os.ReadFile("SIGNALS.md")
 	if err != nil {
@@ -569,12 +779,18 @@ func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 	if end := strings.Index(section[1:], "\n### "); 0 <= end {
 		section = section[:end+1]
 	}
-	for _, required := range []string{"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings"} {
+	// line breaks fall anywhere in a paragraph
+	section = strings.Join(strings.Fields(section), " ")
+	for _, required := range []string{
+		"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings",
+		"its handshake was verified, so the row's `public-udp-path` and `public-udp-observation` resolve",
+		"clear hold for the row's `public-udp-application`",
+	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("§16.9 does not say %q", required)
 		}
 	}
-	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)"} {
+	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)", "no class of the row resolves until"} {
 		if strings.Contains(section, stale) {
 			t.Errorf("§16.9 still says %q", stale)
 		}

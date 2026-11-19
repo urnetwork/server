@@ -160,9 +160,13 @@ func publicUdpUnknown(request PublicUdpRequest, reason string) finding {
 
 // Evaluates one attempt against the pass's settings, the same bounds its
 // transport ran under. A connect api row is healthy only when its /hello
-// completed with 200 and the api's answer; a failed /hello after an exact
-// authenticated handshake is its own application finding, and resolves no
-// other class of the row, since its result is not a complete one.
+// completed with 200 and the api's answer. A failed /hello after an exact
+// authenticated handshake is its own application finding; that handshake
+// still verified the transport, so the row's path and observation classes
+// resolve. A failed handshake sends no /hello, so on a connect api row it
+// holds the application class: the notifier clears an incident by absence,
+// and an open application incident must not clear on attempts that never
+// reached the api.
 func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservation, err error, settings *PublicUdpProbeSettings) []finding {
 	unknown := func(reason string) []finding { return []finding{publicUdpUnknown(request, reason)} }
 	if observation.Failure == PublicUdpFailureSource {
@@ -201,7 +205,12 @@ func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservatio
 		pathFinding.sustain = 2
 		pathFinding.symptom = "A bounded pinned public UDP/QUIC attempt sent traffic but did not complete its authenticated handshake."
 		pathFinding.observed = fmt.Sprintf("verified=false result=%s sent_packets=%d received_packets=%d ignored_unexpected_packets=%d", observation.Failure, observation.SentPackets, observation.ReceivedPackets, observation.UnexpectedPackets)
-		return []finding{pathFinding}
+		if !apiRequest {
+			return []finding{pathFinding}
+		}
+		// silent: it raises nothing, and only withholds absence credit
+		applicationHold := finding{probeId: "public/udp", class: "public-udp-application", target: pathFinding.target, clearHold: true}
+		return []finding{pathFinding, applicationHold}
 	case PublicUdpFailureApplication:
 		// Only an exact authenticated handshake with a connect api front
 		// carries the request, so anything less is unknown, never a failure
@@ -218,8 +227,15 @@ func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservatio
 			observation.SentPackets, observation.ReceivedPackets,
 		)
 		applicationFinding.action = "The authenticated QUIC path from the exact tuple works, so look behind it: check that connect's front on this interface routes the api name over h3 and that its api upstream blocks are ready, then read the api's own errors. An application_status of 0 means no answer arrived within the attempt bound; 502, 503 or 504 point at the front's forward to the api; any other status at the api. Do not treat this as a UDP, NAT or certificate fault."
-		applicationFinding.verify = "Require a later fresh attempt from the exact requested tuple whose /hello completes with 200 and the api's JSON shape on every admitted family. A handshake-only success, missing capability or cancellation remains unknown, never recovery."
-		return []finding{applicationFinding}
+		applicationFinding.verify = "Require a later fresh attempt from the exact requested tuple whose /hello completes with 200 and the api's JSON shape on every admitted family. A failed handshake sends no /hello and holds this class; a handshake-only success, missing capability or cancellation remains unknown, never recovery."
+		findings := []finding{applicationFinding}
+		// the handshake the request rode on is a verified transport result
+		for _, class := range []string{"public-udp-path", "public-udp-observation"} {
+			resolved := publicUdpPathFinding(request, class)
+			resolved.healthy = true
+			findings = append(findings, resolved)
+		}
+		return findings
 	default:
 		return unknown("observation-authority-invalid")
 	}

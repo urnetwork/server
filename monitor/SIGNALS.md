@@ -42430,8 +42430,15 @@ Configured sustain is not two-sample evidence by itself. Each family and
 protocol owns a distinct target, so healthy IPv4 cannot resolve failed IPv6.
 Only a fresh fully verified result supplies transport recovery; missing
 evidence and non-emission do not. A connect `api` row with a failed `/hello`
-reports only `public-udp-application`; no class of the row resolves until a
-`/hello` completes. Overall monitor cancellation joins workers
+reports `public-udp-application`; its handshake was verified, so the row's
+`public-udp-path` and `public-udp-observation` resolve. A failed handshake
+sends no `/hello`, so beside `public-udp-path` it publishes an exact-class
+clear hold for the row's `public-udp-application`: the Slack notifier clears an
+incident after two complete runs without it, and a run that never reached the
+api cannot count toward clearing an open application incident. The hold raises
+nothing and creates no incident; among the row's attempts, only a completed
+`/hello` counts toward clearing `public-udp-application`. Overall monitor
+cancellation joins workers
 and publishes no partial findings. A per-attempt expired source cannot return
 late positive evidence as healthy. Alternate `SignalSettings.Source` must
 implement `PublicUdpSignalSource` explicitly and honor cancellation; absence
