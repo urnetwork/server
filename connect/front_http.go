@@ -227,7 +227,7 @@ type frontTrackedConn struct {
 	writeTimeoutErr atomic.Pointer[error]
 }
 
-// Writes p, or fails at once once a write has failed on its deadline.
+// Writes p, or, after a write has failed on its deadline, fails at once.
 func (self *frontTrackedConn) Write(p []byte) (int, error) {
 	if writeTimeoutErr := self.writeTimeoutErr.Load(); writeTimeoutErr != nil {
 		return 0, *writeTimeoutErr
