@@ -31,11 +31,15 @@ import (
 // warpctl's status error rule (docker.go IsError)
 var lbAltStatusErrorPattern = regexp.MustCompile(`^(?i)error(\s|:)`)
 
-// The native adapter: one attempt on a fresh system dial, verified against the
-// system roots, within the runner's command timeout. It only delegates, so its
-// bounds are observeLbAltStatusWithin's.
+// The native adapter: one attempt on a fresh system dial, or the runner's
+// test dial, verified against the system roots, within the runner's command
+// timeout. It only delegates, so its bounds are observeLbAltStatusWithin's.
 func (self *runner) lbAltStatus(ctx context.Context, request LbAltStatusRequest, settings *LbAltStatusProbeSettings) (LbAltStatusObservation, error) {
-	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, (&net.Dialer{}).DialContext, nil)
+	dial := self.lbAltStatusDial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, dial, nil)
 }
 
 // One attempt within a command timeout, when it is positive; a non-positive

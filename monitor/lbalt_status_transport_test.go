@@ -738,9 +738,9 @@ func TestLbAltStatusNativeAdapterRefusesAnAttemptWithNoPositiveBound(t *testing.
 // settings' own bound, so the shorter applies. A raised attempt timeout
 // reaches the attempt up to the command timeout, and in full when no positive
 // command timeout caps it; a lowered one and the default hold under the
-// monitor's default command timeout. The dial runs under the request's
-// context, so the deadline it records is the attempt's, on the lb route and
-// on a block route.
+// monitor's default command timeout. The attempt goes through the runner's
+// own adapter, whose dial runs under the request's context, so the deadline
+// the dial records is the attempt's, on the lb route and on a block route.
 func TestLbAltStatusNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) {
 	defaultCommandTimeout := (SignalSettings{}).withDefaults().CommandTimeout
 	raised := DefaultLbAltStatusProbeSettings()
@@ -768,8 +768,9 @@ func TestLbAltStatusNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) 
 			lbAltStatusTestRequest(t, "ipv6", lbAltStatusRouteBlock, "g1"),
 		} {
 			dialer := &lbAltStatusTestDialer{t: t, request: request, dialErr: errors.New("synthetic-private-dial-error")}
+			native := &runner{cfg: &monitorConfig{commandTimeout: c.commandTimeout}, lbAltStatusDial: dialer.dial}
 			started := time.Now()
-			observed, err := observeLbAltStatusWithin(context.Background(), c.commandTimeout, request, c.settings, dialer.dial, nil)
+			observed, err := native.lbAltStatus(context.Background(), request, c.settings)
 			finished := time.Now()
 			if err == nil || dialer.dialCount() != 1 || observed.Failure != LbAltStatusFailureConnect || !observed.Dialed {
 				t.Fatalf("%s, %s route: the attempt did not reach its dial: %+v err=%v", c.name, request.Route, observed, err)
