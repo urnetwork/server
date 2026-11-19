@@ -673,6 +673,77 @@ func TestFrontForcedCloseIsNotHeldByAWedgedConnection(t *testing.T) {
 	}
 }
 
+// An idle keepalive connection whose close waits for good holds no step of
+// the drain: the servers' Shutdowns close idle connections off the drain's
+// goroutine, so the exchange drain and the h3 GOAWAYs begin while that close
+// still waits; and at the drain's deadline the forced close cuts the raw
+// socket, which frees the Shutdown holding its server's lock, before it
+// closes the servers. The cancel comes last.
+func TestFrontDrainIsNotHeldByAWedgedIdleConnection(t *testing.T) {
+	var idleConns *testFrontIdleConns
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		idleConns = newTestFrontIdleConns(env)
+	})
+	wedged := idleConns.wedgeIdle(env)
+	warpStatus := &router.WarpStatusState{}
+	warpStatus.SetReady()
+
+	// whether the wedged connection was still open as the exchange drain began
+	exchangeBegan := make(chan bool, 1)
+	exchangeDrain := func() {
+		select {
+		case <-wedged.closed:
+			exchangeBegan <- false
+		default:
+			exchangeBegan <- true
+		}
+	}
+	canceled := make(chan struct{})
+	go drainConnect(warpStatus, env.frontServer, exchangeDrain, func() {
+		close(canceled)
+	})
+	select {
+	case open := <-exchangeBegan:
+		if !open {
+			t.Fatal("the exchange drain began only once the wedged connection was cut")
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the exchange drain never began: the drain's start waits on the wedged connection's close")
+	}
+	quicRuns := func() []*frontQuicRun {
+		env.frontServer.stateLock.Lock()
+		defer env.frontServer.stateLock.Unlock()
+		quicRuns := []*frontQuicRun{}
+		for _, socket := range env.frontServer.sockets {
+			if quicRun, ok := socket.run.(*frontQuicRun); ok {
+				quicRuns = append(quicRuns, quicRun)
+			}
+		}
+		return quicRuns
+	}()
+	if len(quicRuns) == 0 {
+		t.Fatal("no QUIC socket is up")
+	}
+	for _, quicRun := range quicRuns {
+		drainBegan := func() bool {
+			quicRun.stateLock.Lock()
+			defer quicRun.stateLock.Unlock()
+			return quicRun.drainCtx != nil
+		}()
+		if !drainBegan {
+			t.Fatalf("the h3 drain of %s did not begin with the exchange drain", quicRun.socket.key)
+		}
+	}
+
+	endTestFrontDrain(env.frontServer)
+	testFrontWait(t, canceled, "the cancel after the forced close")
+	select {
+	case <-wedged.closed:
+	default:
+		t.Fatal("the drain ended with the wedged connection open")
+	}
+}
+
 // Each h2 connection gets one GOAWAY when the drain begins, while its
 // stream in flight still completes.
 func TestFrontDrainSendsOneH2GoawayPerConnection(t *testing.T) {

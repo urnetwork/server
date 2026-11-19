@@ -9,10 +9,11 @@ package connect
 //  1. the status latch reads draining, so /status is never ready again;
 //  2. while every transport can still send, the HTTP front drains: the nginx
 //     front stops admitting new HTTP work and marks its responses
-//     Connection: close; the tcp servers turn keepalives off, which closes
-//     idle connections, close their listeners and send each h2 connection one
-//     GOAWAY; each h3 api connection is shut down gracefully, one GOAWAY each
-//     and new streams refused. Requests in flight finish;
+//     Connection: close; each tcp server's Shutdown, off the drain's
+//     goroutine, turns keepalives off, closes its listeners, sends each h2
+//     connection one GOAWAY and closes idle connections; each h3 api
+//     connection is shut down gracefully, one GOAWAY each and new streams
+//     refused. Requests in flight finish;
 //  3. alongside, the exchange drains its residents;
 //  4. hijacked H1 connections, connect's websockets and H1+ tunnels and the
 //     forwarded websockets, are tracked until they close or the drain's
@@ -104,12 +105,14 @@ func (self *frontServer) beginDrain() {
 	}
 	self.front.BeginDrain()
 	for _, httpServer := range self.httpServers {
-		// idle keepalive connections close now, and each later http/1
-		// response carries Connection: close
-		httpServer.SetKeepAlivesEnabled(false)
-		// the listeners close, which no new flow reaches after the switch,
-		// and each h2 connection gets one GOAWAY; hijacked connections are the
-		// front's to track
+		// Shutdown turns keepalives off, so each later http/1 response
+		// carries Connection: close; closes the listeners, which no new flow
+		// reaches after the switch; sends each h2 connection one GOAWAY; and
+		// closes idle keepalive connections. It runs off the drain's
+		// goroutine, since closing an idle TLS connection sends close_notify
+		// under the server's lock, which can wait on a client that stopped
+		// reading: the exchange drain and the h3 GOAWAYs below must not wait
+		// behind it. Hijacked connections are the front's to track.
 		go server.HandleError(func() {
 			httpServer.Shutdown(drainCtx)
 		})
