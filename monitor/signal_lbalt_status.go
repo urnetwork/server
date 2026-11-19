@@ -40,7 +40,7 @@ func (self lbAltStatusProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		return []finding{{
 			probeId: "lb/lbalt-status", tier: tierWarn, class: "lbalt-status-inventory", target: "lbalt-status-inventory", sustain: 1,
 			symptom:   "The declared lb status matrix is incomplete or invalid; no lb interface was contacted.",
-			mechanism: "Each enrolled interface needs one enabled inventory host and an interface in that host's services.yml lb inventory, with a public address in every family it is enrolled for and every family it has enrolled. The lb name comes from the environment and primary domain, the route prefix from services.yml lb_hidden_prefixes, and the blocks from the active blocks of the declared service, held to a declared count. The probe settings must bound every attempt. A partial matrix cannot establish healthy coverage.",
+			mechanism: "Each enrolled interface needs one enabled inventory host and an interface in that host's services.yml lb inventory, with a public address in every family it is enrolled for, and enrolled for every family its inventory has. The lb name comes from the environment and primary domain, the route prefix from services.yml lb_hidden_prefixes, and the blocks from the active blocks of the declared service, held to a declared count. The probe settings must bound every attempt. A partial matrix cannot establish healthy coverage.",
 			baseline:  "Independently declared target and block counts match a complete matrix joined to the enabled host inventory and the active services.yml blocks.",
 			observed:  "inventory_complete=false reason=" + reason,
 			evidence:  "Only the fixed validation class is retained. The route prefix, lb name, addresses and settings values are omitted.",

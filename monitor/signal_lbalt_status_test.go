@@ -79,7 +79,8 @@ func TestLbAltStatusSignalDisabledEnrollmentMakesNoCall(t *testing.T) {
 }
 
 // A refused matrix is one inventory finding with its fixed reason, and no
-// interface is contacted.
+// interface is contacted. Its mechanism states both family rules, the
+// family-address and unprobed-family reasons.
 func TestLbAltStatusSignalRefusedMatrixIsOneInventoryFinding(t *testing.T) {
 	source, calls := lbAltStatusTestSignalSource(nil)
 	settings := lbAltStatusTestEnrolledSettings(source)
@@ -91,6 +92,9 @@ func TestLbAltStatusSignalRefusedMatrixIsOneInventoryFinding(t *testing.T) {
 	alert := requireAlertClass(t, alerts, "lbalt-status-inventory")
 	if alert.Observed != "inventory_complete=false reason=block-denominator" || alert.Sustain != 1 || alert.Target != "lbalt-status-inventory" {
 		t.Fatalf("the inventory finding is %+v", alert)
+	}
+	if !strings.Contains(alert.Mechanism, "with a public address in every family it is enrolled for, and enrolled for every family its inventory has.") {
+		t.Fatalf("the inventory mechanism misstates the family rules: %s", alert.Mechanism)
 	}
 }
 
