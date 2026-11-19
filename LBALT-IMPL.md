@@ -520,6 +520,7 @@ As of 2026-11-19, `lbalt/integrate` at server a297487df and warp bdacae4. LBALT.
 - [x] §4 consolidated, this checklist updated, and LBALT.md §11 written
 - [x] the owner's confirmation, 2026-11-19, of the final review's departures (LBALT.md §11.3 (a) to (h), recorded as amendments in its §6) and of the §4 line on the write bound's timing. The KeyUpdate-during-upload gap stays open, h3 keeps its 408, and the monitor's tls-expiry signal is the expiry alert (LBALT.md §11.6)
 - [ ] follow-ups started 2026-11-19 (owner), each on its own branch: the warp test-data scrub, the exchange drain bound, the pre-existing warpctl fixes, and D22 (b) (LBALT.md §11.6)
+  - [x] D22 (b), one QUIC transport per socket group, built on `feat/lbalt-d22b-quic-fanin-1119` (§8), not merged
 - [ ] the code review (LBALT.md §11.7)
 - [ ] merge: origin/main is merged into `lbalt/integrate` (server 30b6935b7, 2026-11-19, no conflicts; its builds, vets and the affected non-DB suites pass). `lbalt/integrate` goes to main in both repos once the work in progress on the branch is committed and the whole tree is tested
 - [ ] the owner's config:
@@ -609,7 +610,7 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 
 - Each udp group has a `frontQuicGroup`: its N sockets in the inventory, and its current transport, a `frontQuicRun`. The run holds the group's fan-in (a `ConnGroup` on the quic port; the whodis fan-in and the decode53 translation over it on the whodis port), the transport from `ConnectHandler.NewQuicTransport`, its listener, and the h3 servers of its api connections.
 - On the quic port the transport reads the `ConnGroup`, so every socket keeps GSO, ECN, DF and batched reads.
-- On the whodis port, `frontWhodisFanIn` reads each socket with a plain read of up to 64 KiB, as the translation read its socket, and writes through one live socket picked as in §8.3. One translation per group sits over it, and the transport over the translation, as one sat over each socket before. Buffer sizes still pass through the translation, now to every socket of the group, and still no DF or ECN. One translation now holds the pump state of every query its group receives, so an answer can use a query's id whichever socket the query reached; with a translation per socket, an answer sent through another socket had none.
+- On the whodis port, `frontWhodisFanIn` reads each socket a whole datagram at a time, up to 64 KiB, so the translation reads what it read from its socket before (its own buffer cuts it, as a socket's read did), and writes through one live socket picked as in §8.3, with the same skip of a socket closed under a write and the same drop with none left. A temporary read error is retried after the sockets' backoff (`SocketRestartInitialDelay` doubling to `SocketRestartMaxDelay`), any other is the socket's loss. One translation per group sits over the fan-in, and the transport over the translation, as one sat over each socket before. The buffer sizes quic-go asks of the translation still reach the sockets, now every socket of the group, including those that join later, and still no DF or ECN. One translation now holds the pump state of every query its group receives, so an answer can use a query's id whichever socket the query reached; with a translation per socket, an answer sent through another socket had none. Its queue is `FrontServerSettings.WhodisFanInQueueLength`, 256 datagrams.
 - Dispatch is unchanged, per transport: name classes; the handshake admission limit, through `NewQuicTransport`; the per-address cap (0x1001); 0x1000 for other served names; the h3 header timeout; `Allow0RTT = false`; the carrier by port kind.
 - Stateless resets are unchanged. No transport has a `StatelessResetKey`, so none sends a reset, and each transport, now one per group, keeps quic-go's random per-transport token key; no key is shared. A packet of a group's connection reaches it from any socket of the group, and one that reaches another group's transport finds no key there.
 
@@ -636,3 +637,44 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 - `ConnGroup` is new vendored code on the packet path. A socket's removal races writes in flight; a write skips a closed socket. Its tests run under `-race`.
 - Replacing a transport runs only after a failure. A test drives it through a hook.
 - (b) doesn't help a flow that moves to another block, or one whose block restarts: those still reconnect after their idle timeout. HMARK hashes the source address alone (D10), so a rebinding that changes only the source port stays in its block.
+- Nothing here ran on Linux. GSO through a group has a Linux-only test (`TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket`), which darwin skips, and Linux's reuseport hash moving real flows between a group's sockets is untested anywhere; the tests move flows themselves. A Linux run of `GOFLAGS= go test -run '^TestUrnetwork' .` in `third_party/quic-go` would cover the first.
+
+### 8.6 Tests
+
+darwin delivers a reuseport group's datagrams to its newest socket, where Linux hashes each flow to one, so every test moves a flow deterministically: either a group narrowed to one socket while the connection is made, whose loss leaves only siblings, or sockets bound to distinct ports behind a relay the test steers, which also stands in for a NAT rebinding.
+
+Vendored (`third_party/quic-go`, `GOFLAGS= go test -run '^TestUrnetwork' .`), each failing when its behavior is taken out of `urnetwork_conn_group.go`:
+- `TestUrnetworkConnGroupKeepsAConnectionWhoseFlowMovesBetweenSockets`: a connection keeps echoing when its flow moves to another socket, and again after a rebinding changes its source port too;
+- `TestUrnetworkConnGroupKeepsAConnectionThroughTheLossOfItsSocket`: a socket whose reads fail reports the error and leaves the write set, and its connection goes on through a sibling;
+- `TestUrnetworkConnGroupWritesThroughOneLiveSocketPerDestination`: one socket per destination, another once it is lost, a drop with no error with none left, `net.ErrClosed` once closed;
+- `TestUrnetworkConnGroupSkipsASocketClosedUnderAWrite`;
+- `TestUrnetworkConnGroupPassesGsoEcnAndPacketInfoToTheSocket` and `TestUrnetworkConnGroupRefusesASocketWithOtherCapabilities`;
+- `TestUrnetworkConnGroupReadsEverySocketWithItsOobPath`: each socket read through its oob conn, ECN bits included, with a lone socket's capabilities;
+- `TestUrnetworkConnGroupOutlivesTheTransportOverIt`: `Transport.Close` leaves the sockets read on; the group's close ends them;
+- `TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket`, Linux only, where the kernel has GSO; not run on darwin.
+
+Front, no database (`connect/front_quic_group_test.go`, `front_quic_transport_test.go`, `front_whodis_test.go`):
+- `TestFrontQuicGroupsFeedOneTransportEach`: one transport per group, reading a `ConnGroup` or a translation, never a socket;
+- `TestFrontQuicKeepsAConnectionThroughTheLossOfItsSocket` and `TestFrontQuicKeepsAConnectionWhoseFlowMovesToASiblingSocket`: an h3 api connection keeps answering on the quic and the whodis ports when its socket is lost, when its flow is steered to another socket, and after a rebinding;
+- `TestFrontDrainKeepsApiConnectionsThroughTheLossOfTheirSocket`: a request in flight finishes across its socket's loss during the drain, one GOAWAY, and nothing re-created;
+- `TestFrontCloseSendsEachApiConnectionsCloseThroughItsSockets`: the forced close's H3_NO_ERROR reaches the client, so the sockets close after the transport;
+- `TestFrontQuicGroupSocketsAreReadAsBound`, `TestFrontReplacesALostQuicTransport` (a quic `ConnGroup` closed under its transport, a whodis translation ended) and `TestFrontDrainSendsOneH3GoawayWhenItsTransportIsLost`, which keeps the vendored http3 fix's coverage now that a socket's loss destroys nothing;
+- the whodis fan-in's five tests: every socket read and one written per destination, a whole datagram past quic-go's 1452 bytes, buffer sizes for later sockets, a temporary read error waited out, a socket closed under a write skipped.
+
+Database-backed (`connect/lbalt_socket_test.go`):
+- `TestLbAltQuicConnectionKeepsItsTransportWhenItsSocketIsLost` replaces `TestLbAltSiblingSocketsNeverResetAMovedQuicConnection`: the moved connection's next request is answered on the same connection, where (a) waited out its idle timeout; still no reset, since no transport has a reset key;
+- `TestLbAltRebuildsALostUdpSocket` now also requires that the new client, whose flow the re-created socket takes, never connects again.
+
+Changed: `TestFrontDrainSendsOneH3GoawayWhenItsSocketIsLost` gave way to the two drain tests above; `TestFrontPublicSocketIgnoresAProxyProtocolHeader` keeps its behavior and leaves the structure to `TestFrontQuicGroupSocketsAreReadAsBound`; `TestFrontDrainIsNotHeldByAWedgedIdleConnection` reads each group's transport.
+
+### 8.7 Performance
+
+`TestConnectPerformanceCarriersLbAlt` (DB-backed, `WARP_TEST_ENV_FAIL_FAST=1`), on the darwin dev machine, 2026-11-19, from test binaries of a3f37e085 (before) and of this branch (after). The first before ran at 14:42; the rest ran back to back from 15:42, after, before, after, before, after, so each later pair saw about the same load. Each invocation reports the best of its three runs per carrier. The machine was shared and heavily loaded throughout.
+
+| Pair | Load average (1 m) | QUIC before | QUIC after | whodis before | whodis after |
+|---|---|---|---|---|---|
+| 1 | 54 to 34; 60 to 52 | 5,399 msg/s, p50 0.63 ms | 7,810 msg/s, p50 0.61 ms | 18 msg/s, 59.3 ms | 19 msg/s, 53.7 ms |
+| 2 | 52 to 63; 63 to 118 | 7,174 msg/s, p50 0.52 ms | 5,788 msg/s, p50 0.61 ms | 18 msg/s, 54.1 ms | 17 msg/s, 54.8 ms |
+| 3 | 118 to 193; 193 to 129 | 2,171 msg/s, p50 1.08 ms | 2,174 msg/s, p50 0.84 ms | 16 msg/s, 64.6 ms | 17 msg/s, 58.7 ms |
+
+Best of all: before 7,174 msg/s and p50 0.52 ms; after 7,810 msg/s and p50 0.61 ms. Inside single invocations the QUIC runs spread from 3.1k to 7.8k msg/s and their p50 from 0.52 to 1.40 ms, more than any pair differs, so the channel handoff (§8.3) shows no cost beyond the noise. The perf harness's QUIC case is one client pair on darwin, where every flow reaches the group's newest socket, so it measures the handoff and not the single listen loop under N sockets' load (§8.5).
