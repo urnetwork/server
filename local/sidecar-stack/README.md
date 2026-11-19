@@ -1,20 +1,37 @@
 # The sidecar's local stack
 
-What §19.11's local tier needs beside `server/local`'s postgres and redis (OPS-M9-01). Today that is one thing,
-the SMTP sink: a destination MX that takes every message handed to it and delivers none, so a local smtpedge
-has somewhere to send and a test can read what arrived.
+What §19.11's local tier needs beside `server/local`'s postgres and redis (OPS-M9-01, TLS-M5-26). Today that is
+two things: the SMTP sink, a destination MX that takes every message handed to it and delivers none, so a local
+smtpedge has somewhere to send and a test can read what arrived; and Pebble, Let's Encrypt's ACME test server, for
+T3's certificate rows (§22.9's "Pebble with 5% bad nonces in T2 and T3").
 
 | Container | What | Ports |
 |---|---|---|
 | `sidecar-test-smtp-sink` | `smtpsink/`, this directory's own SMTP server | SMTP `127.0.0.1:52525`, control `127.0.0.1:52526` |
+| `sidecar-test-pebble` | `pebble/`, Pebble from the Go module server's `go.sum` pins | ACME `https://127.0.0.1:51400/dir`, management `127.0.0.1:51500` |
 
 ```sh
 local/sidecar-stack/stack.sh build    # smtpsink for the docker host, into sidecar-test-smtp-sink:local
 local/sidecar-stack/stack.sh up       # starts the sink and waits for its control port
 local/sidecar-stack/stack.sh check    # sends it one message, reads it back and forgets it
 local/sidecar-stack/stack.sh down     # stops and removes the sink's container and its network
-go test ./local/sidecar-stack/smtpsink/
+local/sidecar-stack/stack.sh pebble-up      # starts Pebble and waits for its management port
+local/sidecar-stack/stack.sh pebble-check   # reads its root and its directory through its own certificate
+local/sidecar-stack/stack.sh pebble-down    # stops and removes Pebble's container and its network
+go test ./local/sidecar-stack/smtpsink/ ./local/sidecar-stack/pebble/
 ```
+
+## Pebble
+
+`pebble/main.go` runs Pebble's web front end, CA and validation authority, from the pinned module, behind an ACME
+listener on TLS and a plain management port: `GET /roots/0` answers Pebble's issuing root, which its chains verify
+under, `GET /tls-cert` the ACME listener's own certificate, a throwaway made at start, which a client trusts to reach
+the directory, and `GET /status` the directory's path. It refuses 5% of good nonces as bad, as §22.9 asks. Its
+validation authority asks `PEBBLE_DNS` for DNS-01 challenges and dials a challenge's host for TLS-ALPN-01;
+`PEBBLE_ALWAYS_VALID=1` passes every challenge with no lookup or dial, for a run whose challenges the container cannot
+reach. It keeps everything in memory and forgets it when it stops, and a test that starts it stops it after use.
+Pebble checks no CAA and no customer `accounturi`, does not reuse orders and has no rate limits, so those rows stay
+LE staging's and the scripted ACME client's (DESIGN-DETAILS 17.6). `pebble/main_test.go` runs it in process on loopback.
 
 ## The sink
 
@@ -50,5 +67,6 @@ image is `FROM scratch` with the one binary built here, so nothing is fetched or
 
 - A local smtpedge does not reach the sink yet: its MX port is a setting no config file sets
   (`SmtpEdgeSettings.MxPort`, 25), and FS-42's M9 step, which runs the edge against a sink, is SMTP-M9-19's.
-- §19.11's local row also names MinIO, Pebble ACME and a test dns edge. MinIO is `sidecar/local`'s and
-  `local/file-cluster-t3`'s; the other two are not in this file.
+- §19.11's local row also names MinIO and a test dns edge. MinIO is `sidecar/local`'s and
+  `local/file-cluster-t3`'s; the dns edge is not in this file.
+- No T3 suite starts the Pebble container on its own yet: certs' T2 rows run `sidecartest.StartPebble` in process.

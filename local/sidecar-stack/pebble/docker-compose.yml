@@ -1,0 +1,47 @@
+# The local tier's ACME server (sidecar DESIGN §19.11's local row, §22.9; TLS-M5-26): Pebble built from the Go module
+# the sidecar test leg pins, for T3's certificate rows, beside server/local's postgres and redis, which this file leaves
+# alone.
+#
+#   pebble   ACME        https://127.0.0.1:51400/dir   (TLS on a throwaway certificate made at start)
+#            management  http://127.0.0.1:51500        GET /roots/0, GET /tls-cert, GET /status
+#
+# Don't run this with a bare `docker compose up`: stack.sh builds the image first, sidecar-test-pebble:local, FROM scratch
+# with the one binary built here, so nothing is pulled. The container is named sidecar-test-pebble and its ports are
+# published on 127.0.0.1 above 50000. Pebble keeps every account, order and key in memory and forgets them when it stops;
+# a test that starts it stops it after use (stack.sh pebble-down).
+#
+# PEBBLE_ALWAYS_VALID=1 passes every challenge with no lookup or dial, for a run whose challenges no resolver the
+# container can reach would answer; PEBBLE_DNS names the resolver otherwise. The project and its network are Pebble's
+# alone, so neither this file's containers nor the sink's are the other's orphans.
+
+name: sidecar-test-pebble
+
+services:
+  pebble:
+    image: ${SIDECAR_STACK_PEBBLE_IMAGE:-sidecar-test-pebble:local}
+    pull_policy: never
+    container_name: sidecar-test-pebble
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [pebble]
+    command:
+      - "-acme"
+      - ":14000"
+      - "-management"
+      - ":15000"
+      - "-nonce-reject"
+      - "5"
+      - "-dns"
+      - "${PEBBLE_DNS:-}"
+      - "-always-valid=${PEBBLE_ALWAYS_VALID:-0}"
+    ports:
+      - "127.0.0.1:51400:14000"
+      - "127.0.0.1:51500:15000"
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
+
+networks:
+  pebble:
+    name: sidecar-test-pebble

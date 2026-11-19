@@ -130,9 +130,10 @@ type hostDeps struct {
 	NewClients func(ctx context.Context) (hostClients, error)
 	// Find and open over the clients, as the engine's request: sidecar.NewSocketEdgeDialer.
 	NewDial func(clients hostClients) (hostSocketDial, error)
-	// Each replaces the block's: a test's gates file, a test's Redis.
-	Gates sidecar.ServiceGates
-	Redis sidecar.Redis
+	// Each replaces the block's: a test's gates file, a test's Redis, a test's metrics registry.
+	Gates   sidecar.ServiceGates
+	Redis   sidecar.Redis
+	Metrics sidecar.Metrics
 	// The engine's clock: real time.
 	Clock sidecar.Clock
 	// Where the block logs: glog. Indexes and counts only (I-13).
@@ -217,8 +218,8 @@ func (self *hostDialer) Dial(ctx context.Context, request *tlsedgeservice.TlsEdg
 		// (TLS-M6-02; DESIGN-DETAILS 17.2.10)
 		ServerName:  request.ServerName,
 		AffinityKey: request.AffinityKey,
-		Metadata:     request.Metadata,
-		EarlyData:    earlyData,
+		Metadata:    request.Metadata,
+		EarlyData:   earlyData,
 	})
 	if err != nil {
 		return nil, err
@@ -292,6 +293,9 @@ func newTlsEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	}
 	if deps.Redis != nil {
 		host.Redis = deps.Redis
+	}
+	if deps.Metrics != nil {
+		host.Metrics = deps.Metrics
 	}
 	self := &tlsEdgeHost{
 		ctx:         hostCtx,
