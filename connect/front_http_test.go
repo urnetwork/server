@@ -323,10 +323,12 @@ func TestFrontHttpsClosesAnIdleKeepaliveConnectionAtTheKeepaliveTimeout(t *testi
 	testFrontReadEnd(t, reader, "the idle keepalive connection")
 }
 
-// Request line and headers over nginx's header buffers in all, plus
+// Request line and headers over twice nginx's header buffers in all, plus
 // net/http's 4 KiB slack, are refused by net/http with 431 before the nginx
-// front sees them (the parity difference newHttpServer documents); under the
-// limit a request reaches the front.
+// front sees them (the parity difference newHttpServer documents); within
+// that a request reaches the front, which answers nginx's own statuses, even
+// past nginx's buffers. Each request opens its own connection, as the bound
+// is a new connection's.
 func TestFrontHttpsRefusesHeadersOverTheTotalLimit(t *testing.T) {
 	const headerBytes = 4 * 1024
 	reached := make(chan string, 4)
@@ -367,6 +369,13 @@ func TestFrontHttpsRefusesHeadersOverTheTotalLimit(t *testing.T) {
 		t.Fatalf("headers under the limit: status %d", status)
 	}
 	if path := <-reached; path != "/under" {
+		t.Fatalf("reached %s", path)
+	}
+	// about 10 KiB: past nginx's buffers, within twice them and the slack
+	if status := request("/within", 10); status != http.StatusOK {
+		t.Fatalf("headers within twice the limit: status %d", status)
+	}
+	if path := <-reached; path != "/within" {
 		t.Fatalf("reached %s", path)
 	}
 	if status := request("/over", 16); status != http.StatusRequestHeaderFieldsTooLarge {

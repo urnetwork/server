@@ -70,6 +70,7 @@ type nginxFront interface {
 	HttpHandler(interfaceName string) http.Handler
 	H3ApiHandler(interfaceName string) http.Handler
 	AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool)
+	ConfigureServer(httpServer *http.Server)
 	BeginDrain()
 	Close() error
 }

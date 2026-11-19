@@ -87,29 +87,26 @@ func (self *frontTcpRun) close() {
 	self.listener.Close()
 }
 
-// A server for one interface's port. Its limits are nginx's client limits
-// (nginx.HttpSettings): the header timeout covers the TLS handshake, request
-// line and headers; the idle timeout is the keepalive timeout; the header
-// bytes are the total of nginx's header buffers, within which the nginx
-// front's handlers apply the finer per-line limits. Nothing bounds a whole
-// request or response here: bodies, uploads, websockets and streamed
+// A server for one interface's port. connect sets what is its own: the
+// handler, the error log that counts and the serving context. The nginx
+// front sets the rest from its HttpSettings (nginx.Front.ConfigureServer,
+// LBALT-IMPL.md §7), as the parity harness's servers get them: the header
+// timeout, which covers the TLS handshake, request line and headers; the
+// idle timeout; header bytes of twice nginx's header buffers, within which
+// the nginx front's handlers apply nginx's own limits; the h2 stream limit;
+// and keepalive_requests and keepalive_time per connection. Nothing bounds a
+// whole request or response here: bodies, uploads, websockets and streamed
 // responses keep the per-read and per-write timeouts the nginx front applies.
 //
 // A parity difference (LBALT-IMPL.md §4): net/http reads at most the header
-// bytes, 64 KiB by default, plus its own 4 KiB slack before the handler, so
-// an HTTP/1.1 request line and headers over that in all, about 68 KiB, are
-// answered 431 by net/http and never reach the nginx front, where nginx
-// answers 400, or 414 for a long request line. Under that size the nginx
-// front answers nginx's codes.
+// bytes, twice nginx's 64 KiB of buffers by default, plus its own 4 KiB
+// slack before the handler, so an HTTP/1.1 request line and headers over
+// that in all, about 132 KiB, are answered 431 by net/http and never reach
+// the nginx front, where nginx answers 400, or 414 for a long request line.
+// Under that size the nginx front answers nginx's codes.
 func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *http.Server {
-	httpSettings := self.settings.Front.Http
 	httpServer := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: httpSettings.ClientHeaderTimeout,
-		IdleTimeout:       httpSettings.KeepaliveTimeout,
-		MaxHeaderBytes:    httpSettings.MaxRequestHeadersTotalBytes,
-		// every request, `OPTIONS *` included, is the nginx front's to answer
-		DisableGeneralOptionsHandler: true,
+		Handler: handler,
 		ErrorLog: log.New(&frontHttpErrorLog{
 			portKind: portKind,
 			observer: self.settings.httpErrorObserverForTest,
@@ -119,15 +116,7 @@ func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *h
 			return self.ctx
 		},
 	}
-	if 0 < httpSettings.Http2MaxConcurrentStreams {
-		httpServer.HTTP2 = &http.HTTP2Config{
-			MaxConcurrentStreams: httpSettings.Http2MaxConcurrentStreams,
-		}
-	}
-	if httpSettings.KeepaliveTimeout <= 0 {
-		// nginx's `keepalive_timeout 0`: one request per connection
-		httpServer.SetKeepAlivesEnabled(false)
-	}
+	self.front.ConfigureServer(httpServer)
 	return httpServer
 }
 
