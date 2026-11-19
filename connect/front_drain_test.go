@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -572,6 +573,104 @@ func TestFrontDrainEndsWhenTheLastConnectionCloses(t *testing.T) {
 	hijacked.echo("during")
 	hijacked.tlsConn.Close()
 	testFrontWait(t, drained, "the drain's end once the last connection closed")
+}
+
+// The raw sockets of a test's https connections, below the front's tracked
+// connections, and a signal each time a public server holds a connection
+// idle, so a test can wedge an idle keepalive connection's server side.
+type testFrontIdleConns struct {
+	accepted chan *testFrontStallingConn
+	idle     chan struct{}
+}
+
+// Wraps the env's tcp binds and its servers' ConnState, before the start.
+func newTestFrontIdleConns(env *testFrontEnv) *testFrontIdleConns {
+	idleConns := &testFrontIdleConns{
+		accepted: make(chan *testFrontStallingConn, 16),
+		idle:     make(chan struct{}, 16),
+	}
+	listen := env.settings.Listen
+	env.settings.Listen = func(network string, address string) (net.Listener, error) {
+		listener, err := listen(network, address)
+		if err != nil {
+			return listener, err
+		}
+		return &testFrontStallingListener{
+			Listener: listener,
+			accepted: idleConns.accepted,
+		}, nil
+	}
+	env.front.connState = func(_ net.Conn, connState http.ConnState) {
+		if connState == http.StateIdle {
+			select {
+			case idleConns.idle <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return idleConns
+}
+
+// Serves one request on a new h1 keepalive connection to eth1's https
+// socket, waits until its server holds it idle, and wedges its raw socket:
+// every later write on it, close_notify included, waits for its close.
+func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingConn {
+	env.t.Helper()
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontApiName)
+	if response := client.get(testFrontApiName, "/"); response.Close {
+		env.t.Fatal("the connection was not kept alive")
+	}
+	var stallingConn *testFrontStallingConn
+	select {
+	case stallingConn = <-self.accepted:
+	case <-time.After(testFrontProgressTimeout):
+		env.t.Fatal("no connection was accepted")
+	}
+	// a front that never cuts the wedge would otherwise hold the test's
+	// own close of the front
+	env.t.Cleanup(func() {
+		stallingConn.Close()
+	})
+	testFrontWait(env.t, self.idle, "the keepalive connection's idle state")
+	stallingConn.wedged.Store(true)
+	return stallingConn
+}
+
+// The forced close is bounded whatever a connection's TLS would send: it
+// cuts every raw socket before http.Server.Close closes the TLS connections
+// the servers own, each with close_notify. An idle keepalive connection
+// whose close_notify waits for good, as one does behind the answer to a
+// KeyUpdate request from a client that stopped reading, would otherwise
+// hold the close, and with it the exit after a handler retirement's cancel,
+// which closes the front without a drain.
+func TestFrontForcedCloseIsNotHeldByAWedgedConnection(t *testing.T) {
+	reports := make(chan string, 4)
+	var idleConns *testFrontIdleConns
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		idleConns = newTestFrontIdleConns(env)
+		env.settings.forcedCloseReportObserverForTest = func(step string) {
+			reports <- step
+		}
+	})
+	wedged := idleConns.wedgeIdle(env)
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		env.frontServer.close()
+	}()
+	testFrontWait(t, closed, "the forced close")
+	select {
+	case <-wedged.closed:
+	default:
+		t.Fatal("the forced close returned with the wedged connection open")
+	}
+	select {
+	case step := <-reports:
+		t.Fatalf("the forced close reported the %s as not closed", step)
+	default:
+	}
 }
 
 // Each h2 connection gets one GOAWAY when the drain begins, while its

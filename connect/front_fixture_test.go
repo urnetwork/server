@@ -288,6 +288,8 @@ type testFront struct {
 	httpHandler  func(interfaceName string) http.Handler
 	h3ApiHandler func(interfaceName string) http.Handler
 
+	// the ConnState of every public server ConfigureServer is given, when set
+	connState func(conn net.Conn, connState http.ConnState)
 	// signaled after each release of an admitted QUIC connection
 	released chan struct{}
 	// a real nginx front over the same route table and settings, which
@@ -482,6 +484,9 @@ func (self *testFront) ConfigureServer(httpServer *http.Server) {
 		self.configuredServers = append(self.configuredServers, httpServer)
 	}()
 	self.configuringFront.ConfigureServer(httpServer)
+	if self.connState != nil {
+		httpServer.ConnState = self.connState
+	}
 }
 
 // Every server ConfigureServer was given, in order.

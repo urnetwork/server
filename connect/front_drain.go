@@ -19,8 +19,9 @@ package connect
 //     deadline passes: the drain timeout, as nginx's worker_shutdown_timeout,
 //     less DrainStopReserve, since warpctl's stop grace is the same 60 m and
 //     the steps below must finish inside it;
-//  5. the forced close, bounded by ForcedCloseTimeout, cuts what is left, the
-//     h3 servers always before their transports;
+//  5. the forced close, bounded by ForcedCloseTimeout, cuts what is left: the
+//     tcp sockets before anything TLS would send on them, and the h3 servers
+//     always before their transports;
 //  6. the serving context is canceled last.
 //
 // A GOAWAY needs a transport that can send. alt once started a graceful
@@ -176,14 +177,22 @@ func (self *frontServer) close() {
 			})
 		}()
 
-		// every serve loop ends: QUIC accepts return, and the tcp servers
-		// close their listeners and the connections they still own
+		// every serve loop ends: QUIC accepts return
 		self.cancel()
+		// every tcp connection's raw socket closes first, hijacked or not.
+		// http.Server.Close below closes each connection it still owns one
+		// after another under the server's lock, and over TLS each close
+		// first sends close_notify, which could wait on a client that stopped
+		// reading, or for good behind a blocked write that holds TLS's write
+		// lock with no deadline, such as the answer to a client's KeyUpdate
+		// request. A drain's Shutdown stuck the same way closing an idle
+		// connection holds the server's lock, which Close needs, until this
+		// cut.
+		self.closeTcpConns()
+		// the tcp servers close their listeners and forget their connections
 		for _, httpServer := range self.httpServers {
 			httpServer.Close()
 		}
-		// the hijacked connections http.Server forgot
-		self.closeTcpConns()
 
 		supervised := make(chan struct{})
 		go func() {

@@ -238,10 +238,16 @@ func (self *testFrontStallingListener) Accept() (net.Conn, error) {
 // A connection whose writes, once it is stalled, wait out their deadline and
 // fail with its error, as a write does to a client that stopped reading
 // once the socket's buffers are full, whatever the kernel's buffer sizes.
-// Safe for concurrent use as a net.Conn is.
+// Once it is wedged, a write waits for the close alone, whatever its
+// deadline: as close_notify does behind a write that holds TLS's write lock
+// with no deadline, since crypto/tls answers a client's KeyUpdate request on
+// the reading goroutine under that lock, net/http clears an idle
+// connection's write deadline, and a client that stopped reading never takes
+// the answer. Safe for concurrent use as a net.Conn is.
 type testFrontStallingConn struct {
 	net.Conn
 	stalled   atomic.Bool
+	wedged    atomic.Bool
 	closed    chan struct{}
 	closeOnce sync.Once
 
@@ -270,8 +276,12 @@ func (self *testFrontStallingConn) SetWriteDeadline(deadline time.Time) error {
 }
 
 // Writes p, or once stalled waits for the write deadline, or the close, and
-// fails.
+// fails; once wedged waits for the close and fails.
 func (self *testFrontStallingConn) Write(p []byte) (int, error) {
+	if self.wedged.Load() {
+		<-self.closed
+		return 0, net.ErrClosed
+	}
 	if !self.stalled.Load() {
 		return self.Conn.Write(p)
 	}
