@@ -59,6 +59,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	quic "github.com/quic-go/quic-go"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -1056,8 +1057,8 @@ type testLbAltBindHold struct {
 	releaseOnce  sync.Once
 }
 
-// Holds every later bind of address until it is let through.
-func (self *testLbAltBinds) hold(address netip.AddrPort) *testLbAltBindHold {
+// Holds every later bind of protocol on address until it is let through.
+func (self *testLbAltBinds) hold(protocol string, address netip.AddrPort) *testLbAltBindHold {
 	hold := &testLbAltBindHold{
 		waitingCount: connect.NewMonitorValue(0),
 		permits:      make(chan struct{}, 64),
@@ -1065,8 +1066,13 @@ func (self *testLbAltBinds) hold(address netip.AddrPort) *testLbAltBindHold {
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.holds[address.String()] = hold
+	self.holds[testLbAltHoldKey(protocol, address.String())] = hold
 	return hold
+}
+
+// The key of a hold: tcp and udp 443 share an address and port.
+func testLbAltHoldKey(protocol string, address string) string {
+	return protocol + " " + address
 }
 
 // Waits until count binds wait at the barrier.
@@ -1098,12 +1104,12 @@ func (self *testLbAltBindHold) releaseAll() {
 	})
 }
 
-// Waits out a hold on the address, if any.
-func (self *testLbAltBinds) beforeBind(address string) {
+// Waits out a hold on the protocol and address, if any.
+func (self *testLbAltBinds) beforeBind(protocol string, address string) {
 	hold := func() *testLbAltBindHold {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		return self.holds[address]
+		return self.holds[testLbAltHoldKey(protocol, address)]
 	}()
 	if hold == nil {
 		return
@@ -1124,7 +1130,7 @@ func (self *testLbAltBinds) beforeBind(address string) {
 // the socket in a wrapper a test can fail writes on. A wrapped socket is no
 // *net.UDPConn, so quic-go reads and writes it without GSO, ECN or OOB.
 func (self *testLbAltBinds) listenPacket(network string, address string) (net.PacketConn, error) {
-	self.beforeBind(address)
+	self.beforeBind(frontProtocolUdp, address)
 	packetConn, err := listenFrontPacket(network, address)
 	if err != nil {
 		return nil, err
@@ -1145,7 +1151,7 @@ func (self *testLbAltBinds) listenPacket(network string, address string) (net.Pa
 
 // FrontServerSettings.Listen: the front's own SO_REUSEPORT bind, recorded.
 func (self *testLbAltBinds) listen(network string, address string) (net.Listener, error) {
-	self.beforeBind(address)
+	self.beforeBind(frontProtocolTcp, address)
 	listener, err := listenFront(network, address)
 	if err != nil {
 		return nil, err
@@ -1262,6 +1268,107 @@ func (self *testLbAltSourceConn) readSources() map[netip.AddrPort]int {
 		sources[source] = count
 	}
 	return sources
+}
+
+// The client QUIC config of the fixture's raw dials.
+func testLbAltClientQuicConfig() *quic.Config {
+	return &quic.Config{
+		HandshakeIdleTimeout: testLbAltProgressTimeout,
+		MaxIdleTimeout:       time.Minute,
+		InitialPacketSize:    connect.H3InitialPacketByteCount,
+	}
+}
+
+// Wraps a client udp socket for a port kind: a whodis dial goes through the
+// client half of the dns translation, the client's own code, with the route
+// table's tld. The translation closes with the test.
+func (self *testLbAltEnv) clientCarrierConn(packetConn net.PacketConn, portKind string) net.PacketConn {
+	self.t.Helper()
+	if portKind != frontPortWhodis {
+		return packetConn
+	}
+	ptSettings := connect.DefaultPacketTranslationSettings()
+	ptSettings.DnsTlds = [][]byte{[]byte(testLbAltWhodisTld)}
+	translation, err := connect.NewPacketTranslation(
+		self.ctx,
+		connect.PacketTranslationModeDns,
+		packetConn,
+		ptSettings,
+	)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	self.t.Cleanup(func() { translation.Close() })
+	return translation
+}
+
+// Dials QUIC to a port kind's socket on address from packetConn, already
+// wrapped for the port kind. early dials with 0-RTT where a ticket allows it.
+func (self *testLbAltEnv) dialQuicFrom(
+	packetConn net.PacketConn,
+	address netip.Addr,
+	portKind string,
+	tlsConfig *tls.Config,
+	quicConfig *quic.Config,
+	early bool,
+) (*quic.Conn, error) {
+	quicTransport := &quic.Transport{Conn: packetConn}
+	self.t.Cleanup(func() { quicTransport.Close() })
+	udpAddr := net.UDPAddrFromAddrPort(self.bindAddress(address, portKind))
+	ctx, cancel := context.WithTimeout(self.ctx, testLbAltProgressTimeout)
+	defer cancel()
+	if early {
+		return quicTransport.DialEarly(ctx, udpAddr, tlsConfig, quicConfig)
+	}
+	return quicTransport.Dial(ctx, udpAddr, tlsConfig, quicConfig)
+}
+
+// Dials QUIC from a new client socket, presenting serverName with nextProtos.
+func (self *testLbAltEnv) dialQuic(address netip.Addr, portKind string, serverName string, nextProtos []string) (*quic.Conn, error) {
+	packetConn := self.clientCarrierConn(self.clientPacketConn(address), portKind)
+	return self.dialQuicFrom(packetConn, address, portKind, self.clientTlsConfig(serverName, nextProtos), testLbAltClientQuicConfig(), false)
+}
+
+// How the server closed one QUIC connection: the dial's error or, for a dial
+// that returned a connection, the error its next accept sees.
+type testLbAltQuicClose struct {
+	// the application code, when an application close arrived
+	applicationCode    quic.ApplicationErrorCode
+	applicationArrived bool
+	// the transport error code, when the server closed with one
+	transportCode quic.TransportErrorCode
+	transportErr  bool
+	err           error
+}
+
+// Reads how the server closed conn, or failed its dial.
+func testLbAltCloseOf(conn *quic.Conn, dialErr error) testLbAltQuicClose {
+	err := dialErr
+	if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), testLbAltProgressTimeout)
+		defer cancel()
+		_, err = conn.AcceptStream(ctx)
+		if err == nil {
+			return testLbAltQuicClose{err: errors.New("the connection was not closed")}
+		}
+	}
+	var applicationErr *quic.ApplicationError
+	if errors.As(err, &applicationErr) && applicationErr.Remote {
+		return testLbAltQuicClose{
+			applicationCode:    applicationErr.ErrorCode,
+			applicationArrived: true,
+			err:                err,
+		}
+	}
+	var transportErr *quic.TransportError
+	if errors.As(err, &transportErr) && transportErr.Remote {
+		return testLbAltQuicClose{
+			transportCode: transportErr.ErrorCode,
+			transportErr:  true,
+			err:           err,
+		}
+	}
+	return testLbAltQuicClose{err: err}
 }
 
 // Waits for a channel or fails the test.
