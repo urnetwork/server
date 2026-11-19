@@ -28,6 +28,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/server/nginx"
 	"github.com/urnetwork/server/router"
 )
@@ -55,16 +57,18 @@ func countTestFrontSocketsUp(frontServer *frontServer, protocol string) int {
 	return count
 }
 
-// A trace on every server connection: it signals each GOAWAY the http3
-// server creates, and, when holding, holds each connection inside its close
-// window. quic-go records a connection's close after it closed the
+// A trace on every server connection: it counts each GOAWAY the http3
+// server creates, without ever blocking the recording loop, and, when
+// holding, holds each connection inside its close window. quic-go records a connection's close after it closed the
 // connection's streams and before it cancels the connection's context, so
 // while the record is held every accept on the connection fails at once and
 // its context is still live: the window in which a graceful http3 shutdown
 // spins. In production the window stays open while Transport.close holds the
 // transport mutex over its destroy fan-out and while every core is busy.
 type testFrontConnectionTrace struct {
-	goaways     chan struct{}
+	// every GOAWAY created: one per connection the drain shut down, and one
+	// per pass of an accept loop spinning against a destroyed transport
+	goaways     *connect.MonitorValue[int]
 	holding     bool
 	held        atomic.Int64
 	release     chan struct{}
@@ -73,7 +77,7 @@ type testFrontConnectionTrace struct {
 
 func newTestFrontConnectionTrace(holding bool) *testFrontConnectionTrace {
 	return &testFrontConnectionTrace{
-		goaways: make(chan struct{}, 256),
+		goaways: connect.NewMonitorValue(0),
 		holding: holding,
 		release: make(chan struct{}),
 	}
@@ -97,7 +101,9 @@ func (self *testFrontConnectionTrace) RecordEvent(event qlogwriter.Event) {
 	switch event := event.(type) {
 	case http3qlog.FrameCreated:
 		if _, ok := event.Frame.Frame.(http3qlog.GoAwayFrame); ok {
-			self.goaways <- struct{}{}
+			self.goaways.Update(func(goaways int) int {
+				return goaways + 1
+			})
 		}
 	case qlog.ConnectionClosed:
 		if self.holding {
@@ -117,14 +123,19 @@ func (self *testFrontConnectionTrace) Release() {
 	})
 }
 
-// Waits for count GOAWAYs.
+// Waits until count GOAWAYs were created.
 func (self *testFrontConnectionTrace) waitGoaways(t testing.TB, count int) {
 	t.Helper()
-	for range count {
+	deadline := time.After(testFrontProgressTimeout)
+	for {
+		goaways, changed := self.goaways.Get()
+		if count <= goaways {
+			return
+		}
 		select {
-		case <-self.goaways:
-		case <-time.After(testFrontProgressTimeout):
-			t.Fatal("a GOAWAY was never created")
+		case <-changed:
+		case <-deadline:
+			t.Fatalf("%d of %d GOAWAYs created", goaways, count)
 		}
 	}
 }
@@ -763,6 +774,12 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 			float64(peak-baseline)/float64(connectionCount),
 			goroutinesPerConnection,
 		)
+	}
+	// each accept loop's pass through its graceful branch creates a GOAWAY:
+	// the drain's one per connection, and none from a loop that met its
+	// destroyed transport while shutting down gracefully
+	if goaways := trace.goaways.Value(); goaways != connectionCount {
+		t.Fatalf("%d GOAWAYs for %d api connections, want one each: a graceful accept loop spun", goaways, connectionCount)
 	}
 	if !strings.Contains(strings.Join(env.front.recordedEvents(), ","), "front close") {
 		t.Fatal("the nginx front was not closed")

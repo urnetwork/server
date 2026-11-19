@@ -62,8 +62,13 @@ func drainConnect(
 	cancel()
 }
 
-// Starts the front's drain, steps 2 of drainConnect. A front that never
+// Starts the front's drain, step 2 of drainConnect. A front that never
 // started, or that already drains or closes, is left as it is.
+//
+// The drain's context outlives the serving context: the graceful h3
+// shutdowns it bounds must not end on their own while close tears the
+// sockets down, since only close knows to close each h3 server before its
+// transport. close releases it last.
 func (self *frontServer) beginDrain() {
 	quicRuns, drainCtx, ok := func() ([]*frontQuicRun, context.Context, bool) {
 		self.stateLock.Lock()
@@ -73,10 +78,11 @@ func (self *frontServer) beginDrain() {
 		}
 		self.draining = true
 		drainTimeout := self.settings.Front.Http.DrainTimeout
+		drainParentCtx := context.WithoutCancel(self.ctx)
 		if 0 < drainTimeout {
-			self.drainCtx, self.drainCancel = context.WithTimeout(self.ctx, drainTimeout)
+			self.drainCtx, self.drainCancel = context.WithTimeout(drainParentCtx, drainTimeout)
 		} else {
-			self.drainCtx, self.drainCancel = context.WithCancel(self.ctx)
+			self.drainCtx, self.drainCancel = context.WithCancel(drainParentCtx)
 		}
 		close(self.drainStarted)
 		quicRuns := []*frontQuicRun{}
@@ -168,9 +174,6 @@ func (self *frontServer) close() {
 		// every serve loop ends: QUIC accepts return, and the tcp servers
 		// close their listeners and the connections they still own
 		self.cancel()
-		if drainCancel != nil {
-			drainCancel()
-		}
 		for _, httpServer := range self.httpServers {
 			httpServer.Close()
 		}
@@ -197,6 +200,10 @@ func (self *frontServer) close() {
 			case <-time.After(forcedCloseTimeout - time.Since(closeTime)):
 				glog.Infof("[front]the %s did not close within %s\n", step.name, forcedCloseTimeout)
 			}
+		}
+		// the drain's shutdowns are all past their transports' close
+		if drainCancel != nil {
+			drainCancel()
 		}
 	})
 }
