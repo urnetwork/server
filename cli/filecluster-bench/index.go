@@ -22,8 +22,9 @@ package main
 // What drives the load is an IndexLoad, SEARCH-M10-40's index writers' load driver, which runs the row's writers and
 // evs's engines in this process over the store it is handed and finishes every fold, evacuation and purge a leg's
 // pushes cause before it returns, so the leg's writes are all in it. Its method takes and returns only std and
-// sidecar types, so the driver, in the sidecar module, needs nothing of this package. None is built yet: the mode
-// refuses to start until one is named in indexLoads.
+// sidecar types, so the driver, in the sidecar module, needs nothing of this package. The driver links only in a build
+// with -tags sidecar_testhooks, through the root's index writer seam, and registers itself there as the load
+// search-notes (index_load_search.go); a build without the tag has no load, and the mode refuses to start.
 //
 // A leg shorter than §22.8's hour, a leg whose load did not drain, a smoke, or a run that names no build is never
 // D-TEST-13's evidence, and the file says so.
@@ -34,6 +35,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -134,9 +136,16 @@ type IndexLoad interface {
 	Close()
 }
 
-// The loads the mode can run, by -load's name: none until SEARCH-M10-40's index writers' load driver lands.
+// The loads a build registers, by -load's name, each from a file of its own: SEARCH-M10-40's driver as search-notes in a
+// build with -tags sidecar_testhooks (index_load_search.go). Written only by those files' init.
+var indexLoadRegistry = map[string]func(ctx context.Context) (IndexLoad, error){}
+
+// SEARCH-M10-40's driver's name, which index_load_search.go registers.
+const indexLoadSearchNotes = "search-notes"
+
+// The loads the mode can run, by -load's name.
 func indexLoads() map[string]func(ctx context.Context) (IndexLoad, error) {
-	return map[string]func(ctx context.Context) (IndexLoad, error){}
+	return maps.Clone(indexLoadRegistry)
 }
 
 // One counted write kind at one size class.
@@ -423,7 +432,7 @@ func runIndexMode(ctx context.Context, args []string, stdout io.Writer) (bool, e
 	}
 	newLoad, ok := indexLoads()[*loadName]
 	if !ok {
-		return false, refuseStart("no index load %q: the index writers' load driver (SEARCH-M10-40) has not landed, so the index row cannot run", *loadName)
+		return false, refuseStart("no index load %q: the index writers' load driver (SEARCH-M10-40) is %q, linked only in a build with -tags sidecar_testhooks, so the index row cannot run on this one", *loadName, indexLoadSearchNotes)
 	}
 	if *legNames != "" {
 		wanted := strings.Split(*legNames, ",")
