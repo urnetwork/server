@@ -519,7 +519,8 @@ As of 2026-11-19, `lbalt/integrate` at server a297487df and warp bdacae4. LBALT.
 - [x] network-namespace harness (warp `warpctl/lbalt_netns*_test.go`, 8 edge tests against real iptables, ip6tables, conntrack and ss): PASS on `lbalt/final-warp` in 93 s and on bdacae4 in 100 s, the first switch's wait included; the rollback keeps every block chain, and the harness's copy of the §2.3 table is checked against the workers'
 - [x] §4 consolidated, this checklist updated, and LBALT.md §11 written
 - [x] the owner's confirmation, 2026-11-19, of the final review's departures (LBALT.md §11.3 (a) to (h), recorded as amendments in its §6) and of the §4 line on the write bound's timing. The KeyUpdate-during-upload gap stays open, h3 keeps its 408, and the monitor's tls-expiry signal is the expiry alert (LBALT.md §11.6)
-- [ ] follow-ups started 2026-11-19 (owner), each on its own branch: the warp test-data scrub, the exchange drain bound, the pre-existing warpctl fixes, and D22 (b) (LBALT.md §11.6)
+- [x] the exchange drain bound (server 0b75c1afa) and the five pre-existing warpctl fixes (warp d8a87f0), 2026-11-19 (LBALT.md §11.6)
+- [ ] the warp test-data scrub and D22 (b), on their own branches (owner, 2026-11-19)
 - [ ] the code review (LBALT.md §11.7)
 - [ ] merge: origin/main is merged into `lbalt/integrate` (server 30b6935b7, 2026-11-19, no conflicts; its builds, vets and the affected non-DB suites pass). `lbalt/integrate` goes to main in both repos once the work in progress on the branch is committed and the whole tree is tested
 - [ ] the owner's config:

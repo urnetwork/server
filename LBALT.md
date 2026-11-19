@@ -1383,10 +1383,15 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The per-block probe reaches each block's status through whichever block the monitor's source hashes to, so a block's own port-80 answer is seen only when that bucket maps to it; its 5 s attempt is looser than Route53's 4 s connect and 2 s response.
 - Older than lb_alt: a disabled enrollment counts as a complete run, so open incidents clear after two runs with it off.
 
-**Pre-existing issues**, each being fixed on its own branch (owner, 2026-11-19).
-- Production-like warp test data outside the lb_alt files: `warpctl/dns_test.go`'s `dnsFixtureWithDns` holds the production lb_hidden_prefixes value (on origin/main since 4c47dc4), `warpctl/testdata/services-vyos.yml`'s interface ids reach tests, goldens and VYOS.md, and `services/services_test.go`, `warpctl/run.go` and its tests hold production-looking names and addresses.
-- `config.go:portBlocksOf` panics on a port that is http in one version and stream in another, which load accepts (only the lb_alt service's 443 is guarded); the allocator can give a candidate ports a dead committed generation's nginx pool chain still targets; and a redirect failure after `cutover.commit()` on a block that binds no lb interface leaves the committed one unowned.
-- The startup orphan drain reads `routingTable.ipv6` on a goroutine while Run's routing reconcile can set it, and `run.go`'s `parseRoutingTable` panics on an lb interface with more than one global IPv6 address.
+**Pre-existing issues** (owner, 2026-11-19: fix them all).
+- Production-like warp test data outside the lb_alt files: `warpctl/dns_test.go`'s `dnsFixtureWithDns` holds the production lb_hidden_prefixes value (on origin/main since 4c47dc4), `warpctl/testdata/services-vyos.yml`'s interface ids reach tests, goldens and VYOS.md, and `services/services_test.go`, `warpctl/run.go` and its tests hold production-looking names and addresses. Being scrubbed on warp `fix/warp-test-data-scrub-1119`.
+- Fixed in warp d8a87f0 (`fix/warpctl-preexisting-1119`, 2026-11-19), each with a test that failed first:
+  - load refuses a port whose lb type would change between versions (`../warp/services/load.go:validatePortBlockLbTypes`), which `config.go:portBlocksOf` panicked on;
+  - the allocator skips ports the block's own chain still targets (`run.go:RunWorker.poolChainTargetPorts`), so a candidate never takes public traffic through a dead committed generation's rules before its readiness poll;
+  - a candidate whose redirect is refused after `cutover.commit()`, on a block that binds no lb interface, is stopped rather than left unowned;
+  - the routing table's late IPv6 address is read and set under a lock, ending the orphan drain's race with Run's routing reconcile;
+  - an lb interface with several global IPv6 addresses starts without IPv6, where `parseRoutingTable` panicked, and adopts the address once one remains.
+- Left by those fixes: a port that moves from tcp http to udp stream keeps its http lb type, and nginx still renders an http upstream for it (no panic); in a two-port pool whose committed generation died while its predecessor drains, a deploy waits for that drain; the REDIRECT chains of `--host_networking=no` blocks aren't read; and `parseDockerNetwork` still panics on a docker network with several global IPv6 addresses, where lb_alt's bridge parse takes the lowest.
 
 **Smaller items.**
 - The original nginx benchmark used a plaintext H1 hop. The `nginx_perf` baseline now terminates verified TLS for both WebSocket and H1+.
