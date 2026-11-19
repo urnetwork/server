@@ -159,6 +159,15 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 		return keyValues
 	}
 	reframed := forwardedAttempt{sequence: 0, method: http.MethodPost, uri: "/upload", body: "hello", framing: "length 5"}
+	streamedTarget := parityLbPrefix + "/by/service/mcp/stream"
+	streamedChunked := parityWithBody(parityGet(parityLbName, parityLbName, streamedTarget), http.MethodPost, []byte("hello"), true)
+	streamedDeclared := parityWithBody(parityGet(parityLbName, parityLbName, streamedTarget), http.MethodPost, []byte("hello"), false)
+	// nginx's first pass sends a body it read whole by its length
+	streamedBuffered := append(
+		forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: streamedTarget, body: "hello", framing: "length 5"}),
+		[2]string{"upstream[0].header.Content-Length", "5"},
+	)
+	streamedOnward := forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: streamedTarget, body: "hello", framing: "chunked"})
 	followed := forwardedAttempt{sequence: 1, method: http.MethodGet, uri: "/two", body: "", framing: "length 0"}
 	cases := []struct {
 		name       string
@@ -672,6 +681,59 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			nginx:       [][2]string{{"response[0].status", "400"}},
 			front:       forwarded(reframed),
 			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "a streamed chunked body the front sends on chunked, which nginx read whole",
+			parityCase: &parityCase{name: "unit", tags: []string{"streamed-chunked-whole"}},
+			requests:   []*parityRequest{streamedChunked},
+			nginx:      streamedBuffered,
+			front:      streamedOnward,
+			difference: parityDifference{key: "upstream[0].framing", nginx: "length 5", front: "chunked"},
+			wantId:     "streamed-chunked-whole",
+		},
+		{
+			name:       "the Content-Length nginx sends for it",
+			parityCase: &parityCase{name: "unit", tags: []string{"streamed-chunked-whole"}},
+			requests:   []*parityRequest{streamedChunked},
+			nginx:      streamedBuffered,
+			front:      streamedOnward,
+			difference: parityDifference{key: "upstream[0].header.Content-Length", nginx: "5", front: parityAbsent},
+			wantId:     "streamed-chunked-whole",
+		},
+		{
+			name:        "a Content-Length the front sends of another length",
+			parityCase:  &parityCase{name: "unit", tags: []string{"streamed-chunked-whole"}},
+			requests:    []*parityRequest{streamedChunked},
+			nginx:       streamedBuffered,
+			front:       append(streamedOnward, [2]string{"upstream[0].header.Content-Length", "4"}),
+			difference:  parityDifference{key: "upstream[0].header.Content-Length", nginx: "5", front: "4"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a streamed chunked body the block got only part of",
+			parityCase:  &parityCase{name: "unit", tags: []string{"streamed-chunked-whole"}},
+			requests:    []*parityRequest{streamedChunked},
+			nginx:       streamedBuffered,
+			front:       forwarded(forwardedAttempt{sequence: 0, method: http.MethodPost, uri: streamedTarget, body: "hell", framing: "chunked"}),
+			difference:  parityDifference{key: "upstream[0].framing", nginx: "length 5", front: "chunked"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a declared streamed body the front sends chunked",
+			parityCase:  &parityCase{name: "unit", tags: []string{"streamed-chunked-whole"}},
+			requests:    []*parityRequest{streamedDeclared},
+			nginx:       streamedBuffered,
+			front:       streamedOnward,
+			difference:  parityDifference{key: "upstream[0].framing", nginx: "length 5", front: "chunked"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a chunked streamed body in a case not written for it",
+			requests:    []*parityRequest{streamedChunked},
+			nginx:       streamedBuffered,
+			front:       streamedOnward,
+			difference:  parityDifference{key: "upstream[0].framing", nginx: "length 5", front: "chunked"},
 			wantUnnamed: true,
 		},
 		{

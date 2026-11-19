@@ -551,6 +551,34 @@ var parityAcceptances = []*parityAcceptance{
 				strings.EqualFold(difference.nginx, difference.front)
 		},
 	},
+	{
+		id:     "streamed-chunked-whole",
+		source: "LBALT-IMPL §4: on a streamed route a chunked body streams chunked though it came whole with its head, where nginx's first pass buffers it and sends its length",
+		match: func(check *parityCheck, difference *parityDifference) bool {
+			index, field, ok := parityUpstreamKey(difference.key)
+			if !ok || !check.hasTag("streamed-chunked-whole") {
+				return false
+			}
+			// the block got the body the client sent on both sides, framed
+			// by its chunks on the front's and by its length on nginx's
+			prefix := "upstream[" + index + "]."
+			request := check.sequenceRequest(parityValue(check.front, prefix+"sequence"))
+			if request == nil || !request.chunked ||
+				parityValue(check.front, prefix+"body") != parityValueOfBytes(request.body) ||
+				parityValue(check.nginx, prefix+"body") != parityValueOfBytes(request.body) {
+				return false
+			}
+			length := strconv.Itoa(len(request.body))
+			switch field {
+			case "framing":
+				return difference.front == "chunked" && difference.nginx == "length "+length
+			case "header.Content-Length":
+				return difference.front == parityAbsent && difference.nginx == length
+			default:
+				return false
+			}
+		},
+	},
 }
 
 // The first acceptance that names a difference, or nil.

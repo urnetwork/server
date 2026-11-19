@@ -682,7 +682,7 @@ func parityCorpus() []*parityCase {
 		{name: "lb/by-block-without-slash", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/b/api/g1"), tags: []string{"slash-redirect"}},
 		{name: "lb/by-service-artifact-route", request: parityWithBody(parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/sn/attempt-artifact"), http.MethodPost, parityBody(300), false)},
 		{name: "lb/by-block-artifact-route", request: parityWithBody(parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/b/api/g1/sn/attempt-artifact"), http.MethodPost, parityBody(300), false), compareBlocks: true},
-		{name: "lb/by-service-mcp-streams", request: parityWithBody(parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/mcp/stream"), http.MethodPost, parityBody(300), true)},
+		{name: "lb/by-service-mcp-streams", request: parityWithBody(parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/mcp/stream"), http.MethodPost, parityBody(300), true), tags: []string{"streamed-chunked-whole"}},
 		{name: "route53/ipv4", request: parityPlainGet(parityLbName, parityLbPrefix+"/status"), tags: []string{"lb-status"}},
 		{name: "route53/ipv6", request: parityFrom(parityPlainGet(parityLbName, parityLbPrefix+"/status"), parityClientIpv6), tags: []string{"lb-status"}},
 		{name: "route53/head", request: parityWith(parityPlainGet(parityLbName, parityLbPrefix+"/status"), http.MethodHead), tags: []string{"lb-status"}},
