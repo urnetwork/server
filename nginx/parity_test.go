@@ -95,6 +95,10 @@ type parityHarnessSettings struct {
 	// how long a client that sent part of its head waits for the server,
 	// past nginx's client_header_timeout of 15 s
 	HeaderStall time.Duration
+	// a pause inside a head that then completes, under nginx's
+	// client_header_timeout of 15 s: the head stall bounds that timeout from
+	// above, and this from below
+	HeaderPause time.Duration
 	// the most body bytes a recording upstream keeps of one attempt
 	UpstreamMaxBodyBytes int64
 	// how long before the run a generated certificate becomes valid, so a
@@ -123,6 +127,7 @@ func defaultParityHarnessSettings() *parityHarnessSettings {
 		StallWithinOverride:    17 * time.Second,
 		StallPastOverride:      25 * time.Second,
 		HeaderStall:            20 * time.Second,
+		HeaderPause:            10 * time.Second,
 
 		UpstreamMaxBodyBytes: 32 * 1024 * 1024,
 		CertificateBackdate:  1 * time.Hour,

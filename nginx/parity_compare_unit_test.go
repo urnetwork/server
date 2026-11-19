@@ -5,15 +5,21 @@ package nginx_test
 // acceptance names the difference it was written for and refuses its near
 // misses, and a difference no entry names is left unaccepted, so the harness
 // fails on it. Its recording upstreams (parity_upstream_test.go): a scenario
-// meets each request's attempts as that request's own.
+// meets each request's attempts as that request's own. Its timeout cases
+// (parity_corpus_test.go): each straddles the timeout it is for.
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/urnetwork/server/nginx"
 )
 
 // An observation with the given keys and values, in order, and the blocks
@@ -772,6 +778,47 @@ func TestParityStatusesScenarioNumbersEachRequestsAttempts(t *testing.T) {
 		if attempt.status != want[i] {
 			t.Errorf("attempt %d recorded status %d, want %d", i, attempt.status, want[i])
 		}
+	}
+}
+
+// Each timeout case straddles the timeout it is for, at the values nginx's
+// config sets, as the front's defaults and the fixture's route file carry
+// them: what should pass waits under its timeout, and what should end the
+// exchange waits past it.
+func TestParityTimeoutCasesStraddleTheirTimeouts(t *testing.T) {
+	settings := defaultParityHarnessSettings()
+	frontSettings := nginx.DefaultFrontSettings()
+
+	clientHeaderTimeout := frontSettings.Http.ClientHeaderTimeout
+	if !(settings.HeaderPause < clientHeaderTimeout && clientHeaderTimeout < settings.HeaderStall) {
+		t.Errorf("the header pause (%s) and stall (%s) don't straddle client_header_timeout (%s)", settings.HeaderPause, settings.HeaderStall, clientHeaderTimeout)
+	}
+
+	clientBodyTimeout := frontSettings.Body.ClientBodyTimeout
+	if clientBodyTimeout <= settings.ProgressingUploadPause {
+		t.Errorf("the progressing upload's pause (%s) is not under client_body_timeout (%s)", settings.ProgressingUploadPause, clientBodyTimeout)
+	}
+	routeFile, err := os.ReadFile(filepath.Join(parityFixtureDir, parityRouteFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeTable, err := nginx.ParseRouteTable(routeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifactTimeout time.Duration
+	for _, service := range routeTable.Services {
+		for _, routeRequestBody := range service.RouteRequestBodies {
+			if service.Name == "api" && routeRequestBody.Path == "/sn/attempt-artifact" {
+				artifactTimeout = time.Duration(routeRequestBody.ClientBodyTimeoutSeconds) * time.Second
+			}
+		}
+	}
+	if artifactTimeout == 0 {
+		t.Fatal("the fixture's api has no /sn/attempt-artifact override")
+	}
+	if !(clientBodyTimeout < settings.StallWithinOverride && settings.StallWithinOverride < artifactTimeout && artifactTimeout < settings.StallPastOverride) {
+		t.Errorf("the stalls within (%s) and past (%s) the artifact override (%s) don't straddle it above client_body_timeout (%s)", settings.StallWithinOverride, settings.StallPastOverride, artifactTimeout, clientBodyTimeout)
 	}
 }
 

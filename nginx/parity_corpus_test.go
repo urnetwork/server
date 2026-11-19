@@ -17,10 +17,12 @@ package nginx_test
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -366,9 +368,12 @@ func paritySendPacedBody(request *parityRequest, pieceCount int, pause time.Dura
 	}
 }
 
-// Writes part of a request, then waits for the server: a response, a close,
-// or nothing until the wait ends.
-func paritySendStalled(partial string, wait time.Duration, request *parityRequest) func(run *parityCaseRun) {
+// Writes a head in two parts and watches the server for the pause between
+// them: a server that answers or closes in that time ends the case there,
+// as a fact records. Without a rest that is all the case does; with one, the
+// rest goes out and the response is recorded. "{case}" and "{sequence}" in
+// the parts are the case key and the request's sequence.
+func paritySendHeadInParts(request *parityRequest, partial string, pause time.Duration, rest string) func(run *parityCaseRun) {
 	return func(run *parityCaseRun) {
 		sequence := run.sequence()
 		conn, err := run.dial(request, sequence)
@@ -376,19 +381,31 @@ func paritySendStalled(partial string, wait time.Duration, request *parityReques
 			return
 		}
 		defer conn.close()
-		message := strings.ReplaceAll(partial, "{case}", run.caseKey)
-		if _, err := io.WriteString(conn.conn, message); err != nil {
+		replacer := strings.NewReplacer("{case}", run.caseKey, "{sequence}", strconv.Itoa(sequence))
+		if _, err := io.WriteString(conn.conn, replacer.Replace(partial)); err != nil {
 			run.fact("partial write", parityErrorClass(err))
 			return
 		}
-		conn.conn.SetReadDeadline(time.Now().Add(wait))
+		conn.conn.SetReadDeadline(time.Now().Add(pause))
 		line, err := conn.reader.ReadString('\n')
 		switch {
 		case err == nil:
 			run.fact("the server sent", strings.TrimSpace(line))
-		default:
+			return
+		case !errors.Is(err, os.ErrDeadlineExceeded):
 			run.fact("the server sent nothing, then", parityErrorClass(err))
+			return
 		}
+		run.fact("the server waited out the pause", "true")
+		if rest == "" {
+			return
+		}
+		if _, err := io.WriteString(conn.conn, replacer.Replace(rest)); err != nil {
+			run.fact("rest write", parityErrorClass(err))
+			return
+		}
+		response, err := conn.readH1Response(request.method)
+		run.recordResponse(sequence, response, err)
 	}
 }
 
@@ -623,6 +640,8 @@ func parityCorpus() []*parityCase {
 		}
 		return lines
 	}
+	// the first lines of a head, without its end
+	partialHead := "GET /hello HTTP/1.1\r\nHost: " + parityApiName + "\r\n" + parityCaseHeader + ": {case}\r\n" + paritySequenceHeader + ": {sequence}\r\n"
 	// a chunked body beside a Content-Length, which nginx refuses
 	contentLengthAndChunked := parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Content-Length", "5"}, [2]string{"Transfer-Encoding", "chunked"})
 	contentLengthAndChunkedKeptAlive := *contentLengthAndChunked
@@ -658,7 +677,12 @@ func parityCorpus() []*parityCase {
 		},
 		{
 			name:       "timeout/header-stall",
-			run:        paritySendStalled("GET /hello HTTP/1.1\r\nHost: "+parityApiName+"\r\nX-Parity-Case: {case}\r\n", settings.HeaderStall, parityGet(parityApiName, parityApiName, "/")),
+			run:        paritySendHeadInParts(parityGet(parityApiName, parityApiName, "/"), partialHead, settings.HeaderStall, ""),
+			concurrent: true,
+		},
+		{
+			name:       "timeout/header-pause-within-the-timeout",
+			run:        paritySendHeadInParts(parityGet(parityApiName, parityApiName, "/"), partialHead, settings.HeaderPause, "User-Agent: parity\r\nConnection: close\r\n\r\n"),
 			concurrent: true,
 		},
 		{
