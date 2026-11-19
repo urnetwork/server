@@ -177,7 +177,7 @@ func limitBucketCapacity(burst int) float64 {
 
 // Refills the bucket for the time since its last update. A clock that went
 // backwards adds nothing.
-func (self *limitBucket) fill(requestsPerSecond float64, burst int, now time.Time) {
+func (self *limitBucket) fillWithLock(requestsPerSecond float64, burst int, now time.Time) {
 	if requestsPerSecond <= 0 {
 		self.tokens = limitBucketCapacity(burst)
 		self.updateTime = now
@@ -191,11 +191,11 @@ func (self *limitBucket) fill(requestsPerSecond float64, burst int, now time.Tim
 
 // Takes one token, or false, leaving the bucket as it was, when it holds
 // less than one. A non-positive rate always admits.
-func (self *limitBucket) take(requestsPerSecond float64, burst int, now time.Time) bool {
+func (self *limitBucket) takeWithLock(requestsPerSecond float64, burst int, now time.Time) bool {
 	if requestsPerSecond <= 0 {
 		return true
 	}
-	self.fill(requestsPerSecond, burst, now)
+	self.fillWithLock(requestsPerSecond, burst, now)
 	if self.tokens < 1 {
 		return false
 	}
@@ -204,8 +204,8 @@ func (self *limitBucket) take(requestsPerSecond float64, burst int, now time.Tim
 }
 
 // Whether the bucket has refilled, so dropping it changes no decision.
-func (self *limitBucket) full(requestsPerSecond float64, burst int, now time.Time) bool {
-	self.fill(requestsPerSecond, burst, now)
+func (self *limitBucket) fullWithLock(requestsPerSecond float64, burst int, now time.Time) bool {
+	self.fillWithLock(requestsPerSecond, burst, now)
 	return limitBucketCapacity(burst) <= self.tokens
 }
 
@@ -233,17 +233,17 @@ type limitAddrState struct {
 }
 
 // Whether nothing is in flight.
-func (self *limitAddrState) idle() bool {
+func (self *limitAddrState) idleWithLock() bool {
 	return self.requestCount == 0 && self.quicConnectionCount == 0
 }
 
 // Whether every bucket has refilled.
-func (self *limitAddrState) full(now time.Time) bool {
-	if !self.sharedBucket.full(self.limitInterface.requestsPerSecond, self.limitInterface.burst, now) {
+func (self *limitAddrState) fullWithLock(now time.Time) bool {
+	if !self.sharedBucket.fullWithLock(self.limitInterface.requestsPerSecond, self.limitInterface.burst, now) {
 		return false
 	}
 	for routeZone, routeBucket := range self.routeBuckets {
-		if !routeBucket.full(routeZone.requestsPerSecond, routeZone.burst, now) {
+		if !routeBucket.fullWithLock(routeZone.requestsPerSecond, routeZone.burst, now) {
 			return false
 		}
 	}
@@ -308,7 +308,7 @@ func (self *frontLimits) sweep() {
 		if now.Sub(addrState.touchTime) < self.settings.StateIdleTimeout {
 			break
 		}
-		if addrState.full(now) {
+		if addrState.fullWithLock(now) {
 			self.removeWithLock(addrState)
 		}
 		element = previousElement
@@ -354,10 +354,10 @@ func (self *frontLimits) acquireRequest(limitInterface *limitInterface, addr net
 				}
 				addrState.routeBuckets[routeZone] = routeBucket
 			}
-			if !routeBucket.take(routeZone.requestsPerSecond, routeZone.burst, now) {
+			if !routeBucket.takeWithLock(routeZone.requestsPerSecond, routeZone.burst, now) {
 				return limitOutcomeRouteRefused
 			}
-		} else if !addrState.sharedBucket.take(limitInterface.requestsPerSecond, limitInterface.burst, now) {
+		} else if !addrState.sharedBucket.takeWithLock(limitInterface.requestsPerSecond, limitInterface.burst, now) {
 			return limitOutcomeRequestRefused
 		}
 
@@ -484,13 +484,13 @@ func (self *frontLimits) markBusyWithLock(addrState *limitAddrState) {
 // when its buckets have refilled.
 func (self *frontLimits) releaseWithLock(addrState *limitAddrState, now time.Time) {
 	addrState.touchTime = now
-	if !addrState.idle() {
+	if !addrState.idleWithLock() {
 		return
 	}
 	if addrState.idleElement == nil {
 		addrState.idleElement = self.idleAddrStates.PushFront(addrState)
 	}
-	if self.settings.StateIdleTimeout <= 0 && addrState.full(now) {
+	if self.settings.StateIdleTimeout <= 0 && addrState.fullWithLock(now) {
 		self.removeWithLock(addrState)
 	}
 }
