@@ -67,7 +67,7 @@ func syntheticFastSequenceBound(settings syntheticFastSettings, count int) time.
 // request owner, retaining SDK/provider/TCP/origin/transport objects across runs.
 func measureSyntheticFastSequence(parent context.Context, settings syntheticFastSettings, count int, fixtureLabel string,
 	execute func(context.Context, int) (syntheticFastReport, error), quiesce func(context.Context, int) error,
-	capture func() (syntheticFastCumulative, any)) (syntheticFastSequenceReport, error) {
+	capture func() (syntheticFastCumulative, any), beforeRun func() error) (syntheticFastSequenceReport, error) {
 	report := syntheticFastSequenceReport{Schema: "perfvar-synthetic-fast-sequence-v5", ExpectedRuns: count, FixtureLabel: fixtureLabel, Stop: "completed"}
 	if count != 1 && count != 5 {
 		return report, errors.New("synthetic sequence requires exactly five benchmarks or one diagnostic")
@@ -99,9 +99,17 @@ func measureSyntheticFastSequence(parent context.Context, settings syntheticFast
 			break
 		}
 		row := &report.Runs[index]
+		row.Before, row.BeforeDetails = capture()
+		if beforeRun != nil {
+			if err := beforeRun(); err != nil {
+				row.Error = err.Error()
+				report.Stop = "pre_measurement_policy_failure"
+				aggregate = errors.Join(aggregate, fmt.Errorf("run%d: %w", index+1, err))
+				break
+			}
+		}
 		row.NotRunReason = ""
 		row.State = "running"
-		row.Before, row.BeforeDetails = capture()
 		runCtx, stopRun := context.WithTimeout(ctx, settings.OverallTimeout)
 		workload, aggregateRunErr := execute(runCtx, index)
 		row.Workload = workload

@@ -164,14 +164,29 @@ const proLocalCacheMaxSize = 8192
 // Reads through the in-process cache, then redis, and loads from the db only on a
 // miss of both. Safe to call on a hot path -- that is what the local tier is for.
 func IsProNetwork(ctx context.Context, networkId server.Id) bool {
+	pro, _ := lookupProNetwork(ctx, networkId, false)
+	return pro
+}
+
+// A required read returns the authoritative entitlement or raises. Optional
+// accounting can still use a known value, but skips the next store if its
+// caller's budget has been spent. The second result distinguishes an unread
+// entitlement from a known free plan.
+func lookupProNetwork(ctx context.Context, networkId server.Id, optional bool) (bool, bool) {
 	if entitlement, ok := getProNetworkLocal(networkId); ok {
-		return entitlement.pro
+		return entitlement.pro, true
+	}
+	if optional && ctx.Err() != nil {
+		return false, false
 	}
 	if entitlement, ok := getProNetworkCached(ctx, networkId); ok {
 		setProNetworkLocal(networkId, entitlement)
-		return entitlement.pro
+		return entitlement.pro, true
 	}
-	return refreshProNetwork(ctx, networkId)
+	if optional && ctx.Err() != nil {
+		return false, false
+	}
+	return refreshProNetwork(ctx, networkId), true
 }
 
 // UpdateProNetwork recomputes a network's entitlement from the db and refreshes both

@@ -138,6 +138,7 @@ func healthyFinding(probeId, tier, class, target string) finding {
 // one layer of a composite probe is unreachable. Returning an error from the
 // whole probe would discard concrete findings already collected elsewhere.
 func cannotObserveFinding(target string, err error) finding {
+	err, archiveStage := splitBackupArchiveReadError(target, err)
 	errorClass := classifyObservationError(err)
 	return finding{
 		probeId: "monitor/visibility", tier: tierWarn,
@@ -145,7 +146,7 @@ func cannotObserveFinding(target string, err error) finding {
 		symptom:   "The monitor could not complete an observation for " + target + " (error_class=" + errorClass + ")",
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",
-		observed:  observationFailureDetails(err, errorClass),
+		observed:  observationFailureDetails(err, errorClass) + archiveStage,
 		action:    observationFailureAction(err, errorClass, "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident."),
 		verify:    "The same target returns a concrete healthy or broken observation on the next run.",
 		playbook:  "SIGNALS.md §1.7 and MONITOR.md §3.6",

@@ -891,6 +891,13 @@ six-of-22 historical replay had complete fleet authority.
   discoverable through `errors.Is`/`errors.As` when the owner ends. Unknown never
   emits a healthy collapse finding, so the notifier keeps an existing incident
   through telemetry loss.
+  A bounded gateway read that fails while the probe is active adds the shared
+  `error_class` and any typed `ssh_admission_failures` or
+  `execution_boundaries` to its visibility warning (§1.7). A joined native
+  wait identifies the local SSH child's completion. A remote HTTP result and
+  the fleet transport count each require their own evidence. The 02:25 UTC
+  warning on 2026-11-19 retained only `bounded_source_unavailable` and its
+  specific source failure remains unknown.
 - False-positive qualifiers: transport multiplicity can change without the
   same change in distinct provider availability. Receiver-held samples can lag
   cessation by up to three minutes; concurrent live carriers are real transport
@@ -3019,7 +3026,7 @@ that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
-error class or direct Redis caller described below. Raw errors, stack arguments,
+error class, Redis caller and operation, or Redis adapter described below. Raw errors, stack arguments,
 source paths and line numbers, endpoints and identities stay private. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
@@ -3035,6 +3042,30 @@ exact standard-library sentinel representation. Error text alone cannot
 identify that type. Neither field establishes the selected pool, remaining
 budget, downstream latency or request outcome. Each applies only to the
 first diagnostic in its own bucket.
+The optional `redis_operation` field records where that diagnostic arose.
+`device_config_read` requires the direct device configuration reader.
+`feature_use_plan_lookup` requires the continuous source frames from the
+entitlement read or cache write through `lookupProNetwork` (or
+`IsProNetwork` on earlier workers) to the concrete feature-use planner. `feature_use_flush_plan` additionally requires the
+planner's direct call from `countMarks`, its recovery boundary and the
+enclosing `flush`. In this source, `flush` reaches that call after the mark
+store acknowledges the write. A shorter stack can retain the direct caller
+or planner alone. The request decision, metric label and completed flush count
+require their own evidence.
+For a `TakeClientCloseRequests` owner, the optional `redis_adapter` is
+`Redis` or `RedisDoOnce`. The named adapter in `redis.go` must be followed
+immediately by the named taker in `client_close_model.go` from the same
+ordinary or versioned Server module. If the selected frame is the taker's
+SPOP callback, its contiguous `redisWithClient.func1`, `redisWithClient` and
+matching adapter `.func1` frames must lead to that same pair. A missing
+source pair, another selected owner, an unfamiliar bridge, or competing
+adapter or taker frames leaves the field absent. The field identifies the
+adapter in that bucket's first exemplar. Command dispatch, mutation, reply,
+effective retries, initiating failure and close completion each require
+independent evidence. At 08:44 UTC on 2026-11-19, the Connect aggregate and
+taker alerts each reported 467 lines/minute. Their retained samples leave
+the adapter, error type and SQLSTATE unknown.
+
 The optional `[legacy_registration_db]` annotation accompanies only a returned
 failed acquisition in close-owner registration. It leaves the original
 `Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner
@@ -5621,6 +5652,36 @@ Global permits still cover the entire `Signal.Run` call, including subordinate
 admission and cleanup, and end before the alert handler or cadence wait. The
 inclusive 40-second owner, native 22-second minimum and global-four/host-two
 caps are unchanged; a lawful wait over 18 seconds can still prevent sampling.
+
+The optional private `host_permit_holders` schema1 records the watcher-local
+command semaphore for the exact address selected by the sampler (§2.1a).
+`at_request` captures other occupied permits just before the existing channel
+select. `at_return` captures them after that select and excludes the sampler's
+own grant. Each holds at most two code-owned catalog keys and distinct,
+address-local grant ordinals. A caller with no recognized scheduled key is
+`unknown`. The receipt keeps the count and last two exact releases between
+these observations, in release order. Each release belongs to the original
+command's once-only release closure. Commands sharing a key retain separate
+ordinals. No address, host name, argv, SQL, credential or external queue token
+enters the projection.
+
+`unique_release` requires a complete, initially full census, a sampler grant
+and exactly one release of an initially occupied permit. `multiple_releases`
+keeps individual release evidence and leaves the enabling release ambiguous.
+`no_release_required` records an initially available slot and no intervening
+release. `not_full_at_request` leaves a release from a partially occupied start
+unattributed. `not_granted` accompanies a canceled or expired acquisition.
+If a command acquired the channel before publishing its holder record, that
+snapshot reports `unavailable` and withholds the holder list. Unsupported
+capacity or exhausted counters withhold the affected evidence. Missing or
+legacy blocks leave ownership unknown. The original receipt and private SQL
+representatives take precedence at the combined 256 KiB storage limit.
+
+These snapshots include local descheduling and the command's full permit
+lifetime, including shared admission and cleanup. They establish neither a
+blocked syscall nor remote execution, database health, avoidable contention or
+the holder of an earlier uninstrumented turn. The existing host timing span,
+shared queue and native lifecycle each retain their own authority.
 
 New PG receipts optionally include fixed-schema `local_phase_timing` offsets
 in nanoseconds from the original monotonic run-slot request, or explicitly
@@ -13128,6 +13189,26 @@ partitions remain absent, never zero; partial healthy data and source failures
 cannot clear a prior invariant PAGE. The retained selection observation remains
 incomplete with no invented outcome rows. Require exact query/source authority
 and independent producer/policy evidence to distinguish these boundaries.
+
+At 01:27 UTC on 2026-11-19 the monitor reported
+`reason=invalid-source-response` and zero paired processes across 20 expected
+slots. That monitor retained only the whole-response verdict. A separate
+picker query in the same drain cannot identify which selection check failed.
+
+When the parser rejects a response, the warning and selection JSONL include
+`source_rejection`, the first parser check that failed. The possible checks
+are `byte-limit`, `json-decode`, `response-status`, `result-type`,
+`response-annotations` (warnings or infos), `row-limit`, `sample-decode`,
+`evaluation-time`, `sample-value`, `process-scope`, `process-identity`,
+`cohort-labels`, `outcome-reason`, `series-field` and `duplicate-cell`. The
+HTTP reader enforces the byte limit before parsing and reports
+`mimir_query_phase=response-bound` for an oversized body.
+
+One invalid row discards the entire response, including valid rows from other
+processes. Zero paired processes then describes the monitor's evidence. A
+healthy quiet window has complete coverage and no rejection field. Additional
+defects can be hidden behind the first failed check. Use the two complete
+post-convergence windows and independent route outcome below to verify recovery.
 
 `-provider-selection-output <path>` appends one JSONL observation for every
 existing probe execution, including qualified nonempty/quiet windows and
@@ -36226,6 +36307,20 @@ bounded reason and count rather than emitted. The query and direct
 discriminator carry no credentials, repository names, checksums, private key
 paths, or backup contents.
 
+When a read produces the WARN/Sustain2 `monitor/visibility` alert for
+`cannot-observe` on `observability/backup-archives`, its observed values carry
+`backup_archive_stage=mimir-query` when the gateway query returns an error or
+`backup_archive_stage=writer-read` when the direct writer read returns an error.
+The stage names the local operation. The writer read follows a decoded
+successful vector that can still carry warnings.
+Admission and native execution markers describe any execution boundaries the
+returned error proves. Earlier timeouts with only `native-wait/started-joined`
+leave the read unidentified. Remote authentication, command execution, writer
+health and archive freshness require independent evidence. A successful
+fallback discards earlier gateway failures. Parent-only cancellations,
+inventory errors and response parser rejections retain their own diagnostics.
+Command output and source error text stay out of these diagnostic fields.
+
 A successful vector carrying any nonempty `warnings` list is incomplete for
 this probe, including a list containing only an empty string. Warning text is
 not an archive or media verdict and never enters public output. The probe emits
@@ -42329,13 +42424,16 @@ or service-port authority.
 Enrollment is explicit in `public_udp`: `enabled`, an independent
 `expected_targets` logical-row count, and `targets`. Each target names a stable
 nonsecret `name`, an existing enabled `host`, `interface`, `service`
-(`connect` or `alt`), `alias`, `front` (`connect` or Alt `api`), `carrier`
-(`quic`, `dns`, `dns-pump`), `families` (`ipv4`, `ipv6`), the exact configured
+(`connect` or `alt`), `alias`, `front` (`connect` or `api`, under either
+service: Alt serves both, and so does connect's lb_alt front, LBALT.md D3),
+`carrier` (`quic`, `dns`, `dns-pump`), `families` (`ipv4`, `ipv6`), the exact configured
 `ipv4_address` / `ipv6_address`, public `port`, TLS `server_name`, and an
 explicit canonical trailing-dot `dns_tld` only for the DNS carriers. No DNS
 resolver chooses a convenient address. Missing family pins, duplicate logical
-paths, an incomplete denominator, ambiguous/missing enabled host ownership or
-invalid protocol authority reject the entire matrix before transport. Disabled
+paths (one host, interface, service, alias, front, carrier, port and family,
+so whodis's one alias on 53 and on 4053 is two paths), an incomplete
+denominator, ambiguous/missing enabled host ownership or invalid protocol
+authority reject the entire matrix before transport. Disabled
 enrollment is unarmed, not a healthy or recovery result. The explicit matrix
 does not discover unlisted dynamic fleet paths; its owner must reconcile it
 with current desired service/alias intent before arming.
@@ -42343,27 +42441,57 @@ with current desired service/alias intent before arming.
 Every declared family row gets a fresh bounded socket and private attempt
 correlation token. The native adapter performs QUIC `Dial`, not early-data
 admission. It uses the exact pinned numeric destination, correct SNI and normal
-certificate verification; only Alt's API front offers `h3`. Connect H3 is
-custom QUIC, not HTTP/3. DNS modes use the existing native packet-translation
-codec, not a generic UDP DNS query. A raw packet boundary below translation
-filters the complete source address and port before QUIC sees a datagram.
-Unexpected tuples are discarded and counted, never accepted as authenticated
-return evidence or treated alone as proof of an SNAT root cause.
+certificate verification. An `api` front offers `h3`, Alt's and connect's
+lb_alt front alike; Connect H3 is custom QUIC, not HTTP/3. DNS modes use the
+existing native packet-translation codec, not a generic UDP DNS query. A raw
+packet boundary below translation filters the complete source address and port
+before QUIC sees a datagram. Unexpected tuples are discarded and counted, never
+accepted as authenticated return evidence or treated alone as proof of an SNAT
+root cause.
+
+A row with service `connect` and front `api` then sends one `GET /hello` over
+HTTP/3 on the same connection, within the same attempt bound (LBALT.md D17).
+Connect's front forwards api requests to the api blocks, so its handshake
+proves nothing about the api behind it. Alt's `api` front embeds the api, and
+it and every `connect` front keep ending at the handshake. `/hello` needs no
+authentication and no database. Only a 200 whose every Content-Type is
+`application/json`, with a body that is one JSON object whose `client_address`
+is an address and port of the probed family, completes the request. The h3
+client lets the server open its control stream and both QPACK streams (RFC
+9114 §6.2, RFC 9204 §4.2), which the handshake-only rows never allow. The
+answer's header and body are bounded; the body, and the observer address it
+echoes, are never retained, only the HTTP status and fixed booleans.
 
 Healthy requires matching attempt and requested tuple, a fresh socket,
 completed authenticated handshake, expected negotiated protocol and positive
-bounded raw sent/received evidence from that exact peer. This proves only the
-transport return path. It does not prove provider authentication, API request
-success, application egress, client election or the serving DNAT generation;
-those layers remain separate §14.5 checks. No HTTP request, provider request,
-DNS lookup, SSH/router observation or credential enrollment is performed.
-Alt direct external UDP ports are evaluated as explicitly enrolled Alt paths,
-not misclassified as leaked Connect-private ports.
+bounded raw sent/received evidence from that exact peer, and for a connect
+`api` row also its completed `/hello`. A handshake-only row proves only the
+transport return path. A connect `api` row also proves one unauthenticated
+`/hello` answered through the front by an api block. Neither proves provider
+authentication, authenticated API success, application egress, client election
+or the serving DNAT generation; those layers remain separate §14.5 checks.
+Apart from that one `/hello`, no HTTP request is made, and no provider request,
+DNS lookup, SSH/router observation or credential enrollment either. Alt direct
+external UDP ports are evaluated as explicitly enrolled Alt paths, not
+misclassified as leaked Connect-private ports.
 
-The cadence is five minutes. At most 32 logical rows expand into 64 family
-attempts, with four workers, five seconds per attempt, and hard raw bounds of
-2048 datagrams and 1 MiB in each direction. Unexpected inbound traffic shares
-the receive budget. DNS state/queues retain their native bounded codec limits.
+The bounds are `PublicUdpProbeSettings` (`DefaultPublicUdpProbeSettings`): a
+five-minute cadence; at most 64 logical rows, which expand into 128 family
+attempts, enough for the lb_alt matrix, every carrier of both fronts on each
+of the ten lb interfaces, quic on 443 and dns on 53 and 4053, which is 60
+rows; four workers; five seconds per attempt, which the transport applies
+whatever its caller's deadline, which the monitor's command timeout, 60 s by
+default, also caps on a native attempt, and which is also the QUIC handshake
+and idle timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and
+1 MiB in each direction; QUIC receive windows of 16 KiB per stream and 32 KiB
+per connection, which never grow; and 16 KiB each for a `/hello` answer's
+header and body. A pass hands one instance to the matrix, the transport and the
+findings, so a tuned budget bounds the wire and the validation of the counts
+the transport reports alike. Settings without a positive attempt timeout and
+positive wire budgets refuse the whole matrix (`probe-settings`) before any
+socket opens. A non-positive receive window takes quic-go's default, which the
+byte budget still bounds. Unexpected inbound traffic shares the receive
+budget. DNS state/queues retain their native bounded codec limits.
 Socket closure precedes transport teardown; translation closure joins its
 workers. No second probe attempt, resolver fallback or alternate endpoint is
 attempted. The over-limit datagram needed to detect a receive-budget breach
@@ -42374,12 +42502,46 @@ packet evidence.
 | --- | --- | --- |
 | `public-udp-inventory` | Declared matrix invalid or incomplete; no path contacted | WARN, 1; never automatic PAGE |
 | `public-udp-path` | A fresh correlated bounded attempt sent bytes but did not complete its authenticated QUIC handshake | WARN, 2 consecutive evaluations; no time-only PAGE |
-| `public-udp-observation` | Source capability, observer family route/socket, TLS authority, packet budget, correlation or complete authenticated evidence is missing/invalid | WARN, 1; never automatic PAGE |
+| `public-udp-application` | A connect `api` row completed its fresh, exact, authenticated handshake, but its `/hello` returned no valid api answer: a status other than 200, a Content-Type other than JSON, a body outside the api's shape or past its bound, or no answer within the attempt | WARN, 2 consecutive evaluations; no time-only PAGE |
+| `public-udp-observation` | Source capability, observer family route/socket, TLS authority, packet budget, correlation, application evidence (any from a handshake-only row, or a connect `api` row's without a completed request or verified handshake) or complete authenticated evidence is missing/invalid | WARN, 1; never automatic PAGE |
+
+Reasons are fixed domains. `public-udp-inventory` reports
+`inventory_complete=false reason=` one of `probe-settings`,
+`target-denominator`, `target-identity`, `path-identity`, `protocol-authority`,
+`codec-authority`, `family-denominator`, `family-address`, `duplicate-path` or
+`unprobed-family`. `public-udp-path` reports the `handshake-timeout` or
+`handshake-failed` result with bounded packet counts. `public-udp-application`
+reports `result=application-failed` with `application_status` (0 when no answer
+arrived), `application_json`, `application_body_valid` and bounded packet
+counts. `public-udp-observation` reports `verified=false reason=` one of
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observer-route-unavailable`,
+`socket-unavailable`, `tls-authentication-unverified`, `wire-budget-exhausted`,
+`configuration-invalid`, `handshake-outcome-unverified`,
+`application-outcome-unverified` or `authenticated-exact-return-unverified`.
+
+On `public-udp-application` the authenticated QUIC path from the exact tuple
+works, so look behind it: whether connect's front on that interface routes the
+api name over h3, whether its api upstream blocks are ready, then the api's own
+errors. Status 0 means no answer arrived within the attempt bound; 502, 503 or
+504 point at the front's forward to the api; any other status at the api. It
+is not a UDP, NAT or certificate fault.
 
 Configured sustain is not two-sample evidence by itself. Each family and
 protocol owns a distinct target, so healthy IPv4 cannot resolve failed IPv6.
 Only a fresh fully verified result supplies transport recovery; missing
-evidence and non-emission do not. Overall monitor cancellation joins workers
+evidence and non-emission do not. A connect `api` row with a failed `/hello`
+reports `public-udp-application`; its handshake was verified, so the row's
+`public-udp-path` and `public-udp-observation` resolve. A failed handshake
+sends no `/hello`, so beside `public-udp-path` it publishes an exact-class
+clear hold for the row's `public-udp-application`: the Slack notifier clears an
+incident after two complete runs without it, and a run that never reached the
+api cannot count toward clearing an open application incident. The hold raises
+nothing and creates no incident; among the row's attempts, only a completed
+`/hello` counts toward clearing `public-udp-application`. Overall monitor
+cancellation joins workers
 and publishes no partial findings. A per-attempt expired source cannot return
 late positive evidence as healthy. Alternate `SignalSettings.Source` must
 implement `PublicUdpSignalSource` explicitly and honor cancellation; absence
@@ -42395,7 +42557,13 @@ raw endpoints, TLS names, codec suffixes, packets, tokens and errors.
 Deterministic acceptance controls cover complete and partial enrollment,
 source absence, source/deadline cancellation, wrong attempts/tuples, protocol
 and TLS authority, per-family recovery isolation, exclusion/shared endpoint
-guards, privacy and bounded packet correlation. Native QUIC/TLS and all DNS
+guards, privacy and bounded packet correlation. The connect `api` controls run
+`/hello` over HTTP/3 on every carrier in both families against a recording
+synthetic api, and cover answers outside the api's shape, the header and body
+bounds, cancellation during the request, a failed `/hello` as its own finding,
+and health only with a completed request. The settings controls show one
+instance bounding the matrix, the worker pool, each attempt's deadline, the
+wire budgets and the validation of reported counts. Native QUIC/TLS and all DNS
 codec controls use a synthetic in-memory packet network and generated test
 certificates, not production probes. Runtime enrollment or deployment still
 requires the normal separately authorized settings and watcher workflow.
@@ -42455,10 +42623,157 @@ status/outcome/count aggregates and evidence hashes in alerts, never JWTs,
 provider identities or response bodies.
 
 This extension remains a detector/coverage requirement. The existing
-`public-udp` implementation still measures authenticated transport only;
-source documentation and local controls do not implement or activate these
-Alt application/generation checks, supply production enrollment, or close the
-user's incident.
+`public-udp` implementation still measures authenticated transport only on
+Alt's rows; its `/hello` covers connect's lb_alt api front, which forwards to
+the ordinary api blocks, not Alt's embedded api. Source documentation and local
+controls do not implement or activate these Alt application/generation checks,
+supply production enrollment, or close the user's incident.
+
+### 16.10 Status routes of lb interfaces and their blocks — LBALT
+
+Probe: `lbalt-status`
+
+`signal_lbalt_status.go` plus `lbalt_status.go` and `lbalt_status_transport.go`
+implement the monitor's part of LBALT.md D17 and §9. Route53 health-checks
+every lb interface address, IPv4 and IPv6, with a plain `GET` of the lb status
+route on TCP 80 and the `<env>-lb.<domain>` Host, and counts any 2xx or 3xx
+healthy without reading the body. That answer decides the interface's DNS
+membership. On an lb_alt interface connect's front answers it
+(LBALT-IMPL.md §2.6), so an accidental redirect to https, or a status other
+than ok, would keep a broken interface in DNS. This probe requires what
+Route53 cannot: a 200, never a redirect followed, with JSON whose status is
+`ok`. One probe source hashes into one HMARK bucket and only ever reaches one
+block of an interface, so every interface is also probed per block.
+
+Enrollment is explicit and off by default, in monitor.yml `lbalt_status`:
+`enabled`, an independent `expected_targets` count, `targets` (each a stable
+nonsecret `name`, an enabled inventory `host`, an `interface` and its
+`families`), `block_service` and an independent `expected_blocks` count.
+Everything else comes from its source of truth: each address from the host's
+services.yml lb inventory (the active version's non-transparent interfaces,
+where lb_alt interfaces stay), the lb name from the environment and the
+primary domain, the route prefix from the first services.yml
+`lb_hidden_prefixes` entry (Route53's path, warpctl `dnsStatusPath`), and the
+blocks from the active blocks of `block_service`, which must number
+`expected_blocks`. An absent block is unarmed, never healthy. A present block
+that fails its strict decode, such as an unknown key or a wrong type, is
+invalid rather than off, so a typo cannot disarm the probe. One enrollment
+serves an interface on nginx or on the front, so it keeps working through a
+rollback (D18). The enrollment and its route prefix form the `lbalt_status`
+settings-freshness category (§1.6).
+
+Each enrolled family expands into its lb route, the port-80 `<prefix>/status`
+with the lb name as Host, and one block route per block,
+`<prefix>/by/b/<service>/<block>/status` on 443 over TLS verified for the lb
+name as SNI and Host, which the lb forwards to that block's private
+`/status`. Port 443 carries that route only for an `lb_exposed` service, the
+default, so a `block_service` set `lb_exposed: false` answers 404 there
+(`http-status`). Every attempt is one fresh TCP connection to the pinned interface
+address in its family. The lb name is never resolved; no proxy, keepalive or
+compression is used; no redirect is followed; the response header and body
+are bounded.
+
+Healthy requires a matching attempt and pin, one fresh connection that was
+dialed, a response, TLS verification on 443, a 200, every Content-Type
+`application/json`, a body that is one JSON object, and `status` exactly `ok`.
+A block route also requires the body's `service` and `block` to name the
+requested block, and fails when the block's front says it is not ready
+(`X-UR-Front-Ready: 0`, LBALT-IMPL.md §2.4). An absent readiness header is no
+evidence, since only a configured connect front sends it. nginx's lb status has
+no `front` field and the front's says `lbalt`: both are healthy, and the
+finding records which answered (`lbalt_front`).
+
+The bounds are `LbAltStatusProbeSettings` (`DefaultLbAltStatusProbeSettings`):
+a five-minute cadence, five seconds per attempt, four workers, at most 32
+targets and 16 blocks, and 16 KiB each of response header and body. A native
+attempt is also capped by the monitor's command timeout, 60 s by default, so
+a raised attempt timeout reaches it only up to that. With five blocks, each
+dual-stack interface takes twelve attempts. Settings without a
+positive attempt timeout and body bound refuse the matrix before any
+connection.
+
+| Finding | Predicate and qualification | Sustain / paging |
+| --- | --- | --- |
+| `lbalt-status-inventory` | Declared matrix invalid or incomplete; no interface contacted | WARN, 1; never automatic PAGE |
+| `lbalt-status-path` | A fresh correlated bounded attempt to the pinned address answered outside its route's contract, or its exchange failed after the connection was attempted | WARN, 2 consecutive evaluations; no time-only PAGE |
+| `lbalt-status-observation` | Source capability, observer route, TLS authority, correlation or complete evidence is missing or invalid | WARN, 1; never automatic PAGE |
+
+Reasons are fixed domains. `lbalt-status-inventory` reports
+`inventory_complete=false reason=` one of:
+
+- `probe-settings`: no positive attempt timeout or body bound;
+- `target-denominator`: an invalid block, no targets, more than the bound, or a
+  declared count that differs from the targets;
+- `route-prefix`: no `lb_hidden_prefixes`, or a first entry that is not path
+  segments of unreserved characters;
+- `lb-authority`: no valid lb name from the environment and primary domain;
+- `block-denominator`: a block service whose active blocks differ from
+  `expected_blocks`, exceed the bound, or are not distinct DNS labels;
+- `target-identity`, `interface-inventory`, `family-denominator`,
+  `family-address`, `duplicate-path` and `unprobed-family`: a target's name or
+  host, its interface in the lb inventory, its families, their addresses, a
+  repeated interface family, or an inventory family left unenrolled.
+
+`lbalt-status-path` reports `verified=false route= reason= status_code= status=
+front_readiness= lbalt_front=`, where the status is reduced to `absent`, `ok`,
+`draining`, `error` or `other`, the readiness to `absent`, `ready`, `not-ready`
+or `invalid`, and the reason is one of:
+
+- `connect-failed`: refused, or a router's host unreachable, as for a down
+  interface;
+- `timeout`, `request-failed` and `response-budget-exhausted`: the exchange
+  after the connection was attempted;
+- `redirect`: any 3xx, which Route53 counts healthy;
+- `http-status`, `content-type`, `body-invalid` and `status-not-ok`: an answer
+  outside the contract;
+- `block-mismatch`, `front-not-ready` and `front-readiness-invalid`: a block
+  route answered by another block, or by a front that is not ready.
+
+`lbalt-status-observation` reports `verified=false reason=` one of
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observation-incomplete` (no response, an
+unverified 443 answer, a reused connection, or an attempt error or expiry),
+`observer-route-unavailable` (the monitor host has no route or address in the
+family), `tls-authentication-unverified` or `configuration-invalid`.
+
+On the lb route, check which front answers the interface (`lbalt_front`) and
+its lb status route: the lb name's status on port 80 must answer itself, not
+redirect. On a block route, read that block's private `/status`, its
+`X-UR-Front-Ready` and `X-UR-Front-Sockets` headers, and its deploy.
+`connect-failed` and `timeout` point at the interface's DNAT, its split chains
+and the block's public sockets before the client path.
+
+Each interface family, route and block owns its own target
+(`<host>/lbalt-status/<target>/<family>/<route>[/<service>/<block>]`), so a
+healthy answer on one cannot resolve a failure on another. Only a fresh fully
+verified answer resolves a target; missing evidence and non-emission do not.
+Overall monitor cancellation joins the attempts and publishes no partial
+findings, and an attempt's own expiry turns a late positive answer into
+`observation-incomplete`. An alternate `SignalSettings.Source` must implement
+`LbAltStatusSignalSource` explicitly; absence never permits a native network
+fallback.
+
+The shared host-scope guard runs before transport. An excluded host is never
+contacted, nor any address a paused owner shares. The interface addresses come
+from the services.yml lb inventory, which host scope registers as each host's
+owned endpoints, disabled hosts included. Alerts carry the host, the
+enrollment label, the family, route, service and block, fixed reasons and the
+HTTP status code. The route prefix exists only in the request path the
+transport sends; the lb name, pinned addresses, bodies, header values, attempt
+tokens and raw errors are never rendered, and transport errors are fixed text,
+since net/http's quote the URL.
+
+Deterministic acceptance controls use loopback HTTP and TLS servers with
+generated certificates for the routes, and synthetic sources for the pass:
+the matrix and every refusal reason, strict enrollment decoding, the expansion
+into lb and block routes, redirects never followed, the status JSON, the
+header and body bounds, block identity and front readiness, certificate
+verification, connection failures and their classification, cancellation, late
+answers, scope guards, the findings of each verdict, and privacy of the prefix
+and the observer address. Runtime enrollment still requires the normal
+separately authorized settings and watcher workflow.
 
 ## 17. Subtensor RPC gateway (snow)
 

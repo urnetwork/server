@@ -48,6 +48,10 @@ func (self *stExtenderOwnNetworks) allNetworkIds() map[server.Id]bool {
 // replace.
 var stExtenderCanaryNetworkIdsRead = model.GetExtenderCanaryNetworkIds
 
+// Reads which provider clients declared that their transports leave through a
+// proxy (E1): a seam the pure tests replace.
+var stExtenderProxiedClientIdsRead = model.GetVerifyProxiedEgress
+
 // Reads the operator's own networks. An absent extender.yml has no durable
 // fleet; an unreadable one is an error, as is an id in any list that does not
 // parse: the operator's own networks must not compete because a list could not
@@ -99,7 +103,8 @@ func readStExtenderOwnNetworks(ctx context.Context, cfg *StConfig) (*stExtenderO
 //   - the operator's own networks (readStExtenderOwnNetworks);
 //   - each provider client's coldkey, by the provider rows' wallet selection
 //     for its record's network;
-//   - and head bindings at either of the epoch's boundary blocks.
+//   - head bindings at either of the epoch's boundary blocks;
+//   - and the provider clients that declared a proxy egress (E1).
 //
 // The wallet resolutions are not retained here, so a census can never
 // disagree with the retention the provider rows make of the same clients'
@@ -117,6 +122,7 @@ func stExtenderEligibilityRules(ctx context.Context, cfg *StConfig, client StCli
 		CanaryNetworkIds:   ownNetworks.canaryNetworkIds,
 		ClientIdColdkeys:   map[server.Id][32]byte{},
 		HeadBoundClientIds: map[server.Id]bool{},
+		ProxiedClientIds:   map[server.Id]bool{},
 	}
 	if len(records) == 0 {
 		return rules, nil
@@ -129,6 +135,9 @@ func stExtenderEligibilityRules(ctx context.Context, cfg *StConfig, client StCli
 		}
 	}
 	clientIds := slices.SortedFunc(maps.Keys(clientIdNetworkIds), func(a, b server.Id) int { return a.Cmp(b) })
+	for clientId := range stExtenderProxiedClientIdsRead(ctx, clientIds) {
+		rules.ProxiedClientIds[clientId] = true
+	}
 	usages := make([]*model.StProviderUsage, len(clientIds))
 	clientId16s := make([][16]byte, len(clientIds))
 	for i, clientId := range clientIds {

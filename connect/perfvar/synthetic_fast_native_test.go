@@ -255,12 +255,24 @@ func syntheticFastNativeIterationJoinError(report syntheticFastNativeIterationRe
 	if report.ProviderTarget != 128*1024*1024 || report.ProviderCount != expectedProviders || len(report.ProviderAfterJoin) != expectedProviders {
 		return errors.New("synthetic Fast iteration lost an original provider after join")
 	}
-	for _, joined := range report.WorkerFinalJoined {
+	if len(report.Sequence.Runs) != len(report.WorkerFinalJoined) {
+		return errors.New("synthetic Fast iteration is missing its original workload states")
+	}
+	workloadStarted := false
+	for index, joined := range report.WorkerFinalJoined {
+		if report.Sequence.Runs[index].State == "NOTRUN" {
+			if joined {
+				return errors.New("synthetic Fast unstarted workload claimed a worker join")
+			}
+			continue
+		}
+		workloadStarted = true
 		if !joined {
 			return errors.New("synthetic Fast iteration workload owner did not join")
 		}
 	}
-	if report.OriginHandlersStarted == 0 || report.OriginHandlersStarted != report.OriginHandlersFinished {
+	originHandlersStarted := report.OriginHandlersStarted > 0
+	if report.OriginHandlersStarted != report.OriginHandlersFinished || originHandlersStarted != workloadStarted {
 		return errors.New("synthetic Fast iteration origin handlers did not join")
 	}
 	usages := append([]*sdk.DeviceLocalMemoryUsage{report.ClientAfterJoin}, report.ProviderAfterJoin...)
@@ -435,9 +447,6 @@ func measureSyntheticFastNativeIteration(t testing.TB, target int64) (report syn
 			if err != nil {
 				return syntheticFastReport{}, err
 			}
-			if !fixture.windowReady() {
-				return syntheticFastReport{}, errors.New("synthetic Fast default window policy was not live before measurement")
-			}
 			report, err := measureSyntheticFast(runCtx, client, func(stream int) string {
 				return fmt.Sprintf("https://origin%d.test/bulk/%d?run=%d", stream%4, stream, ordinal)
 			}, settings, nil, owner)
@@ -452,7 +461,12 @@ func measureSyntheticFastNativeIteration(t testing.TB, target int64) (report syn
 				return errors.New("synthetic Fast retained request owner is missing")
 			}
 			return owner.sealAndWait(joinCtx)
-		}, capture)
+		}, capture, func() error {
+			if !fixture.windowReady() {
+				return errors.New("synthetic Fast default window policy was not live before measurement")
+			}
+			return nil
+		})
 	pendingAttribution := make([]syntheticFastPendingAttribution, len(sequence.Runs))
 	for index := range sequence.Runs {
 		row := &sequence.Runs[index]

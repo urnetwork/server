@@ -1788,12 +1788,7 @@ func updateNetworkPeerProvideModesWithLoader(ctx context.Context, networkId serv
 	operationId := server.NewId()
 	return retryNetworkPeerMutation(ctx, func() bool {
 		state := getNetworkPeerMutationState(ctx, networkId, clientId)
-		// An intent without metadata only needs its fence advanced. If Add
-		// registers meanwhile, the comparison fails and the retry loads modes.
-		var provideModesList []ProvideMode
-		if state.hasMeta {
-			provideModesList = sortedProvideModesList(load())
-		}
+		provideModesList := sortedProvideModesList(load())
 		if updateNetworkPeerProvideModesAtMutationState(
 			ctx,
 			networkId,

@@ -135,6 +135,16 @@ func (self *ConnectRouter) Connect(w http.ResponseWriter, r *http.Request) {
 	self.connectHandler.Connect(w, r)
 }
 
+// The routes of connect names behind the lb, alike on the private listener
+// nginx forwards them to and in-process behind the lb_alt front: only GET /
+// reaches connect, the websocket and H1+ upgrades included. The router
+// answers any other path 404 and any other method 405 with Allow, cookies
+// dropped, before connect counts an H1 handshake or charges the address's
+// rate limit.
+func newConnectRoutes(connect http.HandlerFunc) []*router.Route {
+	return []*router.Route{router.NewRoute("GET", "/", connect)}
+}
+
 // The handler behind this router's routes. The alt front dispatches accepted
 // QUIC connections into the same handler instead of mounting the H1 route, so
 // both fronts share one handler id, heartbeat and drain.
@@ -146,13 +156,18 @@ func (self *ConnectRouter) ConnectHandler() *ConnectHandler {
 // listener enabled by its port allocation is actually accepting. It also
 // becomes unready again if a listener exits between supervised restarts.
 func (self *ConnectRouter) Status(w http.ResponseWriter, r *http.Request) {
-	self.statusWithWarpStatus(w, r, nil)
+	self.statusWithWarpStatus(w, r, nil, nil)
 }
 
 // Keeps transport readiness on the actual handler while selecting the
-// composed service's independent startup/drain latch.
-func (self *ConnectRouter) statusWithWarpStatus(w http.ResponseWriter, r *http.Request, status *router.WarpStatusState) {
+// composed service's independent startup/drain latch. With the lb_alt front
+// configured, publicFront adds its readiness headers (front_status.go); it is
+// nil otherwise.
+func (self *ConnectRouter) statusWithWarpStatus(w http.ResponseWriter, r *http.Request, status *router.WarpStatusState, publicFront *frontServer) {
 	listenerPorts, err := self.connectHandler.ListenerReadyUdpPorts()
+	if publicFront != nil {
+		publicFront.writeStatusHeaders(w.Header(), status.Status(), err == nil)
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("not ready: %s", err), http.StatusServiceUnavailable)
 		return

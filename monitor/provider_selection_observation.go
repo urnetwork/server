@@ -29,6 +29,7 @@ type ProviderSelectionObservation struct {
 	WindowStart            time.Time                             `json:"window_start"`
 	WindowSeconds          int                                   `json:"window_seconds"`
 	Reason                 string                                `json:"reason"`
+	SourceRejection        string                                `json:"source_rejection,omitempty"`
 	SourceCoverageComplete bool                                  `json:"source_coverage_complete"`
 	ShapeCoverageComplete  bool                                  `json:"shape_coverage_complete"`
 	DrawCoverageComplete   bool                                  `json:"draw_coverage_complete"`
@@ -51,7 +52,7 @@ func newProviderSelectionObservation(environment string, now time.Time, evidence
 	observation := ProviderSelectionObservation{
 		SchemaVersion: 1, Environment: environment, ObservedAt: now,
 		WindowStart: now.Add(-5 * time.Minute), WindowSeconds: 300,
-		Reason: evidence.reason, SourceCoverageComplete: evidence.complete,
+		Reason: evidence.reason, SourceRejection: evidence.sourceRejection, SourceCoverageComplete: evidence.complete,
 		ShapeCoverageComplete: evidence.shapeComplete, PairedProcesses: evidence.paired,
 		DrawCoverageComplete: evidence.drawComplete, DrawPairedProcesses: evidence.drawPaired,
 		ShapePairedProcesses: evidence.shapePaired, ExpectedSlots: evidence.expected,

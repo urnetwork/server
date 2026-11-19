@@ -16,9 +16,8 @@ type runSlotPool struct {
 	priorityGrants int
 	waiting        []*runSlotWaiter
 	// Observation only: the scheduler still uses active, waiting and priority.
-	holders          [4]*runSlotWaiter
-	publicSignalKeys map[string]string
-	diagnostic       *RunAdmissionDiagnostic
+	holders    [4]*runSlotWaiter
+	diagnostic *RunAdmissionDiagnostic
 }
 
 type runSlotWaiter struct {
@@ -32,30 +31,41 @@ type runSlotWaiter struct {
 	admissionAttempt *runAdmissionAttempt
 }
 
-// The allowlist comes only from the code-owned catalog, never the caller's
-// selected signal set. Unknown/custom keys cannot become receipt labels.
-func newRunSlotPool(limit int) *runSlotPool {
-	pool := &runSlotPool{limit: limit, publicSignalKeys: map[string]string{}}
+// Both admission layers use the same immutable code-owned catalog. Neither
+// permit state nor the caller's selected signals belong in this allowlist.
+var admissionSignalKeys = sync.OnceValue(func() map[string]string {
+	keys := map[string]string{}
 	for _, signal := range NewSignals() {
 		key := signal.Key()
 		if key != "" && len(key) <= 64 {
-			pool.publicSignalKeys[key] = key
+			keys[key] = key
 		}
 	}
-	return pool
+	return keys
+})
+
+// Resolve the catalog before any scheduled request begins its owner budget.
+func newRunSlotPool(limit int) *runSlotPool {
+	admissionSignalKeys()
+	return &runSlotPool{limit: limit}
 }
 
-// The existing request context carries identity only to the local pool.
+// The request context carries the scheduled signal's proposed key to local admission.
 type runSlotSignalContextKey struct{}
+
+// Return the catalog's own string, even when the caller supplies a matching key.
+func admissionSignalKey(ctx context.Context) string {
+	if key, ok := ctx.Value(runSlotSignalContextKey{}).(string); ok && key != "" && len(key) <= 64 {
+		if public, known := admissionSignalKeys()[key]; known {
+			return public
+		}
+	}
+	return "unknown"
+}
 
 func (p *runSlotPool) acquire(ctx context.Context, priority bool) (func(), error) {
 	pgSampleTransportFromContext(ctx).runSlotRequested()
-	signalKey := "unknown"
-	if key, ok := ctx.Value(runSlotSignalContextKey{}).(string); ok && len(key) <= 64 {
-		if public, known := p.publicSignalKeys[key]; known {
-			signalKey = public
-		}
-	}
+	signalKey := admissionSignalKey(ctx)
 	p.mu.Lock()
 	var attempt *runAdmissionAttempt
 	if ref, ok := ctx.Value(runAdmissionContextKey{}).(*runAdmissionReference); ok {

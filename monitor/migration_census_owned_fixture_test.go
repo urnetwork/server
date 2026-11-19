@@ -311,6 +311,32 @@ func TestMigrationCensusOwnedFixturePgPlanFailureClearsPriorObservation(t *testi
 	})
 }
 
+// An invalid source stops before the borrowed transaction is touched. An ended
+// owner also stops before planning, and both refusals discard prior evidence.
+func TestMigrationCensusBorrowedFixtureRefusesBeforePlanningOrQuery(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		observation := &migrationCensusObservation{
+			settings: DefaultMigrationCensusSettings(), catalogRows: []pgRow{{"stale"}}, catalogComplete: true,
+		}
+		ctx, cancel := context.WithCancel(context.WithValue(t.Context(), migrationCensusContextKey{}, observation))
+		if canceled {
+			cancel()
+		}
+		rows, err := (&snMainnetMigrationTxSource{}).PostgreSQL(ctx, "SELECT 1;")
+		cancel()
+		if err == nil || rows != nil || observation.catalogComplete || observation.catalogRows != nil {
+			t.Fatalf("borrowed fixture retained evidence after refusal, canceled=%t, err=%v", canceled, err)
+		}
+		if canceled {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("ended owner reached planning: %v", err)
+			}
+		} else if err.Error() != "migration census source shape is invalid" {
+			t.Fatalf("live owner lost the plan refusal: %v", err)
+		}
+	}
+}
+
 // The sibling fault adapter borrows an existing transaction. Its uncommitted
 // physical fault must be observed without committing or closing its owner.
 func TestMigrationCensusOwnedFixturePgFaultTransactionRemainsCallerOwned(t *testing.T) {

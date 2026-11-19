@@ -31,6 +31,7 @@ var competitionIntakeFirstCatalogSuccessors = []snMainnetMigrationContract{
 	competitionOfficialReviewEpochTwoMigrationContract,
 	competitionOfficialReviewEpochTwoAstra62MigrationContract,
 	competitionSilleStorageRecoveryMigrationContract,
+	competitionEpochThreeSourceRecoveryMigrationContract,
 }
 
 // Verify every retirement and its replacement query before selecting the owner.

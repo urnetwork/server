@@ -7,7 +7,10 @@
 //
 //   - E1, active: at the census the record is active and unrevoked, and one of
 //     its addresses is active. Only then has it a unit: the keyed hash of its
-//     active IPv4 address's /29, else of its active IPv6 address's /48.
+//     active IPv4 address's /29, else of its active IPv6 address's /48. A
+//     record whose provider client declared that its transports leave through
+//     a proxy (verify_proxied_egress_model.go) is not active: a proxy slot
+//     counts for no unit.
 //   - E3, distinct: active records that share a provider client, an IPv4
 //     address or an IPv6 /64, directly or through other records, count once,
 //     for the record with the lowest (client id, extender id) pair. The others
@@ -59,6 +62,9 @@ type ExtenderEligibilityRules struct {
 	// provider clients with an active fleet binding at either of the epoch's
 	// boundaries (E4)
 	HeadBoundClientIds map[server.Id]bool
+	// provider clients marked as leaving through a proxy
+	// (GetVerifyProxiedEgress): their records are not active (E1)
+	ProxiedClientIds map[server.Id]bool
 }
 
 // One record judged under E1 and E3–E5, with the flags of its census row
@@ -181,7 +187,7 @@ func DecideExtenderEligibility(records []*StExtenderCensusRecord, rules *Extende
 		listedExtenderIds[record.ExtenderId] = true
 		eligibility := &ExtenderEligibility{Record: record}
 		// E1
-		if address, family, ok := unitAddress(record); ok && record.Active && !record.Revoked {
+		if address, family, ok := unitAddress(record); ok && record.Active && !record.Revoked && !rules.ProxiedClientIds[record.ClientId] {
 			eligibility.Flags |= ledger.CensusActive
 			eligibility.Unit, eligibility.Family = rules.Unit(address), family
 			if eligibility.Unit == ([32]byte{}) {
