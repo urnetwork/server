@@ -835,6 +835,7 @@ func parityCorpus() []*parityCase {
 		{name: "balance/least-conn-under-held-requests", run: parityLeastConn, scenario: parityHoldScenario, compareBlocks: true},
 		{name: "balance/ketama-ipv4-and-ipv6", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()), compareBlocks: true},
 		{name: "balance/ketama-retry-walk", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()[:4]), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
+		{name: "balance/ketama-retry-walk-ipv6", run: parityRing(parityGet(parityMcpName, parityMcpName, "/ring"), parityRingClients()[24:28]), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
 		{name: "balance/ketama-retry-walk-post", run: parityRing(parityWithBody(parityGet(parityMcpName, parityMcpName, "/ring"), http.MethodPost, parityBody(50), false), parityRingClients()[24:28]), scenario: parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK), compareBlocks: true},
 
 		// retries

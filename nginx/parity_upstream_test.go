@@ -56,7 +56,8 @@ type parityUpstreamExchange struct {
 	recorder *parityRecorder
 	caseKey  string
 	attempt  *parityAttempt
-	// the case key's attempts so far, this one included
+	// the attempts so far of this request, the case key's attempts under its
+	// sequence, this one included; a retry is the request's second
 	attemptNumber int
 	w             http.ResponseWriter
 	r             *http.Request
@@ -121,7 +122,8 @@ func parityRespondScenario(status int, headerLines [][2]string, body string) par
 	}
 }
 
-// Answers each attempt with its status in order, the last repeating.
+// Answers each attempt of a request with its status in order, the last
+// repeating, so every request of a case meets the same statuses.
 func parityStatusesScenario(statuses ...int) parityScenario {
 	return func(exchange *parityUpstreamExchange) {
 		status := statuses[min(exchange.attemptNumber, len(statuses))-1]
@@ -197,8 +199,8 @@ const parityEchoBufferBytes = 1024
 const parityStreamFirstBytes = 10
 
 // Reads a body as parityStreamRequestScenario does, its first bytes before
-// the client sends the rest, then answers each attempt with its status in
-// order, the last repeating.
+// the client sends the rest, then answers each attempt of a request with its
+// status in order, the last repeating.
 func parityStreamRequestStatusesScenario(statuses ...int) parityScenario {
 	return func(exchange *parityUpstreamExchange) {
 		first := make([]byte, parityStreamFirstBytes)
@@ -354,7 +356,13 @@ func (self *parityRecorder) handler(service string, block string) http.Handler {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			self.caseKeyAttempts[caseKey] = append(self.caseKeyAttempts[caseKey], attempt)
-			return self.caseNameScenarios[caseName], len(self.caseKeyAttempts[caseKey])
+			attemptNumber := 0
+			for _, caseAttempt := range self.caseKeyAttempts[caseKey] {
+				if caseAttempt.sequence == sequence {
+					attemptNumber += 1
+				}
+			}
+			return self.caseNameScenarios[caseName], attemptNumber
 		}()
 		if scenario == nil {
 			scenario = parityDefaultScenario

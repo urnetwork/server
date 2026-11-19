@@ -1,11 +1,17 @@
 package nginx_test
 
-// Tests of the parity harness's comparison (parity_compare_test.go) that run
-// without Docker: every changed key is a difference, each acceptance names
-// the difference it was written for and refuses its near misses, and a
-// difference no entry names is left unaccepted, so the harness fails on it.
+// Tests of the parity harness that run without Docker. Its comparison
+// (parity_compare_test.go): every changed key is a difference, each
+// acceptance names the difference it was written for and refuses its near
+// misses, and a difference no entry names is left unaccepted, so the harness
+// fails on it. Its recording upstreams (parity_upstream_test.go): a scenario
+// meets each request's attempts as that request's own.
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
 	"testing"
 )
 
@@ -253,6 +259,37 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			t.Errorf("%s: named by none, want %s", c.name, c.wantId)
 		case acceptance.id != c.wantId || acceptance.proposed != c.wantProposed:
 			t.Errorf("%s: named by %s (proposed %v), want %s (proposed %v)", c.name, acceptance.id, acceptance.proposed, c.wantId, c.wantProposed)
+		}
+	}
+}
+
+// A statuses scenario numbers the attempts of each request of a case on
+// their own, so every request's first attempt meets the first status: each
+// ring client of a retry walk is answered 503 and walks on.
+func TestParityStatusesScenarioNumbersEachRequestsAttempts(t *testing.T) {
+	recorder := newParityRecorder(defaultParityHarnessSettings())
+	recorder.setScenario("balance/unit", parityStatusesScenario(http.StatusServiceUnavailable, http.StatusOK))
+	handler := recorder.handler("mcp", "g1")
+	statuses := []int{}
+	for _, sequence := range []int{0, 0, 1, 1, 2, 2} {
+		request := httptest.NewRequest(http.MethodGet, "/ring", nil)
+		request.Header.Set(parityCaseHeader, "front/balance/unit")
+		request.Header.Set(paritySequenceHeader, strconv.Itoa(sequence))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		statuses = append(statuses, response.Code)
+	}
+	want := []int{503, 200, 503, 200, 503, 200}
+	if !slices.Equal(statuses, want) {
+		t.Errorf("statuses = %v, want %v", statuses, want)
+	}
+	attempts := recorder.attempts("front/balance/unit")
+	if len(attempts) != len(want) {
+		t.Fatalf("recorded %d attempts, want %d", len(attempts), len(want))
+	}
+	for i, attempt := range attempts {
+		if attempt.status != want[i] {
+			t.Errorf("attempt %d recorded status %d, want %d", i, attempt.status, want[i])
 		}
 	}
 }
