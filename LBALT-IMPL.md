@@ -638,7 +638,7 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 - `ConnGroup` is new vendored code on the packet path. A socket's removal races writes in flight; a write skips a closed socket. Its tests run under `-race`.
 - Replacing a transport runs only after a failure. A test drives it through a hook.
 - (b) doesn't help a flow that moves to another block, or one whose block restarts: those still reconnect after their idle timeout. HMARK hashes the source address alone (D10), so a rebinding that changes only the source port stays in its block.
-- On Linux (2026-11-19), test binaries cross-compiled for linux/arm64 ran in an unprivileged ubuntu:24.04 container with only loopback: the vendored `TestUrnetwork*` tests, `TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket` included, and all 84 `^TestFront` tests passed, without `-race`. Linux's reuseport hash moving real flows between a group's sockets is still untested anywhere; the tests move flows themselves.
+- On Linux (2026-11-19), test binaries cross-compiled for linux/arm64 ran in an unprivileged ubuntu:24.04 container with only loopback: the vendored `TestUrnetwork*` tests, `TestUrnetworkConnGroupSendsAGsoBatchThroughItsSocket` included, and all 84 tests `-run '^TestFront'` selects passed, without `-race`. Linux's reuseport hash moving real flows between a group's sockets is still untested anywhere; the tests move flows themselves.
 
 ### 8.6 Tests
 
@@ -663,10 +663,10 @@ Front, no database (`connect/front_quic_group_test.go`, `front_quic_transport_te
 - the whodis fan-in's five tests: every socket read and one written per destination, a whole datagram past quic-go's 1452 bytes, buffer sizes for later sockets, a temporary read error waited out, a socket closed under a write skipped.
 
 Database-backed (`connect/lbalt_socket_test.go`):
-- `TestLbAltQuicConnectionKeepsItsTransportWhenItsSocketIsLost` replaces `TestLbAltSiblingSocketsNeverResetAMovedQuicConnection`: the moved connection's next request is answered on the same connection, where (a) waited out its idle timeout; still no reset, since no transport has a reset key;
+- `TestLbAltQuicConnectionKeepsItsTransportWhenItsSocketIsLost` replaces the earlier test that a moved connection is never reset: the moved connection's next request is answered on the same connection, where (a) waited out its idle timeout; still no reset, since no transport has a reset key;
 - `TestLbAltRebuildsALostUdpSocket` now also requires that the new client, whose flow the re-created socket takes, never connects again.
 
-Changed: `TestFrontDrainSendsOneH3GoawayWhenItsSocketIsLost` gave way to the two drain tests above; `TestFrontPublicSocketIgnoresAProxyProtocolHeader` keeps its behavior and leaves the structure to `TestFrontQuicGroupSocketsAreReadAsBound`; `TestFrontDrainIsNotHeldByAWedgedIdleConnection` reads each group's transport.
+Changed: the earlier test of one GOAWAY when a socket is lost gave way to the two drain tests above; `TestFrontPublicSocketIgnoresAProxyProtocolHeader` keeps its behavior and leaves the structure to `TestFrontQuicGroupSocketsAreReadAsBound`; `TestFrontDrainIsNotHeldByAWedgedIdleConnection` reads each group's transport.
 
 ### 8.7 Performance
 
