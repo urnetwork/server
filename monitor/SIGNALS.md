@@ -891,6 +891,13 @@ six-of-22 historical replay had complete fleet authority.
   discoverable through `errors.Is`/`errors.As` when the owner ends. Unknown never
   emits a healthy collapse finding, so the notifier keeps an existing incident
   through telemetry loss.
+  A bounded gateway read that fails while the probe is active adds the shared
+  `error_class` and any typed `ssh_admission_failures` or
+  `execution_boundaries` to its visibility warning (§1.7). A joined native
+  wait identifies the local SSH child's completion. A remote HTTP result and
+  the fleet transport count each require their own evidence. The 02:25 UTC
+  warning on 2026-11-19 retained only `bounded_source_unavailable` and its
+  specific source failure remains unknown.
 - False-positive qualifiers: transport multiplicity can change without the
   same change in distinct provider availability. Receiver-held samples can lag
   cessation by up to three minutes; concurrent live carriers are real transport
