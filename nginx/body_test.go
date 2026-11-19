@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 )
 
@@ -111,6 +112,19 @@ func (self *spySpillFiles) checkClosed() {
 			self.t.Errorf("spill file %d is still open", i)
 		}
 	}
+}
+
+// The files created that are still open.
+func (self *spySpillFiles) openCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	openCount := 0
+	for _, file := range self.files {
+		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+			openCount += 1
+		}
+	}
+	return openCount
 }
 
 // The spill files created so far.
@@ -889,4 +903,70 @@ func TestBodyStoreFirstPassRefusals(t *testing.T) {
 		}
 		checkStoreEmpty(t, bodyStore)
 	}
+}
+
+// The store's close, which the front's forced close runs, returns only once
+// every spill file its bodies created is closed, one still being created
+// included. A close that releases a body while its append is creating the
+// file can't see the file: it waits for the append, which finds the body
+// released and closes the file, and the file stays counted against
+// SpillMaxFiles until then (D21). In a synctest bubble, so the close is seen
+// waiting rather than given time to return.
+func TestBodyStoreCloseWaitsForASpillFileBeingCreated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		settings := DefaultBodySettings()
+		bodyStore, spyFiles := newSpyBodyStore(t, settings)
+		created := make(chan struct{})
+		proceed := make(chan struct{})
+		bodyStore.createSpillFile = func() (bodySpillFile, error) {
+			file, err := spyFiles.create()
+			if err != nil {
+				return nil, err
+			}
+			close(created)
+			// the file is open, and its body hasn't recorded it
+			<-proceed
+			return file, nil
+		}
+		refusals := make(chan *bodyRefusal, 1)
+		go func() {
+			body := testBodyBytes(int(settings.MemoryPrefixBytes) + 1000)
+			storedBody, refusal := bodyStore.read(t.Context(), bytes.NewReader(body), bodyReadOptions{
+				declaredLength: int64(len(body)),
+				prefixBytes:    settings.MemoryPrefixBytes,
+			})
+			if storedBody != nil {
+				storedBody.release()
+			}
+			refusals <- refusal
+		}()
+		<-created
+
+		closeDone := make(chan struct{})
+		go func() {
+			bodyStore.close()
+			close(closeDone)
+		}()
+		// every other goroutine is durably blocked: the append at proceed,
+		// and the close returned or waiting for the append
+		synctest.Wait()
+		select {
+		case <-closeDone:
+			if spyFiles.openCount() != 0 {
+				t.Errorf("the store's close returned while a spill file being created was open")
+			}
+		default:
+		}
+		if _, _, spillFiles, _ := bodyStore.usage(); spillFiles != 1 {
+			t.Errorf("with a spill file open, the store counts %d spill files, want 1", spillFiles)
+		}
+
+		close(proceed)
+		<-closeDone
+		spyFiles.checkClosed()
+		if refusal := <-refusals; refusal == nil || refusal.status != http.StatusServiceUnavailable || refusal.reason != bodyRefusalClosed {
+			t.Errorf("the body read the close cut short: %v, want refused as closed", refusal)
+		}
+		checkStoreEmpty(t, bodyStore)
+	})
 }
