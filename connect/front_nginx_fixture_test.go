@@ -2,15 +2,18 @@ package connect
 
 // Fixtures for the front's tests with the real nginx front: a vault of the
 // fixture's identity in the layout the nginx front loads, the real front
-// built over it, an env started with it, and a minimal h2 client that reads
-// frames itself, so a test sees the server's GOAWAY and close.
+// built over it, an env started with it, and minimal h1 and h2 clients that
+// keep to one connection, so a test sees what the server sends on it and
+// when it closes it.
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -97,6 +100,57 @@ func newTestNginxFrontEnv(t testing.TB, mutate func(env *testFrontEnv), connectH
 		t.Fatal(err)
 	}
 	return env
+}
+
+// A minimal h1 client over one TLS connection to a public socket, so every
+// request it sends goes over that connection, until the server closes it.
+type testFrontH1Client struct {
+	t      testing.TB
+	conn   *tls.Conn
+	reader *bufio.Reader
+}
+
+// Dials the https socket on address for serverName, for HTTP/1.1.
+func (self *testFrontEnv) dialH1Client(address string, serverName string) *testFrontH1Client {
+	self.t.Helper()
+	conn, err := tls.Dial("tcp", address, self.clientTlsConfig(serverName, []string{"http/1.1"}))
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	self.t.Cleanup(func() {
+		conn.Close()
+	})
+	// bounds a broken test, never a passing one
+	conn.SetDeadline(time.Now().Add(testFrontProgressTimeout))
+	return &testFrontH1Client{
+		t:      self.t,
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+	}
+}
+
+// GETs path at authority on the connection and reads the response whole,
+// which must be a 200.
+func (self *testFrontH1Client) get(authority string, path string) *http.Response {
+	self.t.Helper()
+	fmt.Fprintf(self.conn, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", path, authority)
+	response, err := http.ReadResponse(self.reader, nil)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK {
+		self.t.Fatalf("GET %s = %d %q, %v", path, response.StatusCode, body, err)
+	}
+	return response
+}
+
+// Whether the server has closed the connection: the next read finds its end.
+func (self *testFrontH1Client) closedByServer() bool {
+	self.t.Helper()
+	_, err := self.reader.ReadByte()
+	return errors.Is(err, io.EOF)
 }
 
 // A minimal h2 client over one TLS connection to a public socket, which

@@ -7,16 +7,17 @@ package nginx
 // requests go to the lb status route on an lb name, which no limit charges.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,27 +47,58 @@ func newTestConfiguredServerOf(t *testing.T, front *Front, enableHttp2 bool) *ht
 	return server
 }
 
-// An h1 GET of the lb status route through client, and the connection it
-// went over.
-func getTestServerLbStatus(t *testing.T, server *httptest.Server, client *http.Client) (*http.Response, net.Conn) {
+// A minimal h1 client over one TLS connection, so every request it sends
+// goes over that connection, until the server closes it.
+type testServerH1Client struct {
+	t      *testing.T
+	conn   *tls.Conn
+	reader *bufio.Reader
+}
+
+// Dials address over TLS for HTTP/1.1.
+func dialTestServerH1Client(t *testing.T, address string) *testServerH1Client {
 	t.Helper()
-	var conn net.Conn
-	r := newTestServerRequest(t, server, "GET", "test-lb.service.example", "/hidden-example/status", nil)
-	r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
-		GotConn: func(gotConnInfo httptrace.GotConnInfo) {
-			conn = gotConnInfo.Conn
-		},
-	}))
-	response, err := client.Do(r)
+	conn, err := tls.Dial("tcp", address, &tls.Config{
+		// the httptest server's certificate names no served name
+		InsecureSkipVerify: true,
+		NextProtos:         []string{"http/1.1"},
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		conn.Close()
+	})
+	// bounds a broken test, never a passing one
+	conn.SetDeadline(time.Now().Add(testTlsExchangeTimeout))
+	return &testServerH1Client{
+		t:      t,
+		conn:   conn,
+		reader: bufio.NewReader(conn),
+	}
+}
+
+// GETs the lb status route on the connection and reads the response whole.
+func (self *testServerH1Client) getLbStatus() *http.Response {
+	self.t.Helper()
+	fmt.Fprintf(self.conn, "GET /hidden-example/status HTTP/1.1\r\nHost: test-lb.service.example\r\n\r\n")
+	response, err := http.ReadResponse(self.reader, nil)
+	if err != nil {
+		self.t.Fatal(err)
 	}
 	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != testLbStatusBody {
-		t.Fatalf("lb status = %d %q, %v", response.StatusCode, body, err)
+		self.t.Fatalf("lb status = %d %q, %v", response.StatusCode, body, err)
 	}
-	return response, conn
+	return response
+}
+
+// Whether the server has closed the connection: the next read finds its end.
+func (self *testServerH1Client) closedByServer() bool {
+	self.t.Helper()
+	_, err := self.reader.ReadByte()
+	return errors.Is(err, io.EOF)
 }
 
 // A minimal h2 client over one TLS connection, which reads the server's
@@ -342,30 +374,21 @@ func TestFrontLastRequestOnConnectionFollowsNginxKeepalive(t *testing.T) {
 
 // Over h1, the connection's 1000th request, nginx's default
 // keepalive_requests, is its last: every response before it keeps the
-// connection, its own carries Connection: close, and the next request goes
-// over a new connection.
+// connection, and its own carries Connection: close and closes it.
 func TestFrontKeepaliveRequestsCloseTheConnectionOverH1(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	if keepaliveRequests := testFront.front.settings.Http.KeepaliveRequests; keepaliveRequests != 1000 {
 		t.Fatalf("KeepaliveRequests %d, want nginx's 1000", keepaliveRequests)
 	}
 	server := newTestConfiguredServer(t, testFront, false)
-	client := server.Client()
-
-	var firstConn net.Conn
-	for i := 1; i <= 1001; i += 1 {
-		response, conn := getTestServerLbStatus(t, server, client)
-		switch {
-		case i == 1:
-			firstConn = conn
-		case i <= 1000 && conn != firstConn:
-			t.Fatalf("request %d went over another connection", i)
-		case i == 1001 && conn == firstConn:
-			t.Fatal("the 1001st request went over the closed connection")
+	client := dialTestServerH1Client(t, server.Listener.Addr().String())
+	for i := 1; i <= 1000; i += 1 {
+		if response := client.getLbStatus(); response.Close != (i == 1000) {
+			t.Fatalf("request %d: Connection close %t", i, response.Close)
 		}
-		if wantClose := i == 1000; response.Close != wantClose {
-			t.Fatalf("request %d: Connection close %t, want %t", i, response.Close, wantClose)
-		}
+	}
+	if !client.closedByServer() {
+		t.Fatal("the server kept the connection after its 1000th request")
 	}
 }
 
@@ -388,27 +411,24 @@ func TestFrontKeepaliveRequestsCloseTheConnectionOverH2(t *testing.T) {
 }
 
 // Over h1, a request more than keepalive_time after the connection was
-// accepted, by the front's clock, is its last, and one at exactly
-// keepalive_time isn't; all of them go over the one connection.
+// accepted, by the front's clock, is its last and closes it, and one at
+// exactly keepalive_time isn't.
 func TestFrontKeepaliveTimeClosesTheConnectionOverH1(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	keepaliveTime := testFront.front.settings.Http.KeepaliveTime
 	server := newTestConfiguredServer(t, testFront, false)
-	client := server.Client()
+	client := dialTestServerH1Client(t, server.Listener.Addr().String())
 
-	response, firstConn := getTestServerLbStatus(t, server, client)
-	if response.Close {
+	if client.getLbStatus().Close {
 		t.Fatal("the first request closed its connection")
 	}
 	testFront.clock.advance(keepaliveTime)
-	response, conn := getTestServerLbStatus(t, server, client)
-	if response.Close || conn != firstConn {
-		t.Fatalf("a request at exactly keepalive_time: close %t, same connection %t", response.Close, conn == firstConn)
+	if client.getLbStatus().Close {
+		t.Fatal("a request at exactly keepalive_time closed its connection")
 	}
 	testFront.clock.advance(time.Nanosecond)
-	response, conn = getTestServerLbStatus(t, server, client)
-	if !response.Close || conn != firstConn {
-		t.Fatalf("a request past keepalive_time: close %t, same connection %t; want its connection's last", response.Close, conn == firstConn)
+	if !client.getLbStatus().Close || !client.closedByServer() {
+		t.Fatal("a request past keepalive_time kept its connection")
 	}
 }
 
@@ -442,7 +462,8 @@ func TestFrontKeepaliveTimeoutZeroClosesEveryConnection(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), settings)
 
 	h1Server := newTestConfiguredServer(t, testFront, false)
-	if response, _ := getTestServerLbStatus(t, h1Server, h1Server.Client()); !response.Close {
+	h1Client := dialTestServerH1Client(t, h1Server.Listener.Addr().String())
+	if !h1Client.getLbStatus().Close || !h1Client.closedByServer() {
 		t.Error("an h1 response kept its connection with keepalive_timeout 0")
 	}
 

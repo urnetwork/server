@@ -16,7 +16,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptrace"
 	"os"
 	"slices"
 	"strconv"
@@ -27,32 +26,6 @@ import (
 
 	"golang.org/x/net/http2"
 )
-
-// An h1 GET of the lb status route through client, and the connection it
-// went over.
-func getTestFrontLbStatus(t *testing.T, env *testFrontEnv, client *http.Client) (*http.Response, net.Conn) {
-	t.Helper()
-	var conn net.Conn
-	r, err := http.NewRequestWithContext(env.ctx, "GET", "https://"+env.routeTable.Lb.Names[0]+env.routeTable.Lb.RoutePrefixes[0]+"/status", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r = r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
-		GotConn: func(gotConnInfo httptrace.GotConnInfo) {
-			conn = gotConnInfo.Conn
-		},
-	}))
-	response, err := client.Do(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("lb status = %d %q, %v", response.StatusCode, body, err)
-	}
-	return response, conn
-}
 
 // connect sets only its own fields on each public server, the handler, the
 // counting error log and the serving context, and hands every one to the
@@ -80,30 +53,23 @@ func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 
 // Through connect's https socket and the real nginx front, the
 // connection's 1000th request, nginx's keepalive_requests, is its last over
-// h1: every response before it keeps the connection, its own carries
-// Connection: close, and the next request opens another connection.
+// h1: every response before it keeps the connection, and its own carries
+// Connection: close and closes it.
 func TestFrontHttpsKeepaliveRequestsCloseTheConnectionOverH1(t *testing.T) {
 	env := newTestNginxFrontEnv(t, nil, http.NotFoundHandler())
 	if keepaliveRequests := env.settings.Front.Http.KeepaliveRequests; keepaliveRequests != 1000 {
 		t.Fatalf("KeepaliveRequests %d, want nginx's 1000", keepaliveRequests)
 	}
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-	client := env.httpsClient(address, env.routeTable.Lb.Names[0], false, nil)
-
-	var firstConn net.Conn
-	for i := 1; i <= 1001; i += 1 {
-		response, conn := getTestFrontLbStatus(t, env, client)
-		switch {
-		case i == 1:
-			firstConn = conn
-		case i <= 1000 && conn != firstConn:
-			t.Fatalf("request %d went over another connection", i)
-		case i == 1001 && conn == firstConn:
-			t.Fatal("the 1001st request went over the closed connection")
+	lbName := env.routeTable.Lb.Names[0]
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), lbName)
+	for i := 1; i <= 1000; i += 1 {
+		if response := client.get(lbName, env.routeTable.Lb.RoutePrefixes[0]+"/status"); response.Close != (i == 1000) {
+			t.Fatalf("request %d: Connection close %t", i, response.Close)
 		}
-		if wantClose := i == 1000; response.Close != wantClose {
-			t.Fatalf("request %d: Connection close %t, want %t", i, response.Close, wantClose)
-		}
+	}
+	if !client.closedByServer() {
+		t.Fatal("the server kept the connection after its 1000th request")
 	}
 }
 
@@ -128,20 +94,16 @@ func TestFrontHttpsKeepaliveRequestsCloseTheConnectionOverH2(t *testing.T) {
 
 // A connection past nginx's keepalive_time is closed after its next request
 // over h1. With a keepalive_time of 1 ns every connection is past it by its
-// first request, which then carries Connection: close, and the next request
-// opens another connection.
+// first request, which then carries Connection: close and closes it.
 func TestFrontHttpsKeepaliveTimeClosesTheConnectionOverH1(t *testing.T) {
 	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
 		env.settings.Front.Http.KeepaliveTime = time.Nanosecond
 	}, http.NotFoundHandler())
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-	client := env.httpsClient(address, env.routeTable.Lb.Names[0], false, nil)
-	response, firstConn := getTestFrontLbStatus(t, env, client)
-	if !response.Close {
+	lbName := env.routeTable.Lb.Names[0]
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), lbName)
+	if !client.get(lbName, env.routeTable.Lb.RoutePrefixes[0]+"/status").Close || !client.closedByServer() {
 		t.Fatal("a request past keepalive_time kept its connection")
-	}
-	if _, conn := getTestFrontLbStatus(t, env, client); conn == firstConn {
-		t.Fatal("the next request went over the closed connection")
 	}
 }
 
