@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -71,11 +72,14 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			{"response[0].generator", generator},
 		}
 	}
-	lbStatus := func(body string) [][2]string {
+	statusBody := func(body string) [][2]string {
 		return [][2]string{{"response[0].body", body}}
 	}
 	nginxStatusBody := `"{\"version\":\"0.0.0-parity\",\"status\":\"ok\"}\n"`
 	frontStatusBody := `"{\"version\":\"0.0.0-parity\",\"status\":\"ok\",\"front\":\"lbalt\"}\n"`
+	lbStatus := parityGet(parityLbName, parityLbName, parityLbPrefix+"/status")
+	lbStatusRange := parityWith(lbStatus, "", [2]string{"Range", "bytes=0-3"})
+	apiGet := parityGet(parityApiName, parityApiName, "/one")
 	// an api request whose head is count header lines of 6600 bytes
 	filledHead := func(count int) *parityRequest {
 		request := parityGet(parityApiName, parityApiName, "/hello")
@@ -84,6 +88,37 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 		}
 		return request
 	}
+	// nine 6600-byte lines, which nginx's packed buffers refuse
+	packedHead := filledHead(9)
+	// the front's observation of a packed head it forwarded, its fourth
+	// line cut short when cut
+	forwardedPackedHead := func(attemptCount int, cut bool) [][2]string {
+		keyValues := [][2]string{
+			{"response[0].status", "200"},
+			{"upstream.count", strconv.Itoa(attemptCount)},
+		}
+		for i, headerLine := range packedHead.headers {
+			value := headerLine[1]
+			if cut && i == 3 {
+				value = value[:len(value)/2]
+			}
+			keyValues = append(keyValues, [2]string{"upstream[0].header." + headerLine[0], value})
+		}
+		return keyValues
+	}
+	longSni := parityGet(strings.Repeat(strings.Repeat("a", 63)+".", 4)+parityUnknownName, parityApiName, "/hello")
+	longSniRefused := [][2]string{{"conn[0].tls.error", "tls: unrecognized name"}}
+	// the front's observation of the long sni request it routed by host
+	longSniRouted := func(certificate string, host string) [][2]string {
+		return [][2]string{
+			{"conn[0].tls.certificate", certificate},
+			{"response[0].status", "200"},
+			{"upstream.count", "1"},
+			{"upstream[0].host", host},
+			{"upstream[0].uri", "/hello"},
+		}
+	}
+	http10 := &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodGet, target: "/hello", host: parityApiName, proto: "HTTP/1.0"}
 	cases := []struct {
 		name       string
 		parityCase *parityCase
@@ -164,17 +199,111 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 		{
 			name:       "the front field of the lb status json",
 			parityCase: &parityCase{name: "unit", tags: []string{"lb-status"}},
-			nginx:      lbStatus(nginxStatusBody),
-			front:      lbStatus(frontStatusBody),
+			requests:   []*parityRequest{lbStatus},
+			nginx:      statusBody(nginxStatusBody),
+			front:      statusBody(frontStatusBody),
 			difference: parityDifference{key: "response[0].body", nginx: nginxStatusBody, front: frontStatusBody},
 			wantId:     "lb-status-json",
 		},
 		{
 			name:        "an lb status json with another version",
 			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
-			nginx:       lbStatus(nginxStatusBody),
-			front:       lbStatus(`"{\"version\":\"0.0.1\",\"status\":\"ok\",\"front\":\"lbalt\"}\n"`),
+			requests:    []*parityRequest{lbStatus},
+			nginx:       statusBody(nginxStatusBody),
+			front:       statusBody(`"{\"version\":\"0.0.1\",\"status\":\"ok\",\"front\":\"lbalt\"}\n"`),
 			difference:  parityDifference{key: "response[0].body", nginx: nginxStatusBody, front: `"{\"version\":\"0.0.1\",\"status\":\"ok\",\"front\":\"lbalt\"}\n"`},
+			wantUnnamed: true,
+		},
+		{
+			name:        "an lb status json from an upstream, beside the case's status request",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{apiGet, lbStatus},
+			nginx:       statusBody(nginxStatusBody),
+			front:       statusBody(frontStatusBody),
+			difference:  parityDifference{key: "response[0].body", nginx: nginxStatusBody, front: frontStatusBody},
+			wantUnnamed: true,
+		},
+		{
+			name:       "a static file header the lb status json has none of",
+			parityCase: &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:   []*parityRequest{lbStatus},
+			difference: parityDifference{key: "response[0].header.Etag", nginx: `"6afe918d-29"`, front: parityAbsent},
+			wantId:     "lb-status-static-file",
+		},
+		{
+			name:       "a static file header of a status request with no Host, which reaches the lb default server",
+			parityCase: &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:   []*parityRequest{{scheme: "https", method: http.MethodGet, target: parityLbPrefix + "/status", proto: "HTTP/1.0"}},
+			difference: parityDifference{key: "response[0].header.Last-Modified", nginx: "Thu, 19 Nov 2026 06:05:01 GMT", front: parityAbsent},
+			wantId:     "lb-status-static-file",
+		},
+		{
+			name:        "a static file header dropped from another request of an lb status case",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{apiGet, lbStatus},
+			difference:  parityDifference{key: "response[0].header.Etag", nginx: `"upstream-1"`, front: parityAbsent},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a static file header the front sends another value of",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{lbStatus},
+			difference:  parityDifference{key: "response[0].header.Etag", nginx: `"6afe918d-29"`, front: `"front-1"`},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a static file header dropped from a status request on a service name",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{parityGet(parityApiName, parityApiName, parityLbPrefix+"/status")},
+			difference:  parityDifference{key: "response[0].header.Etag", nginx: `"upstream-1"`, front: parityAbsent},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the 206 nginx's static module answers a Range on the lb status",
+			parityCase: &parityCase{name: "unit", tags: []string{"lb-status", "lb-status-range"}},
+			requests:   []*parityRequest{lbStatusRange},
+			nginx:      [][2]string{{"response[0].status", "206"}},
+			front:      [][2]string{{"response[0].status", "200"}},
+			difference: parityDifference{key: "response[0].header.Content-Range", nginx: "bytes 0-3/41", front: parityAbsent},
+			wantId:     "lb-status-range",
+		},
+		{
+			name:        "a Range on the lb status the front refused",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status", "lb-status-range"}},
+			requests:    []*parityRequest{lbStatusRange},
+			nginx:       [][2]string{{"response[0].status", "206"}},
+			front:       [][2]string{{"response[0].status", "416"}},
+			difference:  parityDifference{key: "response[0].status", nginx: "206", front: "416"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "an upstream's 206 the front answered 200, beside the case's Range on the lb status",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status", "lb-status-range"}},
+			requests:    []*parityRequest{apiGet, lbStatusRange},
+			nginx:       [][2]string{{"response[0].status", "206"}},
+			front:       [][2]string{{"response[0].status", "200"}},
+			difference:  parityDifference{key: "response[0].status", nginx: "206", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the longer Content-Length of a HEAD of the lb status",
+			parityCase: &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:   []*parityRequest{parityWith(lbStatus, http.MethodHead)},
+			difference: parityDifference{key: "response[0].header.Content-Length", nginx: "41", front: "57"},
+			wantId:     "lb-status-head-length",
+		},
+		{
+			name:        "a HEAD's Content-Length longer by more than the front field",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{parityWith(lbStatus, http.MethodHead)},
+			difference:  parityDifference{key: "response[0].header.Content-Length", nginx: "41", front: "58"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a longer Content-Length on a GET of the lb status, whose body must account for it",
+			parityCase:  &parityCase{name: "unit", tags: []string{"lb-status"}},
+			requests:    []*parityRequest{lbStatus},
+			difference:  parityDifference{key: "response[0].header.Content-Length", nginx: "41", front: "57"},
 			wantUnnamed: true,
 		},
 		{
@@ -245,6 +374,191 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 		{
 			name:        "an upstream attempt count that differs",
 			difference:  parityDifference{key: "upstream.count", nginx: "2", front: "1"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "nginx's always headers on connect's in-process 101",
+			parityCase: &parityCase{name: "unit", tags: []string{"in-process-upgrade"}},
+			front:      [][2]string{{"response[0].status", "101"}},
+			difference: parityDifference{key: "response[0].header.X-Frame-Options", nginx: "SAMEORIGIN", front: parityAbsent},
+			wantId:     "in-process-switch-headers",
+		},
+		{
+			name:        "an always header missing from an in-process 200",
+			parityCase:  &parityCase{name: "unit", tags: []string{"in-process-upgrade"}},
+			front:       [][2]string{{"response[0].status", "200"}},
+			difference:  parityDifference{key: "response[0].header.X-Frame-Options", nginx: "SAMEORIGIN", front: parityAbsent},
+			wantUnnamed: true,
+		},
+		{
+			name:        "another frame option on an in-process 101",
+			parityCase:  &parityCase{name: "unit", tags: []string{"in-process-upgrade"}},
+			front:       [][2]string{{"response[0].status", "101"}},
+			difference:  parityDifference{key: "response[0].header.X-Frame-Options", nginx: "SAMEORIGIN", front: "DENY"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "an always header missing from a forwarded 101",
+			front:       [][2]string{{"response[0].status", "101"}},
+			difference:  parityDifference{key: "response[0].header.X-Frame-Options", nginx: "SAMEORIGIN", front: parityAbsent},
+			wantUnnamed: true,
+		},
+		{
+			name:       "http/1.1 where nginx offers a connect name h2",
+			parityCase: &parityCase{name: "unit", tags: []string{"connect-h2"}},
+			difference: parityDifference{key: "conn[0].tls.alpn", nginx: "h2", front: "http/1.1"},
+			wantId:     "connect-alpn",
+		},
+		{
+			name:       "the HTTP/1.1 response that follows from it",
+			parityCase: &parityCase{name: "unit", tags: []string{"connect-h2"}},
+			difference: parityDifference{key: "response[0].proto", nginx: "HTTP/2.0", front: "HTTP/1.1"},
+			wantId:     "connect-alpn",
+		},
+		{
+			name:        "no ALPN for a connect name",
+			parityCase:  &parityCase{name: "unit", tags: []string{"connect-h2"}},
+			difference:  parityDifference{key: "conn[0].tls.alpn", nginx: "h2", front: ""},
+			wantUnnamed: true,
+		},
+		{
+			name:        "http/1.1 for a name that is not connect's",
+			difference:  parityDifference{key: "conn[0].tls.alpn", nginx: "h2", front: "http/1.1"},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the Trailer request header the front drops",
+			difference: parityDifference{key: "upstream[0].header.Trailer", nginx: "X-Parity-Trailer", front: parityAbsent},
+			wantId:     "trailer-request-header",
+		},
+		{
+			name:        "a Trailer request header the front changed",
+			difference:  parityDifference{key: "upstream[0].header.Trailer", nginx: "X-Parity-Trailer", front: "X-Other"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a Trailer response header the front drops",
+			difference:  parityDifference{key: "response[0].header.Trailer", nginx: "X-Parity-Trailer", front: parityAbsent},
+			wantUnnamed: true,
+		},
+		{
+			name:       "the upstream's answer to a head nginx's packed buffers refuse",
+			parityCase: &parityCase{name: "unit", tags: []string{"header-packing"}},
+			requests:   []*parityRequest{packedHead},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedPackedHead(1, false),
+			difference: parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantId:     "header-buffer-packing",
+		},
+		{
+			name:       "the front's one attempt for it, every header line as sent",
+			parityCase: &parityCase{name: "unit", tags: []string{"header-packing"}},
+			requests:   []*parityRequest{packedHead},
+			nginx:      [][2]string{{"response[0].status", "400"}},
+			front:      forwardedPackedHead(1, false),
+			difference: parityDifference{key: "upstream[0].header.X-Parity-Fill-3", nginx: parityAbsent, front: packedHead.headers[3][1]},
+			wantId:     "header-buffer-packing",
+		},
+		{
+			name:        "a packed head the front forwarded with a line cut short",
+			parityCase:  &parityCase{name: "unit", tags: []string{"header-packing"}},
+			requests:    []*parityRequest{packedHead},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedPackedHead(1, true),
+			difference:  parityDifference{key: "upstream[0].header.X-Parity-Fill-3", nginx: parityAbsent, front: "<cut>"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a packed head the front sent upstream twice",
+			parityCase:  &parityCase{name: "unit", tags: []string{"header-packing"}},
+			requests:    []*parityRequest{packedHead},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedPackedHead(2, false),
+			difference:  parityDifference{key: "upstream.count", nginx: "0", front: "2"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a head refused in a case not written for nginx's packing",
+			requests:    []*parityRequest{packedHead},
+			nginx:       [][2]string{{"response[0].status", "400"}},
+			front:       forwardedPackedHead(1, false),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:         "Go's HTTP/1.0 status line for an HTTP/1.0 request",
+			requests:     []*parityRequest{http10},
+			difference:   parityDifference{key: "response[0].proto", nginx: "HTTP/1.1", front: "HTTP/1.0"},
+			wantId:       "http10-status-line",
+			wantProposed: true,
+		},
+		{
+			name:        "an HTTP/1.0 status line for an HTTP/1.1 request",
+			requests:    []*parityRequest{apiGet},
+			difference:  parityDifference{key: "response[0].proto", nginx: "HTTP/1.1", front: "HTTP/1.0"},
+			wantUnnamed: true,
+		},
+		{
+			name:         "Go's AES-128-GCM where OpenSSL prefers AES-256-GCM, in TLS 1.3",
+			parityCase:   &parityCase{name: "unit", tags: []string{"tls-suites"}},
+			difference:   parityDifference{key: "conn[0].tls.cipher", nginx: "TLS_AES_256_GCM_SHA384", front: "TLS_AES_128_GCM_SHA256"},
+			wantId:       "tls-suite-choice",
+			wantProposed: true,
+		},
+		{
+			name:         "the same choice in TLS 1.2",
+			parityCase:   &parityCase{name: "unit", tags: []string{"tls-suites"}},
+			difference:   parityDifference{key: "conn[0].tls.cipher", nginx: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", front: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"},
+			wantId:       "tls-suite-choice",
+			wantProposed: true,
+		},
+		{
+			name:        "a TLS 1.2 suite outside nginx's EECDH+AESGCM",
+			parityCase:  &parityCase{name: "unit", tags: []string{"tls-suites"}},
+			difference:  parityDifference{key: "conn[0].tls.cipher", nginx: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", front: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "Go's suite choice in a case not written for it",
+			difference:  parityDifference{key: "conn[0].tls.cipher", nginx: "TLS_AES_256_GCM_SHA384", front: "TLS_AES_128_GCM_SHA256"},
+			wantUnnamed: true,
+		},
+		{
+			name:         "the default certificate for an SNI over 255 bytes, routed by Host",
+			parityCase:   &parityCase{name: "unit", tags: []string{"long-sni"}},
+			requests:     []*parityRequest{longSni},
+			nginx:        longSniRefused,
+			front:        longSniRouted(parityLbName, parityApiName),
+			difference:   parityDifference{key: "response[0].status", nginx: parityAbsent, front: "200"},
+			wantId:       "long-sni-default-certificate",
+			wantProposed: true,
+		},
+		{
+			name:         "the upstream attempt it makes",
+			parityCase:   &parityCase{name: "unit", tags: []string{"long-sni"}},
+			requests:     []*parityRequest{longSni},
+			nginx:        longSniRefused,
+			front:        longSniRouted(parityLbName, parityApiName),
+			difference:   parityDifference{key: "upstream[0].host", nginx: parityAbsent, front: parityApiName},
+			wantId:       "long-sni-default-certificate",
+			wantProposed: true,
+		},
+		{
+			name:        "a long SNI the front answered with another certificate",
+			parityCase:  &parityCase{name: "unit", tags: []string{"long-sni"}},
+			requests:    []*parityRequest{longSni},
+			nginx:       longSniRefused,
+			front:       longSniRouted(parityApiName, parityApiName),
+			difference:  parityDifference{key: "response[0].status", nginx: parityAbsent, front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a long SNI request that reached an upstream under another Host",
+			parityCase:  &parityCase{name: "unit", tags: []string{"long-sni"}},
+			requests:    []*parityRequest{longSni},
+			nginx:       longSniRefused,
+			front:       longSniRouted(parityLbName, parityWebName),
+			difference:  parityDifference{key: "upstream[0].host", nginx: parityAbsent, front: parityWebName},
 			wantUnnamed: true,
 		},
 		{

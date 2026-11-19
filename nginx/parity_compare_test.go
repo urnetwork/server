@@ -14,6 +14,7 @@ package nginx_test
 import (
 	"encoding/json"
 	"maps"
+	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -142,6 +143,21 @@ func (self *parityCheck) sequenceRequest(sequence string) *parityRequest {
 	return self.front.sequenceRequests[index]
 }
 
+// Whether a response's request was for the lb status route on an lb name,
+// or on no name, which reaches the default server, an lb name's.
+func (self *parityCheck) isLbStatusRequest(sequence string) bool {
+	request := self.sequenceRequest(sequence)
+	if request == nil || request.target != parityLbPrefix+"/status" {
+		return false
+	}
+	switch request.host {
+	case "", parityLbName, parityLbOtherName:
+		return true
+	default:
+		return false
+	}
+}
+
 // Whether both sides answered a request themselves, with the same status:
 // nginx's or the front's own response, not an upstream's.
 func (self *parityCheck) bothOwnResponses(sequence string) bool {
@@ -263,7 +279,7 @@ var parityAcceptances = []*parityAcceptance{
 		source: "LBALT-IMPL §2.6: the front's lb status json adds \"front\":\"lbalt\" (s-monitor parity decision)",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			sequence, field, ok := parityResponseKey(difference.key)
-			if !ok || !check.hasTag("lb-status") {
+			if !ok || !check.hasTag("lb-status") || !check.isLbStatusRequest(sequence) {
 				return false
 			}
 			if !parityLbStatusBodiesMatch(parityResponseValue(check.nginx, sequence, "body"), parityResponseValue(check.front, sequence, "body")) {
@@ -280,8 +296,9 @@ var parityAcceptances = []*parityAcceptance{
 		id:     "lb-status-static-file",
 		source: "s-http parity decision: the lb status json has no Last-Modified, ETag or Accept-Ranges",
 		match: func(check *parityCheck, difference *parityDifference) bool {
-			_, field, ok := parityResponseKey(difference.key)
-			return ok && check.hasTag("lb-status") && slices.Contains(parityStaticFileFields, field) && difference.front == parityAbsent
+			sequence, field, ok := parityResponseKey(difference.key)
+			return ok && check.hasTag("lb-status") && check.isLbStatusRequest(sequence) &&
+				slices.Contains(parityStaticFileFields, field) && difference.front == parityAbsent
 		},
 	},
 	{
@@ -289,7 +306,7 @@ var parityAcceptances = []*parityAcceptance{
 		source: "s-http parity decision: Range and conditional requests on the lb status get 200, not nginx static's 206 or 304",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			sequence, _, ok := parityResponseKey(difference.key)
-			if !ok || !check.hasTag("lb-status-range") {
+			if !ok || !check.hasTag("lb-status-range") || !check.isLbStatusRequest(sequence) {
 				return false
 			}
 			nginxStatus := parityResponseValue(check.nginx, sequence, "status")
@@ -384,8 +401,8 @@ var parityAcceptances = []*parityAcceptance{
 		id:     "lb-status-head-length",
 		source: "LBALT-IMPL §2.6: the front's lb status json adds \"front\":\"lbalt\", which a HEAD's Content-Length shows",
 		match: func(check *parityCheck, difference *parityDifference) bool {
-			_, field, ok := parityResponseKey(difference.key)
-			if !ok || !check.hasTag("lb-status") || check.parityCase.request == nil || check.parityCase.request.method != "HEAD" {
+			sequence, field, ok := parityResponseKey(difference.key)
+			if !ok || !check.hasTag("lb-status") || !check.isLbStatusRequest(sequence) || check.sequenceRequest(sequence).method != http.MethodHead {
 				return false
 			}
 			nginxLength, nginxErr := strconv.Atoi(strings.TrimPrefix(difference.nginx, "length "))
@@ -409,9 +426,24 @@ var parityAcceptances = []*parityAcceptance{
 			if !check.hasTag("header-packing") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
 				return false
 			}
-			_, _, isResponse := parityResponseKey(difference.key)
-			_, _, isUpstream := parityUpstreamKey(difference.key)
-			return isResponse || isUpstream || difference.key == "upstream.count"
+			if _, _, isResponse := parityResponseKey(difference.key); isResponse {
+				return true
+			}
+			if _, _, isUpstream := parityUpstreamKey(difference.key); !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// what the front forwarded in nginx's place: the one request,
+			// every header line of its own unchanged
+			request := check.sequenceRequest("0")
+			if request == nil || parityValue(check.front, "upstream.count") != "1" {
+				return false
+			}
+			for _, headerLine := range request.headers {
+				if parityValue(check.front, "upstream[0].header."+http.CanonicalHeaderKey(headerLine[0])) != headerLine[1] {
+					return false
+				}
+			}
+			return true
 		},
 	},
 
@@ -433,9 +465,12 @@ var parityAcceptances = []*parityAcceptance{
 		source:   "proposed: Go's server answers an HTTP/1.0 request with an HTTP/1.0 status line, where nginx's is HTTP/1.1",
 		proposed: true,
 		match: func(check *parityCheck, difference *parityDifference) bool {
-			_, field, ok := parityResponseKey(difference.key)
-			return ok && field == "proto" && difference.nginx == "HTTP/1.1" && difference.front == "HTTP/1.0" &&
-				check.parityCase.request != nil && check.parityCase.request.proto == "HTTP/1.0"
+			sequence, field, ok := parityResponseKey(difference.key)
+			if !ok || field != "proto" || difference.nginx != "HTTP/1.1" || difference.front != "HTTP/1.0" {
+				return false
+			}
+			request := check.sequenceRequest(sequence)
+			return request != nil && request.proto == "HTTP/1.0"
 		},
 	},
 	{
@@ -461,8 +496,17 @@ var parityAcceptances = []*parityAcceptance{
 			}
 			_, _, isConn := parityConnKey(difference.key)
 			_, _, isResponse := parityResponseKey(difference.key)
-			_, _, isUpstream := parityUpstreamKey(difference.key)
-			return isConn || isResponse || isUpstream || difference.key == "upstream.count"
+			if isConn || isResponse {
+				return true
+			}
+			if _, _, isUpstream := parityUpstreamKey(difference.key); !isUpstream && difference.key != "upstream.count" {
+				return false
+			}
+			// routed by Host: the one request reached an upstream as sent
+			request := check.sequenceRequest("0")
+			return request != nil && parityValue(check.front, "upstream.count") == "1" &&
+				parityValue(check.front, "upstream[0].host") == request.host &&
+				parityValue(check.front, "upstream[0].uri") == request.target
 		},
 	},
 	{
