@@ -11,8 +11,10 @@ package nginx_test
 // The ordinary client comes from an excluded subnet of the fixture's
 // interface, so the tight limits there apply only to the limit cases, each
 // from an address of its own. The concurrent cases, which wait out
-// timeouts, run in the background beside the rest; none of them uses a
-// service or an address another case's result depends on.
+// timeouts, run in the background beside the rest. They come from the
+// ordinary clients and stay off pool, whose least_conn choices a case
+// compares: api's blocks are compared only on its per-block routes, and
+// mcp's ring doesn't depend on load.
 
 import (
 	"bufio"
@@ -649,10 +651,19 @@ func parityCorpus() []*parityCase {
 
 	return []*parityCase{
 		// timeouts, in the background: nginx's client_body_timeout is 15 s,
-		// the artifact route's override 20 s, and client_header_timeout 15 s
+		// the artifact route's override 20 s, client_header_timeout 15 s, and
+		// the proxy timeouts 30 s, or 60 s on streamed routes
 		{
 			name:       "timeout/upload-progressing-past-the-idle-timeout",
-			run:        paritySendPacedBody(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, parityBody(4000), false), 4, settings.ProgressingUploadPause),
+			run:        paritySendPacedBody(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, parityBody(4000), false), settings.ProgressingUploadPieces, settings.ProgressingUploadPause),
+			concurrent: true,
+		},
+		// streamed as it arrives, so the proxy timeouts run during it: a
+		// whole-request bound, or a read timeout armed before the body is
+		// sent, ends it early
+		{
+			name:       "timeout/streamed-upload-progressing-past-the-idle-timeout",
+			run:        paritySendPacedBody(parityWithBody(parityGet(parityMcpName, parityMcpName, "/mcp"), http.MethodPost, parityBody(8000), false), settings.StreamedUploadPieces, settings.StreamedUploadPause),
 			concurrent: true,
 		},
 		{

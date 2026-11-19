@@ -16,7 +16,8 @@ package nginx_test
 //	LBALT_PARITY_FIXTURE_OUT=<server>/nginx/testdata/parity go test -count=1 -run '^TestLbAltParityFixture$' ./warpctl
 //
 // Running it (opt-in; it needs Docker and the pinned image, and takes about
-// a minute after the build):
+// a minute and a half after the build, the longest case being a streamed
+// upload that outlasts its route's 60 s proxy timeouts):
 //
 //	export GOFLAGS=-trimpath GOCACHE=<the shared cache>
 //	NGINX_PARITY=1 go test -count=1 -v -timeout 30m -run '^TestNginxParity$' ./nginx
@@ -83,10 +84,19 @@ type parityHarnessSettings struct {
 	StopTimeout time.Duration
 	// the most bytes of nginx's output kept for a failure report
 	NginxOutputBytes int
-	// the pause between the pieces of an upload that keeps progressing:
-	// under nginx's client_body_timeout of 15 s, while the upload as a
-	// whole outlasts it
+	// the pause between the pieces of an upload to a buffered route that
+	// keeps progressing: under nginx's client_body_timeout of 15 s, while
+	// the upload as a whole outlasts it and the proxy timeouts of 30 s
 	ProgressingUploadPause time.Duration
+	// the pieces of that upload
+	ProgressingUploadPieces int
+	// the pause between the pieces of an upload to a streamed route that
+	// keeps progressing: under client_body_timeout, while the upload as a
+	// whole outlasts the route's proxy timeouts of 60 s, which nginx arms per
+	// write to the upstream and, for reads, only once the body is sent
+	StreamedUploadPause time.Duration
+	// the pieces of that upload
+	StreamedUploadPieces int
 	// a stall past the server-wide client_body_timeout (15 s) and within the
 	// fixture's artifact route override (20 s)
 	StallWithinOverride time.Duration
@@ -123,11 +133,14 @@ func defaultParityHarnessSettings() *parityHarnessSettings {
 		StopTimeout:        10 * time.Second,
 		NginxOutputBytes:   256 * 1024,
 
-		ProgressingUploadPause: 6 * time.Second,
-		StallWithinOverride:    17 * time.Second,
-		StallPastOverride:      25 * time.Second,
-		HeaderStall:            20 * time.Second,
-		HeaderPause:            10 * time.Second,
+		ProgressingUploadPause:  9 * time.Second,
+		ProgressingUploadPieces: 5,
+		StreamedUploadPause:     10 * time.Second,
+		StreamedUploadPieces:    8,
+		StallWithinOverride:     17 * time.Second,
+		StallPastOverride:       25 * time.Second,
+		HeaderStall:             20 * time.Second,
+		HeaderPause:             10 * time.Second,
 
 		UpstreamMaxBodyBytes: 32 * 1024 * 1024,
 		CertificateBackdate:  1 * time.Hour,

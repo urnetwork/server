@@ -794,9 +794,38 @@ func TestParityTimeoutCasesStraddleTheirTimeouts(t *testing.T) {
 		t.Errorf("the header pause (%s) and stall (%s) don't straddle client_header_timeout (%s)", settings.HeaderPause, settings.HeaderStall, clientHeaderTimeout)
 	}
 
+	// a progressing upload outlasts its route's proxy timeouts, pausing
+	// under client_body_timeout between pieces
 	clientBodyTimeout := frontSettings.Body.ClientBodyTimeout
-	if clientBodyTimeout <= settings.ProgressingUploadPause {
-		t.Errorf("the progressing upload's pause (%s) is not under client_body_timeout (%s)", settings.ProgressingUploadPause, clientBodyTimeout)
+	uploads := []struct {
+		name          string
+		pause         time.Duration
+		pieces        int
+		proxyTimeouts []time.Duration
+	}{
+		{
+			name:          "the buffered upload",
+			pause:         settings.ProgressingUploadPause,
+			pieces:        settings.ProgressingUploadPieces,
+			proxyTimeouts: []time.Duration{frontSettings.Forward.ProxyReadTimeout, frontSettings.Forward.ProxySendTimeout},
+		},
+		{
+			name:          "the streamed upload",
+			pause:         settings.StreamedUploadPause,
+			pieces:        settings.StreamedUploadPieces,
+			proxyTimeouts: []time.Duration{frontSettings.Forward.StreamTimeout},
+		},
+	}
+	for _, upload := range uploads {
+		if clientBodyTimeout <= upload.pause {
+			t.Errorf("%s's pause (%s) is not under client_body_timeout (%s)", upload.name, upload.pause, clientBodyTimeout)
+		}
+		total := time.Duration(upload.pieces-1) * upload.pause
+		for _, proxyTimeout := range upload.proxyTimeouts {
+			if total <= proxyTimeout {
+				t.Errorf("%s (%s in all) does not outlast its proxy timeout (%s)", upload.name, total, proxyTimeout)
+			}
+		}
 	}
 	routeFile, err := os.ReadFile(filepath.Join(parityFixtureDir, parityRouteFileName))
 	if err != nil {
