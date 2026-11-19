@@ -171,14 +171,15 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 			server.Raise(err)
 			return signed, claims
 		}
-		// each code from its own address: a code's creation counts as a sign-in
-		// attempt of its address, which only a verify from that address clears
+		// each code from its own address block: a code's creation counts as a
+		// sign-in attempt of its address's /29 (server.ClientIpHashForAddr),
+		// which only a verify from it clears
 		codes := 0
 		verify := func(name string, authorization string) *session.ByJwt {
 			t.Helper()
 			codes += 1
 			creator := session.Testing_CreateClientSession(ctx, nil)
-			creator.ClientAddress = fmt.Sprintf("198.51.100.%d:443", codes)
+			creator.ClientAddress = fmt.Sprintf("198.51.100.%d:443", 8*codes+1)
 			code, err := model.AuthVerifyCreateCode(model.AuthVerifyCreateCodeArgs{UserAuth: userAuth}, creator)
 			server.Raise(err)
 			var verified model.AuthVerifyResult
