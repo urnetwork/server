@@ -442,6 +442,11 @@ func (self *upstreamGroup) attempt(ctx context.Context, block *upstreamBlock, re
 // 101 becomes a tunnel. A body the block cuts short, or the client stops
 // taking, aborts the response.
 func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http.ResponseController, block *upstreamBlock, exchange *upstreamExchange, options *forwardOptions) {
+	// the block that answered labels the request's metrics and access log
+	// line (D17)
+	if recorder, ok := w.(upstreamBlockRecorder); ok {
+		recorder.recordUpstreamBlock(block.name)
+	}
 	response := exchange.response
 	if response.StatusCode == http.StatusSwitchingProtocols {
 		self.tunnel(w, responseController, block, exchange, options)

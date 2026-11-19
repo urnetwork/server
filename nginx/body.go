@@ -342,6 +342,8 @@ func (self *bodyStore) close() error {
 type storedBody struct {
 	store               *bodyStore
 	memoryReservedBytes int64
+	// runs the release once, and holds every other call until it is done
+	releaseOnce sync.Once
 
 	stateLock          sync.Mutex
 	prefix             []byte
@@ -349,15 +351,20 @@ type storedBody struct {
 	fileSize           int64
 	spillReservedBytes int64
 	spillFileReserved  bool
-	released           bool
+	// closed when the spill file's creation has ended, with the file
+	// recorded or closed; nil until the creation begins
+	spillFileCreateDone chan struct{}
+	released            bool
 }
 
 // Appends a chunk read from the client: the memory prefix first, then the
 // spill file, under the body limit and the spill caps. Only the read that
 // stores the body calls it. The file is created and written outside the
-// lock; a release that comes in between closes the file, so the write fails,
-// and every reservation is recorded under the lock first, so the release
-// returns it.
+// lock, and every reservation is recorded under the lock first, so a release
+// returns it. A release that comes in while the file is being created can't
+// see the file, so it waits for the creation to end, and the append, finding
+// the body released, closes the file; one that comes in later closes the
+// file itself, so the write fails.
 func (self *storedBody) append(chunk []byte) *bodyRefusal {
 	closedRefusal := &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalClosed}
 	file, spillChunk, refusal := func() (bodySpillFile, []byte, *bodyRefusal) {
@@ -395,17 +402,30 @@ func (self *storedBody) append(chunk []byte) *bodyRefusal {
 		if refusal := self.store.reserveSpillFile(); refusal != nil {
 			return refusal
 		}
-		if !recordReservation(func() { self.spillFileReserved = true }) {
+		spillFileCreateDone := make(chan struct{})
+		if !recordReservation(func() {
+			self.spillFileReserved = true
+			self.spillFileCreateDone = spillFileCreateDone
+		}) {
 			self.store.unreserve(self, 0, 0, 1)
 			return closedRefusal
 		}
-		createdFile, err := self.store.createSpillFile()
-		if err != nil {
-			return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalSpillError}
-		}
-		if !recordReservation(func() { self.file = createdFile }) {
-			createdFile.Close()
-			return closedRefusal
+		createdFile, createRefusal := func() (bodySpillFile, *bodyRefusal) {
+			// ends the creation on every exit, a panic included, so a
+			// release never waits for good
+			defer close(spillFileCreateDone)
+			createdFile, err := self.store.createSpillFile()
+			if err != nil {
+				return nil, &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalSpillError}
+			}
+			if !recordReservation(func() { self.file = createdFile }) {
+				createdFile.Close()
+				return nil, closedRefusal
+			}
+			return createdFile, nil
+		}()
+		if createRefusal != nil {
+			return createRefusal
 		}
 		file = createdFile
 	}
@@ -468,31 +488,36 @@ func (self *storedBody) newReader() io.Reader {
 }
 
 // Releases the body's memory, file and reservations. Safe to call more than
-// once, and from any goroutine.
+// once, and from any goroutine. Every call returns only once the body is
+// released, whichever call released it, and the release waits for a spill
+// file still being created, which its append closes. So the store's close,
+// which can find a request's own release or append under way, returns with
+// every spill file the body created closed, and each counted until then.
 func (self *storedBody) release() {
-	file, spillReservedBytes, spillFiles, released := func() (bodySpillFile, int64, int, bool) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.released {
-			return nil, 0, 0, true
+	self.releaseOnce.Do(func() {
+		file, spillFileCreateDone, spillReservedBytes, spillFiles := func() (bodySpillFile, chan struct{}, int64, int) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.released = true
+			file := self.file
+			self.file = nil
+			self.prefix = nil
+			spillFiles := 0
+			if self.spillFileReserved {
+				spillFiles = 1
+			}
+			return file, self.spillFileCreateDone, self.spillReservedBytes, spillFiles
+		}()
+		if spillFileCreateDone != nil {
+			// a file created too late for the release to see is closed by
+			// its append, which finds the body released
+			<-spillFileCreateDone
 		}
-		self.released = true
-		file := self.file
-		self.file = nil
-		self.prefix = nil
-		spillFiles := 0
-		if self.spillFileReserved {
-			spillFiles = 1
+		if file != nil {
+			file.Close()
 		}
-		return file, self.spillReservedBytes, spillFiles, false
-	}()
-	if released {
-		return
-	}
-	if file != nil {
-		file.Close()
-	}
-	self.store.unreserve(self, self.memoryReservedBytes, spillReservedBytes, spillFiles)
+		self.store.unreserve(self, self.memoryReservedBytes, spillReservedBytes, spillFiles)
+	})
 }
 
 // Reads a stored body from its start. Not safe for concurrent use; each
