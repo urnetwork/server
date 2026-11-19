@@ -1275,7 +1275,7 @@ bash -c 'cd server && export WARP_HOME=<urnetwork home> GOCACHE=$WARP_HOME/.goca
 bash -c '<as above> && cd connect && WARP_TEST_ENV_FAIL_FAST=1 go test -count=1 -timeout 40m -v -run "TestConnectPerformance(Carriers|NoContract)" .'
 #   carriers ~3.2 min, no-contract ~40 s
 ```
-`-run "LbAlt"` also selects the four non-DB route-file tests and `TestConnectPerformanceCarriersLbAlt`; `TestConnectPerformanceCarriersNginx` needs warp/lb's `make nginx_local` build (`NGINX_UDP_PROXY_V2_BINARY` or `../warp/lb/build/nginx-local`) and skips without it.
+`-run "LbAlt"` also selects the four non-DB route-file tests and `TestConnectPerformanceCarriersLbAlt`. For `TestConnectPerformanceCarriersNginx`, run `make nginx_perf` in `warp/lb`. The test finds `../warp/lb/build/nginx-perf/sbin/nginx` or uses `NGINX_UDP_PROXY_V2_BINARY` to select a binary with the HTTP TLS and stream modules.
 
 vendored quic-go, from its own module and without `-trimpath`, under which six upstream http3 tests fail:
 ```
@@ -1369,7 +1369,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 
 **Open design items.**
 - D22 (b): a QUIC flow moved to a sibling socket reconnects only after its idle timeout, about 20 s. Started 2026-11-19 (owner).
-- `drainConnect` still waits for `exchange.Drain`, whose DrainAllTimeout (60 m) equals the stop grace, so an exchange drain run to its deadline lets SIGKILL land before the forced close; this predates lb_alt. Being fixed (owner, 2026-11-19).
+- Fixed after review. The front and resident drains share the 58-minute budget. At expiry `drainConnect` force-closes public connections and cancels serving, leaving the two-minute stop reserve for teardown. `TestFrontDrainDeadlineEndsServingWhileExchangeDrains` exercises a resident drain still in progress at that deadline.
 - D6's amendment that upstream targets named by an older route file stay until its last block drains has no code of its own: the targets are the blocks' stable external ports.
 - The 30 s chain refresh needs the committed generation in memory (`lbAltState.chainServicePorts`), so a worker restarted since its last deploy heals no chain until it deploys again.
 - A lost QUIC socket is re-created only once its run has closed, which waits up to ForcedCloseTimeout (30 s) for its api connections' h3 servers.
@@ -1389,7 +1389,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The startup orphan drain reads `routingTable.ipv6` on a goroutine while Run's routing reconcile can set it, and `run.go`'s `parseRoutingTable` panics on an lb interface with more than one global IPv6 address.
 
 **Smaller items.**
-- The perf baseline's nginx is warp/lb's `nginx_local` build, `--with-stream` only, so its H1 hop is plaintext.
+- The original nginx benchmark used a plaintext H1 hop. The `nginx_perf` baseline now terminates verified TLS for both WebSocket and H1+.
 - least_conn after held requests complete is not compared: the front lowers its count after writing to the client, so the next pick races the decrement.
 - Cloudflare (`warpctl/dns_cloudflare.go`) gets no stale-record report; the `alt.*` names are on the route53 primary domain.
 - os.File.Close doesn't wait for a write in flight, so a release racing a spill write holds a descriptor until that write returns.

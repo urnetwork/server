@@ -169,11 +169,13 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 			self.setReadDeadline(time.Unix(1, 0))
 		}
 	}
-	self.readBytes += int64(n)
-	if 0 < self.maxBytes && self.maxBytes < self.readBytes {
+	if remaining := self.maxBytes - self.readBytes; 0 < self.maxBytes && remaining < int64(n) {
 		self.fail(&bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
-		return n, io.ErrUnexpectedEOF
+		self.readBytes = self.maxBytes
+		// io.Copy writes the returned bytes even when the read fails.
+		return int(remaining), io.ErrUnexpectedEOF
 	}
+	self.readBytes += int64(n)
 	if err == io.EOF && 0 <= self.declaredLength && self.readBytes < self.declaredLength {
 		// a body that ended short of its declared length, which the vendored
 		// http3 reports as the stream's end (bodyStore.read): a client-side

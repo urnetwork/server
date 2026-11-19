@@ -118,6 +118,36 @@ func TestLimitBucketDecidesAsNginxLimitReq(t *testing.T) {
 	}
 }
 
+// A rate of one per minute becomes 16 milli-requests per second in nginx.
+// Frequent refusals and a sweep must preserve the last admitted request's time.
+func TestLimitSlowRateMatchesNginxThroughRefusalsAndSweep(t *testing.T) {
+	for _, route := range []bool{false, true} {
+		limits, clock := newTestFrontLimits(t, DefaultLimitSettings())
+		limitInterface := newTestLimitInterface("eth1", 1, 0, 0)
+		var zone *limitRouteZone
+		if route {
+			zone = newLimitRouteZone("api", &RouteRateLimitRule{Path: "/control", RequestsPerMinute: 1})
+		}
+		reference := &nginxLimitReqNode{}
+		addr := netip.MustParseAddr("192.0.2.11")
+		var lastMs int64
+		for _, ms := range []int64{0, 59999, 60000, 62499, 62500, 62499 + 62500, 125000} {
+			clock.advance(time.Duration(ms-lastMs) * time.Millisecond)
+			lastMs = ms
+			if ms == 60000 {
+				limits.sweep()
+			}
+			release, outcome := limits.acquireRequest(limitInterface, addr, zone)
+			if release != nil {
+				release()
+			}
+			if want := reference.lookup(1, 0, ms); (outcome == limitOutcomeAdmitted) != want {
+				t.Errorf("route %t at %d ms: got %s, nginx admitted %t", route, ms, outcome, want)
+			}
+		}
+	}
+}
+
 // With main's values, 450 r/m and burst 150, a new address gets burst+1
 // requests at once, then one per 133.3 ms (450 per minute), as nginx's
 // nodelay does.
@@ -423,6 +453,84 @@ func TestLimitStateCapEvictsTheLeastRecentlyUsedIdleState(t *testing.T) {
 		t.Fatalf("a new address once A is idle = %s", outcome)
 	}
 	releaseB()
+}
+
+// A maintenance pass yields the admission lock with work still pending.
+func TestLimitSweepBoundsEachAdmissionLockHold(t *testing.T) {
+	settings := DefaultLimitSettings()
+	limits, clock := newTestFrontLimits(t, settings)
+	limitInterface := newTestLimitInterface("eth1", 60, 0, 1)
+	addr := netip.MustParseAddr("2001:db8::1")
+	const addressCount = 2048
+	for range addressCount {
+		release, outcome := limits.acquireRequest(limitInterface, addr, nil)
+		if outcome != limitOutcomeAdmitted {
+			t.Fatal(outcome)
+		}
+		release()
+		addr = addr.Next()
+	}
+
+	clock.advance(2 * time.Minute)
+	limits.sweep()
+	remaining := limits.stateCount()
+	if want := addressCount - settings.PruneBatchSize; remaining != want {
+		t.Fatalf("first sweep left %d of %d addresses, want %d", remaining, addressCount, want)
+	}
+	release, outcome := limits.acquireQuicConnection(limitInterface, addr)
+	if outcome != limitOutcomeAdmitted {
+		t.Fatal(outcome)
+	}
+	defer release()
+	for limits.stateCount() > 1 {
+		count := limits.stateCount()
+		limits.sweep()
+		if limits.stateCount() >= count {
+			t.Fatal("sweep failed to advance past the previous batch")
+		}
+	}
+	if _, outcome := limits.acquireQuicConnection(limitInterface, addr); outcome != limitOutcomeQuicRefused {
+		t.Fatalf("sweep forgot the active connection: %s", outcome)
+	}
+}
+
+// An expired address with an outstanding charge counts against the batch.
+// Taking the next address out of idle order must preserve the rest of the walk.
+func TestLimitSweepResumesPastDepletedAndRetouchedAddresses(t *testing.T) {
+	settings := DefaultLimitSettings()
+	settings.PruneBatchSize = 2
+	limits, clock := newTestFrontLimits(t, settings)
+	slow := newTestLimitInterface("slow", 1, 0, 1)
+	fast := newTestLimitInterface("fast", 60, 0, 1)
+	addr := netip.MustParseAddr("192.0.2.1")
+	var retouched netip.Addr
+	for i, limitInterface := range []*limitInterface{slow, slow, fast, fast, fast} {
+		release, outcome := limits.acquireRequest(limitInterface, addr, nil)
+		if outcome != limitOutcomeAdmitted {
+			t.Fatal(outcome)
+		}
+		release()
+		if i == 2 {
+			retouched = addr
+		}
+		addr = addr.Next()
+	}
+	clock.advance(61 * time.Second)
+	if more := limits.sweep(); !more || limits.stateCount() != 5 {
+		t.Fatalf("first batch should retain both depleted buckets, got %d states, more %t", limits.stateCount(), more)
+	}
+	release, outcome := limits.acquireQuicConnection(fast, retouched)
+	if outcome != limitOutcomeAdmitted {
+		t.Fatal(outcome)
+	}
+	defer release()
+	if more := limits.sweep(); more || limits.stateCount() != 3 {
+		t.Fatalf("second batch should free the two remaining idle addresses, got %d states, more %t", limits.stateCount(), more)
+	}
+	clock.advance(2 * time.Second)
+	if more := limits.sweep(); more || limits.stateCount() != 1 {
+		t.Fatalf("after refill only the active connection should remain, got %d states, more %t", limits.stateCount(), more)
+	}
 }
 
 // The sweep drops a state once it has been idle for StateIdleTimeout with

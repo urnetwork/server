@@ -8,6 +8,7 @@ package connect
 // None of it is production API.
 
 import (
+	"crypto/x509"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -25,6 +26,14 @@ func Testing_NewLbAltFront(t testing.TB) *TestingLbAltFront {
 	return &TestingLbAltFront{
 		env: newTestLbAltEnv(t, nil),
 	}
+}
+
+// Generates the nginx baseline's leaf, private key and verifying roots.
+func Testing_LbAltPerfCertificate(t testing.TB, serverName string) ([]byte, []byte, *x509.CertPool) {
+	t.Helper()
+	identity := newTestFrontIdentity(t, []string{serverName})
+	certificate, key := identity.pem(t)
+	return certificate, key, identity.roots
 }
 
 // How a client reaches the front's IPv4 interface address on a carrier mode,

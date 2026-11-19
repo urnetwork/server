@@ -37,6 +37,7 @@ package nginx
 import (
 	"container/list"
 	"context"
+	"math"
 	"net/netip"
 	"sync"
 	"time"
@@ -49,9 +50,9 @@ import (
 type limitInterface struct {
 	// limit state is keyed by it
 	name string
-	// the shared request zone's rate per second; non-positive means no
+	// the shared request zone's rate in milli-requests per second; non-positive means no
 	// request limit, as an absent limit_req does
-	requestsPerSecond float64
+	milliRequestsPerSecond float64
 	// requests the shared zone admits above its rate at once, nodelay
 	burst int
 	// the most requests in flight per address, and separately the most QUIC
@@ -74,11 +75,11 @@ func newLimitInterface(routeInterface *RouteInterface) *limitInterface {
 		excludePrefixes = append(excludePrefixes, prefix.Masked())
 	}
 	return &limitInterface{
-		name:              routeInterface.Name,
-		requestsPerSecond: routeInterface.RateLimit.RequestsPerMinute / 60,
-		burst:             routeInterface.RateLimit.Burst,
-		netConnections:    routeInterface.RateLimit.NetConnections,
-		excludePrefixes:   excludePrefixes,
+		name:                   routeInterface.Name,
+		milliRequestsPerSecond: limitMilliRequestsPerSecond(routeInterface.RateLimit.RequestsPerMinute),
+		burst:                  routeInterface.RateLimit.Burst,
+		netConnections:         routeInterface.RateLimit.NetConnections,
+		excludePrefixes:        excludePrefixes,
 	}
 }
 
@@ -101,17 +102,17 @@ type limitRouteZone struct {
 	// service-relative, as the route file writes it
 	path string
 	// always positive: nginx refuses a zero rate
-	requestsPerSecond float64
-	burst             int
+	milliRequestsPerSecond float64
+	burst                  int
 }
 
 // The route zone of one route file rule.
 func newLimitRouteZone(serviceName string, routeRateLimit *RouteRateLimitRule) *limitRouteZone {
 	return &limitRouteZone{
-		serviceName:       serviceName,
-		path:              routeRateLimit.Path,
-		requestsPerSecond: routeRateLimit.RequestsPerMinute / 60,
-		burst:             routeRateLimit.Burst,
+		serviceName:            serviceName,
+		path:                   routeRateLimit.Path,
+		milliRequestsPerSecond: limitMilliRequestsPerSecond(routeRateLimit.RequestsPerMinute),
+		burst:                  routeRateLimit.Burst,
 	}
 }
 
@@ -152,61 +153,42 @@ func (self limitOutcome) String() string {
 	}
 }
 
-// A token bucket with nginx's `burst=N nodelay` semantics: burst+1 tokens,
-// refilled continuously at the rate, one taken per admitted request. A new
-// bucket is full, as a new nginx node starts with no excess. Guarded by the
-// limiter's stateLock.
+// nginx truncates configured rates to milli-requests per second. The route
+// schema also accepts fractional rates unavailable in nginx configuration.
+func limitMilliRequestsPerSecond(requestsPerMinute float64) float64 {
+	rate := requestsPerMinute * 1000 / 60
+	if math.Trunc(requestsPerMinute) == requestsPerMinute {
+		return math.Floor(rate)
+	}
+	return rate
+}
+
+// Charges and decay are in whole milli-requests, as in ngx_http_limit_req.
+// Only an admission commits the accumulated decay and its timestamp.
 type limitBucket struct {
-	tokens     float64
-	updateTime time.Time
+	charged float64
+	lastMs  int64
 }
 
-// A full bucket.
-func newLimitBucket(burst int, now time.Time) *limitBucket {
-	return &limitBucket{
-		tokens:     limitBucketCapacity(burst),
-		updateTime: now,
+func (self *limitBucket) remainingWithLock(rate float64, nowMs int64) float64 {
+	elapsedMs := nowMs - self.lastMs
+	if elapsedMs <= 0 || self.charged == 0 {
+		return self.charged
 	}
+	return max(0, self.charged-math.Floor(rate*float64(elapsedMs)/1000))
 }
 
-// The tokens a bucket holds when full: a rate with no burst still admits one
-// request per refill interval, which is nginx's excess of zero.
-func limitBucketCapacity(burst int) float64 {
-	return float64(max(burst, 0) + 1)
-}
-
-// Refills the bucket for the time since its last update. A clock that went
-// backwards adds nothing.
-func (self *limitBucket) fillWithLock(requestsPerSecond float64, burst int, now time.Time) {
-	if requestsPerSecond <= 0 {
-		self.tokens = limitBucketCapacity(burst)
-		self.updateTime = now
-		return
-	}
-	if elapsed := now.Sub(self.updateTime); 0 < elapsed {
-		self.tokens = min(limitBucketCapacity(burst), self.tokens+elapsed.Seconds()*requestsPerSecond)
-	}
-	self.updateTime = now
-}
-
-// Takes one token, or false, leaving the bucket as it was, when it holds
-// less than one. A non-positive rate always admits.
-func (self *limitBucket) takeWithLock(requestsPerSecond float64, burst int, now time.Time) bool {
-	if requestsPerSecond <= 0 {
+func (self *limitBucket) takeWithLock(rate float64, burst int, nowMs int64) bool {
+	if rate <= 0 {
 		return true
 	}
-	self.fillWithLock(requestsPerSecond, burst, now)
-	if self.tokens < 1 {
+	remaining := self.remainingWithLock(rate, nowMs)
+	if remaining > float64(burst)*1000 {
 		return false
 	}
-	self.tokens -= 1
+	self.charged = remaining + 1000
+	self.lastMs = nowMs
 	return true
-}
-
-// Whether the bucket has refilled, so dropping it changes no decision.
-func (self *limitBucket) fullWithLock(requestsPerSecond float64, burst int, now time.Time) bool {
-	self.fillWithLock(requestsPerSecond, burst, now)
-	return limitBucketCapacity(burst) <= self.tokens
 }
 
 // The key of one state: an interface and a normalized client IP.
@@ -223,7 +205,7 @@ type limitAddrState struct {
 	// the state's place in the idle order while nothing is in flight, else
 	// nil
 	idleElement  *list.Element
-	sharedBucket *limitBucket
+	sharedBucket limitBucket
 	// created on a route's first request
 	routeBuckets        map[*limitRouteZone]*limitBucket
 	requestCount        int
@@ -238,12 +220,12 @@ func (self *limitAddrState) idleWithLock() bool {
 }
 
 // Whether every bucket has refilled.
-func (self *limitAddrState) fullWithLock(now time.Time) bool {
-	if !self.sharedBucket.fullWithLock(self.limitInterface.requestsPerSecond, self.limitInterface.burst, now) {
+func (self *limitAddrState) fullWithLock(nowMs int64) bool {
+	if self.sharedBucket.remainingWithLock(self.limitInterface.milliRequestsPerSecond, nowMs) > 0 {
 		return false
 	}
 	for routeZone, routeBucket := range self.routeBuckets {
-		if !routeBucket.fullWithLock(routeZone.requestsPerSecond, routeZone.burst, now) {
+		if routeBucket.remainingWithLock(routeZone.milliRequestsPerSecond, nowMs) > 0 {
 			return false
 		}
 	}
@@ -255,12 +237,16 @@ type frontLimits struct {
 	ctx      context.Context
 	settings *LimitSettings
 	now      func() time.Time
+	// All buckets use whole milliseconds on the same monotonic clock.
+	startTime time.Time
 
 	stateLock  sync.Mutex
 	addrStates map[limitAddrKey]*limitAddrState
 	// the states with nothing in flight, the least recently touched at the
 	// back: the eviction and sweep order
 	idleAddrStates *list.List
+	// Next idle state to examine when a sweep yields the admission lock.
+	sweepNext *list.Element
 }
 
 // Builds empty state and starts its sweep, which ends with ctx. now is the
@@ -270,6 +256,7 @@ func newFrontLimits(ctx context.Context, settings *LimitSettings, now func() tim
 		ctx:            ctx,
 		settings:       settings,
 		now:            now,
+		startTime:      now(),
 		addrStates:     map[limitAddrKey]*limitAddrState{},
 		idleAddrStates: list.New(),
 	}
@@ -288,31 +275,43 @@ func (self *frontLimits) run() {
 			return
 		case <-time.After(self.settings.PruneInterval):
 		}
-		self.sweep()
+		for self.sweep() {
+			if self.ctx.Err() != nil {
+				return
+			}
+		}
 	}
 }
 
-// Drops every state idle for StateIdleTimeout whose buckets have refilled.
-// The idle order is by touch time, so the walk from the back stops at the
-// first state touched more recently.
-func (self *frontLimits) sweep() {
+// Examines one batch in idle order. A true result schedules the next batch
+// after releasing the admission lock. Depleted buckets retain their place
+// in the eviction order even when their refill takes several sweeps.
+func (self *frontLimits) sweep() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	now := self.now()
-
-	element := self.idleAddrStates.Back()
-	for element != nil {
-		previousElement := element.Prev()
-		addrState := element.Value.(*limitAddrState)
-		if now.Sub(addrState.touchTime) < self.settings.StateIdleTimeout {
+	nowMs := now.Sub(self.startTime).Milliseconds()
+	element := self.sweepNext
+	if element == nil {
+		element = self.idleAddrStates.Back()
+	}
+	for range max(1, self.settings.PruneBatchSize) {
+		if element == nil {
 			break
 		}
-		if addrState.fullWithLock(now) {
+		addrState := element.Value.(*limitAddrState)
+		if now.Sub(addrState.touchTime) < self.settings.StateIdleTimeout {
+			element = nil
+			break
+		}
+		element = element.Prev()
+		if addrState.fullWithLock(nowMs) {
 			self.removeWithLock(addrState)
 		}
-		element = previousElement
 	}
+	self.sweepNext = element
+	return element != nil
 }
 
 // The number of states held.
@@ -345,19 +344,20 @@ func (self *frontLimits) acquireRequest(limitInterface *limitInterface, addr net
 		}
 		self.touchWithLock(addrState, now)
 
+		nowMs := now.Sub(self.startTime).Milliseconds()
 		if routeZone != nil {
 			routeBucket, ok := addrState.routeBuckets[routeZone]
 			if !ok {
-				routeBucket = newLimitBucket(routeZone.burst, now)
+				routeBucket = &limitBucket{}
 				if addrState.routeBuckets == nil {
 					addrState.routeBuckets = map[*limitRouteZone]*limitBucket{}
 				}
 				addrState.routeBuckets[routeZone] = routeBucket
 			}
-			if !routeBucket.takeWithLock(routeZone.requestsPerSecond, routeZone.burst, now) {
+			if !routeBucket.takeWithLock(routeZone.milliRequestsPerSecond, routeZone.burst, nowMs) {
 				return limitOutcomeRouteRefused
 			}
-		} else if !addrState.sharedBucket.takeWithLock(limitInterface.requestsPerSecond, limitInterface.burst, now) {
+		} else if !addrState.sharedBucket.takeWithLock(limitInterface.milliRequestsPerSecond, limitInterface.burst, nowMs) {
 			return limitOutcomeRequestRefused
 		}
 
@@ -365,7 +365,7 @@ func (self *frontLimits) acquireRequest(limitInterface *limitInterface, addr net
 			return limitOutcomeConcurrencyRefused
 		}
 		addrState.requestCount += 1
-		self.markBusyWithLock(addrState)
+		self.removeIdleWithLock(addrState)
 		return limitOutcomeAdmitted
 	}()
 	if outcome != limitOutcomeAdmitted {
@@ -412,7 +412,7 @@ func (self *frontLimits) acquireQuicConnection(limitInterface *limitInterface, a
 			return limitOutcomeQuicRefused
 		}
 		addrState.quicConnectionCount += 1
-		self.markBusyWithLock(addrState)
+		self.removeIdleWithLock(addrState)
 		return limitOutcomeAdmitted
 	}()
 	if outcome != limitOutcomeAdmitted {
@@ -454,7 +454,6 @@ func (self *frontLimits) addrStateWithLock(limitInterface *limitInterface, addr 
 	addrState := &limitAddrState{
 		key:            key,
 		limitInterface: limitInterface,
-		sharedBucket:   newLimitBucket(limitInterface.burst, now),
 		touchTime:      now,
 	}
 	addrState.idleElement = self.idleAddrStates.PushFront(addrState)
@@ -466,14 +465,19 @@ func (self *frontLimits) addrStateWithLock(limitInterface *limitInterface, addr 
 func (self *frontLimits) touchWithLock(addrState *limitAddrState, now time.Time) {
 	addrState.touchTime = now
 	if addrState.idleElement != nil {
+		if self.sweepNext == addrState.idleElement {
+			self.sweepNext = self.sweepNext.Prev()
+		}
 		self.idleAddrStates.MoveToFront(addrState.idleElement)
 	}
 }
 
-// Takes a state with something in flight out of the idle order, so it is
-// never dropped.
-func (self *frontLimits) markBusyWithLock(addrState *limitAddrState) {
+// Removes a node from the idle order and preserves the sweep cursor.
+func (self *frontLimits) removeIdleWithLock(addrState *limitAddrState) {
 	if addrState.idleElement != nil {
+		if self.sweepNext == addrState.idleElement {
+			self.sweepNext = self.sweepNext.Prev()
+		}
 		self.idleAddrStates.Remove(addrState.idleElement)
 		addrState.idleElement = nil
 	}
@@ -490,17 +494,14 @@ func (self *frontLimits) releaseWithLock(addrState *limitAddrState, now time.Tim
 	if addrState.idleElement == nil {
 		addrState.idleElement = self.idleAddrStates.PushFront(addrState)
 	}
-	if self.settings.StateIdleTimeout <= 0 && addrState.fullWithLock(now) {
+	if self.settings.StateIdleTimeout <= 0 && addrState.fullWithLock(now.Sub(self.startTime).Milliseconds()) {
 		self.removeWithLock(addrState)
 	}
 }
 
 // Drops an idle state.
 func (self *frontLimits) removeWithLock(addrState *limitAddrState) {
-	if addrState.idleElement != nil {
-		self.idleAddrStates.Remove(addrState.idleElement)
-		addrState.idleElement = nil
-	}
+	self.removeIdleWithLock(addrState)
 	delete(self.addrStates, addrState.key)
 }
 

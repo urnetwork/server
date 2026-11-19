@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
 	"sync"
@@ -596,8 +597,8 @@ func TestBodyStoreReadFailures(t *testing.T) {
 	if refusal == nil || refusal.status != http.StatusRequestTimeout || refusal.reason != bodyRefusalTimeout {
 		t.Fatalf("timed out read: %v, want 408", refusal)
 	}
-	if len(deadlines) != 2 || deadlines[0].IsZero() || deadlines[1].IsZero() {
-		t.Errorf("read deadlines %v, want one per read and none cleared", deadlines)
+	if len(deadlines) != 3 || deadlines[0].IsZero() || !deadlines[1].IsZero() || deadlines[2].IsZero() {
+		t.Errorf("read deadlines %v, want the successful read cleared and the failed read still armed", deadlines)
 	}
 	checkStoreEmpty(t, bodyStore)
 
@@ -851,6 +852,90 @@ func TestForwardAbortReleasesBody(t *testing.T) {
 	checkStoreEmpty(t, bodyStore)
 }
 
+// A full budget refuses a known length with the same allocation cost as a
+// reservation without a prefix.
+func TestBodyStoreFullBudgetAvoidsPrefixAllocation(t *testing.T) {
+	settings := DefaultBodySettings()
+	settings.MemoryBudgetBytes = settings.MemoryPrefixBytes
+	store := newBodyStore(settings)
+	held, refusal := store.open(settings.MemoryPrefixBytes, true)
+	if refusal != nil {
+		t.Fatal(refusal)
+	}
+	defer held.release()
+	allocations := func(knownLength bool) float64 {
+		return testing.AllocsPerRun(32, func() {
+			if _, refusal := store.open(settings.MemoryPrefixBytes, knownLength); refusal == nil || refusal.reason != bodyRefusalMemoryBudget {
+				t.Fatalf("expected a memory budget refusal, got %v", refusal)
+			}
+		})
+	}
+	withoutPrefix, withPrefix := allocations(false), allocations(true)
+	if withPrefix > withoutPrefix {
+		t.Errorf("refusing a known length took %.0f allocations, an unknown length %.0f", withPrefix, withoutPrefix)
+	}
+}
+
+// Expiring an armed http2 deadline during a local spill permanently fails
+// the request body. Hold the second client byte until the spill takes place.
+func TestBodyStoreH2ReadDeadlineExcludesSpill(t *testing.T) {
+	store := newBodyStore(DefaultBodySettings())
+	spilling := make(chan struct{})
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		var deadline time.Time
+		setReadDeadline := func(value time.Time) error {
+			deadline = value
+			return controller.SetReadDeadline(value)
+		}
+		store.createSpillFile = func() (bodySpillFile, error) {
+			// Make an armed deadline expire at this exact point.
+			if !deadline.IsZero() {
+				if err := controller.SetReadDeadline(time.Unix(1, 0)); err != nil {
+					t.Error(err)
+				}
+			}
+			close(spilling)
+			return store.createTempSpillFile()
+		}
+		body, refusal := store.read(r.Context(), r.Body, bodyReadOptions{
+			declaredLength: -1, prefixBytes: 0,
+			readTimeout: time.Minute, setReadDeadline: setReadDeadline,
+		})
+		if refusal != nil {
+			http.Error(w, refusal.reason, refusal.status)
+			return
+		}
+		defer body.release()
+		io.Copy(w, body.newReader())
+	}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	go func() {
+		defer writer.Close()
+		if _, err := io.WriteString(writer, "a"); err != nil {
+			return
+		}
+		select {
+		case <-spilling:
+			io.WriteString(writer, "b")
+		case <-t.Context().Done():
+		}
+	}()
+	response, err := server.Client().Post(server.URL, "application/octet-stream", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil || response.ProtoMajor != 2 || response.StatusCode != http.StatusOK || string(body) != "ab" {
+		t.Fatalf("%s returned %s, body %q, err %v", response.Proto, response.Status, body, err)
+	}
+}
+
 // Through a group: a chunked body over the body limit on a streamed route is
 // a 413 while nothing was answered. It streams, chunked, though it came whole
 // with its head, so it is refused as it crosses the limit: its block's
@@ -861,6 +946,7 @@ func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
 	settings.Body.MaxBodyBytes = 1000
 	serviceName := testServiceName("streamed-limit")
 	upstream := newRecordingUpstream(t, "g1", nil)
+	upstream.arrivals = make(chan *recordedRequest, 1)
 	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
@@ -880,10 +966,9 @@ func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
 	if attemptCount(serviceName, "g1", "client") != 1 || attemptCount(serviceName, "g1", "response") != 0 {
 		t.Errorf("%v attempts ended on the client's side, want 1, and none answered", attemptCount(serviceName, "g1", "client"))
 	}
-	for _, recorded := range upstream.recorded() {
-		if recorded.bodyErr == nil {
-			t.Errorf("the block got a whole body of %d bytes", len(recorded.body))
-		}
+	recorded := receiveBounded(t, upstream.arrivals, "the truncated upstream request")
+	if recorded.bodyErr == nil || !bytes.Equal(recorded.body, []byte((chunk + chunk)[:settings.Body.MaxBodyBytes])) {
+		t.Errorf("upstream received %d bytes, err %v, want exactly the allowed prefix and an incomplete body", len(recorded.body), recorded.bodyErr)
 	}
 	checkStoreEmpty(t, bodyStore)
 }

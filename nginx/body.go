@@ -205,14 +205,20 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 
 	readBuffer := self.readBuffers.Get().(*[]byte)
 	defer self.readBuffers.Put(readBuffer)
+	timedRead := 0 < options.readTimeout && options.setReadDeadline != nil
 	for {
 		if ctx.Err() != nil {
 			return nil, &bodyRefusal{status: 0, reason: bodyRefusalCanceled}
 		}
-		if 0 < options.readTimeout && options.setReadDeadline != nil {
+		if timedRead {
 			options.setReadDeadline(time.Now().Add(options.readTimeout))
 		}
 		n, err := body.Read(*readBuffer)
+		if timedRead && (err == nil || err == io.EOF) {
+			// An h2 deadline can fail the stream between reads while the
+			// store waits on a spill file.
+			options.setReadDeadline(time.Time{})
+		}
 		if 0 < n {
 			if storedBody == nil {
 				if refusal := open(); refusal != nil {
@@ -239,10 +245,6 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 		// nginx answers it 400 ("client prematurely closed stream")
 		return nil, &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
 	}
-	if 0 < options.readTimeout && options.setReadDeadline != nil {
-		// nothing reads the client again until its next request
-		options.setReadDeadline(time.Time{})
-	}
 	stored = true
 	return storedBody, nil
 }
@@ -263,29 +265,26 @@ func bodyReadRefusal(ctx context.Context, err error) *bodyRefusal {
 }
 
 // Registers a new body with its memory prefix reserved, or refuses with a
-// local 503. A known length allocates its prefix at once; an unknown one
-// grows it as bytes arrive, within the reservation.
+// local 503. The first append allocates a known length's reserved prefix.
 func (self *bodyStore) open(memoryReservedBytes int64, knownLength bool) (*storedBody, *bodyRefusal) {
-	storedBody := &storedBody{
-		store:               self,
-		memoryReservedBytes: memoryReservedBytes,
-	}
-	if knownLength {
-		storedBody.prefix = make([]byte, 0, memoryReservedBytes)
-	}
-	refusal := func() *bodyRefusal {
+	storedBody, refusal := func() (*storedBody, *bodyRefusal) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		if self.closed {
-			return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalClosed}
+			return nil, &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalClosed}
 		}
 		memoryBudgetBytes := self.settings.MemoryBudgetBytes
 		if 0 < memoryBudgetBytes && memoryBudgetBytes-self.memoryBytes < memoryReservedBytes {
-			return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalMemoryBudget}
+			return nil, &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalMemoryBudget}
+		}
+		storedBody := &storedBody{
+			store:               self,
+			memoryReservedBytes: memoryReservedBytes,
+			knownLength:         knownLength,
 		}
 		self.memoryBytes += memoryReservedBytes
 		self.bodies[storedBody] = true
-		return nil
+		return storedBody, nil
 	}()
 	if refusal != nil {
 		return nil, refusal
@@ -385,6 +384,7 @@ func (self *bodyStore) close() error {
 type storedBody struct {
 	store               *bodyStore
 	memoryReservedBytes int64
+	knownLength         bool
 	// runs the release once, and holds every other call until it is done
 	releaseOnce sync.Once
 
@@ -421,6 +421,9 @@ func (self *storedBody) append(chunk []byte) *bodyRefusal {
 			return nil, nil, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge}
 		}
 		if room := self.memoryReservedBytes - int64(len(self.prefix)); 0 < room {
+			if self.knownLength && self.prefix == nil {
+				self.prefix = make([]byte, 0, self.memoryReservedBytes)
+			}
 			m := min(room, int64(len(chunk)))
 			self.prefix = appendWithin(self.prefix, chunk[:m], self.memoryReservedBytes)
 			chunk = chunk[m:]

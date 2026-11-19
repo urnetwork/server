@@ -63,10 +63,15 @@ func drainConnect(
 		defer close(exchangeDrained)
 		server.HandleError(exchangeDrain)
 	}()
-	publicFront.waitDrained()
-	<-exchangeDrained
+	deadline := publicFront.waitDrained()
+	select {
+	case <-exchangeDrained:
+	case <-deadline:
+	}
 	publicFront.close()
 	cancel()
+	// Cancellation releases resident work still in progress at the deadline.
+	<-exchangeDrained
 }
 
 // Starts the front's drain, step 2 of drainConnect. A front that never
@@ -127,26 +132,26 @@ func (self *frontServer) beginDrain() {
 }
 
 // Waits until no tcp connection or h3 api connection is open, or the drain
-// timeout passes: step 4 of drainConnect. Returns at once without a drain.
-func (self *frontServer) waitDrained() {
+// timeout passes. The same deadline bounds the subsequent resident wait.
+func (self *frontServer) waitDrained() <-chan struct{} {
 	drainCtx := func() context.Context {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		return self.drainCtx
 	}()
 	if drainCtx == nil {
-		return
+		return nil
 	}
 	for {
 		openCount, changed := self.openCount.Get()
 		if openCount == 0 {
-			return
+			return drainCtx.Done()
 		}
 		select {
 		case <-changed:
 		case <-drainCtx.Done():
 			glog.Infof("[front]the drain timeout passed with %d connections open\n", openCount)
-			return
+			return drainCtx.Done()
 		}
 	}
 }

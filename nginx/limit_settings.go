@@ -22,6 +22,9 @@ type LimitSettings struct {
 	// how often idle state is swept, as alt's limiter sweeps every 60 s.
 	// Non-positive disables the sweep.
 	PruneInterval time.Duration
+	// Maximum idle addresses examined in one admission lock acquisition.
+	// Values below one examine one address.
+	PruneBatchSize int
 	// the most (interface, address) states held at once, so a source that
 	// sprays addresses can't grow the state without bound. At the cap, a new
 	// address replaces the least recently used state with nothing in flight,
@@ -39,6 +42,7 @@ func DefaultLimitSettings() *LimitSettings {
 	return &LimitSettings{
 		StateIdleTimeout: 60 * time.Second,
 		PruneInterval:    60 * time.Second,
+		PruneBatchSize:   256,
 		MaxAddressStates: 1024 * 1024,
 	}
 }

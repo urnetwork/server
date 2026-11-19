@@ -218,20 +218,31 @@ func runWithDependencies(
 	stopStartup()
 
 	draining := make(chan struct{})
+	drainDone := make(chan struct{})
 	go func() {
+		defer close(drainDone)
 		select {
 		case <-ctx.Done():
 			// D12's order, with the front draining alongside the exchange
 			// while its transports can still send (front_drain.go)
 			drainConnect(options.WarpStatus, publicFront, func() {
 				if exchange != nil {
-					exchange.Drain()
+					timeout := exchange.settings.DrainAllTimeout
+					if publicFront != nil {
+						if frontTimeout := publicFront.settings.drainDeadlineTimeout(); 0 < frontTimeout {
+							timeout = min(timeout, frontTimeout)
+						}
+					}
+					exchange.drainFor(timeout)
 				}
 			}, cancel)
 		case <-draining:
 		}
 	}()
-	defer close(draining)
+	defer func() {
+		close(draining)
+		<-drainDone
+	}()
 
 	go server.HandleError(func() {
 		for {

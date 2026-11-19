@@ -50,10 +50,12 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +68,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -955,9 +959,8 @@ func perfDrain(messages chan *perfReceivedMessage) {
 //   - nginx: the same four through warp/lb's pinned nginx build, as an nginx
 //     edge interface carries them today: H1 through its http proxy, and QUIC
 //     and whodis through its udp stream with PROXY v2 to connect's trusted
-//     listeners. The local build has no ssl module, so its H1 hop is
-//     plaintext where production terminates TLS in nginx. The case skips
-//     without the build (`make nginx_local` in warp/lb).
+//     listeners. The H1 hop terminates TLS. Build the pinned binary with
+//     `make nginx_perf` in warp/lb.
 //
 // Two clients, each with its own transport on the carrier under test, send
 // to each other without contracts through one exchange. A run takes the echo
@@ -1430,7 +1433,7 @@ func TestConnectPerformanceCarriersLbAlt(t *testing.T) {
 	})
 }
 
-// warp/lb's pinned nginx build (`make nginx_local`): NGINX_UDP_PROXY_V2_BINARY
+// warp/lb's pinned TLS and stream build (`make nginx_perf`): NGINX_UDP_PROXY_V2_BINARY
 // when set, as warp/lb's own tests read it, then the build in the warp
 // checkout beside the server's or under WARP_HOME. "" with the reason when
 // there is none.
@@ -1442,7 +1445,7 @@ func perfNginxBinary() (string, string) {
 		}
 		return resolvedBinary, ""
 	}
-	buildPath := filepath.Join("warp", "lb", "build", "nginx-local", "sbin", "nginx")
+	buildPath := filepath.Join("warp", "lb", "build", "nginx-perf", "sbin", "nginx")
 	candidates := []string{
 		filepath.Join("..", "..", buildPath),
 	}
@@ -1454,21 +1457,59 @@ func perfNginxBinary() (string, string) {
 			return resolvedBinary, ""
 		}
 	}
-	return "", "the pinned nginx build was not found; run `make nginx_local` in warp/lb"
+	return "", "build the pinned TLS and stream nginx with `make nginx_perf` in warp/lb"
+}
+
+const perfNginxName = "connect.service.example"
+
+type perfNginx struct {
+	httpsPort int
+	h3Port    int
+	dnsPort   int
+	roots     *x509.CertPool
+}
+
+// Builds the same verified H1 dial for both upgrade modes. The upstream
+// QUIC listeners have their own self-signed identity.
+func (self *perfNginx) carrierDial(mode connect.TransportMode) *perfCarrierDial {
+	strategy := connect.DefaultClientStrategySettings()
+	strategy.EnableResilient = false
+	platformUrl := "wss://" + perfNginxName
+	transport := connect.DefaultPlatformTransportSettings()
+	transport.PlatformTransportBudget = newPerfCarrierTransportBudget()
+	transport.QuicTlsConfig = &tls.Config{InsecureSkipVerify: true}
+	switch mode {
+	case connect.TransportModeH1:
+		platformUrl = fmt.Sprintf("wss://%s:%d", perfNginxName, self.httpsPort)
+		strategy.ConnectSettings.TlsConfig = &tls.Config{RootCAs: self.roots}
+		strategy.ConnectSettings.DialContextSettings = &connect.DialContextSettings{
+			DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp4", fmt.Sprintf("127.0.0.1:%d", self.httpsPort))
+			},
+		}
+	case connect.TransportModeH3:
+		transport.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", self.h3Port)
+	case connect.TransportModeH3Dns:
+		transport.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", self.dnsPort)
+	}
+	return &perfCarrierDial{
+		platformUrl:       platformUrl,
+		strategySettings:  strategy,
+		transportSettings: transport,
+	}
 }
 
 // Runs nginx with the edge's connect paths in front of perfConnect: an http
 // proxy to connect's H1 port with the websocket upgrade, and udp streams with
 // PROXY v2 to connect's trusted h3 and h3dns listeners, with the lb's
-// proxy settings. Returns the ports nginx listens on, plain http first. nginx
-// stops with the test.
-func startPerfNginx(t testing.TB, nginxBinary string, perfConnect *perfCarrierConnect) (httpPort int, h3Port int, dnsPort int) {
+// proxy settings. nginx stops with the test.
+func startPerfNginx(t testing.TB, nginxBinary string, perfConnect *perfCarrierConnect) *perfNginx {
 	versionOutput, err := exec.Command(nginxBinary, "-V").CombinedOutput()
 	if err != nil {
 		t.Fatalf("read the nginx build configuration: %v: %s", err, versionOutput)
 	}
-	if !strings.Contains(string(versionOutput), "--with-stream") {
-		t.Skipf("the nginx build has no stream module: %s", versionOutput)
+	if !strings.Contains(string(versionOutput), "--with-stream") || !strings.Contains(string(versionOutput), "--with-http_ssl_module") {
+		t.Fatalf("the baseline needs the TLS and stream modules; run make nginx_perf in warp/lb: %s", versionOutput)
 	}
 	freePort := func(network string) int {
 		if network == "tcp" {
@@ -1486,11 +1527,21 @@ func startPerfNginx(t testing.TB, nginxBinary string, perfConnect *perfCarrierCo
 		defer packetConn.Close()
 		return packetConn.LocalAddr().(*net.UDPAddr).Port
 	}
-	httpPort = freePort("tcp")
-	h3Port = freePort("udp")
-	dnsPort = freePort("udp")
+	httpsPort := freePort("tcp")
+	h3Port := freePort("udp")
+	dnsPort := freePort("udp")
 
 	prefixDir := t.TempDir()
+	certPem, keyPem, roots := connectserver.Testing_LbAltPerfCertificate(t, perfNginxName)
+	if err := os.WriteFile(filepath.Join(prefixDir, "server.pem"), certPem, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prefixDir, "server.key"), keyPem, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(prefixDir, "logs"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(prefixDir, "nginx.conf")
 	config := fmt.Sprintf(`
 worker_processes 2;
@@ -1508,7 +1559,9 @@ http {
     proxy_buffering off;
 
     server {
-        listen 127.0.0.1:%d;
+        listen 127.0.0.1:%d ssl;
+        ssl_certificate server.pem;
+        ssl_certificate_key server.key;
         location / {
             proxy_pass http://127.0.0.1:%d;
             proxy_set_header X-UR-Forwarded-For $remote_addr:$remote_port;
@@ -1540,7 +1593,7 @@ stream {
         proxy_pass 127.0.0.1:%d;
     }
 }
-`, httpPort, perfConnect.h1Port, h3Port, perfConnect.h3Port, dnsPort, perfConnect.dnsPort)
+`, httpsPort, perfConnect.h1Port, h3Port, perfConnect.h3Port, dnsPort, perfConnect.dnsPort)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1575,10 +1628,10 @@ stream {
 			fmt.Printf("[perfcarrier]nginx output:\n%s\n", output)
 		}
 	})
-	// ready once its http listener accepts
+	// Ready once the public H1 listener serves the fixture certificate.
 	readyDeadline := time.Now().Add(perfSettleTimeout)
 	for {
-		conn, err := net.Dial("tcp4", fmt.Sprintf("127.0.0.1:%d", httpPort))
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: time.Second}, "tcp4", fmt.Sprintf("127.0.0.1:%d", httpsPort), &tls.Config{RootCAs: roots, ServerName: perfNginxName})
 		if err == nil {
 			conn.Close()
 			break
@@ -1591,7 +1644,56 @@ stream {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	return httpPort, h3Port, dnsPort
+	return &perfNginx{httpsPort: httpsPort, h3Port: h3Port, dnsPort: dnsPort, roots: roots}
+}
+
+// Exercise the nginx side of the carrier benchmark without the exchange or
+// databases. A plain http listener cannot complete this handshake.
+func TestPerfNginxH1TerminatesTls(t *testing.T) {
+	binary, reason := perfNginxBinary()
+	if binary == "" {
+		t.Skip(reason)
+	}
+	upgrades := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrades <- r.Header.Get("Upgrade")
+		if connect.IsFramedUpgrade(r, connect.H1FramerProtocol) {
+			conn, err := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, time.Second)
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err == nil {
+			conn.Close()
+		}
+	}))
+	defer upstream.Close()
+	port := upstream.Listener.Addr().(*net.TCPAddr).Port
+	nginx := startPerfNginx(t, binary, &perfCarrierConnect{h1Port: port, h3Port: 1, dnsPort: 1})
+	for _, h1Plus := range []bool{false, true} {
+		dial := nginx.carrierDial(connect.TransportModeH1)
+		if !strings.HasPrefix(dial.platformUrl, "wss://") {
+			t.Fatalf("H1 benchmark uses %s", dial.platformUrl)
+		}
+		strategy := connect.NewClientStrategy(t.Context(), dial.strategySettings)
+		conn, _, err := strategy.H1DialContextWithDialer(t.Context(), dial.platformUrl, nil, 1024, h1Plus, nil)
+		if err != nil {
+			strategy.Close()
+			t.Fatal(err)
+		}
+		conn.Close()
+		strategy.Close()
+		want := "websocket"
+		if h1Plus {
+			want = connect.H1FramerProtocol
+		}
+		if got := <-upgrades; got != want {
+			t.Fatalf("nginx proxied %q, want %q", got, want)
+		}
+	}
 }
 
 // The websocket, H1+, raw QUIC and QUIC under whodis through warp/lb's nginx
@@ -1609,35 +1711,9 @@ func TestConnectPerformanceCarriersNginx(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		perfConnect := newPerfCarrierConnect(t, ctx, true)
-		httpPort, h3Port, dnsPort := startPerfNginx(t, nginxBinary, perfConnect)
+		nginx := startPerfNginx(t, nginxBinary, perfConnect)
 		nginxDial := func(mode connect.TransportMode) func() *perfCarrierDial {
-			return func() *perfCarrierDial {
-				strategySettings := connect.DefaultClientStrategySettings()
-				strategySettings.EnableResilient = false
-				transportSettings := connect.DefaultPlatformTransportSettings()
-				transportSettings.PlatformTransportBudget = newPerfCarrierTransportBudget()
-				// connect's trusted listeners serve a self-signed certificate
-				// here
-				transportSettings.QuicTlsConfig = &tls.Config{
-					InsecureSkipVerify: true,
-				}
-				platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", httpPort)
-				switch mode {
-				case connect.TransportModeH3:
-					platformUrl = "wss://connect.service.example"
-					transportSettings.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", h3Port)
-				case connect.TransportModeH3Dns:
-					// the trusted h3dns listener decodes with connect's
-					// default tld, which the client's settings keep
-					platformUrl = "wss://connect.service.example"
-					transportSettings.AltUrl = fmt.Sprintf("https://127.0.0.1:%d", dnsPort)
-				}
-				return &perfCarrierDial{
-					platformUrl:       platformUrl,
-					strategySettings:  strategySettings,
-					transportSettings: transportSettings,
-				}
-			}
+			return func() *perfCarrierDial { return nginx.carrierDial(mode) }
 		}
 		for _, carrierCase := range []*perfCarrierCase{
 			{name: "websocket", mode: connect.TransportModeH1, h1Plus: false, dial: nginxDial(connect.TransportModeH1)},

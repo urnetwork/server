@@ -39,12 +39,7 @@ const testFrontVaultVersion = "2026.11.18"
 // under star.x, any other name under itself.
 func writeTestFrontVault(t testing.TB, vaultDir string, routeTable *nginx.RouteTable, identity *testFrontIdentity) {
 	t.Helper()
-	keyDer, err := x509.MarshalPKCS8PrivateKey(identity.certificate.PrivateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: identity.certificate.Certificate[0]})
-	keyBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDer})
+	pemBytes, keyBytes := identity.pem(t)
 	for _, name := range routeTable.ServedNames() {
 		dirName := name
 		if base, ok := strings.CutPrefix(name, "*."); ok {
@@ -61,6 +56,17 @@ func writeTestFrontVault(t testing.TB, vaultDir string, routeTable *nginx.RouteT
 			t.Fatal(err)
 		}
 	}
+}
+
+// Encodes the generated leaf and key for the local nginx fixtures.
+func (self *testFrontIdentity) pem(t testing.TB) ([]byte, []byte) {
+	t.Helper()
+	keyDer, err := x509.MarshalPKCS8PrivateKey(self.certificate.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: self.certificate.Certificate[0]}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDer})
 }
 
 // The nginx front's certificate store for the route table, loaded from a

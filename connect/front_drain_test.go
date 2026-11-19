@@ -284,6 +284,33 @@ func TestFrontDrainRunsInD12Order(t *testing.T) {
 	}
 }
 
+// Expiry cuts the public sockets and cancels serving even when a resident
+// still needs cancellation to finish its drain.
+func TestFrontDrainDeadlineEndsServingWhileExchangeDrains(t *testing.T) {
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.front.httpsHandler = testFrontEchoHandler
+	})
+	hijacked := env.dialHijacked(testFrontConnectName)
+	entered, release := make(chan struct{}), make(chan struct{})
+	canceled, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		drainConnect(&router.WarpStatusState{}, env.frontServer, func() {
+			close(entered)
+			<-release
+		}, func() { close(canceled) })
+	}()
+	defer func() {
+		close(release)
+		testFrontWait(t, done, "resident drain exit")
+	}()
+	testFrontWait(t, entered, "resident drain start")
+	hijacked.echo("during")
+	endTestFrontDrain(env.frontServer)
+	testFrontWait(t, canceled, "serving cancellation at the front deadline")
+	testFrontReadEnd(t, hijacked.reader, "public connection at the front deadline")
+}
+
 // Without a front, connect drains as before: draining, the exchange drain,
 // then cancel.
 func TestFrontDrainWithoutAFrontKeepsConnectsOrder(t *testing.T) {
