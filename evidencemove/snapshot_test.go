@@ -386,7 +386,7 @@ func TestSnapshotExportMatchesTheTable(t *testing.T) {
 		if err != nil || check.Matched != 1 || check.Differ != 1 || check.Missing != 1 {
 			t.Fatalf("tampered sample check %+v, %v", check, err)
 		}
-		sample, err := SampleSnapshot(outPath, 50, 9)
+		sample, err := SampleSnapshot(outPath, 50)
 		if err != nil || len(sample) != 50 {
 			t.Fatalf("sampled %d, %v", len(sample), err)
 		}
