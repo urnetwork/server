@@ -613,9 +613,9 @@ func newTestFrontIdleConns(env *testFrontEnv) *testFrontIdleConns {
 }
 
 // Serves one request on a new h1 keepalive connection to eth1's https
-// socket, waits until its server holds it idle, and wedges its raw socket:
-// every later write on it, close_notify included, waits for its close.
-func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingConn {
+// socket and waits until its server holds it idle. Returns the client and
+// the connection's raw socket.
+func (self *testFrontIdleConns) serveIdle(env *testFrontEnv) (*testFrontH1Client, *testFrontStallingConn) {
 	env.t.Helper()
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
 	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontApiName)
@@ -628,12 +628,20 @@ func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingC
 	case <-time.After(testFrontProgressTimeout):
 		env.t.Fatal("no connection was accepted")
 	}
-	// a front that never cuts the wedge would otherwise hold the test's
-	// own close of the front
+	// a front that never cuts a wedge, or a stalled write, would otherwise
+	// hold the test's own close of the front
 	env.t.Cleanup(func() {
 		stallingConn.Close()
 	})
 	testFrontWait(env.t, self.idle, "the keepalive connection's idle state")
+	return client, stallingConn
+}
+
+// As serveIdle, then wedges the raw socket: every later write on it,
+// close_notify included, waits for its close.
+func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingConn {
+	env.t.Helper()
+	_, stallingConn := self.serveIdle(env)
 	stallingConn.wedged.Store(true)
 	return stallingConn
 }

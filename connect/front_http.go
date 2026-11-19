@@ -15,7 +15,10 @@ package connect
 // tunnels http.Server forgets once hijacked, and the forced close can cut
 // them (D12). Once a write to one fails on its deadline, every later write
 // fails at once, so TLS's close_notify can't hold a handler on a client that
-// stopped reading (frontTrackedConn).
+// stopped reading; and until a hijack, a write left without a deadline is
+// bounded by send_timeout, so crypto/tls's own writes, such as its answer to
+// a client's KeyUpdate request, can't hold a connection for good
+// (frontTrackedConn).
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
@@ -32,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/urnetwork/glog"
 )
@@ -92,8 +96,10 @@ func (self *frontTcpRun) close() {
 }
 
 // A server for one interface's port. connect sets what is its own: the
-// handler, the error log that counts and the serving context. The nginx
-// front sets the rest from its HttpSettings (nginx.Front.ConfigureServer,
+// handler, the error log that counts, the serving context, and the
+// connection state hook that marks a hijacked connection, whose writes keep
+// only their owner's deadlines (frontTrackedConn). The nginx front sets the
+// rest from its HttpSettings (nginx.Front.ConfigureServer,
 // LBALT-IMPL.md §7), as the parity harness's servers get them: the header
 // timeout, which covers the TLS handshake, request line and headers; the
 // idle timeout; header bytes of a multiple of nginx's header buffers, twice
@@ -122,6 +128,19 @@ func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *h
 		BaseContext: func(net.Listener) context.Context {
 			return self.ctx
 		},
+		// net/http reports a hijack with the connection it serves: the
+		// tls.Conn on 443, the tracked socket itself on 80
+		ConnState: func(conn net.Conn, connState http.ConnState) {
+			if connState != http.StateHijacked {
+				return
+			}
+			if tlsConn, ok := conn.(*tls.Conn); ok {
+				conn = tlsConn.NetConn()
+			}
+			if trackedConn, ok := conn.(*frontTrackedConn); ok {
+				trackedConn.hijacked.Store(true)
+			}
+		},
 	}
 	self.front.ConfigureServer(httpServer)
 	return httpServer
@@ -133,6 +152,7 @@ func (self *frontServer) trackTcpConn(conn net.Conn) (*frontTrackedConn, bool) {
 	trackedConn := &frontTrackedConn{
 		Conn:        conn,
 		frontServer: self,
+		sendTimeout: self.settings.Front.Http.SendTimeout,
 	}
 	tracked := func() bool {
 		self.stateLock.Lock()
@@ -225,14 +245,48 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // would hold the handler and its limit slot that much longer, and on h2 the
 // connection's serving goroutine, which makes that close.
 //
+// Until net/http hands the connection to a hijacker, a write its owner left
+// without a deadline is bounded by send_timeout (LBALT-IMPL.md §7): it fails
+// once none of it has gone out for sendTimeout, as nginx's send_timeout
+// bounds a blocked write. Those writes are crypto/tls's own, made on the
+// reading goroutine under its write lock, such as the answer to a client's
+// KeyUpdate request: net/http clears the write deadline after each request,
+// and its idle and header timeouts are read deadlines, which a goroutine
+// blocked in a write never sees. A TLS 1.3 client that sends KeyUpdate
+// requests and stops reading would otherwise hold the connection, its
+// goroutine and its buffers for good, where nginx's read timer closes it
+// (ngx_ssl_handle_recv leaves a blocked write to that timer). Once the
+// bounded write fails, the latch fails every later one, and the read
+// deadline ends the connection. The bound lasts only as long as its write,
+// so a connection idle between writes has none, and an owner's deadline set
+// meanwhile takes over the write and stands. A hijacked connection's writes
+// keep only their owner's deadlines, as a websocket or H1+ tunnel may wait
+// on its client for as long as its owner allows.
+//
 // It passes net/http's half-close to the socket (CloseWrite), which
 // embedding net.Conn would hide.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer
+	// Front.Http.SendTimeout, the bound of a write left without a deadline.
+	// Non-positive leaves such a write unbounded.
+	sendTimeout time.Duration
 	closeOnce   sync.Once
 	// the error of the first write that failed on its deadline, once one has
 	writeTimeoutErr atomic.Pointer[error]
+	// net/http handed the connection to a hijacker (newHttpServer's
+	// connection state hook)
+	hijacked atomic.Bool
+
+	// the socket's write deadline is set only under stateLock, so it never
+	// disagrees with the owner's and the bound's: a call out under the lock,
+	// as SetWriteDeadline never blocks or calls back
+	stateLock sync.Mutex
+	// the write deadline the connection's owner set last, zero for none
+	ownerWriteDeadline time.Time
+	// writes in flight under the bound, and the deadline the latest was given
+	boundWriteCount    int
+	boundWriteDeadline time.Time
 }
 
 // Writes p, or, after a write has failed on its deadline, fails at once.
@@ -240,11 +294,68 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 	if writeTimeoutErr := self.writeTimeoutErr.Load(); writeTimeoutErr != nil {
 		return 0, *writeTimeoutErr
 	}
-	n, err := self.Conn.Write(p)
-	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
-		self.writeTimeoutErr.CompareAndSwap(nil, &err)
+	n := 0
+	for {
+		// bounds the write when its owner left it without a deadline
+		bounded := func() bool {
+			if self.sendTimeout <= 0 || self.hijacked.Load() {
+				return false
+			}
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if self.hijacked.Load() || !self.ownerWriteDeadline.IsZero() {
+				return false
+			}
+			self.boundWriteCount += 1
+			self.boundWriteDeadline = time.Now().Add(self.sendTimeout)
+			self.Conn.SetWriteDeadline(self.boundWriteDeadline)
+			return true
+		}()
+		written, err := self.Conn.Write(p[n:])
+		n += written
+		if bounded {
+			// the socket's deadline is the owner's again once no bounded
+			// write is in flight: none, unless the owner set one meanwhile
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				self.boundWriteCount -= 1
+				if self.boundWriteCount == 0 && self.ownerWriteDeadline.IsZero() {
+					self.Conn.SetWriteDeadline(time.Time{})
+				}
+			}()
+		}
+		if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+			// a bounded write that made progress gets a new bound, as
+			// send_timeout bounds only a write that makes none
+			if bounded && 0 < written {
+				continue
+			}
+			self.writeTimeoutErr.CompareAndSwap(nil, &err)
+		}
+		return n, err
 	}
-	return n, err
+}
+
+// Records the owner's deadline and gives it to the socket, except that a
+// zero one leaves a bounded write in flight its bound.
+func (self *frontTrackedConn) SetWriteDeadline(deadline time.Time) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.ownerWriteDeadline = deadline
+	if deadline.IsZero() && 0 < self.boundWriteCount {
+		return self.Conn.SetWriteDeadline(self.boundWriteDeadline)
+	}
+	return self.Conn.SetWriteDeadline(deadline)
+}
+
+// The read deadline, and the write deadline as SetWriteDeadline records it.
+// net/http's hijack clears both through it.
+func (self *frontTrackedConn) SetDeadline(deadline time.Time) error {
+	if err := self.Conn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	return self.SetWriteDeadline(deadline)
 }
 
 // Closes the socket's write side, when it has one. net/http's h1 server
