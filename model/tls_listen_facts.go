@@ -116,7 +116,7 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 			facts.StandingGrantsEndTime = endTime
 		}
 	}
-	certs, err := tlsListenCerts(ctx, networkId, now, settings)
+	certs, certifiedAliases, err := tlsListenCerts(ctx, networkId, now, settings)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +132,8 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 			facts.CustomCertified, facts.AcmeClaims = getTlsCustomListenFactsInTx(ctx, conn, networkId, now)
 		})
 	}
+	// TLS-M6-03: each certified alias a sidecar's live certificate names the pair of, for every owner of the zone
+	facts.CustomCertified = append(facts.CustomCertified, certifiedAliases...)
 	return facts, nil
 }
 
@@ -204,15 +206,20 @@ type tlsListenCertRow struct {
 	leaf      []byte
 }
 
-// The network's issued rows not past not_after at now, each by what it names against the network's labels. None in
-// a binary without MG5.
-func tlsListenCerts(ctx context.Context, networkId server.Id, now time.Time, settings *TlsListenFactsSettings) ([]*socketsservice.TlsListenCert, error) {
+// The network's issued rows not past not_after at now, each by what it names against the network's labels, and
+// beside them the certified aliases they name (TLS-M6-03): for each row naming the pair of a live alias whose
+// certificate issued, {*.<alias>.<root>, <alias>.<root>}, one TlsListenCustomName for the row's sidecar on every owner
+// (socketsservice.TlsListenCustomNameAnyOwner) with the alias's zone as its name and the row's not_after, which the narrowing
+// reads as <owner>.<alias>.<root>, or the zone itself for @. None in a binary without MG5; no alias without MG6.
+func tlsListenCerts(ctx context.Context, networkId server.Id, now time.Time, settings *TlsListenFactsSettings) ([]*socketsservice.TlsListenCert, []*socketsservice.TlsListenCustomName, error) {
 	certs := []*socketsservice.TlsListenCert{}
+	certifiedAliases := []*socketsservice.TlsListenCustomName{}
 	if !server.SidecarMg5Linked() {
-		return certs, nil
+		return certs, certifiedAliases, nil
 	}
 	rows := []*tlsListenCertRow{}
 	zones := []string{}
+	aliasZones := []string{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -248,14 +255,67 @@ func tlsListenCerts(ctx context.Context, networkId server.Id, now time.Time, set
 				zones = append(zones, label+"."+strings.TrimSuffix(root, "."))
 			}
 		}
+		if dnsAliasLinked() {
+			aliasZones = getTlsListenCertifiedAliasZonesInTx(ctx, conn, networkId)
+		}
 	})
 	if settings.CertMaxCount < len(rows) {
-		return nil, ErrTlsListenFactsTooManyCerts
+		return nil, nil, ErrTlsListenFactsTooManyCerts
 	}
 	for _, row := range rows {
 		certs = append(certs, tlsListenCertOf(row, zones))
+		certifiedAliases = append(certifiedAliases, tlsListenCertifiedAliasesOf(row, aliasZones)...)
 	}
-	return certs, nil
+	return certs, certifiedAliases, nil
+}
+
+// The zones of the network's live aliases a certificate has issued for, <alias>.<root> with no final dot: the
+// aliases dns_label marks certified_time on (DnsAliasCertifiedInTx).
+func getTlsListenCertifiedAliasZonesInTx(ctx context.Context, query server.PgCanQuery, networkId server.Id) []string {
+	zones := []string{}
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT root, label FROM dns_label
+			WHERE network_id = $1 AND kind = $2 AND state = $3 AND certified_time IS NOT NULL
+			ORDER BY root, label
+		`,
+		networkId,
+		DnsLabelKindAlias,
+		DnsLabelStateLive,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var root string
+			var alias string
+			server.Raise(result.Scan(&root, &alias))
+			zones = append(zones, alias+"."+strings.TrimSuffix(root, "."))
+		}
+	})
+	return zones
+}
+
+// The certified aliases row names the whole pair of, one TlsListenCustomName for its sidecar on every owner each.
+func tlsListenCertifiedAliasesOf(row *tlsListenCertRow, aliasZones []string) []*socketsservice.TlsListenCustomName {
+	if len(aliasZones) == 0 {
+		return nil
+	}
+	names := map[string]bool{}
+	for _, name := range tlsListenCertNames(row) {
+		names[strings.ToLower(strings.TrimSuffix(name, "."))] = true
+	}
+	certifiedAliases := []*socketsservice.TlsListenCustomName{}
+	for _, zone := range aliasZones {
+		if names[zone] && names["*."+zone] {
+			certifiedAliases = append(certifiedAliases, &socketsservice.TlsListenCustomName{
+				SidecarId: connect.Id(row.sidecarId),
+				Owner:     socketsservice.TlsListenCustomNameAnyOwner,
+				Name:      zone,
+				NotAfter:  row.notAfter.UTC(),
+			})
+		}
+	}
+	return certifiedAliases
 }
 
 // What a row names: its CSR's names, else its leaf's; a row whose names cannot be read names nothing, which no host

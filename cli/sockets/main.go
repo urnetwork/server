@@ -278,6 +278,8 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	if deps.TlsListenFacts != nil {
 		tlsHooks, err := socketsservice.NewTlsNamespaceHooks(hostCtx, deps.TlsListenFacts, host.ClockOrReal(), settings.Tls)
 		if err == nil {
+			// a scope host's scope and consent are the projection's, read through the gate (TLS-M6-03)
+			tlsHooks.SetScopeConsent(gate)
 			err = engine.RegisterNamespace(sidecar.SocketNamespaceTls, tlsHooks)
 		}
 		if err != nil {
