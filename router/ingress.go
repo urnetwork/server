@@ -6,21 +6,24 @@ package router
 // every proxied request over any value the client sent (warpctl
 // addProxyRequestHeaders): X-UR-Forwarded-For is the address and port it
 // accepted the client's connection from, X-Forwarded-For and
-// X-Forwarded-Source-Port are cleared, and X-UR-Request-Buffering marks only a
-// body the lb streams through. The session takes the client's address from
-// X-UR-Forwarded-For whenever it holds one ip:port value
-// (session.ResolveClientAddress), on the contract that the ingress overwrote
-// it. A front that clients reach directly is its own ingress, since nothing
-// stands in front of it to do this: alt's api front and status listener
-// (alt/ingress.go) and the proxy's api and status routers, which warp exposes
-// by DNAT (proxy/proxy_api.go). It sets the same headers from the connection
-// before any handler reads them. Otherwise a client of that front names its
-// own address to every per-address limit and address-based decision behind
-// it.
+// X-Forwarded-Source-Port are cleared, X-UR-Request-Buffering marks only a
+// body the lb streams through, and Early-Data is cleared, since it carries
+// nginx's $ssl_early_data and early data is off. The session takes the
+// client's address from X-UR-Forwarded-For whenever it holds one ip:port
+// value (session.ResolveClientAddress), on the contract that the ingress
+// overwrote it. A front that clients reach directly is its own ingress, since
+// nothing stands in front of it to do this: alt's api front and status
+// listener (alt/ingress.go) and the proxy's api and status routers, which warp
+// exposes by DNAT (proxy/proxy_api.go). It sets the same headers from the
+// connection before any handler reads them. Otherwise a client of that front
+// names its own address to every per-address limit and address-based
+// decision behind it, or passes its request off as one an intermediary
+// received in early data (RFC 8470).
 //
 // Legitimate clients never send these headers, so each one a front overwrites
 // or removes is counted (urnetwork_ingress_overwritten_headers_total): a
-// sustained rate is a client trying to name an address of its own.
+// sustained rate is a client trying to name an address of its own, or to
+// claim early data.
 
 import (
 	"net/http"
@@ -35,6 +38,8 @@ const (
 	urForwardedForHeader      = "X-UR-Forwarded-For"
 	forwardedForHeader        = "X-Forwarded-For"
 	forwardedSourcePortHeader = "X-Forwarded-Source-Port"
+	// RFC 8470: an intermediary marks a request it received in early data
+	earlyDataHeader = "Early-Data"
 )
 
 // The headers an ingress owns, with the counter's label for each: a closed
@@ -47,6 +52,7 @@ var ingressHeaders = []struct {
 	{header: forwardedForHeader, label: "x_forwarded_for"},
 	{header: forwardedSourcePortHeader, label: "x_forwarded_source_port"},
 	{header: RequestBufferingHeader, label: "x_ur_request_buffering"},
+	{header: earlyDataHeader, label: "early_data"},
 }
 
 var ingressOverwrittenHeadersCounter = prometheus.NewCounterVec(
@@ -82,6 +88,9 @@ func NewIngressHandler(handler http.Handler) http.Handler {
 // and clears the headers nginx clears. The streaming mark is the lb's: a front
 // with no lb reads every body from the client itself, so there a route's own
 // body policy is what applies (StreamingBody), never one a client claims.
+// Early-Data is an intermediary's mark too, and with early data refused
+// nothing here receives a request in early data, so a client's is removed, as
+// nginx's empty $ssl_early_data removes it.
 // Each of these headers the client sent is counted once per request.
 //
 // A peer the front cannot read leaves no X-UR-Forwarded-For at all, so the
@@ -99,6 +108,7 @@ func SetIngressHeaders(r *http.Request) {
 	r.Header.Del(forwardedForHeader)
 	r.Header.Del(forwardedSourcePortHeader)
 	r.Header.Del(RequestBufferingHeader)
+	r.Header.Del(earlyDataHeader)
 	addrPort, err := server.ParseClientAddress(r.RemoteAddr)
 	if err != nil {
 		r.Header.Del(urForwardedForHeader)
