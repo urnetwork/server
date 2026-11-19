@@ -5,6 +5,7 @@ package perfvar
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -350,6 +351,7 @@ type routeEnvironment struct {
 	network                 *simulatedIPNetwork
 	edgeTun                 *clientconnect.Tun
 	edgeAddress             netip.Addr
+	platformTrust           map[string]*routePlatformTrust
 	h1Port                  int
 	h3Port                  int
 	apiPort                 int
@@ -387,6 +389,7 @@ type routeEnvironment struct {
 	// Opt-in connection-creation diagnostics retain handles, never packets.
 	// Atomic publication also permits installation after a TUN is constructed.
 	clientDialObserverForTest atomic.Pointer[routeClientDialObserver]
+	observePlatformTls        func(clientconnect.TransportMode, *tls.Config)
 }
 
 type routeClientDialObserver struct {
@@ -561,8 +564,10 @@ func newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
 		router.NewRoute("GET", "/status", router.WarpStatus),
 		router.NewRoute("GET", "/", handler.Connect),
 	}
-	serverTlsConfig, _, err := newWorkloadTlsConfigs()
+	serverTlsConfig, h1Roots, err := newRoutePlatformH1Tls(edgeAddress)
 	if err != nil {
+		h1Listener.Close()
+		apiListener.Close()
 		handler.Close()
 		exchange.Close()
 		network.close()
@@ -611,16 +616,19 @@ func newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
 		false,
 	))
 	return &routeEnvironment{
-		t:                            t,
-		ctx:                          environmentCtx,
-		cancel:                       cancel,
-		profile:                      profile,
-		accessProfile:                profile,
-		providerAccessProfile:        profile,
-		deviceAccessProfile:          profile,
-		network:                      network,
-		edgeTun:                      edgeTun,
-		edgeAddress:                  edgeAddress,
+		t:                     t,
+		ctx:                   environmentCtx,
+		cancel:                cancel,
+		profile:               profile,
+		accessProfile:         profile,
+		providerAccessProfile: profile,
+		deviceAccessProfile:   profile,
+		network:               network,
+		edgeTun:               edgeTun,
+		edgeAddress:           edgeAddress,
+		platformTrust: map[string]*routePlatformTrust{
+			"edge": {address: edgeAddress, h1Roots: h1Roots, h3Tls: handler.TransportTls()},
+		},
 		h1Port:                       h1Port,
 		h3Port:                       h3Port,
 		apiPort:                      apiPort,
@@ -645,6 +653,55 @@ func newRouteEnvironmentWithNetworkPeersAndHandlerSettings(
 		poolOutstandingBefore:        poolSnapshotBefore.outstanding,
 		poolOutstandingClassesBefore: poolSnapshotBefore.classes,
 	}
+}
+
+// The H1 listener and H3 handler own independent fixture certificates for one edge.
+type routePlatformTrust struct {
+	address netip.Addr
+	h1Roots *x509.CertPool
+	h3Tls   *server.TransportTls
+}
+
+// Generate the fixture H1 certificate for the address used by the real dialer.
+func newRoutePlatformH1Tls(edgeAddress netip.Addr) (*tls.Config, *x509.CertPool, error) {
+	config, _, err := newWorkloadTlsConfigs(net.IP(edgeAddress.AsSlice()))
+	if err != nil {
+		return nil, nil, err
+	}
+	roots, err := routeEdgeCertificateRoots(config, edgeAddress)
+	return config, roots, err
+}
+
+// Pin the listener leaf after checking that it identifies the assigned edge.
+func routeEdgeCertificateRoots(config *tls.Config, edgeAddress netip.Addr) (*x509.CertPool, error) {
+	if config == nil || len(config.Certificates) != 1 || len(config.Certificates[0].Certificate) == 0 {
+		return nil, errors.New("missing route edge certificate")
+	}
+	leaf, err := x509.ParseCertificate(config.Certificates[0].Certificate[0])
+	if err != nil {
+		return nil, err
+	}
+	if err := leaf.VerifyHostname(edgeAddress.String()); err != nil {
+		return nil, err
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	return roots, nil
+}
+
+// Preserve lazy H3 key generation in scenarios that force H1.
+func (self *routePlatformTrust) h3Roots(mode clientconnect.TransportMode) (*x509.CertPool, error) {
+	if mode == clientconnect.TransportModeH1 {
+		return nil, nil
+	}
+	if self == nil || self.h3Tls == nil {
+		return nil, errors.New("missing route H3 edge")
+	}
+	config, err := self.h3Tls.GetTlsConfig(self.address.String())
+	if err != nil {
+		return nil, err
+	}
+	return routeEdgeCertificateRoots(config, self.address)
 }
 
 // Segment profiles preserve end-to-end constant delay across extender hops.
@@ -723,9 +780,16 @@ func (self *routeEnvironment) newClientNodeWithProfileAt(
 	strategySettings.EnableResilient = false
 	strategySettings.MinNextConnectDelay = 0
 	strategySettings.MaxNextConnectDelay = 0
+	edgeTrust := self.platformTrust[edgeName]
+	if edgeTrust == nil || edgeTrust.h1Roots == nil {
+		self.t.Fatalf("missing H1 roots for route edge %s", edgeName)
+	}
 	strategySettings.ConnectSettings.TlsConfig = &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
+		RootCAs:    edgeTrust.h1Roots,
+		MinVersion: tls.VersionTLS13,
+	}
+	if self.observePlatformTls != nil {
+		self.observePlatformTls(clientconnect.TransportModeH1, strategySettings.ConnectSettings.TlsConfig)
 	}
 	strategySettings.ConnectSettings.DialContextSettings = &clientconnect.DialContextSettings{
 		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
@@ -917,7 +981,14 @@ func (self *routeEnvironment) connectPlatform(
 	mode clientconnect.TransportMode,
 ) {
 	settings := clientconnect.DefaultPlatformTransportSettings()
-	settings.QuicTlsConfig.InsecureSkipVerify = true
+	roots, err := self.platformTrust[self.deviceEdgeName].h3Roots(mode)
+	if err != nil {
+		self.t.Fatalf("load route H3 roots: %v", err)
+	}
+	settings.QuicTlsConfig.RootCAs = roots
+	if self.observePlatformTls != nil && mode == clientconnect.TransportModeH3 {
+		self.observePlatformTls(mode, settings.QuicTlsConfig)
+	}
 	settings.H3Port = self.h3Port
 	settings.DnsPort = 0
 	settings.H3PacketConnFactory = func(ctx context.Context) (net.PacketConn, error) {

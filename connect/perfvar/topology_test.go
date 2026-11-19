@@ -3369,7 +3369,6 @@ func fullTunPlatformSettings(
 		settings.ReadTimeout = max(settings.ReadTimeout, allowance)
 		settings.InactiveDrainTimeout = max(settings.InactiveDrainTimeout, allowance)
 	}
-	settings.QuicTlsConfig.InsecureSkipVerify = true
 	settings.H3Port = h3Port
 	settings.DnsPort = 0
 	settings.H3PacketConnFactory = func(ctx context.Context) (net.PacketConn, error) {
@@ -4022,6 +4021,14 @@ func tryNewFullTunPathWithTopologyHooks(
 	if err := afterStage(fullTunConstructionStageProviderClient); err != nil {
 		return nil, err
 	}
+	providerH3Roots, err := environment.platformTrust[environment.providerEdgeName].h3Roots(platformMode)
+	if err != nil {
+		return nil, fmt.Errorf("load full-TUN provider H3 roots: %w", err)
+	}
+	deviceH3Roots, err := environment.platformTrust[environment.deviceEdgeName].h3Roots(platformMode)
+	if err != nil {
+		return nil, fmt.Errorf("load full-TUN device H3 roots: %w", err)
+	}
 	providerPlatformBudget := newFullTunEndpointPlatformBudget()
 	providerPlatformSettings := fullTunPlatformSettings(
 		environment.providerH3Port,
@@ -4030,6 +4037,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		path.providerPlatformReceiveStats,
 		providerPlatformBudget,
 	)
+	providerPlatformSettings.QuicTlsConfig.RootCAs = providerH3Roots
 	providerPlatformSettings.H3DatagramStats = path.providerH3DatagramStats
 	path.providerProgressTrace.configurePlatform(providerPlatformSettings)
 	if hooks != nil && hooks.configureProviderPlatformSettings != nil {
@@ -4201,6 +4209,7 @@ func tryNewFullTunPathWithTopologyHooks(
 			path.devicePlatformReceiveStats,
 			devicePlatformBudget,
 		)
+		settings.QuicTlsConfig.RootCAs = deviceH3Roots
 		settings.H3DatagramStats = path.deviceH3DatagramStats
 		path.deviceProgressTrace.configurePlatform(settings)
 		if hooks != nil && hooks.configureDevicePlatformSettings != nil {
