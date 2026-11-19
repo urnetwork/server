@@ -5,10 +5,11 @@ package nginx
 // which at the response head:
 //
 //   - adds what the request's location adds (response_headers.go);
-//   - closes the client connection while the front drains (D12):
-//     Connection: close on h1, which Go's h2 server turns into a GOAWAY. h3
-//     gets none, since the field is illegal there; connect sends the h3
-//     GOAWAY itself;
+//   - closes the client connection while the front drains (D12), and after
+//     the request nginx's keepalive_requests or keepalive_time makes its
+//     connection's last (front_server.go): Connection: close on h1, which
+//     Go's h2 server turns into a GOAWAY. h3 gets none, since the field is
+//     illegal there; connect sends the h3 GOAWAY itself;
 //   - gzips as nginx's `gzip on` with its defaults does: text/html the
 //     upstream didn't encode, for statuses 200, 403 and 404, of unknown
 //     length or at least HttpSettings.GzipMinLength bytes, to an HTTP/1.1 or
@@ -99,6 +100,9 @@ type responseState struct {
 	// what the request's location adds, set by routing before the head is
 	// written
 	headers responseHeaders
+	// the request is its connection's last (Front.lastRequestOnConnection),
+	// so its head closes the connection, as the drain's heads do
+	closesConnection bool
 	// the limit slot, once the request has one
 	slot *responseSlot
 
@@ -174,7 +178,7 @@ func (self *responseState) writeHeader(statusCode int) {
 
 	header := self.w.Header()
 	self.headers.apply(header, statusCode)
-	if self.front.Draining() && statusCode != http.StatusSwitchingProtocols {
+	if (self.front.Draining() || self.closesConnection) && statusCode != http.StatusSwitchingProtocols {
 		switch self.r.ProtoMajor {
 		case 1, 2:
 			header.Set("Connection", "close")

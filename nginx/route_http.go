@@ -516,6 +516,7 @@ func (self *routeHttpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		startTime:      self.front.now(),
 	}
 	defer exchange.end()
+	exchange.response.closesConnection = self.front.lastRequestOnConnection(r)
 	exchange.response.start()
 	self.serve(exchange, r)
 	exchange.response.finish()

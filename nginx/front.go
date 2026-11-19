@@ -350,10 +350,9 @@ func (self *Front) QuicTlsConfig() *tls.Config {
 // redirects, the /status deny and the added response headers. It expects
 // r.RemoteAddr to be the accepted peer and r.TLS to be set.
 //
-// The handler applies nginx's header limits itself, so the server must let
-// such heads through: MaxHeaderBytes above HttpSettings'
-// MaxRequestHeadersTotalBytes. An interface the route table doesn't list
-// gets a handler that answers 503.
+// The handler applies nginx's header limits itself, and its keepalive_requests
+// and keepalive_time, on a server ConfigureServer has set up. An interface
+// the route table doesn't list gets a handler that answers 503.
 func (self *Front) HttpsHandler(interfaceName string) http.Handler {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
