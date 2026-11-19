@@ -2,7 +2,7 @@
 
 Status: design, 2026-11-18. Nothing is implemented.
 
-Questions D1–D19 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
+Questions D1–D22 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
 
 The §7 measurements were taken 2026-11-18 (§7.1). The owner confirmed the three values they sized (2026-11-18):
 - `cores: 20` on every connect block (D15);
@@ -18,7 +18,7 @@ M7's HMARK test passed on edge-4 on 2026-11-18 (§7.1). It shows that HMARK sele
 - Hold the first public cutover for Gate A (§8 step 4).
 - Hold the `alt.*` move for Gate B (§8 step 6).
 - Its findings are folded into §3, §4 (new §4.6 and §4.7), the decisions they qualify, and §8–§9. Each is marked "review".
-- **Open:** it raised three questions that need owner decisions, D20–D22 (§6 G).
+- It raised three questions, D20–D22 (§6 G), which the owner decided on 2026-11-18.
 
 Terms used here:
 - **interface**: an lb interface, meaning one public address on an edge host.
@@ -587,10 +587,9 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Removal follows the order above.
 - Amended by the review: the DNS handover, which Gate B checks (§8 step 6).
   - Today the generator emits host-pinned alt records and rejects conflicting definitions of the same name (../warp/warpctl/dns.go:263, 373-427). Config load refuses `dns_aliases` on an exposed service (../warp/services/routers.go:692).
-  - So each alt record has exactly one DNS owner during the handover, while alt can still answer clients that cached proxy addresses.
+  - So each alt record has exactly one DNS owner during the handover.
   - The complete record sets are compared before and after, and DNS-only names stay out of TLS and HTTP route generation.
-  - Clients that lose reachability once both names share edge addresses also drop out of the old-host counters. So successful extender activations are tracked by carrier and family.
-  - Rollback after the move is D20.
+  - Rollback after the move is D20: there is no fallback, because nobody uses alt.
 
 ### E. Operations
 
@@ -645,10 +644,9 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - **Decision (owner, 2026-11-18):** as recommended. Setting `lb_alt: false` on an interface moves it back to nginx with the deploy-style cutover. The lb image keeps being built every release, with its tests green, until the cutover has soaked on all ten interfaces.
 - Amended by the review: D14 and D18 share one rollback procedure.
   - A restored nginx interface answers its TCP 80 health check while its UDP goes to nginx's connect-only stream.
-  - So after the `alt.*` move, a client that cached that address loses API over QUIC and whodis there (D20).
+  - So after the `alt.*` move, a client that cached that address loses API over QUIC and whodis there. D20 accepts that, because nobody uses alt.
   - Rollback follows §4.6's order in reverse.
-  - Keep an operable alt deployment and its router rules through the post-DNS soak, and a tested nginx image with usable certificates through the rollback window.
-  - Rehearse rollback with clients pinned to the old proxy address and to the new edge address (Gate B).
+  - Keep a tested nginx image with usable certificates through the rollback window.
 
 ### F. Found while checking the measurements
 
@@ -672,7 +670,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 
 ### G. Raised by the review (LBALT-REVIEW.md, 2026-11-18)
 
-Open: each needs an owner decision.
+All three were decided by the owner on 2026-11-18.
 
 **D20. Rolling an interface back after `alt.*` moves.**
 - After D14, clients cache edge addresses for `alt.*`. Suppose an interface then rolls back to nginx (D18).
@@ -689,6 +687,13 @@ Open: each needs an owner decision.
   - The dispatch is the front's own code on a second listener.
   - It makes D18's single-interface rollback safe after D14.
   - Gate B (§8) rehearses rollback whichever option is chosen.
+- **Decision (owner, 2026-11-18):** no fallback. Nobody uses alt today, so there is nothing to protect on the alt path:
+  - no PROXY-aware private backend;
+  - no forwarding of the old alt (proxy-host) addresses;
+  - no keeping alt answering for clients that cached them.
+
+  An interface that rolls back after the move loses API over QUIC and whodis until DNS withdraws it. Gate B keeps only its DNS-correctness checks (§8 step 6).
+  - Alt's measured load (M5) is probe traffic, and clients default to H1 (owner, 2026-11-18).
 
 **D21. Caps on D19's temp-file spill.**
 - With no cap, 4,096 in-memory 64 KiB prefixes can come with up to 63.75 GiB of temp data per process, at the 16 MiB request cap.
@@ -700,6 +705,7 @@ Open: each needs an owner decision.
   - A body of unknown length reserves before its first read.
   - A body that crosses 16 MiB is answered with 413 at that point.
   - A local capacity refusal is a 503 counted apart from upstream 503s, and only an upstream 503 can be retried.
+- **Decision (owner, 2026-11-18):** as proposed. The caps are 4 GiB and 1,024 files per connect process, with the review's rules above.
 
 **D22. A UDP socket lost after promotion.**
 - D10 gives each block N = 4 SO_REUSEPORT UDP sockets per (address, port), each with its own quic-go transport.
@@ -714,6 +720,10 @@ Open: each needs an owner decision.
 - Recommendation: (a) for the cutover, with (b) as a follow-up if the canary shows rebinding or socket-loss resets.
   - Losing a socket after promotion is rare.
   - QUIC carries about 4% of connect's clients (M4), and a reconnect wave touches only one block's share of them.
+- **Decision (owner, 2026-11-18):** as recommended.
+  - A lost socket is re-created at once, and that block's QUIC clients reconnect once.
+  - The endpoint reports not ready until the socket is back.
+  - (b) is the follow-up if the canary shows rebinding or socket-loss resets.
 
 ## 7. Measurements before deciding
 
@@ -776,6 +786,7 @@ Host CPU was 54–79% busy at sample time. The 7-day peak is 80–88%.
 - Load: 91 req/s, mostly `/hello` (42/s) and `/connect/control` (37/s); 154 KB/s of h3 datagrams in; 0.3 cores per proxy host.
 - Memory: 5.7–6.0 GiB RSS per proxy host.
 - Moving this load to the edges is negligible.
+- That load is probe traffic, and clients default to H1 (owner, 2026-11-18).
 
 **M6. Edge memory.** The 7-day minimum of available memory is 418–645 GiB per host. Memory is not a constraint.
 
@@ -856,16 +867,19 @@ One cutover per interface (D1).
 - Compare that interface with an nginx control interface over the same interval.
 - Then switch the rest one interface at a time. Each next interface waits until step 7's thresholds have held through a busy period and a complete deploy, drain and rollback.
 
-**6. Gate B: before moving `alt.*` DNS** (review; D14, D18, D20).
-- Rehearse interface rollback with one client pinned to the old proxy address and one pinned to the new edge address. A client that cached the edge address must keep API over plain QUIC and whodis (D20).
-- Each alt record has one DNS owner during the handover, while alt can still answer clients that cached the proxy addresses.
+**6. Gate B: before moving `alt.*` DNS** (review; D14, D18; narrowed by D20).
+- Each alt record has exactly one DNS owner during the handover.
 - Compare the complete record sets before and after:
   - the implicit `<env>-alt` names and the bare aliases;
   - the A-only `-v4` and AAAA-only `-v6` names;
   - weights and health membership.
 - DNS-only names stay out of TLS and HTTP route generation.
-- Track successful extender activations by carrier and family, alongside the fall in old-host traffic. Clients that lose reachability once both names share edge addresses also drop out of the old counters, so a fall alone proves nothing.
-- Keep an operable alt deployment and its router rules through the post-DNS soak. Keep a tested nginx image with usable certificates for the rollback window.
+- Keep a tested nginx image with usable certificates for the rollback window (D18).
+- Dropped by D20, because nobody uses alt:
+  - the rollback rehearsal with clients pinned to the old proxy address and to the new edge address;
+  - keeping alt answering for clients that cached the proxy addresses;
+  - tracking extender activations by carrier and family;
+  - keeping alt and its router rules through a post-DNS soak.
 
 **7. Promotion evidence** (review). Set numerical promotion and rollback thresholds from the step 4 baselines, for:
 - H1 and H1+ upgrade success, and p99 application RTT;
@@ -876,7 +890,7 @@ One cutover per interface (D1).
 
 Include a reconnect wave with full and resumed handshakes.
 
-**8. Alt.** Move `alt.*` after Gate B (D14), then remove alt after the soak.
+**8. Alt.** Move `alt.*` after Gate B, then remove alt in D14's order. Nobody uses alt, so it gets no post-DNS soak (D20).
 
 **9. Soak.** Then stop building the lb image for main.
 
