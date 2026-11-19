@@ -14,9 +14,10 @@ import (
 
 // Tunables of the public UDP probe. A pass hands one instance to every part
 // of itself: the matrix bound, the attempt context and worker pool, the
-// transport's wire budgets, QUIC timeouts and /hello request, and the
-// findings' check of the counts the transport reports. So tuning a bound
-// cannot make the transport and the validation of its evidence disagree.
+// transport's wire budgets, QUIC timeouts, receive windows and /hello
+// request, and the findings' check of the counts the transport reports. So
+// tuning a bound cannot make the transport and the validation of its evidence
+// disagree.
 type PublicUdpProbeSettings struct {
 	// Between passes. Non-positive takes the default, since the scheduler
 	// cannot run a non-positive interval.
@@ -39,6 +40,16 @@ type PublicUdpProbeSettings struct {
 	// counted. Reaching it closes the attempt's socket. Must be positive: the
 	// matrix and the transport refuse a non-positive budget.
 	MaxByteCount int
+	// QUIC's flow control window of one stream, in bytes, which the attempt's
+	// QUIC connection starts with and never grows past: what a peer may send
+	// on a stream ahead of the attempt's reads. The /hello answer is under a
+	// kilobyte. Non-positive takes quic-go's default of megabytes, which the
+	// byte budget still bounds on the wire.
+	StreamReceiveWindowByteCount int
+	// The same window for the whole connection, every stream together.
+	// Non-positive takes quic-go's default, which the byte budget still
+	// bounds on the wire.
+	ConnectionReceiveWindowByteCount int
 	// The /hello a connect api front answers after its handshake.
 	ApiRequest PublicUdpApiRequestSettings
 }
@@ -46,13 +57,15 @@ type PublicUdpProbeSettings struct {
 // A new instance on every call.
 func DefaultPublicUdpProbeSettings() *PublicUdpProbeSettings {
 	return &PublicUdpProbeSettings{
-		Cadence:        5 * time.Minute,
-		AttemptTimeout: 5 * time.Second,
-		MaxTargetCount: 32,
-		WorkerCount:    4,
-		MaxPacketCount: 2048,
-		MaxByteCount:   1024 * 1024,
-		ApiRequest:     *DefaultPublicUdpApiRequestSettings(),
+		Cadence:                          5 * time.Minute,
+		AttemptTimeout:                   5 * time.Second,
+		MaxTargetCount:                   32,
+		WorkerCount:                      4,
+		MaxPacketCount:                   2048,
+		MaxByteCount:                     1024 * 1024,
+		StreamReceiveWindowByteCount:     16 * 1024,
+		ConnectionReceiveWindowByteCount: 32 * 1024,
+		ApiRequest:                       *DefaultPublicUdpApiRequestSettings(),
 	}
 }
 
@@ -169,8 +182,9 @@ type PublicUdpApiRequestSettings struct {
 	// default.
 	ResponseHeaderByteLimit int
 	// Bytes of /hello body read before the answer counts as invalid. The body
-	// is under a kilobyte; 16 KiB also matches the attempt's stream receive
-	// window. Must be positive.
+	// is under a kilobyte; 16 KiB also matches the default stream receive
+	// window (PublicUdpProbeSettings.StreamReceiveWindowByteCount). Must be
+	// positive.
 	ResponseBodyByteLimit int
 }
 

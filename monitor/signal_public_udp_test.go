@@ -772,8 +772,8 @@ func TestPublicUdpFindingTextsDescribeTheHello(t *testing.T) {
 }
 
 // SIGNALS.md §16.9 describes the /hello: the application class, the
-// connect api pair, how the row's classes clear, and no claim that no HTTP
-// request is made.
+// connect api pair, how the row's classes clear, the receive windows among
+// the bounds, and no claim that no HTTP request is made.
 func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 	catalog, err := os.ReadFile("SIGNALS.md")
 	if err != nil {
@@ -795,7 +795,7 @@ func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 	for _, required := range []string{
 		"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings",
 		"its handshake was verified, so the row's `public-udp-path` and `public-udp-observation` resolve",
-		"clear hold for the row's `public-udp-application`",
+		"clear hold for the row's `public-udp-application`", "QUIC receive windows of 16 KiB per stream and 32 KiB per connection",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("§16.9 does not say %q", required)

@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -166,24 +165,47 @@ func publicUdpRouteError(err error) bool {
 		errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)
 }
 
-// The native adapter: one attempt under the settings' attempt timeout, or the
-// runner's command timeout when that is shorter. Missing settings, or a
-// non-positive attempt timeout, expire the attempt at its start, and the
-// transport refuses them as configuration before it reads that context.
+// The native adapter: one attempt on a fresh system socket, within the
+// runner's command timeout when one is set. The transport bounds the attempt
+// by the settings' own timeout, so the shorter of the two applies.
 func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest, settings *PublicUdpProbeSettings) (PublicUdpObservation, error) {
-	var timeout time.Duration
-	if settings != nil {
-		timeout = settings.AttemptTimeout
+	if 0 < self.cfg.commandTimeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, self.cfg.commandTimeout)
+		defer cancel()
 	}
-	if 0 < self.cfg.commandTimeout && self.cfg.commandTimeout < timeout {
-		timeout = self.cfg.commandTimeout
-	}
-	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	listen := func(ctx context.Context, network string, address string) (net.PacketConn, error) {
 		return (&net.ListenConfig{}).ListenPacket(ctx, network, address)
 	}
-	return observePublicUdp(attemptCtx, request, settings, listen, nil)
+	return observePublicUdp(ctx, request, settings, listen, nil)
+}
+
+// The QUIC configuration of one attempt. The handshake and idle timeouts are
+// the attempt timeout, so a raised bound is not cut at quic-go's default of
+// five seconds, and the receive windows are the settings', fixed for the
+// attempt. Only a connect api front lets the server open streams: the h3
+// control stream and both QPACK streams.
+func (self *PublicUdpProbeSettings) quicConfig(apiRequest bool) *quic.Config {
+	quicConfig := &quic.Config{
+		HandshakeIdleTimeout: self.AttemptTimeout, MaxIdleTimeout: self.AttemptTimeout,
+		InitialPacketSize: connectcore.H3InitialPacketByteCount,
+		// quic-go reads a negative limit as none
+		MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
+	}
+	if 0 < self.StreamReceiveWindowByteCount {
+		quicConfig.InitialStreamReceiveWindow = uint64(self.StreamReceiveWindowByteCount)
+		quicConfig.MaxStreamReceiveWindow = uint64(self.StreamReceiveWindowByteCount)
+	}
+	if 0 < self.ConnectionReceiveWindowByteCount {
+		quicConfig.InitialConnectionReceiveWindow = uint64(self.ConnectionReceiveWindowByteCount)
+		quicConfig.MaxConnectionReceiveWindow = uint64(self.ConnectionReceiveWindowByteCount)
+	}
+	if apiRequest {
+		// an h3 server that cannot open its control stream closes the
+		// connection before any request
+		quicConfig.MaxIncomingUniStreams = publicUdpH3UniStreamCount
+	}
+	return quicConfig
 }
 
 // Test seams supply a private packet network and trust roots, not a different
@@ -199,10 +221,11 @@ func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest, set
 // else is a fixed application failure. The h3 client lets the server open its
 // control and QPACK streams, which the handshake-only fronts never allow.
 //
-// The settings bound the whole attempt: the wire budgets, the QUIC timeouts
+// The settings bound the whole attempt: its deadline, whatever the caller's
+// context allows beyond it, the wire budgets, the QUIC timeouts and windows,
 // and the /hello answer. Settings that bound nothing are refused before the
-// context is read, since a non-positive timeout expires the attempt at its
-// start, which is a configuration fact and never a timeout.
+// context is read, since a non-positive timeout would expire the attempt at
+// its start, which is a configuration fact and never a timeout.
 func observePublicUdp(
 	ctx context.Context,
 	request PublicUdpRequest,
@@ -216,6 +239,8 @@ func observePublicUdp(
 		observation.Failure = PublicUdpFailureConfiguration
 		return observation, errors.New("public UDP probe settings invalid")
 	}
+	ctx, cancel := context.WithTimeout(ctx, settings.AttemptTimeout)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return observation, err
 	}
@@ -295,20 +320,8 @@ func observePublicUdp(
 	if request.Front == "api" {
 		tlsConfig.NextProtos = []string{http3.NextProtoH3}
 	}
-	quicConfig := &quic.Config{
-		HandshakeIdleTimeout: settings.AttemptTimeout, MaxIdleTimeout: settings.AttemptTimeout,
-		InitialPacketSize:          connectcore.H3InitialPacketByteCount,
-		InitialStreamReceiveWindow: 16 * 1024, MaxStreamReceiveWindow: 16 * 1024,
-		InitialConnectionReceiveWindow: 32 * 1024, MaxConnectionReceiveWindow: 32 * 1024,
-		MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
-	}
-	if apiRequest {
-		// quic-go reads a negative limit as none, and an h3 server that cannot
-		// open its control stream closes the connection before any request
-		quicConfig.MaxIncomingUniStreams = publicUdpH3UniStreamCount
-	}
 	transport = &quic.Transport{Conn: packets}
-	connection, err = transport.Dial(ctx, net.UDPAddrFromAddrPort(peer), tlsConfig, quicConfig)
+	connection, err = transport.Dial(ctx, net.UDPAddrFromAddrPort(peer), tlsConfig, settings.quicConfig(apiRequest))
 	if err != nil {
 		observation.Failure = PublicUdpFailureHandshake
 		var certificateErr *tls.CertificateVerificationError

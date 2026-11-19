@@ -42380,14 +42380,17 @@ misclassified as leaked Connect-private ports.
 
 The bounds are `PublicUdpProbeSettings` (`DefaultPublicUdpProbeSettings`): a
 five-minute cadence; at most 32 logical rows, which expand into 64 family
-attempts; four workers; five seconds per attempt, which is also the QUIC
-handshake and idle timeout and covers a `/hello`; hard raw bounds of 2048
-datagrams and 1 MiB in each direction; and 16 KiB each for a `/hello`
-answer's header and body. A pass hands one instance to the matrix, the
-transport and the findings, so a tuned budget bounds the wire and the
-validation of the counts the transport reports alike. Settings without a
-positive attempt timeout and positive wire budgets refuse the whole matrix
-(`probe-settings`) before any socket opens. A matrix of more than 32 rows, such
+attempts; four workers; five seconds per attempt, which the transport applies
+whatever its caller's deadline, and which is also the QUIC handshake and idle
+timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and 1 MiB in
+each direction; QUIC receive windows of 16 KiB per stream and 32 KiB per
+connection, which never grow; and 16 KiB each for a `/hello` answer's header
+and body. A pass hands one instance to the matrix, the transport and the
+findings, so a tuned budget bounds the wire and the validation of the counts
+the transport reports alike. Settings without a positive attempt timeout and
+positive wire budgets refuse the whole matrix (`probe-settings`) before any
+socket opens. A non-positive receive window takes quic-go's default, which the
+byte budget still bounds. A matrix of more than 32 rows, such
 as every carrier of both fronts on every lb_alt interface, needs a raised
 `MaxTargetCount` default first. Unexpected inbound traffic shares the receive
 budget. DNS state/queues retain their native bounded codec limits.

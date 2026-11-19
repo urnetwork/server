@@ -11,22 +11,28 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	connectcore "github.com/urnetwork/connect"
 )
 
 // The defaults are the probe's documented bounds, and each call returns its
 // own instance, the api request settings included.
 func TestPublicUdpProbeSettingsDefaultsAreFreshInstances(t *testing.T) {
 	want := PublicUdpProbeSettings{
-		Cadence:        5 * time.Minute,
-		AttemptTimeout: 5 * time.Second,
-		MaxTargetCount: 32,
-		WorkerCount:    4,
-		MaxPacketCount: 2048,
-		MaxByteCount:   1024 * 1024,
-		ApiRequest:     PublicUdpApiRequestSettings{ResponseHeaderByteLimit: 16 * 1024, ResponseBodyByteLimit: 16 * 1024},
+		Cadence:                          5 * time.Minute,
+		AttemptTimeout:                   5 * time.Second,
+		MaxTargetCount:                   32,
+		WorkerCount:                      4,
+		MaxPacketCount:                   2048,
+		MaxByteCount:                     1024 * 1024,
+		StreamReceiveWindowByteCount:     16 * 1024,
+		ConnectionReceiveWindowByteCount: 32 * 1024,
+		ApiRequest:                       PublicUdpApiRequestSettings{ResponseHeaderByteLimit: 16 * 1024, ResponseBodyByteLimit: 16 * 1024},
 	}
 	first := DefaultPublicUdpProbeSettings()
 	if *first != want {
@@ -334,6 +340,96 @@ func TestPublicUdpTransportWireBudgetFollowsItsSettings(t *testing.T) {
 		findings := publicUdpFindings(request, observed, err, c.settings)
 		if len(findings) != 1 || findings[0].healthy || findings[0].observed != "verified=false reason=wire-budget-exhausted" {
 			t.Errorf("%s: the findings read %+v", c.name, findings)
+		}
+	}
+
+}
+
+// The attempt's deadline is the settings' attempt timeout, whatever its
+// caller's context allows: a raised timeout reaches the socket's context
+// although the caller set no deadline, and a lowered one holds under a
+// longer caller deadline. The listener records the deadline it was handed.
+func TestPublicUdpTransportBoundsTheAttemptByItsSettings(t *testing.T) {
+	raised := DefaultPublicUdpProbeSettings()
+	raised.AttemptTimeout = time.Hour
+	lowered := DefaultPublicUdpProbeSettings()
+	lowered.AttemptTimeout = time.Second
+	cases := []struct {
+		name           string
+		settings       *PublicUdpProbeSettings
+		callerDeadline time.Duration
+	}{
+		{name: "a raised timeout", settings: raised, callerDeadline: 0},
+		{name: "a lowered timeout", settings: lowered, callerDeadline: 2 * time.Hour},
+	}
+	for _, c := range cases {
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if 0 < c.callerDeadline {
+			ctx, cancel = context.WithTimeout(ctx, c.callerDeadline)
+		}
+		var deadline time.Time
+		bounded := false
+		started := time.Now()
+		observed, err := observePublicUdp(ctx, publicUdpTestNativeRequest("ipv4", "connect", "quic"), c.settings, func(ctx context.Context, _ string, _ string) (net.PacketConn, error) {
+			deadline, bounded = ctx.Deadline()
+			return nil, errors.New("synthetic-private-socket-error")
+		}, nil)
+		finished := time.Now()
+		cancel()
+		if err == nil || observed.Failure != PublicUdpFailureSocket {
+			t.Fatalf("%s: the attempt did not reach its socket: %+v err=%v", c.name, observed, err)
+		}
+		if !bounded || deadline.Before(started.Add(c.settings.AttemptTimeout)) || deadline.After(finished.Add(c.settings.AttemptTimeout)) {
+			t.Errorf("%s: the socket's deadline was %s (bounded=%t), %s after the start", c.name, deadline, bounded, deadline.Sub(started))
+		}
+	}
+}
+
+// The QUIC configuration is the settings': the handshake and idle timeouts
+// are the attempt timeout, so a raised one is not cut at quic-go's
+// five-second default, and the receive windows are the settings' own and
+// never grow, while a non-positive window takes quic-go's default. Only a
+// connect api front lets the server open its three h3 streams.
+func TestPublicUdpQuicConfigFollowsItsSettings(t *testing.T) {
+	tuned := DefaultPublicUdpProbeSettings()
+	tuned.AttemptTimeout = time.Hour
+	tuned.StreamReceiveWindowByteCount = 24 * 1024
+	tuned.ConnectionReceiveWindowByteCount = 48 * 1024
+	unwindowed := DefaultPublicUdpProbeSettings()
+	unwindowed.StreamReceiveWindowByteCount = 0
+	unwindowed.ConnectionReceiveWindowByteCount = -1
+	cases := []struct {
+		name       string
+		settings   *PublicUdpProbeSettings
+		apiRequest bool
+		want       quic.Config
+	}{
+		{name: "tuned, handshake only", settings: tuned, apiRequest: false, want: quic.Config{
+			HandshakeIdleTimeout: time.Hour, MaxIdleTimeout: time.Hour, InitialPacketSize: connectcore.H3InitialPacketByteCount,
+			InitialStreamReceiveWindow: 24 * 1024, MaxStreamReceiveWindow: 24 * 1024,
+			InitialConnectionReceiveWindow: 48 * 1024, MaxConnectionReceiveWindow: 48 * 1024,
+			MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
+		}},
+		{name: "tuned, with /hello", settings: tuned, apiRequest: true, want: quic.Config{
+			HandshakeIdleTimeout: time.Hour, MaxIdleTimeout: time.Hour, InitialPacketSize: connectcore.H3InitialPacketByteCount,
+			InitialStreamReceiveWindow: 24 * 1024, MaxStreamReceiveWindow: 24 * 1024,
+			InitialConnectionReceiveWindow: 48 * 1024, MaxConnectionReceiveWindow: 48 * 1024,
+			MaxIncomingStreams: -1, MaxIncomingUniStreams: 3, EnableDatagrams: true,
+		}},
+		{name: "the defaults", settings: DefaultPublicUdpProbeSettings(), apiRequest: false, want: quic.Config{
+			HandshakeIdleTimeout: 5 * time.Second, MaxIdleTimeout: 5 * time.Second, InitialPacketSize: connectcore.H3InitialPacketByteCount,
+			InitialStreamReceiveWindow: 16 * 1024, MaxStreamReceiveWindow: 16 * 1024,
+			InitialConnectionReceiveWindow: 32 * 1024, MaxConnectionReceiveWindow: 32 * 1024,
+			MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
+		}},
+		{name: "no windows", settings: unwindowed, apiRequest: false, want: quic.Config{
+			HandshakeIdleTimeout: 5 * time.Second, MaxIdleTimeout: 5 * time.Second, InitialPacketSize: connectcore.H3InitialPacketByteCount,
+			MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
+		}},
+	}
+	for _, c := range cases {
+		if quicConfig := c.settings.quicConfig(c.apiRequest); !reflect.DeepEqual(*quicConfig, c.want) {
+			t.Errorf("%s: %+v, want %+v", c.name, *quicConfig, c.want)
 		}
 	}
 }
