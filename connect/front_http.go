@@ -232,25 +232,26 @@ func (self *frontTrackedListener) Accept() (net.Conn, error) {
 // A write its owner left without a deadline is bounded by send_timeout,
 // hijacked or not (LBALT-IMPL.md §7): it fails once none of it has gone out
 // for sendTimeout, as nginx's send_timeout bounds every blocked client write,
-// an upgraded connection's included (ngx_http_upstream_process_upgraded).
-// Those writes are crypto/tls's own, made on the reading goroutine under its
-// write lock, such as the answer to a client's KeyUpdate request. net/http
-// clears the write deadline after each request, and gorilla's websocket
-// upgrade and connect's H1+ one after their 101, while the read deadlines on
-// an idle keepalive connection, a request's head or a websocket's auth frame
-// never reach a goroutine blocked in a write. A TLS 1.3 client that sends
-// KeyUpdate requests and stops reading would otherwise hold the connection,
-// its goroutine and its buffers for good, and a websocket's limit slot
-// before it authenticates, where nginx's timers close it (ngx_ssl_handle_recv
-// leaves a blocked write to the read timer). Once the bounded write fails,
-// the latch fails every later one, and the reader's error or deadline ends
-// the connection. The bound lasts only as long as its write, so a connection
-// idle between writes has none, and an owner's deadline set meanwhile takes
-// over the write and stands: a websocket or tunnel that sets its own
-// deadlines keeps them.
+// an upgraded connection's included (ngx_http_upstream_process_upgraded). The
+// writes it bounds are crypto/tls's own, made on the reading goroutine under
+// its write lock, such as the answer to a client's KeyUpdate request, and
+// net/http's few answers of its own, such as its 431. net/http clears the
+// write deadline after each request, and gorilla's websocket upgrade and
+// connect's H1+ one after their 101, while the read deadlines on an idle
+// keepalive connection, a request's head or a websocket's auth frame never
+// reach a goroutine blocked in a write. A TLS 1.3 client that sends KeyUpdate
+// requests and stops reading would otherwise hold the connection, its
+// goroutine and its buffers for good, and a websocket's limit slot before it
+// authenticates, where nginx's timers close it (ngx_ssl_handle_recv leaves a
+// blocked write to the read timer). Once the bounded write fails, the latch
+// fails every later one, and the reader's error or deadline ends the
+// connection. The bound lasts only as long as its write, so a connection idle
+// between writes has none, and an owner's deadline set meanwhile takes over
+// the write and stands: a websocket or tunnel that sets its own deadlines
+// keeps them.
 //
 // It passes net/http's half-close to the socket (CloseWrite), which
-// embedding net.Conn would hide.
+// embedding net.Conn would hide. Safe for concurrent use as a net.Conn is.
 type frontTrackedConn struct {
 	net.Conn
 	frontServer *frontServer
