@@ -14,8 +14,12 @@ package nginx
 //     upstream didn't encode, for statuses 200, 403 and 404, of unknown
 //     length or at least HttpSettings.GzipMinLength bytes, to an HTTP/1.1 or
 //     later client whose Accept-Encoding offers gzip and whose request has
-//     no Via, never for HEAD. The Content-Length and Accept-Ranges go, a
-//     strong ETag turns weak, and no Vary is added;
+//     no Via. The Content-Length and Accept-Ranges go, and the server adds
+//     no length of its own, a strong ETag turns weak, and no Vary is added,
+//     as gzip_vary is off. A HEAD is decided as a GET and gets the same
+//     head, with nothing compressed: nginx marks a HEAD header-only in its
+//     last header filter, after gzip's has run (ngx_http_header_filter,
+//     ngx_http_v2_header_filter);
 //   - bounds each write to the client by HttpSettings.SendTimeout, as
 //     nginx's send_timeout bounds a write only while it is blocked: the
 //     write deadline is armed just before each write, flush and
@@ -368,7 +372,8 @@ func (self *responseState) finish() {
 }
 
 // Whether nginx's gzip compresses this response (ngx_http_gzip_header_filter
-// and ngx_http_gzip_ok with nginx's defaults).
+// and ngx_http_gzip_ok with nginx's defaults). A HEAD is decided as a GET,
+// since nginx's header_only, which the filter checks, is set only later.
 func (self *responseState) gzips(statusCode int) bool {
 	httpSettings := self.front.settings.Http
 	if httpSettings.GzipLevel <= 0 {
@@ -379,7 +384,8 @@ func (self *responseState) gzips(statusCode int) bool {
 	default:
 		return false
 	}
-	if self.r.Method == http.MethodHead || !self.r.ProtoAtLeast(1, 1) {
+	// gzip_http_version 1.1
+	if !self.r.ProtoAtLeast(1, 1) {
 		return false
 	}
 	// gzip_proxied off
@@ -406,10 +412,16 @@ func (self *responseState) gzips(statusCode int) bool {
 	return true
 }
 
-// Starts the gzip stream, changing the head as nginx's gzip filter does.
+// Starts the gzip stream, changing the head as nginx's gzip filter does. The
+// Content-Length is set to nil, which Go's h1, h2 and h3 servers take as one
+// the handler suppressed, so none of them adds its own: on a GET, from the
+// compressed bytes of a handler that returns before the head is written,
+// where nginx sends no length; on a HEAD, from body bytes the handler wrote
+// anyway, or on h3 as 0. A HEAD gets the head alone, with no body to
+// compress.
 func (self *responseState) startGzip() {
 	header := self.w.Header()
-	header.Del("Content-Length")
+	header["Content-Length"] = nil
 	header.Del("Accept-Ranges")
 	// ngx_http_weak_etag
 	if etag := header.Get("ETag"); etag != "" {
@@ -422,6 +434,9 @@ func (self *responseState) startGzip() {
 		}
 	}
 	header.Set("Content-Encoding", "gzip")
+	if self.r.Method == http.MethodHead {
+		return
+	}
 	gzipWriter := self.front.gzipWriters.Get().(*gzip.Writer)
 	gzipWriter.Reset(&responseBodyWriter{
 		state: self,

@@ -9,15 +9,20 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // The CORS headers a response must have: the echoed or wildcard origin, or
@@ -215,8 +220,11 @@ func TestRouteHttpSecurityHeadersOnEveryStatus(t *testing.T) {
 
 // nginx's gzip with its defaults: text/html the upstream didn't encode,
 // statuses 200, 403 and 404, at least 20 bytes or of unknown length, to an
-// HTTP/1.1 or later client offering gzip with no Via, never HEAD. Content
-// Length and Accept-Ranges go and the ETag turns weak.
+// HTTP/1.1 or later client offering gzip with no Via. Accept-Ranges goes,
+// the ETag turns weak, and the Content-Length is suppressed with nil, so the
+// server adds none. A HEAD is decided as a GET and gets the same head, and
+// nothing is compressed: what a handler writes for it anyway passes as it
+// is, for the server to drop.
 func TestRouteHttpGzipsTextHtml(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	const html = "<html><body>a page of text that compresses</body></html>"
@@ -260,7 +268,12 @@ func TestRouteHttpGzipsTextHtml(t *testing.T) {
 		{name: "json", upstream: upstream{statusCode: 200, contentType: "application/json", body: html}, gzips: false},
 		{name: "already encoded", upstream: upstream{statusCode: 200, contentType: "text/html", contentEncoding: "br", body: html}, gzips: false},
 		{name: "under 20 bytes", upstream: upstream{statusCode: 200, contentType: "text/html", contentLength: "19", body: html[:19]}, gzips: false},
-		{name: "head", upstream: upstream{statusCode: 200, contentType: "text/html"}, method: "HEAD", gzips: false},
+		{name: "head", upstream: upstream{statusCode: 200, contentType: "text/html", contentLength: "57", body: html}, method: "HEAD", gzips: true},
+		{name: "head of unknown length", upstream: upstream{statusCode: 200, contentType: "text/html"}, method: "HEAD", gzips: true},
+		{name: "head of a 404 page", upstream: upstream{statusCode: 404, contentType: "text/html", contentLength: "57"}, method: "HEAD", gzips: true},
+		{name: "head under 20 bytes", upstream: upstream{statusCode: 200, contentType: "text/html", contentLength: "19"}, method: "HEAD", gzips: false},
+		{name: "head of json", upstream: upstream{statusCode: 200, contentType: "application/json", contentLength: "57"}, method: "HEAD", gzips: false},
+		{name: "head over http/1.0", upstream: upstream{statusCode: 200, contentType: "text/html", contentLength: "57"}, method: "HEAD", proto: "HTTP/1.0", gzips: false},
 		{name: "http/1.0", upstream: upstream{statusCode: 200, contentType: "text/html", body: html}, proto: "HTTP/1.0", gzips: false},
 		{name: "via", upstream: upstream{statusCode: 200, contentType: "text/html", body: html}, header: http.Header{"Via": {"1.1 proxy.example"}}, gzips: false},
 		{name: "no gzip offered", upstream: upstream{statusCode: 200, contentType: "text/html", body: html}, header: http.Header{"Accept-Encoding": {"br"}}, gzips: false},
@@ -288,8 +301,11 @@ func TestRouteHttpGzipsTextHtml(t *testing.T) {
 			continue
 		}
 		if !c.gzips {
-			if c.upstream.contentEncoding == "" && c.method != "HEAD" && response.Body.String() != c.upstream.body {
+			if c.upstream.contentEncoding == "" && response.Body.String() != c.upstream.body {
 				t.Errorf("%s: body %q, want the upstream's", c.name, response.Body.String())
+			}
+			if c.upstream.contentLength != "" && header.Get("Content-Length") != c.upstream.contentLength {
+				t.Errorf("%s: Content-Length %q, want the upstream's %q", c.name, header.Get("Content-Length"), c.upstream.contentLength)
 			}
 			continue
 		}
@@ -305,6 +321,17 @@ func TestRouteHttpGzipsTextHtml(t *testing.T) {
 		if values := header.Values("Vary"); slices.Contains(values, "Accept-Encoding") {
 			t.Errorf("%s: gzip added Vary, which nginx's gzip_vary off doesn't", c.name)
 		}
+		// the servers take a nil Content-Length as one suppressed
+		if values, ok := header["Content-Length"]; !ok || values != nil {
+			t.Errorf("%s: Content-Length %q, want it suppressed with nil", c.name, values)
+		}
+		if c.method == "HEAD" {
+			// no gzip stream: what the handler wrote passed as it was
+			if response.Body.String() != c.upstream.body {
+				t.Errorf("%s: body %q, want what the handler wrote, uncompressed", c.name, response.Body.String())
+			}
+			continue
+		}
 		reader, err := gzip.NewReader(bytes.NewReader(response.Body.Bytes()))
 		if err != nil {
 			t.Fatalf("%s: %s", c.name, err)
@@ -317,6 +344,128 @@ func TestRouteHttpGzipsTextHtml(t *testing.T) {
 			t.Errorf("%s: decompressed %q, want %q", c.name, body, c.upstream.body)
 		}
 	}
+}
+
+// Over real h1, h2 and h3 servers, a HEAD of a text/html page gets the head
+// a GET gets, for a forwarded name and, on h1 and h2, for connect
+// in-process: Content-Encoding: gzip, a weak ETag, and no Content-Length or
+// Accept-Ranges, though the handler wrote the page anyway, from which each
+// server would count a Content-Length of its own, h3 even with nothing
+// written. No body arrives, and the next request on the connection is read
+// in step.
+func TestRouteHttpGzipsAHeadOverEveryProtocol(t *testing.T) {
+	const html = "<html><body>a page of text that compresses</body></html>"
+	vault := newTestTlsVault(t)
+	testFront := newTestFront(t, vault.routeTable, testFrontSettings())
+	writePage := func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("Content-Type", "text/html; charset=utf-8")
+		header.Set("ETag", `"v1"`)
+		header.Set("Accept-Ranges", "bytes")
+		// whatever the method, as a handler may
+		io.WriteString(w, html)
+	}
+	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
+		writePage(w, r)
+	}
+	testFront.connectHandler.serve = writePage
+
+	check := func(what string, client *http.Client, url string, host string) {
+		for _, method := range []string{"HEAD", "GET"} {
+			r, err := http.NewRequestWithContext(t.Context(), method, url, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Host = host
+			r.Header.Set("Accept-Encoding", "gzip")
+			response, err := client.Do(r)
+			if err != nil {
+				t.Fatalf("%s %s: %v", what, method, err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil {
+				t.Fatalf("%s %s: reading the body: %v", what, method, err)
+			}
+			header := response.Header
+			if response.StatusCode != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
+				t.Errorf("%s %s = %d, Content-Encoding %q; want 200 gzipped", what, method, response.StatusCode, header.Get("Content-Encoding"))
+				continue
+			}
+			if values := header.Values("Content-Length"); len(values) != 0 {
+				t.Errorf("%s %s: Content-Length %q, want none", what, method, values)
+			}
+			if values := header.Values("Accept-Ranges"); len(values) != 0 {
+				t.Errorf("%s %s: Accept-Ranges %q, want none", what, method, values)
+			}
+			if etag := header.Get("ETag"); etag != `W/"v1"` {
+				t.Errorf("%s %s: ETag %q, want it weak", what, method, etag)
+			}
+			if method == "HEAD" {
+				if len(body) != 0 || len(response.TransferEncoding) != 0 {
+					t.Errorf("%s HEAD: body %q, Transfer-Encoding %q; want neither", what, body, response.TransferEncoding)
+				}
+				continue
+			}
+			reader, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("%s GET: %v", what, err)
+			}
+			if page, err := io.ReadAll(reader); err != nil || string(page) != html {
+				t.Errorf("%s GET: decompressed %q, %v; want the page", what, page, err)
+			}
+		}
+	}
+
+	for _, enableHttp2 := range []bool{false, true} {
+		server := newTestConfiguredServer(t, testFront, enableHttp2)
+		client := server.Client()
+		protocol := "h1"
+		if enableHttp2 {
+			protocol = "h2"
+		}
+		check(protocol+" forwarded", client, server.URL+"/page", "api.service.example")
+		check(protocol+" in-process", client, server.URL+"/page", "connect.service.example")
+	}
+
+	_, quicTlsConfig := vault.newTlsConfigs(t, testFrontSettings().Tls)
+	// quic-go warns once per process when it can't raise the socket buffers
+	t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quicTransport := &quic.Transport{
+		Conn: udpConn,
+	}
+	listener, err := quicTransport.ListenEarly(quicTlsConfig, &quic.Config{})
+	if err != nil {
+		udpConn.Close()
+		t.Fatal(err)
+	}
+	h3Server := &http3.Server{
+		Handler: testFront.front.H3ApiHandler("eth1"),
+	}
+	go h3Server.ServeListener(listener)
+	t.Cleanup(func() {
+		h3Server.Close()
+		listener.Close()
+		quicTransport.Close()
+		udpConn.Close()
+	})
+	h3Transport := &http3.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "api.service.example",
+		},
+		Dial: func(ctx context.Context, _ string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddr(ctx, udpConn.LocalAddr().String(), tlsConfig, quicConfig)
+		},
+	}
+	t.Cleanup(func() {
+		h3Transport.Close()
+	})
+	check("h3 forwarded", &http.Client{Transport: h3Transport, Timeout: testTlsExchangeTimeout}, "https://api.service.example/page", "api.service.example")
 }
 
 // After BeginDrain every h1 and h2 response carries Connection: close, the
