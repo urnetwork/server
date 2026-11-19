@@ -13,10 +13,9 @@ package nginx
 //   - never after a 500, 502 or 504, which pass through, a malformed or
 //     oversized response head, or a response cut short;
 //   - never for a per-block lb route, which reports its block's own result;
-//   - never for a streamed body once its request began going upstream. A
-//     streamed route's body that nginx's first pass reads whole isn't
-//     streamed: nginx buffers it, so it is forwarded with its length and
-//     retried like any buffered body (serveHttp);
+//   - never for a streamed body once its request began going upstream,
+//     unless its first read returned it whole and it was kept, as nginx
+//     buffers a body its first pass reads whole (body_stream.go);
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
 //     isn't an attempt, as nginx's tries++ for a cached connection isn't.
@@ -32,7 +31,6 @@ package nginx
 // upstream.
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -198,75 +196,50 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			self.refuse(w, r, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 			return
 		}
-		bodyOptions := bodyReadOptions{
-			declaredLength:  r.ContentLength,
-			prefixBytes:     options.clientBodyBufferSize,
-			readTimeout:     options.clientBodyTimeout,
-			setReadDeadline: setClientReadDeadline,
-		}
-		var storedBody *storedBody
-		var refusal *bodyRefusal
-		var streamedBody io.Reader
-		if options.streamed {
-			streamedBody = r.Body
-			// the most of the body nginx's first pass reads whole, when it
-			// can (bodyStore.readFirstPass): a chunked body in its buffer of
-			// client_body_buffer_size, and a declared one in a buffer of its
-			// length when that is under client_body_buffer_size and a quarter
-			// (ngx_http_read_client_request_body). An h2 body streams, since
-			// nginx runs an h2 request at its head, before any of its body
-			// arrives, and so does a body that waits for 100 Continue, which
-			// can't have arrived either.
-			firstPassBytes, firstPass := func() (int64, bool) {
-				clientBodyBufferSize := options.clientBodyBufferSize
-				if r.ProtoMajor != 1 || clientBodyBufferSize <= 0 {
-					return 0, false
+		switch {
+		case options.streamed:
+			// a body its first read returns whole is kept for a retry, as
+			// nginx buffers a body its first pass reads whole: an h1 body of
+			// declared length, not one that waits for 100 Continue, which
+			// nginx's first pass reads before the client sends it
+			// (body_stream.go)
+			keepBodyStore := func() *bodyStore {
+				if r.ProtoMajor != 1 || r.ContentLength <= 0 {
+					return nil
 				}
 				for _, expect := range r.Header.Values("Expect") {
 					for _, token := range strings.Split(expect, ",") {
 						if strings.EqualFold(strings.TrimSpace(token), "100-continue") {
-							return 0, false
+							return nil
 						}
 					}
 				}
-				if r.ContentLength < 0 {
-					return clientBodyBufferSize, true
-				}
-				if r.ContentLength < clientBodyBufferSize+clientBodyBufferSize/4 {
-					return r.ContentLength, true
-				}
-				return 0, false
+				return self.bodyStore
 			}()
-			if firstPass {
-				var firstBytes []byte
-				storedBody, firstBytes, refusal = self.bodyStore.readFirstPass(ctx, r.Body, bodyOptions, firstPassBytes)
-				if 0 < len(firstBytes) {
-					streamedBody = io.MultiReader(bytes.NewReader(firstBytes), r.Body)
-				}
-			}
-		} else {
-			storedBody, refusal = self.bodyStore.read(ctx, r.Body, bodyOptions)
-		}
-		if refusal != nil {
-			self.refuse(w, r, responseController, refusal)
-			return
-		}
-		if storedBody != nil {
-			// forwarded with its length, and replayed by a retry, a body the
-			// first pass read whole included, which still goes with
-			// X-UR-Request-Buffering: off, as nginx sends it
-			defer storedBody.release()
-			request.storedBody = storedBody
-			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
-		} else {
 			// the body keeps arriving while the response flows
 			responseController.EnableFullDuplex()
-			request.streamedBody = newForwardStreamedBody(ctx, streamedBody, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
+			streamedBody := newForwardStreamedBody(ctx, r.Body, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline, keepBodyStore)
+			defer streamedBody.release()
+			request.streamedBody = streamedBody
 			if 0 <= r.ContentLength {
 				request.bodyFraming = forwardBodyFraming{known: true, length: r.ContentLength}
 			} else {
 				request.bodyFraming = forwardBodyFraming{chunked: true}
 			}
+		default:
+			storedBody, refusal := self.bodyStore.read(ctx, r.Body, bodyReadOptions{
+				declaredLength:  r.ContentLength,
+				prefixBytes:     options.clientBodyBufferSize,
+				readTimeout:     options.clientBodyTimeout,
+				setReadDeadline: setClientReadDeadline,
+			})
+			if refusal != nil {
+				self.refuse(w, r, responseController, refusal)
+				return
+			}
+			defer storedBody.release()
+			request.storedBody = storedBody
+			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
@@ -323,24 +296,42 @@ type forwardAttempts struct {
 
 // Whether the request may move to another block after a failed attempt:
 // attempts are left, the route names no block, the client is still there,
-// and a streamed body never began going upstream.
+// and a streamed body never began going upstream, or was kept whole by its
+// first read.
 func (self *forwardAttempts) retryAllowed() bool {
 	if self.options.blockName != "" || self.attemptLimit <= self.attemptCount || self.ctx.Err() != nil {
 		return false
 	}
-	return self.request.streamedBody == nil || !self.request.streamedBody.began()
+	streamedBody := self.request.streamedBody
+	return streamedBody == nil || !streamedBody.began() || streamedBody.kept() != nil
 }
 
 // Whether the request may move to another block after exchange's 503. The
 // exchange is live, and its write may be about to begin a streamed body, so
 // the body is first held back from it under its gate's lock: a body held
 // back is whole for the retry, and one that began goes on, its 503 the
-// final answer.
+// final answer, unless its first read kept it whole. A first read still
+// under way when the 503 comes, which nginx's first pass would have found
+// empty, keeps nothing in time.
 func (self *forwardAttempts) retry503Allowed(exchange *upstreamExchange) bool {
 	if !self.retryAllowed() {
 		return false
 	}
-	return self.request.streamedBody == nil || !exchange.holdBody()
+	streamedBody := self.request.streamedBody
+	return streamedBody == nil || !exchange.holdBody() || streamedBody.kept() != nil
+}
+
+// Moves the request on to its next attempt, once a retry is allowed: a
+// streamed body that began, which the retry rules allow only once it is kept
+// whole, goes as a buffered body from here on, its head unchanged, and one
+// held back streams again from its start.
+func (self *forwardAttempts) next() {
+	streamedBody := self.request.streamedBody
+	if streamedBody == nil || !streamedBody.began() {
+		return
+	}
+	self.request.storedBody = streamedBody.kept()
+	self.request.streamedBody = nil
 }
 
 // Runs the attempts and relays the final response, or answers the front's
@@ -373,6 +364,7 @@ func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, respo
 				exchange.finish(false)
 				self.releaseBlock(block, options)
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, upstreamAttemptHttp503).Inc()
+				attempts.next()
 				continue
 			}
 			self.relay(w, responseController, block, exchange, options)
@@ -396,6 +388,7 @@ func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, respo
 		case upstreamFailureError, upstreamFailureTimeout:
 			if attempts.retryAllowed() {
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, failure.String()).Inc()
+				attempts.next()
 				continue
 			}
 		}

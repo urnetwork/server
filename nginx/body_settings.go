@@ -27,7 +27,9 @@ type BodySettings struct {
 	// sized from M2 and confirmed by the owner (D7), room for 4,096
 	// concurrent 64 KiB prefixes. A body that can't reserve its prefix, one
 	// of unknown length included, is a local 503 before its first read,
-	// counted apart from upstream 503s and never retried (D21). Non-positive
+	// counted apart from upstream 503s and never retried (D21). A streamed
+	// body its first read keeps whole for a retry reserves its length here
+	// too, and one with no room streams on, unrefused and unkept. Non-positive
 	// means no budget.
 	MemoryBudgetBytes int64
 	// the spilled bytes the process may hold at once: 4 GiB (D21). A body

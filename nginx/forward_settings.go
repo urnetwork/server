@@ -68,10 +68,13 @@ type ForwardSettings struct {
 	// bytes. A response head is limited by MaxUpstreamResponseHeaderBytes, not
 	// by this. Non-positive means bufio's default size.
 	UpstreamBufferBytes int
-	// the buffer a response body copy, or one direction of a tunnel, uses,
-	// in bytes, pooled per service. Every read is written to the client and
-	// flushed at once, as nginx's `proxy_buffering off` does. Values below 1
-	// mean 1.
+	// the buffer a response body copy, a streamed request body's copy, or
+	// one direction of a tunnel, uses, in bytes, pooled per service. Every
+	// read is written on and flushed at once, as nginx's `proxy_buffering
+	// off` and `proxy_request_buffering off` do. It bounds the streamed
+	// body's first read, which keeps a body it returns whole for a retry
+	// (body_stream.go), so a longer declared body streams unkept. Values
+	// below 1 mean 1.
 	CopyBufferBytes int
 }
 

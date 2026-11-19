@@ -737,8 +737,12 @@ func (self *upstreamExchange) beginBody() bool {
 }
 
 // Stops a streamed body for this exchange: the write may no longer begin
-// it, and one it began is interrupted. A body never begun stays usable for a
-// retry.
+// it, and one it began is interrupted, unless it was read whole. A body never
+// begun stays usable for a retry, and so does one read whole and kept. A
+// whole body has no read left to end, and an interrupt's past deadline would
+// end Go's HTTP/1.1 server's background read of the connection, which it
+// starts at the body's end and answers by canceling the request, the retry
+// of a kept body included.
 func (self *upstreamExchange) stopBody() {
 	began := func() bool {
 		self.stateLock.Lock()
@@ -746,7 +750,7 @@ func (self *upstreamExchange) stopBody() {
 		self.bodyStopped = true
 		return self.bodyBegan
 	}()
-	if began {
+	if began && !self.request.streamedBody.isWhole() {
 		self.request.streamedBody.interrupt()
 	}
 }

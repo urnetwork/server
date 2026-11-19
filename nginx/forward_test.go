@@ -291,11 +291,10 @@ func TestForwardBodyFramingHeaders(t *testing.T) {
 	}
 }
 
-// A streamed route marks the request X-UR-Request-Buffering: off. A body the
-// first pass reads whole goes with its length, a chunked one included, as
-// nginx sends a body it buffered; one it reads only part of streams, chunked
-// when its length is unknown and with its length when declared. A
-// client_body_buffer_size of one byte holds only part of these bodies.
+// A streamed route marks the request X-UR-Request-Buffering: off, and sends
+// its body framed as the client framed it: with its length when declared,
+// and chunked when its length is unknown, though it came whole with its head,
+// where nginx would have buffered it and sent its length.
 func TestForwardStreamedRouteHeaders(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
 	group, _ := newTestGroup(t, testForwardRouteService("streamed-headers", []testBlock{
@@ -304,24 +303,18 @@ func TestForwardStreamedRouteHeaders(t *testing.T) {
 	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
-		if r.URL.Path == "/streams" {
-			options.clientBodyBufferSize = 1
-		}
 		return options
 	})
 	cases := []struct {
-		path        string
 		framing     string
 		body        string
 		wantChunked bool
 	}{
-		{path: "/whole", framing: "Transfer-Encoding: chunked", body: "3\r\nabc\r\n0\r\n\r\n", wantChunked: false},
-		{path: "/whole", framing: "Content-Length: 3", body: "abc", wantChunked: false},
-		{path: "/streams", framing: "Transfer-Encoding: chunked", body: "3\r\nabc\r\n0\r\n\r\n", wantChunked: true},
-		{path: "/streams", framing: "Content-Length: 3", body: "abc", wantChunked: false},
+		{framing: "Transfer-Encoding: chunked", body: "3\r\nabc\r\n0\r\n\r\n", wantChunked: true},
+		{framing: "Content-Length: 3", body: "abc", wantChunked: false},
 	}
 	for _, c := range cases {
-		rawFrontRequest(t, front, "POST "+c.path+" HTTP/1.1\r\nHost: streamed.service.example\r\n"+c.framing+"\r\n\r\n"+c.body)
+		rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: streamed.service.example\r\n"+c.framing+"\r\n\r\n"+c.body)
 	}
 	recorded := upstream.recorded()
 	if len(recorded) != len(cases) {
@@ -330,29 +323,127 @@ func TestForwardStreamedRouteHeaders(t *testing.T) {
 	for i, c := range cases {
 		request := recorded[i]
 		if got := request.header.Values(urRequestBufferingHeader); !reflect.DeepEqual(got, []string{"off"}) {
-			t.Errorf("%s %s: X-UR-Request-Buffering %v, want off", c.path, c.framing, got)
+			t.Errorf("%s: X-UR-Request-Buffering %v, want off", c.framing, got)
 		}
 		if string(request.body) != "abc" {
-			t.Errorf("%s %s: body %q, want abc", c.path, c.framing, request.body)
+			t.Errorf("%s: body %q, want abc", c.framing, request.body)
 		}
 		if c.wantChunked {
 			if !reflect.DeepEqual(request.transferEncoding, []string{"chunked"}) || request.contentLength != -1 {
-				t.Errorf("%s %s: sent as %v and length %d, want chunked", c.path, c.framing, request.transferEncoding, request.contentLength)
+				t.Errorf("%s: sent as %v and length %d, want chunked", c.framing, request.transferEncoding, request.contentLength)
 			}
 		} else if request.contentLength != 3 || len(request.transferEncoding) != 0 {
-			t.Errorf("%s %s: sent as %v and length %d, want length 3", c.path, c.framing, request.transferEncoding, request.contentLength)
+			t.Errorf("%s: sent as %v and length %d, want length 3", c.framing, request.transferEncoding, request.contentLength)
 		}
 	}
 }
 
-// A streamed route's body that the first pass reads whole is buffered, as
-// nginx buffers one: a block's 503 is retried on another block with the
-// whole body, sent with its length, a chunked one included. The first pass
-// holds what nginx's does: a declared body under client_body_buffer_size and
-// a quarter, here 80 bytes of a 64 byte buffer, and a chunked body within
-// the buffer. A body it can't read whole streams, so the block that began
-// taking it gives the final answer, its 503 (D7).
-func TestForwardStreamedBodyReadWholeIsRetried(t *testing.T) {
+// A streamed route's head goes to its block at once, before any of its body,
+// as nginx sends it once its first pass finds nothing to read
+// (ngx_http_read_client_request_body returns NGX_AGAIN and runs
+// ngx_http_upstream_init): the block has the head of a client that sent only
+// its head, with a declared and with a chunked body, and then the body as the
+// client sends it.
+func TestForwardStreamedHeadReachesTheBlockBeforeTheBody(t *testing.T) {
+	for _, c := range []struct {
+		framing string
+		body    string
+	}{
+		{framing: "Content-Length: 5", body: "hello"},
+		{framing: "Transfer-Encoding: chunked", body: "5\r\nhello\r\n0\r\n\r\n"},
+	} {
+		raw := newRawUpstream(t)
+		group, bodyStore := newTestGroup(t, testForwardRouteService(testServiceName("streamed-head-first"), []testBlock{
+			{name: "g1", weight: 1, port: raw.port},
+		}), testForwardFrontSettings())
+		front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			return options
+		})
+		clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+		if err != nil {
+			t.Fatalf("dial front: %v", err)
+		}
+		defer clientConn.Close()
+		io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\n"+c.framing+"\r\n\r\n")
+
+		// the head reaches the block while the client still holds its body
+		upstreamConn, _, request := raw.accept(t)
+		// a bound, so a body held back fails the read rather than hangs it
+		upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		io.WriteString(clientConn, c.body)
+		readExactly(t, request.Body, "hello")
+		readEnd(t, request.Body)
+		io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: response %v %v, want the block's 200", c.framing, response, err)
+		}
+		readExactly(t, response.Body, "ok")
+		if recovered := front.waitServed(t); recovered != nil {
+			t.Errorf("%s: serveHttp ended with %v", c.framing, recovered)
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
+// A client that sends its body only once it has the response head, as a
+// full-duplex client may, gets its block's answer: the request head went up
+// at once, the block answers it before the body, and the body then streams
+// on to the block while the response is relayed.
+func TestForwardStreamedClientWaitingForTheResponseHead(t *testing.T) {
+	raw := newRawUpstream(t)
+	group, bodyStore := newTestGroup(t, testForwardRouteService(testServiceName("streamed-full-duplex"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		return options
+	})
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 5\r\n\r\n")
+
+	upstreamConn, _, request := raw.accept(t)
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	// the block answers the head alone, and keeps its response open
+	io.WriteString(upstreamConn, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nfirst\r\n")
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("a client waiting for the response head got %v %v, want the block's 200", response, err)
+	}
+	readExactly(t, response.Body, "first")
+	// the body only now
+	io.WriteString(clientConn, "hello")
+	readExactly(t, request.Body, "hello")
+	readEnd(t, request.Body)
+	io.WriteString(upstreamConn, "4\r\nlast\r\n0\r\n\r\n")
+	readExactly(t, response.Body, "last")
+	readEnd(t, response.Body)
+	if recovered := front.waitServed(t); recovered != nil {
+		t.Errorf("serveHttp ended with %v", recovered)
+	}
+	checkStoreEmpty(t, bodyStore)
+}
+
+// A streamed route's body that its first read returns whole is kept, as
+// nginx buffers a body its first pass reads whole: a block's 503 is retried
+// on another block, which gets the whole body with its length and
+// X-UR-Request-Buffering: off, as the first one did. Go's server returns a
+// body it holds whole with the head in one read, whatever the route's
+// client_body_buffer_size, here one byte, as nginx buffers a body it pre-read
+// whole whatever that size. Nothing is kept, so the block that began taking
+// the body gives the final answer, its 503 (D7), of a chunked body, though it
+// came whole with its head, where nginx would retry, and of a declared body
+// longer than one read, here past a ForwardSettings.CopyBufferBytes of 16.
+func TestForwardStreamedBodyReadWholeFirstIsRetried(t *testing.T) {
 	chunked := func(data []byte) string {
 		return strconv.FormatInt(int64(len(data)), 16) + "\r\n" + string(data) + "\r\n0\r\n\r\n"
 	}
@@ -362,16 +453,17 @@ func TestForwardStreamedBodyReadWholeIsRetried(t *testing.T) {
 		data        []byte
 		wantRetried bool
 	}{
-		{name: "declared under the threshold", framing: "Content-Length: 79", data: testBodyBytes(79), wantRetried: true},
-		{name: "declared at the threshold", framing: "Content-Length: 80", data: testBodyBytes(80), wantRetried: false},
-		{name: "chunked within the buffer", framing: "Transfer-Encoding: chunked", data: testBodyBytes(64), wantRetried: true},
-		{name: "chunked past the buffer", framing: "Transfer-Encoding: chunked", data: testBodyBytes(65), wantRetried: false},
+		{name: "declared", framing: "Content-Length: 16", data: testBodyBytes(16), wantRetried: true},
+		{name: "chunked", framing: "Transfer-Encoding: chunked", data: testBodyBytes(16), wantRetried: false},
+		{name: "declared past one read", framing: "Content-Length: 17", data: testBodyBytes(17), wantRetried: false},
 	} {
 		body := string(c.data)
 		if strings.HasPrefix(c.framing, "Transfer-Encoding") {
 			body = chunked(c.data)
 		}
-		serviceName := testServiceName("first-pass-retry")
+		settings := testForwardFrontSettings()
+		settings.Forward.CopyBufferBytes = 16
+		serviceName := testServiceName("first-read-retry")
 		busy := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		})
@@ -379,11 +471,11 @@ func TestForwardStreamedBodyReadWholeIsRetried(t *testing.T) {
 		group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 			{name: "g1", weight: 1, port: busy.port},
 			{name: "g2", weight: 1, port: live.port},
-		}), testForwardFrontSettings())
+		}), settings)
 		front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 			options := testForwardOptions(r)
 			options.streamed = true
-			options.clientBodyBufferSize = 64
+			options.clientBodyBufferSize = 1
 			return options
 		})
 		response, responseBody := rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\n"+c.framing+"\r\n\r\n"+body)
@@ -395,6 +487,7 @@ func TestForwardStreamedBodyReadWholeIsRetried(t *testing.T) {
 			if response.StatusCode != http.StatusServiceUnavailable || len(live.recorded()) != 0 || retryCount(serviceName, "http_503") != 0 {
 				t.Errorf("%s: %d %q, retries %v, want the first block's 503 passed through", c.name, response.StatusCode, responseBody, retryCount(serviceName, "http_503"))
 			}
+			checkStoreEmpty(t, bodyStore)
 			continue
 		}
 		if response.StatusCode != http.StatusOK || string(responseBody) != "g2" || retryCount(serviceName, "http_503") != 1 {
@@ -412,12 +505,54 @@ func TestForwardStreamedBodyReadWholeIsRetried(t *testing.T) {
 	}
 }
 
-// The first pass reads h1 bodies only: nginx runs an h2 request when its
-// head arrives, before any of its body, so an h2 body streams, and a block
-// that took it gives the final answer, even a 503, though the body is small
-// and sent whole.
+// A body that comes only partly with its head streams, as nginx streams a
+// body its first pass reads only part of: the first read returns the part,
+// so nothing is kept, and the block, which has the whole body by the time it
+// answers, gives the final answer, its 503 (D7).
+func TestForwardStreamedBodyStillArrivingIsNotRetried(t *testing.T) {
+	serviceName := testServiceName("first-read-part")
+	raw := newRawUpstream(t)
+	live := newRecordingUpstream(t, "g2", nil)
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: live.port},
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		return options
+	})
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 20\r\n\r\nfirst-ten!")
+	upstreamConn, _, request := raw.accept(t)
+	upstreamConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	readExactly(t, request.Body, "first-ten!")
+	io.WriteString(clientConn, "second-ten")
+	readExactly(t, request.Body, "second-ten")
+	io.WriteString(upstreamConn, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\n\r\nbusy")
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil || response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("response %v %v, want the block's 503", response, err)
+	}
+	readExactly(t, response.Body, "busy")
+	front.waitServed(t)
+	if len(live.recorded()) != 0 || retryCount(serviceName, "http_503") != 0 {
+		t.Errorf("a body that streamed was retried after its 503")
+	}
+	checkStoreEmpty(t, bodyStore)
+}
+
+// The first read keeps nothing of an h2 body: nginx runs an h2 request when
+// its head arrives, before any of its body, so an h2 body streams, and a
+// block that took it gives the final answer, even a 503, though the body is
+// small and sent whole.
 func TestForwardStreamedBodyOnH2Streams(t *testing.T) {
-	serviceName := testServiceName("first-pass-h2")
+	serviceName := testServiceName("first-read-h2")
 	busy := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
@@ -449,9 +584,10 @@ func TestForwardStreamedBodyOnH2Streams(t *testing.T) {
 
 // A body that waits for 100 Continue streams, as nginx streams it: nginx
 // sends its 100 Continue and reads at once, before the client can have sent
-// any of the body. So its block's 503 is the final answer.
+// any of the body, so the first read keeps nothing, and its block's 503 is
+// the final answer.
 func TestForwardStreamedBodyExpectingContinueStreams(t *testing.T) {
-	serviceName := testServiceName("first-pass-continue")
+	serviceName := testServiceName("first-read-continue")
 	busy := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
@@ -489,28 +625,104 @@ func TestForwardStreamedBodyExpectingContinueStreams(t *testing.T) {
 	}
 }
 
-// A body the store has no room to hold for the first pass streams as it
-// would without one: it isn't refused, as a buffered body over the budget is.
+// A body the store has no room to keep streams as it would without the
+// first read keeping it: it isn't refused, as a buffered body over the
+// budget is, and its block's 503 is the final answer.
 func TestForwardStreamedBodyOverTheBudgetStreams(t *testing.T) {
 	settings := testForwardFrontSettings()
 	settings.Body.MemoryBudgetBytes = 1
-	serviceName := testServiceName("first-pass-budget")
-	upstream := newRecordingUpstream(t, "g1", nil)
+	serviceName := testServiceName("first-read-budget")
+	busy := newRecordingUpstream(t, "g1", func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	live := newRecordingUpstream(t, "g2", nil)
 	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
-		{name: "g1", weight: 1, port: upstream.port},
+		{name: "g1", weight: 1, port: busy.port},
+		{name: "g2", weight: 1, port: live.port},
 	}), settings)
 	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
 		return options
 	})
-	response, body := rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 5\r\n\r\nsmall")
+	response, _ := rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 5\r\n\r\nsmall")
 	front.waitServed(t)
-	if response.StatusCode != http.StatusOK || string(body) != "g1" || bodyRefusalCount(serviceName, bodyRefusalMemoryBudget) != 0 {
-		t.Errorf("%d %q, budget refusals %v, want the block's answer", response.StatusCode, body, bodyRefusalCount(serviceName, bodyRefusalMemoryBudget))
+	if response.StatusCode != http.StatusServiceUnavailable || bodyRefusalCount(serviceName, bodyRefusalMemoryBudget) != 0 {
+		t.Errorf("%d, budget refusals %v, want the block's 503", response.StatusCode, bodyRefusalCount(serviceName, bodyRefusalMemoryBudget))
 	}
-	if recorded := upstream.recorded(); len(recorded) != 1 || string(recorded[0].body) != "small" {
+	if recorded := busy.recorded(); len(recorded) != 1 || string(recorded[0].body) != "small" {
 		t.Errorf("the block did not get the body")
+	}
+	if len(live.recorded()) != 0 {
+		t.Errorf("a body the store had no room for was retried")
+	}
+	checkStoreEmpty(t, bodyStore)
+}
+
+// A kept body's retry outlives the exchange it leaves: that exchange's end
+// doesn't interrupt a body read whole. An interrupt's past read deadline
+// would end Go's server's background read of the client's connection, which
+// it starts at the body's end, and with it the request, and the retry. The
+// first block answers 503 while the front's write of the body to it holds,
+// so that exchange ends before its write.
+func TestForwardKeptBodyOutlivesTheExchangeItLeaves(t *testing.T) {
+	serviceName := testServiceName("kept-body-retry")
+	raw := newRawUpstream(t)
+	live := newRecordingUpstream(t, "g2", nil)
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+		{name: "g2", weight: 1, port: live.port},
+	}), testForwardFrontSettings())
+	rawAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(raw.port))
+	heldConns := make(chan *holdMarkedWriteConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		if address != rawAddress {
+			return conn
+		}
+		holdConn := newHoldMarkedWriteConn(t, conn, []byte("kept-body"))
+		heldConns <- holdConn
+		return holdConn
+	})
+	writers := make(chan *pastReadDeadlineWriter, 1)
+	front := newTestForwardFrontWrapping(t, group, func(w http.ResponseWriter) http.ResponseWriter {
+		writer := newPastReadDeadlineWriter(w)
+		writers <- writer
+		return writer
+	}, func(r *http.Request) forwardOptions {
+		options := testForwardOptions(r)
+		options.streamed = true
+		return options
+	})
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 9\r\n\r\nkept-body")
+	writer := receiveBounded(t, writers, "the request's writer")
+	holdConn := receiveBounded(t, heldConns, "dial to g1")
+	// the first read kept the body before its write to g1 began
+	waitClosed(t, holdConn.held, "the held body write")
+	conn, _, _ := raw.accept(t)
+	io.WriteString(conn, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	response, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("response %v, want g2's 200", err)
+	}
+	responseBody, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || string(responseBody) != "g2" || retryCount(serviceName, "http_503") != 1 {
+		t.Errorf("%d %q, retries %v, want g2's answer after one retry", response.StatusCode, responseBody, retryCount(serviceName, "http_503"))
+	}
+	if recorded := live.recorded(); len(recorded) != 1 || string(recorded[0].body) != "kept-body" || recorded[0].contentLength != 9 {
+		t.Errorf("g2 did not get the kept body with its length")
+	}
+	front.waitServed(t)
+	select {
+	case <-writer.pastDeadlines:
+		t.Errorf("the client's connection got a past read deadline with its body read whole")
+	default:
 	}
 	checkStoreEmpty(t, bodyStore)
 }

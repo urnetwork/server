@@ -250,6 +250,14 @@ type testForwardFront struct {
 
 // A front over a group, closed when the test ends.
 func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testForwardFront {
+	return newTestForwardFrontWrapping(t, group, func(w http.ResponseWriter) http.ResponseWriter {
+		return w
+	}, options)
+}
+
+// A front over a group whose handler gives serveHttp the response writer
+// wrap makes of the server's, closed when the test ends.
+func newTestForwardFrontWrapping(t *testing.T, group *upstreamGroup, wrap func(w http.ResponseWriter) http.ResponseWriter, options func(r *http.Request) forwardOptions) *testForwardFront {
 	front := &testForwardFront{
 		group:   group,
 		options: options,
@@ -263,10 +271,46 @@ func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *htt
 				panic(recovered)
 			}
 		}()
-		front.group.serveHttp(w, r, front.options(r))
+		front.group.serveHttp(wrap(w), r, front.options(r))
 	}))
 	t.Cleanup(front.server.Close)
 	return front
+}
+
+// A response writer that tells a test each time the forwarder sets a read
+// deadline in the past on the client's connection, as interrupting a
+// streamed body does, and passes every deadline, and the rest, on to the
+// server's writer.
+type pastReadDeadlineWriter struct {
+	http.ResponseWriter
+	// one value for each past deadline, dropped when it is full
+	pastDeadlines chan struct{}
+}
+
+// A writer over the server's w.
+func newPastReadDeadlineWriter(w http.ResponseWriter) *pastReadDeadlineWriter {
+	return &pastReadDeadlineWriter{
+		ResponseWriter: w,
+		pastDeadlines:  make(chan struct{}, 1),
+	}
+}
+
+// Sets the deadline through the server's writer, and tells the test of one
+// in the past.
+func (self *pastReadDeadlineWriter) SetReadDeadline(deadline time.Time) error {
+	err := http.NewResponseController(self.ResponseWriter).SetReadDeadline(deadline)
+	if !deadline.IsZero() && deadline.Before(time.Now()) {
+		select {
+		case self.pastDeadlines <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// The server's writer, for the response controller's other methods.
+func (self *pastReadDeadlineWriter) Unwrap() http.ResponseWriter {
+	return self.ResponseWriter
 }
 
 // A front over a group that serves h2 over TLS, as the public TCP 443 does,
