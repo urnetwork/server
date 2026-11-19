@@ -37,29 +37,13 @@ import (
 // write, so half of it tells the two apart.
 const e2eRstAvoidanceDelay = 500 * time.Millisecond
 
-// A listener whose connections record how the server ends them, each found
+// A listener whose connections record how the server ends them, each known
 // by the client's address. Safe for concurrent use.
 type e2eLingerListener struct {
 	net.Listener
 
 	stateLock sync.Mutex
 	addrConns map[string]*e2eLingerConn
-}
-
-// A listener on loopback, closed when the test ends.
-func listenE2eLinger(t *testing.T) *e2eLingerListener {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		listener.Close()
-	})
-	return &e2eLingerListener{
-		Listener:  listener,
-		addrConns: map[string]*e2eLingerConn{},
-	}
 }
 
 // See net.Listener.
@@ -78,15 +62,6 @@ func (self *e2eLingerListener) Accept() (net.Conn, error) {
 		self.addrConns[conn.RemoteAddr().String()] = lingerConn
 	}()
 	return lingerConn, nil
-}
-
-// The server's end of the connection from the client's address addr, or nil
-// when the listener accepted none. A client that read an answer was
-// accepted before it was answered.
-func (self *e2eLingerListener) conn(addr string) *e2eLingerConn {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.addrConns[addr]
 }
 
 // The server's end of one connection, recording when its last write
@@ -144,64 +119,23 @@ func (self *e2eLingerConn) Close() error {
 	return self.Conn.Close()
 }
 
-// Waits for the server to close the connection, then fails the test unless
-// it waited at least half of Go's rstAvoidanceDelay after its last write,
-// the answer or the TLS close_notify, and, when halfClose is set, it
-// half-closed first.
-func (self *e2eLingerConn) checkLingered(t *testing.T, what string, halfClose bool) {
-	t.Helper()
-	select {
-	case <-self.closed:
-	case <-time.After(e2eWaitTimeout):
-		t.Errorf("%s: the server never closed the connection", what)
-		return
-	}
-	var lastWriteTime, closeWriteTime, closeTime time.Time
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		lastWriteTime = self.lastWriteTime
-		closeWriteTime = self.closeWriteTime
-		closeTime = self.closeTime
-	}()
-	if halfClose && closeWriteTime.IsZero() {
-		t.Errorf("%s: the server closed with no half-close first", what)
-	}
-	if wait := closeTime.Sub(lastWriteTime); wait < e2eRstAvoidanceDelay/2 {
-		t.Errorf("%s: the server closed %s after its last write; want Go's half-close, then its %s wait", what, wait, e2eRstAvoidanceDelay)
-	}
-}
-
-// Waits for the server to close the connection, then fails the test if it
-// half-closed first: Go's server closes at once a connection whose request
-// left nothing unread, unless something marked it.
-func (self *e2eLingerConn) checkClosedAtOnce(t *testing.T, what string) {
-	t.Helper()
-	select {
-	case <-self.closed:
-	case <-time.After(e2eWaitTimeout):
-		t.Errorf("%s: the server never closed the connection", what)
-		return
-	}
-	closeWriteTime := func() time.Time {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.closeWriteTime
-	}()
-	if !closeWriteTime.IsZero() {
-		t.Errorf("%s: the server half-closed and waited, though the body was read whole", what)
-	}
-}
-
-// Serves handler on a new recording listener, as connect serves a public
-// port: TLS through tls.NewListener with the front's one config when overTls
-// is set. The server closes when the test ends.
+// Serves handler on a new recording listener on loopback, as connect serves
+// a public port: TLS through tls.NewListener with the front's one config
+// when overTls is set. The listener and the server close when the test ends.
 func serveE2eLinger(t *testing.T, e2e *e2eFront, handler http.Handler, overTls bool) (*e2eLingerListener, *http.Server) {
 	t.Helper()
-	listener := listenE2eLinger(t)
+	tcpListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &e2eLingerListener{
+		Listener:  tcpListener,
+		addrConns: map[string]*e2eLingerConn{},
+	}
 	httpServer := newE2eHttpServer(t.Context(), e2e.front, handler, e2e.errorLog)
 	t.Cleanup(func() {
 		httpServer.Close()
+		tcpListener.Close()
 	})
 	var served net.Listener = listener
 	if overTls {
@@ -245,89 +179,92 @@ type e2eLingerOutcome struct {
 	err    error
 }
 
-// Writes the head and the first 64 KiB of the body the client keeps sending
-// at once, then keeps writing that body on its own goroutine while it reads
-// the answer, its body, and once more, for the end of the server's side. It
-// runs on a goroutine of its own, so it reports rather than fails.
-func (self *e2eLingerCase) send(ctx context.Context, dial func(ctx context.Context) (net.Conn, error)) *e2eLingerOutcome {
-	outcome := &e2eLingerOutcome{}
-	conn, err := dial(ctx)
-	if err != nil {
-		outcome.err = err
-		return outcome
-	}
-	// bounds a broken test, never a passing one
-	conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
-	outcome.localAddr = conn.LocalAddr().String()
-
-	headBytes := func(headLines []string, contentLength int64) []byte {
-		return []byte(strings.Join(headLines, "\r\n") + "\r\nContent-Length: " + strconv.FormatInt(contentLength, 10) + "\r\n\r\n")
-	}
-	firstWrite := headBytes(self.headLines, self.contentLength)
-	sentBytes := self.contentLength
-	if self.pipelined {
-		firstWrite = append(firstWrite, e2eBody(int(self.contentLength))...)
-		firstWrite = append(firstWrite, headBytes([]string{"POST /pipelined HTTP/1.1", "Host: test-lb.service.example"}, e2eLingerPipelinedContentLength)...)
-		sentBytes = e2eLingerPipelinedContentLength
-	}
-	firstBytes := min(64*1024, sentBytes)
-	if _, err := conn.Write(append(firstWrite, e2eBody(int(firstBytes))...)); err != nil {
-		conn.Close()
-		outcome.err = err
-		return outcome
-	}
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		chunk := e2eBody(32 * 1024)
-		for written := firstBytes; written < sentBytes; {
-			n, err := conn.Write(chunk[:min(int64(len(chunk)), sentBytes-written)])
-			written += int64(n)
-			if err != nil {
-				return
-			}
-		}
-	}()
-	defer func() {
-		// ends a write the server left blocked
-		conn.Close()
-		<-writerDone
-	}()
-
-	reader := bufio.NewReader(conn)
-	response, err := http.ReadResponse(reader, nil)
-	if err != nil {
-		outcome.err = err
-		return outcome
-	}
-	outcome.response = response
-	outcome.body, err = io.ReadAll(response.Body)
-	if err != nil {
-		outcome.err = err
-		return outcome
-	}
-	_, outcome.endErr = reader.ReadByte()
-	return outcome
-}
-
 // Sends every case at once, each on a connection of its own, then fails the
 // test unless each client read its whole answer, Connection: close
 // included, and the end of the server's side, and the server ended each
-// connection with Go's wait, half-closing first when socketHalfCloses is
-// set, as on plain TCP. A case whose body is read whole must close with no
-// half-close there.
+// connection with Go's wait, at least half of its rstAvoidanceDelay after
+// its last write, the answer or the TLS close_notify, half-closing first
+// when socketHalfCloses is set, as on plain TCP. A case whose body is read
+// whole must close with no half-close there.
+//
+// Each client writes the head and the first 64 KiB of the body it keeps
+// sending at once, then keeps writing that body on its own goroutine while
+// it reads the answer, its body, and once more, for the end of the server's
+// side.
 func runE2eLingerCases(t *testing.T, listener *e2eLingerListener, dial func(ctx context.Context) (net.Conn, error), cases []*e2eLingerCase, socketHalfCloses bool) {
 	t.Helper()
+	// on a goroutine of its own, so it reports rather than fails
+	send := func(c *e2eLingerCase) *e2eLingerOutcome {
+		outcome := &e2eLingerOutcome{}
+		conn, err := dial(t.Context())
+		if err != nil {
+			outcome.err = err
+			return outcome
+		}
+		// bounds a broken test, never a passing one
+		conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
+		outcome.localAddr = conn.LocalAddr().String()
+
+		headBytes := func(headLines []string, contentLength int64) []byte {
+			return []byte(strings.Join(headLines, "\r\n") + "\r\nContent-Length: " + strconv.FormatInt(contentLength, 10) + "\r\n\r\n")
+		}
+		firstWrite := headBytes(c.headLines, c.contentLength)
+		sentBytes := c.contentLength
+		if c.pipelined {
+			firstWrite = append(firstWrite, e2eBody(int(c.contentLength))...)
+			firstWrite = append(firstWrite, headBytes([]string{"POST /pipelined HTTP/1.1", "Host: test-lb.service.example"}, e2eLingerPipelinedContentLength)...)
+			sentBytes = e2eLingerPipelinedContentLength
+		}
+		firstBytes := min(64*1024, sentBytes)
+		if _, err := conn.Write(append(firstWrite, e2eBody(int(firstBytes))...)); err != nil {
+			conn.Close()
+			outcome.err = err
+			return outcome
+		}
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			chunk := e2eBody(32 * 1024)
+			for written := firstBytes; written < sentBytes; {
+				n, err := conn.Write(chunk[:min(int64(len(chunk)), sentBytes-written)])
+				written += int64(n)
+				if err != nil {
+					return
+				}
+			}
+		}()
+		defer func() {
+			// ends a write the server left blocked
+			conn.Close()
+			<-writerDone
+		}()
+
+		reader := bufio.NewReader(conn)
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			outcome.err = err
+			return outcome
+		}
+		outcome.response = response
+		outcome.body, err = io.ReadAll(response.Body)
+		if err != nil {
+			outcome.err = err
+			return outcome
+		}
+		_, outcome.endErr = reader.ReadByte()
+		return outcome
+	}
 	outcomes := make([]*e2eLingerOutcome, len(cases))
 	var sends sync.WaitGroup
 	for i, c := range cases {
 		sends.Add(1)
 		go func() {
 			defer sends.Done()
-			outcomes[i] = c.send(t.Context(), dial)
+			outcomes[i] = send(c)
 		}()
 	}
 	sends.Wait()
+
 	for i, c := range cases {
 		outcome := outcomes[i]
 		if outcome.err != nil {
@@ -340,18 +277,44 @@ func runE2eLingerCases(t *testing.T, listener *e2eLingerListener, dial func(ctx 
 		if !errors.Is(outcome.endErr, io.EOF) {
 			t.Errorf("%s: after the answer, %v; want the server's side to end cleanly", c.what, outcome.endErr)
 		}
-		serverConn := listener.conn(outcome.localAddr)
+		// a client that read an answer was accepted before it was answered
+		serverConn := func() *e2eLingerConn {
+			listener.stateLock.Lock()
+			defer listener.stateLock.Unlock()
+			return listener.addrConns[outcome.localAddr]
+		}()
 		if serverConn == nil {
 			t.Errorf("%s: the server's listener has no connection from %s", c.what, outcome.localAddr)
 			continue
 		}
+		select {
+		case <-serverConn.closed:
+		case <-time.After(e2eWaitTimeout):
+			t.Errorf("%s: the server never closed the connection", c.what)
+			continue
+		}
+		var lastWriteTime, closeWriteTime, closeTime time.Time
+		func() {
+			serverConn.stateLock.Lock()
+			defer serverConn.stateLock.Unlock()
+			lastWriteTime = serverConn.lastWriteTime
+			closeWriteTime = serverConn.closeWriteTime
+			closeTime = serverConn.closeTime
+		}()
 		if c.readWhole {
-			if socketHalfCloses {
-				serverConn.checkClosedAtOnce(t, c.what)
+			// Go's server closes at once a connection whose request left
+			// nothing unread, unless something marked it
+			if socketHalfCloses && !closeWriteTime.IsZero() {
+				t.Errorf("%s: the server half-closed and waited, though the body was read whole", c.what)
 			}
 			continue
 		}
-		serverConn.checkLingered(t, c.what, socketHalfCloses)
+		if socketHalfCloses && closeWriteTime.IsZero() {
+			t.Errorf("%s: the server closed with no half-close first", c.what)
+		}
+		if wait := closeTime.Sub(lastWriteTime); wait < e2eRstAvoidanceDelay/2 {
+			t.Errorf("%s: the server closed %s after its last write; want Go's half-close, then its %s wait", c.what, wait, e2eRstAvoidanceDelay)
+		}
 	}
 }
 
