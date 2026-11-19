@@ -141,6 +141,7 @@ type t3SendGate struct {
 	member    func(sidecarId sidecar.Id) bool
 }
 
+// See smtpedgeservice.SmtpGate: allowed for a device of the member in the world's network, else no grant.
 func (self *t3SendGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) sidecar.AclDecision {
 	if networkId == self.networkId && self.member(sidecarId) {
 		return sidecar.AclDecision{Allowed: true, Reason: sidecar.AclReasonRule}
@@ -392,6 +393,7 @@ func (self *t3SendBlock) close() {
 	})
 }
 
+// Every dialer the world's hosts were given.
 func (self *t3SendBlock) dialerList() []*t3SendDialer {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -457,6 +459,7 @@ func (self *t3SendBlock) privacyItems() []*sidecartest.PrivacyItem {
 	return items
 }
 
+// Keeps a copy of body, something the engine took, under name.
 func (self *t3SendBlock) addExchange(name string, body []byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -547,6 +550,7 @@ type t3SendStream struct {
 	received bytes.Buffer
 }
 
+// The stream's Write, what it wrote kept.
 func (self *t3SendStream) Write(b []byte) (int, error) {
 	n, err := self.Conn.Write(b)
 	if 0 < n {
@@ -555,6 +559,7 @@ func (self *t3SendStream) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// The stream's Read, what it read kept.
 func (self *t3SendStream) Read(b []byte) (int, error) {
 	n, err := self.Conn.Read(b)
 	if 0 < n {
@@ -563,6 +568,7 @@ func (self *t3SendStream) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// Appends b to buffer under the stream's lock.
 func (self *t3SendStream) keep(buffer *bytes.Buffer, b []byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -622,6 +628,8 @@ func t3SendRun(t *testing.T, row func(t testing.TB, newWorld sidecartest.SmtpSen
 		block.checkStoreCapture()
 	})
 }
+
+// Each row below is sidecartest's, run on the block; smtp_send_rows.go says what it holds.
 
 func TestT3S6NoRecordReachesTheMxBeforeItsPart(t *testing.T) {
 	t3SendRun(t, sidecartest.RunS6NoRecordReachesTheMxBeforeItsPart)
