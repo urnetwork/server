@@ -48,6 +48,9 @@ func (self *frontServer) superviseSocket(socket *frontSocket, run frontSocketRun
 	for {
 		serveStartTime := time.Now()
 		err := runFrontSocketStep(run.serve)
+		if self.settings.socketServeEndObserverForTest != nil {
+			self.settings.socketServeEndObserverForTest(socket.key)
+		}
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()

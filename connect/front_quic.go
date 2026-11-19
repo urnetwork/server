@@ -20,12 +20,14 @@ package connect
 // Each api connection gets an http3.Server of its own. The drain shuts each
 // down gracefully while its transport can still send, which sends one GOAWAY
 // and refuses new streams; every close then closes the servers before the
-// transport. A graceful http3 shutdown still running when its transport is
-// destroyed spins its accept loop, one GOAWAY writer per pass, for as long as a
-// connection is closed but not done: the old alt's exit burst of 700k
-// goroutines (LBALT.md §3.3, D12). With one server per connection the bounded
-// close of one stuck handler holds nothing else, and no connection waits on
-// another's server.
+// transport. Upstream http3's graceful accept loop spins, one GOAWAY writer per
+// pass, for as long as a connection is closed but not done, whether its client
+// closed it, its idle timeout did or its transport was destroyed: the old
+// alt's exit burst of 700k goroutines (LBALT.md §3.3, D12). The vendored http3
+// ends the loop there instead (third_party/quic-go/URNETWORK.md), so each api
+// connection gets one GOAWAY however it closes. With one server per connection
+// the bounded close of one stuck handler holds nothing else, and no connection
+// waits on another's server.
 
 import (
 	"context"

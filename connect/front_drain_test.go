@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,18 +58,20 @@ func countTestFrontSocketsUp(frontServer *frontServer, protocol string) int {
 
 // A trace on every server connection: it counts each GOAWAY the http3
 // server creates, without ever blocking the recording loop, and, when
-// holding, holds each connection inside its close window. quic-go records a connection's close after it closed the
-// connection's streams and before it cancels the connection's context, so
-// while the record is held every accept on the connection fails at once and
-// its context is still live: the window in which a graceful http3 shutdown
-// spins. In production the window stays open while Transport.close holds the
-// transport mutex over its destroy fan-out and while every core is busy.
+// holding, holds each connection inside its close window. quic-go records a
+// connection's close after it closed the connection's streams and before it
+// cancels the connection's context, so while the record is held every accept
+// on the connection fails at once and its context is still live: the window
+// in which upstream http3's graceful shutdown spins. In production the window
+// stays open while Transport.close holds the transport mutex over its destroy
+// fan-out and while every core is busy.
 type testFrontConnectionTrace struct {
 	// every GOAWAY created: one per connection the drain shut down, and one
-	// per pass of an accept loop spinning against a destroyed transport
-	goaways     *connect.MonitorValue[int]
-	holding     bool
-	held        atomic.Int64
+	// per pass of an accept loop spinning in its graceful branch
+	goaways *connect.MonitorValue[int]
+	holding bool
+	// the connections held in their close window so far
+	held        *connect.MonitorValue[int]
 	release     chan struct{}
 	releaseOnce sync.Once
 }
@@ -80,6 +81,7 @@ func newTestFrontConnectionTrace(holding bool) *testFrontConnectionTrace {
 	return &testFrontConnectionTrace{
 		goaways: connect.NewMonitorValue(0),
 		holding: holding,
+		held:    connect.NewMonitorValue(0),
 		release: make(chan struct{}),
 	}
 }
@@ -111,7 +113,9 @@ func (self *testFrontConnectionTrace) RecordEvent(event qlogwriter.Event) {
 		}
 	case qlog.ConnectionClosed:
 		if self.holding {
-			self.held.Add(1)
+			self.held.Update(func(held int) int {
+				return held + 1
+			})
 			<-self.release
 		}
 	}
@@ -142,6 +146,65 @@ func (self *testFrontConnectionTrace) waitGoaways(t testing.TB, count int) {
 		case <-changed:
 		case <-deadline:
 			t.Fatalf("%d of %d GOAWAYs created", goaways, count)
+		}
+	}
+}
+
+// Waits until count connections are held in their close window.
+func (self *testFrontConnectionTrace) waitHeld(t testing.TB, count int) {
+	t.Helper()
+	deadline := time.After(testFrontProgressTimeout)
+	for {
+		held, changed := self.held.Get()
+		if count <= held {
+			return
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatalf("%d of %d connections reached their close window", held, count)
+		}
+	}
+}
+
+// Waits until the front serves no api connection while the trace holds them
+// in their close window, failing as soon as a GOAWAY past goaways is created:
+// each api connection's h3 server must finish serving it while quic-go is
+// still closing it, with no second GOAWAY.
+func (self *testFrontConnectionTrace) waitServedWithoutAnotherGoaway(t testing.TB, frontServer *frontServer, goaways int) {
+	t.Helper()
+	deadline := time.After(testFrontProgressTimeout)
+	for {
+		openCount, openChanged := frontServer.openCount.Get()
+		created, goawaysChanged := self.goaways.Get()
+		if goaways < created {
+			t.Fatalf("%d GOAWAYs for %d api connections while they closed: an h3 accept loop spun in its graceful branch", created, goaways)
+		}
+		if openCount == 0 {
+			return
+		}
+		select {
+		case <-openChanged:
+		case <-goawaysChanged:
+		case <-deadline:
+			t.Fatalf("%d api connections still served while their connections closed", openCount)
+		}
+	}
+}
+
+// Waits until the front's open count is want.
+func (self *testFrontEnv) waitOpen(want int) {
+	self.t.Helper()
+	deadline := time.After(testFrontProgressTimeout)
+	for {
+		openCount, changed := self.frontServer.openCount.Get()
+		if openCount == want {
+			return
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			self.t.Fatalf("%d connections open, want %d", openCount, want)
 		}
 	}
 }
@@ -706,11 +769,13 @@ func TestFrontCloseBoundsAStuckApiRequest(t *testing.T) {
 // The old alt's exit burst (10-24 to 10-26) cannot come back: the drain
 // shuts each api connection down gracefully while its transport is live,
 // and the forced close then closes every h3 server before its transport. An
-// h3 server still shutting down gracefully when its transport destroyed the
-// connection would spin its accept loop, one GOAWAY writer per pass, for as
-// long as the connection is closed but not done. With every connection held
-// in that window, the close may leave at most a few goroutines per
-// connection: quic-go's destroy waits once per connection id.
+// upstream h3 server still shutting down gracefully when its transport
+// destroyed the connection would spin its accept loop, one GOAWAY writer per
+// pass, for as long as the connection is closed but not done; the vendored
+// http3 ends the loop there too, so the close order and the vendored loop
+// each keep the burst away. With every connection held in that window, the
+// close may leave at most a few goroutines per connection: quic-go's destroy
+// waits once per connection id.
 func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 	const (
 		connectionCount         = 32
@@ -734,18 +799,7 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 		defer conn.CloseWithError(0, "")
 		env.nextDispatch()
 	}
-	deadline := time.After(testFrontProgressTimeout)
-	for {
-		openCount, changed := env.frontServer.openCount.Get()
-		if openCount == connectionCount {
-			break
-		}
-		select {
-		case <-changed:
-		case <-deadline:
-			t.Fatalf("%d of %d api connections registered", openCount, connectionCount)
-		}
-	}
+	env.waitOpen(connectionCount)
 	env.frontServer.beginDrain()
 	trace.waitGoaways(t, connectionCount)
 
@@ -766,7 +820,7 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 			// a burst: release at once rather than let it grow
 			break
 		}
-		if trace.held.Load() == connectionCount {
+		if trace.held.Value() == connectionCount {
 			if allHeldTime.IsZero() {
 				allHeldTime = time.Now()
 			} else if holdDuration <= time.Since(allHeldTime) {
@@ -774,7 +828,7 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 			}
 		}
 		if endTime.Before(time.Now()) {
-			t.Fatalf("%d of %d connections reached their close window", trace.held.Load(), connectionCount)
+			t.Fatalf("%d of %d connections reached their close window", trace.held.Value(), connectionCount)
 		}
 		time.Sleep(100 * time.Microsecond)
 	}
@@ -803,5 +857,118 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(env.front.recordedEvents(), ","), "front close") {
 		t.Fatal("the nginx front was not closed")
+	}
+}
+
+// A client that closes its api connection after the drain's GOAWAY, as a
+// client should, gets no second GOAWAY. The connection's h3 server finishes
+// serving it while quic-go is still closing it, with the close window held
+// open: the vendored http3 ends its graceful accept loop there, where
+// upstream's spun, one GOAWAY writer per pass, until the window closed.
+func TestFrontDrainSendsOneH3GoawayWhenTheClientCloses(t *testing.T) {
+	trace := newTestFrontConnectionTrace(true)
+	defer trace.Release()
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.connectQuic.tracer = trace.tracer
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+	env.waitOpen(1)
+	env.frontServer.beginDrain()
+	trace.waitGoaways(t, 1)
+
+	conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+	trace.waitHeld(t, 1)
+	trace.waitServedWithoutAnotherGoaway(t, env.frontServer, 1)
+
+	trace.Release()
+	deadline := time.After(testFrontProgressTimeout)
+	for {
+		releasedCount, changed := env.connectQuic.releasedCount.Get()
+		if releasedCount == 1 {
+			break
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatal("the closed api connection's dispatch never finished")
+		}
+	}
+	if goaways := trace.goaways.Value(); goaways != 1 {
+		t.Fatalf("%d GOAWAYs for one api connection its client closed during the drain", goaways)
+	}
+}
+
+// A QUIC socket lost while the drain shuts its api connections down
+// gracefully destroys every connection on it at once (D22), and each gets no
+// second GOAWAY. Each h3 server finishes serving its connection while quic-go
+// destroys it, with the close window held open and the lost sockets' release
+// held, so only the destroyed connection can end the serve: before the
+// release, nothing closes the h3 servers.
+func TestFrontDrainSendsOneH3GoawayWhenItsSocketIsLost(t *testing.T) {
+	const connectionCount = 4
+	trace := newTestFrontConnectionTrace(true)
+	defer trace.Release()
+	lostSockets := make(chan frontSocketKey, 16)
+	releaseLost := make(chan struct{})
+	var releaseLostOnce sync.Once
+	release := func() {
+		releaseLostOnce.Do(func() {
+			close(releaseLost)
+		})
+	}
+	defer release()
+	lostBindAddress := ""
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.connectQuic.tracer = trace.tracer
+		address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+		lostBindAddress = env.bindAddress(address, frontPortQuic)
+		env.settings.socketServeEndObserverForTest = func(key frontSocketKey) {
+			if key.portKind == frontPortQuic && key.bindAddress() == lostBindAddress {
+				lostSockets <- key
+				<-releaseLost
+			}
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	for range connectionCount {
+		conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseWithError(0, "")
+		env.nextDispatch()
+	}
+	env.waitOpen(connectionCount)
+	env.frontServer.beginDrain()
+	trace.waitGoaways(t, connectionCount)
+
+	packetConns := env.binds.boundPacketConns(lostBindAddress)
+	if len(packetConns) != env.settings.SocketsPerPort {
+		t.Fatalf("%d quic sockets bound on %s", len(packetConns), lostBindAddress)
+	}
+	for _, packetConn := range packetConns {
+		packetConn.Close()
+	}
+	for range packetConns {
+		select {
+		case <-lostSockets:
+		case <-time.After(testFrontProgressTimeout):
+			t.Fatal("a lost socket's serve did not end")
+		}
+	}
+	trace.waitHeld(t, connectionCount)
+	trace.waitServedWithoutAnotherGoaway(t, env.frontServer, connectionCount)
+
+	release()
+	trace.Release()
+	env.frontServer.waitDrained()
+	if goaways := trace.goaways.Value(); goaways != connectionCount {
+		t.Fatalf("%d GOAWAYs for %d api connections a socket loss destroyed during the drain", goaways, connectionCount)
 	}
 }

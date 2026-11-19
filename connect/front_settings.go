@@ -60,6 +60,10 @@ type FrontServerSettings struct {
 	// Nil outside package tests. Called with each wait before a re-creation
 	// attempt, a zero wait included, on the supervising goroutine.
 	restartWaitObserverForTest func(key frontSocketKey, wait time.Duration)
+	// Nil outside package tests. Called on the supervising goroutine each time
+	// a socket's serve returned, before its run is released, so a test can
+	// hold a lost socket's release.
+	socketServeEndObserverForTest func(key frontSocketKey)
 	// Nil outside package tests. Called with the name and class an accepted
 	// QUIC connection was dispatched by, before its front is entered.
 	dispatchObserverForTest func(serverName string, nameClass nginx.NameClass)

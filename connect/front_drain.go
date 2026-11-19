@@ -24,7 +24,10 @@ package connect
 // A GOAWAY needs a transport that can send. alt once started a graceful
 // HTTP/3 shutdown while its transports were being destroyed and got 700k
 // goroutines (LBALT.md §3.3), which is why step 2 runs first and step 5 closes
-// the h3 servers before any transport.
+// the h3 servers before any transport. The accept loop that spun there spins
+// for any connection that closes during a graceful shutdown, a client closing
+// after its GOAWAY included, so the vendored http3 ends it instead, one GOAWAY
+// per connection (third_party/quic-go/URNETWORK.md).
 
 import (
 	"context"
