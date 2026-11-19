@@ -1243,6 +1243,44 @@ func TestForwardResponseHiddenHeaders(t *testing.T) {
 	}
 }
 
+// Each Early Hints head frees the proxy buffer for the next head, including
+// bytes of the next head already read from the socket.
+func TestForwardEarlyHintsPreserveTheFinalHeaderBudget(t *testing.T) {
+	settings := testForwardFrontSettings()
+	limit := settings.Forward.MaxUpstreamResponseHeaderBytes
+	for _, size := range []int{limit, limit + 1} {
+		raw := newRawUpstream(t)
+		group, _ := newTestGroup(t, testForwardRouteService(testServiceName("early-hints"), []testBlock{
+			{name: "g1", weight: 1, port: raw.port},
+		}), settings)
+		front := newTestForwardFront(t, group, testForwardOptions)
+		statuses := make(chan int, 1)
+		go func() {
+			request, _ := http.NewRequest(http.MethodGet, front.url("/"), nil)
+			response, _, err := testDo(t, request)
+			if err != nil {
+				statuses <- 0
+				return
+			}
+			statuses <- response.StatusCode
+		}()
+		conn, _, _ := raw.accept(t)
+		hints := "HTTP/1.1 103 Early Hints\r\nLink: </" + strings.Repeat("a", limit/2) + ".js>; rel=preload\r\n\r\n"
+		prefix := "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Example: "
+		final := prefix + strings.Repeat("b", size-len(prefix)-4) + "\r\n\r\n"
+		if _, err := io.WriteString(conn, hints+hints+final); err != nil {
+			t.Fatal(err)
+		}
+		want := http.StatusOK
+		if size > limit {
+			want = http.StatusBadGateway
+		}
+		if status := receiveBounded(t, statuses, "final response"); status != want {
+			t.Errorf("two 103s followed by a %d-byte head returned %d, want %d", size, status, want)
+		}
+	}
+}
+
 // A response head of exactly MaxUpstreamResponseHeaderBytes passes; one byte
 // more is a 502, never retried, as nginx's "upstream sent too big header".
 func TestForwardResponseHeadLimit(t *testing.T) {
