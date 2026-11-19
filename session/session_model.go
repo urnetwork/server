@@ -84,8 +84,8 @@ type NetworkSession struct {
 	// for a client session what owns it: hosted_proxy, api_key, device or
 	// legacy (ClientKind*); null for a sign-in or code session
 	ClientKind *string `json:"client_kind"`
-	// a client session whose client has provide enabled: the session cap
-	// does not count it
+	// a client session whose client is exempt from the client caps (a
+	// declared, qualifying provider): the session cap does not count it
 	Provider        bool             `json:"provider"`
 	CreateTime      time.Time        `json:"create_time"`
 	LastMintTime    time.Time        `json:"last_mint_time"`
@@ -101,7 +101,7 @@ type NetworkSessionCounts struct {
 	Live int `json:"live"`
 	// the live sessions the session cap counts: all but the provider ones
 	Capped int `json:"capped"`
-	// client sessions whose client has provide enabled
+	// client sessions whose client is exempt from the client caps
 	Provider    int `json:"provider"`
 	Signin      int `json:"signin"`
 	Code        int `json:"code"`
@@ -162,8 +162,9 @@ type SessionOperationResult struct {
 //	1 z          live sessions, scored by acceptance horizon
 //	2 held       live and revoked-retained sessions, scored by retention
 //	3 generation 4 eid    the revision
-//	5 xz         live client sessions whose client has provide enabled (the
-//	             cap does not count them), scored as in z
+//	5 xz         live client sessions whose client is exempt from the client
+//	             caps (the cap does not count them), scored by the first of
+//	             the exemption's end and the session's acceptance horizon
 //	6 zi         live sign-in and code sessions; 7 zco live code sessions
 //	8 zh, 9 za, 10 zd, 11 zl  live client sessions of a hosted proxy, an API
 //	             key (or MCP) client, an adopted device and a per-client
@@ -222,8 +223,9 @@ end
 
 // KEYS: the shared keys, then s:, u: and r: of the session and the origin's
 // marker. ARGV[11] is the live cap and ARGV[12] the retained cap (zero or less
-// is none), ARGV[14] '1' for a network credential, ARGV[15] the provider
-// exemption ('1', '0' or 'keep') and ARGV[16] '1' to refuse at a cap. While
+// is none), ARGV[14] '1' for a network credential, ARGV[15] the client caps'
+// exemption (its end in unix milli, '0' or 'keep') and ARGV[16] '1' to refuse
+// at a cap. While
 // ARGV[16] is not '1' a mint over a cap is admitted and reports the cap in
 // would (owner decision 6: the cap ships unenforced); nothing is ever evicted.
 const sessionMintLua = sessionLuaCommon + `
@@ -236,10 +238,13 @@ local previous=redis.call('ZSCORE',KEYS[1],sid)
 local reservation=redis.call('ZSCORE',KEYS[2],sid)
 local network=ARGV[14]=='1' or redis.call('HGET',S,'network')=='1'
 local class=classify(redis.call('HGET',S,'kind') or kind,network)
-local exempt=ARGV[15]
-if not clientclass[class] then exempt='0' elseif exempt=='keep' then if redis.call('ZSCORE',KEYS[5],sid) then exempt='1' else exempt='0' end end
+local exemptuntil=0
+if clientclass[class] then
+ if ARGV[15]=='keep' then exemptuntil=tonumber(redis.call('ZSCORE',KEYS[5],sid)) or 0 else exemptuntil=tonumber(ARGV[15]) or 0 end
+end
+local exempt=exemptuntil>now
 local livecap=tonumber(ARGV[11]);local retainedcap=tonumber(ARGV[12]);local would=''
-if not previous and exempt~='1' and livecap>0 and redis.call('ZCARD',KEYS[1])-redis.call('ZCARD',KEYS[5])>=livecap then would='live' end
+if not previous and not exempt and livecap>0 and redis.call('ZCARD',KEYS[1])-redis.call('ZCARD',KEYS[5])>=livecap then would='live' end
 if would=='' and not reservation and retainedcap>0 and redis.call('ZCARD',KEYS[2])-redis.call('ZCARD',KEYS[1])>=retainedcap then would='retained' end
 if would~='' and ARGV[16]=='1' then
  if would=='live' then return fail('session_limit_reached') end
@@ -251,7 +256,7 @@ redis.call('HSETNX',S,'create_epoch',ARGV[13]);redis.call('HSETNX',S,'kind',kind
 local oldclass=redis.call('HGET',S,'class')
 if oldclass and oldclass~=class then unindex(sid) end
 index(sid,class,accept)
-if exempt=='1' then redis.call('ZADD',KEYS[5],accept,sid) else redis.call('ZREM',KEYS[5],sid) end
+if exempt then redis.call('ZADD',KEYS[5],math.min(exemptuntil,accept),sid) else redis.call('ZREM',KEYS[5],sid) end
 redis.call('HSET',S,'class',class)
 if network then redis.call('HSET',S,'network','1') end
 local oldmint=tonumber(redis.call('HGET',S,'last_mint_time')) or 0

@@ -476,101 +476,230 @@ func TestApiKeyReissueKeepsTheClientsSession(t *testing.T) {
 	})
 }
 
-// R-cap: a top-level client's provide state moves its own session in and out
-// of the cap's provider exemption, at the provide and at its mints. Provide
-// enabled is public or stream provide mode (owner, 2026-11-18): a client that
-// provides only to its own network or to friends and family stays counted.
-func TestProvideChangeMovesTheSessionExemption(t *testing.T) {
+// The session cap's exemption is the concurrent client count's (owner
+// decision 2026-11-18): for each state a connected client's provider intent
+// can be in, ClientCapExemptUntil answers exactly what the count decides of
+// the client. Exempt while pending or qualified with a live record and a live
+// intent presence; not without intent, failed (normal, over the limit),
+// without a presence, or once its presence or record has ended.
+func TestClientCapExemptUntilIsTheConcurrentCountsExemption(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetProviderIntentShadowSampling(true)()
+		ctx := t.Context()
+		now := server.NowUtc()
+		presence := 5 * time.Minute
+		state := func(status ProviderIntentStatus) *ProviderIntentState {
+			return &ProviderIntentState{Status: status, AttemptTime: now, GraceEndTime: now.Add(providerIntentGraceTimeout), CheckTime: now.Add(providerIntentRecheckTimeout)}
+		}
+		recordEnd := state(ProviderIntentStatusQualified).expireTime(now)
+		for _, c := range []struct {
+			name     string
+			state    *ProviderIntentState
+			presence time.Duration
+			// the presence set directly past the record's end
+			lastingPresence bool
+			at              time.Time
+			exempt          bool
+		}{
+			{name: "no intent", at: now},
+			{name: "pending with its intent connection", state: state(ProviderIntentStatusPending), presence: presence, at: now, exempt: true},
+			{name: "qualified with its intent connection", state: state(ProviderIntentStatusQualified), presence: presence, at: now, exempt: true},
+			{name: "failed, in a normal slot", state: state(ProviderIntentStatusNormal), presence: presence, at: now},
+			{name: "failed, over the limit", state: state(ProviderIntentStatusOverLimit), presence: presence, at: now},
+			{name: "qualified, no intent connection", state: state(ProviderIntentStatusQualified), at: now},
+			{name: "qualified, at its presence's last millisecond", state: state(ProviderIntentStatusQualified), presence: presence, at: now.Add(presence - 2*time.Millisecond), exempt: true},
+			{name: "qualified, its presence ended", state: state(ProviderIntentStatusQualified), presence: presence, at: now.Add(presence)},
+			{name: "qualified, its record ended", state: state(ProviderIntentStatusQualified), presence: presence, lastingPresence: true, at: recordEnd.Add(time.Second)},
+		} {
+			networkId := testingProviderIntentNetwork(ctx)
+			clientId := testingProviderIntentConnectedClient(ctx, networkId)
+			if c.state != nil {
+				testingSetProviderIntentState(t, ctx, networkId, clientId, c.state, c.presence, now)
+			}
+			if c.lastingPresence {
+				server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+					return r.ZAdd(ctx, providerIntentPresentKey(networkId), redis.Z{Score: float64(recordEnd.Add(time.Hour).UnixMilli()), Member: string(clientId.Bytes())}).Err()
+				}))
+			}
+			_, countedExempt := getNetworkConnectedClientCountsAt(ctx, networkId, c.at)
+			exemptUntil, err := ClientCapExemptUntil(ctx, networkId, clientId, c.at)
+			if err != nil {
+				t.Fatal(c.name, err)
+			}
+			if (countedExempt == 1) != c.exempt || exemptUntil.IsZero() == c.exempt {
+				t.Fatalf("%s: the count's exempt clients %d, ClientCapExemptUntil %v, want exempt %t", c.name, countedExempt, exemptUntil, c.exempt)
+			}
+		}
+	})
+}
+
+// Owner decision 2026-11-18 (~23:50Z): the session cap exempts exactly the
+// clients the concurrent client limit exempts, a top-level client that
+// declared provide intent while its qualification (by a Public provide key) is
+// pending or qualified and its intent connection is live. A client with only a
+// Stream key (every connected app), a hosted proxy, a network-only or
+// friends-and-family provider, and a client with a Public key but no declared
+// intent all count; the declared, qualified provider is exempt from both caps.
+func TestOnlyIntentProvidersAreExemptFromTheSessionCap(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+		defer Testing_SetProviderIntentShadowSampling(true)()
+		ctx := t.Context()
+		network := newSessionCapTestNetwork(t, ctx)
+		Testing_ClearNetworkPeersEnabledCache()
+		key := []byte{1, 2, 3}
+		keyClient := func(modes map[ProvideMode][]byte) (server.Id, server.Id) {
+			clientId, claims := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+				return AuthNetworkClient(&AuthNetworkClientArgs{Description: "client", DeviceSpec: "test"}, network.apiKeySession)
+			})
+			SetProvide(ctx, clientId, modes)
+			return clientId, *claims.SessionId
+		}
+		counted := map[string]server.Id{}
+		_, counted["a connected app with only a stream key"] = keyClient(map[ProvideMode][]byte{ProvideModeStream: key})
+		networkOnly, networkOnlySession := keyClient(map[ProvideMode][]byte{ProvideModeNetwork: key, ProvideModeStream: key})
+		counted["a network-only provider"] = networkOnlySession
+		_, counted["a friends-and-family provider"] = keyClient(map[ProvideMode][]byte{ProvideModeFriendsAndFamily: key, ProvideModeStream: key})
+		_, counted["a public provide key without declared intent"] = keyClient(map[ProvideMode][]byte{ProvideModePublic: key, ProvideModeStream: key})
+		proxy := testAuthProxyClient(t, network.signin)
+		if proxy.ClientId == nil || proxy.ByClientJwt == nil {
+			t.Fatalf("hosted proxy: %+v", proxy)
+		}
+		SetProvide(ctx, *proxy.ClientId, map[ProvideMode][]byte{ProvideModeStream: key})
+		proxyClaims, err := session.ParseByJwt(ctx, *proxy.ByClientJwt)
+		if err != nil || proxyClaims.SessionId == nil {
+			t.Fatal("the hosted proxy has no session of its own", err)
+		}
+		counted["a hosted proxy"] = *proxyClaims.SessionId
+		// declared intent on its connection, a Public key, qualified
+		provider, providerSession := keyClient(map[ProvideMode][]byte{ProvideModePublic: key, ProvideModeStream: key})
+		now := server.NowUtc()
+		testingSetProviderIntentState(t, ctx, network.networkId, provider, &ProviderIntentState{
+			Status:      ProviderIntentStatusQualified,
+			AttemptTime: now,
+			CheckTime:   now.Add(providerIntentRecheckTimeout),
+		}, 5*time.Minute, now)
+
+		exempt := sessionCapMembers(t, ctx, network.networkId, "xz")
+		for name, sessionId := range counted {
+			if exempt[sessionId] {
+				t.Errorf("%s is exempt from the session cap", name)
+			}
+		}
+		if !exempt[providerSession] || len(exempt) != 1 {
+			t.Fatal("the session cap's exempt sessions", exempt, "want only the qualified provider's", providerSession)
+		}
+		// the cap: the sign-in, the five counted clients, and one more
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: 1 + len(counted) + 1, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		if _, err := session.MintNetworkSession(ctx, session.NewByJwt(network.networkId, network.userId, "session-cap", false, false), "password"); err != nil {
+			t.Fatal("the qualified provider took a place under the session cap", err)
+		}
+
+		// the concurrent client limit decides the same of the provider and of
+		// a counted client, connected
+		for _, clientId := range []server.Id{provider, networkOnly} {
+			AddNetworkPeer(ctx, network.networkId, &NetworkPeer{ClientId: clientId}, server.NewId(), 24*time.Hour)
+		}
+		normalCount, exemptCount := getNetworkConnectedClientCountsAt(ctx, network.networkId, server.NowUtc())
+		if normalCount != 1 || exemptCount != 1 {
+			t.Fatal("the concurrent client count", normalCount, exemptCount, "want the provider exempt and the network-only client counted")
+		}
+	})
+}
+
+// A provider install, a top-level client created with declared provide
+// intent, skips the client limits' creation gates; its own session is exempt
+// from the session cap from its creation too, so a provider fleet at an
+// enforced cap still installs providers. Any other new client is refused.
+func TestProviderInstallIsExemptFromItsCreation(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		network := newSessionCapTestNetwork(t, ctx)
+		live := len(sessionCapMembers(t, ctx, network.networkId, "z"))
+		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: live, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
+		_, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "client", DeviceSpec: "test"}, network.apiKeySession)
+		var refusal *session.SessionError
+		if !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" {
+			t.Fatal("an ordinary client at the cap", err)
+		}
+		_, claims := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
+			return AuthNetworkClient(&AuthNetworkClientArgs{Description: "provider", DeviceSpec: "test", ProvideIntent: true}, network.apiKeySession)
+		})
+		if !sessionCapMembers(t, ctx, network.networkId, "xz")[*claims.SessionId] {
+			t.Fatal("a provider install's session is counted")
+		}
+	})
+}
+
+// The session cap follows a client's intent state as the concurrent client
+// count does: each write of the state records the exemption on the client's
+// own session, ending when its intent presence or record ends, and a presence
+// refresh renews it before it lapses.
+func TestIntentStateMovesTheSessionExemption(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		defer Testing_SetProviderIntentShadowSampling(true)()
 		ctx := t.Context()
 		network := newSessionCapTestNetwork(t, ctx)
 		client, claims := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
 			return AuthNetworkClient(&AuthNetworkClientArgs{Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
 		})
-		exempt := func() bool { return sessionCapMembers(t, ctx, network.networkId, "xz")[*claims.SessionId] }
-		if exempt() {
-			t.Fatal("a client that does not provide is exempt")
+		exemptEnd := func() int64 {
+			var end float64
+			server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				var err error
+				end, err = r.ZScore(ctx, session.SessionKey(network.networkId, "xz"), claims.SessionId.String()).Result()
+				if errors.Is(err, server.RedisNil) {
+					return nil
+				}
+				return err
+			}))
+			return int64(end)
 		}
-		key := []byte{1, 2, 3}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key})
-		if exempt() {
-			t.Fatal("a network-only provider's session is exempt")
+		if exemptEnd() != 0 {
+			t.Fatal("a client without intent is exempt")
 		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key})
-		if exempt() {
-			t.Fatal("a friends-and-family provider's session is exempt")
+		now := server.NowUtc()
+		presence := 2 * time.Minute
+		// an intent connection: pending, exempt until its presence ends
+		if result := connectProviderIntentAt(ctx, network.networkId, client, presence, now); result.State.Status != ProviderIntentStatusPending {
+			t.Fatal("the intent connection's state", result.State)
 		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
-		if !exempt() {
-			t.Fatal("a stream provider's session is counted")
+		if end := exemptEnd(); end != now.Add(presence).UnixMilli() {
+			t.Fatal("a pending provider is exempt until", end, "not its presence's end", now.Add(presence).UnixMilli())
 		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key, ProvideModePublic: key})
-		if !exempt() {
-			t.Fatal("a public provider's session is counted")
+		testingSetProviderIntentState(t, ctx, network.networkId, client, &ProviderIntentState{
+			Status:      ProviderIntentStatusQualified,
+			AttemptTime: now,
+			CheckTime:   now.Add(providerIntentRecheckTimeout),
+		}, presence, now)
+		if exemptEnd() == 0 {
+			t.Fatal("a qualified provider is counted")
 		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeNetwork: key})
-		if exempt() {
-			t.Fatal("a provider that went network-only stayed exempt")
+		// a presence refresh renews the recorded end before it lapses
+		later := now.Add(time.Minute)
+		if observed := observeProviderIntentAt(ctx, network.networkId, client, presence, later); observed == nil || observed.Status != ProviderIntentStatusQualified {
+			t.Fatal("the presence refresh", observed)
 		}
-		// the mint records it too, both ways
-		reissue := func() {
-			sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
-				return AuthNetworkClient(&AuthNetworkClientArgs{ClientId: &client, Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
-			})
+		if end := exemptEnd(); end != later.Add(presence).UnixMilli() {
+			t.Fatal("a refreshed provider is exempt until", end, "not its presence's end", later.Add(presence).UnixMilli())
 		}
-		server.Raise(session.UpdateSessionProvideExemption(ctx, network.networkId, *claims.SessionId, true))
-		reissue()
-		if exempt() {
-			t.Fatal("a network-only provider's mint kept the exemption")
-		}
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
-		server.Raise(session.UpdateSessionProvideExemption(ctx, network.networkId, *claims.SessionId, false))
-		reissue()
-		if !exempt() {
-			t.Fatal("the mint did not record the provider exemption")
-		}
-	})
-}
-
-// Owner, 2026-11-18: provide enabled is public or stream provide mode, so a
-// client that provides only to its own network, or to friends and family,
-// takes a place under the session cap; a stream provider's session does not.
-func TestNetworkOnlyProviderCountsTowardTheSessionCap(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		defer session.Testing_SetSessionCreationEnabled(true)()
-		ctx := t.Context()
-		network := newSessionCapTestNetwork(t, ctx)
-		client, _ := sessionCapTestClient(t, ctx, func() (*AuthNetworkClientResult, error) {
-			return AuthNetworkClient(&AuthNetworkClientArgs{Description: "provider", DeviceSpec: "test"}, network.apiKeySession)
-		})
-		// the cap: the network's live sessions now, its sign-in and the client's
-		live := len(sessionCapMembers(t, ctx, network.networkId, "z"))
-		defer session.Testing_SetSessionCapPolicy(session.SessionCapPolicy{Live: live, Retained: session.NetworkSessionRetainedLimit, Enforce: true})()
-		signIn := func() error {
-			_, err := session.MintNetworkSession(ctx, session.NewByJwt(network.networkId, network.userId, "session-cap", false, false), "password")
-			return err
-		}
-		key := []byte{1, 2, 3}
-		for _, modes := range []map[ProvideMode][]byte{
-			{ProvideModeNetwork: key},
-			{ProvideModeFriendsAndFamily: key},
-			{ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key},
-		} {
-			SetProvide(ctx, client, modes)
-			var refusal *session.SessionError
-			if err := signIn(); !errors.As(err, &refusal) || refusal.Code != "session_limit_reached" {
-				t.Fatal("a sign-in past the cap while the client provides", modes, err)
-			}
-		}
-		// a stream provider's session leaves the count: one more sign-in fits
-		SetProvide(ctx, client, map[ProvideMode][]byte{ProvideModeStream: key})
-		if err := signIn(); err != nil {
-			t.Fatal("a stream provider's session took a place under the cap", err)
+		// a failed qualification counts
+		testingSetProviderIntentState(t, ctx, network.networkId, client, &ProviderIntentState{
+			Status:      ProviderIntentStatusNormal,
+			AttemptTime: now,
+			CheckTime:   now.Add(ProviderIntentAttemptAllowance),
+		}, presence, now)
+		if exemptEnd() != 0 {
+			t.Fatal("a failed provider is exempt")
 		}
 	})
 }

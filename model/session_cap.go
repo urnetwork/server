@@ -1,14 +1,18 @@
-// The session cap (pro.yml max_sessions, enforce_session_cap), the one
-// provider predicate it excludes by, and what a client's removal frees
-// (session1118 FIXPLAN R-cap, R-dark, R-free; owner decisions 2026-11-18).
+// The session cap (pro.yml max_sessions, enforce_session_cap), the exemption
+// it shares with the concurrent client limit, and what a client's removal
+// frees (session1118 FIXPLAN R-cap, R-dark, R-free; owner decisions
+// 2026-11-18).
 package model
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
+	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -17,9 +21,7 @@ func init() {
 	session.SetSessionCapPolicySource(func() session.SessionCapPolicy {
 		return Pro().SessionCapPolicy()
 	})
-	session.SetClientProvideEnabledInTx(func(ctx context.Context, tx server.PgTx, clientId server.Id) (bool, error) {
-		return ClientProvideEnabledInTx(ctx, tx, clientId)
-	})
+	session.SetClientCapExemptUntilInTx(clientCapSessionExemptUntilInTx)
 }
 
 // SessionCapPolicy is the session cap pro.yml sets: max_sessions live
@@ -53,61 +55,122 @@ func Testing_SetMaxSessions(maxSessions int) func() {
 	return func() { c.MaxSessions = prev }
 }
 
-// The provide modes whose registered key makes a client a provider the
-// session cap excludes: "provide enabled" is public or stream provide mode,
-// the rule of the concurrent-client exemption (owner, 2026-11-18). A client
-// that provides only to its own network or to friends and family counts. A
-// mint's exemption (ClientProvideEnabledInTx), a provide change's
-// (provideKeysEnableProvide) and the SQL all read these modes, and nothing
-// else decides it.
+// The session cap exempts exactly the clients the concurrent client limit
+// exempts (owner decision 2026-11-18, ~23:50Z): a top-level client that
+// declared provide intent, while its qualification (a registered Public
+// provide key, a passing egress probe, the reliability floor) is pending or
+// qualified and its intent connection is live: ClientCapExemptUntil, the one
+// predicate both apply. A client with only a Stream key (every connected app),
+// a hosted proxy, and a network-only or friends-and-family provider count.
 //
-// Stream is also the return-traffic mode every connect client registers
-// whatever it provides (connect ContractManager.SetProvideModesWithReturnTraffic),
-// so a client is excluded from its first provide registration on.
-var providerProvideModes = []ProvideMode{ProvideModePublic, ProvideModeStream}
+// A provider install, a top-level client created with provide intent, skips
+// the creation gates of the client limits (AuthNetworkClientArgs.ProvideIntent)
+// before it has any intent state; its own session is exempt from its creation
+// for as long as a connection's intent presence lasts, after which its intent
+// state decides.
+const providerInstallSessionExemptTimeout = 6 * time.Minute
 
-// clientProvideEnabledSql is the predicate in SQL, for a trusted client id
-// expression (never request text).
-func clientProvideEnabledSql(clientIdExpression string) string {
-	modes := "{"
-	for i, mode := range providerProvideModes {
-		if 0 < i {
-			modes += ","
-		}
-		modes += fmt.Sprintf("%d", mode)
+// The session mints' exemption (session.SetClientCapExemptUntilInTx): when the
+// top-level client's exemption from the client caps ends, or the zero time.
+func clientCapSessionExemptUntilInTx(ctx context.Context, tx server.PgTx, networkId server.Id, clientId server.Id) (time.Time, error) {
+	// a mint can bind the client to another session: the next record looks
+	// its session up again
+	clientCapSessionMirror.stateLock.Lock()
+	delete(clientCapSessionMirror.entries, clientId)
+	clientCapSessionMirror.stateLock.Unlock()
+	now := server.NowUtc()
+	exemptUntil, err := ClientCapExemptUntil(ctx, networkId, clientId, now)
+	if err != nil || !exemptUntil.IsZero() {
+		return exemptUntil, err
 	}
-	modes += "}"
-	return fmt.Sprintf(
-		`EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = %s AND provide_key.provide_mode = ANY('%s'::int[]))`,
-		clientIdExpression,
-		modes,
-	)
-}
-
-// ClientProvideEnabledInTx reports whether the client has provide enabled, by
-// its registered provide keys.
-func ClientProvideEnabledInTx(ctx context.Context, query server.PgCanQuery, clientId server.Id) (provides bool, returnErr error) {
-	rows, err := query.Query(ctx, `SELECT `+clientProvideEnabledSql("$1"), clientId)
+	var createTime time.Time
+	err = tx.QueryRow(ctx, `SELECT create_time FROM network_client_provider_intent WHERE client_id = $1`, clientId).Scan(&createTime)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
-	defer rows.Close()
-	if rows.Next() {
-		if err := rows.Scan(&provides); err != nil {
-			return false, err
-		}
+	if end := createTime.Add(providerInstallSessionExemptTimeout); now.Before(end) {
+		return end, nil
 	}
-	return provides, rows.Err()
+	return time.Time{}, nil
 }
 
-// provideKeysEnableProvide is the predicate over a provide's key set.
-func provideKeysEnableProvide(secretKeys map[ProvideMode][]byte) bool {
-	for _, mode := range providerProvideModes {
-		if _, ok := secretKeys[mode]; ok {
-			return true
+// The own session of each top-level client whose intent state this process
+// wrote, and the exemption end last recorded on it (the zero time: none), so
+// an intent connection's presence refresh (every two minutes) records only
+// what changes: a renewal before the recorded end lapses.
+type clientCapSessionMirrorEntry struct {
+	sessionId *server.Id
+	end       time.Time
+	at        time.Time
+}
+
+var clientCapSessionMirror = struct {
+	stateLock sync.Mutex
+	entries   map[server.Id]clientCapSessionMirrorEntry
+}{entries: map[server.Id]clientCapSessionMirrorEntry{}}
+
+// An entry is trusted this long; then the client's session is looked up again.
+const clientCapSessionMirrorEntryAge = 30 * time.Minute
+
+// The most clients the mirror remembers per process.
+const clientCapSessionMirrorLimit = 65536
+
+// A presence refresh records the exemption again only when the recorded end is
+// this close (half an intent presence).
+const clientCapSessionMirrorRenewMargin = providerInstallSessionExemptTimeout / 2
+
+// mirrorClientCapSessionExemption records a top-level client's exemption from
+// the client caps on its own session (session.UpdateSessionCapExemption) after
+// a write of its intent state: the same predicate, read after the write. An
+// observation (a presence refresh) records it only when the client's status
+// is exempt and the recorded end is near. Best effort: a failure leaves the
+// recorded end to lapse, and the client's next intent write or mint records it
+// again.
+func mirrorClientCapSessionExemption(ctx context.Context, networkId server.Id, clientId server.Id, observation bool, exemptStatus bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			glog.Infof("[session]client cap exemption of %s not recorded: %v\n", clientId, recovered)
 		}
+	}()
+	now := server.NowUtc()
+	clientCapSessionMirror.stateLock.Lock()
+	entry, cached := clientCapSessionMirror.entries[clientId]
+	clientCapSessionMirror.stateLock.Unlock()
+	if cached && now.Sub(entry.at) >= clientCapSessionMirrorEntryAge {
+		cached = false
 	}
-	return false
+	if observation && cached && (entry.sessionId == nil || !exemptStatus || clientCapSessionMirrorRenewMargin < entry.end.Sub(now)) {
+		return
+	}
+	if !cached {
+		entry = clientCapSessionMirrorEntry{at: now}
+		server.Db(ctx, func(conn server.PgConn) {
+			err := conn.QueryRow(
+				ctx,
+				`SELECT session_id FROM network_client WHERE client_id = $1 AND network_id = $2 AND active AND source_client_id IS NULL`,
+				clientId,
+				networkId,
+			).Scan(&entry.sessionId)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				server.Raise(err)
+			}
+		})
+	}
+	if entry.sessionId != nil {
+		exemptUntil, err := ClientCapExemptUntil(ctx, networkId, clientId, now)
+		server.Raise(err)
+		server.Raise(session.UpdateSessionCapExemption(ctx, networkId, *entry.sessionId, exemptUntil))
+		entry.end = exemptUntil
+	}
+	clientCapSessionMirror.stateLock.Lock()
+	defer clientCapSessionMirror.stateLock.Unlock()
+	if clientCapSessionMirrorLimit <= len(clientCapSessionMirror.entries) {
+		clear(clientCapSessionMirror.entries)
+	}
+	clientCapSessionMirror.entries[clientId] = entry
 }
 
 // recoverSessionRefusal, deferred by a minting route's model entry, returns a

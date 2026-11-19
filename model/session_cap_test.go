@@ -38,18 +38,3 @@ func TestSessionCapPolicyFollowsPro(t *testing.T) {
 	connect.AssertEqual(t, 0, (&ProConfig{}).SessionCapPolicy().Live)
 	connect.AssertEqual(t, 0, (&ProConfig{MaxSessions: -1}).SessionCapPolicy().Live)
 }
-
-// "Provide enabled", the one predicate the session cap excludes by, is a
-// registered public or stream provide key (owner, 2026-11-18). A client that
-// provides only to its own network or to friends and family is no provider.
-func TestProvideEnabledIsPublicOrStream(t *testing.T) {
-	key := []byte{1}
-	connect.AssertEqual(t, false, provideKeysEnableProvide(map[ProvideMode][]byte{}))
-	connect.AssertEqual(t, false, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModeNetwork: key}))
-	connect.AssertEqual(t, false, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModeFriendsAndFamily: key}))
-	connect.AssertEqual(t, false, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModeNetwork: key, ProvideModeFriendsAndFamily: key}))
-	connect.AssertEqual(t, true, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModeStream: key}))
-	connect.AssertEqual(t, true, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModePublic: key}))
-	connect.AssertEqual(t, true, provideKeysEnableProvide(map[ProvideMode][]byte{ProvideModeNetwork: key, ProvideModeStream: key}))
-	connect.AssertEqual(t, `EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = $1 AND provide_key.provide_mode = ANY('{3,4}'::int[]))`, clientProvideEnabledSql("$1"))
-}

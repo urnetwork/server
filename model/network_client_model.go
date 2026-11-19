@@ -3689,10 +3689,6 @@ func SetProvideWithCapabilities(
 	capabilities ProvideCapabilities,
 ) {
 	var inactive bool
-	// a top-level client whose public provide state this provide changed, and
-	// its own session (session_cap.go)
-	var exemptionNetworkId, exemptionSessionId *server.Id
-	var exemption bool
 
 	// The mirror is written after the commit, and that write can fail (redis
 	// unavailable, or the caller canceled). Before the commit, hold the mirror
@@ -3708,7 +3704,6 @@ func SetProvideWithCapabilities(
 	server.Tx(ctx, func(tx server.PgTx) {
 		// reset in case the tx is retried on a transient error
 		inactive = false
-		exemptionNetworkId, exemptionSessionId = nil, nil
 
 		changeTime := server.NowUtc()
 
@@ -3721,9 +3716,7 @@ func SetProvideWithCapabilities(
 		// Even an unchanged provide publishes. Lock its active row and place
 		// its token under the advisory lock, in PostgreSQL commit order.
 		var active bool
-		var clientNetworkId *server.Id
-		var sourceClientId, sessionId *server.Id
-		err := tx.QueryRow(ctx, `SELECT active, network_id, source_client_id, session_id FROM network_client WHERE client_id = $1 FOR KEY SHARE`, clientId).Scan(&active, &clientNetworkId, &sourceClientId, &sessionId)
+		err := tx.QueryRow(ctx, `SELECT active FROM network_client WHERE client_id = $1 FOR KEY SHARE`, clientId).Scan(&active)
 		if errors.Is(err, pgx.ErrNoRows) {
 			active = true
 		} else {
@@ -3763,13 +3756,6 @@ func SetProvideWithCapabilities(
 				storedSecretKeys[provideMode] = secretKey
 			}
 		})
-
-		// the session cap excludes a top-level client's own session while it
-		// has provide enabled; a change is recorded on the session after the
-		// commit (its next mint records it too)
-		if provides := provideKeysEnableProvide(secretKeys); provides != provideKeysEnableProvide(storedSecretKeys) && sourceClientId == nil && sessionId != nil && clientNetworkId != nil {
-			exemptionNetworkId, exemptionSessionId, exemption = clientNetworkId, sessionId, provides
-		}
 
 		difference := newProvideKeyDifference(storedSecretKeys, secretKeys)
 		if !difference.empty() {
@@ -3867,12 +3853,6 @@ func SetProvideWithCapabilities(
 
 	publishProvideMirror(ctx, clientId, holdToken, secretKeys)
 	refreshNetworkPeerProvideModes(ctx, clientId)
-	if exemptionSessionId != nil {
-		// best effort: the session's next mint records the exemption too
-		server.HandleError(func() {
-			server.Raise(session.UpdateSessionProvideExemption(ctx, *exemptionNetworkId, *exemptionSessionId, exemption))
-		})
-	}
 }
 
 // Publish and confirm outside both the PostgreSQL transaction and the Redis

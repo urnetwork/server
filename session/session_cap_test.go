@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/push"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	promdto "github.com/prometheus/client_model/go"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 )
@@ -158,9 +159,9 @@ func TestSessionCapEnforcedRefusesWithoutEviction(t *testing.T) {
 	})
 }
 
-// R-cap: a client session whose top-level client has provide enabled is not
-// counted, and is admitted at the cap; the exemption follows the client's
-// provide state.
+// R-cap: a client session whose top-level client is exempt from the client
+// caps is not counted, and is admitted at the cap, until its exemption ends;
+// the exemption follows the client's intent state.
 func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		defer Testing_SetSessionCapPolicy(SessionCapPolicy{Live: 2, Retained: NetworkSessionRetainedLimit, Enforce: true})()
@@ -170,7 +171,7 @@ func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 		providers := []*ByJwt{}
 		for i := 0; i < 3; i++ {
 			provider := sessionClientFixtureCredential(network, now)
-			if _, err := registerNetworkSession(ctx, provider, MintKindApiKeyClient, nil, false, now, sessionExemptYes); err != nil {
+			if _, err := registerNetworkSession(ctx, provider, MintKindApiKeyClient, nil, false, now, sessionExemptArg(now.Add(time.Hour))); err != nil {
 				t.Fatal("provider session refused", err)
 			}
 			providers = append(providers, provider)
@@ -185,7 +186,7 @@ func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 		}
 		// a provider session is admitted at the cap
 		late := sessionClientFixtureCredential(network, now)
-		if _, err := registerNetworkSession(ctx, late, MintKindApiKeyClient, nil, false, now, sessionExemptYes); err != nil {
+		if _, err := registerNetworkSession(ctx, late, MintKindApiKeyClient, nil, false, now, sessionExemptArg(now.Add(time.Hour))); err != nil {
 			t.Fatal("a provider session was refused at the cap", err)
 		}
 		// a child's mint keeps the exemption its root decided
@@ -198,12 +199,36 @@ func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 		if !sessionContains(sessionLiveMembers(t, ctx, network, "xz"), *providers[0].SessionId) {
 			t.Fatal("a child's mint cleared its root's exemption")
 		}
-		// the client stops providing: its session counts again
-		if err := UpdateSessionProvideExemption(ctx, network, *providers[0].SessionId, false); err != nil {
+		// the client's exemption ends: its session counts again
+		if err := UpdateSessionCapExemption(ctx, network, *providers[0].SessionId, time.Time{}); err != nil {
 			t.Fatal(err)
 		}
 		if sessionContains(sessionLiveMembers(t, ctx, network, "xz"), *providers[0].SessionId) {
-			t.Fatal("the exemption outlived provide")
+			t.Fatal("the exemption outlived the client's")
+		}
+		// an exemption is recorded until its end, and lapses there on its own
+		end := now.Add(10 * time.Minute)
+		if err := UpdateSessionCapExemption(ctx, network, *providers[1].SessionId, end); err != nil {
+			t.Fatal(err)
+		}
+		var recorded float64
+		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+			var err error
+			recorded, err = r.ZScore(ctx, SessionKey(network, "xz"), providers[1].SessionId.String()).Result()
+			if err != nil {
+				return err
+			}
+			// as when the end passed
+			return r.ZAdd(ctx, SessionKey(network, "xz"), redis.Z{Score: float64(now.Add(-time.Second).UnixMilli()), Member: providers[1].SessionId.String()}).Err()
+		}))
+		if int64(recorded) != end.UnixMilli() {
+			t.Fatal("the exemption is recorded until", recorded, "not its end", end.UnixMilli())
+		}
+		if _, err := RegisterNetworkSession(ctx, sessionFixtureCredential(network, now), "password", nil, false, now); err == nil {
+			t.Fatal("the cap admitted a counted session")
+		}
+		if sessionContains(sessionLiveMembers(t, ctx, network, "xz"), *providers[1].SessionId) {
+			t.Fatal("an exemption outlived its end")
 		}
 		// a sign-in session is never exempt
 		other := server.NewId()
@@ -211,7 +236,7 @@ func TestSessionCapExcludesProviderClientSessions(t *testing.T) {
 		if _, err := RegisterNetworkSession(ctx, signin, "password", nil, false, now); err != nil {
 			t.Fatal(err)
 		}
-		if err := UpdateSessionProvideExemption(ctx, other, *signin.SessionId, true); err != nil {
+		if err := UpdateSessionCapExemption(ctx, other, *signin.SessionId, now.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		if sessionContains(sessionLiveMembers(t, ctx, other, "xz"), *signin.SessionId) {
@@ -367,7 +392,7 @@ func TestSessionListPagesByKind(t *testing.T) {
 			kinds[claims.SessionId.String()] = "client/hosted_proxy"
 		}
 		provider := sessionClientFixtureCredential(network, now)
-		register(provider, MintKindApiKeyClient, sessionExemptYes)
+		register(provider, MintKindApiKeyClient, sessionExemptArg(now.Add(time.Hour)))
 		kinds[provider.SessionId.String()] = "client/api_key"
 		adopted := sessionClientFixtureCredential(network, now)
 		register(adopted, MintKindDeviceAdopt, sessionExemptNo)
@@ -562,7 +587,7 @@ func TestSessionLevelSampleObservesEveryLiveNetworkOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if _, err := registerNetworkSession(ctx, sessionClientFixtureCredential(providersOnly, now), MintKindApiKeyClient, nil, false, now, sessionExemptYes); err != nil {
+		if _, err := registerNetworkSession(ctx, sessionClientFixtureCredential(providersOnly, now), MintKindApiKeyClient, nil, false, now, sessionExemptArg(now.Add(time.Hour))); err != nil {
 			t.Fatal(err)
 		}
 		revoked := sessionFixtureCredential(retainedOnly, now)
