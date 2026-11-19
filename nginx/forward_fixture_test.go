@@ -24,7 +24,9 @@ import (
 
 // One request as a recording upstream saw it.
 type recordedRequest struct {
-	block            string
+	block string
+	// the front's end of the connection, which tells connections apart
+	remoteAddr       string
 	method           string
 	requestUri       string
 	proto            string
@@ -53,14 +55,27 @@ type recordingUpstream struct {
 }
 
 func newRecordingUpstream(t *testing.T, name string, handler func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest)) *recordingUpstream {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	return newRecordingUpstreamOn(t, name, listener, handler)
+}
+
+// A recording upstream on a listener the test opened, so it can learn the
+// port before it decides what serves there.
+func newRecordingUpstreamOn(t *testing.T, name string, listener net.Listener, handler func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest)) *recordingUpstream {
 	upstream := &recordingUpstream{
 		t:       t,
 		name:    name,
 		handler: handler,
 	}
-	upstream.server = httptest.NewServer(http.HandlerFunc(upstream.serveHttp))
+	upstream.server = httptest.NewUnstartedServer(http.HandlerFunc(upstream.serveHttp))
+	upstream.server.Listener.Close()
+	upstream.server.Listener = listener
+	upstream.server.Start()
 	t.Cleanup(upstream.server.Close)
-	upstream.port = upstream.server.Listener.Addr().(*net.TCPAddr).Port
+	upstream.port = listener.Addr().(*net.TCPAddr).Port
 	return upstream
 }
 
@@ -68,6 +83,7 @@ func (self *recordingUpstream) serveHttp(w http.ResponseWriter, r *http.Request)
 	body, bodyErr := io.ReadAll(r.Body)
 	recorded := &recordedRequest{
 		block:            self.name,
+		remoteAddr:       r.RemoteAddr,
 		method:           r.Method,
 		requestUri:       r.RequestURI,
 		proto:            r.Proto,
