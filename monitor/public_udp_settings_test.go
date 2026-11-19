@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"sync"
 	"testing"
@@ -303,8 +304,9 @@ func TestPublicUdpTransportRefusesSettingsThatBoundNothing(t *testing.T) {
 // QUIC Initial datagram refuses the first write, and a one-datagram budget the
 // second, either closing the attempt's socket as an exhausted budget that the
 // findings under the same settings read as unknown. Under the default budgets
-// the same attempt, with no server to answer it, only times out. The context
-// deadline bounds a failing test.
+// the same attempt, with no server to answer it, writes a second datagram
+// and goes on until it is canceled; the arrival of that datagram is the
+// barrier. The context deadline bounds a failing test.
 func TestPublicUdpTransportWireBudgetFollowsItsSettings(t *testing.T) {
 	underOneInitial := DefaultPublicUdpProbeSettings()
 	// QUIC pads a client's Initial datagrams to at least 1200 bytes
@@ -343,6 +345,39 @@ func TestPublicUdpTransportWireBudgetFollowsItsSettings(t *testing.T) {
 		}
 	}
 
+	// the default budgets, with an attempt timeout past the test's own bound
+	defaultBudgets := DefaultPublicUdpProbeSettings()
+	defaultBudgets.AttemptTimeout = time.Minute
+	request := publicUdpTestNativeRequest("ipv4", "connect", "quic")
+	client, server := publicUdpTestSocketPair("198.51.100.20:42000", publicUdpTuple(request))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	type result struct {
+		observed PublicUdpObservation
+		err      error
+	}
+	done := make(chan result, 1)
+	go func() {
+		observed, err := observePublicUdp(ctx, request, defaultBudgets, func(context.Context, string, string) (net.PacketConn, error) {
+			return client, nil
+		}, x509.NewCertPool())
+		done <- result{observed: observed, err: err}
+	}()
+	for range 2 {
+		select {
+		case <-server.incoming:
+		case attempt := <-done:
+			t.Fatalf("under the default budgets the attempt ended before its second datagram: %+v err=%v", attempt.observed, attempt.err)
+		case <-ctx.Done():
+			t.Fatal("under the default budgets the attempt never wrote a second datagram")
+		}
+	}
+	cancel()
+	attempt := <-done
+	if !errors.Is(attempt.err, context.Canceled) || attempt.observed.Failure == PublicUdpFailureBudget || attempt.observed.SentPackets < 1 {
+		t.Fatalf("under the default budgets the attempt gave %+v err=%v", attempt.observed, attempt.err)
+	}
 }
 
 // The attempt's deadline is the settings' attempt timeout, whatever its
@@ -431,5 +466,80 @@ func TestPublicUdpQuicConfigFollowsItsSettings(t *testing.T) {
 		if quicConfig := c.settings.quicConfig(c.apiRequest); !reflect.DeepEqual(*quicConfig, c.want) {
 			t.Errorf("%s: %+v, want %+v", c.name, *quicConfig, c.want)
 		}
+	}
+}
+
+// The receive side reads its budgets from the settings too: past a lowered
+// packet or byte budget an inbound datagram, expected or not, closes the
+// socket as an exhausted budget, and past the default budgets a raised one
+// accepts every datagram from the pinned peer.
+func TestPublicUdpTransportReceiveBudgetFollowsItsSettings(t *testing.T) {
+	peer := netip.MustParseAddrPort("192.0.2.20:443")
+	stranger := net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.21:443"))
+	fewPackets := DefaultPublicUdpProbeSettings()
+	fewPackets.MaxPacketCount = 4
+	fewBytes := DefaultPublicUdpProbeSettings()
+	fewBytes.MaxByteCount = 100
+	morePackets := DefaultPublicUdpProbeSettings()
+	morePackets.MaxPacketCount = 2 * DefaultPublicUdpProbeSettings().MaxPacketCount
+	moreBytes := DefaultPublicUdpProbeSettings()
+	moreBytes.MaxByteCount = 2 * DefaultPublicUdpProbeSettings().MaxByteCount
+	cases := []struct {
+		name     string
+		settings *PublicUdpProbeSettings
+		// unexpected datagrams first, then the pinned peer's
+		unexpectedCount   int
+		expectedCount     int
+		datagramByteCount int
+		// the pinned peer's datagrams accepted before the budget closes the
+		// socket; all of them when it never does
+		acceptedCount int
+		exhausted     bool
+	}{
+		{name: "a lowered packet budget", settings: fewPackets, unexpectedCount: 4, expectedCount: 1, datagramByteCount: 1, acceptedCount: 0, exhausted: true},
+		{name: "a lowered byte budget", settings: fewBytes, unexpectedCount: 0, expectedCount: 2, datagramByteCount: 60, acceptedCount: 1, exhausted: true},
+		{
+			name: "a raised packet budget", settings: morePackets, unexpectedCount: 0, expectedCount: DefaultPublicUdpProbeSettings().MaxPacketCount + 1, datagramByteCount: 1,
+			acceptedCount: DefaultPublicUdpProbeSettings().MaxPacketCount + 1, exhausted: false,
+		},
+		{
+			name: "a raised byte budget", settings: moreBytes, unexpectedCount: 0, expectedCount: DefaultPublicUdpProbeSettings().MaxByteCount/(32*1024) + 1, datagramByteCount: 32 * 1024,
+			acceptedCount: DefaultPublicUdpProbeSettings().MaxByteCount/(32*1024) + 1, exhausted: false,
+		},
+	}
+	for _, c := range cases {
+		client, server := publicUdpTestSocketPair("198.51.100.20:42000", peer.String())
+		wire := &publicUdpPacketConn{PacketConn: client, peer: peer, settings: c.settings}
+		for range c.unexpectedCount {
+			client.incoming <- publicUdpTestPacket{data: make([]byte, c.datagramByteCount), from: stranger}
+		}
+		accepted := 0
+		var err error
+		buffer := make([]byte, 64*1024)
+		for range c.expectedCount {
+			// one at a time, past the synthetic socket's queue
+			client.incoming <- publicUdpTestPacket{data: make([]byte, c.datagramByteCount), from: server.address}
+			if _, _, err = wire.ReadFrom(buffer); err != nil {
+				break
+			}
+			accepted++
+		}
+		observed := wire.observation()
+		exhausted := errors.Is(err, errPublicUdpBudget) && observed.Failure == PublicUdpFailureBudget
+		if exhausted != c.exhausted || accepted != c.acceptedCount || observed.ReceivedPackets != c.acceptedCount || observed.UnexpectedPackets != c.unexpectedCount {
+			t.Errorf("%s: %d accepted, exhausted=%t, %+v err=%v", c.name, accepted, exhausted, observed, err)
+		}
+		select {
+		case <-client.closed:
+			if !c.exhausted {
+				t.Errorf("%s: the socket closed within its budget", c.name)
+			}
+		default:
+			if c.exhausted {
+				t.Errorf("%s: the exhausted budget left the socket open", c.name)
+			}
+		}
+		client.Close()
+		server.Close()
 	}
 }
