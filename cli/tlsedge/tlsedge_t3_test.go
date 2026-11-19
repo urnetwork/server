@@ -333,7 +333,9 @@ type t3EdgeOpened struct {
 }
 
 // The block's dial for a test: each request recorded, a refusal queued answered first, and otherwise a stream opened
-// with its TlsEdgeOpen and handed to serve, the device, as a ticket's listener would get it.
+// with its TlsEdgeOpen and handed to serve, the device, as a ticket's listener would get it, or, once a route is set,
+// the request handed to the route: the real sockets engine's Find and a listener's front
+// (tlsedge_custom_route_t3_test.go).
 type t3EdgeDial struct {
 	// the grant expiry each ticket names, past every test's end
 	expireTimeMillis uint64
@@ -343,6 +345,14 @@ type t3EdgeDial struct {
 	requests  []*sidecar.SocketEdgeDialRequest
 	refusals  []error
 	opened    chan *t3EdgeOpened
+	route     func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)
+}
+
+// Hands every dial past a queued refusal to route from now on.
+func (self *t3EdgeDial) setRoute(route func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.route = route
 }
 
 func (self *t3EdgeDial) refuseNext(err error) {
@@ -358,19 +368,22 @@ func (self *t3EdgeDial) Requests() []*sidecar.SocketEdgeDialRequest {
 }
 
 func (self *t3EdgeDial) dial(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error) {
-	refusal := func() error {
+	refusal, route := func() (error, func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.requests = append(self.requests, request)
 		if 0 < len(self.refusals) {
 			refusal := self.refusals[0]
 			self.refusals = self.refusals[1:]
-			return refusal
+			return refusal, nil
 		}
-		return nil
+		return nil, self.route
 	}()
 	if refusal != nil {
 		return nil, refusal
+	}
+	if route != nil {
+		return route(ctx, request)
 	}
 	metadata, err := request.Metadata(self.expireTimeMillis)
 	if err != nil {
@@ -480,10 +493,13 @@ func newT3EdgeRoot(t testing.TB, ctx context.Context) string {
 }
 
 // A network with its label in root, made as publishing makes them: its zone first, so its label takes its place in
-// the map's serial order.
-func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string) (sidecar.Id, string) {
+// the map's serial order. Its id is networkId's when one is given.
+func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string, givenNetworkId *sidecar.Id) (sidecar.Id, string) {
 	t.Helper()
 	networkId := server.NewId()
+	if givenNetworkId != nil {
+		networkId = server.Id(*givenNetworkId)
+	}
 	model.Testing_CreateNetwork(ctx, networkId, "tls-"+strings.ReplaceAll(networkId.String()[24:], "-", ""), server.NewId())
 	if _, err := model.EnsureNetworkZone(ctx, networkId, root); err != nil {
 		t.Fatal(err)
@@ -499,13 +515,19 @@ func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string) (sidecar.I
 // its settings changed by configure first.
 func newT3EdgeWorld(t testing.TB, configure func(settings *hostSettings)) *t3EdgeWorld {
 	t.Helper()
+	return newT3EdgeWorldOn(t, sidecartest.NewFakeClock(time.Now().UTC().Truncate(time.Second)), nil, configure)
+}
+
+// newT3EdgeWorld on clock, which a world of other engines shares, for the network networkId when one is given: one an
+// authorization log of its own already names.
+func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId *sidecar.Id, configure func(settings *hostSettings)) *t3EdgeWorld {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	start := time.Now().UTC().Truncate(time.Second)
-	clock := sidecartest.NewFakeClock(start)
+	start := clock.Now()
 	fakes := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
 	root := newT3EdgeRoot(t, ctx)
-	networkId, label := newT3EdgeNetwork(t, ctx, root)
+	networkId, label := newT3EdgeNetwork(t, ctx, root, givenNetworkId)
 	fakes.Quota.SetLimits(connect.Id(networkId), &sidecar.QuotaLimits{Tier: "free", Limits: map[string]int64{
 		"tls_endpoint_concurrent":        256,
 		"tls_endpoint_new_per_s":         50,
