@@ -186,6 +186,35 @@ func TestStatsProviderEgressCacheNativeGaugeFreshness(t *testing.T) {
 		if testutil.ToFloat64(statsProviderEgressIndexGauge.gauge.WithLabelValues(model.RankModeQuality, "32767")) != 2 {
 			t.Fatal("native publication dropped a historical index label")
 		}
+		// A failed fill leaves the same token as an active fill. A subsequent
+		// collector must still report that refusal and retain its prior gauges.
+		server.Redis(ctx, func(client server.RedisClient) { server.Raise(client.Del(ctx, key).Err()) })
+		policy := statsProviderEgressPolicyKey(ctx)
+		store := redisStatsProviderEgressCacheStore{}
+		token := server.NewId().String()
+		owner := statsProviderEgressCache{
+			store: store, now: time.Now, newToken: func() string { return token },
+			fill: func(context.Context) (*model.ProviderEgressCounts, error) {
+				return nil, errors.New("synthetic source failure")
+			},
+		}
+		failed := statsProviderEgressCacheOutcomes.WithLabelValues("fill_failed")
+		busy := statsProviderEgressCacheOutcomes.WithLabelValues("follower_busy")
+		beforeFailed, beforeBusy := testutil.ToFloat64(failed), testutil.ToFloat64(busy)
+		if _, err := owner.get(ctx, policy); err != errStatsProviderEgressUnavailable {
+			t.Fatal("owner did not report its failed fill")
+		}
+		if got := server.HandleError(func() { statsRefreshProviderEgress(ctx) }); got != errStatsProviderEgressBusy {
+			t.Fatal("collector lost the refusal behind a failed fill's retry fence")
+		}
+		if testutil.ToFloat64(failed) != beforeFailed+1 || testutil.ToFloat64(busy) != beforeBusy+1 {
+			t.Fatal("failed owner and refused follower lost their separate cache outcomes")
+		}
+		if testStatsGaugeValue(t, statsProviderEgressAvailableGauge) != 0 || testStatsGaugeValue(t, statsProviderEgressStartedGauge) != wantStarted || testStatsGaugeValue(t, statsProviderEgressCompletedGauge) != wantCompleted || testutil.ToFloat64(statsProviderEgressIndexGauge.gauge.WithLabelValues(model.RankModeQuality, "32767")) != 2 {
+			t.Fatal("fenced follower changed existing counts or source times, or indicated availability")
+		}
+		server.Raise(store.release(ctx, statsProviderEgressKeys(policy).fill, token))
+
 		set("invalid-snapshot")
 		panicked := false
 		func() {
