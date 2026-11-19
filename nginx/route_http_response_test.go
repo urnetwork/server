@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -127,6 +128,13 @@ func TestRouteHttpSecurityHeadersOnEveryStatus(t *testing.T) {
 	testFront := newTestFront(t, routeTable, testFrontSettings())
 	heldEntered := make(chan struct{})
 	heldRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHeld := func() {
+		releaseOnce.Do(func() {
+			close(heldRelease)
+		})
+	}
+	defer releaseHeld()
 	testFront.forwarders["api"].respond = func(w http.ResponseWriter, r *http.Request, options forwardOptions) {
 		switch options.upstreamPath {
 		case "/404":
@@ -172,14 +180,14 @@ func TestRouteHttpSecurityHeadersOnEveryStatus(t *testing.T) {
 		defer close(done)
 		serveTestRequest(handler, request("/hold"))
 	}()
-	<-heldEntered
+	waitTestBarrier(t, heldEntered)
 	response := serveTestRequest(handler, request("/v1"))
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("over the cap = %d, want 429", response.Code)
 	}
 	checkSecurityHeaders(t, "429", response.Header())
 	checkCorsHeaders(t, "429", response.Header(), "https://app.service.example", true)
-	close(heldRelease)
+	releaseHeld()
 	<-done
 
 	response = serveTestRequest(handler, request("/frame"))

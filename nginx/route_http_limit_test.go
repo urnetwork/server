@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"sync"
 	"testing"
 )
 
@@ -249,6 +250,15 @@ func TestRouteHttpEveryH2StreamTakesASlot(t *testing.T) {
 	server.EnableHTTP2 = true
 	server.StartTLS()
 	defer server.Close()
+	// a failed check still ends the held request, which the server's close
+	// waits for
+	var releaseOnce sync.Once
+	releaseHeld := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer releaseHeld()
 	client := server.Client()
 
 	send := func(path string, gotConn func(httptrace.GotConnInfo)) (*http.Response, error) {
@@ -277,7 +287,7 @@ func TestRouteHttpEveryH2StreamTakesASlot(t *testing.T) {
 			err:      err,
 		}
 	}()
-	<-entered
+	waitTestBarrier(t, entered)
 
 	reused := false
 	response, err := send("/second", func(gotConnInfo httptrace.GotConnInfo) {
@@ -294,7 +304,7 @@ func TestRouteHttpEveryH2StreamTakesASlot(t *testing.T) {
 		t.Fatalf("a second stream while the first is in flight = %d, want 429", response.StatusCode)
 	}
 
-	close(release)
+	releaseHeld()
 	first := <-heldResponse
 	if first.err != nil {
 		t.Fatal(first.err)
@@ -328,16 +338,23 @@ func TestRouteHttpEveryH3StreamTakesASlot(t *testing.T) {
 		io.WriteString(w, "forwarded")
 	}
 	handler := testFront.front.H3ApiHandler("eth1")
+	var releaseOnce sync.Once
+	releaseHeld := func() {
+		releaseOnce.Do(func() {
+			close(release)
+		})
+	}
+	defer releaseHeld()
 
 	done := make(chan int, 1)
 	go func() {
 		done <- serveTestRequest(handler, asTestProtocol(newTestRequest("GET", "api.service.example", "/hold", true), 3)).Code
 	}()
-	<-entered
+	waitTestBarrier(t, entered)
 	if response := serveTestRequest(handler, asTestProtocol(newTestRequest("GET", "api.service.example", "/second", true), 3)); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("a second h3 stream while the first is in flight = %d, want 429", response.Code)
 	}
-	close(release)
+	releaseHeld()
 	if statusCode := <-done; statusCode != http.StatusOK {
 		t.Fatalf("the first stream = %d", statusCode)
 	}

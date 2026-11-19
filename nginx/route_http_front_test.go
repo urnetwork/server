@@ -322,6 +322,8 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 	serveTestRequest(handler, newTestRequest("GET", "connect.service.example", "/", true))
 	serveTestRequest(handler, newTestRequest("GET", "test-lb.service.example", "/hidden-example/status", true))
 	serveTestRequest(handler, newTestRequest("GET", "test-lb.service.example", "/nope", true))
+	// a per-block lb route names its block, whatever the forwarder records
+	serveTestRequest(handler, newTestRequest("GET", "test-lb.service.example", "/hidden-example/by/b/mcp/g1/x", true))
 
 	for _, c := range []struct {
 		labels []string
@@ -333,6 +335,7 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 		{labels: []string{"connect", "h1", "2xx", "local"}, count: 1},
 		{labels: []string{"-", "h1", "2xx", "-"}, count: 1},
 		{labels: []string{"-", "h1", "4xx", "-"}, count: 1},
+		{labels: []string{"mcp", "h1", "2xx", "g1"}, count: 1},
 	} {
 		if count := testCounterValue(t, testFront.metrics.requests.WithLabelValues(c.labels...)); count != c.count {
 			t.Errorf("requests_total%v = %v, want %v", c.labels, count, c.count)

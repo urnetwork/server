@@ -425,3 +425,14 @@ func testCounterValue(t *testing.T, counter prometheus.Counter) float64 {
 	t.Helper()
 	return testutil.ToFloat64(counter)
 }
+
+// Waits for a barrier a request reaches, failing the test when it never
+// does, so a broken path fails instead of hanging.
+func waitTestBarrier(t *testing.T, barrier chan struct{}) {
+	t.Helper()
+	select {
+	case <-barrier:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request never reached its barrier")
+	}
+}
