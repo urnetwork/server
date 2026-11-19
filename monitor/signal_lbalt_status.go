@@ -7,13 +7,13 @@ import (
 	"fmt"
 )
 
-// NewLbAltStatusSignal implements SIGNALS.md §16.10 (`lbalt-status`): the lb
-// status routes of the lb interfaces monitor.yml lbalt_status enrolls, which
-// connect's front answers on an lb_alt interface (LBALT.md D17). Route53
-// counts any 2xx or 3xx of the port-80 lb status healthy without reading it;
-// this signal requires the 200 and the status JSON, and probes every block's
-// own status through the front, since one probe source only ever hashes to
-// one block. lbalt_status.go holds the matrix, the pass and the verdicts.
+// SIGNALS.md §16.10 (`lbalt-status`): the lb status routes of the lb
+// interfaces monitor.yml lbalt_status enrolls, which connect's front answers
+// on an lb_alt interface (LBALT.md D17). Route53 counts any 2xx or 3xx of the
+// port-80 lb status healthy without reading it; this signal requires the 200
+// and the status JSON, and probes every block's own status through the
+// front, since one probe source only ever hashes to one block.
+// lbalt_status.go holds the matrix, the pass and the verdicts.
 func NewLbAltStatusSignal() Signal {
 	return &signalAdapter{number: "16.10", key: "lbalt-status", name: "Status routes of lb interfaces and their blocks", probe: lbAltStatusProbe{settings: DefaultLbAltStatusProbeSettings()}}
 }
@@ -23,7 +23,10 @@ func (lbAltStatusProbe) tier() string { return tierWarn }
 
 // One pass over the enrolled matrix. An absent or disabled enrollment is
 // unarmed: no contact and no recovery. A refused matrix is one inventory
-// finding, and a canceled pass publishes nothing.
+// finding, and a canceled pass publishes nothing. A healthy answer resolves
+// both classes of its target, a path verdict opens lbalt-status-path after
+// two evaluations, and anything else is an unknown observation, never
+// recovery.
 func (self lbAltStatusProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -54,9 +57,51 @@ func (self lbAltStatusProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		// Cancellation publishes neither a partial failure set nor recovery.
 		return nil, err
 	}
+	resultFindings := func(result lbAltStatusResult) []finding {
+		if result.verdict.healthy {
+			findings := []finding{}
+			for _, class := range []string{"lbalt-status-path", "lbalt-status-observation"} {
+				resolved := lbAltStatusFinding(result.request, class)
+				resolved.healthy = true
+				findings = append(findings, resolved)
+			}
+			return findings
+		}
+		if !result.verdict.path {
+			unknown := lbAltStatusFinding(result.request, "lbalt-status-observation")
+			unknown.symptom = "An enrolled lb status route could not be verified from complete authenticated evidence."
+			unknown.observed = "verified=false reason=" + result.verdict.reason
+			return []finding{unknown}
+		}
+		// Only the closed domains render, whatever a source reported: an empty
+		// value is named absent, and a value outside the domain is other or
+		// invalid.
+		status := "other"
+		switch result.observation.Status {
+		case LbAltStatusStateAbsent:
+			status = "absent"
+		case LbAltStatusStateOk, LbAltStatusStateDraining, LbAltStatusStateError:
+			status = string(result.observation.Status)
+		}
+		frontReadiness := string(LbAltStatusFrontReadinessInvalid)
+		switch result.observation.FrontReadiness {
+		case LbAltStatusFrontReadinessAbsent:
+			frontReadiness = "absent"
+		case LbAltStatusFrontReadinessReady, LbAltStatusFrontReadinessNotReady:
+			frontReadiness = string(result.observation.FrontReadiness)
+		}
+		broken := lbAltStatusFinding(result.request, "lbalt-status-path")
+		broken.sustain = 2
+		broken.symptom = "An lb status route on an enrolled lb interface answered outside its contract, or its exchange failed after a connection to the interface's pinned address was attempted."
+		broken.observed = fmt.Sprintf(
+			"verified=false route=%s reason=%s status_code=%d status=%s front_readiness=%s lbalt_front=%t",
+			result.request.Route, result.verdict.reason, result.observation.StatusCode, status, frontReadiness, result.observation.LbAltFront,
+		)
+		return []finding{broken}
+	}
 	findings := []finding{healthyFinding("lb/lbalt-status", tierWarn, "lbalt-status-inventory", "lbalt-status-inventory")}
 	for _, result := range results {
-		findings = append(findings, lbAltStatusFindings(result)...)
+		findings = append(findings, resultFindings(result)...)
 	}
 	return findings, nil
 }
@@ -83,50 +128,4 @@ func lbAltStatusFinding(request LbAltStatusRequest, class string) finding {
 		verify:    "Require a later fresh verified answer on the same interface family, route and block. A missing capability, missing family route, unverified certificate or cancellation remains unknown, never recovery.",
 		playbook:  "SIGNALS.md §16.10",
 	}
-}
-
-// The findings of one attempt's verdict: a healthy answer resolves both
-// classes of its target, a path verdict opens lbalt-status-path after two
-// evaluations, and anything else is an unknown observation, never recovery.
-func lbAltStatusFindings(result lbAltStatusResult) []finding {
-	if result.verdict.healthy {
-		findings := []finding{}
-		for _, class := range []string{"lbalt-status-path", "lbalt-status-observation"} {
-			resolved := lbAltStatusFinding(result.request, class)
-			resolved.healthy = true
-			findings = append(findings, resolved)
-		}
-		return findings
-	}
-	if !result.verdict.path {
-		unknown := lbAltStatusFinding(result.request, "lbalt-status-observation")
-		unknown.symptom = "An enrolled lb status route could not be verified from complete authenticated evidence."
-		unknown.observed = "verified=false reason=" + result.verdict.reason
-		return []finding{unknown}
-	}
-	// Only the closed domains render, whatever a source reported: an empty
-	// value is named absent, and a value outside the domain is other or
-	// invalid.
-	status := "other"
-	switch result.observation.Status {
-	case LbAltStatusStateAbsent:
-		status = "absent"
-	case LbAltStatusStateOk, LbAltStatusStateDraining, LbAltStatusStateError:
-		status = string(result.observation.Status)
-	}
-	frontReadiness := string(LbAltStatusFrontReadinessInvalid)
-	switch result.observation.FrontReadiness {
-	case LbAltStatusFrontReadinessAbsent:
-		frontReadiness = "absent"
-	case LbAltStatusFrontReadinessReady, LbAltStatusFrontReadinessNotReady:
-		frontReadiness = string(result.observation.FrontReadiness)
-	}
-	broken := lbAltStatusFinding(result.request, "lbalt-status-path")
-	broken.sustain = 2
-	broken.symptom = "An lb status route on an enrolled lb interface answered outside its contract, or its exchange failed after a connection to the interface's pinned address was attempted."
-	broken.observed = fmt.Sprintf(
-		"verified=false route=%s reason=%s status_code=%d status=%s front_readiness=%s lbalt_front=%t",
-		result.request.Route, result.verdict.reason, result.observation.StatusCode, status, frontReadiness, result.observation.LbAltFront,
-	)
-	return []finding{broken}
 }
