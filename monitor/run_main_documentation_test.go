@@ -465,7 +465,7 @@ func TestReconciliationDocumentationDistinguishesVersionedScopeAuthority(t *test
 	t.Parallel()
 	for _, document := range []struct{ path, start string }{
 		{"RUN-MAIN.md", "For a two-reconciliation closure gate"},
-		{"MONITOR.md", "Every standing-log cadence also writes"},
+		{"MONITOR.md", "Every standing-log cadence writes coverage and activity"},
 	} {
 		content, err := os.ReadFile(document.path)
 		if err != nil {
