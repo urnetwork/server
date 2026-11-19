@@ -619,7 +619,8 @@ func (self *parityCaseRun) recordResponse(sequence int, response *http.Response,
 	if bodyErr != nil {
 		self.observation.set(prefix+"body.error", parityErrorClass(bodyErr))
 	}
-	if response.Header.Get("Content-Encoding") == "gzip" {
+	// a HEAD's gzip has no body to decode
+	if response.Header.Get("Content-Encoding") == "gzip" && 0 < len(body) {
 		decoded, err := parityGunzip(body)
 		if err != nil {
 			self.observation.set(prefix+"body.decoded", "invalid gzip: "+err.Error())
