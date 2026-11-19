@@ -26,6 +26,7 @@ package nginx
 import (
 	"bufio"
 	"compress/gzip"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -234,9 +235,16 @@ func (self *responseState) hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if self.slot != nil {
 		self.slot.acquireHold()
 	}
-	self.front.trackHijackedConn(hijackedConn)
+	if !self.front.trackHijackedConn(hijackedConn) {
+		// the front is cutting what outlived its drain
+		hijackedConn.Close()
+		return nil, nil, errResponseFrontCut
+	}
 	return hijackedConn, readWriter, nil
 }
+
+// A hijack after the front's cut started.
+var errResponseFrontCut = errors.New("lbalt front: closed")
 
 // Completes a response whose handler returned normally: an empty 200 when
 // nothing was written, and the end of the gzip stream.

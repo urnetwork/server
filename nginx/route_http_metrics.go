@@ -55,7 +55,7 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "limit_refusals_total",
-			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit: request, route, concurrency, quic or state",
+			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit: request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list",
 		}, []string{"limit"}),
 	}
 	registerer.MustRegister(

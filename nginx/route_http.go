@@ -49,6 +49,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server/router"
@@ -658,6 +659,11 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 	// nginx's `proxy_set_header Host $host`
 	r.Host = host
 
+	if self.front.Draining() && routeHttpUpgradeRequested(r) {
+		// a new tunnel would hold this generation for the whole drain
+		exchange.respondError(http.StatusServiceUnavailable)
+		return
+	}
 	if location.inProcess {
 		self.serveInProcess(exchange, r, request, location, upstreamTarget)
 		return
@@ -718,6 +724,22 @@ func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *htt
 	}
 	exchange.response.upstreamBlock = routeHttpInProcessBlock
 	self.front.connectHandler.ServeHTTP(writer, r)
+}
+
+// Whether an h1 request asks to switch protocols: an Upgrade header, and a
+// Connection header with the upgrade token. h2 and h3 carry neither.
+func routeHttpUpgradeRequested(r *http.Request) bool {
+	if r.ProtoMajor != 1 || r.Header.Get("Upgrade") == "" {
+		return false
+	}
+	for _, connection := range r.Header.Values("Connection") {
+		for _, token := range strings.Split(connection, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // One request through a front handler: its response, and what the metrics

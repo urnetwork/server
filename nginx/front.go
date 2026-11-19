@@ -355,9 +355,9 @@ func (self *Front) QuicTlsConfig() *tls.Config {
 // MaxRequestHeadersTotalBytes. An interface the route table doesn't list
 // gets a handler that answers 503.
 func (self *Front) HttpsHandler(interfaceName string) http.Handler {
-	frontInterface, ok := self.frontInterface(interfaceName)
+	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		return self.unknownInterfaceHandler()
+		return self.unknownInterfaceHandler(interfaceName)
 	}
 	return frontInterface.httpsHandler
 }
@@ -367,9 +367,9 @@ func (self *Front) HttpsHandler(interfaceName string) http.Handler {
 // check depends on it), and otherwise a 301 to https for every served name
 // and a deny for any other. It expects r.RemoteAddr to be the accepted peer.
 func (self *Front) HttpHandler(interfaceName string) http.Handler {
-	frontInterface, ok := self.frontInterface(interfaceName)
+	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		return self.unknownInterfaceHandler()
+		return self.unknownInterfaceHandler(interfaceName)
 	}
 	return frontInterface.httpHandler
 }
@@ -379,26 +379,25 @@ func (self *Front) HttpHandler(interfaceName string) http.Handler {
 // for another service (D3), and forwards them as HttpsHandler does. Any other
 // authority is a 421 (Misdirected Request), and /status is alt's 404.
 func (self *Front) H3ApiHandler(interfaceName string) http.Handler {
-	frontInterface, ok := self.frontInterface(interfaceName)
+	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		return self.unknownInterfaceHandler()
+		return self.unknownInterfaceHandler(interfaceName)
 	}
 	return frontInterface.h3ApiHandler
 }
 
 // The interface named interfaceName, or false.
-func (self *Front) frontInterface(interfaceName string) (*frontInterface, bool) {
+func (self *Front) lookupInterface(interfaceName string) (*frontInterface, bool) {
 	frontInterface, ok := self.interfaces[interfaceName]
-	if !ok {
-		// a wiring error at start: an interface name is never an address
-		glog.Errorf("[front]%s: %q\n", errRouteHttpUnknownInterface, interfaceName)
-	}
 	return frontInterface, ok
 }
 
 // The handler of an interface the route table doesn't list: every request is
-// a 503, so nothing is served without that interface's limits.
-func (self *Front) unknownInterfaceHandler() http.Handler {
+// a 503, so nothing is served without that interface's limits. Asking for
+// one is a wiring error at start, logged once there; an interface name is
+// never an address.
+func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
+	glog.Errorf("[front]%s: %q\n", errRouteHttpUnknownInterface, interfaceName)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 	})
@@ -411,10 +410,12 @@ func (self *Front) unknownInterfaceHandler() http.Handler {
 // when the address is at its cap, and connect then closes the connection with
 // application error 0x1001. A true result must be paired with exactly one call
 // of release, when the connection ends. An interface the route table doesn't
-// list admits nothing.
+// list admits nothing, counted under the limit "interface" rather than
+// logged, since connections set its pace.
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) {
-	frontInterface, ok := self.frontInterface(interfaceName)
+	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
+		self.metrics.limitRefusals.WithLabelValues("interface").Inc()
 		return nil, false
 	}
 	release, outcome := self.limits.acquireQuicConnection(frontInterface.limits, addr)
@@ -430,6 +431,14 @@ func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) 
 // Accepted requests and forwarded websockets run on until they end or the
 // drain timeout passes. Connect calls it right after SetDrainingIfReady,
 // while its transports can still send.
+//
+// The front's part: every h1 and h2 response from here carries Connection:
+// close (Go's h2 server sends a GOAWAY for it), and an h1 upgrade request is
+// refused with 503 rather than starting a tunnel that would hold the old
+// generation for the whole drain; the client's next connection reaches the
+// new generation. A request that races the drain is otherwise served.
+// Closing idle keepalive connections and the h2 and h3 GOAWAYs are the
+// servers', so connect's (§2.8).
 func (self *Front) BeginDrain() {
 	if !self.draining.CompareAndSwap(false, true) {
 		return
@@ -529,10 +538,16 @@ func (self *Front) cut() {
 }
 
 // Tracks a hijacked connection until it closes, so the cut can close it.
-func (self *Front) trackHijackedConn(hijackedConn *responseHijackedConn) {
+// False once the cut has started, when the caller must close it, since the
+// cut may already have taken its list.
+func (self *Front) trackHijackedConn(hijackedConn *responseHijackedConn) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.cutStarted {
+		return false
+	}
 	self.hijackedConns[hijackedConn] = true
+	return true
 }
 
 // Ends the tracking of a closed hijacked connection.

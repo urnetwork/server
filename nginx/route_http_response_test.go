@@ -354,6 +354,47 @@ func TestRouteHttpBeginDrainClosesClientConnections(t *testing.T) {
 	}
 }
 
+// While draining, an h1 upgrade is refused with 503 instead of starting a
+// tunnel that would hold the old generation for the whole drain, for a
+// forwarded websocket and for connect in-process alike; an ordinary request
+// is still served, with Connection: close.
+func TestRouteHttpBeginDrainRefusesNewUpgrades(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	mcp := testRouteService(t, routeTable, "mcp")
+	mcp.Websocket = true
+	mcp.Streamable = false
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	upgrade := func(host string) *http.Request {
+		r := newTestRequest("GET", host, "/", true)
+		r.Header.Set("Connection", "keep-alive, Upgrade")
+		r.Header.Set("Upgrade", "websocket")
+		return r
+	}
+
+	// before the drain an upgrade goes through
+	if response := serveTestRequest(handler, upgrade("mcp.service.example")); response.Code != http.StatusOK {
+		t.Fatalf("an upgrade before the drain = %d", response.Code)
+	}
+	testFront.front.BeginDrain()
+	for _, host := range []string{"mcp.service.example", "connect.service.example"} {
+		response := serveTestRequest(handler, upgrade(host))
+		if response.Code != http.StatusServiceUnavailable || response.Header().Get("Connection") != "close" {
+			t.Errorf("%s: an upgrade while draining = %d %q, want 503 and close", host, response.Code, response.Header().Get("Connection"))
+		}
+	}
+	if forwards := testFront.forwarders["mcp"].recordedForwards(); len(forwards) != 1 {
+		t.Errorf("%d mcp forwards, want only the one before the drain", len(forwards))
+	}
+	if requests := testFront.connectHandler.recordedRequests(); len(requests) != 0 {
+		t.Errorf("an upgrade reached connect while draining")
+	}
+	response := serveTestRequest(handler, newTestRequest("GET", "mcp.service.example", "/", true))
+	if response.Code != http.StatusOK || response.Header().Get("Connection") != "close" {
+		t.Errorf("an ordinary request while draining = %d %q, want 200 and close", response.Code, response.Header().Get("Connection"))
+	}
+}
+
 // The access log never holds a client address, from the peer or a header,
 // or a hidden route prefix, wherever the client put it; it honors
 // no_access_log and no_success_access_log, and samples.

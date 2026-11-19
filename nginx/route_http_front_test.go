@@ -106,13 +106,14 @@ func TestFrontServesItsBuiltPartsPerInterface(t *testing.T) {
 	for _, service := range routeTable.Services {
 		serviceForwarders[service.Name] = &testServiceForwarder{}
 	}
+	metrics := newFrontMetrics(prometheus.NewRegistry())
 	front, err := newFront(t.Context(), routeTable, "0123abcd", &frontDependencies{
 		names:             newTestFrontNames(routeTable),
 		serviceForwarders: serviceForwarders,
 		tlsConfig:         tlsConfig,
 		quicTlsConfig:     quicTlsConfig,
 		bodyStore:         &testBodyStore{},
-		metrics:           newFrontMetrics(prometheus.NewRegistry()),
+		metrics:           metrics,
 		accessLog:         &testFrontAccessLog{},
 		now:               time.Now,
 	}, &testConnectHandler{}, "1.2.3", testFrontSettings())
@@ -141,6 +142,43 @@ func TestFrontServesItsBuiltPartsPerInterface(t *testing.T) {
 	}
 	if release, ok := front.AcquireQuicConnection("eth9", netip.MustParseAddr("198.51.100.7")); ok || release != nil {
 		t.Error("an unknown interface admitted a QUIC connection")
+	}
+	if count := testCounterValue(t, metrics.limitRefusals.WithLabelValues("interface")); count != 1 {
+		t.Errorf("%v unknown interface refusals counted, want 1", count)
+	}
+}
+
+// A hijack after the cut started can't escape it: the connection is closed
+// at once, its slot is let go, and the handler gets an error.
+func TestFrontHijackAfterTheCutIsClosed(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	setTestRateLimit(t, routeTable, "eth1", 0, 0, 1)
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	hijackErrs := []error{}
+	testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+		_, _, err := w.(http.Hijacker).Hijack()
+		hijackErrs = append(hijackErrs, err)
+	}
+	testFront.front.cut()
+
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+	testFront.front.HttpsHandler("eth1").ServeHTTP(&testHijackResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		conn:             serverConn,
+	}, newTestRequestFrom("198.51.100.91:1", "GET", "connect.service.example", "/", true))
+	if len(hijackErrs) != 1 || !errors.Is(hijackErrs[0], errResponseFrontCut) {
+		t.Fatalf("hijack errors %v, want the cut's", hijackErrs)
+	}
+	if _, err := clientConn.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the client end read %v, want EOF", err)
+	}
+	if count := testFront.front.hijackedConnCount(); count != 0 {
+		t.Fatalf("%d tracked tunnels, want 0", count)
+	}
+	response := serveTestRequest(testFront.front.HttpsHandler("eth1"), newTestRequestFrom("198.51.100.91:1", "GET", "api.service.example", "/v1", true))
+	if response.Code != http.StatusOK {
+		t.Fatalf("after the refused hijack = %d, want 200: its slot was let go", response.Code)
 	}
 }
 
