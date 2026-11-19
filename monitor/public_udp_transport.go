@@ -4,9 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net"
+	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
 	"syscall"
@@ -14,6 +19,16 @@ import (
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	connectcore "github.com/urnetwork/connect"
+)
+
+const (
+	// the api route a connect api target requests: no auth and no database,
+	// and a JSON body that names the address the api saw
+	// (controller.HelloResult)
+	publicUdpApiRequestPath = "/hello"
+	// RFC 9114 §6.2 and RFC 9204 §4.2: an h3 client lets its peer open the
+	// control stream and both QPACK streams, or the server cannot start
+	publicUdpH3UniStreamCount = 3
 )
 
 var errPublicUdpBudget = errors.New("public UDP wire budget exhausted")
@@ -152,16 +167,25 @@ func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest) (Pu
 	listen := func(ctx context.Context, network string, address string) (net.PacketConn, error) {
 		return (&net.ListenConfig{}).ListenPacket(ctx, network, address)
 	}
-	return observePublicUdp(attemptCtx, request, listen, nil)
+	return observePublicUdp(attemptCtx, request, DefaultPublicUdpApiRequestSettings(), listen, nil)
 }
 
 // Test seams supply a private packet network and trust roots, not a different
 // protocol. Production always uses a fresh UDP socket and normal system roots.
 // Dial (not DialEarly) waits for the authenticated QUIC handshake. Connect's
-// custom H3 offers no HTTP/3 ALPN; only the Alt API front offers h3.
+// custom H3 offers no HTTP/3 ALPN; an api front offers h3.
+//
+// A connect api front then answers one GET /hello over HTTP/3, within the same
+// attempt deadline (LBALT.md D17). That front forwards api requests to the api
+// blocks, so its handshake proves nothing about the api behind it; alt's api
+// front embeds the api, and alt's fronts keep ending at the handshake. Only a
+// 200 with a JSON body in the api's shape completes the request, and anything
+// else is a fixed application failure. The h3 client lets the server open its
+// control and QPACK streams, which the handshake-only fronts never allow.
 func observePublicUdp(
 	ctx context.Context,
 	request PublicUdpRequest,
+	apiRequestSettings *PublicUdpApiRequestSettings,
 	listen func(context.Context, string, string) (net.PacketConn, error),
 	roots *x509.CertPool,
 ) (observation PublicUdpObservation, resultErr error) {
@@ -174,12 +198,16 @@ func observePublicUdp(
 	if err != nil || request.AttemptId == "" || !publicUdpServerName(request.ServerName) ||
 		(request.Family != "ipv4" && request.Family != "ipv6") || (request.Family == "ipv4") != peer.Addr().Is4() ||
 		(request.Service != "connect" && request.Service != "alt") || (request.Front != "connect" && request.Front != "api") ||
-		request.Service == "connect" && request.Front != "connect" ||
 		(request.Carrier != "quic" && request.Carrier != "dns" && request.Carrier != "dns-pump") ||
 		request.Carrier != "quic" && (!strings.HasSuffix(request.DnsTld, ".") || !publicUdpServerName(strings.TrimSuffix(request.DnsTld, "."))) ||
 		request.Carrier == "quic" && request.DnsTld != "" {
 		observation.Failure = PublicUdpFailureConfiguration
 		return observation, errors.New("public UDP request authority invalid")
+	}
+	apiRequest := request.Service == "connect" && request.Front == "api"
+	if apiRequest && (apiRequestSettings == nil || apiRequestSettings.ResponseBodyByteLimit <= 0) {
+		observation.Failure = PublicUdpFailureConfiguration
+		return observation, errors.New("public UDP api request bounds invalid")
 	}
 	network, bind := "udp4", "0.0.0.0:0"
 	if request.Family == "ipv6" {
@@ -242,14 +270,20 @@ func observePublicUdp(
 	if request.Front == "api" {
 		tlsConfig.NextProtos = []string{http3.NextProtoH3}
 	}
-	transport = &quic.Transport{Conn: packets}
-	connection, err = transport.Dial(ctx, net.UDPAddrFromAddrPort(peer), tlsConfig, &quic.Config{
+	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: publicUdpAttemptTimeout, MaxIdleTimeout: publicUdpAttemptTimeout,
 		InitialPacketSize:          connectcore.H3InitialPacketByteCount,
 		InitialStreamReceiveWindow: 16 * 1024, MaxStreamReceiveWindow: 16 * 1024,
 		InitialConnectionReceiveWindow: 32 * 1024, MaxConnectionReceiveWindow: 32 * 1024,
 		MaxIncomingStreams: -1, MaxIncomingUniStreams: -1, EnableDatagrams: true,
-	})
+	}
+	if apiRequest {
+		// quic-go reads a negative limit as none, and an h3 server that cannot
+		// open its control stream closes the connection before any request
+		quicConfig.MaxIncomingUniStreams = publicUdpH3UniStreamCount
+	}
+	transport = &quic.Transport{Conn: packets}
+	connection, err = transport.Dial(ctx, net.UDPAddrFromAddrPort(peer), tlsConfig, quicConfig)
 	if err != nil {
 		observation.Failure = PublicUdpFailureHandshake
 		var certificateErr *tls.CertificateVerificationError
@@ -274,5 +308,82 @@ func observePublicUdp(
 	if actualPeer, ok := publicUdpAddress(connection.RemoteAddr()); !ok || actualPeer != peer {
 		observation.Failure = PublicUdpFailureHandshake
 	}
+	if !apiRequest || observation.Failure != PublicUdpFailureNone {
+		return observation, nil
+	}
+
+	// Only an authenticated handshake from the exact pin carries the request.
+	// The failure stands until a valid answer clears it.
+	observation.ApplicationRequested = true
+	observation.Failure = PublicUdpFailureApplication
+	apiUrl := url.URL{Scheme: "https", Host: request.ServerName, Path: publicUdpApiRequestPath}
+	apiHttpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, apiUrl.String(), nil)
+	if err != nil {
+		return observation, errors.New("public UDP api request unavailable")
+	}
+	apiTransport := &http3.Transport{
+		// an encoded body could exceed the byte bound only once decoded
+		DisableCompression:     true,
+		MaxResponseHeaderBytes: apiRequestSettings.ResponseHeaderByteLimit,
+	}
+	response, err := apiTransport.NewClientConn(connection).RoundTrip(apiHttpRequest)
+	if err != nil {
+		if ctx.Err() != nil {
+			return observation, ctx.Err()
+		}
+		return observation, errors.New("public UDP api request incomplete")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(apiRequestSettings.ResponseBodyByteLimit)+1))
+	response.Body.Close()
+	observation.ApplicationStatus = response.StatusCode
+	observation.ApplicationContentTypeJson = publicUdpJsonContentType(response.Header)
+	if err != nil {
+		if ctx.Err() != nil {
+			return observation, ctx.Err()
+		}
+		return observation, errors.New("public UDP api response incomplete")
+	}
+	observation.ApplicationBodyValid = len(body) <= apiRequestSettings.ResponseBodyByteLimit && publicUdpApiResponseValid(body, request.Family)
+	observation.ApplicationComplete = response.StatusCode == http.StatusOK && observation.ApplicationContentTypeJson && observation.ApplicationBodyValid
+	if observation.ApplicationComplete {
+		observation.Failure = PublicUdpFailureNone
+	}
 	return observation, nil
+}
+
+// Whether a response carries a Content-Type and every one it carries is JSON.
+// A proxy can add the header beside its upstream's, as nginx's lb status
+// routes do, so each value counts.
+func publicUdpJsonContentType(header http.Header) bool {
+	values := header.Values("Content-Type")
+	if len(values) == 0 {
+		return false
+	}
+	for _, value := range values {
+		mediaType, _, err := mime.ParseMediaType(value)
+		if err != nil || mediaType != "application/json" {
+			return false
+		}
+	}
+	return true
+}
+
+// Whether a /hello body has the api's shape: one JSON object whose
+// client_address is an address and port of the probed family, as the api
+// renders the peer its ingress saw. The address is the observer's own and is
+// read only for its shape, never retained.
+func publicUdpApiResponseValid(body []byte, family string) bool {
+	fields := map[string]json.RawMessage{}
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
+		return false
+	}
+	var clientAddress string
+	if json.Unmarshal(fields["client_address"], &clientAddress) != nil {
+		return false
+	}
+	addrPort, err := netip.ParseAddrPort(clientAddress)
+	if err != nil || addrPort.Addr().Zone() != "" || addrPort.Port() == 0 {
+		return false
+	}
+	return addrPort.Addr().Is4() == (family == "ipv4")
 }

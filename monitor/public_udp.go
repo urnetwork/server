@@ -33,6 +33,9 @@ type PublicUdpSettings struct {
 // Each logical path names a nonsecret stable label and an existing enabled
 // inventory host. Families are explicit even when an address is missing.
 // Alt's explicitly published direct UDP ports are not Connect-private leaks.
+// Service connect takes front connect or api, as alt does: connect's lb_alt
+// front serves the api names over h3 and whodis too (LBALT.md D3), and
+// forwards those requests to the api blocks.
 type PublicUdpTargetSettings struct {
 	Name        string   `yaml:"name"`
 	Host        string   `yaml:"host"`
@@ -79,26 +82,61 @@ const (
 	PublicUdpFailureTls           PublicUdpFailure = "tls-authentication-unverified"
 	PublicUdpFailureBudget        PublicUdpFailure = "wire-budget-exhausted"
 	PublicUdpFailureConfiguration PublicUdpFailure = "configuration-invalid"
+	// a connect api front completed its authenticated handshake, but its
+	// /hello request returned no valid api answer
+	PublicUdpFailureApplication PublicUdpFailure = "application-failed"
 )
 
 // Raw addresses remain private. Verified health requires positive bounded
 // wire evidence and a completed authenticated handshake from the exact pin.
 // Unexpected packets are discarded before translation/QUIC; their presence
 // alone cannot attribute a response, let alone prove an SNAT defect.
+//
+// The application fields belong to a connect api front only, which follows
+// its handshake with one GET /hello over HTTP/3. Its status is the HTTP code
+// (0 when no response arrived). The body, and the observer address the api
+// echoes in it, are never retained.
 type PublicUdpObservation struct {
-	AttemptId          string
-	RequestedTuple     string
-	PeerTuple          string
-	FreshSocket        bool
-	HandshakeComplete  bool
-	TlsVerified        bool
-	NegotiatedProtocol string
-	SentPackets        int
-	SentBytes          int
-	ReceivedPackets    int
-	ReceivedBytes      int
-	UnexpectedPackets  int
-	Failure            PublicUdpFailure
+	AttemptId                  string
+	RequestedTuple             string
+	PeerTuple                  string
+	FreshSocket                bool
+	HandshakeComplete          bool
+	TlsVerified                bool
+	NegotiatedProtocol         string
+	ApplicationRequested       bool
+	ApplicationStatus          int
+	ApplicationContentTypeJson bool
+	ApplicationBodyValid       bool
+	ApplicationComplete        bool
+	SentPackets                int
+	SentBytes                  int
+	ReceivedPackets            int
+	ReceivedBytes              int
+	UnexpectedPackets          int
+	Failure                    PublicUdpFailure
+}
+
+// Tunables of the api request a connect api target completes after its
+// handshake (LBALT.md D17). The request has no deadline of its own: it shares
+// the attempt's, so a slow whodis handshake leaves it the rest.
+type PublicUdpApiRequestSettings struct {
+	// Bytes of response header the h3 client accepts. The api's /hello
+	// answer carries a few hundred. Non-positive takes the http3 package's
+	// default.
+	ResponseHeaderByteLimit int
+	// Bytes of /hello body read before the answer counts as invalid. The body
+	// is under a kilobyte; 16 KiB also matches the attempt's stream receive
+	// window. Must be positive.
+	ResponseBodyByteLimit int
+}
+
+// A new instance on every call.
+func DefaultPublicUdpApiRequestSettings() *PublicUdpApiRequestSettings {
+	return &PublicUdpApiRequestSettings{
+		ResponseHeaderByteLimit: 16 * 1024,
+		ResponseBodyByteLimit:   16 * 1024,
+	}
 }
 
 // Synthetic/alternate sources must implement this explicitly. There is no
@@ -145,7 +183,6 @@ func publicUdpRequests(settings PublicUdpSettings, hosts []*host) ([]PublicUdpRe
 		}
 		if target.Service != "connect" && target.Service != "alt" ||
 			target.Front != "connect" && target.Front != "api" ||
-			target.Service == "connect" && target.Front != "connect" ||
 			!slices.Contains([]string{"quic", "dns", "dns-pump"}, target.Carrier) ||
 			target.Port < 1 || target.Port > 65535 || !publicUdpServerName(target.ServerName) {
 			return nil, "protocol-authority"

@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"reflect"
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 	connectcore "github.com/urnetwork/connect"
 )
 
@@ -170,6 +173,32 @@ func publicUdpTestNativeRequest(family string, front string, carrier string) Pub
 
 func publicUdpTestNativeHandshake(t *testing.T, request PublicUdpRequest, trusted bool) (PublicUdpObservation, error) {
 	t.Helper()
+	return publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: trusted})
+}
+
+// What a native attempt runs against, beyond its request.
+type publicUdpTestNativeOptions struct {
+	trusted bool
+	// serves each connection the server accepts as HTTP/3; nil only
+	// completes handshakes
+	api http.Handler
+	// nil takes the defaults
+	apiRequestSettings *PublicUdpApiRequestSettings
+	// the attempt's own context; nil runs it under the fixture's bound
+	attemptCtx context.Context
+}
+
+// One native attempt against an in-memory QUIC server. With an api handler
+// the server serves each connection it accepts as HTTP/3 and then closes it,
+// as a front's api listener does (alt handleApiQuicConn). The server is torn
+// down and its connection joined before this returns.
+func publicUdpTestNativeAttempt(t *testing.T, request PublicUdpRequest, options publicUdpTestNativeOptions) (PublicUdpObservation, error) {
+	t.Helper()
+	trusted, api := options.trusted, options.api
+	apiRequestSettings := options.apiRequestSettings
+	if apiRequestSettings == nil {
+		apiRequestSettings = DefaultPublicUdpApiRequestSettings()
+	}
 	clientAddress := "198.51.100.20:42000"
 	if request.Family == "ipv6" {
 		clientAddress = "[2001:db8:1::20]:42000"
@@ -179,15 +208,23 @@ func publicUdpTestNativeHandshake(t *testing.T, request PublicUdpRequest, truste
 	var serverPackets net.PacketConn = server
 	var serverTransport *quic.Transport
 	var listener *quic.Listener
+	// the attempt must close the client socket itself, which the checks
+	// below read before the deferred close
+	var closeOnce sync.Once
+	closeServer := func() {
+		closeOnce.Do(func() {
+			cancel()
+			if listener != nil {
+				listener.Close()
+			}
+			serverPackets.Close()
+			if serverTransport != nil {
+				serverTransport.Close()
+			}
+		})
+	}
 	defer func() {
-		cancel()
-		if listener != nil {
-			listener.Close()
-		}
-		serverPackets.Close()
-		if serverTransport != nil {
-			serverTransport.Close()
-		}
+		closeServer()
 		client.Close()
 	}()
 	if request.Carrier != "quic" {
@@ -229,17 +266,43 @@ func publicUdpTestNativeHandshake(t *testing.T, request PublicUdpRequest, truste
 	if err != nil {
 		t.Fatal(err)
 	}
+	served := make(chan struct{})
+	if api == nil {
+		close(served)
+	} else {
+		go func() {
+			defer close(served)
+			connection, err := listener.Accept(ctx)
+			if err != nil {
+				return
+			}
+			defer connection.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+			(&http3.Server{Handler: api}).ServeQUICConn(connection)
+		}()
+	}
 	// Unsolicited bytes from another tuple must not spoil a later exact,
 	// authenticated handshake or become return-path root-cause attribution.
 	client.incoming <- publicUdpTestPacket{data: []byte("synthetic unsolicited datagram"), from: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("203.0.113.99:8053"))}
+	attemptCtx := options.attemptCtx
+	if attemptCtx == nil {
+		attemptCtx = ctx
+	}
 	listenCount := 0
-	observed, observeErr := observePublicUdp(ctx, request, func(_ context.Context, network string, _ string) (net.PacketConn, error) {
+	observed, observeErr := observePublicUdp(attemptCtx, request, apiRequestSettings, func(_ context.Context, network string, _ string) (net.PacketConn, error) {
 		listenCount++
 		if network != "udp4" && request.Family == "ipv4" || network != "udp6" && request.Family == "ipv6" {
 			t.Error("native socket family differs from explicit request")
 		}
 		return client, nil
 	}, roots)
+	// the attempt has closed its socket; closing the server ends a connection
+	// its handler still holds, so the join below is bounded by teardown
+	closeServer()
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the synthetic api server did not release its connection")
+	}
 	if listenCount != 1 {
 		t.Fatal("native attempt did not own exactly one fresh socket")
 	}
@@ -268,6 +331,9 @@ func TestPublicUdpNativeHandshakeBothFamiliesAllCodecsAndFronts(t *testing.T) {
 				observed, err := publicUdpTestNativeHandshake(t, request, true)
 				if err != nil || observed.Failure != PublicUdpFailureNone || !observed.HandshakeComplete || !observed.TlsVerified || observed.UnexpectedPackets != 1 {
 					t.Fatalf("native synthetic handshake failed for %s/%s/%s/%s: class=%s", family, path.service, path.front, carrier, observed.Failure)
+				}
+				if observed.ApplicationRequested || observed.ApplicationStatus != 0 {
+					t.Fatalf("a handshake-only front made an api request for %s/%s/%s/%s", family, path.service, path.front, carrier)
 				}
 				for _, finding := range publicUdpFindings(request, observed, err) {
 					if !finding.healthy {
@@ -369,7 +435,7 @@ func publicUdpTestNativeCancellation(t *testing.T, carrier string) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := observePublicUdp(ctx, request, func(context.Context, string, string) (net.PacketConn, error) { return client, nil }, x509.NewCertPool())
+		_, err := observePublicUdp(ctx, request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) { return client, nil }, x509.NewCertPool())
 		done <- err
 	}()
 	select {
@@ -403,7 +469,7 @@ func TestPublicUdpNativeRouteAndSocketPrerequisitesRemainUnknown(t *testing.T) {
 	for _, cause := range []error{syscall.ENETUNREACH, syscall.EAFNOSUPPORT, errors.New("synthetic-private-socket-error")} {
 		request := publicUdpTestNativeRequest("ipv6", "connect", "quic")
 		calls := 0
-		observed, err := observePublicUdp(context.Background(), request, func(context.Context, string, string) (net.PacketConn, error) {
+		observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
 			calls++
 			return nil, cause
 		}, nil)
@@ -425,11 +491,217 @@ func TestPublicUdpNativePreCanceledAttemptNeverOpensSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	_, err := observePublicUdp(ctx, publicUdpTestNativeRequest("ipv4", "connect", "quic"), func(context.Context, string, string) (net.PacketConn, error) {
+	_, err := observePublicUdp(ctx, publicUdpTestNativeRequest("ipv4", "connect", "quic"), DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
 		calls++
 		return nil, errors.New("synthetic forbidden socket")
 	}, nil)
 	if !errors.Is(err, context.Canceled) || calls != 0 {
 		t.Fatal("pre-canceled attempt opened a socket")
+	}
+}
+
+// What the synthetic api saw of one request a front forwarded.
+type publicUdpTestApiRequest struct {
+	method    string
+	path      string
+	authority string
+}
+
+// Records every request the synthetic api serves.
+type publicUdpTestApiRecorder struct {
+	stateLock   sync.Mutex
+	apiRequests []publicUdpTestApiRequest
+}
+
+func (self *publicUdpTestApiRecorder) record(r *http.Request) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.apiRequests = append(self.apiRequests, publicUdpTestApiRequest{method: r.Method, path: r.URL.Path, authority: r.Host})
+}
+
+func (self *publicUdpTestApiRecorder) requests() []publicUdpTestApiRequest {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]publicUdpTestApiRequest(nil), self.apiRequests...)
+}
+
+// The api's /hello as the front forwards it: the answer names the peer the
+// server accepted, rendered as the api's ingress renders it.
+func (self *publicUdpTestApiRecorder) hello() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		self.record(r)
+		peer, err := netip.ParseAddrPort(r.RemoteAddr)
+		if err != nil {
+			http.Error(w, "unreadable peer", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"client_address":"` + netip.AddrPortFrom(peer.Addr().Unmap(), peer.Port()).String() + `"}`))
+	})
+}
+
+func publicUdpTestConnectApiRequest(family string, carrier string) PublicUdpRequest {
+	request := publicUdpTestNativeRequest(family, "api", carrier)
+	request.Service = "connect"
+	return request
+}
+
+// Connect's front forwards api requests to the api blocks, so a connect api
+// target follows its handshake with GET /hello over HTTP/3, on every carrier
+// and in both families. The request names the api host, and only the api's
+// answer completes the attempt. The h3 server opens its control stream first,
+// so this also needs the client to allow it.
+func TestPublicUdpConnectApiFrontCompletesHelloOverHttp3(t *testing.T) {
+	for _, family := range []string{"ipv4", "ipv6"} {
+		for _, carrier := range []string{"quic", "dns", "dns-pump"} {
+			request := publicUdpTestConnectApiRequest(family, carrier)
+			recorder := &publicUdpTestApiRecorder{}
+			observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: recorder.hello()})
+			if err != nil || observed.Failure != PublicUdpFailureNone || !observed.HandshakeComplete || !observed.TlsVerified || observed.NegotiatedProtocol != "h3" {
+				t.Fatalf("%s/%s: the connect api attempt failed: class=%s err=%v", family, carrier, observed.Failure, err)
+			}
+			if !observed.ApplicationRequested || !observed.ApplicationComplete || observed.ApplicationStatus != http.StatusOK ||
+				!observed.ApplicationContentTypeJson || !observed.ApplicationBodyValid {
+				t.Fatalf("%s/%s: the api request did not complete: %+v", family, carrier, observed)
+			}
+			want := []publicUdpTestApiRequest{{method: http.MethodGet, path: "/hello", authority: request.ServerName}}
+			if apiRequests := recorder.requests(); !reflect.DeepEqual(apiRequests, want) {
+				t.Fatalf("%s/%s: the api saw %+v, want %+v", family, carrier, apiRequests, want)
+			}
+			for _, finding := range publicUdpFindings(request, observed, err) {
+				if !finding.healthy {
+					t.Fatalf("%s/%s: a completed api request was not healthy: %s", family, carrier, finding.class)
+				}
+			}
+		}
+	}
+}
+
+// Only a 200 JSON object whose client_address is an address and port of the
+// probed family completes the request. Every other answer is a fixed
+// application failure that the signal cannot read as healthy, and the
+// address in the body is never retained.
+func TestPublicUdpConnectApiFrontRefusesAnswersOutsideTheApiShape(t *testing.T) {
+	const bodyAddress = "203.0.113.200:41000"
+	cases := []struct {
+		name        string
+		status      int
+		contentType string
+		body        string
+	}{
+		{name: "an unavailable api", status: http.StatusServiceUnavailable, contentType: "application/json", body: `{"client_address":"203.0.113.200:41000"}`},
+		{name: "a redirect", status: http.StatusMovedPermanently, contentType: "application/json", body: `{"client_address":"203.0.113.200:41000"}`},
+		{name: "a text body", status: http.StatusOK, contentType: "text/plain", body: `{"client_address":"203.0.113.200:41000"}`},
+		{name: "a json array", status: http.StatusOK, contentType: "application/json", body: `["203.0.113.200:41000"]`},
+		{name: "a json null", status: http.StatusOK, contentType: "application/json", body: `null`},
+		{name: "no client address", status: http.StatusOK, contentType: "application/json", body: `{"gossip_peer_id":"synthetic"}`},
+		{name: "a client address that is not one", status: http.StatusOK, contentType: "application/json", body: `{"client_address":"synthetic"}`},
+		{name: "a client address with no port", status: http.StatusOK, contentType: "application/json", body: `{"client_address":"203.0.113.200"}`},
+		{name: "a client address of the other family", status: http.StatusOK, contentType: "application/json", body: `{"client_address":"[2001:db8::200]:41000"}`},
+		{name: "trailing data", status: http.StatusOK, contentType: "application/json", body: `{"client_address":"203.0.113.200:41000"} {}`},
+	}
+	for _, c := range cases {
+		request := publicUdpTestConnectApiRequest("ipv4", "quic")
+		recorder := &publicUdpTestApiRecorder{}
+		api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			recorder.record(r)
+			w.Header().Set("Content-Type", c.contentType)
+			w.WriteHeader(c.status)
+			w.Write([]byte(c.body))
+		})
+		observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api})
+		if err != nil || observed.Failure != PublicUdpFailureApplication || !observed.ApplicationRequested || observed.ApplicationComplete ||
+			observed.ApplicationStatus != c.status || !observed.HandshakeComplete || !observed.TlsVerified {
+			t.Errorf("%s: the answer was not a fixed application failure: %+v err=%v", c.name, observed, err)
+		}
+		if len(recorder.requests()) != 1 {
+			t.Errorf("%s: the api saw %d requests", c.name, len(recorder.requests()))
+		}
+		if strings.Contains(fmt.Sprintf("%+v", observed), bodyAddress) {
+			t.Errorf("%s: the observation retained the address in the body", c.name)
+		}
+		findings := publicUdpFindings(request, observed, err)
+		if len(findings) != 1 || findings[0].healthy {
+			t.Errorf("%s: an invalid api answer established health", c.name)
+		}
+	}
+}
+
+// The body is read through its byte bound: an answer of the api's shape that
+// runs past it is not complete, while the same answer under the default
+// bound is.
+func TestPublicUdpConnectApiFrontBoundsTheHelloBody(t *testing.T) {
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer := netip.MustParseAddrPort(r.RemoteAddr)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"client_address":"` + peer.String() + `","gossip_peer_id":"` + strings.Repeat("a", 256) + `"}`))
+	})
+	bounded := DefaultPublicUdpApiRequestSettings()
+	bounded.ResponseBodyByteLimit = 64
+	for _, c := range []struct {
+		settings *PublicUdpApiRequestSettings
+		complete bool
+	}{
+		{settings: bounded, complete: false},
+		{settings: DefaultPublicUdpApiRequestSettings(), complete: true},
+	} {
+		request := publicUdpTestConnectApiRequest("ipv4", "quic")
+		observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, apiRequestSettings: c.settings})
+		if err != nil || observed.ApplicationComplete != c.complete || observed.ApplicationBodyValid != c.complete || observed.ApplicationStatus != http.StatusOK {
+			t.Fatalf("a %d byte bound: %+v err=%v", c.settings.ResponseBodyByteLimit, observed, err)
+		}
+		if !c.complete && observed.Failure != PublicUdpFailureApplication {
+			t.Fatalf("a body past its bound was not an application failure: %s", observed.Failure)
+		}
+	}
+}
+
+// The api request rides the attempt's own context: canceling the attempt
+// while the api holds the request returns the cancellation at once, with the
+// failure standing and the socket closed. The handler's entry is the barrier.
+func TestPublicUdpConnectApiFrontCancellationEndsTheApiRequest(t *testing.T) {
+	attemptCtx, cancelAttempt := context.WithCancel(context.Background())
+	defer cancelAttempt()
+	entered := make(chan struct{})
+	var enterOnce sync.Once
+	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		enterOnce.Do(func() { close(entered) })
+		cancelAttempt()
+		<-r.Context().Done()
+	})
+	request := publicUdpTestConnectApiRequest("ipv4", "quic")
+	observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, attemptCtx: attemptCtx})
+	select {
+	case <-entered:
+	default:
+		t.Fatal("the api request never reached the api")
+	}
+	if !errors.Is(err, context.Canceled) || observed.Failure != PublicUdpFailureApplication || observed.ApplicationComplete || observed.ApplicationStatus != 0 {
+		t.Fatalf("a canceled api request kept or lost authority: %+v err=%v", observed, err)
+	}
+}
+
+// A connect api target passes the transport's own authority check and opens
+// its socket; before LBALT it was refused there as configuration-invalid.
+// Its request also needs a positive body bound before any socket opens.
+func TestPublicUdpTransportAdmitsAConnectApiRequest(t *testing.T) {
+	request := publicUdpTestConnectApiRequest("ipv4", "quic")
+	listens := 0
+	observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
+		listens++
+		return nil, errors.New("synthetic-private-socket-error")
+	}, nil)
+	if err == nil || listens != 1 || observed.Failure != PublicUdpFailureSocket {
+		t.Fatalf("a connect api request did not reach its socket: listens=%d class=%s", listens, observed.Failure)
+	}
+	for _, settings := range []*PublicUdpApiRequestSettings{nil, {ResponseHeaderByteLimit: 16 * 1024, ResponseBodyByteLimit: 0}} {
+		listens = 0
+		observed, err = observePublicUdp(context.Background(), request, settings, func(context.Context, string, string) (net.PacketConn, error) {
+			listens++
+			return nil, errors.New("synthetic-private-socket-error")
+		}, nil)
+		if err == nil || listens != 0 || observed.Failure != PublicUdpFailureConfiguration {
+			t.Fatalf("an unbounded api request opened a socket: listens=%d class=%s", listens, observed.Failure)
+		}
 	}
 }
