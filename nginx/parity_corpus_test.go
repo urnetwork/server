@@ -690,6 +690,19 @@ func parityCorpus() []*parityCase {
 		{name: "http/lb-by-block-status", request: parityPlainGet(parityLbName, parityLbPrefix+"/by/b/api/g1/status"), compareBlocks: true},
 		{name: "http/lb-by-block-status-of-a-websocket-service", request: parityPlainGet(parityLbName, parityLbPrefix+"/by/b/relay/g1/status"), compareBlocks: true},
 		{name: "http/lb-by-block-status-of-a-streamable-service", request: parityPlainGet(parityLbName, parityLbPrefix+"/by/b/mcp/g2/status"), compareBlocks: true},
+		// every block of every service the route file lists, lb exposed or
+		// not, as the lb config routes them all
+		{
+			name: "http/lb-by-block-status-of-every-block",
+			run: func(run *parityCaseRun) {
+				for _, service := range run.harness.routeTable.Services {
+					for _, block := range service.Blocks {
+						run.send(parityPlainGet(parityLbName, parityLbPrefix+"/by/b/"+service.Name+"/"+block.Name+"/status"))
+					}
+				}
+			},
+			compareBlocks: true,
+		},
 		{name: "http/lb-by-service", request: parityPlainGet(parityLbName, parityLbPrefix+"/by/service/api/hello")},
 		{name: "http/lb-other-path", request: parityPlainGet(parityLbName, "/hello?x=1")},
 

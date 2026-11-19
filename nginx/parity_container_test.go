@@ -83,6 +83,8 @@ type parityHarness struct {
 	recorder *parityRecorder
 	nginx    *parityTarget
 	front    *parityTarget
+	// the fixture's route file, which the front serves
+	routeTable *nginx.RouteTable
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -117,6 +119,7 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 	if err != nil {
 		t.Fatalf("the fixture's route file: %v", err)
 	}
+	harness.routeTable = routeTable
 	routeInterface := routeTable.Interfaces[0]
 	interfaceIpv4 := netip.MustParseAddr(routeInterface.Ipv4)
 	interfaceIpv6 := netip.MustParseAddr(routeInterface.Ipv6)
