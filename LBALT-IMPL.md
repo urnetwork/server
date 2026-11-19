@@ -136,7 +136,7 @@ lb_alt is enabled for a host when the lb_alt service is connect (validation allo
 - the service sets `lb_alt: true`; or
 - one of the host's interfaces has the override `lb_alt: true`.
 
-**Connect units** on such a host get `--lbaltnets="<iface>:<docker_network>;..."`. It lists every non-transparent lb interface on the host, sorted. It doesn't depend on per-interface overrides, so a flip never changes the unit.
+**Connect units** on such a host get `--lbaltnets="<iface>:<docker_network>;..."`. It lists every non-transparent lb interface on the host, sorted. It doesn't depend on per-interface overrides, so a flip never changes the unit. They also get `--lbalthost=<host>`, the host's key in services.yml, which the route render reads. warpctl never guesses the key from the machine's hostname.
 
 **When a connect block starts, the worker:**
 1. renders the route file, at `<WARP_HOME>/lbalt/<container name>/route.json` (`/srv/warp/<env>/...` on hosts), mode 0444, never rewritten;
@@ -191,6 +191,7 @@ warpctl accepts a candidate generation only if all of these hold:
 ### 2.5 iptables split (lb unit and block workers)
 
 - **Mark.** HMARK on new flows, `--hmark-tuple src --hmark-mod 100 --hmark-offset 0x10000 --hmark-rnd 0x4c42414c`. The seed is a named protocol constant, since it must be stable across restarts.
+  - The rules are written in the form `iptables -S` lists back: `--hmark-src-prefix 32` (IPv4) or `128` (IPv6) in place of `--hmark-tuple src`, which hashes the same. A rule is then deleted by its listed form.
   - The rule sits in mangle PREROUTING, and in mangle OUTPUT for local dials.
   - It matches `-d <interface public address>` and the public ports of §2.3, per protocol.
   - It uses `-m conntrack --ctstate NEW`, in iptables and in ip6tables.
@@ -203,12 +204,14 @@ warpctl accepts a candidate generation only if all of these hold:
   - A block with weight > 0 gets at least one bucket.
 - **Block chain.** It holds only the DNAT rules from §2.3, to `<interface bridge address>:<listen port>`, per protocol and family. The block's own worker writes it, after readiness (§2.4).
 - **Entry.** The lb chain `WARP-<ENV>-LB-<IFACE>` jumps the interface's public ports to the split chain, in place of the nginx DNAT.
-- **Replacement.** A replacement chain is built complete, under a temporary name, before any jump points at it. The last working targets stay until then.
+- **Replacement.** No jump ever points at a partial chain. The last working targets stay until the replacement is complete.
+  - A block chain is replaced in place by one `iptables-restore --noflush` transaction per family (flush and refill), and not at all when it already matches.
+  - The split chain is built complete under `WARP-<ENV>-LBT-<IFACE>`, and the entry jumps switch to it before the old chain goes.
 - **Reconcile** (lb unit, every 30 s).
   - It moves only orphaned bucket ranges, to ready blocks by weight. A block is orphaned when its chain is missing, or its target has no listener.
   - It gives a range back when its block returns.
   - If every block is down, the split chain sends nothing anywhere, so the Route53 health check fails.
-- **Rollback.** Setting the interface's `lb_alt: false` removes the HMARK rules, the entry jumps and the split chains, after nginx's DNAT is restored.
+- **Rollback.** Setting the interface's `lb_alt: false` removes the HMARK rules, the entry jumps and the split chains, after nginx's DNAT is restored. Block chains stay: they belong to the block workers, and do nothing without the split's jumps.
 
 ### 2.6 lb status from the front
 
@@ -258,6 +261,7 @@ func (self *Front) HttpsHandler(interfaceName string) http.Handler // TCP 443: r
 func (self *Front) HttpHandler(interfaceName string) http.Handler  // TCP 80: lb status routes, 301s
 func (self *Front) H3ApiHandler(interfaceName string) http.Handler // h3: only api authorities
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) // alt's per-address QUIC cap (0x1001)
+func (self *Front) ConfigureServer(httpServer *http.Server) // every HttpSettings-derived field of a public TCP server (§7)
 func (self *Front) BeginDrain()                 // stop admitting new HTTP work; responses carry Connection: close
 func (self *Front) Close() error                // release pools and spill files
 ```
@@ -271,7 +275,10 @@ func (self *Front) Close() error                // release pools and spill files
 - If `WARP_LBALT_ROUTE_FILE` is set, connect loads the route file and every certificate before readiness. It then builds the `Front`, and binds every public socket (§2.3) before the private `/status` first answers.
 - Name dispatch:
   - **TCP 443:** TLS through `Front.TlsConfig()`; HTTP/1.1 and h2 through `Front.HttpsHandler(iface)`.
-  - **QUIC:** at the connection, by SNI. Connect names go to `HandleQuicConn`, with the h3 or h3dns carrier. Api names go to http3 with `Front.H3ApiHandler(iface)`. Anything else is closed with 0x1000.
+  - **QUIC:** at the connection, by SNI.
+    - A missing or unknown SNI fails the TLS handshake. alt does the same: its TLS refuses names outside its allowed hosts, since self-signing is off in production.
+    - Connect names go to `HandleQuicConn`, with the h3 or h3dns carrier. Api names go to http3 with `Front.H3ApiHandler(iface)`.
+    - Any other served name completes the handshake and is closed with 0x1000.
   - **Limits:** a per-address QUIC connection cap closes with 0x1001. One handshake admission limit is shared by every socket.
   - **Early data:** the public QUIC config sets `Allow0RTT: false`.
 - whodis on `listen.whodis_port` uses decode53 with `front.whodis_tlds`.
@@ -360,7 +367,33 @@ Cross-unit warp functions:
 
 - [x] base-server
 - [x] base-warp
-- [ ] implementation units
+- [x] implementation units (merged onto `lbalt/integrate` in both repos; each passes its own tests there)
+- [ ] integration (§7)
 - [ ] parity harness (server, opt-in Docker test against the pinned lb image)
 - [ ] network-namespace harness (warp, opt-in Linux container test with two interfaces)
-- [ ] integration and review
+- [ ] review
+
+## 7. Integration decisions (2026-11-18)
+
+Made when the units were merged, from what their reports raised.
+
+Server:
+- **Unexposed services.** `RouteTable.ServedNames()` and the name matcher skip a service with `exposed: false`: its names and its redirect aliases. nginx emits no server block for it, and warpctl requests no certificate for it. Its names reach the default server on TCP and fail TLS on QUIC. The route file still lists it, for the hidden lb routes.
+- **Public TCP servers.** `Front.ConfigureServer(httpServer)` sets every `HttpSettings`-derived field: `ReadHeaderTimeout`, `IdleTimeout`, `MaxHeaderBytes`, the h2 stream limit, `DisableGeneralOptionsHandler`, keepalives off at `keepalive_timeout 0`, and `ConnContext`. Connect sets only `Handler`, `ErrorLog` and `BaseContext`, then calls it. The parity harness builds its servers the same way.
+- **keepalive_requests (1000) and keepalive_time (1 h).** Per-connection state from `ConnContext`. Once either is reached, the response carries `Connection: close` on h1 and a GOAWAY on h2, as in the drain.
+- **Header bytes.** `MaxHeaderBytes` is twice `MaxRequestHeadersTotalBytes`, so the front itself answers nginx's 400 and 414 inside that band. Go's 431 answers only beyond it (§4).
+- **close_notify.** A client write that hit `send_timeout` must not hold the handler while TLS tries close_notify for 5 s. Connect's public TCP sockets fail any write after a timed-out write at once.
+- **Routing to the forwarder.** Routing sets `forwardOptions.host` to the `$host` it routed by.
+
+warp:
+- **`whodis_tlds`.** warpctl's constant `ur.xyz.` is the one source. services.yml gets no key, since the tld is out of scope (LBALT.md §10).
+- **Connect host.** `--lbalthost` (§2.2). It is required with `--lbaltnets`.
+- **Rollback keeps block chains** (§2.5).
+- **lb version polls.** `deploy lb` reads services.yml. When no lb interface of the env is left on nginx, it skips the version poll and logs why. Otherwise it polls as before, ignoring `"front":"lbalt"` samples.
+- **Validation** (`validateLbAlt`). The §2.3 table moves into services, as the one source for `LbAltPublicPorts`, the host DNAT and VyOS. Load refuses:
+  - an lb_alt interface whose public ports fall outside the table;
+  - service port 443 among the lb_alt service's http ports;
+  - an lb interface name with `-` on a host where lb_alt is enabled, since chain names split on it;
+  - a service named `lba` or `lbt`.
+
+Monitor: the lb status probe is a registered signal, with its classes in SIGNALS.md and its settings read from monitor.yml. A failed `/hello` on the public UDP signal has its own finding.
