@@ -175,12 +175,26 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		page   clientScorePage
 		legacy *redis.StringCmd
 		native *redis.SliceCmd
+		// A native page whose manifest checksum this process holds decoded
+		// (clientScorePages) reads only its slot's generation, one read per
+		// slot key in the pipeline, and answers that decode while the
+		// generation is still the manifest's (network_client_score_page_cache.go).
+		generation *redis.SliceCmd
+		decoded    []*ClientScore
 	}
+	slotGenerations := map[string]*redis.SliceCmd{}
 	commands := make([]pageRead, 0, len(pages))
 	for _, page := range pages {
 		read := pageRead{page: page}
 		if page.nativeKey == "" {
 			read.legacy = pipe.Get(ctx, page.key)
+		} else if decoded, ok := clientScorePages.get(page.nativeChecksum); ok {
+			read.decoded = decoded
+			read.generation = slotGenerations[page.nativeKey]
+			if read.generation == nil {
+				read.generation = pipe.HMGet(ctx, page.nativeKey, "g")
+				slotGenerations[page.nativeKey] = read.generation
+			}
 		} else {
 			read.native = pipe.HMGet(ctx, page.nativeKey, "g", page.key)
 		}
@@ -199,54 +213,73 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 	}
 	scores := map[server.Id]*ClientScore{}
 	for _, command := range commands {
-		var data []byte
-		// the sha256 of the page bytes read, by which the decoded page is
-		// cached (decodeClientScorePage)
-		var checksum [sha256.Size]byte
-		if command.native == nil {
-			data, _ = command.legacy.Bytes()
-			if 0 < len(data) {
-				checksum = sha256.Sum256(data)
-			}
-			if command.page.hasModernChecksum && (len(data) == 0 || checksum != command.page.modernChecksum) {
-				self.markModernStale()
-			}
-		} else {
-			if command.native.Err() != nil {
+		var sample []*ClientScore
+		if command.generation != nil {
+			if command.generation.Err() != nil {
 				continue
 			}
-			values, _ := command.native.Result()
-			if len(values) != 2 {
+			values, _ := command.generation.Result()
+			if len(values) != 1 {
 				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))
 				continue
 			}
-			generation, generationOk := values[0].(string)
-			value, valueOk := values[1].(string)
-			if !generationOk || !valueOk || generation != command.page.nativeGeneration {
+			if generation, ok := values[0].(string); !ok || generation != command.page.nativeGeneration {
 				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: missing or changed page", errClientScoreNativeUnavailable))
 				continue
 			}
-			data = []byte(value)
-			if len(data) < sha256.Size || !bytes.Equal(data[:sha256.Size], command.page.nativeChecksum[:]) || sha256.Sum256(data[sha256.Size:]) != command.page.nativeChecksum {
-				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page checksum mismatch", errClientScoreNativeUnavailable))
+			clientScorePageCacheHits.Inc()
+			sample = copyClientScorePage(command.decoded)
+		} else {
+			var data []byte
+			// the sha256 of the page bytes read, by which the decoded page is
+			// cached (decodeClientScorePage)
+			var checksum [sha256.Size]byte
+			if command.native == nil {
+				data, _ = command.legacy.Bytes()
+				if 0 < len(data) {
+					checksum = sha256.Sum256(data)
+				}
+				if command.page.hasModernChecksum && (len(data) == 0 || checksum != command.page.modernChecksum) {
+					self.markModernStale()
+				}
+			} else {
+				if command.native.Err() != nil {
+					continue
+				}
+				values, _ := command.native.Result()
+				if len(values) != 2 {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))
+					continue
+				}
+				generation, generationOk := values[0].(string)
+				value, valueOk := values[1].(string)
+				if !generationOk || !valueOk || generation != command.page.nativeGeneration {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: missing or changed page", errClientScoreNativeUnavailable))
+					continue
+				}
+				data = []byte(value)
+				if len(data) < sha256.Size || !bytes.Equal(data[:sha256.Size], command.page.nativeChecksum[:]) || sha256.Sum256(data[sha256.Size:]) != command.page.nativeChecksum {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page checksum mismatch", errClientScoreNativeUnavailable))
+					continue
+				}
+				checksum = command.page.nativeChecksum
+				data = data[sha256.Size:]
+			}
+			if len(data) == 0 {
+				self.missingPages++
+				if self.observation != nil {
+					self.observation.missingPages++
+				}
 				continue
 			}
-			checksum = command.page.nativeChecksum
-			data = data[sha256.Size:]
-		}
-		if len(data) == 0 {
-			self.missingPages++
-			if self.observation != nil {
-				self.observation.missingPages++
+			var err error
+			sample, err = decodeClientScorePage(data, checksum)
+			if err != nil {
+				sourceErr = errors.Join(sourceErr, err)
+				continue
 			}
-			continue
 		}
-		sample, err := decodeClientScorePage(data, checksum)
-		if err != nil {
-			sourceErr = errors.Join(sourceErr, err)
-			continue
-		}
-		if command.native != nil && len(sample) != command.page.expectedCount {
+		if command.page.nativeKey != "" && len(sample) != command.page.expectedCount {
 			sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page count mismatch", errClientScoreNativeUnavailable))
 			continue
 		}

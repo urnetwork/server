@@ -153,7 +153,9 @@ return 1
 // '#' and the page's field, in the same command. The commit compares those
 // 32 bytes per page. Reading every page into the commit script held a node for
 // 16-30 ms (60 ms at most) per full slot on 2026-10-25. Readers verify every
-// page body against the manifest themselves.
+// page body they read against the manifest themselves; a reader that holds a
+// page's verified decode reads only the slot's generation
+// (network_client_score_page_cache.go).
 const clientScoreNativePagesScript = clientScoreNativeExpiryScript + `
 if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or redis.call('HGET', KEYS[2], 'g') ~= ARGV[2] then return 0 end
 for i = 4, #ARGV, 2 do redis.call('HSET', KEYS[2], ARGV[i], ARGV[i + 1], '#' .. ARGV[i], string.sub(ARGV[i + 1], 1, 32)) end
