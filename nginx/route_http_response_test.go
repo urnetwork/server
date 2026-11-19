@@ -265,6 +265,16 @@ func TestRouteHttpGzipsTextHtml(t *testing.T) {
 		{name: "a page", upstream: upstream{statusCode: 200, contentType: "text/html; charset=utf-8", body: html}, gzips: true},
 		{name: "a page with a length", upstream: upstream{statusCode: 200, contentType: "text/html", contentLength: "57", body: html}, gzips: true},
 		{name: "a 404 page", upstream: upstream{statusCode: 404, contentType: "TEXT/HTML", body: html}, gzips: true},
+		// nginx's type is the value before a ';' only when a charset
+		// follows it, untrimmed, and the whole value otherwise
+		{name: "a page with a charset and no space", upstream: upstream{statusCode: 200, contentType: "text/html;charset=utf-8", body: html}, gzips: true},
+		{name: "a page with an uppercase charset", upstream: upstream{statusCode: 200, contentType: "Text/Html;  CHARSET=\"utf-8\"", body: html}, gzips: true},
+		{name: "a page with another parameter, then a charset", upstream: upstream{statusCode: 200, contentType: "text/html;q=1; charset=utf-8", body: html}, gzips: false},
+		{name: "a page with another parameter", upstream: upstream{statusCode: 200, contentType: "text/html; foo=bar", body: html}, gzips: false},
+		{name: "a page with a space before its charset", upstream: upstream{statusCode: 200, contentType: "text/html ; charset=utf-8", body: html}, gzips: false},
+		{name: "a page with an empty parameter", upstream: upstream{statusCode: 200, contentType: "text/html;", body: html}, gzips: false},
+		{name: "a page with a parameter, then a charset", upstream: upstream{statusCode: 200, contentType: "text/html; foo=bar; charset=utf-8", body: html}, gzips: false},
+		{name: "a page with a charset after an empty parameter", upstream: upstream{statusCode: 200, contentType: "text/html; ;charset=utf-8", body: html}, gzips: false},
 		{name: "a 403 page", upstream: upstream{statusCode: 403, contentType: "text/html", body: html}, gzips: true},
 		{name: "a 500 page", upstream: upstream{statusCode: 500, contentType: "text/html", body: html}, gzips: false},
 		{name: "json", upstream: upstream{statusCode: 200, contentType: "application/json", body: html}, gzips: false},

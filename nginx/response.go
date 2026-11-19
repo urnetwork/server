@@ -452,8 +452,31 @@ func (self *responseState) gzips(statusCode int) bool {
 	if header.Get("Content-Encoding") != "" {
 		return false
 	}
-	mediaType, _, _ := strings.Cut(header.Get("Content-Type"), ";")
-	if !strings.EqualFold(strings.TrimSpace(mediaType), "text/html") {
+	// the part of the Content-Type nginx's gzip_types looks up: the whole
+	// value, but for the bytes before a ';' that spaces and a charset=
+	// parameter follow (ngx_http_upstream_copy_content_type), lowercased
+	// and untrimmed (ngx_http_test_content_type)
+	contentTypeMediaType := func(contentType string) string {
+		for i := 0; i < len(contentType); i += 1 {
+			if contentType[i] != ';' {
+				continue
+			}
+			parameterStart := i + 1
+			for parameterStart < len(contentType) && contentType[parameterStart] == ' ' {
+				parameterStart += 1
+			}
+			if parameterStart == len(contentType) {
+				return contentType
+			}
+			if parameter := contentType[parameterStart:]; len("charset=") <= len(parameter) && strings.EqualFold(parameter[:len("charset=")], "charset=") {
+				return contentType[:i]
+			}
+			// nginx's scan goes on past the parameter's first byte
+			i = parameterStart
+		}
+		return contentType
+	}
+	if !strings.EqualFold(contentTypeMediaType(header.Get("Content-Type")), "text/html") {
 		return false
 	}
 	if contentLength := header.Get("Content-Length"); contentLength != "" {

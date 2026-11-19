@@ -906,6 +906,11 @@ func parityCorpus() []*parityCase {
 		{name: "gzip/html-http10", request: &parityRequest{scheme: "https", sni: parityApiName, method: http.MethodGet, target: "/hello", host: parityApiName, proto: "HTTP/1.0", headers: [][2]string{{"Accept-Encoding", "gzip"}}}, scenario: htmlScenario(http.StatusOK)},
 		{name: "gzip/html-over-h2", request: parityOverH2(parityWith(api, "", [2]string{"Accept-Encoding", "gzip"})), scenario: htmlScenario(http.StatusOK)},
 		{name: "gzip/plain-text", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/plain"}}, html)},
+		// nginx's type is the value before a ';' only when a charset
+		// follows it
+		{name: "gzip/html-with-another-parameter", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/html; foo=bar"}}, html)},
+		{name: "gzip/html-with-a-space-before-its-charset", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "text/html ; charset=utf-8"}}, html)},
+		{name: "gzip/html-with-an-uppercase-charset", request: parityWith(api, "", [2]string{"Accept-Encoding", "gzip"}), scenario: parityRespondScenario(http.StatusOK, [][2]string{{"Content-Type", "TEXT/HTML;CHARSET=utf-8"}}, html)},
 		{name: "gzip/own-404-page", request: parityWith(parityGet(parityLbName, parityLbName, "/missing"), "", [2]string{"Accept-Encoding", "gzip"})},
 
 		// the ingress rewrite
