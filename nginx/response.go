@@ -391,15 +391,17 @@ var errResponseFrontCut = errors.New("lbalt front: closed")
 // half-close, then rstAvoidanceDelay, 500 ms, before the close
 // (closeWriteAndWait), so a client still sending its body has read the
 // answer by the time the close resets the connection. Unmarked, it does that
-// for a declared body over 256 KiB, or one whose read failed; but when the
-// client itself asked to close, it reads none of the body and closes at
-// once, and a client that is still writing, such as Go's own, can report the
-// reset in place of the answer; and a smaller body it reads whole after the
-// answer, then closes at once over a pipelined request still arriving. Only
-// the server's own writer can be marked. h2 and h3 need none: an h2 answer
-// ends its stream and resets the request's side with NO_ERROR while the
-// server reads on, and the vendored http3 stops the request's side with
-// H3_NO_ERROR, so neither closes a connection over an unread body.
+// only when more than 256 KiB of the body is left, a declared body's rest
+// unread or a chunked one's once 256 KiB of it is read, or when that read
+// fails. When the client itself asked to close, it reads none of a declared
+// body and closes at once, and a client that is still writing, such as Go's
+// own, can report the reset in place of the answer; and a smaller body it
+// reads whole after the answer, then closes at once over a pipelined request
+// still arriving. Only the server's own writer can be marked. h2 and h3 need
+// none: an h2 answer ends its stream and resets the request's side with
+// NO_ERROR while the server reads on, and the vendored http3 stops the
+// request's side with H3_NO_ERROR, so neither closes a connection over an
+// unread body.
 func (self *responseState) finish() {
 	if self.hijacked || self.finished {
 		return
