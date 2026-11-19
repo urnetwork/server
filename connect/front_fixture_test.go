@@ -293,7 +293,8 @@ type testFront struct {
 
 	// the ConnState of every public server ConfigureServer is given, when set
 	connState func(conn net.Conn, connState http.ConnState)
-	// signaled after each release of an admitted QUIC connection
+	// signaled after each release of an admitted QUIC connection, while it
+	// has room
 	released chan struct{}
 	// a real nginx front over the same route table and settings, which
 	// configures the public servers as in production, so they get nginx's
@@ -469,7 +470,10 @@ func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Ad
 				defer self.stateLock.Unlock()
 				self.connectionCounts[key] -= 1
 			}()
-			self.released <- struct{}{}
+			select {
+			case self.released <- struct{}{}:
+			default:
+			}
 		})
 	}, true
 }

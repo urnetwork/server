@@ -207,6 +207,57 @@ func TestFrontQuicConnectionCapRefusesWithRateLimited(t *testing.T) {
 	env.nextHandled()
 }
 
+// An api connection over the address's cap is closed with 0x1001 before
+// any request, as a connect connection is: the cap counts every api
+// connection an address holds, and a connect connection shares it. Once the
+// admitted api connection ends, its slot admits the next.
+func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T) {
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.front.connectionCap = 1
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+
+	client, _ := env.apiClient(address, frontPortQuic, nil)
+	if status, _, err := testFrontGet(t, client, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
+		t.Fatalf("the admitted api request = %d %v", status, err)
+	}
+	env.nextDispatch()
+
+	for _, c := range []struct {
+		serverName string
+		nextProtos []string
+	}{
+		{serverName: testFrontApiName, nextProtos: []string{http3.NextProtoH3}},
+		{serverName: testFrontConnectName, nextProtos: nil},
+	} {
+		conn, err := env.dialQuic(address, frontPortQuic, c.serverName, c.nextProtos)
+		if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeRateLimited {
+			t.Fatalf("%s over the cap closed with %#x, want %#x", c.serverName, code, frontQuicErrorCodeRateLimited)
+		}
+		env.nextDispatch()
+	}
+	select {
+	case <-env.connectQuic.handled:
+		t.Fatal("an over-cap connection reached connect's handler")
+	default:
+	}
+
+	// the admitted connection ends and releases its slot
+	client.Transport.(*http3.Transport).Close()
+	select {
+	case <-env.front.released:
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the admitted api connection's slot was never released")
+	}
+	next, _ := env.apiClient(address, frontPortQuic, nil)
+	if status, _, err := testFrontGet(t, next, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
+		t.Fatalf("the api request after the release = %d %v", status, err)
+	}
+	if acquired := env.front.acquired(); len(acquired) != 4 || !slices.Equal(slices.Compact(acquired), []string{testFrontInterfaceA + " 127.0.0.1"}) {
+		t.Fatalf("connections charged to %v, want each of the four to eth1's address", acquired)
+	}
+}
+
 // A client socket a test controls: quic-go reads nothing from it while
 // delivering is false, which is all that makes a source spoofed to the
 // server; retry closes on the first Retry it is sent.
@@ -625,6 +676,59 @@ func TestFrontH3ApiClosesAnIdleConnectionAtTheKeepaliveTimeout(t *testing.T) {
 	env.nextDispatch()
 	if code := testFrontApplicationCode(t, conn, nil); code != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
 		t.Fatalf("the idle api connection closed with %#x", code)
+	}
+}
+
+// A request stream on an api connection whose HEADERS never arrive is reset
+// with H3_REQUEST_INCOMPLETE at the client header timeout, as the tcp
+// servers bound a request's headers, and its handler never runs. With no
+// stream left, the connection then closes at the keepalive timeout, so the
+// front's open count, which the drain waits for, returns to zero. Without
+// the bound, the stream would hold the connection, and the drain, for as
+// long as its client acks the public config's PINGs.
+func TestFrontH3ApiResetsAStreamWhoseHeadersNeverArrive(t *testing.T) {
+	var handled atomic.Int64
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ClientHeaderTimeout = 200 * time.Millisecond
+		env.settings.Front.Http.KeepaliveTimeout = 200 * time.Millisecond
+		env.front.h3ApiHandler = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handled.Add(1)
+			})
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+	env.waitOpen(1)
+
+	stream, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a HEADERS frame's type and the largest length the header limit allows,
+	// and nothing of its field section
+	frameHead := quicvarint.Append(nil, 0x1)
+	frameHead = quicvarint.Append(frameHead, uint64(env.settings.Front.Http.MaxRequestHeadersTotalBytes))
+	if _, err := stream.Write(frameHead); err != nil {
+		t.Fatal(err)
+	}
+	stream.SetReadDeadline(time.Now().Add(testFrontProgressTimeout))
+	_, err = stream.Read(make([]byte, 1))
+	var streamErr *quic.StreamError
+	if !errors.As(err, &streamErr) || !streamErr.Remote || streamErr.ErrorCode != quic.StreamErrorCode(http3.ErrCodeRequestIncomplete) {
+		t.Fatalf("the stream ended with %v, want a reset with H3_REQUEST_INCOMPLETE", err)
+	}
+	if code := testFrontApplicationCode(t, conn, nil); code != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
+		t.Fatalf("the api connection closed with %#x, want its idle timeout's H3_NO_ERROR", code)
+	}
+	env.waitOpen(0)
+	if handled.Load() != 0 {
+		t.Fatal("a request whose headers never arrived reached the api handler")
 	}
 }
 

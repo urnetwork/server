@@ -12,13 +12,22 @@ package connect
 //     header from any new source (§4.4.1). Whodis decodes it with decode53
 //     under the route table's tlds;
 //   - each accepted connection is dispatched by its server name: a connect
-//     name, once the handshake proves the source's address, under the nginx
-//     front's per-address connection cap (0x1001), to connect's handler with
-//     the socket's carrier; an api name to an h3 server of the front's
-//     H3ApiHandler; any other served name closed with 0x1000. A name the
-//     front doesn't serve, or none, never reaches the dispatch: the nginx
-//     front's QUIC TLS config has no certificate for it, so its handshake
-//     fails, as alt's did.
+//     name to connect's handler with the socket's carrier, an api name to an
+//     h3 server of the front's H3ApiHandler, each once the handshake proves
+//     the source's address and under the nginx front's per-address
+//     connection cap (0x1001); any other served name closed with 0x1000. A
+//     name the front doesn't serve, or none, never reaches the dispatch: the
+//     nginx front's QUIC TLS config has no certificate for it, so its
+//     handshake fails, as alt's did.
+//
+// An api connection is bounded before its first request reaches the nginx
+// front's limits: the cap bounds how many one address holds, and the h3
+// server resets a request stream whose HEADERS don't arrive within the
+// client header timeout, reading them into a buffer that grows with what
+// arrives (third_party/quic-go/URNETWORK.md). Without both, an address
+// could hold any number of connections, each with up to a hundred streams
+// that never send their headers, for as long as its client acks the
+// public config's PINGs, which keep the QUIC idle timeout from ever firing.
 //
 // Each api connection gets an http3.Server of its own. The drain shuts each
 // down gracefully while its transport can still send, which sends one GOAWAY
@@ -279,16 +288,33 @@ func (self *ConnectHandler) releaseQuicWindow(conn *quic.Conn) {
 
 // Serves one api connection as h3, once its handshake completes: a request
 // sent in 0-RTT could otherwise arrive before the source's address is proved.
-// The public config refuses early data anyway (D9). The nginx front's handler
-// applies the limits per request and admits only api authorities (D3).
+// The public config refuses early data anyway (D9). The connection is charged
+// to its address's connection cap, as a connect connection is, once the
+// handshake proves the address, so a spoofed source can't take a victim's
+// slots. The nginx front's handler applies the limits per request and admits
+// only api authorities (D3).
 func (self *frontQuicRun) serveApi(conn *quic.Conn) {
-	// the http3 server leaves a connection it served open, so the front closes
-	// what it accepted
-	defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
 		self.countConnection(frontQuicResultHandshakeFailed)
+		conn.CloseWithError(0, "")
 		return
 	}
+	addrPort, err := server.ParseClientAddress(conn.RemoteAddr().String())
+	if err != nil {
+		self.countConnection(frontQuicResultRateLimited)
+		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
+		return
+	}
+	release, ok := self.frontServer.front.AcquireQuicConnection(self.socket.key.interfaceName, addrPort.Addr().Unmap())
+	if !ok {
+		self.countConnection(frontQuicResultRateLimited)
+		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")
+		return
+	}
+	defer release()
+	// the http3 server leaves a connection it served open, so the front closes
+	// what it accepted, before its slot is let go
+	defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 	apiServer := self.frontServer.newApiServer(self.socket.apiHandler)
 	if refusal := self.addApiServer(apiServer); refusal != "" {
 		self.countConnection(refusal)
@@ -304,13 +330,16 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 }
 
 // The h3 server of one api connection, with nginx's client limits: the
-// keepalive timeout as the h3 idle timeout and nginx's header buffers.
+// keepalive timeout as the h3 idle timeout, nginx's header buffers, and the
+// client header timeout as the bound on each request stream's HEADERS, as
+// the tcp servers' ReadHeaderTimeout bounds a request's headers there.
 func (self *frontServer) newApiServer(handler http.Handler) *http3.Server {
 	httpSettings := self.settings.Front.Http
 	return &http3.Server{
-		Handler:        handler,
-		IdleTimeout:    httpSettings.KeepaliveTimeout,
-		MaxHeaderBytes: httpSettings.MaxRequestHeadersTotalBytes,
+		Handler:           handler,
+		IdleTimeout:       httpSettings.KeepaliveTimeout,
+		MaxHeaderBytes:    httpSettings.MaxRequestHeadersTotalBytes,
+		ReadHeaderTimeout: httpSettings.ClientHeaderTimeout,
 	}
 }
 
