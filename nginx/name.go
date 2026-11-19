@@ -162,10 +162,14 @@ type nameMatcher struct {
 }
 
 // Indexes every served name of a parsed table, the set RouteTable.ServedNames
-// lists: the lb names (NameClassLb), every service's names (NameClassConnect
-// for front.connect_service, NameClassApi for front.api_service,
-// NameClassForwarded for the rest) and every redirect alias
-// (NameClassRedirect, with its target). A parsed table serves each name once.
+// lists: the lb names (NameClassLb), every exposed service's names
+// (NameClassConnect for front.connect_service, NameClassApi for
+// front.api_service, NameClassForwarded for the rest) and its redirect
+// aliases (NameClassRedirect, with its target). A service that isn't exposed
+// has no server in nginx, so its names and aliases are left out: they match
+// as unknown names, the default server's on TCP and refused on QUIC, and a
+// shorter wildcard of an exposed service still covers them. A parsed table
+// serves each name once.
 func newNameMatcher(routeTable *RouteTable) *nameMatcher {
 	matcher := &nameMatcher{
 		exactNameMatches:    map[string]nameMatch{},
@@ -187,6 +191,9 @@ func newNameMatcher(routeTable *RouteTable) *nameMatcher {
 		})
 	}
 	for _, service := range routeTable.Services {
+		if !service.Exposed {
+			continue
+		}
 		class := NameClassForwarded
 		switch service.Name {
 		case routeTable.Front.ConnectService:

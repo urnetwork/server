@@ -352,6 +352,20 @@ func TestLoadCertificateStoreReadsTheFlatHostVault(t *testing.T) {
 	}
 }
 
+// A service that isn't exposed needs no certificate (LBALT-IMPL.md §7): the
+// fixture vault holds none for its names, its redirect alias or its
+// wildcard, and the store loads without them.
+func TestLoadCertificateStoreNeedsNoCertificateForAnUnexposedService(t *testing.T) {
+	vault := newTestTlsVault(t)
+	vault.routeTable = newTestUnexposedRouteTable(t)
+	certificateStore := vault.load(t)
+	for _, name := range []string{"mcp.hidden.example", "old-mcp.hidden.example", "*.g1.connect.service.example"} {
+		if _, ok := certificateStore.nameCertificates[name]; ok {
+			t.Errorf("the store holds a certificate for %s, of the unexposed mcp", name)
+		}
+	}
+}
+
 // The earliest NotAfter over every leaf, whichever name it serves.
 func TestCertificateStoreEarliestExpiry(t *testing.T) {
 	vault := newTestTlsVault(t)

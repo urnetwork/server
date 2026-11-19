@@ -213,6 +213,28 @@ func TestNameMatcherServesTheTablesServedNames(t *testing.T) {
 	}
 }
 
+// A service that isn't exposed has no server in nginx, so the matcher knows
+// none of its names or redirect aliases, and a name under its wildcard falls
+// to the exposed connect service's shorter wildcard, as nginx's server_name
+// lookup finds it (LBALT-IMPL.md §7).
+func TestNameMatcherLeavesOutAnUnexposedService(t *testing.T) {
+	matcher := newNameMatcher(newTestUnexposedRouteTable(t))
+	for _, name := range []string{"mcp.hidden.example", "old-mcp.hidden.example"} {
+		if match, ok := matcher.match(name); ok {
+			t.Errorf("match(%q) = %+v, want no match", name, match)
+		}
+	}
+	match, ok := matcher.match("x.g1.connect.service.example")
+	if !ok || match.name != "*.connect.service.example" || match.class != NameClassConnect {
+		t.Errorf("match(\"x.g1.connect.service.example\") = %+v, %t, want connect's *.connect.service.example", match, ok)
+	}
+	for _, servedMatch := range matcher.servedMatches() {
+		if servedMatch.service != nil && servedMatch.service.Name == "mcp" {
+			t.Errorf("servedMatches() has %q of the unexposed mcp", servedMatch.name)
+		}
+	}
+}
+
 // The walk yields the part after each dot, longest first, and only the parts
 // within the bound, for every name and bound here. A 64 KiB name yields the
 // four parts that fit, not one for each of its 32,771 dots.

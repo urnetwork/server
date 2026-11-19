@@ -795,11 +795,13 @@ func TestRouteTableServedNamesDeduplicates(t *testing.T) {
 		Services: []*RouteService{
 			{
 				Name:            "one",
+				Exposed:         true,
 				Names:           []string{"d.example", "a.example", "c.example"},
 				RedirectAliases: []*RouteRedirectAlias{{Name: "e.example", Target: "c.example"}},
 			},
 			{
 				Name:            "two",
+				Exposed:         true,
 				Names:           []string{"c.example", "e.example"},
 				RedirectAliases: []*RouteRedirectAlias{{Name: "d.example", Target: "c.example"}},
 			},
@@ -807,6 +809,49 @@ func TestRouteTableServedNamesDeduplicates(t *testing.T) {
 	}
 	want := []string{"b.example", "a.example", "c.example", "d.example", "e.example"}
 	if servedNames := routeTable.ServedNames(); !slices.Equal(servedNames, want) {
+		t.Fatalf("ServedNames() = %v, want %v", servedNames, want)
+	}
+}
+
+// The fixture's table with mcp unexposed. Its names move under
+// hidden.example, which no fixture certificate covers, beside a wildcard
+// longer than connect's *.connect.service.example, and it gets a redirect
+// alias there.
+func newTestUnexposedRouteTable(t *testing.T) *RouteTable {
+	t.Helper()
+	routeTable, err := ParseRouteTable(routeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcp, ok := routeTable.Service("mcp")
+	if !ok {
+		t.Fatal("no mcp service in the fixture")
+	}
+	mcp.Exposed = false
+	mcp.Names = []string{"*.g1.connect.service.example", "mcp.hidden.example"}
+	mcp.RedirectAliases = []*RouteRedirectAlias{
+		{Name: "old-mcp.hidden.example", Target: "mcp.hidden.example"},
+	}
+	return routeTable
+}
+
+// A service that isn't exposed serves no name: nginx emits no server block
+// for it, so neither its names nor its redirect aliases are listed, and none
+// of them needs a certificate (LBALT-IMPL.md §7).
+func TestRouteTableServedNamesLeavesOutAnUnexposedService(t *testing.T) {
+	want := []string{
+		"test-lb.service.example",
+		"test-lb.other.example",
+		"*.connect.service.example",
+		"api.service.example",
+		"connect.service.example",
+		"old-api.service.example",
+		"test-api.other.example",
+		"test-api.service.example",
+		"test-connect.other.example",
+		"test-connect.service.example",
+	}
+	if servedNames := newTestUnexposedRouteTable(t).ServedNames(); !slices.Equal(servedNames, want) {
 		t.Fatalf("ServedNames() = %v, want %v", servedNames, want)
 	}
 }

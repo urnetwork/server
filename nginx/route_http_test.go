@@ -258,6 +258,37 @@ func TestRouteHttpUnknownAuthorityGetsTheDefaultServer(t *testing.T) {
 	}
 }
 
+// A service that isn't exposed has no server (LBALT-IMPL.md §7): through the
+// production matcher, its names and its redirect alias reach the default
+// server, the first lb name's, on TCP 443 and the default deny on TCP 80,
+// never the service or its 301, and classify as unknown names.
+func TestRouteHttpUnexposedServiceNamesGetTheDefaultServer(t *testing.T) {
+	routeTable := newTestUnexposedRouteTable(t)
+	testFront := newTestFrontWithNames(t, routeTable, testFrontSettings(), &matcherFrontNames{
+		matcher: newNameMatcher(routeTable),
+	})
+	httpsHandler := testFront.front.HttpsHandler("eth1")
+	httpHandler := testFront.front.HttpHandler("eth1")
+	for _, host := range []string{"mcp.hidden.example", "old-mcp.hidden.example"} {
+		if nameClass := testFront.front.ClassifyName(host); nameClass != NameClassUnknown {
+			t.Errorf("ClassifyName(%q) = %s, want unknown", host, nameClass)
+		}
+		response := serveTestRequest(httpsHandler, newTestRequest("GET", host, "/hidden-example/status", true))
+		if response.Code != http.StatusOK || response.Body.String() != testLbStatusBody {
+			t.Errorf("%s, lb status = %d %q, want the default server's status json", host, response.Code, response.Body.String())
+		}
+		if response := serveTestRequest(httpsHandler, newTestRequest("GET", host, "/v1", true)); response.Code != http.StatusNotFound {
+			t.Errorf("%s, a service path = %d, want the default server's 404", host, response.Code)
+		}
+		if response := serveTestRequest(httpHandler, newTestRequest("GET", host, "/v1", false)); response.Code != http.StatusForbidden {
+			t.Errorf("%s on port 80 = %d, want the default server's deny", host, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["mcp"].recordedForwards(); len(forwards) != 0 {
+		t.Errorf("the unexposed mcp got %d forwards", len(forwards))
+	}
+}
+
 // On a standard-status service's names, p/status is denied with a 403 on
 // the normalized uri, as nginx's exact location matches it: //status and
 // /%73tatus are denied, /status/ and /STATUS are proxied. The 403 has no
