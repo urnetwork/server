@@ -972,3 +972,70 @@ func TestFrontDrainSendsOneH3GoawayWhenItsSocketIsLost(t *testing.T) {
 		t.Fatalf("%d GOAWAYs for %d api connections a socket loss destroyed during the drain", goaways, connectionCount)
 	}
 }
+
+// A forwarded websocket that never closes holds the drain only to the drain
+// timeout less the stop reserve. warpctl's stop grace equals the drain
+// timeout, so a wait to the drain timeout would leave the forced close and
+// the cancel to the SIGKILL; here the drain timeout is an hour, as the grace
+// is in production, and the reserve leaves a moment of it, so the cancel
+// comes long before the grace ends.
+func TestFrontDrainEndsInsideTheStopGraceWithAWebsocketOpen(t *testing.T) {
+	const drainWait = 200 * time.Millisecond
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.front.httpsHandler = testFrontEchoHandler
+		env.settings.Front.Http.DrainTimeout = time.Hour
+		env.settings.DrainStopReserve = time.Hour - drainWait
+	})
+	hijacked := env.dialHijacked(testFrontConnectName)
+	hijacked.echo("before")
+	warpStatus := &router.WarpStatusState{}
+	warpStatus.SetReady()
+	canceled := make(chan struct{})
+	go drainConnect(warpStatus, env.frontServer, func() {}, func() {
+		env.front.record("cancel")
+		close(canceled)
+	})
+	testFrontWait(t, canceled, "the cancel inside the stop grace")
+	want := []string{"front begin drain", "front close", "cancel"}
+	if events := env.front.recordedEvents(); !slices.Equal(events, want) {
+		t.Fatalf("drain events %v, want %v", events, want)
+	}
+	testFrontReadEnd(t, hijacked.reader, "the websocket")
+}
+
+// The drain's deadline is the drain timeout less the stop reserve: by
+// default 58 m of nginx's 60 m, leaving the forced close its bound and the
+// rest of the stop its margin. A drain timeout no longer than the reserve is
+// refused; no drain timeout is no deadline, and no reserve keeps the drain
+// timeout.
+func TestFrontDrainDeadlineKeepsTheStopReserve(t *testing.T) {
+	settings := DefaultFrontServerSettings()
+	if deadline := settings.drainDeadlineTimeout(); deadline != 58*time.Minute {
+		t.Fatalf("default drain deadline %s, want 58m", deadline)
+	}
+	// the forced close and the private listener's 30 s shutdown fit in the
+	// reserve
+	if settings.DrainStopReserve <= settings.Front.Http.ForcedCloseTimeout+30*time.Second {
+		t.Fatalf("stop reserve %s leaves no margin after the forced close's %s", settings.DrainStopReserve, settings.Front.Http.ForcedCloseTimeout)
+	}
+	if err := settings.validate(); err != nil {
+		t.Fatal(err)
+	}
+
+	settings.Front.Http.DrainTimeout = settings.DrainStopReserve
+	if err := settings.validate(); err == nil {
+		t.Fatal("a drain timeout no longer than the stop reserve was accepted")
+	}
+	settings.Front.Http.DrainTimeout = 0
+	if err := settings.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if deadline := settings.drainDeadlineTimeout(); deadline != 0 {
+		t.Fatalf("drain deadline %s without a drain timeout", deadline)
+	}
+	settings.Front.Http.DrainTimeout = time.Hour
+	settings.DrainStopReserve = 0
+	if deadline := settings.drainDeadlineTimeout(); deadline != time.Hour {
+		t.Fatalf("drain deadline %s without a reserve, want the drain timeout", deadline)
+	}
+}

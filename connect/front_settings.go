@@ -21,8 +21,8 @@ import (
 type FrontServerSettings struct {
 	// the nginx front's settings, passed to nginx.NewFront. Http also bounds
 	// the public servers here: ClientHeaderTimeout, KeepaliveTimeout and the
-	// header limits on every HTTP server, DrainTimeout on the drain, and
-	// ForcedCloseTimeout on each step of the forced close that ends it.
+	// header limits on every HTTP server, DrainTimeout less DrainStopReserve
+	// on the drain, and ForcedCloseTimeout on the forced close that ends it.
 	Front *nginx.FrontSettings
 	// SO_REUSEPORT sockets bound for each (interface address, protocol,
 	// port), for receive parallelism within the block: N = 4 (D10, confirmed
@@ -46,6 +46,16 @@ type FrontServerSettings struct {
 	// repeatedly, and its re-creations back off. Non-positive never resets the
 	// backoff, so only a socket's first loss is re-created at once.
 	SocketHealthyRunTimeout time.Duration
+	// the end of the stop grace kept for what follows the drain's wait: the
+	// drain's deadline is Front.Http.DrainTimeout less this. warpctl stops a
+	// drained block with `docker stop -t 3600`, the same 60 m as
+	// DrainTimeout, so a forwarded websocket held to DrainTimeout would leave
+	// the bounded forced close (Http.ForcedCloseTimeout, 30 s), the cancel,
+	// the private listener's shutdown (30 s), the exchange's close and the
+	// final stats flush to the SIGKILL. 2 m covers them with a margin.
+	// Non-positive keeps the deadline at DrainTimeout. A positive
+	// DrainTimeout no longer than this is refused at start.
+	DrainStopReserve time.Duration
 	// binds one public udp socket, when set, in place of
 	// listenFrontPacket's SO_REUSEPORT bind to the exact address. Tests use
 	// it to observe, hold and fail binds, as the extender's
@@ -77,6 +87,7 @@ func DefaultFrontServerSettings() *FrontServerSettings {
 		SocketRestartInitialDelay: 100 * time.Millisecond,
 		SocketRestartMaxDelay:     5 * time.Second,
 		SocketHealthyRunTimeout:   1 * time.Minute,
+		DrainStopReserve:          2 * time.Minute,
 	}
 }
 
@@ -91,7 +102,20 @@ func (self *FrontServerSettings) validate() error {
 	if self.SocketRestartInitialDelay <= 0 {
 		return errors.New("front settings need a positive socket restart delay")
 	}
+	if drainTimeout := self.Front.Http.DrainTimeout; 0 < drainTimeout && drainTimeout <= self.DrainStopReserve {
+		return errors.New("front settings leave the drain no time before the stop reserve")
+	}
 	return nil
+}
+
+// How long the drain lets accepted requests and forwarded websockets run:
+// the drain timeout less the stop reserve. Non-positive means no deadline.
+func (self *FrontServerSettings) drainDeadlineTimeout() time.Duration {
+	drainTimeout := self.Front.Http.DrainTimeout
+	if drainTimeout <= 0 {
+		return 0
+	}
+	return drainTimeout - max(self.DrainStopReserve, 0)
 }
 
 // The wait after wait, under the settings' backoff: the initial delay after

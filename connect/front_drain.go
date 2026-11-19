@@ -15,10 +15,12 @@ package connect
 //     and new streams refused. Requests in flight finish;
 //  3. alongside, the exchange drains its residents;
 //  4. hijacked H1 connections, connect's websockets and H1+ tunnels and the
-//     forwarded websockets, are tracked until they close or the drain timeout
-//     passes, as nginx's worker_shutdown_timeout;
-//  5. the forced close, each step bounded by ForcedCloseTimeout, cuts what is
-//     left, the h3 servers always before their transports;
+//     forwarded websockets, are tracked until they close or the drain's
+//     deadline passes: the drain timeout, as nginx's worker_shutdown_timeout,
+//     less DrainStopReserve, since warpctl's stop grace is the same 60 m and
+//     the steps below must finish inside it;
+//  5. the forced close, bounded by ForcedCloseTimeout, cuts what is left, the
+//     h3 servers always before their transports;
 //  6. the serving context is canceled last.
 //
 // A GOAWAY needs a transport that can send. alt once started a graceful
@@ -80,7 +82,7 @@ func (self *frontServer) beginDrain() {
 			return nil, nil, false
 		}
 		self.draining = true
-		drainTimeout := self.settings.Front.Http.DrainTimeout
+		drainTimeout := self.settings.drainDeadlineTimeout()
 		drainParentCtx := context.WithoutCancel(self.ctx)
 		if 0 < drainTimeout {
 			self.drainCtx, self.drainCancel = context.WithTimeout(drainParentCtx, drainTimeout)
