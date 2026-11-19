@@ -520,15 +520,30 @@ func routerRunOptions(ctx context.Context, engine sidecar.StreamEngine, settings
 	if proxySettings == nil {
 		proxySettings = DefaultHostSettings().ProxyHeader
 	}
+	listeners := []*sidecarhost.RunListener{{
+		Port: ports.Smtp,
+		Wrap: NewProxyListenerWrap(ctx, proxySettings, clock),
+	}}
+	if ports.Lan != 0 {
+		// D-SMTP-13's LAN port: smtpedge's hosts alone, then the same PROXY header, then a normal sender's session
+		proxyWrap := NewProxyListenerWrap(ctx, proxySettings, clock)
+		listeners = append(listeners, &sidecarhost.RunListener{
+			Port: ports.Lan,
+			Wrap: func(listener net.Listener) (net.Listener, error) {
+				lan, err := mxedgeservice.NewMxLanListener(listener, settings.MxEdge)
+				if err != nil {
+					return nil, err
+				}
+				return proxyWrap(lan)
+			},
+		})
+	}
 	return &sidecarhost.RunOptions{
 		Service:    hostRouterService,
 		StatusPort: ports.Status,
 		Engine:     engine,
 		Stream:     engine,
-		Listeners: []*sidecarhost.RunListener{{
-			Port: ports.Smtp,
-			Wrap: NewProxyListenerWrap(ctx, proxySettings, clock),
-		}},
+		Listeners:  listeners,
 		Postgres:   true,
 		Groups:     deps.StoreGroups,
 		WarpStatus: deps.WarpStatus,

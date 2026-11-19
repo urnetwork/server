@@ -2,7 +2,8 @@
 // on TCP 25, each its own warp service on its own lb interfaces (W4, plan-OPS-small-readings #6): --role platform
 // for mxedge-platform, rpt.bringyour.com's listener, whose image server/cli/mxedge-platform builds from this
 // main, and --role router for mxedge, whose image this directory builds. Each is a block run by
-// mxedgehost.RunHost through sidecarhost.Run, with GET /status on port 80, TCP 25 behind the lb's PROXY header,
+// mxedgehost.RunHost through sidecarhost.Run, with GET /status on port 80, TCP 25 behind the lb's PROXY header (and
+// for the router mxedge.yml's lan_port, smtpedge's LAN way to an MX on the router's own interfaces, D-SMTP-13),
 // {vault: no, config: yes, site: no} and user 65532. It reads config/<env>/mxedge.yml at start, the platform
 // role's report intake reads smtpedge.yml beside it (report_intake.go, SMTP-M5-06), and the host rereads
 // sidecar.yml's mxedge gate every 60 s.
@@ -116,7 +117,13 @@ func main() {
 		}
 	}
 	setProcessEnv(ctx, *role, routerDeps)
-	if err := mxedgehost.RunHost(ctx, *role, settings, deps, routerDeps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
+	ports := &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}
+	if *role == mxedgehost.HostRoleRouter {
+		// D-SMTP-13's LAN listener, mxedge.yml's lan_port, which smtpedge reaches for an MX on the router's own
+		// interfaces (MAIL-M9-05)
+		ports.Lan = int(mxEdgeSettings.LanPort)
+	}
+	if err := mxedgehost.RunHost(ctx, *role, settings, deps, routerDeps, ports); err != nil {
 		panic(err)
 	}
 }
