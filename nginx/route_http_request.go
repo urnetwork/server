@@ -54,11 +54,13 @@ package nginx
 // values into one (net/http's fixLength, the h2 server's
 // newWriterAndRequest, http3's parseHeaders), where nginx answers a second
 // Content-Length 400 on h1 and h2 alike (ngx_http_process_unique_header_line),
-// and the front forwards the request framed by that one length. Go's h1
-// server also drops the Transfer-Encoding of an HTTP/1.0 request and unfolds
-// an obs-folded line, each of which nginx answers 400; it answers a repeated
-// Transfer-Encoding 501, which nginx answers 400; and an Expect other than
-// 100-continue 417, which nginx ignores.
+// and the front forwards the request framed by that one length. Different
+// values they refuse: 400 on h1, as nginx answers, and a stream reset on h2
+// (PROTOCOL_ERROR) and h3 (H3_MESSAGE_ERROR), where nginx's h2 answers 400.
+// Go's h1 server also drops the Transfer-Encoding of an HTTP/1.0 request and
+// unfolds an obs-folded line, each of which nginx answers 400; it answers a
+// repeated Transfer-Encoding 501, which nginx answers 400; and an Expect
+// other than 100-continue 417, which nginx ignores.
 
 import (
 	"net/http"
