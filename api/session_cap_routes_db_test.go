@@ -11,7 +11,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -171,19 +170,20 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 			server.Raise(err)
 			return signed, claims
 		}
-		// each code from its own address block: a code's creation counts as a
-		// sign-in attempt of its address's /29 (server.ClientIpHashForAddr),
-		// which only a verify from it clears
-		codes := 0
+		// a verify code as the send stores one; the send's own limits (codes
+		// per address and per account) are not what this test is about
+		newCode := func() string {
+			code := strings.ToLower(strings.ReplaceAll(server.NewId().String(), "-", "")[:8])
+			server.Db(ctx, func(conn server.PgConn) {
+				_, err := conn.Exec(ctx, `INSERT INTO user_auth_verify (user_auth_verify_id, user_id, verify_code) VALUES ($1, $2, $3)`, server.NewId(), fixture.userId, code)
+				server.Raise(err)
+			})
+			return code
+		}
 		verify := func(name string, authorization string) *session.ByJwt {
 			t.Helper()
-			codes += 1
-			creator := session.Testing_CreateClientSession(ctx, nil)
-			creator.ClientAddress = fmt.Sprintf("198.51.100.%d:443", 8*codes+1)
-			code, err := model.AuthVerifyCreateCode(model.AuthVerifyCreateCodeArgs{UserAuth: userAuth}, creator)
-			server.Raise(err)
 			var verified model.AuthVerifyResult
-			fixture.call(t, http.MethodPost, "/auth/verify", authorization, map[string]any{"user_auth": userAuth, "verify_code": *code.VerifyCode}, http.StatusOK, &verified)
+			fixture.call(t, http.MethodPost, "/auth/verify", authorization, map[string]any{"user_auth": userAuth, "verify_code": newCode()}, http.StatusOK, &verified)
 			if verified.Error != nil || verified.Network == nil {
 				t.Fatalf("%s: verify %+v", name, verified)
 			}
