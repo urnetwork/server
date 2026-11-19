@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -553,6 +554,68 @@ func TestLbAltStatusDeadlineDuringTheExchangeIsATimeout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the expired attempt did not return")
+	}
+}
+
+// A front that accepts the connection on 443 and never answers the
+// ClientHello holds no socket past its attempt: once the ClientHello has
+// begun and the attempt's deadline passes, the attempt returns a timeout and
+// its client closes the stalled handshake's socket. net/http runs the
+// handshake under a dial context detached from the request's, so only the
+// transport's deferred CloseIdleConnections ends it. The ClientHello's
+// record header is the barrier, and the deadline is an explicit state
+// transition.
+func TestLbAltStatusStalledTlsHandshakeIsClosedWithItsAttempt(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	helloBegun := make(chan net.Conn, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// a TLS handshake record's header: the ClientHello has begun
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(connection, header); err != nil || header[0] != 22 {
+			connection.Close()
+			return
+		}
+		helloBegun <- connection
+	}()
+	request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteBlock, "g1")
+	dialer := &lbAltStatusTestDialer{t: t, request: request, target: listener.Addr().String()}
+	attemptCtx := &publicUdpTestDeadlineContext{Context: context.Background(), expired: make(chan struct{})}
+	type attempt struct {
+		observed LbAltStatusObservation
+		err      error
+	}
+	done := make(chan attempt, 1)
+	go func() {
+		observed, err := observeLbAltStatus(attemptCtx, request, DefaultLbAltStatusProbeSettings(), dialer.dial, nil)
+		done <- attempt{observed: observed, err: err}
+	}()
+	var serverSide net.Conn
+	select {
+	case serverSide = <-helloBegun:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ClientHello began")
+	}
+	t.Cleanup(func() { serverSide.Close() })
+	close(attemptCtx.expired)
+	select {
+	case result := <-done:
+		if !errors.Is(result.err, context.DeadlineExceeded) || result.observed.Failure != LbAltStatusFailureTimeout {
+			t.Fatalf("a stalled handshake gave %+v err=%v", result.observed, result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the expired attempt did not return")
+	}
+	serverSide.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, serverSide); err != nil {
+		t.Fatalf("the stalled handshake's socket stayed open after its attempt: %v", err)
 	}
 }
 

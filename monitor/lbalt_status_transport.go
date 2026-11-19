@@ -131,7 +131,9 @@ func observeLbAltStatus(
 		// and cancellation (transport.go getConn), so that a later request
 		// could take the connection. None follows here, so the dial runs under
 		// the request's own context: the attempt deadline bounds the connect
-		// itself, and the connect ends with the attempt.
+		// itself, and the connect ends with the attempt. The TLS handshake on
+		// 443 still runs under net/http's detached context, which only the
+		// deferred CloseIdleConnections below cancels.
 		DialContext: func(_ context.Context, _ string, address string) (net.Conn, error) {
 			admitted := func() bool {
 				stateLock.Lock()
@@ -157,6 +159,11 @@ func observeLbAltStatus(
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: int64(settings.ResponseHeaderByteLimit),
 	}
+	// With keepalives off no connection is ever idle, but the call also
+	// cancels net/http's detached dial context of every dial still in
+	// progress (transport.go getConn), and a TLS handshake the attempt
+	// abandoned runs under that context: this is what closes its socket when
+	// a front accepts the connection and never answers the ClientHello.
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,
