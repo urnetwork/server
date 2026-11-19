@@ -16,8 +16,10 @@ package nginx
 //   - a declared length over BodySettings.MaxBodyBytes is a 413 before
 //     reading; a body of unknown length that crosses it is a 413 at that
 //     point;
-//   - a read that waits longer than client_body_timeout is a 408, and a
-//     client that ends its body early a 400;
+//   - a read that waits longer than client_body_timeout is nginx's
+//     NGX_HTTP_REQUEST_TIME_OUT, which ends the request with no response
+//     (upstreamGroup.refuse), and a client that ends its body early is a
+//     400;
 //   - a stored body replays byte for byte, memory then file, once per
 //     attempt.
 //
@@ -56,7 +58,8 @@ const (
 	bodyRefusalSpillError = "spill_error"
 	// local 503: the store is closed
 	bodyRefusalClosed = "closed"
-	// 408: a read waited past client_body_timeout
+	// a read waited past client_body_timeout, nginx's 408, which it answers
+	// with no response, as the front does but on h3
 	bodyRefusalTimeout = "timeout"
 	// 400: the client ended its body early or sent a malformed one
 	bodyRefusalIncomplete = "incomplete"

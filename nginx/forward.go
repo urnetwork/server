@@ -77,7 +77,9 @@ type forwardOptions struct {
 	// `?args`. Empty sends the request's escaped path and raw query.
 	upstreamPath string
 	// the body streams through unbuffered, with X-UR-Request-Buffering: off,
-	// and is no longer eligible for a retry once forwarding begins
+	// and is no longer eligible for a retry once forwarding begins, unless
+	// its first read returned it whole, as nginx's first pass would have,
+	// and it was kept (body_stream.go)
 	streamed bool
 	// the service relays websocket upgrades, and every request to it carries
 	// Connection: upgrade and the stream timeouts, as nginx's websocket
@@ -99,19 +101,23 @@ type forwardOptions struct {
 // A service's upstream side as routing sees it. Safe for concurrent use.
 type serviceForwarder interface {
 	// forwards one request and writes the upstream's response, or the front's
-	// own error response (400, 408, 413, 502, 503, 504), to w. It returns
-	// when the response is complete, or for a websocket when the tunnel has
-	// closed, so a caller holding a concurrency slot for the request (D8)
-	// holds it for the tunnel's life; the tunnel's client side is the
-	// connection w hijacks, which the caller tracks from the hijack. A
+	// own error response (400, 413, 502, 503, 504, and 408 on h3), to w. It
+	// returns when the response is complete, or for a websocket when the
+	// tunnel has closed, so a caller holding a concurrency slot for the
+	// request (D8) holds it for the tunnel's life; the tunnel's client side is
+	// the connection w hijacks, which the caller tracks from the hijack. A
 	// response the upstream cuts short after its head reached the client is
 	// aborted by panicking with http.ErrAbortHandler, as
 	// httputil.ReverseProxy does, so the client sees a truncated response,
-	// never a complete one; callers' deferred cleanup runs and they must not
+	// never a complete one; so is a request whose body stalls past
+	// client_body_timeout on h1 or h2, which gets no response, as nginx gives
+	// none, and one whose streamed body fails on the client's side while the
+	// response is relayed. Callers' deferred cleanup runs and they must not
 	// recover it.
 	serveHttp(w http.ResponseWriter, r *http.Request, options forwardOptions)
 	// releases the pools and cuts the tunnels; requests in flight end with
-	// their connections
+	// their connections. A dial in flight ends with it, and it returns once
+	// every such dial has, so no upstream connection outlives it.
 	close()
 }
 

@@ -13,7 +13,11 @@ package nginx
 //   - never after a 500, 502 or 504, which pass through, a malformed or
 //     oversized response head, or a response cut short;
 //   - never for a per-block lb route, which reports its block's own result;
-//   - never for a streamed body once its request began going upstream;
+//   - never for a streamed body once its request began going upstream,
+//     unless its first read returned it whole and it was kept, as nginx
+//     buffers a body its first pass reads whole (body_stream.go); a declared
+//     empty body on a streamed route has nothing to stream, so it is retried
+//     too;
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
 //     isn't an attempt, as nginx's tries++ for a cached connection isn't.
@@ -191,19 +195,48 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 	if forwardRequestHasBody(r) {
 		maxBodyBytes := self.settings.Body.MaxBodyBytes
 		if 0 < maxBodyBytes && maxBodyBytes < r.ContentLength {
-			self.refuse(w, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
+			self.refuse(w, r, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 			return
 		}
-		if options.streamed {
+		switch {
+		case options.streamed && r.ContentLength != 0:
+			// a body its first read returns whole is kept for a retry, as
+			// nginx buffers a body its first pass reads whole: an h1 body of
+			// declared length, not one that waits for 100 Continue, which
+			// nginx's first pass reads before the client sends it
+			// (body_stream.go)
+			keepBodyStore := func() *bodyStore {
+				if r.ProtoMajor != 1 || r.ContentLength <= 0 {
+					return nil
+				}
+				for _, expect := range r.Header.Values("Expect") {
+					for _, token := range strings.Split(expect, ",") {
+						if strings.EqualFold(strings.TrimSpace(token), "100-continue") {
+							return nil
+						}
+					}
+				}
+				return self.bodyStore
+			}()
 			// the body keeps arriving while the response flows
 			responseController.EnableFullDuplex()
-			request.streamedBody = newForwardStreamedBody(ctx, r.Body, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
+			streamedBody := newForwardStreamedBody(ctx, r.Body, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline, keepBodyStore)
+			defer streamedBody.release()
+			request.streamedBody = streamedBody
 			if 0 <= r.ContentLength {
 				request.bodyFraming = forwardBodyFraming{known: true, length: r.ContentLength}
 			} else {
 				request.bodyFraming = forwardBodyFraming{chunked: true}
 			}
-		} else {
+		case options.streamed:
+			// a declared empty body is whole before any read, so it goes with
+			// Content-Length: 0 and is retried, as nginx buffers it on h1
+			// (rb->rest == 0) and on h2 when the HEADERS frame ends the
+			// stream (stream->in_closed), as clients send an empty POST. Its
+			// end isn't waited for: on h2, nginx streams one whose stream
+			// ends later, so the front retries what nginx wouldn't there.
+			request.bodyFraming = forwardBodyFraming{known: true, length: 0}
+		default:
 			storedBody, refusal := self.bodyStore.read(ctx, r.Body, bodyReadOptions{
 				declaredLength:  r.ContentLength,
 				prefixBytes:     options.clientBodyBufferSize,
@@ -211,7 +244,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				setReadDeadline: setClientReadDeadline,
 			})
 			if refusal != nil {
-				self.refuse(w, responseController, refusal)
+				self.refuse(w, r, responseController, refusal)
 				return
 			}
 			defer storedBody.release()
@@ -220,7 +253,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
-	self.forward(ctx, w, responseController, request, &options)
+	self.forward(w, r, responseController, request, &options)
 }
 
 // Fills the options routing left zero with the defaults it would have set.
@@ -273,29 +306,48 @@ type forwardAttempts struct {
 
 // Whether the request may move to another block after a failed attempt:
 // attempts are left, the route names no block, the client is still there,
-// and a streamed body never began going upstream.
+// and a streamed body never began going upstream, or was kept whole by its
+// first read.
 func (self *forwardAttempts) retryAllowed() bool {
 	if self.options.blockName != "" || self.attemptLimit <= self.attemptCount || self.ctx.Err() != nil {
 		return false
 	}
-	return self.request.streamedBody == nil || !self.request.streamedBody.began()
+	streamedBody := self.request.streamedBody
+	return streamedBody == nil || !streamedBody.began() || streamedBody.kept() != nil
 }
 
 // Whether the request may move to another block after exchange's 503. The
 // exchange is live, and its write may be about to begin a streamed body, so
 // the body is first held back from it under its gate's lock: a body held
 // back is whole for the retry, and one that began goes on, its 503 the
-// final answer.
+// final answer, unless its first read kept it whole. A first read still
+// under way when the 503 comes, which nginx's first pass would have found
+// empty, keeps nothing in time.
 func (self *forwardAttempts) retry503Allowed(exchange *upstreamExchange) bool {
 	if !self.retryAllowed() {
 		return false
 	}
-	return self.request.streamedBody == nil || !exchange.holdBody()
+	streamedBody := self.request.streamedBody
+	return streamedBody == nil || !exchange.holdBody() || streamedBody.kept() != nil
+}
+
+// Moves the request on to its next attempt, once a retry is allowed: a
+// streamed body that began, which the retry rules allow only once it is kept
+// whole, goes as a buffered body from here on, its head unchanged, and one
+// held back streams again from its start.
+func (self *forwardAttempts) next() {
+	streamedBody := self.request.streamedBody
+	if streamedBody == nil || !streamedBody.began() {
+		return
+	}
+	self.request.storedBody = streamedBody.kept()
+	self.request.streamedBody = nil
 }
 
 // Runs the attempts and relays the final response, or answers the front's
 // own error.
-func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, responseController *http.ResponseController, request *upstreamRequest, options *forwardOptions) {
+func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, request *upstreamRequest, options *forwardOptions) {
+	ctx := r.Context()
 	triedBlocks := make([]bool, len(self.blocks))
 	var ringWalk *upstreamRingWalk
 	if self.ring != nil && options.blockName == "" {
@@ -322,6 +374,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 				exchange.finish(false)
 				self.releaseBlock(block, options)
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, upstreamAttemptHttp503).Inc()
+				attempts.next()
 				continue
 			}
 			self.relay(w, responseController, block, exchange, options)
@@ -332,7 +385,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 		case upstreamFailureClient:
 			if request.streamedBody != nil {
 				if refusal := request.streamedBody.failure(); refusal != nil {
-					self.refuse(w, responseController, refusal)
+					self.refuse(w, r, responseController, refusal)
 					return
 				}
 			}
@@ -345,6 +398,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 		case upstreamFailureError, upstreamFailureTimeout:
 			if attempts.retryAllowed() {
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, failure.String()).Inc()
+				attempts.next()
 				continue
 			}
 		}
@@ -440,7 +494,12 @@ func (self *upstreamGroup) attempt(ctx context.Context, block *upstreamBlock, re
 // Relays the final response: its head at once, then its body as it arrives,
 // each read written and flushed, as nginx's `proxy_buffering off` sends it. A
 // 101 becomes a tunnel. A body the block cuts short, or the client stops
-// taking, aborts the response.
+// taking, aborts the response. So does a streamed request body that fails on
+// the client's side while the response is relayed, a stall past
+// client_body_timeout included: the exchange cuts the block's side then, as
+// nginx ends the request (ngx_http_upstream_finalize_request terminates one
+// whose body timed out, and ends one with a broken body without its last
+// bytes), and the refusal is counted, as one before the response head is.
 func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http.ResponseController, block *upstreamBlock, exchange *upstreamExchange, options *forwardOptions) {
 	// the block that answered labels the request's metrics and access log
 	// line (D17)
@@ -473,6 +532,16 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 		exchange.stopCancelHook()
 	})
 	if clientErr != nil || upstreamErr != nil {
+		// the request's write ends first, so a streamed body's failure is in
+		// before it is counted: on h1, Go's server cancels the request inside
+		// the client's timed out read, and the cut that cancellation makes
+		// can fail this copy before that read returns to the write
+		exchange.finish(false)
+		if streamedBody := exchange.request.streamedBody; streamedBody != nil {
+			if refusal := streamedBody.failure(); refusal != nil {
+				forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
+			}
+		}
 		// a truncated response must not look complete to the client
 		panic(http.ErrAbortHandler)
 	}
@@ -519,17 +588,34 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 // Answers a body refusal and counts it. A client that went away gets
 // nothing.
 //
-// The body may be partly unread. Go's server reads up to 256 KiB of what
-// remains before it writes the answer, so that read is bounded first by
-// HttpSettings.LingeringTimeout, nginx's lingering_timeout, or cut at once
-// when that is non-positive. A timed out read's deadline has already passed
-// and stays, so its 408 goes out at once.
-func (self *upstreamGroup) refuse(w http.ResponseWriter, responseController *http.ResponseController, refusal *bodyRefusal) {
+// Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
+// finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,
+// before it reaches a block (ngx_http_read_client_request_body_handler) or
+// while it streams (ngx_http_upstream_read_request_handler), and
+// ngx_http_finalize_request terminates such a request with no response. So
+// the handler aborts with http.ErrAbortHandler: Go's h1 server closes the
+// connection, as nginx does, and its h2 server resets the stream, which
+// nginx resets too. Unlike nginx, Go's h1 server sends TLS's close_notify
+// first, where nginx's quiet shutdown after a timeout sends none, and its h2
+// reset is INTERNAL_ERROR, where nginx's is PROTOCOL_ERROR, since Go's
+// server takes no reset code from a handler. h3, which nginx doesn't serve
+// here, still gets the 408. A timed out read's deadline has passed and
+// stays, so nothing waits on the client after it.
+//
+// Any other refused body may be partly unread. Go's server reads up to 256
+// KiB of what remains before it writes the answer, so that read is bounded
+// first by HttpSettings.LingeringTimeout, nginx's lingering_timeout, or cut
+// at once when that is non-positive.
+func (self *upstreamGroup) refuse(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, refusal *bodyRefusal) {
 	forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
 	if refusal.status == 0 {
 		return
 	}
-	if refusal.reason != bodyRefusalTimeout {
+	if refusal.reason == bodyRefusalTimeout {
+		if r.ProtoMajor != 3 {
+			panic(http.ErrAbortHandler)
+		}
+	} else {
 		lingeringDeadline := time.Unix(1, 0)
 		if lingeringTimeout := self.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
 			lingeringDeadline = time.Now().Add(lingeringTimeout)

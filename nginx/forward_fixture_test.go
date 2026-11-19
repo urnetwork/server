@@ -7,7 +7,9 @@ package nginx
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"golang.org/x/net/http2"
 )
 
 // One request as a recording upstream saw it.
@@ -247,6 +250,14 @@ type testForwardFront struct {
 
 // A front over a group, closed when the test ends.
 func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testForwardFront {
+	return newTestForwardFrontWrapping(t, group, func(w http.ResponseWriter) http.ResponseWriter {
+		return w
+	}, options)
+}
+
+// A front over a group whose handler gives serveHttp the response writer
+// wrap makes of the server's, closed when the test ends.
+func newTestForwardFrontWrapping(t *testing.T, group *upstreamGroup, wrap func(w http.ResponseWriter) http.ResponseWriter, options func(r *http.Request) forwardOptions) *testForwardFront {
 	front := &testForwardFront{
 		group:   group,
 		options: options,
@@ -260,10 +271,91 @@ func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *htt
 				panic(recovered)
 			}
 		}()
-		front.group.serveHttp(w, r, front.options(r))
+		front.group.serveHttp(wrap(w), r, front.options(r))
 	}))
 	t.Cleanup(front.server.Close)
 	return front
+}
+
+// A response writer that tells a test each time the forwarder sets a read
+// deadline in the past on the client's connection, as interrupting a
+// streamed body does, and passes every deadline, and the rest, on to the
+// server's writer.
+type pastReadDeadlineWriter struct {
+	http.ResponseWriter
+	// one value for each past deadline, dropped when it is full
+	pastDeadlines chan struct{}
+}
+
+// A writer over the server's w.
+func newPastReadDeadlineWriter(w http.ResponseWriter) *pastReadDeadlineWriter {
+	return &pastReadDeadlineWriter{
+		ResponseWriter: w,
+		pastDeadlines:  make(chan struct{}, 1),
+	}
+}
+
+// Sets the deadline through the server's writer, and tells the test of one
+// in the past.
+func (self *pastReadDeadlineWriter) SetReadDeadline(deadline time.Time) error {
+	err := http.NewResponseController(self.ResponseWriter).SetReadDeadline(deadline)
+	if !deadline.IsZero() && deadline.Before(time.Now()) {
+		select {
+		case self.pastDeadlines <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// The server's writer, for the response controller's other methods.
+func (self *pastReadDeadlineWriter) Unwrap() http.ResponseWriter {
+	return self.ResponseWriter
+}
+
+// A front over a group that serves h2 over TLS, as the public TCP 443 does,
+// closed when the test ends. Its server's Client speaks h2 to it.
+func newTestForwardH2Front(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testForwardFront {
+	front := &testForwardFront{
+		group:   group,
+		options: options,
+		served:  make(chan any, 1024),
+	}
+	front.server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			recovered := recover()
+			front.served <- recovered
+			if recovered != nil {
+				panic(recovered)
+			}
+		}()
+		front.group.serveHttp(w, r, front.options(r))
+	}))
+	front.server.EnableHTTP2 = true
+	front.server.StartTLS()
+	t.Cleanup(front.server.Close)
+	return front
+}
+
+// One h2 connection to an h2 front, through golang.org/x/net/http2's client,
+// so a test sees the stream errors the front's server sends and can send
+// the next stream on the same connection. It closes when the test ends.
+func (self *testForwardFront) h2ClientConn(t *testing.T) *http2.ClientConn {
+	tlsConfig := self.server.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig.NextProtos = []string{"h2"}
+	tlsConn, err := tls.Dial("tcp", self.server.Listener.Addr().String(), tlsConfig)
+	if err != nil {
+		t.Fatalf("dial h2 front: %v", err)
+	}
+	clientConn, err := (&http2.Transport{}).NewClientConn(tlsConn)
+	if err != nil {
+		tlsConn.Close()
+		t.Fatalf("h2 client connection: %v", err)
+	}
+	t.Cleanup(func() {
+		clientConn.Close()
+	})
+	return clientConn
 }
 
 // The default options of a test request: a documentation ipv4 client.
@@ -451,6 +543,50 @@ func (self *holdWriteConn) Close() error {
 	self.closeOnce.Do(func() {
 		close(self.closed)
 	})
+	self.release()
+	return self.Conn.Close()
+}
+
+// A dialed connection whose first write carrying marker holds before it
+// writes, as a write to a block that stopped reading blocks, until released
+// or closed. held is closed when the hold starts.
+type holdMarkedWriteConn struct {
+	net.Conn
+	marker   []byte
+	armed    atomic.Bool
+	held     chan struct{}
+	released chan struct{}
+	release  func()
+}
+
+// A connection over conn whose first write of marker holds. The hold ends
+// when the test does, at the latest.
+func newHoldMarkedWriteConn(t *testing.T, conn net.Conn, marker []byte) *holdMarkedWriteConn {
+	holdConn := &holdMarkedWriteConn{
+		Conn:     conn,
+		marker:   marker,
+		held:     make(chan struct{}),
+		released: make(chan struct{}),
+	}
+	holdConn.release = sync.OnceFunc(func() {
+		close(holdConn.released)
+	})
+	holdConn.armed.Store(true)
+	t.Cleanup(holdConn.release)
+	return holdConn
+}
+
+// Holds the first write of the marker until released, then writes p.
+func (self *holdMarkedWriteConn) Write(p []byte) (int, error) {
+	if bytes.Contains(p, self.marker) && self.armed.CompareAndSwap(true, false) {
+		close(self.held)
+		<-self.released
+	}
+	return self.Conn.Write(p)
+}
+
+// Closes the connection, which ends a held write.
+func (self *holdMarkedWriteConn) Close() error {
 	self.release()
 	return self.Conn.Close()
 }

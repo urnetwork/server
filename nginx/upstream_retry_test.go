@@ -215,8 +215,11 @@ func TestRetryNeverForNamedBlock(t *testing.T) {
 	}
 }
 
-// A streamed body whose request began going upstream is never retried; one
-// whose connect was refused, before anything was sent, is.
+// A streamed body whose request began going upstream, and that its first
+// read didn't return whole, is never retried; one whose connect was refused,
+// before anything was sent, is. The first body comes in two parts, the
+// second once the block has the first, as nginx streams a body its first
+// pass reads only part of.
 func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 	streamedOptions := func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
@@ -232,22 +235,28 @@ func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 		{name: "g2", weight: 1, port: other.port},
 	}), testForwardFrontSettings())
 	front := newTestForwardFront(t, group, streamedOptions)
-	responses := make(chan *http.Response, 1)
-	go func() {
-		request, _ := http.NewRequest(http.MethodPost, front.url("/mcp"), strings.NewReader("streamed"))
-		response, _, _ := testDo(t, request)
-		responses <- response
-	}()
+	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial front: %v", err)
+	}
+	defer clientConn.Close()
+	io.WriteString(clientConn, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 8\r\n\r\nstre")
 	conn, _, request := raw.accept(t)
-	body, _ := io.ReadAll(io.LimitReader(request.Body, 8))
-	if string(body) != "streamed" || request.Header.Get(urRequestBufferingHeader) != "off" {
-		t.Fatalf("first block got %q, buffering %q", body, request.Header.Get(urRequestBufferingHeader))
+	// a bound, so a body held back fails the read rather than hangs it
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	readExactly(t, request.Body, "stre")
+	io.WriteString(clientConn, "amed")
+	readExactly(t, request.Body, "amed")
+	if request.Header.Get(urRequestBufferingHeader) != "off" {
+		t.Fatalf("first block got buffering %q", request.Header.Get(urRequestBufferingHeader))
 	}
 	// the block read the request, then closed without answering
 	conn.Close()
-	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusBadGateway {
-		t.Fatalf("sent streamed request: %v, want 502", response)
+	clientConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if response, err := http.ReadResponse(bufio.NewReader(clientConn), nil); err != nil || response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("sent streamed request: %v %v, want 502", response, err)
 	}
+	front.waitServed(t)
 	if len(other.recorded()) != 0 {
 		t.Errorf("a streamed body was retried after it was sent")
 	}
@@ -680,9 +689,9 @@ func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
 		failure  upstreamFailure
 	}
 	// starts a streamed request of 8 bytes on g1, its block answering 503
-	// once the test lets it
+	// once the test lets it; a body its first read returns whole is kept
 	start := func(body io.Reader) (*forwardStreamedBody, *upstreamRequest, *holdWriteConn, chan exchangeResult) {
-		streamedBody := newForwardStreamedBody(ctx, body, 8, 0, 0, nil)
+		streamedBody := newForwardStreamedBody(ctx, body, 8, 0, 0, nil, group.bodyStore)
 		request := &upstreamRequest{
 			head:         []byte("POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nContent-Length: 8\r\n\r\n"),
 			method:       http.MethodPost,
@@ -736,7 +745,8 @@ func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
 	}
 	exchange.finish(false)
 
-	// the body began before the 503
+	// the body began before the 503, its first read still waiting on the
+	// client: that read keeps nothing in time
 	reader := &gatedReader{chunks: make(chan []byte), waiting: make(chan struct{})}
 	streamedBody, request, holdConn, results = start(reader)
 	holdConn.release()
@@ -752,6 +762,25 @@ func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
 		t.Errorf("the begun body's write ended with %v, want it whole", err)
 	}
 	exchange.finish(false)
+	streamedBody.release()
+
+	// the body began, and its first read returned it whole and kept it,
+	// before the 503: the 503 is retried, with the kept body
+	streamedBody, request, holdConn, results = start(strings.NewReader("streamed"))
+	holdConn.release()
+	conn, _, upstreamRequest = raw.accept(t)
+	readExactly(t, upstreamRequest.Body, "streamed")
+	exchange = answer503(conn, results)
+	attempts := attemptsFor(request)
+	if !attempts.retry503Allowed(exchange) {
+		t.Errorf("a 503 after the streamed body was kept whole was not retried")
+	}
+	exchange.finish(false)
+	attempts.next()
+	if request.streamedBody != nil || request.storedBody == nil || string(readStoredBody(t, request.storedBody)) != "streamed" {
+		t.Errorf("the next attempt doesn't replay the kept body")
+	}
+	streamedBody.release()
 }
 
 // A 503 that comes before a streamed body began going to its block moves the

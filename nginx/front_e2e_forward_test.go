@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/http2"
 )
 
 // A websocket block: it upgrades every request, greets the client, and
@@ -626,5 +627,59 @@ func TestFrontE2eRelaysALargeResponseWhole(t *testing.T) {
 		if err != nil || !bytes.Equal(body, largeBody) || response.ContentLength != int64(len(largeBody)) {
 			t.Errorf("%s: %d of %d bytes, equal %t, Content-Length %d, %v", roundTrip.name, len(body), len(largeBody), bytes.Equal(body, largeBody), response.ContentLength, err)
 		}
+	}
+}
+
+// A body that stalls past client_body_timeout gets no response through the
+// front, as nginx terminates such a request: on h1 the connection closes
+// with nothing written, and on h2 the stream is reset, with INTERNAL_ERROR
+// where nginx's code is PROTOCOL_ERROR, and the connection serves the next
+// stream. It holds for a buffered body (api), read before any block, and a
+// streamed one (mcp), whose block has its start. The front's handler lets
+// the abort through to Go's servers, which log no panic for it, and each
+// refusal is counted.
+func TestFrontE2eBodyTimeoutEndsTheRequestWithoutAResponse(t *testing.T) {
+	settings := e2eFrontSettings(t)
+	settings.Body.ClientBodyTimeout = 100 * time.Millisecond
+	e2e := newE2eFront(t, settings, nil)
+	eth1 := e2e.iface(t, "eth1")
+	for _, service := range []string{"api", "mcp"} {
+		name := service + ".service.example"
+		timeouts := bodyRefusalCount(service, bodyRefusalTimeout)
+
+		raw := e2e.dialRaw(t, eth1.httpsAddr, name)
+		raw.conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
+		io.WriteString(raw.conn, "POST /stalled HTTP/1.1\r\nHost: "+name+"\r\nContent-Length: 100\r\n\r\nfirst-ten!")
+		if answered, err := io.ReadAll(raw.reader); len(answered) != 0 || (err != nil && !isClosedError(err)) {
+			t.Errorf("%s over h1: the stalled body was answered %q %v, want the connection closed with nothing written", service, answered, err)
+		}
+		eth1.httpsServed.await(t, "/stalled")
+
+		clientConn, _ := e2e.newH2ClientConn(t, eth1.httpsAddr, name)
+		bodyReader, bodyWriter := io.Pipe()
+		t.Cleanup(func() {
+			bodyWriter.Close()
+		})
+		go io.WriteString(bodyWriter, "first-ten!")
+		response, err := clientConn.RoundTrip(newE2eRequest(t, "POST", "https://"+name+"/stalled-h2", bodyReader))
+		var streamError http2.StreamError
+		if !errors.As(err, &streamError) || streamError.Code != http2.ErrCodeInternal {
+			if response != nil {
+				response.Body.Close()
+			}
+			t.Errorf("%s over h2: %v %v, want the stream reset with INTERNAL_ERROR", service, response, err)
+		}
+		eth1.httpsServed.await(t, "/stalled-h2")
+		next, body := e2eRoundTripH2(t, clientConn, newE2eRequest(t, "GET", "https://"+name+"/next", nil))
+		if next.StatusCode != http.StatusOK || string(body) != service+"/g1" {
+			t.Errorf("%s over h2: the next stream got %d %q, want its block's answer on the same connection", service, next.StatusCode, body)
+		}
+
+		if counted := bodyRefusalCount(service, bodyRefusalTimeout) - timeouts; counted != 2 {
+			t.Errorf("%s: %v timeouts counted, want one per protocol", service, counted)
+		}
+	}
+	if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+		t.Errorf("the store holds %d bytes, %d spilled in %d files, for %d bodies, after the timeouts", memoryBytes, spillBytes, spillFiles, bodies)
 	}
 }

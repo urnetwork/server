@@ -27,7 +27,9 @@ type BodySettings struct {
 	// sized from M2 and confirmed by the owner (D7), room for 4,096
 	// concurrent 64 KiB prefixes. A body that can't reserve its prefix, one
 	// of unknown length included, is a local 503 before its first read,
-	// counted apart from upstream 503s and never retried (D21). Non-positive
+	// counted apart from upstream 503s and never retried (D21). A streamed
+	// body its first read keeps whole for a retry reserves its length here
+	// too, and one with no room streams on, unrefused and unkept. Non-positive
 	// means no budget.
 	MemoryBudgetBytes int64
 	// the spilled bytes the process may hold at once: 4 GiB (D21). A body
@@ -41,8 +43,9 @@ type BodySettings struct {
 	SpillDir string
 	// the longest wait between two reads of a request body: nginx's
 	// `client_body_timeout 15s`. A route's client_body_timeout_seconds
-	// replaces it there. A stall past it is a 408. Non-positive means no
-	// bound beyond the request's own context.
+	// replaces it there. A stall past it ends the request with no response,
+	// as nginx ends it, or a 408 on h3. Non-positive means no bound beyond the
+	// request's own context.
 	ClientBodyTimeout time.Duration
 	// the scratch buffer one body read uses, in bytes, pooled per front; it
 	// bounds a single read, not what is held. Values below 1 mean 1.

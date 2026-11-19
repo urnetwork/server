@@ -5,7 +5,6 @@ package nginx
 // release on every exit, directly and through a group.
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -16,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -111,6 +111,19 @@ func (self *spySpillFiles) checkClosed() {
 			self.t.Errorf("spill file %d is still open", i)
 		}
 	}
+}
+
+// The files created that are still open.
+func (self *spySpillFiles) openCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	openCount := 0
+	for _, file := range self.files {
+		if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
+			openCount += 1
+		}
+	}
+	return openCount
 }
 
 // The spill files created so far.
@@ -594,8 +607,10 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 }
 
 // Through a group: a declared length over the limit is a 413 before any
-// read or upstream; a stall between body reads is a 408; neither reaches a
-// block, and neither holds anything after.
+// read or upstream. A stall between body reads gets no response at all, as
+// nginx terminates a request whose body timed out: the handler aborts, and
+// Go's server closes the connection with nothing written. Neither reaches a
+// block, both are counted, and neither holds anything after.
 func TestForwardBodyLimitAndTimeout(t *testing.T) {
 	serviceName := testServiceName("body-limit-timeout")
 	upstream := newRecordingUpstream(t, "g1", nil)
@@ -619,12 +634,15 @@ func TestForwardBodyLimitAndTimeout(t *testing.T) {
 	}
 	defer conn.Close()
 	io.WriteString(conn, "POST /upload HTTP/1.1\r\nHost: upload.service.example\r\nContent-Length: 100\r\n\r\nonly ten b")
-	stalled, err := http.ReadResponse(bufio.NewReader(conn), nil)
-	if err != nil || stalled.StatusCode != http.StatusRequestTimeout {
-		t.Fatalf("stalled body: %v %v, want 408", stalled, err)
+	// a bound, so a held connection fails the read rather than hangs it
+	conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	if answered, err := io.ReadAll(conn); len(answered) != 0 || (err != nil && !isClosedError(err)) {
+		t.Fatalf("the stalled body was answered %q %v, want the connection closed with nothing written", answered, err)
 	}
 	front.waitServed(t)
-	front.waitServed(t)
+	if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+		t.Errorf("the stalled body's serveHttp ended with %v, want http.ErrAbortHandler", recovered)
+	}
 	if len(upstream.recorded()) != 0 {
 		t.Errorf("a refused body reached the block")
 	}
@@ -700,15 +718,17 @@ func TestForwardAbortReleasesBody(t *testing.T) {
 	checkStoreEmpty(t, bodyStore)
 }
 
-// Through a group: a streamed body of unknown length that crosses the body
-// limit is a 413 while nothing was answered, and the block's request is
-// cut.
+// Through a group: a chunked body over the body limit on a streamed route is
+// a 413 while nothing was answered. It streams, chunked, though it came whole
+// with its head, so it is refused as it crosses the limit: its block's
+// request is cut, and the attempt is the client's.
 func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
+	chunk := string(testBodyBytes(600))
 	settings := testForwardFrontSettings()
 	settings.Body.MaxBodyBytes = 1000
 	serviceName := testServiceName("streamed-limit")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
 	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
@@ -716,17 +736,87 @@ func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
 		options.streamed = true
 		return options
 	})
-	chunk := string(testBodyBytes(600))
 	response, _ := rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nTransfer-Encoding: chunked\r\n\r\n258\r\n"+chunk+"\r\n258\r\n"+chunk+"\r\n0\r\n\r\n")
 	if response.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("streamed body over the limit: %d, want 413", response.StatusCode)
+		t.Fatalf("body over the limit: %d, want 413", response.StatusCode)
 	}
+	front.waitServed(t)
 	if bodyRefusalCount(serviceName, bodyRefusalTooLarge) != 1 {
 		t.Errorf("the 413 was not counted")
+	}
+	if attemptCount(serviceName, "g1", "client") != 1 || attemptCount(serviceName, "g1", "response") != 0 {
+		t.Errorf("%v attempts ended on the client's side, want 1, and none answered", attemptCount(serviceName, "g1", "client"))
 	}
 	for _, recorded := range upstream.recorded() {
 		if recorded.bodyErr == nil {
 			t.Errorf("the block got a whole body of %d bytes", len(recorded.body))
 		}
 	}
+	checkStoreEmpty(t, bodyStore)
+}
+
+// The store's close, which the front's forced close runs, returns only once
+// every spill file its bodies created is closed, one still being created
+// included. A close that releases a body while its append is creating the
+// file can't see the file: it waits for the append, which finds the body
+// released and closes the file, and the file stays counted against
+// SpillMaxFiles until then (D21). In a synctest bubble, so the close is seen
+// waiting rather than given time to return.
+func TestBodyStoreCloseWaitsForASpillFileBeingCreated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		settings := DefaultBodySettings()
+		bodyStore, spyFiles := newSpyBodyStore(t, settings)
+		created := make(chan struct{})
+		proceed := make(chan struct{})
+		bodyStore.createSpillFile = func() (bodySpillFile, error) {
+			file, err := spyFiles.create()
+			if err != nil {
+				return nil, err
+			}
+			close(created)
+			// the file is open, and its body hasn't recorded it
+			<-proceed
+			return file, nil
+		}
+		refusals := make(chan *bodyRefusal, 1)
+		go func() {
+			body := testBodyBytes(int(settings.MemoryPrefixBytes) + 1000)
+			storedBody, refusal := bodyStore.read(t.Context(), bytes.NewReader(body), bodyReadOptions{
+				declaredLength: int64(len(body)),
+				prefixBytes:    settings.MemoryPrefixBytes,
+			})
+			if storedBody != nil {
+				storedBody.release()
+			}
+			refusals <- refusal
+		}()
+		<-created
+
+		closeDone := make(chan struct{})
+		go func() {
+			bodyStore.close()
+			close(closeDone)
+		}()
+		// every other goroutine is durably blocked: the append at proceed,
+		// and the close returned or waiting for the append
+		synctest.Wait()
+		select {
+		case <-closeDone:
+			if spyFiles.openCount() != 0 {
+				t.Errorf("the store's close returned while a spill file being created was open")
+			}
+		default:
+		}
+		if _, _, spillFiles, _ := bodyStore.usage(); spillFiles != 1 {
+			t.Errorf("with a spill file open, the store counts %d spill files, want 1", spillFiles)
+		}
+
+		close(proceed)
+		<-closeDone
+		spyFiles.checkClosed()
+		if refusal := <-refusals; refusal == nil || refusal.status != http.StatusServiceUnavailable || refusal.reason != bodyRefusalClosed {
+			t.Errorf("the body read the close cut short: %v, want refused as closed", refusal)
+		}
+		checkStoreEmpty(t, bodyStore)
+	})
 }

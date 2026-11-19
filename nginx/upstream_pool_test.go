@@ -7,6 +7,7 @@ package nginx
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -580,5 +582,123 @@ func TestUpstreamPoolKeepsConnectionWhenClientLeavesAfterResponse(t *testing.T) 
 	}
 	if group.blocks[0].pool.idleCount() != 1 {
 		t.Errorf("the connection of a whole response was not pooled after its client left")
+	}
+}
+
+// A dial in flight when its group closes ends with the close, which returns
+// only once that dial's connection is closed: the dial runs on a context the
+// close cancels, and the pool waits for it to return. The dial here has its
+// connection and returns it once its context ends, as a dial whose connect
+// completes as it is canceled does; without the close's cancel it would wait
+// as long as the request's context, the connection open.
+func TestUpstreamGroupCloseEndsADialInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		group, _ := newTestGroup(t, testForwardRouteService(testServiceName("close-dial"), []testBlock{
+			{name: "g1", weight: 1, port: 1},
+		}), testForwardFrontSettings())
+		dialedConns := make(chan net.Conn, 1)
+		group.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+			conn, peerConn := net.Pipe()
+			t.Cleanup(func() { peerConn.Close() })
+			dialedConns <- conn
+			<-ctx.Done()
+			return conn, nil
+		}
+		requestCtx, cancelRequest := context.WithCancel(t.Context())
+		defer cancelRequest()
+		go group.blocks[0].pool.dial(requestCtx)
+		dialedConn := <-dialedConns
+
+		closeDone := make(chan struct{})
+		go func() {
+			group.close()
+			close(closeDone)
+		}()
+		// the close returned, or waits on a dial its cancel never reached
+		synctest.Wait()
+		select {
+		case <-closeDone:
+		default:
+			t.Errorf("the group's close is waiting on a dial in flight, which its close should have ended")
+			cancelRequest()
+			<-closeDone
+		}
+		// closed by the dial, or by the pool if the dial recorded it first
+		if err := dialedConn.SetDeadline(time.Time{}); !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("after the close, the dial's connection is open (%v), want it closed", err)
+		}
+	})
+}
+
+// A pool's close waits for a dial in flight, whatever that dial does with
+// its context, so it never returns while the dial's connection is open: the
+// dial closes the connection itself once it finds the pool closed. The dial
+// here has its connection and holds it until the test lets it go.
+func TestUpstreamPoolCloseWaitsForADialInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		group, _ := newTestGroup(t, testForwardRouteService(testServiceName("close-dial-wait"), []testBlock{
+			{name: "g1", weight: 1, port: 1},
+		}), testForwardFrontSettings())
+		dialedConns := make(chan net.Conn, 1)
+		proceed := make(chan struct{})
+		group.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+			conn, peerConn := net.Pipe()
+			t.Cleanup(func() { peerConn.Close() })
+			dialedConns <- conn
+			<-proceed
+			return conn, nil
+		}
+		dialErrs := make(chan error, 1)
+		go func() {
+			_, err := group.blocks[0].pool.dial(t.Context())
+			dialErrs <- err
+		}()
+		dialedConn := <-dialedConns
+		dialedConnClosed := func() bool {
+			return errors.Is(dialedConn.SetDeadline(time.Time{}), io.ErrClosedPipe)
+		}
+
+		closeDone := make(chan struct{})
+		go func() {
+			group.blocks[0].pool.close()
+			close(closeDone)
+		}()
+		// the close returned, or waits for the dial
+		synctest.Wait()
+		select {
+		case <-closeDone:
+			if !dialedConnClosed() {
+				t.Errorf("the pool's close returned with a dial's connection open")
+			}
+		default:
+		}
+		close(proceed)
+		<-closeDone
+		if !dialedConnClosed() {
+			t.Errorf("the pool's close returned with a dial's connection open")
+		}
+		if err := <-dialErrs; !errors.Is(err, net.ErrClosed) {
+			t.Errorf("the dial returned %v, want the pool closed", err)
+		}
+	})
+}
+
+// A closed pool dials nothing: a request that reaches a block after its
+// group closed gets net.ErrClosed without a connection being opened, so no
+// dial can begin once the close has stopped waiting for dials.
+func TestUpstreamPoolClosedDialsNothing(t *testing.T) {
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("closed-dial"), []testBlock{
+		{name: "g1", weight: 1, port: 1},
+	}), testForwardFrontSettings())
+	dialCount := 0
+	group.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		dialCount += 1
+		conn, peerConn := net.Pipe()
+		peerConn.Close()
+		return conn, nil
+	}
+	group.close()
+	if _, err := group.blocks[0].pool.dial(testContext(t)); !errors.Is(err, net.ErrClosed) || dialCount != 0 {
+		t.Errorf("a dial on a closed pool returned %v after %d dials, want net.ErrClosed and none", err, dialCount)
 	}
 }
