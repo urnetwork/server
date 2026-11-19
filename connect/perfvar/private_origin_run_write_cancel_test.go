@@ -326,7 +326,7 @@ func TestPrivateOriginRunCanceledWriteQuiesces(t *testing.T) {
 			}, func(ctx context.Context, ordinal int) error {
 				return fixture.origin.runs[ordinal].Load().sealAndWait(ctx)
 			},
-			func() (syntheticFastCumulative, any) { return syntheticFastCumulative{}, nil })
+			func() (syntheticFastCumulative, any) { return syntheticFastCumulative{}, nil }, nil)
 		row := sequence.Runs[0]
 		if !blocked.Load() || !row.Workload.Joined || row.Workload.WorkerJoinState != "WORKERS_JOINED" || row.Workload.MeasurementBytes != 0 {
 			t.Fatal("regression did not compose real blocked origin I/O with joined zero-payload workers")

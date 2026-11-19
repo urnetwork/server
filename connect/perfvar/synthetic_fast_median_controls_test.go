@@ -56,7 +56,7 @@ func TestSyntheticFastMedianRunsThreeJoinedFiveWindowSequences(t *testing.T) {
 					drains++
 					events = append(events, fmt.Sprintf("drain%d.%d", index, window+1))
 					return nil
-				}, func() (syntheticFastCumulative, any) { return syntheticFastCumulative{}, nil })
+				}, func() (syntheticFastCumulative, any) { return syntheticFastCumulative{}, nil }, nil)
 			if sequenceErr != nil {
 				t.Fatalf("%s: original sampler failed its control: %v", row.name, sequenceErr)
 			}
@@ -234,7 +234,8 @@ func TestSyntheticFastMedianRequiresEveryNativeJoinReceipt(t *testing.T) {
 				if target == 64*1024*1024 {
 					providerCount = 12
 				}
-				native := syntheticFastNativeIterationReport{ConsumerTarget: target, ProviderTarget: 128 * 1024 * 1024, ProviderCount: providerCount,
+				sequence := syntheticFastMeanControl([5]float64{210, 210, 210, 210, 210})
+				native := syntheticFastNativeIterationReport{ConsumerTarget: target, ProviderTarget: 128 * 1024 * 1024, ProviderCount: providerCount, Sequence: sequence,
 					WorkerFinalJoined: [5]bool{true, true, true, true, true}, OriginHandlersStarted: 5, OriginHandlersFinished: 5,
 					ClientAfterJoin: &sdk.DeviceLocalMemoryUsage{}, ProviderAfterJoin: make([]*sdk.DeviceLocalMemoryUsage, providerCount)}
 				for p := range native.ProviderAfterJoin {
@@ -244,7 +245,7 @@ func TestSyntheticFastMedianRequiresEveryNativeJoinReceipt(t *testing.T) {
 					row.mutate(&native)
 				}
 				joinErr := syntheticFastNativeIterationJoinError(native)
-				mean, meanErr := syntheticFastFiveWindowMean(syntheticFastMeanControl([5]float64{210, 210, 210, 210, 210}))
+				mean, meanErr := syntheticFastFiveWindowMean(sequence)
 				return syntheticFastIterationSample{Mean: mean, OwnersJoined: joinErr == nil, EnvironmentClosed: true}, errors.Join(meanErr, joinErr)
 			})
 			passed := row.mutate == nil
