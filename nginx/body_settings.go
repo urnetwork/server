@@ -37,13 +37,16 @@ type BodySettings struct {
 	// needs one more is a local 503. Non-positive means no cap.
 	SpillMaxFiles int
 	// the directory spill files go in. Empty means os.TempDir(). Each file
-	// is removed when its request ends.
+	// is unlinked as soon as it is created and freed when its request ends.
 	SpillDir string
 	// the longest wait between two reads of a request body: nginx's
 	// `client_body_timeout 15s`. A route's client_body_timeout_seconds
 	// replaces it there. A stall past it is a 408. Non-positive means no
 	// bound beyond the request's own context.
 	ClientBodyTimeout time.Duration
+	// the scratch buffer one body read uses, in bytes, pooled per front; it
+	// bounds a single read, not what is held. Values below 1 mean 1.
+	ReadBufferBytes int
 }
 
 // A new instance on every call, with nginx's limits and the decided budget
@@ -57,5 +60,6 @@ func DefaultBodySettings() *BodySettings {
 		SpillMaxFiles:     1024,
 		SpillDir:          "",
 		ClientBodyTimeout: 15 * time.Second,
+		ReadBufferBytes:   32 * 1024,
 	}
 }
