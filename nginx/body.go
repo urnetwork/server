@@ -18,8 +18,13 @@ package nginx
 //     point;
 //   - a read that waits longer than client_body_timeout is nginx's
 //     NGX_HTTP_REQUEST_TIME_OUT, which ends the request with no response
-//     (upstreamGroup.refuse), and a client that ends its body early is a
-//     400;
+//     (upstreamGroup.refuse);
+//   - a client that goes away ends the request with no response too. On h1
+//     that includes one that ends its body early, since Go's server reports
+//     the closed side by canceling the request, as nginx terminates a
+//     request whose connection closed under its body. Elsewhere a body that
+//     ends early, on h2 or h3, or an h1 chunked body that breaks its framing,
+//     is a 400;
 //   - a stored body replays byte for byte, memory then file, once per
 //     attempt.
 //

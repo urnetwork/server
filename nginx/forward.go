@@ -110,10 +110,10 @@ type serviceForwarder interface {
 	// aborted by panicking with http.ErrAbortHandler, as
 	// httputil.ReverseProxy does, so the client sees a truncated response,
 	// never a complete one; so is a request whose body stalls past
-	// client_body_timeout on h1 or h2, which gets no response, as nginx gives
-	// none, and one whose streamed body fails on the client's side while the
-	// response is relayed. Callers' deferred cleanup runs and they must not
-	// recover it.
+	// client_body_timeout on h1 or h2, or whose client went away, which get
+	// no response, as nginx gives none, and one whose streamed body fails on
+	// the client's side while the response is relayed. Callers' deferred
+	// cleanup runs and they must not recover it.
 	serveHttp(w http.ResponseWriter, r *http.Request, options forwardOptions)
 	// releases the pools and cuts the tunnels; requests in flight end with
 	// their connections. A dial in flight ends with it, and it returns once

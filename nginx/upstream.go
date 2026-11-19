@@ -389,12 +389,12 @@ func (self *upstreamGroup) forward(w http.ResponseWriter, r *http.Request, respo
 					return
 				}
 			}
-			// the client went away, nginx's 499, which nobody sees. A
-			// handler that wrote nothing would answer 200 to a client still
-			// there, should the context end for another reason, so answer
-			// 502, uncounted.
-			writeForwardError(w, http.StatusBadGateway)
-			return
+			// the request's context ended: its client went away, nginx's
+			// 499, which ngx_http_upstream_finalize_request terminates with
+			// nothing sent, or connect's forced close cut the server's
+			// connections. Either way no response goes out, and the request
+			// is recorded with none, not as one of the front's own 502s.
+			panic(http.ErrAbortHandler)
 		case upstreamFailureError, upstreamFailureTimeout:
 			if attempts.retryAllowed() {
 				upstreamRetriesCounter.WithLabelValues(self.service.Name, failure.String()).Inc()
@@ -585,8 +585,15 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 	}
 }
 
-// Answers a body refusal and counts it. A client that went away gets
-// nothing.
+// Answers a body refusal and counts it.
+//
+// A client that went away gets no response, and the request is recorded with
+// none: the handler aborts with http.ErrAbortHandler, as nginx terminates a
+// request whose client connection failed (c->error, which
+// ngx_http_finalize_request answers with ngx_http_terminate_request), so the
+// front's default 200 for a handler that wrote nothing never goes out. On h1
+// a client that ends its body early is one: Go's server reports its closed
+// side by canceling the request.
 //
 // Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
 // finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,
@@ -609,7 +616,7 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 func (self *upstreamGroup) refuse(w http.ResponseWriter, r *http.Request, responseController *http.ResponseController, refusal *bodyRefusal) {
 	forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
 	if refusal.status == 0 {
-		return
+		panic(http.ErrAbortHandler)
 	}
 	if refusal.reason == bodyRefusalTimeout {
 		if r.ProtoMajor != 3 {
