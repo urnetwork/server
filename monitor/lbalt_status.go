@@ -28,10 +28,11 @@
 //
 // lbAltStatusRequests validates the matrix, lbAltStatusProbe.observe runs the
 // attempts, and each result carries its fixed verdict (lbAltStatusEvaluate).
-// Nothing schedules a pass yet. That needs a signal registered in NewSignals
-// with its classes in SIGNALS.md, and monitor.yml lbalt_status and services.yml
-// lb_hidden_prefixes carried through SignalSettings and monitorConfig
-// (lbAltStatusSettingsFromNode, cloneLbAltStatusSettings).
+// The lbalt-status signal (signal_lbalt_status.go, SIGNALS.md §16.10) runs a
+// pass at the probe settings' cadence and turns the verdicts into findings.
+// Its enrollment reaches it through SignalSettings.LbAltStatus and
+// monitorConfig.lbAltStatus, read from monitor.yml lbalt_status with the
+// route prefix from services.yml lb_hidden_prefixes.
 package monitor
 
 import (

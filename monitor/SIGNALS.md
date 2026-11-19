@@ -42519,6 +42519,148 @@ the ordinary api blocks, not Alt's embedded api. Source documentation and local
 controls do not implement or activate these Alt application/generation checks,
 supply production enrollment, or close the user's incident.
 
+### 16.10 Status routes of lb interfaces and their blocks — LBALT
+
+Probe: `lbalt-status`
+
+`signal_lbalt_status.go` plus `lbalt_status.go` and `lbalt_status_transport.go`
+implement the monitor's part of LBALT.md D17 and §9. Route53 health-checks
+every lb interface address, IPv4 and IPv6, with a plain `GET` of the lb status
+route on TCP 80 and the `<env>-lb.<domain>` Host, and counts any 2xx or 3xx
+healthy without reading the body. That answer decides the interface's DNS
+membership. On an lb_alt interface connect's front answers it
+(LBALT-IMPL.md §2.6), so an accidental redirect to https, or a status other
+than ok, would keep a broken interface in DNS. This probe requires what
+Route53 cannot: a 200, never a redirect followed, with JSON whose status is
+`ok`. One probe source hashes into one HMARK bucket and only ever reaches one
+block of an interface, so every interface is also probed per block.
+
+Enrollment is explicit and off by default, in monitor.yml `lbalt_status`:
+`enabled`, an independent `expected_targets` count, `targets` (each a stable
+nonsecret `name`, an enabled inventory `host`, an `interface` and its
+`families`), `block_service` and an independent `expected_blocks` count.
+Everything else comes from its source of truth: each address from the host's
+services.yml lb inventory (the active version's non-transparent interfaces,
+where lb_alt interfaces stay), the lb name from the environment and the
+primary domain, the route prefix from the first services.yml
+`lb_hidden_prefixes` entry (Route53's path, warpctl `dnsStatusPath`), and the
+blocks from the active blocks of `block_service`, which must number
+`expected_blocks`. An absent block is unarmed, never healthy. A present block
+that fails its strict decode, such as an unknown key or a wrong type, is
+invalid rather than off, so a typo cannot disarm the probe. One enrollment
+serves an interface on nginx or on the front, so it keeps working through a
+rollback (D18). The enrollment and its route prefix form the `lbalt_status`
+settings-freshness category (§1.6).
+
+Each enrolled family expands into its lb route, the port-80 `<prefix>/status`
+with the lb name as Host, and one block route per block,
+`<prefix>/by/b/<service>/<block>/status` on 443 over TLS verified for the lb
+name as SNI and Host, which the lb forwards to that block's private
+`/status`. Port 443 carries that route only for an `lb_exposed` service, the
+default, so a `block_service` set `lb_exposed: false` answers 404 there
+(`http-status`). Every attempt is one fresh TCP connection to the pinned interface
+address in its family. The lb name is never resolved; no proxy, keepalive or
+compression is used; no redirect is followed; the response header and body
+are bounded.
+
+Healthy requires a matching attempt and pin, one fresh connection that was
+dialed, a response, TLS verification on 443, a 200, every Content-Type
+`application/json`, a body that is one JSON object, and `status` exactly `ok`.
+A block route also requires the body's `service` and `block` to name the
+requested block, and fails when the block's front says it is not ready
+(`X-UR-Front-Ready: 0`, LBALT-IMPL.md §2.4). An absent readiness header is no
+evidence, since only a configured connect front sends it. nginx's lb status has
+no `front` field and the front's says `lbalt`: both are healthy, and the
+finding records which answered (`lbalt_front`).
+
+The bounds are `LbAltStatusProbeSettings` (`DefaultLbAltStatusProbeSettings`):
+a five-minute cadence, five seconds per attempt, four workers, at most 32
+targets and 16 blocks, and 16 KiB each of response header and body. With five
+blocks, each dual-stack interface takes twelve attempts. Settings without a
+positive attempt timeout and body bound refuse the matrix before any
+connection.
+
+| Finding | Predicate and qualification | Sustain / paging |
+| --- | --- | --- |
+| `lbalt-status-inventory` | Declared matrix invalid or incomplete; no interface contacted | WARN, 1; never automatic PAGE |
+| `lbalt-status-path` | A fresh correlated bounded attempt to the pinned address answered outside its route's contract, or its exchange failed after the connection was attempted | WARN, 2 consecutive evaluations; no time-only PAGE |
+| `lbalt-status-observation` | Source capability, observer route, TLS authority, correlation or complete evidence is missing or invalid | WARN, 1; never automatic PAGE |
+
+Reasons are fixed domains. `lbalt-status-inventory` reports
+`inventory_complete=false reason=` one of:
+
+- `probe-settings`: no positive attempt timeout or body bound;
+- `target-denominator`: an invalid block, no targets, more than the bound, or a
+  declared count that differs from the targets;
+- `route-prefix`: no `lb_hidden_prefixes`, or a first entry that is not path
+  segments of unreserved characters;
+- `lb-authority`: no valid lb name from the environment and primary domain;
+- `block-denominator`: a block service whose active blocks differ from
+  `expected_blocks`, exceed the bound, or are not distinct DNS labels;
+- `target-identity`, `interface-inventory`, `family-denominator`,
+  `family-address`, `duplicate-path` and `unprobed-family`: a target's name or
+  host, its interface in the lb inventory, its families, their addresses, a
+  repeated interface family, or an inventory family left unenrolled.
+
+`lbalt-status-path` reports `verified=false route= reason= status_code= status=
+front_readiness= lbalt_front=`, where the status is reduced to `absent`, `ok`,
+`draining`, `error` or `other`, the readiness to `absent`, `ready`, `not-ready`
+or `invalid`, and the reason is one of:
+
+- `connect-failed`: refused, or a router's host unreachable, as for a down
+  interface;
+- `timeout`, `request-failed` and `response-budget-exhausted`: the exchange
+  after the connection was attempted;
+- `redirect`: any 3xx, which Route53 counts healthy;
+- `http-status`, `content-type`, `body-invalid` and `status-not-ok`: an answer
+  outside the contract;
+- `block-mismatch`, `front-not-ready` and `front-readiness-invalid`: a block
+  route answered by another block, or by a front that is not ready.
+
+`lbalt-status-observation` reports `verified=false reason=` one of
+`source-unavailable`, `attempt-authority-unavailable`,
+`observation-authority-invalid`, `observation-incomplete` (no response, an
+unverified 443 answer, a reused connection, or an attempt error or expiry),
+`observer-route-unavailable` (the monitor host has no route or address in the
+family), `tls-authentication-unverified` or `configuration-invalid`.
+
+On the lb route, check which front answers the interface (`lbalt_front`) and
+its lb status route: the lb name's status on port 80 must answer itself, not
+redirect. On a block route, read that block's private `/status`, its
+`X-UR-Front-Ready` and `X-UR-Front-Sockets` headers, and its deploy.
+`connect-failed` and `timeout` point at the interface's DNAT, its split chains
+and the block's public sockets before the client path.
+
+Each interface family, route and block owns its own target
+(`<host>/lbalt-status/<target>/<family>/<route>[/<service>/<block>]`), so a
+healthy answer on one cannot resolve a failure on another. Only a fresh fully
+verified answer resolves a target; missing evidence and non-emission do not.
+Overall monitor cancellation joins the attempts and publishes no partial
+findings, and an attempt's own expiry turns a late positive answer into
+`observation-incomplete`. An alternate `SignalSettings.Source` must implement
+`LbAltStatusSignalSource` explicitly; absence never permits a native network
+fallback.
+
+The shared host-scope guard runs before transport. An excluded host is never
+contacted, nor any address a paused owner shares. The interface addresses come
+from the services.yml lb inventory, which host scope registers as each host's
+owned endpoints, disabled hosts included. Alerts carry the host, the
+enrollment label, the family, route, service and block, fixed reasons and the
+HTTP status code. The route prefix exists only in the request path the
+transport sends; the lb name, pinned addresses, bodies, header values, attempt
+tokens and raw errors are never rendered, and transport errors are fixed text,
+since net/http's quote the URL.
+
+Deterministic acceptance controls use loopback HTTP and TLS servers with
+generated certificates for the routes, and synthetic sources for the pass:
+the matrix and every refusal reason, strict enrollment decoding, the expansion
+into lb and block routes, redirects never followed, the status JSON, the
+header and body bounds, block identity and front readiness, certificate
+verification, connection failures and their classification, cancellation, late
+answers, scope guards, the findings of each verdict, and privacy of the prefix
+and the observer address. Runtime enrollment still requires the normal
+separately authorized settings and watcher workflow.
+
 ## 17. Subtensor RPC gateway (snow)
 
 Snow provides the testfinney archive node on loopback `127.0.0.1:9945` and an

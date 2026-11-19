@@ -42,6 +42,7 @@ func lbAltStatusTestSignalSettings(source SignalSource) SignalSettings {
 			{Interface: "eth2", IPv4Address: "198.51.100.11"},
 		},
 	})
+	settings.LogServices = []string{"api", "connect"}
 	settings.LogServiceBlocks = map[string][]string{
 		"api":     {"g1", "g2"},
 		"connect": append([]string(nil), lbAltStatusTestBlocks...),

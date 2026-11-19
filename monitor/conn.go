@@ -205,6 +205,8 @@ type monitorConfig struct {
 	pgQuerySampleUntil      time.Time
 	pgQuerySampleContinuous bool
 	publicUdp               PublicUdpSettings
+	// the lb status enrollment (§16.10), with the services.yml route prefix
+	lbAltStatus LbAltStatusSettings
 	// the operator's observer overlay route contract (§1.7)
 	observerOverlay ObserverOverlaySettings
 

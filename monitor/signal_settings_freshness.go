@@ -225,6 +225,7 @@ func settingsMismatchCategories(startup, current SignalSettings) []string {
 		{category: "host_inventory", startup: []any{startup.Hosts, startup.disabledHosts}, current: []any{current.Hosts, current.disabledHosts}},
 		{category: "router_inventory", startup: []any{startup.Routers, startup.routerDesiredGeneration}, current: []any{current.Routers, current.routerDesiredGeneration}},
 		{category: "public_udp", startup: startup.PublicUdp, current: current.PublicUdp},
+		{category: "lbalt_status", startup: startup.LbAltStatus, current: current.LbAltStatus},
 		{category: "observer_overlay", startup: startup.ObserverOverlay, current: current.ObserverOverlay},
 		{category: "excluded_hosts", startup: startup.ExcludedHosts, current: current.ExcludedHosts},
 		{category: "postgresql", startup: startup.PostgreSQL, current: current.PostgreSQL},
