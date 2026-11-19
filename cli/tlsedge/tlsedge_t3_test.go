@@ -958,3 +958,64 @@ func TestT3TlsedgeKeysShareTheirSlot(t *testing.T) {
 		}
 	})
 }
+
+// TLS-M6-02's fleet key on T3 (plan-TLS-visitor-hash-key; §9.7, tls-3): two tlsedge blocks on the stack's Redis, on one
+// clock so they read one UTC day, take one daily key, {vhk}tls:<yyyymmdd>, which the first to read it creates with a
+// ttl of at most 25 h: one visitor's Finds carry the same 16-byte affinity key from either block, and its records the
+// same 16-byte hash, the two keys apart, and neither holding the visitor's address.
+func TestT3TlsedgeBlocksShareTheFleetsDailyVisitorKey(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		clock := sidecartest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+		worlds := []*t3EdgeWorld{newT3EdgeWorldOn(t, clock, nil, nil), newT3EdgeWorldOn(t, clock, nil, nil)}
+		for _, world := range worlds {
+			hostTestAwait(t, "the fleet key's first read", 1, world.host.engine.VisitorKeyRefreshes)
+			if !world.host.engine.VisitorKeys().FleetHeld() {
+				t.Fatal("a block holds no fleet key after its first read")
+			}
+		}
+		affinityKeys := [][]byte{}
+		visitorHashes := [][]byte{}
+		for index, world := range worlds {
+			world.visit(world.serverName("blog"), []string{"h2"}, []byte(fmt.Sprintf("a visit to block %d", index)))
+			world.awaitEnded(1)
+			requests := world.dial.Requests()
+			if len(requests) != 1 || len(requests[0].AffinityKey) != 16 {
+				t.Fatalf("block %d's dials: %+v", index, requests)
+			}
+			affinityKeys = append(affinityKeys, requests[0].AffinityKey)
+			records := world.closeAndReadRecords()
+			if len(records) != 1 || len(records[0].VisitorHash) != 16 {
+				t.Fatalf("block %d's records: %+v", index, records)
+			}
+			visitorHashes = append(visitorHashes, records[0].VisitorHash)
+		}
+		if !bytes.Equal(affinityKeys[0], affinityKeys[1]) {
+			t.Fatal("the two blocks' Finds carry different affinity keys for one visitor")
+		}
+		if !bytes.Equal(visitorHashes[0], visitorHashes[1]) {
+			t.Fatal("the two blocks' records hold different hashes for one visitor")
+		}
+		if bytes.Equal(affinityKeys[0], visitorHashes[0]) {
+			t.Fatal("the affinity key is the record hash")
+		}
+		address := net.ParseIP(t3EdgeVisitorAddress).To4()
+		for _, key := range [][]byte{affinityKeys[0], visitorHashes[0]} {
+			if bytes.Contains(key, address) {
+				t.Fatal("a visitor key holds the visitor's address")
+			}
+		}
+		name := "{vhk}tls:" + clock.Now().UTC().Format("20060102")
+		server.Redis(worlds[0].ctx, func(client server.RedisClient) {
+			value, err := client.Get(worlds[0].ctx, name).Bytes()
+			if err != nil || len(value) != 32 {
+				t.Fatalf("the fleet key at %s: %d bytes, %v", name, len(value), err)
+			}
+			ttl, err := client.TTL(worlds[0].ctx, name).Result()
+			if err != nil || ttl <= 0 || 25*time.Hour < ttl {
+				t.Fatalf("the fleet key's ttl: %v, %v", ttl, err)
+			}
+		})
+	})
+}
