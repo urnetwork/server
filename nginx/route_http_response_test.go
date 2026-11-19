@@ -539,8 +539,9 @@ func TestRouteHttpHijackedUpgradeCarriesTheAlwaysHeaders(t *testing.T) {
 // it stays connected. The front bounds that read by LingeringTimeout, as
 // nginx bounds its lingering reads: a 404, a 403 and a 301 to a request
 // whose body stalls after its first bytes arrive after LingeringTimeout,
-// with Connection: close, and the connection closes. A body sent whole is
-// read and the connection kept.
+// with Connection: close, and the connection closes. A non-positive
+// LingeringTimeout cuts the read at once. A body sent whole is read and the
+// connection kept.
 func TestRouteHttpOwnAnswerBoundsTheReadOfAnUnreadBody(t *testing.T) {
 	const lingeringTimeout = 200 * time.Millisecond
 	const answerBound = 3 * time.Second
@@ -577,6 +578,21 @@ func TestRouteHttpOwnAnswerBoundsTheReadOfAnUnreadBody(t *testing.T) {
 		if !client.closedByServer() {
 			t.Errorf("%s%s with a stalled body: the connection was kept", c.host, c.target)
 		}
+	}
+
+	zeroSettings := testFrontSettings()
+	zeroSettings.Http.LingeringTimeout = 0
+	zeroServer := newTestConfiguredServer(t, newTestFront(t, loadTestRouteTable(t), zeroSettings), false)
+	zeroClient := dialTestServerH1Client(t, zeroServer.Listener.Addr().String())
+	zeroClient.conn.SetDeadline(time.Now().Add(answerBound))
+	fmt.Fprintf(zeroClient.conn, "POST /status HTTP/1.1\r\nHost: api.service.example\r\nContent-Length: 1000\r\n\r\n0123456789")
+	response, err := http.ReadResponse(zeroClient.reader, nil)
+	if err != nil {
+		t.Fatalf("a stalled body with no LingeringTimeout: no answer: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden || !response.Close {
+		t.Errorf("a stalled body with no LingeringTimeout = %d, Connection close %t; want 403 with Connection: close", response.StatusCode, response.Close)
 	}
 
 	client := dialTestServerH1Client(t, server.Listener.Addr().String())

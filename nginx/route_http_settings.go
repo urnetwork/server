@@ -22,11 +22,16 @@ import (
 // ServerHeaderBytesMultiple times MaxRequestHeadersTotalBytes, so the
 // handler sees every head nginx would answer with a 414 or 400 instead of Go
 // answering 431. It sets no WriteTimeout, which would cut a stream
-// SendTimeout lets live.
-// KeepaliveRequests and KeepaliveTime, which Go's server lacks, are applied
-// per connection, from state ConfigureServer attaches. Of nginx's lingering
-// close, LingeringTimeout bounds the reads Go's server makes of an unread
-// body before an early refusal (the forwarder's refuse).
+// SendTimeout lets live. KeepaliveRequests and KeepaliveTime, which Go's
+// server lacks, are applied per connection, from state ConfigureServer
+// attaches.
+//
+// Of nginx's lingering close only LingeringTimeout applies: Go's h1 server
+// has no lingering_time. nginx answers a request whose body is unread at
+// once, then reads and discards the body for up to lingering_time, 30 s.
+// Go's reads up to 256 KiB of it before the answer, which LingeringTimeout
+// bounds; when more is left, or that read is cut, it closes the connection
+// 500 ms after the answer, reading nothing more (LBALT-IMPL.md §4).
 type HttpSettings struct {
 	// how long a new connection has for its TLS handshake, request line and
 	// headers, and a keepalive connection for a request's headers once they
@@ -78,14 +83,11 @@ type HttpSettings struct {
 	// `http2_max_concurrent_streams 128`. Each stream counts against the
 	// address's concurrency limit (D8). Non-positive leaves Go's default.
 	Http2MaxConcurrentStreams int
-	// after an error response sent before the body was read, such as a 413,
-	// how long the front keeps reading and discarding the body so the client
-	// can read the response: nginx's default `lingering_time 30s`.
-	// Non-positive closes at once.
-	LingeringTime time.Duration
-	// the longest wait between two reads while lingering: nginx's default
-	// `lingering_timeout 5s`. Non-positive means no bound within
-	// LingeringTime.
+	// on h1, the longest Go's server may spend reading a body the request
+	// left unread before an early answer, the front's own or the forwarder's
+	// refusal: nginx's default `lingering_timeout 5s`, its bound on each
+	// lingering read. A read it cuts has the connection closed after the
+	// answer. Non-positive cuts that read at once.
 	LingeringTimeout time.Duration
 	// how long a drain lets accepted requests and forwarded websockets run
 	// before they are cut: nginx's `worker_shutdown_timeout 60m`, the same as
@@ -125,7 +127,6 @@ func DefaultHttpSettings() *HttpSettings {
 		MaxRequestHeadersTotalBytes: 8 * 8 * 1024,
 		ServerHeaderBytesMultiple:   2,
 		Http2MaxConcurrentStreams:   128,
-		LingeringTime:               30 * time.Second,
 		LingeringTimeout:            5 * time.Second,
 		DrainTimeout:                60 * time.Minute,
 		ForcedCloseTimeout:          30 * time.Second,
