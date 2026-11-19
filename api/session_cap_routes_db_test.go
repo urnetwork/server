@@ -11,6 +11,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -170,9 +171,15 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 			server.Raise(err)
 			return signed, claims
 		}
+		// each code from its own address: a code's creation counts as a sign-in
+		// attempt of its address, which only a verify from that address clears
+		codes := 0
 		verify := func(name string, authorization string) *session.ByJwt {
 			t.Helper()
-			code, err := model.AuthVerifyCreateCode(model.AuthVerifyCreateCodeArgs{UserAuth: userAuth}, session.Testing_CreateClientSession(ctx, nil))
+			codes += 1
+			creator := session.Testing_CreateClientSession(ctx, nil)
+			creator.ClientAddress = fmt.Sprintf("198.51.100.%d:443", codes)
+			code, err := model.AuthVerifyCreateCode(model.AuthVerifyCreateCodeArgs{UserAuth: userAuth}, creator)
 			server.Raise(err)
 			var verified model.AuthVerifyResult
 			fixture.call(t, http.MethodPost, "/auth/verify", authorization, map[string]any{"user_auth": userAuth, "verify_code": *code.VerifyCode}, http.StatusOK, &verified)
