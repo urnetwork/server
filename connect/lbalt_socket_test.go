@@ -2,8 +2,9 @@ package connect
 
 // The lb_alt front's public udp sockets under loss and failure, with real
 // clients and a real exchange (LBALT.md D13, D22, §4.4.4, §9 "Carriers"):
-// a lost socket is rebuilt on its own while its siblings serve, and a socket
-// survives datagrams it can't write.
+// a lost socket is rebuilt on its own while its siblings serve, a socket
+// survives datagrams it can't write, and a sibling never resets a connection
+// it doesn't hold.
 
 import (
 	"context"
@@ -214,15 +215,18 @@ func TestLbAltUdpSocketsSurviveDatagramsTheyCannotWrite(t *testing.T) {
 }
 
 // A QUIC connection whose packets reach a sibling socket of its group, as a
-// re-creation moves most of a group's flows (D22) and a NAT rebinding moves
-// one (D10), is told at once with a stateless reset, so its client
-// reconnects rather than waiting out its idle timeout: every transport of
-// the block derives reset tokens from one key, so a socket that never saw the
-// connection answers with the token the connection's own socket advertised.
-// Here the group is narrowed to one socket, the connection made on it, and
-// the socket lost after a sibling is back, so the next packet can only reach
-// the sibling.
-func TestLbAltQuicTellsAMovedConnectionWithAStatelessReset(t *testing.T) {
+// re-creation moves most of a group's flows (D22), is never answered with a
+// stateless reset: the sibling doesn't hold the connection and keeps no reset
+// key, so it stays silent, the connection ends by its idle timeout, and the
+// client then connects again through the group, the one reconnect D22 (a)
+// accepts. Transports that shared one key would each answer a connection they
+// don't hold with that connection's own token, so anyone who saw a connection
+// id could fetch its token from another socket of the block, or from the same
+// port by another source port, and end the connection with it (RFC 9000
+// §21.11). Here the group is narrowed to one socket, the connection made on
+// it, and the socket lost after a sibling is back, so the connection's next
+// packets can only reach the sibling.
+func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, &testLbAltEnvSettings{
 			frontSettings: func(settings *FrontServerSettings) {
@@ -244,8 +248,9 @@ func TestLbAltQuicTellsAMovedConnectionWithAStatelessReset(t *testing.T) {
 		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
 
 		quicConfig := testLbAltClientQuicConfig()
-		// a connection nobody tells ends here instead
-		quicConfig.MaxIdleTimeout = 20 * time.Second
+		// the moved connection ends here unless a reset ends it first, which
+		// would come within a round trip of its next packet
+		quicConfig.MaxIdleTimeout = 10 * time.Second
 		conn, err := env.dialQuicFrom(
 			env.clientPacketConn(address),
 			address,
@@ -266,17 +271,27 @@ func TestLbAltQuicTellsAMovedConnectionWithAStatelessReset(t *testing.T) {
 		hold.waitWaiting(t, socketsPerPort-1)
 		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
 
-		// a packet of data: quic-go answers no packet as small as a stateless
-		// reset with one
+		// packets of data, each larger than a stateless reset, which quic-go
+		// answers with one when its transport has a reset key; a connection
+		// already ended fails here rather than passing below
 		stream, err := conn.OpenStream()
 		if err != nil {
 			t.Fatal(err)
 		}
-		stream.Write(make([]byte, 1024))
-		testLbAltWait(t, conn.Context().Done(), "the moved connection's end")
-		var resetErr *quic.StatelessResetError
-		if err := context.Cause(conn.Context()); !errors.As(err, &resetErr) {
-			t.Fatalf("the moved connection ended with %v, want a stateless reset", err)
+		if _, err := stream.Write(make([]byte, 1024)); err != nil {
+			t.Fatal(err)
 		}
+		testLbAltWait(t, conn.Context().Done(), "the moved connection's end")
+		var idleTimeoutErr *quic.IdleTimeoutError
+		if err := context.Cause(conn.Context()); !errors.As(err, &idleTimeoutErr) {
+			t.Fatalf("the moved connection ended with %v, want its idle timeout", err)
+		}
+
+		// the client connects again, through the group's live socket
+		reconnected, err := env.dialQuic(address, frontPortQuic, testLbAltApiName, []string{http3.NextProtoH3})
+		if err != nil {
+			t.Fatalf("the reconnect: %v", err)
+		}
+		reconnected.CloseWithError(0, "")
 	})
 }
