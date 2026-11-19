@@ -332,8 +332,8 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 
 // The h3 server of one api connection, with nginx's client limits: the
 // keepalive timeout as the h3 idle timeout, nginx's header buffers, and the
-// client header timeout as the bound on each request stream's HEADERS, as
-// the tcp servers' ReadHeaderTimeout bounds a request's headers there.
+// client header timeout as the bound on each request stream's HEADERS. The
+// public tcp listeners apply the same setting to h1 and h2 request headers.
 func (self *frontServer) newApiServer(handler http.Handler) *http3.Server {
 	httpSettings := self.settings.Front.Http
 	return &http3.Server{
