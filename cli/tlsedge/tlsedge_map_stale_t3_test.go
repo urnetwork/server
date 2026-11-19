@@ -15,8 +15,12 @@ package main
 //   - the stopped lb restarted loads the current version before it serves 443, passes the next round, and the host
 //     turns ready.
 //
-// What waits: map-stale past 20 min and its page on a fake clock, nginx -t refusing a map, a false report and a dropped
-// host, and TLS-ALPN-01 orders waiting on host_ready (TLS-M6-05's orderer). The test steps on lbmap's reports and the
+//   - with nginx -t refusing the config, a host added stays out of the split, lbmap reporting the version nginx still
+//     runs, and the host stays pending naming the interface; once nginx -t passes again lbmap loads it and it turns
+//     ready.
+//
+// What waits: map-stale past 20 min and its page on a fake clock, a false report and a dropped host, and TLS-ALPN-01
+// orders waiting on host_ready (TLS-M6-05's orderer). The test steps on lbmap's reports and the
 // API's answers; the probes' hellos are the only traffic, sent as the edge would.
 
 import (
@@ -24,6 +28,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"os"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -169,6 +175,66 @@ func TestT3Fs122AHostAddedWhileOneInterfaceIsDownStaysPendingNamingIt(t *testing
 			t.Fatal("the restarted interface did not route the new host from its first connection")
 		}
 		api.probeRound(t, world, splits, []string{second})
+		t3SplitAwaitReady(t, world, second)
+	})
+}
+
+// FS-122's nginx -t clause: while the config nginx -t reads is one it refuses, lbmap keeps the map nginx runs and reports
+// that version, so a host added then reaches the http branch and stays pending naming the interface; once nginx -t
+// passes again lbmap loads the version, the host routes, passes its probe and turns ready.
+func TestT3Fs122AMapNginxRefusesKeepsTheHostPending(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		world := newT3EdgeWorld(t, nil)
+		first, second := t3CustomHost(t, "app"), t3CustomHost(t, "shop")
+		api := newT3SplitApi(t, world, []string{t3SplitInterface})
+		version := world.mapCustomHost(first)
+		world.reloadNames()
+		split := newT3SplitOn(t, world, api, t3SplitInterface, []string{first, second})
+		split.startLb(version)
+		api.probeRound(t, world, []*t3Split{split}, []string{first})
+		t3SplitAwaitReady(t, world, first)
+
+		// the config breaks under nginx: lbmap's nginx -t refuses every load from here
+		config, err := os.ReadFile(split.configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(split.configPath, append(slices.Clone(config), []byte("\nthis_is_no_directive on;\n")...), 0644); err != nil {
+			t.Fatal(err)
+		}
+		reportCount := len(split.reports.reported())
+		refused := world.mapCustomHost(second)
+		world.reloadNames()
+		// a report follows the failed load, still naming the version nginx runs
+		guard := time.Now().Add(t3EdgeGuardTimeout)
+		for len(split.reports.reported()) <= reportCount {
+			if time.Now().After(guard) {
+				t.Fatal("lbmap reported nothing after the refused load")
+			}
+			runtime.Gosched()
+		}
+		if reported := split.reports.reported(); reported[len(reported)-1] != version {
+			t.Fatalf("lbmap reported %v with nginx -t refusing %d", reported, refused)
+		}
+		if !split.reachesPlatform(second) {
+			t.Fatal("a host nginx -t refused routed")
+		}
+		api.probeRound(t, world, []*t3Split{split}, []string{second})
+		if row := t3SplitReadiness(t, world, second); row.ReadyTime != nil || !slices.Equal(row.PendingInterfaces, []string{t3SplitInterface}) {
+			t.Fatalf("the refused host: %+v", row)
+		}
+
+		// nginx -t passes again: lbmap loads the version on its next try
+		if err := os.WriteFile(split.configPath, config, 0644); err != nil {
+			t.Fatal(err)
+		}
+		split.reports.await(t, refused)
+		if !split.reachesDevice(second, []string{"h2"}, split.customPool) {
+			t.Fatal("the host did not route once nginx -t passed")
+		}
+		api.probeRound(t, world, []*t3Split{split}, []string{second})
 		t3SplitAwaitReady(t, world, second)
 	})
 }

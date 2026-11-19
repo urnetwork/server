@@ -362,6 +362,8 @@ type t3Split struct {
 	// the dns API, shared with the world's other splits, and this interface's name in its inventory
 	api           *t3SplitApi
 	interfaceName string
+	// the config the lb's nginx runs and lbmap's nginx -t reads
+	configPath string
 	// the lb binary and the environment it runs in
 	lb  string
 	env []string
@@ -534,7 +536,8 @@ func newT3SplitOn(t testing.TB, world *t3EdgeWorld, api *t3SplitApi, interfaceNa
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(prefixDir, interfaceName+".conf"), config.Bytes(), 0644); err != nil {
+	split.configPath = filepath.Join(prefixDir, interfaceName+".conf")
+	if err := os.WriteFile(split.configPath, config.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
 
