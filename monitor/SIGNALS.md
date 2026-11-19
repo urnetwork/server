@@ -42387,10 +42387,10 @@ of the ten lb interfaces, quic on 443 and dns on 53 and 4053, which is 60
 rows; four workers; five seconds per attempt, which the transport applies
 whatever its caller's deadline, which the monitor's command timeout, 60 s by
 default, also caps on a native attempt, and which is also the QUIC handshake
-and idle timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and 1 MiB in
-each direction; QUIC receive windows of 16 KiB per stream and 32 KiB per
-connection, which never grow; and 16 KiB each for a `/hello` answer's header
-and body. A pass hands one instance to the matrix, the transport and the
+and idle timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and
+1 MiB in each direction; QUIC receive windows of 16 KiB per stream and 32 KiB
+per connection, which never grow; and 16 KiB each for a `/hello` answer's
+header and body. A pass hands one instance to the matrix, the transport and the
 findings, so a tuned budget bounds the wire and the validation of the counts
 the transport reports alike. Settings without a positive attempt timeout and
 positive wire budgets refuse the whole matrix (`probe-settings`) before any
