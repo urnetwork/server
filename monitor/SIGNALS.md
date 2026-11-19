@@ -13129,6 +13129,26 @@ cannot clear a prior invariant PAGE. The retained selection observation remains
 incomplete with no invented outcome rows. Require exact query/source authority
 and independent producer/policy evidence to distinguish these boundaries.
 
+At 01:27 UTC on 2026-11-19 the monitor reported
+`reason=invalid-source-response` and zero paired processes across 20 expected
+slots. That monitor retained only the whole-response verdict. A separate
+picker query in the same drain cannot identify which selection check failed.
+
+When the parser rejects a response, the warning and selection JSONL include
+`source_rejection`, the first parser check that failed. The possible checks
+are `byte-limit`, `json-decode`, `response-status`, `result-type`,
+`response-annotations` (warnings or infos), `row-limit`, `sample-decode`,
+`evaluation-time`, `sample-value`, `process-scope`, `process-identity`,
+`cohort-labels`, `outcome-reason`, `series-field` and `duplicate-cell`. The
+HTTP reader enforces the byte limit before parsing and reports
+`mimir_query_phase=response-bound` for an oversized body.
+
+One invalid row discards the entire response, including valid rows from other
+processes. Zero paired processes then describes the monitor's evidence. A
+healthy quiet window has complete coverage and no rejection field. Additional
+defects can be hidden behind the first failed check. Use the two complete
+post-convergence windows and independent route outcome below to verify recovery.
+
 `-provider-selection-output <path>` appends one JSONL observation for every
 existing probe execution, including qualified nonempty/quiet windows and
 source-unavailable windows. It adds no source query. Each record retains the
