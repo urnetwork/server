@@ -16,7 +16,10 @@ package connect
 // WebSocket, H1+, H3 and whodis carriers, and the api's alt h3 and whodis
 // dialers. Each is pointed at the front's public sockets the way a client
 // reaches an interface: it presents the served name, and only the address it
-// dials is the interface's bridge address, standing in for the DNAT.
+// dials is the interface's bridge address, standing in for the DNAT. A test
+// that checks the address the front sees a client at binds the client's
+// sockets to the loopback of the family it dials (testLbAltClientAddress),
+// which is not the interface's address where that is 127.0.0.2.
 //
 // Two layouts, since a darwin host can bind only 127.0.0.1 and ::1 on
 // loopback, and the upstream address may be no interface's:
@@ -708,19 +711,39 @@ func (self *testLbAltEnv) clientTlsConfig(serverName string, nextProtos []string
 	}
 }
 
-// A udp client socket of address's family on loopback, closed with the test.
+// The address a client's socket binds for a dial to address, and so the
+// address the front accepts the client from: the loopback of address's
+// family. That is the interface's own address only where the interface is on
+// 127.0.0.1 or ::1, so a test compares a client address the front reports
+// with this, never with the address dialed. Unbound, the socket would leave
+// from whatever source the host picks: 127.0.0.1 for 127.0.0.2 on Linux, a
+// loopback alias itself on darwin.
+func testLbAltClientAddress(address netip.Addr) netip.Addr {
+	if address.Is6() {
+		return netip.IPv6Loopback()
+	}
+	return netip.AddrFrom4([4]byte{127, 0, 0, 1})
+}
+
+// A udp client socket of address's family, bound to testLbAltClientAddress.
+func testLbAltListenClientPacket(address netip.Addr) (*net.UDPConn, error) {
+	network := "udp4"
+	if address.Is6() {
+		network = "udp6"
+	}
+	return net.ListenUDP(network, net.UDPAddrFromAddrPort(netip.AddrPortFrom(testLbAltClientAddress(address), 0)))
+}
+
+// A udp client socket of address's family, bound to testLbAltClientAddress,
+// closed with the test.
 func (self *testLbAltEnv) clientPacketConn(address netip.Addr) *net.UDPConn {
 	self.t.Helper()
-	network, local := "udp4", "127.0.0.1:0"
-	if address.Is6() {
-		network, local = "udp6", "[::1]:0"
-	}
-	packetConn, err := net.ListenPacket(network, local)
+	packetConn, err := testLbAltListenClientPacket(address)
 	if err != nil {
 		self.t.Fatal(err)
 	}
 	self.t.Cleanup(func() { packetConn.Close() })
-	return packetConn.(*net.UDPConn)
+	return packetConn
 }
 
 // One network with one device and client: the client's jwt for connect, and
@@ -814,10 +837,11 @@ func testLbAltClientSettings() *connect.ClientSettings {
 
 // How a client reaches the front on one carrier: the platform url names the
 // connect name and the public https port; the strategy's tcp dial goes to the
-// interface address's https socket, and the h3 carriers' packets to its quic
-// or whodis socket (PlatformTransportSettings.AltUrl), the name staying the
-// sni. Returns the platform url and the settings of the client's strategy and
-// transport, new on each call.
+// interface address's https socket from testLbAltClientAddress, and the h3
+// carriers' packets to its quic or whodis socket
+// (PlatformTransportSettings.AltUrl), the name staying the sni. Returns the
+// platform url and the settings of the client's strategy and transport, new
+// on each call.
 func (self *testLbAltEnv) clientDialSettings(carrier testLbAltCarrier, dial *testLbAltDial) (string, *connect.ClientStrategySettings, *connect.PlatformTransportSettings) {
 	strategySettings := connect.DefaultClientStrategySettings()
 	strategySettings.EnableResilient = false
@@ -827,9 +851,12 @@ func (self *testLbAltEnv) clientDialSettings(carrier testLbAltCarrier, dial *tes
 		RootCAs: self.roots,
 	}
 	httpsTarget := self.bindAddress(dial.address, frontPortHttps).String()
+	clientAddress := net.TCPAddrFromAddrPort(netip.AddrPortFrom(testLbAltClientAddress(dial.address), 0))
 	strategySettings.ConnectSettings.DialContextSettings = &connect.DialContextSettings{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-			dialer := &net.Dialer{}
+			dialer := &net.Dialer{
+				LocalAddr: clientAddress,
+			}
 			return dialer.DialContext(ctx, "tcp", httpsTarget)
 		},
 	}

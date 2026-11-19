@@ -9,6 +9,7 @@ package connect
 import (
 	"encoding/json"
 	"net/http"
+	"net/netip"
 	"slices"
 	"testing"
 
@@ -43,17 +44,19 @@ func TestLbAltCarriersAuthenticateAndExchangeMessagesBothWays(t *testing.T) {
 			clientB := env.newClient(env.newPeer("b"), pair.carrierB, &testLbAltDial{address: addressB})
 			for _, c := range []struct {
 				client  *testLbAltClient
-				address string
+				address netip.Addr
 			}{
-				{client: clientA, address: addressA.String()},
-				{client: clientB, address: addressB.String()},
+				{client: clientA, address: addressA},
+				{client: clientB, address: addressB},
 			} {
 				edge := env.waitResidentEdge(c.client.peer.clientId)
 				if edge.Carrier != c.client.carrier.residentCarrier {
 					t.Fatalf("pair %d: %s reached its resident as carrier %d, want %d", i, c.client.carrier.name, edge.Carrier, c.client.carrier.residentCarrier)
 				}
-				if edge.ClientIp.String() != c.address {
-					t.Fatalf("pair %d: %s's resident saw the client at %s, want %s", i, c.client.carrier.name, edge.ClientIp, c.address)
+				// the h3 carriers' own sockets bind no address, and a dial to
+				// 127.0.0.1 or ::1, as both addresses here are, leaves from it
+				if edge.ClientIp != testLbAltClientAddress(c.address) {
+					t.Fatalf("pair %d: %s's resident saw the client at %s, want %s", i, c.client.carrier.name, edge.ClientIp, testLbAltClientAddress(c.address))
 				}
 				h1Snapshot := c.client.h1Stats.Snapshot()
 				switch c.client.carrier {

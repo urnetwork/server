@@ -177,7 +177,7 @@ func (self *testLbAltProxyPrefixConn) WriteTo(p []byte, addr net.Addr) (int, err
 // claiming another address never completes a handshake, in either family;
 // one that opens TCP 443 or 80 with a PROXY line fails its TLS handshake or
 // gets a 400. A real client on the same sockets connects, and its resident
-// sees its own address, never the claimed one.
+// sees it at the address its socket binds, never the claimed one.
 func TestLbAltPublicSocketsDoNotHonorAProxyHeader(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, nil)
@@ -246,10 +246,16 @@ func TestLbAltPublicSocketsDoNotHonorAProxyHeader(t *testing.T) {
 			}
 
 			// a real client on the same sockets connects as itself
-			client := env.newClient(env.newPeer("plain"), testLbAltCarrierQuic, &testLbAltDial{address: interfaceAddress.address})
+			sourceConns := &testLbAltSourceConns{
+				address: interfaceAddress.address,
+			}
+			client := env.newClient(env.newPeer("plain"), testLbAltCarrierQuic, &testLbAltDial{
+				address:           interfaceAddress.address,
+				packetConnFactory: sourceConns.newPacketConn,
+			})
 			edge := env.waitResidentEdge(client.peer.clientId)
-			if edge.ClientIp != interfaceAddress.address {
-				t.Fatalf("%s: the resident saw the client at %s", interfaceAddress.address, edge.ClientIp)
+			if edge.ClientIp != testLbAltClientAddress(interfaceAddress.address) {
+				t.Fatalf("%s: the resident saw the client at %s, want %s", interfaceAddress.address, edge.ClientIp, testLbAltClientAddress(interfaceAddress.address))
 			}
 			if result := env.nextQuicResult(); result != frontPortQuic+" "+frontQuicResultConnect {
 				t.Fatalf("%s: the real client counted %q", interfaceAddress.address, result)
@@ -262,8 +268,8 @@ func TestLbAltPublicSocketsDoNotHonorAProxyHeader(t *testing.T) {
 // The ingress headers a client sends on TCP 443 are not honored (§4.4.2):
 // connect's H1 path resolves a client from X-UR-Forwarded-For, which the
 // front derives from the accepted peer, so a real client that sends its own
-// X-UR-Forwarded-For and X-Forwarded-For still reaches its resident as
-// itself, on the websocket and on H1+.
+// X-UR-Forwarded-For and X-Forwarded-For still reaches its resident at the
+// address its socket binds, on the websocket and on H1+.
 func TestLbAltH1IngressHeadersComeFromTheAcceptedPeer(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, nil)
@@ -278,8 +284,8 @@ func TestLbAltH1IngressHeadersComeFromTheAcceptedPeer(t *testing.T) {
 					},
 				})
 				edge := env.waitResidentEdge(client.peer.clientId)
-				if edge.ClientIp != interfaceAddress.address {
-					t.Fatalf("%s %s: the resident saw the client at %s", interfaceAddress.address, carrier.name, edge.ClientIp)
+				if edge.ClientIp != testLbAltClientAddress(interfaceAddress.address) {
+					t.Fatalf("%s %s: the resident saw the client at %s, want %s", interfaceAddress.address, carrier.name, edge.ClientIp, testLbAltClientAddress(interfaceAddress.address))
 				}
 				client.close()
 			}

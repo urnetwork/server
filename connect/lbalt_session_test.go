@@ -33,13 +33,10 @@ type testLbAltSourceConns struct {
 	sourceConns []*testLbAltSourceConn
 }
 
-// H3PacketConnFactory: a loopback socket of the address's family.
+// H3PacketConnFactory: a socket of the address's family, bound to
+// testLbAltClientAddress.
 func (self *testLbAltSourceConns) newPacketConn(ctx context.Context) (net.PacketConn, error) {
-	network, local := "udp4", "127.0.0.1:0"
-	if self.address.Is6() {
-		network, local = "udp6", "[::1]:0"
-	}
-	packetConn, err := net.ListenPacket(network, local)
+	packetConn, err := testLbAltListenClientPacket(self.address)
 	if err != nil {
 		return nil, err
 	}
@@ -69,8 +66,10 @@ func (self *testLbAltSourceConns) readSources() map[netip.AddrPort]int {
 // address and the whodis port. That is what conntrack needs to restore the
 // public 53 or 4053 of the DNAT on each reply (§4.1); in process there is no
 // DNAT, and both public ports reach this one socket. A socket bound to a
-// wildcard would answer from whichever source routing picks. The quic socket
-// answers the same way.
+// wildcard would answer from whichever source routing picks, on Linux
+// 127.0.0.1 for a client that dialed 127.0.0.2. The quic socket answers the
+// same way. The resident sees each client at the address its socket binds
+// (testLbAltClientAddress), not at the interface's.
 func TestLbAltUdpRepliesComeFromTheAddressAndPortTheClientDialed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, nil)
@@ -93,8 +92,8 @@ func TestLbAltUdpRepliesComeFromTheAddressAndPortTheClientDialed(t *testing.T) {
 					packetConnFactory: sourceConns.newPacketConn,
 				})
 				other := env.newClient(env.newPeer("other"), testLbAltCarrierWebSocket, &testLbAltDial{address: otherAddress})
-				if edge := env.waitResidentEdge(client.peer.clientId); edge.Carrier != c.carrier.residentCarrier || edge.ClientIp != interfaceAddress.address {
-					t.Fatalf("%s %s: edge %+v", interfaceAddress.address, c.carrier.name, edge)
+				if edge := env.waitResidentEdge(client.peer.clientId); edge.Carrier != c.carrier.residentCarrier || edge.ClientIp != testLbAltClientAddress(interfaceAddress.address) {
+					t.Fatalf("%s %s: edge %+v, want the client at %s", interfaceAddress.address, c.carrier.name, edge, testLbAltClientAddress(interfaceAddress.address))
 				}
 				testLbAltExchangeMessages(t, client, other, 4)
 
