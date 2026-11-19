@@ -135,13 +135,17 @@ func TestPublicUdpObservationAuthorityCannotBeForgedByPartialEvidence(t *testing
 		func(observed *PublicUdpObservation) { observed.NegotiatedProtocol = "" },
 		func(observed *PublicUdpObservation) { observed.ReceivedPackets = 0 },
 		func(observed *PublicUdpObservation) { observed.SentBytes = 0 },
-		func(observed *PublicUdpObservation) { observed.UnexpectedPackets = publicUdpMaxPackets },
-		func(observed *PublicUdpObservation) { observed.SentBytes = publicUdpMaxBytes + 1 },
+		func(observed *PublicUdpObservation) {
+			observed.UnexpectedPackets = DefaultPublicUdpProbeSettings().MaxPacketCount
+		},
+		func(observed *PublicUdpObservation) {
+			observed.SentBytes = DefaultPublicUdpProbeSettings().MaxByteCount + 1
+		},
 		func(observed *PublicUdpObservation) { observed.Failure = PublicUdpFailure("synthetic-private-error") },
 	} {
 		observed := publicUdpTestHealthy(request)
 		mutate(&observed)
-		findings := publicUdpFindings(request, observed, nil)
+		findings := publicUdpFindings(request, observed, nil, DefaultPublicUdpProbeSettings())
 		if len(findings) != 1 || findings[0].healthy || findings[0].class != "public-udp-observation" {
 			t.Fatal("partial, stale or contradictory evidence claimed an authenticated exact return path")
 		}

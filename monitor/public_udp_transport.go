@@ -1,3 +1,8 @@
+// The native transport of the public UDP probe (public_udp.go): per attempt,
+// one fresh UDP socket whose packet boundary admits only the pinned tuple,
+// an authenticated QUIC handshake over the row's carrier, and for a connect
+// api front one GET /hello over HTTP/3. Every bound comes from the pass's
+// PublicUdpProbeSettings.
 package monitor
 
 import (
@@ -15,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -35,10 +41,13 @@ var errPublicUdpBudget = errors.New("public UDP wire budget exhausted")
 
 // The packet boundary is below DNS translation and QUIC. It never passes a
 // datagram from a different wire tuple upward, even if its payload looks valid.
-// Locks protect bookkeeping only, never a blocking transport operation.
+// Its wire budgets are the attempt's settings, the same the findings validate
+// its counts against. Locks protect bookkeeping only, never a blocking
+// transport operation.
 type publicUdpPacketConn struct {
 	net.PacketConn
-	peer netip.AddrPort
+	peer     netip.AddrPort
+	settings *PublicUdpProbeSettings
 
 	stateLock       sync.Mutex
 	sentPackets     int
@@ -78,7 +87,7 @@ func (self *publicUdpPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) 
 		accepted, exhausted := func() (bool, bool) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if n < 0 || n > len(datagram) || self.reads >= publicUdpMaxPackets || publicUdpMaxBytes-self.readBytes < n {
+			if n < 0 || n > len(datagram) || self.reads >= self.settings.MaxPacketCount || self.settings.MaxByteCount-self.readBytes < n {
 				self.failure = PublicUdpFailureBudget
 				return false, true
 			}
@@ -110,7 +119,7 @@ func (self *publicUdpPacketConn) WriteTo(buffer []byte, address net.Addr) (int, 
 	exhausted := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		if self.writes >= publicUdpMaxPackets || publicUdpMaxBytes-self.writeBytes < len(buffer) {
+		if self.writes >= self.settings.MaxPacketCount || self.settings.MaxByteCount-self.writeBytes < len(buffer) {
 			self.failure = PublicUdpFailureBudget
 			return true
 		}
@@ -157,9 +166,16 @@ func publicUdpRouteError(err error) bool {
 		errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT)
 }
 
-func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest) (PublicUdpObservation, error) {
-	timeout := publicUdpAttemptTimeout
-	if self.cfg.commandTimeout > 0 && self.cfg.commandTimeout < timeout {
+// The native adapter: one attempt under the settings' attempt timeout, or the
+// runner's command timeout when that is shorter. Missing settings, or a
+// non-positive attempt timeout, expire the attempt at its start, and the
+// transport refuses them as configuration before it reads that context.
+func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest, settings *PublicUdpProbeSettings) (PublicUdpObservation, error) {
+	var timeout time.Duration
+	if settings != nil {
+		timeout = settings.AttemptTimeout
+	}
+	if 0 < self.cfg.commandTimeout && self.cfg.commandTimeout < timeout {
 		timeout = self.cfg.commandTimeout
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -167,7 +183,7 @@ func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest) (Pu
 	listen := func(ctx context.Context, network string, address string) (net.PacketConn, error) {
 		return (&net.ListenConfig{}).ListenPacket(ctx, network, address)
 	}
-	return observePublicUdp(attemptCtx, request, DefaultPublicUdpApiRequestSettings(), listen, nil)
+	return observePublicUdp(attemptCtx, request, settings, listen, nil)
 }
 
 // Test seams supply a private packet network and trust roots, not a different
@@ -182,15 +198,24 @@ func (self *runner) publicUdp(ctx context.Context, request PublicUdpRequest) (Pu
 // 200 with a JSON body in the api's shape completes the request, and anything
 // else is a fixed application failure. The h3 client lets the server open its
 // control and QPACK streams, which the handshake-only fronts never allow.
+//
+// The settings bound the whole attempt: the wire budgets, the QUIC timeouts
+// and the /hello answer. Settings that bound nothing are refused before the
+// context is read, since a non-positive timeout expires the attempt at its
+// start, which is a configuration fact and never a timeout.
 func observePublicUdp(
 	ctx context.Context,
 	request PublicUdpRequest,
-	apiRequestSettings *PublicUdpApiRequestSettings,
+	settings *PublicUdpProbeSettings,
 	listen func(context.Context, string, string) (net.PacketConn, error),
 	roots *x509.CertPool,
 ) (observation PublicUdpObservation, resultErr error) {
 	observation.AttemptId = request.AttemptId
 	observation.RequestedTuple = publicUdpTuple(request)
+	if !publicUdpProbeSettingsValid(settings) {
+		observation.Failure = PublicUdpFailureConfiguration
+		return observation, errors.New("public UDP probe settings invalid")
+	}
 	if err := ctx.Err(); err != nil {
 		return observation, err
 	}
@@ -204,8 +229,8 @@ func observePublicUdp(
 		observation.Failure = PublicUdpFailureConfiguration
 		return observation, errors.New("public UDP request authority invalid")
 	}
-	apiRequest := request.Service == "connect" && request.Front == "api"
-	if apiRequest && (apiRequestSettings == nil || apiRequestSettings.ResponseBodyByteLimit <= 0) {
+	apiRequest := publicUdpCompletesApiRequest(request)
+	if apiRequest && settings.ApiRequest.ResponseBodyByteLimit <= 0 {
 		observation.Failure = PublicUdpFailureConfiguration
 		return observation, errors.New("public UDP api request bounds invalid")
 	}
@@ -222,7 +247,7 @@ func observePublicUdp(
 		return observation, errors.New("public UDP socket unavailable")
 	}
 	observation.FreshSocket = true
-	wire := &publicUdpPacketConn{PacketConn: raw, peer: peer}
+	wire := &publicUdpPacketConn{PacketConn: raw, peer: peer, settings: settings}
 	var packets net.PacketConn = wire
 	var transport *quic.Transport
 	var connection *quic.Conn
@@ -271,7 +296,7 @@ func observePublicUdp(
 		tlsConfig.NextProtos = []string{http3.NextProtoH3}
 	}
 	quicConfig := &quic.Config{
-		HandshakeIdleTimeout: publicUdpAttemptTimeout, MaxIdleTimeout: publicUdpAttemptTimeout,
+		HandshakeIdleTimeout: settings.AttemptTimeout, MaxIdleTimeout: settings.AttemptTimeout,
 		InitialPacketSize:          connectcore.H3InitialPacketByteCount,
 		InitialStreamReceiveWindow: 16 * 1024, MaxStreamReceiveWindow: 16 * 1024,
 		InitialConnectionReceiveWindow: 32 * 1024, MaxConnectionReceiveWindow: 32 * 1024,
@@ -324,7 +349,7 @@ func observePublicUdp(
 	apiTransport := &http3.Transport{
 		// an encoded body could exceed the byte bound only once decoded
 		DisableCompression:     true,
-		MaxResponseHeaderBytes: apiRequestSettings.ResponseHeaderByteLimit,
+		MaxResponseHeaderBytes: settings.ApiRequest.ResponseHeaderByteLimit,
 	}
 	response, err := apiTransport.NewClientConn(connection).RoundTrip(apiHttpRequest)
 	if err != nil {
@@ -333,7 +358,7 @@ func observePublicUdp(
 		}
 		return observation, errors.New("public UDP api request incomplete")
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, int64(apiRequestSettings.ResponseBodyByteLimit)+1))
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(settings.ApiRequest.ResponseBodyByteLimit)+1))
 	response.Body.Close()
 	observation.ApplicationStatus = response.StatusCode
 	observation.ApplicationContentTypeJson = publicUdpJsonContentType(response.Header)
@@ -348,7 +373,7 @@ func observePublicUdp(
 	// The address is the observer's own, read only for its shape and never
 	// retained.
 	apiResponseValid := func() bool {
-		if apiRequestSettings.ResponseBodyByteLimit < len(body) {
+		if settings.ApiRequest.ResponseBodyByteLimit < len(body) {
 			return false
 		}
 		fields := map[string]json.RawMessage{}

@@ -50,7 +50,7 @@ func publicUdpTestSocketPair(client string, server string) (*publicUdpTestSocket
 	newSocket := func(address string) *publicUdpTestSocket {
 		return &publicUdpTestSocket{
 			address:  net.UDPAddrFromAddrPort(netip.MustParseAddrPort(address)),
-			incoming: make(chan publicUdpTestPacket, publicUdpMaxPackets+1),
+			incoming: make(chan publicUdpTestPacket, DefaultPublicUdpProbeSettings().MaxPacketCount+1),
 			closed:   make(chan struct{}), wrote: make(chan struct{}), changed: make(chan struct{}),
 		}
 	}
@@ -183,7 +183,7 @@ type publicUdpTestNativeOptions struct {
 	// completes handshakes
 	api http.Handler
 	// nil takes the defaults
-	apiRequestSettings *PublicUdpApiRequestSettings
+	probeSettings *PublicUdpProbeSettings
 	// the attempt's own context; nil runs it under the fixture's bound
 	attemptCtx context.Context
 }
@@ -195,9 +195,9 @@ type publicUdpTestNativeOptions struct {
 func publicUdpTestNativeAttempt(t *testing.T, request PublicUdpRequest, options publicUdpTestNativeOptions) (PublicUdpObservation, error) {
 	t.Helper()
 	trusted, api := options.trusted, options.api
-	apiRequestSettings := options.apiRequestSettings
-	if apiRequestSettings == nil {
-		apiRequestSettings = DefaultPublicUdpApiRequestSettings()
+	probeSettings := options.probeSettings
+	if probeSettings == nil {
+		probeSettings = DefaultPublicUdpProbeSettings()
 	}
 	clientAddress := "198.51.100.20:42000"
 	if request.Family == "ipv6" {
@@ -288,7 +288,7 @@ func publicUdpTestNativeAttempt(t *testing.T, request PublicUdpRequest, options 
 		attemptCtx = ctx
 	}
 	listenCount := 0
-	observed, observeErr := observePublicUdp(attemptCtx, request, apiRequestSettings, func(_ context.Context, network string, _ string) (net.PacketConn, error) {
+	observed, observeErr := observePublicUdp(attemptCtx, request, probeSettings, func(_ context.Context, network string, _ string) (net.PacketConn, error) {
 		listenCount++
 		if network != "udp4" && request.Family == "ipv4" || network != "udp6" && request.Family == "ipv6" {
 			t.Error("native socket family differs from explicit request")
@@ -335,7 +335,7 @@ func TestPublicUdpNativeHandshakeBothFamiliesAllCodecsAndFronts(t *testing.T) {
 				if observed.ApplicationRequested || observed.ApplicationStatus != 0 {
 					t.Fatalf("a handshake-only front made an api request for %s/%s/%s/%s", family, path.service, path.front, carrier)
 				}
-				for _, finding := range publicUdpFindings(request, observed, err) {
+				for _, finding := range publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings()) {
 					if !finding.healthy {
 						t.Fatal("authenticated exact native result did not establish only its transport path")
 					}
@@ -355,7 +355,7 @@ func TestPublicUdpNativeRejectsUntrustedAndWrongNameCertificates(t *testing.T) {
 		if err == nil || observed.TlsVerified || observed.Failure != PublicUdpFailureTls {
 			t.Fatal("native transport did not enforce trust roots and exact SNI certificate verification")
 		}
-		findings := publicUdpFindings(request, observed, err)
+		findings := publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings())
 		if len(findings) != 1 || findings[0].healthy || findings[0].class != "public-udp-observation" {
 			t.Fatal("unauthenticated tuple traffic established transport health")
 		}
@@ -366,7 +366,7 @@ func TestPublicUdpRawTupleFilterDropsWrongSourceBeforeProtocol(t *testing.T) {
 	client, server := publicUdpTestSocketPair("198.51.100.20:42000", "192.0.2.20:443")
 	defer client.Close()
 	defer server.Close()
-	wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443")}
+	wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443"), settings: DefaultPublicUdpProbeSettings()}
 	client.incoming <- publicUdpTestPacket{data: []byte("wrong port"), from: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.20:8053"))}
 	client.incoming <- publicUdpTestPacket{data: []byte("wrong address"), from: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.21:443"))}
 	client.incoming <- publicUdpTestPacket{data: []byte("exact"), from: server.address}
@@ -384,15 +384,16 @@ func TestPublicUdpRawTupleFilterDropsWrongSourceBeforeProtocol(t *testing.T) {
 func TestPublicUdpRawBudgetsCloseOwnedSocket(t *testing.T) {
 	for _, inbound := range []bool{false, true} {
 		client, server := publicUdpTestSocketPair("198.51.100.20:42000", "192.0.2.20:443")
-		wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443")}
+		settings := DefaultPublicUdpProbeSettings()
+		wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443"), settings: settings}
 		var err error
 		if inbound {
-			for range publicUdpMaxPackets + 1 {
+			for range settings.MaxPacketCount + 1 {
 				client.incoming <- publicUdpTestPacket{data: []byte{1}, from: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.21:443"))}
 			}
 			_, _, err = wire.ReadFrom(make([]byte, 64))
 		} else {
-			_, err = wire.WriteTo(make([]byte, publicUdpMaxBytes+1), server.address)
+			_, err = wire.WriteTo(make([]byte, settings.MaxByteCount+1), server.address)
 		}
 		if !errors.Is(err, errPublicUdpBudget) || wire.observation().Failure != PublicUdpFailureBudget {
 			t.Fatal("wire budget was not enforced before unbounded traffic")
@@ -410,11 +411,12 @@ func TestPublicUdpRawByteBudgetCountsWholeDatagramsBeforeProtocolTruncation(t *t
 	client, server := publicUdpTestSocketPair("198.51.100.20:42000", "192.0.2.20:443")
 	defer client.Close()
 	defer server.Close()
-	wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443")}
+	settings := DefaultPublicUdpProbeSettings()
+	wire := &publicUdpPacketConn{PacketConn: client, peer: netip.MustParseAddrPort("192.0.2.20:443"), settings: settings}
 	payload := make([]byte, 65535)
 	// The protocol requests only a tiny buffer. The raw boundary must still
 	// count all bytes, including oversized unsolicited traffic, before drop.
-	for range publicUdpMaxBytes/len(payload) + 1 {
+	for range settings.MaxByteCount/len(payload) + 1 {
 		client.incoming <- publicUdpTestPacket{data: payload, from: net.UDPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.21:443"))}
 	}
 	if _, _, err := wire.ReadFrom(make([]byte, 8)); !errors.Is(err, errPublicUdpBudget) {
@@ -435,7 +437,7 @@ func publicUdpTestNativeCancellation(t *testing.T, carrier string) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := observePublicUdp(ctx, request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) { return client, nil }, x509.NewCertPool())
+		_, err := observePublicUdp(ctx, request, DefaultPublicUdpProbeSettings(), func(context.Context, string, string) (net.PacketConn, error) { return client, nil }, x509.NewCertPool())
 		done <- err
 	}()
 	select {
@@ -469,7 +471,7 @@ func TestPublicUdpNativeRouteAndSocketPrerequisitesRemainUnknown(t *testing.T) {
 	for _, cause := range []error{syscall.ENETUNREACH, syscall.EAFNOSUPPORT, errors.New("synthetic-private-socket-error")} {
 		request := publicUdpTestNativeRequest("ipv6", "connect", "quic")
 		calls := 0
-		observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
+		observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpProbeSettings(), func(context.Context, string, string) (net.PacketConn, error) {
 			calls++
 			return nil, cause
 		}, nil)
@@ -480,7 +482,7 @@ func TestPublicUdpNativeRouteAndSocketPrerequisitesRemainUnknown(t *testing.T) {
 		if err == nil || observed.FreshSocket || calls != 1 || observed.Failure != expected {
 			t.Fatal("missing local socket/family route did not retain its bounded prerequisite class")
 		}
-		findings := publicUdpFindings(request, observed, err)
+		findings := publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings())
 		if len(findings) != 1 || findings[0].healthy || findings[0].class != "public-udp-observation" || !strings.Contains(findings[0].observed, string(expected)) {
 			t.Fatal("missing local prerequisite was inferred as remote outage or healthy transport")
 		}
@@ -491,7 +493,7 @@ func TestPublicUdpNativePreCanceledAttemptNeverOpensSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	calls := 0
-	_, err := observePublicUdp(ctx, publicUdpTestNativeRequest("ipv4", "connect", "quic"), DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
+	_, err := observePublicUdp(ctx, publicUdpTestNativeRequest("ipv4", "connect", "quic"), DefaultPublicUdpProbeSettings(), func(context.Context, string, string) (net.PacketConn, error) {
 		calls++
 		return nil, errors.New("synthetic forbidden socket")
 	}, nil)
@@ -568,7 +570,7 @@ func TestPublicUdpConnectApiFrontCompletesHelloOverHttp3(t *testing.T) {
 			if apiRequests := recorder.requests(); !reflect.DeepEqual(apiRequests, want) {
 				t.Fatalf("%s/%s: the api saw %+v, want %+v", family, carrier, apiRequests, want)
 			}
-			for _, finding := range publicUdpFindings(request, observed, err) {
+			for _, finding := range publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings()) {
 				if !finding.healthy {
 					t.Fatalf("%s/%s: a completed api request was not healthy: %s", family, carrier, finding.class)
 				}
@@ -620,7 +622,7 @@ func TestPublicUdpConnectApiFrontRefusesAnswersOutsideTheApiShape(t *testing.T) 
 		if strings.Contains(fmt.Sprintf("%+v", observed), bodyAddress) {
 			t.Errorf("%s: the observation retained the address in the body", c.name)
 		}
-		findings := publicUdpFindings(request, observed, err)
+		findings := publicUdpFindings(request, observed, err, DefaultPublicUdpProbeSettings())
 		if len(findings) != 1 || findings[0].healthy {
 			t.Errorf("%s: an invalid api answer established health", c.name)
 		}
@@ -636,19 +638,19 @@ func TestPublicUdpConnectApiFrontBoundsTheHelloBody(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"client_address":"` + peer.String() + `","gossip_peer_id":"` + strings.Repeat("a", 256) + `"}`))
 	})
-	bounded := DefaultPublicUdpApiRequestSettings()
-	bounded.ResponseBodyByteLimit = 64
+	bounded := DefaultPublicUdpProbeSettings()
+	bounded.ApiRequest.ResponseBodyByteLimit = 64
 	for _, c := range []struct {
-		settings *PublicUdpApiRequestSettings
+		settings *PublicUdpProbeSettings
 		complete bool
 	}{
 		{settings: bounded, complete: false},
-		{settings: DefaultPublicUdpApiRequestSettings(), complete: true},
+		{settings: DefaultPublicUdpProbeSettings(), complete: true},
 	} {
 		request := publicUdpTestConnectApiRequest("ipv4", "quic")
-		observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, apiRequestSettings: c.settings})
+		observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, probeSettings: c.settings})
 		if err != nil || observed.ApplicationComplete != c.complete || observed.ApplicationBodyValid != c.complete || observed.ApplicationStatus != http.StatusOK {
-			t.Fatalf("a %d byte bound: %+v err=%v", c.settings.ResponseBodyByteLimit, observed, err)
+			t.Fatalf("a %d byte bound: %+v err=%v", c.settings.ApiRequest.ResponseBodyByteLimit, observed, err)
 		}
 		if !c.complete && observed.Failure != PublicUdpFailureApplication {
 			t.Fatalf("a body past its bound was not an application failure: %s", observed.Failure)
@@ -668,10 +670,10 @@ func TestPublicUdpConnectApiFrontBoundsTheHelloHeader(t *testing.T) {
 		w.Header().Set("X-Synthetic-Padding", marker+strings.Repeat("p", 4*1024))
 		hello.ServeHTTP(w, r)
 	})
-	bounded := DefaultPublicUdpApiRequestSettings()
-	bounded.ResponseHeaderByteLimit = 1024
+	bounded := DefaultPublicUdpProbeSettings()
+	bounded.ApiRequest.ResponseHeaderByteLimit = 1024
 	request := publicUdpTestConnectApiRequest("ipv4", "quic")
-	observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, apiRequestSettings: bounded})
+	observed, err := publicUdpTestNativeAttempt(t, request, publicUdpTestNativeOptions{trusted: true, api: api, probeSettings: bounded})
 	if err == nil || !observed.ApplicationRequested || observed.ApplicationComplete || observed.ApplicationStatus != 0 ||
 		observed.Failure != PublicUdpFailureApplication || !observed.HandshakeComplete || !observed.TlsVerified {
 		t.Fatalf("a header past its bound gave %+v err=%v", observed, err)
@@ -719,14 +721,16 @@ func TestPublicUdpConnectApiFrontCancellationEndsTheApiRequest(t *testing.T) {
 func TestPublicUdpTransportAdmitsAConnectApiRequest(t *testing.T) {
 	request := publicUdpTestConnectApiRequest("ipv4", "quic")
 	listens := 0
-	observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpApiRequestSettings(), func(context.Context, string, string) (net.PacketConn, error) {
+	observed, err := observePublicUdp(context.Background(), request, DefaultPublicUdpProbeSettings(), func(context.Context, string, string) (net.PacketConn, error) {
 		listens++
 		return nil, errors.New("synthetic-private-socket-error")
 	}, nil)
 	if err == nil || listens != 1 || observed.Failure != PublicUdpFailureSocket {
 		t.Fatalf("a connect api request did not reach its socket: listens=%d class=%s", listens, observed.Failure)
 	}
-	for _, settings := range []*PublicUdpApiRequestSettings{nil, {ResponseHeaderByteLimit: 16 * 1024, ResponseBodyByteLimit: 0}} {
+	unboundedBody := DefaultPublicUdpProbeSettings()
+	unboundedBody.ApiRequest.ResponseBodyByteLimit = 0
+	for _, settings := range []*PublicUdpProbeSettings{nil, unboundedBody} {
 		listens = 0
 		observed, err = observePublicUdp(context.Background(), request, settings, func(context.Context, string, string) (net.PacketConn, error) {
 			listens++

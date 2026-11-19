@@ -42360,10 +42360,19 @@ DNS lookup, SSH/router observation or credential enrollment is performed.
 Alt direct external UDP ports are evaluated as explicitly enrolled Alt paths,
 not misclassified as leaked Connect-private ports.
 
-The cadence is five minutes. At most 32 logical rows expand into 64 family
-attempts, with four workers, five seconds per attempt, and hard raw bounds of
-2048 datagrams and 1 MiB in each direction. Unexpected inbound traffic shares
-the receive budget. DNS state/queues retain their native bounded codec limits.
+The bounds are `PublicUdpProbeSettings` (`DefaultPublicUdpProbeSettings`): a
+five-minute cadence; at most 32 logical rows, which expand into 64 family
+attempts; four workers; five seconds per attempt, which is also the QUIC
+handshake and idle timeout and covers a `/hello`; hard raw bounds of 2048
+datagrams and 1 MiB in each direction; and 16 KiB each for a `/hello`
+answer's header and body. A pass hands one instance to the matrix, the
+transport and the findings, so a tuned budget bounds the wire and the
+validation of the counts the transport reports alike. Settings without a
+positive attempt timeout and positive wire budgets refuse the whole matrix
+(`probe-settings`) before any socket opens. A matrix of more than 32 rows, such
+as every carrier of both fronts on every lb_alt interface, needs a raised
+`MaxTargetCount` default first. Unexpected inbound traffic shares the receive
+budget. DNS state/queues retain their native bounded codec limits.
 Socket closure precedes transport teardown; translation closure joins its
 workers. No second probe attempt, resolver fallback or alternate endpoint is
 attempted. The over-limit datagram needed to detect a receive-budget breach

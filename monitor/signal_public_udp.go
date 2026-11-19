@@ -1,3 +1,6 @@
+// The public-udp signal (SIGNALS.md §16.9): one pass of the public UDP probe
+// (public_udp.go, public_udp_transport.go) per cadence, its observations
+// turned into findings against the pass's own settings.
 package monitor
 
 import (
@@ -12,18 +15,29 @@ import (
 // NewPublicUdpSignal implements SIGNALS.md §16.9. Enrollment is explicit;
 // successful checks prove an exact authenticated transport return path only.
 func NewPublicUdpSignal() Signal {
-	return &signalAdapter{number: "16.9", key: "public-udp", name: "Exact public UDP/QUIC return path", probe: publicUdpProbe{}}
+	return &signalAdapter{number: "16.9", key: "public-udp", name: "Exact public UDP/QUIC return path", probe: publicUdpProbe{settings: DefaultPublicUdpProbeSettings()}}
 }
 
+// One pass's attempts and findings. Its settings reach the matrix, the
+// transport and the findings alike.
 type publicUdpProbe struct {
+	// nil takes the defaults
+	settings *PublicUdpProbeSettings
 	// Local deterministic deadline controls may replace context construction,
-	// never the protocol or source. Production always uses the fixed budget.
+	// never the protocol or source. Production uses the attempt timeout.
 	attemptContext func(context.Context) (context.Context, context.CancelFunc)
 }
 
-func (publicUdpProbe) id() string             { return "public/udp" }
-func (publicUdpProbe) tier() string           { return tierWarn }
-func (publicUdpProbe) cadence() time.Duration { return 5 * time.Minute }
+func (publicUdpProbe) id() string   { return "public/udp" }
+func (publicUdpProbe) tier() string { return tierWarn }
+
+// The settings' cadence, or the default's when it is not positive.
+func (self publicUdpProbe) cadence() time.Duration {
+	if self.settings != nil && 0 < self.settings.Cadence {
+		return self.settings.Cadence
+	}
+	return DefaultPublicUdpProbeSettings().Cadence
+}
 
 func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	if err := ctx.Err(); err != nil {
@@ -32,12 +46,16 @@ func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	if !env.cfg.publicUdp.Enabled {
 		return nil, nil
 	}
-	requests, reason := publicUdpRequests(env.cfg.publicUdp, env.cfg.hosts)
+	settings := self.settings
+	if settings == nil {
+		settings = DefaultPublicUdpProbeSettings()
+	}
+	requests, reason := publicUdpRequests(env.cfg.publicUdp, settings, env.cfg.hosts)
 	if reason != "" {
 		return []finding{{
 			probeId: "public/udp", tier: tierWarn, class: "public-udp-inventory", target: "public-udp-inventory", sustain: 1,
 			symptom:   "The declared public UDP path matrix is incomplete or invalid; no path was contacted.",
-			mechanism: "Each service, alias, carrier and configured address family needs explicit ownership, a pinned public address, an exact port and authenticated protocol authority. An empty or partial matrix cannot establish healthy coverage.",
+			mechanism: "Each service, alias, carrier and configured address family needs explicit ownership, a pinned public address, an exact port and authenticated protocol authority, and the probe settings must bound every attempt. An empty or partial matrix cannot establish healthy coverage.",
 			baseline:  "An independently declared target count matches a complete explicit matrix joined to enabled host inventory.",
 			observed:  "inventory_complete=false reason=" + reason,
 			evidence:  "Only the fixed validation class is retained. Settings values, endpoints, names used for TLS and DNS codec authority are omitted.",
@@ -50,7 +68,7 @@ func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	newAttempt := self.attemptContext
 	if newAttempt == nil {
 		newAttempt = func(parent context.Context) (context.Context, context.CancelFunc) {
-			return context.WithTimeout(parent, publicUdpAttemptTimeout)
+			return context.WithTimeout(parent, settings.AttemptTimeout)
 		}
 	}
 	results := make([][]finding, len(requests))
@@ -60,7 +78,7 @@ func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	}
 	close(jobs)
 	var workers sync.WaitGroup
-	for range min(publicUdpConcurrency, len(requests)) {
+	for range min(max(settings.WorkerCount, 1), len(requests)) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -80,14 +98,14 @@ func (self publicUdpProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 					continue
 				}
 				attemptCtx, cancel := newAttempt(ctx)
-				observed, err := transport.publicUdp(attemptCtx, request)
+				observed, err := transport.publicUdp(attemptCtx, request, settings)
 				// Capture deadline authority before our own cleanup cancel. A
 				// source returning nil after expiry cannot establish health.
 				if attemptErr := attemptCtx.Err(); err == nil && attemptErr != nil {
 					err = attemptErr
 				}
 				cancel()
-				results[index] = publicUdpFindings(request, observed, err)
+				results[index] = publicUdpFindings(request, observed, err, settings)
 			}
 		}()
 	}
@@ -128,17 +146,19 @@ func publicUdpUnknown(request PublicUdpRequest, reason string) finding {
 	return finding
 }
 
-func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservation, err error) []finding {
+// Evaluates one attempt against the pass's settings, the same bounds its
+// transport ran under.
+func publicUdpFindings(request PublicUdpRequest, observation PublicUdpObservation, err error, settings *PublicUdpProbeSettings) []finding {
 	unknown := func(reason string) []finding { return []finding{publicUdpUnknown(request, reason)} }
 	if observation.Failure == PublicUdpFailureSource {
 		return unknown("source-unavailable")
 	}
 	if observation.AttemptId != request.AttemptId || observation.RequestedTuple != publicUdpTuple(request) ||
-		observation.SentPackets < 0 || observation.SentPackets > publicUdpMaxPackets ||
-		observation.ReceivedPackets < 0 || observation.ReceivedPackets > publicUdpMaxPackets ||
-		observation.UnexpectedPackets < 0 || observation.UnexpectedPackets > publicUdpMaxPackets-observation.ReceivedPackets ||
-		observation.SentBytes < 0 || observation.SentBytes > publicUdpMaxBytes ||
-		observation.ReceivedBytes < 0 || observation.ReceivedBytes > publicUdpMaxBytes {
+		observation.SentPackets < 0 || observation.SentPackets > settings.MaxPacketCount ||
+		observation.ReceivedPackets < 0 || observation.ReceivedPackets > settings.MaxPacketCount ||
+		observation.UnexpectedPackets < 0 || observation.UnexpectedPackets > settings.MaxPacketCount-observation.ReceivedPackets ||
+		observation.SentBytes < 0 || observation.SentBytes > settings.MaxByteCount ||
+		observation.ReceivedBytes < 0 || observation.ReceivedBytes > settings.MaxByteCount {
 		return unknown("observation-authority-invalid")
 	}
 	switch observation.Failure {
