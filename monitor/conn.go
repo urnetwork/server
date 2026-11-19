@@ -594,7 +594,7 @@ func (self *runner) pg(ctx context.Context, sql string) ([]pgRow, error) {
 		return nil, err
 	}
 	if observation := migrationCensusFromContext(ctx); observation != nil {
-		return runMigrationCensus(ctx, sql, observation, func(script string) (string, error) {
+		return runMigrationCensus(ctx, sql, observation, func(_ *migrationCensusPlan, script string) (string, error) {
 			remoteCmd := fmt.Sprintf(
 				"IFS= read -r PGPASSWORD; export PGPASSWORD; "+
 					"export PGOPTIONS='-c statement_timeout=%d -c default_transaction_read_only=on'; "+

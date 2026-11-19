@@ -252,9 +252,9 @@ func (self *migrationCensusPlan) parse(out string) ([]pgRow, []pgRow, error) {
 	return []pgRow{completeRow}, catalogRows, nil
 }
 
-// The transport callback owns the child until return. A late successful child
-// or canceled owner cannot publish either artifacts or catalog identities.
-func runMigrationCensus(ctx context.Context, query string, observation *migrationCensusObservation, run func(string) (string, error)) ([]pgRow, error) {
+// A transport consumes the checked plan or its psql script. Its child completes
+// before either the artifacts or the catalog identities can be published.
+func runMigrationCensus(ctx context.Context, query string, observation *migrationCensusObservation, run func(*migrationCensusPlan, string) (string, error)) ([]pgRow, error) {
 	observation.catalogRows = nil
 	observation.catalogComplete = false
 	if err := ctx.Err(); err != nil {
@@ -268,7 +268,7 @@ func runMigrationCensus(ctx context.Context, query string, observation *migratio
 	if err != nil {
 		return nil, err
 	}
-	out, err := run(script)
+	out, err := run(plan, script)
 	if err != nil {
 		return nil, err
 	}
