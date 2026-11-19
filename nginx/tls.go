@@ -41,8 +41,10 @@ const (
 	tlsNextProtoH3    = "h3"
 )
 
-// The handshake error for a QUIC name the front serves no certificate for.
-// It names no server name, since the client chose it.
+// The handshake error when the front has no certificate for a ClientHello:
+// on QUIC a missing, invalid or unknown server name, and on TCP any name the
+// default server can't stand in for. It names no server name, since the
+// client chose it.
 var errTlsNoCertificate = errors.New("lbalt: no certificate for the server name")
 
 // Every served name's certificate and key. Read-only once loaded, so safe
@@ -82,7 +84,7 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 	}
 	now := time.Now()
 
-	// the leaf's validity and its cover of name, its server name
+	// whether leaf is valid now and covers name, the server name it serves
 	checkServes := func(leaf *x509.Certificate, name string) error {
 		if now.Before(leaf.NotBefore) {
 			return fmt.Errorf("is not valid until %s", leaf.NotBefore.UTC().Format(time.RFC3339))
@@ -91,8 +93,8 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 			return fmt.Errorf("expired at %s", leaf.NotAfter.UTC().Format(time.RFC3339))
 		}
 		if strings.HasPrefix(name, "*.") {
-			// x509 matches a wildcard SAN to one label only, so no exact name
-			// stands in for every label under the base
+			// only the wildcard SAN covers every label under the base: an
+			// exact SAN under it covers only itself
 			hasWildcard := slices.ContainsFunc(leaf.DNSNames, func(dnsName string) bool {
 				return strings.EqualFold(dnsName, name)
 			})
