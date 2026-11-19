@@ -754,6 +754,63 @@ func TestGateM3ListsOnThisTree(t *testing.T) {
 	}
 }
 
+// sidecar-gate -list M6-in on this tree (TEST-M6-02), the one Gn-in that runs code: FS-46 lists by its owners' tests,
+// the benchmark's item reads open on M4's dark build, and the pilot's measures read open (D-PHASE-6).
+func TestGateM6InListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M6-in")
+	if swept != 1 || items != 4 {
+		t.Errorf("M6-in's sweep names %d cases and %d items", swept, items)
+	}
+	report, _ := listGateOnThisTree(t, "M6-in")
+	open := 0
+	for _, result := range report.rows {
+		if result.outcome == gateOpen && (strings.HasPrefix(result.label, "the design-partner pilot's measures") || strings.HasPrefix(result.label, "§20.9's escrow benchmark")) {
+			open += 1
+		}
+		if result.label == "FS-46" && result.outcome != gateListed {
+			t.Errorf("FS-46 at M6-in reads %s: %v", result.outcome, result.details)
+		}
+	}
+	if open != 2 {
+		t.Errorf("%d of the benchmark and the pilot's measures read open at M6-in", open)
+	}
+}
+
+// sidecar-gate -list M6 on this tree (TEST-M6-02): see checkGateListsOnThisTree. QD-1081's rows in server's api list,
+// each test declared under its tags.
+func TestGateM6ListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M6")
+	if swept < 10 || items < 16 {
+		t.Errorf("M6's sweep names %d cases and %d items", swept, items)
+	}
+	report, _ := listGateOnThisTree(t, "M6")
+	outcomes := map[string]string{}
+	for _, result := range report.rows {
+		outcomes[result.label] = result.outcome
+	}
+	for _, label := range []string{"FS-19 (team)", "FS-19 (invite)", "FS-21 (team)", "FS-97 (team)", "FS-124 (team)"} {
+		if outcomes[label] != gateListed {
+			t.Errorf("%s at M6 reads %q", label, outcomes[label])
+		}
+	}
+}
+
+// sidecar-gate -list M7 on this tree (TEST-M7-01): see checkGateListsOnThisTree.
+func TestGateM7ListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M7")
+	if swept != 2 || items < 9 {
+		t.Errorf("M7's sweep names %d cases and %d items", swept, items)
+	}
+}
+
+// sidecar-gate -list M8 on this tree (TEST-M8-01): see checkGateListsOnThisTree.
+func TestGateM8ListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "M8")
+	if swept != 4 || items < 11 {
+		t.Errorf("M8's sweep names %d cases and %d items", swept, items)
+	}
+}
+
 // sidecar-gate -list next on this tree (TEST-M3-02): the next cluster's review runs §22.9's file-cluster suite beside
 // FS-63's and FS-119's next-cluster cases, and fails nothing.
 func TestGateNextListsOnThisTree(t *testing.T) {
