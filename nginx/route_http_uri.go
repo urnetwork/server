@@ -51,6 +51,9 @@ func parseRouteUri(requestTarget string) (routeUri, bool) {
 	var pendingCharacter byte
 	pending := false
 
+	// set when a ? or # ended the path, which skips the end-of-input dot
+	// handling, as nginx's goto args and goto done do
+	pathEnded := false
 	// the args end at a fragment
 	setArgs := func(rest string) {
 		args, _, _ = strings.Cut(rest, "#")
@@ -103,8 +106,10 @@ scan:
 				state = stateQuoted
 			case '?':
 				setArgs(requestTarget[i:])
+				pathEnded = true
 				break scan
 			case '#':
+				pathEnded = true
 				break scan
 			default:
 				path = append(path, c)
@@ -122,8 +127,10 @@ scan:
 				state = stateQuoted
 			case '?':
 				setArgs(requestTarget[i:])
+				pathEnded = true
 				break scan
 			case '#':
+				pathEnded = true
 				break scan
 			default:
 				state = stateUsual
@@ -145,9 +152,11 @@ scan:
 			case '?':
 				path = path[:len(path)-1]
 				setArgs(requestTarget[i:])
+				pathEnded = true
 				break scan
 			case '#':
 				path = path[:len(path)-1]
+				pathEnded = true
 				break scan
 			default:
 				state = stateUsual
@@ -162,9 +171,11 @@ scan:
 				}
 				if c == '?' {
 					setArgs(requestTarget[i:])
+					pathEnded = true
 					break scan
 				}
 				if c == '#' {
+					pathEnded = true
 					break scan
 				}
 				state = stateSlash
@@ -205,14 +216,16 @@ scan:
 		}
 	}
 
-	switch state {
-	case stateQuoted, stateQuotedSecond:
-		return routeUri{}, false
-	case stateDot:
-		path = path[:len(path)-1]
-	case stateDotDot:
-		if !climb() {
+	if !pathEnded {
+		switch state {
+		case stateQuoted, stateQuotedSecond:
 			return routeUri{}, false
+		case stateDot:
+			path = path[:len(path)-1]
+		case stateDotDot:
+			if !climb() {
+				return routeUri{}, false
+			}
 		}
 	}
 	return routeUri{
