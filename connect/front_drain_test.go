@@ -747,28 +747,18 @@ func TestFrontDrainIsNotHeldByAWedgedIdleConnection(t *testing.T) {
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("the exchange drain never began: the drain's start waits on the wedged connection's close")
 	}
-	quicRuns := func() []*frontQuicRun {
-		env.frontServer.stateLock.Lock()
-		defer env.frontServer.stateLock.Unlock()
-		quicRuns := []*frontQuicRun{}
-		for _, socket := range env.frontServer.sockets {
-			if quicRun, ok := socket.run.(*frontQuicRun); ok {
-				quicRuns = append(quicRuns, quicRun)
-			}
-		}
-		return quicRuns
-	}()
-	if len(quicRuns) == 0 {
-		t.Fatal("no QUIC socket is up")
+	if len(env.frontServer.quicGroups) == 0 {
+		t.Fatal("the front has no QUIC transport")
 	}
-	for _, quicRun := range quicRuns {
+	for _, quicGroup := range env.frontServer.quicGroups {
+		quicRun := quicGroup.currentRun()
 		drainBegan := func() bool {
 			quicRun.stateLock.Lock()
 			defer quicRun.stateLock.Unlock()
 			return quicRun.drainCtx != nil
 		}()
 		if !drainBegan {
-			t.Fatalf("the h3 drain of %s did not begin with the exchange drain", quicRun.socket.key)
+			t.Fatalf("the h3 drain of %s did not begin with the exchange drain", quicGroup)
 		}
 	}
 
@@ -1217,75 +1207,6 @@ func TestFrontDrainSendsOneH3GoawayWhenTheClientCloses(t *testing.T) {
 	}
 	if goaways := trace.goaways.Value(); goaways != 1 {
 		t.Fatalf("%d GOAWAYs for one api connection its client closed during the drain", goaways)
-	}
-}
-
-// A QUIC socket lost while the drain shuts its api connections down
-// gracefully destroys every connection on it at once (D22), and each gets no
-// second GOAWAY. Each h3 server finishes serving its connection while quic-go
-// destroys it, with the close window held open and the lost sockets' release
-// held, so only the destroyed connection can end the serve: before the
-// release, nothing closes the h3 servers.
-func TestFrontDrainSendsOneH3GoawayWhenItsSocketIsLost(t *testing.T) {
-	const connectionCount = 4
-	trace := newTestFrontConnectionTrace(true)
-	defer trace.Release()
-	lostSockets := make(chan frontSocketKey, 16)
-	releaseLost := make(chan struct{})
-	var releaseLostOnce sync.Once
-	release := func() {
-		releaseLostOnce.Do(func() {
-			close(releaseLost)
-		})
-	}
-	defer release()
-	lostBindAddress := ""
-	env := newTestFrontEnv(t, func(env *testFrontEnv) {
-		env.connectQuic.tracer = trace.tracer
-		address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-		lostBindAddress = env.bindAddress(address, frontPortQuic)
-		env.settings.socketServeEndObserverForTest = func(key frontSocketKey) {
-			if key.portKind == frontPortQuic && key.bindAddress() == lostBindAddress {
-				lostSockets <- key
-				<-releaseLost
-			}
-		}
-	})
-	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-	for range connectionCount {
-		conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.CloseWithError(0, "")
-		env.nextDispatch()
-	}
-	env.waitOpen(connectionCount)
-	env.frontServer.beginDrain()
-	trace.waitGoaways(t, connectionCount)
-
-	packetConns := env.binds.boundPacketConns(lostBindAddress)
-	if len(packetConns) != env.settings.SocketsPerPort {
-		t.Fatalf("%d quic sockets bound on %s", len(packetConns), lostBindAddress)
-	}
-	for _, packetConn := range packetConns {
-		packetConn.Close()
-	}
-	for range packetConns {
-		select {
-		case <-lostSockets:
-		case <-time.After(testFrontProgressTimeout):
-			t.Fatal("a lost socket's serve did not end")
-		}
-	}
-	trace.waitHeld(t, connectionCount)
-	trace.waitServedWithoutAnotherGoaway(t, env.frontServer, connectionCount)
-
-	release()
-	trace.Release()
-	env.frontServer.waitDrained()
-	if goaways := trace.goaways.Value(); goaways != connectionCount {
-		t.Fatalf("%d GOAWAYs for %d api connections a socket loss destroyed during the drain", goaways, connectionCount)
 	}
 }
 

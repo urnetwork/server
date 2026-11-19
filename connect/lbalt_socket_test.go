@@ -2,21 +2,21 @@ package connect
 
 // The lb_alt front's public udp sockets under loss and failure, with real
 // clients and a real exchange (LBALT.md D13, D22, §4.4.4, §9 "Carriers"):
-// a lost socket is rebuilt on its own while its siblings serve, a socket
-// survives datagrams it can't write, and a sibling never resets a connection
-// it doesn't hold.
+// a lost socket is rebuilt on its own while its siblings serve, and the
+// connections whose flows move between a group's sockets keep their
+// transport (D22 (b)); a socket survives datagrams it can't write.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"syscall"
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/urnetwork/server"
@@ -48,8 +48,13 @@ func (self *testLbAltEnv) expectReady(what string) {
 // front not ready (D22), while the carriers on every sibling socket keep
 // serving real clients both ways, and a new client connects through the
 // group's other sockets. Losing it never ends the process. Once it is back,
-// readiness is whole again, and only that socket was bound again. The quic
-// and the whodis sockets each in turn.
+// readiness is whole again, and only that socket was bound again. The
+// re-creation changes the group's size, which moves flows between its
+// sockets (on darwin the newest socket takes them all), but every socket
+// feeds the group's one transport, so the new client keeps its connection
+// and never connects again (D22 (b)); with a transport per socket it
+// reconnected after its idle timeout. The quic and the whodis sockets each in
+// turn.
 func TestLbAltRebuildsALostUdpSocket(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, &testLbAltEnvSettings{
@@ -102,6 +107,9 @@ func TestLbAltRebuildsALostUdpSocket(t *testing.T) {
 			// new client on the group's other sockets
 			testLbAltExchangeMessages(t, websocketClient, quicClient, 4)
 			testLbAltExchangeMessages(t, whodisClient, websocketClient, 4)
+			for len(env.quicResults) != 0 {
+				env.nextQuicResult()
+			}
 			newClient := env.newClient(env.newPeer("new"), c.carrier, &testLbAltDial{address: lostAddress})
 			if edge := env.waitResidentEdge(newClient.peer.clientId); edge.Carrier != c.carrier.residentCarrier {
 				t.Fatalf("%s lost: the new client arrived as carrier %d", c.portKind, edge.Carrier)
@@ -109,6 +117,9 @@ func TestLbAltRebuildsALostUdpSocket(t *testing.T) {
 			testLbAltExchangeMessages(t, newClient, quicClient, 4)
 			if err := env.frontServer.ctx.Err(); err != nil {
 				t.Fatalf("%s lost: the front ended: %v", c.portKind, err)
+			}
+			if result := env.nextQuicResult(); result != c.portKind+" "+frontQuicResultConnect {
+				t.Fatalf("%s lost: the new client's connection counted %q", c.portKind, result)
 			}
 
 			hold.releaseAll()
@@ -124,6 +135,7 @@ func TestLbAltRebuildsALostUdpSocket(t *testing.T) {
 				}
 			}
 			testLbAltExchangeMessages(t, newClient, whodisClient, 4)
+			env.expectNoQuicResult(c.portKind + " back: the new client connected again")
 			newClient.close()
 		}
 	})
@@ -215,25 +227,29 @@ func TestLbAltUdpSocketsSurviveDatagramsTheyCannotWrite(t *testing.T) {
 }
 
 // A QUIC connection whose packets reach a sibling socket of its group, as a
-// re-creation moves most of a group's flows (D22), is never answered with a
-// stateless reset: the sibling doesn't hold the connection and keeps no reset
-// key, so it stays silent, the connection ends by its idle timeout, and the
-// client then connects again through the group, the one reconnect D22 (a)
-// accepts. Transports that shared one key would each answer a connection they
-// don't hold with that connection's own token, so anyone who saw a connection
-// id could fetch its token from another socket of the block, or from the same
-// port by another source port, and end the connection with it (RFC 9000
-// §21.11). Here the group is narrowed to one socket, the connection made on
-// it, and the socket lost after a sibling is back, so the connection's next
-// packets can only reach the sibling.
-func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
+// re-creation moves most of a group's flows (D22), keeps working (D22 (b)):
+// every socket of the group feeds one transport, which holds the connection,
+// so its next request is answered at once on the same connection. With a
+// transport per socket the sibling's transport didn't hold it, stayed silent,
+// and the connection ended by its idle timeout. No transport answers with a
+// stateless reset: none has a reset key, and each keeps quic-go's own random
+// token key, never shared, so no transport of the block is a reset oracle for
+// another (RFC 9000 §21.11). Here the group is narrowed to one socket, the
+// connection made on it, and the socket lost after a sibling is back, so the
+// connection's next packets can only reach the sibling.
+func TestLbAltQuicConnectionKeepsItsTransportWhenItsSocketIsLost(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		env := newTestLbAltEnv(t, &testLbAltEnvSettings{
+			upstreams: true,
+			apiHandler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, "api %s", r.URL.Path)
+			}),
 			frontSettings: func(settings *FrontServerSettings) {
 				settings.SocketRestartInitialDelay = time.Millisecond
 			},
 		})
-		address, _ := env.address(testLbAltInterfaceA, frontFamilyIpv4)
+		// the upstreams layout keeps 127.0.0.1 for the blocks
+		address, _ := env.address(testLbAltInterfaceA, frontFamilyIpv6)
 		bindAddress := env.bindAddress(address, frontPortQuic)
 		socketCount := len(env.frontServer.sockets)
 		socketsPerPort := env.settings.SocketsPerPort
@@ -241,6 +257,9 @@ func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
 		hold := env.binds.hold(frontProtocolUdp, bindAddress)
 		defer hold.releaseAll()
 		packetConns := env.binds.boundPacketConns(bindAddress)
+		if len(packetConns) != socketsPerPort {
+			t.Fatalf("%d quic sockets bound on %s", len(packetConns), bindAddress)
+		}
 		for _, packetConn := range packetConns[1:] {
 			packetConn.Close()
 		}
@@ -248,8 +267,7 @@ func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
 		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
 
 		quicConfig := testLbAltClientQuicConfig()
-		// the moved connection ends here unless a reset ends it first, which
-		// would come within a round trip of its next packet
+		// a connection the move lost ends here, or sooner by a reset
 		quicConfig.MaxIdleTimeout = 10 * time.Second
 		conn, err := env.dialQuicFrom(
 			env.clientPacketConn(address),
@@ -263,6 +281,26 @@ func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer conn.CloseWithError(0, "")
+		clientConn := (&http3.Transport{}).NewClientConn(conn)
+		get := func(path string) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(env.ctx, testLbAltProgressTimeout)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+testLbAltApiName+path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := clientConn.RoundTrip(request)
+			if err != nil {
+				t.Fatalf("GET %s: %v (the connection: %v)", path, err, context.Cause(conn.Context()))
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil || response.StatusCode != http.StatusOK || string(body) != "api "+path {
+				t.Fatalf("GET %s: %d %q %v", path, response.StatusCode, body, err)
+			}
+		}
+		get("/on-its-socket")
 
 		// a sibling comes back, and the connection's socket is lost
 		hold.releaseOne()
@@ -271,27 +309,9 @@ func TestLbAltSiblingSocketsNeverResetAMovedQuicConnection(t *testing.T) {
 		hold.waitWaiting(t, socketsPerPort-1)
 		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
 
-		// packets of data, each larger than a stateless reset, which quic-go
-		// answers with one when its transport has a reset key; a connection
-		// already ended fails here rather than passing below
-		stream, err := conn.OpenStream()
-		if err != nil {
-			t.Fatal(err)
+		get("/on-the-sibling")
+		if err := conn.Context().Err(); err != nil {
+			t.Fatalf("the moved connection ended: %v", context.Cause(conn.Context()))
 		}
-		if _, err := stream.Write(make([]byte, 1024)); err != nil {
-			t.Fatal(err)
-		}
-		testLbAltWait(t, conn.Context().Done(), "the moved connection's end")
-		var idleTimeoutErr *quic.IdleTimeoutError
-		if err := context.Cause(conn.Context()); !errors.As(err, &idleTimeoutErr) {
-			t.Fatalf("the moved connection ended with %v, want its idle timeout", err)
-		}
-
-		// the client connects again, through the group's live socket
-		reconnected, err := env.dialQuic(address, frontPortQuic, testLbAltApiName, []string{http3.NextProtoH3})
-		if err != nil {
-			t.Fatalf("the reconnect: %v", err)
-		}
-		reconnected.CloseWithError(0, "")
 	})
 }
