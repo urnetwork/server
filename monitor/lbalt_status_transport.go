@@ -31,11 +31,15 @@ import (
 // warpctl's status error rule (docker.go IsError)
 var lbAltStatusErrorPattern = regexp.MustCompile(`^(?i)error(\s|:)`)
 
-// The native adapter: one attempt on a fresh system dial, verified against the
-// system roots, within the runner's command timeout. It only delegates, so its
-// bounds are observeLbAltStatusWithin's.
+// The native adapter: one attempt on a fresh system dial, or the runner's
+// test dial, verified against the system roots, within the runner's command
+// timeout. It only delegates, so its bounds are observeLbAltStatusWithin's.
 func (self *runner) lbAltStatus(ctx context.Context, request LbAltStatusRequest, settings *LbAltStatusProbeSettings) (LbAltStatusObservation, error) {
-	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, (&net.Dialer{}).DialContext, nil)
+	dial := self.lbAltStatusDial
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, dial, nil)
 }
 
 // One attempt within a command timeout, when it is positive; a non-positive
@@ -127,7 +131,9 @@ func observeLbAltStatus(
 		// and cancellation (transport.go getConn), so that a later request
 		// could take the connection. None follows here, so the dial runs under
 		// the request's own context: the attempt deadline bounds the connect
-		// itself, and the connect ends with the attempt.
+		// itself, and the connect ends with the attempt. The TLS handshake on
+		// 443 still runs under net/http's detached context, which only the
+		// deferred CloseIdleConnections below cancels.
 		DialContext: func(_ context.Context, _ string, address string) (net.Conn, error) {
 			admitted := func() bool {
 				stateLock.Lock()
@@ -153,6 +159,11 @@ func observeLbAltStatus(
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: int64(settings.ResponseHeaderByteLimit),
 	}
+	// With keepalives off no connection is ever idle, but the call also
+	// cancels net/http's detached dial context of every dial still in
+	// progress (transport.go getConn), and a TLS handshake the attempt
+	// abandoned runs under that context: this is what closes its socket when
+	// a front accepts the connection and never answers the ClientHello.
 	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Transport: transport,

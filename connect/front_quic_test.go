@@ -103,16 +103,16 @@ func TestFrontQuicServesApiNamesOverH3(t *testing.T) {
 	}
 }
 
-// Every name that is neither connect's nor the api's, a forwarded service, an
-// lb name, an unknown name or no name at all, is closed with 0x1000, and the
-// code arrives: the front waits for the handshake before it refuses.
+// Every served name that is neither connect's nor the api's, a forwarded
+// service's, an lb name and a redirect alias, completes its handshake and is
+// closed with 0x1000, and the code arrives: the front waits for the handshake
+// before it refuses. A name the front doesn't serve never gets this far
+// (TestFrontQuicFailsTheHandshakeOfAnUnknownServerName).
 func TestFrontQuicRefusesOtherNamesWithUnknownServerName(t *testing.T) {
 	env := newTestFrontEnv(t, nil)
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-	for _, serverName := range []string{testFrontForwardedName, env.routeTable.Lb.Names[0], testFrontUnknownName, ""} {
+	for _, serverName := range []string{testFrontForwardedName, env.routeTable.Lb.Names[0], testFrontRedirectName} {
 		tlsConfig := env.clientTlsConfig(serverName, []string{http3.NextProtoH3})
-		// an unknown or missing name has no certificate to verify against
-		tlsConfig.InsecureSkipVerify = true
 		conn, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
 		if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeUnknownServerName {
 			t.Fatalf("%q closed with %#x, want %#x", serverName, code, frontQuicErrorCodeUnknownServerName)
@@ -128,6 +128,37 @@ func TestFrontQuicRefusesOtherNamesWithUnknownServerName(t *testing.T) {
 	}
 	if acquired := env.front.acquired(); len(acquired) != 0 {
 		t.Fatalf("a refused connection was charged to the connection cap: %v", acquired)
+	}
+}
+
+// A name the real nginx front doesn't serve, or no name at all, fails the
+// TLS handshake on QUIC, on the quic and whodis sockets, since its QUIC TLS
+// config holds no certificate for it, as alt held none (LBALT-IMPL.md §2.8):
+// the client reads a TLS alert as a crypto error, never an application
+// close, and nothing is dispatched.
+func TestFrontQuicFailsTheHandshakeOfAnUnknownServerName(t *testing.T) {
+	env := newTestNginxFrontEnv(t, nil, http.NotFoundHandler())
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	for _, portKind := range []string{frontPortQuic, frontPortWhodis} {
+		for _, serverName := range []string{testFrontUnknownName, ""} {
+			tlsConfig := env.clientTlsConfig(serverName, []string{http3.NextProtoH3})
+			// nothing could verify a name the front has no certificate for
+			tlsConfig.InsecureSkipVerify = true
+			conn, err := env.dialQuicFrom(env.clientPacketConn(address), address, portKind, tlsConfig)
+			if err == nil {
+				conn.CloseWithError(0, "")
+				t.Fatalf("%s %q: the handshake completed", portKind, serverName)
+			}
+			var transportErr *quic.TransportError
+			if !errors.As(err, &transportErr) || !transportErr.Remote || !transportErr.ErrorCode.IsCryptoError() {
+				t.Fatalf("%s %q: the dial failed with %v, want the front's TLS alert", portKind, serverName, err)
+			}
+		}
+	}
+	select {
+	case dispatch := <-env.dispatched:
+		t.Fatalf("a failed handshake was dispatched: %+v", dispatch)
+	default:
 	}
 }
 
@@ -174,6 +205,57 @@ func TestFrontQuicConnectionCapRefusesWithRateLimited(t *testing.T) {
 	defer third.CloseWithError(0, "")
 	env.nextDispatch()
 	env.nextHandled()
+}
+
+// An api connection over the address's cap is closed with 0x1001 before
+// any request, as a connect connection is: the cap counts every api
+// connection an address holds, and a connect connection shares it. Once the
+// admitted api connection ends, its slot admits the next.
+func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T) {
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.front.connectionCap = 1
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+
+	client, _ := env.apiClient(address, frontPortQuic, nil)
+	if status, _, err := testFrontGet(t, client, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
+		t.Fatalf("the admitted api request = %d %v", status, err)
+	}
+	env.nextDispatch()
+
+	for _, c := range []struct {
+		serverName string
+		nextProtos []string
+	}{
+		{serverName: testFrontApiName, nextProtos: []string{http3.NextProtoH3}},
+		{serverName: testFrontConnectName, nextProtos: nil},
+	} {
+		conn, err := env.dialQuic(address, frontPortQuic, c.serverName, c.nextProtos)
+		if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeRateLimited {
+			t.Fatalf("%s over the cap closed with %#x, want %#x", c.serverName, code, frontQuicErrorCodeRateLimited)
+		}
+		env.nextDispatch()
+	}
+	select {
+	case <-env.connectQuic.handled:
+		t.Fatal("an over-cap connection reached connect's handler")
+	default:
+	}
+
+	// the admitted connection ends and releases its slot
+	client.Transport.(*http3.Transport).Close()
+	select {
+	case <-env.front.released:
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the admitted api connection's slot was never released")
+	}
+	next, _ := env.apiClient(address, frontPortQuic, nil)
+	if status, _, err := testFrontGet(t, next, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
+		t.Fatalf("the api request after the release = %d %v", status, err)
+	}
+	if acquired := env.front.acquired(); len(acquired) != 4 || !slices.Equal(slices.Compact(acquired), []string{testFrontInterfaceA + " 127.0.0.1"}) {
+		t.Fatalf("connections charged to %v, want each of the four to eth1's address", acquired)
+	}
 }
 
 // A client socket a test controls: quic-go reads nothing from it while
@@ -472,8 +554,7 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 	waitReleased(1)
 
 	// a refused name
-	tlsConfig := env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
-	tlsConfig.InsecureSkipVerify = true
+	tlsConfig := env.clientTlsConfig(testFrontForwardedName, []string{http3.NextProtoH3})
 	refused, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
 	testFrontApplicationCode(t, refused, err)
 	env.nextDispatch()
@@ -526,12 +607,12 @@ func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
 	}
 }
 
-// A connection is counted with the result the front decided for it: an
-// unknown name whose handshake never completes is a failed handshake, and
-// only one whose handshake completed is refused with 0x1000 and counted as
-// an unknown name. The first client refuses the handshake only once the
-// front has dispatched its connection, so the front decides while the
-// handshake is still under way.
+// A connection is counted with the result the front decided for it: a
+// served name the front refuses on QUIC whose handshake never completes is a
+// failed handshake, and only one whose handshake completed is refused with
+// 0x1000 and counted as an unknown name. The first client refuses the
+// handshake only once the front has dispatched its connection, so the front
+// decides while the handshake is still under way.
 func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 	var results chan string
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
@@ -540,8 +621,7 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
 
 	refuse := make(chan struct{})
-	tlsConfig := env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
-	tlsConfig.InsecureSkipVerify = true
+	tlsConfig := env.clientTlsConfig(testFrontForwardedName, []string{http3.NextProtoH3})
 	tlsConfig.VerifyConnection = func(tls.ConnectionState) error {
 		<-refuse
 		return errors.New("the test's client refuses the handshake")
@@ -554,7 +634,7 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 		}
 		dialed <- err
 	}()
-	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassUnknown {
+	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassForwarded {
 		t.Fatalf("dispatch = %+v", dispatch)
 	}
 	close(refuse)
@@ -567,18 +647,17 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 		t.Fatal("the refusing dial never ended")
 	}
 	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultHandshakeFailed {
-		t.Fatalf("an unknown name whose handshake failed counted as %q", result)
+		t.Fatalf("a refused name whose handshake failed counted as %q", result)
 	}
 
-	tlsConfig = env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
-	tlsConfig.InsecureSkipVerify = true
+	tlsConfig = env.clientTlsConfig(testFrontForwardedName, []string{http3.NextProtoH3})
 	conn, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
 	if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeUnknownServerName {
 		t.Fatalf("closed with %#x", code)
 	}
 	env.nextDispatch()
 	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultUnknownName {
-		t.Fatalf("an unknown name refused with 0x1000 counted as %q", result)
+		t.Fatalf("a name refused with 0x1000 counted as %q", result)
 	}
 }
 
@@ -597,6 +676,59 @@ func TestFrontH3ApiClosesAnIdleConnectionAtTheKeepaliveTimeout(t *testing.T) {
 	env.nextDispatch()
 	if code := testFrontApplicationCode(t, conn, nil); code != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
 		t.Fatalf("the idle api connection closed with %#x", code)
+	}
+}
+
+// A request stream on an api connection whose HEADERS never arrive is reset
+// with H3_REQUEST_INCOMPLETE at the client header timeout, as the tcp
+// servers bound a request's headers, and its handler never runs. With no
+// stream left, the connection then closes at the keepalive timeout, so the
+// front's open count, which the drain waits for, returns to zero. Without
+// the bound, the stream would hold the connection, and the drain, for as
+// long as its client acks the public config's PINGs.
+func TestFrontH3ApiResetsAStreamWhoseHeadersNeverArrive(t *testing.T) {
+	var handled atomic.Int64
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ClientHeaderTimeout = 200 * time.Millisecond
+		env.settings.Front.Http.KeepaliveTimeout = 200 * time.Millisecond
+		env.front.h3ApiHandler = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handled.Add(1)
+			})
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+	env.waitOpen(1)
+
+	stream, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a HEADERS frame's type and the largest length the header limit allows,
+	// and nothing of its field section
+	frameHead := quicvarint.Append(nil, 0x1)
+	frameHead = quicvarint.Append(frameHead, uint64(env.settings.Front.Http.MaxRequestHeadersTotalBytes))
+	if _, err := stream.Write(frameHead); err != nil {
+		t.Fatal(err)
+	}
+	stream.SetReadDeadline(time.Now().Add(testFrontProgressTimeout))
+	_, err = stream.Read(make([]byte, 1))
+	var streamErr *quic.StreamError
+	if !errors.As(err, &streamErr) || !streamErr.Remote || streamErr.ErrorCode != quic.StreamErrorCode(http3.ErrCodeRequestIncomplete) {
+		t.Fatalf("the stream ended with %v, want a reset with H3_REQUEST_INCOMPLETE", err)
+	}
+	if code := testFrontApplicationCode(t, conn, nil); code != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
+		t.Fatalf("the api connection closed with %#x, want its idle timeout's H3_NO_ERROR", code)
+	}
+	env.waitOpen(0)
+	if handled.Load() != 0 {
+		t.Fatal("a request whose headers never arrived reached the api handler")
 	}
 }
 

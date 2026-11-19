@@ -274,6 +274,7 @@ func TestLbAltStatusSignalCancellationPublishesNothing(t *testing.T) {
 // whose lb interface it is, a paused host's included. So excluding or pausing
 // that host keeps every probe off the address, even a public UDP row
 // enrolled under another host, while the host's other addresses are probed.
+// Each withheld lb status attempt is unknown as scope-excluded.
 func TestLbAltProbeAddressesAreOwnedByTheirLbInterfaceHost(t *testing.T) {
 	lbAltSource, lbAltCalls := lbAltStatusTestSignalSource(nil)
 	settings := lbAltStatusTestEnrolledSettings(lbAltSource)
@@ -304,6 +305,19 @@ func TestLbAltProbeAddressesAreOwnedByTheirLbInterfaceHost(t *testing.T) {
 	requireAlertClass(t, alerts, "monitor-host-scope-partial")
 	if int(lbAltCalls.Load()) != 2*(1+len(lbAltStatusTestBlocks)) {
 		t.Fatalf("the lb status probe made %d calls, want eth1's two families only", lbAltCalls.Load())
+	}
+	withheld := 0
+	for _, alert := range alerts {
+		if alert.Class != "lbalt-status-observation" {
+			continue
+		}
+		withheld++
+		if !strings.Contains(alert.Target, "/edge-synthetic-eth2/ipv4/") || alert.Observed != "verified=false reason=scope-excluded" {
+			t.Fatalf("the paused pass raised %s with %q, want only eth2's withheld attempts as scope-excluded", alert.Target, alert.Observed)
+		}
+	}
+	if withheld != 1+len(lbAltStatusTestBlocks) {
+		t.Fatalf("the paused pass raised %d observations, want one per eth2 route", withheld)
 	}
 
 	// a public UDP row under another host, pinned to an excluded host's lb interface

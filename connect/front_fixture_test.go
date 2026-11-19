@@ -56,6 +56,7 @@ const (
 	testFrontConnectWild   = "g1.connect.service.example"
 	testFrontApiName       = "api.service.example"
 	testFrontForwardedName = "mcp.service.example"
+	testFrontRedirectName  = "old-api.service.example"
 	testFrontUnknownName   = "other.unknown.example"
 	testFrontWhodisTld     = "whodis.example."
 )
@@ -273,7 +274,9 @@ func newTestFrontRouteFile(t testing.TB) []byte {
 // A fake nginx front: name classes from the route table with nginx's
 // wildcards, one long-lived TLS config of each kind with a generated
 // certificate, alt's per-address QUIC cap, and handlers that answer with the
-// interface they were built for. It records the calls connect makes.
+// interface they were built for. As the nginx front's, its QUIC TLS config
+// fails the handshake of a name it doesn't serve, no name included. It
+// records the calls connect makes.
 type testFront struct {
 	identity        *testFrontIdentity
 	nameClasses     map[string]nginx.NameClass
@@ -288,7 +291,10 @@ type testFront struct {
 	httpHandler  func(interfaceName string) http.Handler
 	h3ApiHandler func(interfaceName string) http.Handler
 
-	// signaled after each release of an admitted QUIC connection
+	// the ConnState of every public server ConfigureServer is given, when set
+	connState func(conn net.Conn, connState http.ConnState)
+	// signaled after each release of an admitted QUIC connection, while it
+	// has room
 	released chan struct{}
 	// a real nginx front over the same route table and settings, which
 	// configures the public servers as in production, so they get nginx's
@@ -352,6 +358,9 @@ func newTestFront(routeTable *nginx.RouteTable, identity *testFrontIdentity) *te
 	}
 	front.quicTlsConfig = &tls.Config{
 		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if front.ClassifyName(clientHello.ServerName) == nginx.NameClassUnknown {
+				return nil, errors.New("the test front serves no such name")
+			}
 			var nextProtos []string
 			if slices.Contains(clientHello.SupportedProtos, http3.NextProtoH3) {
 				nextProtos = []string{http3.NextProtoH3}
@@ -461,7 +470,10 @@ func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Ad
 				defer self.stateLock.Unlock()
 				self.connectionCounts[key] -= 1
 			}()
-			self.released <- struct{}{}
+			select {
+			case self.released <- struct{}{}:
+			default:
+			}
 		})
 	}, true
 }
@@ -482,6 +494,9 @@ func (self *testFront) ConfigureServer(httpServer *http.Server) {
 		self.configuredServers = append(self.configuredServers, httpServer)
 	}()
 	self.configuringFront.ConfigureServer(httpServer)
+	if self.connState != nil {
+		httpServer.ConnState = self.connState
+	}
 }
 
 // Every server ConfigureServer was given, in order.

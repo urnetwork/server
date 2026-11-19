@@ -151,6 +151,14 @@ type Server struct {
 	// If zero or negative, there is no timeout.
 	IdleTimeout time.Duration
 
+	// urnetwork: the time a request stream may take to deliver its HEADERS
+	// frame, from the stream's start, as http.Server.ReadHeaderTimeout bounds
+	// an HTTP/1 request's headers. A stream past it is reset with
+	// H3_REQUEST_INCOMPLETE, and the handler never runs. The deadline is
+	// cleared before the handler, which bounds its own reads of the body. If
+	// zero or negative, there is no timeout (URNETWORK.md).
+	ReadHeaderTimeout time.Duration
+
 	// ConnContext optionally specifies a function that modifies the context used for a new connection c.
 	// The provided ctx has a ServerContextKey value.
 	ConnContext func(ctx context.Context, c *quic.Conn) context.Context
@@ -449,6 +457,7 @@ func (s *Server) newRawServerConn(conn *quic.Conn) (*RawServerConn, *quic.SendSt
 		connCtx,
 		s.Handler,
 		s.maxHeaderBytes(),
+		s.ReadHeaderTimeout,
 	)
 
 	// open the control stream and send a SETTINGS frame, it's also used to send a GOAWAY frame later

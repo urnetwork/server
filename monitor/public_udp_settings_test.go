@@ -27,7 +27,7 @@ func TestPublicUdpProbeSettingsDefaultsAreFreshInstances(t *testing.T) {
 	want := PublicUdpProbeSettings{
 		Cadence:                          5 * time.Minute,
 		AttemptTimeout:                   5 * time.Second,
-		MaxTargetCount:                   32,
+		MaxTargetCount:                   64,
 		WorkerCount:                      4,
 		MaxPacketCount:                   2048,
 		MaxByteCount:                     1024 * 1024,
@@ -88,7 +88,7 @@ func publicUdpTestMatrix(n int) PublicUdpSettings {
 func TestPublicUdpMatrixBoundFollowsItsSettings(t *testing.T) {
 	hosts := []*host{{name: "edge-synthetic"}}
 	raised := DefaultPublicUdpProbeSettings()
-	raised.MaxTargetCount = 64
+	raised.MaxTargetCount = 128
 	lowered := DefaultPublicUdpProbeSettings()
 	lowered.MaxTargetCount = 0
 	settingsWith := func(mutate func(*PublicUdpProbeSettings)) *PublicUdpProbeSettings {
@@ -102,9 +102,9 @@ func TestPublicUdpMatrixBoundFollowsItsSettings(t *testing.T) {
 		settings *PublicUdpProbeSettings
 		reason   string
 	}{
-		{name: "the default bound", rows: 32, settings: DefaultPublicUdpProbeSettings(), reason: ""},
-		{name: "past the default bound", rows: 33, settings: DefaultPublicUdpProbeSettings(), reason: "target-denominator"},
-		{name: "a raised bound", rows: 33, settings: raised, reason: ""},
+		{name: "the default bound", rows: 64, settings: DefaultPublicUdpProbeSettings(), reason: ""},
+		{name: "past the default bound", rows: 65, settings: DefaultPublicUdpProbeSettings(), reason: "target-denominator"},
+		{name: "a raised bound", rows: 65, settings: raised, reason: ""},
 		{name: "no bound", rows: 1, settings: lowered, reason: "target-denominator"},
 		{name: "no settings", rows: 1, settings: nil, reason: "probe-settings"},
 		{name: "no attempt timeout", rows: 1, settings: settingsWith(func(settings *PublicUdpProbeSettings) { settings.AttemptTimeout = 0 }), reason: "probe-settings"},
@@ -416,6 +416,54 @@ func TestPublicUdpTransportBoundsTheAttemptByItsSettings(t *testing.T) {
 		}
 		if !bounded || deadline.Before(started.Add(c.settings.AttemptTimeout)) || deadline.After(finished.Add(c.settings.AttemptTimeout)) {
 			t.Errorf("%s: the socket's deadline was %s (bounded=%t), %s after the start", c.name, deadline, bounded, deadline.Sub(started))
+		}
+	}
+}
+
+// A native attempt runs within the runner's command timeout and under the
+// settings' own bound, so the shorter applies. A raised attempt timeout
+// reaches the attempt up to the command timeout, and in full when no positive
+// command timeout caps it; a lowered one and the default hold under the
+// monitor's default command timeout. The attempt goes through the runner's
+// own adapter, and its socket records the deadline it was opened under.
+func TestPublicUdpNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) {
+	defaultCommandTimeout := (SignalSettings{}).withDefaults().CommandTimeout
+	raised := DefaultPublicUdpProbeSettings()
+	raised.AttemptTimeout = time.Hour
+	lowered := DefaultPublicUdpProbeSettings()
+	lowered.AttemptTimeout = time.Second
+	cases := []struct {
+		name           string
+		settings       *PublicUdpProbeSettings
+		commandTimeout time.Duration
+		// how long after its start the attempt's deadline falls
+		bound time.Duration
+	}{
+		{name: "a raised timeout under a shorter command timeout", settings: raised, commandTimeout: time.Minute, bound: time.Minute},
+		{name: "a raised timeout within a longer command timeout", settings: raised, commandTimeout: 2 * time.Hour, bound: time.Hour},
+		{name: "a raised timeout and no command timeout", settings: raised, commandTimeout: 0, bound: time.Hour},
+		{name: "a raised timeout and a negative command timeout", settings: raised, commandTimeout: -time.Second, bound: time.Hour},
+		{name: "a lowered timeout", settings: lowered, commandTimeout: defaultCommandTimeout, bound: time.Second},
+		{name: "the default under the default command timeout", settings: DefaultPublicUdpProbeSettings(), commandTimeout: defaultCommandTimeout, bound: 5 * time.Second},
+		{name: "the default and no command timeout", settings: DefaultPublicUdpProbeSettings(), commandTimeout: 0, bound: 5 * time.Second},
+	}
+	for _, c := range cases {
+		var deadline time.Time
+		bounded := false
+		listens := 0
+		native := &runner{cfg: &monitorConfig{commandTimeout: c.commandTimeout}, publicUdpListen: func(ctx context.Context, _ string, _ string) (net.PacketConn, error) {
+			listens++
+			deadline, bounded = ctx.Deadline()
+			return nil, errors.New("synthetic-private-socket-error")
+		}}
+		started := time.Now()
+		observed, err := native.publicUdp(context.Background(), publicUdpTestNativeRequest("ipv4", "connect", "quic"), c.settings)
+		finished := time.Now()
+		if err == nil || listens != 1 || observed.Failure != PublicUdpFailureSocket {
+			t.Fatalf("%s: the attempt did not reach its socket: %+v err=%v", c.name, observed, err)
+		}
+		if !bounded || deadline.Before(started.Add(c.bound)) || deadline.After(finished.Add(c.bound)) {
+			t.Errorf("%s: the socket was opened under a deadline %s after the start (bounded=%t), want %s", c.name, deadline.Sub(started), bounded, c.bound)
 		}
 	}
 }

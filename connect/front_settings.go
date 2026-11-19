@@ -88,6 +88,9 @@ type FrontServerSettings struct {
 	// Nil outside package tests. Called with the name of each forced close
 	// step reported as not closed within ForcedCloseTimeout, as it is logged.
 	forcedCloseReportObserverForTest func(step string)
+	// Nil outside package tests. Called on start's goroutine once the front
+	// reads as started, before any socket's supervisor runs.
+	startedObserverForTest func()
 }
 
 // A new instance on every call, with its own nginx front defaults.

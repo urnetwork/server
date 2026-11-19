@@ -135,6 +135,16 @@ func (self *ConnectRouter) Connect(w http.ResponseWriter, r *http.Request) {
 	self.connectHandler.Connect(w, r)
 }
 
+// The routes of connect names behind the lb, alike on the private listener
+// nginx forwards them to and in-process behind the lb_alt front: only GET /
+// reaches connect, the websocket and H1+ upgrades included. The router
+// answers any other path 404 and any other method 405 with Allow, cookies
+// dropped, before connect counts an H1 handshake or charges the address's
+// rate limit.
+func newConnectRoutes(connect http.HandlerFunc) []*router.Route {
+	return []*router.Route{router.NewRoute("GET", "/", connect)}
+}
+
 // The handler behind this router's routes. The alt front dispatches accepted
 // QUIC connections into the same handler instead of mounting the H1 route, so
 // both fronts share one handler id, heartbeat and drain.

@@ -7,7 +7,8 @@ package connect
 // keepalive_time close connections on h1 and h2, on the lb status route of
 // an lb name, which no limit charges; and a client that stops reading over
 // TLS, on h1 or h2, is cut at send_timeout without close_notify holding its
-// handler.
+// handler. The public sockets bound a write left without a deadline by
+// send_timeout, hijacked or not (frontTrackedConn).
 
 import (
 	"bufio"
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"golang.org/x/net/http2"
 
 	"github.com/urnetwork/server/nginx"
@@ -52,6 +54,67 @@ func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 			httpServer.ConnContext == nil {
 			t.Fatalf("a public server's limits are not the nginx front's: header timeout %s, idle timeout %s, header bytes %d", httpServer.ReadHeaderTimeout, httpServer.IdleTimeout, httpServer.MaxHeaderBytes)
 		}
+	}
+}
+
+// Connect names reach connect in-process only through connect's own routes,
+// as a connect block's private listener routes what nginx forwards it: GET /
+// reaches connect, its upgrade included, with the client's cookies dropped,
+// while another path answers 404, an upgrade to it included, and another
+// method on / 405 with Allow: GET, none of them reaching connect.
+func TestFrontConnectNamesReachConnectOnlyThroughItsRoutes(t *testing.T) {
+	t.Setenv("WARP_VERSION", "0.0.0-test")
+	type connectRequest struct {
+		method string
+		path   string
+		cookie bool
+	}
+	connectRequests := make(chan connectRequest, 16)
+	connect := func(w http.ResponseWriter, r *http.Request) {
+		connectRequests <- connectRequest{method: r.Method, path: r.URL.Path, cookie: r.Header.Get("Cookie") != ""}
+		io.WriteString(w, "connect")
+	}
+	env := newUnstartedTestFrontEnv(t, nil)
+	if err := env.frontServer.startWithConnectRoutes(env.ctx, connect, env.connectQuic); err != nil {
+		t.Fatal(err)
+	}
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	const upgradeHeader = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+	cases := []struct {
+		method string
+		path   string
+		header string
+		status int
+		allow  string
+	}{
+		{method: http.MethodGet, path: "/favicon.ico", status: http.StatusNotFound},
+		{method: http.MethodGet, path: "/other", header: upgradeHeader, status: http.StatusNotFound},
+		{method: http.MethodPost, path: "/", header: "Content-Length: 0\r\n", status: http.StatusMethodNotAllowed, allow: http.MethodGet},
+		{method: http.MethodDelete, path: "/x", status: http.StatusNotFound},
+		{method: http.MethodGet, path: "/", header: "Cookie: session=synthetic\r\n", status: http.StatusOK},
+		{method: http.MethodGet, path: "/", header: upgradeHeader, status: http.StatusOK},
+	}
+	for _, c := range cases {
+		client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontConnectName)
+		fmt.Fprintf(client.conn, "%s %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", c.method, c.path, testFrontConnectName, c.header)
+		response, err := http.ReadResponse(client.reader, nil)
+		if err != nil {
+			t.Fatalf("%s %s: %v", c.method, c.path, err)
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != c.status || response.Header.Get("Allow") != c.allow {
+			t.Fatalf("%s %s = %d with Allow %q, want %d with Allow %q", c.method, c.path, response.StatusCode, response.Header.Get("Allow"), c.status, c.allow)
+		}
+	}
+	close(connectRequests)
+	got := []connectRequest{}
+	for request := range connectRequests {
+		got = append(got, request)
+	}
+	want := []connectRequest{{method: http.MethodGet, path: "/"}, {method: http.MethodGet, path: "/"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("connect saw %+v, want only the two GET / without a cookie", got)
 	}
 }
 
@@ -211,6 +274,252 @@ func TestFrontTrackedConnFailsWritesAfterATimedOutWrite(t *testing.T) {
 	}
 }
 
+// A raw connection over one end of a pipe, whose writes wait for the other
+// end to read, or for their deadline. It reports the write deadline each
+// write starts under, so a test sees a write's bound and can act while the
+// write waits.
+type testFrontDeadlineConn struct {
+	net.Conn
+	// the write deadline of each write as it starts
+	writeStarts chan time.Time
+
+	stateLock     sync.Mutex
+	writeDeadline time.Time
+}
+
+// Over conn, one end of a pipe.
+func newTestFrontDeadlineConn(conn net.Conn) *testFrontDeadlineConn {
+	return &testFrontDeadlineConn{
+		Conn:        conn,
+		writeStarts: make(chan time.Time, 16),
+	}
+}
+
+// See net.Conn.
+func (self *testFrontDeadlineConn) SetDeadline(deadline time.Time) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.writeDeadline = deadline
+	}()
+	return self.Conn.SetDeadline(deadline)
+}
+
+// See net.Conn.
+func (self *testFrontDeadlineConn) SetWriteDeadline(deadline time.Time) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.writeDeadline = deadline
+	}()
+	return self.Conn.SetWriteDeadline(deadline)
+}
+
+// The write deadline set last, zero for none.
+func (self *testFrontDeadlineConn) currentWriteDeadline() time.Time {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.writeDeadline
+}
+
+// Reports the deadline the write starts under, then writes p.
+func (self *testFrontDeadlineConn) Write(p []byte) (int, error) {
+	self.writeStarts <- self.currentWriteDeadline()
+	return self.Conn.Write(p)
+}
+
+// The deadline the next write started under.
+func (self *testFrontDeadlineConn) nextWriteStart(t testing.TB) time.Time {
+	t.Helper()
+	select {
+	case deadline := <-self.writeStarts:
+		return deadline
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("no write started")
+		return time.Time{}
+	}
+}
+
+// A write deadline as a test reports it: none, or how far away it is.
+func testFrontDeadlineText(deadline time.Time) string {
+	if deadline.IsZero() {
+		return "none"
+	}
+	return fmt.Sprintf("%s away", time.Until(deadline))
+}
+
+// A write its owner left without a deadline, on a connection net/http still
+// owns, fails once none of it has gone out for send_timeout, as crypto/tls's
+// answer to a KeyUpdate request does on a client that stopped reading; every
+// later write fails at once; and the socket has no deadline again once the
+// bounded write returned, so a connection idle between writes has none.
+func TestFrontTrackedConnBoundsAWriteItsOwnerLeftWithoutADeadline(t *testing.T) {
+	const sendTimeout = 50 * time.Millisecond
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	rawConn := newTestFrontDeadlineConn(serverConn)
+	trackedConn := &frontTrackedConn{
+		Conn:        rawConn,
+		sendTimeout: sendTimeout,
+	}
+	writeStart := time.Now()
+	written := make(chan error, 1)
+	go func() {
+		_, err := trackedConn.Write([]byte("a"))
+		written <- err
+	}()
+	startDeadline := rawConn.nextWriteStart(t)
+	if startDeadline.Before(writeStart.Add(sendTimeout)) || time.Now().Add(sendTimeout).Before(startDeadline) {
+		t.Fatalf("the write started under the deadline %s, want send_timeout %s from its start", testFrontDeadlineText(startDeadline), sendTimeout)
+	}
+	select {
+	case err := <-written:
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("the write the peer never reads = %v, want its bound's error", err)
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("a write the peer never reads was not cut")
+	}
+	if deadline := rawConn.currentWriteDeadline(); !deadline.IsZero() {
+		t.Fatalf("after the bounded write the socket's deadline is %s, want none", testFrontDeadlineText(deadline))
+	}
+
+	go io.Copy(io.Discard, clientConn)
+	n, err := trackedConn.Write([]byte("b"))
+	if n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a write after the cut one = %d, %v; want it failed at once with the bound's error", n, err)
+	}
+}
+
+// A raw connection whose first write puts out one byte and fails on its
+// deadline, as a write to a client that reads slowly does, and whose later
+// writes go out whole. It records the write deadline each write starts
+// under. Only its deadlines and writes are used.
+type testFrontPartialWriteConn struct {
+	net.Conn
+
+	stateLock      sync.Mutex
+	writeDeadline  time.Time
+	startDeadlines []time.Time
+	written        []byte
+}
+
+// See net.Conn.
+func (self *testFrontPartialWriteConn) SetWriteDeadline(deadline time.Time) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.writeDeadline = deadline
+	return nil
+}
+
+// Puts out one byte of the first write and fails it on its deadline; puts
+// out every later write whole.
+func (self *testFrontPartialWriteConn) Write(p []byte) (int, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.startDeadlines = append(self.startDeadlines, self.writeDeadline)
+	if len(self.startDeadlines) == 1 {
+		self.written = append(self.written, p[0])
+		return 1, os.ErrDeadlineExceeded
+	}
+	self.written = append(self.written, p...)
+	return len(p), nil
+}
+
+// A bounded write that makes progress gets a new bound, as nginx's
+// send_timeout bounds only a write that makes none: a write to a client
+// that reads, however slowly, is never cut, and nothing latches.
+func TestFrontTrackedConnRestartsTheBoundOfAWriteThatMakesProgress(t *testing.T) {
+	rawConn := &testFrontPartialWriteConn{}
+	trackedConn := &frontTrackedConn{
+		Conn:        rawConn,
+		sendTimeout: time.Hour,
+	}
+	if n, err := trackedConn.Write([]byte("ab")); n != 2 || err != nil {
+		t.Fatalf("a write that made progress before its bound = %d, %v; want it written whole", n, err)
+	}
+	if n, err := trackedConn.Write([]byte("c")); n != 1 || err != nil {
+		t.Fatalf("the next write = %d, %v; want it written, nothing latched", n, err)
+	}
+	if string(rawConn.written) != "abc" {
+		t.Fatalf("the socket got %q, want abc", rawConn.written)
+	}
+	startDeadlines := rawConn.startDeadlines
+	if len(startDeadlines) != 3 {
+		t.Fatalf("%d attempts, want the first write's two and the next write's one", len(startDeadlines))
+	}
+	for i, startDeadline := range startDeadlines {
+		if startDeadline.IsZero() {
+			t.Fatalf("attempt %d started with no bound", i)
+		}
+	}
+	if startDeadlines[1].Before(startDeadlines[0]) {
+		t.Fatal("the attempt after the progress started under an earlier bound")
+	}
+}
+
+// An owner's deadline set while a bounded write waits takes the write over
+// and stands once it returns, so the bound never overwrites or clears it,
+// and the writes under it get no bound; an owner that clears its deadline
+// meanwhile leaves the write its bound.
+func TestFrontTrackedConnKeepsAnOwnerDeadlineSetDuringABoundedWrite(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	rawConn := newTestFrontDeadlineConn(serverConn)
+	trackedConn := &frontTrackedConn{
+		Conn:        rawConn,
+		sendTimeout: time.Hour,
+	}
+	written := make(chan error, 1)
+	write := func(data string) {
+		go func() {
+			_, err := trackedConn.Write([]byte(data))
+			written <- err
+		}()
+	}
+	readWritten := func(what string) {
+		t.Helper()
+		if _, err := io.ReadFull(clientConn, make([]byte, 1)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-written:
+			if err != nil {
+				t.Fatalf("%s = %v, want it written", what, err)
+			}
+		case <-time.After(testFrontProgressTimeout):
+			t.Fatalf("%s did not return once read", what)
+		}
+	}
+
+	write("a")
+	bound := rawConn.nextWriteStart(t)
+	if bound.IsZero() {
+		t.Fatal("the write started with no bound")
+	}
+	trackedConn.SetWriteDeadline(time.Time{})
+	if deadline := rawConn.currentWriteDeadline(); !deadline.Equal(bound) {
+		t.Fatalf("an owner that cleared its deadline mid-write left the socket's deadline %s, want the write's bound", testFrontDeadlineText(deadline))
+	}
+	ownerDeadline := time.Now().Add(2 * time.Hour)
+	trackedConn.SetWriteDeadline(ownerDeadline)
+	if deadline := rawConn.currentWriteDeadline(); !deadline.Equal(ownerDeadline) {
+		t.Fatalf("the owner's deadline set mid-write left the socket's %s, want the owner's", testFrontDeadlineText(deadline))
+	}
+	readWritten("the bounded write")
+	if deadline := rawConn.currentWriteDeadline(); !deadline.Equal(ownerDeadline) {
+		t.Fatalf("after the bounded write the socket's deadline is %s, want the owner's", testFrontDeadlineText(deadline))
+	}
+
+	write("b")
+	if startDeadline := rawConn.nextWriteStart(t); !startDeadline.Equal(ownerDeadline) {
+		t.Fatalf("a write under the owner's deadline started under %s, want the owner's", testFrontDeadlineText(startDeadline))
+	}
+	readWritten("the write under the owner's deadline")
+}
+
 // A public listener that reports each connection it accepts, wrapped so a
 // test can stall it.
 type testFrontStallingListener struct {
@@ -238,15 +547,24 @@ func (self *testFrontStallingListener) Accept() (net.Conn, error) {
 // A connection whose writes, once it is stalled, wait out their deadline and
 // fail with its error, as a write does to a client that stopped reading
 // once the socket's buffers are full, whatever the kernel's buffer sizes.
-// Safe for concurrent use as a net.Conn is.
+// Once it is wedged, a write waits for the close alone, whatever its
+// deadline: as close_notify does behind a write that holds TLS's write lock
+// past every bound a close has, such as the answer crypto/tls writes on the
+// reading goroutine to a client's KeyUpdate request, which only that write's
+// own bound, send_timeout, ends (frontTrackedConn). It records the write
+// deadline each write starts under. Safe for concurrent use as a net.Conn
+// is.
 type testFrontStallingConn struct {
 	net.Conn
 	stalled   atomic.Bool
+	wedged    atomic.Bool
 	closed    chan struct{}
 	closeOnce sync.Once
 
 	stateLock     sync.Mutex
 	writeDeadline time.Time
+	// the write deadline of each write as it started, in order
+	writeStartDeadlines []time.Time
 }
 
 // See net.Conn.
@@ -270,16 +588,21 @@ func (self *testFrontStallingConn) SetWriteDeadline(deadline time.Time) error {
 }
 
 // Writes p, or once stalled waits for the write deadline, or the close, and
-// fails.
+// fails; once wedged waits for the close and fails.
 func (self *testFrontStallingConn) Write(p []byte) (int, error) {
-	if !self.stalled.Load() {
-		return self.Conn.Write(p)
-	}
 	writeDeadline := func() time.Time {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		self.writeStartDeadlines = append(self.writeStartDeadlines, self.writeDeadline)
 		return self.writeDeadline
 	}()
+	if self.wedged.Load() {
+		<-self.closed
+		return 0, net.ErrClosed
+	}
+	if !self.stalled.Load() {
+		return self.Conn.Write(p)
+	}
 	var expired <-chan time.Time
 	if !writeDeadline.IsZero() {
 		expired = time.After(time.Until(writeDeadline))
@@ -298,6 +621,254 @@ func (self *testFrontStallingConn) Close() error {
 		close(self.closed)
 	})
 	return self.Conn.Close()
+}
+
+// The write deadline of every write so far as it started, in order.
+func (self *testFrontStallingConn) startedWriteDeadlines() []time.Time {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.writeStartDeadlines)
+}
+
+// An idle keepalive connection whose client stopped reading closes once a
+// write crypto/tls makes on its reading goroutine has stalled for
+// send_timeout. net/http left that write no deadline, and its idle and
+// header timeouts are read deadlines, which a goroutine blocked in a write
+// never sees, so the connection would otherwise keep its goroutine, buffers
+// and socket until the client closes it, where nginx's read timer closes it
+// (frontTrackedConn). The write here is the alert answering a record that
+// fails to decrypt; a client's KeyUpdate request asks for the same kind of
+// write, as often as it likes.
+func TestFrontHttpsClosesAnIdleConnectionWhoseTlsWriteStallsOnAClientThatStoppedReading(t *testing.T) {
+	var idleConns *testFrontIdleConns
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		idleConns = newTestFrontIdleConns(env)
+		env.settings.Front.Http.SendTimeout = 100 * time.Millisecond
+	})
+	client, stallingConn := idleConns.serveIdle(env)
+	stallingConn.stalled.Store(true)
+	// an application data record of 32 bytes that no key decrypts
+	record := append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
+	if _, err := client.conn.NetConn().Write(record); err != nil {
+		t.Fatal(err)
+	}
+	testFrontWait(t, stallingConn.closed, "the close of the idle connection whose alert stalled")
+	env.waitOpen(0)
+}
+
+// A connect websocket, upgraded as connect's handler upgrades it, whose
+// client sends no auth frame and stops reading closes once a write
+// crypto/tls makes on the reading goroutine has stalled for send_timeout.
+// gorilla's upgrade clears the write deadline after its 101, as connect's
+// H1+ upgrade does, and the auth frame's read deadline never reaches a
+// goroutine blocked in a write, so an unauthenticated client would otherwise
+// keep the connection and its limit slot until it closes them, where nginx
+// bounds an upgraded connection's every blocked client write by send_timeout
+// (frontTrackedConn). The write here is the alert answering a record that
+// fails to decrypt; a client's KeyUpdate request asks for the same kind of
+// write, as often as it likes.
+func TestFrontClosesAnUnauthenticatedWebsocketWhoseTlsWriteStallsOnAClientThatStoppedReading(t *testing.T) {
+	readEnded := make(chan error, 1)
+	connectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{
+			HandshakeTimeout: testFrontProgressTimeout,
+		}
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		// the auth frame's deadline, far past the test, so only the bound
+		// of the write the read makes can end it
+		ws.SetReadDeadline(time.Now().Add(time.Hour))
+		_, _, err = ws.ReadMessage()
+		readEnded <- err
+	})
+	accepted := make(chan *testFrontStallingConn, 16)
+	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.SendTimeout = 100 * time.Millisecond
+		listen := env.settings.Listen
+		env.settings.Listen = func(network string, address string) (net.Listener, error) {
+			listener, err := listen(network, address)
+			if err != nil {
+				return listener, err
+			}
+			return &testFrontStallingListener{
+				Listener: listener,
+				accepted: accepted,
+			}, nil
+		}
+	}, connectHandler)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontConnectName)
+	var stallingConn *testFrontStallingConn
+	select {
+	case stallingConn = <-accepted:
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("no connection was accepted")
+	}
+	// a front that never bounds the stalled write would otherwise hold the
+	// test's own close of the front
+	t.Cleanup(func() {
+		stallingConn.Close()
+	})
+	fmt.Fprintf(client.conn, "GET / HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n", testFrontConnectName)
+	response, err := http.ReadResponse(client.reader, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("the upgrade = %d", response.StatusCode)
+	}
+	stallingConn.stalled.Store(true)
+	// an application data record of 32 bytes that no key decrypts
+	record := append([]byte{23, 3, 3, 0, 32}, make([]byte, 32)...)
+	if _, err := client.conn.NetConn().Write(record); err != nil {
+		t.Fatal(err)
+	}
+	testFrontWait(t, stallingConn.closed, "the close of the unauthenticated websocket whose alert stalled")
+	select {
+	case err := <-readEnded:
+		if err == nil {
+			t.Fatal("the auth read returned a message")
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the auth read never ended")
+	}
+	env.waitOpen(0)
+}
+
+// A response net/http writes for a handler that set no deadline is bounded
+// by send_timeout, over TLS on 443 and plain on 80; so is a hijacked
+// connection's write its owner left without one, while one its owner gave a
+// deadline is written under that deadline alone (frontTrackedConn).
+func TestFrontPublicTcpWritesWithoutADeadlineAreBoundedBySendTimeout(t *testing.T) {
+	const sendTimeout = time.Hour
+	ownerDeadline := time.Now().Add(2 * time.Hour)
+	hijackingHandler := func(interfaceName string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/upgrade" {
+				io.WriteString(w, "plain")
+				return
+			}
+			conn, readWriter, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			readWriter.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: test-owned\r\nConnection: Upgrade\r\n\r\n")
+			if err := readWriter.Flush(); err != nil {
+				return
+			}
+			conn.SetWriteDeadline(ownerDeadline)
+			if _, err := io.WriteString(conn, "owned\n"); err != nil {
+				return
+			}
+			// until the client closes
+			io.Copy(io.Discard, readWriter)
+		})
+	}
+	accepted := make(chan *testFrontStallingConn, 16)
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.SendTimeout = sendTimeout
+		env.front.httpsHandler = hijackingHandler
+		env.front.httpHandler = hijackingHandler
+		listen := env.settings.Listen
+		env.settings.Listen = func(network string, address string) (net.Listener, error) {
+			listener, err := listen(network, address)
+			if err != nil {
+				return listener, err
+			}
+			return &testFrontStallingListener{
+				Listener: listener,
+				accepted: accepted,
+			}, nil
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	bounded := func(deadline time.Time) bool {
+		return sendTimeout/2 < time.Until(deadline) && !deadline.After(time.Now().Add(sendTimeout))
+	}
+	cases := []struct {
+		portKind string
+		dial     func() (net.Conn, error)
+	}{
+		{
+			portKind: frontPortHttps,
+			dial: func() (net.Conn, error) {
+				return tls.Dial("tcp", env.bindAddress(address, frontPortHttps), env.clientTlsConfig(testFrontConnectName, []string{"http/1.1"}))
+			},
+		},
+		{
+			portKind: frontPortHttp,
+			dial: func() (net.Conn, error) {
+				return net.Dial("tcp", env.bindAddress(address, frontPortHttp))
+			},
+		},
+	}
+	for _, c := range cases {
+		conn, err := c.dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			conn.Close()
+		})
+		// bounds a broken test, never a passing one
+		conn.SetDeadline(time.Now().Add(testFrontProgressTimeout))
+		var rawConn *testFrontStallingConn
+		select {
+		case rawConn = <-accepted:
+		case <-time.After(testFrontProgressTimeout):
+			t.Fatalf("%s: no connection was accepted", c.portKind)
+		}
+		reader := bufio.NewReader(conn)
+
+		// past the TLS handshake, whose writes have its own deadline
+		from := len(rawConn.startedWriteDeadlines())
+		fmt.Fprintf(conn, "GET /plain HTTP/1.1\r\nHost: %s\r\n\r\n", testFrontConnectName)
+		response, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", c.portKind, err)
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("%s: the plain request = %d", c.portKind, response.StatusCode)
+		}
+		responseDeadlines := rawConn.startedWriteDeadlines()[from:]
+		if len(responseDeadlines) == 0 {
+			t.Fatalf("%s: the response was never written", c.portKind)
+		}
+		for _, deadline := range responseDeadlines {
+			if !bounded(deadline) {
+				t.Errorf("%s: net/http's response started under the deadline %s, want send_timeout's bound, %s", c.portKind, testFrontDeadlineText(deadline), sendTimeout)
+			}
+		}
+
+		from = len(rawConn.startedWriteDeadlines())
+		fmt.Fprintf(conn, "GET /upgrade HTTP/1.1\r\nHost: %s\r\nUpgrade: test-owned\r\nConnection: Upgrade\r\n\r\n", testFrontConnectName)
+		response, err = http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", c.portKind, err)
+		}
+		if response.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("%s: the upgrade = %d", c.portKind, response.StatusCode)
+		}
+		if line, err := reader.ReadString('\n'); line != "owned\n" || err != nil {
+			t.Fatalf("%s: the tunnel sent %q, %v", c.portKind, line, err)
+		}
+		tunnelDeadlines := rawConn.startedWriteDeadlines()[from:]
+		if len(tunnelDeadlines) != 2 {
+			t.Fatalf("%s: the tunnel made %d writes, want its 101 and its owned line", c.portKind, len(tunnelDeadlines))
+		}
+		if deadline := tunnelDeadlines[0]; !bounded(deadline) {
+			t.Errorf("%s: the hijacked 101, left without a deadline, started under the deadline %s, want send_timeout's bound, %s", c.portKind, testFrontDeadlineText(deadline), sendTimeout)
+		}
+		if deadline := tunnelDeadlines[1]; !deadline.Equal(ownerDeadline) {
+			t.Errorf("%s: the hijacked write its owner gave a deadline started under the deadline %s, want the owner's alone", c.portKind, testFrontDeadlineText(deadline))
+		}
+	}
 }
 
 // A TLS h1 client that stops reading has the nginx front's blocked write cut

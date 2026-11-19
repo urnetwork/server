@@ -2,11 +2,13 @@
 
 This directory is the unmodified source distribution of
 `github.com/quic-go/quic-go v0.61.0` (module zip
-`h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=`), except for two narrowly
-scoped changes, in `connection.go` and in `http3/server.go`, the added
-`urnetwork_conn_timer_test.go` and `http3/urnetwork_graceful_goaway_test.go`,
-and the removed upstream `.github/` directory. The upstream MIT license and
-source headers are preserved.
+`h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=`), except for three narrowly
+scoped changes, in `connection.go`, in `http3/server.go`, and in
+`http3/server.go` with `http3/server_conn.go`, the added
+`urnetwork_conn_timer_test.go`, `http3/urnetwork_graceful_goaway_test.go` and
+`http3/urnetwork_read_header_timeout_test.go`, and the removed upstream
+`.github/` directory. The upstream MIT license and source headers are
+preserved.
 
 ## The run loop timer
 
@@ -95,6 +97,54 @@ here, under `GOFLAGS=-trimpath`, skipping the six tests that read source paths
 at run time (`TestErrorCodes`, `TestServerAltSvcFromUnixSocket`,
 `TestServerClosing`, `TestServerConcurrentServeAndClose`,
 `TestServerImmediateGracefulShutdown`, `TestServerListenAndServeErrors`).
+
+## The header phase of an http3 request stream
+
+`RawServerConn.handleRequestStream` stops the connection's idle timer when a
+request stream starts, parses the stream's first frame, and reads the
+HEADERS frame's field section into a buffer of the length the frame
+announces, up to `MaxHeaderBytes`. Upstream did both with no deadline. A
+stream that announced a length and sent nothing more held its goroutine and
+that buffer, and with the idle timer stopped its connection too, for as long
+as the peer acked the connection's PINGs, which the connect front's public
+QUIC config sends, so the QUIC idle timeout never fired either. An
+unauthenticated address could pin about 7 MiB and 100 goroutines per api
+connection to the front this way (server LBALT final review).
+
+The change, in `http3/server.go` and `http3/server_conn.go`:
+
+- `Server.ReadHeaderTimeout`, passed to each `RawServerConn`. When positive,
+  a request stream's read deadline is set to the stream's start plus the
+  timeout before its first frame is parsed, and cleared once the request is
+  parsed, before the handler runs, which bounds its own reads of the body. A
+  stream past it takes the existing `H3_REQUEST_INCOMPLETE` path, its
+  goroutine ends, and with no stream left the idle timer re-arms. The bound
+  also covers unknown frames skipped before the HEADERS frame.
+- `readHeaderBlock` reads the field section through an `io.LimitReader` of
+  the announced length with `io.ReadAll`, so the buffer grows with the bytes
+  that arrive, at most about twice what was received, rather than taking the
+  announced length up front. A stream that ends first is
+  `io.ErrUnexpectedEOF`, on the same error path as before.
+
+With `ReadHeaderTimeout` unset, only the read of the field section changes.
+
+### Tests
+
+`http3/urnetwork_read_header_timeout_test.go`, run with
+`go test -run '^TestUrnetwork' ./http3/` in this directory:
+
+- a stream that sends only a HEADERS frame's type and announced length is
+  reset with `H3_REQUEST_INCOMPLETE` once `ReadHeaderTimeout` passes, and its
+  handler never runs; upstream never resets it;
+- a handler that reads its body only after waiting out `ReadHeaderTimeout`
+  still reads it whole, so the deadline ends with the parsed request;
+- a field section announcing 64 KiB of which ten bytes arrive never asks for a
+  read larger than 4 KiB, where upstream asked for 64 KiB at once; a whole
+  section is read exactly, and a stream that ends first is an error.
+
+The upstream http3 suite passes with this change: `go test -count=1
+./http3/...` here, with no `-trimpath`, since some of its tests read source
+paths at run time.
 
 Every main module that wants these changes must replace
 `github.com/quic-go/quic-go` with this directory; Go does not inherit

@@ -250,6 +250,13 @@ func TestPublicUdpExcludedAndSharedPausedEndpointMakesNoCall(t *testing.T) {
 			t.Fatal("an excluded or shared paused endpoint reached transport")
 		}
 		requireAlertClass(t, alerts, "monitor-host-scope-partial")
+		if shared {
+			// the enabled row's own host is kept, and its withheld attempt is
+			// unknown as scope-excluded, never forged evidence
+			if observation := requireAlertClass(t, alerts, "public-udp-observation"); observation.Observed != "verified=false reason=scope-excluded" {
+				t.Fatalf("a withheld attempt reported %q", observation.Observed)
+			}
+		}
 	}
 }
 
@@ -796,12 +803,13 @@ func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 		"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings",
 		"its handshake was verified, so the row's `public-udp-path` and `public-udp-observation` resolve",
 		"clear hold for the row's `public-udp-application`", "QUIC receive windows of 16 KiB per stream and 32 KiB per connection",
+		"at most 64 logical rows", "alias, front, carrier, port and family",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("§16.9 does not say %q", required)
 		}
 	}
-	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)", "no class of the row resolves until"} {
+	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)", "no class of the row resolves until", "at most 32 logical rows", "needs a raised"} {
 		if strings.Contains(section, stale) {
 			t.Errorf("§16.9 still says %q", stale)
 		}

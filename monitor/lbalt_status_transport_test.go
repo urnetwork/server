@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -509,16 +510,25 @@ func TestLbAltStatusConnectionFailuresAreClassified(t *testing.T) {
 
 // The attempt's deadline ends an exchange the front holds open: a path
 // failure, returned at once with the deadline's own error. The front's entry
-// is the barrier, and the deadline is an explicit state transition.
+// is the barrier, and the deadline is an explicit state transition. The front
+// holds the exchange until the attempt ends it or the test does, so an
+// attempt whose request ignores its deadline fails at the bound below rather
+// than holding the server's close, and the test, for good.
 func TestLbAltStatusDeadlineDuringTheExchangeIsATimeout(t *testing.T) {
 	attemptCtx := &publicUdpTestDeadlineContext{Context: context.Background(), expired: make(chan struct{})}
 	entered := make(chan struct{})
+	release := make(chan struct{})
 	var enterOnce sync.Once
 	front := &lbAltStatusTestFront{answer: func(w http.ResponseWriter, r *http.Request) {
 		enterOnce.Do(func() { close(entered) })
-		<-r.Context().Done()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
 	}}
 	server, _ := lbAltStatusTestServer(t, front, false)
+	// after the server's close in cleanup order, so it runs first
+	t.Cleanup(func() { close(release) })
 	request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, "")
 	type attempt struct {
 		observed LbAltStatusObservation
@@ -544,6 +554,68 @@ func TestLbAltStatusDeadlineDuringTheExchangeIsATimeout(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the expired attempt did not return")
+	}
+}
+
+// A front that accepts the connection on 443 and never answers the
+// ClientHello holds no socket past its attempt: once the ClientHello has
+// begun and the attempt's deadline passes, the attempt returns a timeout and
+// its client closes the stalled handshake's socket. net/http runs the
+// handshake under a dial context detached from the request's, so only the
+// transport's deferred CloseIdleConnections ends it. The ClientHello's
+// record header is the barrier, and the deadline is an explicit state
+// transition.
+func TestLbAltStatusStalledTlsHandshakeIsClosedWithItsAttempt(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	helloBegun := make(chan net.Conn, 1)
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		// a TLS handshake record's header: the ClientHello has begun
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(connection, header); err != nil || header[0] != 22 {
+			connection.Close()
+			return
+		}
+		helloBegun <- connection
+	}()
+	request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteBlock, "g1")
+	dialer := &lbAltStatusTestDialer{t: t, request: request, target: listener.Addr().String()}
+	attemptCtx := &publicUdpTestDeadlineContext{Context: context.Background(), expired: make(chan struct{})}
+	type attempt struct {
+		observed LbAltStatusObservation
+		err      error
+	}
+	done := make(chan attempt, 1)
+	go func() {
+		observed, err := observeLbAltStatus(attemptCtx, request, DefaultLbAltStatusProbeSettings(), dialer.dial, nil)
+		done <- attempt{observed: observed, err: err}
+	}()
+	var serverSide net.Conn
+	select {
+	case serverSide = <-helloBegun:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no ClientHello began")
+	}
+	t.Cleanup(func() { serverSide.Close() })
+	close(attemptCtx.expired)
+	select {
+	case result := <-done:
+		if !errors.Is(result.err, context.DeadlineExceeded) || result.observed.Failure != LbAltStatusFailureTimeout {
+			t.Fatalf("a stalled handshake gave %+v err=%v", result.observed, result.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the expired attempt did not return")
+	}
+	serverSide.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.Copy(io.Discard, serverSide); err != nil {
+		t.Fatalf("the stalled handshake's socket stayed open after its attempt: %v", err)
 	}
 }
 
@@ -738,9 +810,9 @@ func TestLbAltStatusNativeAdapterRefusesAnAttemptWithNoPositiveBound(t *testing.
 // settings' own bound, so the shorter applies. A raised attempt timeout
 // reaches the attempt up to the command timeout, and in full when no positive
 // command timeout caps it; a lowered one and the default hold under the
-// monitor's default command timeout. The dial runs under the request's
-// context, so the deadline it records is the attempt's, on the lb route and
-// on a block route.
+// monitor's default command timeout. The attempt goes through the runner's
+// own adapter, whose dial runs under the request's context, so the deadline
+// the dial records is the attempt's, on the lb route and on a block route.
 func TestLbAltStatusNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) {
 	defaultCommandTimeout := (SignalSettings{}).withDefaults().CommandTimeout
 	raised := DefaultLbAltStatusProbeSettings()
@@ -768,8 +840,9 @@ func TestLbAltStatusNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) 
 			lbAltStatusTestRequest(t, "ipv6", lbAltStatusRouteBlock, "g1"),
 		} {
 			dialer := &lbAltStatusTestDialer{t: t, request: request, dialErr: errors.New("synthetic-private-dial-error")}
+			native := &runner{cfg: &monitorConfig{commandTimeout: c.commandTimeout}, lbAltStatusDial: dialer.dial}
 			started := time.Now()
-			observed, err := observeLbAltStatusWithin(context.Background(), c.commandTimeout, request, c.settings, dialer.dial, nil)
+			observed, err := native.lbAltStatus(context.Background(), request, c.settings)
 			finished := time.Now()
 			if err == nil || dialer.dialCount() != 1 || observed.Failure != LbAltStatusFailureConnect || !observed.Dialed {
 				t.Fatalf("%s, %s route: the attempt did not reach its dial: %+v err=%v", c.name, request.Route, observed, err)

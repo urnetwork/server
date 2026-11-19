@@ -42335,8 +42335,10 @@ service: Alt serves both, and so does connect's lb_alt front, LBALT.md D3),
 `ipv4_address` / `ipv6_address`, public `port`, TLS `server_name`, and an
 explicit canonical trailing-dot `dns_tld` only for the DNS carriers. No DNS
 resolver chooses a convenient address. Missing family pins, duplicate logical
-paths, an incomplete denominator, ambiguous/missing enabled host ownership or
-invalid protocol authority reject the entire matrix before transport. Disabled
+paths (one host, interface, service, alias, front, carrier, port and family,
+so whodis's one alias on 53 and on 4053 is two paths), an incomplete
+denominator, ambiguous/missing enabled host ownership or invalid protocol
+authority reject the entire matrix before transport. Disabled
 enrollment is unarmed, not a healthy or recovery result. The explicit matrix
 does not discover unlisted dynamic fleet paths; its owner must reconcile it
 with current desired service/alias intent before arming.
@@ -42379,20 +42381,21 @@ external UDP ports are evaluated as explicitly enrolled Alt paths, not
 misclassified as leaked Connect-private ports.
 
 The bounds are `PublicUdpProbeSettings` (`DefaultPublicUdpProbeSettings`): a
-five-minute cadence; at most 32 logical rows, which expand into 64 family
-attempts; four workers; five seconds per attempt, which the transport applies
-whatever its caller's deadline, and which is also the QUIC handshake and idle
-timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and 1 MiB in
-each direction; QUIC receive windows of 16 KiB per stream and 32 KiB per
-connection, which never grow; and 16 KiB each for a `/hello` answer's header
-and body. A pass hands one instance to the matrix, the transport and the
+five-minute cadence; at most 64 logical rows, which expand into 128 family
+attempts, enough for the lb_alt matrix, every carrier of both fronts on each
+of the ten lb interfaces, quic on 443 and dns on 53 and 4053, which is 60
+rows; four workers; five seconds per attempt, which the transport applies
+whatever its caller's deadline, which the monitor's command timeout, 60 s by
+default, also caps on a native attempt, and which is also the QUIC handshake
+and idle timeout and covers a `/hello`; hard raw bounds of 2048 datagrams and
+1 MiB in each direction; QUIC receive windows of 16 KiB per stream and 32 KiB
+per connection, which never grow; and 16 KiB each for a `/hello` answer's
+header and body. A pass hands one instance to the matrix, the transport and the
 findings, so a tuned budget bounds the wire and the validation of the counts
 the transport reports alike. Settings without a positive attempt timeout and
 positive wire budgets refuse the whole matrix (`probe-settings`) before any
 socket opens. A non-positive receive window takes quic-go's default, which the
-byte budget still bounds. A matrix of more than 32 rows, such
-as every carrier of both fronts on every lb_alt interface, needs a raised
-`MaxTargetCount` default first. Unexpected inbound traffic shares the receive
+byte budget still bounds. Unexpected inbound traffic shares the receive
 budget. DNS state/queues retain their native bounded codec limits.
 Socket closure precedes transport teardown; translation closure joins its
 workers. No second probe attempt, resolver fallback or alternate endpoint is
@@ -42416,8 +42419,10 @@ Reasons are fixed domains. `public-udp-inventory` reports
 reports `result=application-failed` with `application_status` (0 when no answer
 arrived), `application_json`, `application_body_valid` and bounded packet
 counts. `public-udp-observation` reports `verified=false reason=` one of
-`source-unavailable`, `attempt-authority-unavailable`,
-`observation-authority-invalid`, `observer-route-unavailable`,
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observer-route-unavailable`,
 `socket-unavailable`, `tls-authentication-unverified`, `wire-budget-exhausted`,
 `configuration-invalid`, `handshake-outcome-unverified`,
 `application-outcome-unverified` or `authenticated-exact-return-unverified`.
@@ -42585,8 +42590,10 @@ finding records which answered (`lbalt_front`).
 
 The bounds are `LbAltStatusProbeSettings` (`DefaultLbAltStatusProbeSettings`):
 a five-minute cadence, five seconds per attempt, four workers, at most 32
-targets and 16 blocks, and 16 KiB each of response header and body. With five
-blocks, each dual-stack interface takes twelve attempts. Settings without a
+targets and 16 blocks, and 16 KiB each of response header and body. A native
+attempt is also capped by the monitor's command timeout, 60 s by default, so
+a raised attempt timeout reaches it only up to that. With five blocks, each
+dual-stack interface takes twelve attempts. Settings without a
 positive attempt timeout and body bound refuse the matrix before any
 connection.
 
@@ -42628,8 +42635,10 @@ or `invalid`, and the reason is one of:
   route answered by another block, or by a front that is not ready.
 
 `lbalt-status-observation` reports `verified=false reason=` one of
-`source-unavailable`, `attempt-authority-unavailable`,
-`observation-authority-invalid`, `observation-incomplete` (no response, an
+`scope-excluded` (the host scope withheld the attempt: its address is shared
+with a paused or excluded owner, §1.6), `source-unavailable`,
+`attempt-authority-unavailable`, `observation-authority-invalid`,
+`observation-incomplete` (no response, an
 unverified 443 answer, a reused connection, or an attempt error or expiry),
 `observer-route-unavailable` (the monitor host has no route or address in the
 family), `tls-authentication-unverified` or `configuration-invalid`.

@@ -15,10 +15,12 @@ package connect
 //     long-lived config and serves HTTP/1.1 and h2 through its HttpsHandler;
 //     TCP 80 serves its HttpHandler. QUIC dispatches each connection by its
 //     server name: connect names to connect's own handler, api names to an
-//     h3 server of the front's H3ApiHandler, anything else closed with
-//     0x1000; the per-address connection cap closes with 0x1001, and one
-//     handshake admission limit stands behind every socket (§4.4.4). Whodis
-//     is the same dispatch under decode53, with the route table's tlds.
+//     h3 server of the front's H3ApiHandler, and any other served name is
+//     closed with 0x1000, while a name the front doesn't serve, or none,
+//     fails the TLS handshake; the per-address connection cap closes with
+//     0x1001, and one handshake admission limit stands behind every socket
+//     (§4.4.4). Whodis is the same dispatch under decode53, with the route
+//     table's tlds.
 //   - supervision (D13, D22). Each socket is supervised on its own: a lost one
 //     is re-created at once, the backoff resetting after a healthy run, it
 //     reads as missing until it is back, and its siblings never notice.
@@ -39,7 +41,10 @@ package connect
 // results.
 //
 // Goroutine safety: a frontServer's methods are safe for concurrent use,
-// except that start runs at most once.
+// except that start runs at most once, and beginDrain and close act only once
+// start has published the front as started: one called before that returns
+// doing nothing, and the sockets start then serves wait for a later close or
+// the end of start's context.
 
 import (
 	"context"
@@ -58,6 +63,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/nginx"
+	"github.com/urnetwork/server/router"
 )
 
 // The nginx.Front methods connect calls (LBALT-IMPL.md §2.7). *nginx.Front
@@ -296,10 +302,21 @@ func newFrontSockets(routeTable *nginx.RouteTable, socketsPerPort int) ([]*front
 }
 
 // Builds the nginx front around connect's router and starts the server: the
-// router's H1 Connect handler serves connect names in-process, and its
-// ConnectHandler their QUIC.
+// router's H1 Connect handler serves connect names in-process through
+// connect's own routes, and its ConnectHandler their QUIC.
 func (self *frontServer) startWithRouter(ctx context.Context, connectRouter *ConnectRouter) error {
-	return self.startWithConnect(ctx, http.HandlerFunc(connectRouter.Connect), connectRouter.ConnectHandler())
+	return self.startWithConnectRoutes(ctx, connectRouter.Connect, connectRouter.ConnectHandler())
+}
+
+// Starts the server with connect names served in-process through connect's
+// own routes (newConnectRoutes), as a connect block's private listener
+// routes the requests nginx forwards it: connect sees only GET /, and the
+// router answers the rest before connect counts or admits anything. GET
+// /status needs no route, since the nginx front's exact /status deny answers
+// it first, connect's status being standard. connectQuic serves connect
+// names' QUIC.
+func (self *frontServer) startWithConnectRoutes(ctx context.Context, connect http.HandlerFunc, connectQuic frontConnectQuic) error {
+	return self.startWithConnect(ctx, router.NewRouter(ctx, newConnectRoutes(connect)), connectQuic)
 }
 
 // Builds the nginx front from the loaded route table and certificates, with
@@ -387,6 +404,10 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 		}
 		runs = append(runs, run)
 	}
+	// every supervisor is counted before the front reads as started, so a
+	// close that finds it started waits for every run, even one whose
+	// supervisor has yet to start
+	self.supervisors.Add(len(self.sockets))
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -395,8 +416,10 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 		}
 		self.started = true
 	}()
+	if self.settings.startedObserverForTest != nil {
+		self.settings.startedObserverForTest()
+	}
 	for i, socket := range self.sockets {
-		self.supervisors.Add(1)
 		go self.superviseSocket(socket, runs[i])
 	}
 	// the process's cancel without a drain, such as a confirmed handler

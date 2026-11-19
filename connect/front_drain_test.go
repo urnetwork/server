@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"runtime"
 	"slices"
@@ -24,6 +25,7 @@ import (
 	http3qlog "github.com/quic-go/quic-go/http3/qlog"
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/qlogwriter"
+	"github.com/quic-go/quic-go/quicvarint"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
@@ -574,6 +576,184 @@ func TestFrontDrainEndsWhenTheLastConnectionCloses(t *testing.T) {
 	testFrontWait(t, drained, "the drain's end once the last connection closed")
 }
 
+// The raw sockets of a test's https connections, below the front's tracked
+// connections, and a signal each time a public server holds a connection
+// idle, so a test can wedge an idle keepalive connection's server side.
+type testFrontIdleConns struct {
+	accepted chan *testFrontStallingConn
+	idle     chan struct{}
+}
+
+// Wraps the env's tcp binds and its servers' ConnState, before the start.
+func newTestFrontIdleConns(env *testFrontEnv) *testFrontIdleConns {
+	idleConns := &testFrontIdleConns{
+		accepted: make(chan *testFrontStallingConn, 16),
+		idle:     make(chan struct{}, 16),
+	}
+	listen := env.settings.Listen
+	env.settings.Listen = func(network string, address string) (net.Listener, error) {
+		listener, err := listen(network, address)
+		if err != nil {
+			return listener, err
+		}
+		return &testFrontStallingListener{
+			Listener: listener,
+			accepted: idleConns.accepted,
+		}, nil
+	}
+	env.front.connState = func(_ net.Conn, connState http.ConnState) {
+		if connState == http.StateIdle {
+			select {
+			case idleConns.idle <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return idleConns
+}
+
+// Serves one request on a new h1 keepalive connection to eth1's https
+// socket and waits until its server holds it idle. Returns the client and
+// the connection's raw socket.
+func (self *testFrontIdleConns) serveIdle(env *testFrontEnv) (*testFrontH1Client, *testFrontStallingConn) {
+	env.t.Helper()
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontApiName)
+	if response := client.get(testFrontApiName, "/"); response.Close {
+		env.t.Fatal("the connection was not kept alive")
+	}
+	var stallingConn *testFrontStallingConn
+	select {
+	case stallingConn = <-self.accepted:
+	case <-time.After(testFrontProgressTimeout):
+		env.t.Fatal("no connection was accepted")
+	}
+	// a front that never cuts a wedge, or a stalled write, would otherwise
+	// hold the test's own close of the front
+	env.t.Cleanup(func() {
+		stallingConn.Close()
+	})
+	testFrontWait(env.t, self.idle, "the keepalive connection's idle state")
+	return client, stallingConn
+}
+
+// As serveIdle, then wedges the raw socket: every later write on it,
+// close_notify included, waits for its close.
+func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingConn {
+	env.t.Helper()
+	_, stallingConn := self.serveIdle(env)
+	stallingConn.wedged.Store(true)
+	return stallingConn
+}
+
+// The forced close is bounded whatever a connection's TLS would send: it
+// cuts every raw socket before http.Server.Close closes the TLS connections
+// the servers own, each with close_notify. An idle keepalive connection
+// whose close_notify waits past the close's bound, as one does behind the
+// answer to a KeyUpdate request from a client that stopped reading until
+// that answer's send_timeout, would otherwise hold the close, and with it
+// the exit after a handler retirement's cancel, which closes the front
+// without a drain.
+func TestFrontForcedCloseIsNotHeldByAWedgedConnection(t *testing.T) {
+	reports := make(chan string, 4)
+	var idleConns *testFrontIdleConns
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		idleConns = newTestFrontIdleConns(env)
+		env.settings.forcedCloseReportObserverForTest = func(step string) {
+			reports <- step
+		}
+	})
+	wedged := idleConns.wedgeIdle(env)
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		env.frontServer.close()
+	}()
+	testFrontWait(t, closed, "the forced close")
+	select {
+	case <-wedged.closed:
+	default:
+		t.Fatal("the forced close returned with the wedged connection open")
+	}
+	select {
+	case step := <-reports:
+		t.Fatalf("the forced close reported the %s as not closed", step)
+	default:
+	}
+}
+
+// An idle keepalive connection whose close waits, here for good, holds no
+// step of the drain: the servers' Shutdowns close idle connections off the
+// drain's goroutine, so the exchange drain and the h3 GOAWAYs begin while
+// that close still waits; and at the drain's deadline the forced close cuts
+// the raw socket, which frees the Shutdown holding its server's lock,
+// before it closes the servers. The cancel comes last.
+func TestFrontDrainIsNotHeldByAWedgedIdleConnection(t *testing.T) {
+	var idleConns *testFrontIdleConns
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		idleConns = newTestFrontIdleConns(env)
+	})
+	wedged := idleConns.wedgeIdle(env)
+	warpStatus := &router.WarpStatusState{}
+	warpStatus.SetReady()
+
+	// whether the wedged connection was still open as the exchange drain began
+	exchangeBegan := make(chan bool, 1)
+	exchangeDrain := func() {
+		select {
+		case <-wedged.closed:
+			exchangeBegan <- false
+		default:
+			exchangeBegan <- true
+		}
+	}
+	canceled := make(chan struct{})
+	go drainConnect(warpStatus, env.frontServer, exchangeDrain, func() {
+		close(canceled)
+	})
+	select {
+	case open := <-exchangeBegan:
+		if !open {
+			t.Fatal("the exchange drain began only once the wedged connection was cut")
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the exchange drain never began: the drain's start waits on the wedged connection's close")
+	}
+	quicRuns := func() []*frontQuicRun {
+		env.frontServer.stateLock.Lock()
+		defer env.frontServer.stateLock.Unlock()
+		quicRuns := []*frontQuicRun{}
+		for _, socket := range env.frontServer.sockets {
+			if quicRun, ok := socket.run.(*frontQuicRun); ok {
+				quicRuns = append(quicRuns, quicRun)
+			}
+		}
+		return quicRuns
+	}()
+	if len(quicRuns) == 0 {
+		t.Fatal("no QUIC socket is up")
+	}
+	for _, quicRun := range quicRuns {
+		drainBegan := func() bool {
+			quicRun.stateLock.Lock()
+			defer quicRun.stateLock.Unlock()
+			return quicRun.drainCtx != nil
+		}()
+		if !drainBegan {
+			t.Fatalf("the h3 drain of %s did not begin with the exchange drain", quicRun.socket.key)
+		}
+	}
+
+	endTestFrontDrain(env.frontServer)
+	testFrontWait(t, canceled, "the cancel after the forced close")
+	select {
+	case <-wedged.closed:
+	default:
+		t.Fatal("the drain ended with the wedged connection open")
+	}
+}
+
 // Each h2 connection gets one GOAWAY when the drain begins, while its
 // stream in flight still completes.
 func TestFrontDrainSendsOneH2GoawayPerConnection(t *testing.T) {
@@ -763,6 +943,115 @@ func TestFrontCloseBoundsAStuckApiRequest(t *testing.T) {
 	case <-closed:
 	case <-time.After(50 * forcedCloseTimeout):
 		t.Fatalf("the close waited over %s for a stuck api request, past its %s bound", 50*forcedCloseTimeout, forcedCloseTimeout)
+	}
+}
+
+// A close that finds the front started waits for every socket's supervisor,
+// even one start has yet to run, since start counts the supervisors before
+// the front reads as started. The close runs on start's own goroutine in the
+// moment between the two, so no supervisor can run before the close's
+// bounded wait for the sockets ends, and the close reports them as not
+// closed in time; a close that counted none would return at once with
+// nothing to report. Once start goes on, every socket is released.
+func TestFrontCloseRacingStartWaitsForEverySupervisor(t *testing.T) {
+	reports := make(chan string, 4)
+	closed := false
+	env := newUnstartedTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ForcedCloseTimeout = 100 * time.Millisecond
+		env.settings.forcedCloseReportObserverForTest = func(step string) {
+			reports <- step
+		}
+		env.settings.startedObserverForTest = func() {
+			env.frontServer.close()
+			closed = true
+		}
+	})
+	if err := env.frontServer.start(env.ctx, env.front, env.connectQuic); err != nil {
+		t.Fatal(err)
+	}
+	if !closed {
+		t.Fatal("start never read as started")
+	}
+	select {
+	case step := <-reports:
+		if step != "sockets" {
+			t.Fatalf("the close reported the %s, want the sockets", step)
+		}
+	default:
+		t.Fatal("the close found no supervisor to wait for")
+	}
+	env.waitSocketsUp(0)
+}
+
+// The drain is not held by an api request stream whose HEADERS never
+// arrive: the stream is reset at the client header timeout, its connection
+// then idles out at the keepalive timeout under the drain's graceful
+// shutdown, and the drain ends long before its deadline. A request on a
+// later stream of the same connection is the barrier that the pending
+// stream was accepted first, since quic-go accepts a connection's streams in
+// order of their ids. Both are written raw, since an http3 client closes a
+// connection itself once a GOAWAY finds it without a request of its own.
+func TestFrontDrainEndsDespiteAnApiStreamWhoseHeadersNeverArrive(t *testing.T) {
+	served := make(chan struct{}, 1)
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ClientHeaderTimeout = 200 * time.Millisecond
+		env.settings.Front.Http.KeepaliveTimeout = 200 * time.Millisecond
+		env.front.h3ApiHandler = func(string) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case served <- struct{}{}:
+				default:
+				}
+			})
+		}
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+
+	pending, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a HEADERS frame's type and announced length, and nothing of its
+	// field section
+	frameHead := quicvarint.Append(nil, 0x1)
+	frameHead = quicvarint.Append(frameHead, 64)
+	if _, err := pending.Write(frameHead); err != nil {
+		t.Fatal(err)
+	}
+	// a complete GET / on a later stream, its field section encoded with
+	// QPACK's static table alone (RFC 9204 §4.5, Appendix A): no dynamic
+	// table, then :method GET, :scheme https and :path / indexed, and
+	// :authority as a literal with a static name reference
+	fieldSection := []byte{0x00, 0x00, 0xc0 | 17, 0xc0 | 23, 0xc0 | 1, 0x50, byte(len(testFrontApiName))}
+	fieldSection = append(fieldSection, testFrontApiName...)
+	headersFrame := quicvarint.Append(nil, 0x1)
+	headersFrame = quicvarint.Append(headersFrame, uint64(len(fieldSection)))
+	headersFrame = append(headersFrame, fieldSection...)
+	barrier, err := conn.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := barrier.Write(headersFrame); err != nil {
+		t.Fatal(err)
+	}
+	barrier.Close()
+	testFrontWait(t, served, "the later stream's request")
+
+	env.frontServer.beginDrain()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		env.frontServer.waitDrained()
+	}()
+	testFrontWait(t, drained, "the drain's end once the pending stream was reset and its connection idled out")
+	if openCount := env.frontServer.openCount.Value(); openCount != 0 {
+		t.Fatalf("the drain ended with %d connections open", openCount)
 	}
 }
 
