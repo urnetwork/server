@@ -40,6 +40,10 @@ type CtfEgress struct {
 	// the unit is the verify head model's pin of the epoch; otherwise it is
 	// the prefix of the miner's live address
 	Pinned bool
+	// the miner's platform transport declared it leaves through a proxy
+	// (verify_proxied_egress_model.go): it has no unit, neither a pin, nor
+	// its live address's prefix, nor one a presence sample recorded
+	Proxied bool
 	// the keyed IPv4 addresses and IPv6 /64s it holds, ascending
 	Addresses [][32]byte
 }
@@ -57,6 +61,9 @@ type CtfEgress struct {
 // keyed /29 or /48, so the duplicate rule, not the bijection, picks one of the
 // providers sharing an address. The reads are pipelined 512 providers at a
 // time.
+//
+// A provider marked as leaving through a proxy (MarkVerifyProxiedEgress) has
+// no unit and is Proxied: its live address is its proxy's, not a host's.
 func GetCtfProviderEgress(ctx context.Context, clientIds []server.Id, settings *VerifySettings, epoch uint64, pin bool) map[server.Id]*CtfEgress {
 	egresses := map[server.Id]*CtfEgress{}
 	if len(clientIds) == 0 {
@@ -67,6 +74,7 @@ func GetCtfProviderEgress(ctx context.Context, clientIds []server.Id, settings *
 	server.Redis(ctx, func(r server.RedisClient) {
 		for start := 0; start < len(clientIds); start += 512 {
 			chunk := clientIds[start:min(start+512, len(clientIds))]
+			marked := readVerifyProxiedEgress(ctx, r, chunk)
 			cmds := make([][]*redis.MapStringStringCmd, len(chunk))
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				for i, clientId := range chunk {
@@ -88,7 +96,9 @@ func GetCtfProviderEgress(ctx context.Context, clientIds []server.Id, settings *
 				}
 				live := newVerifyLiveEgress(versions[0], versions[1])
 				egress := ctfEgressOfLive(live)
-				if pinned, ok := pins[clientId]; ok {
+				if marked[clientId] {
+					egress.Proxied = true
+				} else if pinned, ok := pins[clientId]; ok {
 					unit := pinned
 					egress.Unit = &unit
 					egress.UnitFamily = ctfPinFamily(live, pinned)
