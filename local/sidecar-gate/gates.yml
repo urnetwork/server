@@ -666,6 +666,8 @@ gates:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+    - item: '§23.6''s M4 design closure: witnesses'' control contracts (§6, §8); C13''s sealed source and the dial fence (§17); HTTP liveness (§18); the page Worker; the escrow comparator and index (D-QUOTA-9; §20); Q-BRIDGE-2, Q-SDK-5; the forwarding leg''s file list and budget, Q-SDK-7''s (§4.7, §18.10; owner decisions 197, 215, 216, 491)'
+      external: 'people: the Gn-in review reads and signs the closure (§23.8)'
   M4:
     - row: FS-19
       case: grant
@@ -682,24 +684,24 @@ gates:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs21OnT3]}
     - row: FS-37
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs37]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs37OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs37PageKilledWithNoUnloadReapsOnce, TestFs37CloseBeaconReapsAtOnce, TestFs37OldGenerationPollsKeepNothingAlive, TestFs37TwoTabsReapIndependently, TestFs37ConnectedEphemeralSurvivesAShortDisconnect, TestFs37MemberPageRefreshingForThirtyOneDaysStaysActive]}
+        - {repo: server, package: ./taskworker/work, tags: sidecar_pending, stores: true, names: [TestFs37PageKilledWithNoUnloadReapsOnceOnT3, TestFs37CloseBeaconReapsAtOnceOnT3, TestFs37OldGenerationPollsKeepNothingAliveOnT3, TestFs37TwoTabsReapIndependentlyOnT3, TestFs37ConnectedEphemeralSurvivesAShortDisconnectOnT3, TestFs37PageWorkerRefreshingForThirtyOneDaysStaysActiveOnT3, TestFs37ReapJobRunsTheReapOnT3]}
     - row: FS-38
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs38]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs38OnT3]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestFs38OnT3]}
     - row: FS-38
       case: forged
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs38Forged]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs38ForgedOnT3]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestFs38ForgedOnT3]}
     - row: FS-56
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs56]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs56OnT3]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestFs56OnT3]}
     - row: FS-97
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs97]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs97WeeklyReEnrollmentForAYearStopsGrowingAfterThirteenWeeks, TestFs97AWorkerBackByAResyncOrAReAddIsNeverRevoked, TestFs97AWorkerNoGroupOfTheDeviceSeatedIsNeverRevoked, TestFs97AKillBetweenTheRevocationsAndTheAdmissionLandsEachOnce, TestFs97AWorkerThatResyncsBeforeThePostOrDuringARetryIsNotRevoked]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs97OnT3]}
     - row: FS-106
       case: page-worker
@@ -707,6 +709,80 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs106PageWorker]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs106PageWorkerOnT3]}
       store_clock: true
+    - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (none at this gate) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules]}
+        - {repo: server, package: ./sidecart3, names: [TestGateT3RunsTheNightlySeeds]}
+    - item: 'the rows that pass on clause tests alone run under no explorer seed, lost answer or twin but their owners'': FS-37 and FS-97 are plain tests on one fixed schedule each, with no registered builder (SDK-M4-08, TEAM-M4-01), so §22.8''s rules above do not reach them until each has one (QD-1084''s clause registry)'
+    - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M4-out]}
+    - item: 'FI-11, path integrity, answers through TEST-M4-01''s oracle on both tiers: a byte before a backend''s audience check or after its flow''s revocation fails at the step it arrived in, a positive twin must reach its backend admitted, and a proof is held to its MX''s own transactions, read after every step on T2''s Net and on T3''s'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFi11FailsAByteBeforeTheAudienceCheck, TestFi11FailsAByteAfterARevocationSwap, TestFi11PassesATwinThatReachesTheBackend, TestFi11FailsAProofTheMxRefused, TestFi11FixtureReadsEachCaseOnT2]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFi11RunsAfterEveryStepOnT3]}
+    - item: 'FS-38 and FS-56 read FI-11 from the path''s own bytes, a RecordingBackend over BridgeNet''s upstream, which nothing has built: both still check their NAT''s dials through FsBridgePathIntegrity, the bridge world''s own account (BRIDGE-M4-22, TEST-M4-01)'
+    - item: '§22.7''s private-names assertion (BRIDGE-M4-14): a private name gets A or NODATA on the device for every qtype'
+    - item: '§22.7''s unsealed-peer assertion (BRIDGE-M4-22, BRIDGE-M8-01): a bridge flow from an unsealed peer is denied'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestBridgeUnsealedPeerFlowIsDenied]}
+    - item: '§22.7''s public-exits assertion (BRIDGE-M4-22, BRIDGE-M4-03): after C6a, public exits refuse 100.64/10 and RFC 1918 destinations'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestBridgePublicExitsRefuseOverlayAndPrivateDestinations]}
+    - item: '§22.7''s flow-pins assertion (BRIDGE-M4-22): a TCP flow idle 300-600 s keeps its link across a withdraw'
+    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-106''s page-worker read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
+        - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
+    - item: 'CC4''s TLS-intercepting proxy, a cloud sandbox''s stand-in with its own CA (§22.7; TEST-M4-02): every byte it decrypts reaches the capture, canaries stay sealed inside, a bearer token is declared, and what it cannot capture it refuses'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestInterceptingProxyCapturesWhatItDecrypts, TestInterceptingProxyTerminatesTlsWithItsOwnCa, TestInterceptingProxyRefusesWhatItCannotCapture, TestInterceptingProxyListensForAClientThatDialsByAddress]}
+    - item: 'S8, reach a subnet (§22.7; §3.7''s F7; BRIDGE-M4-22): the flow under the scenario harness on T2, and on T3 with every contract server''s controller''s'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/scenario, names: [TestScenarioS8]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestScenarioS8OnT3, TestBridgeFlowPathReadsNoPostgresOnT3]}
+      external: 'production: S8''s T6 cell in main, dark, which tests/sidecar-main.sh skips while its gates are off (TEST-M4-03)'
+    - item: 'witnesses'' control contracts (§23.6''s M4 closure; D-PROTO-18; PROTO-M4-03): a control contract carries Hello, HeadCheck and its proof and no data, an unset class reads as control, and a stream opened on one is denied; FS-21 is its schedule above'
+      tests:
+        - {repo: sidecar, package: ., names: [TestContractClassTable, TestControlContractCarriesHelloAndHeadCheckOnly, TestUnsetContractClassIsControl, TestContractClassReadPerFrame, TestControlBothWaysOpenStreamAnswersDenied, TestControlContractRejectsStreamOpenDenied]}
+    - item: 'the escrow comparator, dark (§23.4''s M4 row; D-QUOTA-9, §20.9; QUOTA-M4-01): one strict total draw order, its reads with the gate off today''s, and the gate refusing on without MG6''s index and off under a live team_credit line'
+      tests:
+        - {repo: server, package: ./model, stores: true, names: [TestEscrowDrawLessTable, TestEscrowDrawLessIsAStrictTotalOrder, TestEscrowDrawOrderReadsGateOffAreTodays, TestEscrowDrawOrderGateNeedsMg6, TestEscrowDrawOrderGateOffWithoutAName, TestEscrowDrawOrderGateRefusesOffUnderALiveLine]}
+    - item: '§22.8''s escrow benchmark harness, dark (QUOTA-M4-03; §20.9''s gate, owner decision 92): admission and settlement measured with escrow_draw_order off and on in a database of the run''s own, the gate adding no round trip to an admission, an added one counted, and escrowbench''s verdict on two builds'' files; M6''s entry reads its run at twice the Y1 rates beside FS-46'
+      tests:
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestEscrowBenchmarkMeasurements, TestEscrowBenchmarkCountsAnAddedRoundTrip]}
+        - {repo: server, package: ./cli/escrowbench, names: [TestEntryPassesWithinFivePercent, TestEntryFailsAnAddedRoundTrip, TestEntryFailsPastFivePercent, TestFailedAttemptsAndShortRunsFail, TestExitHoldsTheRerunToTheEntryRun, TestExitFailsAnEntryRunThatIsNoYardstick, TestRunsPacedDifferentlyFail]}
+      external: 'hardware: the evidence run on T5''s performance host at twice the Y1 rates, main''s baseline beside the dark build''s, before M6''s entry; a run on this host is a smoke, which is no evidence'
+    - item: 'make size (§18.10, §22.9; D-SDK-20, Q-SDK-7): what the forwarding leg adds to the ios_extension leg, stripped as sdk ships it, within 7.5 MiB, the limit owner decisions 215 and 491 put where the 1 MiB gate stood, and the page Worker''s sidecar_http leg within its goal or its recorded miss; a real build over a limit trips the gate. It links, and the ios_extension leg needs Xcode'
+      tests:
+        - {repo: sidecar, package: ./check, tags: 'sidecar_check,sidecar_size', names: [TestSizeGateIosExtension, TestSizeGateSidecarHttp, TestSizeGateFindsATablePlantedInDevice, TestSizeGateFindsATablePlantedInAListedRootFile, TestSizeGateLeavesOutARootTableNoForwardingFileReads, TestSizeGateFindsATablePlantedInTheRoot]}
+    - item: the budget ledger's size rows hold make size's own numbers, ios-extension-device-role and page-worker-wasm, a raise only with a reviewed line (budgets.yml; D-TEST-3; TEST-M1-09)
+      tests:
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestBudgetsRiseOnlyWithAReviewedLine, TestBudgetsFailOnARaiseWithNoReviewedLine, TestBudgetSizeRowsHoldTheSizeGatesNumbers, TestSizeVerdictsHoldTheirLimits, TestSizeFailsOnAForwardingLegOverItsLimit, TestSizeFailsOnSidecarHttpOverItsGoal, TestSizeFailsOnSidecarHttpOverItsMissGate]}
+    - item: 'per-target memory, before any iOS bridge link (§18.4, §22.9; budgets.yml''s memory rows: ios-sidecar-role-memory, android-sidecar-role-memory, desktop-daemon-memory, page-worker-heap), which name no test yet: each is measured on T4''s cells and on T5, never on a merge (SDK-M8-15)'
+      external: 'hardware: T4''s darwin/arm64 and Android surrogate cells, a T5 host for the daemon, and the page Worker''s heap in Node and Playwright'
+    - item: '§22.9''s Browsers row on the page Worker (§22.17''s M4 tests; SDK-M4-09): pagestack serves T2''s fake api, evs and gkm to the key origin alone on loopback, and a device of a vault''s owner opens a record over HTTPS alone; the Playwright harness in mmm/sidecar.ur.io/test/playwright drives the key origin in a browser'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/cmd/pagestack, names: [TestVaultRecordOpensOverHttpsAlone, TestFixtureIdsAnswerAtTheHarnessAddressAlone, TestServicesHonorNothingTheFixtureDoesNotHold, TestKeyOriginServesOnlyItsFilesWithItsCsp, TestServicesAnswerCorsForTheKeyOriginAlone, TestProxyTunnelsOnlyTheFixtureNames, TestListenersBindOnlyLoopbackAboveFiftyThousand]}
+      external: 'hardware and people: the Playwright run on Chromium, Firefox and WebKit, which this build ran on Chromium alone with re-enrollment after eviction, no network by_jwt and a vault record opening in the page Worker left fixme until the Worker enrolls and reads; Safari''s real 7-day cap and storage pressure'
+    - item: 'FS-106''s page Worker case and FS-97''s leaf legs below their rows (KEYS-M4-01): the Worker''s upkeep and the stale-leaf view at unit level on a fake of gkm''s routes, and the Worker''s leaf on the MLS subset; these are no run of FS-106''s schedule on gkmservice, so its row above reads missing whatever they show'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestAPageWorkersLeafOnTheRealSubset, TestAPageWorkersEngineYieldsInsideAnMlsOperation]}
+    - item: 'the MLS legs of FS-97 and of FS-106''s page Worker case left the gates with MLS (owner decision 610; QD-1040): §10.9''s stale Removes, KF5''s resync and KF2''s re-add, path-only and external commits, GroupInfo, KeyPackages, epochs and acks; until KEYS reworks both rows onto deliveries their drafted clauses still run, so a pass there counts only what v0''s wraps keep'
+      external: 'people: the review phase''s rework of FS-97 and FS-106''s page Worker case onto deliveries, and design-records'' fold of owner decision 610 into §22.8''s two rows'
+    - item: 'suspension within one epoch (§23.4''s M4 exit; §8.6, D-ACL-8; ACL-M4-04): the contract gate holds a suspension within its head''s interval, a suspend swaps the policy before its other effects, and a suspended device''s keys and delegations drop until the unsuspend'
+      tests:
+        - {repo: sidecar, package: ., names: [TestAclContractGateHoldsASuspensionWithinItsHeadsInterval, TestAclSuspendEffectsSwapThePolicyFirst, TestAclSuspendEffectsRetryIsANoOp, TestAclSuspendSigners, TestAclSuspendAndUnsuspendInBothOrders, TestAclSuspendDropsTheDelegationsKey, TestAclGateHonorScopeClosesAtASuspend]}
+    - item: 'forwards, private IPs and model servers behind approved, expiring grants (§23.4''s M4 exit; §17 v0): the exit scenario, a forward behind an approved grant that then expires and a tagged ephemeral cloud-agent sidecar over the userspace stack, which no test runs yet (BRIDGE-M4-22''s to add); FS-19''s grant case, FS-38, FS-56 and S8 above show its parts'
+      external: 'hardware: the forwards and private IPs on Linux and WSL2 hosts, since this host runs darwin'
+    - item: a Claude Code cloud agent reaches a granted port (§23.4's M4 exit; §18.9)
+      external: 'production and people: a real cloud sandbox''s agent behind its proxy, which the intercepting-proxy fixture above only stands in for'
+    - item: ur.io/recurd opens a vault record (§23.4's M4 exit; §18.8; owner decisions 219, 223)
+      external: 'production: the real site and its key origin, where the page Worker enrolls by hand-off from the ur.io session; here a device of the owner opens the fixture''s record over HTTPS alone (the Browsers item above)'
+    - item: trust documents drafted (§23.4's M4 exit; D-TRUST-4)
+      external: 'people: the owner''s drafts, which no test reads'
+    - item: 'not yet due at M4, and shown here as no row and no pass: FS-19''s team at M6-out, FS-19''s invite at M6-out, FS-19''s quick-burner at M8-out, FS-21''s team at M6-out, FS-38''s shares at M6-out, FS-97''s team at M6-out (§23.6''s gate map)'
+      external: 'a later gate: each case passes at the gate catalog.yml holds it at, FS-38''s shares and FS-97''s Team cases at M6''s exit among them'
   M5-in:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
