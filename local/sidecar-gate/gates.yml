@@ -1229,7 +1229,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest, names: [TestWakePayloadsCarryOnlyATopicClassAndVersion]}
         - {repo: sidecar, package: ./sidecartest, names: [TestAWakePayloadCarryingAnIdFails]}
     - item: '§22.7''s mx-scope assertion (MAIL-M8-09): SNI mx.<scope>.<net>.<root> reaches only that scope''s receivers'
-    - item: 'the ledger''s T4-16 closed (HANDOFF §10; TEST-M8-01; §17.4, D-BRIDGE-12): on BridgeNet''s CGNAT fixture a carrier resolver inside 100.64/10 keeps its /32 carve over UDP and TCP, also at the overlay resolver''s own address, and a mutant dropping the carve fails; BRIDGE-M8-03''s T6 form of the case is the tests repo''s and is not run here'
+    - item: 'the ledger''s T4-16 closed (HANDOFF §10; TEST-M8-01; §17.4, D-BRIDGE-12): on BridgeNet''s CGNAT fixture a carrier resolver inside 100.64/10 keeps its /32 carve over UDP and TCP, also at the overlay resolver''s own address, and a mutant dropping the carve fails; BRIDGE-M8-03''s T6 form, tests/bridge-cgnat-fixture.sh, takes a system resolver among its carrier addresses and runs on T6''s host, never here'
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestBridgeCgnatCarrierResolverKeepsItsCarve, TestBridgeCgnatDroppingTheResolverCarveFails, TestBridgeCgnatCarrierResolverAtTheOverlayResolversAddress]}
     - item: '§22.5''s forwarding cases (§23.6''s M8 row; owner decision 197; BRIDGE-M8-06, BRIDGE-M8-07, TEAM-M8-02): the forwarding Delegation''s setup and its resumes, FS-38''s forwarding-key delegations with their refusals, forgeries, revocation and supersession, the app host''s compile and its races, and the forward_only client''s mint'
