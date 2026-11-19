@@ -20,11 +20,16 @@ package connect
 //     fails the TLS handshake; the per-address connection cap closes with
 //     0x1001, and one handshake admission limit stands behind every socket
 //     (§4.4.4). Whodis is the same dispatch under decode53, with the route
-//     table's tlds.
+//     table's tlds. Each udp group of SocketsPerPort sockets feeds one QUIC
+//     transport, so a flow the kernel moves between a group's sockets keeps
+//     its connection (D22 (b), LBALT-IMPL.md §8).
 //   - supervision (D13, D22). Each socket is supervised on its own: a lost one
 //     is re-created at once, the backoff resetting after a healthy run, it
-//     reads as missing until it is back, and its siblings never notice.
-//     Losing a socket never ends the process.
+//     reads as missing until it is back, and its siblings never notice; a
+//     lost udp socket's flows move to its siblings, on the same transport.
+//     Each udp group's transport is supervised too, and replaced if it ends
+//     while the front serves. Losing a socket or a transport never ends the
+//     process.
 //   - readiness (front_status.go) and the drain (front_drain.go, D12).
 //
 // The trusted listeners on the services bridge, the private H1 with /status,
@@ -171,8 +176,9 @@ type frontSocket struct {
 	key frontSocketKey
 	// the interface's server for the socket's tcp port, or nil
 	httpServer *http.Server
-	// the interface's h3 api handler, for a udp socket
-	apiHandler http.Handler
+	// the group whose transport a udp socket feeds, set at construction, or
+	// nil for a tcp socket
+	quicGroup *frontQuicGroup
 
 	up  bool
 	run frontSocketRun
@@ -191,6 +197,8 @@ type frontServer struct {
 	whodisTlds [][]byte
 	// every expected socket, in route table order, fixed at construction
 	sockets []*frontSocket
+	// every udp group, in route table order, fixed at construction
+	quicGroups []*frontQuicGroup
 
 	// set once by start, before started is published under stateLock
 	ctx           context.Context
@@ -235,7 +243,7 @@ func newFrontServer(load *frontLoad, settings *FrontServerSettings) (*frontServe
 	for _, whodisTld := range load.routeTable.Front.WhodisTlds {
 		whodisTlds = append(whodisTlds, []byte(whodisTld))
 	}
-	return &frontServer{
+	frontServer := &frontServer{
 		generation:        load.generation,
 		revision:          load.revision,
 		certificateExpiry: load.certificateExpiry,
@@ -248,7 +256,21 @@ func newFrontServer(load *frontLoad, settings *FrontServerSettings) (*frontServe
 		openCount:         connect.NewMonitorValue(0),
 		upCount:           connect.NewMonitorValue(0),
 		tcpConns:          map[*frontTrackedConn]bool{},
-	}, nil
+	}
+	// a group's sockets are listed together, from index 0
+	for _, socket := range sockets {
+		if socket.key.protocol != frontProtocolUdp {
+			continue
+		}
+		if socket.key.index == 0 {
+			frontServer.quicGroups = append(frontServer.quicGroups, &frontQuicGroup{
+				frontServer: frontServer,
+				key:         socket.key,
+			})
+		}
+		socket.quicGroup = frontServer.quicGroups[len(frontServer.quicGroups)-1]
+	}
+	return frontServer, nil
 }
 
 // Every expected socket of the route table: for each interface and present
@@ -348,10 +370,12 @@ func (self *frontServer) startWithConnect(ctx context.Context, connectHandler ht
 	return nil
 }
 
-// Binds and listens on every public socket, then serves each under its own
-// supervisor until ctx ends or close. Every socket is up when it returns, so
-// the first answer of the private /status already shows the complete set; a
-// socket that can't be bound fails the start, with every socket bound so far
+// Opens every udp group's transport, binds and listens on every public
+// socket, the udp ones joining their group's transport, then serves each
+// socket and transport under its own supervisor until ctx ends or close.
+// Every socket is up when it returns, so the first answer of the private
+// /status already shows the complete set; a transport that can't be opened or
+// a socket that can't be bound fails the start, with everything opened so far
 // released. Runs at most once.
 func (self *frontServer) start(ctx context.Context, front nginxFront, connectQuic frontConnectQuic) error {
 	cancelCtx, cancel := context.WithCancel(ctx)
@@ -387,19 +411,49 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 			socket.httpServer = interfaceNameHttpsServers[socket.key.interfaceName]
 		case frontPortHttp:
 			socket.httpServer = interfaceNameHttpServers[socket.key.interfaceName]
-		default:
-			socket.apiHandler = interfaceNameApiHandlers[socket.key.interfaceName]
 		}
 	}
+	for _, quicGroup := range self.quicGroups {
+		quicGroup.apiHandler = interfaceNameApiHandlers[quicGroup.key.interfaceName]
+	}
 
+	quicRuns := make([]*frontQuicRun, 0, len(self.quicGroups))
 	runs := make([]frontSocketRun, 0, len(self.sockets))
+	// releases what a failed start opened: the sockets, then the transports,
+	// whose fan-ins close what the sockets left
+	release := func() {
+		for _, run := range runs {
+			run.close()
+		}
+		for _, quicRun := range quicRuns {
+			quicRun.close()
+		}
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			for _, quicGroup := range self.quicGroups {
+				quicGroup.run = nil
+			}
+		}()
+		cancel()
+	}
+	for _, quicGroup := range self.quicGroups {
+		quicRun, err := self.openQuicTransport(quicGroup)
+		if err != nil {
+			release()
+			return fmt.Errorf("open the quic transport of %s: %w", quicGroup, err)
+		}
+		quicRuns = append(quicRuns, quicRun)
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			quicGroup.run = quicRun
+		}()
+	}
 	for _, socket := range self.sockets {
 		run, err := self.openSocket(socket)
 		if err != nil {
-			for _, run := range runs {
-				run.close()
-			}
-			cancel()
+			release()
 			return fmt.Errorf("bind %s %s: %w", socket.key, socket.key.bindAddress(), err)
 		}
 		runs = append(runs, run)
@@ -407,7 +461,7 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 	// every supervisor is counted before the front reads as started, so a
 	// close that finds it started waits for every run, even one whose
 	// supervisor has yet to start
-	self.supervisors.Add(len(self.sockets))
+	self.supervisors.Add(len(self.sockets) + len(self.quicGroups))
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -419,6 +473,9 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 	if self.settings.startedObserverForTest != nil {
 		self.settings.startedObserverForTest()
 	}
+	for i, quicGroup := range self.quicGroups {
+		go self.superviseQuicTransport(quicGroup, quicRuns[i])
+	}
 	for i, socket := range self.sockets {
 		go self.superviseSocket(socket, runs[i])
 	}
@@ -426,7 +483,7 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 	// retirement, still closes the front in its order
 	context.AfterFunc(cancelCtx, self.close)
 	if glog.V(1) {
-		glog.Infof("[front]serving %d public sockets on %d interfaces\n", len(self.sockets), len(self.routeTable.Interfaces))
+		glog.Infof("[front]serving %d public sockets and %d quic transports on %d interfaces\n", len(self.sockets), len(self.quicGroups), len(self.routeTable.Interfaces))
 	}
 	return nil
 }
@@ -439,6 +496,16 @@ func (self *frontServer) openSocket(socket *frontSocket) (run frontSocketRun, er
 		} else {
 			run, err = self.openQuicSocket(socket)
 		}
+	}); r != nil {
+		return nil, fmt.Errorf("panic: %v", r)
+	}
+	return run, err
+}
+
+// Opens a udp group's transport, reading a panic as its failure.
+func (self *frontServer) openQuicTransport(quicGroup *frontQuicGroup) (run *frontQuicRun, err error) {
+	if r := server.HandleError(func() {
+		run, err = self.openQuicRun(quicGroup)
 	}); r != nil {
 		return nil, fmt.Errorf("panic: %v", r)
 	}

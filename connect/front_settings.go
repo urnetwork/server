@@ -27,8 +27,9 @@ type FrontServerSettings struct {
 	Front *nginx.FrontSettings
 	// SO_REUSEPORT sockets bound for each (interface address, protocol,
 	// port), for receive parallelism within the block: N = 4 (D10, confirmed
-	// by the owner 2026-11-18). warpctl promotes a generation only with every
-	// one of them up. Non-positive is refused at start.
+	// by the owner 2026-11-18). The udp sockets of each address and port feed
+	// one QUIC transport (D22 (b)). warpctl promotes a generation only with
+	// every one of them up. Non-positive is refused at start.
 	SocketsPerPort int
 	// the wait before re-creating a lost socket once the previous attempt
 	// failed or the re-created socket was lost again before
@@ -57,6 +58,12 @@ type FrontServerSettings struct {
 	// Non-positive keeps the deadline at DrainTimeout. A positive
 	// DrainTimeout no longer than this is refused at start.
 	DrainStopReserve time.Duration
+	// the datagrams that can wait between a whodis group's sockets and its
+	// translation (front_whodis.go): past it, each socket's reader waits, and
+	// what arrives meanwhile waits in the socket's own receive buffer, as when
+	// the translation is slow to read a lone socket. 256, as quic-go's
+	// ConnGroup queues for the quic port. Non-positive is refused at start.
+	WhodisFanInQueueLength int
 	// binds one public udp socket, when set, in place of
 	// listenFrontPacket's SO_REUSEPORT bind to the exact address. Tests use
 	// it to observe, hold and fail binds, as the extender's
@@ -75,6 +82,11 @@ type FrontServerSettings struct {
 	// a socket's serve returned, before its run is released, so a test can
 	// hold a lost socket's release.
 	socketServeEndObserverForTest func(key frontSocketKey)
+	// Nil outside package tests. Called on the supervising goroutine each time
+	// a udp group's transport stopped serving, with the group's first
+	// socket's key, before the transport is closed or replaced, so a test can
+	// hold a lost transport's release.
+	quicTransportServeEndObserverForTest func(key frontSocketKey)
 	// Nil outside package tests. Called with the name and class an accepted
 	// QUIC connection was dispatched by, before its front is entered.
 	dispatchObserverForTest func(serverName string, nameClass nginx.NameClass)
@@ -102,6 +114,7 @@ func DefaultFrontServerSettings() *FrontServerSettings {
 		SocketRestartMaxDelay:     5 * time.Second,
 		SocketHealthyRunTimeout:   1 * time.Minute,
 		DrainStopReserve:          2 * time.Minute,
+		WhodisFanInQueueLength:    256,
 	}
 }
 
@@ -115,6 +128,9 @@ func (self *FrontServerSettings) validate() error {
 	}
 	if self.SocketRestartInitialDelay <= 0 {
 		return errors.New("front settings need a positive socket restart delay")
+	}
+	if self.WhodisFanInQueueLength <= 0 {
+		return errors.New("front settings need a positive whodis fan-in queue")
 	}
 	if drainTimeout := self.Front.Http.DrainTimeout; 0 < drainTimeout && drainTimeout <= self.DrainStopReserve {
 		return errors.New("front settings leave the drain no time before the stop reserve")

@@ -652,6 +652,9 @@ type testFrontBinds struct {
 	listeners   map[string][]net.Listener
 	failCounts  map[string]int
 	holds       map[string]*testFrontBindHold
+	// addresses whose udp binds take a free port of the address instead, so
+	// a test can reach each socket of the group on its own
+	ephemeralAddresses map[string]bool
 }
 
 // A barrier on the binds of one address.
@@ -671,7 +674,17 @@ func newTestFrontBinds() *testFrontBinds {
 		listeners:   map[string][]net.Listener{},
 		failCounts:  map[string]int{},
 		holds:       map[string]*testFrontBindHold{},
+
+		ephemeralAddresses: map[string]bool{},
 	}
+}
+
+// Binds each later udp socket of address to a free port of its address,
+// recorded under address.
+func (self *testFrontBinds) bindEphemerally(address string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.ephemeralAddresses[address] = true
 }
 
 // Fails the next count binds of address.
@@ -728,7 +741,16 @@ func (self *testFrontBinds) listenPacket(network string, address string) (net.Pa
 	if err := self.beforeBind(network, address); err != nil {
 		return nil, err
 	}
-	packetConn, err := listenFrontPacket(network, address)
+	bindAddress := address
+	ephemeral := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.ephemeralAddresses[address]
+	}()
+	if ephemeral {
+		bindAddress = netip.AddrPortFrom(netip.MustParseAddrPort(address).Addr(), 0).String()
+	}
+	packetConn, err := listenFrontPacket(network, bindAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -1035,6 +1057,18 @@ func (self *testFrontEnv) dialQuicFrom(
 	portKind string,
 	tlsConfig *tls.Config,
 ) (*quic.Conn, error) {
+	target := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(self.bindAddress(address, portKind)))
+	return self.dialQuicTo(packetConn, target, portKind, tlsConfig)
+}
+
+// Dials QUIC to target from packetConn, as dialQuicFrom dials a port kind's
+// socket.
+func (self *testFrontEnv) dialQuicTo(
+	packetConn net.PacketConn,
+	target *net.UDPAddr,
+	portKind string,
+	tlsConfig *tls.Config,
+) (*quic.Conn, error) {
 	if portKind == frontPortWhodis {
 		ptSettings := connect.DefaultPacketTranslationSettings()
 		ptSettings.DnsTlds = [][]byte{[]byte(testFrontWhodisTld)}
@@ -1052,10 +1086,9 @@ func (self *testFrontEnv) dialQuicFrom(
 	}
 	quicTransport := &quic.Transport{Conn: packetConn}
 	self.t.Cleanup(func() { quicTransport.Close() })
-	udpAddr := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(self.bindAddress(address, portKind)))
 	ctx, cancel := context.WithTimeout(self.ctx, testFrontProgressTimeout)
 	defer cancel()
-	return quicTransport.Dial(ctx, udpAddr, tlsConfig, testFrontClientQuicConfig())
+	return quicTransport.Dial(ctx, target, tlsConfig, testFrontClientQuicConfig())
 }
 
 // Dials QUIC from a new client socket.
