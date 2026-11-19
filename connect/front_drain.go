@@ -186,11 +186,12 @@ func (self *frontServer) close() {
 		// http.Server.Close below closes each connection it still owns one
 		// after another under the server's lock, and over TLS each close
 		// first sends close_notify, which could wait on a client that stopped
-		// reading, or for good behind a blocked write that holds TLS's write
-		// lock with no deadline, such as the answer to a client's KeyUpdate
-		// request. A drain's Shutdown stuck the same way closing an idle
-		// connection holds the server's lock, which Close needs, until this
-		// cut.
+		// reading, or behind a blocked write that holds TLS's write lock,
+		// such as the answer to a client's KeyUpdate request, until that
+		// write's send_timeout (frontTrackedConn), by default as long as
+		// this close's whole bound. A drain's Shutdown stuck the same way
+		// closing an idle connection holds the server's lock, which Close
+		// needs, until this cut.
 		self.closeTcpConns()
 		// the tcp servers close their listeners and forget their connections
 		for _, httpServer := range self.httpServers {

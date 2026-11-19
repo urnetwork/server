@@ -649,10 +649,11 @@ func (self *testFrontIdleConns) wedgeIdle(env *testFrontEnv) *testFrontStallingC
 // The forced close is bounded whatever a connection's TLS would send: it
 // cuts every raw socket before http.Server.Close closes the TLS connections
 // the servers own, each with close_notify. An idle keepalive connection
-// whose close_notify waits for good, as one does behind the answer to a
-// KeyUpdate request from a client that stopped reading, would otherwise
-// hold the close, and with it the exit after a handler retirement's cancel,
-// which closes the front without a drain.
+// whose close_notify waits past the close's bound, as one does behind the
+// answer to a KeyUpdate request from a client that stopped reading until
+// that answer's send_timeout, would otherwise hold the close, and with it
+// the exit after a handler retirement's cancel, which closes the front
+// without a drain.
 func TestFrontForcedCloseIsNotHeldByAWedgedConnection(t *testing.T) {
 	reports := make(chan string, 4)
 	var idleConns *testFrontIdleConns
@@ -682,12 +683,12 @@ func TestFrontForcedCloseIsNotHeldByAWedgedConnection(t *testing.T) {
 	}
 }
 
-// An idle keepalive connection whose close waits for good holds no step of
-// the drain: the servers' Shutdowns close idle connections off the drain's
-// goroutine, so the exchange drain and the h3 GOAWAYs begin while that close
-// still waits; and at the drain's deadline the forced close cuts the raw
-// socket, which frees the Shutdown holding its server's lock, before it
-// closes the servers. The cancel comes last.
+// An idle keepalive connection whose close waits, here for good, holds no
+// step of the drain: the servers' Shutdowns close idle connections off the
+// drain's goroutine, so the exchange drain and the h3 GOAWAYs begin while
+// that close still waits; and at the drain's deadline the forced close cuts
+// the raw socket, which frees the Shutdown holding its server's lock,
+// before it closes the servers. The cancel comes last.
 func TestFrontDrainIsNotHeldByAWedgedIdleConnection(t *testing.T) {
 	var idleConns *testFrontIdleConns
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
