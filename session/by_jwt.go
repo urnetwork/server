@@ -160,6 +160,15 @@ type ByJwt struct {
 	// server never reads it: admission reads the plan live.
 	ClientLimitUpgrade *bool `json:"client_limit_upgrade,omitempty"`
 	gojwt.RegisteredClaims
+	// the session this mint starts, when the mint chose SessionId itself
+	// (session_mint.go). Never signed or serialized, and not carried by a
+	// renewal or a copy.
+	mintStart *sessionMintStart
+	// the session a renewal carries from its presented credential, with the
+	// earliest expiry along the way: a horizon the session's registration
+	// already covers (session_mint_unextended.go). Never signed or
+	// serialized; kept by a copy.
+	carried *carriedSession
 }
 
 func newRegisteredClaims(userId server.Id) gojwt.RegisteredClaims {
@@ -589,10 +598,15 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 		}
 		return validateByJwtStateRecord(ctx, byJwt, nil)
 	}
-	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	if err != nil {
 		return err
 	}
-	return validateByJwtStateRemembered(ctx, byJwt, nil)
+	if err := validateByJwtStateRemembered(ctx, byJwt, nil); err != nil {
+		return err
+	}
+	acceptedMarkerUnchecked(ctx, byJwt, markerUnchecked, revocationCheckPathFromContext(ctx))
+	return nil
 }
 
 // Every check ValidateByJwtState makes before its state query: the identity
@@ -600,26 +614,33 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 // process's remembered refusals. A nil result is not authorization, only the
 // absence of a refusal that needs no query. A credential answered by its
 // revocation record reads its session there, in validateByJwtStateAfterBeforeQuery.
-func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireClient bool) error {
+// markerUnchecked, for validateByJwtStateAfterBeforeQuery, is whether Redis
+// left the marker unanswered (decision 3).
+func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireClient bool) (markerUnchecked bool, err error) {
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
-		return err
+		return false, err
 	}
 	if usesRevocationRecord(byJwt) {
 		if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
-			return err
+			return false, err
 		}
-	} else if err := validateSessionAuthority(ctx, byJwt); err != nil {
-		return err
+	} else if markerUnchecked, err = validateSessionAuthority(ctx, byJwt); err != nil {
+		return false, err
 	}
-	return refuseRememberedByJwtState(ctx, byJwt, nil)
+	return markerUnchecked, refuseRememberedByJwtState(ctx, byJwt, nil)
 }
 
-// The state check that completes validateByJwtStateBeforeQuery.
-func validateByJwtStateAfterBeforeQuery(ctx context.Context, byJwt *ByJwt) error {
+// The state check that completes validateByJwtStateBeforeQuery, with the
+// marker answer it returned.
+func validateByJwtStateAfterBeforeQuery(ctx context.Context, byJwt *ByJwt, markerUnchecked bool) error {
 	if usesRevocationRecord(byJwt) {
 		return validateByJwtStateRecord(ctx, byJwt, nil)
 	}
-	return validateByJwtStateRemembered(ctx, byJwt, nil)
+	if err := validateByJwtStateRemembered(ctx, byJwt, nil); err != nil {
+		return err
+	}
+	acceptedMarkerUnchecked(ctx, byJwt, markerUnchecked, revocationCheckPathFromContext(ctx))
+	return nil
 }
 
 // Checks durable child ownership and live credentials in one primary-key read.
@@ -634,10 +655,15 @@ func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClient
 		}
 		return validateByJwtStateRecord(ctx, byJwt, &parentClientId)
 	}
-	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	if err != nil {
 		return err
 	}
-	return validateByJwtStateRemembered(ctx, byJwt, &parentClientId)
+	if err := validateByJwtStateRemembered(ctx, byJwt, &parentClientId); err != nil {
+		return err
+	}
+	acceptedMarkerUnchecked(ctx, byJwt, markerUnchecked, revocationCheckPathFromContext(ctx))
+	return nil
 }
 
 // Checks the same live state through the caller's already-owned transaction.
@@ -646,21 +672,37 @@ func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, r
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
 	}
-	if err := validateSessionAuthority(ctx, byJwt); err != nil {
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	if err != nil {
 		return err
 	}
-	_, err := validateByJwtStateQuery(ctx, tx, byJwt, nil)
-	return err
+	if _, err := validateByJwtStateQuery(ctx, tx, byJwt, nil); err != nil {
+		return err
+	}
+	acceptedMarkerUnchecked(ctx, byJwt, markerUnchecked, revocationCheckPathTransaction)
+	return nil
 }
 
-func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) error {
+// The horizon, then the session's revocation marker. markerUnchecked is true
+// when Redis did not answer the marker while the caller still waits: the
+// credential's other checks decide, and an acceptance is counted
+// (decision 3, revocation_check.go).
+func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) (markerUnchecked bool, err error) {
 	if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
-		return err
+		return false, err
 	}
 	if byJwt.SessionId != nil {
-		return CheckSession(ctx, byJwt.NetworkId, *byJwt.SessionId)
+		return checkSessionWithinBudget(ctx, byJwt)
 	}
-	return nil
+	return false, nil
+}
+
+// Counts a credential every other check accepted after its marker went
+// unanswered.
+func acceptedMarkerUnchecked(ctx context.Context, byJwt *ByJwt, markerUnchecked bool, path string) {
+	if markerUnchecked {
+		noteUncheckedAcceptance(ctx, byJwt, path)
+	}
 }
 
 // Refuses incomplete identities before a standalone caller acquires a pool slot.
@@ -911,15 +953,23 @@ func (self *ByJwt) clone() *ByJwt {
 	copy.ExpiresAt = cloneNumericDate(self.ExpiresAt)
 	copy.NotBefore = cloneNumericDate(self.NotBefore)
 	copy.IssuedAt = cloneNumericDate(self.IssuedAt)
+	copy.mintStart = nil
+	if self.carried != nil {
+		carried := *self.carried
+		copy.carried = &carried
+	}
 	return &copy
 }
 
-// Copies lineage and identity while refreshing only registered claims.
+// Copies lineage and identity while refreshing only registered claims. The
+// renewal carries the session; it does not start it.
 func (self *ByJwt) Renew() *ByJwt {
 	copy := *self
 	copy.RegisteredClaims = newRegisteredClaims(self.UserId)
 	copy.Roles = slices.Clone(self.Roles)
 	copy.ClientLimitUpgrade = cloneClientLimitUpgrade(self.ClientLimitUpgrade)
+	copy.mintStart = nil
+	copy.carried = self.carriedByRenewal()
 	return &copy
 }
 

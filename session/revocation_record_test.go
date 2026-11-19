@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server"
 )
 
@@ -223,7 +225,8 @@ func TestRevocationRecordRefusesRevokedSessionInEveryShard(t *testing.T) {
 }
 
 // A credential rotation refuses older credentials and a deletion refuses the
-// whole network, both from the records the change wrote before committing.
+// whole network, from the records the change wrote before committing, once
+// the state query the change committed to confirms them (one query each).
 func TestRevocationRecordRefusesRotatedAndDeletedNetworks(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		defer Testing_SetRevocationRecordEnabled(true)()
@@ -242,30 +245,97 @@ func TestRevocationRecordRefusesRotatedAndDeletedNetworks(t *testing.T) {
 		if err := ValidateByJwtState(ctx, top, true); !errors.Is(err, ErrByJwtInactive) {
 			t.Errorf("a credential created before the rotation: %v", err)
 		}
-		if queries := testingStateQueries(StateQueryApiControl, true) - before; queries != 0 {
-			t.Errorf("the rotation refusal ran %.0f state queries", queries)
+		if queries := testingStateQueries(StateQueryApiControl, true) - before; queries != 1 {
+			t.Errorf("the rotation refusal ran %.0f state queries, want its confirmation", queries)
 		}
 		fresh := network.taggedClient(ctx, nil)
 		fresh.CreateTime = cutoff.Add(time.Millisecond)
 		if err := ValidateByJwtState(ctx, fresh, true); err != nil {
 			t.Fatal("a credential created after the rotation was refused", err)
 		}
-		if err := RetireNetworkRecords(ctx, network.networkId); err != nil {
-			t.Fatal(err)
-		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(RetireNetworkRecords(ctx, network.networkId))
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network WHERE network_id=$1`, network.networkId))
+		})
 		before = testingStateQueries(StateQueryApiControl, true)
 		if err := ValidateByJwtState(ctx, fresh, true); !errors.Is(err, ErrByJwtInactive) {
 			t.Errorf("a credential of a deleted network: %v", err)
 		}
-		if queries := testingStateQueries(StateQueryApiControl, true) - before; queries != 0 {
-			t.Errorf("the deletion refusal ran %.0f state queries", queries)
+		if queries := testingStateQueries(StateQueryApiControl, true) - before; queries != 1 {
+			t.Errorf("the deletion refusal ran %.0f state queries, want its confirmation", queries)
 		}
 	})
 }
 
-// The record is the authority: when Redis does not answer, nothing is
-// accepted and SQL is not asked instead.
-func TestRevocationRecordUnavailableRefusesWithoutStateQuery(t *testing.T) {
+// S2 N4: a rotation or deletion whose transaction fails after its record
+// write leaves a spurious n:cred or n:del. No projection lowers either, so an
+// n:cred refused every earlier credential of the network for as long as its
+// records were used, a sign-out without a password change, and an n:del
+// refused the whole network for 25 hours. The state query does not confirm
+// them, and they are overruled.
+func TestRevocationRecordOverrulesUncommittedNetworkRevocations(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetRevocationRecordEnabled(true)()
+		ctx := WithStateQuerySource(t.Context(), StateQueryApiControl)
+		overruled := func() float64 {
+			return testutil.ToFloat64(revocationRecordCheckCounter.WithLabelValues("api", "control", "client", "record_overruled"))
+		}
+
+		rotated := newTestingStateRefusalNetwork(ctx)
+		top := rotated.taggedClient(ctx, nil)
+		if err := ValidateByJwtState(ctx, top, true); err != nil {
+			t.Fatal(err)
+		}
+		// the password change fails after its record write and rolls back
+		failure := errors.New("synthetic commit failure")
+		err := func() (err error) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					err = recovered.(error)
+				}
+			}()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.Raise(RotateCredentialRecordsInTx(ctx, tx, rotated.userId, top.CreateTime.Add(time.Second)))
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, rotated.userId, top.CreateTime.Add(time.Second)))
+				server.Raise(failure)
+			})
+			return nil
+		}()
+		if !errors.Is(err, failure) {
+			t.Fatalf("the password change did not fail: %v", err)
+		}
+		if value, ok := testingRevocationField(ctx, t, revocationRecordKey(rotated.networkId, *top.ClientId), revocationFieldCredential); !ok || value == "" {
+			t.Fatal("the failed change left no n:cred to overrule")
+		}
+		before := overruled()
+		for range 2 {
+			if err := ValidateByJwtState(ctx, top, true); err != nil {
+				t.Fatalf("an uncommitted rotation refused the credential: %v", err)
+			}
+		}
+		if got := overruled() - before; got != 2 {
+			t.Errorf("counted %.0f overruled refusals, want 2", got)
+		}
+
+		// the network's deletion fails after its record write too
+		if err := RetireNetworkRecords(ctx, rotated.networkId); err != nil {
+			t.Fatal(err)
+		}
+		before = overruled()
+		if err := ValidateByJwtState(ctx, top, true); err != nil {
+			t.Fatalf("an uncommitted deletion refused the credential: %v", err)
+		}
+		if got := overruled() - before; got != 1 {
+			t.Errorf("counted %.0f overruled deletion refusals, want 1", got)
+		}
+	})
+}
+
+// When Redis does not answer, the credential is accepted unchecked and
+// counted (owner decision 3b, 2026-11-18), and SQL is not asked instead: a
+// Redis outage must not move every tagged check onto PgBouncer. Until then
+// the record refused with 503 here.
+func TestRevocationRecordUnavailableAcceptsWithoutStateQuery(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		defer Testing_SetRevocationRecordEnabled(true)()
 		ctx := WithStateQuerySource(t.Context(), StateQueryConnectH1)
@@ -277,11 +347,21 @@ func TestRevocationRecordUnavailableRefusesWithoutStateQuery(t *testing.T) {
 		}
 		defer func() { readRevocationRecord = read }()
 		before := testingStateQueries(StateQueryConnectH1, true)
-		if err := ValidateByJwtState(ctx, top, true); !errors.Is(err, ErrAuthUnavailable) {
-			t.Fatalf("an unavailable record answered: %v", err)
+		accepted := testingUncheckedAcceptances(revocationCheckPathConnectH1, revocationCheckCredentialClient)
+		if err := ValidateByJwtState(ctx, top, true); err != nil {
+			t.Fatalf("an unavailable record refused the credential: %v", err)
+		}
+		if got := testingUncheckedAcceptances(revocationCheckPathConnectH1, revocationCheckCredentialClient) - accepted; got != 1 {
+			t.Errorf("counted %.0f unchecked acceptances, want 1", got)
 		}
 		if queries := testingStateQueries(StateQueryConnectH1, true) - before; queries != 0 {
 			t.Errorf("an unavailable record fell back to %.0f state queries", queries)
+		}
+		// a record that answers still refuses: a deactivated client
+		readRevocationRecord = read
+		network.deactivate(ctx, top)
+		if err := ValidateByJwtState(ctx, top, true); !errors.Is(err, ErrByJwtInactive) {
+			t.Fatalf("an answering record accepted a deactivated client: %v", err)
 		}
 	})
 }

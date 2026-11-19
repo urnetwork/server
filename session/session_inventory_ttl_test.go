@@ -129,7 +129,8 @@ func TestSessionInventoryReadKeepsSharedKeysPastHorizon(t *testing.T) {
 
 		// a network with no session holds only its revision keys, as every
 		// network did on Main while new session creation was dark; the other
-		// holds a session, so all four shared keys exist
+		// holds a password session, so the live set, the retained set, the
+		// revision keys and the sign-in class index exist
 		networkId := server.NewId()
 		sessionNetworkId := server.NewId()
 		registration, err := RegisterNetworkSession(ctx, sessionFixtureCredential(sessionNetworkId, start), "password", nil, false, start)
@@ -153,7 +154,7 @@ func TestSessionInventoryReadKeepsSharedKeysPastHorizon(t *testing.T) {
 				keyCount := 2
 				if id == sessionNetworkId {
 					horizon = retainUntil
-					keyCount = 4
+					keyCount = 5
 				}
 				keyExpireTimes := sessionSharedKeyExpireTimes(t, ctx, id)
 				if len(keyExpireTimes) != keyCount {

@@ -605,7 +605,7 @@ func CommitNetworkSignOut(
 			for _, client := range plan.Clients {
 				clientIds = append(clientIds, client.ClientId)
 			}
-			deactivatedClientCount, err = deactivateNetworkClientsInTx(ctx, tx, clientIds, networkId)
+			deactivatedClientCount, err = deactivateNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathSignOutAll), tx, clientIds, networkId)
 			server.Raise(err)
 		}
 

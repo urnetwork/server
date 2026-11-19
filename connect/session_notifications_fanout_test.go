@@ -101,10 +101,11 @@ func TestSessionHintListenerRegistrationRechecksNoListener(t *testing.T) {
 	})
 }
 
-// A session event still rechecks every listener of its network, and only that
-// network: the event carries no session id, so each local connection of the
-// network must revalidate.
-func TestSessionEventRechecksEveryListenerOfItsNetwork(t *testing.T) {
+// A session revocation event rechecks every listener of its network, and only
+// that network: the event carries no session id, so each local connection of
+// the network must revalidate. Only the increment is a report; the event
+// key's ttl and expiry are not.
+func TestSessionRevocationEventRechecksEveryListenerOfItsNetwork(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -123,14 +124,69 @@ func TestSessionEventRechecksEveryListenerOfItsNetwork(t *testing.T) {
 		synctest.Wait()
 		before, otherBefore := rechecks.Load(), otherRechecks.Load()
 
-		subscriber.dispatch("__keyspace@0__:{ns_"+networkId.String()+"}eid", "incr")
+		channel := "__keyspace@0__:{ns_" + networkId.String() + "}rid"
+		for _, event := range []string{"expire", "expired", "del"} {
+			subscriber.dispatch(channel, event)
+		}
 		synctest.Wait()
+		if got := rechecks.Load() - before; got != 0 {
+			t.Fatalf("the revocation event key's ttl and expiry rechecked %d listeners", got)
+		}
 
+		subscriber.dispatch(channel, "incrby")
+		synctest.Wait()
 		if got := rechecks.Load() - before; got != 2 {
-			t.Fatalf("session event rechecked %d of the network's 2 listeners", got)
+			t.Fatalf("session revocation event rechecked %d of the network's 2 listeners", got)
 		}
 		if got := otherRechecks.Load() - otherBefore; got != 0 {
-			t.Fatalf("session event rechecked %d listeners of another network", got)
+			t.Fatalf("session revocation event rechecked %d listeners of another network", got)
+		}
+
+		for _, remove := range removes {
+			remove()
+		}
+	})
+}
+
+// S1 W8, S2 N7: the inventory revision (eid) changes on every new session,
+// and its event rechecked every lease of the network on every process. With
+// creation on, each sign-in, code login, hosted proxy bootstrap or API-key
+// client would have cost one authoritative check per connection of its
+// network. A change of the inventory refreshes the hints and rechecks no
+// lease: only a revocation (TestSessionRevocationEventRechecksEveryListenerOfItsNetwork)
+// can end a transport's authority.
+func TestSessionInventoryEventRechecksNoLease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var revisionReads atomic.Int64
+		subscriber := newSessionFanoutSubscriber(ctx, &revisionReads)
+
+		networkId := server.NewId()
+		var rechecks atomic.Int64
+		var hints atomic.Int64
+		removes := []func(){
+			subscriber.AddSessionListener(networkId, func() { rechecks.Add(1) }, nil),
+			subscriber.AddSessionListener(networkId, func() { rechecks.Add(1) }, nil),
+			subscriber.AddSessionListener(networkId, nil, func(*protocol.NetworkSessionsChanged) { hints.Add(1) }),
+		}
+		// past the registration hint's coalescing window
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		rechecksBefore, hintsBefore := rechecks.Load(), hints.Load()
+
+		// a session created, then the initialization of a missing revision
+		channel := "__keyspace@0__:{ns_" + networkId.String() + "}eid"
+		subscriber.dispatch(channel, "incrby")
+		subscriber.dispatch(channel, "set")
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := rechecks.Load() - rechecksBefore; got != 0 {
+			t.Fatalf("an inventory change rechecked %d transport leases", got)
+		}
+		if got := hints.Load() - hintsBefore; got == 0 {
+			t.Fatal("an inventory change refreshed no hint")
 		}
 
 		for _, remove := range removes {
@@ -144,7 +200,7 @@ func TestSessionEventRechecksEveryListenerOfItsNetwork(t *testing.T) {
 // timer, so every connection cost two authoritative PostgreSQL checks a
 // minute (connect's untagged state queries ran at 7.9k/s for 203k
 // connections). The pass refreshes hints; the lease timers keep the minute
-// bound, and session events still recheck at once.
+// bound, and session revocation events still recheck at once.
 func TestSessionCorrectivePassRefreshesHintsWithoutRechecks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -178,12 +234,13 @@ func TestSessionCorrectivePassRefreshesHintsWithoutRechecks(t *testing.T) {
 			t.Errorf("hint listener received %d hints over three corrective passes; want at least 3", got)
 		}
 
-		// a session event still rechecks each listener of the network once
-		subscriber.dispatch("__keyspace@0__:{ns_"+networkId.String()+"}eid", "incr")
+		// a session revocation event still rechecks each listener of the
+		// network once
+		subscriber.dispatch("__keyspace@0__:{ns_"+networkId.String()+"}rid", "incrby")
 		synctest.Wait()
 		for i := range listenerCount {
 			if got := rechecks[i].Load(); got != 2 {
-				t.Errorf("listener %d rechecked %d times after a session event; want 2", i, got)
+				t.Errorf("listener %d rechecked %d times after a session revocation event; want 2", i, got)
 			}
 		}
 
@@ -263,6 +320,50 @@ func TestKeyEventResyncSpreadsSessionRechecks(t *testing.T) {
 
 		for _, remove := range removes {
 			remove()
+		}
+	})
+}
+
+// S1 W11: every resident was sent its network's revision every minute,
+// whether or not it changed. A hint listener now gets each revision once: at
+// registration, and when the revision changes. A listener joining later still
+// gets the current one.
+func TestSessionHintsSkipAnUnchangedRevision(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var eventId atomic.Int64
+		eventId.Store(7)
+		subscriber := &keyEventSubscriber{
+			ctx: ctx,
+			sessionRevision: func(ctx context.Context, networkId server.Id) (string, int64, error) {
+				return "synthetic-generation", eventId.Load(), nil
+			},
+		}
+		networkId := server.NewId()
+		var firstHints, secondHints atomic.Int64
+		removeFirst := subscriber.AddSessionListener(networkId, nil, func(*protocol.NetworkSessionsChanged) { firstHints.Add(1) })
+		defer removeFirst()
+		// the registration's hint, then three corrective passes
+		time.Sleep(3*time.Minute + 30*time.Second)
+		synctest.Wait()
+		if got := firstHints.Load(); got != 1 {
+			t.Fatalf("an unchanged revision was hinted %d times, want once", got)
+		}
+
+		eventId.Store(8)
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if got := firstHints.Load(); got != 2 {
+			t.Fatalf("a changed revision brought the listener to %d hints, want 2", got)
+		}
+
+		removeSecond := subscriber.AddSessionListener(networkId, nil, func(*protocol.NetworkSessionsChanged) { secondHints.Add(1) })
+		defer removeSecond()
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if firstHints.Load() != 2 || secondHints.Load() != 1 {
+			t.Fatalf("a new listener got %d hints and the first %d, want 1 and still 2", secondHints.Load(), firstHints.Load())
 		}
 	})
 }

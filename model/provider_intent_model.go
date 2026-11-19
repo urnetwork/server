@@ -608,6 +608,11 @@ func applyProviderIntentState(
 			result = providerIntentApplyResult{applied: false, record: record}
 		}
 	})
+	if result.applied {
+		// the session cap applies the same exemption to the client's own
+		// session (session_cap.go)
+		mirrorClientCapSessionExemption(ctx, networkId, clientId, false, false)
+	}
 	return
 }
 
@@ -846,9 +851,13 @@ func observeProviderIntentAt(
 		record = value
 	})
 	state, err := parseProviderIntentRecord(record)
-	if err != nil {
+	if err != nil || state == nil {
+		// no live record (an empty record parses as nil)
 		return nil
 	}
+	// a presence refresh renews the session cap's record of the exemption
+	// before it lapses (session_cap.go)
+	mirrorClientCapSessionExemption(ctx, networkId, clientId, true, state.Status == ProviderIntentStatusPending || state.Status == ProviderIntentStatusQualified)
 	return state
 }
 

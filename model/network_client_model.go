@@ -359,20 +359,26 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, clientSession *session
 // Parent validation belongs to the transaction that creates the child. Other
 // entry points keep their existing caller-owned authentication boundary.
 func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool, internalProbe ...bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	// a mint refused in the transaction (409 session_limit_reached, ...) is
+	// the route's answer, not a 500
+	defer recoverSessionRefusal(&authClientResult, &authClientError)
 	mintCredential := clientSession.ByJwt.Renew()
 	probe := len(internalProbe) > 0 && internalProbe[0]
+	// a new hosted proxy has a session of its own whatever creates it; a
+	// reissue keeps the client's session (owner decision 1)
+	ownSession := authClient.ProxyConfig != nil && authClient.ClientId == nil
 	if !probe {
-		session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity)
+		if ownSession {
+			session.PrepareOwnSessionMint(mintCredential)
+		} else {
+			session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity)
+		}
 	}
 	mint := func(ctx context.Context, tx server.PgTx, credential *session.ByJwt) (string, error) {
 		if probe {
 			return session.SignInternalProbeInTx(ctx, tx, credential)
 		}
-		kind := "legacy"
-		if clientSession.ApiKeyAuthenticated {
-			kind = "api_key_client"
-		}
-		return session.RegisterAndSignInTx(ctx, tx, credential, kind, nil, false)
+		return session.RegisterAndSignInTx(ctx, tx, credential, authClientMintKind(authClient, clientSession), nil, false)
 	}
 	if registration != nil {
 		registration.mintCredential = mintCredential
@@ -1302,6 +1308,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
+			if clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
+				// an API key reissuing its client keeps the client's own
+				// session rather than starting another (owner decision 1)
+				server.Raise(session.ReuseClientSessionInTx(clientSession.Ctx, tx, byJwtWithClientId))
+			}
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
 			server.Raise(mintErr)
@@ -1313,6 +1324,20 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 	}
 
 	return
+}
+
+// The kind a client mint registers a new session with: a hosted proxy's own
+// session, a client an API key or an MCP identity created, else a lineage the
+// creating credential carries (session.MintKind*).
+func authClientMintKind(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) string {
+	switch {
+	case authClient.ProxyConfig != nil && authClient.ClientId == nil:
+		return session.MintKindHostedProxy
+	case clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity:
+		return session.MintKindApiKeyClient
+	default:
+		return session.MintKindLegacy
+	}
 }
 
 // A caller's explicit resolver is authoritative. Only an unset resolver may
@@ -1351,6 +1376,8 @@ func RemoveNetworkClient(
 	var removeClientResult *RemoveNetworkClientResult
 	var removeClientErr error
 
+	// the removed client's own session is freed (session_cap.go)
+	removeCtx := withSessionFreePath(clientSession.Ctx, session.SessionFreePathRemoveClient)
 	// important: must check `network_id = session network_id`
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		var removed bool
@@ -1359,7 +1386,7 @@ func RemoveNetworkClient(
 			// a client token removes only its own client and its children
 			// (AUTHZ1.md); any other client answers as one that does not exist
 			removed, err = deactivateOwnedNetworkClientInTx(
-				clientSession.Ctx,
+				removeCtx,
 				tx,
 				removeClient.ClientId,
 				clientSession.ByJwt.NetworkId,
@@ -1368,7 +1395,7 @@ func RemoveNetworkClient(
 		} else {
 			var rowCount int64
 			rowCount, err = deactivateNetworkClientsInTx(
-				clientSession.Ctx,
+				removeCtx,
 				tx,
 				[]server.Id{removeClient.ClientId},
 				clientSession.ByJwt.NetworkId,
@@ -1443,7 +1470,7 @@ func retireProberNetworkClientInTx(ctx context.Context, tx server.PgTx, clientId
 	if !active {
 		return true, nil
 	}
-	count, err := deactivateLockedNetworkClientsInTx(ctx, tx, []server.Id{clientId}, networkId)
+	count, err := deactivateLockedNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathProber), tx, []server.Id{clientId}, networkId)
 	return count == 1, err
 }
 
@@ -1608,6 +1635,11 @@ func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.Pg
 			if err != nil {
 				return nil, err
 			}
+			// a session cleanup spares descendants bound to other sessions
+			generationClientIds, err = sessionCleanupDescendantsInTx(ctx, tx, generationClientIds)
+			if err != nil {
+				return nil, err
+			}
 			descendantClientIds = append(descendantClientIds, generationClientIds...)
 			parentClientIds = generationClientIds
 		}
@@ -1643,7 +1675,7 @@ func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.Pg
 			WHERE
 				network_client.client_id = ANY($1) AND
 				network_client.network_id = $2
-			RETURNING network_client.client_id
+			RETURNING network_client.client_id, network_client.session_id
 		`,
 		deactivatedClientIds,
 		networkId,
@@ -1655,9 +1687,11 @@ func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.Pg
 	for _, clientId := range lockedClientIds {
 		lockedClientIdSet[clientId] = true
 	}
+	boundSessionIds := []server.Id{}
 	for result.Next() {
 		var clientId server.Id
-		if err := result.Scan(&clientId); err != nil {
+		var sessionId *server.Id
+		if err := result.Scan(&clientId, &sessionId); err != nil {
 			result.Close()
 			return 0, 0, err
 		}
@@ -1665,12 +1699,19 @@ func deactivateLockedNetworkClientsCountedInTx(ctx context.Context, tx server.Pg
 		if lockedClientIdSet[clientId] {
 			lockedCount += 1
 		}
+		if sessionId != nil {
+			boundSessionIds = append(boundSessionIds, *sessionId)
+		}
 	}
 	result.Close()
 	if err := result.Err(); err != nil {
 		return 0, 0, err
 	}
 	if err := removeDeactivatedProvideKeysInTx(ctx, tx, deactivatedClientIds); err != nil {
+		return 0, 0, err
+	}
+	// a removed client frees its own session (session_cap.go)
+	if err := queueClientSessionFreeInTx(ctx, tx, map[server.Id][]server.Id{networkId: boundSessionIds}); err != nil {
 		return 0, 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
@@ -1927,7 +1968,7 @@ func removeProvideMirrors(ctx context.Context, clientIds []server.Id) {
 }
 
 func removeNetworkClientsBatchExec(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) {
-	_, err := deactivateNetworkClientsInTx(ctx, tx, clientIds, networkId)
+	_, err := deactivateNetworkClientsInTx(withSessionFreePath(ctx, session.SessionFreePathRemoveClients), tx, clientIds, networkId)
 	server.Raise(err)
 }
 
@@ -4657,7 +4698,8 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 			// The ordered FOR UPDATE above completes before the UPDATE reads the
 			// primary database clock, so a lifecycle reader that won the row lock
 			// remains earlier than the deactivation it delayed even across hosts.
-			tag := server.RaisePgResult(tx.Exec(
+			markedSessionIds := map[server.Id][]server.Id{}
+			marked, err := tx.Query(
 				ctx,
 				`
 					WITH lifecycle_clock AS MATERIALIZED (
@@ -4671,12 +4713,26 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 					WHERE
 						network_client.client_id = ANY($1) AND
 						network_client.active = true
+					RETURNING network_client.network_id, network_client.session_id
 				`,
 				clientIds,
-			))
-			batchCount = tag.RowsAffected()
+			)
+			server.WithPgResult(marked, err, func() {
+				for marked.Next() {
+					var networkId server.Id
+					var sessionId *server.Id
+					server.Raise(marked.Scan(&networkId, &sessionId))
+					batchCount += 1
+					if sessionId != nil {
+						markedSessionIds[networkId] = append(markedSessionIds[networkId], *sessionId)
+					}
+				}
+			})
 			// as every deactivation (deactivateLockedNetworkClientsInTx)
 			server.Raise(removeDeactivatedProvideKeysInTx(ctx, tx, clientIds))
+			// the 30-day idle reap frees the marked clients' own sessions, as a
+			// removal does (session_cap.go)
+			server.Raise(queueClientSessionFreeInTx(withSessionFreePath(ctx, session.SessionFreePathIdleReap), tx, markedSessionIds))
 		}, server.TxReadCommitted)
 		if 0 < batchCount {
 			glog.Infof("[ncm]marked %d abandoned top level clients inactive\n", batchCount)
@@ -4831,7 +4887,7 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 					LIMIT $2
 				) t
 				WHERE network_client.client_id = t.client_id
-				RETURNING network_client.client_id, network_client.device_id, network_client.network_id, network_client.source_client_id
+				RETURNING network_client.client_id, network_client.device_id, network_client.network_id, network_client.source_client_id, network_client.session_id
 				`,
 				minClientTime.UTC(),
 				reapChildBatchCount,
@@ -4839,19 +4895,27 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 			// this reap removes active children too, so the revocation
 			// records refuse every removed row before the batch commits
 			retired := []session.RetiredClient{}
+			deletedSessionIds := map[server.Id][]server.Id{}
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var clientId, networkId server.Id
-					var deviceId, sourceClientId *server.Id
-					server.Raise(rows.Scan(&clientId, &deviceId, &networkId, &sourceClientId))
+					var deviceId, sourceClientId, sessionId *server.Id
+					server.Raise(rows.Scan(&clientId, &deviceId, &networkId, &sourceClientId, &sessionId))
 					batchClientIds = append(batchClientIds, clientId)
 					if deviceId != nil {
 						batchDeviceIds = append(batchDeviceIds, *deviceId)
 					}
 					retired = append(retired, session.RetiredClient{ClientId: clientId, NetworkId: networkId, SourceClientId: sourceClientId})
+					if sessionId != nil {
+						deletedSessionIds[networkId] = append(deletedSessionIds[networkId], *sessionId)
+					}
 				}
 			})
 			server.Raise(session.RevokeRetiredClientRecordsInTx(ctx, tx, retired))
+			// a child that owned its session (a hosted proxy a client token
+			// created) frees it; a child carrying its parent's session frees
+			// nothing while the parent is active (session_cap.go)
+			server.Raise(queueClientSessionFreeInTx(withSessionFreePath(ctx, session.SessionFreePathStaleChild), tx, deletedSessionIds))
 		}, server.TxReadCommitted)
 		reapedClientIds = append(reapedClientIds, batchClientIds...)
 		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)

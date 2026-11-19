@@ -34,7 +34,10 @@ func CleanupSessionOperation(ctx context.Context, operation session.SessionClean
 				}
 			})
 			// The predicate was rechecked after waiting for locks. A newer rebind wins.
-			_, err = deactivateLockedNetworkClientsInTx(ctx, tx, ids, operation.NetworkId)
+			// The sessions are revoked: their markers refuse them, and nothing is
+			// freed. The cascade spares a descendant an explicit re-auth bound to
+			// another session (S2 R3): its credentials carry that session.
+			_, err = deactivateLockedNetworkClientsInTx(withSessionCleanupTargets(withoutSessionFree(ctx), operation.TargetSessionIds), tx, ids, operation.NetworkId)
 			server.Raise(err)
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE auth_code SET remaining_uses=0 WHERE network_id=$1 AND origin_session_id=ANY($2) AND active`, operation.NetworkId, operation.TargetSessionIds))
 			server.Raise(tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM network_client WHERE network_id=$1 AND session_id=ANY($2) AND active)`, operation.NetworkId, operation.TargetSessionIds).Scan(&complete))
@@ -61,6 +64,13 @@ func RecoverSessionOperations(ctx context.Context, limit int) error {
 		}
 		result, err := session.EnforceSessionOperation(ctx, op.NetworkId, op.OperationId)
 		if err != nil {
+			// An operation that cannot proceed now moves behind every other
+			// pending one, so a few stuck at the head never starve the rest of
+			// recovery (S2 N1); it is retried in its turn and counted.
+			session.ObserveSessionOperationRecoveryFailure()
+			if deferErr := session.DeferSessionOperation(ctx, op.NetworkId, op.OperationId); deferErr != nil {
+				failures = append(failures, fmt.Errorf("session operation %s defer: %w", op.OperationId, deferErr))
+			}
 			continue
 		}
 		if result.State != "enforced" {

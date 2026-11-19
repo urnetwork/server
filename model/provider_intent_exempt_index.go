@@ -88,10 +88,14 @@
 package model
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
 )
@@ -173,12 +177,23 @@ const providerIntentExemptBuildLimit = 1024
 // with calls of up to 0.57 s, each one holding every key on the node.
 const providerIntentExemptRebuildWalkLimit = 4 * providerIntentExemptBuildLimit
 
-// Re-derives one registry entry's exempt index entry. The status match is the
-// walk's (count_clients_walk). `key_ttl_seconds` is a backstop for the index
-// key: entries carry their own expiry in their score, so it is re-armed only
-// once half of it has passed.
+// The client caps' provider exemption, one predicate for both
+// (ClientCapExemptUntil; owner decision 2026-11-18): an intent client is exempt
+// while it has a pending or qualified record, a live record expiry and a live
+// intent presence. intent_exempt_until returns when its exemption ends, the
+// first of its presence and record expiries as their original score strings
+// (the presence on a tie), or false. With live_min_ms, an exemption that ends
+// before it is false without the record read. The concurrent client count
+// applies it to each registry member (count_clients_walk, and the exempt index
+// entries exempt_index_score derives), and the session cap to a top-level
+// client's own session.
+//
+// exempt_index_score re-derives one registry entry's exempt index entry: the
+// first of the registry entry's expiry and the member's exemption end.
+// `key_ttl_seconds` is a backstop for the index key: entries carry their own
+// expiry in their score, so it is re-armed only once half of it has passed.
 const providerIntentExemptSyncLua = `
-local function exempt_index_score(registry_key, pi_key, present_key, expire_key, member)
+local function intent_exempt_until(pi_key, present_key, expire_key, member, live_min_ms)
 	local present = redis.call('ZSCORE', present_key, member)
 	if present == false then
 		return false
@@ -187,8 +202,11 @@ local function exempt_index_score(registry_key, pi_key, present_key, expire_key,
 	if expire == false then
 		return false
 	end
-	local registered = redis.call('ZSCORE', registry_key, member)
-	if registered == false then
+	local exempt_end = present
+	if tonumber(expire) < tonumber(present) then
+		exempt_end = expire
+	end
+	if live_min_ms ~= nil and tonumber(exempt_end) < live_min_ms then
 		return false
 	end
 	local record = redis.call('HGET', pi_key, member)
@@ -199,13 +217,22 @@ local function exempt_index_score(registry_key, pi_key, present_key, expire_key,
 	if status ~= 'pending' and status ~= 'qualified' then
 		return false
 	end
+	return exempt_end
+end
+
+local function exempt_index_score(registry_key, pi_key, present_key, expire_key, member)
+	local exempt_end = intent_exempt_until(pi_key, present_key, expire_key, member, nil)
+	if exempt_end == false then
+		return false
+	end
+	local registered = redis.call('ZSCORE', registry_key, member)
+	if registered == false then
+		return false
+	end
 	-- the original score strings, so the entry keeps their exact values
 	local score = registered
-	if tonumber(present) < tonumber(score) then
-		score = present
-	end
-	if tonumber(expire) < tonumber(score) then
-		score = expire
+	if tonumber(exempt_end) < tonumber(score) then
+		score = exempt_end
 	end
 	return score
 end
@@ -222,6 +249,43 @@ local function sync_exempt_index(index_key, registry_tag, registry_key, pi_key, 
 	end
 end
 `
+
+// One client's exemption end by the client caps' one predicate
+// (intent_exempt_until), for ClientCapExemptUntil.
+var providerIntentExemptUntilScript = redis.NewScript(fmt.Sprintf(`%s
+return intent_exempt_until(KEYS[1], KEYS[2], KEYS[3], ARGV[1], nil)
+`, providerIntentExemptSyncLua))
+
+// ClientCapExemptUntil is the one exemption both client caps apply (owner
+// decision 2026-11-18): a top-level client that declared provide intent on its
+// connection is exempt while its qualification record is pending or qualified
+// and live, and its intent presence is live (intent_exempt_until, which the
+// concurrent client count applies to each of a network's registry members).
+// Returns when the client's exemption ends, or the zero time when the client
+// is not exempt at `now`.
+func ClientCapExemptUntil(ctx context.Context, networkId server.Id, clientId server.Id, now time.Time) (exemptUntil time.Time, returnErr error) {
+	keys := providerIntentKeys(networkId)
+	returnErr = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		value, err := providerIntentExemptUntilScript.Run(ctx, r, keys[:3], string(clientId.Bytes())).Text()
+		if errors.Is(err, server.RedisNil) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		exemptEndMs, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return err
+		}
+		// live at now as for the count (providerIntentCountArgs: an expiry
+		// after now's millisecond)
+		if now.UnixMilli() < int64(exemptEndMs) {
+			exemptUntil = time.UnixMilli(int64(exemptEndMs))
+		}
+		return nil
+	})
+	return
+}
 
 // The count library of the provider intent scripts. count_clients_walk is the
 // walk over every live registry member, used while a network's index builds.
@@ -246,16 +310,7 @@ local function count_clients_walk(pi_key, present_key, expire_key, connected_key
 		local members = redis.call('ZRANGEBYSCORE', registry_key, live_min, '+inf')
 		for _, member in ipairs(members) do
 			if member ~= skip_member then
-				local exempt = false
-				local present = redis.call('ZSCORE', present_key, member)
-				local expire = redis.call('ZSCORE', expire_key, member)
-				if present and expire and live_min_ms <= tonumber(present) and live_min_ms <= tonumber(expire) then
-					local record = redis.call('HGET', pi_key, member)
-					if record then
-						local status = string.match(record, '^(%%S+)')
-						exempt = status == 'pending' or status == 'qualified'
-					end
-				end
+				local exempt = intent_exempt_until(pi_key, present_key, expire_key, member, live_min_ms) ~= false
 				if exempt then
 					exempt_count = exempt_count + 1
 				else

@@ -323,12 +323,14 @@ func TestNetworkSignOutAllCommitRefusesEveryOldToken(t *testing.T) {
 			if !ok || parseErr != nil || micros < cutoff.UnixMicro() {
 				t.Fatalf("record %s credential cutoff %q (present %t), want at least %d", key, value, ok, cutoff.UnixMicro())
 			}
+			// the credential cutoff refuses the sign-out's sessions in every
+			// shard, so the operation writes no session tombstone (F4)
 			value, ok, err = session.Testing_RevocationRecordField(ctx, key, session.Testing_RevocationSessionField(*target.tagged.SessionId))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !ok || value != session.Testing_RevocationTombstone {
-				t.Fatalf("record %s session field %q (present %t), want the tombstone", key, value, ok)
+			if ok && value == session.Testing_RevocationTombstone {
+				t.Fatalf("record %s holds a session tombstone the credential cutoff makes redundant", key)
 			}
 		}
 		if err := session.CheckSession(ctx, target.networkId, *target.tagged.SessionId); !errors.Is(err, session.ErrSessionRevoked) {

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	// "strconv"
@@ -514,7 +515,10 @@ func legacyAppleSsoUserId(
 func handleLoginParsedAuthJwt(
 	args *HandleLoginParsedAuthJwtArgs,
 	ctx context.Context,
-) (*AuthLoginResult, error) {
+) (result *AuthLoginResult, returnErr error) {
+	// the sign-in's mint raises a refusal (409 session_limit_reached, ...);
+	// it is the route's answer, not a 500
+	defer recoverSessionRefusal(&result, &returnErr)
 	return handleLoginParsedAuthJwtWithStore(args, ctx, &parsedAuthJwtLoginDb)
 }
 
@@ -631,6 +635,14 @@ func handleLoginParsedAuthJwtWithStore(
 		}
 	}
 
+	store.setUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId)
+
+	// The session first: a sign-in the session cap refuses (409
+	// session_limit_reached) links no provider and sends no notice of one.
+	// The link came first and committed while the response said refused
+	// (session1118 C).
+	signed := store.signByJwt(context.WithValue(ctx, sessionSignInKindKey{}, string(args.AuthJwt.AuthType)), networkId, *userId, networkName)
+
 	if matchingSso == nil {
 
 		/**
@@ -638,6 +650,7 @@ func handleLoginParsedAuthJwtWithStore(
 		 * but user has a different SSO
 		 * add the new SSO auth
 		 * (for a legacy Apple account this backfills its sso row)
+		 * A link the store refuses does not stop the sign-in, as before.
 		 */
 		store.addSsoAuth(
 			&AddSsoAuthArgs{
@@ -653,12 +666,10 @@ func handleLoginParsedAuthJwtWithStore(
 		)
 	}
 
-	store.setUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId)
-
 	// successful login
 	result := &AuthLoginResult{
 		Network: &AuthLoginResultNetwork{
-			ByJwt: store.signByJwt(context.WithValue(ctx, sessionSignInKindKey{}, string(args.AuthJwt.AuthType)), networkId, *userId, networkName),
+			ByJwt: signed,
 		},
 	}
 	return result, nil
@@ -1152,7 +1163,10 @@ type AuthVerifyResultError struct {
 func AuthVerify(
 	verify AuthVerifyArgs,
 	clientSession *session.ClientSession,
-) (*AuthVerifyResult, error) {
+) (verifyResult *AuthVerifyResult, returnErr error) {
+	// the session's refusal raised in the verification's transaction (409
+	// session_limit_reached, ...) is the route's answer, not a 500
+	defer recoverSessionRefusal(&verifyResult, &returnErr)
 	userAuth, _ := NormalUserAuthV1(&verify.UserAuth)
 
 	if userAuth == nil {
@@ -1225,9 +1239,51 @@ func AuthVerify(
 		return result, nil
 	}
 
-	// verified
+	// verified: the code proved the sign-in method
+	SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
+
+	isPro := IsProFresh(
+		clientSession.Ctx,
+		&networkId,
+	)
+
+	// A signed-in caller that verifies a sign-in method of its own network
+	// (an email or phone added in Account) keeps its session: the verify
+	// renews the caller's session. It started another session, which no app
+	// installs: an unused "Verification code" sign-in listed for 90 days,
+	// counted toward the session cap and refused there (session1118 C). Any
+	// other caller starts a session, as before. Both credentials are
+	// allocated outside the retryable transaction.
+	presented := presentedNetworkCredential(clientSession, networkId, userId)
+	var renewal *session.ByJwt
+	if presented != nil {
+		renewal = presented.Renew()
+		renewal.NetworkName = networkName
+		renewal.GuestMode = false
+		renewal.Pro = isPro
+		session.PrepareSessionMint(renewal, false)
+	}
+	fresh := session.NewByJwt(
+		networkId,
+		userId,
+		networkName,
+		false,
+		isPro,
+	)
+	session.PrepareSessionMint(fresh, true)
+
 	newAccount := false
+	var signed string
+	var signedCredential *session.ByJwt
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		// The verification commits with the session it returns: a session
+		// the cap refuses (409 session_limit_reached) leaves the code unused
+		// and the sign-in method unverified, so the same code works once a
+		// session is signed out. It committed first, and the retry answered
+		// "Invalid code." (session1118 C). The lifecycle lock comes first, as
+		// in every mint, before the rows a credential rotation also writes.
+		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, networkId, false))
+
 		// classify before marking this sign-in verified
 		newAccount = isNewAccountVerification(
 			&pgAuthVerifyAccountLookup{ctx: clientSession.Ctx, conn: tx},
@@ -1260,29 +1316,11 @@ func AuthVerify(
 			// sign-up
 			addNetworkWelcomeInTx(clientSession.Ctx, tx, networkId, userId, *userAuth)
 		}
-	})
 
-	SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
+		signed, signedCredential = signAuthVerifyInTx(clientSession.Ctx, tx, presented, renewal, fresh)
+	}, server.TxReadCommitted)
 
-	isGuestMode := false
-
-	isPro := IsProFresh(
-		clientSession.Ctx,
-		&networkId,
-	)
-
-	byJwt := session.NewByJwt(
-		networkId,
-		userId,
-		networkName,
-		isGuestMode,
-		isPro,
-	)
-	signed, mintErr := session.MintNetworkSession(clientSession.Ctx, byJwt, "verify")
-	if mintErr != nil {
-		return nil, mintErr
-	}
-	clientSession.WithByJwt(byJwt).ObserveAuthenticatedUse()
+	clientSession.WithByJwt(signedCredential).ObserveAuthenticatedUse()
 	result := &AuthVerifyResult{
 		Network: &AuthVerifyResultNetwork{
 			ByJwt: signed,
@@ -1290,6 +1328,47 @@ func AuthVerify(
 		NewAccount: newAccount,
 	}
 	return result, nil
+}
+
+// The verify's session, in the verification's transaction under the network's
+// lifecycle lock: the presented credential's session renewed while it is
+// still live, else a new session (the "verify" sign-in). A refusal raises, and
+// the transaction rolls back with it.
+func signAuthVerifyInTx(ctx context.Context, tx server.PgTx, presented *session.ByJwt, renewal *session.ByJwt, fresh *session.ByJwt) (string, *session.ByJwt) {
+	if presented != nil {
+		err := session.ValidateByJwtStateInTx(ctx, tx, presented, false)
+		if err == nil {
+			signed, err := session.RegisterAndSignInTx(ctx, tx, renewal, session.MintKindLegacy, nil, false)
+			server.Raise(err)
+			return signed, renewal
+		}
+		if errors.Is(err, session.ErrAuthUnavailable) {
+			server.Raise(err)
+		}
+		// the caller's session has ended (revoked, rotated, expired): a new
+		// session, as for a signed-out caller
+	}
+	server.Raise(session.ValidateByJwtStateInTx(ctx, tx, fresh, false))
+	signed, err := session.RegisterAndSignInTx(ctx, tx, fresh, "verify", nil, false)
+	server.Raise(err)
+	return signed, fresh
+}
+
+// The caller's own network credential on a route that serves signed-out
+// callers: the request's signed network token (not an API key, not a client
+// or lag guest token) for networkId and userId, or nil. Its signature and
+// audience are checked here; its state in the caller's transaction
+// (session.ValidateByJwtStateInTx).
+func presentedNetworkCredential(clientSession *session.ClientSession, networkId server.Id, userId server.Id) *session.ByJwt {
+	token, ok := strings.CutPrefix(http.Header(clientSession.Header).Get("Authorization"), "Bearer ")
+	if !ok || token == "" {
+		return nil
+	}
+	presented, err := session.ParseByJwtForAudience(clientSession.Ctx, token, session.ByJwtAudienceApi)
+	if err != nil || presented.NetworkId != networkId || presented.UserId != userId || presented.ClientId != nil || presented.LagGuest {
+		return nil
+	}
+	return presented
 }
 
 // authVerifyAccountLookup reads what decides whether a verification completes
@@ -1941,7 +2020,7 @@ func AuthCodeCreate(
 		now := server.NowUtc()
 		endTime := now.Add(duration)
 		if clientSession.ByJwt.SessionId != nil {
-			horizon, err := session.RegisterNetworkSession(clientSession.Ctx, clientSession.ByJwt, "restored", nil, false, now)
+			horizon, err := session.RegisterRestoredSessionInTx(clientSession.Ctx, tx, clientSession.ByJwt, now)
 			server.Raise(err)
 			// in UTC, as the end_time column holds it
 			effective := time.UnixMilli(horizon.AcceptUntil).UTC()

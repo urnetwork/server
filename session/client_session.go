@@ -268,13 +268,14 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 				if answer != nil && byJwt.ClientId != nil {
 					// the checks ValidateByJwtState makes before its query,
 					// then the answer, then only the query
-					if err := validateByJwtStateBeforeQuery(stateCtx, byJwt, false); err != nil {
+					markerUnchecked, err := validateByJwtStateBeforeQuery(stateCtx, byJwt, false)
+					if err != nil {
 						return false, err
 					}
 					if answer(stateCtx, *byJwt.ClientId) {
 						return true, nil
 					}
-					if err := validateByJwtStateAfterBeforeQuery(stateCtx, byJwt); err != nil {
+					if err := validateByJwtStateAfterBeforeQuery(stateCtx, byJwt, markerUnchecked); err != nil {
 						return false, err
 					}
 				} else if err := ValidateByJwtState(stateCtx, byJwt, false); err != nil {
