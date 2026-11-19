@@ -503,6 +503,25 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 	return split
 }
 
+// Sets one of the lb's environment values for its next start.
+func (self *t3Split) setEnv(key string, value string) {
+	prefix := key + "="
+	for index, entry := range self.env {
+		if strings.HasPrefix(entry, prefix) {
+			self.env[index] = prefix + value
+			return
+		}
+	}
+	self.env = append(self.env, prefix+value)
+}
+
+// The versions lbmap reported, in order.
+func (self *t3SplitReports) reported() []uint64 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]uint64{}, self.versions...)
+}
+
 // Starts the lb process and returns once its nginx listens, after lbmap reported version when it is above 0: lbmap
 // loads the newest version before nginx serves 443, so a report of it means the first connection routes by it.
 func (self *t3Split) startLb(version uint64) {
