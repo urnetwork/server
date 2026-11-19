@@ -494,36 +494,18 @@ func (self *e2eErrorLog) panics() []string {
 }
 
 // An http.Server for one of the front's public TCP ports, as connect's
-// newHttpServer builds it (connect/front_http.go): nginx's client header
-// timeout, keepalive timeout and h2 stream cap from HttpSettings, every
-// request, OPTIONS * included, for the front's handler, keepalives off at
-// keepalive_timeout 0, no read or write timeout, and requests that end with
-// ctx. MaxHeaderBytes is twice MaxRequestHeadersTotalBytes, as LBALT-IMPL.md
-// §7 decides.
-//
-// Until Front.ConfigureServer lands, this mirrors connect's builder. The
-// integrator switches it to set only Handler, ErrorLog and BaseContext and
-// then call ConfigureServer, as connect will.
-func newE2eHttpServer(ctx context.Context, httpSettings *HttpSettings, handler http.Handler, errorLog *e2eErrorLog) *http.Server {
+// newHttpServer builds it (connect/front_http.go): the handler, the error log
+// and requests that end with ctx are the caller's, and the front sets the
+// rest from its HttpSettings (Front.ConfigureServer).
+func newE2eHttpServer(ctx context.Context, front *Front, handler http.Handler, errorLog *e2eErrorLog) *http.Server {
 	httpServer := &http.Server{
-		Handler:                      handler,
-		ReadHeaderTimeout:            httpSettings.ClientHeaderTimeout,
-		IdleTimeout:                  httpSettings.KeepaliveTimeout,
-		MaxHeaderBytes:               2 * httpSettings.MaxRequestHeadersTotalBytes,
-		DisableGeneralOptionsHandler: true,
-		ErrorLog:                     log.New(errorLog, "", 0),
+		Handler:  handler,
+		ErrorLog: log.New(errorLog, "", 0),
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
 		},
 	}
-	if 0 < httpSettings.Http2MaxConcurrentStreams {
-		httpServer.HTTP2 = &http.HTTP2Config{
-			MaxConcurrentStreams: httpSettings.Http2MaxConcurrentStreams,
-		}
-	}
-	if httpSettings.KeepaliveTimeout <= 0 {
-		httpServer.SetKeepAlivesEnabled(false)
-	}
+	front.ConfigureServer(httpServer)
 	return httpServer
 }
 
@@ -671,14 +653,13 @@ func newE2eFront(t *testing.T, settings *FrontSettings, editRouteTable func(rout
 // clone of it, so the server leaves the config alone.
 func (self *e2eFront) serveInterface(t *testing.T, interfaceName string) *e2eInterface {
 	t.Helper()
-	httpSettings := self.settings.Http
 	e2eInterface := &e2eInterface{
 		name:        interfaceName,
 		httpsServed: newE2eServedLog(),
 		httpServed:  newE2eServedLog(),
 	}
-	httpsServer := newE2eHttpServer(t.Context(), httpSettings, newE2eServedHandler(self.front.HttpsHandler(interfaceName), e2eInterface.httpsServed), self.errorLog)
-	httpServer := newE2eHttpServer(t.Context(), httpSettings, newE2eServedHandler(self.front.HttpHandler(interfaceName), e2eInterface.httpServed), self.errorLog)
+	httpsServer := newE2eHttpServer(t.Context(), self.front, newE2eServedHandler(self.front.HttpsHandler(interfaceName), e2eInterface.httpsServed), self.errorLog)
+	httpServer := newE2eHttpServer(t.Context(), self.front, newE2eServedHandler(self.front.HttpHandler(interfaceName), e2eInterface.httpServed), self.errorLog)
 	t.Cleanup(func() {
 		httpsServer.Close()
 		httpServer.Close()

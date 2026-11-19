@@ -33,9 +33,9 @@ package nginx_test
 //   - starts nginx through the image's own lb binary, which rewrites its
 //     listens to the interface address and the internal ports, as in
 //     production;
-//   - starts the front with nginx.NewFront, behind http.Servers set up as
-//     connect's newHttpServer sets them up (connect/front_http.go), since
-//     Front.ConfigureServer (LBALT-IMPL.md §7) does not exist yet;
+//   - starts the front with nginx.NewFront, behind http.Servers built as
+//     connect's newHttpServer builds them (connect/front_http.go), with
+//     Front.ConfigureServer (LBALT-IMPL.md §7);
 //   - sends the corpus (parity_corpus_test.go) to both, and compares.
 //
 // Time is scaled down nowhere: the fixture's own route override (20 s) is the

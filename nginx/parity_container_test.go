@@ -270,7 +270,7 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 		if err != nil {
 			t.Fatal(err)
 		}
-		httpsServer := newParityFrontHttpServer(ctx, front.HttpsHandler(routeInterface.Name), frontSettings.Http, discardLog)
+		httpsServer := newParityFrontHttpServer(ctx, front, front.HttpsHandler(routeInterface.Name), discardLog)
 		harness.httpServers = append(harness.httpServers, httpsServer)
 		go httpsServer.Serve(tls.NewListener(httpsListener, front.TlsConfig()))
 
@@ -278,7 +278,7 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 		if err != nil {
 			t.Fatal(err)
 		}
-		httpServer := newParityFrontHttpServer(ctx, front.HttpHandler(routeInterface.Name), frontSettings.Http, discardLog)
+		httpServer := newParityFrontHttpServer(ctx, front, front.HttpHandler(routeInterface.Name), discardLog)
 		harness.httpServers = append(harness.httpServers, httpServer)
 		go httpServer.Serve(httpListener)
 	}
@@ -292,35 +292,19 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 	return harness
 }
 
-// An http.Server for one of the front's public tcp ports, set up as
-// connect's newHttpServer sets one up (connect/front_http.go): nginx's client
-// header timeout, keepalive timeout, header bytes and h2 stream limit, and no
-// general OPTIONS handler. It stands in for Front.ConfigureServer, which
-// LBALT-IMPL.md §7 decides and lbalt/integrate doesn't have yet; once it
-// exists, this should call it instead. Its MaxHeaderBytes is connect's,
-// MaxRequestHeadersTotalBytes, where §7 decides twice that, so a head inside
-// the band between them gets Go's 431 where the front should answer 400, and
-// the run reports it.
-func newParityFrontHttpServer(ctx context.Context, handler http.Handler, httpSettings *nginx.HttpSettings, errorLog *log.Logger) *http.Server {
+// An http.Server for one of the front's public tcp ports, as connect's
+// newHttpServer builds it (connect/front_http.go): the handler, the error log
+// and requests that end with ctx are the caller's, and the front sets the
+// rest from its HttpSettings (nginx.Front.ConfigureServer).
+func newParityFrontHttpServer(ctx context.Context, front *nginx.Front, handler http.Handler, errorLog *log.Logger) *http.Server {
 	httpServer := &http.Server{
-		Handler:                      handler,
-		ReadHeaderTimeout:            httpSettings.ClientHeaderTimeout,
-		IdleTimeout:                  httpSettings.KeepaliveTimeout,
-		MaxHeaderBytes:               httpSettings.MaxRequestHeadersTotalBytes,
-		DisableGeneralOptionsHandler: true,
-		ErrorLog:                     errorLog,
+		Handler:  handler,
+		ErrorLog: errorLog,
 		BaseContext: func(net.Listener) context.Context {
 			return ctx
 		},
 	}
-	if 0 < httpSettings.Http2MaxConcurrentStreams {
-		httpServer.HTTP2 = &http.HTTP2Config{
-			MaxConcurrentStreams: httpSettings.Http2MaxConcurrentStreams,
-		}
-	}
-	if httpSettings.KeepaliveTimeout <= 0 {
-		httpServer.SetKeepAlivesEnabled(false)
-	}
+	front.ConfigureServer(httpServer)
 	return httpServer
 }
 
