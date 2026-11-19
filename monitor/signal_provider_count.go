@@ -162,7 +162,7 @@ var providerCountRequestExplainedReasons = []string{"filtered_destinations", "in
 
 // Every zero-reason and target-kind value the producer can export; anything
 // else makes the explanations untrusted.
-var providerCountZeroReasons = []string{"intentional_zero", "direct_excluded", "no_specs", "unresolved_target", "cache_page_gap", "cache_missing", "backfill_unavailable", "filtered_capability", "cache_empty", "unsupported_rank", "eligible_not_selected", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_client_ids", "filtered_destinations", "filtered_explicit_mixed", "filtered_mixed", "unclassified_zero"}
+var providerCountZeroReasons = []string{"intentional_zero", "direct_excluded", "no_specs", "unresolved_target", "cache_page_gap", "cache_missing", "backfill_unavailable", "filtered_capability", "cache_empty", "unsupported_rank", "eligible_not_selected", "drawable_not_selected", "no_drawable_candidates", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_client_ids", "filtered_destinations", "filtered_explicit_mixed", "filtered_mixed", "unclassified_zero"}
 var providerCountTargetKinds = []string{"none", "location_unknown", "country", "region", "city", "group", "best_available", "direct", "mixed"}
 
 // The cohort's explained zeros, clamped to its zeros: each explanation was

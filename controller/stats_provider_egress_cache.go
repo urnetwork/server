@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -31,6 +32,18 @@ var (
 	errStatsProviderEgressBusy        = errors.New("provider egress stats refresh in progress")
 	errStatsProviderEgressInvalid     = errors.New("provider egress stats snapshot invalid")
 )
+
+// An instance emits one fixed outcome per cache lookup. The collector's
+// availability gauge separately records whether it could use the result.
+var statsProviderEgressCacheOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_stats_provider_egress_cache_lookups_total",
+	Help: "Provider-egress dashboard cache lookups by terminal outcome on this process",
+}, []string{"outcome"})
+
+// Only a process that uses the dashboard cache creates any outcome series.
+func init() {
+	prometheus.MustRegister(statsProviderEgressCacheOutcomes)
+}
 
 type statsProviderEgressSnapshot struct {
 	Counts      *model.ProviderEgressCounts
@@ -323,6 +336,8 @@ func statsProviderEgressFill(ctx context.Context, fill func(context.Context) (*m
 }
 
 func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string) (*statsProviderEgressSnapshot, error) {
+	outcome := "other_refusal"
+	defer func() { statsProviderEgressCacheOutcomes.WithLabelValues(outcome).Inc() }()
 	if ctx.Err() != nil || len(policyKey) == 0 || len(policyKey) > 4096 {
 		return nil, errStatsProviderEgressUnavailable
 	}
@@ -330,6 +345,7 @@ func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string)
 	if snapshot, fresh, err := cache.read(ctx, keys.value); err != nil {
 		return nil, err
 	} else if fresh {
+		outcome = "fresh_read"
 		return snapshot, nil
 	}
 	token, leaseStarted := cache.newToken(), cache.now()
@@ -348,9 +364,11 @@ func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string)
 		if acquired && cache.store.release(ctx, keys.fill, token) != nil || ctx.Err() != nil {
 			return nil, errStatsProviderEgressUnavailable
 		}
+		outcome = "fresh_read"
 		return snapshot, nil
 	}
 	if !acquired {
+		outcome = "follower_busy"
 		return nil, errStatsProviderEgressBusy
 	}
 	// A delayed acquisition/recheck cannot start work that outlives its lease.
@@ -360,6 +378,7 @@ func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string)
 	fillCtx, cancel := context.WithTimeout(ctx, statsProviderEgressFillTime)
 	defer cancel()
 	started := cache.now()
+	outcome = "fill_failed"
 	counts, err := statsProviderEgressFill(fillCtx, cache.fill)
 	completed := cache.now()
 	deadline, _ := fillCtx.Deadline()
@@ -376,7 +395,15 @@ func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string)
 	if remaining <= 0 || fillCtx.Err() != nil || !time.Now().Before(deadline) || publicationTime.Sub(leaseStarted) >= statsProviderEgressLeaseTTL {
 		return nil, errStatsProviderEgressUnavailable
 	}
+	outcome = "publication_unknown"
 	published, publishErr := cache.store.publish(fillCtx, keys, token, value, remaining)
+	if publishErr == nil {
+		if published {
+			outcome = "published_acknowledged"
+		} else {
+			outcome = "publication_refused"
+		}
+	}
 	if fillCtx.Err() != nil || !time.Now().Before(deadline) {
 		return nil, errStatsProviderEgressUnavailable
 	}
@@ -385,6 +412,7 @@ func (cache statsProviderEgressCache) get(ctx context.Context, policyKey string)
 	}
 	// A lost reply or replaced lease can only recover through a valid publication.
 	if retained, fresh, err := cache.read(fillCtx, keys.value); err == nil && fresh {
+		outcome = "fresh_read_after_publish"
 		return retained, nil
 	}
 	return nil, errStatsProviderEgressUnavailable

@@ -61,12 +61,22 @@ func reviewedSourceImageManifest(current *model.CompetitionSourceActivation, pro
 // No main configuration/credentials enter this request. Manifest bytes are
 // prospective source identity, not evidence that the build or qualification ran.
 type reviewedSourceBuildRequest struct {
-	TrustedInstrument    *model.CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
-	Operation            string                                   `json:"operation"`
-	Proposal             *reviewedSourceProposal                  `json:"proposal"`
-	SourceManifest       []byte                                   `json:"source_manifest"`
-	SourceGeneration     int                                      `json:"source_generation"`
-	ConfigLocalDirectory string                                   `json:"config_local_directory"`
-	VaultLocalDirectory  string                                   `json:"vault_local_directory"`
-	SandboxContract      string                                   `json:"sandbox_contract"`
+	ExecutionBaseImageDigest string                                   `json:"execution_base_image_digest,omitempty"`
+	TrustedInstrument        *model.CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
+	Operation                string                                   `json:"operation"`
+	Proposal                 *reviewedSourceProposal                  `json:"proposal"`
+	SourceManifest           []byte                                   `json:"source_manifest"`
+	SourceGeneration         int                                      `json:"source_generation"`
+	ConfigLocalDirectory     string                                   `json:"config_local_directory"`
+	VaultLocalDirectory      string                                   `json:"vault_local_directory"`
+	SandboxContract          string                                   `json:"sandbox_contract"`
+}
+
+const epochThreeSecurityBuildImage = "sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702"
+
+func sourceBuildBaseImage(request reviewedSourceBuildRequest) string {
+	if request.ExecutionBaseImageDigest != "" {
+		return request.ExecutionBaseImageDigest
+	}
+	return request.Proposal.EvaluatedImageDigest
 }

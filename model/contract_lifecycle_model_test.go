@@ -202,13 +202,22 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 
 	// 7b941e32 moved the deactivation write out of deactivateNetworkClientsInTx
 	// into deactivateLockedNetworkClientsInTx, which requires its caller to
-	// hold FOR UPDATE on every target row. The writer reads the database clock
-	// in its single UPDATE, and every reviewed caller locks before calling it.
-	lockedWriter := functionSource("network_client_model.go", "deactivateLockedNetworkClientsInTx")
+	// hold FOR UPDATE on every target row, and da2872676 moved it on into
+	// deactivateLockedNetworkClientsCountedInTx, which the former only calls
+	// with its own arguments. The writer reads the database clock in its
+	// single UPDATE, and every reviewed caller of either locks before calling
+	// it.
+	lockedWriter := functionSource("network_client_model.go", "deactivateLockedNetworkClientsCountedInTx")
 	lockedWriteIndex := strings.Index(lockedWriter, "WITH lifecycle_clock AS MATERIALIZED")
 	if strings.Count(lockedWriter, "WITH lifecycle_clock AS MATERIALIZED") != 1 || strings.Count(lockedWriter, clockMarker) != 1 ||
 		lockedWriteIndex < 0 || strings.Index(lockedWriter, clockMarker) <= lockedWriteIndex {
-		t.Errorf("deactivateLockedNetworkClientsInTx: want one write reading the database clock")
+		t.Errorf("deactivateLockedNetworkClientsCountedInTx: want one write reading the database clock")
+	}
+	lockedWrapper := functionSource("network_client_model.go", "deactivateLockedNetworkClientsInTx")
+	if strings.ContainsAny(lockedWrapper, "`\"") ||
+		strings.Count(lockedWrapper, "deactivateLockedNetworkClientsCountedInTx(") != 1 ||
+		!strings.Contains(lockedWrapper, "deactivateLockedNetworkClientsCountedInTx(ctx, tx, lockedClientIds, networkId)") {
+		t.Errorf("deactivateLockedNetworkClientsInTx: want no statement of its own, only one call of deactivateLockedNetworkClientsCountedInTx with its caller's locked clients")
 	}
 	deactivation := functionSource("network_client_model.go", "deactivateNetworkClientsInTx")
 	if marked := strings.Index(deactivation, "/* network_client_deactivation_write_boundary */"); marked < 0 ||
@@ -226,23 +235,38 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 	if activeMarked < 0 || activeOrdered <= activeMarked || activeLocked <= activeOrdered || activeWrite <= activeLocked {
 		t.Errorf("deactivateActiveNetworkClientsInTx: want its marked lock of every target row, in client_id order, before the locked write of the rows it locked")
 	}
+	lockedWriterCalls := []string{
+		"deactivateLockedNetworkClientsInTx(",
+		"deactivateLockedNetworkClientsCountedInTx(",
+	}
 	lockedCallers := []string{}
 	for _, source := range sources {
 		for _, declaration := range source.file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Name.Name == "deactivateLockedNetworkClientsInTx" {
+			if !ok || function.Name.Name == "deactivateLockedNetworkClientsInTx" || function.Name.Name == "deactivateLockedNetworkClientsCountedInTx" {
 				continue
 			}
 			start := source.fileSet.Position(function.Pos()).Offset
 			end := source.fileSet.Position(function.End()).Offset
 			body := string(source.data[start:end])
-			callIndex := strings.Index(body, "deactivateLockedNetworkClientsInTx(")
-			if callIndex < 0 {
+			callCount := 0
+			callIndex := -1
+			for _, call := range lockedWriterCalls {
+				index := strings.Index(body, call)
+				if index < 0 {
+					continue
+				}
+				callCount += strings.Count(body, call)
+				if callIndex < 0 || index < callIndex {
+					callIndex = index
+				}
+			}
+			if callCount == 0 {
 				continue
 			}
 			lockedCallers = append(lockedCallers, function.Name.Name)
 			lockIndex := strings.Index(body, "FOR UPDATE")
-			if strings.Count(body, "deactivateLockedNetworkClientsInTx(") != 1 || lockIndex < 0 || callIndex <= lockIndex {
+			if callCount != 1 || lockIndex < 0 || callIndex <= lockIndex {
 				t.Errorf("%s: want FOR UPDATE (%d) before its one locked deactivation write (%d)", function.Name.Name, lockIndex, callIndex)
 			}
 		}
@@ -252,6 +276,10 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 		"CleanupSessionOperation",
 		// reviewed 2026-11-06: the proxy trim's active-only deactivateNetworkClientsInTx
 		"deactivateActiveNetworkClientsInTx",
+		// reviewed 2026-11-18: the account deletion cleanup (da2872676) locks
+		// each batch of the deleted network's active clients FOR UPDATE and
+		// deactivates exactly the clients it locked
+		"deactivateDeletedNetworkClients",
 		"deactivateNetworkClientsInTx",
 		"deactivateOwnedNetworkClientInTx",
 		"drainProberShardInTx",

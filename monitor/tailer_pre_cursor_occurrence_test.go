@@ -76,7 +76,7 @@ func TestStandingTailPreCursorKeepsReconciliationReplayDedup(t *testing.T) {
 	tailer.lastLineTime = now
 	source := "[fixture-host.example][fixture-service][fixture-block][cid:fixture-process][" + now.Format(time.RFC3339) + "] OOM command not allowed synthetic source failure"
 	summary := "[warpctl][loki-tail-pre-cursor-entries] service=fixture-service count=1"
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 		return source + "\n" + summary + "\n", nil
 	}
 

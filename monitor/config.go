@@ -34,6 +34,10 @@ type monitorYaml struct {
 	AddressMode string            `yaml:"address_mode"`
 	Routers     []RouterSettings  `yaml:"routers"`
 	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
+	// lbalt_status: the lb status enrollment (SIGNALS.md §16.10). The raw node
+	// keeps an absent block (off) apart from a present one that fails its
+	// strict decode (invalid).
+	LbAltStatus yaml.Node `yaml:"lbalt_status"`
 	// observer_overlay: the operator's observer route contract (SIGNALS.md §1.7)
 	ObserverOverlay ObserverOverlaySettings `yaml:"observer_overlay"`
 	Hosts           []struct {
@@ -122,10 +126,13 @@ type dnsAliasesYaml struct {
 // versions entry is the active warpctl configuration; older entries are
 // intentionally ignored because they retain historical interface identities.
 type servicesYaml struct {
-	Domain        string                `yaml:"domain"`
-	Domains       map[string]string     `yaml:"domains"`
-	ExposeAliases []string              `yaml:"expose_aliases"`
-	Versions      []servicesVersionYaml `yaml:"versions"`
+	Domain        string            `yaml:"domain"`
+	Domains       map[string]string `yaml:"domains"`
+	ExposeAliases []string          `yaml:"expose_aliases"`
+	// the lb's hidden route prefixes, whose first is the path of Route53's lb
+	// status check (warpctl dnsStatusPath). Private: never rendered.
+	LbHiddenPrefixes []string              `yaml:"lb_hidden_prefixes"`
+	Versions         []servicesVersionYaml `yaml:"versions"`
 }
 
 type servicesVersionYaml struct {
@@ -295,6 +302,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 	settings := SignalSettings{
 		Routers:                   cloneRouterSettings(y.Routers),
 		PublicUdp:                 clonePublicUdpSettings(y.PublicUdp),
+		LbAltStatus:               lbAltStatusSettingsFromNode(y.LbAltStatus, services.LbHiddenPrefixes),
 		ObserverOverlay:           cloneObserverOverlaySettings(y.ObserverOverlay),
 		Environment:               env,
 		PublicDomain:              strings.TrimSpace(services.Domain),

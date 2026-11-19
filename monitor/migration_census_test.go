@@ -118,8 +118,11 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 	// The exact predecessor differs in SQL only by the additive suffix. This
 	// comparison is offline and does not claim a production OOM observation.
 	priorContracts := []snMainnetMigrationContract{}
+	priorHead := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	for _, contract := range migrationCurrentSuffixContracts {
-		if contract.artifact.requiredVersion != server.CompetitionSilleStorageRecoveryMigrationVersion() {
+		if contract.artifact.requiredVersion == priorHead {
+			priorContracts = append(priorContracts, competitionSilleStorageRecoveryMigrationContract)
+		} else if contract.artifact.requiredVersion < server.CompetitionEpochThreeSourceRecoveryMigrationVersion() {
 			priorContracts = append(priorContracts, contract)
 		}
 	}
@@ -201,7 +204,7 @@ func TestMigrationCensusOwnerBoundsRefuseWithoutPartialPlan(t *testing.T) {
 func TestMigrationCensusFramesReassembleOnlyCompleteObservation(t *testing.T) {
 	plan, query := migrationCensusTestPlan(t)
 	observation := &migrationCensusObservation{settings: plan.settings}
-	rows, err := runMigrationCensus(t.Context(), query, observation, func(string) (string, error) {
+	rows, err := runMigrationCensus(t.Context(), query, observation, func(*migrationCensusPlan, string) (string, error) {
 		return migrationCensusTestCsv(migrationCensusTestFrames(plan)), nil
 	})
 	if err != nil || !reflect.DeepEqual(rows, []pgRow{{"1", "t", "private,quoted;cell"}}) || !observation.catalogComplete ||
@@ -249,7 +252,7 @@ func TestMigrationCensusFramesRejectNullMalformedOrderAndTruncation(t *testing.T
 		func(f []string) []string { return append(f, f[6]) },
 	} {
 		observation := &migrationCensusObservation{settings: plan.settings, catalogComplete: true, catalogRows: []pgRow{{"stale"}}}
-		rows, err := runMigrationCensus(t.Context(), query, observation, func(string) (string, error) {
+		rows, err := runMigrationCensus(t.Context(), query, observation, func(*migrationCensusPlan, string) (string, error) {
 			return migrationCensusTestCsv(mutate(migrationCensusTestFrames(plan))), nil
 		})
 		if err == nil || rows != nil || observation.catalogComplete || observation.catalogRows != nil {
@@ -271,7 +274,7 @@ func TestMigrationCensusCanceledOrFailedTransportNeverPublishes(t *testing.T) {
 	for _, cancelOwner := range []bool{false, true} {
 		ctx, cancel := context.WithCancel(parent)
 		observation := &migrationCensusObservation{settings: plan.settings, catalogComplete: true}
-		rows, err := runMigrationCensus(ctx, query, observation, func(string) (string, error) {
+		rows, err := runMigrationCensus(ctx, query, observation, func(*migrationCensusPlan, string) (string, error) {
 			if cancelOwner {
 				cancel()
 				return migrationCensusTestCsv(migrationCensusTestFrames(plan)), nil

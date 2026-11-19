@@ -21,7 +21,7 @@ func fixedReconcileReceiptClock(now time.Time) func() time.Time {
 
 func syntheticReceiptTailer(now *time.Time, service string) *logTailer {
 	tailer := newLogTailer(service, &probeEnv{now: func() time.Time { return *now }})
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 	return tailer
 }
 
@@ -136,26 +136,26 @@ func TestReconcileReceiptFailureCancellationAndIncompleteQueryResetPair(t *testi
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			saturated := strings.Repeat("[private-block]["+now.Add(-3*time.Minute).Format(time.RFC3339)+"]ordinary private-token\n", logReconcileLimit)
-			tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+			tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 				return "", errors.New("private-error 192.0.2.91 aaaaaaaa-aaaa")
 			}
 			switch failure {
 			case "pre-canceled":
 				cancel()
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 					t.Fatal("pre-canceled reconciliation invoked a query")
 					return "", nil
 				}
 			case "mid-query-canceled":
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 					cancel()
 					return "", nil
 				}
 			case "saturated-boundary":
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return saturated, nil }
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return saturated, nil }
 			case "incomplete-block", "canceled-block":
 				tailer.blocks = []string{"private-block-one", "private-block-two"}
-				tailer.reconcile = func(_ context.Context, _ time.Time, blocks []string) (string, error) {
+				tailer.reconcile = func(_ context.Context, _ time.Time, _ time.Time, blocks []string) (string, error) {
 					if len(blocks) == 0 {
 						return saturated, nil
 					}
@@ -178,7 +178,7 @@ func TestReconcileReceiptFailureCancellationAndIncompleteQueryResetPair(t *testi
 			if receipt.Fresh != 0 || receipt.ConsecutiveTwo != 0 || receipt.LatestCompletedAt.Oldest != nil {
 				t.Fatal("failed, incomplete, or canceled query retained a consecutive-success claim")
 			}
-			tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+			tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 			for attempt := 1; attempt <= 2; attempt++ {
 				now = now.Add(logReconcileInterval)
 				tailer.reconcileOnce(context.Background())
@@ -216,7 +216,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 					tailer.blocks = []string{"private-block-one", "private-block-two"}
 				}
 				calls := 0
-				tailer.reconcile = func(_ context.Context, pageStart time.Time, blocks []string) (string, error) {
+				tailer.reconcile = func(_ context.Context, pageStart time.Time, _ time.Time, blocks []string) (string, error) {
 					calls++
 					switch phase {
 					case "aggregate":
@@ -246,7 +246,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 				if calls != wantCalls {
 					t.Fatalf("query calls=%d, want bounded phase path %d", calls, wantCalls)
 				}
-				_, _, _, lastError := tailer.reconcileSnapshot()
+				_, _, _, _, lastError := tailer.reconcileSnapshot()
 				if lastError != errLogReconcileIncomplete.Error() {
 					t.Fatal("producer loss was accepted or its diagnostic retained raw page/selector evidence")
 				}
@@ -266,7 +266,7 @@ func TestReconcileReceiptProducerDeclaredTimestampLossResetsEveryPage(t *testing
 				if receipt.Fresh != 0 || receipt.ConsecutiveTwo != 0 || receipt.LatestCompletedAt.Oldest != nil {
 					t.Fatal("producer-declared incomplete page retained completed-window proof")
 				}
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 				for attempt := 1; attempt <= 2; attempt++ {
 					now = now.Add(logReconcileInterval)
 					tailer.reconcileOnce(context.Background())
@@ -295,7 +295,7 @@ func TestReconcileReceiptSuccessfulRetryAndFramedWarningAreNotProducerLoss(t *te
 	} {
 		now := time.Date(2026, 9, 15, 23, 40, 0, 0, time.UTC)
 		tailer := syntheticReceiptTailer(&now, "private-service")
-		tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return output, nil }
+		tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return output, nil }
 		probe := &logTailProbe{tailers: []*logTailer{tailer}}
 		tailer.reconcileOnce(context.Background())
 		now = now.Add(logReconcileInterval)
@@ -319,7 +319,7 @@ func TestReconcileReceiptRejectsRepeatedNonadvancingAndStaleEvidence(t *testing.
 				now = now.Add(-time.Second)
 			case "nonadvancing-completion":
 				now = now.Add(logReconcileInterval)
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 					now = initial
 					return "", nil
 				}
@@ -401,7 +401,7 @@ func TestRunLoopArmsReconciliationReceiptsOnlyOnDiagnostics(t *testing.T) {
 		t.Fatal("standing collector preparation failed")
 	}
 	probe, ok := signals[0].(*signalAdapter).probe.(*logTailProbe)
-	if !ok || probe.reconcileDiagnostics != os.Stderr {
+	if !ok || probe.reconcileDiagnostics != os.Stderr || probe.activityDiagnostics != os.Stderr {
 		t.Fatal("production standing collector omitted its retained diagnostic receipt sink")
 	}
 	if probe.reconcileReceipt(settings.Now).ConsecutiveTwo != 0 {
@@ -579,8 +579,12 @@ func TestReconcileReceiptScopeClockBoundaries(t *testing.T) {
 		{"one", func(tailer *logTailer) { tailer.reconcileSuccesses[0] = logReconcileSuccess{} }, "fresh-one-window", true, false},
 		{"edge-fresh", func(tailer *logTailer) {
 			tailer.reconcileSuccesses[1].completed = now.Add(-2*logReconcileInterval + time.Nanosecond)
+			tailer.reconcileSuccesses[1].start = tailer.reconcileSuccesses[1].completed.Add(-logReconcileLookback)
 		}, "fresh-one-window", true, false},
-		{"edge-stale", func(tailer *logTailer) { tailer.reconcileSuccesses[1].completed = now.Add(-2 * logReconcileInterval) }, "stale-window", false, false},
+		{"edge-stale", func(tailer *logTailer) {
+			tailer.reconcileSuccesses[1].completed = now.Add(-2 * logReconcileInterval)
+			tailer.reconcileSuccesses[1].start = tailer.reconcileSuccesses[1].completed.Add(-logReconcileLookback)
+		}, "stale-window", false, false},
 		{"future", func(tailer *logTailer) { tailer.reconcileSuccesses[1].completed = now.Add(time.Second) }, "invalid-time", false, false},
 		{"reversed", func(tailer *logTailer) { tailer.reconcileSuccesses[1].completed = tailer.reconcileSuccesses[1].start }, "invalid-time", false, false},
 		{"future-started", func(tailer *logTailer) { tailer.startedAt = now.Add(time.Second) }, "invalid-time", true, true},
@@ -653,7 +657,7 @@ func TestReconcileReceiptScopeFailureCancellationAndIncompleteRemainUnattributed
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			calls := 0
-			tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+			tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 				calls++
 				if kind == "mid-canceled" {
 					cancel()
@@ -705,7 +709,7 @@ func TestReconcileReceiptScopeSingleWriteAndEncodingFailureAreNonmutating(t *tes
 	now := time.Date(2026, 10, 17, 23, 57, 43, 0, time.UTC)
 	tailer := syntheticScopePair(now, "api")
 	calls := 0
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { calls++; return "", nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { calls++; return "", nil }
 	writer := &reconcileScopeWriteCounter{}
 	probe := &logTailProbe{tailers: []*logTailer{tailer}, reconcileDiagnostics: writer}
 	before := tailer.reconcileSuccesses

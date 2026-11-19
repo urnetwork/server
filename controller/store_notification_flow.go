@@ -9,7 +9,7 @@ package controller
 // purchase whose first notification came in that window and was cancelled
 // before it was processed was never acknowledged, and Google refunded it
 // (support inbox 8010, 8046, 8086, 8098). The App Store had the same blind
-// spot. Each notification now ends in one outcome:
+// spot. The notification handlers record these outcomes:
 //
 //   - accepted: verified and processed;
 //   - refused_unavailable: our verification config is missing (the route
@@ -22,10 +22,11 @@ package controller
 //     disagree);
 //   - refused_signature: an App Store JWS whose signature or chain does not
 //     verify against the pinned Apple roots;
-//   - refused_claims: a verified App Store notification for another app,
-//     environment or version;
+//   - refused_claims: a signed App Store notification failed a decoded claim,
+//     required field, or nested identity check;
 //   - refused_malformed: a body that is not a notification;
-//   - error: verified, then processing failed (the store retries it).
+//   - error: App Store processing returned an error after verification;
+//     Play's token lookup failed or processing of a verified push failed.
 //
 // Each outcome is counted (urnetwork_store_notifications_total), each
 // refusal or error but refused_unavailable is logged as one fixed line for the

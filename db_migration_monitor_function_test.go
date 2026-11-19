@@ -5,6 +5,7 @@ package server_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -39,6 +40,25 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			}
 		}
 
+		postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
+		distributed := server.CompetitionDistributedReevaluationMigrationVersion()
+		// Each successor inherits both the baseline and append-only guards.
+		guardOwnerVersions := []int{
+			server.CompetitionDistributedEvaluationMigrationVersion(),
+			server.CompetitionIntakeFirstMigrationVersion(),
+			server.CompetitionReviewHandoffMigrationVersion(),
+			server.CompetitionOfficialReviewMigrationVersion(),
+			server.CompetitionExecutorControlAmendmentMigrationVersion(),
+			server.CompetitionExecutorQualificationRecoveryMigrationVersion(),
+			server.CompetitionExecutorAdmissionExceptionMigrationVersion(),
+			server.CompetitionExecutorAdmissionClaimMigrationVersion(),
+			distributed,
+			server.CompetitionOperatorRequestedPatchRetryMigrationVersion(),
+			server.CompetitionSecondRecoveryMigrationVersion(),
+			server.CompetitionOfficialReviewEpochTwoMigrationVersion(),
+			server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(),
+			server.CompetitionSilleStorageRecoveryMigrationVersion(),
+		}
 		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, 720, 721, 841, 842, 843, 844, 845, 846, 847, 921, 922, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -50,56 +70,31 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 
 			baselineMissing := []int{676}
 			appendOnlyMissing := []int{676}
-			// Staging approvals, sealed evaluation custody, holds/incidents,
-			// source abandonment, job reevaluation, the finalization hold, the
-			// post-close recovery and the competition custody that the
-			// executor, intake-first, review handoff, official review, executor
-			// control amendment, qualification recovery and admission exception
-			// migrations carry in turn share the baseline's append-only guard.
-			// Its rename must report every published dependent artifact still
-			// active at the head, the successor that carries a retired one's
-			// custody in its place, while historical heads must not report
-			// dependencies introduced later.
-			type dependency struct{ version, retiredAt int }
-			active := func(dependencies []dependency) []int {
-				versions := []int{}
-				for _, dependency := range dependencies {
-					if dependency.version <= version && (dependency.retiredAt == 0 || version < dependency.retiredAt) {
-						versions = append(versions, dependency.version)
-					}
+			// A guard fault belongs to each published artifact that still
+			// checks the function at this schema version.
+			for _, dependency := range []struct{ version, retiredAt int }{
+				{version: 721}, {version: 842}, {version: 843}, {version: 845},
+				{version: server.CompetitionJobReevaluationMigrationVersion(), retiredAt: postClose},
+				{version: server.CompetitionFinalizationHoldMigrationVersion()},
+				{version: postClose, retiredAt: distributed},
+			} {
+				if dependency.version <= version && (dependency.retiredAt == 0 || version < dependency.retiredAt) {
+					appendOnlyMissing = append(appendOnlyMissing, dependency.version)
 				}
-				return versions
 			}
-			executor := server.CompetitionDistributedEvaluationMigrationVersion()
-			intake := server.CompetitionIntakeFirstMigrationVersion()
-			handoff := server.CompetitionReviewHandoffMigrationVersion()
-			official := server.CompetitionOfficialReviewMigrationVersion()
-			control := server.CompetitionExecutorControlAmendmentMigrationVersion()
-			recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
-			exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
-			claim := server.CompetitionExecutorAdmissionClaimMigrationVersion()
-			distributed := server.CompetitionDistributedReevaluationMigrationVersion()
-			patchRetry := server.CompetitionOperatorRequestedPatchRetryMigrationVersion()
-			postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
-			appendOnlyMissing = append(appendOnlyMissing, active([]dependency{
-				{721, 0}, {842, 0}, {843, 0}, {845, 0},
-				{server.CompetitionJobReevaluationMigrationVersion(), postClose},
-				{server.CompetitionFinalizationHoldMigrationVersion(), 0},
-				{executor, intake}, {postClose, distributed}, {intake, handoff}, {handoff, official},
-				{official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
-			})...)
 			var reviewMissing []int
 			if version == 677 {
 				reviewMissing = []int{677}
 			} else if version >= 678 {
-				// the executor, intake-first, review handoff, official review,
-				// executor control amendment, qualification recovery and admission
-				// exception custody carry the baseline guard in turn
 				baselineMissing = append(baselineMissing, 678)
-				baselineMissing = append(baselineMissing, active([]dependency{
-					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, recovery}, {recovery, exception}, {exception, claim}, {claim, distributed}, {distributed, patchRetry}, {patchRetry, 0},
-				})...)
 				reviewMissing = []int{678}
+			}
+			for _, ownerVersion := range slices.Backward(guardOwnerVersions) {
+				if ownerVersion <= version {
+					baselineMissing = append(baselineMissing, ownerVersion)
+					appendOnlyMissing = append(appendOnlyMissing, ownerVersion)
+					break
+				}
 			}
 			for _, fault := range []struct {
 				name    string

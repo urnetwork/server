@@ -100,10 +100,28 @@ func TestWinnerClosingOfficialApprovalRequiresCompleteAmendmentForAdoption(t *te
 func TestWinnerClosingOfficialCheckpointAdoptionCannotCrossEpoch(t *testing.T) {
 	fixture := newOfficialWinnerClosingFixture(t)
 	fixture.snapshot.Round.Epoch = 2
+	fixture.snapshot.Seal.Epoch = 2
 	fixture.step(t, "winner_review_pending", false)
 	fixture.step(t, "winner_review_blocked", true)
 	if fixture.snapshot.Transition.WinnerReview != nil {
 		t.Fatal("epoch-one amendment acquired a later-epoch checkpoint")
+	}
+}
+
+func TestWinnerClosingOfficialApprovalRejectsMismatchedSealEpoch(t *testing.T) {
+	fixture := newOfficialWinnerClosingFixture(t)
+	fixture.step(t, "winner_review_pending", false)
+	fixture.snapshot.Seal.Epoch = 2
+	fixture.step(t, "winner_review_blocked", true)
+	if fixture.snapshot.Transition.WinnerReview != nil || fixture.reviews != 0 || fixture.builds != 0 {
+		t.Fatal("mismatched seal allowed review or source progression")
+	}
+}
+
+func TestWinnerReviewWithinCheckpointRejectsMissingSeal(t *testing.T) {
+	fixture := newOfficialWinnerClosingFixture(t)
+	if winnerReviewWithinCheckpoint(fixture.snapshot.WinnerReview, nil, nil) {
+		t.Fatal("missing seal was accepted")
 	}
 }
 

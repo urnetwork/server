@@ -374,7 +374,8 @@ func (self *hostScopeRunner) reduceFindings(settings SignalSettings, findings []
 	for _, observed := range findings {
 		excludedTarget, allowedTarget := false, false
 		for _, configured := range self.cfg.scopeHosts() {
-			if hostScopeTargetMatches(observed.target, configured.name) {
+			observedHostFault := !observed.healthy && observed.scopeEvidenceHostName != "" && observed.scopeEvidenceHostName == configured.name
+			if hostScopeTargetMatches(observed.target, configured.name) || observedHostFault {
 				if self.excludedHostNames[configured.name] {
 					excludedTarget = true
 				} else {

@@ -151,6 +151,14 @@ type Server struct {
 	// If zero or negative, there is no timeout.
 	IdleTimeout time.Duration
 
+	// urnetwork: the time a request stream may take to deliver its HEADERS
+	// frame, from the stream's start, as http.Server.ReadHeaderTimeout bounds
+	// an HTTP/1 request's headers. A stream past it is reset with
+	// H3_REQUEST_INCOMPLETE, and the handler never runs. The deadline is
+	// cleared before the handler, which bounds its own reads of the body. If
+	// zero or negative, there is no timeout (URNETWORK.md).
+	ReadHeaderTimeout time.Duration
+
 	// ConnContext optionally specifies a function that modifies the context used for a new connection c.
 	// The provided ctx has a ServerContextKey value.
 	ConnContext func(ctx context.Context, c *quic.Conn) context.Context
@@ -449,6 +457,7 @@ func (s *Server) newRawServerConn(conn *quic.Conn) (*RawServerConn, *quic.SendSt
 		connCtx,
 		s.Handler,
 		s.maxHeaderBytes(),
+		s.ReadHeaderTimeout,
 	)
 
 	// open the control stream and send a SETTINGS frame, it's also used to send a GOAWAY frame later
@@ -509,6 +518,18 @@ func (s *Server) handleConn(conn *quic.Conn) error {
 			if s.closeCtx.Err() != nil {
 				hconn.CloseWithError(quic.ApplicationErrorCode(ErrCodeNoError), "")
 				handleErr = http.ErrServerClosed
+				break
+			}
+			// urnetwork: the GOAWAY was sent, so with closeCtx live the accept
+			// failed because the connection is closing: quic-go closes its
+			// streams before it cancels its context. Going back to the graceful
+			// branch would start another GOAWAY writer on every pass until the
+			// context is canceled (URNETWORK.md).
+			if inGracefulShutdown {
+				var appErr *quic.ApplicationError
+				if !errors.As(err, &appErr) || appErr.ErrorCode != quic.ApplicationErrorCode(ErrCodeNoError) {
+					handleErr = fmt.Errorf("accepting stream failed: %w", err)
+				}
 				break
 			}
 			inGracefulShutdown = s.graceCtx.Err() != nil

@@ -106,7 +106,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	}
 	proposal := qualification.Build.Proposal
 	if profile == nil || profile.Schema != 1 || profile.Kind != "prospective-source-hardware-fingerprint/v1" || profile.RuntimeQualified ||
-		profile.ImageId != qualification.Artifacts.ImageId || profile.BaseImageId != proposal.EvaluatedImageDigest || profile.ReviewId != sourceBuildAuthorizationIdentity(qualification.Build) ||
+		profile.ImageId != qualification.Artifacts.ImageId || profile.BaseImageId != sourceBuildBaseImage(qualification.Build) || profile.ReviewId != sourceBuildAuthorizationIdentity(qualification.Build) ||
 		profile.SourceLockSha256 != proposal.SourceLockSha256 || !validSha256(profile.QualificationSha256) || !validSha256(profileDigest) {
 		return nil, errors.New("source qualification host evidence belongs to another image or claims premature runtime readiness")
 	}
@@ -214,6 +214,9 @@ func runSourceBuildQualifier(opts docopt.Opts) {
 	}
 	ctx, stop := signalContext()
 	defer stop()
+	if optBool(opts, "--retained-test-evidence-only") {
+		ctx = context.WithValue(ctx, retainedSourceQualificationKey{}, true)
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()

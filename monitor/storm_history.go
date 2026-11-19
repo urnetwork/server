@@ -137,6 +137,11 @@ type stormHistory struct {
 // behind now, and keys each tagged series by its part's shape.
 func readStormHistory(ctx context.Context, env *probeEnv, query string, shapes map[string]stormShape, points int, settings StormReadSettings) (*stormHistory, error) {
 	at := fleetEvaluationTime(env.now(), settings.EvaluationLag)
+	return readStormHistoryAt(ctx, env, query, shapes, points, settings, at)
+}
+
+// Reads a fixed range ending at an explicit clock, including historical UTC windows.
+func readStormHistoryAt(ctx context.Context, env *probeEnv, query string, shapes map[string]stormShape, points int, settings StormReadSettings, at time.Time) (*stormHistory, error) {
 	start := at.Add(-time.Duration(points-1) * settings.Step)
 	raw, _, err := readFleetMimirRange(ctx, env, query, start, at, settings.Step, settings.FleetReadSettings)
 	if err != nil {

@@ -69,17 +69,23 @@ func stExtenderMigrationPrimaryKey(t testing.TB, ctx context.Context, table stri
 	return key
 }
 
-// Every row of the pool's state, in key order, as text.
+// Read the columns present at the extender pool migration, in key order.
 func stExtenderMigrationState(t testing.TB, ctx context.Context) []string {
 	t.Helper()
 	state := []string{}
 	MaintenanceDb(ctx, func(conn PgConn) {
 		for _, sql := range []string{
-			`SELECT row(r.*)::text FROM st_ledger_v2_epoch_rows AS r ORDER BY deployment_key, no_id, epoch`,
-			`SELECT row(c.*)::text FROM st_ledger_v2_extender_census AS c ORDER BY deployment_key, no_id, epoch`,
-			`SELECT row(a.*)::text FROM st_amendments AS a ORDER BY deployment_key`,
-			`SELECT row(s.*)::text FROM st_ledger_v2_extender_shadow AS s ORDER BY deployment_key, no_id, epoch`,
-			`SELECT row(p.*)::text FROM st_platform_endpoint AS p ORDER BY client_id, register_time`,
+			`SELECT row(deployment_key, no_id, epoch, provider_chunks, declared_by, rebuild_requested_by, create_time,
+				extender_bytes, extender_census_chunks, extender_intra_platform_bytes, extender_intra_network_bytes,
+				extender_contracts, extender_payers)::text
+				FROM st_ledger_v2_epoch_rows ORDER BY deployment_key, no_id, epoch`,
+			`SELECT row(deployment_key, no_id, epoch, census, census_rows, capture_time)::text
+				FROM st_ledger_v2_extender_census ORDER BY deployment_key, no_id, epoch`,
+			`SELECT row(deployment_key, raw, update_time)::text FROM st_amendments ORDER BY deployment_key`,
+			`SELECT row(deployment_key, no_id, epoch, report_ref, report, create_time)::text
+				FROM st_ledger_v2_extender_shadow ORDER BY deployment_key, no_id, epoch`,
+			`SELECT row(client_id, network_id, kind, register_time, registered_by, revoke_time, revoked_by)::text
+				FROM st_platform_endpoint ORDER BY client_id, register_time`,
 		} {
 			result, err := conn.Query(ctx, sql)
 			WithPgResult(result, err, func() {

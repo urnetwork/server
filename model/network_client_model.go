@@ -652,18 +652,33 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// snapshot, but neither a separate pool borrower nor a TTL authority.
 		// Read on the transaction's owned connection before BEGIN, and keep
 		// cache publication outside the database connection's lifetime.
-		// the Embed allowance the token's client_limit_upgrade claim reads,
-		// through the process cache, before any connection is checked out
-		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		//
+		// The token's client_limit_upgrade claim reads the Embed allowance
+		// through the process cache. Other mints read a miss before any
+		// connection is checked out (networkClientLimitOverride). A hosted mint
+		// reads a miss on its owned connection with the entitlement, so it still
+		// borrows one pooled connection per attempt, and caches the read after
+		// a successful mint, as it does the entitlement.
 		var isPro bool
 		var mintEntitlement proEntitlement
+		var clientLimitOverride bool
+		// the hosted mint's own read of the Embed allowance; nil on a cache hit
+		var mintClientLimit *networkClientLimitLocalEntry
 		if validateParent {
+			cachedClientLimit, clientLimitCached := networkClientLimitLocal.Get(clientSession.ByJwt.NetworkId, server.NowUtc())
+			clientLimitOverride = cachedClientLimit.override
 			registrationTxOptions = append(registrationTxOptions, server.TxReadBeforeBegin(func(conn server.PgCanQuery) {
 				mintEntitlement = loadProNetworkWithConn(clientSession.Ctx, conn, clientSession.ByJwt.NetworkId)
 				observeProNetworkLoaded(clientSession.ByJwt.NetworkId)
 				isPro = mintEntitlement.pro
+				if !clientLimitCached {
+					clientLimit := readNetworkClientLimitLocalEntry(clientSession.Ctx, conn, clientSession.ByJwt.NetworkId)
+					mintClientLimit = &clientLimit
+					clientLimitOverride = clientLimit.override
+				}
 			}))
 		} else {
+			_, clientLimitOverride = networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
 		// a proxy create over the network's rate is refused here, before any db
@@ -1084,6 +1099,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			server.HandleError(func() {
 				storeProNetwork(clientSession.Ctx, clientSession.ByJwt.NetworkId, mintEntitlement)
 			})
+			if mintClientLimit != nil {
+				networkClientLimitLocal.Put(clientSession.ByJwt.NetworkId, *mintClientLimit)
+			}
 		}
 
 		// only redis is written after the commit. The identity cache, the proxy

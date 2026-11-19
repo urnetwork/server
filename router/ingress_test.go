@@ -1,9 +1,9 @@
 package router
 
 // The ingress of a front with no lb in front of it (ingress.go): what a
-// client of such a front can send, a forged X-UR-Forwarded-For and the
-// standard forwarding headers, against what reaches the handler, and the
-// count of the headers it overwrote.
+// client of such a front can send, a forged X-UR-Forwarded-For, the standard
+// forwarding headers and an Early-Data claim, against what reaches the
+// handler, and the count of the headers it overwrote.
 
 import (
 	"net/http"
@@ -48,7 +48,7 @@ func serveThroughIngress(t *testing.T, remoteAddr string, headers map[string][]s
 	handler := NewIngressHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served += 1
 		observation.urForwardedFor = r.Header.Values(urForwardedForHeader)
-		for _, header := range []string{forwardedForHeader, forwardedSourcePortHeader, RequestBufferingHeader} {
+		for _, header := range []string{forwardedForHeader, forwardedSourcePortHeader, RequestBufferingHeader, earlyDataHeader} {
 			observation.others = append(observation.others, r.Header.Values(header)...)
 		}
 		if clientSession, err := session.NewClientSessionFromRequest(r); err == nil {
@@ -106,13 +106,25 @@ func TestIngressCountsEachForwardingHeaderTheClientSent(t *testing.T) {
 				forwardedForHeader:        {"203.0.113.8"},
 				forwardedSourcePortHeader: {"41001"},
 				RequestBufferingHeader:    {RequestBufferingOff},
+				earlyDataHeader:           {"1"},
 			},
 			want: map[string]float64{
 				"x_ur_forwarded_for":      1,
 				"x_forwarded_for":         1,
 				"x_forwarded_source_port": 1,
 				"x_ur_request_buffering":  1,
+				"early_data":              1,
 			},
+		},
+		{
+			name:    "a client's early data claim",
+			headers: map[string][]string{earlyDataHeader: {"1"}},
+			want:    map[string]float64{"early_data": 1},
+		},
+		{
+			name:    "a repeated early data claim",
+			headers: map[string][]string{earlyDataHeader: {"1", "1"}},
+			want:    map[string]float64{"early_data": 1},
 		},
 		{
 			name:    "the standard header alone",

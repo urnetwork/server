@@ -42,6 +42,7 @@ func NewSignals() []Signal {
 	return []Signal{
 		NewContractRateSignal(),
 		NewProviderConnectionsSignal(),
+		NewDeliveredTrafficFloorSignal(),
 		NewTaskCanariesSignal(),
 		NewNetEscrowSignal(),
 		NewPostgresStateSignal(),
@@ -98,6 +99,8 @@ func NewSignals() []Signal {
 		NewPgBouncerPoolStarvationSignal(),
 		NewContractStageLatencySignal(),
 		NewContractFailureShareSignal(),
+		NewConnectHandshakeRefusalsSignal(),
+		NewApiRouteErrorsSignal(),
 		NewWorkerMemorySignal(),
 		NewWorkerChurnSignal(),
 		NewWorkerCapSignal(),
@@ -165,6 +168,7 @@ func NewSignals() []Signal {
 		NewStuckLeasesSignal(),
 		NewTaskConvergenceSignal(),
 		NewProxyPathSignal(),
+		NewHostedProxySetupSignal(),
 		NewProxyMemorySignal(),
 		NewProxyPoolSignal(),
 		NewProxyTransportSignal(),
@@ -174,6 +178,7 @@ func NewSignals() []Signal {
 		NewIdentityChurnSignal(),
 		NewKeyPublicationSignal(),
 		NewPublicUdpSignal(),
+		NewLbAltStatusSignal(),
 		NewSubtensorSignal(),
 		NewSubtensorConvergenceSignal(),
 		NewPointsReadinessSignal(),
@@ -381,10 +386,14 @@ func (m *Monitor) Run(ctx context.Context) (Alerts, error) {
 	return alerts, errors.Join(errs...)
 }
 
-// Strip direct prepared pool metadata before routing; append only to the expected identity.
+// Keep probe-specific details on the existing generic visibility identity.
 func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
 	legacy, prepared := splitPoolRetentionPreparedError(signal, err)
+	legacy, archiveStage := splitBackupArchiveReadError(signal.ID(), legacy)
 	alert := legacyVisibilityAlert(settings, signal, legacy)
+	if archiveStage != "" && alert.Class == "cannot-observe" {
+		alert.Observed += archiveStage
+	}
 	if prepared != nil && alert.SignalNumber == "1.3b" && alert.SignalKey == "pool-retention" &&
 		alert.SignalID == "monitor/visibility" && alert.Class == "cannot-observe" &&
 		alert.Target == "pg/pool-retention" && alert.Severity == SeverityWarn &&

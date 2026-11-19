@@ -567,7 +567,9 @@ func (self *dbProxyFeatureUsePlans) plans(ctx context.Context, proxyIds []server
 			}
 		}
 	}()
-	if 0 < len(missingProxyIds) {
+	// The mark write already succeeded. Its remaining budget also bounds the
+	// optional mapping query; known mappings can still classify their marks.
+	if 0 < len(missingProxyIds) && ctx.Err() == nil {
 		loadedNetworkIds := getProxyNetworkIds(ctx, missingProxyIds)
 		func() {
 			self.stateLock.Lock()
@@ -592,7 +594,10 @@ func (self *dbProxyFeatureUsePlans) plans(ctx context.Context, proxyIds []server
 			return plan.pro, ok && now.Sub(plan.readTime) < self.settings.PlanCacheTtl
 		}()
 		if !ok {
-			pro = IsProNetwork(ctx, networkId)
+			pro, ok = lookupProNetwork(ctx, networkId, true)
+			if !ok {
+				continue
+			}
 			func() {
 				self.stateLock.Lock()
 				defer self.stateLock.Unlock()

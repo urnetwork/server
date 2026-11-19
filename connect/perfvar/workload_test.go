@@ -1726,7 +1726,7 @@ func measureUDPWorkloadWithStartHook(
 }
 
 // A short-lived certificate keeps inner QUIC hermetic and production-like.
-func newWorkloadTlsConfigs() (*tls.Config, *tls.Config, error) {
+func newWorkloadTlsConfigs(ipAddresses ...net.IP) (*tls.Config, *tls.Config, error) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
@@ -1739,6 +1739,7 @@ func newWorkloadTlsConfigs() (*tls.Config, *tls.Config, error) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     []string{"perfvar.invalid"},
+		IPAddresses:  ipAddresses,
 	}
 	certificateBytes, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
 	if err != nil {

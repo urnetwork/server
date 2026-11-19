@@ -22,6 +22,13 @@ const subtensorPromQLEngineFixture = "testdata/subtensor_promql_engine_test.go.t
 // gate for this signal: point MONITOR_PROMQL_ENGINE_SOURCE at pinned Mimir
 // source containing its vendored Prometheus engine, then run this test.
 func TestSubtensorConvergencePromQLEngine(t *testing.T) {
+	runCatalogPromqlScript(t, func() string { return subtensorConvergencePromQLScript(t) })
+}
+
+// Run a monitor's raw-series script in the pinned vendored engine. The
+// external fixture simply passes the supplied script to promqltest.RunTest.
+func runCatalogPromqlScript(t *testing.T, script func() string) {
+	t.Helper()
 	engineSource := os.Getenv("MONITOR_PROMQL_ENGINE_SOURCE")
 	if engineSource == "" {
 		t.Skip("set MONITOR_PROMQL_ENGINE_SOURCE to run the required pinned-engine regression")
@@ -35,9 +42,8 @@ func TestSubtensorConvergencePromQLEngine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := subtensorConvergencePromQLScript(t)
-	scriptPath := filepath.Join(testDirectory, "subtensor.test")
-	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
+	scriptPath := filepath.Join(testDirectory, "monitor.test")
+	if err := os.WriteFile(scriptPath, []byte(script()), 0600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

@@ -108,7 +108,7 @@ type logClass struct {
 	canonical *logCanonical
 }
 
-type logReconcileQuery func(ctx context.Context, start time.Time, blocks []string) (string, error)
+type logReconcileQuery func(ctx context.Context, start, end time.Time, blocks []string) (string, error)
 
 var framerRejectRe = regexp.MustCompile(`\[framer\]\[reject\](?:read|write(?: batch)?) messageLen=[0-9]+ > MaxMessageLen=[0-9]+(?: \(maxFrameLen=[0-9]+\))?`)
 
@@ -400,11 +400,11 @@ var logClasses = []logClass{
 		},
 		groupBy:       storeNotificationLogGroup(storeNotificationRefusedRe),
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.22c",
-		meaning:   "the api refused or failed a store notification that verified as the store's: a Google Play push of the configured publisher for another audience (refused_audience), an App Store notification for another app, environment or version (refused_claims), or a verified notification it could not process (error)",
-		mechanism: "Our configuration and the store's disagree, or our processing fails: google.yml webhook.audience no longer matches the Pub/Sub push subscription's audience, apple.yml app_store_notifications no longer matches the app, or the database or the store's API fails behind a verified notification. The store retries a refused or failed notification for a while; a purchase whose first notification is lost this way can go uncredited, and Google refunds a Play purchase left unacknowledged for three days.",
-		context:   "One line is one refused or failed delivery, not one purchase: the store retries the same notification. urnetwork_store_notifications_total{store,outcome} counts them on the api dashboard; store-notification-silent (§2.22c) pages when nothing is accepted for a day while purchases continue.",
-		action:    "Compare the store's configuration with ours through the vault owner (google.yml webhook.audience and publisher_email against the Play Pub/Sub push subscription; apple.yml app_store_notifications against App Store Connect), or fix the processing error the api log names next to the line. Never disable verification to clear the page; reconcile the purchases of the window once notifications are accepted again.",
-		verify:    "No store-notification-refused line for two log-errors cadences after ingestion delay, the accepted outcome count rising for the store, and purchases of the window acknowledged and credited once.",
+		meaning:   "The diagnostic contains the displayed store and outcome. The producer stage for this combination is unknown.",
+		mechanism: "The producer records the store and outcome. Different inputs and processing results can share them. The emitting build and source-local reason determine the applicable branch.",
+		context:   "The rate counts matching diagnostic lines. Unique notifications, delivered HTTP responses, redeliveries and entitlement outcomes require independent receipts. The api counter groups by store and outcome. The separate store-notification-silent signal measures the age of acceptance while purchases continue.",
+		action:    "Match the emitting build and original attempt at the source. Reduce its reason to a fixed category. Check configuration with its owner if that category indicates a mismatch. Verify the appropriate entitlement decision against the matched delivery or reconciliation record.",
+		verify:    "Match the final disposition to the original attempt and compare a successful same-type delivery on the same release. Check two complete log-errors cadences after ingestion delay and the store's accepted outcomes.",
 	},
 	{name: "store-notification-unverified", re: storeNotificationUnverifiedRe,
 		sample: func(line string) string {
@@ -567,20 +567,10 @@ var logClasses = []logClass{
 		sample: func(string) string {
 			return "outgoing TCP dial: i/o timeout (correlation metadata and other fields omitted)"
 		},
-		frame: func(line string) string {
-			// Combined errors cannot identify a single exemplar destination.
-			if strings.Count(line, "dial tcp ") != 1 {
-				return ""
-			}
-			match := dialIoTimeoutRe.FindStringSubmatch(line)
-			if len(match) != 2 {
-				return ""
-			}
-			return match[1]
-		},
+		frame:         dialTimeoutExemplar,
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5, §4, and §5.2",
-		meaning:   "an otherwise-unclassified outgoing TCP connection attempt exceeded its deadline",
-		mechanism: "A dial timeout identifies an unfinished connection attempt, not the target service or cause. Remote listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives until independently distinguished.",
+		meaning:   "the selected stream contained otherwise-unclassified TCP dial-timeout diagnostics",
+		mechanism: "The source can report or relay a dial timeout. Native socket and application outcomes require the original attempt. Remote listener saturation, packet loss, routing, deadline ownership and local resource pressure remain alternatives until independently distinguished.",
 		context:   "Service-specific signatures take precedence. Do not infer a Redis event-loop wedge or a persistent target outage from this generic text alone. The stable service target names the emitter; the count aggregates all matching service/class lines. The frame names only the first exemplar's textual dial destination, not every counted line's destination; multiple dial candidates leave it unknown.",
 		action:    "Resolve the exact target and original source path, then compare bounded same-window process, listener, TCP, and resource evidence. Use §5.2 only for an identified Redis node with a corroborating local PING hang and accept-path evidence. Do not restart an inferred service before attribution and authorization.",
 		verify:    "The original source path reaches the intended target, its owning health signal remains healthy, and this class stays below threshold for 10 minutes through the relevant lifecycle. Later reachability alone does not establish the earlier cause.",
@@ -873,7 +863,7 @@ var logClasses = []logClass{
 		rateThreshold: 5, tier: tierPage, playbook: "SIGNALS.md §4",
 		meaning:   "a panic-shaped diagnostic, including recovered failures; a recognized structured stack supplies its innermost owning application function",
 		mechanism: "The service-wide bucket retains every matching diagnostic. Recognized owners additionally have bounded per-owner buckets at the same threshold; these counts overlap and must not be summed as incidents. A recovered post-commit error is not proof of a failed primary operation or process crash.",
-		context:   "Only normalized function ownership, an allowlisted Go error type, and a PostgreSQL SQLSTATE may enter the sample. Unknown, malformed, oversized, or excess-cardinality stacks remain in the aggregate; an absent owner is not a healthy result.",
+		context:   "The sample retains normalized ownership, an allowlisted error type and SQLSTATE. A validated stack can also identify a finite provider-egress error class, the direct Redis caller and its operation, or the Redis adapter called by TakeClientCloseRequests in this sample. Unknown, malformed, oversized and excess-cardinality stacks still count in the aggregate.",
 		action:    "Correlate the framed owner with its source recovery boundary and exact running artifact before assigning impact or deploying. An ownership-admission wrapper alone leaves the business caller and cause unknown; inspect one bounded original structured stack and its error discriminator. A changed owner after parser correction is not recovery. For SQLSTATE 25006 at server/model.StampTopLevelClientContractTime, follow the contained post-commit write discriminator in §4; do not infer global database failure.",
 		verify:    "Require the owning regression and exact artifact convergence, then ten minutes below the unchanged service-wide and owner thresholds under comparable traffic with fresh log coverage. Verify the primary operation and any derived write independently; aggregate and owner alerts are overlapping views, not separate incident counts.",
 	},
@@ -1242,10 +1232,13 @@ var panicLogSqlstateRe = regexp.MustCompile(`\(SQLSTATE ([0-9A-Z]{5})\)$`)
 
 // A fixed redacted projection; no raw error, source path or stack is retained.
 type panicLogObservation struct {
-	owner      string
-	errorType  string
-	sqlstate   string
-	errorClass string
+	owner          string
+	errorType      string
+	sqlstate       string
+	errorClass     string
+	redisCaller    string
+	redisOperation string
+	redisAdapter   string
 }
 
 // Accepts the exact bounded ErrorJson schema, including duplicate-key rejection.
@@ -1314,17 +1307,22 @@ func parsePanicLogObservation(line string) panicLogObservation {
 	case "*pgconn.PgError", "*errors.errorString", "*fmt.wrapError", "*fmt.wrapErrors", "runtime.errorString", "*runtime.TypeAssertionError", "string":
 		observation.errorType = errorType
 	}
+	// Match the standard library sentinel as rendered by ErrorJson. Wrapped
+	// errors and ordinary error strings can contain the same words.
+	if errorText == "context.deadlineExceededError=context deadline exceeded" {
+		observation.errorType = errorType
+	}
 	if errorType == "*pgconn.PgError" {
 		if match := panicLogSqlstateRe.FindStringSubmatch(strings.TrimSpace(errorText)); len(match) == 2 {
 			observation.sqlstate = match[1]
 		}
 	}
 	for index := 0; index < len(stack); index++ {
-		line := strings.TrimSpace(stack[index])
-		if !strings.HasPrefix(line, "github.com/urnetwork/") {
+		frame := strings.TrimSpace(stack[index])
+		if !strings.HasPrefix(frame, "github.com/urnetwork/") {
 			continue
 		}
-		match := panicLogFunctionRe.FindStringSubmatch(line)
+		match := panicLogFunctionRe.FindStringSubmatch(frame)
 		if len(match) != 3 || index+1 >= len(stack) || !panicLogSourceRe.MatchString(strings.TrimSpace(stack[index+1])) {
 			return observation
 		}
@@ -1358,10 +1356,86 @@ func parsePanicLogObservation(line string) panicLogObservation {
 		}
 		if len(owner) <= panicLogOwnerMaxBytes {
 			observation.owner = owner
+			if match[1] == "server/model" || match[1] == "server/v2026/model" {
+				switch match[2] {
+				case "proxyAdmissionRedis":
+					observation.redisCaller, observation.redisOperation = panicProxyAdmissionOperation(match[1], stack[index:])
+				case "TakeClientCloseRequests", "TakeClientCloseRequests.func1":
+					observation.redisAdapter = panicCloseRequestRedisAdapter(line, match[1], stack, index)
+				}
+			}
 		}
 		return observation
 	}
 	return observation
+}
+
+// The direct caller identifies the Redis access. A plan lookup or flush also
+// requires its own contiguous application frames from this same stack.
+func panicProxyAdmissionOperation(module string, frames []string) (string, string) {
+	if len(frames) < 4 || !panicSourceHasFile(frames[1], "proxy_admission_model.go") {
+		return "", ""
+	}
+	caller := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[2]))
+	if len(caller) != 3 || caller[1] != module {
+		return "", ""
+	}
+	switch caller[2] {
+	case "GetProxyDeviceConfig":
+		if panicSourceHasFile(frames[3], "network_client_proxy_model.go") {
+			return caller[2], "device_config_read"
+		}
+	case "getProNetworkCached", "setProNetworkCached":
+		if panicSourceHasFile(frames[3], "pro_model.go") {
+			return caller[2], panicProxyPlanOperation(module, caller[2], frames[4:])
+		}
+	}
+	return "", ""
+}
+
+// Each consumed pair must match both a fixed function and its source file.
+func panicProxyFrameIs(frames []string, module, function, file string) bool {
+	if len(frames) < 2 {
+		return false
+	}
+	match := panicLogFunctionRe.FindStringSubmatch(strings.TrimSpace(frames[0]))
+	return len(match) == 3 && match[1] == module && match[2] == function && panicSourceHasFile(frames[1], file)
+}
+
+// An interrupted entitlement lookup can belong to several application paths.
+// Only the concrete planner identifies feature-use accounting. Its immediate
+// flush lineage identifies the phase reached after markAll returned success.
+func panicProxyPlanOperation(module, caller string, frames []string) string {
+	if caller == "setProNetworkCached" {
+		for _, function := range []string{"storeProNetwork", "refreshProNetworkInConn", "refreshProNetwork"} {
+			if !panicProxyFrameIs(frames, module, function, "pro_model.go") {
+				return ""
+			}
+			frames = frames[2:]
+		}
+	}
+	const file = "proxy_feature_use_model.go"
+	// Older workers called IsProNetwork directly. Both forms require the
+	// same concrete planner as the immediately enclosing frame.
+	lookup := panicProxyFrameIs(frames, module, "lookupProNetwork", "pro_model.go") ||
+		panicProxyFrameIs(frames, module, "IsProNetwork", "pro_model.go")
+	if !lookup || !panicProxyFrameIs(frames[2:], module, "(*dbProxyFeatureUsePlans).plans", file) {
+		return ""
+	}
+	frames = frames[4:]
+	if panicProxyFrameIs(frames, module, "(*ProxyFeatureUses).countMarks.func1", file) &&
+		panicProxyFrameIs(frames[2:], strings.TrimSuffix(module, "/model"), "HandleError", "trace.go") &&
+		panicProxyFrameIs(frames[4:], module, "(*ProxyFeatureUses).countMarks", file) &&
+		panicProxyFrameIs(frames[6:], module, "(*ProxyFeatureUses).flush", file) {
+		return "feature_use_flush_plan"
+	}
+	return "feature_use_plan_lookup"
+}
+
+func panicSourceHasFile(line string, filename string) bool {
+	source := panicLogSourceRe.FindString(strings.TrimSpace(line))
+	file, location, ok := strings.Cut(strings.TrimPrefix(source, "/"), ":")
+	return ok && file == filename && location[0] != '0'
 }
 
 // An empty owner deliberately leaves malformed or unknown records aggregate-only.
@@ -1380,6 +1454,15 @@ func panicLogSample(line string) string {
 	if observation.errorClass != "unknown" {
 		sample += " error_class=" + observation.errorClass
 	}
+	if observation.redisCaller != "" {
+		sample += " redis_caller=" + observation.redisCaller
+	}
+	if observation.redisOperation != "" {
+		sample += " redis_operation=" + observation.redisOperation
+	}
+	if observation.redisAdapter != "" {
+		sample += " redis_adapter=" + observation.redisAdapter
+	}
 	return sample
 }
 
@@ -1390,8 +1473,38 @@ func panicLogSample(line string) string {
 // searches can truncate the exact burst that makes the severity actionable.
 const netEscrowNegativePageRate = 100
 
-// The generic dial class uses its own capture for exemplar attribution.
-var dialIoTimeoutRe = regexp.MustCompile(`dial tcp ([0-9.]+:[0-9]+).*i/o timeout`)
+// Go's dial error may include a local address before the destination. An API
+// process that already scrubbed the address still emits its destination port.
+const dialEndpointPattern = `(?:[0-9.]+|\[(?:scrubbed|[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?)\]):[0-9]+`
+
+var dialIoTimeoutRe = regexp.MustCompile(`\bdial tcp(?:4|6)? (?:` + dialEndpointPattern + `->)?(` + dialEndpointPattern + `): (?:connect: )?i/o timeout\b`)
+
+// A combined diagnostic has no single exemplar destination. Preserve the
+// existing IPv4 frame and expose only the port of scrubbed and IPv6 sources.
+func dialTimeoutExemplar(line string) string {
+	if strings.Count(line, "dial tcp") != 1 {
+		return ""
+	}
+	match := dialIoTimeoutRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return ""
+	}
+	endpoint := match[1]
+	if port, scrubbed := strings.CutPrefix(endpoint, "[scrubbed]:"); scrubbed {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return ""
+		}
+		return endpoint
+	}
+	address, err := netip.ParseAddrPort(endpoint)
+	if err != nil {
+		return ""
+	}
+	if address.Addr().Is6() {
+		return fmt.Sprintf("[scrubbed]:%d", address.Port())
+	}
+	return endpoint
+}
 
 // Legacy ungrouped classes retain a first-address exemplar hint, which need
 // not identify the failing endpoint. Class-specific frames bypass this hint.
@@ -1422,12 +1535,26 @@ var paymentWebhookRefusedRe = regexp.MustCompile(`\[(play|stripe|coinbase|helius
 
 // controller/store_notification_flow.go RecordStoreNotificationOutcome: one
 // fixed line per refused or failed store notification,
-// `[store-notification]<google|apple> <outcome>`. Our side's refusals and
-// failures (a verified push for another audience or app, or one we could not
-// process) page; a push that never verified (no valid token or signature, a
-// malformed body) may be anyone's, and warns at a rate.
+// `[store-notification]<google|apple> <outcome>`. A lookup or processing
+// error and the two claim refusals page. Malformed and unauthenticated
+// pushes warn at a rate.
 var storeNotificationRefusedRe = regexp.MustCompile(`\[store-notification\](google|apple) (refused_audience|refused_claims|error)\b`)
 var storeNotificationUnverifiedRe = regexp.MustCompile(`\[store-notification\](google|apple) (refused_auth|refused_signature|refused_malformed)\b`)
+
+// The producer establishes different stages for the same outcome across stores.
+func storeNotificationRefusalMeaning(frame string, fallback string) string {
+	switch frame {
+	case "store=apple outcome=error":
+		return "The App Store handler completed notification verification and processing returned an error. Transaction claims, product policy, account binding and a missing destination can share this outcome. The reason for this attempt is unknown."
+	case "store=apple outcome=refused_claims":
+		return "The App Store handler checked the outer signature and rejected decoded claims. Missing required data and mismatched app identities can share this outcome."
+	case "store=google outcome=error":
+		return "The Play handler can record this error during token lookup before publisher verification or during processing of a verified push. The stage for this attempt is unknown."
+	case "store=google outcome=refused_audience":
+		return "The Play token matched the configured publisher and its audience differed from the configured audience."
+	}
+	return fallback
+}
 
 // The store and outcome of a store notification line.
 func storeNotificationLogGroup(re *regexp.Regexp) func(string) string {
@@ -1768,6 +1895,7 @@ type logTailer struct {
 	lastReconcileError   string
 	// One local recording of the retained failure, never an HTTP response clock.
 	lastReconcileFailure logReconcileFailure
+	reconcileAttempt     logReconcileAttempt
 	// Bounded successful-query receipts belong only to this collector
 	// generation. Failure or cancellation invalidates the consecutive pair.
 	reconcileSuccesses [2]logReconcileSuccess
@@ -1806,12 +1934,13 @@ func newLogTailer(service string, env *probeEnv) *logTailer {
 	}
 	if env != nil && env.runner != nil && env.cfg != nil {
 		tailer.blocks = append([]string(nil), env.cfg.logServiceBlocks[service]...)
-		tailer.reconcile = func(ctx context.Context, start time.Time, blocks []string) (string, error) {
+		tailer.reconcile = func(ctx context.Context, start, end time.Time, blocks []string) (string, error) {
 			args := []string{"logs", env.cfg.env, service}
 			args = append(args, blocks...)
 			args = append(
 				args,
 				"--since="+start.UTC().Format(time.RFC3339Nano),
+				"--until="+end.UTC().Format(time.RFC3339Nano),
 				fmt.Sprintf("--limit=%d", logReconcileLimit),
 			)
 			return env.runner.warpctl(ctx, args...)
@@ -1926,10 +2055,17 @@ var errLogReconcileIncomplete = errors.New("bounded overlap producer declared in
 
 // Every aggregate, block, and continuation page crosses this completion
 // boundary before parsing. Do not retain the producer's count or timestamp.
-func (self *logTailer) reconcilePage(ctx context.Context, start time.Time, blocks []string) (string, error) {
-	out, err := self.reconcile(ctx, start, blocks)
+func (self *logTailer) reconcilePage(ctx context.Context, start, end time.Time, blocks []string) (string, error) {
+	out, err := self.reconcile(ctx, start, end, blocks)
 	if err == nil && logReconcileIncompleteRe.MatchString(out) {
 		return "", errLogReconcileIncomplete
+	}
+	if err == nil && ctx.Err() == nil {
+		self.stateLock.Lock()
+		if self.reconcileAttempt.active {
+			self.reconcileAttempt.recordPage(self.clock().UTC())
+		}
+		self.stateLock.Unlock()
 	}
 	return out, err
 }
@@ -1967,7 +2103,7 @@ func reconcilePartitionLabel(service string, blocks []string) string {
 // closed because completeness cannot be proven.
 func (self *logTailer) completeReconcilePartition(
 	ctx context.Context,
-	start time.Time,
+	start, end time.Time,
 	blocks []string,
 	first []reconcileLine,
 ) ([]reconcileLine, error) {
@@ -2015,7 +2151,7 @@ func (self *logTailer) completeReconcilePartition(
 		}
 
 		pageStart = boundary
-		out, err := self.reconcilePage(ctx, pageStart, blocks)
+		out, err := self.reconcilePage(ctx, pageStart, end, blocks)
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -2044,14 +2180,22 @@ func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time)
 		if ctx.Err() != nil {
 			self.stateLock.Lock()
 			self.reconcileSuccesses = [2]logReconcileSuccess{}
+			self.reconcileAttempt.finish()
 			self.stateLock.Unlock()
 		}
 	}()
 	if ctx.Err() != nil {
 		return
 	}
-	start := self.clock().Add(-logReconcileLookback)
-	out, err := self.reconcilePage(ctx, start, nil)
+	end := self.clock().UTC()
+	start := end.Add(-logReconcileLookback)
+	self.stateLock.Lock()
+	self.reconcileAttempt = logReconcileAttempt{
+		active: true, number: self.reconcileAttempt.number + 1,
+		startedAt: end,
+	}
+	self.stateLock.Unlock()
+	out, err := self.reconcilePage(ctx, start, end, nil)
 	if ctx.Err() != nil {
 		return
 	}
@@ -2062,7 +2206,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time)
 	lines := parseReconcileLines(out)
 	if len(lines) >= logReconcileLimit {
 		if len(self.blocks) <= 1 {
-			lines, err = self.completeReconcilePartition(ctx, start, nil, lines)
+			lines, err = self.completeReconcilePartition(ctx, start, end, nil, lines)
 			if ctx.Err() != nil {
 				return
 			}
@@ -2073,7 +2217,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time)
 			lines = nil
 			for _, block := range self.blocks {
 				blockPartition := []string{block}
-				out, err := self.reconcilePage(ctx, start, blockPartition)
+				out, err := self.reconcilePage(ctx, start, end, blockPartition)
 				if ctx.Err() != nil {
 					return
 				}
@@ -2083,6 +2227,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time)
 				blockLines, err := self.completeReconcilePartition(
 					ctx,
 					start,
+					end,
 					blockPartition,
 					parseReconcileLines(out),
 				)
@@ -2114,6 +2259,7 @@ func (self *logTailer) reconcileOnce(ctx context.Context) (retryAfter time.Time)
 func (self *logTailer) recordReconcile(start time.Time, err error) (retryAfter time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	self.reconcileAttempt.finish()
 	if err != nil {
 		retryAfter = warpctlLogRetryDeadline(err)
 		var logQueryError *warpctlLogQueryError
@@ -2135,7 +2281,7 @@ func (self *logTailer) recordReconcile(start time.Time, err error) (retryAfter t
 		self.reconcileSuccesses = [2]logReconcileSuccess{}
 		return
 	}
-	self.lastReconcileTime = self.clock()
+	self.lastReconcileTime = self.clock().UTC()
 	self.lastReconcileError = ""
 	self.lastReconcileFailure = logReconcileFailure{}
 	latest := logReconcileSuccess{start: start, completed: self.lastReconcileTime}
@@ -2308,10 +2454,10 @@ func (self *logTailer) healthSnapshot() (lastLine time.Time, restarts int, scanE
 	return self.lastLineTime, self.restartCount, self.scanErrorCount
 }
 
-func (self *logTailer) reconcileSnapshot() (enabled bool, startedAt time.Time, lastSuccess time.Time, lastError string) {
+func (self *logTailer) reconcileSnapshot() (enabled bool, startedAt time.Time, lastSuccess time.Time, latest logReconcileSuccess, lastError string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return self.reconcile != nil, self.startedAt, self.lastReconcileTime, self.lastReconcileError
+	return self.reconcile != nil, self.startedAt, self.lastReconcileTime, self.reconcileSuccesses[1], self.lastReconcileError
 }
 
 // classify folds one log line into the current window.
@@ -2490,8 +2636,14 @@ func (self *logTailer) drainWindow() []finding {
 			broken = true
 			tier := c.tier
 			baseline := "healthy ~0/min for all classes; volume is retry amplification, not incident size (1.5)"
+			if c.name == "panic" {
+				baseline = "healthy ~0 panic-shaped diagnostic lines/minute. Retry and unique incident counts are unknown."
+			}
 			if c.name == "doh-dial-timeout" {
 				baseline = "healthy ~0/min; sampled outbound dial-leg lines are neither resolver-call failures nor user-request failures; fanout, hedging, and replacement ownership can add legs"
+			}
+			if c.name == "dial-io-timeout" {
+				baseline = "baseline ~0 matching diagnostic lines/minute. Unique attempts, retries and failed operations are unknown."
 			}
 			if c.name == "port-exhaustion" {
 				baseline = "baseline ~0 matching diagnostic lines/minute; counts do not prove retries, native allocation pressure or recovery"
@@ -2511,6 +2663,11 @@ func (self *logTailer) drainWindow() []finding {
 				}
 			}
 			attribution := self.classTargets[key]
+			meaning := c.meaning
+			if c.name == "store-notification-refused" {
+				meaning = storeNotificationRefusalMeaning(attribution, meaning)
+				baseline = "baseline ~0 matching store notification diagnostic lines/minute. Retry count and purchase impact are unknown."
+			}
 			if c.observationOnly {
 				observed += fmt.Sprintf(" observation_service=%s affected_selector=unknown", self.service)
 			} else if c.groupBy != nil {
@@ -2566,7 +2723,7 @@ func (self *logTailer) drainWindow() []finding {
 				baseline:  baseline,
 				observed:  observed,
 				mechanism: c.mechanism,
-				evidence:  "meaning: " + c.meaning + canonicalEvidence + "\nsample: " + self.classSamples[key],
+				evidence:  "meaning: " + meaning + canonicalEvidence + "\nsample: " + self.classSamples[key],
 				context:   c.context,
 				action:    c.action,
 				verify:    c.verify,
@@ -2585,7 +2742,7 @@ func (self *logTailer) drainWindow() []finding {
 			latest := self.reconcileSuccesses[1]
 			withholdHealthy = withholdHealthy || self.lastReconcileError != "" ||
 				!self.reconcileSuccesses[0].advancesTo(latest) ||
-				self.clock().Sub(latest.completed) >= 2*logReconcileInterval
+				!latest.freshAt(self.clock())
 		}
 		if !broken && !withholdHealthy {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
@@ -2728,6 +2885,7 @@ type logTailProbe struct {
 	// Successful overlap evidence stays in the existing diagnostic stream,
 	// separate from active Alerts. A sink failure must not affect findings.
 	reconcileDiagnostics io.Writer
+	activityDiagnostics  io.Writer
 }
 
 // tailerSilentThreshold: no line for this long means the monitor is blind to
@@ -2784,9 +2942,15 @@ func (self *logTailProbe) check(ctx context.Context, env *probeEnv) ([]finding, 
 		restartDelta := restarts - self.lastRestartCounts[i]
 		self.lastRestartCounts[i] = restarts
 		findings = append(findings, tailerHealthFindings(tailer.service, now, lastLine, restartDelta, scanErrors)...)
-		enabled, startedAt, lastSuccess, lastError := tailer.reconcileSnapshot()
+		enabled, startedAt, lastSuccess, latest, lastError := tailer.reconcileSnapshot()
 		if enabled {
-			findings = append(findings, tailerReconcileFinding(tailer.service, now, startedAt, lastSuccess, lastError))
+			observed := now
+			// A reconciliation can finish after the initial check clock and
+			// before this snapshot. Re-read its clock before judging freshness.
+			if latest.completed.After(observed) && tailer.clock != nil {
+				observed = tailer.clock()
+			}
+			findings = append(findings, tailerReconcileFinding(tailer.service, observed, startedAt, lastSuccess, latest, lastError))
 		}
 	}
 	monitorEvidence := tailTransportMonitorRouteEvidence{}
@@ -3149,9 +3313,9 @@ func tailTransportRouteFindings(
 	return findings
 }
 
-func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, lastSuccess time.Time, lastError string) finding {
+func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, lastSuccess time.Time, latest logReconcileSuccess, lastError string) finding {
 	target := "logs/" + service
-	stale := !lastSuccess.IsZero() && now.Sub(lastSuccess) >= 2*logReconcileInterval
+	stale := !lastSuccess.IsZero() && !latest.freshAt(now)
 	neverCompleted := lastSuccess.IsZero() && now.Sub(startedAt) >= 2*logReconcileInterval
 	if lastError == "" && !stale && !neverCompleted {
 		return healthyFinding("monitor/visibility", tierWarn, "tailer-reconcile", target)
@@ -3161,10 +3325,13 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 	if !lastSuccess.IsZero() {
 		observed = "last_success=" + lastSuccess.UTC().Format(time.RFC3339)
 	}
+	if !latest.start.IsZero() {
+		observed += " source_end=" + latest.end().UTC().Format(time.RFC3339Nano)
+	}
 	if lastError != "" {
 		observed += " error=" + lastError
 	} else if stale {
-		observed += " error=reconciliation has not completed on cadence"
+		observed += " error=completed reconciliation source window is stale, invalid, or unavailable"
 	} else {
 		observed += " error=initial reconciliation has not completed"
 	}

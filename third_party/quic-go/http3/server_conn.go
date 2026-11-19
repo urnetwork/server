@@ -26,6 +26,10 @@ type RawServerConn struct {
 	serverContext  context.Context
 	requestHandler http.Handler
 	maxHeaderBytes int
+	// urnetwork: the bound on a request stream's header phase, from the
+	// stream's start to its parsed request; non-positive is none
+	// (URNETWORK.md)
+	readHeaderTimeout time.Duration
 
 	decoder *qpack.Decoder
 
@@ -42,15 +46,17 @@ func newRawServerConn(
 	serverContext context.Context,
 	requestHandler http.Handler,
 	maxHeaderBytes int,
+	readHeaderTimeout time.Duration,
 ) *RawServerConn {
 	c := &RawServerConn{
-		idleTimeout:    idleTimeout,
-		serverContext:  serverContext,
-		requestHandler: requestHandler,
-		maxHeaderBytes: maxHeaderBytes,
-		decoder:        qpack.NewDecoder(),
-		qlogger:        qlogger,
-		logger:         logger,
+		idleTimeout:       idleTimeout,
+		serverContext:     serverContext,
+		requestHandler:    requestHandler,
+		maxHeaderBytes:    maxHeaderBytes,
+		readHeaderTimeout: readHeaderTimeout,
+		decoder:           qpack.NewDecoder(),
+		qlogger:           qlogger,
+		logger:            logger,
 	}
 	c.rawConn = *newRawConn(conn, enableDatagrams, c.onStreamsEmpty, nil, qlogger, logger)
 	if idleTimeout > 0 {
@@ -107,6 +113,13 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	connCtx := c.serverContext
 	maxHeaderBytes := c.requestMaxHeaderBytes()
 
+	// urnetwork: the header phase is bounded, so a stream that never
+	// completes its HEADERS frame ends with H3_REQUEST_INCOMPLETE rather than
+	// holding its goroutine, and the connection's idle timer, for good
+	// (URNETWORK.md)
+	if c.readHeaderTimeout > 0 {
+		str.SetReadDeadline(time.Now().Add(c.readHeaderTimeout))
+	}
 	fp := &frameParser{closeConn: conn.CloseWithError, r: str, streamID: str.StreamID()}
 	frame, err := fp.ParseNext(qlogger)
 	if err != nil {
@@ -127,8 +140,8 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 		c.rejectWithHeaderFieldsTooLarge(str)
 		return
 	}
-	headerBlock := make([]byte, hf.Length)
-	if _, err := io.ReadFull(str, headerBlock); err != nil {
+	headerBlock, err := readHeaderBlock(str, hf.Length)
+	if err != nil {
 		maybeQlogInvalidHeadersFrame(qlogger, str.StreamID(), hf.Length)
 		str.CancelRead(quic.StreamErrorCode(ErrCodeRequestIncomplete))
 		str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestIncomplete))
@@ -160,6 +173,12 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 		str.CancelRead(quic.StreamErrorCode(errCode))
 		str.CancelWrite(quic.StreamErrorCode(errCode))
 		return
+	}
+
+	// urnetwork: the request is parsed; its handler bounds its own reads of
+	// the body (URNETWORK.md)
+	if c.readHeaderTimeout > 0 {
+		str.SetReadDeadline(time.Time{})
 	}
 
 	connState := conn.ConnectionState().TLS
@@ -243,6 +262,22 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	// If the EOF was read by the handler, CancelRead() is a no-op.
 	str.CancelRead(quic.StreamErrorCode(ErrCodeNoError))
 	str.Close()
+}
+
+// urnetwork: reads a HEADERS frame's field section of length bytes, which
+// the caller has checked against the header limit. The buffer grows with the
+// bytes that arrive rather than taking the announced length up front, so a
+// frame that announces a length and sends little holds about what it sent
+// (URNETWORK.md). A stream that ends first is io.ErrUnexpectedEOF.
+func readHeaderBlock(r io.Reader, length uint64) ([]byte, error) {
+	headerBlock, err := io.ReadAll(io.LimitReader(r, int64(length)))
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(headerBlock)) != length {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return headerBlock, nil
 }
 
 func (c *RawServerConn) rejectWithHeaderFieldsTooLarge(str *stateTrackingStream) {

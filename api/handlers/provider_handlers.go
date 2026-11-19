@@ -11,16 +11,18 @@ import (
 // statsCacheTtl bounds how stale a fresh per-network provider-stats response
 // can be. Dashboards poll these endpoints, so a short per-network cache absorbs
 // repeated calls. The stats depend only on (network_id, args), which makes
-// the network-scoped cache safe. A provider list whose refresh is slower than
-// a miss's wait answers its last published value instead, for up to
-// router.handlerCacheLastGoodTtl; its created_time says how old it is.
+// the network-scoped cache safe. A provider list stays fresh longer when its
+// fill took longer: four times the fill, up to 5 minutes
+// (router.renewingHandlerCacheValueTtl). A provider list whose refresh is
+// slower than a miss's wait answers its last published value instead, for up
+// to router.handlerCacheLastGoodTtl; its created_time says how old it is.
 const statsCacheTtl = 30 * time.Second
 
 // A slow provider-list fill keeps its lease while queries run, and runs to
 // the end of this budget even when its caller leaves first (the lb cuts an
 // upstream at 30 s, and clients give up sooner), so the next request finds
 // the list. This permits a fill longer than the 30s cache lease while bounding
-// repeated renewal. Response TTL is unchanged.
+// repeated renewal. Renewal itself extends no response lifetime.
 const providerListStatsFillTimeout = 2 * time.Minute
 
 // GET /stats/providers — all providers in the caller network, last 24h.

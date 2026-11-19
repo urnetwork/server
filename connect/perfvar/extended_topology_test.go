@@ -1729,16 +1729,17 @@ func TestProductionStreamP2pExtendedTopology(t *testing.T) {
 // One logical server/connect edge owns an independently addressed exchange,
 // handler, and client-carrier endpoint.
 type splitExchangeEdge struct {
-	name       string
-	tun        *clientconnect.Tun
-	address    netip.Addr
-	h1Port     int
-	h3Port     int
-	apiPort    int
-	exchange   *connectserver.Exchange
-	handler    *connectserver.ConnectHandler
-	httpServer *http.Server
-	apiServer  *http.Server
+	platformTrust *routePlatformTrust
+	name          string
+	tun           *clientconnect.Tun
+	address       netip.Addr
+	h1Port        int
+	h3Port        int
+	apiPort       int
+	exchange      *connectserver.Exchange
+	handler       *connectserver.ConnectHandler
+	httpServer    *http.Server
+	apiServer     *http.Server
 }
 
 // The two-edge fixture separates application access, provider access, and the
@@ -1868,13 +1869,18 @@ func newSplitExchangeEnvironmentWithProfiles(
 	for _, edge := range edges {
 		routes[edge.name] = edge.address.String()
 	}
-	serverTlsConfig, _, err := newWorkloadTlsConfigs()
-	if err != nil {
-		network.close()
-		cancel()
-		t.Fatalf("create split exchange TLS: %v", err)
+	h1ServerConfigs := make([]*tls.Config, len(edges))
+	for edgeIndex, edge := range edges {
+		config, roots, err := newRoutePlatformH1Tls(edge.address)
+		if err != nil {
+			network.close()
+			cancel()
+			t.Fatalf("create %s TLS: %v", edge.name, err)
+		}
+		config.NextProtos = []string{"http/1.1"}
+		h1ServerConfigs[edgeIndex] = config
+		edge.platformTrust = &routePlatformTrust{address: edge.address, h1Roots: roots}
 	}
-	serverTlsConfig.NextProtos = []string{"http/1.1"}
 	announces := newRouteAsyncLifecycle()
 	for edgeIndex, edge := range edges {
 		exchangePort := exchangeListeners[edgeIndex].Addr().(*net.TCPAddr).Port
@@ -1918,14 +1924,15 @@ func newSplitExchangeEnvironmentWithProfiles(
 			handlerSettings,
 			connectserver.ConnectHandlerPacketConns{H3: h3PacketConns[edgeIndex]},
 		)
+		edge.platformTrust.h3Tls = edge.handler.TransportTls()
 		httpRoutes := []*router.Route{
 			router.NewRoute("GET", "/status", router.WarpStatus),
 			router.NewRoute("GET", "/", edge.handler.Connect),
 		}
 		edge.httpServer = &http.Server{Handler: router.NewRouter(environmentCtx, httpRoutes)}
-		go func(edge *splitExchangeEdge, listener net.Listener) {
-			_ = edge.httpServer.Serve(tls.NewListener(listener, serverTlsConfig.Clone()))
-		}(edge, h1Listeners[edgeIndex])
+		go func(edge *splitExchangeEdge, listener net.Listener, config *tls.Config) {
+			_ = edge.httpServer.Serve(tls.NewListener(listener, config))
+		}(edge, h1Listeners[edgeIndex], h1ServerConfigs[edgeIndex])
 		edge.apiServer = &http.Server{Handler: router.NewRouter(environmentCtx, api.Routes())}
 		go func(edge *splitExchangeEdge, listener net.Listener) {
 			_ = edge.apiServer.Serve(listener)
@@ -1995,23 +2002,27 @@ func (self *splitExchangeEnvironment) fullTunRouteView() *routeEnvironment {
 		deviceAccessProfile:     self.deviceAccess,
 		providerAccessProfile:   self.providerAccess,
 		internalExchangeProfile: &internalProfile,
-		network:                 self.network,
-		edgeAddress:             self.edges[0].address,
-		h1Port:                  self.edges[0].h1Port,
-		h3Port:                  self.edges[0].h3Port,
-		apiPort:                 self.edges[0].apiPort,
-		deviceEdgeName:          self.edges[0].name,
-		providerEdgeName:        self.edges[1].name,
-		providerEdgeAddress:     self.edges[1].address,
-		providerH1Port:          self.edges[1].h1Port,
-		providerH3Port:          self.edges[1].h3Port,
-		providerApiPort:         self.edges[1].apiPort,
-		networkId:               self.networkId,
-		userId:                  self.userId,
-		userSession:             self.userSession,
-		extenderErrors:          make(chan error, 32),
-		announces:               self.announces,
-		controls:                self.controls,
+		platformTrust: map[string]*routePlatformTrust{
+			self.edges[0].name: self.edges[0].platformTrust,
+			self.edges[1].name: self.edges[1].platformTrust,
+		},
+		network:             self.network,
+		edgeAddress:         self.edges[0].address,
+		h1Port:              self.edges[0].h1Port,
+		h3Port:              self.edges[0].h3Port,
+		apiPort:             self.edges[0].apiPort,
+		deviceEdgeName:      self.edges[0].name,
+		providerEdgeName:    self.edges[1].name,
+		providerEdgeAddress: self.edges[1].address,
+		providerH1Port:      self.edges[1].h1Port,
+		providerH3Port:      self.edges[1].h3Port,
+		providerApiPort:     self.edges[1].apiPort,
+		networkId:           self.networkId,
+		userId:              self.userId,
+		userSession:         self.userSession,
+		extenderErrors:      make(chan error, 32),
+		announces:           self.announces,
+		controls:            self.controls,
 	}
 }
 
@@ -2024,6 +2035,11 @@ func (self *splitExchangeEnvironment) newClient(
 ) *routeClient {
 	if edgeIndex < 0 || len(self.edges) <= edgeIndex {
 		self.t.Fatalf("split exchange edge index=%d", edgeIndex)
+	}
+	edge := self.edges[edgeIndex]
+	h3Roots, err := edge.platformTrust.h3Roots(mode)
+	if err != nil {
+		self.t.Fatalf("load %s H3 roots: %v", edge.name, err)
 	}
 	result, err := model.AuthNetworkClient(
 		&model.AuthNetworkClientArgs{Description: description},
@@ -2060,8 +2076,8 @@ func (self *splitExchangeEnvironment) newClient(
 	strategySettings.MinNextConnectDelay = 0
 	strategySettings.MaxNextConnectDelay = 0
 	strategySettings.ConnectSettings.TlsConfig = &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
+		RootCAs:    edge.platformTrust.h1Roots,
+		MinVersion: tls.VersionTLS13,
 	}
 	strategySettings.ConnectSettings.DialContextSettings = &clientconnect.DialContextSettings{
 		DialContext: clientTun.DialContext,
@@ -2085,9 +2101,8 @@ func (self *splitExchangeEnvironment) newClient(
 		},
 		settings,
 	)
-	edge := self.edges[edgeIndex]
 	platformSettings := clientconnect.DefaultPlatformTransportSettings()
-	platformSettings.QuicTlsConfig.InsecureSkipVerify = true
+	platformSettings.QuicTlsConfig.RootCAs = h3Roots
 	platformSettings.H3Port = edge.h3Port
 	platformSettings.DnsPort = 0
 	platformSettings.H3PacketConnFactory = func(ctx context.Context) (net.PacketConn, error) {

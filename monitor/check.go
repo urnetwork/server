@@ -71,6 +71,10 @@ type finding struct {
 	target  string // host, host:port, table — the concrete thing the signal is about
 	frame   string // innermost app frame / query id / node ports, or ""
 
+	// One guarded inventory host that independently establishes this aggregate fault.
+	// It supplies no authority for a healthy aggregate under partial coverage.
+	scopeEvidenceHostName string
+
 	healthy bool
 	// sustain is how many consecutive failing ticks before a ticket opens
 	// (SIGNALS.md "for n min" translated to ticks at the probe's cadence)
@@ -134,6 +138,7 @@ func healthyFinding(probeId, tier, class, target string) finding {
 // one layer of a composite probe is unreachable. Returning an error from the
 // whole probe would discard concrete findings already collected elsewhere.
 func cannotObserveFinding(target string, err error) finding {
+	err, archiveStage := splitBackupArchiveReadError(target, err)
 	errorClass := classifyObservationError(err)
 	return finding{
 		probeId: "monitor/visibility", tier: tierWarn,
@@ -141,7 +146,7 @@ func cannotObserveFinding(target string, err error) finding {
 		symptom:   "The monitor could not complete an observation for " + target + " (error_class=" + errorClass + ")",
 		mechanism: "The source command, parser, or network path failed, so this target's production state is unknown even if sibling checks completed.",
 		baseline:  "Every configured target returns a bounded, parseable observation at each signal cadence.",
-		observed:  observationFailureDetails(err, errorClass),
+		observed:  observationFailureDetails(err, errorClass) + archiveStage,
 		action:    observationFailureAction(err, errorClass, "Restore the observation path and rerun the named signal; also determine whether the unreachable target is the incident."),
 		verify:    "The same target returns a concrete healthy or broken observation on the next run.",
 		playbook:  "SIGNALS.md §1.7 and MONITOR.md §3.6",

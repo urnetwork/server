@@ -93,7 +93,7 @@ func newWinnerClosingFixture() *winnerClosingFixture {
 		WinnerReviewPolicy: model.CompetitionWinnerReviewPolicy, WinnerReviewTimeoutSeconds: 600}
 	return &winnerClosingFixture{now: now, snapshot: CompetitionSupervisorSnapshot{
 		Round:         &model.CompetitionRoundResult{RoundId: server.NewId(), Epoch: 1, Status: "sealed", DecisionMode: model.CompetitionDecisionModeV2},
-		Seal:          &model.CompetitionEvaluationSeal{PublicationAt: now, SourceChoiceAt: now, SealSha256: strings.Repeat("c", 64)},
+		Seal:          &model.CompetitionEvaluationSeal{Epoch: 1, PublicationAt: now, SourceChoiceAt: now, SealSha256: strings.Repeat("c", 64)},
 		CurrentSource: &model.CompetitionSourceActivation{Generation: 1, SourceGeneration: 0},
 		WinnerReview:  &CompetitionWinnerReviewState{Policy: policy, CurrentDecision: model.CompetitionRewardDecision{Revision: 1, SelectedJobId: &job, DecisionSha256: strings.Repeat("d", 64)}},
 	}}
@@ -197,7 +197,7 @@ func TestWinnerClosingCompleteSixEpochLifecycle(t *testing.T) {
 	for epoch := 1; epoch <= 6; epoch++ {
 		job := server.NewId()
 		f.snapshot.Round = &model.CompetitionRoundResult{RoundId: server.NewId(), Epoch: epoch, Status: "sealed", DecisionMode: model.CompetitionDecisionModeV2}
-		f.snapshot.Seal = &model.CompetitionEvaluationSeal{PublicationAt: f.now, SourceChoiceAt: f.now, SealSha256: strings.Repeat("a", 64)}
+		f.snapshot.Seal = &model.CompetitionEvaluationSeal{Epoch: epoch, PublicationAt: f.now, SourceChoiceAt: f.now, SealSha256: strings.Repeat("a", 64)}
 		f.snapshot.Transition, f.snapshot.Intent = nil, nil
 		f.snapshot.WinnerReview = &CompetitionWinnerReviewState{Policy: policy, CurrentDecision: model.CompetitionRewardDecision{Revision: 1, SelectedJobId: &job, DecisionSha256: strings.Repeat("b", 64)}}
 		if epoch == 2 {
@@ -304,6 +304,7 @@ func TestWinnerClosingApprovesBuildsQualifiesAndOpens(t *testing.T) {
 func TestWinnerClosingWaitsForExactOfficialEpochTwoReview(t *testing.T) {
 	fixture := newWinnerClosingFixture()
 	fixture.snapshot.Round.Epoch = 2
+	fixture.snapshot.Seal.Epoch = 2
 	roundId := fixture.snapshot.Round.RoundId
 	supervisor := &CompetitionSupervisor{Enabled: true, OwnerId: "test-owner", Driver: fixture,
 		Now: func() time.Time { return fixture.now }, OfficialReviewRoundId: &roundId}
@@ -435,6 +436,7 @@ func TestWinnerClosingRevocationDuringPreparationIsDurablyBlocked(t *testing.T) 
 func TestWinnerClosingSixthEpochStillRequiresReview(t *testing.T) {
 	f := newWinnerClosingFixture()
 	f.snapshot.Round.Epoch = 6
+	f.snapshot.Seal.Epoch = 6
 	for _, state := range []string{"winner_review_pending", "winner_review_pending", "winner_review_recorded", "complete", "season_complete"} {
 		f.step(t, state, false)
 	}

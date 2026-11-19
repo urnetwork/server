@@ -95,13 +95,18 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{version: secondRecoveryVersion, removedAt: epochTwoOfficialVersion, name: "exact-job second recovery with immutable prior receipt"},
 		{version: epochTwoOfficialVersion, removedAt: epochTwoAstra62Version, name: "epoch-two official reviewer substitution with retained complete custody"},
 		{version: epochTwoAstra62Version, removedAt: server.CompetitionSilleStorageRecoveryMigrationVersion(), name: "epoch-two Astra 6.2 reviewer provenance with retained complete custody"},
-		{version: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: 0, name: "exact Sille storage interruption recovery with retained catalog custody"},
+		{version: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), name: "exact Sille storage interruption recovery with retained catalog custody"},
+		{version: server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), removedAt: 0, name: competitionEpochThreeSourceRecoveryCatalogName},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
+	return fmt.Sprintf("%s@v%d", competitionEpochThreeSourceRecoveryCatalogName, server.CompetitionEpochThreeSourceRecoveryMigrationVersion())
+}
+
+func competitionSourceGuardsStorageRecoveryOwner() string {
 	return fmt.Sprintf("exact Sille storage interruption recovery with retained catalog custody@v%d", server.CompetitionSilleStorageRecoveryMigrationVersion())
 }
 
@@ -195,7 +200,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{oldVersion: server.CompetitionOperatorRequestedPatchRetryMigrationVersion(), nextVersion: server.CompetitionSecondRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsPatchRetryOwner(), nextOwner: competitionSourceGuardsSecondRecoveryOwner()},
 		{oldVersion: server.CompetitionSecondRecoveryMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), oldOwner: competitionSourceGuardsSecondRecoveryOwner(), nextOwner: competitionSourceGuardsEpochTwoOfficialOwner()},
 		{oldVersion: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), nextVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoOfficialOwner(), nextOwner: competitionSourceGuardsEpochTwoAstra62Owner()},
-		{oldVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), nextVersion: server.CompetitionSilleStorageRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoAstra62Owner(), nextOwner: currentOwner},
+		{oldVersion: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), nextVersion: server.CompetitionSilleStorageRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsEpochTwoAstra62Owner(), nextOwner: competitionSourceGuardsStorageRecoveryOwner()},
+		{oldVersion: server.CompetitionSilleStorageRecoveryMigrationVersion(), nextVersion: server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), oldOwner: competitionSourceGuardsStorageRecoveryOwner(), nextOwner: currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -323,7 +329,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{head: server.CompetitionSecondRecoveryMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), owner: competitionSourceGuardsSecondRecoveryOwner()},
 		{head: server.CompetitionOfficialReviewEpochTwoMigrationVersion(), removedAt: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), owner: competitionSourceGuardsEpochTwoOfficialOwner()},
 		{head: server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(), removedAt: server.CompetitionSilleStorageRecoveryMigrationVersion(), owner: competitionSourceGuardsEpochTwoAstra62Owner()},
-		{head: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: 0, owner: currentOwner},
+		{head: server.CompetitionSilleStorageRecoveryMigrationVersion(), removedAt: server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), owner: competitionSourceGuardsStorageRecoveryOwner()},
+		{head: server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), removedAt: 0, owner: currentOwner},
 	}
 	faults := []struct {
 		name string

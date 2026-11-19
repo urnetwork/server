@@ -42,7 +42,7 @@ func migrationSilleStorageRecoveryTestOwner(t testing.TB) migrationArtifact {
 	previous := migrationEpochTwoAstra62TestOwner(t)
 	version := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	current := migrationCurrentSuffixTestContract(t, version).artifact
-	if version <= previous.requiredVersion || previous.removedVersion != version || current.removedVersion != 0 ||
+	if version <= previous.requiredVersion || previous.removedVersion != version || current.removedVersion != server.CompetitionEpochThreeSourceRecoveryMigrationVersion() ||
 		current.name != "exact Sille storage interruption recovery with retained catalog custody" {
 		t.Fatal("Sille storage recovery catalog owner has an unreviewed boundary")
 	}

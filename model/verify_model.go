@@ -21,6 +21,7 @@ package model
 //	{vce2_<clientId>}       v2 reverse hash: exact ip -> expiry; read and withdrawn, never fed
 //	{verify_egress_v2_<ip>}leases forward client/owner -> expiry
 //	{vhead_<clientId>}<window> egress-IP-hash a provider's hops record in one scoring window (§8.1)
+//	{vproxy_<clientId>}     a provider whose transport declared a proxy egress: no unit (verify_proxied_egress_model.go)
 //	{vtr_<trailId>}window   the scoring window the trail was seeded in
 //	verify_eligible_v2      set of currently eligible provider clientIds (§5.1)
 //	{velig_<clientId>}      eligibility token spend counter (INCR+EXPIRE, §5.3)

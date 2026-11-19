@@ -156,6 +156,16 @@ func NewAPIReleaseProofSignal() Signal {
 	return &signalAdapter{number: "8.12a", key: "api-release-proof", name: "Bounded API release proof", probe: apiReleaseProofProbe{}}
 }
 
+// Recognize the built-in probe without treating a caller's custom Signal as optional.
+func isApiReleaseProofSignal(signal Signal) bool {
+	adapter, ok := signal.(*signalAdapter)
+	if !ok {
+		return false
+	}
+	_, ok = adapter.probe.(apiReleaseProofProbe)
+	return ok
+}
+
 type apiReleaseProofProbe struct{}
 
 func (apiReleaseProofProbe) id() string               { return "deploy/api-release-proof" }

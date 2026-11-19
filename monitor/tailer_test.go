@@ -1286,7 +1286,7 @@ func TestStandingReconciliationUsesBoundedTwoMinuteOverlap(t *testing.T) {
 	}
 	tailer := newLogTailer("taskworker", env)
 	tailer.reconcileOnce(context.Background())
-	want := "warpctl logs main taskworker --since=2026-08-31T18:52:00Z --limit=20000"
+	want := "warpctl logs main taskworker --since=2026-08-31T18:52:00Z --until=2026-08-31T18:54:00Z --limit=20000"
 	if got != want {
 		t.Fatalf("reconciliation command = %q, want %q", got, want)
 	}
@@ -1321,7 +1321,7 @@ func TestStandingReconciliationRecoversLateRecordsWithoutReplay(t *testing.T) {
 	tailer.ingestStanding(lines[0], true, true)
 	tailer.ingestStanding(lines[2], true, true)
 	reconciled := strings.Join(lines, "\n")
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return reconciled, nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return reconciled, nil }
 	tailer.reconcileOnce(context.Background())
 
 	terminal := findingByClass(t, tailer.drainWindow(), "window-stall-terminal")
@@ -1350,7 +1350,7 @@ func TestFirstStandingReconciliationDoesNotCountPreStartHistory(t *testing.T) {
 	tailer.lastLineTime = tailer.startedAt
 	oldLine := reconciliationWindowFailedLine("2026-08-31T18:52:30", "quality")
 	currentLine := reconciliationWindowFailedLine("2026-08-31T18:53:30", "quality")
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 		return oldLine + "\n" + currentLine, nil
 	}
 	tailer.reconcileOnce(context.Background())
@@ -1377,7 +1377,7 @@ func TestStandingReconciliationFailurePreservesStreamAndRaisesVisibility(t *test
 	tailer.lastLineTime = tailer.startedAt
 	streamLine := reconciliationWindowFailedLine("2026-08-31T18:53:31", "quality")
 	tailer.ingestStanding(streamLine, true, true)
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 		return "", fmt.Errorf("Loki query error (502): Bad Gateway")
 	}
 	tailer.reconcileOnce(context.Background())
@@ -1406,14 +1406,14 @@ func TestStandingReconciliationLimitIsVisibilityFailure(t *testing.T) {
 	for i := 0; i < logReconcileLimit; i++ {
 		fmt.Fprintf(&output, "[edge-0][grafana][g1][cid:test][2026-08-31T18:53:30.100000Z]ordinary line %d\n", i)
 	}
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return output.String(), nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return output.String(), nil }
 	tailer.reconcileOnce(context.Background())
 
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	_, _, lastSuccess, latest, lastError := tailer.reconcileSnapshot()
 	if !lastSuccess.IsZero() || !strings.Contains(lastError, "20000-line limit") {
 		t.Fatalf("truncated overlap was accepted: last_success=%s error=%q", lastSuccess, lastError)
 	}
-	visibility := tailerReconcileFinding("grafana", fixedNow, tailer.startedAt, lastSuccess, lastError)
+	visibility := tailerReconcileFinding("grafana", fixedNow, tailer.startedAt, lastSuccess, latest, lastError)
 	if visibility.healthy {
 		t.Fatalf("truncated overlap did not raise visibility: %+v", visibility)
 	}
@@ -1439,7 +1439,7 @@ func TestStandingReconciliationPartitionsSaturatedAggregateByBlock(t *testing.T)
 		blocks []string
 	}
 	var calls []queryCall
-	tailer.reconcile = func(_ context.Context, start time.Time, blocks []string) (string, error) {
+	tailer.reconcile = func(_ context.Context, start time.Time, _ time.Time, blocks []string) (string, error) {
 		calls = append(calls, queryCall{start: start, blocks: append([]string(nil), blocks...)})
 		if len(blocks) == 0 {
 			return saturated.String(), nil
@@ -1461,7 +1461,7 @@ func TestStandingReconciliationPartitionsSaturatedAggregateByBlock(t *testing.T)
 		t.Fatalf("partition calls = %#v, want aggregate, g1, g2", calls)
 	}
 
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	_, _, lastSuccess, _, lastError := tailer.reconcileSnapshot()
 	if !lastSuccess.Equal(fixedNow) || lastError != "" {
 		t.Fatalf("partitioned overlap not accepted: last_success=%s error=%q", lastSuccess, lastError)
 	}
@@ -1487,7 +1487,7 @@ func TestStandingReconciliationRejectsSaturatedBlockPartition(t *testing.T) {
 	for i := 0; i < logReconcileLimit; i++ {
 		fmt.Fprintf(&saturated, "[edge-0][proxy][g2][cid:test][I][2026-08-31T18:53:30.%06dZ][server.go:764]ordinary peer sync %d\n", i, i)
 	}
-	tailer.reconcile = func(_ context.Context, _ time.Time, blocks []string) (string, error) {
+	tailer.reconcile = func(_ context.Context, _ time.Time, _ time.Time, blocks []string) (string, error) {
 		if len(blocks) == 0 || blocks[0] == "g2" {
 			return saturated.String(), nil
 		}
@@ -1495,7 +1495,7 @@ func TestStandingReconciliationRejectsSaturatedBlockPartition(t *testing.T) {
 	}
 
 	tailer.reconcileOnce(context.Background())
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	_, _, lastSuccess, _, lastError := tailer.reconcileSnapshot()
 	if !lastSuccess.IsZero() || !strings.Contains(lastError, "proxy block g2") {
 		t.Fatalf("saturated block was accepted: last_success=%s error=%q", lastSuccess, lastError)
 	}
@@ -1523,7 +1523,7 @@ func TestStandingReconciliationContinuesSaturatedBlockFromInclusiveBoundary(t *t
 		blocks []string
 	}
 	var calls []queryCall
-	tailer.reconcile = func(_ context.Context, start time.Time, blocks []string) (string, error) {
+	tailer.reconcile = func(_ context.Context, start time.Time, _ time.Time, blocks []string) (string, error) {
 		calls = append(calls, queryCall{start: start, blocks: append([]string(nil), blocks...)})
 		if len(blocks) == 0 || (blocks[0] == "g1" && start.Equal(wantStart)) {
 			return saturated.String(), nil
@@ -1541,7 +1541,7 @@ func TestStandingReconciliationContinuesSaturatedBlockFromInclusiveBoundary(t *t
 	if !calls[2].start.Equal(boundaryAt) || !reflect.DeepEqual(calls[2].blocks, []string{"g1"}) {
 		t.Fatalf("continuation = %#v, want g1 at inclusive boundary %s", calls[2], boundaryAt)
 	}
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	_, _, lastSuccess, _, lastError := tailer.reconcileSnapshot()
 	if !lastSuccess.Equal(fixedNow) || lastError != "" {
 		t.Fatalf("continued block overlap not accepted: last_success=%s error=%q", lastSuccess, lastError)
 	}
@@ -1564,7 +1564,7 @@ func TestStandingReconciliationBoundsAdvancingContinuationPages(t *testing.T) {
 	tailer.startedAt = fixedNow.Add(-logReconcileLookback)
 
 	calls := 0
-	tailer.reconcile = func(_ context.Context, _ time.Time, _ []string) (string, error) {
+	tailer.reconcile = func(_ context.Context, _ time.Time, _ time.Time, _ []string) (string, error) {
 		calls++
 		observedAt := fixedNow.Add(-time.Minute).Add(time.Duration(calls) * time.Second)
 		var output strings.Builder
@@ -1581,7 +1581,7 @@ func TestStandingReconciliationBoundsAdvancingContinuationPages(t *testing.T) {
 	}
 
 	tailer.reconcileOnce(context.Background())
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
+	_, _, lastSuccess, _, lastError := tailer.reconcileSnapshot()
 	if calls != logReconcileMaxPages {
 		t.Fatalf("continuation queries = %d, want bounded %d", calls, logReconcileMaxPages)
 	}

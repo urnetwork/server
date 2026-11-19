@@ -73,9 +73,7 @@ func TestStatsQueryPlans(t *testing.T) {
 
 			assertStatsIndexPlan(t, ctx, conn, "02_transfer_list", providerStatsTransferBytesSQL, five, w24)
 
-			assertStatsIndexPlan(t, ctx, conn, "03_contracts_clients_list", `
-				SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
-				FROM transfer_contract WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2 GROUP BY destination_id`, five, w24)
+			assertStatsIndexPlan(t, ctx, conn, "03_contracts_clients_list", providerStatsContractsSQL, five, w24)
 
 			assertStatsIndexPlan(t, ctx, conn, "04_payout_list", providerPayoutStatsSql, networkId, w24, now)
 

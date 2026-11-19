@@ -102,3 +102,38 @@ func TestControlFrameMetricsBoundedErrorsAndQuietCells(t *testing.T) {
 		t.Fatalf("unknown message error = %v", got)
 	}
 }
+
+// Cancellation during completion accounting still rethrows the original
+// panic. The recorded outcome must agree with that disposition.
+func TestControlFrameMetricsCancellationDuringPanicAccounting(t *testing.T) {
+	metrics := newControlFrameMetrics(prometheus.NewRegistry())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handlerStarted := false
+	metrics.now = func() time.Time {
+		if handlerStarted {
+			cancel()
+		}
+		return time.Unix(0, 0)
+	}
+
+	sentinel := errors.New("synthetic frame failure")
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != sentinel {
+				t.Fatalf("expected original panic, got %v", recovered)
+			}
+		}()
+		_ = observeControlFrame(ctx, &protocol.CreateContract{}, metrics, func() error {
+			handlerStarted = true
+			panic(sentinel)
+		})
+	}()
+
+	if got := testutil.ToFloat64(metrics.completions.WithLabelValues("internal", "create_contract", "canceled")); got != 1 {
+		t.Fatalf("canceled completions = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(metrics.completions.WithLabelValues("internal", "create_contract", "panic")); got != 0 {
+		t.Fatalf("live-context panic completions = %v, want 0", got)
+	}
+}

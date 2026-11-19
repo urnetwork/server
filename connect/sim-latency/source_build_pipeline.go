@@ -33,7 +33,7 @@ func executeSourceBuildPipeline(ctx context.Context, request reviewedSourceBuild
 		if err := os.Mkdir(phaseDirectory, 0o700); err != nil {
 			return nil, err
 		}
-		input := sourceBuildSandboxInput{Owner: owner, Phase: phase, ImageId: request.Proposal.EvaluatedImageDigest, Commit: request.Proposal.Commits["server"],
+		input := sourceBuildSandboxInput{Owner: owner, Phase: phase, ImageId: sourceBuildBaseImage(request), Commit: request.Proposal.Commits["server"],
 			SourceDirectory: root.SourceDirectory, MetadataDirectory: filepath.Join(phaseDirectory, "metadata"), OutputDirectory: filepath.Join(phaseDirectory, "output")}
 		if err := os.Mkdir(input.OutputDirectory, 0o700); err != nil {
 			return nil, err
@@ -88,7 +88,7 @@ func executeSourceBuildPipeline(ctx context.Context, request reviewedSourceBuild
 		}
 		return commandErr
 	}
-	image, err := executeSourceBuildImage(ctx, owner, request.Proposal.EvaluatedImageDigest, root.Directory, settings, loggedDocker)
+	image, err := executeSourceBuildImage(ctx, owner, sourceBuildBaseImage(request), root.Directory, settings, loggedDocker)
 	if err != nil {
 		return nil, err
 	}
