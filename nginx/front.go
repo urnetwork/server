@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net/http"
+	"net/netip"
 )
 
 // How the front treats a served name. Names match by nginx's server_name
@@ -118,6 +119,17 @@ func (self *Front) HttpHandler(interfaceName string) http.Handler {
 // authorities, so a connection whose SNI is an api name can't carry a request
 // for another service (D3), and forwards them as HttpsHandler does.
 func (self *Front) H3ApiHandler(interfaceName string) http.Handler {
+	panic("lbalt: not implemented")
+}
+
+// Admits one QUIC connection from addr on the interface, under alt's
+// per-address connection cap (D8): the interface's rate_limit.net_connections,
+// counted per (interface name, normalized client IP) apart from HTTP
+// concurrency, with exclude_subnets exempt and zero meaning no cap. ok is false
+// when the address is at its cap, and connect then closes the connection with
+// application error 0x1001. A true result must be paired with exactly one call
+// of release, when the connection ends.
+func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) {
 	panic("lbalt: not implemented")
 }
 

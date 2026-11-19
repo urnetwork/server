@@ -139,7 +139,7 @@ lb_alt is enabled for a host when the lb_alt service is connect (validation allo
 **Connect units** on such a host get `--lbaltnets="<iface>:<docker_network>;..."`. It lists every non-transparent lb interface on the host, sorted. It doesn't depend on per-interface overrides, so a flip never changes the unit.
 
 **When a connect block starts, the worker:**
-1. renders the route file, at `/srv/warp/<env>/lbalt/<container name>/route.json`, mode 0444, never rewritten;
+1. renders the route file, at `<WARP_HOME>/lbalt/<container name>/route.json` (`/srv/warp/<env>/...` on hosts), mode 0444, never rewritten;
 2. bind-mounts it read-only at `/srv/warp/lbalt/route.json`;
 3. sets these env vars:
    - `WARP_LBALT_ROUTE_FILE=/srv/warp/lbalt/route.json`
@@ -257,6 +257,7 @@ func (self *Front) QuicTlsConfig() *tls.Config  // one long-lived base config fo
 func (self *Front) HttpsHandler(interfaceName string) http.Handler // TCP 443: routes by authority
 func (self *Front) HttpHandler(interfaceName string) http.Handler  // TCP 80: lb status routes, 301s
 func (self *Front) H3ApiHandler(interfaceName string) http.Handler // h3: only api authorities
+func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) // alt's per-address QUIC cap (0x1001)
 func (self *Front) BeginDrain()                 // stop admitting new HTTP work; responses carry Connection: close
 func (self *Front) Close() error                // release pools and spill files
 ```
@@ -328,10 +329,37 @@ The front reproduces these:
 
 A unit that finds another difference adds it to this list in its report, with its choice.
 
-## 5. Status
+## 5. Decisions made while building the base (2026-11-18)
 
-- [ ] base-server
-- [ ] base-warp
+Route table (server `nginx/route.go`, which w-route must satisfy):
+- Parsing requires every field under its exact key, and refuses `null` and unknown or recased keys.
+- Names are lowercase. A served name belongs to exactly one place: an lb name, one service's `names`, or one redirect alias. nginx's generator keeps a redirect alias among its service's hosts, so w-route moves it out of `names`, as the fixture shows.
+- Addresses are in canonical `netip` text, so `X-UR-Front-Sockets` matches what warpctl rendered. No interface address may equal `upstream.ipv4`.
+- These lists are non-empty: `domains`, `lb.names`, `lb.route_prefixes`, `interfaces`, each service's `route_prefixes`, and `front.whodis_tlds`.
+- `status` is the resolved value, so `"standard"` is written out.
+- `route_request_bodies` values are positive. `route_rate_limits` rates are above 0, because nginx refuses a zero rate.
+- Block ports are unique across services. `http_port` differs from `https_port`, `quic_port` from `whodis_port`, and `connect_service` from `api_service`.
+- Identities use only `[A-Za-z0-9._-]`.
+- A block of weight 0 gets no new requests. nginx refuses `weight=0`, and the split gives it no bucket.
+
+Services (warp `services/lbalt.go`):
+- `LbAltService` names the service that declares lb_alt, `true` or `false`, so D2's "`true` under a disabled service default" works.
+- `LbAltBucketCount = 100` is the one source of the HMARK modulus.
+- Validation also refuses an effective lb_alt interface whose lb_alt service blocks can't be split into buckets.
+- Only the lb_alt service's own `tcp_stream_ports` are refused. Lb-level stream ports name no service and are not refused.
+
+Front API (§2.7): `AcquireQuicConnection` was added for alt's per-address QUIC cap. s-http implements it.
+
+Cross-unit warp functions:
+- They are stubbed in base with fixed signatures, in files their owners replace.
+- `warpctl/lbalt_route.go` (w-route): `renderLbAltRouteTable`, `writeLbAltRouteFile`, `removeLbAltRouteFile`.
+- `warpctl/lbalt_split.go` (w-split): `reconcileLbAltSplit`, `removeLbAltSplit`, `writeLbAltBlockChains`, `pollLbAltReadiness`.
+- w-units calls them. Their owners may add helpers, but not change these signatures.
+
+## 6. Status
+
+- [x] base-server
+- [x] base-warp
 - [ ] implementation units
 - [ ] parity harness (server, opt-in Docker test against the pinned lb image)
 - [ ] network-namespace harness (warp, opt-in Linux container test with two interfaces)
