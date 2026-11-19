@@ -15,10 +15,12 @@ package connect
 //     long-lived config and serves HTTP/1.1 and h2 through its HttpsHandler;
 //     TCP 80 serves its HttpHandler. QUIC dispatches each connection by its
 //     server name: connect names to connect's own handler, api names to an
-//     h3 server of the front's H3ApiHandler, anything else closed with
-//     0x1000; the per-address connection cap closes with 0x1001, and one
-//     handshake admission limit stands behind every socket (§4.4.4). Whodis
-//     is the same dispatch under decode53, with the route table's tlds.
+//     h3 server of the front's H3ApiHandler, and any other served name is
+//     closed with 0x1000, while a name the front doesn't serve, or none,
+//     fails the TLS handshake; the per-address connection cap closes with
+//     0x1001, and one handshake admission limit stands behind every socket
+//     (§4.4.4). Whodis is the same dispatch under decode53, with the route
+//     table's tlds.
 //   - supervision (D13, D22). Each socket is supervised on its own: a lost one
 //     is re-created at once, the backoff resetting after a healthy run, it
 //     reads as missing until it is back, and its siblings never notice.

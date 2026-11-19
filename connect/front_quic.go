@@ -15,7 +15,10 @@ package connect
 //     name, once the handshake proves the source's address, under the nginx
 //     front's per-address connection cap (0x1001), to connect's handler with
 //     the socket's carrier; an api name to an h3 server of the front's
-//     H3ApiHandler; anything else closed with 0x1000.
+//     H3ApiHandler; any other served name closed with 0x1000. A name the
+//     front doesn't serve, or none, never reaches the dispatch: the nginx
+//     front's QUIC TLS config has no certificate for it, so its handshake
+//     fails, as alt's did.
 //
 // Each api connection gets an http3.Server of its own. The drain shuts each
 // down gracefully while its transport can still send, which sends one GOAWAY
