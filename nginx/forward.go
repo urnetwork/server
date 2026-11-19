@@ -371,8 +371,8 @@ type forwardBodyFraming struct {
 // zero included, or a body of unknown length. A request with neither, as a
 // GET, gets no framing headers, as nginx's $proxy_internal_body_length is
 // empty for it. On h3 every request without a content-length has a body of
-// unknown length, so a buffered route frames none once its stream ends with
-// no data (upstreamGroup.serveHttp).
+// unknown length, so a buffered route frames none, and reserves nothing, for
+// one whose stream ends with no data (upstreamGroup.serveHttp).
 func forwardRequestHasBody(r *http.Request) bool {
 	if r.ContentLength != 0 {
 		return true

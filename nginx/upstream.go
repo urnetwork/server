@@ -246,22 +246,21 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				prefixBytes:     options.clientBodyBufferSize,
 				readTimeout:     options.clientBodyTimeout,
 				setReadDeadline: setClientReadDeadline,
+				// the vendored http3 gives every request without a
+				// content-length a body of unknown length, an h3 GET's
+				// included. One whose stream ends with no data has none to
+				// frame, as nginx's h3 frames none for a stream it finds
+				// ended with its head (ngx_http_v3_process_request_header),
+				// so it goes like an h1 or h2 GET: unframed, with nothing
+				// reserved for it, so a full body budget doesn't refuse it
+				absentWhenEmpty: r.ProtoMajor == 3,
 			})
 			if refusal != nil {
 				self.refuse(w, r, responseController, refusal)
 				return
 			}
-			defer storedBody.release()
-			if r.ProtoMajor == 3 && r.ContentLength < 0 && storedBody.length() == 0 {
-				// the vendored http3 gives every request without a
-				// content-length a body of unknown length, an h3 GET's
-				// included. One whose stream ended with no data has none to
-				// frame, as nginx's h3 frames none for a stream it finds
-				// ended with its head (ngx_http_v3_process_request_header),
-				// so it goes like an h1 or h2 GET, and its memory goes back
-				// now rather than at its end
-				storedBody.release()
-			} else {
+			if storedBody != nil {
+				defer storedBody.release()
 				request.storedBody = storedBody
 				request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
 			}

@@ -310,6 +310,97 @@ func TestBodyStoreUnknownLengthReservesBeforeFirstRead(t *testing.T) {
 	checkStoreEmpty(t, bodyStore)
 }
 
+// A body of unknown length read with absentWhenEmpty, as an h3 request
+// without a content-length is, reserves nothing while its read waits, an
+// empty read included: one that ends before any byte is no body, and one
+// whose first bytes arrive reserves the whole prefix before the read waits
+// again.
+func TestBodyStoreAbsentWhenEmptyReservesAtItsFirstBytes(t *testing.T) {
+	settings := DefaultBodySettings()
+	bodyStore, _ := newSpyBodyStore(t, settings)
+	for _, chunk := range [][]byte{{}, []byte("ten bytes!")} {
+		reader := &gatedReader{chunks: make(chan []byte), waiting: make(chan struct{})}
+		results := make(chan *storedBody, 1)
+		go func() {
+			storedBody, refusal := bodyStore.read(testContext(t), reader, bodyReadOptions{
+				declaredLength:  -1,
+				prefixBytes:     settings.MemoryPrefixBytes,
+				absentWhenEmpty: true,
+			})
+			if refusal != nil {
+				t.Errorf("chunk %q: refused %v", chunk, refusal)
+			}
+			results <- storedBody
+		}()
+		receiveBounded(t, reader.waiting, "the body read")
+		if memoryBytes, _, _, bodies := bodyStore.usage(); memoryBytes != 0 || bodies != 0 {
+			t.Errorf("chunk %q: before the first read the store holds memory %d for %d bodies, want nothing", chunk, memoryBytes, bodies)
+		}
+		reader.chunks <- chunk
+		receiveBounded(t, reader.waiting, "the body read")
+		wantMemoryBytes, wantBodies := int64(0), 0
+		if 0 < len(chunk) {
+			wantMemoryBytes, wantBodies = settings.MemoryPrefixBytes, 1
+		}
+		if memoryBytes, _, _, bodies := bodyStore.usage(); memoryBytes != wantMemoryBytes || bodies != wantBodies {
+			t.Errorf("chunk %q: after the read the store holds memory %d for %d bodies, want %d for %d", chunk, memoryBytes, bodies, wantMemoryBytes, wantBodies)
+		}
+		close(reader.chunks)
+		storedBody := receiveBounded(t, results, "stored body")
+		switch {
+		case len(chunk) == 0 && storedBody != nil:
+			t.Errorf("a body that ended with no bytes was stored, %d bytes", storedBody.length())
+		case 0 < len(chunk) && (storedBody == nil || !bytes.Equal(readStoredBody(t, storedBody), chunk)):
+			t.Errorf("chunk %q: stored %v", chunk, storedBody)
+		}
+		if storedBody != nil {
+			storedBody.release()
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
+// With the memory budget full, a body read with absentWhenEmpty that ends
+// before any byte is no body, refused by nothing, and one with bytes is the
+// local 503 after its first read. Read without it, or with a declared
+// length, a body is refused before its first read.
+func TestBodyStoreAbsentWhenEmptyUnderAFullBudget(t *testing.T) {
+	settings := DefaultBodySettings()
+	// no prefix fits
+	settings.MemoryBudgetBytes = 1
+	bodyStore, _ := newSpyBodyStore(t, settings)
+	for _, c := range []struct {
+		name            string
+		body            []byte
+		declaredLength  int64
+		absentWhenEmpty bool
+		wantReads       int
+		wantRefused     bool
+	}{
+		{name: "absent", declaredLength: -1, absentWhenEmpty: true, wantReads: 1},
+		{name: "with bytes", body: []byte("ten bytes!"), declaredLength: -1, absentWhenEmpty: true, wantReads: 1, wantRefused: true},
+		{name: "empty, read without absentWhenEmpty", declaredLength: -1, wantReads: 0, wantRefused: true},
+		{name: "of declared length", body: []byte("ten bytes!"), declaredLength: 10, absentWhenEmpty: true, wantReads: 0, wantRefused: true},
+	} {
+		reader := &countingReader{reader: bytes.NewReader(c.body)}
+		storedBody, refusal := bodyStore.read(testContext(t), reader, bodyReadOptions{
+			declaredLength:  c.declaredLength,
+			prefixBytes:     settings.MemoryPrefixBytes,
+			absentWhenEmpty: c.absentWhenEmpty,
+		})
+		switch {
+		case c.wantRefused && (refusal == nil || refusal.status != http.StatusServiceUnavailable || refusal.reason != bodyRefusalMemoryBudget):
+			t.Errorf("%s: %v, want a local 503", c.name, refusal)
+		case !c.wantRefused && (refusal != nil || storedBody != nil):
+			t.Errorf("%s: stored %v, refused %v, want no body", c.name, storedBody, refusal)
+		}
+		if reader.reads != c.wantReads {
+			t.Errorf("%s: %d reads, want %d", c.name, reader.reads, c.wantReads)
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
 // With the memory budget full, a body is a local 503 before its first read;
 // once a body is released, the next one fits.
 func TestBodyStoreMemoryBudget(t *testing.T) {

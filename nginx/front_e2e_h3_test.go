@@ -168,3 +168,53 @@ func TestFrontE2eH3BodilessRequestHasNoFraming(t *testing.T) {
 		t.Errorf("the h3 POST of no declared length reached the block with Content-Length %q and body %q", last.header.Get("Content-Length"), last.body)
 	}
 }
+
+// With the body budget full, as bodies held by other requests can fill it,
+// an h3 GET still reaches its block, as the same GET does over h1 and h2 and
+// through nginx's h3, which peeks at the stream: its body of unknown length
+// reserves nothing until bytes arrive, and none do. An h3 POST of no
+// declared length is still the local 503 once its bytes arrive, and reaches
+// no block.
+func TestFrontE2eH3BodilessRequestNeedsNoBodyBudget(t *testing.T) {
+	settings := e2eFrontSettings(t)
+	// no body's prefix fits
+	settings.Body.MemoryBudgetBytes = 1
+	e2e := newE2eFront(t, settings, nil)
+	client := newE2eH3ApiClient(t, e2e)
+
+	beforeBudget := bodyRefusalCount("api", bodyRefusalMemoryBudget)
+	response, err := client.Do(newE2eRequest(t, "GET", "https://api.service.example/v1/get", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if count := bodyRefusalCount("api", bodyRefusalMemoryBudget) - beforeBudget; count != 0 {
+		t.Errorf("the h3 GET counted %v budget refusals, want none", count)
+	}
+	if response.ProtoMajor != 3 || response.StatusCode != http.StatusOK {
+		t.Fatalf("the h3 GET with the budget full = HTTP/%d %d, want the block's 200", response.ProtoMajor, response.StatusCode)
+	}
+	if got := e2e.awaitServiceRequests(t, "api", 1)[0]; got.method != "GET" || got.requestUri != "/v1/get" {
+		t.Errorf("the block got %s %s, want the GET", got.method, got.requestUri)
+	}
+
+	requestCounts := e2e.requestCounts()
+	// a body the client didn't measure, so it declares no length
+	response, err = client.Do(newE2eRequest(t, "POST", "https://api.service.example/unmeasured", io.NopCloser(strings.NewReader("0123456789"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.ProtoMajor != 3 || response.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("the h3 POST of no declared length with the budget full = HTTP/%d %d, want the local 503", response.ProtoMajor, response.StatusCode)
+	}
+	if count := bodyRefusalCount("api", bodyRefusalMemoryBudget) - beforeBudget; count != 1 {
+		t.Errorf("the h3 POST counted %v budget refusals, want 1", count)
+	}
+	if requests := e2e.requestsSince(requestCounts); len(requests) != 0 {
+		t.Errorf("the refused h3 POST reached a block: %d requests", len(requests))
+	}
+	if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+		t.Errorf("the store holds %d bytes, %d spilled in %d files, for %d bodies, want nothing", memoryBytes, spillBytes, spillFiles, bodies)
+	}
+}
