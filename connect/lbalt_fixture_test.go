@@ -117,6 +117,9 @@ type testLbAltEnvSettings struct {
 	exchangeSettings func(settings *ExchangeSettings)
 	// adjusts the front server's settings before the start
 	frontSettings func(settings *FrontServerSettings)
+	// hands the front its udp sockets in wrappers whose writes a test can fail
+	// (testLbAltBinds.failable)
+	failableUdp bool
 }
 
 // One connect block fronting its interfaces, with its exchange and, in the
@@ -157,7 +160,7 @@ func newTestLbAltEnv(t testing.TB, envSettings *testLbAltEnvSettings) *testLbAlt
 		ctx:                    ctx,
 		cancel:                 cancel,
 		warpStatus:             &router.WarpStatusState{},
-		binds:                  newTestLbAltBinds(),
+		binds:                  newTestLbAltBinds(envSettings.failableUdp),
 		quicResults:            make(chan string, 256),
 		websocketUpstreamConns: make(chan *websocket.Conn, 16),
 	}
@@ -1026,25 +1029,34 @@ func (self *testLbAltEnv) newApiStrategy(address netip.Addr, portKind string) *c
 }
 
 // Records the front's binds in order by bind address, and lets a test hold
-// the binds of one address and fail or wrap the udp sockets it hands the
-// front.
+// the binds of one address and fail the writes of the udp sockets it hands
+// the front.
 type testLbAltBinds struct {
+	// hands the front each udp socket in a wrapper whose writes a test can
+	// fail. A wrapped socket is no *net.UDPConn, so quic-go then reads and
+	// writes it without GSO, ECN or OOB; unwrapped, the front gets the raw
+	// socket, as in production.
+	failable bool
 	// successful binds so far, for tests to wait on
 	boundCount *connect.MonitorValue[int]
 
 	stateLock   sync.Mutex
-	packetConns map[string][]*testLbAltPacketConn
-	listeners   map[string][]net.Listener
-	holds       map[string]*testLbAltBindHold
+	packetConns map[string][]net.PacketConn
+	// the wrappers, when failable
+	failingConns map[string][]*testLbAltPacketConn
+	listeners    map[string][]net.Listener
+	holds        map[string]*testLbAltBindHold
 }
 
 // Binds that record and never hold until told to.
-func newTestLbAltBinds() *testLbAltBinds {
+func newTestLbAltBinds(failable bool) *testLbAltBinds {
 	return &testLbAltBinds{
-		boundCount:  connect.NewMonitorValue(0),
-		packetConns: map[string][]*testLbAltPacketConn{},
-		listeners:   map[string][]net.Listener{},
-		holds:       map[string]*testLbAltBindHold{},
+		failable:     failable,
+		boundCount:   connect.NewMonitorValue(0),
+		packetConns:  map[string][]net.PacketConn{},
+		failingConns: map[string][]*testLbAltPacketConn{},
+		listeners:    map[string][]net.Listener{},
+		holds:        map[string]*testLbAltBindHold{},
 	}
 }
 
@@ -1126,27 +1138,33 @@ func (self *testLbAltBinds) beforeBind(protocol string, address string) {
 	}
 }
 
-// FrontServerSettings.ListenPacket: the front's own SO_REUSEPORT bind, with
-// the socket in a wrapper a test can fail writes on. A wrapped socket is no
-// *net.UDPConn, so quic-go reads and writes it without GSO, ECN or OOB.
+// FrontServerSettings.ListenPacket: the front's own SO_REUSEPORT bind,
+// recorded, and wrapped when failable.
 func (self *testLbAltBinds) listenPacket(network string, address string) (net.PacketConn, error) {
 	self.beforeBind(frontProtocolUdp, address)
 	packetConn, err := listenFrontPacket(network, address)
 	if err != nil {
 		return nil, err
 	}
-	wrapped := &testLbAltPacketConn{
-		PacketConn: packetConn,
+	var failingConn *testLbAltPacketConn
+	if self.failable {
+		failingConn = &testLbAltPacketConn{
+			PacketConn: packetConn,
+		}
+		packetConn = failingConn
 	}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.packetConns[address] = append(self.packetConns[address], wrapped)
+		self.packetConns[address] = append(self.packetConns[address], packetConn)
+		if failingConn != nil {
+			self.failingConns[address] = append(self.failingConns[address], failingConn)
+		}
 	}()
 	self.boundCount.Update(func(boundCount int) int {
 		return boundCount + 1
 	})
-	return wrapped, nil
+	return packetConn, nil
 }
 
 // FrontServerSettings.Listen: the front's own SO_REUSEPORT bind, recorded.
@@ -1167,11 +1185,19 @@ func (self *testLbAltBinds) listen(network string, address string) (net.Listener
 	return listener, nil
 }
 
-// The udp sockets bound on address, in bind order.
-func (self *testLbAltBinds) boundPacketConns(address netip.AddrPort) []*testLbAltPacketConn {
+// The udp sockets bound on address, in bind order, as the front got them.
+func (self *testLbAltBinds) boundPacketConns(address netip.AddrPort) []net.PacketConn {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return slices.Clone(self.packetConns[address.String()])
+}
+
+// The wrappers of the udp sockets bound on address, in bind order, when
+// failable.
+func (self *testLbAltBinds) boundFailingConns(address netip.AddrPort) []*testLbAltPacketConn {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.failingConns[address.String()])
 }
 
 // The tcp listeners bound on address, in bind order.
