@@ -194,6 +194,7 @@ func TestFreshClientSessionUnbindsItsClientWhenRedisDoesNotRegister(t *testing.T
 		defer pop()
 		untagged := testingUntaggedMints(SessionKindClient)
 		var signed string
+		var elapsed time.Duration
 		err := sessionTx(ctx, func(tx server.PgTx) error {
 			if err := LockSessionLifecycle(ctx, tx, network.networkId, false); err != nil {
 				return err
@@ -202,11 +203,19 @@ func TestFreshClientSessionUnbindsItsClientWhenRedisDoesNotRegister(t *testing.T
 				return err
 			}
 			var err error
+			start := time.Now()
 			signed, err = RegisterAndSignInTx(ctx, tx, mint, "api_key_client", nil, false)
+			elapsed = time.Since(start)
 			return err
 		})
 		if err != nil || signed == "" {
 			t.Fatalf("the client mint failed while Redis did not answer: %v", err)
+		}
+		// each Redis step of the mint waits at most the mint budget: the
+		// top-level client's exemption read (model's, linked into this test
+		// binary), then the clock sample. RedisAuth alone would wait 2 s.
+		if bound := 3*SessionMintRedisBudget + time.Second; bound < elapsed {
+			t.Errorf("the client mint took %s while Redis did not answer, past %s", elapsed, bound)
 		}
 		if mint.SessionId != nil || mint.RootClientId == nil {
 			t.Fatalf("the untagged client token has session %v and root %v", mint.SessionId, mint.RootClientId)

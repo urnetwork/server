@@ -79,9 +79,18 @@ func clientCapSessionExemptUntilInTx(ctx context.Context, tx server.PgTx, networ
 	delete(clientCapSessionMirror.entries, clientId)
 	clientCapSessionMirror.stateLock.Unlock()
 	now := server.NowUtc()
-	exemptUntil, err := ClientCapExemptUntil(ctx, networkId, clientId, now)
-	if err != nil || !exemptUntil.IsZero() {
-		return exemptUntil, err
+	// Within the mint budget, as the mint's registration: a Redis that does
+	// not answer is a mint Redis does not register, which falls back to an
+	// untagged or unextended token (owner decision 3) rather than holding the
+	// mint's transaction for RedisAuth's two seconds and failing it.
+	redisCtx, cancelRedis := context.WithTimeout(ctx, session.SessionMintRedisBudget)
+	exemptUntil, err := ClientCapExemptUntil(redisCtx, networkId, clientId, now)
+	cancelRedis()
+	if err != nil {
+		return time.Time{}, errors.Join(session.ErrAuthUnavailable, session.ErrSessionStoreUnavailable, err)
+	}
+	if !exemptUntil.IsZero() {
+		return exemptUntil, nil
 	}
 	var createTime time.Time
 	err = tx.QueryRow(ctx, `SELECT create_time FROM network_client_provider_intent WHERE client_id = $1`, clientId).Scan(&createTime)
