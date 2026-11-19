@@ -6,9 +6,12 @@ package nginx
 // certificate takes effect on the next connect deploy (D6, rotation (a)). The
 // lookup is warpctl's findLatestTls, over every vault layout a block can see:
 // the build machine's <vault>/<env>/tls and <vault>/all/tls, and the flat
-// <vault>/tls a host has, which xops merges from both. Unlike warpctl, the
-// store also checks what nginx never did: each key matches its certificate,
-// each certificate's SANs cover the name it serves, and each is valid now.
+// <vault>/tls a host has, which xops merges from both. Each key must match
+// its certificate, as nginx requires too: OpenSSL's SSL_CTX_use_PrivateKey
+// checks the key against the certificate loaded before it ("key values
+// mismatch"), and nginx then refuses its configuration. The store checks two
+// things nginx never did: each certificate's SANs cover the name it serves,
+// and each leaf is valid now, between its NotBefore and NotAfter.
 //
 // The two base configs are built once and shared by every socket of the
 // block, so Go's automatic per-process session ticket keys span all of them
