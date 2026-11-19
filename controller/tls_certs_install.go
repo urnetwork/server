@@ -29,14 +29,19 @@ package controller
 //	               in either app mode. A name the rules write as a glob, as
 //	               the implicit document's dns:* does, is asked as one host the
 //	               glob names, so the answer is the gate's own for a
-//	               registration of that host. A scope host's grant is left out
-//	               until TLS-M6-03 gives a scope's devices their own set, so a
-//	               device granted only there holds no network set meanwhile
+//	               registration of that host. A network-level device is
+//	               granted by its one-label hosts, and a Team scope's device
+//	               by its own scope's hosts alone (TLS-M6-03), so a device
+//	               granted only on a scope host holds no network set
 //	identifier set sidecar.TlsIdentifierSet over certs.yml's root, the
 //	               network's label and its live aliases
 //	               (model.GetNetworkTlsCertNames), the set POST /dns/key-record
 //	               attests; a granted network with no label yet takes one,
-//	               §12.5's first need at an order
+//	               §12.5's first need at an order. A scope device's set is its
+//	               scope's pair alone, and a member scope's only for its
+//	               member's consented devices (owner decisions 40, 58, 126),
+//	               the scope read from the state by ScopeOf, which finds none
+//	               until §7.9's rows carry TeamScopeRow
 //
 // Anything the projection, §21's standing or Postgres cannot answer is an
 // error, which the route answers 503: a network whose state the cache has not
@@ -153,6 +158,20 @@ type TlsCertsInstallDeps struct {
 	// A network's label in root and its live aliases; allocate gives a network
 	// with no label one. nil: model.GetNetworkTlsCertNames.
 	Names func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (label string, aliases []string, err error)
+	// The Team scope a sidecar's device holds its certificate in, read from
+	// the network's verified state, false for a network-level device
+	// (TLS-M6-03). nil: tlsCertScopeOf, which finds none, since §7.9's rows
+	// carry no TeamScopeRow yet (protos-bridge-row-fields #3).
+	ScopeOf func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool)
+}
+
+// The Team scope of a sidecar's device in the state: none. §7.9's rows carry
+// no TeamScopeRow yet (protos-bridge-row-fields #3), so no state places a
+// device in a scope, every device orders its network's set, and a scope host's
+// grant gives no set, the closed direction, until the rows carry scopes and a
+// source here reads them, as socketsservice.SocketScopeSource will.
+func tlsCertScopeOf(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
+	return sidecar.AclScope{}, false
 }
 
 // api's certs install as server.SidecarSwitchInstall drives it: nothing is
@@ -289,12 +308,17 @@ func buildTlsCerts(ctx context.Context, deps *TlsCertsInstallDeps, settings *Tls
 		closeGate()
 		return nil, fmt.Errorf("%w: the engine: %w", ErrTlsCertsInstall, err)
 	}
+	scopeOf := deps.ScopeOf
+	if scopeOf == nil {
+		scopeOf = tlsCertScopeOf
+	}
 	source := &tlsCertSubjectSource{
 		root:     config.Settings.RootDomain,
 		states:   gate.States,
 		view:     sidecar.NewAclGateView(gate.States, gate.Abuse, nil),
 		abuse:    gate.Abuse,
 		names:    names,
+		scopeOf:  scopeOf,
 		settings: settings,
 	}
 	installed := &TlsCertsDeps{
@@ -390,6 +414,7 @@ type tlsCertSubjectSource struct {
 	// asked at an order's start so a standing not loaded is on its way; may be nil
 	abuse    sidecar.AbuseGate
 	names    func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (label string, aliases []string, err error)
+	scopeOf  func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool)
 	settings *TlsCertsInstallSettings
 }
 
@@ -413,7 +438,13 @@ func (self *tlsCertSubjectSource) subject(ctx context.Context, principal *sideca
 		// no sidecar of the network the projection admits now: granted nothing
 		return &TlsCertSubject{}, nil
 	}
-	granted, err := self.granted(snapshot, networkId, sidecarId, now)
+	// TLS-M6-03: a Team scope's device holds only its scope's pair, and a member scope's set goes only to its member's
+	// consented devices (owner decisions 40, 58, 126); a scope device is granted nothing for the network's own set
+	scope, scoped := self.scopeOf(snapshot, sidecarId)
+	if scoped && scope.MemberId != (sidecar.Id{}) && !snapshot.Acl.ConsentedFor(sidecarId, scope.MemberId) {
+		return &TlsCertSubject{IdentityPublicKey: identityPublicKey}, nil
+	}
+	granted, err := self.granted(snapshot, networkId, sidecarId, scope, scoped, now)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +458,7 @@ func (self *tlsCertSubjectSource) subject(ctx context.Context, principal *sideca
 	if label == "" {
 		return nil, fmt.Errorf("%w: the network has no label", ErrTlsCertSubjectUnavailable)
 	}
-	identifierSet, err := sidecar.TlsIdentifierSet(self.root, label, "", aliases)
+	identifierSet, err := tlsCertSubjectIdentifierSet(self.root, label, scope, scoped, aliases)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the network's names give no identifier set", ErrTlsCertSubjectUnavailable)
 	}
@@ -436,6 +467,20 @@ func (self *tlsCertSubjectSource) subject(ctx context.Context, principal *sideca
 		IdentityPublicKey: identityPublicKey,
 		Granted:           true,
 	}, nil
+}
+
+// §13.8's set for the subject (TLS-M6-03): a scope device's scope pair alone, whatever aliases say, and a
+// network-level device's network pair with each live alias's pair beside it, which §12 answers once a device holds
+// it (DnsAliasCertifiedInTx at the issue). certs takes a CSR only for exactly this set (certsCheckCsr), so a scope
+// device's CSR for the network pair, and a network device's for a scope's, are refused.
+func tlsCertSubjectIdentifierSet(root string, label string, scope sidecar.AclScope, scoped bool, aliases []string) ([]string, error) {
+	if scoped {
+		if scope.Label == "" {
+			return nil, sidecar.ErrTlsIdentifierSet
+		}
+		return sidecar.TlsIdentifierSet(root, label, scope.Label, nil)
+	}
+	return sidecar.TlsIdentifierSet(root, label, "", aliases)
 }
 
 // The network's loaded state, asking the cache to load it when it holds none
@@ -508,7 +553,7 @@ func tlsCertIdentityKey(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id)
 // Whether the gate holds an active smtp/ or tls/ grant of the network for the
 // sidecar at now (the file header's grant row). An error is a refusal that
 // says nothing of the grant: a state or a standing the view has not loaded.
-func (self *tlsCertSubjectSource) granted(snapshot *sidecar.AclGateSnapshot, networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) (bool, error) {
+func (self *tlsCertSubjectSource) granted(snapshot *sidecar.AclGateSnapshot, networkId sidecar.Id, sidecarId sidecar.Id, scope sidecar.AclScope, scoped bool, now time.Time) (bool, error) {
 	subject := sidecar.AclSidecarSubject(sidecarId)
 	unloaded := func(decision sidecar.AclDecision) error {
 		if !decision.Allowed && decision.Reason == sidecar.AclReasonNoState {
@@ -524,8 +569,9 @@ func (self *tlsCertSubjectSource) granted(snapshot *sidecar.AclGateSnapshot, net
 		return true, nil
 	}
 	for _, name := range snapshot.Acl.PublishedNames(now) {
-		if strings.Contains(name.Host, ".") {
-			// a scope host: TLS-M6-03's
+		// a network-level device's set rides its one-label hosts, and a scope device's its own scope's hosts alone
+		// (TLS-M6-03), so neither is granted its set by the other's grant
+		if _, hostScope, scopeHost := strings.Cut(name.Host, "."); scopeHost != scoped || scoped && hostScope != scope.Label {
 			continue
 		}
 		host := strings.ReplaceAll(name.Host, "*", tlsCertsGlobHostFill)

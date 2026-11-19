@@ -29,8 +29,10 @@ package model
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -562,14 +564,111 @@ func (self *CertsStore) TransitionCert(ctx context.Context, transition *certsser
 	if transition.At.IsZero() {
 		return false, certsservice.ErrCertsStateTime
 	}
+	var aliasWrites []*tlsCertAliasWrite
 	returnErr = self.run(ctx, func(ctx context.Context) {
+		// read committed, as the alias's zone write that an issue joins must be (DnsWriteInTx); the move itself is
+		// one compare-and-move UPDATE, which no isolation level changes
 		server.Tx(ctx, func(tx server.PgTx) {
+			aliasWrites = nil
 			var err error
 			applied, err = transitionCertInTx(ctx, tx, transition)
 			server.Raise(err)
-		})
+			if applied && transition.To == sidecar.TlsCertStateIssued && 0 < len(transition.Chain) {
+				aliasWrites, err = certifyTlsCertAliasesInTx(ctx, tx, transition.CertId, transition.At)
+				server.Raise(err)
+			}
+		}, server.TxReadCommitted)
 	})
+	if returnErr == nil {
+		for _, write := range aliasWrites {
+			DnsWritePost(ctx, write.root, write.serial, write.networkId)
+		}
+	}
 	return
+}
+
+// One alias a chain's issue certified, whose zone write's serial is raised after the commit.
+type tlsCertAliasWrite struct {
+	root      string
+	networkId server.Id
+	serial    uint64
+}
+
+// The live aliases a row's set names a pair of, {*.<alias>.<root>, <alias>.<root>}, in each root the network holds
+// names in, by root: what DnsAliasCertifiedInTx certifies (TLS-M6-03; DNS's reading 11). The network's own label's
+// pair is no alias's, and a name a CSR does not hold whole names nothing.
+func tlsCertAliasPairs(names []string, roots []string, labels map[string]string) map[string][]string {
+	held := map[string]bool{}
+	for _, name := range names {
+		held[strings.ToLower(strings.TrimSuffix(name, "."))] = true
+	}
+	rootAliases := map[string][]string{}
+	for _, root := range roots {
+		zoneSuffix := "." + strings.TrimSuffix(root, ".")
+		for name := range held {
+			zone, wildcard := strings.CutPrefix(name, "*.")
+			if !wildcard || !held[zone] {
+				continue
+			}
+			alias, found := strings.CutSuffix(zone, zoneSuffix)
+			if !found || alias == "" || strings.Contains(alias, ".") || alias == labels[root] {
+				continue
+			}
+			rootAliases[root] = append(rootAliases[root], alias)
+		}
+		slices.Sort(rootAliases[root])
+	}
+	return rootAliases
+}
+
+// Certifies, in tx, each live alias of the row's network whose pair the row's set names, as the issue of its chain
+// at issueTime: dns_label.certified_time is set once and the alias takes its label's apex from that write's serial
+// (DnsAliasCertifiedInTx), so a network's alias answers only once a device holds a certificate for it (§13.8's set
+// row, I-14). A name that is no live alias, a retiring one among them, takes no certificate and is passed over; any
+// other refusal fails the issue, which certs' next pass moves again. Returns the writes whose serials to raise.
+func certifyTlsCertAliasesInTx(ctx context.Context, tx server.PgTx, certId sidecar.Id, issueTime time.Time) ([]*tlsCertAliasWrite, error) {
+	if !dnsAliasLinked() {
+		return nil, nil
+	}
+	var networkId server.Id
+	var csr []byte
+	found := false
+	result, err := tx.Query(ctx, `SELECT network_id, csr FROM network_tls_cert WHERE cert_id = $1`, server.Id(certId))
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&networkId, &csr))
+			found = true
+		}
+	})
+	if !found || len(csr) == 0 {
+		return nil, nil
+	}
+	request, err := x509.ParseCertificateRequest(csr)
+	if err != nil {
+		// a row's CSR was checked at its acceptance; one that does not parse names no alias
+		return nil, nil
+	}
+	roots := getNetworkDnsRootsInTx(ctx, tx, networkId)
+	labels := map[string]string{}
+	for _, root := range roots {
+		labels[root] = getNetworkLabelInTx(ctx, tx, networkId, root)
+	}
+	writes := []*tlsCertAliasWrite{}
+	for root, aliases := range tlsCertAliasPairs(request.DNSNames, roots, labels) {
+		for _, alias := range aliases {
+			write, err := DnsAliasCertifiedInTx(ctx, tx, root, networkId, alias, issueTime)
+			if errors.Is(err, ErrDnsAliasNotLive) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if write != nil {
+				writes = append(writes, &tlsCertAliasWrite{root: root, networkId: networkId, serial: write.Serial})
+			}
+		}
+	}
+	return writes, nil
 }
 
 // CertsStore.TransitionCert in the caller's transaction, which custom rows' moves join (TLS-M6-05): one

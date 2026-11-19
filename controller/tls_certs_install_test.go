@@ -213,6 +213,8 @@ type tlsInstallTestWorld struct {
 	// by network: the label and aliases the names read answers
 	labels  map[sidecar.Id]string
 	aliases map[sidecar.Id][]string
+	// by sidecar: the Team scope its device holds its set in (TLS-M6-03)
+	scopes map[sidecar.Id]sidecar.AclScope
 	// the names reads, as "<network>:<allocate>"
 	nameReads []string
 	namesErr  error
@@ -229,6 +231,7 @@ func newTlsInstallTestWorld(t *testing.T) *tlsInstallTestWorld {
 		certsConfig:  []byte("root: " + tlsTestRoot + "\n"),
 		labels:       map[sidecar.Id]string{},
 		aliases:      map[sidecar.Id][]string{},
+		scopes:       map[sidecar.Id]sidecar.AclScope{},
 	}
 	// the routes start with nothing installed, as a process does
 	SetTlsCerts(nil)
@@ -270,6 +273,10 @@ func newTlsInstallTestWorld(t *testing.T) *tlsInstallTestWorld {
 				return "", nil, fmt.Errorf("names read in %q", root)
 			}
 			return world.labels[networkId], world.aliases[networkId], nil
+		},
+		ScopeOf: func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
+			scope, ok := world.scopes[sidecarId]
+			return scope, ok
 		},
 	}, settings)
 	world.install.Testing_SetLog(func(format string, arguments ...any) {
@@ -621,4 +628,66 @@ func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
 			t.Fatalf("an order once sidecar.yml names no certs switch answered %v", err)
 		}
 	}()
+}
+
+// TLS-M6-03: a Team scope's device orders its scope's pair alone, granted by its scope's hosts; its CSR for the
+// network's pair is refused, as a network device's CSR for a scope's pair is; and a member scope's device that is no
+// consented device of the member is granted nothing. With no scope source a device is the network's (tlsCertScopeOf).
+func TestTlsCertsInstallSubjectGivesAScopeDeviceItsScopePairAlone(t *testing.T) {
+	world := newTlsInstallTestWorld(t)
+	network := world.network("acme", "shop")
+	scoped := network.device([]string{"app.team", "tls/443/app.team"}, tlsInstallTestPublish...)
+	networkDevice := network.device(tlsInstallTestImplicitTargets, tlsInstallTestPublish...)
+	unconsented := network.device([]string{"app.crew", "tls/443/app.crew"}, tlsInstallTestPublish...)
+	network.load()
+	world.scopes[scoped.sidecarId] = sidecar.AclScope{Label: "team"}
+	world.scopes[unconsented.sidecarId] = sidecar.AclScope{Label: "crew", MemberId: sidecar.NewId()}
+	world.on = true
+	if !world.install.Sync(world.ctx) {
+		t.Fatalf("not installed: %q", world.lines)
+	}
+
+	scopeSet, err := sidecar.TlsIdentifierSet(tlsTestRoot, "acme", "team", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := TlsCertOrder(world.ctx, scoped.token, world.orderArgs(scoped, scopeSet))
+	if err != nil || result.State != sidecar.TlsCertStateQueued {
+		t.Fatalf("the scope device's order for its scope's pair: %+v, %v", result, err)
+	}
+	if _, err := TlsCertOrder(world.ctx, scoped.token, world.orderArgs(scoped, scoped.identifierSet)); err == nil || tlsTestStatus(err, "503") {
+		t.Fatalf("the scope device's order for the network's pair answered %v", err)
+	}
+	if _, err := TlsCertOrder(world.ctx, networkDevice.token, world.orderArgs(networkDevice, scopeSet)); err == nil || tlsTestStatus(err, "503") {
+		t.Fatalf("a network device's order for a scope's pair answered %v", err)
+	}
+	// the network device's own set, its aliases' pairs beside its label's, is what it orders
+	if result, err := world.order(networkDevice); err != nil || result.State != sidecar.TlsCertStateQueued {
+		t.Fatalf("the network device's order: %+v, %v", result, err)
+	}
+	if _, err := world.order(unconsented); !tlsTestStatus(err, "403") {
+		t.Fatalf("an unconsented member scope device's order answered %v", err)
+	}
+	if rows := world.store.Rows(); len(rows) != 2 {
+		t.Fatalf("%d rows for two granted orders", len(rows))
+	}
+}
+
+// The subject's set: a scope device's scope pair alone, whatever aliases say, and a network device's label pair
+// with each alias's pair beside it.
+func TestTlsCertSubjectIdentifierSet(t *testing.T) {
+	scoped, err := tlsCertSubjectIdentifierSet(tlsTestRoot, "acme", sidecar.AclScope{Label: "team"}, true, []string{"shop"})
+	if err != nil || !slices.Equal(scoped, []string{"*.team.acme." + tlsTestRoot, "team.acme." + tlsTestRoot}) {
+		t.Fatalf("a scope device's set: %v, %v", scoped, err)
+	}
+	networkSet, err := tlsCertSubjectIdentifierSet(tlsTestRoot, "acme", sidecar.AclScope{}, false, []string{"shop"})
+	if err != nil || !slices.Equal(networkSet, []string{"*.acme." + tlsTestRoot, "*.shop." + tlsTestRoot, "acme." + tlsTestRoot, "shop." + tlsTestRoot}) {
+		t.Fatalf("a network device's set: %v, %v", networkSet, err)
+	}
+	if _, err := tlsCertSubjectIdentifierSet(tlsTestRoot, "acme", sidecar.AclScope{}, true, nil); err == nil {
+		t.Fatal("a scope with no label gave a set")
+	}
+	if _, ok := tlsCertScopeOf(nil, sidecar.NewId()); ok {
+		t.Fatal("the default scope source placed a device in a scope")
+	}
 }
