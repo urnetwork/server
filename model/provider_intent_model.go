@@ -851,7 +851,8 @@ func observeProviderIntentAt(
 		record = value
 	})
 	state, err := parseProviderIntentRecord(record)
-	if err != nil {
+	if err != nil || state == nil {
+		// no live record (an empty record parses as nil)
 		return nil
 	}
 	// a presence refresh renews the session cap's record of the exemption
