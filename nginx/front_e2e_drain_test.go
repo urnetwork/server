@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,4 +138,52 @@ func TestFrontE2eDrainClosesConnectionsAndKeepsWebsockets(t *testing.T) {
 	conn.Close()
 	waitE2eClosed(t, websocketBlock.ended, "the block's end of the tunnel")
 	eth1.httpsServed.await(t, "/ws")
+}
+
+// During the drain a new upgrade to a forwarded websocket service is a 503
+// however its Connection header reads: the forwarder tunnels on the block's
+// 101 to any h1 request with an Upgrade header, sending Connection: upgrade
+// itself, as nginx does, so one without the client's own Connection token
+// would otherwise open a tunnel that holds the draining generation. It never
+// reaches the block. Before the drain, the same request tunnels.
+func TestFrontE2eDrainRefusesAnUpgradeWithoutTheConnectionToken(t *testing.T) {
+	e2e := newE2eFront(t, nil, nil)
+	eth1 := e2e.iface(t, "eth1")
+	websocketBlock := newE2eWebsocketBlock()
+	gossip := e2e.upstream(t, "gossip", "g1")
+	gossip.setHandler(websocketBlock.serveHttp)
+	upgradeHead := func(path string) []string {
+		return []string{
+			"GET " + path + " HTTP/1.1",
+			"Host: gossip.service.example",
+			"Upgrade: websocket",
+			"Sec-WebSocket-Version: 13",
+			"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+		}
+	}
+	upgrade := func(path string) *http.Response {
+		rawConn := e2e.dialRaw(t, eth1.httpsAddr, "gossip.service.example")
+		rawConn.conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
+		if _, err := io.WriteString(rawConn.conn, strings.Join(upgradeHead(path), "\r\n")+"\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		response, err := http.ReadResponse(rawConn.reader, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		return response
+	}
+
+	if response := upgrade("/ws-before-the-drain"); response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("an upgrade without the Connection token before the drain = %d, want the block's 101", response.StatusCode)
+	}
+
+	e2e.front.BeginDrain()
+	requestCounts := e2e.requestCounts()
+	if response := upgrade("/ws-during-the-drain"); response.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("an upgrade without the Connection token during the drain = %d, want 503", response.StatusCode)
+	}
+	if requests := e2e.requestsSince(requestCounts); len(requests) != 0 {
+		t.Errorf("the upgrade during the drain reached %v", e2eRequestServices(requests))
+	}
 }

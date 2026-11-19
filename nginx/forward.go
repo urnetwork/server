@@ -292,6 +292,16 @@ func forwardedForValue(clientAddrPort netip.AddrPort) string {
 	return addrText + ":" + port
 }
 
+// Whether a request to a service tunnels once its block answers 101: an h1
+// request with an Upgrade header to a websocket service. nginx relays
+// $http_upgrade there, with its own Connection: upgrade, and tunnels on the
+// block's 101 whatever the client's Connection header says
+// (ngx_http_proxy_process_header); only HTTP/1.1 can upgrade. The
+// drain refuses such a request by the same test (routeHttpHandler.serveProxy).
+func forwardUpgradeRequested(r *http.Request, websocket bool) bool {
+	return websocket && r.ProtoMajor == 1 && r.Header.Get(upgradeHeader) != ""
+}
+
 // The upstream Host: routing's normalized authority, or the request's Host
 // lowercased, without its port and one trailing dot, as nginx's $host is for
 // any host routing accepts.

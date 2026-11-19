@@ -183,9 +183,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 		return responseController.SetReadDeadline(deadline)
 	}
 
-	// nginx relays $http_upgrade on a websocket service, and tunnels when
-	// the block answers 101 to a request that had one; only HTTP/1.1 can
-	upgrade := options.websocket && r.ProtoMajor == 1 && r.Header.Get(upgradeHeader) != ""
+	upgrade := forwardUpgradeRequested(r, options.websocket)
 	request := &upstreamRequest{
 		method:       r.Method,
 		upgrade:      upgrade,

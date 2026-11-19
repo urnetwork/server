@@ -675,8 +675,13 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 	// nginx's `proxy_set_header Host $host`
 	r.Host = host
 
-	if self.front.Draining() && routeHttpUpgradeRequested(r) {
-		// a new tunnel would hold this generation for the whole drain
+	// a new tunnel would hold this generation for the whole drain: one to
+	// connect in-process, whose upgrades need the Connection token as
+	// connect checks them, and one the forwarder would open, which needs
+	// only an Upgrade header, as nginx's tunnel does
+	upgradeRequested := routeHttpUpgradeRequested(r) ||
+		(!location.inProcess && forwardUpgradeRequested(r, routeService.service.Websocket))
+	if self.front.Draining() && upgradeRequested {
 		exchange.respondError(http.StatusServiceUnavailable)
 		return
 	}
