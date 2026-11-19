@@ -787,41 +787,60 @@ gates:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+    - item: '§23.6''s M5 design closure: the ALPN audience and the custom-SNI map (§13); report parsing (§14); hold kinds and abuse clocks (§21); Q-OPS-5'
+      external: 'people: the Gn-in review reads and signs the closure (§23.8), re-reading M10''s hold cases for this gate (D-PHASE-8)'
   M5:
     - row: FS-25
       case: dns-route
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs25DnsRouteOnT3]}
+        - {repo: server, package: ./api, tags: sidecar_pending, stores: true, names: [TestFs25RouteResponseLostAfterCommit, TestFs25RouteTwoApiInstancesRacing, TestFs25RouteCancelRefusesTheRest]}
     - row: FS-34
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs34]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs34OnT3]}
+        - {repo: sidecar, package: ., names: [TestTlsFrontZeroBytesBeforeAuthentication]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsFrontSuiteNoByteReachesAPrivateAudiencesService]}
+        - {repo: server, package: ./cli/tlsedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs34NoByteReachesAPrivateAudiencesService]}
     - row: FS-39
       case: report-intake
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs39ReportIntake]}
+        - {repo: sidecar, package: ./smtpedgeservice, names: [TestReportIntakeCountsAGzipXmlAggregateOncePerReporterAndReportId, TestReportIntakeCountsAGzipJsonTlsRptAggregateOnce, TestReportIntakeUnverifyingReporterCountsNothing, TestReportIntakeUnknownTokenDropsUnread, TestReportIntakeArfBodyCanaryInNoLogRowOrMetric, TestAggregateGzipXmlParsesToRows, TestAggregateGzipTlsRptJsonParsesToRows]}
+        - {repo: sidecar, package: ./mxedgeservice, names: [TestPlatformCanaryReachesNoLogOrMetric]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestPlatformScenarioArfCanaryJointWithReportIntake]}
     - row: FS-41
       case: m5
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs41M5OnT3]}
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestDnsCtReplayInsertsOnlyMissingNames, TestDnsLabelReclaimRebindsTheName, TestDnsLabelReclaimRefusals]}
+        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
+        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughARedisLoss]}
+        - {repo: server, package: ./sidecarrestore, names: [TestLabelsStepSchedulesEachRootsReplayFromTheSidecarDump]}
     - row: FS-42
       case: m5
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs42M5OnT3]}
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges, TestFs42DnsStepOnTheRestoreFrame, TestFs42DnsStepCountsAnNsItCannotStop]}
+        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughAPostgresRestore, TestT3TlsedgeTakesASnapshotAfterALabelMapRestore]}
+        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
+        - {repo: server, package: ./sidecarrestore, names: [TestM5StepsAreRegisteredInTheProcesssFrame, TestM5StepsRunInTheFramesOrder, TestAbuseStepPlansFirstAndAppliesOnlyWhenTold, TestM5StepsSkipADatabaseBeforeMg5AndRefuseAnUnlinkedBinary, TestDnsStepRunsEachRootToItsEndUnderTheIncident, TestLabelsStepSchedulesEachRootsReplayFromTheSidecarDump]}
     - row: FS-47
       case: section-21
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs47Section21]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs47Section21OnT3]}
+        - {repo: server, package: ./quotahost, tags: sidecar_pending, stores: true, names: [TestFs47T3ClosureGrowthReads, TestFs47T3ReviewedTightening]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestAbuseClosureGrowthOpensOneCaseAndNoAction, TestNetworkSidecarLimitRefusesFloorAndPacingRows, TestNetworkSidecarLimitDirectRowsClampedOrIgnored]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestTightenNetworkLimitWritesRowsALiftClears]}
     - row: FS-48
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs48]}
+        - {repo: server, package: ./model, tags: sidecar_pending, names: [TestLegalHoldDeadlinesFollowTheStatutes, TestFs48EraseAndNowReadNoHoldKind]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestFs48HoldsAcrossTheirDeadlinesOnPostgres]}
+        - {repo: sidecar, package: ./evsservice, names: [TestRepoShredUnderAHoldKeepsCiphertextAndDeletesKeys, TestEraseUnderAHoldDestroysAVersionlessPathsKeyAndKeepsItsCiphertext]}
+        - {repo: sidecar, package: ./gkmservice, names: [TestGkmHoldPausesEverySweepButNotShredGroup]}
     - row: FS-49
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs49]}
+        - {repo: server, package: ./model, tags: sidecar_pending, names: [TestFs49WeekendClocks]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestFs49WeekendClocksOnPostgres]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestFileAbuseNoticePagesEveryClassOnASaturdayNight, TestFileAbuseNoticeRegistrarAt0200PagesBothWithNoEscalationWait, TestAbuseClockPassCountsOverdueReviewsAndLiftsNothing]}
     - row: FS-52
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs52OnT3]}
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs52BlocksNAndNextServeTogetherAndRollBack]}
     - row: FS-66
       case: hold
       tests:
@@ -850,7 +869,108 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92OnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
-    - item: S7's SNI-less abuse@<root> case
+    - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (FS-25) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules]}
+        - {repo: server, package: ./sidecart3, names: [TestGateT3RunsTheNightlySeeds]}
+    - item: 'the rows that pass on clause tests alone run under no explorer seed, lost answer or twin but their owners'': FS-25''s dns-route, FS-34, FS-39''s report-intake, FS-41''s m5, FS-42''s m5, FS-47''s section-21, FS-48, FS-49, FS-52 are plain tests on one fixed schedule each, with no registered builder, so §22.8''s rules above reach only the hold cases at this gate until each has one (QD-1084''s clause registry)'
+    - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M5-out]}
+    - item: '§22.7''s synthesized-dmarc assertion (DNS-M5-11): synthesized DMARC records carry no ruf, no fo and no rua into <root>'
+      tests:
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestDnsSystemDmarcNeverReportsIntoTheRoot]}
+    - item: '§22.7''s certificates assertion (TLS-M5-25, TLS-M6-03): no certificate whose key URnetwork holds names *.<root> or *.<net>.<root>'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestTlsNoCertificateRestsOnAKeyUrnetworkHolds]}
+    - item: 'CC4''s M5 sources (§22.7; TEST-M5-01): edge records, report parse output, Find calls, dns edge queries and a fake upstream resolver, each read by the scan and each path into each class catching a canary put through it, a private name never reaching the upstream resolver; on T3 the edge records are the rows server''s own stores wrote'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestEdgeSourcesCatchEachPathsLeakInEachForm, TestEdgeSourcesReadACleanWorldClean, TestEdgeRecordItemsHoldEveryField, TestFindTransportCapturesACallAndChangesNothing, TestFakeUpstreamResolverHoldsEveryQuery, TestEdgeQueryValueDeclaredAgainstDns2PassesAtAnEdgeAlone, TestDnsHarnessCapturesEveryEdgeQuery]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3EdgeRecordsOfServersTlsStoreAreScanned, TestT3EdgeRecordsOfServersMxStoreAreScanned, TestT3EdgeQueriesAndFindsAreScanned]}
+    - item: '§22.7''s leak leg at M5 (TEST-M5-01, TLS-M5-25): a sidecar_leaktest build leaks into every class the scan covers, M5''s edge classes among them, and a published host''s name into each class, and the scan catches each, on T2 and on a T3 Net'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_leaktest, names: [TestEveryClassCatchesItsLeak, TestAClassWithNoLeakFails, TestEdgeSourcesCatchEachPathsLeakInEachForm, TestTlsCanaryHostLeakedIntoEachClassIsCaught]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack,sidecar_leaktest', stores: true, names: [TestT3EveryEdgeClassCatchesItsLeak]}
+    - item: '§22.7''s certificate and scope rows no area holds whole (TEST-M5-01; I-13, I-14): a world that keeps them passes, a planted certificate naming the network''s names under a held key fails, and a device outside a scope holding its certificate, or getting its key into the scope''s TLSA, fails; no tls certificate rests on a key URnetwork holds (TLS-M5-25)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestCertificateRowsPassAWorldThatKeepsThem, TestCertificateRowsFailAHeldKeysNetworkNames, TestCertificateRowsFailAScopesCertificateOnAnotherDevice, TestCertificateRowsFailAScopesTlsaPinningAnotherDevicesKey, TestTlsNoCertificateRestsOnAKeyUrnetworkHolds]}
+    - item: 'the schema guard at M5 (I-18): every tls field, table and Redis family maps to its row both ways, with none left planned (TLS-M5-25), and §21''s columns hold no address (ABUSE-M5-21)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestTlsRowsAndFamiliesMapBothWays, TestTlsRowsAreNoLongerPlanned, TestTlsCanariesReachOnlyTheirRows]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestAbuseSchemaHoldsNoAddress]}
+    - item: 'S5, publish HTTPS (§22.7; §3.7''s F4; §23.4''s M5 exit, passthrough publish; TLS-M5-25, TLS-M5-26): each §13.7 audience admitted and Community held to 7 days, what the grants or facts do not allow refused, a visitor completing TLS on the device''s key while tlsedge holds only ciphertext and the hello, a members visitor with no session reaching only edge login, the edge''s Find under each audience''s publish and denied with none, and a removed device''s certificate revoked with its sockets ended, on T2; the passthrough and the Find on T3'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsSuiteAdmitsEachAudienceAndHoldsCommunityToSevenDays, TestTlsSuiteRefusesWhatTheGrantsOrFactsDoNotAllow, TestTlsSuitePassthroughCompletesTlsOnTheDeviceKey, TestTlsSuiteEdgeFindPassesUnderEachAudiencesPublish, TestTlsSuiteEdgeFindIsDeniedWithNoPublish, TestTlsFrontSuiteMembersVisitorWithoutASessionReachesEdgeLogin, TestTlsRevocationEndsARemovedDevicesCertificateAndSockets]}
+        - {repo: sidecar, package: ., names: [TestTlsEdgeLoginFullFlow, TestTlsEdgeLoginRefusesBadTokens, TestTlsEdgeLoginRefusesANonMember, TestTlsEdgeLoginStateIsSingleUse]}
+        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgePassthroughEndsOnTheDeviceKey]}
+        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3EdgeFindPassesUnderEachAudiencesPublish]}
+      external: 'production: S5''s T6 cell in main, dark, on test roots and LE staging (§19.11)'
+    - item: 'the kill switch within 5 s (§23.4''s M5 exit; §13.9; TLS-M5-25, TLS-M5-26): new and open connections of a killed host end within five seconds on the fake clock and Find refuses too, a kill read in the middle of a Find keeps the listener''s lease, and a publish ends its sweep before a kill can meet it, on T2; new and open connections on T3'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsSuiteKillSwitchEndsNewAndOpenConnectionsWithinFiveSeconds, TestTlsSuiteKillWaitKeepsTheListenersLeaseThroughAKillReadMidFind, TestTlsSuitePublishEndsItsSweepBeforeAKillCanMeetIt]}
+        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillSwitchEndsNewAndOpenConnections]}
+    - item: 'the CT and zone watches alarm on a test certificate and record (§23.4''s M5 exit; owner decision 98): a certificate no attestation covers and one on a key no row holds alarm while an attested one and an order in flight do not, and an operator''s change to a watched record, split answers and resolvers disagreeing with the zone alarm while a requested change does not, each on fixtures'
+      tests:
+        - {repo: sidecar, package: ., names: [TestTlsCtWatchAnUnattestedCertificateAlarms, TestTlsCtWatchAnAttestedCertificateDoesNotAlarm, TestTlsCtWatchAnOrderInFlightDoesNotAlarm, TestTlsCtWatchATamperedAttestationAlarms, TestTlsCtWatchACustomCertificateOnAKeyNoRowHoldsAlarms, TestTlsComponentRunsTheCtWatch, TestDnsWatchAlarmsOnAnOperatorChangeAndNotARequestedOne, TestDnsWatchSplitAnswersAlarm, TestDnsWatchResolversDisagreeingWithTheZoneAlarm]}
+      external: 'production: CT on real logs, since staging CT is unreliable (§22.9''s ACME row), and the zone watch against the production zone through two public resolvers'
+    - item: 'S7''s SNI-less abuse@<root> case, which §22.17 runs at M5 (§22.7; MAIL-M5-04, ABUSE-M5-21; S7''s other cases are M7''s): a reporter that sends no SNI reaches the platform listener through the lb''s PROXY line and its mail reaches the intake after a 250, a connection with no PROXY header dropped, on T2; on T3 the block on the private stores, and the mail parsed header-only, dropped unread and kept nowhere, no log line or metric holding an address'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestPlatformScenarioSniLessAbuseMailReachesTheIntake, TestPlatformScenarioDropsAConnectionWithNoProxyHeader]}
+        - {repo: server, package: ./mxedgehost, tags: sidecar_pending, stores: true, names: [TestRunHostOnThePrivateStores, TestProxyListenerWrapTakesOnlyTheLbsConnections, TestBlockWithNoCertificateIsNeverReady]}
+        - {repo: server, package: ./cli/mxedge, tags: sidecar_pending, stores: true, names: [TestS7AbuseMailWithNoSniIsDroppedUnreadAndKeptNowhere]}
+    - item: 'FS-39''s report intake on Postgres and its case leg, which the catalog does not ask for and the owners wrote (SMTP-M5-06, ABUSE-M5-09): an aggregate counted once per reporter and report id through the real store, <root>''s rows split by §12''s label map, and the abuse sink opening cases by class and type and never reading a body'
+      tests:
+        - {repo: server, package: ./cli/mxedge, tags: sidecar_pending, stores: true, names: [TestReportIntakeCountsAnAggregateOnceOnPostgres, TestReportIntakeSplitsRootRowsByTheLabelMapOnPostgres]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestAbuseIntakeNeverReadsBody, TestAbuseSmtpSinkOpensCasesByClassAndType, TestAbuseSmtpSinkRefusals]}
+    - item: '§22.5''s §21 row as ABUSE-M5-21 reports it, clause by clause, beside FS-48 and FS-49 above: the composed path from the form to a second reviewer''s grant, TTL sweeps on an injected clock with a held network skipped until its hold ends, an access-log row per read, every retention sweep honoring holds, a held network''s deletion copying what it removes, a forged or tampered mailed record refused at the restore step, and canaries in reported mail reaching no store, log or metric'
+      tests:
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestAbuseComposedPathFromTheFormToASecondReviewersGrant, TestAbusePrivacyCanariesInReportedMailReachNoStoreLogOrMetric, TestEveryAbuseReadLogs, TestLegalHoldDeadlinesEndOnThePass, TestParseAbuseRecordsOpensAndVerifies, TestAbuseMailboxForgeryOpensButDoesNotVerify, TestAbuseMailboxSealRefusesTampering, TestAcceptAbuseReportKeepsNoThirdPartyData]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestAbuseRetentionTtlsAtTheirBoundaries, TestAbuseRetentionSkipsAHeldNetworkUntilItsHoldEnds, TestAbuseRetentionResumesAStoppedPass, TestAbuseReaderLogsEachReadBeforeItAnswers, TestAbuseReaderAnswersNothingWhenItCannotLog, TestEveryRetentionSweepHonorsHolds, TestRemoveNetworkUnderAHoldCopiesWhatItRemoves]}
+    - item: 'the dns edge serves the user root, signed without a DS (§23.4''s M5 exit; owner decision 109; §22.5''s §12 row, R-DNS-7; DNS-M5-24): both NS alike at one serial, a failed or drained interface gone from every answer on both, a key set failing its self-check never serving, a challenge served at both NS within 60 s, and no name or key in the edges'' queries or metrics, on T3; §22.9''s DNS row beside it, delv, Unbound, Knot Resolver and BIND validating compact denial and wildcards against the KSK as a trust anchor, each reading open where its tool or image is not on the host'
+      tests:
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestDnsT3BothNsAnswerAlikeAtOneSerial, TestDnsT3FailedOrDrainedInterfaceLeavesEveryAnswerOnBothNs, TestDnsT3KeySetFailingSelfCheckNeverServes, TestDnsT3ChallengeServedAtBothNsWithinSixtySeconds, TestDnsT3NoNameOrKeyReachesTheEdgesQueriesOrMetrics, TestDnsConformanceDelvValidatesAgainstTheKsk, TestDnsConformanceUnboundValidatesAgainstTheKsk, TestDnsConformanceKnotResolverValidatesAgainstTheKsk, TestDnsConformanceBindResolverValidatesAgainstTheKsk, TestDnsConformanceZonemasterChecksTheTestRoot]}
+      external: 'hardware and production: the two dns edge hosts at the site with their own addresses (OPS-M5-04; owner decisions 69, 71, 123), zonemaster over test roots at T6, two public resolvers, and DNSSEC''s 30 clean days before M7''s DS (§12.6)'
+    - item: '§22.9''s ACME row on Pebble with 5% bad nonces (TLS-M5-15, TLS-M5-25, TLS-M5-26): the rate is sidecartest.StartPebble''s default, which every T2 run below takes, and the local stack''s pebble''s on T3, this sweep setting none; orders to a chain by DNS-01, ARI and renewal, replaces, revocation, rollover and the suite''s own orders pass through the rejected nonces'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateM5PebbleRunsAtFivePercentBadNonces]}
+        - {repo: sidecar, package: ./certsservice, names: [TestCertsAcmeOrderToChain, TestCertsAcmeAriAndOfflineRenewal, TestCertsAcmeReplacesNamesTheCertificateIdOnTheWire, TestCertsAcmeRevokeWithReason, TestCertsAcmeRolloverBetweenOrders, TestCertsRunOnPebbleKeepsTheChainAndTheReason]}
+        - {repo: server, package: ./local/sidecar-stack/pebble, names: [TestPebbleServesItsDirectoryAndRoots]}
+      external: 'production: LE staging, which alone refuses URnetwork''s account under a customer accounturi and checks CAA, and GTS and ZeroSSL (§22.9)'
+    - item: '§13.7''s browser rows as the front''s Go tests show them (§22.9''s Browsers row; TLS-M5-19 to TLS-M5-21): 421 for a request naming another host than its connection''s, a hello cut at every boundary and across two records, X25519MLKEM768 negotiated first, other origins'' requests arriving anonymous with and without Fetch Metadata, a WebSocket passing only after the check, and the front''s cookies never reaching the backend; FS-34 above is the row''s private audiences without a usable ALPN. SDK-M4-09''s Playwright harness drives the key origin alone and holds no spec for these rows'
+      tests:
+        - {repo: sidecar, package: ., names: [TestTlsHttpAnswers421ForAnotherHost, TestTlsHttpOtherOriginsArriveAnonymous, TestTlsHttpSessionViewRows, TestTlsHttpWebSocketPassesAfterTheCheck, TestTlsHttpFrontCookiesNeverReachTheBackend, TestTlsFrontNegotiatesX25519MLKEM768First, TestTlsFrontServesHttpOverEachAlpn]}
+        - {repo: sidecar, package: ./tlsedgeservice, names: [TestClientHelloSeedsAtEveryBoundary, TestReadClientHelloKeepsRecordFramingVerbatim]}
+      external: 'hardware and people: Chrome, Firefox, Safari and curl against a published host, through Playwright specs nobody has written for §13.7''s rows'
+    - item: 'the inline paths and the CROSSSLOT lints on M5''s engines (§22.5''s hot-path gates, §22.4; I-12; SOCK-M5-17, TLS-M5-26, DNS-M5-24): Find one script with Postgres refused, every script of the sockets engine in one slot, tlsedge''s route holding to its inline-path row with its keys sharing their slot, a route probe making no Find, and dns''s Redis calls naming one hash tag'
+      tests:
+        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3FindIsOneScriptWithPostgresRefused, TestT3EveryScriptOfTheEngineKeepsToOneSlot, TestT3ThreeThousandNamesInThreePages]}
+        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeRouteHoldsToItsInlinePathRow, TestT3TlsedgeKeysShareTheirSlot, TestT3TlsedgeRouteProbeMakesNoFind]}
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestDnsT3RedisCallsNameOneHashTag]}
+    - item: 'the tls meter end to end (§20.6; D-QUOTA-3, D-QUOTA-4; QUOTA-M5-01): a lease, its spends, a batch, the journal rows, the flush and network_service_usage on T3 under FI-13 (a), and an empty balance marking spent, Find answering quota and open streams resetting as leases run out'
+      tests:
+        - {repo: server, package: ./quotahost, tags: sidecar_pending, stores: true, names: [TestTlsMeterT3MoneyPath, TestTlsMeterT3EmptyBalance]}
+    - item: 'the sockets and tlsedge load harnesses'' scaled runs (§22.8; SOCK-M5-17, TLS-M5-26): in-flight share held to weight, a scaled-down connection run, and a run the harness cannot make refused'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestSocketLoadKeepsInflightToWeight, TestTlsEdgeLoadScaledDown, TestTlsEdgeLoadRefusesWhatItCannotRun]}
+      external: 'hardware: the evidence runs on T5''s performance host, 100,000 listeners with about 6,700 registration calls a second and 50,000 connections per process against §13.5''s setup targets; a run on this host is a smoke, which is no evidence'
+    - item: 'FS-50''s M5 pages (§19.8''s M5 rows; owner decisions 134, 143; DNS-M5-17, OPS-M5-08): at 02:00 on the fake clock both nameservers failing, a broken 443 split and a registrar notice reach the rota''s pager, the split paging the second person at 30 minutes unacknowledged and the notice both at once, and a failing canary signature raises its class at page tier; FS-50''s row itself is M3''s'
+      tests:
+        - {repo: server, package: ./monitor, names: [TestFs50M5ConditionsAt0200ReachTheRota, TestDnsCanaryNsDownAt0200PagesAndABlindMinuteHoldsIt, TestDnsCanaryEachFailureRaisesItsClass]}
+    - item: 'the certificate re-order of FS-42''s M5 step on T3 (TLS-M5-26''s plan reading 7): a chain newer than the dump ordered again with replaces through server''s certs routes, which no test this sweep found shows; the certificate manager''s half is T2''s TestTlsCertManagerReordersALostRowWithReplaces'
+    - item: 'the hold cases of FS-66, FS-69, FS-76, FS-78, FS-92 (§23.6''s M5 row; D-PHASE-8): the rows above read open on M10''s exit, since each runs once M10''s Gn-out has passed, and are TEST-M10-06''s to pass, never this gate''s; holds pause format 1''s sweeps and GC here, in §21''s row and FS-48 above'
+      external: 'a later gate: M10''s Gn-out, where TEST-M10-06 runs each hold case against format 2 and api''s real writes (ABUSE-M10-01)'
+    - item: 'holds refuse placement until counsel confirms (§21.9; owner decision 133; §23.6''s lead times): abuse.yml''s holds_enabled is off until then, and a placement while it is off is refused with nothing written'
+      tests:
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestLegalHoldRefusesUntilEnabled]}
+      external: 'people: counsel''s confirmation of owner decision 133''s condition and of each hold kind''s applicability, preserve_2703f and report_2258a, before holds ship, with the deferral, contract-row, copyright-count and weekend-wait readings beside them (owner decisions 525, 526, 528, 529)'
+    - item: platform names and company MX off ur.network before the NS switch (§23.4's M5 exit; §12.4)
+      external: 'production: the registrar''s and the company''s own zones, which no local run reaches'
+    - item: the LE domain override for the user root (§23.6's lead times; mmm/lag.dev/ops/letsencrypt.md)
+      external: 'people and production: Let''s Encrypt''s rate-limit override, asked at M0 and untimed'
+    - item: 'abuse readiness and the rota from M5 (§19.8, §21.8; owner decisions 95, 134, 143, 498, 530): a DMCA agent, registrar and Search Console contacts, business-hours abuse review, and registrar, registry and law-enforcement notices reaching the pager through the company mailbox''s rule'
+      external: 'people: the owner''s pager service and mailbox, the registered agent and the two-person out-of-hours rota'
+    - item: 'not yet due at M5, and shown here as no row and no pass: FS-39''s labels at M7-out, FS-41''s m6 at M6-out, FS-41''s m7 at M7-out, FS-41''s m8 at M8-out, FS-42''s m6 at M6-out, FS-42''s m7 at M7-out, FS-42''s m8 at M8-out, FS-42''s m9 at M9-out, FS-47''s mail at M7-out, FS-66 at M10-out, FS-76 at M10-out, FS-76''s team-record at M6-out and M10-out, FS-76''s mailbox at M7-out and M10-out, FS-78 at M10-out, FS-78''s mailbox at M7-out and M10-out (§23.6''s gate map)'
+      external: 'a later gate: each case passes at the gate catalog.yml holds it at, FS-39''s labels and S7''s other cases at M7''s exit among them'
   M6-in:
     - row: FS-46
       tests:
