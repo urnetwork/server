@@ -82,7 +82,10 @@ func TestFrontE2eClientResetMidBodyIsRecordedWithNoStatus(t *testing.T) {
 	spilling := make(chan struct{}, 1)
 	// set before any request reaches the store
 	store.createSpillFile = func() (bodySpillFile, error) {
-		spilling <- struct{}{}
+		select {
+		case spilling <- struct{}{}:
+		default:
+		}
 		return createSpillFile()
 	}
 	beforeNone := e2eApiRequestCount("h2", "none")
