@@ -1039,6 +1039,8 @@ type testLbAltBinds struct {
 	failable bool
 	// successful binds so far, for tests to wait on
 	boundCount *connect.MonitorValue[int]
+	// the writes failed so far on every failable socket
+	failedWriteCount *connect.MonitorValue[int]
 
 	stateLock   sync.Mutex
 	packetConns map[string][]net.PacketConn
@@ -1051,12 +1053,13 @@ type testLbAltBinds struct {
 // Binds that record and never hold until told to.
 func newTestLbAltBinds(failable bool) *testLbAltBinds {
 	return &testLbAltBinds{
-		failable:     failable,
-		boundCount:   connect.NewMonitorValue(0),
-		packetConns:  map[string][]net.PacketConn{},
-		failingConns: map[string][]*testLbAltPacketConn{},
-		listeners:    map[string][]net.Listener{},
-		holds:        map[string]*testLbAltBindHold{},
+		failable:         failable,
+		boundCount:       connect.NewMonitorValue(0),
+		failedWriteCount: connect.NewMonitorValue(0),
+		packetConns:      map[string][]net.PacketConn{},
+		failingConns:     map[string][]*testLbAltPacketConn{},
+		listeners:        map[string][]net.Listener{},
+		holds:            map[string]*testLbAltBindHold{},
 	}
 }
 
@@ -1149,7 +1152,8 @@ func (self *testLbAltBinds) listenPacket(network string, address string) (net.Pa
 	var failingConn *testLbAltPacketConn
 	if self.failable {
 		failingConn = &testLbAltPacketConn{
-			PacketConn: packetConn,
+			PacketConn:  packetConn,
+			failedCount: self.failedWriteCount,
 		}
 		packetConn = failingConn
 	}
@@ -1209,13 +1213,16 @@ func (self *testLbAltBinds) boundListeners(address netip.AddrPort) []net.Listene
 
 // One public udp socket the front was handed. Its writes fail while failures
 // are queued, each failure costing one datagram, as a socket fails to write
-// to one address or for a moment.
+// to one address or for a moment; its next read fails when a test says so,
+// as a socket fails for good.
 type testLbAltPacketConn struct {
 	net.PacketConn
+	// the writes failed so far on every socket of the binds
+	failedCount *connect.MonitorValue[int]
 
-	stateLock   sync.Mutex
-	writeErrs   []error
-	failedCount int
+	stateLock sync.Mutex
+	writeErrs []error
+	readErr   error
 }
 
 // Queues errors for the next writes.
@@ -1225,11 +1232,22 @@ func (self *testLbAltPacketConn) failWrites(errs ...error) {
 	self.writeErrs = append(self.writeErrs, errs...)
 }
 
-// The writes failed so far, and the failures still queued.
-func (self *testLbAltPacketConn) writeFailures() (int, int) {
+// Drops the failures still queued.
+func (self *testLbAltPacketConn) clearWriteFailures() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return self.failedCount, len(self.writeErrs)
+	self.writeErrs = nil
+}
+
+// Fails the next read with err, and every read after it. A read waiting now
+// is woken by a deadline in the past, and answers err too.
+func (self *testLbAltPacketConn) failReads(err error) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.readErr = err
+	}()
+	self.PacketConn.SetReadDeadline(time.Now())
 }
 
 // Writes the datagram, or answers the next queued failure.
@@ -1242,13 +1260,32 @@ func (self *testLbAltPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		}
 		err := self.writeErrs[0]
 		self.writeErrs = self.writeErrs[1:]
-		self.failedCount += 1
 		return err
 	}()
 	if err != nil {
+		self.failedCount.Update(func(failedCount int) int {
+			return failedCount + 1
+		})
 		return 0, err
 	}
 	return self.PacketConn.WriteTo(p, addr)
+}
+
+// Reads a datagram, or answers the read failure.
+func (self *testLbAltPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	readFailure := func() error {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.readErr
+	}
+	if readErr := readFailure(); readErr != nil {
+		return 0, nil, readErr
+	}
+	n, addr, err := self.PacketConn.ReadFrom(p)
+	if readErr := readFailure(); readErr != nil {
+		return 0, nil, readErr
+	}
+	return n, addr, err
 }
 
 // A client udp socket that records the source of every datagram it reads, as
