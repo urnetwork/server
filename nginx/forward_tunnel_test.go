@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,13 +17,12 @@ import (
 )
 
 // A websocket test setup: a raw block that switches protocols, and a front
-// for a websocket service whose tunnelOpened hook is counted.
+// for a websocket service.
 type tunnelFixture struct {
-	raw           *rawUpstream
-	group         *upstreamGroup
-	front         *testForwardFront
-	tunnelsOpened atomic.Int32
-	serviceName   string
+	raw         *rawUpstream
+	group       *upstreamGroup
+	front       *testForwardFront
+	serviceName string
 }
 
 // A tunnel fixture for one run of a test, its service named after serviceName.
@@ -39,9 +37,6 @@ func newTunnelFixture(t *testing.T, serviceName string, settings *FrontSettings)
 	fixture.front = newTestForwardFront(t, fixture.group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.websocket = true
-		options.tunnelOpened = func() {
-			fixture.tunnelsOpened.Add(1)
-		}
 		return options
 	})
 	return fixture
@@ -102,9 +97,9 @@ func isClosedError(err error) bool {
 }
 
 // Bytes flow both ways, those sent ahead of the switch included; the 101
-// reaches the client with the block's headers except the hidden ones; the
-// hook runs once; serveHttp holds the request, and its block, until the
-// tunnel closes, then returns.
+// reaches the client with the block's headers except the hidden ones;
+// serveHttp holds the request, and its block, until the tunnel closes, then
+// returns.
 func TestTunnelRelaysBothWays(t *testing.T) {
 	fixture := newTunnelFixture(t, "tunnel-relay", testForwardFrontSettings())
 	clientConn, clientReader, upstreamConn, upstreamReader := fixture.open(t)
@@ -114,9 +109,6 @@ func TestTunnelRelaysBothWays(t *testing.T) {
 		readExactly(t, upstreamReader, message)
 		io.WriteString(upstreamConn, "echo:"+message)
 		readExactly(t, clientReader, "echo:"+message)
-	}
-	if fixture.tunnelsOpened.Load() != 1 {
-		t.Errorf("tunnelOpened ran %d times, want once", fixture.tunnelsOpened.Load())
 	}
 	// the tunnel is open, so serveHttp hasn't returned and the block is
 	// held
@@ -245,9 +237,6 @@ func TestTunnelSwitchOnlyWhenAsked(t *testing.T) {
 	io.WriteString(upstreamConn, "HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n")
 	if response := receiveBounded(t, responses, "response"); response == nil || response.StatusCode != http.StatusUpgradeRequired {
 		t.Fatalf("refused upgrade: %v, want the block's 426", response)
-	}
-	if fixture.tunnelsOpened.Load() != 0 {
-		t.Errorf("a tunnel opened without a switch")
 	}
 }
 

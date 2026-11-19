@@ -699,6 +699,7 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 	routeService.forwarder.serveHttp(exchange.writer(), r, forwardOptions{
 		interfaceName:        self.frontInterface.limits.name,
 		clientAddrPort:       request.clientAddrPort,
+		host:                 host,
 		blockName:            location.blockName,
 		upstreamPath:         upstreamTarget,
 		streamed:             streamed,

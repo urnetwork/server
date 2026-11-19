@@ -94,15 +94,6 @@ type forwardOptions struct {
 	// elsewhere, as routing would set it. The send timeout follows the same
 	// rule and isn't an option.
 	readTimeout time.Duration
-	// called once, from serveHttp's goroutine, when a websocket upgrade
-	// becomes a tunnel: the upstream answered 101, the client connection is
-	// hijacked and the 101 relayed. serveHttp returns only when the tunnel
-	// ends, so a caller that holds a concurrency slot for the request (D8)
-	// holds it for the tunnel's whole life by releasing it when serveHttp
-	// returns; the hook marks the moment the request stopped being an HTTP
-	// exchange, for the drain's tracking (D12) and the access log. Nil skips
-	// it.
-	tunnelOpened func()
 }
 
 // A service's upstream side as routing sees it. Safe for concurrent use.
@@ -110,8 +101,11 @@ type serviceForwarder interface {
 	// forwards one request and writes the upstream's response, or the front's
 	// own error response (400, 408, 413, 502, 503, 504), to w. It returns
 	// when the response is complete, or for a websocket when the tunnel has
-	// closed. A response the upstream cuts short after its head reached the
-	// client is aborted by panicking with http.ErrAbortHandler, as
+	// closed, so a caller holding a concurrency slot for the request (D8)
+	// holds it for the tunnel's life; the tunnel's client side is the
+	// connection w hijacks, which the caller tracks from the hijack. A
+	// response the upstream cuts short after its head reached the client is
+	// aborted by panicking with http.ErrAbortHandler, as
 	// httputil.ReverseProxy does, so the client sees a truncated response,
 	// never a complete one; callers' deferred cleanup runs and they must not
 	// recover it.
