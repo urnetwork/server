@@ -20,14 +20,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/certsservice"
+	"github.com/urnetwork/sidecar/socketsservice"
 
 	"github.com/urnetwork/server"
 )
 
-// A row of the world's network ordering set's CSR, and a chain for it.
+// A row of the world's network ordering set's CSR for a sidecar of its own, and a chain for it.
 func testTlsCertAliasRow(t testing.TB, ctx context.Context, world *testDnsRecordsWorld, set []string) (sidecar.Id, [][]byte) {
+	certId, chain, _ := testTlsCertAliasRowOf(t, ctx, world, set)
+	return certId, chain
+}
+
+// testTlsCertAliasRow, with the row's sidecar.
+func testTlsCertAliasRowOf(t testing.TB, ctx context.Context, world *testDnsRecordsWorld, set []string) (sidecar.Id, [][]byte, server.Id) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -50,6 +58,7 @@ func testTlsCertAliasRow(t testing.TB, ctx context.Context, world *testDnsRecord
 		t.Fatal(err)
 	}
 	certId := server.NewId()
+	sidecarId := server.NewId()
 	spki := sha256.Sum256(certId.Bytes())
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -59,10 +68,10 @@ func testTlsCertAliasRow(t testing.TB, ctx context.Context, world *testDnsRecord
 					cert_id, network_id, client_id, sidecar_id, identifier_set_sha256, spki_sha256, attestation, csr, state, state_time
 				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ordering', $9)
 			`,
-			certId, world.networkId, server.NewId(), server.NewId(), identifierSetSha256[:], spki[:], []byte{0x01}, csr, server.NowUtc(),
+			certId, world.networkId, server.NewId(), sidecarId, identifierSetSha256[:], spki[:], []byte{0x01}, csr, server.NowUtc(),
 		))
 	})
-	return sidecar.Id(certId), [][]byte{leaf}
+	return sidecar.Id(certId), [][]byte{leaf}, sidecarId
 }
 
 // The row's issue as certs' order chain moves it.
@@ -122,12 +131,29 @@ func TestTlsCertIssueCertifiesTheAliasesItsSetNames(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		aliasCertId, aliasChain := testTlsCertAliasRow(t, ctx, world, aliasSet)
+		aliasCertId, aliasChain, aliasSidecarId := testTlsCertAliasRowOf(t, ctx, world, aliasSet)
 		if !testTlsCertIssue(t, ctx, aliasCertId, aliasChain) {
 			t.Fatal("the alias's issue did not apply")
 		}
 		if !testTlsAliasCertified(t, ctx, world) {
 			t.Fatal("the issue of a certificate naming the alias left it uncertified")
+		}
+		// ValidateListen's facts carry the certified alias for the row's sidecar, on every owner of the zone
+		facts, err := GetTlsListenFacts(ctx, world.networkId, server.NowUtc())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, custom := range facts.CustomCertified {
+			if custom.Owner == socketsservice.TlsListenCustomNameAnyOwner && custom.Name == name+"."+root {
+				if custom.SidecarId != connect.Id(aliasSidecarId) || !server.NowUtc().Before(custom.NotAfter) {
+					t.Fatalf("the certified alias's facts %+v", custom)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the facts hold no certified alias: %+v", facts.CustomCertified)
 		}
 		// a second issue for it certifies nothing more and still lands
 		againCertId, againChain := testTlsCertAliasRow(t, ctx, world, aliasSet)

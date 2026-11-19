@@ -206,16 +206,107 @@ http {
 }
 `))
 
-// The dns API's internal routes' check for the test's lbmap bearer alone.
+// The dns API's internal routes' check for the test's two bearers: lbmap's, and the dns edge stand-in's route probes.
 type t3SplitAuth struct {
-	bearer string
+	bearer     string
+	edgeBearer string
 }
 
 func (self *t3SplitAuth) Authenticate(request *http.Request) (dnsservice.DnsCallerClass, bool) {
-	if request.Header.Get("Authorization") == "Bearer "+self.bearer {
+	switch request.Header.Get("Authorization") {
+	case "Bearer " + self.bearer:
 		return dnsservice.DnsCallerLbmap, true
+	case "Bearer " + self.edgeBearer:
+		return dnsservice.DnsCallerEdge, true
 	}
 	return "", false
+}
+
+// 256 random bits in unpadded base64url, an internal caller's bearer.
+func t3SplitBearer(t testing.TB) string {
+	t.Helper()
+	bearerBytes := make([]byte, 32)
+	if _, err := rand.Read(bearerBytes); err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(bearerBytes)
+}
+
+// The dns API on Postgres for one or more lb interfaces, with each interface's applied reports.
+type t3SplitApi struct {
+	url        string
+	bearer     string
+	edgeBearer string
+	// by interface
+	reports map[string]*t3SplitReports
+	// while set, the API answers 503 to everything, as one that is down
+	down atomic.Bool
+	// the device's certificate for each custom host, one for every split of the API, and what trusts them
+	custom     map[string]tls.Certificate
+	customPool *x509.CertPool
+}
+
+// The dns API over world's Postgres for the lb interfaces named, its hold on the wall clock, behind lbmap's bearer and
+// the dns edge's.
+func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3SplitApi {
+	t.Helper()
+	api := &t3SplitApi{
+		bearer:     t3SplitBearer(t),
+		edgeBearer: t3SplitBearer(t),
+		reports:    map[string]*t3SplitReports{},
+		custom:     map[string]tls.Certificate{},
+		customPool: x509.NewCertPool(),
+	}
+	inventory := []dnsservice.DnsLbInterface{}
+	for _, name := range interfaces {
+		api.reports[name] = &t3SplitReports{changed: make(chan struct{})}
+		inventory = append(inventory, dnsservice.DnsLbInterface{Name: name, Ipv4: netip.MustParseAddr("127.0.0.1")})
+	}
+	apiHost := *world.fakes.ServiceHost()
+	apiHost.Clock = sidecar.RealClock{}
+	apiGates := sidecartest.NewFakeServiceGates(nil)
+	if err := apiGates.Set("sidecar:\n  dns: {enabled: true, percent: 100}\n"); err != nil {
+		t.Fatal(err)
+	}
+	apiHost.Gates = apiGates
+	dnsSettings := dnsservice.DefaultDnsSettings()
+	dnsSettings.Roots = []string{world.root + "."}
+	dnsSettings.SignaturesPerSecond = 1000
+	dnsSettings.Tcp.ConnectionsPerSource = 2
+	dnsSettings.Rrl.ResponsesPerSecond = 2
+	block, err := dnsservice.NewDnsApi(world.ctx, &apiHost, dnsSettings, sidecartest.NewFakeDnsStore(world.clock, nil), &dnsservice.DnsApiDeps{
+		Auth:           &t3SplitAuth{bearer: api.bearer, edgeBearer: api.edgeBearer},
+		Interfaces:     func() []dnsservice.DnsLbInterface { return inventory },
+		CustomHostMaps: dnshost.NewCustomHostMaps(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(block.Close)
+	handler := block.Handler()
+	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if api.down.Load() {
+			http.Error(writer, "down", http.StatusServiceUnavailable)
+			return
+		}
+		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/custom-host-map/applied") {
+			body, _ := io.ReadAll(request.Body)
+			report := &struct {
+				Interface string `json:"interface"`
+				Version   uint64 `json:"version"`
+			}{}
+			if json.Unmarshal(body, report) == nil {
+				if reports, ok := api.reports[report.Interface]; ok {
+					defer reports.add(report.Version)
+				}
+			}
+			request.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		handler.ServeHTTP(writer, request)
+	}))
+	t.Cleanup(apiServer.Close)
+	api.url = apiServer.URL
+	return api
 }
 
 // What lbmap reported, version by version.
@@ -268,11 +359,14 @@ type t3Split struct {
 	platform   *x509.CertPool
 	custom     map[string]tls.Certificate
 	customPool *x509.CertPool
+	// the dns API, shared with the world's other splits, and this interface's name in its inventory
+	api           *t3SplitApi
+	interfaceName string
+	// the config the lb's nginx runs and lbmap's nginx -t reads
+	configPath string
 	// the lb binary and the environment it runs in
 	lb  string
 	env []string
-	// while set, the dns API answers 503 to everything, as one that is down
-	apiDown atomic.Bool
 
 	stateLock sync.Mutex
 	// the running lb, nil while stopped
@@ -354,76 +448,39 @@ func (self *t3EdgeWorld) reloadNames() {
 	hostTestAwait(self.t, "the block's names", count+1, self.host.engine.NameLoads)
 }
 
-// The split over world: the dns API on Postgres, lbmap's credential, the config and the lb process, returned once
-// lbmap has reported the map's version at start.
+// The split over world with a dns API of its own for its one interface.
 func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split {
+	t.Helper()
+	return newT3SplitOn(t, world, newT3SplitApi(t, world, []string{t3SplitInterface}), t3SplitInterface, customHosts)
+}
+
+// The split for interfaceName over world and api: lbmap's credential, the config and the lb process's environment,
+// the lb not started.
+func newT3SplitOn(t testing.TB, world *t3EdgeWorld, api *t3SplitApi, interfaceName string, customHosts []string) *t3Split {
 	t.Helper()
 	nginx := t3SplitNginx(t)
 	lb := t3SplitBuildLb(t)
 	split := &t3Split{
-		world:      world,
-		port:       t3SplitPort(t),
-		http80Port: t3SplitPort(t),
-		reports:    &t3SplitReports{changed: make(chan struct{})},
-		platform:   x509.NewCertPool(),
-		custom:     map[string]tls.Certificate{},
-		customPool: x509.NewCertPool(),
+		world:         world,
+		port:          t3SplitPort(t),
+		http80Port:    t3SplitPort(t),
+		reports:       api.reports[interfaceName],
+		platform:      x509.NewCertPool(),
+		custom:        api.custom,
+		customPool:    api.customPool,
+		api:           api,
+		interfaceName: interfaceName,
 	}
 	for _, host := range customHosts {
+		if _, ok := api.custom[host]; ok {
+			continue
+		}
 		certificate, _, _ := t3SplitCertificate(t, []string{host}, world.start)
-		split.custom[host] = certificate
-		split.customPool.AddCert(certificate.Leaf)
+		api.custom[host] = certificate
+		api.customPool.AddCert(certificate.Leaf)
 	}
 	world.dial.serve = split.serveDevice
-
-	// the dns API on Postgres, its hold on the wall clock, behind the lbmap bearer
-	bearerBytes := make([]byte, 32)
-	if _, err := rand.Read(bearerBytes); err != nil {
-		t.Fatal(err)
-	}
-	bearer := base64.RawURLEncoding.EncodeToString(bearerBytes)
-	apiHost := *world.fakes.ServiceHost()
-	apiHost.Clock = sidecar.RealClock{}
-	apiGates := sidecartest.NewFakeServiceGates(nil)
-	if err := apiGates.Set("sidecar:\n  dns: {enabled: true, percent: 100}\n"); err != nil {
-		t.Fatal(err)
-	}
-	apiHost.Gates = apiGates
-	dnsSettings := dnsservice.DefaultDnsSettings()
-	dnsSettings.Roots = []string{world.root + "."}
-	dnsSettings.SignaturesPerSecond = 1000
-	dnsSettings.Tcp.ConnectionsPerSource = 2
-	dnsSettings.Rrl.ResponsesPerSecond = 2
-	api, err := dnsservice.NewDnsApi(world.ctx, &apiHost, dnsSettings, sidecartest.NewFakeDnsStore(world.clock, nil), &dnsservice.DnsApiDeps{
-		Auth: &t3SplitAuth{bearer: bearer},
-		Interfaces: func() []dnsservice.DnsLbInterface {
-			return []dnsservice.DnsLbInterface{{Name: t3SplitInterface, Ipv4: netip.MustParseAddr("127.0.0.1")}}
-		},
-		CustomHostMaps: dnshost.NewCustomHostMaps(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(api.Close)
-	handler := api.Handler()
-	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if split.apiDown.Load() {
-			http.Error(writer, "down", http.StatusServiceUnavailable)
-			return
-		}
-		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/custom-host-map/applied") {
-			body, _ := io.ReadAll(request.Body)
-			report := &struct {
-				Version uint64 `json:"version"`
-			}{}
-			if json.Unmarshal(body, report) == nil {
-				defer split.reports.add(report.Version)
-			}
-			request.Body = io.NopCloser(bytes.NewReader(body))
-		}
-		handler.ServeHTTP(writer, request)
-	}))
-	t.Cleanup(apiServer.Close)
+	bearer := api.bearer
 
 	// the lb's directories: short, since a unix socket's path has a small bound
 	runDir, err := os.MkdirTemp("", "tlslb")
@@ -479,18 +536,19 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(prefixDir, t3SplitInterface+".conf"), config.Bytes(), 0644); err != nil {
+	split.configPath = filepath.Join(prefixDir, interfaceName+".conf")
+	if err := os.WriteFile(split.configPath, config.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	split.lb = lb
 	split.env = append(os.Environ(),
 		"PATH="+filepath.Dir(nginx)+string(os.PathListSeparator)+os.Getenv("PATH"),
-		"WARP_BLOCK="+t3SplitInterface,
+		"WARP_BLOCK="+interfaceName,
 		"WARP_LB_CONFIG_DIR="+prefixDir,
 		"WARP_LB_RUN_DIR="+runDir,
 		"WARP_LBMAP_CREDENTIAL="+credentialPath,
-		"WARP_LBMAP_API_URL="+apiServer.URL,
+		"WARP_LBMAP_API_URL="+api.url,
 		"WARP_LBMAP_LOAD_DELAY=0s",
 		"WARP_LBMAP_RELOAD_MIN_INTERVAL=0s",
 		"WARP_LBMAP_START_TIMEOUT=2s",
@@ -501,6 +559,25 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 		split.stopLb()
 	})
 	return split
+}
+
+// Sets one of the lb's environment values for its next start.
+func (self *t3Split) setEnv(key string, value string) {
+	prefix := key + "="
+	for index, entry := range self.env {
+		if strings.HasPrefix(entry, prefix) {
+			self.env[index] = prefix + value
+			return
+		}
+	}
+	self.env = append(self.env, prefix+value)
+}
+
+// The versions lbmap reported, in order.
+func (self *t3SplitReports) reported() []uint64 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return append([]uint64{}, self.versions...)
 }
 
 // Starts the lb process and returns once its nginx listens, after lbmap reported version when it is above 0: lbmap
@@ -820,7 +897,7 @@ func TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion(t *testing.T) {
 		version := world.mapCustomHost(host)
 		world.reloadNames()
 		split := newT3Split(t, world, []string{host})
-		split.apiDown.Store(true)
+		split.api.down.Store(true)
 		split.startLb(0)
 		if !split.reachesPlatform(t3SplitPlatformHost + "." + world.root) {
 			t.Fatal("a platform name did not route with the dns API down")
@@ -834,7 +911,7 @@ func TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion(t *testing.T) {
 		if reported != 0 {
 			t.Fatalf("lbmap reported %d versions with the API down", reported)
 		}
-		split.apiDown.Store(false)
+		split.api.down.Store(false)
 		split.reports.await(t, version)
 		if !split.reachesDevice(host, []string{"h2"}, split.customPool) {
 			t.Fatal("the host did not route once its version loaded")

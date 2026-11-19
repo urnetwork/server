@@ -182,39 +182,50 @@ func benchSetupQuantile(durations []time.Duration, q float64) time.Duration {
 	return durations[min(len(durations)-1, int(q*float64(len(durations))))]
 }
 
-func BenchmarkTlsEdgeSetup(b *testing.B) {
+// One cold setup and count warm ones on a fresh world: the cold one's time and the warm ones' p50 and p95.
+func benchSetupRun(b testing.TB, count int, timer func(start bool)) (cold time.Duration, p50 time.Duration, p95 time.Duration) {
 	address, visit, closeWorld := newBenchSetupWorld(b)
 	defer closeWorld()
 	// the first connection is cold: the network's limits and leases are loaded on it
-	cold := benchSetupOne(b, address, visit)
-	durations := make([]time.Duration, 0, b.N)
-	b.ResetTimer()
-	for range b.N {
+	cold = benchSetupOne(b, address, visit)
+	durations := make([]time.Duration, 0, count)
+	timer(true)
+	for range count {
 		durations = append(durations, benchSetupOne(b, address, visit))
 	}
-	b.StopTimer()
-	p50 := benchSetupQuantile(slices.Clone(durations), 0.5)
-	p95 := benchSetupQuantile(durations, 0.95)
+	timer(false)
+	p50 = benchSetupQuantile(slices.Clone(durations), 0.5)
+	p95 = benchSetupQuantile(durations, 0.95)
+	return cold, p50, p95
+}
+
+func BenchmarkTlsEdgeSetup(b *testing.B) {
+	cold, p50, p95 := benchSetupRun(b, b.N, func(start bool) {
+		if start {
+			b.ResetTimer()
+		} else {
+			b.StopTimer()
+		}
+	})
 	b.ReportMetric(float64(p50.Microseconds()), "p50-us")
 	b.ReportMetric(float64(p95.Microseconds()), "p95-us")
 	b.ReportMetric(float64(cold.Microseconds()), "cold-us")
 	b.Logf("tlsedge's own setup: cold %v against §13.5's %v, warm p50 %v and p95 %v against %v, over %d connections",
-		cold, benchSetupColdTarget, p50, p95, benchSetupWarmTarget, len(durations))
+		cold, benchSetupColdTarget, p50, p95, benchSetupWarmTarget, b.N)
 }
 
-// The benchmark as a test, so a plain go test records the baseline: a short run's p95 is logged against §13.5's
-// targets and held to them, since tlsedge's own share is a small part of what they bound.
+// How many warm setups the baseline test times: enough for a p95, and few enough that repeated runs leave the host's
+// ephemeral ports to spare, since each closed connection's port waits out TIME_WAIT.
+const benchSetupBaselineCount = 500
+
+// The benchmark's measure as a test, so a plain go test records the baseline: a fixed count's p95 is logged against
+// §13.5's targets and held to them, since tlsedge's own share is a small part of what they bound.
 func TestTlsEdgeSetupBaseline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("the baseline runs only without -short")
 	}
-	result := testing.Benchmark(BenchmarkTlsEdgeSetup)
-	if result.N == 0 {
-		t.Fatal("the benchmark did not run")
-	}
-	p95 := time.Duration(result.Extra["p95-us"]) * time.Microsecond
-	cold := time.Duration(result.Extra["cold-us"]) * time.Microsecond
-	t.Logf("BenchmarkTlsEdgeSetup: %d connections, %v a setup, p95 %v, cold %v", result.N, time.Duration(result.NsPerOp()), p95, cold)
+	cold, p50, p95 := benchSetupRun(t, benchSetupBaselineCount, func(start bool) {})
+	t.Logf("tlsedge's own setup: cold %v, warm p50 %v and p95 %v over %d connections", cold, p50, p95, benchSetupBaselineCount)
 	if benchSetupWarmTarget < p95 || benchSetupColdTarget < cold {
 		t.Fatalf("tlsedge's own setup is past §13.5's targets: p95 %v (%v), cold %v (%v)", p95, benchSetupWarmTarget, cold, benchSetupColdTarget)
 	}

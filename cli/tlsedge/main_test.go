@@ -388,22 +388,38 @@ func TestHostIsNotReadyWithoutClientsAndRetries(t *testing.T) {
 	if _, err := host.dialer.Dial(t.Context(), &tlsedgeservice.TlsEdgeDialRequest{Target: &tlsedgeservice.TlsEdgeTarget{Name: "tls/443/@"}}); !errors.Is(err, sidecar.ErrSocketUnavailable) {
 		t.Fatalf("a dial with no clients: %v", err)
 	}
-	// the retry waits on the clock: the engine's own timers are pending too, so watch until the retry's is
-	retryAt := world.clock.Now().Add(hostTestSettings().ClientsRetryInterval)
+	// the retry waits on the clock. The engine's names and limits loops arm timers at the same instant, so a timer
+	// there may be theirs and the retry's still to come: move the clock one interval at a time, each step once a timer
+	// one interval ahead is pending, until the second attempt has made the clients
+	retryInterval := hostTestSettings().ClientsRetryInterval
 	guard, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	for {
-		pending, added := world.clock.WatchTimers()
-		if slices.ContainsFunc(pending, func(at time.Time) bool { return at.Equal(retryAt) }) {
-			break
+	for made := false; !made; {
+		retryAt := world.clock.Now().Add(retryInterval)
+		for {
+			pending, added := world.clock.WatchTimers()
+			if slices.ContainsFunc(pending, func(at time.Time) bool { return at.Equal(retryAt) }) {
+				break
+			}
+			select {
+			case <-added:
+			case <-guard.Done():
+				t.Fatal("the host never armed its retry")
+			}
 		}
+		world.clock.Advance(retryInterval)
 		select {
-		case <-added:
+		case <-host.clientsMade:
+			made = true
+		case attempt := <-attempts:
+			if attempt != 2 {
+				t.Fatalf("attempt %d", attempt)
+			}
 		case <-guard.Done():
-			t.Fatal("the host never armed its retry")
+			t.Fatal("the host never made its clients")
+		default:
 		}
 	}
-	world.clock.Advance(hostTestSettings().ClientsRetryInterval)
 	hostTestAwaitClients(t, host)
 	if !host.Ready() {
 		t.Fatal("not ready once the clients were made")
