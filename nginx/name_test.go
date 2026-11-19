@@ -158,7 +158,7 @@ func TestNameMatcherMatchesAsNginxServerNames(t *testing.T) {
 		{name: "unknown.example", wantOk: false},
 		{name: "service.example", wantOk: false},
 		{name: "example", wantOk: false},
-		{name: "api.service.example.other", wantOk: false},
+		{name: "api.service.example.example", wantOk: false},
 		{name: "x.api.service.example", wantOk: false},
 		{name: "x.test-lb.service.example", wantOk: false},
 	}

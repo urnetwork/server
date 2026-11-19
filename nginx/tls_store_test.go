@@ -301,7 +301,7 @@ func TestLoadCertificateStoreLoadsEveryServedName(t *testing.T) {
 		{name: "unknown.example"},
 		{name: "service.example"},
 		{name: "x.api.service.example"},
-		{name: "connect.service.example.other"},
+		{name: "connect.service.example.example"},
 	}
 	for _, c := range cases {
 		certificate, ok := certificateStore.certificate(c.name)
