@@ -195,7 +195,7 @@ func runWithDependencies(
 		statusHandler = func(w http.ResponseWriter, r *http.Request) {
 			connectRouter.statusWithWarpStatus(w, r, options.WarpStatus, publicFront)
 		}
-		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
+		routes = append(routes, newConnectRoutes(connectRouter.Connect)...)
 		privateProfile, privateProfileErr := startPrivateHeapProfile(runCtx, options.PrivateHeapProfileTarget, exchange, connectRouter.connectHandler)
 		if privateProfileErr != nil {
 			// Optional diagnostics must not gate serving or expose private paths.

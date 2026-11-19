@@ -3,8 +3,9 @@ package connect
 // The lb_alt front's refusals, through its public sockets with connect's real
 // handler and the real nginx front (LBALT-IMPL.md §2.8, LBALT.md D3, D9,
 // §4.4, §9 "Carriers"): names that are neither connect's nor the api's,
-// names the front doesn't serve, the per-address QUIC cap, and a PROXY
-// header a client sends.
+// names the front doesn't serve, connect names' paths and methods other than
+// connect's own, the per-address QUIC cap, and a PROXY header a client
+// sends.
 
 import (
 	"bufio"
@@ -12,6 +13,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -19,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/urnetwork/server"
@@ -109,6 +113,74 @@ func TestLbAltQuicFailsTheHandshakeOfAnUnknownServerName(t *testing.T) {
 			}
 		}
 		env.expectNoQuicResult("after the failed handshakes")
+	})
+}
+
+// A connect name reaches connect's real handler through connect's own
+// routes, as a block's private listener routes what nginx forwards it: a
+// path other than /, an upgrade to one included, is answered 404 and another
+// method on / 405 with Allow: GET, before the handler counts an H1 handshake
+// or charges the address's rate limit, while the websocket and H1+ upgrades
+// of GET / still authenticate.
+func TestLbAltConnectNamesReachConnectOnlyThroughItsRoutes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		env := newTestLbAltEnv(t, nil)
+		address, _ := env.address(testLbAltInterfaceA, frontFamilyIpv4)
+		// every H1 admission the handler counts, whatever its result
+		handshakeCount := func() float64 {
+			metrics := make(chan prometheus.Metric, 256)
+			go func() {
+				defer close(metrics)
+				defaultConnectH1LifecycleMetrics.handshakes.Collect(metrics)
+			}()
+			count := 0.0
+			for metric := range metrics {
+				written := &dto.Metric{}
+				if err := metric.Write(written); err == nil {
+					count += written.GetCounter().GetValue()
+				}
+			}
+			return count
+		}
+		const upgradeHeader = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+		handshakesBefore := handshakeCount()
+		for _, c := range []struct {
+			method string
+			path   string
+			header string
+			status int
+			allow  string
+		}{
+			{method: http.MethodGet, path: "/favicon.ico", status: http.StatusNotFound},
+			{method: http.MethodPost, path: "/", header: "Content-Length: 0\r\n", status: http.StatusMethodNotAllowed, allow: http.MethodGet},
+			{method: http.MethodGet, path: "/other", header: upgradeHeader, status: http.StatusNotFound},
+		} {
+			tlsConn, err := tls.Dial("tcp", env.bindAddress(address, frontPortHttps).String(), env.clientTlsConfig(testLbAltConnectName, []string{"http/1.1"}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tlsConn.SetDeadline(time.Now().Add(testLbAltProgressTimeout))
+			fmt.Fprintf(tlsConn, "%s %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", c.method, c.path, testLbAltConnectName, c.header)
+			response, err := http.ReadResponse(bufio.NewReader(tlsConn), nil)
+			if err != nil {
+				tlsConn.Close()
+				t.Fatalf("%s %s: %v", c.method, c.path, err)
+			}
+			io.Copy(io.Discard, response.Body)
+			response.Body.Close()
+			tlsConn.Close()
+			if response.StatusCode != c.status || response.Header.Get("Allow") != c.allow {
+				t.Fatalf("%s %s = %d with Allow %q, want %d with Allow %q", c.method, c.path, response.StatusCode, response.Header.Get("Allow"), c.status, c.allow)
+			}
+		}
+		if handshakesAfter := handshakeCount(); handshakesAfter != handshakesBefore {
+			t.Fatalf("connect's handler counted %v H1 handshakes for requests outside its routes", handshakesAfter-handshakesBefore)
+		}
+		for _, carrier := range []testLbAltCarrier{testLbAltCarrierWebSocket, testLbAltCarrierH1Plus} {
+			client := env.newClient(env.newPeer("routed"), carrier, &testLbAltDial{address: address})
+			env.waitResidentEdge(client.peer.clientId)
+			client.close()
+		}
 	})
 }
 

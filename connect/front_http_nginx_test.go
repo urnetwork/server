@@ -55,6 +55,67 @@ func TestFrontHttpServersAreConfiguredByTheNginxFront(t *testing.T) {
 	}
 }
 
+// Connect names reach connect in-process only through connect's own routes,
+// as a connect block's private listener routes what nginx forwards it: GET /
+// reaches connect, its upgrade included, with the client's cookies dropped,
+// while another path answers 404, an upgrade to it included, and another
+// method on / 405 with Allow: GET, none of them reaching connect.
+func TestFrontConnectNamesReachConnectOnlyThroughItsRoutes(t *testing.T) {
+	t.Setenv("WARP_VERSION", "0.0.0-test")
+	type connectRequest struct {
+		method string
+		path   string
+		cookie bool
+	}
+	connectRequests := make(chan connectRequest, 16)
+	connect := func(w http.ResponseWriter, r *http.Request) {
+		connectRequests <- connectRequest{method: r.Method, path: r.URL.Path, cookie: r.Header.Get("Cookie") != ""}
+		io.WriteString(w, "connect")
+	}
+	env := newUnstartedTestFrontEnv(t, nil)
+	if err := env.frontServer.startWithConnectRoutes(env.ctx, connect, env.connectQuic); err != nil {
+		t.Fatal(err)
+	}
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	const upgradeHeader = "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+	cases := []struct {
+		method string
+		path   string
+		header string
+		status int
+		allow  string
+	}{
+		{method: http.MethodGet, path: "/favicon.ico", status: http.StatusNotFound},
+		{method: http.MethodGet, path: "/other", header: upgradeHeader, status: http.StatusNotFound},
+		{method: http.MethodPost, path: "/", header: "Content-Length: 0\r\n", status: http.StatusMethodNotAllowed, allow: http.MethodGet},
+		{method: http.MethodDelete, path: "/x", status: http.StatusNotFound},
+		{method: http.MethodGet, path: "/", header: "Cookie: session=synthetic\r\n", status: http.StatusOK},
+		{method: http.MethodGet, path: "/", header: upgradeHeader, status: http.StatusOK},
+	}
+	for _, c := range cases {
+		client := env.dialH1Client(env.bindAddress(address, frontPortHttps), testFrontConnectName)
+		fmt.Fprintf(client.conn, "%s %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", c.method, c.path, testFrontConnectName, c.header)
+		response, err := http.ReadResponse(client.reader, nil)
+		if err != nil {
+			t.Fatalf("%s %s: %v", c.method, c.path, err)
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != c.status || response.Header.Get("Allow") != c.allow {
+			t.Fatalf("%s %s = %d with Allow %q, want %d with Allow %q", c.method, c.path, response.StatusCode, response.Header.Get("Allow"), c.status, c.allow)
+		}
+	}
+	close(connectRequests)
+	got := []connectRequest{}
+	for request := range connectRequests {
+		got = append(got, request)
+	}
+	want := []connectRequest{{method: http.MethodGet, path: "/"}, {method: http.MethodGet, path: "/"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("connect saw %+v, want only the two GET / without a cookie", got)
+	}
+}
+
 // Through connect's https socket and the real nginx front, the
 // connection's 1000th request, nginx's keepalive_requests, is its last over
 // h1: every response before it keeps the connection, and its own carries

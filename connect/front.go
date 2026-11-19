@@ -61,6 +61,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/nginx"
+	"github.com/urnetwork/server/router"
 )
 
 // The nginx.Front methods connect calls (LBALT-IMPL.md §2.7). *nginx.Front
@@ -299,10 +300,21 @@ func newFrontSockets(routeTable *nginx.RouteTable, socketsPerPort int) ([]*front
 }
 
 // Builds the nginx front around connect's router and starts the server: the
-// router's H1 Connect handler serves connect names in-process, and its
-// ConnectHandler their QUIC.
+// router's H1 Connect handler serves connect names in-process through
+// connect's own routes, and its ConnectHandler their QUIC.
 func (self *frontServer) startWithRouter(ctx context.Context, connectRouter *ConnectRouter) error {
-	return self.startWithConnect(ctx, http.HandlerFunc(connectRouter.Connect), connectRouter.ConnectHandler())
+	return self.startWithConnectRoutes(ctx, connectRouter.Connect, connectRouter.ConnectHandler())
+}
+
+// Starts the server with connect names served in-process through connect's
+// own routes (newConnectRoutes), as a connect block's private listener
+// routes the requests nginx forwards it: connect sees only GET /, and the
+// router answers the rest before connect counts or admits anything. GET
+// /status needs no route, since the nginx front's exact /status deny answers
+// it first, connect's status being standard. connectQuic serves connect
+// names' QUIC.
+func (self *frontServer) startWithConnectRoutes(ctx context.Context, connect http.HandlerFunc, connectQuic frontConnectQuic) error {
+	return self.startWithConnect(ctx, router.NewRouter(ctx, newConnectRoutes(connect)), connectQuic)
 }
 
 // Builds the nginx front from the loaded route table and certificates, with
