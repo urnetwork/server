@@ -179,6 +179,27 @@ func CaptureStores(net *sidecartest.Net, settings *CaptureStoresSettings) (*Capt
 	return report, nil
 }
 
+// CaptureStores' Redis keys and sidecar table rows alone, added to capture and read again at each Scan, for a T3 test
+// of a block that keeps no objects and runs no Net, such as smtpedge's on the stack (SMTP-M9-31). ctx bounds every
+// read. settings nil takes the defaults, whose SidecarColumnsPath is this package's: a test elsewhere names its own.
+func CaptureStoreRows(ctx context.Context, capture *sidecartest.PrivacyCapture, settings *CaptureStoresSettings) (*CaptureStoresReport, error) {
+	if settings == nil {
+		settings = DefaultCaptureStoresSettings()
+	}
+	tables, err := sidecarTables(settings.SidecarColumnsPath)
+	if err != nil {
+		return nil, err
+	}
+	tables = append(tables, settings.ExtraPostgresTables...)
+	report := &CaptureStoresReport{}
+	capture.AddSource(func() []*sidecartest.PrivacyItem {
+		report.reset()
+		inspect := sidecartest.InspectContext(context.WithoutCancel(ctx))
+		return append(captureRedis(inspect, settings, report), capturePostgres(inspect, tables, settings, report)...)
+	})
+	return report, nil
+}
+
 // Every object of every cluster, each an item that streams its key, metadata and body.
 func captureObjects(ctx context.Context, blobs sidecar.BlobStore, settings *CaptureStoresSettings, report *CaptureStoresReport) []*sidecartest.PrivacyItem {
 	items := []*sidecartest.PrivacyItem{}

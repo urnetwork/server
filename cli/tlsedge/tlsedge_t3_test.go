@@ -333,7 +333,9 @@ type t3EdgeOpened struct {
 }
 
 // The block's dial for a test: each request recorded, a refusal queued answered first, and otherwise a stream opened
-// with its TlsEdgeOpen and handed to serve, the device, as a ticket's listener would get it.
+// with its TlsEdgeOpen and handed to serve, the device, as a ticket's listener would get it, or, once a route is set,
+// the request handed to the route: the real sockets engine's Find and a listener's front
+// (tlsedge_custom_route_t3_test.go).
 type t3EdgeDial struct {
 	// the grant expiry each ticket names, past every test's end
 	expireTimeMillis uint64
@@ -343,6 +345,14 @@ type t3EdgeDial struct {
 	requests  []*sidecar.SocketEdgeDialRequest
 	refusals  []error
 	opened    chan *t3EdgeOpened
+	route     func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)
+}
+
+// Hands every dial past a queued refusal to route from now on.
+func (self *t3EdgeDial) setRoute(route func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.route = route
 }
 
 func (self *t3EdgeDial) refuseNext(err error) {
@@ -358,19 +368,22 @@ func (self *t3EdgeDial) Requests() []*sidecar.SocketEdgeDialRequest {
 }
 
 func (self *t3EdgeDial) dial(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error) {
-	refusal := func() error {
+	refusal, route := func() (error, func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error)) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.requests = append(self.requests, request)
 		if 0 < len(self.refusals) {
 			refusal := self.refusals[0]
 			self.refusals = self.refusals[1:]
-			return refusal
+			return refusal, nil
 		}
-		return nil
+		return nil, self.route
 	}()
 	if refusal != nil {
 		return nil, refusal
+	}
+	if route != nil {
+		return route(ctx, request)
 	}
 	metadata, err := request.Metadata(self.expireTimeMillis)
 	if err != nil {
@@ -480,10 +493,13 @@ func newT3EdgeRoot(t testing.TB, ctx context.Context) string {
 }
 
 // A network with its label in root, made as publishing makes them: its zone first, so its label takes its place in
-// the map's serial order.
-func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string) (sidecar.Id, string) {
+// the map's serial order. Its id is networkId's when one is given.
+func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string, givenNetworkId *sidecar.Id) (sidecar.Id, string) {
 	t.Helper()
 	networkId := server.NewId()
+	if givenNetworkId != nil {
+		networkId = server.Id(*givenNetworkId)
+	}
 	model.Testing_CreateNetwork(ctx, networkId, "tls-"+strings.ReplaceAll(networkId.String()[24:], "-", ""), server.NewId())
 	if _, err := model.EnsureNetworkZone(ctx, networkId, root); err != nil {
 		t.Fatal(err)
@@ -499,13 +515,19 @@ func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string) (sidecar.I
 // its settings changed by configure first.
 func newT3EdgeWorld(t testing.TB, configure func(settings *hostSettings)) *t3EdgeWorld {
 	t.Helper()
+	return newT3EdgeWorldOn(t, sidecartest.NewFakeClock(time.Now().UTC().Truncate(time.Second)), nil, configure)
+}
+
+// newT3EdgeWorld on clock, which a world of other engines shares, for the network networkId when one is given: one an
+// authorization log of its own already names.
+func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId *sidecar.Id, configure func(settings *hostSettings)) *t3EdgeWorld {
+	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
-	start := time.Now().UTC().Truncate(time.Second)
-	clock := sidecartest.NewFakeClock(start)
+	start := clock.Now()
 	fakes := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
 	root := newT3EdgeRoot(t, ctx)
-	networkId, label := newT3EdgeNetwork(t, ctx, root)
+	networkId, label := newT3EdgeNetwork(t, ctx, root, givenNetworkId)
 	fakes.Quota.SetLimits(connect.Id(networkId), &sidecar.QuotaLimits{Tier: "free", Limits: map[string]int64{
 		"tls_endpoint_concurrent":        256,
 		"tls_endpoint_new_per_s":         50,
@@ -934,5 +956,66 @@ func TestT3TlsedgeKeysShareTheirSlot(t *testing.T) {
 				t.Errorf("%s", finding)
 			}
 		}
+	})
+}
+
+// TLS-M6-02's fleet key on T3 (plan-TLS-visitor-hash-key; §9.7, tls-3): two tlsedge blocks on the stack's Redis, on one
+// clock so they read one UTC day, take one daily key, {vhk}tls:<yyyymmdd>, which the first to read it creates with a
+// ttl of at most 25 h: one visitor's Finds carry the same 16-byte affinity key from either block, and its records the
+// same 16-byte hash, the two keys apart, and neither holding the visitor's address.
+func TestT3TlsedgeBlocksShareTheFleetsDailyVisitorKey(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		clock := sidecartest.NewFakeClock(time.Now().UTC().Truncate(time.Second))
+		worlds := []*t3EdgeWorld{newT3EdgeWorldOn(t, clock, nil, nil), newT3EdgeWorldOn(t, clock, nil, nil)}
+		for _, world := range worlds {
+			hostTestAwait(t, "the fleet key's first read", 1, world.host.engine.VisitorKeyRefreshes)
+			if !world.host.engine.VisitorKeys().FleetHeld() {
+				t.Fatal("a block holds no fleet key after its first read")
+			}
+		}
+		affinityKeys := [][]byte{}
+		visitorHashes := [][]byte{}
+		for index, world := range worlds {
+			world.visit(world.serverName("blog"), []string{"h2"}, []byte(fmt.Sprintf("a visit to block %d", index)))
+			world.awaitEnded(1)
+			requests := world.dial.Requests()
+			if len(requests) != 1 || len(requests[0].AffinityKey) != 16 {
+				t.Fatalf("block %d's dials: %+v", index, requests)
+			}
+			affinityKeys = append(affinityKeys, requests[0].AffinityKey)
+			records := world.closeAndReadRecords()
+			if len(records) != 1 || len(records[0].VisitorHash) != 16 {
+				t.Fatalf("block %d's records: %+v", index, records)
+			}
+			visitorHashes = append(visitorHashes, records[0].VisitorHash)
+		}
+		if !bytes.Equal(affinityKeys[0], affinityKeys[1]) {
+			t.Fatal("the two blocks' Finds carry different affinity keys for one visitor")
+		}
+		if !bytes.Equal(visitorHashes[0], visitorHashes[1]) {
+			t.Fatal("the two blocks' records hold different hashes for one visitor")
+		}
+		if bytes.Equal(affinityKeys[0], visitorHashes[0]) {
+			t.Fatal("the affinity key is the record hash")
+		}
+		address := net.ParseIP(t3EdgeVisitorAddress).To4()
+		for _, key := range [][]byte{affinityKeys[0], visitorHashes[0]} {
+			if bytes.Contains(key, address) {
+				t.Fatal("a visitor key holds the visitor's address")
+			}
+		}
+		name := "{vhk}tls:" + clock.Now().UTC().Format("20060102")
+		server.Redis(worlds[0].ctx, func(client server.RedisClient) {
+			value, err := client.Get(worlds[0].ctx, name).Bytes()
+			if err != nil || len(value) != 32 {
+				t.Fatalf("the fleet key at %s: %d bytes, %v", name, len(value), err)
+			}
+			ttl, err := client.TTL(worlds[0].ctx, name).Result()
+			if err != nil || ttl <= 0 || 25*time.Hour < ttl {
+				t.Fatalf("the fleet key's ttl: %v, %v", ttl, err)
+			}
+		})
 	})
 }

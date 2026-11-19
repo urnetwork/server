@@ -502,3 +502,54 @@ func TestSmtpEdgeColumnsMapToMetadataRows(t *testing.T) {
 		smtpCheckColumnRows(t, listBytes, smtpEdgeTables, smtpEdgeColumnRows)
 	})
 }
+
+// A call whose context ended, as the engine's StoreTimeout ends one on a slow Postgres, answers an error and never
+// raises into its caller, which is one of smtpedge's goroutines with no server handler to catch it; the store answers
+// again once a context lives. SMTP-M9-31's T3 found the send log's flush ending the process this way.
+func TestSmtpEdgeStoreAnswersAnEndedContextWithAnError(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg9Linked() {
+			return
+		}
+		store := NewSmtpEdgeStore(nil)
+		ended, cancel := context.WithCancel(context.Background())
+		cancel()
+		networkId := sidecar.Id(server.NewId())
+		calls := map[string]func() error{
+			"InsertSends": func() error {
+				return store.InsertSends(ended, []*smtpedgeservice.SmtpSendRecord{smtpTestSend(networkId, server.NowUtc())})
+			},
+			"ActiveHalts": func() error {
+				_, err := store.ActiveHalts(ended)
+				return err
+			},
+			"SetHalt": func() error {
+				return store.SetHalt(ended, &smtpedgeservice.SmtpHalt{HaltId: sidecar.NewId(), NetworkId: networkId, Trigger: smtpedgeservice.SmtpHaltTriggerFraud, StartTime: server.NowUtc()})
+			},
+			"FindSends": func() error {
+				_, err := store.FindSends(ended, &smtpedgeservice.SmtpJoinKey{NetworkId: networkId, Since: server.NowUtc().Add(-time.Hour), Until: server.NowUtc()})
+				return err
+			},
+			"RecipientCount": func() error {
+				_, err := store.RecipientCount(ended, networkId, server.NowUtc().Add(-time.Hour))
+				return err
+			},
+		}
+		for name, call := range calls {
+			raised, err := func() (raised any, err error) {
+				defer func() {
+					raised = recover()
+				}()
+				return nil, call()
+			}()
+			if raised != nil {
+				t.Errorf("%s raised %v", name, raised)
+			} else if !errors.Is(err, context.Canceled) {
+				t.Errorf("%s answered %v", name, err)
+			}
+		}
+		if _, err := store.ActiveHalts(context.Background()); err != nil {
+			t.Fatalf("the store after an ended call: %v", err)
+		}
+	})
+}
