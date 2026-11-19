@@ -149,3 +149,69 @@ func TestMintRoutesAnswerTheSessionCapWith409(t *testing.T) {
 		}
 	})
 }
+
+// POST /auth/verify takes an optional bearer (the API spec marks it so, for
+// the site and the apps, which verify an added sign-in method signed in). A
+// live network token of the verified network and user renews the caller's own
+// session; any other bearer is served as a signed-out caller, never refused,
+// and the verify starts a new session.
+func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		defer session.Testing_SetSessionCreationEnabled(true)()
+		ctx := t.Context()
+		fixture := newRouteAccessDbFixture(t, ctx)
+		userAuth := fixture.networkId.String() + "@bringyour.com"
+		mint := func(networkId server.Id, userId server.Id) (string, *session.ByJwt) {
+			claims := session.NewByJwt(networkId, userId, "verify", false, false)
+			signed, err := session.MintNetworkSession(ctx, claims, "password")
+			server.Raise(err)
+			return signed, claims
+		}
+		verify := func(name string, authorization string) *session.ByJwt {
+			t.Helper()
+			code, err := model.AuthVerifyCreateCode(model.AuthVerifyCreateCodeArgs{UserAuth: userAuth}, session.Testing_CreateClientSession(ctx, nil))
+			server.Raise(err)
+			var verified model.AuthVerifyResult
+			fixture.call(t, http.MethodPost, "/auth/verify", authorization, map[string]any{"user_auth": userAuth, "verify_code": *code.VerifyCode}, http.StatusOK, &verified)
+			if verified.Error != nil || verified.Network == nil {
+				t.Fatalf("%s: verify %+v", name, verified)
+			}
+			returned, err := session.ParseByJwt(ctx, verified.Network.ByJwt)
+			server.Raise(err)
+			if returned.NetworkId != fixture.networkId || returned.SessionId == nil {
+				t.Fatalf("%s: the verify returned %+v", name, returned)
+			}
+			return returned
+		}
+
+		own, ownClaims := mint(fixture.networkId, fixture.userId)
+		if returned := verify("the signed-in caller", "Bearer "+own); *returned.SessionId != *ownClaims.SessionId {
+			t.Error("a signed-in caller's verify started another session")
+		}
+
+		otherNetwork, otherUser := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, otherNetwork, "verify-other", otherUser)
+		other, _ := mint(otherNetwork, otherUser)
+		ended, endedClaims := mint(fixture.networkId, fixture.userId)
+		if _, err := session.RevokeNetworkSession(&session.RevokeSessionArgs{SessionId: *endedClaims.SessionId, OperationId: server.NewId()}, session.Testing_CreateClientSession(ctx, ownClaims)); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []struct {
+			name          string
+			authorization string
+		}{
+			{"no bearer", ""},
+			{"a malformed bearer", "Bearer not-a-token"},
+			{"another network's token", "Bearer " + other},
+			{"an ended session's token", "Bearer " + ended},
+			{"an API key", fixture.key()},
+		} {
+			returned := verify(c.name, c.authorization)
+			if *returned.SessionId == *ownClaims.SessionId || *returned.SessionId == *endedClaims.SessionId {
+				t.Errorf("%s: the verify returned an existing session", c.name)
+			}
+		}
+	})
+}

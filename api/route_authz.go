@@ -112,7 +112,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /auth/login":                              routeAccessPublic,
 	"POST /auth/wallet-nonce":                       routeAccessPublic,
 	"POST /auth/login-with-password":                routeAccessPublic,
-	"POST /auth/verify":                             routeAccessPublic,
+	"POST /auth/verify":                             routeAccessPublic, // optional bearer: a live network token of the verified network renews its own session; any other bearer is served signed out (model.AuthVerify)
 	"POST /auth/wallet-challenge":                   routeAccessPublic,
 	"GET /auth/refresh":                             routeAccessClient,
 	"POST /auth/network-refresh":                    routeAccessNetwork, // renews the network credential: a client token must never obtain one (3b48aa3d made /auth/refresh client only for that reason)
