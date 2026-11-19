@@ -3045,8 +3045,8 @@ first diagnostic in its own bucket.
 The optional `redis_operation` field records where that diagnostic arose.
 `device_config_read` requires the direct device configuration reader.
 `feature_use_plan_lookup` requires the continuous source frames from the
-entitlement read or cache write through `IsProNetwork` to the concrete
-feature-use planner. `feature_use_flush_plan` additionally requires the
+entitlement read or cache write through `lookupProNetwork` (or
+`IsProNetwork` on earlier workers) to the concrete feature-use planner. `feature_use_flush_plan` additionally requires the
 planner's direct call from `countMarks`, its recovery boundary and the
 enclosing `flush`. In this source, `flush` reaches that call after the mark
 store acknowledges the write. A shorter stack can retain the direct caller

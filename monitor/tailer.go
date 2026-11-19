@@ -1402,7 +1402,7 @@ func panicProxyFrameIs(frames []string, module, function, file string) bool {
 	return len(match) == 3 && match[1] == module && match[2] == function && panicSourceHasFile(frames[1], file)
 }
 
-// An interrupted lookup can belong to several paths through IsProNetwork.
+// An interrupted entitlement lookup can belong to several application paths.
 // Only the concrete planner identifies feature-use accounting. Its immediate
 // flush lineage identifies the phase reached after markAll returned success.
 func panicProxyPlanOperation(module, caller string, frames []string) string {
@@ -1415,8 +1415,11 @@ func panicProxyPlanOperation(module, caller string, frames []string) string {
 		}
 	}
 	const file = "proxy_feature_use_model.go"
-	if !panicProxyFrameIs(frames, module, "IsProNetwork", "pro_model.go") ||
-		!panicProxyFrameIs(frames[2:], module, "(*dbProxyFeatureUsePlans).plans", file) {
+	// Older workers called IsProNetwork directly. Both forms require the
+	// same concrete planner as the immediately enclosing frame.
+	lookup := panicProxyFrameIs(frames, module, "lookupProNetwork", "pro_model.go") ||
+		panicProxyFrameIs(frames, module, "IsProNetwork", "pro_model.go")
+	if !lookup || !panicProxyFrameIs(frames[2:], module, "(*dbProxyFeatureUsePlans).plans", file) {
 		return ""
 	}
 	frames = frames[4:]

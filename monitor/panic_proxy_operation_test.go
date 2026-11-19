@@ -85,6 +85,8 @@ func TestProxyRedisOperationRequiresAccountingLineage(t *testing.T) {
 			original := proxyPlanOperationStack(module, caller)
 			for _, tc := range []struct{ label, stack, operation string }{
 				{"flush", original, "feature_use_flush_plan"},
+				{"optional planner", strings.Replace(original, ".IsProNetwork(", ".lookupProNetwork(", 1), "feature_use_flush_plan"},
+				{"ordinary reader", strings.NewReplacer(".IsProNetwork(", ".lookupProNetwork(", ".(*dbProxyFeatureUsePlans).plans(", ".IsProNetwork(").Replace(original), ""},
 				{"planner", strings.Replace(original, ".countMarks.func1(", ".unrelated(", 1), "feature_use_plan_lookup"},
 				{"wrong recovery", strings.Replace(original, ".HandleError(", ".HandleError2(", 1), "feature_use_plan_lookup"},
 				{"colliding recovery", strings.Replace(original, strings.TrimSuffix(module, "/model")+".HandleError", "connect.HandleError", 1), "feature_use_plan_lookup"},
