@@ -7,7 +7,9 @@ package nginx
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -333,5 +335,63 @@ func TestFrontE2eCloseReleasesUpstreamConnectionsAndSpillFiles(t *testing.T) {
 	}
 	if requests := e2e.requestsSince(requestCounts); len(requests) != 0 {
 		t.Errorf("a request after Close reached %v", e2eRequestServices(requests))
+	}
+}
+
+// Close never reports the forced close complete while an upstream dial is
+// in flight with its connection open. The close ends a dial through its
+// context; one that has its connection and doesn't return it is waited for,
+// up to HttpSettings.ForcedCloseTimeout, and closes the connection itself
+// once it finds its pool closed. So Close returns the forced close's error
+// rather than nil while the dial holds, and the request it served is a 502,
+// with no block left to try. The api group's dial seam has its connection
+// and holds it until the test lets it go, whatever its context says.
+func TestFrontE2eCloseNeverReportsADialStillOpen(t *testing.T) {
+	settings := e2eFrontSettings(t)
+	// with a dial held, Close can only end at this bound
+	settings.Http.ForcedCloseTimeout = 1 * time.Second
+	e2e := newE2eFront(t, settings, nil)
+	eth1 := e2e.iface(t, "eth1")
+	group := e2e.front.serviceForwarders["api"].(*upstreamGroup)
+	hold := newE2eHold(t)
+	dialedConns := make(chan net.Conn, 1)
+	dialer := &net.Dialer{}
+	// set before any request reaches the group
+	group.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		conn, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		dialedConns <- conn
+		<-hold.released
+		return conn, nil
+	}
+
+	client := e2e.newH1Client(t, eth1.httpsAddr, "api.service.example")
+	statuses := make(chan int, 1)
+	go func() {
+		response, err := client.Do(newE2eRequest(t, "GET", "https://api.service.example/dialing", nil))
+		if err != nil {
+			statuses <- 0
+			return
+		}
+		response.Body.Close()
+		statuses <- response.StatusCode
+	}()
+	dialedConn := receiveE2e(t, dialedConns, "dial")
+	dialedConnOpen := func() bool {
+		return dialedConn.SetDeadline(time.Time{}) == nil
+	}
+
+	if err := e2e.front.Close(); err == nil && dialedConnOpen() {
+		t.Errorf("Close reported the forced close complete with a dial's connection open")
+	}
+	hold.release()
+	waitE2eClosed(t, e2e.front.cutDone, "the forced close")
+	if dialedConnOpen() {
+		t.Errorf("the dial's connection is open after the forced close completed")
+	}
+	if status := receiveE2e(t, statuses, "response"); status != http.StatusBadGateway {
+		t.Errorf("the request whose dial was in flight = %d, want 502", status)
 	}
 }

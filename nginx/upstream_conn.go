@@ -72,6 +72,9 @@ var errUpstreamHeadTooLarge = errors.New("upstream response head too large")
 type upstreamPool struct {
 	group *upstreamGroup
 	block *upstreamBlock
+	// dials in flight, which close waits for: a dial's connection is the
+	// pool's only once recorded, so close can't cut it before then
+	pendingDials sync.WaitGroup
 
 	stateLock sync.Mutex
 	// idle connections, the least recently used first
@@ -173,9 +176,31 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 	}
 }
 
-// Dials a new connection to the block. The error is the dial's.
+// Dials a new connection to the block. The dial ends with the request's
+// context or the group's close, whichever comes first, and close waits for
+// it, so no connection outlives a close that never saw it: a dial that
+// finds the pool closed once it has a connection closes it. The error is the
+// dial's, or net.ErrClosed for a closed pool.
 func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error) {
-	conn, err := self.group.dialContext(ctx, "tcp", self.block.target)
+	open := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return false
+		}
+		self.pendingDials.Add(1)
+		return true
+	}()
+	if !open {
+		return nil, net.ErrClosed
+	}
+	defer self.pendingDials.Done()
+	dialCtx, cancelDial := context.WithCancel(ctx)
+	defer cancelDial()
+	stopGroupCancel := context.AfterFunc(self.group.ctx, cancelDial)
+	defer stopGroupCancel()
+
+	conn, err := self.group.dialContext(dialCtx, "tcp", self.block.target)
 	if err != nil {
 		return nil, err
 	}
@@ -282,7 +307,9 @@ func (self *upstreamPool) sweep(now time.Time) {
 	}
 }
 
-// Closes every connection, idle or in use, and keeps no more.
+// Closes every connection, idle or in use, and keeps no more. It returns
+// once every dial in flight has ended, each closing the connection it got:
+// the group's close ends their dials first, so the wait is short.
 func (self *upstreamPool) close() {
 	upstreamConns := func() []*upstreamConnection {
 		self.stateLock.Lock()
@@ -299,6 +326,7 @@ func (self *upstreamPool) close() {
 	for _, upstreamConn := range upstreamConns {
 		upstreamConn.close()
 	}
+	self.pendingDials.Wait()
 }
 
 // The number of idle connections.

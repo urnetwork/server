@@ -111,7 +111,8 @@ type serviceForwarder interface {
 	// recover it.
 	serveHttp(w http.ResponseWriter, r *http.Request, options forwardOptions)
 	// releases the pools and cuts the tunnels; requests in flight end with
-	// their connections
+	// their connections. A dial in flight ends with it, and it returns once
+	// every such dial has, so no upstream connection outlives it.
 	close()
 }
 
