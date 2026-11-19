@@ -332,8 +332,8 @@ func (self *Front) ClassifyName(name string) NameClass {
 // session tickets resume across the block's sockets (D6c).
 // GetConfigForClient picks the certificate by SNI, the default server's for
 // a missing or unknown one, and ALPN by class: http/1.1 only for connect
-// names, h2 and http/1.1 for the rest. Serve it through tls.NewListener and
-// http.Server.Serve; ServeTLS would clone it.
+// names, h2 and http/1.1 for the rest. NewTlsListener and http.Server.Serve
+// share this configuration across sockets.
 func (self *Front) TlsConfig() *tls.Config {
 	return self.tlsConfig
 }
