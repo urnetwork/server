@@ -89,11 +89,11 @@ type HttpSettings struct {
 	// address's concurrency limit (D8). Non-positive leaves Go's default.
 	Http2MaxConcurrentStreams int
 	// on h1, the longest Go's server may spend reading a body the request
-	// left unread for an early answer, the front's own or the forwarder's
-	// refusal, before the answer or, when it closes the connection, after
-	// it: nginx's default `lingering_timeout 5s`, its bound on each
-	// lingering read. A read it cuts has the connection closed after the
-	// answer. Non-positive cuts that read at once.
+	// left unread for an early answer, the front's own, connect's in-process
+	// one or the forwarder's refusal, before the answer or, when it closes
+	// the connection, after it: nginx's default `lingering_timeout 5s`, its
+	// bound on each lingering read. A read it cuts has the connection closed
+	// after the answer. Non-positive cuts that read at once.
 	LingeringTimeout time.Duration
 	// how long a drain lets accepted requests and forwarded websockets run
 	// before they are cut: nginx's `worker_shutdown_timeout 60m`, the same as

@@ -7,14 +7,18 @@ package nginx
 // Connection: close, and a client that asked to close. Go's server must end
 // such a connection with a half-close and a wait before the close
 // (closeWriteAndWait), never close it at once, so the client has read the
-// whole answer by the time the close resets the connection.
+// whole answer by the time the close resets the connection. A client that
+// holds the rest of its body back must still get connect's in-process
+// answer, and the end of the server's side, once LingeringTimeout cuts Go's
+// read of the body.
 //
 // The servers are built as connect builds its public ones: the front's
 // handlers under Front.ConfigureServer, TLS through tls.NewListener with the
 // front's one config, plain TCP for port 80, over listeners whose
 // connections record how the server ends them. Each client writes its head
 // and the first 64 KiB of the body it keeps sending at once, so some of it
-// is unread whenever the server closes, then keeps writing while it reads.
+// is unread whenever the server closes, then keeps writing while it reads;
+// or the head and a body's first bytes, holding the rest back.
 
 import (
 	"bufio"
@@ -149,12 +153,21 @@ func serveE2eLinger(t *testing.T, e2e *e2eFront, handler http.Handler, overTls b
 type e2eLingerCase struct {
 	what string
 	// the request line and headers, but the Content-Length
-	headLines     []string
+	headLines []string
+	// the declared body's length; -1 for none, for a body whose framing
+	// headLines declare, such as a chunked one, which only a client that
+	// holds its body back sends
 	contentLength int64
 	// the declared body goes whole with the head, followed by a pipelined
 	// request whose own body the client keeps sending; otherwise the client
 	// keeps sending the declared body
 	pipelined bool
+	// the client sends the head and heldBackBodyPrefix, then holds the rest
+	// of its body back: it writes nothing more while it reads the answer and
+	// the end of the server's side
+	heldBack bool
+	// with heldBack, the body's first bytes, framed as the head declares
+	heldBackBodyPrefix string
 	// the answer's handler reads the body whole, so the connection closes
 	// at once, with no half-close, as nothing of it is left to arrive
 	readWhole  bool
@@ -190,7 +203,8 @@ type e2eLingerOutcome struct {
 // Each client writes the head and the first 64 KiB of the body it keeps
 // sending at once, then keeps writing that body on its own goroutine while
 // it reads the answer, its body, and once more, for the end of the server's
-// side.
+// side. One that holds its body back writes the head and the body's first
+// bytes, and nothing more.
 func runE2eLingerCases(t *testing.T, listener *e2eLingerListener, dial func(ctx context.Context) (net.Conn, error), cases []*e2eLingerCase, socketHalfCloses bool) {
 	t.Helper()
 	// on a goroutine of its own, so it reports rather than fails
@@ -206,11 +220,20 @@ func runE2eLingerCases(t *testing.T, listener *e2eLingerListener, dial func(ctx 
 		outcome.localAddr = conn.LocalAddr().String()
 
 		headBytes := func(headLines []string, contentLength int64) []byte {
-			return []byte(strings.Join(headLines, "\r\n") + "\r\nContent-Length: " + strconv.FormatInt(contentLength, 10) + "\r\n\r\n")
+			head := strings.Join(headLines, "\r\n") + "\r\n"
+			if 0 <= contentLength {
+				head += "Content-Length: " + strconv.FormatInt(contentLength, 10) + "\r\n"
+			}
+			return []byte(head + "\r\n")
 		}
 		firstWrite := headBytes(c.headLines, c.contentLength)
+		// the body the client keeps sending
 		sentBytes := c.contentLength
-		if c.pipelined {
+		switch {
+		case c.heldBack:
+			firstWrite = append(firstWrite, c.heldBackBodyPrefix...)
+			sentBytes = 0
+		case c.pipelined:
 			firstWrite = append(firstWrite, e2eBody(int(c.contentLength))...)
 			firstWrite = append(firstWrite, headBytes([]string{"POST /pipelined HTTP/1.1", "Host: test-lb.service.example"}, e2eLingerPipelinedContentLength)...)
 			sentBytes = e2eLingerPipelinedContentLength
@@ -464,5 +487,63 @@ func TestFrontE2eClosingAnswersLingerForABodyStillArriving(t *testing.T) {
 	drainE2e.front.Close()
 	runE2eLingerCases(t, drainListener, dialTls(drainE2e, drainListener), []*e2eLingerCase{
 		{what: "closed 503", headLines: []string{"POST /hidden-example/missing HTTP/1.1", "Host: test-lb.service.example", "Connection: close"}, contentLength: contentLength, statusCode: http.StatusServiceUnavailable, body: e2eOwnAnswerBody(http.StatusServiceUnavailable)},
+	}, false)
+}
+
+// Connect in-process answers without reading a body it has no use for, and
+// a client that holds the rest of its body back still gets the answer and
+// the end of the server's side: Go's server reads what is left of the body
+// before an answer that keeps the connection, or after one that closes it,
+// and the front bounds that read by LingeringTimeout once connect's handler
+// returns, as before its own answers. Over TLS, as connect serves its names:
+// keep-alive requests, with a declared body and a chunked one, answered once
+// the bound cuts the read, with Connection: close; and answers that close the
+// connection, whose ends follow the bound: a client that expects
+// 100-continue, one that asked to close with a chunked body, of which Go
+// reads up to 256 KiB where it reads none of a declared one, the drain's
+// close and keepalive_requests'. Each server ends the connection with Go's
+// half-close and wait, the read having been cut. Unbounded, the answer, or
+// the end, would wait on the client for as long as it stays connected.
+func TestFrontE2eConnectInProcessBoundsTheReadOfAHeldBackBody(t *testing.T) {
+	const declaredContentLength = 1000
+	const declaredPrefix = "0123456789"
+	// one chunk of ten bytes
+	const chunkedPrefix = "a\r\n0123456789\r\n"
+	newSettings := func() *FrontSettings {
+		settings := e2eFrontSettings(t)
+		// so each client waits little for the bound
+		settings.Http.LingeringTimeout = 200 * time.Millisecond
+		return settings
+	}
+	dialTls := func(e2e *e2eFront, listener *e2eLingerListener) func(ctx context.Context) (net.Conn, error) {
+		return func(ctx context.Context) (net.Conn, error) {
+			return e2e.dialTls(ctx, listener.Addr().String(), "", []string{"http/1.1"})
+		}
+	}
+
+	e2e := newE2eFront(t, newSettings(), nil)
+	listener, _ := serveE2eLinger(t, e2e, e2e.front.HttpsHandler("eth1"), true)
+	runE2eLingerCases(t, listener, dialTls(e2e, listener), []*e2eLingerCase{
+		{what: "keep-alive", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example"}, contentLength: declaredContentLength, heldBack: true, heldBackBodyPrefix: declaredPrefix, statusCode: http.StatusOK, body: "connect"},
+		{what: "keep-alive chunked", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example", "Transfer-Encoding: chunked"}, contentLength: -1, heldBack: true, heldBackBodyPrefix: chunkedPrefix, statusCode: http.StatusOK, body: "connect"},
+		{what: "100-continue", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example", "Expect: 100-continue"}, contentLength: declaredContentLength, heldBack: true, statusCode: http.StatusOK, body: "connect"},
+		{what: "client close chunked", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example", "Connection: close", "Transfer-Encoding: chunked"}, contentLength: -1, heldBack: true, heldBackBodyPrefix: chunkedPrefix, statusCode: http.StatusOK, body: "connect"},
+	}, false)
+
+	keepaliveSettings := newSettings()
+	keepaliveSettings.Http.KeepaliveRequests = 1
+	keepaliveE2e := newE2eFront(t, keepaliveSettings, nil)
+	keepaliveListener, _ := serveE2eLinger(t, keepaliveE2e, keepaliveE2e.front.HttpsHandler("eth1"), true)
+	runE2eLingerCases(t, keepaliveListener, dialTls(keepaliveE2e, keepaliveListener), []*e2eLingerCase{
+		{what: "keepalive_requests", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example"}, contentLength: declaredContentLength, heldBack: true, heldBackBodyPrefix: declaredPrefix, statusCode: http.StatusOK, body: "connect"},
+	}, false)
+
+	drainE2e := newE2eFront(t, newSettings(), nil)
+	drainListener, drainServer := serveE2eLinger(t, drainE2e, drainE2e.front.HttpsHandler("eth1"), true)
+	// connect's drain: the front's, and the server's keepalives off
+	drainE2e.front.BeginDrain()
+	drainServer.SetKeepAlivesEnabled(false)
+	runE2eLingerCases(t, drainListener, dialTls(drainE2e, drainListener), []*e2eLingerCase{
+		{what: "draining", headLines: []string{"POST /upload HTTP/1.1", "Host: connect.service.example"}, contentLength: declaredContentLength, heldBack: true, heldBackBodyPrefix: declaredPrefix, statusCode: http.StatusOK, body: "connect"},
 	}, false)
 }

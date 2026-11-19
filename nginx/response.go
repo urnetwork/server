@@ -300,6 +300,12 @@ func (self *responseState) start() {
 	self.r.Body = self.requestBody
 }
 
+// Whether the h1 request has a body its handlers left unread, wholly or in
+// part. False on h2 and h3, and for a request without a body.
+func (self *responseState) requestBodyUnread() bool {
+	return self.requestBody != nil && !self.requestBody.readWhole.Load()
+}
+
 // An h1 request body whose first read arms the client write deadline, for
 // the 100 Continue, and which notes when it has been read whole
 // (responseState.start). Read by one goroutine at a time, as a request body
@@ -407,7 +413,7 @@ func (self *responseState) finish() {
 		self.gzipWriter = nil
 	}
 	self.finished = true
-	if self.endsConnection && self.requestBody != nil && !self.requestBody.readWhole.Load() {
+	if self.endsConnection && self.requestBodyUnread() {
 		limitReader := http.MaxBytesReader(self.w, io.NopCloser(strings.NewReader("x")), 0)
 		limitReader.Read(make([]byte, 1))
 	}

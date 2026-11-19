@@ -3,7 +3,8 @@ package nginx
 // Tests of what the handlers add to responses: the CORS matrix, the security
 // headers on every status and on a hijacked upgrade's 101, gzip as nginx's
 // defaults, Connection: close while draining, the access log, and the bound
-// on reading an unread body before the front's own answers.
+// on reading a body that the front's own answers, or connect's in-process
+// ones, leave unread.
 
 import (
 	"bufio"
@@ -15,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -755,6 +757,106 @@ func TestRouteHttpOwnAnswerBoundsTheReadOfAnUnreadBody(t *testing.T) {
 		response.Body.Close()
 		if response.StatusCode != http.StatusForbidden || response.Close {
 			t.Errorf("request %d with a whole body = %d, Connection close %t; want 403 on a kept connection", i+1, response.StatusCode, response.Close)
+		}
+	}
+}
+
+// A response writer that hijacks into one end of a pipe, as
+// testHijackResponseWriter does, and records each read deadline set through
+// it, as an h1 server's writer sets its connection's. Used by one goroutine.
+type testReadDeadlineResponseWriter struct {
+	*testHijackResponseWriter
+	readDeadlines []time.Time
+}
+
+// The read deadline http.ResponseController sets.
+func (self *testReadDeadlineResponseWriter) SetReadDeadline(deadline time.Time) error {
+	self.readDeadlines = append(self.readDeadlines, deadline)
+	return nil
+}
+
+// When connect's in-process handler returns on h1 with the body unread,
+// wholly or in part, declared or chunked, the front bounds what Go's server
+// then reads of it by LingeringTimeout, as for its own answers: Go's server
+// reads it before an answer that keeps the connection, or after one that
+// closes it. A body read whole, a request without one, a connection connect
+// hijacked, whose deadlines are its tunnel's, and h2 get no deadline.
+func TestRouteHttpConnectInProcessBoundsTheReadOfAnUnreadBody(t *testing.T) {
+	const lingeringTimeout = 7 * time.Second
+	settings := testFrontSettings()
+	settings.Http.LingeringTimeout = lingeringTimeout
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	handler := testFront.front.HttpsHandler("eth1")
+
+	cases := []struct {
+		what       string
+		method     string
+		protoMajor int
+		// of a ten-byte body; -1 for chunked, 0 for none
+		contentLength int64
+		// what connect's handler does before it answers "connect", if
+		// anything
+		serve func(w http.ResponseWriter, r *http.Request)
+		// what the client got through the writer: "connect", or nothing
+		// after a hijack
+		answer  string
+		bounded bool
+	}{
+		{what: "unread", method: "POST", protoMajor: 1, contentLength: 10, answer: "connect", bounded: true},
+		{what: "chunked unread", method: "POST", protoMajor: 1, contentLength: -1, answer: "connect", bounded: true},
+		{what: "partly read", method: "POST", protoMajor: 1, contentLength: 10, serve: func(w http.ResponseWriter, r *http.Request) {
+			io.ReadFull(r.Body, make([]byte, 4))
+		}, answer: "connect", bounded: true},
+		{what: "read whole", method: "POST", protoMajor: 1, contentLength: 10, serve: func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+		}, answer: "connect", bounded: false},
+		{what: "no body", method: "GET", protoMajor: 1, contentLength: 0, answer: "connect", bounded: false},
+		{what: "hijacked", method: "POST", protoMajor: 1, contentLength: 10, serve: func(w http.ResponseWriter, r *http.Request) {
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+		}, answer: "", bounded: false},
+		{what: "h2 unread", method: "POST", protoMajor: 2, contentLength: 10, answer: "connect", bounded: false},
+	}
+	for _, c := range cases {
+		serve := c.serve
+		testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+			if serve != nil {
+				serve(w, r)
+			}
+			io.WriteString(w, "connect")
+		}
+		r := asTestProtocol(newTestRequest(c.method, "connect.service.example", "/upload", true), c.protoMajor)
+		if c.contentLength != 0 {
+			r.Body = io.NopCloser(strings.NewReader("0123456789"))
+			r.ContentLength = c.contentLength
+		}
+		serverConn, clientConn := net.Pipe()
+		writer := &testReadDeadlineResponseWriter{
+			testHijackResponseWriter: &testHijackResponseWriter{
+				ResponseRecorder: httptest.NewRecorder(),
+				conn:             serverConn,
+			},
+			readDeadlines: []time.Time{},
+		}
+		requestCount := len(testFront.connectHandler.recordedRequests())
+		startTime := time.Now()
+		handler.ServeHTTP(writer, r)
+		endTime := time.Now()
+		serverConn.Close()
+		clientConn.Close()
+
+		if len(testFront.connectHandler.recordedRequests()) != requestCount+1 || writer.Body.String() != c.answer {
+			t.Errorf("%s: answered %q, want %q from connect", c.what, writer.Body.String(), c.answer)
+		}
+		if !c.bounded {
+			if len(writer.readDeadlines) != 0 {
+				t.Errorf("%s: read deadlines %v set, want none", c.what, writer.readDeadlines)
+			}
+			continue
+		}
+		if len(writer.readDeadlines) != 1 || writer.readDeadlines[0].Before(startTime.Add(lingeringTimeout)) || endTime.Add(lingeringTimeout).Before(writer.readDeadlines[0]) {
+			t.Errorf("%s: read deadlines %v set, want one LingeringTimeout %s after connect returned", c.what, writer.readDeadlines, lingeringTimeout)
 		}
 	}
 }
