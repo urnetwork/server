@@ -560,23 +560,6 @@ type e2eFront struct {
 	errorLog   *e2eErrorLog
 }
 
-// The certificates of the e2e table's names, by vault directory, and the
-// names each leaf lists. Every served name finds its pair by findLatestTls's
-// own, star.<parent> or <parent> rule, and a few names have a leaf of their
-// own, so a handshake shows which name chose its certificate.
-func e2eVaultDirNames() map[string][]string {
-	return map[string][]string{
-		"test-lb.service.example":       {"test-lb.service.example"},
-		"api.service.example":           {"api.service.example"},
-		"app.web.service.example":       {"app.web.service.example"},
-		"star.service.example":          {"*.service.example"},
-		"star.other.example":            {"*.other.example"},
-		"star.connect.service.example":  {"*.connect.service.example"},
-		"star.web.service.example":      {"*.web.service.example"},
-		"star.deep.web.service.example": {"*.deep.web.service.example"},
-	}
-}
-
 // Builds the front through NewFront and serves it: an upstream for every
 // block, the route file with their ports, loaded through LoadRouteTable, a
 // vault loaded through LoadCertificateStore, and each interface's sockets.
@@ -623,8 +606,23 @@ func newE2eFront(t *testing.T, settings *FrontSettings, editRouteTable func(rout
 
 	authority := newTestTlsAuthority(t)
 	vaultDir := t.TempDir()
+	// the certificates of the table's names, by vault directory, and the
+	// names each leaf lists. Every served name finds its pair by
+	// findLatestTls's own, star.<parent> or <parent> rule, and a few names
+	// have a leaf of their own, so a handshake shows which name chose its
+	// certificate.
+	dirDnsNames := map[string][]string{
+		"test-lb.service.example":       {"test-lb.service.example"},
+		"api.service.example":           {"api.service.example"},
+		"app.web.service.example":       {"app.web.service.example"},
+		"star.service.example":          {"*.service.example"},
+		"star.other.example":            {"*.other.example"},
+		"star.connect.service.example":  {"*.connect.service.example"},
+		"star.web.service.example":      {"*.web.service.example"},
+		"star.deep.web.service.example": {"*.deep.web.service.example"},
+	}
 	dirLeafs := map[string]*x509.Certificate{}
-	for dirName, dnsNames := range e2eVaultDirNames() {
+	for dirName, dnsNames := range dirDnsNames {
 		pair := authority.issueValid(t, 30*24*time.Hour, dnsNames...)
 		writeTestTlsPair(t, filepath.Join(vaultDir, routeTable.Env), testTlsVersion, dirName, pair)
 		dirLeafs[dirName] = pair.leaf
@@ -1072,7 +1070,9 @@ func (self *e2eFront) dialH2Framer(t *testing.T, addr string, sni string) *e2eH2
 		streamBodies:  map[uint32]*bytes.Buffer{},
 		endedStreams:  map[uint32]bool{},
 	}
-	h2Framer.framer.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+	// h2's initial SETTINGS_HEADER_TABLE_SIZE, which the framer's settings
+	// keep
+	h2Framer.framer.ReadMetaHeaders = hpack.NewDecoder(4*1024, nil)
 	conn.SetDeadline(time.Now().Add(e2eWaitTimeout))
 	if _, err := io.WriteString(conn, http2.ClientPreface); err != nil {
 		t.Fatal(err)
