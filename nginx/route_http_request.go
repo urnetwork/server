@@ -20,7 +20,14 @@ package nginx
 //     max_headers, else 400: on h1 every line, Host included, and on h2 and
 //     h3 every field but the pseudo-headers and Cookie, which nginx merges
 //     uncounted (ngx_http_process_request_headers,
-//     ngx_http_v2_state_process_header);
+//     ngx_http_v2_state_process_header). nginx counts the lines it received,
+//     and the h1 count can't tell two lines Go's server may make up from the
+//     client's own: the Cache-Control: no-cache it adds beside a Pragma:
+//     no-cache that came without one (fixPragmaCacheControl), and the Host
+//     of an HTTP/1.0 request in absolute form, which it takes from the
+//     target whether or not a Host line came. So a head of exactly
+//     max_headers lines with either is a 400 nginx would serve
+//     (LBALT-IMPL.md §4);
 //   - a second line of a header nginx keeps once is a 400
 //     (ngx_http_process_unique_header_line), and so is a second Host field
 //     on h2 and h3 (ngx_http_process_host);
@@ -160,7 +167,10 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 	if maxRequestHeaderLines := httpSettings.MaxRequestHeaderLines; 0 < maxRequestHeaderLines {
 		headerLineCount := 0
 		if r.ProtoMajor == 1 {
-			// the lines Go's h1 server takes out of the header map
+			// the lines Go's h1 server takes out of the header map. An
+			// absolute target's host counts as a Host line whether or not
+			// one came, as a Cache-Control the server added does (the file
+			// comment)
 			if r.Host != "" {
 				headerLineCount += 1
 			}
