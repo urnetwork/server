@@ -488,6 +488,42 @@ func TestMimirAdmissionSignalPagesOnRateLimitedCounterGrowth(t *testing.T) {
 	}
 }
 
+// Exercise both independent pages through declaration, a missing host, and recovery.
+func TestMimirAdmissionSignalReportsOnlyObservedQuietProgress(t *testing.T) {
+	signal := NewMimirAdmissionSignal()
+	start := time.Date(2035, 2, 3, 4, 0, 0, 0, time.UTC)
+	processStart := start.Add(-time.Hour).Unix()
+	first := mimirAdmissionCounterHostResponses(processStart, 2, 3, 20, 1)
+	requireStates := func(alerts []Alert, state, quiet string) {
+		t.Helper()
+		for _, class := range []string{"mimir-series-limit", "mimir-ingestion-rate-limit"} {
+			page := requireAlertClass(t, alerts, class)
+			if page.Severity != SeverityPage || !strings.HasPrefix(page.Observed, "state="+state+" configured_hosts=") ||
+				!strings.Contains(page.Observed, "quiet_complete="+quiet+" ") {
+				t.Errorf("%s: want state %q and quiet %q, got %s", class, state, quiet, page.Observed)
+			}
+		}
+	}
+	requireStates(runMimirAdmissionSynthetic(t, signal, start, first), "positive counter at first observation of child generation", "0s")
+	increased := mimirAdmissionCounterHostResponses(processStart, 4, 6, 20, 1)
+	partial := mimirAdmissionCounterHostResponses(processStart, 4, 6, 20, 1)
+	partial["metrics-b.example"] = mimirAdmissionSyntheticResponse{err: context.DeadlineExceeded}
+	partialAlerts := runMimirAdmissionSynthetic(t, signal, start.Add(time.Minute), partial)
+	requireAlertClass(t, partialAlerts, "cannot-observe")
+	requireStates(partialAlerts, "new direct counter increase", "0s")
+	requireStates(runMimirAdmissionSynthetic(t, signal, start.Add(2*time.Minute), increased), "two-hour complete quiet hold in progress", "0s")
+	unavailable := map[string]mimirAdmissionSyntheticResponse{"metrics-a.example": {err: context.DeadlineExceeded}}
+	unknownAlerts := runMimirAdmissionSynthetic(t, signal, start.Add(3*time.Minute), unavailable)
+	requireAlertClass(t, unknownAlerts, "cannot-observe")
+	requireStates(unknownAlerts, "incident held pending verified quiet evidence", "0s")
+	restoredAt := start.Add(4 * time.Hour)
+	requireStates(runMimirAdmissionSynthetic(t, signal, restoredAt, increased), "two-hour complete quiet hold in progress", "0s")
+	requireStates(runMimirAdmissionSynthetic(t, signal, restoredAt.Add(time.Hour), increased), "two-hour complete quiet hold in progress", "1h0m0s")
+	if alerts := runMimirAdmissionSynthetic(t, signal, restoredAt.Add(mimirAdmissionQuietWindow), increased); len(alerts) != 0 {
+		t.Fatalf("complete quiet window failed to recover: %+v", alerts)
+	}
+}
+
 func TestMimirAdmissionSignalKeepsRateAndSeriesQuietHoldsIndependent(t *testing.T) {
 	signal := NewMimirAdmissionSignal()
 	start := time.Date(2032, 1, 2, 4, 30, 0, 0, time.UTC)
@@ -1064,7 +1100,11 @@ func TestMimirAdmissionSignalSaveFailurePreservesDurableIncident(t *testing.T) {
 		positive,
 	)
 	requireAlertClass(t, failureAlerts, "cannot-observe")
-	requireAlertClass(t, failureAlerts, "mimir-series-limit")
+	failedStatePage := requireAlertClass(t, failureAlerts, "mimir-series-limit")
+	if !strings.Contains(failedStatePage.Observed, "state=incident held pending verified quiet evidence ") ||
+		!strings.Contains(failedStatePage.Observed, "quiet_complete=0s ") {
+		t.Fatalf("uncommitted recovery reported quiet progress: %s", failedStatePage.Observed)
+	}
 	after := mimirAdmissionPersistedState{}
 	loaded, err = loadProviderState(stateDir, "mimir-admission", mimirAdmissionStateVersion, &after)
 	if err != nil || !loaded {
@@ -1133,7 +1173,11 @@ func TestMimirAdmissionSignalEarlyStateFailuresRetainMaturePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireAlertClass(t, lockAlerts, "cannot-observe")
-	requireAlertClass(t, lockAlerts, "mimir-series-limit")
+	failedStatePage := requireAlertClass(t, lockAlerts, "mimir-series-limit")
+	if !strings.Contains(failedStatePage.Observed, "state=incident held pending verified quiet evidence ") ||
+		!strings.Contains(failedStatePage.Observed, "quiet_complete=0s ") {
+		t.Fatalf("uncommitted recovery reported quiet progress: %s", failedStatePage.Observed)
+	}
 	if gotState := probe.snapshotState(); !reflect.DeepEqual(gotState, wantState) {
 		t.Fatalf("lock failure changed retained state:\nwant=%+v\ngot=%+v", wantState, gotState)
 	}

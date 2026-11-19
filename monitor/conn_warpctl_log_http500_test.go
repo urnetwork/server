@@ -60,8 +60,8 @@ func TestWarpctlLogHttp500NativeFailureKeepsStatus(t *testing.T) {
 	tailer.clock = func() time.Time { return now }
 	tailer.startedAt = now.Add(-2 * time.Minute)
 	tailer.recordReconcile(now.Add(-2*time.Minute), fmt.Errorf("fixture-private-partition: %w", queryErr))
-	_, _, lastSuccess, lastError := tailer.reconcileSnapshot()
-	finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError)
+	_, _, lastSuccess, latest, lastError := tailer.reconcileSnapshot()
+	finding := tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError)
 	alert := alertFromFinding(syntheticSettings(&syntheticSource{}), "1.5", "log-errors", "Log errors", finding)
 	if alert.SignalID != "monitor/visibility" || alert.Class != "tailer-reconcile" || alert.Target != "logs/fixture-service" || alert.Frame != "" || alert.Severity != SeverityWarn || alert.Sustain != 2 {
 		t.Fatal("HTTP500 classification changed reconciliation identity or urgency")
@@ -72,9 +72,9 @@ func TestWarpctlLogHttp500NativeFailureKeepsStatus(t *testing.T) {
 	requireAlertOmits(t, alert, privateBody, "fixture-private", "panic:", "/synthetic/", "response_shape=")
 	alerts, runErr := runOneShotLogOutput(t, context.Background(), out, queryErr, nil)
 	requireOneShotLogVisibility(t, alerts, runErr, queryErr, "observation-log-query-http-500", privateBody, "fixture-private", "panic:", "/synthetic/", "response_shape=")
-	tailer.recordReconcile(now.Add(-time.Minute), nil)
-	_, _, lastSuccess, lastError = tailer.reconcileSnapshot()
-	if !tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, lastError).healthy {
+	tailer.recordReconcile(now.Add(-logReconcileLookback), nil)
+	_, _, lastSuccess, latest, lastError = tailer.reconcileSnapshot()
+	if !tailerReconcileFinding("fixture-service", now, tailer.startedAt, lastSuccess, latest, lastError).healthy {
 		t.Fatal("a subsequent completed query did not restore the original visibility identity")
 	}
 }

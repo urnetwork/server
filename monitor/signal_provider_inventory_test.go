@@ -49,7 +49,7 @@ func providerInventoryTestRows(selection, failure bool, slots []pickerProcessKey
 		if selection {
 			reason := "returned"
 			if failure {
-				reason = "eligible_not_selected"
+				reason = "drawable_not_selected"
 			}
 			next = selectionTestRows(reason, 3)
 		} else {

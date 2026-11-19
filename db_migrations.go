@@ -11915,6 +11915,8 @@ var migrations = []any{
 	// Preserve the original failed attempt while allowing the exact retained
 	// Sille storage interruption to receive one controlled recovery.
 	newSqlMigration(CompetitionSilleStorageRecoveryMigrationSql()),
+
+	newSqlMigration(competitionEpochThreeSourceRecoveryMigration()),
 }
 
 // The deleted_network backfill (the migration above): every network an App

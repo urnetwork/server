@@ -391,3 +391,38 @@ func TestMimirShellRetiredRejectionRetainsOnlySafeFailure(t *testing.T) {
 		})
 	}
 }
+
+// A diagnostic cannot establish a connect timeout if the same failed child
+// also produced stdout. Failed response data stays private in either case.
+func TestMimirShellConnectTimeoutRequiresEmptyNativeStdout(t *testing.T) {
+	directory := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' \"$SYNTHETIC_MIMIR_STDOUT\"\nprintf '%s\\n' 'ssh: connect to host 192.0.2.91 port 22: Connection timed out' >&2\nexit 255\n"
+	if err := os.WriteFile(filepath.Join(directory, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	runner := newRunner(&monitorConfig{addressMode: addressModeOverlay, commandTimeout: time.Minute})
+	hosts := []*host{{name: "synthetic", overlayIp: "192.0.2.91"}}
+	for _, control := range []struct {
+		stdout string
+		class  string
+	}{
+		{stdout: "", class: observationErrorClassTimeout},
+		{stdout: "private-stdout-canary", class: observationErrorClassSSHExit255},
+		{stdout: "\n", class: observationErrorClassSSHExit255},
+	} {
+		t.Setenv("SYNTHETIC_MIMIR_STDOUT", control.stdout)
+		output, selected, err := mimirShellFirstServiceGateway(context.Background(), runner, hosts, nil, "synthetic-command", 65536)
+		if err == nil || output != "" || selected != nil {
+			t.Fatal("failed gateway returned a response or selected a host")
+		}
+		if got := classifyObservationError(err); got != control.class {
+			t.Fatalf("native stdout bytes=%d: class=%s, want %s", len(control.stdout), got, control.class)
+		}
+		for _, private := range []string{"private-stdout-canary", "192.0.2.91", "Connection timed out"} {
+			if strings.Contains(err.Error(), private) {
+				t.Fatal("failed native output escaped diagnostic reduction")
+			}
+		}
+	}
+}

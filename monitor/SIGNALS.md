@@ -348,10 +348,8 @@ active missing capability and must not be read as green.
 | 22.10 | Coverage gap | `subnet-coverage` and the registered family readers share the executable evidence, retention and recovery acceptance tests; testnet campaign qualification and on-chain peer review before production paging are missing |
 | 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 | 25.1 | Coverage gap | `contract-failure-share` implements the per-service returned-call failure share; the seasonal reply floor and external Grafana rule/contact-point delivery proof remain missing |
-| 25.2 | Coverage gap | `connection-rate` counts connections PostgreSQL recorded; the Connect handshake-outcome reader is missing |
-| 25.3 | Coverage gap | `log-errors` classifies service error logs; the per-route API error share and request-rate floor are missing |
-| 25.4 | Coverage gap | `provider-connections` watches provider supply; the delivered-traffic floor is missing |
-| 25.5 | Coverage gap | `provider-picker`, `proxy-path` and `egress-outcomes` cover parts of the journey; the external end-to-end probe is missing |
+| 25.3 | Coverage gap | `api-route-errors` implements the per-customer-route 5xx share on API and alt. The all-route fleet share, seven-day traffic floor and verified Grafana delivery are missing |
+| 25.5 | Coverage gap | `hosted-proxy-setup` observes one off-site hosted proxy leg. `provider-picker`, `proxy-path` and `egress-outcomes` observe other components. The external two-vantage end-to-end probe is missing |
 | 26.5 | Shared contract | `contract-failure-share` (§25.1) is this rule: PAGE at 20% or more for 5 minutes with at least 20 creations/s, read from Mimir history at one-minute steps |
 <!-- numbered-coverage-end -->
 
@@ -893,6 +891,13 @@ six-of-22 historical replay had complete fleet authority.
   discoverable through `errors.Is`/`errors.As` when the owner ends. Unknown never
   emits a healthy collapse finding, so the notifier keeps an existing incident
   through telemetry loss.
+  A bounded gateway read that fails while the probe is active adds the shared
+  `error_class` and any typed `ssh_admission_failures` or
+  `execution_boundaries` to its visibility warning (§1.7). A joined native
+  wait identifies the local SSH child's completion. A remote HTTP result and
+  the fleet transport count each require their own evidence. The 02:25 UTC
+  warning on 2026-11-19 retained only `bounded_source_unavailable` and its
+  specific source failure remains unknown.
 - False-positive qualifiers: transport multiplicity can change without the
   same change in distinct provider availability. Receiver-held samples can lag
   cessation by up to three minutes; concurrent live carriers are real transport
@@ -2916,9 +2921,9 @@ false-negative boundary); a new known producer line reaching both the standing
 tail and Loki is the positive transport control. Never restart the monitor or
 service solely because a quiet producer has emitted no line.
 Count lines per minute matching each class in section 4. Healthy ≈ 0 for all
-classes. Alert on rate, include the class name and one sample line. Error
-VOLUME is retry amplification, not incident size — 100k identical lines can
-be one sick node × fleet retry loops. The monitor should report class + rate
+classes. Alert on rate, include the class name and one sample line. One
+failing node can generate 100k matching lines through fleet retries. Distinct
+failures can also produce the same signature. The monitor should report class + rate
 + distinct target (ip:port) set, and normally should not use raw volume as
 severity. The explicit exception is a class where each line is itself a
 mutation exposure: `netescrow-negative` warns on any line and pages at
@@ -2981,8 +2986,10 @@ Generic `panic` retains its service-wide, empty-frame PAGE at five diagnostic
 lines/minute, including malformed or unowned records. A bounded structured
 `ErrorJson` stack additionally supplies independently counted owner frames at
 the same threshold; three lines from one owner plus two from another still
-page the aggregate. Aggregate and owner counts overlap and must not be summed
-as incidents. The parser accepts at most 64 KiB and 128 stack lines, recognizes
+page the aggregate. Each bucket retains its first sample. Aggregate and owner
+counts overlap. The line counts alone leave retry counts, unique incident
+counts and the outcomes of individual operations unknown. The parser accepts
+at most 64 KiB and 128 stack lines, recognizes
 an allowlist of application modules from Server's go.mod closure, skips known
 recovery/database wrappers, and strips compiler closure suffixes from
 module-relative function owners.
@@ -3019,11 +3026,32 @@ that finite error class. Application subpackages with the same short names
 remain owners; wrapper skipping is an exact symbol rule, not a prefix rule.
 Samples retain only that normalized owner (at most 112 bytes), an allowlisted
 Go error type, a validated PostgreSQL SQLSTATE, and the finite provider-egress
-error class described below—not raw errors, stack
-arguments, source paths/line numbers, endpoints, or identities. Unknown or
+error class or Redis caller and operation described below. Raw errors, stack arguments,
+source paths and line numbers, endpoints and identities stay private. Unknown or
 malformed stacks remain aggregate-only. At most 16 owners per service/window
 gain buckets; overflow still counts in the aggregate, existing owners remain
 admitted, and the cap resets on drain. Typed classes retain precedence.
+For the exact `proxyAdmissionRedis` model frame, the panic sample can also
+retain a fixed `redis_caller` field. The next frame must be a direct call from
+the same module version, with the expected source file for both frames. The
+three supported callers are `GetProxyDeviceConfig` (device configuration),
+`getProNetworkCached` (entitlement read), and `setProNetworkCached` (cache
+write). A closure, missing frame, or different source leaves the caller
+unknown. The sample retains Go's direct context deadline type only for the
+exact standard-library sentinel representation. Error text alone cannot
+identify that type. Neither field establishes the selected pool, remaining
+budget, downstream latency or request outcome. Each applies only to the
+first diagnostic in its own bucket.
+The optional `redis_operation` field records where that diagnostic arose.
+`device_config_read` requires the direct device configuration reader.
+`feature_use_plan_lookup` requires the continuous source frames from the
+entitlement read or cache write through `IsProNetwork` to the concrete
+feature-use planner. `feature_use_flush_plan` additionally requires the
+planner's direct call from `countMarks`, its recovery boundary and the
+enclosing `flush`. In this source, `flush` reaches that call after the mark
+store acknowledges the write. A shorter stack can retain the direct caller
+or planner alone. The request decision, metric label and completed flush count
+require their own evidence.
 The optional `[legacy_registration_db]` annotation accompanies only a returned
 failed acquisition in close-owner registration. It leaves the original
 `Unexpected error` ErrorJson's exact `error`/`stack` schema and aggregate/owner
@@ -3928,6 +3956,23 @@ selectors are not copied into that error. The receipt success pair resets.
 Successful retry diagnostics and timestamp-framed remote messages quoting the
 warning do not establish producer loss. This is a deterministic completeness
 boundary, not evidence that production encountered this fallback.
+Every aggregate, block and inclusive continuation uses the same exclusive
+source cutoff, captured by the monitor at the start of the logical attempt.
+This requires a paired Warpctl with bounded Grafana `logs --until` support.
+The source cutoff equals the original lower bound plus two minutes. Local
+completion may follow it by minutes. A qualifying fresh window requires a
+completed query whose source cutoff is less than 90 seconds old. Two-window
+evidence also requires a positive source-time overlap and timely completions
+for both queries. A long-running historical query or a gap between intervals
+cannot supply that evidence.
+
+A moving upper bound can exhaust eight pages by including newer timestamps
+on each continuation. The finite window can still contain too many records,
+or enough records can share a rendered boundary to prevent advancement.
+The terminal cap documents incomplete coverage in all these cases. A fixed
+source window can still acquire late records behind its cursor after it was
+read. The standing stream and subsequent overlaps remain independent inputs.
+
 Deterministic synthetic tests reproduce a stream
 that sees two of four same-second wallet attempts and misses a canonical 429,
 recover the absent records from the bounded query exactly once, exclude
@@ -3965,6 +4010,26 @@ aggregate. Null metadata likewise supplies no missing timestamp authority.
 class, proof of HTTP429, current request state, or a cause. Cancellation can
 invalidate a pair without setting an error. `last_success_at` remains
 historical after a pair is invalidated and cannot supply current freshness.
+
+The companion `monitor-log-reconcile-activity ` schema-1 diagnostic projects
+each of the same collector snapshots at the same `observed_at` into a separate
+4-KiB line. Each row contains the fixed service key, collector count and start,
+and an activity state of idle, active, disabled, ambiguous or invalid-time.
+An active attempt has a generation-local `attempt_number`, `attempt_started_at`,
+`pages_completed` and nullable `last_page_completed_at`. Bind the watcher
+artifact, collector start, and attempt number before comparing consecutive
+records. A newly started attempt has zero completed pages. Returning an
+accepted aggregate, block or continuation page advances the count, even when
+that page is full. The terminal update clears the active fields under the
+same lock as the coverage outcome. Cancellation clears the active fields and
+preserves the existing cancellation semantics.
+
+These clocks are local logical-attempt and child-return observations. They do
+not time an HTTP request, count physical requests, guarantee newly ingested
+records, or establish service health. A repeated count while active can also
+cover parsing or classification. Idle includes the interval between attempts
+and an admitted cooldown. Missing activity across samples leaves progress
+unknown. Coverage and its two-window gate keep using the existing receipt.
 
 The additive schema-2 fields `last_failure_monitor_recorded_at` and
 `last_failure_attempt_window_start` describe only the currently retained failure.
@@ -5149,8 +5214,10 @@ to judge and returns nothing.
   sustain 1): no contract is configured. It is a configured standing state:
   kept in the alert file, never posted to Slack, and no lookup runs.
 - `observer-route-diverted` (same target, sustain 2): one or more overlay
-  addresses route through an interface or gateway outside the contract (a
-  broken tunnel falling back to the LAN or default route), or have no route.
+  addresses have no route, or the kernel selects a route whose interface and
+  gateway both fall outside the contract. This can occur on an active VPN
+  device. Confirm the intended observer route with its operator before
+  attributing an SSH failure or deciding whether to correct routing or the contract.
   Its evidence names the affected inventory hosts by state and the exit
   interfaces; cannot-observe and stale-tail findings for those hosts in the
   same minutes are local observation-path candidates, not production faults.
@@ -5160,6 +5227,11 @@ to judge and returns nothing.
   one route object with unique keys for exactly the looked-up address; the
   macOS adapter needs exactly one interface line and classifies its
   not-in-table diagnostic as no route even with a zero exit.
+
+A permitted host's diverted, absent or unobservable route retains its aggregate
+warning alongside `monitor-host-scope-partial` when another host is excluded.
+The evidence names the affected permitted hosts. A healthy aggregate still
+requires complete coverage.
 
 All three are visibility classes: while one lasts, this signal's executions
 are incomplete. Addresses, gateways and raw route output never enter alerts;
@@ -13074,6 +13146,26 @@ cannot clear a prior invariant PAGE. The retained selection observation remains
 incomplete with no invented outcome rows. Require exact query/source authority
 and independent producer/policy evidence to distinguish these boundaries.
 
+At 01:27 UTC on 2026-11-19 the monitor reported
+`reason=invalid-source-response` and zero paired processes across 20 expected
+slots. That monitor retained only the whole-response verdict. A separate
+picker query in the same drain cannot identify which selection check failed.
+
+When the parser rejects a response, the warning and selection JSONL include
+`source_rejection`, the first parser check that failed. The possible checks
+are `byte-limit`, `json-decode`, `response-status`, `result-type`,
+`response-annotations` (warnings or infos), `row-limit`, `sample-decode`,
+`evaluation-time`, `sample-value`, `process-scope`, `process-identity`,
+`cohort-labels`, `outcome-reason`, `series-field` and `duplicate-cell`. The
+HTTP reader enforces the byte limit before parsing and reports
+`mimir_query_phase=response-bound` for an oversized body.
+
+One invalid row discards the entire response, including valid rows from other
+processes. Zero paired processes then describes the monitor's evidence. A
+healthy quiet window has complete coverage and no rejection field. Additional
+defects can be hidden behind the first failed check. Use the two complete
+post-convergence windows and independent route outcome below to verify recovery.
+
 `-provider-selection-output <path>` appends one JSONL observation for every
 existing probe execution, including qualified nonempty/quiet windows and
 source-unavailable windows. It adds no source query. Each record retains the
@@ -13086,9 +13178,20 @@ does not change settings-generation authority. A local write failure remains
 visible alongside actual alerts.
 
 - `provider-selection-empty-despite-eligible` **PAGE**: at least 3 completed
-  zero responses in five minutes with positive discovery count, known rank and
-  eligible candidates remaining after all request filters, sustained for two
-  one-minute observations. This is a selection invariant, not a supply claim.
+  zero responses in five minutes for a known rank, sustained for two
+  observations. Schema 4 emits `drawable_not_selected` only when a candidate
+  reached a positive-quota native, borrowed or Online answer draw and survived
+  all later applicable revocations. A completed empty response with preliminary
+  survivors but no remaining drawable candidate emits `no_drawable_candidates`.
+  The independent provider-count signal continues to include both reasons.
+- `provider-selection-empty-after-prefilter` **PAGE** retains the same threshold
+  for the schema 1–3 `eligible_not_selected` observation. Those producers counted
+  preliminary candidate visits before final admission and live revalidation.
+  Their completed zeroes have unknown terminal eligibility. Keep the two reason
+  populations separate throughout rollout. Neither estimates distinct users,
+  route success or global supply. Upgrade the monitor before API producers.
+  Verify two complete five-minute windows after schema 4 reaches every placement,
+  with positive same-cohort selection and an independent route outcome.
 - `provider-selection-cache-page-gap` **WARN**: at least 20 completed zero
   responses referencing absent positive-count cache pages in five minutes,
   sustained for two observations. Inspect publication/expiry and exact reader
@@ -13114,11 +13217,14 @@ keeps a schema-1 or schema-2 process that reports either capability reason
 unknown. A capability refusal is the request's own filter, so it adds no
 finding.
 
-The original zero invariants remain observable during mixed schema-1/schema-2
-rollouts. Complete response-shape attribution requires schema 2 (or 3) at both
+Legacy completed zeros and cache gaps remain observable during mixed rollouts.
+Complete response-shape attribution requires schema 2 or newer at both
 ends of the window in every configured slot. A complete legacy/mixed fleet retains
 `provider-selection-unavailable` with `frame=response-shape` and
-`reason=incomplete-shape-schema-window`, alongside any proven legacy invariant.
+`reason=incomplete-shape-schema-window`, alongside observed legacy empty responses. An otherwise complete shape window
+with any pre-schema-4 producer reports `frame=terminal-draw` and
+`reason=incomplete-terminal-draw-window`. The observation retains the terminal
+draw coverage flag and the number of schema-4 paired processes.
 A changed/future schema or a reason incompatible with its schema stays unknown;
 old `returned` never means ten-plus. Small-result observations add no generic
 scarcity rule and do not clear or suppress §2.9a.
@@ -13134,7 +13240,9 @@ not a zero count. An unrelated healthy group or the zero-caller US country
 cache sampled by §2.9 cannot clear an affected group/caller incident. Restoring
 the diagnostic output alone is not product recovery.
 
-False-positive qualifiers: cache publication/expiry can transiently expose a
+False-positive qualifiers: older selection producers counted candidates before
+final draw membership and later revocation. A live client window can retain
+working routes through an empty refill. Cache publication/expiry can expose a
 positive count before its page; the sustained warning identifies that boundary
 without blaming overall supply. A city/group can legitimately have no sampled
 supply, and explicit, family, network and hard exclusions can correctly empty
@@ -13146,8 +13254,11 @@ first-observation counters, partial metrics coverage, low volume and the
 thresholds can hide real failures. Error/canceled requests are separate from
 completed zeroes. Per-request final reasons are a priority explanation, not a
 complete per-provider causal trace; multiple missing and filtered boundaries
-may coexist. Source-generation checks do not prove every intervening scrape
-was retained. Route failures after selection remain outside this signal.
+may coexist. Schema 4 establishes eligibility only for pools actually offered
+to positive-quota answer draws. A skipped pool or a candidate lost before
+admission needs independent evidence. Source-generation checks do not prove
+every intervening scrape was retained. Route failures after selection remain
+outside this signal.
 
 Build/deploy the API containing schema-2 diagnostics before trusting small-result
 and exclusion-source attribution; schema 1 retains only the older zero boundary.
@@ -22811,18 +22922,21 @@ was processed was never acknowledged, and Google refunded it after three days
 (support inbox 8010, 8046, 8086, 8098). The App Store's notifications
 (POST /apple/notification) had the same blind spot.
 
-Every notification of either store now ends in one outcome
-(controller/store_notification_flow.go), counted on the api and alt as
+The notification handlers record outcomes (controller/store_notification_flow.go)
+on the api and alt as
 `urnetwork_store_notifications_total{store,outcome}` (`google`, `apple`):
 `accepted`; `refused_unavailable` (our verification config is missing: 503,
 with the `payment-webhook-refused` line); `refused_auth` (a Play push with no
 valid Google token of the configured publisher); `refused_audience` (the
 configured publisher's token for another audience: our google.yml and the
 Pub/Sub subscription disagree); `refused_signature` (an App Store JWS that does
-not verify against the pinned roots, or is too old); `refused_claims` (a
-verified App Store notification of another app, environment or version);
-`refused_malformed` (a body that is not a notification); `error` (verified,
-then processing failed; the store redelivers it). An accepted notification
+not verify against the pinned roots, or is too old); `refused_claims` (the App
+Store outer signature passed and a decoded claim, required field, or nested
+identity check failed); `refused_malformed` (a body that is not a notification).
+Apple records `error` when `ProcessAppleNotification` returns an error after
+verification. Google records `error` for either an unavailable token lookup
+before publisher verification or a processing error after verification. An
+accepted notification
 sets `urnetwork_store_notification_last_accepted_timestamp_seconds{store}` and,
 at most once a minute per process, the store's row of `store_notification_flow`,
 which the migration creates with its clock at the migration. The api
@@ -22843,10 +22957,16 @@ dashboard's "store notifications" panels show both.
 - `store-notification-refused` (PAGE, from the §1.5 log tail at one line a
   minute): the fixed line `[store-notification]<store> <outcome>` for
   `refused_audience`, `refused_claims` or `error`, framed by store and
-  outcome: a notification that verified as the store's was refused or failed.
-  Our configuration and the store's disagree, or processing fails behind it.
-  Correct the configuration through the vault owner or fix the processing
-  error; never disable verification.
+  outcome. A verified Apple refund missing its transaction and a verified
+  subscription with a disallowed product both record `apple error`. Account
+  binding failures and a missing destination network can share that outcome.
+  A subscription missing its transaction instead reaches `apple refused_claims`
+  even for the expected app and environment. The diagnostic count cannot
+  establish a configuration or database failure, unique deliveries, retries,
+  a final HTTP response or an entitlement decision. A raised processing failure
+  can escape before the marker. Classify the original attempt in its emitting
+  build, then match its delivery receipt and any applicable entitlement
+  decision. A store-wide accepted outcome can come from a different attempt.
 - `store-notification-unverified` (WARN, from the log tail at five lines a
   minute): the same line for `refused_auth`, `refused_signature` or
   `refused_malformed`. Anyone can post to the routes, so these alone are not
@@ -25415,7 +25535,10 @@ Probe: `redis-pool`
   missing, foreign or invalid tuples remain `redis-pool-unobservable`.
   An aggregate query's evaluation timestamp is not raw-source freshness.
   Unsuccessful, annotated or non-vector responses remain unavailable; no
-  missing field is manufactured into zero. Discrete coverage is not continuous
+  missing field is manufactured into zero. On a failed gateway read, the
+  observer recognizes the selected-address SSH connect-timeout diagnostic
+  only when native stdout was empty. With partial stdout, exit 255 leaves
+  the SSH or remote-command failure unresolved. Discrete coverage is not continuous
   scraping or an inventory-independent census.
 - These checks qualify reported accounting, not actual event counts in an
   exact interval. Both pinned go-redis9.22 and9.23 use uint32 child counters and
@@ -25861,7 +25984,7 @@ controls, then observe complete fresh coverage through the normal alert window.
 | `[family]dial tag=doh ... err=...i/o timeout`, `[egress]dial tag=doh ... err=...i/o timeout`, or exact `observable=v1 ... result=timeout` (`doh-dial-timeout`) | An outgoing resolver attempt timed out, not necessarily the logical DNS query. Proxy `path=tun` legs are classified separately as `doh-tun-dial-timeout`. The DoH client races endpoint attempts and returns the first usable address answer; another leg can succeed. Logs are throttled per target, and legacy diagnostic forms can describe one attempt twice, so line rate is neither an attempt count nor a logical failure denominator. Legacy path/family/outcome remain unknown. New finite `path`, `attempted_family`, `resolver_owner`, `resolver_scope`, and `resolver_outcome` tokens identify only the initiating resolver call; a detached losing HTTP dial may report `answer` after that call returned successfully. | Preserve PAGE at 10 lines/minute and the single `doh-attempt` frame. The bounded sample retains only validated finite tokens and omits endpoints, domains, and correlation identifiers. Correlate the original process path, same-window controls, and fresh same-process `[doh]resolver` cumulative outcome snapshots; see §5.2 for scope and Taskworker measurement qualifiers. Pending/unknown outcomes and later host TCP success do not prove successful fallback or exclude earlier impact. Do not restart Redis or change DNS policy/timeouts from this signature. Require ten minutes below threshold with fresh observation and healthy original-path controls; user-facing recovery additionally requires independent final-query or end-to-end success. |
 | Proxy exact `observable=v1 path=tun ... result=timeout` (`doh-tun-dial-timeout`) | A hosted device's remote DoH leg through its own tunnel timed out. The tunnel egresses through the provider the customer selected, so a device pinned to an offline or retired provider times out every leg it races. Lines are throttled per process and resolver target: one such device keeps a process above threshold, and the rate measures neither devices nor failed lookups. On Main on 2026-10-12 every Proxy process logged ~20/min of these while logical tun resolver calls had zero timeouts and zero failures (~66% answered, ~34% canceled by their callers), host-path calls answered 100%, and the ingress dial failure ratio was at its pre-incident baseline. | WARN at 10 lines/minute with the single `doh-tun-attempt` frame. Before treating it as a platform incident, compare fresh same-process `[doh]resolver owner_path=tun` deltas and the Proxy ingress dial outcome ratio with their baseline; a platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups (it would egress the customer's queries from the platform host) or lengthen resolver timeouts from this class. Platform-owned host/caller paths keep the `doh-dial-timeout` page. |
 | DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
-| otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
+| Otherwise-unclassified TCP dial diagnostic ending in `: i/o timeout` or `: connect: i/o timeout` (`dial-io-timeout`) | The selected service stream reached the diagnostic threshold. Count raw and already-scrubbed destination text, including a local-to-remote dial pair. The frame describes only the first counted exemplar. Multiple dial candidates or an invalid endpoint leave that frame unknown. A scrubbed destination retains its port. A timeout on a later read cannot turn an earlier dial refusal into a dial timeout. Reports and relays can share the same text. The line count gives no unique attempt, retry, failed operation, listener or service identity. | Preserve PAGE at 10 matching diagnostic lines per service/class window and the existing service-specific exclusions. Match a source clock, emitting build, call site, typed socket error, deadline owner and terminal operation receipt before assigning cause. Compare original-path and listener controls. Apply §5.2 only to an independently identified Redis target with a corroborating local PING hang and accept-path evidence. Verify ten complete minutes below threshold with original-path workload and healthy owner-side controls. |
 | otherwise-unclassified `connect: connection refused` | Selected-service log text matched the fallback category; PAGE at >=10 matching diagnostic lines per service/class window. The text alone does not authenticate a socket attempt, listener state, target ownership or caller outcome. More-specific rows retain precedence. | Bind the original event, immutable emitter and source namespace, intended target, typed socket/context result and independently acknowledged operation before assigning listener or service cause. Only after binding the source and target, reproduce the intended operation from the same source path and network namespace. Do not assume Redis or restart an inferred service. Quiet or missing logs cannot establish recovery. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` (`port-exhaustion`) | The selected stream reported this text at rate. It does not identify a native emitter, error code, resource namespace, exhausted port range, unique attempts or one destination. A frame is only the first exemplar's textual address hint. | Preserve the WARN at >=100 matching lines/window. Bind the original event to its artifact/process/attempt/network namespace and compare same-window local-address and socket/tuple limit/usage evidence. Ephemeral-port pressure is a candidate, not a diagnosis; do not infer a target-node fault, restart clients, raise limits, change routes or promise a fixed self-drain timer. Complete comparable logs plus independent native controls are required for recovery. |
@@ -27899,9 +28022,10 @@ losing up to 20 GB/h. Each production action needs the owner's go.
    local PING vs remote dial; UPDATE 0 rows vs rows returned; control
    experiment on pristine HEAD (is this failure pre-existing?). If a check
    can't distinguish two hypotheses, it's the wrong check.
-2. **Error text over error volume.** Class + target + frame identifies the
-   incident; volume only measures retry amplification. The monitoring service
-   should dedupe by identity and report rate.
+2. **Error text over error volume.** Class, target and frame identify a
+   finding. The monitoring service should dedupe by that identity and report
+   the matching line rate. Attributing the rate to retries requires evidence
+   that attempts belong to the same operation.
 3. **Aggregate + individual, always both.** Near-baseline aggregates with
    individual failures = deterministic partial failure (hash-slot semantics).
    This inverted "metrics look fine" twice during the day.
@@ -31360,9 +31484,12 @@ for deliberate modified builds. Load the expectation once at process startup
 from a regular local file of at most 16 KiB; reject unknown, duplicate or aliased
 JSON fields. Preserve its source-file hash with the release handoff. The receipt
 also identifies the canonical parsed expectation by SHA-256. Editing the file
-does not hot-reload a running monitor. No expectation means no query, receipt or
-release alert; an expired expectation produces an unqualified receipt without
-remote contact. A configured expectation cannot silently exclude this signal.
+does not hot-reload a running monitor. Without an expectation, the selected
+signal remains idle in continuous mode. It requests no execution slot and
+produces no dispatch witness, visibility warning, query or release receipt.
+An explicit signal selection still requires an expectation to arm the proof.
+An expired expectation produces an unqualified receipt without remote contact
+when admitted. A configured expectation cannot silently exclude this signal.
 
 One fixed-time Mimir query reads only `process_start_time_seconds`,
 `urnetwork_source_info`, `urnetwork_build_info`, and `urnetwork_api_ready`, with
@@ -32294,7 +32421,7 @@ its new `instance` label: the old label set ends with the old process and the
 new one starts at zero. Every dashboard query on these families (connect.json
 panels 5–10, 89 and 90; public-traffic.json panels 3 and 25) sums, or groups by
 `direction`, `kind` or `op`, so totals stay continuous across the deploy, and
-no alert or monitor probe reads them yet (§25.4 is proposed). A query that
+the §25.4 monitor also sums the qualified socket and local byte families. A query that
 selects one exact pre-release label set without an aggregation would split
 into one series per `op`; wrap it in `sum`. The label triples the series of
 both families per process, to 18 each.
@@ -35027,6 +35154,16 @@ or reinterpret a missing observation as zero throughput.
 ### 11.20a Mimir series and sample-rate admission
 
 Probe: `mimir-admission`
+
+Both admission pages distinguish a positive total at the first observation of
+a child generation from a measured increase between observations of that child.
+A qualified positive remains visible when sibling observations fail. A held page
+reports quiet progress only for a saved, complete, comparable observation.
+Missing children, a generation change without an increase, and unavailable
+state leave the incident open pending verified quiet evidence. With zero
+qualified children, the displayed zero counter sums and limit ranges supply
+no current measurements. Missing direct evidence can conceal additional
+loss. Each incident retains its independent two-hour recovery window.
 
 Fleet counter and journal-context sums use checked nonnegative int64
 aggregation. A sum above MaxInt64 renders only that field as `unavailable`,
@@ -48118,7 +48255,7 @@ acknowledged by a person, per §7's 2026-10-22 rule 4.
 | 25.1 | `contract-failure-share`, `contract-reply-floor` | `urnetwork_contract_creation_completed_total` (yes) | failure share ≥ 5% for 10 min | ≥ 20% for 5 min; replies under 30% of the 7-day same-window median for 10 min | 10-25 07:10Z, 5 min after onset, as a new class beside §2.30's standing page; the proxy-only aftershock |
 | 25.2 | `connect-handshake-refusals` | `urnetwork_connect_h1_handshake_results_total` (yes) | `auth_dependency` ≥ 20/s for 5 min; acceptance under 50% for 15 min | ≥ 100/s for 5 min; acceptance under 30% for 10 min | 10-19 10:15Z, about 2 h 35 min before the owner; 10-25 07:10Z; 10-24 WARN by 18:15Z |
 | 25.3 | `api-route-errors` | `urnetwork_http_requests_total` (yes) | a customer route ≥ 2% 5xx for 10 min; fleet ≥ 1% | a route ≥ 10% for 5 min; fleet ≥ 5%; customer-route requests under 40% of the 7-day median | 10-23 11Z; 10-25 07Z; 10-19 by route at 10:30Z while the fleet share was 0.05% |
-| 25.4 | `delivered-traffic-floor` | `urnetwork_connect_exchange_io_bytes_total`, `urnetwork_proxy_session_bytes_total` (yes) | under 50% of the 7-day same-window median for 15 min | under 25% for 10 min | 10-19 WARN at 11Z, PAGE at 12Z; 10-25 08Z |
+| 25.4 | `delivered-traffic-floor` | Connect socket plus local exchange byte counters, hosted proxy session bytes (yes) | under 50% of the 7-day same-window median for 15 min | under 25% for 10 min | 10-19 WARN at 11Z, PAGE at 12Z; 10-25 08Z |
 | 25.5 | `customer-journey` | external probe (missing) | a step failing 2 of 5 minutes; median over 5 s | a step failing 3 consecutive minutes from both vantage points; median over 10 s | each outage above, by construction |
 | 2.11b | `pgbouncer-saturated` | `pgbouncer_pool_clients_waiting`, `pgbouncer_pool_servers` (yes) | waiting over 500 with servers ≥ 608 | waiting over 2,000 | 10-21 14:45Z; 10-25 01:00Z; 10-26 22:30Z |
 | 2.11c | `pgbouncer-frontend-imbalance` | SSH read on edge-2 (missing) | reuseport lost, worker skew over 3×, overflows, hop over 2 ms | — | 10-26 before xops `dff7502` |
@@ -48258,12 +48395,19 @@ context (§2.11b/§2.11a), CPU pressure (§8.14a), Redis (§3.5b) and escrow adm
 
 ### 25.2 Connect handshake refusals and acceptance
 
-Status: proposed 2026-10-26; the reader is missing. §2.7 (`connection-rate`)
-counts connections PostgreSQL recorded, which stops when the database path
-does.
+Probe: `connect-handshake-refusals`
+
+The monitor reads Connect's admission decisions independently of §2.7
+(`connection-rate`), which counts connections PostgreSQL recorded. It reports
+one fleet incident at `<env>/connect-h1`. Its evidence names the placed
+host/block with the highest dependency-refusal rate and the lowest positive-volume
+acceptance share at the last evaluation. Person-facing Grafana delivery is a
+separate requirement in §25.
 
 Source (exists): `urnetwork_connect_h1_handshake_results_total{result}` from
-every Connect process. Results seen 10-17 to 10-26: `accepted`,
+every placed Connect process. Both websocket and H1+ use this counter. The
+handler increments `accepted` once at stage `authenticated` or records one
+other result at stage `http` or `upgraded`. Results seen 10-17 to 10-26: `accepted`,
 `client_canceled`, `auth_dependency`, `auth_frame`, `state_refused`,
 `auth_deadline`, `auth_read`, `jwt_refused`, `rate_limit`, `draining`,
 `upgrade_error`, `client_missing`, `auth_echo` and `unclassified`.
@@ -48296,15 +48440,45 @@ Evidence:
   to 18:30Z, a WARN about an hour before the 19:30Z report.
 - 10-18: 149–313/s through the livelock episodes.
 
-False-positive qualifiers: a deploy's drain refuses with `draining`, which
-neither rule counts as a refusal. A client release that hangs up early raises
-`client_canceled` and lowers acceptance with no server fault; when the drop is
-`client_canceled` alone, look at client versions. One block's dependency
-failure shows on that block's series, so split by host and block.
-False-negative qualifiers: this counter covers the H1 carrier; H3/QUIC and
-H1+ have their own counters (§16.3, §23.1) and need the same rules. A Connect
-process that is down publishes nothing, which is unknown (§8.14), not zero.
-An accepted handshake can still fail at contract creation (§25.1).
+The monitor requests one bounded Mimir range at a nominal one-minute cadence,
+ending two minutes behind its clock. Each evaluation sums five-minute
+per-counter rates. Six one-minute samples span the five-minute hold, eleven
+span ten minutes and sixteen span fifteen. A shorter qualified PAGE can open
+while the older part of the WARN history is missing. A clear needs both WARN
+arms within their bands over their respective full holds.
+
+At every evaluation the desired hosts and blocks come from active Connect
+placement. A slot must have exactly one process across the rate window, with
+a stable start predating it. The start and all observed counter children need
+original samples within three minutes of each end. A child needs enough
+samples for a rate and zero recorded resets. Connect creates each outcome
+child on its first event. An absent accepted or dependency result counts as
+zero only when the slot's other children establish a complete observed family.
+A newly seen or disappearing child, overlapping generation, excluded slot
+or missing family leaves that slot unknown. A first-ever child can delay
+qualification by a rate window before the alert hold starts. The response is bounded to 1 MiB
+and 16,384 points by default. Only the fixed parts and slot names leave Mimir.
+
+WARN `connect-handshake-refusals-unobservable` (sustain two observations)
+covers unavailable placement, failed or capped reads, incomplete source and
+zero fleet admissions. With partial placement coverage, the observed
+dependency-refusal sum is a lower bound and can still prove a threshold.
+Fleet acceptance needs every slot and a positive denominator. A missing
+or mixed hold cannot clear an open incident. Source gaps are reported with
+fixed reason codes and inventory names.
+
+False-positive qualifiers: rollout drains and client cancellations both enter
+the denominator, so either can lower acceptance. Only `auth_dependency` enters
+the absolute refusal threshold. Compare `client_canceled` with client releases
+and `draining` with rollout timing before assigning a backend cause. At low
+volume the acceptance share can move substantially on a few completed attempts.
+
+False-negative qualifiers: the fleet share can mask an isolated block. H3/QUIC
+(§16.3), attempts that never reach this handler and unfinished handshakes are
+outside the counter. An accepted handshake can still fail at contract creation
+(§25.1). Original clocks and rate endpoints qualify the observed samples.
+They cannot detect an outcome that the producer or metrics path never exported,
+or prove continuous observations between evaluations.
 
 ACTION: for `auth_dependency`, read Connect's logs for the dependency that
 failed: the database path (§2.11b, §2.11a, §1.3a) or Redis (§1.4, §3.5b).
@@ -48312,25 +48486,85 @@ Then §5.1.
 
 ### 25.3 API errors on customer routes
 
-Status: proposed 2026-10-26; the per-route share and the request-rate floor
-are missing. `log-errors` classifies service error logs.
+Probe: `api-route-errors` (per-route share; the all-route fleet share, seasonal
+request-rate floor and external Grafana delivery remain open).
 
-Source (exists): `urnetwork_http_requests_total{job,route,status}`, with the
-`urnetwork_http_request_duration_seconds` histogram for latency.
+The API and alt each run the API router. On each job the default probe sums
+per-slot rates for one route before dividing its 5xx rate by its completed
+request rate. It reads one bounded Mimir range each minute, two minutes
+behind the monitor clock. PAGE requires all six minute endpoints of a
+five-minute hold at or above 10%, using trailing five-minute rates. WARN
+requires all eleven endpoints of a ten-minute hold at or above 2%, using
+trailing ten-minute rates. Every endpoint needs at least one completed
+request/s on that route across the job. Both holds must be fully observed
+and clear for recovery. Low volume keeps an existing incident open.
+
+`urnetwork_http_requests_total{job,route,status,outcome}` increments once
+when the router finishes. The first written numeric status owns the numerator:
+a 5xx with outcome `canceled` still counts when it was written to a live
+caller. A numeric panic 5xx is a handler defect even if the caller has left.
+A 5xx written after the caller went away on the cancellation path is
+`status="none"`. All four terminal outcomes for configured routes
+(`completed`, `canceled`, `panic`, `aborted`) count in the denominator,
+including `none`. The independent summary's `urnetwork_http_request_duration_seconds_count`
+counts the same completions without a status partition.
+
+Earlier releases encoded a 5xx written after disconnect as a numeric canceled
+response. An intermediate release could suppress a panic's numeric 5xx
+after disconnect. The probe uses that push's `urnetwork_source_info`
+to check for exactly one clean, audited revision with an image digest on the
+same process. The default revisions are `bc9d61d23`, `92cf3b5e5` and
+`13a7f7416`. Each has identical router and metrics source. Additional audited
+full revisions can be supplied in the signal settings. An unrecognized,
+modified, mixed or missing source leaves those two cohorts uncertain.
+For such intervals the lower error count excludes numeric canceled 5xx and
+the upper count includes status-none panics as possible 5xx. Other outcomes
+retain their measured status. A threshold must hold even at the lower bound
+to raise an incident, or clear even at the upper bound to permit recovery.
+When these bounds span a band the visibility reason is
+`status_contract_unverified`. The alert reports the recorded share and both
+bounds. This also permits a conclusive verdict without release metadata when
+neither ambiguous cohort can change it.
+
+The active services inventory supplies the host/block denominator separately
+for API and alt. An unplaced alt creates no requirement. Every sampled slot
+needs a single stable publisher with matching job, service and process nonce,
+a source clock at most 45 seconds old, and fresh counter and summary children
+on that exact push. Source rates use the elapsed push clocks. A missing 5xx
+child is zero only with a complete observed route family whose cumulative sum
+equals the summary count. A missing route, changing process, counter reset,
+stale child, disagreement between the concurrent gathers or a missing sample
+is unknown. Repeated missing coverage emits WARN
+`api-route-errors-unobservable` after two observations. Complete sibling
+routes can still report a breach. The default query admits at most 512
+status/outcome children per slot and route, a 4 MiB answer and 65,536 range
+points. Only fixed route names and aggregate rates enter findings.
 
 Customer routes are the ones an app or the hosted proxy depends on:
 `POST ^/connect/control$` (about 4.9k requests/s on 10-26 03Z),
 `POST ^/network/auth-client$` (93/s), `POST ^/network/find-providers2$`
 (8/s), `GET ^/network/provider-locations$`, `GET ^/auth/refresh$`,
 `GET ^/network/user$`, `GET ^/subscription/balance$` and the account login
-routes. Leave out `GET ^/hello$` (690/s of health checks) and the prober's
+routes. The login allowlist covers POST on `/auth/login`,
+`/auth/login-with-password`, `/auth/code-login`, `/auth/verify`,
+`/auth/verify-send`, `/auth/wallet-challenge` and `/auth/wallet-nonce`, GET
+and POST on `/auth/apple/callback`, and GET on `/auth/google/callback`.
+Include `GET ^/network/reliability$` from the October 19 replay below. Leave out `GET ^/hello$` (690/s of health checks) and the prober's
 `^/network/provider-egress-*` routes, which §2.19 owns.
 
 - 5xx share per customer route over 5 and 10 minutes, with at least 1
   request/s on the route.
-- The fleet 5xx share.
-- Customer-route requests/s against the median of the same 30-minute window
-  on the previous 7 days.
+- The proposed fleet 5xx share needs a complete all-route ingress denominator.
+  On this source alt's public wrapper answers `/status` with a 404 before
+  reaching the router. The alt job's `GET ^/status$` observations come from
+  its separate status listener. Both routers can emit the same `not_found`
+  and `method_not_allowed` children for other paths. The shared collector has
+  no listener label. Bind each deployed front's population before attributing
+  an all-route fleet share. The named customer routes belong to the API front.
+- The proposed customer-route traffic floor compares against the same
+  30-minute window on each of the previous seven days. Qualify historical
+  placement, source continuity and positive traffic mass separately for all
+  seven windows. Current placement alone cannot establish that history.
 
 Healthy: fleet 5xx 0.01–0.16% (30-minute windows, 10-17 to 10-26 outside
 incidents).
@@ -48360,10 +48594,13 @@ False-positive qualifiers: a client bug that calls one route wrongly produces
 one route; read that route's request rate and caller spread. §13.3 expects no
 client impact from API deploys, so a 5xx burst during a rollout is a drain
 defect to investigate, not to suppress. False-negative qualifiers: a request
-that times out at the client is never recorded (the rate floor covers it). An
+that never finishes at the router has no terminal count. Upstream refusals
+and releases that never exported a complete family remain invisible. The
+proposed traffic floor could detect a drop in completed volume. An
 error answered as 200 with an error body is invisible here (§2.9a and §2.9b
-read provider results). alt embeds its own API router and needs the same rule
-on its job.
+read provider results). Alt ingress can reject requests before its embedded
+API router starts. Missing error or completion series throughout a window
+can also limit what a complete-looking export proves.
 
 ACTION: the routes that fail name the dependency: authentication and user
 routes the database path, `find-providers2` the score cache (§2.8, §2.9),
@@ -48371,9 +48608,13 @@ routes the database path, `find-providers2` the score cache (§2.8, §2.9),
 
 ### 25.4 Delivered traffic against the same window last week
 
-Status: proposed 2026-10-26; the floor is missing. §1.1a
-(`provider-connections`) watches provider supply; nothing watches the bytes
-customers receive.
+Probe: `delivered-traffic-floor`
+
+The reader compares observed rates for two separate targets, Connect and
+hosted proxy. §1.1a (`provider-connections`) measures provider supply.
+Factury alert 170 tracks the additional evidence needed to assess customer
+demand and receipt. The Grafana rule and contact-point delivery remain
+independent verification gates.
 
 Source (exists): `urnetwork_connect_exchange_io_bytes_total` for all Connect
 traffic and `urnetwork_proxy_session_bytes_total` for hosted proxy sessions.
@@ -48386,6 +48627,21 @@ and the socket counter alone would fall by that share, about 60% of exchange
 frames once every block is on. A block with in-process forward delivery on
 also carries its same-process forward frames there; the local counter sums
 both operations, as the socket counter does.
+
+Connect records the complete four-byte frame header and payload on each socket
+read or write. Summing both directions includes both endpoints of a completed
+hop, plus pings and handshakes. Local links add one sent and one received
+measurement per delivery. A change from sockets to local links can therefore
+preserve the combined rate while reducing the socket rate. Compare the same
+direction and frame-kind population across all eight windows.
+
+The hosted proxy binds both byte directions on the first successful upstream
+dial for each of HTTP and SOCKS. Earlier failed dials and an unused protocol
+can both leave its children absent. Destination-to-client bytes advance on an
+upstream read, before the relay writes to the client. Client-to-destination
+bytes advance on an upstream write. WireGuard has a separate packet ledger.
+A disconnected client and a client that received the full reply can produce
+identical session-byte counts.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.
@@ -48410,11 +48666,43 @@ and §25.1 before paging on traffic alone. False-negative qualifiers: growth
 hides partial loss. The exchange counter measures bytes through Connect's
 exchange, not bytes the customer's application received.
 
+Every minute, eight bounded Mimir range reads end at the evaluation clock
+(two minutes behind now) and the same UTC clock on each of the previous seven
+days. Each range evaluates a 30-minute rate at one-minute steps. The numerator
+is the change in a cumulative counter and the denominator is the elapsed time
+between the gateway receipts of its two process pushes. The eight reads share
+a 50-second budget. Each response is bounded to 1 MiB and 4,096 range points. The default policy requires 16 qualifying endpoints for WARN
+and 11 for PAGE. Recovery requires all 16 endpoints at or above the WARN
+floor. Mixed history holds the incident open. A complete PAGE interval can
+still alert beside an earlier gap in the longer WARN interval.
+
+For each service the cohort is its currently configured host and block slots.
+Each window also enumerates native process starts for the entire service,
+independently of its bytes. An extra observed historical slot, an excluded
+or absent configured slot, overlapping publishers or a process change within
+a half-hour disqualifies that service's interval. A matching nonce and start
+and fresh, co-stamped counter endpoints must cover every expected cell. Each
+Connect socket process exposes 18 current cells and local delivery exposes
+12, including the eagerly initialized zeros. The proxy requires all four
+HTTP/SOCKS direction cells. A counter reset, lazy or older schema, partial
+reference or zero reference median leaves the comparison unknown. A measured
+zero current rate against a positive qualified median can cross the floor.
+The class `delivered-traffic-floor-unobservable` reports incomplete source
+coverage separately for each service. Historical intended placement outside
+the matched cohort requires independently dated inventory. The October replay
+figures predate the current local-link schema and do not qualify this reader's
+historical coverage.
+
+A volume fall can establish reduced observed traffic. Establishing failed customer
+delivery also needs evidence of contemporaneous demand and completed transfers
+for that population. Factury alert 170 retains that open source question and
+the requirement for a matched healthy control.
+
 ACTION: confirm with §25.2 and §1.1a, then follow §5.1.
 
 ### 25.5 Synthetic customer journey from outside the datacenter
 
-Status: proposed 2026-10-26; the probe is missing. Partial journeys exist: the
+Status: the full two-vantage probe is missing. Planetoid supplies the off-site hosted setup observation in §25.5a. Other partial observations include the
 egress prober inside the datacenter (`egress-outcomes`, and the
 `urnetwork_egress_probe_attempts_total{result}` ok share in Mimir), the app
 location picker (`provider-picker`, §2.9b) and the hosted proxy's public path
@@ -48465,6 +48753,45 @@ ACTION: the failing step names the boundary: steps 1–2 ingress and
 authentication (§18, §25.3), step 3 the score cache (§2.8, §2.9), step 4
 Connect and contract creation (§25.2, §25.1, §2.30), step 5 the hosted proxy
 (§14).
+
+### 25.5a Off-site hosted proxy setup p90
+
+Probe: `hosted-proxy-setup`
+
+The existing `tests/proxy-test` runner creates a hosted proxy from off-site
+Planetoid and waits for the proxy to return an HTTP 200 trace containing a
+nonempty location. The round robin schedules available countries. The US
+lane runs probe-only from the same machine. The clock starts at the attempt
+that created the proxy. Each readiness timeout contributes its elapsed
+setup time. Creation failures and canceled runs have no setup measurement.
+The producer counts exit-country mismatches separately.
+
+The monitor reads a bounded ten-minute raw Mimir matrix from the Main node
+publisher on Planetoid. The active unit start comes from a single read of
+`proxy-test.service` on the inventoried observer. The source is
+`tests/proxy-test/metrics.go` and the deployment is
+`xops/main/ansible/playbook-proxy-test.yml`. The writer and scrape must be
+within 120 seconds of evaluation. The p90, count, timeout count and oldest
+age must share the writer's scrape timestamp. All 100 observations must
+belong to the running unit and fall within the past day. Each lane must
+show an increase in a measured setup outcome during the last ten minutes.
+An unchanged count window can survive indefinitely in an actively written
+file. These freshness limits qualify the measurement available to the monitor.
+
+WARN `hosted-proxy-setup-slow` when nearest-rank p90 exceeds 7 seconds for
+the round robin or 3 seconds for the US lane on 100 measured setups, the
+targets in `proxy/P90SPEED.md` §10. A full advancing cohort at or below its
+target recovers that lane. WARN `hosted-proxy-setup-unobservable` when the
+observer, current unit, clocks, paired values, full cohort or recent
+activity cannot qualify it. Mixed, stale, stopped, reset or warming evidence
+holds the lane's prior slow finding. Each lane recovers independently.
+
+The observer, trace destination and provider mix can affect the result.
+Both lanes share the same observer and Pro account. Direct client
+authentication, fixed-location selection, H1 and H3 customer contracts and
+a second independent external observer remain the open §25.5 work in
+Factury #170. A ready trace proves receipt of that response on a sampled
+hosted path. A missing publication reports a coverage problem.
 
 ## 26. Backlog and storm signals — from the 2026-10-26 incidents
 

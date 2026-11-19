@@ -114,6 +114,47 @@ func providerConnectionsSignalForTest(t *testing.T) Signal {
 	return nil
 }
 
+// A completed gateway failure retains only its fixed observation details.
+// A source without a typed marker supplies no execution or admission proof.
+func TestProviderConnectionsGatewayFailureDetails(t *testing.T) {
+	deadline := fmt.Errorf("%s: %w", providerConnectionsPrivate, context.DeadlineExceeded)
+	wait := &observationBoundaryError{err: deadline, boundary: observationBoundaryNativeWait}
+	release := &sshAdmissionUnavailableError{err: errors.New(providerConnectionsPrivate), phase: sshAdmissionFailureRelease}
+	const unavailable = "visibility_reason=bounded_source_unavailable "
+	for _, tc := range []struct {
+		name     string
+		err      error
+		observed string
+	}{
+		{name: "acquire", err: &sshAdmissionUnavailableError{err: deadline, phase: sshAdmissionFailureAcquire}, observed: unavailable + "error_class=observation-timeout ssh_admission_failures=acquire"},
+		{name: "wait and release", err: errors.Join(wait, release), observed: unavailable + "error_class=observation-timeout ssh_admission_failures=release execution_boundaries=native-wait/started-joined"},
+		{name: "untyped", err: errors.New(providerConnectionsPrivate + " native-wait/started-joined ssh_admission_failures=acquire"), observed: unavailable + "error_class=observation-unclassified"},
+		{name: "malformed body", observed: "visibility_reason=invalid_response"},
+	} {
+		var calls atomic.Int32
+		source := &syntheticSource{hostFn: func(_ HostSettings, command string) (string, error) {
+			calls.Add(1)
+			if strings.Contains(command, "monitor-provider-connections-native") {
+				t.Errorf("%s started a census after gateway failure", tc.name)
+			}
+			return providerConnectionsPrivate, tc.err
+		}}
+		settings := providerConnectionsTestSettings(source, func() time.Time { return providerConnectionsTestNow })
+		alerts, err := providerConnectionsSignalForTest(t).Run(t.Context(), settings)
+		if err != nil || calls.Load() != 1 || len(alerts) != 1 {
+			t.Fatalf("%s: got %d reads, %d alerts, error %v", tc.name, calls.Load(), len(alerts), err)
+		}
+		alert := requireAlertClass(t, alerts, "provider-connections-unobservable")
+		if !isVisibilityAlert(alert) || alert.Severity != SeverityWarn || alert.Sustain != 2 || alert.Identity() != "mimir/provider-connections|provider-connections-unobservable|synthetic/connect-fleet|" {
+			t.Errorf("%s changed the visibility warning identity", tc.name)
+		}
+		if alert.Observed != tc.observed {
+			t.Errorf("%s: got %q, want %q", tc.name, alert.Observed, tc.observed)
+		}
+		requireAlertOmits(t, alert, providerConnectionsPrivate, "http_status=")
+	}
+}
+
 func TestProviderConnectionsSignalSteadyFleetIsQuiet(t *testing.T) {
 	now := providerConnectionsTestNow
 	var calls atomic.Int32
@@ -502,6 +543,7 @@ func TestProviderConnectionsRetainsIndependentFailureWithItsOwnClock(t *testing.
 	}
 	requireAlertClass(t, alerts, "provider-connections-unobservable")
 	page := requireAlertClass(t, alerts, "provider-connections-collapse")
+	requireAlertOmits(t, page, "error_class=", "execution_boundaries=", providerConnectionsPrivate)
 	if !strings.Contains(page.Observed, "measured_window_end="+provedAt.Format(time.RFC3339)) || !strings.Contains(page.Observed, "current_source=unknown") {
 		t.Fatal("prior complete failure borrowed the later query clock")
 	}

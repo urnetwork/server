@@ -37,24 +37,54 @@ const (
 	maxStatsWindow = 366 * 24 * time.Hour
 )
 
-// Select the requested providers' closed contracts before looking up reports.
-// The lateral fence keeps each report lookup on its complete primary key even
-// when a large provider array makes a whole-history join look inexpensive.
+// Settled transfer bytes per provider: the destination reports of the
+// requested providers' contracts closed in the window. The closed contracts
+// are selected first, and the reports are read only through contract_close's
+// complete primary key, scoped to those contracts, even when a large provider
+// array makes a whole-history join look inexpensive.
+//
+// Until 2026-11-18 each eligible contract's report was found by its own
+// primary-key descent, about five index pages per contract. The largest
+// networks close more than ten million contracts a day, and that read alone
+// ran past the provider list's 2-minute fill budget. The eligible contracts
+// are now grouped by the first four bytes of their id: contract ids lead with
+// their creation millisecond (connect.NewId), so a group is about a minute of
+// creation and one key range of the index. Each group's reports are read by
+// one primary-key scan over its keys, which visits a leaf page once for all of
+// its keys, and are matched back to their contracts by id. Ids without the
+// time prefix group less tightly; the totals are the same either way.
 const providerStatsTransferBytesSQL = `
 	WITH eligible AS MATERIALIZED (
 		SELECT contract_id, destination_id
 		FROM transfer_contract
 		WHERE destination_id = ANY($1::uuid[]) AND close_time >= $2
+	), id_range AS MATERIALIZED (
+		SELECT array_agg(contract_id) AS contract_ids
+		FROM eligible
+		GROUP BY substr(uuid_send(contract_id), 1, 4)
+	), report AS MATERIALIZED (
+		SELECT cc.contract_id, cc.used_transfer_byte_count
+		FROM id_range
+		CROSS JOIN LATERAL (
+			SELECT contract_id, used_transfer_byte_count
+			FROM contract_close
+			WHERE contract_id = ANY(id_range.contract_ids) AND party = 'destination'
+			OFFSET 0
+		) cc
 	)
-	SELECT tc.destination_id, COALESCE(SUM(cc.used_transfer_byte_count), 0)
-	FROM eligible tc
-	CROSS JOIN LATERAL (
-		SELECT used_transfer_byte_count
-		FROM contract_close cc
-		WHERE cc.contract_id = tc.contract_id AND cc.party = 'destination'
-		OFFSET 0
-	) cc
-	GROUP BY tc.destination_id
+	SELECT eligible.destination_id, COALESCE(SUM(report.used_transfer_byte_count), 0)
+	FROM report
+	JOIN eligible ON eligible.contract_id = report.contract_id
+	GROUP BY eligible.destination_id
+`
+
+// Contracts opened in the window and the distinct clients they served, per
+// provider.
+const providerStatsContractsSQL = `
+	SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
+	FROM transfer_contract
+	WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2
+	GROUP BY destination_id
 `
 
 // resolveStatsWindow computes the lookback window from a last_n hours value
@@ -136,20 +166,13 @@ func statsProviders(
 	windowStart time.Time,
 	now time.Time,
 ) (*StatsProvidersResult, error) {
+	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
-	providers := []*ProviderStats{}
-	var returnErr error
 
-	// Payout authority and metrics share one primary owner. Replica lag must
-	// not make a retained earning boundary look absent when policy is removed.
-	server.Db(clientSession.Ctx, func(conn server.PgConn) {
-		// enumerate the network's active top-level provider clients
-		order := []server.Id{}
-		result, err := conn.Query(
-			clientSession.Ctx,
-			providerStatsClientsSQL,
-			networkId,
-		)
+	// enumerate the network's active top-level provider clients
+	order := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, providerStatsClientsSQL, networkId)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var clientId server.Id
@@ -157,19 +180,40 @@ func statsProviders(
 				order = append(order, clientId)
 			}
 		})
-		if len(order) == 0 {
-			return
-		}
-		ids := idStrings(order)
+	})
+	if len(order) == 0 {
+		return &StatsProvidersResult{
+			CreatedTime: server.NowUtc(),
+			Providers:   []*ProviderStats{},
+		}, nil
+	}
+	ids := idStrings(order)
 
-		// transfer bytes (settled) per provider
-		transferBytes := map[server.Id]int64{}
-		result, err = conn.Query(
-			clientSession.Ctx,
-			providerStatsTransferBytesSQL,
-			ids,
-			windowStart,
-		)
+	// Three reads, each on its own pooled primary connection: the payout
+	// attribution (it reads the network's sweeps, not its provider list), the
+	// contract counts with the search and connection reads, and the transfer
+	// bytes on this goroutine. For the largest networks each takes tens of
+	// seconds; in sequence they passed the list's 2-minute fill budget
+	// (2026-11-18), and together they take as long as the slowest. Payout
+	// authority and metrics stay on the primary: replica lag must not make a
+	// retained earning boundary look absent when policy is removed. Every read
+	// is joined before this returns, a raise included, and a raise here first
+	// cancels the others.
+	readsCtx, cancelReads := context.WithCancel(ctx)
+	payout := startProviderStatsRead(readsCtx, func(conn server.PgConn) (map[server.Id]map[string]NanoCents, error) {
+		return queryProviderPayoutStats(readsCtx, conn, networkId, windowStart, now)
+	})
+	defer payout.wait()
+	activity := startProviderStatsRead(readsCtx, func(conn server.PgConn) (*providerStatsActivity, error) {
+		return queryProviderStatsActivity(readsCtx, conn, ids, windowStart, now), nil
+	})
+	defer activity.wait()
+	defer cancelReads()
+
+	// transfer bytes (settled) per provider
+	transferBytes := map[server.Id]int64{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(ctx, providerStatsTransferBytesSQL, ids, windowStart)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var clientId server.Id
@@ -178,99 +222,148 @@ func statsProviders(
 				transferBytes[clientId] = byteCount
 			}
 		})
-
-		// contracts + distinct served clients per provider
-		contracts := map[server.Id]int{}
-		clients := map[server.Id]int{}
-		result, err = conn.Query(
-			clientSession.Ctx,
-			`
-			SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
-			FROM transfer_contract
-			WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2
-			GROUP BY destination_id
-			`,
-			ids,
-			windowStart,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var contractCount int
-				var clientCount int
-				server.Raise(result.Scan(&clientId, &contractCount, &clientCount))
-				contracts[clientId] = contractCount
-				clients[clientId] = clientCount
-			}
-		})
-
-		// Validate whole network allocations before selecting current providers.
-		payoutNanoCents := map[server.Id]NanoCents{}
-		clientDayPayouts, err := queryProviderPayoutStats(clientSession.Ctx, conn, networkId, windowStart, now)
-		if err != nil {
-			returnErr = err
-			return
-		}
-		for _, clientId := range order {
-			for _, amount := range clientDayPayouts[clientId] {
-				if math.MaxInt64-payoutNanoCents[clientId] < amount {
-					returnErr = fmt.Errorf("provider payout total exceeds nanocent range for client %s", clientId)
-					return
-				}
-				payoutNanoCents[clientId] += amount
-			}
-		}
-
-		// search interest per provider
-		searchInterest := map[server.Id]int{}
-		result, err = conn.Query(
-			clientSession.Ctx,
-			`
-			SELECT client_id, COALESCE(SUM(match_count), 0)
-			FROM search_provider_stats
-			WHERE client_id = ANY($1::uuid[]) AND period_start >= $2
-			GROUP BY client_id
-			`,
-			ids,
-			windowStart,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				var count int
-				server.Raise(result.Scan(&clientId, &count))
-				searchInterest[clientId] = count
-			}
-		})
-
-		// connection intervals per provider -> uptime, events, current state
-		intervals := queryConnectionIntervals(clientSession.Ctx, conn, ids, windowStart, now)
-
-		for _, clientId := range order {
-			ivals := intervals[clientId]
-			providers = append(providers, &ProviderStats{
-				ClientId:               clientId,
-				Connected:              anyActive(ivals),
-				ConnectedEventsLast24h: connectedEvents(ivals, windowStart, now),
-				UptimeLast24h:          uptimeHours(ivals, windowStart, now),
-				TransferDataLast24h:    bytesToGib(transferBytes[clientId]),
-				PayoutLast24h:          NanoCentsToUsd(payoutNanoCents[clientId]),
-				PayoutAsset:            "USDC",
-				PayoutBasis:            "legacy_escrow_credit_by_sweep_time_not_transfer_confirmation",
-				SearchInterestLast24h:  searchInterest[clientId],
-				ContractsLast24h:       contracts[clientId],
-				ClientsLast24h:         clients[clientId],
-			})
-		}
 	})
-	if returnErr != nil {
-		return nil, returnErr
+	reads, err := activity.result()
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate whole network allocations before selecting current providers.
+	clientDayPayouts, err := payout.result()
+	if err != nil {
+		return nil, err
+	}
+	payoutNanoCents := map[server.Id]NanoCents{}
+	for _, clientId := range order {
+		for _, amount := range clientDayPayouts[clientId] {
+			if math.MaxInt64-payoutNanoCents[clientId] < amount {
+				return nil, fmt.Errorf("provider payout total exceeds nanocent range for client %s", clientId)
+			}
+			payoutNanoCents[clientId] += amount
+		}
+	}
+
+	providers := []*ProviderStats{}
+	for _, clientId := range order {
+		ivals := reads.intervals[clientId]
+		providers = append(providers, &ProviderStats{
+			ClientId:               clientId,
+			Connected:              anyActive(ivals),
+			ConnectedEventsLast24h: connectedEvents(ivals, windowStart, now),
+			UptimeLast24h:          uptimeHours(ivals, windowStart, now),
+			TransferDataLast24h:    bytesToGib(transferBytes[clientId]),
+			PayoutLast24h:          NanoCentsToUsd(payoutNanoCents[clientId]),
+			PayoutAsset:            "USDC",
+			PayoutBasis:            "legacy_escrow_credit_by_sweep_time_not_transfer_confirmation",
+			SearchInterestLast24h:  reads.searchInterest[clientId],
+			ContractsLast24h:       reads.contracts[clientId],
+			ClientsLast24h:         reads.clients[clientId],
+		})
 	}
 
 	return &StatsProvidersResult{
 		CreatedTime: server.NowUtc(),
 		Providers:   providers,
 	}, nil
+}
+
+// The provider list's per-provider activity apart from transfer bytes.
+type providerStatsActivity struct {
+	contracts      map[server.Id]int
+	clients        map[server.Id]int
+	searchInterest map[server.Id]int
+	intervals      map[server.Id][]*connectionInterval
+}
+
+func queryProviderStatsActivity(
+	ctx context.Context,
+	conn server.PgConn,
+	ids []string,
+	windowStart time.Time,
+	now time.Time,
+) *providerStatsActivity {
+	activity := &providerStatsActivity{
+		contracts:      map[server.Id]int{},
+		clients:        map[server.Id]int{},
+		searchInterest: map[server.Id]int{},
+	}
+
+	// contracts + distinct served clients per provider
+	result, err := conn.Query(ctx, providerStatsContractsSQL, ids, windowStart)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var clientId server.Id
+			var contractCount int
+			var clientCount int
+			server.Raise(result.Scan(&clientId, &contractCount, &clientCount))
+			activity.contracts[clientId] = contractCount
+			activity.clients[clientId] = clientCount
+		}
+	})
+
+	// search interest per provider
+	result, err = conn.Query(
+		ctx,
+		`
+		SELECT client_id, COALESCE(SUM(match_count), 0)
+		FROM search_provider_stats
+		WHERE client_id = ANY($1::uuid[]) AND period_start >= $2
+		GROUP BY client_id
+		`,
+		ids,
+		windowStart,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var clientId server.Id
+			var count int
+			server.Raise(result.Scan(&clientId, &count))
+			activity.searchInterest[clientId] = count
+		}
+	})
+
+	// connection intervals per provider -> uptime, events, current state
+	activity.intervals = queryConnectionIntervals(ctx, conn, ids, windowStart, now)
+	return activity
+}
+
+// One read on its own pooled primary connection, started before its caller's
+// other reads and joined before the caller returns. The read's raise, such as
+// the db layer's stop when its context ends, is raised again in the goroutine
+// that takes the result.
+type providerStatsRead[R any] struct {
+	done   chan struct{}
+	value  R
+	err    error
+	raised any
+}
+
+func startProviderStatsRead[R any](ctx context.Context, read func(server.PgConn) (R, error)) *providerStatsRead[R] {
+	self := &providerStatsRead[R]{done: make(chan struct{})}
+	go func() {
+		defer close(self.done)
+		defer func() {
+			self.raised = recover()
+		}()
+		server.Db(ctx, func(conn server.PgConn) {
+			self.value, self.err = read(conn)
+		})
+	}()
+	return self
+}
+
+// Waits for the read and returns its result, raising its raise again.
+func (self *providerStatsRead[R]) result() (R, error) {
+	<-self.done
+	if self.raised != nil {
+		panic(self.raised)
+	}
+	return self.value, self.err
+}
+
+// Waits for the read without taking its result.
+func (self *providerStatsRead[R]) wait() {
+	<-self.done
 }
 
 // -----------------------------------------------------------------------------

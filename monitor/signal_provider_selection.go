@@ -88,33 +88,55 @@ type providerSelectionEvidence struct {
 	complete         bool
 	shapePaired      int
 	shapeComplete    bool
+	drawPaired       int
+	drawComplete     bool
 	reason           string
+	sourceRejection  string
 }
 
 // Does not echo untrusted metric labels or source error bodies on failure.
 func parseProviderSelection(raw, environment string, now time.Time, scope providerPickerScope) providerSelectionEvidence {
 	evidence := providerSelectionEvidence{counts: map[providerSelectionKey]float64{}, expected: len(scope.slots), reason: "incomplete-process-window"}
-	invalid := func() providerSelectionEvidence {
-		return providerSelectionEvidence{expected: len(scope.slots), reason: "invalid-source-response"}
+	invalid := func(boundary string) providerSelectionEvidence {
+		return providerSelectionEvidence{expected: len(scope.slots), reason: "invalid-source-response", sourceRejection: boundary}
 	}
 	var response struct {
 		mimirInstantResponse
 		Warnings []string `json:"warnings"`
 		Infos    []string `json:"infos"`
 	}
-	if len(raw) > providerSelectionMaxBytes || json.Unmarshal([]byte(raw), &response) != nil || response.Status != "success" || response.Data.ResultType != "vector" || len(response.Warnings) != 0 || len(response.Infos) != 0 || len(response.Data.Result) > 8192 {
-		return invalid()
+	switch {
+	case len(raw) > providerSelectionMaxBytes:
+		return invalid("byte-limit")
+	case json.Unmarshal([]byte(raw), &response) != nil:
+		return invalid("json-decode")
+	case response.Status != "success":
+		return invalid("response-status")
+	case response.Data.ResultType != "vector":
+		return invalid("result-type")
+	case len(response.Warnings) != 0 || len(response.Infos) != 0:
+		return invalid("response-annotations")
+	case len(response.Data.Result) > 8192:
+		return invalid("row-limit")
 	}
 	processes := map[pickerProcessKey]*providerSelectionProcess{}
 	contains := func(v string, allowed string) bool { return slices.Contains(strings.Split(allowed, "|"), v) }
 	for _, row := range response.Data.Result {
 		at, value, err := mimirInstantValue(row.Value)
-		if err != nil || at.Unix() != now.Unix() || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 9007199254740991 {
-			return invalid()
+		switch {
+		case err != nil:
+			return invalid("sample-decode")
+		case at.Unix() != now.Unix():
+			return invalid("evaluation-time")
+		case math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || value > 9007199254740991:
+			return invalid("sample-value")
 		}
 		key := pickerProcessKey{host: row.Metric["host"], block: row.Metric["block"], instance: row.Metric["instance"]}
-		if row.Metric["env"] != environment || row.Metric["job"] != "api" || !scope.slots[key.host+"\x00"+key.block] || key.instance == "" || len(key.instance) > 512 {
-			return invalid()
+		if row.Metric["env"] != environment || row.Metric["job"] != "api" || !scope.slots[key.host+"\x00"+key.block] {
+			return invalid("process-scope")
+		}
+		if key.instance == "" || len(key.instance) > 512 {
+			return invalid("process-identity")
 		}
 		process := processes[key]
 		if process == nil {
@@ -129,19 +151,19 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		case "count", "count_time", "resets", "samples":
 			outcome := providerSelectionKey{targetKind: row.Metric["target_kind"], requestClass: row.Metric["request_class"], family: row.Metric["ip_family"], rankMode: row.Metric["rank_mode"], outcome: row.Metric["outcome"], reason: row.Metric["reason"]}
 			if !contains(outcome.targetKind, "none|direct|country|region|city|location_unknown|group|best_available|mixed") || !contains(outcome.requestClass, "default_minimum|count_zero|count_small|count_positive|forced_minimum") || !contains(outcome.family, "any|v4|v6|dualstack|unknown") || !contains(outcome.rankMode, "quality|speed|online|unknown") {
-				return invalid()
+				return invalid("cohort-labels")
 			}
 			validReason := false
 			switch outcome.outcome {
 			case "nonempty":
 				validReason = contains(outcome.reason, "returned|returned_3_9|returned_10_plus|returned_small_direct|returned_small_mixed_direct|returned_small_requested|returned_small_cache_unknown|returned_small_eligible|returned_small_sample|returned_small_filtered_hard|returned_small_filtered_network|returned_small_filtered_family|returned_small_filtered_explicit|returned_small_filtered_client_ids|returned_small_filtered_destinations|returned_small_filtered_explicit_mixed|returned_small_filtered_mixed|returned_small_filtered_capability")
 			case "zero":
-				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_client_ids|filtered_destinations|filtered_explicit_mixed|filtered_mixed|filtered_capability|unclassified_zero")
+				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|drawable_not_selected|no_drawable_candidates|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_client_ids|filtered_destinations|filtered_explicit_mixed|filtered_mixed|filtered_capability|unclassified_zero")
 			case "error", "canceled":
 				validReason = contains(outcome.reason, "validate|caller_location|load_primary|load_backfill|hard_exclusions|filter|directory|select|record_matches")
 			}
 			if !validReason {
-				return invalid()
+				return invalid("outcome-reason")
 			}
 			fields = process.outcomes[outcome]
 			if fields == nil {
@@ -149,10 +171,10 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 				process.outcomes[outcome] = fields
 			}
 		default:
-			return invalid()
+			return invalid("series-field")
 		}
 		if _, exists := fields[field]; exists {
-			return invalid()
+			return invalid("duplicate-cell")
 		}
 		fields[field] = value
 	}
@@ -170,7 +192,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		// Schema 3 is schema 2 with the capability refusals of FP2-MODERN.md
 		// apart from filtered_hard, as filtered_capability.
 		schema := fields["now_schema"]
-		if len(fields) != 8 || (schema != 1 && schema != 2 && schema != 3) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
+		if len(fields) != 8 || (schema != 1 && schema != 2 && schema != 3 && schema != 4) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
 			continue
 		}
 		if !fresh(fields["now_schema_time"], now) || !fresh(fields["now_start_time"], now) || !fresh(fields["prior_schema_time"], now.Add(-5*time.Minute)) || !fresh(fields["prior_start_time"], now.Add(-5*time.Minute)) {
@@ -187,6 +209,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			if schema == 1 && contains(outcome.reason, "filtered_client_ids|filtered_destinations|filtered_explicit_mixed") {
 				valid = false
 			}
+			if schema < 4 && contains(outcome.reason, "drawable_not_selected|no_drawable_candidates") || schema == 4 && outcome.reason == "eligible_not_selected" {
+				valid = false
+			}
 			if schema < 3 && contains(outcome.reason, "filtered_capability|returned_small_filtered_capability") {
 				valid = false
 			}
@@ -198,6 +223,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		evidence.paired++
 		if 2 <= schema {
 			evidence.shapePaired++
+		}
+		if schema == 4 {
+			evidence.drawPaired++
 		}
 		for outcome, values := range process.outcomes {
 			evidence.counts[outcome] += values["count"]
@@ -211,6 +239,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		evidence.reason = "complete"
 	}
 	evidence.shapeComplete = evidence.complete && evidence.shapePaired == evidence.expected
+	evidence.drawComplete = evidence.complete && evidence.drawPaired == evidence.expected
 	return evidence
 }
 
@@ -251,17 +280,23 @@ func (providerSelectionProbe) check(ctx context.Context, env *probeEnv) ([]findi
 // A missing positive-count page or an eligible-but-unselected zero is narrower.
 func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 	findings := []finding{}
-	if !evidence.complete || !evidence.shapeComplete {
+	if !evidence.drawComplete {
 		reason, frame := evidence.reason, ""
-		if evidence.complete {
+		if evidence.shapeComplete {
+			reason, frame = "incomplete-terminal-draw-window", "terminal-draw"
+		} else if evidence.complete {
 			reason, frame = "incomplete-shape-schema-window", "response-shape"
+		}
+		observed := fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s draw_paired_processes=%d", evidence.paired, evidence.shapePaired, evidence.expected, reason, evidence.drawPaired)
+		if evidence.sourceRejection != "" {
+			observed += " source_rejection=" + evidence.sourceRejection
 		}
 		findings = append(findings, finding{
 			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
-			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 1 retains zero-reason authority; schema 2 or 3 is required for small-list and exclusion-source attribution, and schema 3 also attributes capability refusals (filtered_capability). Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
-			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1, schema-2 or schema-3 window and valid observed counter partitions; complete response-shape attribution requires schema 2 or 3 everywhere.",
-			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.shapePaired, evidence.expected, reason),
+			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 2 adds small-list attribution, schema 3 adds capability refusals, and schema 4 establishes terminal draw eligibility. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
+			baseline:  "Exactly one returned process identity per inventory-enabled API host/block, with a fresh same-generation schema-1 through schema-4 window and valid observed counter partitions; complete response-shape attribution requires schema 2 or newer everywhere.",
+			observed:  observed,
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
 			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",
 			action:    "Verify emitting API ancestry for the selection diagnostic schema, complete the authorized rollout and inspect scrape/generation/reset coverage. Do not change selection filters to restore telemetry.",
@@ -279,9 +314,16 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 			continue
 		}
 		class, tier, threshold := "", tierWarn, 20.0
+		symptom := "Provider selection returned zero across a proven internal boundary"
+		mechanism := "Positive cached page counts referenced absent pages in this completed zero response."
 		switch key.reason {
 		case "eligible_not_selected":
+			class, tier, threshold = "provider-selection-empty-after-prefilter", tierPage, 3
+			symptom = "Provider selection returned zero after candidates passed preliminary filters"
+			mechanism = "Schema 1 through 3 count candidate visits before native membership, live Quality validation and Online fallback. Terminal eligibility is unknown."
+		case "drawable_not_selected":
 			class, tier, threshold = "provider-selection-empty-despite-eligible", tierPage, 3
+			mechanism = "A candidate reached a positive-quota answer draw and remained eligible after later request-local revocations, but the completed response contained zero providers."
 		case "cache_page_gap":
 			class = "provider-selection-cache-page-gap"
 		case "cache_missing":
@@ -295,13 +337,13 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 		}
 		findings = append(findings, finding{
 			probeId: "mimir/provider-selection", tier: tier, class: class, target: "api-fleet", frame: key.frame(), sustain: 2,
-			symptom:   "Provider selection returned zero across a proven internal boundary",
-			mechanism: "eligible_not_selected means a positive discovery count and known rank retained candidates after every request filter but returned none. cache_page_gap means positive cached page counts referenced absent pages in a zero response. Neither means global provider scarcity.",
+			symptom:   symptom,
+			mechanism: mechanism,
 			baseline:  fmt.Sprintf("At least %.0f matching completed zero responses in five minutes, sustained for two one-minute observations; intentional zero and ForceMinimum requests excluded.", threshold),
-			observed:  fmt.Sprintf("requests=%.3f reason=%s target_kind=%s ip_family=%s rank_mode=%s request_class=%s paired_processes=%d expected_slots=%d scope_complete=%t", count, key.reason, key.targetKind, key.family, key.rankMode, key.requestClass, evidence.paired, evidence.expected, evidence.complete),
+			observed:  fmt.Sprintf("requests=%.3f reason=%s target_kind=%s ip_family=%s rank_mode=%s request_class=%s paired_processes=%d expected_slots=%d scope_complete=%t terminal_draw_complete=%t", count, key.reason, key.targetKind, key.family, key.rankMode, key.requestClass, evidence.paired, evidence.expected, evidence.complete, evidence.drawComplete),
 			evidence:  "Request-local stage and cache/filter observations from the same completed response, aggregated by fixed vocabulary; no customer, provider, network, target ID, address or request ID.",
 			context:   "Backfill remains within the requested location/group, not the global online pool. A publication/expiry race can transiently miss a page; country/region/city metadata can be unknown on old caches. Sampled candidate pools are not full supply, and returned entries do not prove route success. Counts cover observed same-generation processes and may undercount newly appearing lazy labels.",
-			action:    "Inspect the exact API/cache writer artifacts and the matching stage durations. For page gaps verify atomic publication/expiry and reader fallback; for eligible candidates verify count/rank/backfill selection. Preserve hard, network, family and caller exclusions; never clear caches or widen targets to silence the signal.",
+			action:    "Inspect the exact API/cache writer artifacts and the matching stage durations. Verify cache publication and reader fallback for page gaps. For a legacy empty, establish the actual terminal draw and revocations before attributing selection loss. For a drawable empty, inspect the draw and assembly. Preserve hard, network, family and caller exclusions; never clear caches or widen targets to silence the signal.",
 			verify:    "Two complete post-boundary five-minute windows have no matching invariant failures, with positive naturally occurring selection and independent route success. Generic zero-tail attribution still needs the bounded reason distribution and request-intent baseline.", playbook: "SIGNALS.md §2.9c and §2.9a",
 		})
 	}

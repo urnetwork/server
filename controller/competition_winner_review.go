@@ -22,6 +22,23 @@ type CompetitionWinnerReviewState struct {
 	CurrentDecision  model.CompetitionRewardDecision         `json:"current_decision"`
 	ApprovedReviewId *server.Id                              `json:"approved_review_id,omitempty"`
 	ApprovedReview   *model.CompetitionIntegrityReviewResult `json:"approved_review,omitempty"`
+	RecoveryPrior    *model.CompetitionIntegrityReviewResult `json:"recovery_prior,omitempty"`
+}
+
+func winnerReviewWithinCheckpoint(state *CompetitionWinnerReviewState, seal *model.CompetitionEvaluationSeal, checkpoint *model.CompetitionWinnerReviewCheckpoint) bool {
+	if seal == nil {
+		return false
+	}
+	review := state.ApprovedReview
+	if model.CompetitionReviewWithinCheckpointForEpoch(review, checkpoint, seal.Epoch) {
+		return true
+	}
+	if review == nil {
+		return false
+	}
+	imported := model.CompetitionOfficialReviewImport{RoundId: review.RoundId, Review: review.Request}
+	return model.IsCompetitionEpochThreeSourceRecovery(imported) &&
+		model.ValidateCompetitionEpochThreeSourceRecoveryEvidence(state.RecoveryPrior, imported, *seal, state.CurrentDecision, checkpoint, state.Policy, review.CreatedAt) == nil
 }
 
 // Trusted broker input binds the entire elected decision and durable deadline.
@@ -51,7 +68,8 @@ type competitionSupervisorWinnerReviewDriver interface {
 // restart, infrastructure retry or unchanged decision cannot reset its clock.
 func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, lease model.CompetitionSupervisorLease, snapshot *CompetitionSupervisorSnapshot, transition *model.CompetitionSupervisorTransition, now time.Time) (*model.CompetitionSupervisorTransition, string, error, bool) {
 	state := snapshot.WinnerReview
-	if snapshot.Round == nil || snapshot.Seal == nil || state == nil || !model.IsCompetitionWinnerReviewPolicy(state.Policy.WinnerReviewPolicy) || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
+	if snapshot.Round == nil || snapshot.Seal == nil || snapshot.Seal.Epoch != snapshot.Round.Epoch ||
+		state == nil || !model.IsCompetitionWinnerReviewPolicy(state.Policy.WinnerReviewPolicy) || model.ValidateCompetitionAutomationPolicy(state.Policy) != nil {
 		return transition, "winner_review_blocked", ErrConflict, true
 	}
 	if now.Before(snapshot.Seal.PublicationAt) {
@@ -115,7 +133,7 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 		}
 		if checkpoint == nil || checkpoint.JobId != *decision.SelectedJobId || checkpoint.RoundId != snapshot.Round.RoundId ||
 			state.ApprovedReview.Request.ExpectedDecisionSha256 != checkpoint.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != checkpoint.RewardRevision ||
-			!model.CompetitionReviewWithinCheckpointForEpoch(state.ApprovedReview, checkpoint, snapshot.Round.Epoch) ||
+			!winnerReviewWithinCheckpoint(state, snapshot.Seal, checkpoint) ||
 			(snapshot.Round.Epoch == 2 && state.ApprovedReview.Request.OfficialReviewOverride != nil && (snapshot.Seal == nil || !model.CompetitionOfficialReviewPrereviewMatchesSeal(model.CompetitionOfficialReviewImport{RoundId: snapshot.Round.RoundId, Review: state.ApprovedReview.Request}, *snapshot.Seal))) {
 			return block("winner_review_identity_conflict", ErrConflict)
 		}
@@ -199,6 +217,9 @@ func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.Comp
 		review := &result.IntegrityReviews[i]
 		if review.Request.JobId != *state.CurrentDecision.SelectedJobId {
 			continue
+		}
+		if review.ReviewId.String() == "01a1f050-3e1b-05ea-1f68-47e072828d9e" {
+			state.RecoveryPrior = review
 		}
 		if review.Request.RewardDisposition != "unchanged" {
 			reward = review
@@ -305,6 +326,11 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 		if result.Seal.Epoch != 2 {
 			return ErrConflict
 		}
+		if model.IsCompetitionEpochThreeSourceRecovery(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: request}) {
+			// The independently pinned authorization above ran the exact
+			// database binding against the unchanged checkpoint.
+			return nil
+		}
 	}
 	var content []byte
 	if err := tx.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, result.Seal.Environment, result.Seal.CompetitionId, result.Seal.SeasonId, result.Seal.Epoch+1).Scan(&content); err != nil {
@@ -368,7 +394,7 @@ func validateWinnerSourceInTx(ctx context.Context, tx server.PgTx, settings *Set
 		return err
 	}
 	if transition.WinnerReview == nil || *transition.WinnerReview != *intent.WinnerReview ||
-		!model.CompetitionReviewWithinCheckpointForEpoch(state.ApprovedReview, intent.WinnerReview, result.Seal.Epoch) ||
+		!winnerReviewWithinCheckpoint(state, &result.Seal, intent.WinnerReview) ||
 		(result.Seal.Epoch == 2 && state.ApprovedReview.Request.OfficialReviewOverride != nil && !model.CompetitionOfficialReviewPrereviewMatchesSeal(model.CompetitionOfficialReviewImport{RoundId: predecessorId, Review: state.ApprovedReview.Request}, result.Seal)) ||
 		state.ApprovedReview.Request.ExpectedDecisionSha256 != intent.WinnerReview.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != intent.WinnerReview.RewardRevision ||
 		intent.BuildReadyAt.IsZero() || intent.BuildReadyAt.After(intent.PreparedAt) {

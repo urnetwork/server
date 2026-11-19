@@ -492,7 +492,9 @@ func (self *providerConnectionsProbe) check(ctx context.Context, env *probeEnv) 
 	}
 	if err != nil {
 		self.resetNative()
-		return self.unknownFindings(target, "bounded_source_unavailable", now), nil
+		findings := self.unknownFindings(target, "bounded_source_unavailable", now)
+		findings[0].observed += " " + observationFailureDetails(err, classifyObservationError(err))
+		return findings, nil
 	}
 	frame, reason := parseProviderConnectionsFrame(output, env.cfg.env, now, hosts, blocks)
 	if reason != "" {

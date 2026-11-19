@@ -41,7 +41,7 @@ func TestPeerConnectionTeardownStallRecoveryRequiresCompleteOverlap(t *testing.T
 	tailer := newLogTailer("taskworker", nil)
 	now := time.Date(2000, 1, 1, 0, 1, 0, 0, time.UTC)
 	tailer.clock = func() time.Time { return now }
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 	hasHealthy := func() bool {
 		for _, finding := range tailer.drainWindow() {
 			if finding.class == "peerconn-teardown-stalled" && finding.healthy {
@@ -53,16 +53,16 @@ func TestPeerConnectionTeardownStallRecoveryRequiresCompleteOverlap(t *testing.T
 	if hasHealthy() {
 		t.Fatal("unreconciled stream cleared teardown-stall ticket")
 	}
-	tailer.recordReconcile(now.Add(-time.Minute), nil)
+	tailer.recordReconcile(now.Add(-logReconcileLookback), nil)
 	if hasHealthy() {
 		t.Fatal("one overlap cleared teardown-stall ticket")
 	}
 	now = now.Add(logReconcileInterval)
-	tailer.recordReconcile(now.Add(-time.Minute), nil)
+	tailer.recordReconcile(now.Add(-logReconcileLookback), nil)
 	if !hasHealthy() {
 		t.Fatal("two advancing complete overlaps did not permit recovery")
 	}
-	tailer.recordReconcile(now.Add(-time.Minute), errLogReconcileIncomplete)
+	tailer.recordReconcile(now.Add(-logReconcileLookback), errLogReconcileIncomplete)
 	if hasHealthy() {
 		t.Fatal("failed overlap cleared teardown-stall ticket")
 	}

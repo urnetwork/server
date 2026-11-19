@@ -71,6 +71,10 @@ type finding struct {
 	target  string // host, host:port, table — the concrete thing the signal is about
 	frame   string // innermost app frame / query id / node ports, or ""
 
+	// One guarded inventory host that independently establishes this aggregate fault.
+	// It supplies no authority for a healthy aggregate under partial coverage.
+	scopeEvidenceHostName string
+
 	healthy bool
 	// sustain is how many consecutive failing ticks before a ticket opens
 	// (SIGNALS.md "for n min" translated to ticks at the probe's cadence)

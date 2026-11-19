@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server/model"
 )
 
@@ -182,7 +183,43 @@ func statsProviderEgressTestWire(t testing.TB, counts *model.ProviderEgressCount
 	return value
 }
 
+// Checks the deltas of every fixed outcome, including those expected to stay
+// zero. Taking a fresh baseline avoids resetting shared metrics between tests.
+func statsProviderEgressCheckOutcomes(t *testing.T) func(map[string]int) {
+	t.Helper()
+	baseline := map[string]int{}
+	for _, outcome := range []string{"other_refusal", "fresh_read", "follower_busy", "fill_failed", "published_acknowledged", "publication_refused", "publication_unknown", "fresh_read_after_publish"} {
+		baseline[outcome] = int(testutil.ToFloat64(statsProviderEgressCacheOutcomes.WithLabelValues(outcome)))
+	}
+	return func(want map[string]int) {
+		t.Helper()
+		for outcome, before := range baseline {
+			after := int(testutil.ToFloat64(statsProviderEgressCacheOutcomes.WithLabelValues(outcome)))
+			if delta := after - before; delta != want[outcome] {
+				t.Errorf("outcome %s increased by %d, want %d", outcome, delta, want[outcome])
+			}
+			baseline[outcome] = after
+		}
+	}
+}
+
+// An explicit token mismatch and an absent readback establish refusal to
+// publish the old owner's value.
+func TestStatsProviderEgressCachePublicationRefused(t *testing.T) {
+	check := statsProviderEgressCheckOutcomes(t)
+	store := newStatsProviderEgressTestStore()
+	cache := statsProviderEgressTestCache(store, func(context.Context) (*model.ProviderEgressCounts, error) {
+		store.put(statsProviderEgressKeys("policy").fill, "synthetic-replacement", statsProviderEgressLeaseTTL)
+		return statsProviderEgressTestCounts(), nil
+	})
+	if snapshot, err := cache.get(t.Context(), "policy"); snapshot != nil || err != errStatsProviderEgressUnavailable {
+		t.Fatalf("replaced owner reported a successful lookup: %v", err)
+	}
+	check(map[string]int{"publication_refused": 1})
+}
+
 func TestStatsProviderEgressCacheEightCollectors(t *testing.T) {
+	check := statsProviderEgressCheckOutcomes(t)
 	store := newStatsProviderEgressTestStore()
 	started, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
@@ -234,6 +271,7 @@ func TestStatsProviderEgressCacheEightCollectors(t *testing.T) {
 	if fills.Load() != 1 {
 		t.Fatalf("eight collectors began %d fills", fills.Load())
 	}
+	check(map[string]int{"follower_busy": 7})
 	releaseOnce.Do(func() { close(release) })
 	var first result
 	select {
@@ -253,6 +291,7 @@ func TestStatsProviderEgressCacheEightCollectors(t *testing.T) {
 		}
 		sinks[index] = snapshot
 	}
+	check(map[string]int{"published_acknowledged": 1, "fresh_read": 8})
 	sinks[0].Counts.ReasonCounts[model.ProviderExcludedTls] = 100
 	if sinks[1].Counts.ReasonCounts[model.ProviderExcludedTls] != 0 || fills.Load() != 1 {
 		t.Fatal("readers shared mutable maps or re-executed the query")
@@ -292,6 +331,8 @@ func TestStatsProviderEgressCacheRedisFaults(t *testing.T) {
 	for _, scenario := range []string{"get", "acquire", "acquire_lost_reply", "publish", "publish_lost_reply"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := newStatsProviderEgressTestStore()
+			check := statsProviderEgressCheckOutcomes(t)
+			wantOutcome := "other_refusal"
 			privateErr := errors.New("untrusted backend detail")
 			wantSuccess, wantFills := false, 0
 			switch scenario {
@@ -300,10 +341,13 @@ func TestStatsProviderEgressCacheRedisFaults(t *testing.T) {
 			case "acquire":
 				store.acquireErr = privateErr
 			case "acquire_lost_reply":
+				wantOutcome = "published_acknowledged"
 				store.acquireErr, store.acquireApplied, wantSuccess, wantFills = privateErr, true, true, 1
 			case "publish":
+				wantOutcome = "publication_unknown"
 				store.publishErr, wantFills = privateErr, 1
 			case "publish_lost_reply":
+				wantOutcome = "fresh_read_after_publish"
 				store.publishErr, store.publishApplied, wantSuccess, wantFills = privateErr, true, true, 1
 			}
 			fills := 0
@@ -319,6 +363,7 @@ func TestStatsProviderEgressCacheRedisFaults(t *testing.T) {
 			} else if snapshot != nil || err != errStatsProviderEgressUnavailable {
 				t.Fatalf("Redis fault became a result or leaked its error: %v", err)
 			}
+			check(map[string]int{wantOutcome: 1})
 			if fills != wantFills {
 				t.Fatalf("fills=%d, want %d", fills, wantFills)
 			}
@@ -335,6 +380,7 @@ func TestStatsProviderEgressCacheFailedFillRetainsFence(t *testing.T) {
 	for _, scenario := range []string{"error", "panic", "nil", "cancel", "late"} {
 		t.Run(scenario, func(t *testing.T) {
 			store := newStatsProviderEgressTestStore()
+			check := statsProviderEgressCheckOutcomes(t)
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			fills := 0
@@ -367,6 +413,7 @@ func TestStatsProviderEgressCacheFailedFillRetainsFence(t *testing.T) {
 			if snapshot, err := cache.get(t.Context(), "policy"); snapshot != nil || err != errStatsProviderEgressBusy || fills != 1 {
 				t.Fatal("failed fill lost its retry fence")
 			}
+			check(map[string]int{"fill_failed": 1, "follower_busy": 1})
 		})
 	}
 }

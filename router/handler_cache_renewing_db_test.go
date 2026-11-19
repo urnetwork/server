@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -136,6 +137,39 @@ func TestHandlerCacheRenewingNativeSlowFillCoalesces(t *testing.T) {
 		joined = true
 		if result.err != nil || result.value == nil || result.value.Message != "owner" {
 			t.Fatalf("native owner=(%v,%v)", result.value, result.err)
+		}
+	})
+}
+
+// The db layer's own raise at the fill budget, from a real query: server.Db
+// ends a read whose context has ended by raising DbContextDoneError, and a
+// renewing fill ends with the budget's error instead of panicking (the cause
+// of "[h]renewing cache fill panic: Done", 2026-11-18). The 1 s budget against
+// a 20 s sleep is a wide margin, not a timing assertion.
+func TestHandlerCacheRenewingNativeDbDeadlineReturnsError(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		store := newRenewingCacheTestStore()
+		key := "renewing-native-db-deadline"
+		var value *handlerCacheTestResult
+		var err error
+		var raised any
+		func() {
+			defer func() { raised = recover() }()
+			value, err = cacheJsonWithRenewingFill(t.Context(), store, key, 3*time.Second, time.Second,
+				func(fillCtx context.Context) (*handlerCacheTestResult, error) {
+					server.Db(fillCtx, func(conn server.PgConn) {
+						server.RaisePgResult(conn.Exec(fillCtx, `SELECT pg_sleep(20)`))
+					})
+					return &handlerCacheTestResult{Message: "slept"}, nil
+				})
+		}()
+		if raised != nil || value != nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("real db read past the fill budget = (%v,%v) raised=%v, want context.DeadlineExceeded", value, err, raised)
+		}
+		if token, exists, _ := store.get(t.Context(), newHandlerCacheKeys(key).fill); !exists || !isHandlerCacheFence(token) {
+			t.Fatalf("budget-ended fill left lease %q (exists=%v), want its failure fence", token, exists)
 		}
 	})
 }

@@ -51,6 +51,11 @@ var transferDebitResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Asynchronous payer debit batches by finite result; not contract throughput or provider payout.",
 }, []string{"result"})
 
+var transferDebitFlushPhaseErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_transfer_debit_flush_phase_errors_total",
+	Help: "Recovered per-balance flush errors by last entered apply, Redis release or cleanup phase. A commit error leaves the durable outcome unknown.",
+}, []string{"phase"})
+
 var transferDebitOldestAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Name: "urnetwork_transfer_debit_oldest_seconds", Help: "Oldest retained debit age by bounded worker partition; includes committed records awaiting Redis release.",
 }, []string{"shard", "state"})
@@ -62,7 +67,7 @@ var transferDebitActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urn
 var transferDebitCompleteTime = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "urnetwork_transfer_debit_complete_timestamp_seconds", Help: "Last debit-worker completion without a failed balance; busy balances can remain pending."}, []string{"shard"})
 
 func init() {
-	prometheus.MustRegister(transferDebitResults, transferDebitOldestAge, transferDebitSampleTime, transferDebitActive, transferDebitCompleteTime)
+	prometheus.MustRegister(transferDebitResults, transferDebitFlushPhaseErrors, transferDebitOldestAge, transferDebitSampleTime, transferDebitActive, transferDebitCompleteTime)
 }
 
 type TransferDebitFlushResult struct {
@@ -155,8 +160,18 @@ func nextTransferDebitBalance(ctx context.Context, shard int, after *server.Id) 
 // fair-cursor policy; the durable journal remains the accounting replay fence.
 func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *server.Id, maxBalances int,
 	operations transferDebitPageOperations) (result TransferDebitFlushResult, returnErr error) {
+	pageExpiredAfterProgress := func() bool {
+		return result.LastBalanceId != nil && bounded.Err() != nil &&
+			context.Cause(bounded) == errTransferDebitPageDeadline && ctx.Err() == nil
+	}
 	server.HandleError(func() {
 		for range maxBalances {
+			// The previous balance finished. An already-expired checkout
+			// cannot visit another key; hand the cursor back to the task.
+			if pageExpiredAfterProgress() {
+				result.More = true
+				return
+			}
 			next := operations.nextBalance(bounded, shard, after)
 			if next == nil {
 				result.LastBalanceId = nil
@@ -201,13 +216,43 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 	// A next-key checkout/read can exhaust the page after earlier balances
 	// committed. Return that prefix for the task post instead of replaying its
 	// old cursor through task failure backoff. No unvisited key is acknowledged.
-	if returnErr != nil && result.Balances > 0 && result.LastBalanceId != nil &&
-		ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errTransferDebitPageDeadline &&
-		isSettlementPageCancellation(returnErr) {
+	if returnErr != nil && pageExpiredAfterProgress() && isSettlementPageCancellation(returnErr) {
 		result.More = true
 		returnErr = nil
 	}
 	return
+}
+
+// Operation names are assigned by the flush itself. The transaction owner sets
+// its phase at the actual boundary, including immediately before Commit.
+func transferDebitFlushFailurePhase(operation string, phase server.DbOperationPhase) string {
+	switch operation {
+	case "redis_release":
+		return "redis_release"
+	case "apply", "cleanup":
+	default:
+		return "unknown"
+	}
+	switch phase {
+	case server.DbOperationOwnershipConfiguration:
+		return operation + "_configuration"
+	case server.DbOperationOwnershipAcquire, server.DbOperationAcquire:
+		return operation + "_acquire"
+	case server.DbOperationAdmission:
+		return operation + "_admission"
+	case server.DbOperationSessionSetup:
+		return operation + "_session_setup"
+	case server.DbOperationBegin:
+		return operation + "_begin"
+	case server.DbOperationCallback:
+		return operation + "_callback"
+	case server.DbOperationCommit:
+		return operation + "_commit"
+	case server.DbOperationAcknowledged, server.DbOperationPostCommit:
+		return operation + "_after_commit"
+	default:
+		return operation + "_unknown"
+	}
 }
 
 // Probe common same-backend ownership once before shared grant SQL; a known
@@ -218,6 +263,8 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (appliedCount, releasedCount int, busy bool, returnErr error) {
 	var records []transferDebit
 	committed := false
+	operation := "apply"
+	var phase server.DbPhaseObservation
 	server.HandleError(func() {
 		admitted := server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
 			records = nil
@@ -276,7 +323,8 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
        FROM unnest($2::uuid[],$3::bigint[]) AS entry(contract_id,amount)
        WHERE escrow.balance_id=$1 AND escrow.contract_id=entry.contract_id AND escrow.redis_reserved AND NOT escrow.settled`, balanceId, ids, amounts))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_debit_journal SET applied=true WHERE balance_id=$1 AND contract_id=ANY($2) AND NOT applied`, balanceId, ids))
-		}, server.TxReadCommitted, server.OptNoRetry())
+		}, server.TxReadCommitted, server.OptNoRetry(), &phase)
+		operation = ""
 		committed = admitted
 		if !admitted {
 			busy = true
@@ -294,6 +342,7 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 		bounded, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
 		// no preflight PING, as for redisContractReservation, and outside a transaction
+		operation = "redis_release"
 		server.Raise(server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 			_, err := r.Pipelined(bounded, func(pipe redis.Pipeliner) error {
 				for _, record := range records {
@@ -304,6 +353,7 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 			})
 			return err
 		}, server.OptRedisNoPreflight(), server.OptRedisKeepLateReplies()))
+		operation = ""
 		ids := make([]server.Id, 0, len(records))
 		for _, record := range records {
 			ids = append(ids, record.contractId)
@@ -311,17 +361,23 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 		// Another admitted pass may hold these applied rows after Redis release.
 		// Refuse known contention before cleanup SQL; the retained journal makes
 		// the later release/deletion replay safe without another financial debit.
+		operation = "cleanup"
+		phase = server.DbPhaseObservation{}
+		var deletedCount int
 		if !server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_debit_journal WHERE balance_id=$1 AND contract_id=ANY($2) AND applied`, balanceId, ids))
-			releasedCount = int(tag.RowsAffected())
-		}, server.TxReadCommitted, server.OptNoRetry()) {
+			deletedCount = int(tag.RowsAffected())
+		}, server.TxReadCommitted, server.OptNoRetry(), &phase) {
 			busy = true
 			transferDebitResults.WithLabelValues("busy").Inc()
 			return
 		}
+		releasedCount = deletedCount
+		operation = ""
 		transferDebitResults.WithLabelValues("released").Inc()
 	}, func(err error) {
 		returnErr = err
+		transferDebitFlushPhaseErrors.WithLabelValues(transferDebitFlushFailurePhase(operation, phase.Phase())).Inc()
 		if !committed {
 			// An unacknowledged commit is reconciled by the next journal read.
 			// It must not be reported as an observed committed debit.

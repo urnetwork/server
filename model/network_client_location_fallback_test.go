@@ -856,7 +856,7 @@ func TestFindProviders2TargetsWithoutSupplyIsTheCacheEmptyBoundary(t *testing.T)
 		func(observation *findProviders2SelectionObservation) {},
 		func(observation *findProviders2SelectionObservation) { observation.loaded = 1 },
 		func(observation *findProviders2SelectionObservation) {
-			observation.loaded, observation.eligible = 1, 1
+			observation.loaded, observation.passedRequestFilters = 1, true
 		},
 		func(observation *findProviders2SelectionObservation) {
 			observation.loaded, observation.dropped[3], observation.explicitSources = 1, 1, 2

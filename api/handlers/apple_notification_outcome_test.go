@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -66,26 +68,52 @@ func TestAppleNotificationRefusalOutcomes(t *testing.T) {
 		bundleId:    "network.example.app",
 		environment: "Production",
 	}))
+	config := appleTestVerifier(chain, now).config
+	missingTransaction := func(kind string) string {
+		return signedEnvelope(chain.sign(t, gojwt.MapClaims{
+			"notificationType": kind,
+			"notificationUUID": server.NewId().String(),
+			"version":          appleNotificationVersion,
+			"signedDate":       now.UnixMilli(),
+			"data": map[string]any{
+				"bundleId":    config.BundleId,
+				"environment": "Production",
+				"appAppleId":  config.AppAppleId,
+			},
+		}))
+	}
+	subscription := signedEnvelope(appleTestSignedNotification(t, chain, now, appleTestNotificationOptions{
+		bundleId:    config.BundleId,
+		environment: "Production",
+	}))
 
 	type refusalCase struct {
-		name        string
-		body        string
-		unavailable bool
-		status      int
-		outcome     string
+		name            string
+		body            string
+		unavailable     bool
+		disallowProduct bool
+		status          int
+		outcome         string
 	}
 	for _, refusal := range []refusalCase{
 		{name: "not a notification", body: "synthetic", status: http.StatusBadRequest, outcome: controller.StoreNotificationRefusedMalformed},
 		{name: "a JWS that does not verify", body: signedEnvelope(tamperedPayload), status: http.StatusBadRequest, outcome: controller.StoreNotificationRefusedSignature},
 		{name: "another app's notification", body: signedEnvelope(otherAppPayload), status: http.StatusBadRequest, outcome: controller.StoreNotificationRefusedClaims},
 		{name: "no verifier config", body: signedEnvelope(otherAppPayload), unavailable: true, status: http.StatusServiceUnavailable, outcome: controller.StoreNotificationRefusedUnavailable},
+		{name: "verified refund missing its transaction", body: missingTransaction("REFUND"), status: http.StatusBadRequest, outcome: controller.StoreNotificationError},
+		{name: "verified subscription with a disallowed product", body: subscription, disallowProduct: true, status: http.StatusBadRequest, outcome: controller.StoreNotificationError},
+		{name: "same-app subscription missing its transaction", body: missingTransaction("SUBSCRIBED"), status: http.StatusBadRequest, outcome: controller.StoreNotificationRefusedClaims},
 	} {
 		if refusal.unavailable {
 			appleNotificationVerifierSource = func() *appleNotificationVerifier {
 				panic("apple.yml app_store_notifications is required")
 			}
 		} else {
-			appleNotificationVerifierSource = func() *appleNotificationVerifier { return appleTestVerifier(chain, now) }
+			verifier := appleTestVerifier(chain, now)
+			if refusal.disallowProduct {
+				verifier.config.ProductIds = []string{"synthetic-other-product"}
+			}
+			appleNotificationVerifierSource = func() *appleNotificationVerifier { return verifier }
 		}
 		beforeOutcomeCounts := map[string]float64{}
 		for _, outcome := range controller.StoreNotificationOutcomes {

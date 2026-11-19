@@ -66,7 +66,7 @@ func TestReconcileFailureReceiptRecordsAttemptBeforeRepeatedChecks(t *testing.T)
 	until := recorded.Add(2 * time.Minute)
 	queryError := &warpctlLogQueryError{class: observationErrorClassLogHttp429, retryAfter: until, err: errors.New("synthetic-rejection")}
 	calls := 0
-	tailer.reconcile = func(_ context.Context, actualStart time.Time, blocks []string) (string, error) {
+	tailer.reconcile = func(_ context.Context, actualStart time.Time, _ time.Time, blocks []string) (string, error) {
 		calls++
 		if !actualStart.Equal(start) || len(blocks) != 0 {
 			t.Fatal("failure timing changed the ordinary attempt window")
@@ -121,13 +121,13 @@ func TestReconcileFailureReceiptRecordsAttemptBeforeRepeatedChecks(t *testing.T)
 func TestReconcileFailureReceiptRecoveryStalenessAndGeneration(t *testing.T) {
 	now := time.Date(2032, 2, 3, 4, 5, 6, 0, time.UTC)
 	tailer := syntheticReceiptTailer(&now, "api")
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 		return "", errors.New("synthetic-rejection")
 	}
 	tailer.reconcileOnce(context.Background())
 	probe := &logTailProbe{tailers: []*logTailer{tailer}}
 	requireReconcileFailureReceiptClocks(t, probe.reconcileReceipt(fixedReconcileReceiptClock(now)), "api", now, now.Add(-logReconcileLookback))
-	tailer.reconcile = func(context.Context, time.Time, []string) (string, error) { return "", nil }
+	tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) { return "", nil }
 	for attempt := 1; attempt <= 2; attempt++ {
 		now = now.Add(logReconcileInterval)
 		tailer.reconcileOnce(context.Background())
@@ -162,7 +162,7 @@ func TestReconcileFailureReceiptCancellationKeepsExistingErrorState(t *testing.T
 			var recorded, start time.Time
 			if priorFailure {
 				recorded, start = now, now.Add(-logReconcileLookback)
-				tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+				tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 					return "", errors.New("synthetic-old-failure")
 				}
 				tailer.reconcileOnce(context.Background())
@@ -171,7 +171,7 @@ func TestReconcileFailureReceiptCancellationKeepsExistingErrorState(t *testing.T
 			now = now.Add(logReconcileInterval)
 			ctx, cancel := context.WithCancel(context.Background())
 			calls := 0
-			tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+			tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 				calls++
 				cancel()
 				return "", errors.New("synthetic-canceled-return")
@@ -212,7 +212,7 @@ func TestReconcileFailureReceiptRetainsLogicalAttemptBoundary(t *testing.T) {
 		}
 		calls := 0
 		var failedPageStart time.Time
-		tailer.reconcile = func(_ context.Context, pageStart time.Time, blocks []string) (string, error) {
+		tailer.reconcile = func(_ context.Context, pageStart time.Time, _ time.Time, blocks []string) (string, error) {
 			calls++
 			if saturated != "" && calls == 1 {
 				return saturated, nil
@@ -290,7 +290,7 @@ func TestReconcileFailureReceiptSnapshotExcludesLaterFailure(t *testing.T) {
 	tailers := []*logTailer{syntheticReceiptTailer(&initial, "api"), syntheticReceiptTailer(&initial, "proxy")}
 	for _, tailer := range tailers {
 		tailer.clock = func() time.Time { return oldRecorded }
-		tailer.reconcile = func(context.Context, time.Time, []string) (string, error) {
+		tailer.reconcile = func(context.Context, time.Time, time.Time, []string) (string, error) {
 			return "", errors.New("synthetic-rejection")
 		}
 		tailer.reconcileOnce(context.Background())

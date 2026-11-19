@@ -808,17 +808,16 @@ type SampleCheck struct {
 	Failures []string `json:"failures,omitempty"`
 }
 
-// Reads count records at uniformly random positions.
-func SampleSnapshot(path string, count int, seed uint64) ([]SnapshotRecord, error) {
+// Samples uniform positions with replacement, up to the snapshot's row count.
+func SampleSnapshot(path string, count int) ([]SnapshotRecord, error) {
 	source, err := OpenSnapshotSource(path)
 	if err != nil {
 		return nil, err
 	}
 	defer source.Close()
-	random := rand.New(rand.NewPCG(seed, seed^0x5eed))
 	records := []SnapshotRecord{}
 	for range min(int64(count), source.rows) {
-		record, err := source.record(random.Int64N(source.rows))
+		record, err := source.record(rand.Int64N(source.rows))
 		if err != nil {
 			return nil, err
 		}

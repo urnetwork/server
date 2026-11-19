@@ -4320,7 +4320,7 @@
     {
       "type": "timeseries",
       "title": "provider-egress stats source",
-      "description": "1 when the last provider-egress refresh obtained a complete fresh snapshot (0 means unavailable), and the age of the published counts' original source-read start and completion. Cache hits do not advance either clock.",
+      "description": "Availability and original source ages for each Taskworker process. A busy follower reports zero availability until it obtains a complete fresh snapshot. Previous source times can remain visible during a refusal. A missing worker series leaves its freshness unknown.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -4352,18 +4352,18 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(urnetwork_stats_provider_egress_refresh_available{env=\"$env\"})",
-          "legendFormat": "available"
+          "expr": "urnetwork_stats_provider_egress_refresh_available{env=\"$env\",service=\"taskworker\",instance!=\"\"}",
+          "legendFormat": "available {{host}} / {{block}} / {{instance}}"
         },
         {
           "refId": "B",
-          "expr": "time() - max(urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\"} > 0)",
-          "legendFormat": "source started age seconds"
+          "expr": "time() - (urnetwork_stats_provider_egress_source_started_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "source started age seconds {{host}} / {{block}} / {{instance}}"
         },
         {
           "refId": "C",
-          "expr": "time() - max(urnetwork_stats_provider_egress_source_completed_seconds{env=\"$env\"} > 0)",
-          "legendFormat": "source completed age seconds"
+          "expr": "time() - (urnetwork_stats_provider_egress_source_completed_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} > 0)",
+          "legendFormat": "source completed age seconds {{host}} / {{block}} / {{instance}}"
         }
       ]
     },
@@ -4418,6 +4418,46 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "provider-egress cache lookups by Taskworker and outcome",
+      "description": "Cumulative cache lookups since the process started. published_acknowledged means Redis acknowledged the owner's publication. fresh_read and fresh_read_after_publish mean this process obtained a fresh stored snapshot. The latter follows an unacknowledged or refused publication. follower_busy can occur during a successful fill or behind a failed owner's retry fence. fill_failed is a fill that stopped before publication. publication_refused means Redis rejected ownership. publication_unknown means the reply and any readback left the publication outcome unknown. other_refusal covers earlier cache errors. The collector checks policy again before exposing a snapshot.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 242
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_stats_provider_egress_cache_lookups_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}",
+          "legendFormat": "{{outcome}} {{host}} / {{block}} / {{instance}}"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "verified caches (session/by_jwt_verified_cache.go, connect net_tls_chain_cache.go)",
       "collapsed": false,
@@ -4425,7 +4465,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 242
+        "y": 250
       }
     },
     {
@@ -4440,7 +4480,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 243
+        "y": 251
       },
       "fieldConfig": {
         "defaults": {
@@ -4512,7 +4552,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 243
+        "y": 251
       },
       "fieldConfig": {
         "defaults": {
@@ -4567,7 +4607,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 251
+        "y": 259
       },
       "fieldConfig": {
         "defaults": {
@@ -4639,7 +4679,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 251
+        "y": 259
       },
       "fieldConfig": {
         "defaults": {

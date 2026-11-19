@@ -135,12 +135,20 @@ type providerTransferTestPlanNode struct {
 	Recheck  float64                        `json:"Rows Removed by Index Recheck"`
 	Hits     float64                        `json:"Shared Hit Blocks"`
 	Reads    float64                        `json:"Shared Read Blocks"`
+	Searches float64                        `json:"Index Searches"`
 	Plans    []providerTransferTestPlanNode `json:"Plans"`
 }
 
 // Keep real migrated indexes and triggers. The separate native experiment uses
 // 200k providers/660k contracts/1.52M reports; this smaller model fixture tests
 // the same history-to-current skew without changing the application schema.
+//
+// The candidate reads reports only through contract_close's complete primary
+// key and reads each eligible contract's report once. Its root-cause bound
+// (2026-11-18): it does not descend the report index once per eligible
+// contract, as the per-contract lateral lookup did, which for the largest
+// networks' ten million contracts a day ran past the provider list's 2-minute
+// fill budget; it scans each group of eligible ids' keys in one pass.
 func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("provider statistics query-work population")
@@ -208,7 +216,7 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 							if len(plans) != 1 {
 								t.Fatal("unexpected provider transfer plan")
 							}
-							var contractWork, reportWork, reportLoops float64
+							var contractWork, reportWork, reportLoops, reportSearches float64
 							point := false
 							var inspect func(providerTransferTestPlanNode)
 							inspect = func(node providerTransferTestPlanNode) {
@@ -219,12 +227,13 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 								if planContractTable(node.Relation) == "contract_close" {
 									reportWork += work
 									reportLoops += node.Loops
+									reportSearches += node.Searches
 									// PostgreSQL deparses varchar equality as (party)::text.
 									// Ignore only these type decorations, retaining both
 									// equality keys and the exact primary-index identity.
 									condition := strings.NewReplacer("(", "", ")", "", "::text", "", "::uuid", "").Replace(node.Cond)
 									fullKey := node.Index == "contract_close_pkey" && strings.Contains(condition, "contract_id =") && strings.Contains(condition, "party =")
-									if variant == 1 && (!fullKey || node.Rows+node.Removed+node.Recheck > 1) {
+									if variant == 1 && !fullKey {
 										t.Fatalf("%d/%s lost complete report PK lookup: %s", count, mode, raw)
 									}
 									point = point || fullKey
@@ -235,8 +244,11 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 							}
 							inspect(plans[0].Plan)
 							want := min(count, int(eligible))
-							if variant == 1 && (!point || contractWork > float64(want)*1.01+1 || reportWork > float64(want)*1.01+1 || reportLoops != float64(want)) {
+							if variant == 1 && (!point || contractWork > float64(want)*1.01+1 || reportWork > float64(want)*1.01+1) {
 								t.Fatalf("%d/%s exceeded eligible contracts: contract=%.0f report=%.0f probes=%.0f want=%d plan=%s", count, mode, contractWork, reportWork, reportLoops, want, raw)
+							}
+							if variant == 1 && reportSearches > float64(want)/10+2 {
+								t.Fatalf("%d/%s descended the report index per eligible contract: searches=%.0f eligible=%d plan=%s", count, mode, reportSearches, want, raw)
 							}
 							rows, err := tx.Query(ctx, call, pgx.QueryExecModeExec)
 							seen, total := 0, int64(0)
@@ -255,7 +267,7 @@ func TestProviderStatsTransferQueryWorkFollowsEligibleContracts(t *testing.T) {
 							if seen != want || total != int64(7*want) {
 								t.Fatal("dense provider grouping changed")
 							}
-							t.Logf("providers=%d mode=%s candidate=%t contract_work=%.0f report_work=%.0f report_probes=%.0f shared_hits=%.0f shared_reads=%.0f", count, mode, variant == 1, contractWork, reportWork, reportLoops, plans[0].Plan.Hits, plans[0].Plan.Reads)
+							t.Logf("providers=%d mode=%s candidate=%t contract_work=%.0f report_work=%.0f report_probes=%.0f report_searches=%.0f shared_hits=%.0f shared_reads=%.0f", count, mode, variant == 1, contractWork, reportWork, reportLoops, reportSearches, plans[0].Plan.Hits, plans[0].Plan.Reads)
 						}()
 					}
 				}

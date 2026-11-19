@@ -118,8 +118,11 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 	// The exact predecessor differs in SQL only by the additive suffix. This
 	// comparison is offline and does not claim a production OOM observation.
 	priorContracts := []snMainnetMigrationContract{}
+	priorHead := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	for _, contract := range migrationCurrentSuffixContracts {
-		if contract.artifact.requiredVersion != server.CompetitionSilleStorageRecoveryMigrationVersion() {
+		if contract.artifact.requiredVersion == priorHead {
+			priorContracts = append(priorContracts, competitionSilleStorageRecoveryMigrationContract)
+		} else if contract.artifact.requiredVersion < server.CompetitionEpochThreeSourceRecoveryMigrationVersion() {
 			priorContracts = append(priorContracts, contract)
 		}
 	}

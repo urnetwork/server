@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -543,4 +544,105 @@ func TestAPIReleaseProofSharesRuntimeHostBudget(t *testing.T) {
 	if out, err := other.shell(context.Background(), env.cfg.hosts[1], "true"); err != nil || out != "other-host-ok" {
 		t.Fatal("saturated host blocked an unrelated destination")
 	}
+}
+
+// Four ordinary probes keep the pool full through multiple release-proof
+// cadences. Only an armed release expectation can lose its observation.
+func TestApiReleaseProofContinuousAdmissionRequiresExpectation(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", configured), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				settings := syntheticSettings(&syntheticSource{})
+				settings.StateDir = t.TempDir()
+				settings.Now = releaseTestNow
+				if configured {
+					settings.APIReleaseProof = releaseTestPolicy()
+				}
+
+				proof := NewAPIReleaseProofSignal()
+				signals := []Signal{proof}
+				var active, maximum atomic.Int64
+				started := make(chan struct{}, runLoopMaxConcurrentSignals)
+				for i := range runLoopMaxConcurrentSignals {
+					signals = append(signals, &blockingLoopSignal{
+						number: fmt.Sprint(i), active: &active, maximum: &maximum, started: started,
+					})
+				}
+				watcher := NewWithSignals(settings, signals...)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				result := make(chan error, 1)
+				var proofTurns, visibleTimeouts int
+				go func() {
+					result <- watcher.RunExecutionLoop(ctx, RunLoopOptions{}, func(_ context.Context, signal Signal, turn SignalExecution) error {
+						if signal == proof {
+							proofTurns++
+							for _, alert := range turn.Alerts {
+								if alert.Class == "cannot-observe" && strings.Contains(alert.Observed, "global-admission/not-attempted") {
+									visibleTimeouts++
+								}
+							}
+						}
+						return nil
+					})
+				}()
+				for range runLoopMaxConcurrentSignals {
+					<-started
+				}
+				time.Sleep(33 * time.Minute)
+				cancel()
+				if err := <-result; err != nil {
+					t.Fatal(err)
+				}
+				if maximum.Load() != runLoopMaxConcurrentSignals || active.Load() != 0 {
+					t.Fatal("ordinary probes did not retain and release all four slots")
+				}
+				if configured && visibleTimeouts == 0 {
+					t.Fatal("configured proof lost its queue-inclusive visibility warning")
+				}
+				if !configured && (proofTurns != 0 || visibleTimeouts != 0) {
+					t.Fatalf("disabled proof produced %d turns and %d visible queue timeouts", proofTurns, visibleTimeouts)
+				}
+			})
+		})
+	}
+}
+
+// An explicitly selected, unconfigured proof keeps a focused watcher alive.
+// Its selection remains part of the witness identity without an invented run.
+func TestApiReleaseProofDisabledFocusRemainsIdle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		settings := syntheticSettings(&syntheticSource{})
+		settings.StateDir = t.TempDir()
+		proof := NewAPIReleaseProofSignal()
+		var output, diagnostics bytes.Buffer
+		witness := invocationControlWitness(t, proof, &output, &diagnostics)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			done <- NewWithSignals(settings, proof).RunExecutionLoop(ctx, RunLoopOptions{
+				MinimumProbeCadence: 15 * time.Minute, InvocationWitness: witness,
+			}, func(context.Context, Signal, SignalExecution) error {
+				t.Error("disabled proof produced a handler observation")
+				return nil
+			})
+		}()
+		time.Sleep(31 * time.Minute)
+		select {
+		case <-done:
+			t.Fatal("explicitly focused watcher exited before cancellation")
+		default:
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if output.Len() != 0 || diagnostics.Len() != 0 {
+			t.Fatal("disabled proof produced an invocation witness or witness error")
+		}
+		if _, err := os.Stat(filepath.Join(settings.StateDir, "api-release-proof")); !os.IsNotExist(err) {
+			t.Fatal("disabled proof created a release receipt directory")
+		}
+	})
 }

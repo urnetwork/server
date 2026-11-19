@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -27,13 +28,30 @@ type providerPayoutConnectionCounts struct {
 	schemaReads       int
 	boundaryReads     int
 	payoutReads       int
+	boundaryPid       uint32
+	payoutPid         uint32
 }
 
 // The tripwire rejects a forbidden acquisition immediately, so the single-slot
 // regression fails from the ownership violation rather than a timeout or sleep.
+// A read acquiring a connection while it already holds one is the violation:
+// with one slot it would wait forever. The provider list's concurrent reads
+// (2026-11-18) each hold one connection on their own goroutine and never
+// acquire a second, so the tripwire counts held connections per goroutine.
 type providerPayoutConnectionObserver struct {
 	stateLock sync.Mutex
 	counts    providerPayoutConnectionCounts
+	holders   map[string]int
+}
+
+// The current goroutine's id, from its stack header ("goroutine 7 [running]").
+func providerPayoutConnectionGoroutine() string {
+	stack := make([]byte, 64)
+	stack = stack[:runtime.Stack(stack, false)]
+	if fields := strings.Fields(string(stack)); 2 <= len(fields) {
+		return fields[1]
+	}
+	return ""
 }
 
 // Every PostgreSQL pool participates in the same acquisition tripwire.
@@ -41,7 +59,7 @@ func (self *providerPayoutConnectionObserver) TraceAcquireStart(ctx context.Cont
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.counts.acquires++
-	if self.counts.held != 0 {
+	if self.holders[providerPayoutConnectionGoroutine()] != 0 {
 		self.counts.nestedAcquires++
 		panic(errors.New("synthetic provider stats nested PostgreSQL acquisition"))
 	}
@@ -55,15 +73,24 @@ func (self *providerPayoutConnectionObserver) TraceAcquireEnd(_ context.Context,
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.holders == nil {
+		self.holders = map[string]int{}
+	}
+	self.holders[providerPayoutConnectionGoroutine()]++
 	self.counts.ownerPid = data.Conn.PgConn().PID()
 	self.counts.held++
 	self.counts.peakHeld = max(self.counts.peakHeld, self.counts.held)
 }
 
-// Releasing the callback's connection ends its resource ownership.
+// Releasing the callback's connection ends its resource ownership. The
+// callback releases on the goroutine that acquired.
 func (self *providerPayoutConnectionObserver) TraceRelease(*pgxpool.Pool, pgxpool.TraceReleaseData) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	goroutine := providerPayoutConnectionGoroutine()
+	if self.holders[goroutine]--; self.holders[goroutine] <= 0 {
+		delete(self.holders, goroutine)
+	}
 	self.counts.held--
 }
 
@@ -81,9 +108,11 @@ func (self *providerPayoutConnectionObserver) TraceQueryStart(ctx context.Contex
 	}
 	if strings.HasPrefix(sql, "SELECT earning_identity, identity_sha256, initial_config_sha256, prepared_at FROM provider_payout_boundary") {
 		self.counts.boundaryReads++
+		self.counts.boundaryPid = conn.PgConn().PID()
 	}
 	if strings.HasPrefix(sql, "WITH payout_sweeps AS MATERIALIZED") {
 		self.counts.payoutReads++
+		self.counts.payoutPid = conn.PgConn().PID()
 	}
 	return ctx
 }
@@ -178,11 +207,16 @@ func testProviderStatsPayoutConnection(t *testing.T, mode string, wantErr error)
 				t.Error(err)
 			}
 		}()
+		// The provider list enumerates its providers, then reads the payout
+		// attribution, its activity and its transfer bytes concurrently, each
+		// on its own connection (2026-11-18): four acquisitions, which one slot
+		// serves in turn. The detail and the overview keep one.
 		for _, request := range []struct {
-			name string
-			read func() (float64, bool, error)
+			name     string
+			acquires int
+			read     func() (float64, bool, error)
 		}{
-			{name: "list", read: func() (float64, bool, error) {
+			{name: "list", acquires: 4, read: func() (float64, bool, error) {
 				result, err := StatsProviders(f.session)
 				if result == nil {
 					return 0, false, err
@@ -192,7 +226,7 @@ func testProviderStatsPayoutConnection(t *testing.T, mode string, wantErr error)
 				}
 				return result.Providers[0].PayoutLast24h, true, err
 			}},
-			{name: "bounded_list", read: func() (float64, bool, error) {
+			{name: "bounded_list", acquires: 4, read: func() (float64, bool, error) {
 				result, err := StatsProvidersLastN(&StatsProvidersArgs{LastN: 24}, f.session)
 				if result == nil {
 					return 0, false, err
@@ -202,14 +236,14 @@ func testProviderStatsPayoutConnection(t *testing.T, mode string, wantErr error)
 				}
 				return result.Providers[0].PayoutLast24h, true, err
 			}},
-			{name: "detail", read: func() (float64, bool, error) {
+			{name: "detail", acquires: 1, read: func() (float64, bool, error) {
 				result, err := StatsProvider(&StatsProviderArgs{ClientId: f.client, LastN: 24}, f.session)
 				if result == nil {
 					return 0, false, err
 				}
 				return statsSumFloat(result.Payout), true, err
 			}},
-			{name: "overview", read: func() (float64, bool, error) {
+			{name: "overview", acquires: 1, read: func() (float64, bool, error) {
 				result, err := StatsProvidersOverview(&StatsProvidersOverviewArgs{LastN: 24}, f.session)
 				if result == nil {
 					return 0, false, err
@@ -228,8 +262,11 @@ func testProviderStatsPayoutConnection(t *testing.T, mode string, wantErr error)
 			} else if present || !errors.Is(err, wantErr) {
 				t.Errorf("%s/%s changed boundary refusal: present=%t error=%v want=%v", mode, request.name, present, err, wantErr)
 			}
-			if counts.acquires != 1 || counts.nestedAcquires != 0 || counts.peakHeld != 1 || counts.held != 0 || counts.ownerPid == 0 || counts.foreignStatements != 0 {
+			if counts.acquires != request.acquires || counts.nestedAcquires != 0 || counts.peakHeld != 1 || counts.held != 0 || counts.ownerPid == 0 || counts.foreignStatements != 0 {
 				t.Errorf("%s/%s acquired another PostgreSQL owner: %+v", mode, request.name, counts)
+			}
+			if counts.boundaryPid == 0 || (counts.payoutReads != 0 && counts.payoutPid != counts.boundaryPid) {
+				t.Errorf("%s/%s read the payout attribution apart from its boundary: %+v", mode, request.name, counts)
 			}
 			wantBoundaryReads, wantPayoutReads := 1, 1
 			if wantErr != nil {

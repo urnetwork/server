@@ -36,7 +36,7 @@ func selectionTestRows(reason string, count float64) []map[string]any {
 			stamp = stamp.Add(-5 * time.Minute)
 		}
 		add(bound+"_start", float64(now.Add(-time.Hour).Unix()), false)
-		add(bound+"_schema", 2, false)
+		add(bound+"_schema", 4, false)
 		add(bound+"_start_time", float64(stamp.Unix()), false)
 		add(bound+"_schema_time", float64(stamp.Unix()), false)
 	}
@@ -66,10 +66,10 @@ func TestProviderSelectionSignalMixedSchemaKeepsShapeUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible")
+	requireAlertClass(t, alerts, "provider-selection-empty-after-prefilter")
 	unknown := requireAlertClass(t, alerts, "provider-selection-unavailable")
 	if unknown.Frame != "response-shape" || !strings.Contains(unknown.Markdown(), "paired_processes=2 shape_paired_processes=1 expected_slots=2") {
-		t.Fatal("mixed producer versions lost old invariant authority or certified complete response shape")
+		t.Fatal("mixed producer versions lost legacy empty observations or certified complete response shape")
 	}
 }
 
@@ -85,7 +85,7 @@ func TestProviderSelectionSignalSchemaVersionBoundaries(t *testing.T) {
 			case defect == "changed" && field == "prior_schema":
 				row["value"].([]any)[1] = "1"
 			case defect == "future" && (field == "now_schema" || field == "prior_schema"):
-				row["value"].([]any)[1] = "4"
+				row["value"].([]any)[1] = "5"
 			case defect == "legacy-new-reason" && (field == "now_schema" || field == "prior_schema"):
 				row["value"].([]any)[1] = "1"
 			case defect == "new-legacy-reason" && labels["reason"] != "":
@@ -135,17 +135,17 @@ func TestProviderSelectionSignalAcceptsSchemaThreeCapabilityReasons(t *testing.T
 			}
 		}
 		alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
-		if err != nil || len(alerts) != 0 {
+		if err != nil || len(alerts) != 1 || alerts[0].Frame != "terminal-draw" {
 			t.Fatalf("schema 3 %s raised alerts=%+v error=%v", reason, alerts, err)
 		}
 	}
-	// the invariant findings keep their schema-3 authority
+	// the legacy empty PAGE remains separate from terminal eligibility
 	alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, selectionTestRowsAtSchema(3, "eligible_not_selected", 3))))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alert := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible"); len(alerts) != 1 || !strings.Contains(alert.Markdown(), "scope_complete=true") {
-		t.Fatalf("a schema 3 producer lost its invariant authority: alerts=%+v", alerts)
+	if alert := requireAlertClass(t, alerts, "provider-selection-empty-after-prefilter"); len(alerts) != 2 || !strings.Contains(alert.Markdown(), "scope_complete=true") {
+		t.Fatalf("a schema 3 producer lost its legacy empty finding: alerts=%+v", alerts)
 	}
 }
 
@@ -189,10 +189,10 @@ func TestProviderSelectionSignalMixedSchemaTwoAndThreeKeepShape(t *testing.T) {
 	var record ProviderSelectionObservation
 	settings.ProviderSelectionObserver = func(value ProviderSelectionObservation) error { record = value; return nil }
 	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
-	if err != nil || len(alerts) != 0 {
+	if err != nil || len(alerts) != 1 || alerts[0].Frame != "terminal-draw" {
 		t.Fatalf("a mixed schema 2 and 3 fleet raised alerts=%+v error=%v", alerts, err)
 	}
-	if !record.SourceCoverageComplete || !record.ShapeCoverageComplete || record.PairedProcesses != 2 || record.ShapePairedProcesses != 2 || len(record.Outcomes) != 2 {
+	if record.DrawCoverageComplete || record.DrawPairedProcesses != 0 || !record.SourceCoverageComplete || !record.ShapeCoverageComplete || record.PairedProcesses != 2 || record.ShapePairedProcesses != 2 || len(record.Outcomes) != 2 {
 		t.Fatalf("a mixed schema 2 and 3 fleet lost shape authority: %+v", record)
 	}
 }
@@ -240,7 +240,7 @@ func selectionTestSettings(t testing.TB, raw string) SignalSettings {
 
 // The known invariant does not require assuming a global supply baseline.
 func TestProviderSelectionSignalEligibleZeroPagesAndRedacts(t *testing.T) {
-	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("eligible_not_selected", 3)))
+	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("drawable_not_selected", 3)))
 	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +265,7 @@ func TestProviderSelectionSignalEligibleZeroPagesAndRedacts(t *testing.T) {
 // frame, while an unlisted rank still fails closed.
 func TestProviderSelectionSignalAcceptsOnlineRankMode(t *testing.T) {
 	for _, rankMode := range []string{"online", "synthetic-rank"} {
-		rows := selectionTestRows("eligible_not_selected", 3)
+		rows := selectionTestRows("drawable_not_selected", 3)
 		for _, row := range rows {
 			if labels := row["metric"].(map[string]string); labels["rank_mode"] != "" {
 				labels["rank_mode"] = rankMode
@@ -316,7 +316,7 @@ func TestProviderSelectionSignalHealthyAndRestrictedControls(t *testing.T) {
 // Every source defect fails closed without echoing arbitrary metric text.
 func TestProviderSelectionSignalUnavailableControls(t *testing.T) {
 	for _, defect := range []string{"missing", "old-schema", "stale", "restart", "reset", "one-sample", "duplicate", "unknown-label"} {
-		rows := selectionTestRows("eligible_not_selected", 3)
+		rows := selectionTestRows("drawable_not_selected", 3)
 		if defect == "missing" {
 			rows = nil
 		}
@@ -356,7 +356,7 @@ func TestProviderSelectionSignalUnavailableControls(t *testing.T) {
 // An incomplete fleet denominator must not erase a proven observed-subset
 // failure, or let that subset certify the unobserved generation.
 func TestProviderSelectionSignalPartialRetainsKnownFailure(t *testing.T) {
-	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("eligible_not_selected", 3)))
+	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("drawable_not_selected", 3)))
 	settings.LogServiceBlocks["api"] = []string{"blue", "green"}
 	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
 	if err != nil {
@@ -431,7 +431,7 @@ func selectionGenerationTestRows(instance string, startAge time.Duration, bound,
 // Exercise both the parser and the public alert/observation consumer projection.
 func TestProviderSelectionSignalReturnedGenerationPreventsCompleteCoverage(t *testing.T) {
 	for _, count := range []float64{0, 3} {
-		rows := selectionTestRows("eligible_not_selected", count)
+		rows := selectionTestRows("drawable_not_selected", count)
 		if count == 0 {
 			rows = rows[:8]
 		}
@@ -476,7 +476,7 @@ func TestProviderSelectionSignalReturnedGenerationPreventsCompleteCoverage(t *te
 // grants it counters or lets a valid predecessor certify unique slot ownership.
 func TestProviderSelectionSignalUnpairedGenerationAuthorityControls(t *testing.T) {
 	for _, defect := range []string{"young", "prior-only", "stale-now", "missing-start", "missing-schema", "reset", "schema-switch", "zero-schema", "unsupported-schema"} {
-		other := selectionGenerationTestRows("private-unpaired", 10*time.Minute, "", "eligible_not_selected", 100)
+		other := selectionGenerationTestRows("private-unpaired", 10*time.Minute, "", "drawable_not_selected", 100)
 		filtered := []map[string]any{}
 		for _, row := range other {
 			field := row["metric"].(map[string]string)["monitor_selection"]
@@ -495,11 +495,11 @@ func TestProviderSelectionSignalUnpairedGenerationAuthorityControls(t *testing.T
 			case defect == "zero-schema" && (field == "now_schema" || field == "prior_schema"):
 				row["value"].([]any)[1] = "0"
 			case defect == "unsupported-schema" && (field == "now_schema" || field == "prior_schema"):
-				row["value"].([]any)[1] = "4"
+				row["value"].([]any)[1] = "5"
 			}
 			filtered = append(filtered, row)
 		}
-		rows := append(selectionTestRows("eligible_not_selected", 3), filtered...)
+		rows := append(selectionTestRows("drawable_not_selected", 3), filtered...)
 		settings := selectionTestSettings(t, pickerTestPayload(t, rows))
 		var record ProviderSelectionObservation
 		settings.ProviderSelectionObserver = func(value ProviderSelectionObservation) error { record = value; return nil }
@@ -620,7 +620,7 @@ func TestProviderSelectionSignalGenerationScopeControls(t *testing.T) {
 // A denied expected slot stays unknown without contacting it or dropping
 // a separately qualified positive from the permitted slot.
 func TestProviderSelectionSignalGenerationDeniedSlotKeepsUnknown(t *testing.T) {
-	raw := pickerTestPayload(t, selectionTestRows("eligible_not_selected", 3))
+	raw := pickerTestPayload(t, selectionTestRows("drawable_not_selected", 3))
 	settings := selectionTestSettings(t, raw)
 	settings.Hosts = append(settings.Hosts, HostSettings{Name: "denied-synthetic.example", Roles: []string{"services"}})
 	settings.LogServiceHosts["api"] = append(settings.LogServiceHosts["api"], "denied-synthetic.example")
@@ -653,7 +653,7 @@ func TestProviderSelectionSignalGenerationDeniedSlotKeepsUnknown(t *testing.T) {
 // nor the public serializers may turn ambiguous coverage into a healthy scope.
 func TestProviderSelectionSignalGenerationOrderAndPublicJson(t *testing.T) {
 	for _, variant := range []string{"healthy", "quiet", "now-only", "missing-prior-start", "restart", "unsupported-schema", "stale-prior", "future-now", "stale-count", "reset", "one-sample", "same-start-complete", "same-start-unpaired", "duplicate-cell"} {
-		rows := selectionTestRows("eligible_not_selected", 3)
+		rows := selectionTestRows("drawable_not_selected", 3)
 		complete := variant == "healthy" || variant == "quiet"
 		paired, requests, reason := 1, 3.0, "incomplete-process-window"
 		if complete {
@@ -673,7 +673,7 @@ func TestProviderSelectionSignalGenerationOrderAndPublicJson(t *testing.T) {
 			if variant == "same-start-complete" {
 				paired, requests = 2, 7
 			}
-			for _, row := range selectionGenerationTestRows("private-generation-order", startAge, bound, "eligible_not_selected", 4) {
+			for _, row := range selectionGenerationTestRows("private-generation-order", startAge, bound, "drawable_not_selected", 4) {
 				field := row["metric"].(map[string]string)["monitor_selection"]
 				if variant == "missing-prior-start" && field == "prior_start" {
 					continue
@@ -682,7 +682,7 @@ func TestProviderSelectionSignalGenerationOrderAndPublicJson(t *testing.T) {
 				case variant == "restart" && field == "now_start":
 					row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-6 * time.Minute).Unix())
 				case variant == "unsupported-schema" && (field == "now_schema" || field == "prior_schema"):
-					row["value"].([]any)[1] = "4"
+					row["value"].([]any)[1] = "5"
 				case variant == "stale-prior" && field == "prior_schema_time":
 					row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-5*time.Minute - 91*time.Second).Unix())
 				case variant == "future-now" && field == "now_start_time":
@@ -749,7 +749,7 @@ func TestProviderSelectionSignalGenerationOrderAndPublicJson(t *testing.T) {
 			if requests > 0 {
 				wantAlerts++
 				outcome, ok := outcomes[0].(map[string]any)
-				if !ok || outcome["requests"] != requests || outcome["reason"] != "eligible_not_selected" {
+				if !ok || outcome["requests"] != requests || outcome["reason"] != "drawable_not_selected" {
 					t.Fatalf("%s/%s: valid subset was erased or unpaired counts gained authority", variant, order)
 				}
 				positive := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible")
