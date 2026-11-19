@@ -94,6 +94,13 @@ func (self *frontTcpRun) close() {
 // front's handlers apply the finer per-line limits. Nothing bounds a whole
 // request or response here: bodies, uploads, websockets and streamed
 // responses keep the per-read and per-write timeouts the nginx front applies.
+//
+// A parity difference (LBALT-IMPL.md §4): net/http reads at most the header
+// bytes, 64 KiB by default, plus its own 4 KiB slack before the handler, so
+// an HTTP/1.1 request line and headers over that in all, about 68 KiB, are
+// answered 431 by net/http and never reach the nginx front, where nginx
+// answers 400, or 414 for a long request line. Under that size the nginx
+// front answers nginx's codes.
 func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *http.Server {
 	httpSettings := self.settings.Front.Http
 	httpServer := &http.Server{
@@ -105,6 +112,7 @@ func (self *frontServer) newHttpServer(handler http.Handler, portKind string) *h
 		DisableGeneralOptionsHandler: true,
 		ErrorLog: log.New(&frontHttpErrorLog{
 			portKind: portKind,
+			observer: self.settings.httpErrorObserverForTest,
 		}, "", 0),
 		// requests end with the front
 		BaseContext: func(net.Listener) context.Context {
@@ -229,6 +237,8 @@ func (self *frontTrackedConn) Close() error {
 // logged, except a handler panic, logged without the address.
 type frontHttpErrorLog struct {
 	portKind string
+	// FrontServerSettings.httpErrorObserverForTest
+	observer func(portKind string, kind string, logged string)
 }
 
 // Counts one message by its kind, logging only a panic, scrubbed.
@@ -244,8 +254,13 @@ func (self *frontHttpErrorLog) Write(message []byte) (int, error) {
 		kind = frontHttpErrorAccept
 	}
 	frontHttpServerErrorsCounter.WithLabelValues(self.portKind, kind).Inc()
+	logged := ""
 	if kind == frontHttpErrorPanic {
-		glog.Errorf("[front]%s handler panic: %s\n", self.portKind, scrubFrontHttpPanic(text))
+		logged = scrubFrontHttpPanic(text)
+		glog.Errorf("[front]%s handler panic: %s\n", self.portKind, logged)
+	}
+	if self.observer != nil {
+		self.observer(self.portKind, kind, logged)
 	}
 	return len(message), nil
 }

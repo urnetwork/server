@@ -4,9 +4,11 @@ package connect
 // D3, D9, §4.4).
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -18,6 +20,7 @@ import (
 
 	quic "github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/quicvarint"
 
 	"github.com/urnetwork/server/nginx"
 )
@@ -495,4 +498,82 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 			t.Fatal("the front returned the window of a connection connect's handler served")
 		}
 	}
+}
+
+// An idle api connection is closed at nginx's keepalive timeout, as the h3
+// server's idle timeout.
+func TestFrontH3ApiClosesAnIdleConnectionAtTheKeepaliveTimeout(t *testing.T) {
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.KeepaliveTimeout = 100 * time.Millisecond
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+	if code := testFrontApplicationCode(t, conn, nil); code != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
+		t.Fatalf("the idle api connection closed with %#x", code)
+	}
+}
+
+// The h3 api server takes nginx's header buffers as its header limit, which
+// its SETTINGS advertise as the largest field section a request may carry.
+func TestFrontH3ApiAdvertisesTheHeaderLimit(t *testing.T) {
+	const headerBytes = 4 * 1024
+	// SETTINGS_MAX_FIELD_SECTION_SIZE (RFC 9114 §7.2.4.1)
+	const settingMaxFieldSectionSize = 0x6
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.MaxRequestHeadersTotalBytes = headerBytes
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseWithError(0, "")
+	env.nextDispatch()
+
+	ctx, cancel := context.WithTimeout(env.ctx, testFrontProgressTimeout)
+	defer cancel()
+	stream, err := conn.AcceptUniStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.SetReadDeadline(time.Now().Add(testFrontProgressTimeout))
+	reader := quicvarint.NewReader(stream)
+	// the control stream (type 0x0) opens with its SETTINGS frame (type 0x4)
+	if streamType, err := quicvarint.Read(reader); err != nil || streamType != 0x0 {
+		t.Fatalf("the server's first stream is of type %d: %v", streamType, err)
+	}
+	if frameType, err := quicvarint.Read(reader); err != nil || frameType != 0x4 {
+		t.Fatalf("the control stream opens with a frame of type %d: %v", frameType, err)
+	}
+	frameLength, err := quicvarint.Read(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, frameLength)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		t.Fatal(err)
+	}
+	payloadReader := bytes.NewReader(payload)
+	for 0 < payloadReader.Len() {
+		id, err := quicvarint.Read(payloadReader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := quicvarint.Read(payloadReader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id == settingMaxFieldSectionSize {
+			if value != headerBytes {
+				t.Fatalf("the api server advertises a %d byte field section, want %d", value, headerBytes)
+			}
+			return
+		}
+	}
+	t.Fatal("the api server advertises no field section limit")
 }
