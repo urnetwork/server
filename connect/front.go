@@ -88,6 +88,9 @@ type frontConnectQuic interface {
 	// a new copy of the handler's server QUIC config, with its shared receive
 	// window budget
 	NewQuicConfig() *quic.Config
+	// returns a closed connection's grants from that budget, for a
+	// connection the handler did not serve
+	releaseQuicWindow(conn *quic.Conn)
 }
 
 var _ frontConnectQuic = (*ConnectHandler)(nil)

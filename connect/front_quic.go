@@ -163,7 +163,18 @@ func (self *frontQuicRun) carrier() ResidentCarrier {
 
 // Routes one accepted connection by the name it presented. Returns when the
 // connection is finished.
+//
+// Every connection shares connect's receive window budget through the
+// public QUIC config. Connect's handler returns what a connection it served
+// was granted; every other connection, api or refused, returns its own here,
+// once closed, so no later increase can be charged to it.
 func (self *frontQuicRun) dispatch(conn *quic.Conn) {
+	servedByConnect := false
+	defer func() {
+		if !servedByConnect {
+			self.frontServer.connectQuic.releaseQuicWindow(conn)
+		}
+	}()
 	serverName := self.serverName(conn)
 	nameClass := self.frontServer.front.ClassifyName(serverName)
 	if self.frontServer.settings.dispatchObserverForTest != nil {
@@ -171,12 +182,15 @@ func (self *frontQuicRun) dispatch(conn *quic.Conn) {
 	}
 	switch nameClass {
 	case nginx.NameClassConnect:
-		self.serveConnect(conn)
+		servedByConnect = self.serveConnect(conn)
 	case nginx.NameClassApi:
 		self.serveApi(conn)
 	default:
 		self.refuseUnknownName(conn)
 	}
+	// a connection the dispatch left open, such as one whose name never
+	// arrived, closes before its window is returned
+	conn.CloseWithError(0, "")
 }
 
 // The name the client presented. An early connection is accepted once its
@@ -213,23 +227,25 @@ func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
 // hands it to connect's handler, which applies its own connection rate
 // limit. The cap is charged only once the handshake proves the source receives
 // packets at its address, so a spoofed source can't take a victim's slots.
-func (self *frontQuicRun) serveConnect(conn *quic.Conn) {
+// Reports whether connect's handler served the connection, and so owns
+// returning its window.
+func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
 	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
 		self.countConnection(frontQuicResultHandshakeFailed)
 		conn.CloseWithError(0, "")
-		return
+		return false
 	}
 	addrPort, err := server.ParseClientAddress(conn.RemoteAddr().String())
 	if err != nil {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
-		return
+		return false
 	}
 	release, ok := self.frontServer.front.AcquireQuicConnection(self.socket.key.interfaceName, addrPort.Addr().Unmap())
 	if !ok {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")
-		return
+		return false
 	}
 	defer release()
 	self.countConnection(frontQuicResultConnect)
@@ -237,7 +253,17 @@ func (self *frontQuicRun) serveConnect(conn *quic.Conn) {
 		if glog.V(1) {
 			glog.Infof("[front]connect closing, refused a %s connection on %s\n", self.socket.key.portKind, self.socket.key.interfaceName)
 		}
+		return false
 	}
+	return true
+}
+
+// Returns everything one connection was granted from the handler's receive
+// window budget. The caller runs it once the connection is closed, so no
+// later increase can be charged to it. A nil budget, the default, has nothing
+// to return.
+func (self *ConnectHandler) releaseQuicWindow(conn *quic.Conn) {
+	self.quicWindowBudget.release(conn)
 }
 
 // Serves one api connection as h3, once its handshake completes: a request

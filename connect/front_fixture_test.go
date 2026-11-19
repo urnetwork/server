@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -485,23 +486,41 @@ type testFrontConnectQuic struct {
 	tracer  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace
 	handled chan testFrontHandledQuic
 	release chan struct{}
+	// refuses each connection while set, as a closing handler does
+	refusing atomic.Bool
+	// the connections whose window grants the front returned so far
+	releasedCount *connect.MonitorValue[int]
 
 	stateLock sync.Mutex
 	// every socket a transport was built on, in order
 	transportConns []net.PacketConn
+	// every connection whose window grants the front returned, and whether
+	// it was closed by then
+	releasedConns []testFrontReleasedQuic
+}
+
+// One connection whose window grants the front returned.
+type testFrontReleasedQuic struct {
+	conn   *quic.Conn
+	closed bool
 }
 
 // A fake with no handshake limit and no tracer.
 func newTestFrontConnectQuic() *testFrontConnectQuic {
 	return &testFrontConnectQuic{
-		counted: make(chan struct{}, 64),
-		handled: make(chan testFrontHandledQuic, 64),
-		release: make(chan struct{}),
+		releasedCount: connect.NewMonitorValue(0),
+		counted:       make(chan struct{}, 64),
+		handled:       make(chan testFrontHandledQuic, 64),
+		release:       make(chan struct{}),
 	}
 }
 
 // frontConnectQuic
 func (self *testFrontConnectQuic) HandleQuicConn(conn *quic.Conn, carrier ResidentCarrier) bool {
+	if self.refusing.Load() {
+		conn.CloseWithError(0, "")
+		return false
+	}
 	self.handled <- testFrontHandledQuic{conn: conn, carrier: carrier}
 	select {
 	case <-conn.Context().Done():
@@ -530,6 +549,28 @@ func (self *testFrontConnectQuic) NewQuicTransport(conn net.PacketConn) *quic.Tr
 		}
 	}
 	return transport
+}
+
+// frontConnectQuic
+func (self *testFrontConnectQuic) releaseQuicWindow(conn *quic.Conn) {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.releasedConns = append(self.releasedConns, testFrontReleasedQuic{
+			conn:   conn,
+			closed: conn.Context().Err() != nil,
+		})
+	}()
+	self.releasedCount.Update(func(releasedCount int) int {
+		return releasedCount + 1
+	})
+}
+
+// The connections whose window grants the front returned.
+func (self *testFrontConnectQuic) released() []testFrontReleasedQuic {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.releasedConns)
 }
 
 // The sockets transports were built on.

@@ -424,3 +424,75 @@ func (self *testFrontSessionCache) Put(sessionKey string, state *tls.ClientSessi
 		}
 	}
 }
+
+// Every connection draws on connect's receive window budget through the
+// public QUIC config, and connect's handler returns the grants only of a
+// connection it serves: the front returns those of an api connection, a
+// refused one and one connect's closing handler refused, each once closed.
+func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) {
+	env := newTestFrontEnv(t, nil)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	waitReleased := func(count int) []testFrontReleasedQuic {
+		t.Helper()
+		deadline := time.After(testFrontProgressTimeout)
+		for {
+			releasedCount, changed := env.connectQuic.releasedCount.Get()
+			if count <= releasedCount {
+				return env.connectQuic.released()
+			}
+			select {
+			case <-changed:
+			case <-deadline:
+				t.Fatalf("%d of %d windows returned", releasedCount, count)
+			}
+		}
+	}
+
+	// served by connect's handler, which returns the window itself
+	served, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.nextDispatch()
+	servedConn := env.nextHandled().conn
+	served.CloseWithError(0, "")
+	testFrontWait(t, servedConn.Context().Done(), "the served connection's close")
+
+	// an api connection, closed by its client
+	client, _ := env.apiClient(address, frontPortQuic, nil)
+	if status, _, err := testFrontGet(t, client, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
+		t.Fatalf("api request = %d %v", status, err)
+	}
+	env.nextDispatch()
+	client.Transport.(*http3.Transport).Close()
+	waitReleased(1)
+
+	// a refused name
+	tlsConfig := env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
+	tlsConfig.InsecureSkipVerify = true
+	refused, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
+	testFrontApplicationCode(t, refused, err)
+	env.nextDispatch()
+	waitReleased(2)
+
+	// a connect name connect's closing handler refused
+	env.connectQuic.refusing.Store(true)
+	closing, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if err == nil {
+		defer closing.CloseWithError(0, "")
+	}
+	env.nextDispatch()
+	released := waitReleased(3)
+
+	if len(released) != 3 {
+		t.Fatalf("%d windows returned, want 3", len(released))
+	}
+	for _, releasedQuic := range released {
+		if !releasedQuic.closed {
+			t.Fatal("a window was returned while its connection could still draw on it")
+		}
+		if releasedQuic.conn == servedConn {
+			t.Fatal("the front returned the window of a connection connect's handler served")
+		}
+	}
+}
