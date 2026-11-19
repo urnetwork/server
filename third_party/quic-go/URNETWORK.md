@@ -4,8 +4,11 @@ This directory is the unmodified source distribution of
 `github.com/quic-go/quic-go v0.61.0` (module zip
 `h1:ui88A53s8MSVYLC56en0KQ17HARk+9986Dn0SBfKNvA=`), except for three narrowly
 scoped changes, in `connection.go`, in `http3/server.go`, and in
-`http3/server.go` with `http3/server_conn.go`, the added
-`urnetwork_conn_timer_test.go`, `http3/urnetwork_graceful_goaway_test.go` and
+`http3/server.go` with `http3/server_conn.go`, one addition,
+`urnetwork_conn_group.go`, the added `urnetwork_conn_timer_test.go`,
+`urnetwork_conn_group_test.go`, `urnetwork_conn_group_oob_test.go`,
+`urnetwork_conn_group_linux_test.go`,
+`http3/urnetwork_graceful_goaway_test.go` and
 `http3/urnetwork_read_header_timeout_test.go`, and the removed upstream
 `.github/` directory. The upstream MIT license and source headers are
 preserved.
@@ -145,6 +148,82 @@ With `ReadHeaderTimeout` unset, only the read of the field section changes.
 The upstream http3 suite passes with this change: `go test -count=1
 ./http3/...` here, with no `-trimpath`, since some of its tests read source
 paths at run time.
+
+## One transport over a group of sockets
+
+`ConnGroup`, in the added `urnetwork_conn_group.go`, is the packet conn of one
+`Transport` over several UDP sockets bound to one local address and port, such
+as the sockets of one SO_REUSEPORT group. No upstream file changes.
+
+The kernel spreads a reuseport group's flows over its sockets by a hash of
+each flow's 4-tuple, and moves most of them whenever a socket leaves or joins
+the group; a NAT rebinding moves one. With a `Transport` per socket, a moved
+flow reaches a transport that doesn't hold its connection IDs, and the client
+reconnects only after its idle timeout. The connect front (server LBALT.md
+D22 (b), LBALT-IMPL.md §8) serves each group of its public sockets on the
+QUIC port through one `ConnGroup` and one `Transport`, so a moved flow keeps
+its connection.
+
+A plain `net.PacketConn` fan-in would lose quic-go's per-socket paths, since
+`Transport` wraps any conn that isn't OOB-capable as a basic conn, and its oob
+conn reads one socket through that socket's `SyscallConn`. `ConnGroup` keeps
+them:
+
+- `ConnGroup.Add` wraps each socket as `Transport.init` wraps the conn it is
+  given (`wrapConn`): the 7 MiB buffers, the DF bit, ECN and packet info
+  reception, batched reads and the GSO probe, so a `*net.UDPConn` is read and
+  written through its own oob conn. Each socket is read on its own goroutine
+  into one queue of 256 packets; `ConnGroup` implements `rawConn`, so
+  `Transport` uses it as it is, and its one listen loop reads the queue.
+- A write goes out through one live socket, picked by a seeded hash of the
+  destination address and port, so one flow leaves through one socket while
+  the group's sockets stay the same. The GSO segment size, the ECN marking and
+  the packet info pass to that socket's own write unchanged, and so does every
+  error but one: a socket closed under the write (`net.ErrClosed`) is skipped
+  for the next. With no socket left the packet is dropped, as the network
+  drops one, since a write error ends the connection that wrote; once the
+  group is closed, writes fail with `net.ErrClosed`.
+- A socket whose read fails leaves the group at once, and its
+  `ConnGroupMember` reports the error (`Done`, `Err`); temporary errors are
+  retried, as `Transport.listen` retries them. `Add` brings in a replacement
+  while the transport serves. `ConnGroupMember.Close` removes and closes one
+  socket, and `ConnGroup.Close` every socket.
+- The group's capabilities (DF, GSO, ECN) are its first socket's, and a socket
+  with others is refused: a connection reads them when it starts, and a GSO
+  batch must never reach a socket without GSO.
+- The group never closes on its own. `Transport.Close` stops its listen loop
+  with a read deadline in the past, as on a socket, and the group keeps its
+  sockets until it is closed itself.
+
+### Tests
+
+`urnetwork_conn_group_test.go`, `urnetwork_conn_group_oob_test.go` (darwin,
+linux, freebsd) and `urnetwork_conn_group_linux_test.go`, run with
+`go test -run '^TestUrnetwork' .` in this directory. A relay stands in for the
+kernel's choice of socket, and for a NAT, so a flow moves between sockets
+bound to distinct ports when a test says, whatever the platform's reuseport
+delivery:
+
+- a connection keeps echoing when its flow moves to another socket of the
+  group, and again after a rebinding changes its source port as well;
+- a socket whose reads fail reports the error and leaves the write set, and
+  the connection it carried goes on through a sibling;
+- one destination's writes leave through one socket, then through another
+  once that socket is lost, are dropped without an error with no socket left,
+  and fail once the group is closed; a socket closed under a write is skipped;
+- a write passes its GSO size, ECN marking and packet info to its socket, and
+  a group reports its first socket's capabilities and refuses a socket with
+  others;
+- every socket is read through its oob conn, with the ECN bits of each
+  datagram, and the group's capabilities are a lone socket's;
+- `Transport.Close` over the group leaves its sockets read on, and closing the
+  group ends them, and its reads, with `net.ErrClosed`;
+- on Linux, a GSO batch leaves as segments of the asked size where the kernel
+  supports GSO (not run on darwin).
+
+Each fails when its behavior is taken out of `urnetwork_conn_group.go`. The
+upstream suite passes with this addition: `go test -short .` here ran 747
+tests.
 
 Every main module that wants these changes must replace
 `github.com/quic-go/quic-go` with this directory; Go does not inherit
