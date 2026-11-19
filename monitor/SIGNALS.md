@@ -42335,8 +42335,10 @@ service: Alt serves both, and so does connect's lb_alt front, LBALT.md D3),
 `ipv4_address` / `ipv6_address`, public `port`, TLS `server_name`, and an
 explicit canonical trailing-dot `dns_tld` only for the DNS carriers. No DNS
 resolver chooses a convenient address. Missing family pins, duplicate logical
-paths, an incomplete denominator, ambiguous/missing enabled host ownership or
-invalid protocol authority reject the entire matrix before transport. Disabled
+paths (one host, interface, service, alias, front, carrier, port and family,
+so whodis's one alias on 53 and on 4053 is two paths), an incomplete
+denominator, ambiguous/missing enabled host ownership or invalid protocol
+authority reject the entire matrix before transport. Disabled
 enrollment is unarmed, not a healthy or recovery result. The explicit matrix
 does not discover unlisted dynamic fleet paths; its owner must reconcile it
 with current desired service/alias intent before arming.

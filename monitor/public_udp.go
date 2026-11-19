@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -282,7 +283,9 @@ func publicUdpRequests(settings PublicUdpSettings, probeSettings *PublicUdpProbe
 				(family == "ipv4") != address.Is4() {
 				return nil, "family-address"
 			}
-			key := strings.Join([]string{target.Host, target.Interface, target.Service, target.Alias, target.Front, target.Carrier, family}, "/")
+			// the port is the path's too: whodis serves one alias on 53 and
+			// on 4053
+			key := strings.Join([]string{target.Host, target.Interface, target.Service, target.Alias, target.Front, target.Carrier, strconv.Itoa(target.Port), family}, "/")
 			if paths[key] {
 				return nil, "duplicate-path"
 			}
