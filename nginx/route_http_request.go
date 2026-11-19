@@ -21,6 +21,9 @@ package nginx
 //     h3 every field but the pseudo-headers and Cookie, which nginx merges
 //     uncounted (ngx_http_process_request_headers,
 //     ngx_http_v2_state_process_header);
+//   - a second line of a header nginx keeps once is a 400
+//     (ngx_http_process_unique_header_line), and so is a second Host field
+//     on h2 and h3 (ngx_http_process_host);
 //   - on h2 and h3, a Host header that differs from :authority is a 400, and
 //     neither is a 400;
 //   - the host is valid, as nginx's $host normalization decides
@@ -31,7 +34,12 @@ package nginx
 // Go's servers refuse part of this first, with their own statuses: an h1
 // head over the server's MaxHeaderBytes or MaxHeaderValueCount (431), a
 // missing, malformed or repeated Host on h1 (400, as nginx answers a repeated
-// one), an h2 or h3 head over its header list limit. So
+// one), an h2 or h3 head over its header list limit. Go's h1 server also
+// merges repeated identical Content-Length lines, answers a repeated
+// Transfer-Encoding 501 and an Expect other than 100-continue 417, and drops
+// the Transfer-Encoding of an HTTP/1.0 request, none of which the handler
+// sees, where nginx answers 400 to the first, second and last and ignores
+// the Expect (LBALT-IMPL.md §4). So
 // Front.ConfigureServer sets MaxHeaderBytes to a multiple of
 // MaxRequestHeadersTotalBytes, and MaxHeaderValueCount to a multiple of
 // MaxRequestHeaderLines, twice by default
@@ -42,6 +50,24 @@ import (
 	"net/http"
 	"net/netip"
 )
+
+// The request headers nginx keeps once, answering a second line with 400
+// (ngx_http_headers_in's ngx_http_process_unique_header_line). Go's servers
+// merge or refuse a repeated Content-Length and take Transfer-Encoding out of
+// the header map, so those two never repeat here. Keys are canonical.
+var routeRequestUniqueHeaders = []string{
+	"If-Modified-Since",
+	"If-Unmodified-Since",
+	"If-Match",
+	"If-None-Match",
+	"Content-Length",
+	"Content-Range",
+	"If-Range",
+	"Transfer-Encoding",
+	"Expect",
+	"Authorization",
+	"Proxy-Authorization",
+}
 
 // One request as routing reads it, once validated.
 type routeRequest struct {
@@ -148,9 +174,18 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 		}
 	}
 
+	for _, name := range routeRequestUniqueHeaders {
+		if 1 < len(r.Header[name]) {
+			return nil, http.StatusBadRequest
+		}
+	}
+
 	if 2 <= r.ProtoMajor {
 		// Go keeps a Host header on h2 and h3, and sets r.Host from it only
-		// when there is no :authority
+		// when there is no :authority. nginx refuses a second one, as on h1
+		if 1 < len(r.Header.Values("Host")) {
+			return nil, http.StatusBadRequest
+		}
 		for _, host := range r.Header.Values("Host") {
 			if host != r.Host {
 				return nil, http.StatusBadRequest

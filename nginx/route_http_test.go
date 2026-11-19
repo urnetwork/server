@@ -918,6 +918,78 @@ func TestRouteHttpCountsHeaderLinesAsNginxMaxHeaders(t *testing.T) {
 	}
 }
 
+// A second line of a header nginx keeps once is a 400, on h1, h2 and h3, as
+// nginx answers it (ngx_http_process_unique_header_line), and so is a second
+// Host field on h2 and h3, though both equal :authority. One line of each,
+// and a repeat of any other header, passes. A refused request is never
+// forwarded.
+func TestRouteHttpRefusesARepeatedHeaderNginxKeepsOnce(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+	uniqueHeaderValues := map[string]string{
+		"Authorization":       "Bearer one",
+		"Proxy-Authorization": "Basic one",
+		"Content-Range":       "bytes 0-1/2",
+		"Expect":              "100-continue",
+		"If-Match":            `"one"`,
+		"If-None-Match":       `"one"`,
+		"If-Modified-Since":   "Mon, 02 Jan 2006 15:04:05 GMT",
+		"If-Unmodified-Since": "Mon, 02 Jan 2006 15:04:05 GMT",
+		"If-Range":            `"one"`,
+	}
+	forwardCount := 0
+	for _, protoMajor := range []int{1, 2, 3} {
+		newRequest := func() *http.Request {
+			r := newTestRequest("GET", "api.service.example", "/v1", true)
+			if protoMajor != 1 {
+				r = asTestProtocol(r, protoMajor)
+			}
+			return r
+		}
+		for name, value := range uniqueHeaderValues {
+			once := newRequest()
+			once.Header.Add(name, value)
+			if response := serveTestRequest(handler, once); response.Code != http.StatusOK {
+				t.Errorf("h%d one %s line = %d, want it forwarded", protoMajor, name, response.Code)
+			}
+			forwardCount += 1
+			twice := newRequest()
+			twice.Header.Add(name, value)
+			twice.Header.Add(name, value)
+			if response := serveTestRequest(handler, twice); response.Code != http.StatusBadRequest {
+				t.Errorf("h%d two %s lines = %d, want 400", protoMajor, name, response.Code)
+			}
+		}
+		repeated := newRequest()
+		repeated.Header.Add("Accept", "text/plain")
+		repeated.Header.Add("Accept", "text/html")
+		repeated.Header.Add("Cache-Control", "no-cache")
+		repeated.Header.Add("Cache-Control", "no-store")
+		if response := serveTestRequest(handler, repeated); response.Code != http.StatusOK {
+			t.Errorf("h%d repeated Accept and Cache-Control = %d, want it forwarded", protoMajor, response.Code)
+		}
+		forwardCount += 1
+		if protoMajor == 1 {
+			continue
+		}
+		host := newRequest()
+		host.Header.Add("Host", "api.service.example")
+		if response := serveTestRequest(handler, host); response.Code != http.StatusOK {
+			t.Errorf("h%d one Host equal to :authority = %d, want it forwarded", protoMajor, response.Code)
+		}
+		forwardCount += 1
+		hosts := newRequest()
+		hosts.Header.Add("Host", "api.service.example")
+		hosts.Header.Add("Host", "api.service.example")
+		if response := serveTestRequest(handler, hosts); response.Code != http.StatusBadRequest {
+			t.Errorf("h%d two Host fields equal to :authority = %d, want 400", protoMajor, response.Code)
+		}
+	}
+	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != forwardCount {
+		t.Errorf("%d requests forwarded, want the %d with no repeat", len(forwards), forwardCount)
+	}
+}
+
 // nginx's request validation, before any server: a method outside
 // [A-Z_-]+, an invalid Host, TRACE and CONNECT, a request line or headers
 // over the limits, a target nginx can't parse, and an h2 or h3 :authority

@@ -666,6 +666,12 @@ func parityCorpus() []*parityCase {
 			}),
 		},
 		{
+			name: "tls/h2-two-host-fields-equal-to-the-authority",
+			run: paritySendRawH2(parityApiName, [][2]string{
+				{":method", "GET"}, {":scheme", "https"}, {":authority", parityApiName}, {":path", "/hello"}, {"host", parityApiName}, {"host", parityApiName},
+			}),
+		},
+		{
 			name: "tls/h2-no-authority-no-host",
 			run: paritySendRawH2(parityApiName, [][2]string{
 				{":method", "GET"}, {":scheme", "https"}, {":path", "/hello"},
@@ -905,6 +911,15 @@ func parityCorpus() []*parityCase {
 		},
 		{name: "limits/transfer-encoding-not-chunked-last", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), true), "", [2]string{"Transfer-Encoding", "gzip, chunked"})},
 		{name: "limits/two-content-lengths", request: parityWith(parityWithBody(parityGet(parityApiName, parityApiName, "/upload"), http.MethodPost, []byte("hello"), false), "", [2]string{"Content-Length", "5"}, [2]string{"Content-Length", "6"})},
+		// a second line of a header nginx keeps once is a 400
+		{name: "limits/two-authorization-headers", request: parityWith(api, "", [2]string{"Authorization", "Bearer one"}, [2]string{"Authorization", "Bearer two"})},
+		{name: "limits/two-if-none-match-headers", request: parityWith(api, "", [2]string{"If-None-Match", `"one"`}, [2]string{"If-None-Match", `"two"`})},
+		{
+			name: "limits/two-authorization-fields-over-h2",
+			run: paritySendRawH2(parityApiName, [][2]string{
+				{":method", "GET"}, {":scheme", "https"}, {":authority", parityApiName}, {":path", "/hello"}, {"authorization", "Bearer one"}, {"authorization", "Bearer two"},
+			}),
+		},
 		{name: "limits/head-method", request: parityWith(api, http.MethodHead)},
 		{name: "limits/options-asterisk", request: parityWith(parityGet(parityApiName, parityApiName, "*"), http.MethodOptions)},
 
