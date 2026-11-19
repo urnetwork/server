@@ -413,7 +413,7 @@ func TestForwardResponseHeadLimit(t *testing.T) {
 	} {
 		raw := newRawUpstream(t)
 		other := newRecordingUpstream(t, "g2", nil)
-		serviceName := "head-limit-" + strings.Repeat("x", c.headBytes-maxHeadBytes)
+		serviceName := testServiceName("head-limit-" + strings.Repeat("x", c.headBytes-maxHeadBytes))
 		group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
 			{name: "g1", weight: 1, port: raw.port},
 			{name: "g2", weight: 1, port: other.port},

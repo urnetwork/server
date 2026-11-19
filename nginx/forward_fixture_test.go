@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +99,15 @@ func (self *recordingUpstream) recorded() []*recordedRequest {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return append([]*recordedRequest{}, self.requests...)
+}
+
+// Service names, numbered so that each run of a test, under -count, counts
+// its metrics apart.
+var testServiceNameCount atomic.Int64
+
+// A service name for one run of a test: the name and a number.
+func testServiceName(name string) string {
+	return name + "-" + strconv.FormatInt(testServiceNameCount.Add(1), 10)
 }
 
 // A block for a test group: a name, a weight and the port its upstream

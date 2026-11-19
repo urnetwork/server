@@ -535,7 +535,7 @@ func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
 	second := newRecordingUpstream(t, "g2", handler)
 	first.arrivals = arrivals
 	second.arrivals = arrivals
-	serviceName := "block-cap"
+	serviceName := testServiceName("block-cap")
 	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: first.port},
 		{name: "g2", weight: 1, port: second.port},

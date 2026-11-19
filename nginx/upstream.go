@@ -185,7 +185,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 	if forwardRequestHasBody(r) {
 		maxBodyBytes := self.settings.Body.MaxBodyBytes
 		if 0 < maxBodyBytes && maxBodyBytes < r.ContentLength {
-			self.refuse(w, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
+			self.refuse(w, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 			return
 		}
 		if options.streamed {
@@ -205,7 +205,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				setReadDeadline: setClientReadDeadline,
 			})
 			if refusal != nil {
-				self.refuse(w, refusal)
+				self.refuse(w, responseController, refusal)
 				return
 			}
 			defer storedBody.release()
@@ -295,7 +295,7 @@ func (self *upstreamGroup) forward(ctx context.Context, w http.ResponseWriter, r
 		case upstreamFailureClient:
 			if request.streamedBody != nil {
 				if refusal := request.streamedBody.failure(); refusal != nil {
-					self.refuse(w, refusal)
+					self.refuse(w, responseController, refusal)
 				}
 			}
 			return
@@ -463,11 +463,25 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 
 // Answers a body refusal and counts it. A client that went away gets
 // nothing.
-func (self *upstreamGroup) refuse(w http.ResponseWriter, refusal *bodyRefusal) {
+//
+// The body may be partly unread. Go's server reads up to 256 KiB of what
+// remains before it writes the answer, so that read is bounded first by
+// HttpSettings.LingeringTimeout, nginx's lingering_timeout, or cut at once
+// when that is non-positive. A timed out read's deadline has already passed
+// and stays, so its 408 goes out at once.
+func (self *upstreamGroup) refuse(w http.ResponseWriter, responseController *http.ResponseController, refusal *bodyRefusal) {
 	forwardBodyRefusalsCounter.WithLabelValues(self.service.Name, refusal.reason).Inc()
-	if refusal.status != 0 {
-		writeForwardError(w, refusal.status)
+	if refusal.status == 0 {
+		return
 	}
+	if refusal.reason != bodyRefusalTimeout {
+		lingeringDeadline := time.Unix(1, 0)
+		if lingeringTimeout := self.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
+			lingeringDeadline = time.Now().Add(lingeringTimeout)
+		}
+		responseController.SetReadDeadline(lingeringDeadline)
+	}
+	writeForwardError(w, refusal.status)
 }
 
 // Answers the front's own 502 or 504 and counts it.

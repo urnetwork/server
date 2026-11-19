@@ -149,8 +149,9 @@ type bodyReadOptions struct {
 
 // Reads a whole body into the store, under the rules in the file comment.
 // On a refusal nothing stays reserved or open. The client's read deadline
-// is cleared when the read ends, so nothing times out the connection while
-// the upstream answers.
+// is cleared when the body has been read whole, so nothing times out the
+// connection while the upstream answers; after a failed read it stays, so
+// the server closes the connection rather than wait on the client.
 func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyReadOptions) (*storedBody, *bodyRefusal) {
 	maxBodyBytes := self.settings.MaxBodyBytes
 	if 0 < maxBodyBytes && maxBodyBytes < options.declaredLength {
@@ -171,9 +172,6 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 		}
 	}()
 
-	if 0 < options.readTimeout && options.setReadDeadline != nil {
-		defer options.setReadDeadline(time.Time{})
-	}
 	readBuffer := self.readBuffers.Get().(*[]byte)
 	defer self.readBuffers.Put(readBuffer)
 	for {
@@ -193,22 +191,30 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 			break
 		}
 		if err != nil {
+			// the deadline stays: the server must not wait on this client
+			// to discard what remains of its body
 			return nil, bodyReadRefusal(ctx, err)
 		}
+	}
+	if 0 < options.readTimeout && options.setReadDeadline != nil {
+		// nothing reads the client again until its next request
+		options.setReadDeadline(time.Time{})
 	}
 	stored = true
 	return storedBody, nil
 }
 
-// The refusal for a failed client body read: the client went away, its
-// read timed out (408), or its body ended early or broke its framing (400).
+// The refusal for a failed client body read: its read timed out (408), the
+// client went away, or its body ended early or broke its framing (400). The
+// timeout is checked first: Go's HTTP/1.1 server cancels the request's
+// context on any failed read, a timed out one included.
 func bodyReadRefusal(ctx context.Context, err error) *bodyRefusal {
-	if ctx.Err() != nil {
-		return &bodyRefusal{status: 0, reason: bodyRefusalCanceled}
-	}
 	var netErr net.Error
 	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		return &bodyRefusal{status: http.StatusRequestTimeout, reason: bodyRefusalTimeout}
+	}
+	if ctx.Err() != nil {
+		return &bodyRefusal{status: 0, reason: bodyRefusalCanceled}
 	}
 	return &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
 }
