@@ -509,16 +509,25 @@ func TestLbAltStatusConnectionFailuresAreClassified(t *testing.T) {
 
 // The attempt's deadline ends an exchange the front holds open: a path
 // failure, returned at once with the deadline's own error. The front's entry
-// is the barrier, and the deadline is an explicit state transition.
+// is the barrier, and the deadline is an explicit state transition. The front
+// holds the exchange until the attempt ends it or the test does, so an
+// attempt whose request ignores its deadline fails at the bound below rather
+// than holding the server's close, and the test, for good.
 func TestLbAltStatusDeadlineDuringTheExchangeIsATimeout(t *testing.T) {
 	attemptCtx := &publicUdpTestDeadlineContext{Context: context.Background(), expired: make(chan struct{})}
 	entered := make(chan struct{})
+	release := make(chan struct{})
 	var enterOnce sync.Once
 	front := &lbAltStatusTestFront{answer: func(w http.ResponseWriter, r *http.Request) {
 		enterOnce.Do(func() { close(entered) })
-		<-r.Context().Done()
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
 	}}
 	server, _ := lbAltStatusTestServer(t, front, false)
+	// after the server's close in cleanup order, so it runs first
+	t.Cleanup(func() { close(release) })
 	request := lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, "")
 	type attempt struct {
 		observed LbAltStatusObservation
