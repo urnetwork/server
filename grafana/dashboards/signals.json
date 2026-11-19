@@ -4094,7 +4094,7 @@
     {
       "type": "timeseries",
       "title": "session journal backlog",
-      "description": "Durable session operation and index repair backlog by state.",
+      "description": "Durable session operation and index repair backlog by state, and the pending session operations a recovery pass could not advance in the last 5 minutes (urnetwork_session_operation_recovery_failures_total). Recovery runs on maintenance shard 0 every 30 seconds; an operation it cannot advance is retried in its turn, behind the others, so it never holds up later operations. A failure count that keeps rising is one operation failing every pass: read the taskworker log, and the oldest unfinished session operation panel for its age.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4128,6 +4128,11 @@
           "refId": "A",
           "expr": "max by (state) (urnetwork_session_journal_pending{env=\"$env\"})",
           "legendFormat": "{{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_session_operation_recovery_failures_total{env=\"$env\"}[5m]))",
+          "legendFormat": "recovery could not advance (last 5m)"
         }
       ]
     },
@@ -4612,8 +4617,8 @@
     },
     {
       "type": "timeseries",
-      "title": "mints issued untagged / s by service and kind (Redis unreachable at mint)",
-      "description": "Mints that could not reach Redis to register their session and issued an untagged credential instead, as before sessions (decision 3, REVOKE-FINAL.md \u00a715), per second by service and mint kind, so no session exists that nobody can list or revoke. An untagged credential is not on the Sessions list and session revocation does not reach it; client removal and password reset still do. It gets its session at its next refresh. SessionMintsUntagged (warn) fires when more than 1% of a service's session mints (urnetwork_session_storage_seconds_count, operation mint) fall back for 10 minutes, with at least 0.1 a second.",
+      "title": "mints issued untagged or unextended / s by service and kind (Redis unreachable at mint)",
+      "description": "Mints that could not register their session in Redis within the mint budget, per second by service and session kind (decisions 3 and 9, REVOKE-FINAL.md \u00a715). Untagged: a mint that would start a session issued an untagged credential instead, as before sessions, so no session exists that nobody can list or revoke. An untagged credential is not on the Sessions list and session revocation does not reach it; client removal and password reset still do. It gets its session at its next refresh. Unextended: a mint that carries an existing session (a refresh, or a client minted under a tagged credential, such as a hosted proxy's child) signed on that session without extending it, expiring no later than the credential it was minted from, so every revocation of the session still outlives it; the next refresh after Redis answers extends it. SessionMintsUntagged (warn) fires when more than 1% of a service's session mints (urnetwork_session_storage_seconds_count, operation mint) fall back untagged for 10 minutes, with at least 0.1 a second. Both rise together in an outage.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4646,14 +4651,19 @@
         {
           "refId": "A",
           "expr": "sum by (service, kind) (rate(urnetwork_session_mint_untagged_total{env=\"$env\"}[$__rate_interval]))",
-          "legendFormat": "{{service}} {{kind}}"
+          "legendFormat": "untagged {{service}} {{kind}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (service, kind) (rate(urnetwork_session_mint_unextended_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "unextended {{service}} {{kind}}"
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "session limit: would refuse (unenforced) and refused / s by kind and cap",
-      "description": "New sessions over a network's session limit, per second by session kind (signin, code, client) and cap: live is the 5,000 live sessions per network set in config all/pro.yml, retained is the retained-ID limit. While all/pro.yml enforce_session_cap is false, as shipped, nothing is refused and each would-be refusal counts as would refuse. Once it is true, a new session over the limit answers 409 session_limit_reached with a pointer to Settings \u2192 Sessions and counts as refused; nothing is evicted, and refreshing an existing session is never refused (decisions 6 and 7, REVOKE-FINAL.md \u00a715). Sessions owned by a client with public or stream provide mode do not count toward the limit.",
+      "description": "New sessions over a network's session limit, per second by session kind (signin, code, client) and cap: live is the 5,000 live sessions per network set in config all/pro.yml, retained is the 10,000 retained revocation markers (held minus live). While all/pro.yml enforce_session_cap is false, as shipped, nothing is refused and each would-be refusal counts as would refuse. Once it is true, a new session over the limit answers 409 session_limit_reached with a pointer to Account \u2192 Sessions and counts as refused; nothing is evicted, and refreshing a tagged session is never refused. A legacy token's first renewal starts its session, so it counts as new (decisions 6 and 7, REVOKE-FINAL.md \u00a715). A top-level client's own session does not count while the concurrent client limit exempts the client: declared provide intent, pending or qualified with a live intent connection.",
       "gridPos": {
         "h": 8,
         "w": 8,

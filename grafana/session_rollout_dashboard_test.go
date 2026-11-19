@@ -19,7 +19,8 @@ import (
 //     (decision 3), beside the Redis pool timeouts and the Redis pool dial
 //     failures the services log, and as the share of record checks the
 //     alerts in warp grafana/alerting/session-auth.yml evaluate;
-//   - mints that fell back to untagged credentials;
+//   - mints that fell back to untagged credentials, and mints of an existing
+//     session signed on it unextended (decision 9);
 //   - new sessions the limit would refuse while all/pro.yml keeps it
 //     unenforced, and those it refuses once enforced, by kind and cap;
 //   - client sessions freed by removal, by path;
@@ -65,13 +66,14 @@ func TestSessionRolloutPanelsChartFailOpenLimitAndFrees(t *testing.T) {
 		{"Redis pool dial failures / min by service", "short", [][2]string{
 			{`sum by (service) (count_over_time({env="$env"} |= "connection pool: failed to dial" [1m]))`, "{{service}}"},
 		}, []string{"failed to dial after N attempts", "No counter", "i/o timeout", "connection refused", "redis cluster"}},
-		{"mints issued untagged / s by service and kind (Redis unreachable at mint)", "ops", [][2]string{
-			{`sum by (service, kind) (rate(urnetwork_session_mint_untagged_total{env="$env"}[$__rate_interval]))`, "{{service}} {{kind}}"},
-		}, []string{"decision 3", "untagged credential", "next refresh", "SessionMintsUntagged", "1%", "operation mint"}},
+		{"mints issued untagged or unextended / s by service and kind (Redis unreachable at mint)", "ops", [][2]string{
+			{`sum by (service, kind) (rate(urnetwork_session_mint_untagged_total{env="$env"}[$__rate_interval]))`, "untagged {{service}} {{kind}}"},
+			{`sum by (service, kind) (rate(urnetwork_session_mint_unextended_total{env="$env"}[$__rate_interval]))`, "unextended {{service}} {{kind}}"},
+		}, []string{"decisions 3 and 9", "untagged credential", "next refresh", "SessionMintsUntagged", "1%", "operation mint", "without extending it", "no later than the credential it was minted from", "hosted proxy's child"}},
 		{"session limit: would refuse (unenforced) and refused / s by kind and cap", "ops", [][2]string{
 			{`sum by (kind, cap) (rate(urnetwork_session_cap_would_refuse_total{env="$env"}[$__rate_interval]))`, "would refuse {{kind}} {{cap}}"},
 			{`sum by (kind, cap) (rate(urnetwork_session_cap_refused_total{env="$env"}[$__rate_interval]))`, "refused {{kind}} {{cap}}"},
-		}, []string{"signin, code, client", "5,000", "all/pro.yml", "enforce_session_cap", "409 session_limit_reached", "Settings → Sessions", "nothing is evicted", "public or stream provide mode", "decisions 6 and 7"}},
+		}, []string{"signin, code, client", "5,000", "all/pro.yml", "enforce_session_cap", "409 session_limit_reached", "Account → Sessions", "nothing is evicted", "concurrent client limit exempts", "declared provide intent", "legacy token's first renewal", "decisions 6 and 7"}},
 		{"would-refuse new sessions in the last 24 hours by kind and cap", "short", [][2]string{
 			{`sum by (kind, cap) (increase(urnetwork_session_cap_would_refuse_total{env="$env"}[1d]))`, "{{kind}} {{cap}}"},
 		}, []string{"24-hour", "enforce_session_cap", "plan step 4"}},
@@ -235,6 +237,10 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 		series("urnetwork_session_mint_untagged_total", "synthetic", "api", "a1", `,kind="api_key_client"`, "0+60x20"),
 		series("urnetwork_session_mint_untagged_total", "synthetic", "api", "a2", `,kind="api_key_client"`, "0+60x20"),
 		series("urnetwork_session_mint_untagged_total", "synthetic", "proxy", "p1", `,kind="legacy_proxy"`, "0+6x20"),
+		// refreshes and a hosted proxy's children signed on their session unextended
+		series("urnetwork_session_mint_unextended_total", "synthetic", "api", "a1", `,kind="signin"`, "0+30x20"),
+		series("urnetwork_session_mint_unextended_total", "synthetic", "proxy", "p1", `,kind="client"`, "0+90x20"),
+		series("urnetwork_session_mint_unextended_total", "other", "api", "o1", `,kind="signin"`, "0+60000x20"),
 		series("urnetwork_session_cap_would_refuse_total", "synthetic", "api", "a1", `,kind="client",cap="live"`, "0+120x20"),
 		series("urnetwork_session_cap_would_refuse_total", "synthetic", "proxy", "p1", `,kind="client",cap="live"`, "0+60x20"),
 		series("urnetwork_session_cap_would_refuse_total", "synthetic", "api", "a1", `,kind="signin",cap="retained"`, "0+6x20"),
@@ -249,7 +255,7 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 	const (
 		uncheckedTitle = "credentials accepted unchecked / s by service, path and credential"
 		shareTitle     = "unchecked share of tagged credential checks by service"
-		untaggedTitle  = "mints issued untagged / s by service and kind (Redis unreachable at mint)"
+		untaggedTitle  = "mints issued untagged or unextended / s by service and kind (Redis unreachable at mint)"
 		capTitle       = "session limit: would refuse (unenforced) and refused / s by kind and cap"
 		dayTitle       = "would-refuse new sessions in the last 24 hours by kind and cap"
 		freedTitle     = "client sessions freed on removal / s by path"
@@ -272,6 +278,10 @@ func evaluateSessionRolloutExpressions(t *testing.T, panels map[string]*testPane
 		{"expr": expression(untaggedTitle, 0), "eval_time": "10m", "exp_samples": []map[string]any{
 			sample(`{kind="api_key_client",service="api"}`, 2),
 			sample(`{kind="legacy_proxy",service="proxy"}`, 0.1),
+		}},
+		{"expr": expression(untaggedTitle, 1), "eval_time": "10m", "exp_samples": []map[string]any{
+			sample(`{kind="signin",service="api"}`, 0.5),
+			sample(`{kind="client",service="proxy"}`, 1.5),
 		}},
 		{"expr": expression(capTitle, 0), "eval_time": "10m", "exp_samples": []map[string]any{
 			sample(`{cap="live",kind="client"}`, 3),

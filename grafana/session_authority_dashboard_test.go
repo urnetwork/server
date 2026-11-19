@@ -75,6 +75,20 @@ func TestSessionAuthorityPanelsDrawTheAlertLevels(t *testing.T) {
 			}
 		}
 	}
+	// the pending operations a recovery pass could not advance chart beside
+	// the backlog they stay in
+	const recoveryExpr = `sum(increase(urnetwork_session_operation_recovery_failures_total{env="$env"}[5m]))`
+	backlog := dashboard.Panels[index("session journal backlog")]
+	if backlog.Type != "timeseries" || backlog.FieldConfig.Defaults.Unit != "short" || len(backlog.Targets) != 2 ||
+		backlog.Targets[0].Expr != `max by (state) (urnetwork_session_journal_pending{env="$env"})` ||
+		backlog.Targets[1].Expr != recoveryExpr || backlog.Targets[1].LegendFormat != "recovery could not advance (last 5m)" {
+		t.Errorf("the session journal backlog does not chart the backlog and %s", recoveryExpr)
+	}
+	for _, word := range []string{"recovery pass could not advance", "urnetwork_session_operation_recovery_failures_total", "shard 0", "behind the others", "keeps rising"} {
+		if !strings.Contains(backlog.Description, word) {
+			t.Errorf("the session journal backlog does not explain %q", word)
+		}
+	}
 	clock := dashboard.Panels[index("session clock, authority loss and observation drops")]
 	for _, word := range []string{"SessionClockDisagreement", "10 seconds", "SessionClockRefusals", "SessionAuthorityLoss", "reads 0 until minting is on"} {
 		if !strings.Contains(clock.Description, word) {
@@ -121,6 +135,10 @@ func TestSessionAuthorityPanelsDrawTheAlertLevels(t *testing.T) {
 		series("urnetwork_taskworker_executions_total", "synthetic", "t1", `,task="work.Other",outcome="succeeded"`, "0+600x20"),
 		series("urnetwork_taskworker_executions_total", "other", "o1", `,task="work.MaintainNetworkSessions",outcome="succeeded"`, "0+600x20"),
 		series("urnetwork_session_journal_oldest_seconds", "other", "o1", `,state="prepared"`, "0+600x20"),
+		// shard 0's taskworker fails to advance one operation each pass, twice
+		// a minute; another environment never shows
+		series("urnetwork_session_operation_recovery_failures_total", "synthetic", "t1", "", "0+2x20"),
+		series("urnetwork_session_operation_recovery_failures_total", "other", "o1", "", "0+600x20"),
 	}
 	fixture, err := json.Marshal(map[string]any{"evaluation_interval": "1m", "tests": []map[string]any{{
 		"name": "session authority panels", "interval": "1m", "input_series": inputs,
@@ -131,6 +149,9 @@ func TestSessionAuthorityPanelsDrawTheAlertLevels(t *testing.T) {
 			{"expr": expression(maintenanceExpr), "eval_time": "10m", "exp_samples": []map[string]any{
 				{"labels": `{outcome="succeeded"}`, "value": 60},
 				{"labels": `{outcome="failed"}`, "value": 2},
+			}},
+			{"expr": expression(recoveryExpr), "eval_time": "10m", "exp_samples": []map[string]any{
+				{"labels": `{}`, "value": 10},
 			}},
 		},
 	}}})
