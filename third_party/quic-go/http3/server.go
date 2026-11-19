@@ -511,6 +511,18 @@ func (s *Server) handleConn(conn *quic.Conn) error {
 				handleErr = http.ErrServerClosed
 				break
 			}
+			// urnetwork: the GOAWAY was sent, so with closeCtx live the accept
+			// failed because the connection is closing: quic-go closes its
+			// streams before it cancels its context. Going back to the graceful
+			// branch would start another GOAWAY writer on every pass until the
+			// context is canceled (URNETWORK.md).
+			if inGracefulShutdown {
+				var appErr *quic.ApplicationError
+				if !errors.As(err, &appErr) || appErr.ErrorCode != quic.ApplicationErrorCode(ErrCodeNoError) {
+					handleErr = fmt.Errorf("accepting stream failed: %w", err)
+				}
+				break
+			}
 			inGracefulShutdown = s.graceCtx.Err() != nil
 			if !inGracefulShutdown {
 				var appErr *quic.ApplicationError

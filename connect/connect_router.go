@@ -146,13 +146,18 @@ func (self *ConnectRouter) ConnectHandler() *ConnectHandler {
 // listener enabled by its port allocation is actually accepting. It also
 // becomes unready again if a listener exits between supervised restarts.
 func (self *ConnectRouter) Status(w http.ResponseWriter, r *http.Request) {
-	self.statusWithWarpStatus(w, r, nil)
+	self.statusWithWarpStatus(w, r, nil, nil)
 }
 
 // Keeps transport readiness on the actual handler while selecting the
-// composed service's independent startup/drain latch.
-func (self *ConnectRouter) statusWithWarpStatus(w http.ResponseWriter, r *http.Request, status *router.WarpStatusState) {
+// composed service's independent startup/drain latch. With the lb_alt front
+// configured, publicFront adds its readiness headers (front_status.go); it is
+// nil otherwise.
+func (self *ConnectRouter) statusWithWarpStatus(w http.ResponseWriter, r *http.Request, status *router.WarpStatusState, publicFront *frontServer) {
 	listenerPorts, err := self.connectHandler.ListenerReadyUdpPorts()
+	if publicFront != nil {
+		publicFront.writeStatusHeaders(w.Header(), status.Status(), err == nil)
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("not ready: %s", err), http.StatusServiceUnavailable)
 		return
