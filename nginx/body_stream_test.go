@@ -6,6 +6,7 @@ package nginx
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"os"
 	"testing"
 	"testing/iotest"
@@ -144,4 +145,49 @@ func TestStreamedBodyTimeoutBeforeAnInterruptIsTheClients(t *testing.T) {
 			}
 		}
 	})
+}
+
+// A declared body whose reads end, without an error, short of its length, as
+// the vendored http3 ends one at the stream's end, fails as the client's 400
+// with an unexpected end, so its request's write fails and nothing marks it
+// whole; one of unknown length, or one ending at its length, reads to its
+// end.
+func TestStreamedBodyEndingShortOfItsLengthFails(t *testing.T) {
+	for _, c := range []struct {
+		name           string
+		body           io.Reader
+		declaredLength int64
+		wantFailure    bool
+	}{
+		{name: "short", body: bytes.NewReader([]byte("short")), declaredLength: 10, wantFailure: true},
+		{name: "short with its end", body: iotest.DataErrReader(bytes.NewReader([]byte("short"))), declaredLength: 10, wantFailure: true},
+		{name: "whole", body: bytes.NewReader([]byte("whole body")), declaredLength: 10},
+		{name: "of unknown length", body: bytes.NewReader([]byte("short")), declaredLength: -1},
+	} {
+		streamedBody := newForwardStreamedBody(testContext(t), c.body, c.declaredLength, 0, 0, nil, nil)
+		reader := io.Reader(streamedBody)
+		if 0 <= c.declaredLength {
+			reader = io.LimitReader(streamedBody, c.declaredLength)
+		}
+		_, err := io.ReadAll(reader)
+		refusal := streamedBody.failure()
+		if c.wantFailure {
+			if err != io.ErrUnexpectedEOF {
+				t.Errorf("%s: the read ended with %v, want an unexpected end", c.name, err)
+			}
+			if refusal == nil || refusal.status != http.StatusBadRequest || refusal.reason != bodyRefusalIncomplete {
+				t.Errorf("%s: the body's failure is %v, want the client's 400", c.name, refusal)
+			}
+			if streamedBody.isWhole() {
+				t.Errorf("%s: the short body is marked whole", c.name)
+			}
+		} else {
+			if err != nil || refusal != nil {
+				t.Errorf("%s: the read ended with %v, failure %v", c.name, err, refusal)
+			}
+			if !streamedBody.isWhole() {
+				t.Errorf("%s: the body read to its end isn't whole", c.name)
+			}
+		}
+	}
 }

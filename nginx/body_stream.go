@@ -174,6 +174,13 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 		self.fail(&bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 		return n, io.ErrUnexpectedEOF
 	}
+	if err == io.EOF && 0 <= self.declaredLength && self.readBytes < self.declaredLength {
+		// a body that ended short of its declared length, which the vendored
+		// http3 reports as the stream's end (bodyStore.read): a client-side
+		// failure, which ends the request with nginx's 400
+		self.fail(&bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete})
+		return n, io.ErrUnexpectedEOF
+	}
 	// a declared length counts as the end: the request's writer reads no
 	// further than it, so it may never see the end itself
 	if err == io.EOF || (err == nil && 0 <= self.declaredLength && self.declaredLength <= self.readBytes) {

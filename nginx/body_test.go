@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"testing/synctest"
 	"time"
 )
@@ -401,6 +402,47 @@ func TestBodyStoreSpillWriteFailure(t *testing.T) {
 	}
 	checkStoreEmpty(t, bodyStore)
 	spyFiles.checkClosed()
+}
+
+// A body whose reads end, without an error, short of its declared length, as
+// the vendored http3 ends one at the stream's end, is nginx's 400, and
+// nothing stays held; one that ends at its length, whether that read reports
+// the end or not, is stored.
+func TestBodyStoreRefusesABodyEndingShortOfItsLength(t *testing.T) {
+	settings := DefaultBodySettings()
+	for _, c := range []struct {
+		name           string
+		body           io.Reader
+		declaredLength int64
+		wantRefused    bool
+	}{
+		{name: "short", body: bytes.NewReader(testBodyBytes(10)), declaredLength: 100, wantRefused: true},
+		{name: "short with its end", body: iotest.DataErrReader(bytes.NewReader(testBodyBytes(10))), declaredLength: 100, wantRefused: true},
+		{name: "short past the prefix", body: bytes.NewReader(testBodyBytes(int(settings.MemoryPrefixBytes) + 10)), declaredLength: 2 * settings.MemoryPrefixBytes, wantRefused: true},
+		{name: "empty", body: bytes.NewReader(nil), declaredLength: 1, wantRefused: true},
+		{name: "whole", body: bytes.NewReader(testBodyBytes(100)), declaredLength: 100},
+		{name: "whole with its end", body: iotest.DataErrReader(bytes.NewReader(testBodyBytes(100))), declaredLength: 100},
+		{name: "of unknown length", body: bytes.NewReader(testBodyBytes(10)), declaredLength: -1},
+	} {
+		bodyStore, spyFiles := newSpyBodyStore(t, settings)
+		storedBody, refusal := bodyStore.read(testContext(t), c.body, bodyReadOptions{
+			declaredLength: c.declaredLength,
+			prefixBytes:    settings.MemoryPrefixBytes,
+		})
+		if c.wantRefused {
+			if refusal == nil || refusal.status != http.StatusBadRequest || refusal.reason != bodyRefusalIncomplete {
+				t.Errorf("%s: %v, want a 400", c.name, refusal)
+			}
+		} else {
+			if refusal != nil {
+				t.Errorf("%s: refused %v", c.name, refusal)
+			} else {
+				storedBody.release()
+			}
+		}
+		checkStoreEmpty(t, bodyStore)
+		spyFiles.checkClosed()
+	}
 }
 
 // A client that goes away while its body spills: nothing to answer, and

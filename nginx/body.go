@@ -204,6 +204,13 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 			return nil, bodyReadRefusal(ctx, err)
 		}
 	}
+	if 0 <= options.declaredLength && storedBody.length() != options.declaredLength {
+		// a body that ended short of its declared length, which Go's h1 and
+		// h2 servers report as a failed read, but the vendored http3 as the
+		// stream's end: RFC 9114 §4.1.2 makes such a request malformed, and
+		// nginx answers it 400 ("client prematurely closed stream")
+		return nil, &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
+	}
 	if 0 < options.readTimeout && options.setReadDeadline != nil {
 		// nothing reads the client again until its next request
 		options.setReadDeadline(time.Time{})
