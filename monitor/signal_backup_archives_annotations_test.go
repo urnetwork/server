@@ -48,6 +48,11 @@ func backupArchiveAnnotationSettings(now time.Time, payload func() string, write
 		}
 		return "", fmt.Errorf("unexpected synthetic observation route")
 	}}
+	return backupArchiveSourceSettings(now, source)
+}
+
+// Both archive sources are injected through the public signal settings.
+func backupArchiveSourceSettings(now time.Time, source SignalSource) SignalSettings {
 	settings := syntheticSettings(source)
 	settings.Now = func() time.Time { return now }
 	settings.Hosts = append(settings.Hosts,

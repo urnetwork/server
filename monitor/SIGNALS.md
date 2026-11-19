@@ -36307,6 +36307,20 @@ bounded reason and count rather than emitted. The query and direct
 discriminator carry no credentials, repository names, checksums, private key
 paths, or backup contents.
 
+When a read produces the WARN/Sustain2 `monitor/visibility` alert for
+`cannot-observe` on `observability/backup-archives`, its observed values carry
+`backup_archive_stage=mimir-query` when the gateway query returns an error or
+`backup_archive_stage=writer-read` when the direct writer read returns an error.
+The stage names the local operation. The writer read follows a decoded
+successful vector that can still carry warnings.
+Admission and native execution markers describe any execution boundaries the
+returned error proves. Earlier timeouts with only `native-wait/started-joined`
+leave the read unidentified. Remote authentication, command execution, writer
+health and archive freshness require independent evidence. A successful
+fallback discards earlier gateway failures. Parent-only cancellations,
+inventory errors and response parser rejections retain their own diagnostics.
+Command output and source error text stay out of these diagnostic fields.
+
 A successful vector carrying any nonempty `warnings` list is incomplete for
 this probe, including a list containing only an empty string. Warning text is
 not an archive or media verdict and never enters public output. The probe emits

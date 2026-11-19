@@ -616,6 +616,59 @@ func parseBackupArchiveIntegritySample(
 	}, nil
 }
 
+// Only the two transport return sites can identify which archive read failed.
+type backupArchiveReadStage string
+
+const (
+	backupArchiveMimirQuery backupArchiveReadStage = "mimir-query"
+	backupArchiveWriterRead backupArchiveReadStage = "writer-read"
+)
+
+// Only code-owned stage names can enter a public alert or a direct error.
+func (self backupArchiveReadStage) details() string {
+	switch self {
+	case backupArchiveMimirQuery, backupArchiveWriterRead:
+		return " backup_archive_stage=" + string(self)
+	default:
+		return ""
+	}
+}
+
+// Preserve the original SSH and lifecycle causes behind a fixed public message.
+type backupArchiveReadError struct {
+	stage backupArchiveReadStage
+	cause error
+}
+
+func (self *backupArchiveReadError) Error() string {
+	return "backup archives: source read failed" + self.stage.details()
+}
+
+func (self *backupArchiveReadError) Unwrap() error { return self.cause }
+
+// Preserve the existing error classifier and unobservable identity. An ended
+// owner keeps its lifecycle verdict and may carry an independently failed read.
+func splitBackupArchiveReadError(target string, err error) (error, string) {
+	if target != "observability/backup-archives" {
+		return err, ""
+	}
+	returned := err
+	ended, interrupted := err.(*signalContextError)
+	if interrupted {
+		returned = ended.sourceErr
+	}
+	failure, ok := returned.(*backupArchiveReadError)
+	if !ok || failure == nil {
+		return err, ""
+	}
+	if interrupted {
+		err = &signalContextError{contextErr: ended.contextErr, sourceErr: failure.cause}
+	} else {
+		err = failure.cause
+	}
+	return err, failure.stage.details()
+}
+
 func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	backupHosts := env.cfg.hostsWithRole("backup")
 	if len(backupHosts) == 0 {
@@ -640,7 +693,14 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		nil,
 		"curl -fsS --max-time 15 '"+queryURL+"'", mimirShellResponseMaxBytes)
 	if err != nil {
-		return nil, fmt.Errorf("backup archives: query Mimir through service gateways: %w", err)
+		// The gateway can return just the ended owner after a successful read.
+		if err == ctx.Err() {
+			return nil, err
+		}
+		return nil, &backupArchiveReadError{
+			stage: backupArchiveMimirQuery,
+			cause: fmt.Errorf("backup archives: query Mimir through service gateways: %w", err),
+		}
 	}
 
 	var response mimirInstantResponse
@@ -669,9 +729,15 @@ func (backupArchivesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	now := env.now().UTC()
 	writers := make(map[string]backupArchiveWriterObservation, len(backupHosts))
 	for _, host := range backupHosts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		output, err := env.runner.shell(ctx, host, backupArchiveWriterCommand)
 		if err != nil {
-			return nil, fmt.Errorf("backup archives: inspect writer on %s: %w", host.name, err)
+			return nil, &backupArchiveReadError{
+				stage: backupArchiveWriterRead,
+				cause: fmt.Errorf("backup archives: inspect writer on %s: %w", host.name, err),
+			}
 		}
 		writer, err := parseBackupArchiveWriterObservation(host.name, output)
 		if err != nil {
