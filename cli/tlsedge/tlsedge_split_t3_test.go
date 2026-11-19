@@ -15,11 +15,12 @@ package main
 // it platform, unknown and absent SNI go to the http branch and user SNI to tlsedge; removing the host withdraws its
 // route at lbmap's next load, its hello reaching the http branch again.
 //
-// What waits (TLS-M6-07's rest): FS-122's clauses, an lbmap stopped and nginx -t refusing past 15 and 20 min on a fake
-// clock, map-stale, a restart with an old map, the dns API down at start, three adds and a remove in one window, a
-// restore, a false report, a dropped host, route probes; FS-41's and FS-42's custom-host steps; 17.6's challenge
-// routing and eligibility rows on T3; two lb interfaces. The test steps on lbmap's own reports, never on a sleep; a real
-// timer is only a guard.
+// FS-122 here: the version's route probe reaching tlsedge and no listener, an lb restarted with an old map file loading
+// the current version before it serves 443, and the dns API down at start leaving the split on no version until it
+// answers. What waits (TLS-M6-07's rest): FS-122's other clauses, an lbmap stopped and nginx -t refusing past 15 and 20
+// min on a fake clock, map-stale, three adds and a remove in one window, a restore, a false report and a dropped host;
+// FS-41's and FS-42's custom-host steps; 17.6's challenge routing and eligibility rows on T3; two lb interfaces. The
+// tests step on lbmap's own reports, never on a sleep; a real timer is only a guard.
 
 import (
 	"bufio"
@@ -46,6 +47,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"text/template"
@@ -54,6 +56,7 @@ import (
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/sidecartest"
+	"github.com/urnetwork/sidecar/tlsedgeservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/dnshost"
@@ -265,6 +268,35 @@ type t3Split struct {
 	platform   *x509.CertPool
 	custom     map[string]tls.Certificate
 	customPool *x509.CertPool
+	// the lb binary and the environment it runs in
+	lb  string
+	env []string
+	// while set, the dns API answers 503 to everything, as one that is down
+	apiDown atomic.Bool
+
+	stateLock sync.Mutex
+	// the running lb, nil while stopped
+	command *exec.Cmd
+	exited  chan struct{}
+	output  *t3SplitOutput
+}
+
+// What the lb and its nginx wrote, kept for a failure's log.
+type t3SplitOutput struct {
+	stateLock sync.Mutex
+	buffer    bytes.Buffer
+}
+
+func (self *t3SplitOutput) Write(b []byte) (int, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.buffer.Write(b)
+}
+
+func (self *t3SplitOutput) String() string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.buffer.String()
 }
 
 // A free loopback port.
@@ -375,6 +407,10 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 	t.Cleanup(api.Close)
 	handler := api.Handler()
 	apiServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if split.apiDown.Load() {
+			http.Error(writer, "down", http.StatusServiceUnavailable)
+			return
+		}
 		if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/custom-host-map/applied") {
 			body, _ := io.ReadAll(request.Body)
 			report := &struct {
@@ -447,8 +483,8 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 		t.Fatal(err)
 	}
 
-	command := exec.Command(lb)
-	command.Env = append(os.Environ(),
+	split.lb = lb
+	split.env = append(os.Environ(),
 		"PATH="+filepath.Dir(nginx)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"WARP_BLOCK="+t3SplitInterface,
 		"WARP_LB_CONFIG_DIR="+prefixDir,
@@ -457,14 +493,27 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 		"WARP_LBMAP_API_URL="+apiServer.URL,
 		"WARP_LBMAP_LOAD_DELAY=0s",
 		"WARP_LBMAP_RELOAD_MIN_INTERVAL=0s",
-		"WARP_LBMAP_START_TIMEOUT=10s",
+		"WARP_LBMAP_START_TIMEOUT=2s",
 		"WARP_LBMAP_POLL_TIMEOUT=1s",
 		"WARP_LBMAP_POLL_MIN_INTERVAL=0s",
 	)
+	t.Cleanup(func() {
+		split.stopLb()
+	})
+	return split
+}
+
+// Starts the lb process and returns once its nginx listens, after lbmap reported version when it is above 0: lbmap
+// loads the newest version before nginx serves 443, so a report of it means the first connection routes by it.
+func (self *t3Split) startLb(version uint64) {
+	t := self.world.t
+	t.Helper()
+	command := exec.Command(self.lb)
+	command.Env = self.env
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
+	output := &t3SplitOutput{}
+	command.Stdout = output
+	command.Stderr = output
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -473,27 +522,19 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 		command.Wait()
 		close(exited)
 	}()
-	t.Cleanup(func() {
-		// the lb and its nginx, a drain past the test's need, end with their group
-		syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		<-exited
-		if t.Failed() {
-			t.Logf("the lb's output:\n%s", server.ScrubAddrsText(output.String()))
-		}
-	})
-	version, err := model.GetDnsCustomHostMap(world.ctx, world.root)
-	if err != nil {
-		t.Fatal(err)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.command, self.exited, self.output = command, exited, output
+	}()
+	if 0 < version {
+		self.reports.await(t, version)
 	}
-	if version != nil {
-		split.reports.await(t, version.Version)
-	}
-	// nginx serves once its listener answers; lbmap's report came after its load, before nginx started
 	guard := time.Now().Add(t3EdgeGuardTimeout)
 	for {
-		if conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", split.port)); err == nil {
+		if conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", self.port)); err == nil {
 			conn.Close()
-			break
+			return
 		}
 		select {
 		case <-exited:
@@ -505,7 +546,38 @@ func newT3Split(t testing.TB, world *t3EdgeWorld, customHosts []string) *t3Split
 		}
 		runtime.Gosched()
 	}
-	return split
+}
+
+// Ends the lb and its nginx with their process group, at once: a drain is past what a test needs.
+func (self *t3Split) stopLb() {
+	command, exited, output := func() (*exec.Cmd, chan struct{}, *t3SplitOutput) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		command, exited, output := self.command, self.exited, self.output
+		self.command, self.exited, self.output = nil, nil, nil
+		return command, exited, output
+	}()
+	if command == nil {
+		return
+	}
+	syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	<-exited
+	if self.world.t.Failed() {
+		self.world.t.Logf("the lb's output:\n%s", server.ScrubAddrsText(output.String()))
+	}
+}
+
+// The newest custom-host map's version, 0 before any.
+func (self *t3Split) mapVersion() uint64 {
+	self.world.t.Helper()
+	customHostMap, err := model.GetDnsCustomHostMap(self.world.ctx, self.world.root)
+	if err != nil {
+		self.world.t.Fatal(err)
+	}
+	if customHostMap == nil {
+		return 0
+	}
+	return customHostMap.Version
 }
 
 // The device's end: TLS on the custom host's own certificate for its name and the network's otherwise, acme-tls/1
@@ -597,6 +669,22 @@ func (self *t3Split) reachesPlatform(serverName string) bool {
 	return string(body) == t3SplitPlatformPage
 }
 
+// What the split answers bytes sent raw over TCP, read until it closes.
+func (self *t3Split) raw(hello []byte) []byte {
+	self.world.t.Helper()
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", self.port))
+	if err != nil {
+		self.world.t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(t3EdgeGuardTimeout))
+	if _, err := conn.Write(hello); err != nil {
+		self.world.t.Fatal(err)
+	}
+	answer, _ := io.ReadAll(conn)
+	return answer
+}
+
 // FS-35 through the real splitter, lbmap and tlsedge: a registered custom host's hello reaches the device and completes
 // TLS on its key, its acme-tls/1 hello too, with Find carrying the host; platform, unknown and absent SNI stay with the
 // http branch and user SNI goes to tlsedge; removing the host withdraws its route at lbmap's next load.
@@ -616,6 +704,7 @@ func TestT3Fs35CustomHostThroughTheRealSplitter(t *testing.T) {
 		}
 		world.reloadNames()
 		split := newT3Split(t, world, []string{host})
+		split.startLb(version)
 
 		// the custom host, to the device on its own certificate, with Find's server name
 		if !split.reachesDevice(host, []string{"h2", "http/1.1"}, split.customPool) {
@@ -655,6 +744,17 @@ func TestT3Fs35CustomHostThroughTheRealSplitter(t *testing.T) {
 		if len(world.dial.Requests()) != dials {
 			t.Fatal("a platform, unknown or absent SNI reached Find")
 		}
+		// the version's route probe goes to tlsedge, which answers it unrecognized_name and reaches no listener (§13.4)
+		customHostMap, err := model.GetDnsCustomHostMap(world.ctx, world.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if answer := split.raw(t3EdgeHello(t, dnsservice.DnsCustomHostMapProbeName(customHostMap.Digest), []string{"ur-route-probe", "http/1.1"})); !bytes.Equal(answer, t3EdgeAlert(tlsedgeservice.TlsAlertUnrecognizedName)) {
+			t.Fatalf("the route probe answered %x", answer)
+		}
+		if len(world.dial.Requests()) != dials {
+			t.Fatal("the route probe reached Find")
+		}
 
 		// the removal withdraws the route at lbmap's next load
 		removed := world.unmapCustomHost(host)
@@ -665,6 +765,79 @@ func TestT3Fs35CustomHostThroughTheRealSplitter(t *testing.T) {
 		}
 		if len(world.dial.Requests()) != dials {
 			t.Fatal("the removed host reached Find")
+		}
+	})
+}
+
+// FS-122's restart clause: an lb restarted with an old map file loads the current version before its nginx serves 443,
+// so a host added while it was down routes from the first connection on.
+func TestT3Fs122AnLbRestartedOnAnOldMapLoadsTheCurrentVersionFirst(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		world := newT3EdgeWorld(t, nil)
+		suffix := make([]byte, 4)
+		if _, err := rand.Read(suffix); err != nil {
+			t.Fatal(err)
+		}
+		first := fmt.Sprintf("app.corp-%x.example", suffix)
+		second := fmt.Sprintf("shop.corp-%x.example", suffix)
+		version := world.mapCustomHost(first)
+		world.reloadNames()
+		split := newT3Split(t, world, []string{first, second})
+		split.startLb(version)
+		if !split.reachesDevice(first, []string{"h2"}, split.customPool) {
+			t.Fatal("the first host did not route")
+		}
+
+		// the lb stops; a host is added; it starts again on the map file it left
+		split.stopLb()
+		version = world.mapCustomHost(second)
+		world.reloadNames()
+		split.startLb(version)
+		if !split.reachesDevice(second, []string{"h2"}, split.customPool) {
+			t.Fatal("a host added while the lb was down did not route from its restart's first connection")
+		}
+		if !split.reachesDevice(first, []string{"h2"}, split.customPool) {
+			t.Fatal("the old map's host stopped routing")
+		}
+	})
+}
+
+// FS-122's outage clause: with the dns API down at start, nginx still starts on the map it holds, none at a first
+// start, so the interface is current for no version and a custom host's hello reaches the http branch, platform names
+// routing as ever; once the API answers, lbmap's next poll loads the version and the host routes.
+func TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		world := newT3EdgeWorld(t, nil)
+		suffix := make([]byte, 4)
+		if _, err := rand.Read(suffix); err != nil {
+			t.Fatal(err)
+		}
+		host := fmt.Sprintf("app.corp-%x.example", suffix)
+		version := world.mapCustomHost(host)
+		world.reloadNames()
+		split := newT3Split(t, world, []string{host})
+		split.apiDown.Store(true)
+		split.startLb(0)
+		if !split.reachesPlatform(t3SplitPlatformHost + "." + world.root) {
+			t.Fatal("a platform name did not route with the dns API down")
+		}
+		if !split.reachesPlatform(host) {
+			t.Fatal("a custom host routed with no version loaded")
+		}
+		split.reports.stateLock.Lock()
+		reported := len(split.reports.versions)
+		split.reports.stateLock.Unlock()
+		if reported != 0 {
+			t.Fatalf("lbmap reported %d versions with the API down", reported)
+		}
+		split.apiDown.Store(false)
+		split.reports.await(t, version)
+		if !split.reachesDevice(host, []string{"h2"}, split.customPool) {
+			t.Fatal("the host did not route once its version loaded")
 		}
 	})
 }
