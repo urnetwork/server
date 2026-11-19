@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -497,6 +498,87 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 		if releasedQuic.conn == servedConn {
 			t.Fatal("the front returned the window of a connection connect's handler served")
 		}
+	}
+}
+
+// The results the env's QUIC connections are counted with, as "<port kind>
+// <result>".
+func observeTestFrontConnectionResults(env *testFrontEnv) chan string {
+	results := make(chan string, 64)
+	env.settings.connectionResultObserverForTest = func(portKind string, result string) {
+		select {
+		case results <- portKind + " " + result:
+		default:
+		}
+	}
+	return results
+}
+
+// The next result a QUIC connection was counted with.
+func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
+	t.Helper()
+	select {
+	case result := <-results:
+		return result
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("no QUIC connection was counted")
+		return ""
+	}
+}
+
+// A connection is counted with the result the front decided for it: an
+// unknown name whose handshake never completes is a failed handshake, and
+// only one whose handshake completed is refused with 0x1000 and counted as
+// an unknown name. The first client refuses the handshake only once the
+// front has dispatched its connection, so the front decides while the
+// handshake is still under way.
+func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
+	var results chan string
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		results = observeTestFrontConnectionResults(env)
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+
+	refuse := make(chan struct{})
+	tlsConfig := env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
+	tlsConfig.InsecureSkipVerify = true
+	tlsConfig.VerifyConnection = func(tls.ConnectionState) error {
+		<-refuse
+		return errors.New("the test's client refuses the handshake")
+	}
+	dialed := make(chan error, 1)
+	go func() {
+		conn, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
+		if err == nil {
+			conn.CloseWithError(0, "")
+		}
+		dialed <- err
+	}()
+	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassUnknown {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+	close(refuse)
+	select {
+	case err := <-dialed:
+		if err == nil {
+			t.Fatal("the refused handshake completed")
+		}
+	case <-time.After(testFrontProgressTimeout):
+		t.Fatal("the refusing dial never ended")
+	}
+	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultHandshakeFailed {
+		t.Fatalf("an unknown name whose handshake failed counted as %q", result)
+	}
+
+	tlsConfig = env.clientTlsConfig(testFrontUnknownName, []string{http3.NextProtoH3})
+	tlsConfig.InsecureSkipVerify = true
+	conn, err := env.dialQuicFrom(env.clientPacketConn(address), address, frontPortQuic, tlsConfig)
+	if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeUnknownServerName {
+		t.Fatalf("closed with %#x", code)
+	}
+	env.nextDispatch()
+	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultUnknownName {
+		t.Fatalf("an unknown name refused with 0x1000 counted as %q", result)
 	}
 }
 

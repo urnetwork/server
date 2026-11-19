@@ -40,19 +40,23 @@ var frontSocketBindFailuresCounter = prometheus.NewCounterVec(
 )
 
 // Results of an accepted public QUIC connection, as the metric labels them.
+// Each connection counts once, when the front decides it.
 const (
-	// served by connect in-process
+	// handed to connect's handler in-process, counted at the hand-off; the
+	// handler serves it, or refuses it while it drains or closes, and counts
+	// its own refusals
 	frontQuicResultConnect = "connect"
 	// served by the h3 api front
 	frontQuicResultApi = "api"
-	// a name the front doesn't serve on QUIC, closed with 0x1000
+	// a name the front doesn't serve on QUIC, closed with 0x1000 once its
+	// handshake completed
 	frontQuicResultUnknownName = "unknown_name"
 	// over the per-address connection cap, or of an unreadable address,
 	// closed with 0x1001
 	frontQuicResultRateLimited = "rate_limited"
 	// the handshake never completed
 	frontQuicResultHandshakeFailed = "handshake_failed"
-	// the front or connect's handler was closing
+	// an api connection arriving while the front closes
 	frontQuicResultClosing = "closing"
 	// an api connection arriving while the front drains
 	frontQuicResultDraining = "draining"
@@ -63,7 +67,7 @@ var frontQuicConnectionsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "front_quic_connections_total",
-		Help:      "Accepted public lb_alt QUIC connections by port kind and result: connect, api, unknown_name (0x1000), rate_limited (0x1001), handshake_failed, closing, draining",
+		Help:      "Accepted public lb_alt QUIC connections by port kind and result: connect (handed to connect's handler), api, unknown_name (0x1000 after the handshake), rate_limited (0x1001), handshake_failed, closing and draining (api connections the front no longer serves)",
 	},
 	[]string{"port", "result"},
 )

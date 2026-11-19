@@ -217,11 +217,12 @@ func (self *frontQuicRun) serverName(conn *quic.Conn) string {
 // the server's handshake flight arrives without its code (RFC 9000 §10.2.3),
 // and the code is what tells a client this refusal from a failure.
 func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
-	self.countConnection(frontQuicResultUnknownName)
 	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
+		self.countConnection(frontQuicResultHandshakeFailed)
 		conn.CloseWithError(0, "")
 		return
 	}
+	self.countConnection(frontQuicResultUnknownName)
 	conn.CloseWithError(frontQuicErrorCodeUnknownServerName, "unknown server name")
 }
 
@@ -231,6 +232,11 @@ func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
 // packets at its address, so a spoofed source can't take a victim's slots.
 // Reports whether connect's handler served the connection, and so owns
 // returning its window.
+//
+// The connection counts as connect's when it is handed over, so the count
+// follows accepts rather than each resident's lifetime. What the handler then
+// does with it, serving it or refusing it while it drains or closes, is
+// connect's to count.
 func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
 	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
 		self.countConnection(frontQuicResultHandshakeFailed)
@@ -432,4 +438,7 @@ func closeFrontApiServers(apiServers []*http3.Server, timeout time.Duration) {
 // Counts one accepted connection's result.
 func (self *frontQuicRun) countConnection(result string) {
 	frontQuicConnectionsCounter.WithLabelValues(self.socket.key.portKind, result).Inc()
+	if observer := self.frontServer.settings.connectionResultObserverForTest; observer != nil {
+		observer(self.socket.key.portKind, result)
+	}
 }

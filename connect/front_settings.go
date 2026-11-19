@@ -77,6 +77,9 @@ type FrontServerSettings struct {
 	// Nil outside package tests. Called with the name and class an accepted
 	// QUIC connection was dispatched by, before its front is entered.
 	dispatchObserverForTest func(serverName string, nameClass nginx.NameClass)
+	// Nil outside package tests. Called with the port kind and result each
+	// accepted QUIC connection is counted with, as it is counted.
+	connectionResultObserverForTest func(portKind string, result string)
 	// Nil outside package tests. Called with the port kind and kind of each
 	// message a public HTTP server wrote to its error log, as it is counted,
 	// and the text the front logged for it, empty when it logged nothing.
