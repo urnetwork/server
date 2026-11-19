@@ -620,6 +620,7 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 		exchange.response.headers.corsAllowOrigin = location.service.cors.allowOrigin(r)
 		if r.Method == http.MethodOptions {
 			exchange.response.headers.preflight = true
+			exchange.boundUnreadBody()
 			exchange.writer().WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -778,10 +779,31 @@ func (self *routeHttpExchange) writer() http.ResponseWriter {
 	return self.response.writer()
 }
 
+// Before the front writes an answer of its own on h1, bounds the read Go's
+// server makes then of a body the request left unread, at most 256 KiB, by
+// HttpSettings.LingeringTimeout, nginx's lingering_timeout, as the
+// forwarder's refusals are bounded (upstreamGroup.refuse). Unbounded, a
+// client that stops sending its body would hold the answer, the request's
+// slot and the connection for as long as it stays connected. A read cut by
+// the bound has Go's server close the connection after the answer. h2 and h3
+// answer without reading.
+func (self *routeHttpExchange) boundUnreadBody() {
+	if self.r.ProtoMajor != 1 || self.r.ContentLength == 0 {
+		return
+	}
+	// a deadline already passed cuts the read at once
+	lingeringDeadline := time.Unix(1, 0)
+	if lingeringTimeout := self.front.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
+		lingeringDeadline = time.Now().Add(lingeringTimeout)
+	}
+	http.NewResponseController(self.writer()).SetReadDeadline(lingeringDeadline)
+}
+
 // Answers with the front's own response for a status: text, not nginx's
 // html pages (LBALT-IMPL.md §4). On h1, a 400, 413, 414, 500 or 501 closes
 // the connection, as nginx's own responses of those statuses do.
 func (self *routeHttpExchange) respondError(statusCode int) {
+	self.boundUnreadBody()
 	writer := self.writer()
 	header := writer.Header()
 	body := http.StatusText(statusCode) + "\n"
@@ -803,6 +825,7 @@ func (self *routeHttpExchange) respondError(statusCode int) {
 
 // Answers a 301 to location.
 func (self *routeHttpExchange) redirect(location string) {
+	self.boundUnreadBody()
 	writer := self.writer()
 	header := writer.Header()
 	body := http.StatusText(http.StatusMovedPermanently) + "\n"
@@ -820,6 +843,7 @@ func (self *routeHttpExchange) respondLbStatus() {
 		self.respondError(http.StatusMethodNotAllowed)
 		return
 	}
+	self.boundUnreadBody()
 	writer := self.writer()
 	header := writer.Header()
 	header.Set("Content-Type", responseStatusJsonContentType)

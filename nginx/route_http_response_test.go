@@ -2,7 +2,8 @@ package nginx
 
 // Tests of what the handlers add to responses: the CORS matrix, the security
 // headers on every status and on a hijacked upgrade's 101, gzip as nginx's
-// defaults, Connection: close while draining, and the access log.
+// defaults, Connection: close while draining, the access log, and the bound
+// on reading an unread body before the front's own answers.
 
 import (
 	"bufio"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // The CORS headers a response must have: the echoed or wildcard origin, or
@@ -528,5 +530,66 @@ func TestRouteHttpHijackedUpgradeCarriesTheAlwaysHeaders(t *testing.T) {
 	}
 	if forwards := testFront.forwarders["mcp"].recordedForwards(); len(forwards) != 2 {
 		t.Errorf("%d upgrades forwarded, want 2", len(forwards))
+	}
+}
+
+// On h1, before the front writes an answer of its own, Go's server reads
+// the body the request left unread, up to 256 KiB, so a client that stops
+// sending its body would hold the answer, and the request, for as long as
+// it stays connected. The front bounds that read by LingeringTimeout, as
+// nginx bounds its lingering reads: a 404, a 403 and a 301 to a request
+// whose body stalls after its first bytes arrive after LingeringTimeout,
+// with Connection: close, and the connection closes. A body sent whole is
+// read and the connection kept.
+func TestRouteHttpOwnAnswerBoundsTheReadOfAnUnreadBody(t *testing.T) {
+	const lingeringTimeout = 200 * time.Millisecond
+	const answerBound = 3 * time.Second
+	settings := testFrontSettings()
+	settings.Http.LingeringTimeout = lingeringTimeout
+	testFront := newTestFront(t, loadTestRouteTable(t), settings)
+	server := newTestConfiguredServer(t, testFront, false)
+
+	cases := []struct {
+		host       string
+		target     string
+		statusCode int
+	}{
+		{host: "test-lb.service.example", target: "/hidden-example/missing", statusCode: http.StatusNotFound},
+		{host: "api.service.example", target: "/status", statusCode: http.StatusForbidden},
+		{host: "old-api.service.example", target: "/v1", statusCode: http.StatusMovedPermanently},
+	}
+	for _, c := range cases {
+		client := dialTestServerH1Client(t, server.Listener.Addr().String())
+		client.conn.SetDeadline(time.Now().Add(answerBound))
+		start := time.Now()
+		// 10 of the 1000 bytes the request declares
+		fmt.Fprintf(client.conn, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 1000\r\n\r\n0123456789", c.target, c.host)
+		response, err := http.ReadResponse(client.reader, nil)
+		if err != nil {
+			t.Fatalf("%s%s with a stalled body: no answer: %v", c.host, c.target, err)
+		}
+		answerTime := time.Since(start)
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != c.statusCode || !response.Close || answerTime < lingeringTimeout {
+			t.Errorf("%s%s with a stalled body = %d, Connection close %t, after %s; want %d with Connection: close after LingeringTimeout %s", c.host, c.target, response.StatusCode, response.Close, answerTime, c.statusCode, lingeringTimeout)
+		}
+		if !client.closedByServer() {
+			t.Errorf("%s%s with a stalled body: the connection was kept", c.host, c.target)
+		}
+	}
+
+	client := dialTestServerH1Client(t, server.Listener.Addr().String())
+	for i := range 2 {
+		fmt.Fprintf(client.conn, "POST /status HTTP/1.1\r\nHost: api.service.example\r\nContent-Length: 10\r\n\r\n0123456789")
+		response, err := http.ReadResponse(client.reader, nil)
+		if err != nil {
+			t.Fatalf("request %d with a whole body: %v", i+1, err)
+		}
+		io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden || response.Close {
+			t.Errorf("request %d with a whole body = %d, Connection close %t; want 403 on a kept connection", i+1, response.StatusCode, response.Close)
+		}
 	}
 }
