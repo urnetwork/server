@@ -5,10 +5,23 @@ package model
 // queries Postgres (I-12), and POST /mail/enable's write.
 //
 //   - <net> is the SNI's routable part (MailRouteName): a network's label or
-//     its alias, which mx.<net>.<root> names. A Team scope's and a custom MX
-//     host's keys are named by the same function and written by nothing yet:
-//     scope routes wait on team_mail's member scopes (MAIL-M10-04) and custom
-//     MX hosts on §12.8's custom-host rows, so both route nothing.
+//     its alias, which mx.<net>.<root> names, or a Team scope's <scope>.<net>,
+//     which mx.<scope>.<net>.<root> names. A custom MX host's keys are named by
+//     the same function and written by nothing yet: they wait on §12.8's
+//     custom-host rows, so they route nothing.
+//   - A Team scope's names (MAIL-M8-09; owner decisions 40, 58) route to host
+//     mx.<scope>, its receivers smtp/25/mx.<scope>'s alone, for each scope the
+//     network's signed projection lists (DnsScopeLabelSource, the one source
+//     POST /dns/key-record holds a scope to), under the label and each live
+//     alias, once a receiver's key for mx.<scope> is published: §7.9's
+//     team_mail: member scopes is sealed in the config, so its server-side
+//     trace is a scope receiver's post, which only the scope member's
+//     consented devices make (POST /dns/key-record's gate) and only under
+//     member scopes. A scope with no published key, one the projection no
+//     longer lists, and every scope while the process reads no scope labels,
+//     route nothing, their keys deleted where mail_host_key still names their
+//     host. A direct MX repoints only the network's own mx, so it leaves scope
+//     routes as they are; a suspension or a withheld mx.<scope> takes them.
 //   - The value is one JSON MailRoute, mxedgeservice.MailRoute's bytes: the
 //     network, its live label, which the router's stream target names even
 //     for an alias, the host its receivers listen at (mx), flags, and the
@@ -40,6 +53,7 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -171,8 +185,11 @@ type mailRouteChange struct {
 	removed []string
 }
 
-// One network's routes as Postgres has them now, in one read-only snapshot.
+// One network's routes as Postgres has them now, in one read-only snapshot, and
+// its Team scopes' as the process's scope source lists them (see the file
+// header), read from memory before the snapshot.
 func readMailRouteChange(ctx context.Context, networkId server.Id, root string, settings *MailRouteSettings) *mailRouteChange {
+	scopeLabels, scopesKnown := dnsNetworkScopeLabels(ctx, networkId)
 	change := &mailRouteChange{routes: map[string]*MailRoute{}}
 	server.Tx(ctx, func(tx server.PgTx) {
 		change.routes = map[string]*MailRoute{}
@@ -197,10 +214,62 @@ func readMailRouteChange(ctx context.Context, networkId server.Id, root string, 
 				labels = append(labels, row)
 			}
 		})
+
+		// each scope host's published receivers, newest first, and every scope a key names in any state, so a
+		// scope that stops routing has its names deleted
+		scopeReceiverIds := map[string][]server.Id{}
+		scopes := []string{}
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT host, receiver_sidecar_id, state FROM mail_host_key
+				WHERE network_id = $1 AND host <> $2
+				ORDER BY publish_time DESC, receiver_sidecar_id, spki_sha256
+			`,
+			networkId,
+			mailRouteHost,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var host string
+				var receiverSidecarId server.Id
+				var state string
+				server.Raise(result.Scan(&host, &receiverSidecarId, &state))
+				scope, found := strings.CutPrefix(host, mailRouteHost+".")
+				if !found || !isDnsCtLabel(scope) {
+					continue
+				}
+				if !slices.Contains(scopes, scope) {
+					scopes = append(scopes, scope)
+				}
+				receivers := scopeReceiverIds[scope]
+				if state == string(MailHostKeyStatePublished) && !slices.Contains(receivers, receiverSidecarId) && len(receivers) < settings.ReceiverMaxCount {
+					scopeReceiverIds[scope] = append(receivers, receiverSidecarId)
+				}
+			}
+		})
+		if scopesKnown {
+			for _, scope := range scopeLabels {
+				if isDnsCtLabel(scope) && !slices.Contains(scopes, scope) {
+					scopes = append(scopes, scope)
+				}
+			}
+		}
+		slices.Sort(scopes)
+
+		// what routes nothing: every name the network's labels and scopes name
 		for _, row := range labels {
 			change.removed = append(change.removed, row.label)
+			for _, scope := range scopes {
+				change.removed = append(change.removed, scope+"."+row.label)
+			}
 		}
 		if getMailNetworkInQuerier(ctx, tx, networkId) == nil {
+			return
+		}
+		// suspended while the reason is set, a passed until included, as a write
+		// to the zone is refused until the lift (getDnsZoneSuspendedInTx)
+		if getDnsZoneSuspendedInTx(ctx, tx, root, networkId) {
 			return
 		}
 
@@ -212,15 +281,7 @@ func readMailRouteChange(ctx context.Context, networkId server.Id, root string, 
 			string(MailDirectMxStateVerified),
 			string(MailDirectMxStateFailing),
 		).Scan(&directMx))
-		if directMx {
-			return
-		}
 
-		// suspended while the reason is set, a passed until included, as a write
-		// to the zone is refused until the lift (getDnsZoneSuspendedInTx)
-		if getDnsZoneSuspendedInTx(ctx, tx, root, networkId) {
-			return
-		}
 		withheld := []string{}
 		result, err = tx.Query(
 			ctx,
@@ -266,13 +327,16 @@ func readMailRouteChange(ctx context.Context, networkId server.Id, root string, 
 				networkLabel = row.label
 			}
 		}
+		// whether a name's mail host routes: its label live, the network's label known, and nothing withholding it
+		hostRoutes := func(row *labelRow, mailHost string) bool {
+			return row.state == DnsLabelStateLive && networkLabel != "" &&
+				!slices.ContainsFunc(withheld, func(owner string) bool { return dnsOwnerAtOrBelow(mailHost, owner) })
+		}
 
 		change.removed = nil
 		for _, row := range labels {
-			mailHost := mailRouteHost + "." + row.label + "." + root
-			routes := row.state == DnsLabelStateLive && networkLabel != "" &&
-				!slices.ContainsFunc(withheld, func(owner string) bool { return dnsOwnerAtOrBelow(mailHost, owner) })
-			if !routes {
+			// a direct MX points the network's own mx at its receivers (§12.8), so the routers carry none of it
+			if directMx || !hostRoutes(row, mailRouteHost+"."+row.label+"."+root) {
 				change.removed = append(change.removed, row.label)
 				continue
 			}
@@ -281,6 +345,28 @@ func readMailRouteChange(ctx context.Context, networkId server.Id, root string, 
 				route.Flags |= MailRouteFlagAlias
 			}
 			change.routes[row.label] = route
+		}
+		for _, scope := range scopes {
+			receivers := scopeReceiverIds[scope]
+			listed := scopesKnown && slices.Contains(scopeLabels, scope)
+			for _, row := range labels {
+				name := scope + "." + row.label
+				if !listed || len(receivers) == 0 || !hostRoutes(row, mailRouteHost+"."+name+"."+root) {
+					change.removed = append(change.removed, name)
+					continue
+				}
+				route := &MailRoute{
+					NetworkId:          networkId,
+					Label:              networkLabel,
+					Host:               mailRouteHost + "." + scope,
+					Flags:              MailRouteFlagScope,
+					ReceiverSidecarIds: receivers,
+				}
+				if row.kind == DnsLabelKindAlias {
+					route.Flags |= MailRouteFlagAlias
+				}
+				change.routes[name] = route
+			}
 		}
 	}, pgx.ReadOnly, pgx.RepeatableRead)
 	return change

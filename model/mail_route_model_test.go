@@ -11,6 +11,7 @@ package model
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"errors"
 	"net/http"
@@ -24,6 +25,8 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
+	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
 )
@@ -388,11 +391,141 @@ func TestMailRouteListsPublishedReceiversAndDropsADirectMx(t *testing.T) {
 			}
 		})
 		projection, err = ProjectMailRoutes(ctx, networkId, root)
-		if err != nil || len(projection.Routed) != 0 || !slices.Equal(projection.Removed, []string{label}) || testMailRoute(t, ctx, label) != nil {
+		// the scope a key names but no scope source lists routes nothing either (MAIL-M8-09)
+		if err != nil || len(projection.Routed) != 0 || !slices.Equal(projection.Removed, []string{label, "eng." + label}) || testMailRoute(t, ctx, label) != nil {
 			t.Fatalf("a verified direct MX: %+v %v", projection, err)
 		}
 		if status, err := GetMailStatus(ctx, networkId); err != nil || !status.DirectMx || !status.Enabled {
 			t.Fatalf("status with a direct MX: %+v %v", status, err)
+		}
+	})
+}
+
+// The receiver's attestation of spki for a Team scope's mail host, over the scope's identifier set (§13.8).
+func (self *testDnsReceiver) attestScope(t testing.TB, networkId server.Id, root string, label string, scope string, spki []byte) []byte {
+	t.Helper()
+	identifierSet, err := sidecar.TlsIdentifierSet(strings.TrimSuffix(root, "."), label, scope, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setSha256, err := sidecar.TlsIdentifierSetHash(identifierSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spkiSha256 := sha256.Sum256(spki)
+	attestation := &protocol.TlsKeyAttestation{
+		NetworkId:           networkId.Bytes(),
+		SidecarId:           self.sidecarId.Bytes(),
+		SpkiSha256:          spkiSha256[:],
+		IdentifierSetSha256: setSha256[:],
+		IssueTimeMillis:     uint64(server.NowUtc().UnixMilli()),
+	}
+	signed, err := sidecar.SignTlsKeyAttestation(attestation, func(purpose string, signedType bridge.SignedType, body []byte, agentId *sidecar.Id) (*bridge.Signed, error) {
+		return &bridge.Signed{
+			Body:      body,
+			SignerId:  self.sidecarId.Bytes(),
+			Signature: ed25519.Sign(self.identityKey, bridge.SignedBytes(purpose, signedType, body)),
+			Type:      uint32(signedType),
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signed
+}
+
+// §22.7's Team scope rows on the route (MAIL-M8-09): a scope the projection
+// lists routes once its receiver's key is published, to host mx.eng, so SNI
+// mx.eng.<net>.<root> reaches only smtp/25/mx.eng's listeners, its value
+// listing the scope's receivers and none of the network's; the receiver's
+// removal drops its TLSA and, with no receiver left, the scope's route; a
+// scope the projection stops listing, and every scope with no source, route
+// nothing, the network's own route standing throughout.
+func TestMailRouteRoutesATeamScopeToItsOwnReceivers(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, apex := testDnsNetwork(t, ctx, root)
+		label := strings.TrimSuffix(apex, "."+root)
+		testDnsScopeSource(t, networkId, "eng")
+		if _, err := EnableMail(ctx, networkId, root); err != nil {
+			t.Fatal(err)
+		}
+		scopeName := "eng." + label
+		if name := MailRouteName(root, "mx.eng."+apex); name != scopeName {
+			t.Fatalf("the scope's SNI routes by %q", name)
+		}
+		if testMailRoute(t, ctx, scopeName) != nil {
+			t.Fatal("a scope with no published key routes")
+		}
+		member := newTestDnsReceiver(t, ctx, networkId)
+		network := newTestDnsReceiver(t, ctx, networkId)
+		if _, err := PublishDnsKeyRecord(ctx, &DnsKeyRecord{Root: root, NetworkId: networkId, ReceiverSidecarId: member.sidecarId, Request: &sidecar.DnsKeyRecordRequest{
+			Host: "mx.eng", Spki: member.spki, Attestation: member.attestScope(t, networkId, root, label, "eng", member.spki),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PublishDnsKeyRecord(ctx, &DnsKeyRecord{Root: root, NetworkId: networkId, ReceiverSidecarId: network.sidecarId, Request: &sidecar.DnsKeyRecordRequest{
+			Host: "mx", Spki: network.spki, Attestation: network.attest(t, networkId, root, label, network.spki),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		projection, err := ProjectMailRoutes(ctx, networkId, root)
+		if err != nil || len(projection.Routed) != 2 || !slices.Contains(projection.Routed, label) || !slices.Contains(projection.Routed, scopeName) {
+			t.Fatalf("projection %+v %v", projection, err)
+		}
+		route := testMailRoute(t, ctx, scopeName)
+		if route == nil || route.NetworkId != networkId || route.Label != label || route.Host != "mx.eng" || route.Flags != MailRouteFlagScope ||
+			!slices.Equal(route.ReceiverSidecarIds, []server.Id{member.sidecarId}) {
+			t.Fatalf("the scope's route %+v", route)
+		}
+		if own := testMailRoute(t, ctx, label); own == nil || own.Host != "mx" || !slices.Equal(own.ReceiverSidecarIds, []server.Id{network.sidecarId}) {
+			t.Fatalf("the network's route %+v", own)
+		}
+		if values := testDnsTlsaValues(t, ctx, root, networkId, "eng."+apex); len(values) != 1 {
+			t.Fatalf("the scope's TLSA %v", values)
+		}
+
+		// the member's receiver is removed: its TLSA goes in the deactivation's transaction, its route at the projection
+		removal := &Removal{Subjects: []*RemovalSubject{{NetworkId: networkId, Kind: sidecar.RevocationKindSidecar, SubjectId: member.sidecarId}}, Time: server.NowUtc()}
+		err = dnsCatchRefusal(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				if err := applyDnsTlsaRemovalEffectInTx(ctx, tx, removal); err != nil {
+					panic(dnsWriteRefusal{err: err})
+				}
+				if err := applyMailHostKeyRemovalEffectInTx(ctx, tx, removal); err != nil {
+					panic(dnsWriteRefusal{err: err})
+				}
+			}, server.TxReadCommitted)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if values := testDnsTlsaValues(t, ctx, root, networkId, "eng."+apex); len(values) != 0 {
+			t.Fatalf("the removed receiver's TLSA stayed: %v", values)
+		}
+		projection, err = ProjectMailRoutes(ctx, networkId, root)
+		if err != nil || !slices.Equal(projection.Routed, []string{label}) || !slices.Contains(projection.Removed, scopeName) || testMailRoute(t, ctx, scopeName) != nil {
+			t.Fatalf("after the removal %+v %v", projection, err)
+		}
+
+		// another of the member's devices posts its key, then the scope leaves the projection
+		next := newTestDnsReceiver(t, ctx, networkId)
+		if _, err := PublishDnsKeyRecord(ctx, &DnsKeyRecord{Root: root, NetworkId: networkId, ReceiverSidecarId: next.sidecarId, Request: &sidecar.DnsKeyRecordRequest{
+			Host: "mx.eng", Spki: next.spki, Attestation: next.attestScope(t, networkId, root, label, "eng", next.spki),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ProjectMailRoutes(ctx, networkId, root); err != nil || testMailRoute(t, ctx, scopeName) == nil {
+			t.Fatalf("the next receiver's scope route: %v", err)
+		}
+		testDnsScopeSource(t, networkId)
+		if _, err := ProjectMailRoutes(ctx, networkId, root); err != nil || testMailRoute(t, ctx, scopeName) != nil {
+			t.Fatalf("a scope the projection no longer lists routes: %v", err)
+		}
+		t.Cleanup(SetDnsScopeLabelSource(nil))
+		if _, err := ProjectMailRoutes(ctx, networkId, root); err != nil || testMailRoute(t, ctx, scopeName) != nil || testMailRoute(t, ctx, label) == nil {
+			t.Fatalf("with no scope source: %v", err)
 		}
 	})
 }
