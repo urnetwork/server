@@ -23,7 +23,7 @@ import (
 
 // Sends raw request bytes to the front and reads the final response,
 // skipping informational ones.
-func rawFrontRequest(t *testing.T, front *testFront, rawRequest string) (*http.Response, []byte) {
+func rawFrontRequest(t *testing.T, front *testForwardFront, rawRequest string) (*http.Response, []byte) {
 	conn, err := net.Dial("tcp", front.server.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("dial front: %v", err)
@@ -57,10 +57,10 @@ func rawFrontRequest(t *testing.T, front *testFront, rawRequest string) (*http.R
 // query exactly as escaped.
 func TestForwardRequestContract(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("contract", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("contract", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	rawRequest := strings.Join([]string{
 		"POST /a/b%20c/../d?x=1&y=%2F HTTP/1.1",
@@ -155,10 +155,10 @@ func TestForwardedForAddresses(t *testing.T) {
 	}
 
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("forwarded-for", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("forwarded-for", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.clientAddrPort = netip.MustParseAddrPort("[2001:db8::10]:443")
 		return options
@@ -222,10 +222,10 @@ func TestNginxInet6Ntop(t *testing.T) {
 // sent exactly.
 func TestForwardRoutedHostAndPath(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("routed", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("routed", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.host = "api.service.example"
 		options.upstreamPath = "/v1/x%2Fy?z=1"
@@ -268,10 +268,10 @@ func TestForwardHost(t *testing.T) {
 // length is sent as one, as nginx's $proxy_internal_body_length.
 func TestForwardBodyFramingHeaders(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("framing", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("framing", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	rawFrontRequest(t, front, "GET / HTTP/1.1\r\nHost: framing.service.example\r\n\r\n")
 	rawFrontRequest(t, front, "POST / HTTP/1.1\r\nHost: framing.service.example\r\nContent-Length: 0\r\n\r\n")
@@ -291,10 +291,10 @@ func TestForwardBodyFramingHeaders(t *testing.T) {
 // length is unknown, with its length when declared.
 func TestForwardStreamedRouteHeaders(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("streamed-headers", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("streamed-headers", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
 		return options
@@ -322,10 +322,10 @@ func TestForwardStreamedRouteHeaders(t *testing.T) {
 // Upgrade only when it sent one, as nginx's websocket locations do.
 func TestForwardWebsocketServiceHeaders(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("websocket-headers", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("websocket-headers", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.websocket = true
 		return options
@@ -370,10 +370,10 @@ func TestForwardResponseHiddenHeaders(t *testing.T) {
 		header.Add("X-Upstream", "b")
 		io.WriteString(w, "body")
 	})
-	group, _ := newTestGroup(t, testRouteService("hidden", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("hidden", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodGet, front.url("/"), nil)
 	response, body, err := testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != "body" {
@@ -401,7 +401,7 @@ func TestForwardResponseHiddenHeaders(t *testing.T) {
 // A response head of exactly MaxUpstreamResponseHeaderBytes passes; one byte
 // more is a 502, never retried, as nginx's "upstream sent too big header".
 func TestForwardResponseHeadLimit(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	maxHeadBytes := settings.Forward.MaxUpstreamResponseHeaderBytes
 	headOfSize := func(size int) string {
 		prefix := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Fill: "
@@ -419,12 +419,12 @@ func TestForwardResponseHeadLimit(t *testing.T) {
 		raw := newRawUpstream(t)
 		other := newRecordingUpstream(t, "g2", nil)
 		serviceName := testServiceName("head-limit-" + strings.Repeat("x", c.headBytes-maxHeadBytes))
-		group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 			{name: "g1", weight: 1, port: raw.port},
 			{name: "g2", weight: 1, port: other.port},
 		}), settings)
 		// the first pick of two idle blocks of equal weight is the first
-		front := newTestFront(t, group, testForwardOptions)
+		front := newTestForwardFront(t, group, testForwardOptions)
 		responses := make(chan *http.Response, 1)
 		go func() {
 			request, _ := http.NewRequest(http.MethodGet, front.url("/"), nil)
@@ -483,10 +483,10 @@ func TestForwardResponseHeadSentBeforeBody(t *testing.T) {
 		<-release
 		io.WriteString(w, "data: late\n\n")
 	})
-	group, _ := newTestGroup(t, testRouteService("head-first", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("head-first", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodGet, front.url("/events"), nil)
 	response, err := testClient().Do(request)
 	if err != nil {
@@ -510,7 +510,7 @@ func TestForwardResponseHeadSentBeforeBody(t *testing.T) {
 // timeout still gets its answer. The hold is the subject here, so the test
 // waits out several read timeouts while the block stops reading.
 func TestForwardReadTimeoutArmsAfterRequestSent(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.ProxyReadTimeout = 100 * time.Millisecond
 	gotPart := make(chan struct{})
 	release := make(chan struct{})
@@ -526,10 +526,10 @@ func TestForwardReadTimeoutArmsAfterRequestSent(t *testing.T) {
 		io.WriteString(w, "done")
 	})
 	serviceName := testServiceName("read-timeout-armed")
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	type result struct {
 		response *http.Response
 		body     []byte
@@ -588,9 +588,9 @@ func TestForwardResponseContentLength(t *testing.T) {
 // flushes work on h2 as on h1.
 func TestForwardHttp2Client(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, bodyStore := newTestGroup(t, testRouteService("h2", []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService("h2", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	protos := make(chan string, 4)
 	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		protos <- r.Proto
@@ -660,10 +660,10 @@ func TestForwardStreamedBodyPassesThrough(t *testing.T) {
 	}
 	for _, c := range cases {
 		raw := newRawUpstream(t)
-		group, _ := newTestGroup(t, testRouteService(testServiceName("streamed-pass-through"), []testBlock{
+		group, _ := newTestGroup(t, testForwardRouteService(testServiceName("streamed-pass-through"), []testBlock{
 			{name: "g1", weight: 1, port: raw.port},
-		}), testFrontSettings())
-		front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+		}), testForwardFrontSettings())
+		front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 			options := testForwardOptions(r)
 			options.streamed = true
 			return options
@@ -698,13 +698,13 @@ func TestForwardStreamedBodyPassesThrough(t *testing.T) {
 // the handler aborts and the upstream connection is closed, rather than both
 // waiting on the client.
 func TestForwardSendTimeoutCutsStalledClient(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Http.SendTimeout = 200 * time.Millisecond
 	raw := newRawUpstream(t)
-	group, _ := newTestGroup(t, testRouteService(testServiceName("send-timeout-client"), []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("send-timeout-client"), []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("dial front: %v", err)
@@ -742,15 +742,15 @@ func TestForwardSendTimeoutCutsStalledClient(t *testing.T) {
 // mid-body: Go's server reads what remains of a body before it writes the
 // answer, and lingering_timeout bounds that read.
 func TestForwardRefusalAnswersWithinLingeringTimeout(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Body.MemoryBudgetBytes = 1
 	settings.Http.LingeringTimeout = 200 * time.Millisecond
 	serviceName := testServiceName("refusal-lingering")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	clientConn, err := net.Dial("tcp", front.server.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("dial front: %v", err)

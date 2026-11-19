@@ -22,7 +22,7 @@ import (
 type tunnelFixture struct {
 	raw           *rawUpstream
 	group         *upstreamGroup
-	front         *testFront
+	front         *testForwardFront
 	tunnelsOpened atomic.Int32
 	serviceName   string
 }
@@ -33,10 +33,10 @@ func newTunnelFixture(t *testing.T, serviceName string, settings *FrontSettings)
 		raw:         newRawUpstream(t),
 		serviceName: testServiceName(serviceName),
 	}
-	fixture.group, _ = newTestGroup(t, testRouteService(fixture.serviceName, []testBlock{
+	fixture.group, _ = newTestGroup(t, testForwardRouteService(fixture.serviceName, []testBlock{
 		{name: "g1", weight: 1, port: fixture.raw.port},
 	}), settings)
-	fixture.front = newTestFront(t, fixture.group, func(r *http.Request) forwardOptions {
+	fixture.front = newTestForwardFront(t, fixture.group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.websocket = true
 		options.tunnelOpened = func() {
@@ -106,7 +106,7 @@ func isClosedError(err error) bool {
 // hook runs once; serveHttp holds the request, and its block, until the
 // tunnel closes, then returns.
 func TestTunnelRelaysBothWays(t *testing.T) {
-	fixture := newTunnelFixture(t, "tunnel-relay", testFrontSettings())
+	fixture := newTunnelFixture(t, "tunnel-relay", testForwardFrontSettings())
 	clientConn, clientReader, upstreamConn, upstreamReader := fixture.open(t)
 
 	for _, message := range []string{"ping", "pong-longer", "x"} {
@@ -153,7 +153,7 @@ func blockActiveRequests(group *upstreamGroup, blockIndex int) int {
 
 // The block's end ends the tunnel too.
 func TestTunnelEndsWithTheBlock(t *testing.T) {
-	fixture := newTunnelFixture(t, "tunnel-block-end", testFrontSettings())
+	fixture := newTunnelFixture(t, "tunnel-block-end", testForwardFrontSettings())
 	_, clientReader, upstreamConn, _ := fixture.open(t)
 	io.WriteString(upstreamConn, "last")
 	upstreamConn.Close()
@@ -165,7 +165,7 @@ func TestTunnelEndsWithTheBlock(t *testing.T) {
 // With no bytes either way for ForwardSettings.StreamTimeout the tunnel
 // closes, as nginx's re-armed proxy_read_timeout closes it.
 func TestTunnelIdleTimeout(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.StreamTimeout = 100 * time.Millisecond
 	fixture := newTunnelFixture(t, "tunnel-idle", settings)
 	start := time.Now()
@@ -181,7 +181,7 @@ func TestTunnelIdleTimeout(t *testing.T) {
 // Bytes one way keep the tunnel open past the idle bound even when the
 // other way is silent, since nginx re-arms its timer on every event.
 func TestTunnelOneWayTrafficKeepsItOpen(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.StreamTimeout = 1 * time.Second
 	fixture := newTunnelFixture(t, "tunnel-one-way", settings)
 	_, clientReader, upstreamConn, _ := fixture.open(t)
@@ -206,7 +206,7 @@ func TestTunnelOneWayTrafficKeepsItOpen(t *testing.T) {
 // Closing the group cuts its tunnels: both sides end and serveHttp
 // returns.
 func TestTunnelCutByClose(t *testing.T) {
-	fixture := newTunnelFixture(t, "tunnel-close", testFrontSettings())
+	fixture := newTunnelFixture(t, "tunnel-close", testForwardFrontSettings())
 	_, clientReader, _, upstreamReader := fixture.open(t)
 	fixture.group.close()
 	readEnd(t, clientReader)
@@ -218,7 +218,7 @@ func TestTunnelCutByClose(t *testing.T) {
 // an ordinary response, and one that switches without being asked is a
 // 502, never retried.
 func TestTunnelSwitchOnlyWhenAsked(t *testing.T) {
-	fixture := newTunnelFixture(t, "tunnel-unasked", testFrontSettings())
+	fixture := newTunnelFixture(t, "tunnel-unasked", testForwardFrontSettings())
 	responses := make(chan *http.Response, 1)
 	go func() {
 		request, _ := http.NewRequest(http.MethodGet, fixture.front.url("/plain"), nil)
@@ -273,7 +273,7 @@ func writeFlood(conn net.Conn) chan error {
 // without progress, while the block still sends and the idle bound is far
 // off.
 func TestTunnelSendTimeoutCutsStalledClient(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Http.SendTimeout = 200 * time.Millisecond
 	fixture := newTunnelFixture(t, "tunnel-client-stall", settings)
 	_, clientReader, upstreamConn, _ := fixture.open(t)
@@ -297,7 +297,7 @@ func TestTunnelSendTimeoutCutsStalledClient(t *testing.T) {
 // nginx's proxy_send_timeout on websocket routes, though bytes the other way
 // keep the idle bound from passing.
 func TestTunnelStreamTimeoutCutsStalledBlock(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.StreamTimeout = 1 * time.Second
 	fixture := newTunnelFixture(t, "tunnel-block-stall", settings)
 	clientConn, clientReader, upstreamConn, _ := fixture.open(t)

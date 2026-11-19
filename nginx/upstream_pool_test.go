@@ -30,7 +30,7 @@ func requestConns(upstream *recordingUpstream) []string {
 
 // Sends a request through the front and waits for serveHttp to return, so
 // its connection is back in the pool.
-func sendAndWait(t *testing.T, front *testFront, path string) {
+func sendAndWait(t *testing.T, front *testForwardFront, path string) {
 	t.Helper()
 	request, _ := http.NewRequest(http.MethodGet, front.url(path), nil)
 	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusOK {
@@ -42,12 +42,12 @@ func sendAndWait(t *testing.T, front *testFront, path string) {
 // A connection serves keepalive_requests requests, then closes.
 func TestUpstreamPoolKeepaliveRequests(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	service := testRouteService("pool-requests", []testBlock{
+	service := testForwardRouteService("pool-requests", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	})
 	service.Keepalive.Requests = 2
-	group, _ := newTestGroup(t, service, testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	for range 3 {
 		sendAndWait(t, front, "/")
 	}
@@ -61,12 +61,12 @@ func TestUpstreamPoolKeepaliveRequests(t *testing.T) {
 // nginx's upstream without `keepalive`.
 func TestUpstreamPoolWithoutKeepalive(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	service := testRouteService("pool-none", []testBlock{
+	service := testForwardRouteService("pool-none", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	})
 	service.Keepalive.Connections = 0
-	group, _ := newTestGroup(t, service, testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	for range 3 {
 		sendAndWait(t, front, "/")
 	}
@@ -100,12 +100,12 @@ func TestUpstreamPoolEvictsLeastRecentlyUsed(t *testing.T) {
 		io.WriteString(w, "g1")
 	})
 	upstream.arrivals = arrivals
-	service := testRouteService("pool-evict", []testBlock{
+	service := testForwardRouteService("pool-evict", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	})
 	service.Keepalive.Connections = 1
-	group, _ := newTestGroup(t, service, testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	pool := group.blocks[0].pool
 	send := func(path string) *recordedRequest {
 		go func() {
@@ -145,11 +145,11 @@ func TestUpstreamPoolEvictsLeastRecentlyUsed(t *testing.T) {
 // closes, as nginx checks keepalive_time after each request.
 func TestUpstreamPoolIdleTimeoutAndKeepaliveTime(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	service := testRouteService("pool-time", []testBlock{
+	service := testForwardRouteService("pool-time", []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	})
-	group, _ := newTestGroup(t, service, testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	pool := group.blocks[0].pool
 
 	sendAndWait(t, front, "/first")
@@ -203,10 +203,10 @@ func waitReadable(t *testing.T, conn net.Conn) {
 func TestUpstreamPoolDropsClosedIdleConnection(t *testing.T) {
 	serviceName := testServiceName("pool-peek")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	pool := group.blocks[0].pool
 	sendAndWait(t, front, "/first")
 	pooledConn := idleConnsOf(t, pool, 1)[0].conn
@@ -293,10 +293,10 @@ func TestUpstreamStatefulRetryWalksForward(t *testing.T) {
 			upstreams[peers[i].name] = newRecordingUpstreamOn(t, peers[i].name, listener, nil)
 		}
 	}
-	service := testRouteService(testServiceName("stateful-walk"), testBlocks)
+	service := testForwardRouteService(testServiceName("stateful-walk"), testBlocks)
 	service.Stateful = true
-	group, _ := newTestGroup(t, service, testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.clientAddrPort = netip.MustParseAddrPort(clientKey + ":5000")
 		return options
@@ -368,16 +368,16 @@ func (self *deadlineConn) SyscallConn() (syscall.RawConn, error) {
 // it from the pool.
 func TestUpstreamPoolKeepsConnectionPastItsReadDeadline(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(testServiceName("pool-read-deadline"), []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("pool-read-deadline"), []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	dialedConns := make(chan *deadlineConn, 4)
 	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
 		dialedConn := &deadlineConn{Conn: conn}
 		dialedConns <- dialedConn
 		return dialedConn
 	})
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	sendAndWait(t, front, "/first")
 	// the time of any read deadline the first exchange left comes
@@ -395,14 +395,14 @@ func TestUpstreamPoolKeepsConnectionPastItsReadDeadline(t *testing.T) {
 // closes an idle connection past keepalive_timeout: the block sees it
 // close, and the pool is left empty.
 func TestUpstreamPoolSweepLoopClosesExpiredConnection(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.KeepaliveSweepInterval = 10 * time.Millisecond
 	raw := newRawUpstream(t)
-	service := testRouteService(testServiceName("pool-sweep-loop"), []testBlock{
+	service := testForwardRouteService(testServiceName("pool-sweep-loop"), []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 	})
 	group, _ := newTestGroup(t, service, settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	go func() {
 		request, _ := http.NewRequest(http.MethodGet, front.url("/"), nil)
 		testDo(t, request)
@@ -434,9 +434,9 @@ func TestUpstreamPoolSweepLoopClosesExpiredConnection(t *testing.T) {
 // connection, rather than cut it.
 func TestUpstreamFinishWaitsForLateWriteReport(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(testServiceName("finish-write-wait"), []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("finish-write-wait"), []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	dialedConns := make(chan *holdWriteConn, 1)
 	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
 		holdConn := newHoldWriteConn(t, conn)
@@ -449,7 +449,7 @@ func TestUpstreamFinishWaitsForLateWriteReport(t *testing.T) {
 		// never fires: only the write's report ends this wait
 		return nil
 	}
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	responses := make(chan string, 1)
 	go func() {
 		request, _ := http.NewRequest(http.MethodGet, front.url("/late-report"), nil)
@@ -486,8 +486,8 @@ func TestUpstreamFinishWaitsForLateWriteReport(t *testing.T) {
 // closed rather than pooled, and nothing waits on the write beyond the bound.
 func TestUpstreamFinishGivesUpOnWriteReportPastItsWait(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	settings := testFrontSettings()
-	group, _ := newTestGroup(t, testRouteService(testServiceName("finish-write-give-up"), []testBlock{
+	settings := testForwardFrontSettings()
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("finish-write-give-up"), []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
 	dialedConns := make(chan *holdWriteConn, 1)
@@ -504,7 +504,7 @@ func TestUpstreamFinishGivesUpOnWriteReportPastItsWait(t *testing.T) {
 		passed <- time.Now()
 		return passed
 	}
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodGet, front.url("/no-report"), nil)
 	response, body, err := testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != "g1" {
@@ -551,9 +551,9 @@ func (self *clientGoneWriter) Unwrap() http.ResponseWriter {
 // stops watching for the client once the response was read whole.
 func TestUpstreamPoolKeepsConnectionWhenClientLeavesAfterResponse(t *testing.T) {
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(testServiceName("pool-client-gone"), []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("pool-client-gone"), []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	served := make(chan any, 1)
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {

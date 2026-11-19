@@ -6,6 +6,7 @@ package nginx
 
 import (
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -145,8 +146,11 @@ func TestRouteHttpLbRoutesForwardWithThePrefixStripped(t *testing.T) {
 			clientBodyBufferSize: c.clientBodyBufferSize,
 			readTimeout:          readTimeout,
 		}
-		if forward.options != want {
-			t.Errorf("%s: options %+v, want %+v", c.target, forward.options, want)
+		// the tunnel hook is checked by the tunnel tests, not here
+		options := forward.options
+		options.tunnelOpened = nil
+		if !reflect.DeepEqual(options, want) {
+			t.Errorf("%s: options %+v, want %+v", c.target, options, want)
 		}
 		if forward.host != "test-lb.service.example" {
 			t.Errorf("%s: Host %q, want the lb name", c.target, forward.host)

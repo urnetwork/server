@@ -545,7 +545,7 @@ func TestBodyStoreReleaseOnEveryExit(t *testing.T) {
 // local 503 before its body is read, counted as a refusal and never sent
 // to a block, while the held request still completes.
 func TestForwardBodyBudgetIsLocal503(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Body.MemoryBudgetBytes = settings.Body.MemoryPrefixBytes
 	serviceName := testServiceName("body-budget")
 	release := make(chan struct{})
@@ -559,11 +559,11 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 	})
 	upstream.arrivals = arrivals
 	other := newRecordingUpstream(t, "g2", nil)
-	group, bodyStore := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 		{name: "g2", weight: 1, port: other.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	heldResponses := make(chan *http.Response, 1)
 	go func() {
@@ -599,10 +599,10 @@ func TestForwardBodyBudgetIsLocal503(t *testing.T) {
 func TestForwardBodyLimitAndTimeout(t *testing.T) {
 	serviceName := testServiceName("body-limit-timeout")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, bodyStore := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.clientBodyTimeout = 50 * time.Millisecond
 		return options
@@ -638,7 +638,7 @@ func TestForwardBodyLimitAndTimeout(t *testing.T) {
 // replayed to a block ends the attempt, and the body's memory, file and
 // reservations are released.
 func TestForwardCancellationDuringReplay(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	serviceName := testServiceName("body-replay-cancel")
 	gotPart := make(chan struct{})
 	release := make(chan struct{})
@@ -650,12 +650,12 @@ func TestForwardCancellationDuringReplay(t *testing.T) {
 		<-release
 	})
 	defer close(release)
-	group, bodyStore := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
 	spyFiles := &spySpillFiles{t: t, dir: t.TempDir()}
 	bodyStore.createSpillFile = spyFiles.create
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -682,10 +682,10 @@ func TestForwardCancellationDuringReplay(t *testing.T) {
 // a panic, and the stored body is still released.
 func TestForwardAbortReleasesBody(t *testing.T) {
 	raw := newRawUpstream(t)
-	group, bodyStore := newTestGroup(t, testRouteService("body-abort", []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService("body-abort", []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	go func() {
 		request, _ := http.NewRequest(http.MethodPost, front.url("/"), bytes.NewReader(testBodyBytes(100*1024)))
 		testDo(t, request)
@@ -704,14 +704,14 @@ func TestForwardAbortReleasesBody(t *testing.T) {
 // limit is a 413 while nothing was answered, and the block's request is
 // cut.
 func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Body.MaxBodyBytes = 1000
 	serviceName := testServiceName("streamed-limit")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
 	}), settings)
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
 		return options

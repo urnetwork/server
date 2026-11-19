@@ -154,7 +154,7 @@ func closedPort(t *testing.T) int {
 // response was read, as Go's tests lengthen maxWriteWaitBeforeConnReuse, so
 // a loaded scheduler never costs a test its pooled connection. Tests of
 // that wait order it through the group's waitAfter.
-func testFrontSettings() *FrontSettings {
+func testForwardFrontSettings() *FrontSettings {
 	settings := DefaultFrontSettings()
 	settings.Forward.KeepaliveSweepInterval = 0
 	settings.Forward.KeepaliveWriteWait = 30 * time.Second
@@ -175,7 +175,7 @@ func idleConnsOf(t *testing.T, pool *upstreamPool, want int) []*upstreamConnecti
 
 // A service of the route table with the given blocks and nginx's default
 // keepalive.
-func testRouteService(serviceName string, testBlocks []testBlock) *RouteService {
+func testForwardRouteService(serviceName string, testBlocks []testBlock) *RouteService {
 	routeBlocks := []*RouteBlock{}
 	for _, block := range testBlocks {
 		routeBlocks = append(routeBlocks, &RouteBlock{
@@ -238,7 +238,7 @@ func newTestGroup(t *testing.T, service *RouteService, settings *FrontSettings) 
 // A front for tests: an http server whose handler forwards every request
 // through a group with options the test chooses. served receives one value
 // each time serveHttp returns, its panic included.
-type testFront struct {
+type testForwardFront struct {
 	server  *httptest.Server
 	group   *upstreamGroup
 	options func(r *http.Request) forwardOptions
@@ -246,8 +246,8 @@ type testFront struct {
 }
 
 // A front over a group, closed when the test ends.
-func newTestFront(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testFront {
-	front := &testFront{
+func newTestForwardFront(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testForwardFront {
+	front := &testForwardFront{
 		group:   group,
 		options: options,
 		served:  make(chan any, 1024),
@@ -275,7 +275,7 @@ func testForwardOptions(r *http.Request) forwardOptions {
 }
 
 // The front's url for a path.
-func (self *testFront) url(path string) string {
+func (self *testForwardFront) url(path string) string {
 	return self.server.URL + path
 }
 
@@ -301,7 +301,7 @@ func testDo(t *testing.T, request *http.Request) (*http.Response, []byte, error)
 
 // Waits for serveHttp to return, with a bound so a broken test fails rather
 // than hangs.
-func (self *testFront) waitServed(t *testing.T) any {
+func (self *testForwardFront) waitServed(t *testing.T) any {
 	select {
 	case recovered := <-self.served:
 		return recovered

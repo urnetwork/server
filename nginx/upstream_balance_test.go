@@ -184,9 +184,9 @@ func referenceChashPeer(points []referenceRingPoint, peers []*referencePeer, wal
 
 // A group over the given blocks with no sockets: selection only.
 func newSelectionGroup(t *testing.T, serviceName string, stateful bool, testBlocks []testBlock) *upstreamGroup {
-	service := testRouteService(serviceName, testBlocks)
+	service := testForwardRouteService(serviceName, testBlocks)
 	service.Stateful = stateful
-	group, _ := newTestGroup(t, service, testFrontSettings())
+	group, _ := newTestGroup(t, service, testForwardFrontSettings())
 	return group
 }
 
@@ -453,8 +453,8 @@ func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 		testBlocks = append(testBlocks, testBlock{name: name, weight: weight, port: upstream.port})
 		peers = append(peers, &referencePeer{name: name, weight: weight})
 	}
-	group, _ := newTestGroup(t, testRouteService("least-conn", testBlocks), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	group, _ := newTestGroup(t, testForwardRouteService("least-conn", testBlocks), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	// held handlers end on any exit, so the servers' cleanup never waits
 	defer func() {
 		for _, release := range releases {
@@ -498,11 +498,11 @@ func TestUpstreamLeastConnUnderHeldRequests(t *testing.T) {
 func TestUpstreamWeightZeroBlock(t *testing.T) {
 	zero := newRecordingUpstream(t, "g0", nil)
 	live := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService("weight-zero", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("weight-zero", []testBlock{
 		{name: "g0", weight: 0, port: zero.port},
 		{name: "g1", weight: 1, port: live.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.blockName = r.URL.Query().Get("block")
 		return options
@@ -525,7 +525,7 @@ func TestUpstreamWeightZeroBlock(t *testing.T) {
 // A block at ForwardSettings.MaxBlockActiveRequests is skipped, and with
 // every block at its cap the request is nginx's "no live upstreams", a 502.
 func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.MaxBlockActiveRequests = 1
 	release := make(chan struct{})
 	// held handlers end on any exit, so the servers' cleanup never waits
@@ -539,11 +539,11 @@ func TestUpstreamBlockCapAndNoLiveUpstreams(t *testing.T) {
 	first.arrivals = arrivals
 	second.arrivals = arrivals
 	serviceName := testServiceName("block-cap")
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: first.port},
 		{name: "g2", weight: 1, port: second.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	for range 2 {
 		go func() {
 			request, _ := http.NewRequest(http.MethodGet, front.url("/held"), nil)

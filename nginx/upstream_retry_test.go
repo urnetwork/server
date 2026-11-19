@@ -34,11 +34,11 @@ func testBodyBytes(size int) []byte {
 func TestRetryRefusedConnectOnAnotherBlock(t *testing.T) {
 	serviceName := testServiceName("retry-refused")
 	live := newRecordingUpstream(t, "g2", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: closedPort(t)},
 		{name: "g2", weight: 1, port: live.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodPost, front.url("/write"), strings.NewReader("payload"))
 	response, body, err := testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != "g2" {
@@ -69,11 +69,11 @@ func TestRetry503ReplaysBodyByteForByte(t *testing.T) {
 	serviceName := testServiceName("retry-503")
 	busy := newRecordingUpstream(t, "g1", answer(http.StatusServiceUnavailable))
 	live := newRecordingUpstream(t, "g2", answer(http.StatusOK))
-	group, bodyStore := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: busy.port},
 		{name: "g2", weight: 1, port: live.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodPost, front.url("/sn/attempt-artifact"), bytes.NewReader(requestBody))
 	response, body, err := testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusOK || string(body) != "answer from g2" {
@@ -94,11 +94,11 @@ func TestRetry503ReplaysBodyByteForByte(t *testing.T) {
 	finalServiceName := testServiceName("retry-503-final")
 	first := newRecordingUpstream(t, "g1", answer(http.StatusServiceUnavailable))
 	second := newRecordingUpstream(t, "g2", answer(http.StatusServiceUnavailable))
-	finalGroup, _ := newTestGroup(t, testRouteService(finalServiceName, []testBlock{
+	finalGroup, _ := newTestGroup(t, testForwardRouteService(finalServiceName, []testBlock{
 		{name: "g1", weight: 1, port: first.port},
 		{name: "g2", weight: 1, port: second.port},
-	}), testFrontSettings())
-	finalFront := newTestFront(t, finalGroup, testForwardOptions)
+	}), testForwardFrontSettings())
+	finalFront := newTestForwardFront(t, finalGroup, testForwardOptions)
 	request, _ = http.NewRequest(http.MethodPost, finalFront.url("/"), bytes.NewReader(requestBody))
 	response, body, err = testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusServiceUnavailable || string(body) != "answer from g2" || response.Header.Get("X-Block") != "g2" {
@@ -111,10 +111,10 @@ func TestRetry503ReplaysBodyByteForByte(t *testing.T) {
 	// one block: nothing to retry on
 	singleServiceName := testServiceName("retry-503-single")
 	only := newRecordingUpstream(t, "g1", answer(http.StatusServiceUnavailable))
-	singleGroup, _ := newTestGroup(t, testRouteService(singleServiceName, []testBlock{
+	singleGroup, _ := newTestGroup(t, testForwardRouteService(singleServiceName, []testBlock{
 		{name: "g1", weight: 1, port: only.port},
-	}), testFrontSettings())
-	singleFront := newTestFront(t, singleGroup, testForwardOptions)
+	}), testForwardFrontSettings())
+	singleFront := newTestForwardFront(t, singleGroup, testForwardOptions)
 	request, _ = http.NewRequest(http.MethodGet, singleFront.url("/"), nil)
 	response, _, err = testDo(t, request)
 	if err != nil || response.StatusCode != http.StatusServiceUnavailable || len(only.recorded()) != 1 {
@@ -132,11 +132,11 @@ func TestRetryNeverOn500502504(t *testing.T) {
 			io.WriteString(w, "application error")
 		})
 		other := newRecordingUpstream(t, "g2", nil)
-		group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+		group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 			{name: "g1", weight: 1, port: failing.port},
 			{name: "g2", weight: 1, port: other.port},
-		}), testFrontSettings())
-		front := newTestFront(t, group, testForwardOptions)
+		}), testForwardFrontSettings())
+		front := newTestForwardFront(t, group, testForwardOptions)
 		request, _ := http.NewRequest(http.MethodPost, front.url("/auth/password-reset"), strings.NewReader("reset"))
 		response, body, err := testDo(t, request)
 		if err != nil || response.StatusCode != status || string(body) != "application error" {
@@ -153,11 +153,11 @@ func TestRetryNeverOn500502504(t *testing.T) {
 func TestRetryNeverOnPartialResponse(t *testing.T) {
 	raw := newRawUpstream(t)
 	other := newRecordingUpstream(t, "g2", nil)
-	group, _ := newTestGroup(t, testRouteService("retry-partial", []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService("retry-partial", []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: other.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	type result struct {
 		response *http.Response
 		body     []byte
@@ -192,12 +192,12 @@ func TestRetryNeverForNamedBlock(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	other := newRecordingUpstream(t, "g3", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: closedPort(t)},
 		{name: "g2", weight: 1, port: busy.port},
 		{name: "g3", weight: 1, port: other.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.blockName = r.URL.Query().Get("block")
 		return options
@@ -227,11 +227,11 @@ func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 	raw := newRawUpstream(t)
 	other := newRecordingUpstream(t, "g2", nil)
 	sentServiceName := testServiceName("retry-streamed-sent")
-	group, _ := newTestGroup(t, testRouteService(sentServiceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(sentServiceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: other.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, streamedOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, streamedOptions)
 	responses := make(chan *http.Response, 1)
 	go func() {
 		request, _ := http.NewRequest(http.MethodPost, front.url("/mcp"), strings.NewReader("streamed"))
@@ -254,11 +254,11 @@ func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 
 	refusedServiceName := testServiceName("retry-streamed-refused")
 	live := newRecordingUpstream(t, "g2", nil)
-	refusedGroup, _ := newTestGroup(t, testRouteService(refusedServiceName, []testBlock{
+	refusedGroup, _ := newTestGroup(t, testForwardRouteService(refusedServiceName, []testBlock{
 		{name: "g1", weight: 1, port: closedPort(t)},
 		{name: "g2", weight: 1, port: live.port},
-	}), testFrontSettings())
-	refusedFront := newTestFront(t, refusedGroup, streamedOptions)
+	}), testForwardFrontSettings())
+	refusedFront := newTestForwardFront(t, refusedGroup, streamedOptions)
 	request2, _ := http.NewRequest(http.MethodPost, refusedFront.url("/mcp"), strings.NewReader("streamed"))
 	response, responseBody, err := testDo(t, request2)
 	if err != nil || response.StatusCode != http.StatusOK || string(responseBody) != "g2" || string(live.recorded()[0].body) != "streamed" {
@@ -290,9 +290,9 @@ func (self *faultConn) Write(p []byte) (int, error) {
 func TestStaleKeepaliveRedoIsNotAnAttempt(t *testing.T) {
 	serviceName := testServiceName("stale-redo")
 	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: upstream.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	dialer := &net.Dialer{}
 	dialedConnsLock := sync.Mutex{}
 	dialedConns := []*faultConn{}
@@ -307,7 +307,7 @@ func TestStaleKeepaliveRedoIsNotAnAttempt(t *testing.T) {
 		dialedConns = append(dialedConns, dialedConn)
 		return dialedConn, nil
 	}
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 
 	request, _ := http.NewRequest(http.MethodPost, front.url("/first"), strings.NewReader("one"))
 	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusOK {
@@ -342,11 +342,11 @@ func TestStaleKeepaliveRedoIsNotAnAttempt(t *testing.T) {
 // nginx maps them; each is counted as the front's own error.
 func TestRetryFinalFailureMapping(t *testing.T) {
 	refusedServiceName := testServiceName("final-refused")
-	refusedGroup, _ := newTestGroup(t, testRouteService(refusedServiceName, []testBlock{
+	refusedGroup, _ := newTestGroup(t, testForwardRouteService(refusedServiceName, []testBlock{
 		{name: "g1", weight: 1, port: closedPort(t)},
 		{name: "g2", weight: 1, port: closedPort(t)},
-	}), testFrontSettings())
-	refusedFront := newTestFront(t, refusedGroup, testForwardOptions)
+	}), testForwardFrontSettings())
+	refusedFront := newTestForwardFront(t, refusedGroup, testForwardOptions)
 	request, _ := http.NewRequest(http.MethodGet, refusedFront.url("/"), nil)
 	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusBadGateway {
 		t.Fatalf("refused blocks: %v %v, want 502", response, err)
@@ -356,14 +356,14 @@ func TestRetryFinalFailureMapping(t *testing.T) {
 	}
 
 	// a block that accepts and never answers times out its read
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.ProxyReadTimeout = 50 * time.Millisecond
 	raw := newRawUpstream(t)
 	timeoutServiceName := testServiceName("final-timeout")
-	timeoutGroup, _ := newTestGroup(t, testRouteService(timeoutServiceName, []testBlock{
+	timeoutGroup, _ := newTestGroup(t, testForwardRouteService(timeoutServiceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 	}), settings)
-	timeoutFront := newTestFront(t, timeoutGroup, testForwardOptions)
+	timeoutFront := newTestForwardFront(t, timeoutGroup, testForwardOptions)
 	request, _ = http.NewRequest(http.MethodGet, timeoutFront.url("/"), nil)
 	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("silent block: %v %v, want 504", response, err)
@@ -374,13 +374,13 @@ func TestRetryFinalFailureMapping(t *testing.T) {
 
 	// a dial past the connect timeout
 	dialTimeoutServiceName := testServiceName("final-dial-timeout")
-	dialTimeoutGroup, _ := newTestGroup(t, testRouteService(dialTimeoutServiceName, []testBlock{
+	dialTimeoutGroup, _ := newTestGroup(t, testForwardRouteService(dialTimeoutServiceName, []testBlock{
 		{name: "g1", weight: 1, port: closedPort(t)},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	dialTimeoutGroup.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
 		return nil, &net.OpError{Op: "dial", Net: network, Err: dialTimeoutError{}}
 	}
-	dialTimeoutFront := newTestFront(t, dialTimeoutGroup, testForwardOptions)
+	dialTimeoutFront := newTestForwardFront(t, dialTimeoutGroup, testForwardOptions)
 	request, _ = http.NewRequest(http.MethodGet, dialTimeoutFront.url("/"), nil)
 	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("dial timeout: %v %v, want 504", response, err)
@@ -403,7 +403,7 @@ func (self dialTimeoutError) Temporary() bool { return true }
 // eligible block, the answer is nginx's "no live upstreams" 502, not the
 // timeout's 504.
 func TestRetryAfterTimeoutWithNoLiveBlockIs502(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.MaxBlockActiveRequests = 1
 	raw := newRawUpstream(t)
 	release := make(chan struct{})
@@ -414,11 +414,11 @@ func TestRetryAfterTimeoutWithNoLiveBlockIs502(t *testing.T) {
 	busy.arrivals = arrivals
 	serviceName := testServiceName("retry-timeout-no-live")
 	// g2's weight makes it the first pick of two idle blocks
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 2, port: busy.port},
 	}), settings)
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		if r.URL.Path == "/short" {
 			options.readTimeout = 50 * time.Millisecond
@@ -455,11 +455,11 @@ func TestRetryBufferedPostAcrossBlockShutdown(t *testing.T) {
 	serviceName := testServiceName("retry-drain")
 	draining := newRecordingUpstream(t, "g1", nil)
 	live := newRecordingUpstream(t, "g2", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: draining.port},
 		{name: "g2", weight: 1, port: live.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.blockName = r.URL.Query().Get("block")
 		return options
@@ -493,11 +493,11 @@ func TestRetryNeverOnEarlyInvalidHead(t *testing.T) {
 	serviceName := testServiceName("retry-early-invalid")
 	raw := newRawUpstream(t)
 	other := newRecordingUpstream(t, "g2", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: other.port},
-	}), testFrontSettings())
-	front := newTestFront(t, group, testForwardOptions)
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
 	responses := make(chan *http.Response, 1)
 	go func() {
 		// more than loopback buffers hold, so the write is still going
@@ -525,17 +525,17 @@ func TestRetryNeverOnEarlyInvalidHead(t *testing.T) {
 // proxy_send_timeout: D7 moves the request to another block, which gets the
 // whole body.
 func TestRetrySendTimeoutOnStalledBlock(t *testing.T) {
-	settings := testFrontSettings()
+	settings := testForwardFrontSettings()
 	settings.Forward.ProxySendTimeout = 200 * time.Millisecond
 	serviceName := testServiceName("retry-send-timeout")
 	raw := newRawUpstream(t)
 	live := newRecordingUpstream(t, "g2", nil)
 	// the first pick of two idle blocks of equal weight is the first
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: live.port},
 	}), settings)
-	front := newTestFront(t, group, testForwardOptions)
+	front := newTestForwardFront(t, group, testForwardOptions)
 	type result struct {
 		response *http.Response
 		body     []byte
@@ -571,10 +571,10 @@ func TestRetrySendTimeoutOnStalledBlock(t *testing.T) {
 	// with no other block, the stalled send is the front's 504
 	onlyServiceName := testServiceName("send-timeout-only")
 	onlyRaw := newRawUpstream(t)
-	onlyGroup, _ := newTestGroup(t, testRouteService(onlyServiceName, []testBlock{
+	onlyGroup, _ := newTestGroup(t, testForwardRouteService(onlyServiceName, []testBlock{
 		{name: "g1", weight: 1, port: onlyRaw.port},
 	}), settings)
-	onlyFront := newTestFront(t, onlyGroup, testForwardOptions)
+	onlyFront := newTestForwardFront(t, onlyGroup, testForwardOptions)
 	go func() {
 		request, _ := http.NewRequest(http.MethodPost, onlyFront.url("/upload"), bytes.NewReader(requestBody))
 		response, body, err := testDo(t, request)
@@ -615,11 +615,11 @@ func (self *signalingBody) Close() error {
 func TestRetryStreamedUpstreamFailureIsUpstreamError(t *testing.T) {
 	serviceName := testServiceName("streamed-upstream-failure")
 	raw := newRawUpstream(t)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	bodyReads := make(chan struct{}, 16)
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
 		// the front's reads of the client's body signal as they start
@@ -664,10 +664,10 @@ func TestRetryStreamedUpstreamFailureIsUpstreamError(t *testing.T) {
 // and goes on undisturbed.
 func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
 	raw := newRawUpstream(t)
-	group, _ := newTestGroup(t, testRouteService(testServiceName("retry-503-hold"), []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("retry-503-hold"), []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: closedPort(t)},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	dialedConns := make(chan *holdWriteConn, 2)
 	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
 		holdConn := newHoldWriteConn(t, conn)
@@ -761,10 +761,10 @@ func TestRetry503BeforeStreamedBodyBeganMovesItWhole(t *testing.T) {
 	serviceName := testServiceName("retry-503-streamed")
 	raw := newRawUpstream(t)
 	live := newRecordingUpstream(t, "g2", nil)
-	group, _ := newTestGroup(t, testRouteService(serviceName, []testBlock{
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
 		{name: "g1", weight: 1, port: raw.port},
 		{name: "g2", weight: 1, port: live.port},
-	}), testFrontSettings())
+	}), testForwardFrontSettings())
 	rawAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(raw.port))
 	heldConns := make(chan *holdWriteConn, 1)
 	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
@@ -775,7 +775,7 @@ func TestRetry503BeforeStreamedBodyBeganMovesItWhole(t *testing.T) {
 		heldConns <- holdConn
 		return holdConn
 	})
-	front := newTestFront(t, group, func(r *http.Request) forwardOptions {
+	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
 		return options
