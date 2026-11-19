@@ -542,6 +542,7 @@ func TestHostDialerSplitsTheHelloAtEarlyData(t *testing.T) {
 		return &tlsedgeservice.TlsEdgeDialRequest{
 			Target:      &tlsedgeservice.TlsEdgeTarget{NetworkId: networkId, Label: "abcdefghij", Host: "blog", Port: 443, Name: "tls/443/blog"},
 			AlpnIds:     []string{"h2", "http/1.1"},
+			ServerName:  "app.corp.example",
 			AffinityKey: []byte("affinity"),
 			HelloBytes:  hello,
 		}
@@ -553,7 +554,8 @@ func TestHostDialerSplitsTheHelloAtEarlyData(t *testing.T) {
 	}
 	sent := dial.Requests()[0]
 	if sent.NetworkId != networkId || sent.NetworkLabel != "abcdefghij" || sent.Name != "tls/443/blog" || sent.Protocol != "tls" ||
-		!slices.Equal(sent.Alpns, []string{"h2", "http/1.1"}) || string(sent.AffinityKey) != "affinity" || len(sent.EarlyData) != 100 {
+		!slices.Equal(sent.Alpns, []string{"h2", "http/1.1"}) || sent.ServerName != "app.corp.example" || string(sent.AffinityKey) != "affinity" ||
+		len(sent.EarlyData) != 100 {
 		t.Fatalf("sent %+v", sent)
 	}
 

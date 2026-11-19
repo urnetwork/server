@@ -14,7 +14,8 @@ import (
 
 // tlsedge's store on Postgres (§13.5, §13.9; TLS-M5-11, on the answer to
 // plan-TLS-edge-data-source): sidecar's tlsedgeservice.TlsEdgeStore over
-// DNS-M5-10's label map, network_tls_suspension and tls_connection_record.
+// DNS-M5-10's label map, DNS-M6-02's active custom hosts (TLS-M6-02),
+// network_tls_suspension and tls_connection_record.
 // The engine calls it only from its names and kills loops and its 10 s record
 // batches, never from a connection, so no visitor waits on Postgres (I-12).
 // A binary that does not link the migrations these tables come from answers
@@ -143,6 +144,49 @@ func (self *TlsEdgeStore) NamesSince(ctx context.Context, root string, after uin
 	return self.names(ctx, func(ctx context.Context) (*DnsLabelMap, error) {
 		return DnsLabelMapSince(ctx, root, after)
 	})
+}
+
+// The active custom hosts of root as the engine routes by them (TLS-M6-02): each row's owner,
+// <host>.<label>.<root>, cut into its host and label. A row of another root, or whose owner is not one
+// host of a label's zone in root, routes nothing and is left out, the closed direction.
+func tlsEdgeCustomHostEntries(rows []*DnsCustomHostRow, root string) []*tlsedgeservice.TlsEdgeCustomHostEntry {
+	root = dnsLabelRoot(root)
+	entries := make([]*tlsedgeservice.TlsEdgeCustomHostEntry, 0, len(rows))
+	for _, row := range rows {
+		if row.Root != root || row.StrictMx() {
+			continue
+		}
+		rest, ok := strings.CutSuffix(row.Owner, "."+root)
+		if !ok {
+			continue
+		}
+		ownerHost, ownerLabel, ok := strings.Cut(rest, ".")
+		if !ok || ownerHost == "" || ownerLabel == "" || strings.Contains(ownerLabel, ".") {
+			continue
+		}
+		entries = append(entries, &tlsedgeservice.TlsEdgeCustomHostEntry{
+			Host:       strings.TrimSuffix(row.Host, "."),
+			NetworkId:  sidecar.Id(row.NetworkId),
+			OwnerHost:  ownerHost,
+			OwnerLabel: ownerLabel,
+		})
+	}
+	return entries
+}
+
+// The active custom hosts of root: DnsCustomHostActiveRows, which a binary not linking the custom-host
+// tables answers empty, as a release before M6 has none.
+func (self *TlsEdgeStore) CustomHosts(ctx context.Context, root string) ([]*tlsedgeservice.TlsEdgeCustomHostEntry, error) {
+	callCtx, cancel := self.callContext(ctx)
+	defer cancel()
+	var rows []*DnsCustomHostRow
+	err := tlsEdgeStoreRun(func() {
+		rows = DnsCustomHostActiveRows(callCtx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return tlsEdgeCustomHostEntries(rows, root), nil
 }
 
 // Every row of network_tls_suspension: GetTlsSuspensions.

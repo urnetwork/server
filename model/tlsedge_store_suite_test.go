@@ -17,8 +17,8 @@ import (
 
 // The Postgres store keeps what the engine's store suite asks of every
 // TlsEdgeStore, the fake's included, each hook writing through the model
-// production uses. No model writes an alias yet (§12.5, M6), so the alias
-// case is skipped, and the run says so.
+// production uses, a custom host through §12.8's add and remove. The alias
+// case is skipped here, and the run says so.
 func TestTlsEdgeStorePassesItsSuite(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		if !server.SidecarMg5Linked() {
@@ -27,6 +27,9 @@ func TestTlsEdgeStorePassesItsSuite(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		store := NewTlsEdgeStore(nil)
+		// the suite's networks are Teams for their custom hosts (R-DNS-3)
+		team := map[server.Id]bool{}
+		testDnsSetTeam(t, team)
 		sidecartest.RunTlsEdgeStoreSuite(t, store, &sidecartest.TlsEdgeStoreSuiteHooks{
 			Root: root,
 			AddLabel: func(ctx context.Context, networkId sidecar.Id) (string, error) {
@@ -37,6 +40,40 @@ func TestTlsEdgeStorePassesItsSuite(t *testing.T) {
 					return "", err
 				}
 				return EnsureNetworkLabel(ctx, id, root)
+			},
+			AddCustomHost: func(ctx context.Context, networkId sidecar.Id, host string, ownerHost string, active bool) error {
+				id := server.Id(networkId)
+				team[id] = true
+				// the host's domain is the case's own, verified for the network (§7.6)
+				_, domain, _ := strings.Cut(host, ".")
+				verified := ""
+				server.Db(ctx, func(conn server.PgConn) {
+					verified = getNetworkDnsCustomHostDomainInTx(ctx, conn, id, host)
+				})
+				if verified == "" {
+					testDnsNetworkDomain(t, ctx, id, domain, true)
+				}
+				label, err := EnsureNetworkLabel(ctx, id, root)
+				if err != nil {
+					return err
+				}
+				add := &sidecar.DnsCustomHostAddRequest{Host: host, Owner: ownerHost + "." + label + "." + root}
+				if active {
+					// weak mode is active at once (§12.8 step 2); strong mode stays pending for certs' walk
+					add.Mode = sidecar.DnsCustomHostModeWeak
+					add.WeakDisclosureAccepted = true
+				}
+				_, err = AddDnsCustomHost(ctx, &DnsCustomHostRequest{Root: root, NetworkId: id, Add: add, ActorKind: AdminEventActorSystem})
+				return err
+			},
+			RemoveCustomHost: func(ctx context.Context, networkId sidecar.Id, host string) error {
+				_, err := RemoveDnsCustomHost(ctx, &DnsCustomHostRequest{
+					Root:      root,
+					NetworkId: server.Id(networkId),
+					Remove:    &sidecar.DnsCustomHostRemoveRequest{Host: host},
+					ActorKind: AdminEventActorSystem,
+				})
+				return err
 			},
 			WithdrawNetwork: func(ctx context.Context, networkId sidecar.Id) (returnErr error) {
 				server.Tx(ctx, func(tx server.PgTx) {

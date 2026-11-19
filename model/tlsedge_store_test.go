@@ -74,3 +74,32 @@ func TestTlsEdgeStoreAnswersErrorsUnlinked(t *testing.T) {
 		t.Error("records with no table")
 	}
 }
+
+// The active custom hosts as the engine routes by them (TLS-M6-02): each owner cut into its host and its
+// network's label, and a row of another root, a strict-mode MX host and an owner that is no one host of a
+// label's zone left out.
+func TestTlsEdgeCustomHostEntriesCutTheOwner(t *testing.T) {
+	networkId := server.NewId()
+	root := "sidecar.example."
+	rows := []*DnsCustomHostRow{
+		{Host: "app.corp.example", Root: root, NetworkId: networkId, Owner: "web.abcdefghij." + root, State: "active"},
+		{Host: "corp.example", Root: root, NetworkId: networkId, Owner: "shop.abcdefghij." + root, State: "active"},
+		{Host: "other.corp.example", Root: "other.example.", NetworkId: networkId, Owner: "web.abcdefghij.other.example.", State: "active"},
+		{Host: "mail.corp.example", Root: root, NetworkId: networkId, Owner: "mx.abcdefghij." + root, State: "active"},
+		{Host: "apex.corp.example", Root: root, NetworkId: networkId, Owner: "abcdefghij." + root, State: "active"},
+		{Host: "deep.corp.example", Root: root, NetworkId: networkId, Owner: "a.b.abcdefghij." + root, State: "active"},
+	}
+	entries := tlsEdgeCustomHostEntries(rows, "sidecar.example")
+	if len(entries) != 2 {
+		t.Fatalf("%d entries: %+v", len(entries), entries)
+	}
+	for index, want := range []tlsedgeservice.TlsEdgeCustomHostEntry{
+		{Host: "app.corp.example", OwnerHost: "web", OwnerLabel: "abcdefghij"},
+		{Host: "corp.example", OwnerHost: "shop", OwnerLabel: "abcdefghij"},
+	} {
+		entry := entries[index]
+		if entry.Host != want.Host || entry.OwnerHost != want.OwnerHost || entry.OwnerLabel != want.OwnerLabel || [16]byte(entry.NetworkId) != [16]byte(networkId) {
+			t.Errorf("entry %d: %+v", index, entry)
+		}
+	}
+}

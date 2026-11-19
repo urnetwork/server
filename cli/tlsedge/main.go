@@ -213,7 +213,10 @@ func (self *hostDialer) Dial(ctx context.Context, request *tlsedgeservice.TlsEdg
 		Name:         request.Target.Name,
 		Protocol:     hostFindProtocol,
 		Alpns:        request.AlpnIds,
-		AffinityKey:  request.AffinityKey,
+		// an alias's or a custom host's name, which Find matches against certified listeners alone
+		// (TLS-M6-02; DESIGN-DETAILS 17.2.10)
+		ServerName:  request.ServerName,
+		AffinityKey: request.AffinityKey,
 		Metadata:     request.Metadata,
 		EarlyData:    earlyData,
 	})
