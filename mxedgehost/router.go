@@ -19,6 +19,12 @@ package mxedgehost
 //     nothing is rejected at the banner.
 //   - sidecar.yml's mxedge gate through sidecarhost's Gates, reread every 60 s: the service gate at each
 //     hello and plaintext transaction, and its network list once SNI names a network.
+//   - Push: pushservice's hint writer on the block's Redis, its forced mail hints followed by §18.7's wake
+//     enqueue while sidecar.yml's wake switch is on: what §15.6's wake hold (MAIL-M8-05) and a direct MX's
+//     alert hint a network's receivers through. It resolves sidecars to clients only through
+//     RouterDeps.PushResolver, which nothing gives until plan-KEYS-hint-addressing's internal route lands,
+//     so until then every such hint is counted as unresolved and lost, mxedge.yml's wake_hold stays off,
+//     and a receiver's hourly resync covers the alert (§6.8). No Postgres is read for it (I-12).
 //
 // Readiness is §19.4's mxedge column: every seam given, the engine ready (a probe found the store and
 // today's k), and all K clients connected. Nothing here logs an address, a name or a network (I-13).
@@ -40,6 +46,7 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/mxedgeservice"
 	"github.com/urnetwork/sidecar/protocol"
+	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
@@ -107,6 +114,12 @@ type RouterDeps struct {
 	DirectMxStore mxedgeservice.MxDirectMxStore
 	// TCP to a direct-MX receiver. nil: the host's dialer.
 	DirectMxDial func(ctx context.Context, address netip.AddrPort) (net.Conn, error)
+	// Resolves a receiver's sidecar to its current client for the block's hints, with no Postgres
+	// (plan-KEYS-hint-addressing: api's internal POST /sidecar/identity/clients behind a 5-minute map). nil, as
+	// until that route lands: every hint by sidecar is lost and counted.
+	PushResolver pushservice.PushClientResolver
+	// Replaces the block's hint writer: a test's.
+	Push sidecar.Push
 	// Each replaces the block's: a test's gates, a test's Redis.
 	Gates sidecar.ServiceGates
 	Redis sidecar.Redis
@@ -256,6 +269,14 @@ func NewRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 	if deps.Redis != nil {
 		host.Redis = deps.Redis
 	}
+	if deps.Push != nil {
+		host.Push = deps.Push
+	} else if push, err := newRouterPush(host, deps.PushResolver); err == nil {
+		host.Push = push
+	} else {
+		// no hint goes out: a hold hints no one, as with the push down, and a receiver's resync covers it
+		log.Errorf("[%s]no hint writer: %v", hostRouterService, err)
+	}
 	self := &RouterHost{
 		ctx:         hostCtx,
 		cancel:      cancel,
@@ -306,6 +327,19 @@ func NewRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 		close(self.clientsMade)
 	}
 	return self, nil
+}
+
+// The block's hint writer (see the file header's Push row): pushservice's on host's Redis, its mail hints a wake
+// class, so a forced one to a token holder is enqueued due now while sidecar.yml's wake switch is on (§18.7's step
+// 2). resolver nil resolves no sidecar.
+func newRouterPush(host *sidecar.ServiceHost, resolver pushservice.PushClientResolver) (*pushservice.HintWriter, error) {
+	wake, err := pushservice.NewWakeEnqueuer(host.Redis, nil, host.ClockOrReal(), func() bool {
+		return host.GatesOrClosed().Switch(sidecar.GateSwitchWake)
+	}, host.Metrics)
+	if err != nil {
+		return nil, err
+	}
+	return pushservice.NewWakingHintWriter(host.Redis, nil, resolver, host.Metrics, wake)
 }
 
 // Starts a Team direct MX's prober (mxedgeservice.MxDirectMxProber) on the block's context: the host's dial to TCP 25,
