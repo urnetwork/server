@@ -103,9 +103,11 @@ type LbAltStatusProbeSettings struct {
 	// non-positive interval.
 	Cadence time.Duration
 	// Bound on one attempt: the TCP connect, the TLS handshake on 443, the
-	// request and the whole response, as the other public probes' 5 s. Must
-	// be positive: a non-positive bound would expire every attempt at its
-	// start, so the matrix and the transport refuse it before any dial.
+	// request and the whole response, as the other public probes' 5 s. The
+	// runner's command timeout still caps a native attempt when it is
+	// shorter. Must be positive: a non-positive bound would expire every
+	// attempt at its start, so the matrix and the transport refuse it before
+	// any dial.
 	AttemptTimeout time.Duration
 	// Attempts in flight at once. Non-positive runs one at a time.
 	WorkerCount int

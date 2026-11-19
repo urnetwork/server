@@ -2,9 +2,11 @@
 // one fresh TCP connection to the exact pinned address in the requested
 // family, then plain HTTP/1.1 on 80 or HTTP/1.1 over verified TLS on 443. The
 // lb name is the Host and, on 443, the SNI, and is never resolved. No proxy,
-// no keepalive, no compression and no redirect followed; the response header
-// and body are bounded. Errors are fixed text, since net/http's carry the
-// request URL and with it the hidden prefix.
+// no keepalive, no compression and no redirect followed. Every bound comes
+// from the pass's LbAltStatusProbeSettings: the attempt deadline, which the
+// runner's command timeout also caps on a native attempt, and the response
+// header and body. Errors are fixed text, since net/http's carry the request
+// URL and with it the hidden prefix.
 package monitor
 
 import (
@@ -29,26 +31,45 @@ import (
 // warpctl's status error rule (docker.go IsError)
 var lbAltStatusErrorPattern = regexp.MustCompile(`^(?i)error(\s|:)`)
 
-// The native adapter: one attempt under the attempt timeout, or the runner's
-// command timeout when that is shorter. Missing settings, or a non-positive
-// attempt timeout, expire the attempt at its start, and the transport refuses
-// them as configuration before it reads that context.
+// The native adapter: one attempt on a fresh system dial, verified against the
+// system roots, within the runner's command timeout. It only delegates, so its
+// bounds are observeLbAltStatusWithin's.
 func (self *runner) lbAltStatus(ctx context.Context, request LbAltStatusRequest, settings *LbAltStatusProbeSettings) (LbAltStatusObservation, error) {
-	var timeout time.Duration
-	if settings != nil {
-		timeout = settings.AttemptTimeout
+	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, (&net.Dialer{}).DialContext, nil)
+}
+
+// One attempt within a command timeout, when it is positive; a non-positive
+// one caps nothing. The transport bounds the attempt by the settings' own
+// timeout as well, so the shorter of the two applies: a tuned attempt timeout
+// reaches the attempt up to the command timeout. The dial and the roots are
+// the transport's seams.
+func observeLbAltStatusWithin(
+	ctx context.Context,
+	commandTimeout time.Duration,
+	request LbAltStatusRequest,
+	settings *LbAltStatusProbeSettings,
+	dial func(context.Context, string, string) (net.Conn, error),
+	roots *x509.CertPool,
+) (LbAltStatusObservation, error) {
+	if 0 < commandTimeout {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, commandTimeout)
+		defer cancel()
 	}
-	if 0 < self.cfg.commandTimeout && self.cfg.commandTimeout < timeout {
-		timeout = self.cfg.commandTimeout
-	}
-	attemptCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	return observeLbAltStatus(attemptCtx, request, settings, (&net.Dialer{}).DialContext, nil)
+	return observeLbAltStatus(ctx, request, settings, dial, roots)
 }
 
 // Test seams supply the dialer and the trust roots, never a different
 // protocol: production dials the pin with net.Dialer and verifies against the
-// system roots. The dialer receives the pin itself, in the request's family.
+// system roots. The dialer receives the pin itself, in the request's family,
+// under the request's own context.
+//
+// The settings bound the whole attempt. Its deadline is the attempt timeout,
+// whatever the caller's context allows beyond it, and it covers the connect,
+// the TLS handshake on 443, the request and the whole response. Settings that
+// bound nothing are refused before the context is read, since a non-positive
+// timeout would expire the attempt at its start, which is a configuration
+// fact and never a timeout.
 func observeLbAltStatus(
 	ctx context.Context,
 	request LbAltStatusRequest,
@@ -58,12 +79,12 @@ func observeLbAltStatus(
 ) (observation LbAltStatusObservation, resultErr error) {
 	observation.AttemptId = request.AttemptId
 	observation.RequestedTuple = lbAltStatusTuple(request)
-	// Before the context: a non-positive attempt timeout expires the attempt
-	// at its start, which is a configuration fact and never a timeout.
 	if settings == nil || settings.AttemptTimeout <= 0 || settings.ResponseBodyByteLimit <= 0 {
 		observation.Failure = LbAltStatusFailureConfiguration
 		return observation, errors.New("lb status probe settings invalid")
 	}
+	ctx, cancel := context.WithTimeout(ctx, settings.AttemptTimeout)
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return observation, err
 	}
@@ -89,6 +110,12 @@ func observeLbAltStatus(
 		network = "tcp6"
 	}
 	authority := net.JoinHostPort(request.ServerName, strconv.Itoa(request.Port))
+	statusUrl := url.URL{Scheme: scheme, Host: request.ServerName, Path: request.Path}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl.String(), nil)
+	if err != nil {
+		observation.Failure = LbAltStatusFailureConfiguration
+		return observation, errors.New("lb status request unavailable")
+	}
 
 	// Bookkeeping only: no lock is held across the dial.
 	var stateLock sync.Mutex
@@ -96,7 +123,12 @@ func observeLbAltStatus(
 	connected := false
 	transport := &http.Transport{
 		Proxy: nil,
-		DialContext: func(ctx context.Context, _ string, address string) (net.Conn, error) {
+		// net/http dials under a context detached from the request's deadline
+		// and cancellation (transport.go getConn), so that a later request
+		// could take the connection. None follows here, so the dial runs under
+		// the request's own context: the attempt deadline bounds the connect
+		// itself, and the connect ends with the attempt.
+		DialContext: func(_ context.Context, _ string, address string) (net.Conn, error) {
 			admitted := func() bool {
 				stateLock.Lock()
 				defer stateLock.Unlock()
@@ -106,7 +138,7 @@ func observeLbAltStatus(
 			if !admitted {
 				return nil, errors.New("lb status dial outside its pin")
 			}
-			connection, err := dial(ctx, network, pin.String())
+			connection, err := dial(httpRequest.Context(), network, pin.String())
 			if err == nil {
 				func() {
 					stateLock.Lock()
@@ -168,12 +200,6 @@ func observeLbAltStatus(
 		return observation, errors.New(text)
 	}
 
-	statusUrl := url.URL{Scheme: scheme, Host: request.ServerName, Path: request.Path}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, statusUrl.String(), nil)
-	if err != nil {
-		observation.Failure = LbAltStatusFailureConfiguration
-		return observation, errors.New("lb status request unavailable")
-	}
 	response, err := client.Do(httpRequest)
 	if err != nil {
 		return incomplete(err, "lb status request incomplete")
