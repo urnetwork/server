@@ -99,9 +99,10 @@ func (self *testLbAltEnv) publicPortsReleased() bool {
 // (drainConnect), alongside the real exchange's drain (D12):
 //   - an api request in flight on h3 when the drain begins completes, after its
 //     connection got the GOAWAY;
-//   - a new stream on that connection is refused with H3_REQUEST_REJECTED, a
-//     new api connection is closed unserved, and no new tcp connection is
-//     accepted;
+//   - a request on a new stream of that connection is refused with
+//     H3_REQUEST_REJECTED, a request on a new api connection goes unanswered
+//     as the connection is closed unserved, neither reaches the upstream, and
+//     no new tcp connection is accepted;
 //   - readiness is never ready again;
 //   - a forwarded websocket established before the drain keeps carrying
 //     messages both ways, and holds the drain open, until the drain's
@@ -214,6 +215,13 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 		for len(env.quicResults) != 0 {
 			env.nextQuicResult()
 		}
+		// a request stream the client opens now and sends its request on only
+		// after the GOAWAY, so the server first sees the stream in the drain:
+		// the client's http3 opens no new stream once it has the GOAWAY
+		drainRequestStream, err := clientConn.OpenRequestStream(env.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		drainStartTime := time.Now()
 		drained := make(chan struct{})
@@ -231,18 +239,21 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 			t.Fatalf("readiness while draining: status %d, %s %q", code, frontReadyHeader, header.Get(frontReadyHeader))
 		}
 
-		// a stream opened after the GOAWAY is refused
-		streamCtx, streamCancel := context.WithTimeout(env.ctx, testLbAltProgressTimeout)
-		defer streamCancel()
-		stream, err := conn.OpenStreamSync(streamCtx)
+		// a request on a stream the server first sees after the GOAWAY is
+		// refused, unread
+		drainRequest, err := http.NewRequestWithContext(env.ctx, http.MethodGet, "https://"+testLbAltApiName+"/during-drain", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stream.Write([]byte{0})
-		_, err = stream.Read(make([]byte, 1))
+		if err := drainRequestStream.SendRequestHeader(drainRequest); err != nil {
+			t.Fatal(err)
+		}
+		drainRequestStream.Close()
+		drainRequestStream.SetReadDeadline(time.Now().Add(testLbAltProgressTimeout))
+		_, err = drainRequestStream.ReadResponse()
 		var streamErr *quic.StreamError
 		if !errors.As(err, &streamErr) || !streamErr.Remote || streamErr.ErrorCode != quic.StreamErrorCode(http3.ErrCodeRequestRejected) {
-			t.Fatalf("a new stream during the drain read %v, want H3_REQUEST_REJECTED", err)
+			t.Fatalf("a request on a new stream during the drain read %v, want H3_REQUEST_REJECTED", err)
 		}
 
 		// the request in flight completes
@@ -256,9 +267,21 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 			t.Fatal("the request in flight never completed")
 		}
 
-		// a new api connection is closed unserved, and no new tcp connection
-		// is accepted
+		// a new api connection is closed unserved, its request unanswered, and
+		// no new tcp connection is accepted
 		fresh, err := env.dialQuic(address, frontPortQuic, testLbAltApiName, []string{http3.NextProtoH3})
+		if err == nil {
+			freshCtx, freshCancel := context.WithTimeout(env.ctx, testLbAltProgressTimeout)
+			defer freshCancel()
+			freshRequest, err := http.NewRequestWithContext(freshCtx, http.MethodGet, "https://"+testLbAltApiName+"/fresh", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response, err := (&http3.Transport{}).NewClientConn(fresh).RoundTrip(freshRequest); err == nil {
+				response.Body.Close()
+				t.Fatalf("a request on a new api connection during the drain was answered %d", response.StatusCode)
+			}
+		}
 		freshClose := testLbAltCloseOf(fresh, err)
 		if !freshClose.applicationArrived || freshClose.applicationCode != quic.ApplicationErrorCode(http3.ErrCodeNoError) {
 			t.Fatalf("a new api connection during the drain closed %+v", freshClose)
@@ -278,11 +301,6 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 		default:
 			t.Fatal("the upstream never served the request in flight")
 		}
-		select {
-		case path := <-servedPaths:
-			t.Fatalf("the drain forwarded a new request: %s", path)
-		default:
-		}
 
 		// the websocket holds the drain open until its deadline
 		if err := echo("after the rest finished"); err != nil {
@@ -296,6 +314,13 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 		testLbAltWait(t, drained, "the drain")
 		if elapsed := time.Since(drainStartTime); elapsed < drainTimeout {
 			t.Fatalf("the drain ended after %s, before its %s deadline", elapsed, drainTimeout)
+		}
+		// neither request sent during the drain reached the upstream, which had
+		// the rest of the drain to receive one the front forwarded
+		select {
+		case path := <-servedPaths:
+			t.Fatalf("the drain forwarded a new request: %s", path)
+		default:
 		}
 		websocketConn.SetReadDeadline(time.Now().Add(testLbAltProgressTimeout))
 		if _, _, err := websocketConn.ReadMessage(); err == nil {
