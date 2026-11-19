@@ -478,7 +478,7 @@ func addLbRoutes(routes *routeHttpTable, routeTable *RouteTable, lbRoutePrefix s
 
 // Whether a served name is a leading wildcard, `*.b.c`.
 func routeNameIsWildcard(name string) bool {
-	return 2 <= len(name) && name[:2] == "*."
+	return strings.HasPrefix(name, "*.")
 }
 
 // The service of a matched name, when it serves its names; nil for an lb

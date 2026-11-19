@@ -12,6 +12,18 @@ import (
 )
 
 // How the front serves clients. Read-only once the front is built.
+//
+// The handlers apply the header limits, SendTimeout, the drain, gzip and
+// the access log themselves. The rest are the servers', so connect's: an
+// http.Server's ReadHeaderTimeout is ClientHeaderTimeout, its IdleTimeout
+// KeepaliveTimeout, and its HTTP2.MaxConcurrentStreams
+// Http2MaxConcurrentStreams. Its MaxHeaderBytes must be above
+// MaxRequestHeadersTotalBytes, twice it say, so the handler sees every head
+// nginx would answer with a 414 or 400 instead of Go answering 431; and it
+// sets no WriteTimeout, which would cut a stream SendTimeout lets live. Go's
+// server has no KeepaliveRequests or KeepaliveTime, nor nginx's lingering
+// close, so those need per-connection state connect's server would have to
+// provide.
 type HttpSettings struct {
 	// how long a new connection has for its TLS handshake, request line and
 	// headers, and a keepalive connection for a request's headers once they

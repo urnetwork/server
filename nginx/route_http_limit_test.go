@@ -203,8 +203,8 @@ func TestRouteHttpRouteZonesApplyOnServiceNamesOnly(t *testing.T) {
 	}
 }
 
-// One source on two interfaces has a quota on each, and an excluded source
-// has none at all.
+// One source on two interfaces has a quota on each, shared by every service
+// of an interface, and an excluded source has none at all.
 func TestRouteHttpLimitsArePerInterfaceAndSkipExcludedSubnets(t *testing.T) {
 	routeTable := loadTestRouteTable(t)
 	setTestRateLimit(t, routeTable, "eth1", 1, 0, 1, "203.0.113.0/24")
@@ -217,6 +217,11 @@ func TestRouteHttpLimitsArePerInterfaceAndSkipExcludedSubnets(t *testing.T) {
 	}
 	if response := serveTestRequest(testFront.front.HttpsHandler("eth1"), newTestRequestFrom(addr, "GET", "api.service.example", "/v1", true)); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("eth1 again = %d, want 429", response.Code)
+	}
+	// the shared zone is the interface's, across services, as nginx's
+	// standardlimit is
+	if response := serveTestRequest(testFront.front.HttpsHandler("eth1"), newTestRequestFrom(addr, "GET", "mcp.service.example", "/v1", true)); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("another service on eth1 = %d, want 429: one quota per interface", response.Code)
 	}
 	if response := serveTestRequest(testFront.front.HttpsHandler("eth2"), newTestRequestFrom(addr, "GET", "api.service.example", "/v1", true)); response.Code != http.StatusOK {
 		t.Fatalf("the same source on eth2 = %d, want its own quota", response.Code)
