@@ -6,6 +6,7 @@ package connect
 // survives datagrams it can't write.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/urnetwork/server"
 )
@@ -205,6 +209,74 @@ func TestLbAltUdpSocketsSurviveDatagramsTheyCannotWrite(t *testing.T) {
 				}
 			}
 			client.close()
+		}
+	})
+}
+
+// A QUIC connection whose packets reach a sibling socket of its group, as a
+// re-creation moves most of a group's flows (D22) and a NAT rebinding moves
+// one (D10), is told at once with a stateless reset, so its client
+// reconnects rather than waiting out its idle timeout: every transport of
+// the block derives reset tokens from one key, so a socket that never saw the
+// connection answers with the token the connection's own socket advertised.
+// Here the group is narrowed to one socket, the connection made on it, and
+// the socket lost after a sibling is back, so the next packet can only reach
+// the sibling.
+func TestLbAltQuicTellsAMovedConnectionWithAStatelessReset(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		env := newTestLbAltEnv(t, &testLbAltEnvSettings{
+			frontSettings: func(settings *FrontServerSettings) {
+				settings.SocketRestartInitialDelay = time.Millisecond
+			},
+		})
+		address, _ := env.address(testLbAltInterfaceA, frontFamilyIpv4)
+		bindAddress := env.bindAddress(address, frontPortQuic)
+		socketCount := len(env.frontServer.sockets)
+		socketsPerPort := env.settings.SocketsPerPort
+
+		hold := env.binds.hold(frontProtocolUdp, bindAddress)
+		defer hold.releaseAll()
+		packetConns := env.binds.boundPacketConns(bindAddress)
+		for _, packetConn := range packetConns[1:] {
+			packetConn.Close()
+		}
+		hold.waitWaiting(t, socketsPerPort-1)
+		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
+
+		quicConfig := testLbAltClientQuicConfig()
+		// a connection nobody tells ends here instead
+		quicConfig.MaxIdleTimeout = 20 * time.Second
+		conn, err := env.dialQuicFrom(
+			env.clientPacketConn(address),
+			address,
+			frontPortQuic,
+			env.clientTlsConfig(testLbAltApiName, []string{http3.NextProtoH3}),
+			quicConfig,
+			false,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.CloseWithError(0, "")
+
+		// a sibling comes back, and the connection's socket is lost
+		hold.releaseOne()
+		env.waitSocketsUp(socketCount - (socketsPerPort - 1) + 1)
+		packetConns[0].Close()
+		hold.waitWaiting(t, socketsPerPort-1)
+		env.waitSocketsUp(socketCount - (socketsPerPort - 1))
+
+		// a packet of data: quic-go answers no packet as small as a stateless
+		// reset with one
+		stream, err := conn.OpenStream()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stream.Write(make([]byte, 1024))
+		testLbAltWait(t, conn.Context().Done(), "the moved connection's end")
+		var resetErr *quic.StatelessResetError
+		if err := context.Cause(conn.Context()); !errors.As(err, &resetErr) {
+			t.Fatalf("the moved connection ended with %v, want a stateless reset", err)
 		}
 	})
 }
