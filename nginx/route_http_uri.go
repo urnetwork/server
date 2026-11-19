@@ -244,20 +244,15 @@ scan:
 	}, true
 }
 
-// The path nginx sends upstream for this uri's path, or a part of it: the
-// path re-escaped when the client's held a % or when rewritten, a rewrite's
-// r->internal, and otherwise as it is.
-func (self routeUri) upstreamPath(path string, rewritten bool) string {
-	if self.quoted || rewritten {
-		return escapeRouteUriPath(path)
-	}
-	return path
-}
-
-// The path and query nginx sends upstream for a uri: its upstream path, then
-// ? and the args when there are any.
+// The path and query nginx sends upstream for this uri's path, or a part of
+// it: the path re-escaped when the client's held a % or when rewritten, a
+// rewrite's r->internal, and otherwise as it is, then ? and the args when
+// there are any.
 func (self routeUri) upstreamTarget(path string, rewritten bool) string {
-	upstreamPath := self.upstreamPath(path, rewritten)
+	upstreamPath := path
+	if self.quoted || rewritten {
+		upstreamPath = escapeRouteUriPath(path)
+	}
 	if self.args == "" {
 		return upstreamPath
 	}
