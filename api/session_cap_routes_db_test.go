@@ -151,10 +151,11 @@ func TestMintRoutesAnswerTheSessionCapWith409(t *testing.T) {
 }
 
 // POST /auth/verify takes an optional bearer (the API spec marks it so, for
-// the site and the apps, which verify an added sign-in method signed in). A
-// live network token of the verified network and user renews the caller's own
-// session; any other bearer is served as a signed-out caller, never refused,
-// and the verify starts a new session.
+// the site and the apps, which verify an added sign-in method signed in, and
+// whose sign-in dialog sends a signed-in page's token). A live network token
+// of the verified network and user renews the caller's own session; any other
+// bearer is served as a signed-out caller, never refused, and the verify
+// starts a new session, as before. A wrong code is answered as before.
 func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -204,6 +205,7 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 		}{
 			{"no bearer", ""},
 			{"a malformed bearer", "Bearer not-a-token"},
+			// a page signed in to another account signs in to this one
 			{"another network's token", "Bearer " + other},
 			{"an ended session's token", "Bearer " + ended},
 			{"an API key", fixture.key()},
@@ -211,6 +213,26 @@ func TestAuthVerifyTakesAnOptionalBearer(t *testing.T) {
 			returned := verify(c.name, c.authorization)
 			if *returned.SessionId == *ownClaims.SessionId || *returned.SessionId == *endedClaims.SessionId {
 				t.Errorf("%s: the verify returned an existing session", c.name)
+			}
+		}
+
+		// a wrong code is answered as before, 200 with the error, whatever
+		// bearer the request carries: never a 401, which ends the sdk's
+		// sign-in. Four failed attempts, under the five an address may make in
+		// five minutes (model.AttemptFailedCountThreshold).
+		for _, c := range []struct {
+			name          string
+			authorization string
+		}{
+			{"the signed-in caller", "Bearer " + own},
+			{"another network's token", "Bearer " + other},
+			{"an ended session's token", "Bearer " + ended},
+			{"a malformed bearer", "Bearer not-a-token"},
+		} {
+			var refused model.AuthVerifyResult
+			fixture.call(t, http.MethodPost, "/auth/verify", c.authorization, map[string]any{"user_auth": userAuth, "verify_code": "wrong-code"}, http.StatusOK, &refused)
+			if refused.Error == nil || refused.Network != nil {
+				t.Errorf("%s: a wrong code answered %+v", c.name, refused)
 			}
 		}
 	})
