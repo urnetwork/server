@@ -125,10 +125,11 @@ type hostDeps struct {
 	// How the client's ur/smtpedge registration reaches sockets.
 	Registrations *sidecar.SocketPlatformRegistrationsArgs
 	// Each replaces the block's own: a test's.
-	Gates sidecar.ServiceGates
-	Redis sidecar.Redis
-	Clock sidecar.Clock
-	Log   sidecar.Logger
+	Gates   sidecar.ServiceGates
+	Redis   sidecar.Redis
+	Metrics sidecar.Metrics
+	Clock   sidecar.Clock
+	Log     sidecar.Logger
 }
 
 // The engine as the block runs it. Safe for concurrent use.
@@ -179,6 +180,9 @@ func newSmtpEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps
 	}
 	if deps.Redis != nil {
 		host.Redis = deps.Redis
+	}
+	if deps.Metrics != nil {
+		host.Metrics = deps.Metrics
 	}
 	self := &smtpEdgeHost{
 		ctx:      hostCtx,

@@ -69,13 +69,14 @@ func (self *SmtpEdgeStore) callContext(ctx context.Context) (context.Context, co
 	return context.WithTimeout(ctx, self.settings.CallTimeout)
 }
 
-// Runs callback and returns what it raised, as an error.
+// Runs callback and returns what it raised, as an error, a context that ended
+// under it included. The store's callers are smtpedge's goroutines (its send
+// log, its probe, its ladder), which run under no server handler, so a raise
+// that left here would end the process: a call past the engine's StoreTimeout
+// on a slow Postgres fails instead, and the engine tries it again (§14.9).
 func smtpEdgeStoreRun(callback func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
-			}
 			if recoveredErr, ok := r.(error); ok {
 				err = recoveredErr
 			} else {
