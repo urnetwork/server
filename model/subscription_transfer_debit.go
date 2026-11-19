@@ -160,8 +160,18 @@ func nextTransferDebitBalance(ctx context.Context, shard int, after *server.Id) 
 // fair-cursor policy; the durable journal remains the accounting replay fence.
 func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *server.Id, maxBalances int,
 	operations transferDebitPageOperations) (result TransferDebitFlushResult, returnErr error) {
+	pageExpiredAfterProgress := func() bool {
+		return result.LastBalanceId != nil && bounded.Err() != nil &&
+			context.Cause(bounded) == errTransferDebitPageDeadline && ctx.Err() == nil
+	}
 	server.HandleError(func() {
 		for range maxBalances {
+			// The previous balance finished. An already-expired checkout
+			// cannot visit another key; hand the cursor back to the task.
+			if pageExpiredAfterProgress() {
+				result.More = true
+				return
+			}
 			next := operations.nextBalance(bounded, shard, after)
 			if next == nil {
 				result.LastBalanceId = nil
@@ -206,9 +216,7 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 	// A next-key checkout/read can exhaust the page after earlier balances
 	// committed. Return that prefix for the task post instead of replaying its
 	// old cursor through task failure backoff. No unvisited key is acknowledged.
-	if returnErr != nil && result.Balances > 0 && result.LastBalanceId != nil &&
-		ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errTransferDebitPageDeadline &&
-		isSettlementPageCancellation(returnErr) {
+	if returnErr != nil && pageExpiredAfterProgress() && isSettlementPageCancellation(returnErr) {
 		result.More = true
 		returnErr = nil
 	}

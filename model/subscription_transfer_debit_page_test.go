@@ -7,10 +7,47 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/server"
 )
+
+// A completed balance may use the page's last instant. No subsequent key can
+// be read with that expired checkout budget, even when the balance was busy.
+func TestAsyncDebitPageSkipsLookupAfterCompletedBalanceExpiresBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, busy := range []bool{false, true} {
+			ctx := t.Context()
+			bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errTransferDebitPageDeadline)
+			first := server.NewId()
+			lookups := 0
+			applied, busyCount := 1, 0
+			if busy {
+				applied, busyCount = 0, 1
+			}
+			result, err := flushTransferDebitPage(ctx, bounded, 0, nil, 64, transferDebitPageOperations{
+				nextBalance: func(pageCtx context.Context, _ int, _ *server.Id) *server.Id {
+					lookups++
+					if pageCtx.Err() != nil {
+						panic(errors.Join(server.DbContextDoneError, pageCtx.Err(), pageCtx.Err()))
+					}
+					return &first
+				},
+				flushBalance: func(pageCtx context.Context, _ server.Id) (int, int, bool, error) {
+					<-pageCtx.Done()
+					return applied, applied, busy, nil
+				},
+			})
+			cancel()
+			if err != nil || lookups != 1 || result.LastBalanceId == nil || *result.LastBalanceId != first ||
+				result.Balances != 1 || result.Applied != applied || result.Released != applied ||
+				result.Busy != busyCount || result.Failed != 0 || !result.More {
+				t.Fatalf("busy=%t: expired page made %d lookups, result=%+v err=%v", busy, lookups, result, err)
+			}
+		}
+	})
+}
 
 // Both pgx's wrapped deadline and the pool's retained cancellation graph must
 // yield the completed prefix when only the worker's page budget expired.
@@ -98,12 +135,15 @@ func TestAsyncDebitPageDeadlineKeepsForeignFailures(t *testing.T) {
 		progress     bool
 		pageCause    error
 		cancelParent bool
+		stopInFlush  bool
 		lookupErr    error
 	}{
 		{name: "no_progress", pageCause: errTransferDebitPageDeadline, lookupErr: server.DbContextDoneError},
 		{name: "parent_cancel", progress: true, cancelParent: true, lookupErr: server.DbContextDoneError},
 		{name: "parent_and_page_cancel", progress: true, pageCause: errTransferDebitPageDeadline, cancelParent: true, lookupErr: server.DbContextDoneError},
 		{name: "foreign_budget", progress: true, pageCause: foreignBudget, lookupErr: context.DeadlineExceeded},
+		{name: "foreign_budget_before_lookup", progress: true, pageCause: foreignBudget, stopInFlush: true, lookupErr: context.DeadlineExceeded},
+		{name: "parent_and_page_stopped_before_lookup", progress: true, pageCause: errTransferDebitPageDeadline, cancelParent: true, stopInFlush: true, lookupErr: server.DbContextDoneError},
 		{name: "unexpected_query", progress: true, lookupErr: unrelated},
 		{name: "unexpected_after_deadline", progress: true, pageCause: errTransferDebitPageDeadline, lookupErr: unrelated},
 		{name: "mixed_error", progress: true, pageCause: errTransferDebitPageDeadline, lookupErr: errors.Join(context.DeadlineExceeded, unrelated)},
@@ -118,6 +158,14 @@ func TestAsyncDebitPageDeadlineKeepsForeignFailures(t *testing.T) {
 		bounded, expire := context.WithCancelCause(ctx)
 		first, prior := server.NewId(), server.NewId()
 		lookups := 0
+		stop := func() {
+			if c.pageCause != nil {
+				expire(c.pageCause)
+			}
+			if c.cancelParent {
+				cancelParent()
+			}
+		}
 		result, err := flushTransferDebitPage(ctx, bounded, 0, &prior, 64, transferDebitPageOperations{
 			nextBalance: func(_ context.Context, _ int, after *server.Id) *server.Id {
 				lookups++
@@ -127,15 +175,17 @@ func TestAsyncDebitPageDeadlineKeepsForeignFailures(t *testing.T) {
 					}
 					return &first
 				}
-				if c.pageCause != nil {
-					expire(c.pageCause)
-				}
-				if c.cancelParent {
-					cancelParent()
+				if !c.stopInFlush {
+					stop()
 				}
 				panic(c.lookupErr)
 			},
-			flushBalance: func(context.Context, server.Id) (int, int, bool, error) { return 1, 1, false, nil },
+			flushBalance: func(context.Context, server.Id) (int, int, bool, error) {
+				if c.stopInFlush {
+					stop()
+				}
+				return 1, 1, false, nil
+			},
 		})
 		expire(nil)
 		cancelParent()
