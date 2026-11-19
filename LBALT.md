@@ -1,6 +1,6 @@
 # LBALT: connect fronts the edge interfaces (`lb_alt`)
 
-Status: designed 2026-11-18; implemented on branch `lbalt/integrate` (server a297487df, warp bdacae4), 2026-11-19, and not merged to main or deployed. §11 holds the implementation notes for code review.
+Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4), with origin/main merged in; not merged to main or deployed, and nothing runs until services.yml declares `services.connect.lb_alt`. §11 holds the implementation notes for code review.
 
 Questions D1–D22 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
 
@@ -181,7 +181,7 @@ This section assembles the decisions recorded in §6.
 | TCP 80 | any | 301 to https; lb status routes on lb names, including Route53's health check (D17); denied otherwise |
 | UDP 443 (h3) | connect names | connect, in-process |
 | UDP 443 (h3) | api names | h3 terminated in connect; HTTP/1.1 to api blocks |
-| UDP 443 (h3) | anything else | refused with application error 0x1000, as alt does |
+| UDP 443 (h3) | anything else | another served name is closed with application error 0x1000; a missing or unknown SNI fails the TLS handshake, as alt's does (amended 2026-11-19, §11.3 (a)) |
 | UDP 4053, UDP 53 → 4053 | as UDP 443 | the same dispatch under decode53, as alt does |
 
 No name gets an Alt-Svc header, so browsers keep using TCP for web, mmm and app.
@@ -350,6 +350,9 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - Amended by the review:
   - Tests cover all three override cases: no interface override; `true` under a disabled service default; and `false` under an enabled default, which is the rollback switch.
   - An lb_alt interface stays in DNS and in the edge inventory, unlike a transparent one (§4.6).
+- Amended 2026-11-19 (owner; §11.3 (d), (e)):
+  - A host's connect units follow only whether connect declares lb_alt (`true` or `false`), where connect is placed, and a non-transparent lb interface; never the default's value or an override. Declaring is the one step that redeploys connect, so the canary declares `services.connect.lb_alt: false` and lets every connect block deploy before the first override (§8 step 5), and removing the declaration is the last step of a full rollback.
+  - Validation also refuses, on an lb_alt host, block chain names over 28 characters and front interfaces whose resolved keepalives differ, and everywhere a service named `lba` or `lbt`, alone or before a `-`.
 
 **D3. Names and protocols served.**
 - The proposal is the §4.1 table: every fronted name on TCP, h3 and whodis for connect and api names only, and no Alt-Svc.
@@ -357,6 +360,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
 - Recommendation: §4.1 as written. It matches alt on UDP and nginx on TCP.
 - **Decision (owner, 2026-11-18):** §4.1 as written. h3 and whodis serve connect and api names only, everything else on QUIC is refused with 0x1000, and no name gets an Alt-Svc header.
 - Amended by the review: on h3, each forwarded request's authority must also be one of the api names that D3 admits. A connection whose SNI is an api name cannot carry a request for another service.
+- Amended 2026-11-19 (owner; §11.3 (a), (f)): on QUIC, a missing or unknown SNI fails the TLS handshake (CRYPTO_ERROR 0x150), as alt's does, since the QUIC config has no certificate to complete it with; only another served name is closed with 0x1000. Connect names served in-process reach only connect's own routes, GET / with the websocket and H1+ upgrades: another path is 404 and another method 405, as a block's private router answers behind nginx.
 
 ### B. Front and forwarding
 
@@ -416,6 +420,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - D6c: Go's automatic ticket keys belong to the listener's `tls.Config`. A config returned by `GetConfigForClient` uses the original's keys unless it sets its own (crypto/tls common.go), and the vendored quic-go uses the listener's config without cloning it.
     - So the ticket scope is one long-lived config shared by every socket of the block. A ticket from one block or host still can't resume on another.
     - Tests verify resumption across sockets within one block.
+- Amended 2026-11-19 (owner; §11.3 (h)): a leaf outside its validity window loads and serves, logged at error level, as nginx serves it; `X-UR-Front-Cert-Expiry` and `urnetwork_front_certificate_expiry_timestamp_seconds` report the earliest expiry, lapsed or not. The expiry alert is the monitor's tls-expiry signal (monitor/SIGNALS.md §18.2), which warns 21 days ahead for the manager name's certificate on every lb interface, lb_alt ones included.
 
 **D7. Retries and body buffering.**
 - nginx buffers every body that isn't streamed (16 MiB cap, 64 KiB in memory, the rest on disk). That lets it retry a 503 or a connect failure on another block, including for non-idempotent requests.
@@ -433,6 +438,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - A streamed body becomes ineligible for retry once forwarding begins.
   - Go's transport can retry on its own, so tests count attempts at a recording upstream (§9).
   - A timeout after a POST reached the first block can still run it twice. nginx does the same today under `non_idempotent`, and that stays accepted.
+- Amended 2026-11-19 (owner; §11.3 (c)): an h3 request without a content-length, which the vendored http3 gives every bodiless h3 request, reserves at its first bytes, so its 503 comes after that read (D21).
 
 **D8. Limits.**
 - nginx's per-address limits are kept per interface process. With the source-address hash split (D10), an address always lands on one block per interface, so per-block buckets reproduce per-interface limits exactly. (Corrected below: one block serves several interfaces.)
@@ -449,6 +455,9 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - The lb status exemptions, `exclude_subnets` and per-stream accounting on h2 and h3 carry over.
   - An upgraded connection holds its concurrency slot until the tunnel closes.
   - During a deploy overlap, the draining generation counts its own sessions, so a client may briefly have up to twice its limit. The same happens today when a new lb container starts with fresh zones.
+- Amended 2026-11-19 (owner; §11.3 (b), (g)):
+  - An api QUIC connection is charged to the per-address connection cap too, once its handshake completes (0x1001), and an h3 request stream's HEADERS must arrive within client_header_timeout (H3_REQUEST_INCOMPLETE).
+  - On connect's public TCP sockets, a write with no deadline, hijacked or not, ends once none of it has gone out for send_timeout, as nginx bounds a blocked client write. A stall during a request head therefore closes up to send_timeout after it began, where nginx closes at client_header_timeout: an accepted nginx difference (LBALT-IMPL §4).
 
 **D9. Default server, ALPN, early data.**
 - **No or unknown SNI on TCP.** nginx answers with the lb name's certificate and the lb routes. Recommendation: do the same. On QUIC, refuse, as alt does.
@@ -466,6 +475,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Raw-QUIC connect may offer no ALPN, while api requests use `h3`. As in alt, dispatch picks the front by SNI (alt/alt.go:399-405). ALPN keeps alt's handling, which offers the intersection with `[h3]` (alt.go:356-388), so connect without ALPN still gets through.
   - "Early data off" means the public QUIC config sets `Allow0RTT: false` and TLS refuses early data. Waiting for the handshake to complete before dispatch is a separate control. A resumed session must report `Used0RTT == false` (§9).
   - Real client code exercises WebSocket, H1+, raw QUIC and API h3 before the first cutover (Gate A).
+- Amended 2026-11-19 (owner; §11.3 (a)): on QUIC, no or an unknown SNI fails the TLS handshake rather than getting 0x1000 (D3).
 
 ### C. Networking and deploy
 
@@ -619,6 +629,7 @@ lb_alt, TCP   client -> public ip:443 -DNAT, hash split-> connect block (TLS)
   - Qualify beta with pinned test traffic before that switch.
   - Then compare the switched interface with an nginx control interface over the same interval (§8 steps 4–5).
   - Measure each block's actual traffic share and skew. One hash bucket can hold a large NAT.
+- Amended 2026-11-19 (owner; §11.3 (e)): a family still on nginx switches only once every block of positive weight is ready there, nginx keeping new flows meanwhile, so the first switch still reaches all five blocks at once.
 
 **D17. Observability.**
 - Open question: does anything use nginx's access logs today, such as dashboards, monitor probes or abuse investigation?
@@ -706,6 +717,7 @@ All three were decided by the owner on 2026-11-18.
   - A body that crosses 16 MiB is answered with 413 at that point.
   - A local capacity refusal is a 503 counted apart from upstream 503s, and only an upstream 503 can be retried.
 - **Decision (owner, 2026-11-18):** as proposed. The caps are 4 GiB and 1,024 files per connect process, with the review's rules above.
+- Amended 2026-11-19 (owner; §11.3 (c)): an h3 body of unknown length reserves once a read returns bytes, not before its first read, so bodiless h3 GETs are served under a full budget, as on h1 and h2.
 
 **D22. A UDP socket lost after promotion.**
 - D10 gives each block N = 4 SO_REUSEPORT UDP sockets per (address, port), each with its own quic-go transport.
@@ -977,7 +989,7 @@ Server paths are from the server root and warp paths from `../warp/`; in a warp 
 
 ### 11.1 Where things are
 
-- `lbalt/integrate` holds everything. Server: `/Users/brien/urnetwork-wt/lbalt/integrate/server` at a297487df, merge base 16e4846aa; origin/main has moved since, so main is merged in before `lbalt/integrate` goes to main. Warp: `/Users/brien/urnetwork-wt/lbalt/integrate/warp` at bdacae4, merge base 9782f32.
+- `lbalt/integrate` holds everything. Server: `/Users/brien/urnetwork-wt/lbalt/integrate/server` at a297487df, merge base 16e4846aa. Warp: `/Users/brien/urnetwork-wt/lbalt/integrate/warp` at bdacae4, merge base 9782f32. On 2026-11-19 origin/main's 18 newer server commits were merged in (30b6935b7, no conflicts; of lb_alt's files they touched only monitor/conn.go, monitor/registry.go and monitor/SIGNALS.md),. lb_alt alone is `git diff 16e4846aa c211bea11` in server and `git diff 9782f32 bdacae4` in warp.
 - `lbalt/base` (server 82456174a, warp ee9d340) holds the contract, the route file types and parser, the settings, the API stubs and the shared fixture.
 - Each unit has a branch `lbalt/<unit>` and a worktree under `/Users/brien/urnetwork-wt/lbalt/<unit>/`. Server: `s-tls`, `s-forward`, `s-http`, `s-connect`, `s-monitor`; then `int-front`, `int-e2e`, `int-monitor`, `int-carriers`, `harness-parity`; then round 2's `r2-forward`, `r2-http`, `r2-monitor`, from 4285c3007, merged as 869f0d563, b99fc7b5a and c6c0712bd; then the final review's `final-nginx` and `final-connect`, from 85101757a, merged as 9981127c4 and 9ff29fe87. Warp: `w-route`, `w-split`, `w-units`, `w-edge`, then `int-warp`, `harness-netns`, `harness-parity`, then `final-warp`, merged as bdacae4.
 - The integrator's own commits: server 8af8f868d, 6505ed506, 6efe5fbad, 0e9138ed1, 2ff1790c2, 4285c3007, 85101757a and a297487df; warp 7b71ef2, 295cd2c, cd6963a and 4cb3677. The units' reports stay outside the repos; their decisions are in LBALT-IMPL §5 and §7 and here.
@@ -1075,7 +1087,7 @@ Each heading names the decisions and sections it implements. D15 and D16 have no
 
 Each with its reason. A departure that also makes the front differ from nginx is described in §11.4 and only named here.
 
-**Final review, for the owner to confirm**; the decision text of §1 to §10 is left as decided.
+**Final review, confirmed by the owner 2026-11-19.** §6 records each as an amendment of D2, D3, D6, D7, D8, D9, D16 or D21, and §4.1's table follows; §8 step 5 points to (d).
 - (a) **QUIC with a missing or unknown SNI.** §3.3, the §4.1 row "UDP 443 (h3) | anything else", D3 and D9 refuse it with 0x1000. The code fails its TLS handshake (CRYPTO_ERROR 0x150, internal_error), as alt does and LBALT-IMPL §2.8 says, since the QUIC config has no certificate for it and 0x1000 needs a completed handshake; only a served name other than connect and api gets 0x1000.
 - (b) **D8 extended to h3 api connections** (LBALT-IMPL §2.8). D8 keeps alt's per-address QUIC cap for connect. An api connection is now charged to it too after its handshake (`net_connections`, 0x1001), idle ones included, and a request stream's HEADERS must arrive within client_header_timeout (H3_REQUEST_INCOMPLETE). Before, one address could hold any number of api connections, each with up to 100 header-less streams and about 7 MiB.
 - (c) **h3 bodies reserve at their first bytes** (08ed6a81b). D21 reserves "a body of unknown length ... before its first read", and D7 and D19 answer 503 before reading the body. The vendored http3 gives every h3 request without a content-length, GETs included, a body of unknown length, so reserving first refused bodiless h3 GETs under a full budget, which h1, h2 and nginx's h3 serve. Such a body now reserves once a read returns bytes, and its 503 comes after that read.
@@ -1087,7 +1099,7 @@ Each with its reason. A departure that also makes the front differ from nginx is
 - (e) **The first switch waits for every block** (LBALT-IMPL §2.5; warp 2dc67af, d7ee30b). D16's amendment sends a first switch's flows to all five blocks at once, but the split took whichever were ready. Now a family whose nginx still listens behind its DNAT switches only once every block of positive weight is ready, nginx keeping new flows meanwhile; a retired nginx's DNAT holds nothing. This also covers declaring lb_alt and switching in one edit. Load also refuses (LBALT-IMPL §7) block chain names over 28 characters, whose promotion would never complete; front interfaces whose resolved keepalives differ for a service with tcp port 80 and none of its own, whose render would fail; and services named `lba` or `lbt`, alone or before a `-`.
 - (f) **Connect names reach connect through its own routes** (de51d9975). §4.1 and LBALT-IMPL §2.7 serve connect names in-process, and the units passed any method and path to `ConnectRouter.Connect`. Now only GET / reaches connect, the websocket and H1+ upgrades included; another path is 404, another method on / 405 with `Allow: GET`, and cookies are dropped, before connect counts or rate-limits anything, as a block's private router answers behind nginx.
 - (g) **Writes without a deadline end at send_timeout** (LBALT-IMPL §7; b036731cf, d522f11f4). The contract failed only writes after one that timed out. Now, on connect's public TCP sockets, a write its owner left without a deadline, hijacked or not, fails once none of it has gone out for send_timeout, as nginx bounds a blocked client write; an owner's deadline keeps it. Before, a TLS 1.3 client that sent KeyUpdate requests and stopped reading held such a connection, and every drain of its block, for good, and an unauthenticated websocket its D8 slot.
-- (h) **A certificate outside its validity window serves** (LBALT-IMPL §2.7; c003371e6). D6 asks for complete, matching pairs with SAN coverage; the units also refused a leaf not valid now, which would stop every connect block of an lb_alt host at its next start over one name. Neither nginx nor warpctl reads a NotAfter, so the leaf now serves, logged at error level, and `X-UR-Front-Cert-Expiry` and `urnetwork_front_certificate_expiry_timestamp_seconds` carry the earliest NotAfter, lapsed or not. Nothing alerts on them yet (§11.6).
+- (h) **A certificate outside its validity window serves** (LBALT-IMPL §2.7; c003371e6). D6 asks for complete, matching pairs with SAN coverage; the units also refused a leaf not valid now, which would stop every connect block of an lb_alt host at its next start over one name. Neither nginx nor warpctl reads a NotAfter, so the leaf now serves, logged at error level, and `X-UR-Front-Cert-Expiry` and `urnetwork_front_certificate_expiry_timestamp_seconds` carry the earliest NotAfter, lapsed or not. The expiry alert is the monitor's tls-expiry signal (monitor/SIGNALS.md §18.2), which warns 21 days ahead for the manager name's certificate on every lb interface, lb_alt ones included; nothing reads the front's header or metric, which the owner judged enough (2026-11-19).
 
 **LBALT-IMPL §5 and §7** are built as written, in the code §11.2 names and in `nginx/route_http.go:routeServiceStatusStandard`, `nginx/upstream_balance.go` with `services.LbAltBucketBlocks` (weight 0 gets no requests and no bucket), `services.LbAltService`, `services.LbAltBucketCount`, `newNameMatcher`, `routeHttpHandler.serveProxy` (`forwardOptions.host`), `lbAltDefaultWhodisTld` and `monitor/signal_lbalt_status.go:NewLbAltStatusSignal` (`lbalt-status-inventory`, `lbalt-status-path`, `lbalt-status-observation`). They differ from the text in:
 - MaxHeaderBytes and MaxHeaderValueCount come from settings, `ServerHeaderBytesMultiple` and `ServerHeaderLinesMultiple` (2 each), since CODESTYLE allows no package-level tunable.
@@ -1188,8 +1200,9 @@ One list, from LBALT-IMPL §4, the units', round 2's and the final review's pari
 - A service both websocket and streamable has its bodies streamed, where nginx buffers them; no such service is in main.
 
 **Timeouts and connections**
-- A body that stalls past client_body_timeout gets no response, as nginx terminates the request: on h1 the connection closes with nothing written, before any block or while a streamed body is forwarded, a relayed response included; on h2 only the stream is reset. Unlike nginx, Go's h1 server sends TLS close_notify first, where nginx's quiet shutdown sends none; the h2 reset is INTERNAL_ERROR, nginx's PROTOCOL_ERROR, since Go's server takes no reset code from a handler; h3, which nginx doesn't serve here, answers 408.
+- A body that stalls past client_body_timeout gets no response, as nginx terminates the request: on h1 the connection closes with nothing written, before any block or while a streamed body is forwarded, a relayed response included; on h2 only the stream is reset. Unlike nginx, Go's h1 server sends TLS close_notify first, where nginx's quiet shutdown sends none; the h2 reset is INTERNAL_ERROR, nginx's PROTOCOL_ERROR, since Go's server takes no reset code from a handler; h3, which nginx doesn't serve here, answers 408 (kept, owner 2026-11-19).
 - send_timeout bounds each write as a whole, a handler write or flush of at most 32 KiB and on h2 each frame (through the write byte timeout, which closes the connection), where nginx re-arms it on any progress, so a client reading slower than about 1 KiB/s is cut by the front and kept by nginx.
+- A write with no deadline on connect's public TCP sockets, such as the answer to a TLS 1.3 KeyUpdate from a client that stopped reading, ends once none of it has gone out for send_timeout (§11.3 (g)). A reader blocked behind such a write during a request head is closed up to send_timeout (30 s) after nginx's read timer would close it: about 30 s in rather than at client_header_timeout (15 s). An idle one closes at keepalive_timeout, as in nginx. Accepted by the owner, 2026-11-19.
 - Lingering close. nginx discards an unread body after any answer of its own for up to lingering_time (30 s), each read waiting at most lingering_timeout (5 s), then keeps the connection or, for a closing answer, shuts its write side and discards until EOF or 30 s. Go's h1 server has no lingering_time: it reads up to 256 KiB of the body within lingering_timeout, before an answer that keeps the connection and after one that closes it, and when the connection then closes with the body unread it half-closes (a FIN on port 80, close_notify on 443) and closes 500 ms later, as the front ensures in every such case. So:
   - the answer to a stalled body comes after lingering_timeout, where nginx answers at once, for the front's own answers, the forwarder's refusals and connect's in-process answers alike;
   - a client still sending 500 ms after its answer gets a reset where nginx goes on discarding: one that reads while it writes (Go's client, curl, browsers) has the answer first, one that reads only after writing its whole body loses it once the upload outlasts 500 ms and the socket buffers;
@@ -1338,9 +1351,8 @@ Each is open, checked against the code at a297487df and bdacae4.
 **Reruns.** One `lbalt/final-nginx` race run of seven failed with its output uncaptured; six reruns, 15 runs of the new tests and the final merged tree's race run passed. If it recurs, keep the output.
 
 **Left by the final review.**
-- Nothing alerts on certificate expiry: `X-UR-Front-Cert-Expiry` has no reader (warp only names it) and no monitor signal reads `urnetwork_front_certificate_expiry_timestamp_seconds`, while a lapsed leaf only logs (§11.3 (h)). warpctl's readiness poll or the monitor should warn of the earliest expiry more than a full connect rolling deploy ahead; the private status could also count `CertificateStore.NotValidNames`.
-- A KeyUpdate during an upload (low): `nginx/response.go:responseRequestBody.Read` arms the client write deadline at an h1 body's first read, for Go's 100 Continue, until the response's first write. Once an upload outlasts send_timeout, a write crypto/tls makes during the rest of the read fails at once, and the response with it, where nginx waits under client_body_timeout. Such a write is the answer to a client's TLS 1.3 KeyUpdate request, which mainstream clients don't send unprompted. Clearing the deadline after the first read races a response write on full-duplex streamed routes, whose body the forwarder's request writer reads, so the fix needs a design.
-- The write bound's timing: a connection whose reader blocks in such a write closes when the write's bound passes, if its read deadline passed first, up to send_timeout (30 s) after nginx's read timer, so a KeyUpdate wedge during a request head closes about 30 s after it began, not at client_header_timeout (15 s); an idle wedge closes at keepalive_timeout, as in nginx. Bounding the write by the earlier of the two needs `frontTrackedConn` to track read deadlines. Proposed for LBALT-IMPL §4, not accepted.
+- Certificate expiry is alerted only by the monitor's tls-expiry signal (monitor/SIGNALS.md §18.2): the manager name's certificate on every lb interface, lb_alt ones included, warned 21 days ahead. Nothing reads `X-UR-Front-Cert-Expiry` or `urnetwork_front_certificate_expiry_timestamp_seconds`, which cover every served name, and a lapsed leaf only logs (§11.3 (h)). The owner judged the signal enough (2026-11-19).
+- A KeyUpdate during an upload (low): `nginx/response.go:responseRequestBody.Read` arms the client write deadline at an h1 body's first read, for Go's 100 Continue, until the response's first write. Once an upload outlasts send_timeout, a write crypto/tls makes during the rest of the read fails at once, and the response with it, where nginx waits under client_body_timeout. Such a write is the answer to a client's TLS 1.3 KeyUpdate request, which mainstream clients don't send unprompted. Clearing the deadline after the first read races a response write on full-duplex streamed routes, whose body the forwarder's request writer reads, so the fix needs a design. Left as a known gap (owner, 2026-11-19), to revisit if such failures appear after the canary.
 - nginx's worker_connections, and its reuse of idle keepalive connections under pressure, have no counterpart: the read timeouts bound a public TCP connection, as in nginx, but no global cap does.
 - The in-process connect router is a second `router.Router`: one more RouterStats report a minute per connect process, unflushed at the drain's end. It has no GET /status route, since the front's deny answers first for connect's standard status; a non-standard connect would get 404 where nginx forwards /status.
 - Two different h2 Content-Length values get a stream reset where nginx answers 400 (§11.4), with no corpus case, which would need an acceptance entry.
@@ -1351,14 +1363,13 @@ Each is open, checked against the code at a297487df and bdacae4.
   - With interfaces on both nginx and lb_alt, `deploy lb`'s version poll still samples `<env>-lb` through DNS, so rounds reaching only connect fronts count nothing and the poll can time out though nginx converged. The verifier: LBALT-IMPL §7 decides it, and it is harmless, since `deploy lb` promotes before it polls and `--timeout 0` skips the poll.
 
 **Left from round 2.**
-- h3 still answers 408 on a body timeout (`TestNewFrontH3BoundsEachBodyReadByTheClientBodyTimeout`); ending it as on h1 and h2, as nginx's own h3 module would, means dropping the `r.ProtoMajor != 3` condition in `upstreamGroup.refuse` and that test's 408: the owner's call.
 - An aborted request is logged and counted without nginx's 408 or 499 (§11.4); a writer method that records a status without writing it, called before the abort, would fix it.
 - No parity case sends a head alone, or a whole body longer than one read, so the first read's residuals have unit tests only.
 - The linger tests compare the server's wait with `e2eRstAvoidanceDelay`, a copy of Go's unexported 500 ms.
 
 **Open design items.**
-- D22 (b): a QUIC flow moved to a sibling socket reconnects only after its idle timeout, about 20 s.
-- `drainConnect` still waits for `exchange.Drain`, whose DrainAllTimeout (60 m) equals the stop grace, so an exchange drain run to its deadline lets SIGKILL land before the forced close; this predates lb_alt.
+- D22 (b): a QUIC flow moved to a sibling socket reconnects only after its idle timeout, about 20 s. Started 2026-11-19 (owner).
+- `drainConnect` still waits for `exchange.Drain`, whose DrainAllTimeout (60 m) equals the stop grace, so an exchange drain run to its deadline lets SIGKILL land before the forced close; this predates lb_alt. Being fixed (owner, 2026-11-19).
 - D6's amendment that upstream targets named by an older route file stay until its last block drains has no code of its own: the targets are the blocks' stable external ports.
 - The 30 s chain refresh needs the committed generation in memory (`lbAltState.chainServicePorts`), so a worker restarted since its last deploy heals no chain until it deploys again.
 - A lost QUIC socket is re-created only once its run has closed, which waits up to ForcedCloseTimeout (30 s) for its api connections' h3 servers.
@@ -1372,7 +1383,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The per-block probe reaches each block's status through whichever block the monitor's source hashes to, so a block's own port-80 answer is seen only when that bucket maps to it; its 5 s attempt is looser than Route53's 4 s connect and 2 s response.
 - Older than lb_alt: a disabled enrollment counts as a complete run, so open incidents clear after two runs with it off.
 
-**Pre-existing issues, left for the owner.**
+**Pre-existing issues**, each being fixed on its own branch (owner, 2026-11-19).
 - Production-like warp test data outside the lb_alt files: `warpctl/dns_test.go`'s `dnsFixtureWithDns` holds the production lb_hidden_prefixes value (on origin/main since 4c47dc4), `warpctl/testdata/services-vyos.yml`'s interface ids reach tests, goldens and VYOS.md, and `services/services_test.go`, `warpctl/run.go` and its tests hold production-looking names and addresses.
 - `config.go:portBlocksOf` panics on a port that is http in one version and stream in another, which load accepts (only the lb_alt service's 443 is guarded); the allocator can give a candidate ports a dead committed generation's nginx pool chain still targets; and a redirect failure after `cutover.commit()` on a block that binds no lb interface leaves the committed one unowned.
 - The startup orphan drain reads `routingTable.ipv6` on a goroutine while Run's routing reconcile can set it, and `run.go`'s `parseRoutingTable` panics on an lb interface with more than one global IPv6 address.
@@ -1385,9 +1396,8 @@ Each is open, checked against the code at a297487df and bdacae4.
 - Once connect declares lb_alt, a connect generation on a host where it is placed with a front interface never starts if the api isn't fronted there, since the render fails; load doesn't check that.
 
 **Owner actions not taken.**
-- Confirm the final review's departures (§11.3 (a) to (h)), and decide on the proposed §4 line for the write bound's timing.
 - Before declaring lb_alt, load the edited services.yml with this warpctl: every host where connect is placed with a front interface must pass the `-`, chain-length and keepalive rules, and should front the api. Then declare `services.connect.lb_alt: false` first (§11.3 (d)).
-- services.yml's lb_alt declarations, connect's `cores: 20` (D15) and the `alt.*` `dns_aliases` move (Gate B); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry. Nothing is merged or deployed.
+- services.yml's lb_alt declarations, connect's `cores: 20` (D15) and the `alt.*` `dns_aliases` move (Gate B); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry. Nothing is merged to main or deployed.
 
 ### 11.7 Review focus
 
