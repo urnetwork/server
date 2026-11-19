@@ -811,21 +811,13 @@ func testLbAltClientSettings() *connect.ClientSettings {
 	return clientSettings
 }
 
-// Connects one client to the front on one carrier: the platform url names the
+// How a client reaches the front on one carrier: the platform url names the
 // connect name and the public https port; the strategy's tcp dial goes to the
 // interface address's https socket, and the h3 carriers' packets to its quic
 // or whodis socket (PlatformTransportSettings.AltUrl), the name staying the
-// sni. Closes with the test.
-func (self *testLbAltEnv) newClient(peer *testLbAltPeer, carrier testLbAltCarrier, dial *testLbAltDial) *testLbAltClient {
-	self.t.Helper()
-	clientSettings := testLbAltClientSettings()
-	client := connect.NewClient(
-		self.ctx,
-		connect.Id(peer.clientId),
-		Testing_NewControllerOutOfBandControl(self.ctx, peer.clientId, clientSettings.ContractManagerSettings),
-		clientSettings,
-	)
-
+// sni. Returns the platform url and the settings of the client's strategy and
+// transport, new on each call.
+func (self *testLbAltEnv) clientDialSettings(carrier testLbAltCarrier, dial *testLbAltDial) (string, *connect.ClientStrategySettings, *connect.PlatformTransportSettings) {
 	strategySettings := connect.DefaultClientStrategySettings()
 	strategySettings.EnableResilient = false
 	strategySettings.ExpandExtenderProfileCount = 0
@@ -840,12 +832,9 @@ func (self *testLbAltEnv) newClient(peer *testLbAltPeer, carrier testLbAltCarrie
 			return dialer.DialContext(ctx, "tcp", httpsTarget)
 		},
 	}
-	clientStrategy := connect.NewClientStrategy(self.ctx, strategySettings)
 
-	h1Stats := &connect.H1ConnectionStats{}
 	transportSettings := connect.DefaultPlatformTransportSettings()
 	transportSettings.EnableH1Plus = carrier.h1Plus
-	transportSettings.H1ConnectionStats = h1Stats
 	transportSettings.QuicTlsConfig = &tls.Config{
 		RootCAs: self.roots,
 	}
@@ -863,6 +852,24 @@ func (self *testLbAltEnv) newClient(peer *testLbAltPeer, carrier testLbAltCarrie
 		budgetStats.MaxTransportCount,
 	)
 	platformUrl := fmt.Sprintf("wss://%s", net.JoinHostPort(testLbAltConnectName, strconv.Itoa(self.routeTable.Listen.HttpsPort)))
+	return platformUrl, strategySettings, transportSettings
+}
+
+// Connects one client to the front on one carrier (clientDialSettings). Closes
+// with the test.
+func (self *testLbAltEnv) newClient(peer *testLbAltPeer, carrier testLbAltCarrier, dial *testLbAltDial) *testLbAltClient {
+	self.t.Helper()
+	clientSettings := testLbAltClientSettings()
+	client := connect.NewClient(
+		self.ctx,
+		connect.Id(peer.clientId),
+		Testing_NewControllerOutOfBandControl(self.ctx, peer.clientId, clientSettings.ContractManagerSettings),
+		clientSettings,
+	)
+	platformUrl, strategySettings, transportSettings := self.clientDialSettings(carrier, dial)
+	clientStrategy := connect.NewClientStrategy(self.ctx, strategySettings)
+	h1Stats := &connect.H1ConnectionStats{}
+	transportSettings.H1ConnectionStats = h1Stats
 	transport := connect.NewPlatformTransportWithTargetMode(
 		self.ctx,
 		clientStrategy,
