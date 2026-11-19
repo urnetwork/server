@@ -842,6 +842,13 @@ func AwaitQuicHandshake(ctx context.Context, conn *quic.Conn) error {
 	return nil
 }
 
+// A new random stateless reset key, which a handler's transports share.
+func newConnectQuicStatelessResetKey() *quic.StatelessResetKey {
+	statelessResetKey := &quic.StatelessResetKey{}
+	cryptorand.Read(statelessResetKey[:])
+	return statelessResetKey
+}
+
 // newConnectQuicConfig keeps the server half of H3 aligned with the client's
 // conservative startup packet and enabled DPLPMTUD behavior.
 func newConnectQuicConfig(
@@ -899,6 +906,12 @@ type ConnectHandler struct {
 	// So does one count of unvalidated handshakes, for an external listener
 	// using NewQuicTransport.
 	quicHandshakeLimit *connectQuicHandshakeLimit
+	// And one stateless reset key, random per handler, from which every
+	// transport derives its reset tokens: a socket that never saw a
+	// connection, the sibling its flow moved to (LBALT.md D22), answers its
+	// packets with the token the connection's own socket advertised, so the
+	// client reconnects at once instead of waiting out its idle timeout.
+	quicStatelessResetKey *quic.StatelessResetKey
 
 	listenerStateLock sync.RWMutex
 	listenerStates    map[connectListenerKey]bool
@@ -1124,6 +1137,7 @@ func newConnectHandlerWithPacketConns(
 		transportDelayControl: newConnectTransportDelayControl(cancelCtx, settings),
 	}
 	h.refusalHold = newConnectRefusalHold(cancelCtx, exchange.IsDraining, settings)
+	h.quicStatelessResetKey = newConnectQuicStatelessResetKey()
 
 	go server.HandleError(h.run, cancel)
 	// the hold releases every socket it holds when it stops, so a failure of
@@ -2462,10 +2476,14 @@ func (self *ConnectHandler) NewQuicConfig() *quic.Config {
 }
 
 // NewQuicTransport returns a QUIC transport on conn whose handshakes count
-// against this handler's unvalidated-handshake limit. An external listener for
-// the same handler must not build an unbounded one.
+// against this handler's unvalidated-handshake limit, and whose stateless
+// resets use the handler's one key. An external listener for the same handler
+// must not build an unbounded one.
 func (self *ConnectHandler) NewQuicTransport(conn net.PacketConn) *quic.Transport {
-	transport := &quic.Transport{Conn: conn}
+	transport := &quic.Transport{
+		Conn:              conn,
+		StatelessResetKey: self.quicStatelessResetKey,
+	}
 	if limit := self.quicHandshakeLimit; limit != nil {
 		transport.VerifySourceAddress = limit.verifySourceAddress
 		transport.ConnContext = limit.connContext
