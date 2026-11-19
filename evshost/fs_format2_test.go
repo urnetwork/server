@@ -59,6 +59,18 @@ func TestFs91OnT3(t *testing.T) {
 	})
 }
 
+// The copy released within §11.8's window after the DROP (QD-1105), with the store clock the row's case is flagged
+// for.
+func TestFs91WithinTheWindowOnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		settings := sidecart3.DefaultSettings()
+		if fault.DefaultCatalog().Case("FS-91", "").StoreClock {
+			settings.StoreClock = sidecart3.DefaultStoreClockSettings()
+		}
+		fault.RunClause(tb, "FS-91", "within the window", fault.Fs91ReleasedWithinTheWindow, sidecart3.RuleSettings(tb, settings))
+	})
+}
+
 func TestFs94OnT3(t *testing.T) {
 	fsCommitTestEnv().Run(t, func(tb testing.TB) {
 		sidecart3.RunRow(tb, "FS-94", "", nil)
