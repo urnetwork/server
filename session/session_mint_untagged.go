@@ -58,13 +58,20 @@ func StartSessionMint(credential *ByJwt, sessionId server.Id) {
 	credential.mintStart = &sessionMintStart{sessionId: sessionId, fresh: true}
 }
 
-// A mint waits at most this long for each Redis step of its registration, the
-// clock sample and the mint script, inside its SQL transaction. A Redis stall
-// then holds a mint's PostgreSQL connection for at most two budgets, where
-// RedisAuth alone allows two seconds each: at the 380 tagged mints a second
-// S4 measured, two-second waits would hold more connections than PgBouncer
-// has.
+// A mint waits at most this long for each Redis step of its registration,
+// the top-level client's exemption read, the clock sample and the mint script,
+// inside its SQL transaction. A Redis stall then holds a mint's PostgreSQL
+// connection for at most three budgets, where RedisAuth alone allows two
+// seconds each: at the 380 tagged mints a second S4 measured, two-second waits
+// would hold more connections than PgBouncer has.
 const sessionMintRedisBudget = RevocationCheckBudget
+
+// SessionMintRedisBudget bounds a Redis read another package makes for a mint
+// inside its transaction (model's client cap exemption,
+// SetClientCapExemptUntilInTx). Such a read that Redis does not answer within
+// it returns ErrSessionStoreUnavailable, and RegisterAndSignInTx falls back as
+// for a registration Redis does not answer.
+const SessionMintRedisBudget = sessionMintRedisBudget
 
 // The service label comes from the stats push grouping (StartStatsPusher).
 var sessionMintUntaggedCounter = prometheus.NewCounterVec(prometheus.CounterOpts{

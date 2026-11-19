@@ -185,13 +185,17 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		return "", errors.New("client mint requires resolved root")
 	}
 	if credential.SessionId != nil {
+		// The exemption read and the registration each within the mint
+		// budget. When Redis answers neither, a mint that starts its session
+		// signs it untagged, and one that carries its presented credential's
+		// session signs it unextended (session_mint_untagged.go): a top-level
+		// client's exemption is read from Redis too, and a read that waited out
+		// the caller failed the whole mint.
 		exempt, err := sessionMintExemption(ctx, tx, credential)
-		if err != nil {
-			return "", err
+		var registered *registeredSession
+		if err == nil {
+			registered, err = registerSessionMint(ctx, credential, kind, origin, fenceOrigin, exempt)
 		}
-		// within the mint budget; a mint that starts its session signs it
-		// untagged when Redis does not register it (session_mint_untagged.go)
-		registered, err := registerSessionMint(ctx, credential, kind, origin, fenceOrigin, exempt)
 		if err != nil {
 			if untagErr := untagUnregisteredSessionMintInTx(ctx, tx, credential, kind, err); untagErr != nil {
 				return "", untagErr
