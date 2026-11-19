@@ -216,11 +216,14 @@ func TestRetryNeverForNamedBlock(t *testing.T) {
 }
 
 // A streamed body whose request began going upstream is never retried; one
-// whose connect was refused, before anything was sent, is.
+// whose connect was refused, before anything was sent, is. The route's
+// client_body_buffer_size of 4 bytes holds none of these bodies, so the
+// first pass doesn't read them and they stream.
 func TestRetryStreamedOnlyBeforeSending(t *testing.T) {
 	streamedOptions := func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
+		options.clientBodyBufferSize = 4
 		return options
 	}
 
@@ -756,7 +759,9 @@ func TestRetry503HoldsStreamedBodyBeforeDeciding(t *testing.T) {
 
 // A 503 that comes before a streamed body began going to its block moves the
 // request to another block with the whole body, though the first block's
-// write is poised right before the body as the 503 is decided on.
+// write is poised right before the body as the 503 is decided on. The
+// route's client_body_buffer_size of 4 bytes holds none of the body, so it
+// streams rather than being read whole by the first pass.
 func TestRetry503BeforeStreamedBodyBeganMovesItWhole(t *testing.T) {
 	serviceName := testServiceName("retry-503-streamed")
 	raw := newRawUpstream(t)
@@ -778,6 +783,7 @@ func TestRetry503BeforeStreamedBodyBeganMovesItWhole(t *testing.T) {
 	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
 		options := testForwardOptions(r)
 		options.streamed = true
+		options.clientBodyBufferSize = 4
 		return options
 	})
 	responses := make(chan string, 1)

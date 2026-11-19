@@ -77,7 +77,9 @@ type forwardOptions struct {
 	// `?args`. Empty sends the request's escaped path and raw query.
 	upstreamPath string
 	// the body streams through unbuffered, with X-UR-Request-Buffering: off,
-	// and is no longer eligible for a retry once forwarding begins
+	// and is no longer eligible for a retry once forwarding begins. As in
+	// nginx, a body read whole before forwarding begins (nginx's first pass,
+	// bodyStore.readFirstPass) is buffered instead, and goes with its length.
 	streamed bool
 	// the service relays websocket upgrades, and every request to it carries
 	// Connection: upgrade and the stream timeouts, as nginx's websocket

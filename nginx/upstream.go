@@ -13,7 +13,10 @@ package nginx
 //   - never after a 500, 502 or 504, which pass through, a malformed or
 //     oversized response head, or a response cut short;
 //   - never for a per-block lb route, which reports its block's own result;
-//   - never for a streamed body once its request began going upstream;
+//   - never for a streamed body once its request began going upstream. A
+//     streamed route's body that nginx's first pass reads whole isn't
+//     streamed: nginx buffers it, so it is forwarded with its length and
+//     retried like any buffered body (serveHttp);
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
 //     isn't an attempt, as nginx's tries++ for a cached connection isn't.
@@ -29,6 +32,7 @@ package nginx
 // upstream.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -194,29 +198,75 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			self.refuse(w, r, responseController, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge})
 			return
 		}
+		bodyOptions := bodyReadOptions{
+			declaredLength:  r.ContentLength,
+			prefixBytes:     options.clientBodyBufferSize,
+			readTimeout:     options.clientBodyTimeout,
+			setReadDeadline: setClientReadDeadline,
+		}
+		var storedBody *storedBody
+		var refusal *bodyRefusal
+		var streamedBody io.Reader
 		if options.streamed {
+			streamedBody = r.Body
+			// the most of the body nginx's first pass reads whole, when it
+			// can (bodyStore.readFirstPass): a chunked body in its buffer of
+			// client_body_buffer_size, and a declared one in a buffer of its
+			// length when that is under client_body_buffer_size and a quarter
+			// (ngx_http_read_client_request_body). An h2 body streams, since
+			// nginx runs an h2 request at its head, before any of its body
+			// arrives, and so does a body that waits for 100 Continue, which
+			// can't have arrived either.
+			firstPassBytes, firstPass := func() (int64, bool) {
+				clientBodyBufferSize := options.clientBodyBufferSize
+				if r.ProtoMajor != 1 || clientBodyBufferSize <= 0 {
+					return 0, false
+				}
+				for _, expect := range r.Header.Values("Expect") {
+					for _, token := range strings.Split(expect, ",") {
+						if strings.EqualFold(strings.TrimSpace(token), "100-continue") {
+							return 0, false
+						}
+					}
+				}
+				if r.ContentLength < 0 {
+					return clientBodyBufferSize, true
+				}
+				if r.ContentLength < clientBodyBufferSize+clientBodyBufferSize/4 {
+					return r.ContentLength, true
+				}
+				return 0, false
+			}()
+			if firstPass {
+				var firstBytes []byte
+				storedBody, firstBytes, refusal = self.bodyStore.readFirstPass(ctx, r.Body, bodyOptions, firstPassBytes)
+				if 0 < len(firstBytes) {
+					streamedBody = io.MultiReader(bytes.NewReader(firstBytes), r.Body)
+				}
+			}
+		} else {
+			storedBody, refusal = self.bodyStore.read(ctx, r.Body, bodyOptions)
+		}
+		if refusal != nil {
+			self.refuse(w, r, responseController, refusal)
+			return
+		}
+		if storedBody != nil {
+			// forwarded with its length, and replayed by a retry, a body the
+			// first pass read whole included, which still goes with
+			// X-UR-Request-Buffering: off, as nginx sends it
+			defer storedBody.release()
+			request.storedBody = storedBody
+			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
+		} else {
 			// the body keeps arriving while the response flows
 			responseController.EnableFullDuplex()
-			request.streamedBody = newForwardStreamedBody(ctx, r.Body, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
+			request.streamedBody = newForwardStreamedBody(ctx, streamedBody, r.ContentLength, maxBodyBytes, options.clientBodyTimeout, setClientReadDeadline)
 			if 0 <= r.ContentLength {
 				request.bodyFraming = forwardBodyFraming{known: true, length: r.ContentLength}
 			} else {
 				request.bodyFraming = forwardBodyFraming{chunked: true}
 			}
-		} else {
-			storedBody, refusal := self.bodyStore.read(ctx, r.Body, bodyReadOptions{
-				declaredLength:  r.ContentLength,
-				prefixBytes:     options.clientBodyBufferSize,
-				readTimeout:     options.clientBodyTimeout,
-				setReadDeadline: setClientReadDeadline,
-			})
-			if refusal != nil {
-				self.refuse(w, r, responseController, refusal)
-				return
-			}
-			defer storedBody.release()
-			request.storedBody = storedBody
-			request.bodyFraming = forwardBodyFraming{known: true, length: storedBody.length()}
 		}
 	}
 	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)

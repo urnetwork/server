@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -704,33 +705,188 @@ func TestForwardAbortReleasesBody(t *testing.T) {
 	checkStoreEmpty(t, bodyStore)
 }
 
-// Through a group: a streamed body of unknown length that crosses the body
-// limit is a 413 while nothing was answered, and the block's request is
-// cut.
+// Through a group: a chunked body over the body limit on a streamed route is
+// a 413 while nothing was answered. One the first pass reads whole is
+// refused there, before any block; one that streams is refused as it
+// crosses the limit, its block's request cut, the attempt the client's.
 func TestForwardStreamedBodyCrossesLimit(t *testing.T) {
-	settings := testForwardFrontSettings()
-	settings.Body.MaxBodyBytes = 1000
-	serviceName := testServiceName("streamed-limit")
-	upstream := newRecordingUpstream(t, "g1", nil)
-	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
-		{name: "g1", weight: 1, port: upstream.port},
-	}), settings)
-	front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
-		options := testForwardOptions(r)
-		options.streamed = true
-		return options
-	})
 	chunk := string(testBodyBytes(600))
-	response, _ := rawFrontRequest(t, front, "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nTransfer-Encoding: chunked\r\n\r\n258\r\n"+chunk+"\r\n258\r\n"+chunk+"\r\n0\r\n\r\n")
-	if response.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Fatalf("streamed body over the limit: %d, want 413", response.StatusCode)
-	}
-	if bodyRefusalCount(serviceName, bodyRefusalTooLarge) != 1 {
-		t.Errorf("the 413 was not counted")
-	}
-	for _, recorded := range upstream.recorded() {
-		if recorded.bodyErr == nil {
-			t.Errorf("the block got a whole body of %d bytes", len(recorded.body))
+	rawRequest := "POST /mcp HTTP/1.1\r\nHost: mcp.service.example\r\nTransfer-Encoding: chunked\r\n\r\n258\r\n" + chunk + "\r\n258\r\n" + chunk + "\r\n0\r\n\r\n"
+	for _, c := range []struct {
+		name string
+		// the route's client_body_buffer_size: zero takes the default, which
+		// holds the whole body, and 100 lets the first pass read only its start
+		clientBodyBufferSize int64
+		wantClientAttempts   float64
+	}{
+		{name: "read whole by the first pass", clientBodyBufferSize: 0, wantClientAttempts: 0},
+		{name: "streamed", clientBodyBufferSize: 100, wantClientAttempts: 1},
+	} {
+		settings := testForwardFrontSettings()
+		settings.Body.MaxBodyBytes = 1000
+		serviceName := testServiceName("streamed-limit")
+		upstream := newRecordingUpstream(t, "g1", nil)
+		group, bodyStore := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+			{name: "g1", weight: 1, port: upstream.port},
+		}), settings)
+		front := newTestForwardFront(t, group, func(r *http.Request) forwardOptions {
+			options := testForwardOptions(r)
+			options.streamed = true
+			options.clientBodyBufferSize = c.clientBodyBufferSize
+			return options
+		})
+		response, _ := rawFrontRequest(t, front, rawRequest)
+		if response.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("%s: body over the limit: %d, want 413", c.name, response.StatusCode)
 		}
+		front.waitServed(t)
+		if bodyRefusalCount(serviceName, bodyRefusalTooLarge) != 1 {
+			t.Errorf("%s: the 413 was not counted", c.name)
+		}
+		if attempts := attemptCount(serviceName, "g1", "client"); attempts != c.wantClientAttempts || attemptCount(serviceName, "g1", "response") != 0 {
+			t.Errorf("%s: %v attempts ended on the client's side, want %v, and none answered", c.name, attempts, c.wantClientAttempts)
+		}
+		for _, recorded := range upstream.recorded() {
+			if recorded.bodyErr == nil {
+				t.Errorf("%s: the block got a whole body of %d bytes", c.name, len(recorded.body))
+			}
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
+// The first pass makes one read of a body. A declared body that read returns
+// whole is stored, in memory whole and reserved under the budget, and the
+// read deadline is cleared after it; so is a chunked body whose end that
+// read reaches. Of any other body the read's bytes come back, with nothing
+// held and the deadline left for the stream's next read to replace.
+func TestBodyStoreFirstPass(t *testing.T) {
+	settings := DefaultBodySettings()
+	bodyStore, spyFiles := newSpyBodyStore(t, settings)
+	for _, c := range []struct {
+		name           string
+		body           io.Reader
+		declaredLength int64
+		limitBytes     int64
+		// the stored body, or nil when the body isn't whole
+		wantStored []byte
+		wantFirst  []byte
+	}{
+		{name: "declared whole", body: bytes.NewReader([]byte("whole body")), declaredLength: 10, limitBytes: 10, wantStored: []byte("whole body")},
+		{name: "declared empty", body: http.NoBody, declaredLength: 0, limitBytes: 0, wantStored: []byte{}},
+		{name: "chunked whole", body: iotest.DataErrReader(bytes.NewReader([]byte("chunked"))), declaredLength: -1, limitBytes: 64, wantStored: []byte("chunked")},
+		{name: "declared part", body: iotest.HalfReader(bytes.NewReader([]byte("whole body"))), declaredLength: 10, limitBytes: 10, wantFirst: []byte("whole")},
+		{name: "chunked before its end", body: bytes.NewReader([]byte("chunked")), declaredLength: -1, limitBytes: 64, wantFirst: []byte("chunked")},
+		{name: "chunked past the limit", body: iotest.DataErrReader(bytes.NewReader([]byte("chunked"))), declaredLength: -1, limitBytes: 4, wantFirst: []byte("chun")},
+	} {
+		deadlines := []time.Time{}
+		storedBody, firstBytes, refusal := bodyStore.readFirstPass(testContext(t), c.body, bodyReadOptions{
+			declaredLength: c.declaredLength,
+			readTimeout:    settings.ClientBodyTimeout,
+			setReadDeadline: func(deadline time.Time) error {
+				deadlines = append(deadlines, deadline)
+				return nil
+			},
+		}, c.limitBytes)
+		if refusal != nil {
+			t.Fatalf("%s: refused %v", c.name, refusal)
+		}
+		if c.wantStored == nil {
+			if storedBody != nil || !bytes.Equal(firstBytes, c.wantFirst) {
+				t.Errorf("%s: stored %v, first bytes %q, want %q to stream", c.name, storedBody != nil, firstBytes, c.wantFirst)
+			}
+			if len(deadlines) != 1 || deadlines[0].IsZero() {
+				t.Errorf("%s: read deadlines %v, want the read's, left for the stream", c.name, deadlines)
+			}
+			checkStoreEmpty(t, bodyStore)
+			continue
+		}
+		if storedBody == nil || firstBytes != nil {
+			t.Fatalf("%s: stored %v, first bytes %q, want the body stored", c.name, storedBody != nil, firstBytes)
+		}
+		if replay := readStoredBody(t, storedBody); !bytes.Equal(replay, c.wantStored) || storedBody.spilled() {
+			t.Errorf("%s: stored %q, spilled %v, want %q in memory", c.name, replay, storedBody.spilled(), c.wantStored)
+		}
+		if memoryBytes, _, _, bodies := bodyStore.usage(); memoryBytes != min(c.limitBytes, int64(settings.ReadBufferBytes)) || bodies != 1 {
+			t.Errorf("%s: the store reserves %d bytes for %d bodies, want the read's bytes for one", c.name, memoryBytes, bodies)
+		}
+		if len(deadlines) != 2 || deadlines[0].IsZero() || !deadlines[1].IsZero() {
+			t.Errorf("%s: read deadlines %v, want the read's, then cleared", c.name, deadlines)
+		}
+		storedBody.release()
+		checkStoreEmpty(t, bodyStore)
+	}
+	if spyFiles.count() != 0 {
+		t.Errorf("the first pass created %d spill files, want none", spyFiles.count())
+	}
+}
+
+// The first pass reads nothing of a body the store can't reserve for, over
+// its budget, or of a declared body longer than one read returns; either
+// streams as it would without the first pass, unrefused.
+func TestBodyStoreFirstPassReadsNothingItCantHold(t *testing.T) {
+	readBufferBytes := int64(DefaultBodySettings().ReadBufferBytes)
+	for _, c := range []struct {
+		name              string
+		memoryBudgetBytes int64
+		declaredLength    int64
+		limitBytes        int64
+	}{
+		{name: "over the budget", memoryBudgetBytes: 1000, declaredLength: 1001, limitBytes: 1001},
+		{name: "longer than one read", memoryBudgetBytes: 0, declaredLength: readBufferBytes + 1, limitBytes: readBufferBytes + 1},
+	} {
+		settings := DefaultBodySettings()
+		settings.MemoryBudgetBytes = c.memoryBudgetBytes
+		bodyStore, _ := newSpyBodyStore(t, settings)
+		reader := &countingReader{reader: bytes.NewReader(testBodyBytes(int(c.declaredLength)))}
+		storedBody, firstBytes, refusal := bodyStore.readFirstPass(testContext(t), reader, bodyReadOptions{
+			declaredLength: c.declaredLength,
+		}, c.limitBytes)
+		if storedBody != nil || firstBytes != nil || refusal != nil || reader.reads != 0 {
+			t.Errorf("%s: stored %v, first bytes %d, refused %v, after %d reads, want nothing read", c.name, storedBody != nil, len(firstBytes), refusal, reader.reads)
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+}
+
+// The first pass's read fails as any body read does: past client_body_timeout
+// it is nginx's 408 timeout, which ends the request unanswered, with the
+// deadline left, so the server never waits on the client; a body that ends
+// before its declared length is a 400; and a chunked body over the limit is
+// a 413. None holds anything after.
+func TestBodyStoreFirstPassRefusals(t *testing.T) {
+	settings := DefaultBodySettings()
+	settings.MaxBodyBytes = 5
+	bodyStore, _ := newSpyBodyStore(t, settings)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, c := range []struct {
+		name           string
+		ctx            context.Context
+		body           io.Reader
+		declaredLength int64
+		wantStatus     int
+		wantReason     string
+	}{
+		{name: "timed out", ctx: ctx, body: errorReader{err: os.ErrDeadlineExceeded, cancel: cancel}, declaredLength: 5, wantStatus: http.StatusRequestTimeout, wantReason: bodyRefusalTimeout},
+		{name: "ended early", ctx: testContext(t), body: iotest.DataErrReader(bytes.NewReader([]byte("abc"))), declaredLength: 5, wantStatus: http.StatusBadRequest, wantReason: bodyRefusalIncomplete},
+		{name: "chunked over the limit", ctx: testContext(t), body: iotest.DataErrReader(bytes.NewReader([]byte("chunked"))), declaredLength: -1, wantStatus: http.StatusRequestEntityTooLarge, wantReason: bodyRefusalTooLarge},
+	} {
+		deadlines := []time.Time{}
+		storedBody, firstBytes, refusal := bodyStore.readFirstPass(c.ctx, c.body, bodyReadOptions{
+			declaredLength: c.declaredLength,
+			readTimeout:    settings.ClientBodyTimeout,
+			setReadDeadline: func(deadline time.Time) error {
+				deadlines = append(deadlines, deadline)
+				return nil
+			},
+		}, 64)
+		if storedBody != nil || firstBytes != nil || refusal == nil || refusal.status != c.wantStatus || refusal.reason != c.wantReason {
+			t.Errorf("%s: stored %v, first bytes %q, refused %v, want %d %s", c.name, storedBody != nil, firstBytes, refusal, c.wantStatus, c.wantReason)
+		}
+		if c.wantReason == bodyRefusalTimeout && (len(deadlines) != 1 || deadlines[0].IsZero()) {
+			t.Errorf("%s: read deadlines %v, want the read's left in place", c.name, deadlines)
+		}
+		checkStoreEmpty(t, bodyStore)
 	}
 }

@@ -33,6 +33,7 @@ package nginx
 // panic.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -204,6 +205,79 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 	}
 	stored = true
 	return storedBody, nil
+}
+
+// Reads a streamed route's body as far as nginx reads one before it
+// forwards it (ngx_http_read_client_request_body, before its post handler):
+// what came with the head, then what the socket holds without waiting, into
+// a buffer of limitBytes. nginx forwards a body that pass reads whole as a
+// buffered one, with its length, a chunked one included, and may retry it
+// (D7); any other it streams, those bytes first. Go's server can't read
+// without waiting, so this is one read: it returns what the server holds of
+// the body already, and waits only when it holds none, under the read
+// timeout. One read returns at most BodySettings.ReadBufferBytes, so a
+// longer declared body isn't read here.
+//
+// The bytes the read may hold are reserved first, as for any stored body,
+// and a store that can't reserve them, over its budget or closed, reads
+// nothing: the body streams as it would without this read. A body the read
+// returns whole is a stored body, held in memory whole, as nginx holds it
+// in its one buffer, and the client's read deadline is cleared, since
+// nothing reads the client again until its next request. Otherwise the
+// reservation is released, and the bytes read come back for the stream to
+// send first. A refusal is read's: a timed out or broken read, a client that
+// went away, or a body over BodySettings.MaxBodyBytes.
+func (self *bodyStore) readFirstPass(ctx context.Context, body io.Reader, options bodyReadOptions, limitBytes int64) (*storedBody, []byte, *bodyRefusal) {
+	readBuffer := self.readBuffers.Get().(*[]byte)
+	defer self.readBuffers.Put(readBuffer)
+	readBytes := min(int64(len(*readBuffer)), max(limitBytes, 0))
+	if 0 <= options.declaredLength {
+		if readBytes < options.declaredLength {
+			return nil, nil, nil
+		}
+		readBytes = options.declaredLength
+	}
+	storedBody, refusal := self.open(readBytes, 0 <= options.declaredLength)
+	if refusal != nil {
+		return nil, nil, nil
+	}
+	stored := false
+	defer func() {
+		if !stored {
+			storedBody.release()
+		}
+	}()
+
+	if ctx.Err() != nil {
+		return nil, nil, &bodyRefusal{status: 0, reason: bodyRefusalCanceled}
+	}
+	if 0 < options.readTimeout && options.setReadDeadline != nil {
+		options.setReadDeadline(time.Now().Add(options.readTimeout))
+	}
+	n, err := body.Read((*readBuffer)[:readBytes])
+	firstBytes := (*readBuffer)[:n]
+	if err != nil && err != io.EOF {
+		return nil, nil, bodyReadRefusal(ctx, err)
+	}
+	whole := err == io.EOF
+	if 0 <= options.declaredLength {
+		if whole && int64(n) < options.declaredLength {
+			return nil, nil, &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
+		}
+		// the declared length is the end, which the read may report later
+		whole = int64(n) == options.declaredLength
+	}
+	if !whole {
+		return nil, bytes.Clone(firstBytes), nil
+	}
+	if 0 < options.readTimeout && options.setReadDeadline != nil {
+		options.setReadDeadline(time.Time{})
+	}
+	if refusal := storedBody.append(firstBytes); refusal != nil {
+		return nil, nil, refusal
+	}
+	stored = true
+	return storedBody, nil, nil
 }
 
 // The refusal for a failed client body read: its read timed out (408), the
