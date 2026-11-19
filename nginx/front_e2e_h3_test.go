@@ -61,16 +61,6 @@ func newE2eH3ApiClient(t *testing.T, e2e *e2eFront) *http.Client {
 	}
 }
 
-// The api service with /stream/ paths streamed, as the api's streamable
-// paths are.
-func e2eStreamApiPaths(routeTable *RouteTable) {
-	for _, service := range routeTable.Services {
-		if service.Name == "api" {
-			service.StreamablePaths = []string{"/stream/.*"}
-		}
-	}
-}
-
 // An h3 body whose stream ends 90 bytes short of its declared 100 is a 400,
 // as nginx answers a stream that ends before its body ("client prematurely
 // closed stream") and as the front answers on h2: on a buffered route it
@@ -78,7 +68,14 @@ func e2eStreamApiPaths(routeTable *RouteTable) {
 // as a complete 10-byte body, and on a streamed route, whose head went
 // upstream at once, it is a refusal, not one of the front's own 502s.
 func TestFrontE2eH3BodyEndingShortOfItsLengthIs400(t *testing.T) {
-	e2e := newE2eFront(t, nil, e2eStreamApiPaths)
+	// the api's /stream/ paths stream, as the api's streamable paths do
+	e2e := newE2eFront(t, nil, func(routeTable *RouteTable) {
+		for _, service := range routeTable.Services {
+			if service.Name == "api" {
+				service.StreamablePaths = []string{"/stream/.*"}
+			}
+		}
+	})
 	client := newE2eH3ApiClient(t, e2e)
 
 	for _, c := range []struct {
