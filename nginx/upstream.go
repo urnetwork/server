@@ -20,9 +20,15 @@ package nginx
 //     too;
 //   - a reused keepalive connection that failed before any request byte was
 //     written is redone at once on a fresh connection to the same block, and
-//     isn't an attempt, as nginx's tries++ for a cached connection isn't.
-//     nginx then moves to another block; the front stays on the block it
-//     chose, as Go's transport does.
+//     isn't an attempt. nginx's rule is wider: any error on a cached
+//     connection costs no try, written or not (ngx_http_upstream_next's
+//     tries++ for u->peer.cached and NGX_HTTP_UPSTREAM_FT_ERROR), and with
+//     one server it redoes the request there. A failure after the write may
+//     have reached the block, so the front counts it as one of D7's attempts
+//     and moves only to another block: a single-block service, or a
+//     per-block lb route, answers that race with a 502 where nginx redoes the
+//     request (LBALT-IMPL.md §4). Where nginx moves a redo to another block,
+//     the front stays on the block it chose, as Go's transport does.
 //
 // With no attempt left, a connect error or a failed exchange is a 502 and a
 // timeout a 504, as nginx maps them; a retry that finds no eligible block is

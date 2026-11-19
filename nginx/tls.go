@@ -369,9 +369,13 @@ func quicNegotiableNextProtos(offeredNextProtos []string) []string {
 // class (D9): http/1.1 only for connect names, whose websocket and H1+
 // carriers need it, and h2 then http/1.1 for the rest, as nginx prefers. A
 // missing, invalid or unknown SNI gets the default server, nginx's first lb
-// server: defaultName's certificate, with h2 and http/1.1. A client offering
-// protocols but none of these is refused with an alert, as nginx refuses it;
-// one offering none gets HTTP/1.1.
+// server: defaultName's certificate, with h2 and http/1.1. An SNI ending in a
+// dot is none of these: crypto/tls refuses its ClientHello with decode_error
+// before GetConfigForClient runs, where nginx drops the dot and serves the
+// name (RFC 6066 forbids the dot). A client offering protocols but none of
+// these is refused with an alert, as nginx refuses it, though nginx also
+// selects http/1.0 and http/0.9, which the front refuses; one offering none
+// gets HTTP/1.1.
 //
 // quicTlsConfig serves QUIC, and ports alt's tlsConfigForClient
 // (alt/alt.go:356-374): a served name gets its certificate, and the ALPN is

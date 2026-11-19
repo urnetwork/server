@@ -7,7 +7,10 @@ package nginx
 // gets through.
 
 import (
+	"bytes"
 	"crypto/tls"
+	"io"
+	"net"
 	"slices"
 	"testing"
 	"time"
@@ -84,6 +87,11 @@ func TestTlsConfigRefusesAnAlpnOfferWithNoOverlap(t *testing.T) {
 		{serverName: "unknown.example", offered: []string{"spdy/3.1"}, wantOk: false},
 		{serverName: "test-api.service.example", offered: []string{"h2"}, wantOk: true, wantNextProto: "h2"},
 		{serverName: "test-api.service.example", offered: []string{"http/1.1"}, wantOk: true, wantNextProto: "http/1.1"},
+		// nginx also selects these, the front only http/1.1 beside them
+		// (LBALT-IMPL.md §4)
+		{serverName: "test-api.service.example", offered: []string{"http/1.0"}, wantOk: false},
+		{serverName: "test-api.service.example", offered: []string{"http/0.9"}, wantOk: false},
+		{serverName: "test-api.service.example", offered: []string{"http/1.0", "http/1.1"}, wantOk: true, wantNextProto: "http/1.1"},
 		{serverName: "test-connect.service.example", offered: []string{"http/1.1", "h2"}, wantOk: true, wantNextProto: "http/1.1"},
 		{serverName: "test-connect.service.example", offered: nil, wantOk: true, wantNextProto: ""},
 		{serverName: "test-api.service.example", offered: nil, wantOk: true, wantNextProto: ""},
@@ -107,6 +115,85 @@ func TestTlsConfigRefusesAnAlpnOfferWithNoOverlap(t *testing.T) {
 		}
 		if state.NegotiatedProtocol != c.wantNextProto {
 			t.Errorf("sni %q offering %v negotiated %q, want %q", c.serverName, c.offered, state.NegotiatedProtocol, c.wantNextProto)
+		}
+	}
+}
+
+// An SNI ending in a dot fails the handshake with decode_error: crypto/tls
+// refuses the ClientHello before GetConfigForClient runs, where nginx drops
+// the dot and serves the name (LBALT-IMPL.md §4; RFC 6066 forbids the dot).
+// Go's client strips the dot, so the ClientHello is a Go client's for a name
+// of the same length, the name replaced in its bytes. The same name with a
+// letter for the dot, unknown, gets the default server's ServerHello.
+func TestTlsConfigRefusesAnSniEndingInADot(t *testing.T) {
+	const (
+		tlsRecordTypeAlert     = 21
+		tlsRecordTypeHandshake = 22
+		tlsAlertDecodeError    = 50
+	)
+	vault := newTestTlsVault(t)
+	tlsConfig, _ := vault.newTlsConfigs(t, DefaultTlsSettings())
+	placeholder := "test-api.service.exampleZ"
+	clientHello := func() []byte {
+		clientSide, serverSide := net.Pipe()
+		defer clientSide.Close()
+		defer serverSide.Close()
+		go tls.Client(clientSide, &tls.Config{
+			ServerName:         placeholder,
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h2", "http/1.1"},
+		}).Handshake()
+		serverSide.SetDeadline(time.Now().Add(testTlsExchangeTimeout))
+		header := make([]byte, 5)
+		if _, err := io.ReadFull(serverSide, header); err != nil {
+			t.Fatal(err)
+		}
+		body := make([]byte, int(header[3])*256+int(header[4]))
+		if _, err := io.ReadFull(serverSide, body); err != nil {
+			t.Fatal(err)
+		}
+		return append(header, body...)
+	}()
+	if bytes.Count(clientHello, []byte(placeholder)) != 1 {
+		t.Fatalf("the ClientHello names the placeholder %d times", bytes.Count(clientHello, []byte(placeholder)))
+	}
+	for _, c := range []struct {
+		serverName     string
+		wantRecordType byte
+		wantAlert      byte
+	}{
+		{serverName: placeholder, wantRecordType: tlsRecordTypeHandshake},
+		{serverName: "test-api.service.example.", wantRecordType: tlsRecordTypeAlert, wantAlert: tlsAlertDecodeError},
+	} {
+		listener := listenTestTls(t, tlsConfig)
+		go func() {
+			listener.tcpListener.SetDeadline(time.Now().Add(testTlsExchangeTimeout))
+			conn, err := listener.tlsListener.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			conn.SetDeadline(time.Now().Add(testTlsExchangeTimeout))
+			conn.(*tls.Conn).Handshake()
+		}()
+		conn, err := net.Dial("tcp", listener.tcpListener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.SetDeadline(time.Now().Add(testTlsExchangeTimeout))
+		if _, err := conn.Write(bytes.Replace(clientHello, []byte(placeholder), []byte(c.serverName), 1)); err != nil {
+			t.Fatal(err)
+		}
+		record := make([]byte, 7)
+		if _, err := io.ReadFull(conn, record[:5]); err != nil {
+			t.Fatalf("sni %q: no answer: %v", c.serverName, err)
+		}
+		if record[0] == tlsRecordTypeAlert {
+			io.ReadFull(conn, record[5:])
+		}
+		conn.Close()
+		if record[0] != c.wantRecordType || (c.wantRecordType == tlsRecordTypeAlert && record[6] != c.wantAlert) {
+			t.Errorf("sni %q: record type %d, alert %d; want %d, %d", c.serverName, record[0], record[6], c.wantRecordType, c.wantAlert)
 		}
 	}
 }
