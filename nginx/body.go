@@ -342,6 +342,8 @@ func (self *bodyStore) close() error {
 type storedBody struct {
 	store               *bodyStore
 	memoryReservedBytes int64
+	// runs the release once, and holds every other call until it is done
+	releaseOnce sync.Once
 
 	stateLock          sync.Mutex
 	prefix             []byte
@@ -468,31 +470,29 @@ func (self *storedBody) newReader() io.Reader {
 }
 
 // Releases the body's memory, file and reservations. Safe to call more than
-// once, and from any goroutine.
+// once, and from any goroutine. Every call returns only once the body is
+// released, whichever call released it, so the store's close, which can find
+// a request's own release under way, returns with every file closed.
 func (self *storedBody) release() {
-	file, spillReservedBytes, spillFiles, released := func() (bodySpillFile, int64, int, bool) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.released {
-			return nil, 0, 0, true
+	self.releaseOnce.Do(func() {
+		file, spillReservedBytes, spillFiles := func() (bodySpillFile, int64, int) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.released = true
+			file := self.file
+			self.file = nil
+			self.prefix = nil
+			spillFiles := 0
+			if self.spillFileReserved {
+				spillFiles = 1
+			}
+			return file, self.spillReservedBytes, spillFiles
+		}()
+		if file != nil {
+			file.Close()
 		}
-		self.released = true
-		file := self.file
-		self.file = nil
-		self.prefix = nil
-		spillFiles := 0
-		if self.spillFileReserved {
-			spillFiles = 1
-		}
-		return file, self.spillReservedBytes, spillFiles, false
-	}()
-	if released {
-		return
-	}
-	if file != nil {
-		file.Close()
-	}
-	self.store.unreserve(self, self.memoryReservedBytes, spillReservedBytes, spillFiles)
+		self.store.unreserve(self, self.memoryReservedBytes, spillReservedBytes, spillFiles)
+	})
 }
 
 // Reads a stored body from its start. Not safe for concurrent use; each
