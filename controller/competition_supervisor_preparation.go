@@ -70,12 +70,17 @@ func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourc
 // Pure receipt checking preserves a deterministic boundary for malformed,
 // missing, duplicate, and different-generation readiness evidence.
 func sourcePreparationReceiptsMatch(intent *model.CompetitionSourceActivation, receipts []model.CompetitionSourceReadiness) error {
+	return sourcePreparationReceiptsMatchWithCorrection(intent, receipts, nil)
+}
+
+// The separately authenticated correction affects the worker receipt only.
+func sourcePreparationReceiptsMatchWithCorrection(intent *model.CompetitionSourceActivation, receipts []model.CompetitionSourceReadiness, correction *model.CompetitionEpochThreeRuntimeCorrection) error {
 	if intent == nil || intent.TargetRoundId == (server.Id{}) || len(receipts) != 2 {
 		return ErrReviewNotReady
 	}
 	roles := map[string]bool{}
 	for _, receipt := range receipts {
-		if roles[receipt.Role] || !sourcePreparationReceiptMatches(intent, receipt) {
+		if roles[receipt.Role] || !sourcePreparationReceiptMatchesCorrection(intent, receipt, correction) {
 			return ErrReviewNotReady
 		}
 		roles[receipt.Role] = true
@@ -111,7 +116,11 @@ func (self PostgresStore) SourcePreparationReady(ctx context.Context, settings *
 	if err != nil {
 		return err
 	}
-	return sourcePreparationReceiptsMatch(intent, receipts)
+	correction, err := readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return err
+	}
+	return sourcePreparationReceiptsMatchWithCorrection(intent, receipts, correction)
 }
 
 // Reads the original independently recorded role identities after external
@@ -154,6 +163,15 @@ func AcknowledgeCompetitionSourceWorker(ctx context.Context, settings *Settings,
 	if err := LoadCompetitionRuntimeManifestContext(ctx, settings, intent); err != nil {
 		return err
 	}
+	correction, err := readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return err
+	}
+	if correction != nil {
+		// The original runtime envelope remains immutable; only this
+		// worker's observed identity is compared with the approved repair.
+		settings.EvaluationPolicy.HostQualificationSha256 = correction.WorkerQualificationSha256
+	}
 	worker, err := NewWorker(settings, store, CommandEvaluator{}, workerId)
 	if err != nil {
 		return err
@@ -161,6 +179,9 @@ func AcknowledgeCompetitionSourceWorker(ctx context.Context, settings *Settings,
 	host, err := worker.preflight(ctx)
 	if err != nil {
 		return err
+	}
+	if correction != nil && worker.workerImageDigest != correction.WorkerImageDigest {
+		return errors.New("source readiness worker image differs from the approved runtime correction")
 	}
 	if !sourceWorkerHostReady(host, settings, intent) || settings.artifactArchive == nil || settings.artifactArchive.Check(ctx) != nil {
 		return errors.New("source_not_ready: exact-round worker host or archive qualification is incomplete")

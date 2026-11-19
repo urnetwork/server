@@ -106,7 +106,7 @@ func competitionExecutorQualificationSha256(settings *Settings) string {
 		}
 		return ""
 	}
-	return settings.EvaluationPolicy.HostQualificationSha256
+	return competitionBaselineQualification(settings, settings.automationRoundId)
 }
 
 // A policy alone cannot route database work; the exact frozen round and one

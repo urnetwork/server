@@ -73,6 +73,10 @@ func settingsForCompetitionApiRound(ctx context.Context, settings *Settings, sto
 		return nil, err
 	}
 	frozen.runtimeIntentSha256 = intent.IntentSha256
+	frozen.epochThreeRuntimeCorrection, err = readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
 	return frozen, nil
 }
 

@@ -11917,6 +11917,10 @@ var migrations = []any{
 	newSqlMigration(CompetitionSilleStorageRecoveryMigrationSql()),
 
 	newSqlMigration(competitionEpochThreeSourceRecoveryMigration()),
+
+	// Bind an independently approved runtime correction to epoch three
+	// without changing its original intake or grading policy.
+	newSqlMigration(competitionEpochThreeRuntimeCorrectionSql()),
 }
 
 // The deleted_network backfill (the migration above): every network an App

@@ -508,6 +508,7 @@ func (self CommandEvaluator) PrepareRoundBaseline(ctx context.Context, settings 
 	copy := *job
 	copy.AttemptCount = 1
 	request := evaluatorRequestForJob(settings, &copy, seed, directory, patchPath, providersPath)
+	request.EvaluationPolicy.HostQualificationSha256 = competitionBaselineQualification(settings, job.RoundId)
 	request.RoundBaselinePath, request.RoundBaselineSha256 = "", ""
 	requestBytes, err := json.Marshal(request)
 	request.RoundSeedHex, seed = "", ""

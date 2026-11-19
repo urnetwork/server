@@ -32,6 +32,8 @@ func (self PostgresStore) SourceLifecycleStatus(ctx context.Context, settings *S
 			frozen, _, err = competitionIntakeFirstFrozenSettings(settings, intent)
 			server.Raise(err)
 			status = &CompetitionSourceLifecycleStatus{Schema: 1, Capability: CompetitionSourceLifecycleCapability, Purpose: CompetitionSourceLifecyclePrepared, Intent: intent}
+			correction, err := loadEpochThreeRuntimeCorrection(ctx, tx, intent)
+			server.Raise(err)
 			rows, err := tx.Query(ctx, `SELECT receipt_json FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4`,
 				intent.Environment, intent.CompetitionId, intent.SeasonId, generation)
 			roles := []model.CompetitionSourceReadiness{}
@@ -41,7 +43,7 @@ func (self PostgresStore) SourceLifecycleStatus(ctx context.Context, settings *S
 					server.Raise(rows.Scan(&content))
 					var receipt model.CompetitionSourceReadiness
 					server.Raise(json.Unmarshal(content, &receipt))
-					if !sourcePreparationReceiptMatches(intent, receipt) || receipt.RecordedAt.IsZero() {
+					if !sourcePreparationReceiptMatchesCorrection(intent, receipt, correction) || receipt.RecordedAt.IsZero() {
 						panic(ErrConflict)
 					}
 					roles = append(roles, receipt)
@@ -63,11 +65,12 @@ func (self PostgresStore) SourceLifecycleStatus(ctx context.Context, settings *S
 			server.Raise(err)
 			frozen, err = competitionIntakeFirstActivationMatches(settings, intent, round, api, grant)
 			server.Raise(err)
+			frozen.epochThreeRuntimeCorrection = correction
 			status.Intake, status.Purpose = grant, CompetitionSourceLifecycleIntake
 			status.Round = &CompetitionSourceLifecycleRound{RoundId: round.RoundId, Epoch: round.Epoch, OpensAt: round.OpensAt, ClosesAt: round.ClosesAt, Canceled: round.Canceled}
 			var currentGeneration int64
 			server.Raise(tx.QueryRow(ctx, `SELECT generation FROM competition_source_pointer WHERE environment=$1 AND competition_id=$2 AND season_id=$3`, intent.Environment, intent.CompetitionId, intent.SeasonId).Scan(&currentGeneration))
-			status.GradingRuntimeActivated = intent.ActivatedAt != nil && intent.AbandonedAt == nil && currentGeneration == generation && sourcePreparationReceiptsMatch(intent, roles) == nil
+			status.GradingRuntimeActivated = intent.ActivatedAt != nil && intent.AbandonedAt == nil && currentGeneration == generation && sourcePreparationReceiptsMatchWithCorrection(intent, roles, correction) == nil
 			if !status.GradingRuntimeActivated {
 				return
 			}

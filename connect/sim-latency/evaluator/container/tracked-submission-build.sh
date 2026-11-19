@@ -116,7 +116,9 @@ tracked_submission_build() {
             infrastructure_failure "candidate source worktree changed during tracked compilation"
     done
     candidate_source_identity_sha256="$(sha256sum "$source_identity" | awk '{print $1}')"
-    install -m 0400 "$assembly/sim-latency" "$build_context/sim-latency"
+    # The broker already sealed this inode. Both leaves are on one bounded
+    # mount, so moving it does not need another complete binary allocation.
+    mv -T -- "$assembly/sim-latency" "$build_context/sim-latency"
     install -m 0400 "$build_context/source-application.json" "$build_context/validated-identity.json"
     jq -nS --argjson check "$check_receipt" --argjson compile "$compile_receipt" --argjson binary "$binary_receipt" \
         '{schema:1,kind:"sim-latency-tracked-compiler",check_cache:$check,compile_cache:$compile,binary:$binary}' \
