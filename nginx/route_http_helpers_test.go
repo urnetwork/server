@@ -254,6 +254,8 @@ func (self *testConnectHandler) recordedRequests() []*testConnectRequest {
 // A body store that counts its closes.
 type testBodyStore struct {
 	closeErr error
+	// runs inside close, when set
+	closeHook func()
 
 	stateLock  sync.Mutex
 	closeCount int
@@ -261,9 +263,14 @@ type testBodyStore struct {
 
 // See frontBodyStore.
 func (self *testBodyStore) close() error {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.closeCount += 1
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.closeCount += 1
+	}()
+	if self.closeHook != nil {
+		self.closeHook()
+	}
 	return self.closeErr
 }
 

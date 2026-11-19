@@ -26,13 +26,20 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
-// A real TLS server of the front's TCP 443 handler, configured by
-// ConfigureServer as connect configures its public servers, h2 when
-// enableHttp2 is set. It closes when the test ends.
+// A real TLS server of the test front's TCP 443 handler, as
+// newTestConfiguredServerOf builds it.
 func newTestConfiguredServer(t *testing.T, testFront *testFront, enableHttp2 bool) *httptest.Server {
 	t.Helper()
-	server := httptest.NewUnstartedServer(testFront.front.HttpsHandler("eth1"))
-	testFront.front.ConfigureServer(server.Config)
+	return newTestConfiguredServerOf(t, testFront.front, enableHttp2)
+}
+
+// A real TLS server of front's TCP 443 handler for eth1, configured by
+// ConfigureServer as connect configures its public servers, h2 when
+// enableHttp2 is set. It closes when the test ends.
+func newTestConfiguredServerOf(t *testing.T, front *Front, enableHttp2 bool) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(front.HttpsHandler("eth1"))
+	front.ConfigureServer(server.Config)
 	server.EnableHTTP2 = enableHttp2
 	server.StartTLS()
 	t.Cleanup(server.Close)
@@ -41,7 +48,7 @@ func newTestConfiguredServer(t *testing.T, testFront *testFront, enableHttp2 boo
 
 // An h1 GET of the lb status route through client, and the connection it
 // went over.
-func getTestLbStatus(t *testing.T, server *httptest.Server, client *http.Client) (*http.Response, net.Conn) {
+func getTestServerLbStatus(t *testing.T, server *httptest.Server, client *http.Client) (*http.Response, net.Conn) {
 	t.Helper()
 	var conn net.Conn
 	r := newTestServerRequest(t, server, "GET", "test-lb.service.example", "/hidden-example/status", nil)
@@ -64,7 +71,7 @@ func getTestLbStatus(t *testing.T, server *httptest.Server, client *http.Client)
 
 // A minimal h2 client over one TLS connection, which reads the server's
 // frames itself, so a test sees the GOAWAY and the connection's close.
-type testH2Client struct {
+type testServerH2Client struct {
 	t            *testing.T
 	conn         *tls.Conn
 	framer       *http2.Framer
@@ -78,7 +85,7 @@ type testH2Client struct {
 }
 
 // Dials address over TLS, negotiating h2, and opens the connection.
-func dialTestH2Client(t *testing.T, address string) *testH2Client {
+func dialTestServerH2Client(t *testing.T, address string) *testServerH2Client {
 	t.Helper()
 	conn, err := tls.Dial("tcp", address, &tls.Config{
 		// the httptest server's certificate names no served name
@@ -100,7 +107,7 @@ func dialTestH2Client(t *testing.T, address string) *testH2Client {
 		t.Fatal(err)
 	}
 	headerBlock := &bytes.Buffer{}
-	client := &testH2Client{
+	client := &testServerH2Client{
 		t:            t,
 		conn:         conn,
 		framer:       http2.NewFramer(conn, conn),
@@ -118,7 +125,7 @@ func dialTestH2Client(t *testing.T, address string) *testH2Client {
 // Reads the next frame, answering the server's settings and pings, keeping
 // the connection's flow-control window open and noting a GOAWAY. Nil once
 // the server has closed the connection.
-func (self *testH2Client) readFrame() http2.Frame {
+func (self *testServerH2Client) readFrame() http2.Frame {
 	self.t.Helper()
 	frame, err := self.framer.ReadFrame()
 	if err != nil {
@@ -150,7 +157,7 @@ func (self *testH2Client) readFrame() http2.Frame {
 
 // GETs path at authority on a new stream and reads frames until its response
 // ends. The response's status.
-func (self *testH2Client) get(authority string, path string) string {
+func (self *testServerH2Client) get(authority string, path string) string {
 	self.t.Helper()
 	streamId := self.nextStreamId
 	self.nextStreamId += 2
@@ -198,7 +205,7 @@ func (self *testH2Client) get(authority string, path string) string {
 
 // Reads frames until the server closes the connection, and reports whether
 // it sent a GOAWAY first, and its last stream and code.
-func (self *testH2Client) readToClose() (goAwayReceived bool, lastStreamId uint32, errCode http2.ErrCode) {
+func (self *testServerH2Client) readToClose() (goAwayReceived bool, lastStreamId uint32, errCode http2.ErrCode) {
 	self.t.Helper()
 	for self.readFrame() != nil {
 	}
@@ -206,7 +213,7 @@ func (self *testH2Client) readToClose() (goAwayReceived bool, lastStreamId uint3
 }
 
 // The id of an h2 client's nth stream, from 1.
-func testH2StreamId(n int) uint32 {
+func testServerH2StreamId(n int) uint32 {
 	return uint32(2*n - 1)
 }
 
@@ -347,7 +354,7 @@ func TestFrontKeepaliveRequestsCloseTheConnectionOverH1(t *testing.T) {
 
 	var firstConn net.Conn
 	for i := 1; i <= 1001; i += 1 {
-		response, conn := getTestLbStatus(t, server, client)
+		response, conn := getTestServerLbStatus(t, server, client)
 		switch {
 		case i == 1:
 			firstConn = conn
@@ -368,15 +375,15 @@ func TestFrontKeepaliveRequestsCloseTheConnectionOverH1(t *testing.T) {
 func TestFrontKeepaliveRequestsCloseTheConnectionOverH2(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	server := newTestConfiguredServer(t, testFront, true)
-	client := dialTestH2Client(t, server.Listener.Addr().String())
+	client := dialTestServerH2Client(t, server.Listener.Addr().String())
 	for i := 1; i <= 1000; i += 1 {
 		if status := client.get("test-lb.service.example", "/hidden-example/status"); status != strconv.Itoa(http.StatusOK) {
 			t.Fatalf("stream %d: status %s", i, status)
 		}
 	}
 	goAwayReceived, lastStreamId, errCode := client.readToClose()
-	if !goAwayReceived || lastStreamId != testH2StreamId(1000) || errCode != http2.ErrCodeNo {
-		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testH2StreamId(1000))
+	if !goAwayReceived || lastStreamId != testServerH2StreamId(1000) || errCode != http2.ErrCodeNo {
+		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testServerH2StreamId(1000))
 	}
 }
 
@@ -389,17 +396,17 @@ func TestFrontKeepaliveTimeClosesTheConnectionOverH1(t *testing.T) {
 	server := newTestConfiguredServer(t, testFront, false)
 	client := server.Client()
 
-	response, firstConn := getTestLbStatus(t, server, client)
+	response, firstConn := getTestServerLbStatus(t, server, client)
 	if response.Close {
 		t.Fatal("the first request closed its connection")
 	}
 	testFront.clock.advance(keepaliveTime)
-	response, conn := getTestLbStatus(t, server, client)
+	response, conn := getTestServerLbStatus(t, server, client)
 	if response.Close || conn != firstConn {
 		t.Fatalf("a request at exactly keepalive_time: close %t, same connection %t", response.Close, conn == firstConn)
 	}
 	testFront.clock.advance(time.Nanosecond)
-	response, conn = getTestLbStatus(t, server, client)
+	response, conn = getTestServerLbStatus(t, server, client)
 	if !response.Close || conn != firstConn {
 		t.Fatalf("a request past keepalive_time: close %t, same connection %t; want its connection's last", response.Close, conn == firstConn)
 	}
@@ -411,7 +418,7 @@ func TestFrontKeepaliveTimeClosesTheConnectionOverH2(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
 	keepaliveTime := testFront.front.settings.Http.KeepaliveTime
 	server := newTestConfiguredServer(t, testFront, true)
-	client := dialTestH2Client(t, server.Listener.Addr().String())
+	client := dialTestServerH2Client(t, server.Listener.Addr().String())
 
 	client.get("test-lb.service.example", "/hidden-example/status")
 	testFront.clock.advance(keepaliveTime)
@@ -421,8 +428,8 @@ func TestFrontKeepaliveTimeClosesTheConnectionOverH2(t *testing.T) {
 		t.Fatalf("the stream past keepalive_time: status %s", status)
 	}
 	goAwayReceived, lastStreamId, errCode := client.readToClose()
-	if !goAwayReceived || lastStreamId != testH2StreamId(3) || errCode != http2.ErrCodeNo {
-		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testH2StreamId(3))
+	if !goAwayReceived || lastStreamId != testServerH2StreamId(3) || errCode != http2.ErrCodeNo {
+		t.Fatalf("closed with a GOAWAY %t, last stream %d, code %s; want one naming stream %d, no error", goAwayReceived, lastStreamId, errCode, testServerH2StreamId(3))
 	}
 }
 
@@ -435,15 +442,15 @@ func TestFrontKeepaliveTimeoutZeroClosesEveryConnection(t *testing.T) {
 	testFront := newTestFront(t, loadTestRouteTable(t), settings)
 
 	h1Server := newTestConfiguredServer(t, testFront, false)
-	if response, _ := getTestLbStatus(t, h1Server, h1Server.Client()); !response.Close {
+	if response, _ := getTestServerLbStatus(t, h1Server, h1Server.Client()); !response.Close {
 		t.Error("an h1 response kept its connection with keepalive_timeout 0")
 	}
 
 	h2Server := newTestConfiguredServer(t, testFront, true)
-	client := dialTestH2Client(t, h2Server.Listener.Addr().String())
+	client := dialTestServerH2Client(t, h2Server.Listener.Addr().String())
 	client.get("test-lb.service.example", "/hidden-example/status")
 	goAwayReceived, lastStreamId, _ := client.readToClose()
-	if !goAwayReceived || lastStreamId != testH2StreamId(1) {
+	if !goAwayReceived || lastStreamId != testServerH2StreamId(1) {
 		t.Errorf("an h2 connection closed with a GOAWAY %t, last stream %d; want one after the first stream", goAwayReceived, lastStreamId)
 	}
 }
