@@ -11,7 +11,9 @@ package main
 //
 //   - a host both interfaces loaded and probed turns ready;
 //   - a host added while one interface's lb is stopped stays pending in the API's readiness, naming that interface
-//     alone, while the other loads it, routes it and passes its probes;
+//     alone, while the other loads it, routes it and passes its probes; dns.yml's map windows judge the stored state
+//     map-stale for the stopped interface past stale_after_s, never for the one that reported the newest version, and
+//     for neither while the version is young;
 //   - the stopped lb restarted loads the current version before it serves 443, passes the next round, and the host
 //     turns ready.
 //
@@ -19,8 +21,8 @@ package main
 //     runs, and the host stays pending naming the interface; once nginx -t passes again lbmap loads it and it turns
 //     ready.
 //
-// What waits: map-stale past 20 min and its page on a fake clock, a false report and a dropped host, and TLS-ALPN-01
-// orders waiting on host_ready (TLS-M6-05's orderer). The test steps on lbmap's reports and the
+// What waits: map-stale's page and the dns edges leaving the stale interface out of their answers, which DNS-M6-03 and
+// §19.8 build, a false report and a dropped host, and TLS-ALPN-01 orders waiting on host_ready (TLS-M6-05's orderer). The test steps on lbmap's reports and the
 // API's answers; the probes' hellos are the only traffic, sent as the edge would.
 
 import (
@@ -167,6 +169,21 @@ func TestT3Fs122AHostAddedWhileOneInterfaceIsDownStaysPendingNamingIt(t *testing
 		}
 		if ready := t3SplitReadiness(t, world, first); ready.ReadyTime == nil {
 			t.Fatalf("a host both had loaded went pending: %+v", ready)
+		}
+		// map-stale, judged by dns.yml's map windows over the stored state: none while the version is young; past
+		// stale_after_s the stopped interface is stale and the one that reported the newest version is never left out,
+		// though past poll_silence_s it is not current either (§13.4's never the last one)
+		state, err := model.GetDnsCustomHostMapState(world.ctx, world.root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mapSettings := dnsservice.DefaultDnsSettings().Map
+		if judgment := mapSettings.Judge(state, time.Now()); 0 < len(judgment.MapStale) {
+			t.Fatalf("map-stale while the version is young: %v", judgment.MapStale)
+		}
+		later := time.Now().Add(time.Duration(mapSettings.StaleAfterSeconds+60) * time.Second)
+		if judgment := mapSettings.Judge(state, later); !judgment.MapStale[interfaces[1]] || judgment.MapStale[interfaces[0]] {
+			t.Fatalf("map-stale past stale_after_s: %v", judgment.MapStale)
 		}
 
 		// the stopped lb starts again, loads the current version before it serves, passes, and the host turns ready
