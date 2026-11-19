@@ -30,6 +30,79 @@ type publicUdpTestPacket struct {
 	from net.Addr
 }
 
+// Supplies one ordinary packet for each read, without allocating in the socket.
+type publicUdpRepeatedPacket struct {
+	net.PacketConn
+	address *net.UDPAddr
+}
+
+// Returns a single payload byte from the pinned peer.
+func (self *publicUdpRepeatedPacket) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	buffer[0] = 42
+	return 1, self.address, nil
+}
+
+// A warmed-up read must reuse the full-size datagram buffer. The small
+// protocol buffer still receives the payload and the wire counts stay exact.
+func TestPublicUdpReadsReuseTheWireBuffer(t *testing.T) {
+	peer := netip.MustParseAddrPort("192.0.2.1:443")
+	wire := &publicUdpPacketConn{
+		PacketConn: &publicUdpRepeatedPacket{address: net.UDPAddrFromAddrPort(peer)},
+		peer:       peer, settings: DefaultPublicUdpProbeSettings(),
+	}
+	var buffer [1]byte
+	allocations := testing.AllocsPerRun(32, func() {
+		n, _, err := wire.ReadFrom(buffer[:])
+		if err != nil || n != 1 || buffer[0] != 42 {
+			t.Fatalf("read %d bytes, first byte %d, error %v", n, buffer[0], err)
+		}
+	})
+	if allocations != 0 {
+		t.Errorf("warmed-up UDP read allocated %.0f objects, want zero", allocations)
+	}
+	if got := wire.observation(); got.ReceivedBytes != 33 || got.ReceivedPackets != 33 {
+		t.Errorf("received %d bytes in %d packets including warmup", got.ReceivedBytes, got.ReceivedPackets)
+	}
+}
+
+// Exposes each borrowed destination while two socket reads are in progress.
+type publicUdpHeldReads struct {
+	net.PacketConn
+	address *net.UDPAddr
+	buffers chan []byte
+	release chan struct{}
+}
+
+func (self *publicUdpHeldReads) ReadFrom(buffer []byte) (int, net.Addr, error) {
+	self.buffers <- buffer
+	<-self.release
+	return 1, self.address, nil
+}
+
+func TestPublicUdpConcurrentReadsOwnTheirBuffers(t *testing.T) {
+	peer := netip.MustParseAddrPort("192.0.2.1:443")
+	socket := &publicUdpHeldReads{address: net.UDPAddrFromAddrPort(peer), buffers: make(chan []byte), release: make(chan struct{})}
+	wire := &publicUdpPacketConn{PacketConn: socket, peer: peer, settings: DefaultPublicUdpProbeSettings()}
+	results := make(chan byte, 2)
+	for range 2 {
+		go func() {
+			var buffer [1]byte
+			if n, _, err := wire.ReadFrom(buffer[:]); n != 1 || err != nil {
+				t.Errorf("read %d bytes, error %v", n, err)
+			}
+			results <- buffer[0]
+		}()
+	}
+	first := <-socket.buffers
+	second := <-socket.buffers
+	first[0], second[0] = 1, 2
+	close(socket.release)
+	a, b := <-results, <-results
+	if !((a == 1 && b == 2) || (a == 2 && b == 1)) {
+		t.Fatalf("concurrent readers returned %d and %d", a, b)
+	}
+}
+
 // A bounded in-memory datagram network keeps native QUIC/TLS/codec controls
 // off real sockets, hostnames and interfaces. Deadlines are only safety bounds;
 // ordering controls use the first-write barrier or explicit packet delivery.

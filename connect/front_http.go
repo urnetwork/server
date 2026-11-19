@@ -6,9 +6,9 @@ package connect
 //
 // Each interface has one http.Server per port, serving every socket of that
 // port on the interface's addresses, so the drain reaches each with one
-// Shutdown. TLS is the nginx front's one long-lived config through
-// tls.NewListener, never cloned: http.Server.ServeTLS would clone it, and
-// session tickets would then stop resuming across the block's sockets (D6c).
+// Shutdown. The nginx TLS listener uses the front's long-lived config so
+// tickets resume across the block's sockets (D6c), and applies the header
+// timeout to HTTP/2 after net/http completes the handshake.
 //
 // Every accepted connection is tracked from its accept to its close, under
 // TLS and through a hijack, so the drain can wait for the websockets and H1+
@@ -25,7 +25,6 @@ package connect
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"log"
 	"net"
@@ -37,6 +36,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/server/nginx"
 )
 
 // One bound public tcp listener, served by its interface's server for the
@@ -78,7 +78,7 @@ func (self *frontTcpRun) serve() error {
 		frontServer: self.frontServer,
 	}
 	if self.socket.key.portKind == frontPortHttps {
-		listener = tls.NewListener(listener, self.frontServer.tlsConfig)
+		listener = nginx.NewTlsListener(listener, self.frontServer.tlsConfig, self.socket.httpServer.ReadHeaderTimeout)
 	}
 	return self.socket.httpServer.Serve(listener)
 }

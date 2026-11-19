@@ -21,8 +21,8 @@ package nginx
 //     exchange: a pooled connection carries none;
 //   - a streamed body goes on as it arrives, each read written and flushed,
 //     as nginx's proxy_request_buffering off sends it;
-//   - the response head is limited as nginx's proxy_buffer_size limits it,
-//     every head of the attempt together, an informational one included;
+//   - each response head fits nginx's proxy_buffer_size, including each
+//     informational head before the block's final response;
 //   - a connection is kept only when its response was read whole and its
 //     request written whole, as nginx keeps one only once request_body_sent
 //     (ngx_http_upstream_free_keepalive_peer). The write runs in its own
@@ -538,11 +538,6 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	upstreamConn.readErr = nil
 	upstreamConn.writtenBytes.Store(0)
 	upstreamConn.readArmed.Store(false)
-	if maxHeadBytes := self.settings.Forward.MaxUpstreamResponseHeaderBytes; 0 < maxHeadBytes {
-		upstreamConn.headBytesLeft = int64(maxHeadBytes)
-	} else {
-		upstreamConn.headBytesLeft = -1
-	}
 
 	exchange = &upstreamExchange{
 		conn:        upstreamConn,
@@ -572,7 +567,7 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		exchange.writeResult <- err
 	}()
 
-	response, err := readUpstreamResponseHead(upstreamConn.reader, request.method)
+	response, err := upstreamConn.readResponseHead(request.method, self.settings.Forward.MaxUpstreamResponseHeaderBytes)
 	if err == nil && response.StatusCode == http.StatusSwitchingProtocols && !request.upgrade {
 		err = errors.New("upstream switched protocols unasked")
 		upstreamConn.readErr = nil
@@ -609,14 +604,18 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	return exchange, upstreamFailureNone, false
 }
 
-// Reads the final response head, past informational ones, as nginx skips
-// them. A 101 is final. The bytes after the head stay in reader.
-func readUpstreamResponseHead(reader *bufio.Reader, method string) (*http.Response, error) {
+// Reads past informational heads to the final response. Each head starts
+// with its own budget, including bytes already buffered for it. A 101 is final.
+func (self *upstreamConnection) readResponseHead(method string, maxHeadBytes int) (*http.Response, error) {
 	request := &http.Request{
 		Method: method,
 	}
 	for {
-		response, err := http.ReadResponse(reader, request)
+		self.headBytesLeft = -1
+		if maxHeadBytes > 0 {
+			self.headBytesLeft = int64(maxHeadBytes - self.reader.Buffered())
+		}
+		response, err := http.ReadResponse(self.reader, request)
 		if err != nil {
 			return nil, err
 		}
