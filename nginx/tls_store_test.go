@@ -555,3 +555,29 @@ func TestLoadCertificateStoreSearchesEnvThenAllThenTheFlatLayout(t *testing.T) {
 		t.Fatalf("loaded %s's leaf, want the flat layout's", got)
 	}
 }
+
+// A 64 KiB name under the served wildcard gets its pair, and the store walks
+// only the bases as long as the longest served one, as the matcher does.
+func TestCertificateStoreWalksOnlyBasesAsLongAsTheLongestServedOne(t *testing.T) {
+	vault := newTestTlsVault(t)
+	certificateStore := vault.load(t)
+	if want := len("connect.service.example"); certificateStore.maxWildcardBaseLength != want {
+		t.Fatalf("the bound is %d bytes, want the served wildcard base's %d", certificateStore.maxWildcardBaseLength, want)
+	}
+	longPrefix := newTestLongNamePrefix()
+	certificate, ok := certificateStore.certificate(longPrefix + "g1.connect.service.example")
+	if !ok || !certificate.Leaf.Equal(vault.dirPairs["star.connect.service.example"].leaf) {
+		t.Fatal("a 64 KiB name under *.connect.service.example didn't get its pair")
+	}
+	if _, ok := certificateStore.certificate(longPrefix + "unknown.example"); ok {
+		t.Fatal("a 64 KiB unknown name got a pair")
+	}
+	// the bases certificate may look up: one per dot within the bound
+	lookupCount := 0
+	for range wildcardBases(longPrefix+"unknown.example", certificateStore.maxWildcardBaseLength) {
+		lookupCount += 1
+	}
+	if certificateStore.maxWildcardBaseLength+1 < lookupCount {
+		t.Fatalf("a 64 KiB name may look up %d bases, want at most %d", lookupCount, certificateStore.maxWildcardBaseLength+1)
+	}
+}

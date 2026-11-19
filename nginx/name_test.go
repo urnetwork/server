@@ -3,11 +3,35 @@ package nginx
 // Host normalization and name matching tests. normalizeHost is checked
 // against the pinned nginx's ngx_http_validate_host, case by case, and the
 // matcher against nginx's server_name precedence over a fixture that puts an
-// exact name and a longer wildcard under the connect wildcard.
+// exact name and a longer wildcard under the connect wildcard. Names of 64
+// KiB, about as long as a TCP SNI can be, check that matching one walks no
+// more than the longest served wildcard base.
 
 import (
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 )
+
+// A 64 KiB run of one-letter labels, each with its dot, to put in front of a
+// name.
+func newTestLongNamePrefix() string {
+	return strings.Repeat("a.", 32*1024)
+}
+
+// The part of name after each of its dots, longest first, keeping those of
+// at most maxBaseLength bytes: the bases a wildcard covering the name can
+// have, by plain enumeration.
+func testWildcardBases(name string, maxBaseLength int) []string {
+	bases := []string{}
+	for i := 0; i < len(name); i += 1 {
+		if name[i] == '.' && len(name)-i-1 <= maxBaseLength {
+			bases = append(bases, name[i+1:])
+		}
+	}
+	return bases
+}
 
 // Each host nginx's $host accepts normalizes as nginx writes it, and each one
 // it declines is refused.
@@ -185,6 +209,128 @@ func TestNameMatcherServesTheTablesServedNames(t *testing.T) {
 		selfMatch, ok := matcher.match(match.name)
 		if !ok || selfMatch.name != match.name {
 			t.Errorf("match(%q) = %q, %t, want itself", match.name, selfMatch.name, ok)
+		}
+	}
+}
+
+// The walk yields the part after each dot, longest first, and only the parts
+// within the bound, for every name and bound here. A 64 KiB name yields the
+// four parts that fit, not one for each of its 32,771 dots.
+func TestWildcardBasesYieldsOnlyThePartsWithinTheBound(t *testing.T) {
+	collectBases := func(name string, maxBaseLength int) []string {
+		bases := []string{}
+		for base := range wildcardBases(name, maxBaseLength) {
+			bases = append(bases, base)
+		}
+		return bases
+	}
+	// names here are long, so failures show their length and their end
+	describe := func(name string) string {
+		return fmt.Sprintf("%d bytes ending %q", len(name), name[max(0, len(name)-32):])
+	}
+
+	longName := newTestLongNamePrefix() + "x.connect.service.example"
+	wantBases := []string{"x.connect.service.example", "connect.service.example", "service.example", "example"}
+	if bases := collectBases(longName, len("x.connect.service.example")); !slices.Equal(bases, wantBases) {
+		t.Fatalf("a name of %s yielded %d bases, want %v", describe(longName), len(bases), wantBases)
+	}
+
+	names := []string{
+		"",
+		"example",
+		".",
+		"a.",
+		"..",
+		"a..b.example",
+		".connect.service.example",
+		"x.connect.service.example",
+		longName,
+	}
+	// around each base length of x.connect.service.example, and the most a
+	// served base may have
+	maxBaseLengths := []int{-1, 0, 1, 6, 7, 8, 14, 15, 16, 22, 23, 24, 25, 26, 253}
+	for _, name := range names {
+		for _, maxBaseLength := range maxBaseLengths {
+			bases := collectBases(name, maxBaseLength)
+			if want := testWildcardBases(name, maxBaseLength); !slices.Equal(bases, want) {
+				t.Errorf("a name of %s with bound %d yielded %d bases, want %d", describe(name), maxBaseLength, len(bases), len(want))
+			}
+		}
+	}
+}
+
+// With more than 8 wildcards, where each lookup hashes the whole key, a 64
+// KiB name walks only the bases as long as the longest served one, and still
+// matches as nginx does: under the longest wildcard, whose base begins right
+// where the walk starts; under shorter ones; or under none.
+func TestNameMatcherWalksOnlyBasesAsLongAsTheLongestServedOne(t *testing.T) {
+	// 250 bytes, near the 253 a served name may have
+	longestBase := strings.Join([]string{
+		strings.Repeat("b", 63),
+		strings.Repeat("c", 63),
+		strings.Repeat("d", 63),
+		strings.Repeat("e", 50),
+		"example",
+	}, ".")
+	tree := routeFixtureTree(t)
+	names := routeTreeValue(t, tree, "services", 2, "names").([]any)
+	for i := range 9 {
+		names = append(names, fmt.Sprintf("*.w%d.service.example", i))
+	}
+	names = append(names, "*."+longestBase)
+	setRouteTreeValue(t, tree, names, "services", 2, "names")
+	routeTable, err := ParseRouteTable(encodeRouteTree(t, tree))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matcher := newNameMatcher(routeTable)
+	if len(matcher.wildcardBaseMatches) <= 8 {
+		t.Fatalf("the table has %d wildcards, want more than 8", len(matcher.wildcardBaseMatches))
+	}
+	if matcher.maxWildcardBaseLength != len(longestBase) {
+		t.Fatalf("the bound is %d bytes, want the longest base's %d", matcher.maxWildcardBaseLength, len(longestBase))
+	}
+
+	// nginx's rule with no bound: the exact name, then each part after a dot
+	unboundedMatch := func(name string) (nameMatch, bool) {
+		if match, ok := matcher.exactNameMatches[name]; ok {
+			return match, true
+		}
+		for _, base := range testWildcardBases(name, len(name)) {
+			if match, ok := matcher.wildcardBaseMatches[base]; ok {
+				return match, true
+			}
+		}
+		return nameMatch{}, false
+	}
+	longPrefix := newTestLongNamePrefix()
+	cases := []struct {
+		description string
+		name        string
+		wantName    string
+	}{
+		{description: "the longest base", name: longPrefix + longestBase, wantName: "*." + longestBase},
+		{description: "a label then the longest base", name: longPrefix + "x." + longestBase, wantName: "*." + longestBase},
+		{description: "w8.service.example", name: longPrefix + "w8.service.example", wantName: "*.w8.service.example"},
+		{description: "g1.connect.service.example", name: longPrefix + "g1.connect.service.example", wantName: "*.connect.service.example"},
+		{description: "unknown.example", name: longPrefix + "unknown.example", wantName: ""},
+	}
+	for _, c := range cases {
+		match, ok := matcher.match(c.name)
+		wantMatch, wantOk := unboundedMatch(c.name)
+		if ok != wantOk || match != wantMatch {
+			t.Errorf("64 KiB ending in %s matched %q, %t, want the unbounded walk's %q, %t", c.description, match.name, ok, wantMatch.name, wantOk)
+		}
+		if match.name != c.wantName {
+			t.Errorf("64 KiB ending in %s matched %q, want %q", c.description, match.name, c.wantName)
+		}
+		// the bases match may look up: one per dot within the bound
+		lookupCount := 0
+		for range wildcardBases(c.name, matcher.maxWildcardBaseLength) {
+			lookupCount += 1
+		}
+		if matcher.maxWildcardBaseLength+1 < lookupCount {
+			t.Errorf("64 KiB ending in %s may look up %d bases, want at most %d", c.description, lookupCount, matcher.maxWildcardBaseLength+1)
 		}
 	}
 }

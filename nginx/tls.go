@@ -55,6 +55,9 @@ type CertificateStore struct {
 	nameCertificates map[string]*tls.Certificate
 	// the pairs of the served wildcards, each *.b.c keyed by its base b.c
 	wildcardBaseCertificates map[string]*tls.Certificate
+	// the longest base in wildcardBaseCertificates, in bytes: no longer part
+	// of a name can match, so certificate looks none up
+	maxWildcardBaseLength int
 	// the earliest NotAfter of the leaves
 	earliestExpiry time.Time
 }
@@ -157,6 +160,7 @@ func LoadCertificateStore(vaultDir string, env string, routeTable *RouteTable) (
 		certificateStore.nameCertificates[name] = certificate
 		if base, ok := strings.CutPrefix(name, "*."); ok {
 			certificateStore.wildcardBaseCertificates[base] = certificate
+			certificateStore.maxWildcardBaseLength = max(certificateStore.maxWildcardBaseLength, len(base))
 		}
 		if certificateStore.earliestExpiry.IsZero() || certificate.Leaf.NotAfter.Before(certificateStore.earliestExpiry) {
 			certificateStore.earliestExpiry = certificate.Leaf.NotAfter
@@ -174,22 +178,18 @@ func (self *CertificateStore) EarliestExpiry() time.Time {
 // The certificate for a served name as the route table writes it (a wildcard
 // as *.b.c), or for a normalized name that a served wildcard covers, by
 // nginx's rule: one or more leading labels, the longest wildcard first. False
-// for any other name.
+// for any other name. A long name costs no more than a short one, as in
+// nameMatcher.match.
 func (self *CertificateStore) certificate(name string) (*tls.Certificate, bool) {
 	if certificate, ok := self.nameCertificates[name]; ok {
 		return certificate, true
 	}
-	rest := name
-	for {
-		_, base, ok := strings.Cut(rest, ".")
-		if !ok {
-			return nil, false
-		}
+	for base := range wildcardBases(name, self.maxWildcardBaseLength) {
 		if certificate, ok := self.wildcardBaseCertificates[base]; ok {
 			return certificate, true
 		}
-		rest = base
 	}
+	return nil, false
 }
 
 // The files of one certificate and key pair in the vault.

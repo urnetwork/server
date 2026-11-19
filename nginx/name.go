@@ -11,8 +11,14 @@ package nginx
 // nginx gives an invalid or unknown SNI the default server's certificate,
 // and an unknown Host the default server's routes; the callers here do the
 // same with a false result.
+//
+// A name comes from the client before any authentication: an SNI can run to
+// 64 KiB over TCP (Go caps only the whole ClientHello) and 16 KiB over QUIC,
+// and a Host to the front's header limit. Matching one costs time linear in
+// its length.
 
 import (
+	"iter"
 	"strings"
 )
 
@@ -150,6 +156,9 @@ type nameMatcher struct {
 	exactNameMatches map[string]nameMatch
 	// the leading wildcards, each *.b.c keyed by its base b.c
 	wildcardBaseMatches map[string]nameMatch
+	// the longest base in wildcardBaseMatches, in bytes: no longer part of a
+	// name can match, so match looks none up
+	maxWildcardBaseLength int
 }
 
 // Indexes every served name of a parsed table, the set RouteTable.ServedNames
@@ -166,6 +175,7 @@ func newNameMatcher(routeTable *RouteTable) *nameMatcher {
 		match.name = name
 		if base, ok := strings.CutPrefix(name, "*."); ok {
 			matcher.wildcardBaseMatches[base] = match
+			matcher.maxWildcardBaseLength = max(matcher.maxWildcardBaseLength, len(base))
 		} else {
 			matcher.exactNameMatches[name] = match
 		}
@@ -209,18 +219,41 @@ func (self *nameMatcher) match(name string) (nameMatch, bool) {
 	if match, ok := self.exactNameMatches[name]; ok {
 		return match, true
 	}
-	// each pass drops one more leading label, so the first base found is the
-	// longest wildcard's, as ngx_hash_find_wc_head finds the deepest
-	rest := name
-	for {
-		_, base, ok := strings.Cut(rest, ".")
-		if !ok {
-			return nameMatch{}, false
-		}
+	// longest first, so the first base found is the longest wildcard's, as
+	// ngx_hash_find_wc_head finds the deepest
+	for base := range wildcardBases(name, self.maxWildcardBaseLength) {
 		if match, ok := self.wildcardBaseMatches[base]; ok {
 			return match, true
 		}
-		rest = base
+	}
+	return nameMatch{}, false
+}
+
+// The bases a leading wildcard covering name could have, longest first: the
+// part of name after each of its dots. Only bases of at most maxBaseLength
+// bytes are yielded, and the walk starts where the first of them can begin,
+// so a long name costs no more than a short one. Looking up the part after
+// every dot would hash bytes in the square of the name's length, since a Go
+// map of more than 8 entries hashes the whole key on every lookup. None for
+// a negative maxBaseLength.
+func wildcardBases(name string, maxBaseLength int) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		if maxBaseLength < 0 {
+			return
+		}
+		rest := name
+		// a base of at most maxBaseLength bytes follows a dot in the last
+		// maxBaseLength+1 bytes
+		if maxBaseLength < len(rest)-1 {
+			rest = rest[len(rest)-1-maxBaseLength:]
+		}
+		for {
+			_, base, ok := strings.Cut(rest, ".")
+			if !ok || !yield(base) {
+				return
+			}
+			rest = base
+		}
 	}
 }
 
