@@ -203,6 +203,19 @@ func testFrontFreePorts(t testing.TB, addresses []netip.Addr, count int) []int {
 // revision of its bytes.
 func newTestFrontRouteTable(t testing.TB) (*nginx.RouteTable, string) {
 	t.Helper()
+	encoded := newTestFrontRouteFile(t)
+	parsed, err := nginx.ParseRouteTable(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	return parsed, hex.EncodeToString(digest[:])
+}
+
+// The bytes of a route file of the shared fixture with the test interfaces
+// on loopback and free listen ports, as warpctl writes one.
+func newTestFrontRouteFile(t testing.TB) []byte {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "nginx", "testdata", "route_v1_example.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -254,13 +267,7 @@ func newTestFrontRouteTable(t testing.TB) (*nginx.RouteTable, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	encoded = append(encoded, '\n')
-	parsed, err := nginx.ParseRouteTable(encoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(encoded)
-	return parsed, hex.EncodeToString(digest[:])
+	return append(encoded, '\n')
 }
 
 // A fake nginx front: name classes from the route table with nginx's
