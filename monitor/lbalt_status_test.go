@@ -542,6 +542,40 @@ func TestLbAltStatusPassRunsEveryAttemptFreshly(t *testing.T) {
 	}
 }
 
+// Each attempt of a pass runs under the pass's own settings and is bounded by
+// their attempt timeout: a raised timeout reaches every attempt's context,
+// which the source records.
+func TestLbAltStatusPassBoundsEachAttemptByItsSettings(t *testing.T) {
+	probeSettings := DefaultLbAltStatusProbeSettings()
+	probeSettings.AttemptTimeout = time.Hour
+	var stateLock sync.Mutex
+	attemptDeadlines := []time.Time{}
+	unboundedCount := 0
+	source := &lbAltStatusTestSource{syntheticSource: &syntheticSource{}, observe: func(ctx context.Context, request LbAltStatusRequest) (LbAltStatusObservation, error) {
+		func() {
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			if deadline, ok := ctx.Deadline(); ok {
+				attemptDeadlines = append(attemptDeadlines, deadline)
+			} else {
+				unboundedCount++
+			}
+		}()
+		return lbAltStatusTestHealthy(request), nil
+	}}
+	started := time.Now()
+	requests, results, err := lbAltStatusTestPass(t, lbAltStatusTestSignalSettings(source), lbAltStatusProbe{settings: probeSettings})
+	finished := time.Now()
+	if err != nil || len(results) != len(requests) || unboundedCount != 0 || len(attemptDeadlines) != len(requests) {
+		t.Fatalf("a pass of %d requests gave %d results and %d bounded and %d unbounded attempts: %v", len(requests), len(results), len(attemptDeadlines), unboundedCount, err)
+	}
+	for index, deadline := range attemptDeadlines {
+		if deadline.Before(started.Add(probeSettings.AttemptTimeout)) || deadline.After(finished.Add(probeSettings.AttemptTimeout)) {
+			t.Fatalf("attempt %d ran under a deadline %s after the start", index, deadline.Sub(started))
+		}
+	}
+}
+
 // A canceled pass joins the attempts in flight, starts no other and publishes
 // nothing. The sources' entry is the barrier.
 func TestLbAltStatusPassCancellationJoinsWithoutResults(t *testing.T) {
