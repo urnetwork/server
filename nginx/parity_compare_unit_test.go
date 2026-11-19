@@ -76,9 +76,19 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 	}
 	nginxStatusBody := `"{\"version\":\"0.0.0-parity\",\"status\":\"ok\"}\n"`
 	frontStatusBody := `"{\"version\":\"0.0.0-parity\",\"status\":\"ok\",\"front\":\"lbalt\"}\n"`
+	// an api request whose head is count header lines of 6600 bytes
+	filledHead := func(count int) *parityRequest {
+		request := parityGet(parityApiName, parityApiName, "/hello")
+		for i := range count {
+			request = parityWith(request, "", parityLongHeader("X-Parity-Fill-"+strconv.Itoa(i), 6600))
+		}
+		return request
+	}
 	cases := []struct {
-		name         string
-		parityCase   *parityCase
+		name       string
+		parityCase *parityCase
+		// the request each sequence sent, on both sides
+		requests     []*parityRequest
 		nginx        [][2]string
 		front        [][2]string
 		frontBlocks  []string
@@ -237,6 +247,41 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			difference:  parityDifference{key: "upstream.count", nginx: "2", front: "1"},
 			wantUnnamed: true,
 		},
+		{
+			name:       "Go's 431 for a head past LBALT-IMPL §7's band",
+			parityCase: &parityCase{name: "unit", tags: []string{"past-max-header-bytes"}},
+			requests:   []*parityRequest{filledHead(21)},
+			nginx:      ownPage("400", "proxy"),
+			front:      ownPage("431", "proxy"),
+			difference: parityDifference{key: "response[0].status", nginx: "400", front: "431"},
+			wantId:     "max-header-bytes-431",
+		},
+		{
+			name:        "Go's 431 for a head inside LBALT-IMPL §7's band, which the front answers itself",
+			parityCase:  &parityCase{name: "unit", tags: []string{"past-max-header-bytes"}},
+			requests:    []*parityRequest{filledHead(11)},
+			nginx:       ownPage("400", "proxy"),
+			front:       ownPage("431", "proxy"),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "431"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "a head past the band that the front forwarded",
+			parityCase:  &parityCase{name: "unit", tags: []string{"past-max-header-bytes"}},
+			requests:    []*parityRequest{filledHead(21)},
+			nginx:       ownPage("400", "proxy"),
+			front:       ownPage("200", "upstream"),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "200"},
+			wantUnnamed: true,
+		},
+		{
+			name:        "Go's 431 for a head past the band, in a case not written for it",
+			requests:    []*parityRequest{filledHead(21)},
+			nginx:       ownPage("400", "proxy"),
+			front:       ownPage("431", "proxy"),
+			difference:  parityDifference{key: "response[0].status", nginx: "400", front: "431"},
+			wantUnnamed: true,
+		},
 	}
 	for _, c := range cases {
 		checkCase := c.parityCase
@@ -247,6 +292,10 @@ func TestParityAcceptancesMatchOnlyTheirDifferences(t *testing.T) {
 			parityCase: checkCase,
 			nginx:      newParityTestObservation(c.nginx),
 			front:      newParityTestObservation(c.front, c.frontBlocks...),
+		}
+		for sequence, request := range c.requests {
+			check.nginx.sequenceRequests[sequence] = request
+			check.front.sequenceRequests[sequence] = request
 		}
 		difference := c.difference
 		acceptance := check.acceptance(&difference)

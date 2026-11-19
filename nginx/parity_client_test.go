@@ -146,6 +146,10 @@ type parityObservation struct {
 	// the block each upstream attempt reached, by its index; never compared,
 	// for acceptances that depend on where a request went
 	attemptIndexBlocks map[int]string
+	// the request each sequence sent, for the requests a case sends as a
+	// parityRequest; never compared, for acceptances that depend on what was
+	// asked
+	sequenceRequests map[int]*parityRequest
 }
 
 // An empty observation.
@@ -156,6 +160,7 @@ func newParityObservation() *parityObservation {
 		peerAddrPorts:      map[string]bool{},
 		sequenceStatuses:   map[int]int{},
 		attemptIndexBlocks: map[int]string{},
+		sequenceRequests:   map[int]*parityRequest{},
 	}
 }
 
@@ -235,6 +240,13 @@ func (self *parityCaseRun) sequence() int {
 // Records a fact of the case.
 func (self *parityCaseRun) fact(name string, value string) {
 	self.observation.set("fact."+name, value)
+}
+
+// Records which request a sequence sent.
+func (self *parityCaseRun) recordRequest(sequence int, request *parityRequest) {
+	self.observation.stateLock.Lock()
+	defer self.observation.stateLock.Unlock()
+	self.observation.sequenceRequests[sequence] = request
 }
 
 // The name of one of the case's barriers on this target.
@@ -380,42 +392,50 @@ func (self *parityConn) close() {
 	self.conn.Close()
 }
 
-// The head of an h1 request, byte for byte: the request line, Host, the
-// case's own headers, the request's header lines, Connection: close unless
-// the request keeps the connection, and the body's framing.
-func (self *parityConn) h1Head(request *parityRequest, sequence int) []byte {
-	proto := request.proto
+// The head of the request as h1 sends it under a case key, byte for byte:
+// the request line, Host, the case's own headers, the request's header
+// lines, Connection: close unless the request keeps the connection, and the
+// body's framing.
+func (self *parityRequest) h1Head(caseKey string, sequence int) []byte {
+	proto := self.proto
 	if proto == "" {
 		proto = "HTTP/1.1"
 	}
 	head := &bytes.Buffer{}
-	fmt.Fprintf(head, "%s %s %s\r\n", request.method, request.target, proto)
-	if request.host != "" {
-		fmt.Fprintf(head, "Host: %s\r\n", request.host)
+	fmt.Fprintf(head, "%s %s %s\r\n", self.method, self.target, proto)
+	if self.host != "" {
+		fmt.Fprintf(head, "Host: %s\r\n", self.host)
 	}
-	for _, extraHost := range request.extraHosts {
+	for _, extraHost := range self.extraHosts {
 		fmt.Fprintf(head, "Host: %s\r\n", extraHost)
 	}
-	fmt.Fprintf(head, "%s: %s\r\n", parityCaseHeader, self.run.caseKey)
+	fmt.Fprintf(head, "%s: %s\r\n", parityCaseHeader, caseKey)
 	fmt.Fprintf(head, "%s: %d\r\n", paritySequenceHeader, sequence)
-	if !request.hasHeader("User-Agent") {
+	if !self.hasHeader("User-Agent") {
 		head.WriteString("User-Agent: parity\r\n")
 	}
-	for _, headerLine := range request.headers {
+	for _, headerLine := range self.headers {
 		fmt.Fprintf(head, "%s: %s\r\n", headerLine[0], headerLine[1])
 	}
-	if !request.keepalive && !request.hasHeader("Connection") {
+	if !self.keepalive && !self.hasHeader("Connection") {
 		head.WriteString("Connection: close\r\n")
 	}
-	if request.body != nil && !request.hasHeader("Content-Length") && !request.hasHeader("Transfer-Encoding") {
-		if request.chunked {
+	if self.body != nil && !self.hasHeader("Content-Length") && !self.hasHeader("Transfer-Encoding") {
+		if self.chunked {
 			head.WriteString("Transfer-Encoding: chunked\r\n")
 		} else {
-			fmt.Fprintf(head, "Content-Length: %d\r\n", len(request.body))
+			fmt.Fprintf(head, "Content-Length: %d\r\n", len(self.body))
 		}
 	}
 	head.WriteString("\r\n")
 	return head.Bytes()
+}
+
+// The head of an h1 request on this connection, recording which request the
+// sequence sent.
+func (self *parityConn) h1Head(request *parityRequest, sequence int) []byte {
+	self.run.recordRequest(sequence, request)
+	return request.h1Head(self.run.caseKey, sequence)
 }
 
 // The body of an h1 request as written, chunked when the request is.
@@ -472,6 +492,7 @@ func (self *parityConn) roundTripH2(request *parityRequest, sequence int) (*http
 	if err != nil {
 		return nil, err
 	}
+	self.run.recordRequest(sequence, request)
 	var body io.Reader
 	if request.body != nil {
 		body = bytes.NewReader(request.body)

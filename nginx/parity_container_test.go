@@ -211,7 +211,10 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 // header timeout, keepalive timeout, header bytes and h2 stream limit, and no
 // general OPTIONS handler. It stands in for Front.ConfigureServer, which
 // LBALT-IMPL.md §7 decides and lbalt/integrate doesn't have yet; once it
-// exists, this should call it instead.
+// exists, this should call it instead. Its MaxHeaderBytes is connect's,
+// MaxRequestHeadersTotalBytes, where §7 decides twice that, so a head inside
+// the band between them gets Go's 431 where the front should answer 400, and
+// the run reports it.
 func newParityFrontHttpServer(ctx context.Context, handler http.Handler, httpSettings *nginx.HttpSettings, errorLog *log.Logger) *http.Server {
 	httpServer := &http.Server{
 		Handler:                      handler,

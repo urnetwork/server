@@ -18,10 +18,21 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/urnetwork/server/nginx"
 )
 
 // The value of a key one side never set.
 const parityAbsent = "<absent>"
+
+// LBALT-IMPL §7: a public server's MaxHeaderBytes is this many times
+// HttpSettings.MaxRequestHeadersTotalBytes, so the front itself answers
+// nginx's 400 and 414 for any head under it.
+const parityMaxHeaderBytesFactor = 2
+
+// The bytes net/http reads past MaxHeaderBytes before it answers 431, the
+// bufio slop of its initial read limit.
+const parityGoHeaderSlopBytes = 4 * 1024
 
 // One key whose values differ between nginx and the front.
 type parityDifference struct {
@@ -116,6 +127,19 @@ func parityConnKey(key string) (string, string, bool) {
 // A response's value on one side.
 func parityResponseValue(observation *parityObservation, sequence string, field string) string {
 	return parityValue(observation, "response["+sequence+"]."+field)
+}
+
+// The request a response's sequence sent, or nil when the case sent it some
+// other way, as raw bytes or raw h2 fields. Read once the case is done.
+func (self *parityCheck) sequenceRequest(sequence string) *parityRequest {
+	index, err := strconv.Atoi(sequence)
+	if err != nil {
+		return nil
+	}
+	if request, ok := self.nginx.sequenceRequests[index]; ok {
+		return request
+	}
+	return self.front.sequenceRequests[index]
 }
 
 // Whether both sides answered a request themselves, with the same status:
@@ -319,13 +343,25 @@ var parityAcceptances = []*parityAcceptance{
 	},
 	{
 		id:     "max-header-bytes-431",
-		source: "LBALT-IMPL §7 header bytes, s-connect: past the server's MaxHeaderBytes Go answers 431 where nginx answers 400",
+		source: "LBALT-IMPL §7 header bytes: past MaxHeaderBytes, twice MaxRequestHeadersTotalBytes, and Go's read slop, Go answers 431 where nginx answers 400; inside that band the front answers 400 itself",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			sequence, field, ok := parityResponseKey(difference.key)
 			if !ok || !check.hasTag("past-max-header-bytes") {
 				return false
 			}
 			if parityResponseValue(check.nginx, sequence, "status") != "400" || parityResponseValue(check.front, sequence, "status") != "431" {
+				return false
+			}
+			// a 431 inside the band is a server set up against §7, refusing
+			// a head the front must answer itself
+			request := check.sequenceRequest(sequence)
+			if request == nil {
+				return false
+			}
+			index, _ := strconv.Atoi(sequence)
+			headBytes := len(request.h1Head("front/"+check.parityCase.name, index))
+			bandBytes := parityMaxHeaderBytesFactor*nginx.DefaultHttpSettings().MaxRequestHeadersTotalBytes + parityGoHeaderSlopBytes
+			if headBytes <= bandBytes {
 				return false
 			}
 			return field == "status" || field == "header.Connection" || slices.Contains(parityOwnPageFields, field)

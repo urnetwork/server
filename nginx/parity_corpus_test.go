@@ -861,7 +861,10 @@ func parityCorpus() []*parityCase {
 		{name: "limits/header-past-8k", request: parityWith(api, "", parityLongHeader("X-Parity-Long", 8*1024+100))},
 		{name: "limits/head-of-60k", request: parityWith(api, "", headLines(9)...), tags: []string{"header-packing"}},
 		{name: "limits/head-of-66k", request: parityWith(api, "", headLines(10)...)},
-		{name: "limits/head-of-73k", request: parityWith(api, "", headLines(11)...), tags: []string{"past-max-header-bytes"}},
+		// inside LBALT-IMPL §7's band, twice the 64 KiB, where the front
+		// answers nginx's 400 itself; past it, Go's 431 is accepted
+		{name: "limits/head-of-73k", request: parityWith(api, "", headLines(11)...)},
+		{name: "limits/head-of-139k", request: parityWith(api, "", headLines(21)...), tags: []string{"past-max-header-bytes"}},
 		{name: "limits/head-of-60k-over-h2", request: parityOverH2(parityWith(api, "", headLines(9)...))},
 		{name: "limits/trace", request: parityWith(api, "TRACE")},
 		{name: "limits/trace-over-h2", request: parityOverH2(parityWith(api, "TRACE"))},
