@@ -925,6 +925,12 @@ func parityCorpus() []*parityCase {
 		{name: "uri/above-the-root", request: parityGet(parityApiName, parityApiName, "/../a")},
 		{name: "uri/empty-query", request: parityGet(parityApiName, parityApiName, "/a?")},
 		{name: "uri/unicode-and-reserved", request: parityGet(parityApiName, parityApiName, "/caf%C3%A9;v=1/%20x?k=%E2%9C%93")},
+		// raw bytes above 0x7f with no % in the path go as received, the
+		// path normalized; beside a % they are escaped (quoted_uri)
+		{name: "uri/raw-utf8-without-a-percent", request: parityGet(parityApiName, parityApiName, "/a//caf\xc3\xa9/./x?k=%E2%9C%93")},
+		{name: "uri/raw-utf8-beside-a-percent", request: parityGet(parityApiName, parityApiName, "/caf\xc3\xa9/%20x")},
+		{name: "uri/raw-utf8-on-an-lb-route", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api/caf\xc3\xa9")},
+		{name: "uri/raw-utf8-in-process", request: parityGet(parityConnectName, parityConnectName, "/caf\xc3\xa9/x")},
 		{name: "uri/lb-route-normalized", request: parityGet(parityLbName, parityLbName, parityLbPrefix+"/by/service/api//x/../y%2Fz?q")},
 		{name: "uri/relay-prefix", request: parityGet(parityRelayName, parityRelayName, parityRelayPrefix+"/a?b")},
 		{name: "uri/in-process", request: parityGet(parityConnectName, parityConnectName, "/a//b/../c?d")},

@@ -327,6 +327,69 @@ func TestRouteHttpUnmatchedPathAnswersByMethod(t *testing.T) {
 	}
 }
 
+// The path routing sends upstream is re-escaped only when the client's path
+// held a %, as nginx's quoted_uri decides, or a rewrite changed it, as the
+// nested streamable location under a prefix does (r->internal): a path of
+// raw bytes above 0x7f goes as it was received, normalized, to a forwarded
+// service, on an lb route and to connect in-process, whose request target
+// and escaped path agree.
+func TestRouteHttpEscapesTheUpstreamPathOnlyAsNginx(t *testing.T) {
+	routeTable := loadTestRouteTable(t)
+	mcp := testRouteService(t, routeTable, "mcp")
+	mcp.Streamable = false
+	mcp.RoutePrefixes = []string{"/svc-hidden"}
+	mcp.StreamablePaths = []string{"/stream/.*"}
+	testFront := newTestFront(t, routeTable, testFrontSettings())
+	handler := testFront.front.HttpsHandler("eth1")
+
+	for _, c := range []struct {
+		host         string
+		target       string
+		service      string
+		upstreamPath string
+	}{
+		{host: "api.service.example", target: "/caf\xc3\xa9/x?q=%20", service: "api", upstreamPath: "/caf\xc3\xa9/x?q=%20"},
+		{host: "api.service.example", target: "/a//caf\xc3\xa9/./x", service: "api", upstreamPath: "/a/caf\xc3\xa9/x"},
+		{host: "api.service.example", target: "/caf%C3%A9/x", service: "api", upstreamPath: "/caf%C3%A9/x"},
+		{host: "api.service.example", target: "/caf\xc3\xa9/%20", service: "api", upstreamPath: "/caf%C3%A9/%20"},
+		{host: "test-lb.service.example", target: "/hidden-example/by/service/api/caf\xc3\xa9", service: "api", upstreamPath: "/caf\xc3\xa9"},
+		{host: "mcp.service.example", target: "/svc-hidden/other/caf\xc3\xa9", service: "mcp", upstreamPath: "/other/caf\xc3\xa9"},
+		{host: "mcp.service.example", target: "/svc-hidden/stream/caf\xc3\xa9", service: "mcp", upstreamPath: "/stream/caf%C3%A9"},
+	} {
+		response := serveTestRequest(handler, newTestRequest("GET", c.host, c.target, true))
+		if response.Code != http.StatusOK {
+			t.Errorf("%s %q = %d", c.host, c.target, response.Code)
+			continue
+		}
+		forwards := testFront.forwarders[c.service].recordedForwards()
+		if forward := forwards[len(forwards)-1]; forward.options.upstreamPath != c.upstreamPath {
+			t.Errorf("%s %q went upstream as %q, want %q", c.host, c.target, forward.options.upstreamPath, c.upstreamPath)
+		}
+	}
+
+	for _, c := range []struct {
+		target      string
+		requestUri  string
+		path        string
+		escapedPath string
+	}{
+		{target: "/caf\xc3\xa9/x?q", requestUri: "/caf\xc3\xa9/x?q", path: "/caf\xc3\xa9/x", escapedPath: "/caf%C3%A9/x"},
+		{target: "/caf%C3%A9/x", requestUri: "/caf%C3%A9/x", path: "/caf\xc3\xa9/x", escapedPath: "/caf%C3%A9/x"},
+		{target: "/a%20b", requestUri: "/a%20b", path: "/a b", escapedPath: "/a%20b"},
+	} {
+		var escapedPath string
+		testFront.connectHandler.serve = func(w http.ResponseWriter, r *http.Request) {
+			escapedPath = r.URL.EscapedPath()
+		}
+		serveTestRequest(handler, newTestRequest("GET", "connect.service.example", c.target, true))
+		requests := testFront.connectHandler.recordedRequests()
+		request := requests[len(requests)-1]
+		if request.requestUri != c.requestUri || request.path != c.path || escapedPath != c.escapedPath {
+			t.Errorf("in-process %q: RequestURI %q, path %q, escaped %q; want %q, %q, %q", c.target, request.requestUri, request.path, escapedPath, c.requestUri, c.path, c.escapedPath)
+		}
+	}
+}
+
 // A service that isn't exposed has no server (LBALT-IMPL.md §7): through the
 // production matcher, its names and its redirect alias reach the default
 // server, the first lb name's, on TCP 443 and the default deny on TCP 80,

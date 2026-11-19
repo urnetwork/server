@@ -77,6 +77,68 @@ func TestParseRouteUriAsNginx(t *testing.T) {
 	}
 }
 
+// A % in the path, before any ? or #, is nginx's quoted_uri, whatever comes
+// before it: its parsers set it at the path's first %, in the request line's
+// states or in ngx_http_parse_complex_uri's sw_quoted. Raw bytes above 0x7f
+// are ordinary characters to them, and a % in the query or a fragment is no
+// part of the path.
+func TestParseRouteUriRecordsAPercentInThePath(t *testing.T) {
+	cases := []struct {
+		requestTarget string
+		quoted        bool
+	}{
+		{requestTarget: "/caf\xc3\xa9/x", quoted: false},
+		{requestTarget: "/a//caf\xc3\xa9/./x", quoted: false},
+		{requestTarget: "/a+b.c", quoted: false},
+		{requestTarget: "/a?x=%20", quoted: false},
+		{requestTarget: "/a#%20", quoted: false},
+		{requestTarget: "/caf%C3%A9/x", quoted: true},
+		{requestTarget: "/%73tatus", quoted: true},
+		{requestTarget: "/a.b%20c", quoted: true},
+		{requestTarget: "/a//b%20c", quoted: true},
+		{requestTarget: "/a/./%2e%2e/b", quoted: true},
+		{requestTarget: "/a%3Fb?c", quoted: true},
+	}
+	for _, c := range cases {
+		uri, ok := parseRouteUri(c.requestTarget)
+		if !ok {
+			t.Errorf("parseRouteUri(%q) refused a valid target", c.requestTarget)
+			continue
+		}
+		if uri.quoted != c.quoted {
+			t.Errorf("parseRouteUri(%q) quoted = %t, want %t", c.requestTarget, uri.quoted, c.quoted)
+		}
+	}
+}
+
+// nginx re-escapes the path it sends upstream only when the client's path
+// held a %, or a rewrite changed it, and otherwise sends the normalized path
+// as it is (ngx_http_proxy_create_request).
+func TestRouteUriUpstreamTargetEscapesAsNginx(t *testing.T) {
+	cases := []struct {
+		requestTarget string
+		rewritten     bool
+		target        string
+	}{
+		{requestTarget: "/caf\xc3\xa9/x?q=%20", target: "/caf\xc3\xa9/x?q=%20"},
+		{requestTarget: "/a//caf\xc3\xa9/./x", target: "/a/caf\xc3\xa9/x"},
+		{requestTarget: "/caf\xc3\xa9/x", rewritten: true, target: "/caf%C3%A9/x"},
+		{requestTarget: "/caf%C3%A9/x", target: "/caf%C3%A9/x"},
+		{requestTarget: "/caf\xc3\xa9/%20", target: "/caf%C3%A9/%20"},
+		{requestTarget: "/a%2fb", target: "/a/b"},
+	}
+	for _, c := range cases {
+		uri, ok := parseRouteUri(c.requestTarget)
+		if !ok {
+			t.Errorf("parseRouteUri(%q) refused a valid target", c.requestTarget)
+			continue
+		}
+		if target := uri.upstreamTarget(uri.path, c.rewritten); target != c.target {
+			t.Errorf("%q, rewritten %t: upstreamTarget = %q, want %q", c.requestTarget, c.rewritten, target, c.target)
+		}
+	}
+}
+
 // nginx's NGX_ESCAPE_URI escapes control bytes, space, #, %, ?, DEL and
 // bytes over 0x7f in uppercase hex, and nothing else, so a decoded path goes
 // upstream as nginx sends it.
@@ -102,11 +164,11 @@ func TestEscapeRouteUriPathAsNginx(t *testing.T) {
 	if !ok {
 		t.Fatal("parseRouteUri refused a valid target")
 	}
-	if target := uri.upstreamTarget(uri.path); target != "/a%20b?q=%20" {
+	if target := uri.upstreamTarget(uri.path, false); target != "/a%20b?q=%20" {
 		t.Errorf("upstreamTarget = %q, want the path escaped and the args raw", target)
 	}
 	uri, _ = parseRouteUri("/a?")
-	if target := uri.upstreamTarget(uri.path); target != "/a" {
+	if target := uri.upstreamTarget(uri.path, false); target != "/a" {
 		t.Errorf("upstreamTarget = %q, want no ? for empty args", target)
 	}
 }

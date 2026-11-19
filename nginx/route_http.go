@@ -136,9 +136,10 @@ func (self *routeHttpLocation) upstream(request *routeRequest) (string, bool) {
 			// nginx sends the client's own target
 			return request.requestUri, true
 		}
-		return request.uri.upstreamTarget(rest), true
+		// its rewrite takes the prefix off, which escapes the rest
+		return request.uri.upstreamTarget(rest, true), true
 	}
-	return request.uri.upstreamTarget(rest), self.streamed
+	return request.uri.upstreamTarget(rest, false), self.streamed
 }
 
 // The decoded path of what upstream gets, for the in-process handler.
@@ -758,7 +759,9 @@ func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *htt
 		Path:     path,
 		RawQuery: request.uri.args,
 	}
-	if escapedPath := escapeRouteUriPath(path); escapedPath != path {
+	// the path as the request target carries it, escaped as nginx would
+	// send it, so EscapedPath agrees with RequestURI
+	if escapedPath, _, _ := strings.Cut(upstreamTarget, "?"); escapedPath != path {
 		upstreamUrl.RawPath = escapedPath
 	}
 	r.URL = upstreamUrl

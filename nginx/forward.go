@@ -73,8 +73,9 @@ type forwardOptions struct {
 	// whatever its weight. Empty means any eligible block of the service.
 	blockName string
 	// the path and query to send upstream, exactly: routing sets it to
-	// nginx's normalized URI, with a matched prefix replaced, re-escaped, and
-	// `?args`. Empty sends the request's escaped path and raw query.
+	// nginx's normalized URI, with a matched prefix replaced, re-escaped when
+	// the client's path held a % (routeUri.upstreamPath), and `?args`. Empty
+	// sends the request's escaped path and raw query.
 	upstreamPath string
 	// the body streams through unbuffered, with X-UR-Request-Buffering: off,
 	// and is no longer eligible for a retry once forwarding begins, unless
