@@ -22,8 +22,9 @@ import (
 // head nginx would answer with a 414 or 400 instead of Go answering 431. It
 // sets no WriteTimeout, which would cut a stream SendTimeout lets live.
 // KeepaliveRequests and KeepaliveTime, which Go's server lacks, are applied
-// per connection, from state ConfigureServer attaches. nginx's lingering
-// close has no counterpart.
+// per connection, from state ConfigureServer attaches. Of nginx's lingering
+// close, LingeringTimeout bounds the reads Go's server makes of an unread
+// body before an early refusal (the forwarder's refuse).
 type HttpSettings struct {
 	// how long a new connection has for its TLS handshake, request line and
 	// headers, and a keepalive connection for a request's headers once they
