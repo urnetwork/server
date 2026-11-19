@@ -27,6 +27,7 @@ type countingReader struct {
 	reads     int
 }
 
+// Reads from the reader, counting the call and its bytes.
 func (self *countingReader) Read(p []byte) (int, error) {
 	self.reads += 1
 	n, err := self.reader.Read(p)
@@ -71,6 +72,7 @@ type spySpillFile struct {
 
 var errInjectedQuota = errors.New("injected quota exceeded")
 
+// Writes through to the file, or as much as the quota allows and then fails.
 func (self *spySpillFile) Write(p []byte) (int, error) {
 	if 0 < self.files.quotaBytes && self.files.quotaBytes < self.writtenBytes+int64(len(p)) {
 		n, _ := self.File.Write(p[:self.files.quotaBytes-self.writtenBytes])
@@ -82,6 +84,7 @@ func (self *spySpillFile) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// Creates and unlinks a spill file in the test directory, and records it.
 func (self *spySpillFiles) create() (bodySpillFile, error) {
 	file, err := os.CreateTemp(self.dir, "spy-body-*")
 	if err != nil {
@@ -107,6 +110,7 @@ func (self *spySpillFiles) checkClosed() {
 	}
 }
 
+// The spill files created so far.
 func (self *spySpillFiles) count() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -241,6 +245,7 @@ type gatedReader struct {
 
 var errGatedReaderClosed = errors.New("client connection closed")
 
+// Hands out the rest of the current chunk, or waits for the next one.
 func (self *gatedReader) Read(p []byte) (int, error) {
 	if len(self.remainder) == 0 {
 		self.waiting <- struct{}{}
@@ -478,6 +483,7 @@ type errorReader struct {
 	cancel context.CancelFunc
 }
 
+// Fails at once, canceling first when it has a cancel.
 func (self errorReader) Read(p []byte) (int, error) {
 	if self.cancel != nil {
 		self.cancel()

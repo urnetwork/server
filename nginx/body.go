@@ -353,45 +353,77 @@ type storedBody struct {
 }
 
 // Appends a chunk read from the client: the memory prefix first, then the
-// spill file, under the body limit and the spill caps.
+// spill file, under the body limit and the spill caps. Only the read that
+// stores the body calls it. The file is created and written outside the
+// lock; a release that comes in between closes the file, so the write fails,
+// and every reservation is recorded under the lock first, so the release
+// returns it.
 func (self *storedBody) append(chunk []byte) *bodyRefusal {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.released {
-		return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalClosed}
+	closedRefusal := &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalClosed}
+	file, spillChunk, refusal := func() (bodySpillFile, []byte, *bodyRefusal) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.released {
+			return nil, nil, closedRefusal
+		}
+		maxBodyBytes := self.store.settings.MaxBodyBytes
+		if 0 < maxBodyBytes && maxBodyBytes-self.lengthWithLock() < int64(len(chunk)) {
+			return nil, nil, &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge}
+		}
+		if room := self.memoryReservedBytes - int64(len(self.prefix)); 0 < room {
+			m := min(room, int64(len(chunk)))
+			self.prefix = appendWithin(self.prefix, chunk[:m], self.memoryReservedBytes)
+			chunk = chunk[m:]
+		}
+		return self.file, chunk, nil
+	}()
+	if refusal != nil || len(spillChunk) == 0 {
+		return refusal
 	}
-	maxBodyBytes := self.store.settings.MaxBodyBytes
-	if 0 < maxBodyBytes && maxBodyBytes-self.lengthWithLock() < int64(len(chunk)) {
-		return &bodyRefusal{status: http.StatusRequestEntityTooLarge, reason: bodyRefusalTooLarge}
+	// records a reservation the store granted, unless the body was released
+	recordReservation := func(record func()) bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.released {
+			return false
+		}
+		record()
+		return true
 	}
 
-	if room := self.memoryReservedBytes - int64(len(self.prefix)); 0 < room {
-		m := min(room, int64(len(chunk)))
-		self.prefix = appendWithin(self.prefix, chunk[:m], self.memoryReservedBytes)
-		chunk = chunk[m:]
-	}
-	if len(chunk) == 0 {
-		return nil
-	}
-
-	if self.file == nil {
+	if file == nil {
 		if refusal := self.store.reserveSpillFile(); refusal != nil {
 			return refusal
 		}
-		self.spillFileReserved = true
-		file, err := self.store.createSpillFile()
+		if !recordReservation(func() { self.spillFileReserved = true }) {
+			self.store.unreserve(self, 0, 0, 1)
+			return closedRefusal
+		}
+		createdFile, err := self.store.createSpillFile()
 		if err != nil {
 			return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalSpillError}
 		}
-		self.file = file
+		if !recordReservation(func() { self.file = createdFile }) {
+			createdFile.Close()
+			return closedRefusal
+		}
+		file = createdFile
 	}
-	if refusal := self.store.reserveSpillBytes(int64(len(chunk))); refusal != nil {
+	spillBytes := int64(len(spillChunk))
+	if refusal := self.store.reserveSpillBytes(spillBytes); refusal != nil {
 		return refusal
 	}
-	self.spillReservedBytes += int64(len(chunk))
-	n, err := self.file.Write(chunk)
-	self.fileSize += int64(n)
-	if err != nil || n < len(chunk) {
+	if !recordReservation(func() { self.spillReservedBytes += spillBytes }) {
+		self.store.unreserve(self, 0, spillBytes, 0)
+		return closedRefusal
+	}
+	n, err := file.Write(spillChunk)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.fileSize += int64(n)
+	}()
+	if err != nil || n < len(spillChunk) {
 		return &bodyRefusal{status: http.StatusServiceUnavailable, reason: bodyRefusalSpillError}
 	}
 	return nil
@@ -408,6 +440,7 @@ func appendWithin(prefix []byte, chunk []byte, limit int64) []byte {
 	return append(grown, chunk...)
 }
 
+// The bytes stored so far, memory and file.
 func (self *storedBody) lengthWithLock() int64 {
 	return int64(len(self.prefix)) + self.fileSize
 }
@@ -469,6 +502,9 @@ type storedBodyReader struct {
 	offset     int64
 }
 
+// Reads on from the reader's offset, the memory prefix first, then the
+// file at that offset. A released body fails with errBodyReleased, and a file
+// shorter than what was written with io.ErrUnexpectedEOF.
 func (self *storedBodyReader) Read(p []byte) (int, error) {
 	prefix, file, fileSize, released := func() ([]byte, bodySpillFile, int64, bool) {
 		self.storedBody.stateLock.Lock()

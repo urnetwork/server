@@ -54,6 +54,8 @@ type recordingUpstream struct {
 	requests  []*recordedRequest
 }
 
+// A recording upstream on a new loopback listener, closed when the test
+// ends.
 func newRecordingUpstream(t *testing.T, name string, handler func(w http.ResponseWriter, r *http.Request, recorded *recordedRequest)) *recordingUpstream {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,6 +81,7 @@ func newRecordingUpstreamOn(t *testing.T, name string, listener net.Listener, ha
 	return upstream
 }
 
+// Records the request, its whole body included, then answers it.
 func (self *recordingUpstream) serveHttp(w http.ResponseWriter, r *http.Request) {
 	body, bodyErr := io.ReadAll(r.Body)
 	recorded := &recordedRequest{
@@ -225,6 +228,7 @@ type testFront struct {
 	served  chan any
 }
 
+// A front over a group, closed when the test ends.
 func newTestFront(t *testing.T, group *upstreamGroup, options func(r *http.Request) forwardOptions) *testFront {
 	front := &testFront{
 		group:   group,
@@ -318,6 +322,8 @@ type rawUpstream struct {
 	conns    chan net.Conn
 }
 
+// A raw upstream on a new loopback listener; it and every connection it
+// accepted close when the test ends.
 func newRawUpstream(t *testing.T) *rawUpstream {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

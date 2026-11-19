@@ -108,7 +108,7 @@ func (self *upstreamGroup) tunnel(w http.ResponseWriter, responseController *htt
 	}
 	extendIdle()
 
-	if sendTimeout > 0 {
+	if 0 < sendTimeout {
 		clientConn.SetWriteDeadline(time.Now().Add(sendTimeout))
 	}
 	clientReadWriter.Writer.Write(forwardSwitchingProtocolsHead(w.Header(), exchange.response))

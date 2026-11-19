@@ -272,6 +272,7 @@ type faultConn struct {
 
 var errInjectedWrite = errors.New("injected write failure")
 
+// Fails with nothing written once failWrites is set.
 func (self *faultConn) Write(p []byte) (int, error) {
 	if self.failWrites.Load() {
 		return 0, errInjectedWrite
@@ -386,8 +387,13 @@ func TestRetryFinalFailureMapping(t *testing.T) {
 // A dial error that reports a timeout, as net.Dialer's does.
 type dialTimeoutError struct{}
 
-func (dialTimeoutError) Error() string   { return "i/o timeout" }
-func (dialTimeoutError) Timeout() bool   { return true }
+// The text net.Dialer's timeout carries.
+func (dialTimeoutError) Error() string { return "i/o timeout" }
+
+// Always a timeout.
+func (dialTimeoutError) Timeout() bool { return true }
+
+// Always temporary, as a timeout is.
 func (dialTimeoutError) Temporary() bool { return true }
 
 // A timeout moves the request to another block; when that retry finds no

@@ -101,6 +101,7 @@ type upstreamConnection struct {
 	closeOnce    sync.Once
 }
 
+// An empty, open pool for one block of a group.
 func newUpstreamPool(group *upstreamGroup, block *upstreamBlock) *upstreamPool {
 	return &upstreamPool{
 		group:       group,
@@ -466,9 +467,9 @@ type upstreamExchange struct {
 
 	// gates a streamed body: once stopped, the write may not begin reading
 	// it, and a body already begun is interrupted
-	bodyStateLock sync.Mutex
-	bodyBegan     bool
-	bodyStopped   bool
+	stateLock   sync.Mutex
+	bodyBegan   bool
+	bodyStopped bool
 }
 
 // Writes the request and reads the response head. On a failure the
@@ -618,24 +619,32 @@ func (self *upstreamExchange) writeRequest() error {
 // Lets the write begin reading a streamed body, unless the exchange already
 // stopped it; a body begun can no longer be retried.
 func (self *upstreamExchange) beginBody() bool {
-	self.bodyStateLock.Lock()
-	defer self.bodyStateLock.Unlock()
-	if self.bodyStopped {
-		return false
+	began := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.bodyStopped {
+			return false
+		}
+		self.bodyBegan = true
+		return true
+	}()
+	if began {
+		self.request.streamedBody.begin()
 	}
-	self.bodyBegan = true
-	self.request.streamedBody.begin()
-	return true
+	return began
 }
 
 // Stops a streamed body for this exchange: the write may no longer begin
 // it, and one it began is interrupted. A body never begun stays usable for a
 // retry.
 func (self *upstreamExchange) stopBody() {
-	self.bodyStateLock.Lock()
-	defer self.bodyStateLock.Unlock()
-	self.bodyStopped = true
-	if self.bodyBegan {
+	began := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.bodyStopped = true
+		return self.bodyBegan
+	}()
+	if began {
 		self.request.streamedBody.interrupt()
 	}
 }

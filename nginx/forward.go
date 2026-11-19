@@ -327,7 +327,7 @@ func forwardTarget(r *http.Request, options *forwardOptions) string {
 	if target == "" {
 		return "/"
 	}
-	if !strings.ContainsFunc(target, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+	if !strings.ContainsFunc(target, func(c rune) bool { return c <= ' ' || c == 0x7f }) {
 		return target
 	}
 	const upperHex = "0123456789ABCDEF"

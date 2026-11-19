@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"reflect"
@@ -578,4 +579,68 @@ func TestForwardResponseContentLength(t *testing.T) {
 			t.Errorf("status %d length %d: Content-Length %q, want %q", c.status, c.contentLength, got, c.want)
 		}
 	}
+}
+
+// Through an h2 front: a buffered body and a streamed body of unknown
+// length are forwarded as HTTP/1.1, with the Host the stream's authority
+// gives, and a response relayed back, so the per-stream deadlines and
+// flushes work on h2 as on h1.
+func TestForwardHttp2Client(t *testing.T) {
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, bodyStore := newTestGroup(t, testRouteService("h2", []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), testFrontSettings())
+	protos := make(chan string, 4)
+	front := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protos <- r.Proto
+		options := testForwardOptions(r)
+		options.streamed = r.URL.Path == "/streamed"
+		group.serveHttp(w, r, options)
+	}))
+	front.EnableHTTP2 = true
+	front.StartTLS()
+	defer front.Close()
+	client := front.Client()
+
+	request, _ := http.NewRequest(http.MethodPost, front.URL+"/buffered", bytes.NewReader(testBodyBytes(70*1024)))
+	request.Host = "H2.Service.Example"
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatalf("buffered request: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "g1" || <-protos != "HTTP/2.0" {
+		t.Fatalf("buffered response %d %q", response.StatusCode, body)
+	}
+
+	bodyReader, bodyWriter := io.Pipe()
+	go func() {
+		bodyWriter.Write([]byte("streamed "))
+		bodyWriter.Write([]byte("body"))
+		bodyWriter.Close()
+	}()
+	request, _ = http.NewRequest(http.MethodPost, front.URL+"/streamed", bodyReader)
+	request.Host = "h2.service.example"
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatalf("streamed request: %v", err)
+	}
+	io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || <-protos != "HTTP/2.0" {
+		t.Fatalf("streamed response %d", response.StatusCode)
+	}
+
+	recorded := upstream.recorded()
+	if len(recorded) != 2 {
+		t.Fatalf("upstream saw %d requests, want 2", len(recorded))
+	}
+	if recorded[0].proto != "HTTP/1.1" || recorded[0].host != "h2.service.example" || !bytes.Equal(recorded[0].body, testBodyBytes(70*1024)) || recorded[0].contentLength != 70*1024 {
+		t.Errorf("buffered upstream request %s %s %d bytes", recorded[0].proto, recorded[0].host, len(recorded[0].body))
+	}
+	if !reflect.DeepEqual(recorded[1].transferEncoding, []string{"chunked"}) || string(recorded[1].body) != "streamed body" {
+		t.Errorf("streamed upstream request %v %q", recorded[1].transferEncoding, recorded[1].body)
+	}
+	checkStoreEmpty(t, bodyStore)
 }

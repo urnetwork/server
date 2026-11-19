@@ -98,6 +98,7 @@ var bodySpillFilesGauge = prometheus.NewGauge(
 	},
 )
 
+// Registers the metrics with the default registry once per process.
 func init() {
 	prometheus.MustRegister(
 		upstreamAttemptsCounter,

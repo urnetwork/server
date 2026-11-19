@@ -28,12 +28,16 @@ type forwardStreamedBody struct {
 	setReadDeadline func(time.Time) error
 	readBytes       int64
 	beganForwarding atomic.Bool
+	// set by interrupt before its past deadline, and checked by a read after
+	// its own deadline, so neither deadline can hide the other
+	interrupted atomic.Bool
 
-	stateLock   sync.Mutex
-	refusal     *bodyRefusal
-	interrupted bool
+	stateLock sync.Mutex
+	refusal   *bodyRefusal
 }
 
+// A streamed body over the client's, read under its timeout through
+// setReadDeadline, and under maxBytes when its length is unknown.
 func newForwardStreamedBody(ctx context.Context, body io.Reader, maxBytes int64, readTimeout time.Duration, setReadDeadline func(time.Time) error) *forwardStreamedBody {
 	return &forwardStreamedBody{
 		ctx:             ctx,
@@ -59,18 +63,17 @@ func (self *forwardStreamedBody) began() bool {
 // client's side is kept as the request's refusal; one caused by interrupt
 // isn't.
 func (self *forwardStreamedBody) Read(p []byte) (int, error) {
-	interrupted := func() bool {
-		// set the deadline under the lock, so interrupt's past deadline is
-		// never overwritten by a later read's
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if !self.interrupted && 0 < self.readTimeout && self.setReadDeadline != nil {
-			self.setReadDeadline(time.Now().Add(self.readTimeout))
-		}
-		return self.interrupted
-	}()
-	if interrupted {
+	if self.interrupted.Load() {
 		return 0, errBodyInterrupted
+	}
+	if 0 < self.readTimeout && self.setReadDeadline != nil {
+		self.setReadDeadline(time.Now().Add(self.readTimeout))
+		// an interrupt whose past deadline this one may have replaced has
+		// set its flag already: restore its deadline and stop
+		if self.interrupted.Load() {
+			self.setReadDeadline(time.Unix(1, 0))
+			return 0, errBodyInterrupted
+		}
 	}
 	n, err := self.body.Read(p)
 	self.readBytes += int64(n)
@@ -93,12 +96,14 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 
 // Keeps the first client-side failure, unless the read was interrupted.
 func (self *forwardStreamedBody) fail(refusal *bodyRefusal) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.interrupted || self.refusal != nil {
+	if self.interrupted.Load() {
 		return
 	}
-	self.refusal = refusal
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.refusal == nil {
+		self.refusal = refusal
+	}
 }
 
 // Whether the body failed on the client's side.
@@ -119,12 +124,9 @@ func (self *forwardStreamedBody) failure() *bodyRefusal {
 // read deadlines a pending read ends only with the client's next bytes or
 // its connection.
 func (self *forwardStreamedBody) interrupt() {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.interrupted {
+	if self.interrupted.Swap(true) {
 		return
 	}
-	self.interrupted = true
 	if self.setReadDeadline != nil {
 		self.setReadDeadline(time.Unix(1, 0))
 	}

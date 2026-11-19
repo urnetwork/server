@@ -163,6 +163,8 @@ type referenceWalk struct {
 	tries int
 }
 
+// The peer for the walk's next attempt, as get_chash_peer picks it, and
+// whether it fell back to round robin; -1 for none.
 func referenceChashPeer(points []referenceRingPoint, peers []*referencePeer, walk *referenceWalk, tried []bool) (peer int, fellBack bool) {
 	if walk.tries > 20 || len(peers) == 1 {
 		return referenceRoundRobin(peers, tried), true

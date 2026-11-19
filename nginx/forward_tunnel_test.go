@@ -27,6 +27,7 @@ type tunnelFixture struct {
 	serviceName   string
 }
 
+// A tunnel fixture for one run of a test, its service named after serviceName.
 func newTunnelFixture(t *testing.T, serviceName string, settings *FrontSettings) *tunnelFixture {
 	fixture := &tunnelFixture{
 		raw:         newRawUpstream(t),
@@ -95,6 +96,7 @@ func readEnd(t *testing.T, reader io.Reader) {
 	}
 }
 
+// Whether a read error is the end of a connection the other side closed.
 func isClosedError(err error) bool {
 	return err == io.EOF || strings.Contains(err.Error(), "reset") || strings.Contains(err.Error(), "closed")
 }
