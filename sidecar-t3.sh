@@ -119,13 +119,14 @@ layout_up() {
   curl -sf -o /dev/null --max-time 5 "$layout_health"
 }
 
-# §22.7's scenarios on T3 (TEST-M2-11), and CC3's self-test under the leak leg's tag (TEST-M2-09).
+# §22.7's scenarios on T3 (TEST-M2-11), and CC3's self-test (TEST-M2-09) and CC4's M5 classes' (TEST-M5-01) under the
+# leak leg's tag.
 scenarios() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestScenario'
   # §14's S6, FS-123 and privacy row on the smtpedge block over the private stack (SMTP-M9-31; cli/smtpedge's
   # s6_test.go), sidecartest's rows T2 runs on the stub edge
   go_t3 ./cli/smtpedge -tags "$tags" -run '^TestT3'
-  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_leaktest" -run '^TestT3EveryStoreClassCatchesItsLeak$'
+  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_leaktest" -run '^(TestT3EveryStoreClassCatchesItsLeak|TestT3EveryEdgeClassCatchesItsLeak)$'
 }
 
 # FS-86's card commits on T3's 4-host layouts (RECORD-M10-07; sidecar_directory_load_layout_t3_test.go): 16 devices'
