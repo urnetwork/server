@@ -733,3 +733,51 @@ func TestLbAltStatusNativeAdapterRefusesAnAttemptWithNoPositiveBound(t *testing.
 		}
 	}
 }
+
+// A native attempt runs within the runner's command timeout and under the
+// settings' own bound, so the shorter applies. A raised attempt timeout
+// reaches the attempt up to the command timeout, and in full when no positive
+// command timeout caps it; a lowered one and the default hold under the
+// monitor's default command timeout. The dial runs under the request's
+// context, so the deadline it records is the attempt's, on the lb route and
+// on a block route.
+func TestLbAltStatusNativeAttemptIsBoundedWithinTheCommandTimeout(t *testing.T) {
+	defaultCommandTimeout := (SignalSettings{}).withDefaults().CommandTimeout
+	raised := DefaultLbAltStatusProbeSettings()
+	raised.AttemptTimeout = time.Hour
+	lowered := DefaultLbAltStatusProbeSettings()
+	lowered.AttemptTimeout = time.Second
+	cases := []struct {
+		name           string
+		settings       *LbAltStatusProbeSettings
+		commandTimeout time.Duration
+		// how long after its start the attempt's deadline falls
+		bound time.Duration
+	}{
+		{name: "a raised timeout under a shorter command timeout", settings: raised, commandTimeout: time.Minute, bound: time.Minute},
+		{name: "a raised timeout within a longer command timeout", settings: raised, commandTimeout: 2 * time.Hour, bound: time.Hour},
+		{name: "a raised timeout and no command timeout", settings: raised, commandTimeout: 0, bound: time.Hour},
+		{name: "a raised timeout and a negative command timeout", settings: raised, commandTimeout: -time.Second, bound: time.Hour},
+		{name: "a lowered timeout", settings: lowered, commandTimeout: defaultCommandTimeout, bound: time.Second},
+		{name: "the default under the default command timeout", settings: DefaultLbAltStatusProbeSettings(), commandTimeout: defaultCommandTimeout, bound: 5 * time.Second},
+		{name: "the default and no command timeout", settings: DefaultLbAltStatusProbeSettings(), commandTimeout: 0, bound: 5 * time.Second},
+	}
+	for _, c := range cases {
+		for _, request := range []LbAltStatusRequest{
+			lbAltStatusTestRequest(t, "ipv4", lbAltStatusRouteLb, ""),
+			lbAltStatusTestRequest(t, "ipv6", lbAltStatusRouteBlock, "g1"),
+		} {
+			dialer := &lbAltStatusTestDialer{t: t, request: request, dialErr: errors.New("synthetic-private-dial-error")}
+			started := time.Now()
+			observed, err := observeLbAltStatusWithin(context.Background(), c.commandTimeout, request, c.settings, dialer.dial, nil)
+			finished := time.Now()
+			if err == nil || dialer.dialCount() != 1 || observed.Failure != LbAltStatusFailureConnect || !observed.Dialed {
+				t.Fatalf("%s, %s route: the attempt did not reach its dial: %+v err=%v", c.name, request.Route, observed, err)
+			}
+			deadline, bounded := dialer.dialDeadline()
+			if !bounded || deadline.Before(started.Add(c.bound)) || deadline.After(finished.Add(c.bound)) {
+				t.Errorf("%s, %s route: the dial ran under a deadline %s after the start (bounded=%t), want %s", c.name, request.Route, deadline.Sub(started), bounded, c.bound)
+			}
+		}
+	}
+}

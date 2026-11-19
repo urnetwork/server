@@ -3,9 +3,10 @@
 // family, then plain HTTP/1.1 on 80 or HTTP/1.1 over verified TLS on 443. The
 // lb name is the Host and, on 443, the SNI, and is never resolved. No proxy,
 // no keepalive, no compression and no redirect followed. Every bound comes
-// from the pass's LbAltStatusProbeSettings: the attempt deadline, and the
-// response header and body. Errors are fixed text, since net/http's carry the
-// request URL and with it the hidden prefix.
+// from the pass's LbAltStatusProbeSettings: the attempt deadline, which the
+// runner's command timeout also caps on a native attempt, and the response
+// header and body. Errors are fixed text, since net/http's carry the request
+// URL and with it the hidden prefix.
 package monitor
 
 import (
@@ -24,21 +25,38 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // warpctl's status error rule (docker.go IsError)
 var lbAltStatusErrorPattern = regexp.MustCompile(`^(?i)error(\s|:)`)
 
-// The native adapter: one attempt on a fresh system dial, within the runner's
-// command timeout when one is set. The transport bounds the attempt by the
-// settings' own timeout, so the shorter of the two applies.
+// The native adapter: one attempt on a fresh system dial, verified against the
+// system roots, within the runner's command timeout. It only delegates, so its
+// bounds are observeLbAltStatusWithin's.
 func (self *runner) lbAltStatus(ctx context.Context, request LbAltStatusRequest, settings *LbAltStatusProbeSettings) (LbAltStatusObservation, error) {
-	if 0 < self.cfg.commandTimeout {
+	return observeLbAltStatusWithin(ctx, self.cfg.commandTimeout, request, settings, (&net.Dialer{}).DialContext, nil)
+}
+
+// One attempt within a command timeout, when it is positive; a non-positive
+// one caps nothing. The transport bounds the attempt by the settings' own
+// timeout as well, so the shorter of the two applies: a tuned attempt timeout
+// reaches the attempt up to the command timeout. The dial and the roots are
+// the transport's seams.
+func observeLbAltStatusWithin(
+	ctx context.Context,
+	commandTimeout time.Duration,
+	request LbAltStatusRequest,
+	settings *LbAltStatusProbeSettings,
+	dial func(context.Context, string, string) (net.Conn, error),
+	roots *x509.CertPool,
+) (LbAltStatusObservation, error) {
+	if 0 < commandTimeout {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, self.cfg.commandTimeout)
+		ctx, cancel = context.WithTimeout(ctx, commandTimeout)
 		defer cancel()
 	}
-	return observeLbAltStatus(ctx, request, settings, (&net.Dialer{}).DialContext, nil)
+	return observeLbAltStatus(ctx, request, settings, dial, roots)
 }
 
 // Test seams supply the dialer and the trust roots, never a different
