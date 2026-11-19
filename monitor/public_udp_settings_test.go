@@ -27,7 +27,7 @@ func TestPublicUdpProbeSettingsDefaultsAreFreshInstances(t *testing.T) {
 	want := PublicUdpProbeSettings{
 		Cadence:                          5 * time.Minute,
 		AttemptTimeout:                   5 * time.Second,
-		MaxTargetCount:                   32,
+		MaxTargetCount:                   64,
 		WorkerCount:                      4,
 		MaxPacketCount:                   2048,
 		MaxByteCount:                     1024 * 1024,
@@ -88,7 +88,7 @@ func publicUdpTestMatrix(n int) PublicUdpSettings {
 func TestPublicUdpMatrixBoundFollowsItsSettings(t *testing.T) {
 	hosts := []*host{{name: "edge-synthetic"}}
 	raised := DefaultPublicUdpProbeSettings()
-	raised.MaxTargetCount = 64
+	raised.MaxTargetCount = 128
 	lowered := DefaultPublicUdpProbeSettings()
 	lowered.MaxTargetCount = 0
 	settingsWith := func(mutate func(*PublicUdpProbeSettings)) *PublicUdpProbeSettings {
@@ -102,9 +102,9 @@ func TestPublicUdpMatrixBoundFollowsItsSettings(t *testing.T) {
 		settings *PublicUdpProbeSettings
 		reason   string
 	}{
-		{name: "the default bound", rows: 32, settings: DefaultPublicUdpProbeSettings(), reason: ""},
-		{name: "past the default bound", rows: 33, settings: DefaultPublicUdpProbeSettings(), reason: "target-denominator"},
-		{name: "a raised bound", rows: 33, settings: raised, reason: ""},
+		{name: "the default bound", rows: 64, settings: DefaultPublicUdpProbeSettings(), reason: ""},
+		{name: "past the default bound", rows: 65, settings: DefaultPublicUdpProbeSettings(), reason: "target-denominator"},
+		{name: "a raised bound", rows: 65, settings: raised, reason: ""},
 		{name: "no bound", rows: 1, settings: lowered, reason: "target-denominator"},
 		{name: "no settings", rows: 1, settings: nil, reason: "probe-settings"},
 		{name: "no attempt timeout", rows: 1, settings: settingsWith(func(settings *PublicUdpProbeSettings) { settings.AttemptTimeout = 0 }), reason: "probe-settings"},

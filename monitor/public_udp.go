@@ -28,7 +28,9 @@ type PublicUdpProbeSettings struct {
 	// start, so the matrix and the transport refuse it before any socket.
 	AttemptTimeout time.Duration
 	// The largest declared target count. Each target expands into at most
-	// two family attempts. Non-positive refuses every matrix.
+	// two family attempts. 64 covers the lb_alt matrix, every carrier of
+	// both fronts on each of the ten lb interfaces, quic on 443 and dns on 53
+	// and 4053, which is 60 rows. Non-positive refuses every matrix.
 	MaxTargetCount int
 	// Attempts in flight at once. Non-positive runs one at a time.
 	WorkerCount int
@@ -59,7 +61,7 @@ func DefaultPublicUdpProbeSettings() *PublicUdpProbeSettings {
 	return &PublicUdpProbeSettings{
 		Cadence:                          5 * time.Minute,
 		AttemptTimeout:                   5 * time.Second,
-		MaxTargetCount:                   32,
+		MaxTargetCount:                   64,
 		WorkerCount:                      4,
 		MaxPacketCount:                   2048,
 		MaxByteCount:                     1024 * 1024,

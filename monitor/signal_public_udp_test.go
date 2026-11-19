@@ -796,12 +796,13 @@ func TestPublicUdpCatalogDescribesTheHello(t *testing.T) {
 		"| `public-udp-application` |", "`GET /hello`", "`probe-settings`", "`application-outcome-unverified`", "PublicUdpProbeSettings",
 		"its handshake was verified, so the row's `public-udp-path` and `public-udp-observation` resolve",
 		"clear hold for the row's `public-udp-application`", "QUIC receive windows of 16 KiB per stream and 32 KiB per connection",
+		"at most 64 logical rows",
 	} {
 		if !strings.Contains(section, required) {
 			t.Errorf("§16.9 does not say %q", required)
 		}
 	}
-	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)", "no class of the row resolves until"} {
+	for _, stale := range []string{"only Alt's API front offers", "No HTTP request", "(`connect` or Alt `api`)", "no class of the row resolves until", "at most 32 logical rows", "needs a raised"} {
 		if strings.Contains(section, stale) {
 			t.Errorf("§16.9 still says %q", stale)
 		}
