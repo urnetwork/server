@@ -1,0 +1,155 @@
+package nginx
+
+// Request validation (owner: s-http): what nginx checks while it reads a
+// request, before any server or location applies, and so before the limits
+// and without added headers:
+//
+//   - the request target is origin form or absolute form, and its uri
+//     parses (route_http_uri.go): else 400;
+//   - the request line fits HttpSettings.MaxRequestLineBytes, else 414; a
+//     header fits MaxRequestHeaderBytes and the whole head
+//     MaxRequestHeadersTotalBytes, else 400;
+//   - a header name outside [A-Za-z0-9-] is dropped, as nginx ignores it
+//     (ignore_invalid_headers on, underscores_in_headers off);
+//   - on h2 and h3, a Host header that differs from :authority is a 400, and
+//     neither is a 400;
+//   - the host is valid, as nginx's $host normalization decides
+//     (normalizeHost), else 400. An HTTP/1.1 request with no host is a 400;
+//     HTTP/1.0 may send none;
+//   - TRACE and CONNECT are 405.
+//
+// Go's servers refuse part of this first, with their own statuses: an h1
+// head over the server's MaxHeaderBytes (431), a missing or malformed Host on
+// h1 (400), an h2 or h3 head over its header list limit. So the server must
+// set MaxHeaderBytes above MaxRequestHeadersTotalBytes for the handler to
+// apply nginx's statuses, and two Host headers on h1 reach the handler as the
+// first, since Go drops the header from the map; nginx refuses them with a
+// 400 (LBALT-IMPL.md §4, reported).
+
+import (
+	"net/http"
+	"net/netip"
+)
+
+// One request as routing reads it, once validated.
+type routeRequest struct {
+	// nginx's $host: the normalized host, empty when the request named
+	// none, which only HTTP/1.0 may do
+	host string
+	// the name the host matched, valid when hostMatched
+	hostMatch   nameMatch
+	hostMatched bool
+	// the target's normalized path and its query
+	uri routeUri
+	// nginx's $request_uri: the raw target in origin form, for redirects
+	requestUri string
+	// the accepted peer, with an IPv4-mapped address unmapped
+	clientAddrPort netip.AddrPort
+}
+
+// Validates a request as nginx does before choosing a location, dropping
+// the header names nginx ignores and an h2 or h3 Host header that agrees
+// with :authority. A non-zero status is the answer when the request is
+// refused.
+func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSettings) (*routeRequest, int) {
+	peerAddrPort, err := netip.ParseAddrPort(r.RemoteAddr)
+	if err != nil {
+		// a server always sets the peer; one the front can't read is never
+		// served, so nothing acts for an address it doesn't know
+		return nil, http.StatusInternalServerError
+	}
+	clientAddrPort := netip.AddrPortFrom(peerAddrPort.Addr().Unmap().WithZone(""), peerAddrPort.Port())
+
+	requestLineBytes := len(r.Method) + len(" ") + len(r.RequestURI) + len(" ") + len(r.Proto) + len("\r\n")
+	if 0 < httpSettings.MaxRequestLineBytes && httpSettings.MaxRequestLineBytes < requestLineBytes {
+		return nil, http.StatusRequestURITooLong
+	}
+
+	request := &routeRequest{
+		clientAddrPort: clientAddrPort,
+	}
+	if r.Method != http.MethodConnect {
+		requestUri, ok := routeRequestUri(r.RequestURI)
+		if !ok {
+			return nil, http.StatusBadRequest
+		}
+		uri, ok := parseRouteUri(requestUri)
+		if !ok {
+			return nil, http.StatusBadRequest
+		}
+		request.requestUri = requestUri
+		request.uri = uri
+	}
+
+	headBytes := requestLineBytes + len("\r\n")
+	addHeaderLine := func(name string, value string) bool {
+		headerLineBytes := len(name) + len(": ") + len(value) + len("\r\n")
+		headBytes += headerLineBytes
+		return httpSettings.MaxRequestHeaderBytes <= 0 || headerLineBytes <= httpSettings.MaxRequestHeaderBytes
+	}
+	if r.ProtoMajor == 1 && r.Host != "" {
+		// Go's h1 server moves Host out of the header map
+		if !addHeaderLine("Host", r.Host) {
+			return nil, http.StatusBadRequest
+		}
+	}
+	for name, values := range r.Header {
+		for _, value := range values {
+			if !addHeaderLine(name, value) {
+				return nil, http.StatusBadRequest
+			}
+		}
+	}
+	if 0 < httpSettings.MaxRequestHeadersTotalBytes && httpSettings.MaxRequestHeadersTotalBytes < headBytes {
+		return nil, http.StatusBadRequest
+	}
+
+	for name := range r.Header {
+		if !validRouteHeaderName(name) {
+			delete(r.Header, name)
+		}
+	}
+
+	if 2 <= r.ProtoMajor {
+		// Go keeps a Host header on h2 and h3, and sets r.Host from it only
+		// when there is no :authority
+		for _, host := range r.Header.Values("Host") {
+			if host != r.Host {
+				return nil, http.StatusBadRequest
+			}
+		}
+		r.Header.Del("Host")
+	}
+
+	if r.Host != "" {
+		host, ok := names.normalizeHost(r.Host)
+		if !ok {
+			return nil, http.StatusBadRequest
+		}
+		request.host = host
+		request.hostMatch, request.hostMatched = names.match(host)
+	} else if r.ProtoAtLeast(1, 1) {
+		return nil, http.StatusBadRequest
+	}
+
+	switch r.Method {
+	case http.MethodTrace, http.MethodConnect:
+		return nil, http.StatusMethodNotAllowed
+	}
+	return request, 0
+}
+
+// Whether nginx keeps a request header of this name: only letters, digits
+// and '-' (ngx_http_parse_header_line with underscores_in_headers off).
+func validRouteHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i += 1 {
+		c := name[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}

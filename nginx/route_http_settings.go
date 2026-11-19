@@ -76,6 +76,12 @@ type HttpSettings struct {
 	// the gzip compression level: nginx's default `gzip_comp_level 1`.
 	// Non-positive disables gzip.
 	GzipLevel int
+	// one request in this many is written to the access log, at glog's V(1)
+	// only (D17): nginx logged every request at the default level, and the
+	// lines served only ad hoc counts, which a sample answers. Hosts in
+	// no_access_log and successes on no_success_access_log paths are never
+	// written. Non-positive writes none.
+	AccessLogSampleInterval int
 }
 
 // A new instance on every call, with nginx's values.
@@ -96,5 +102,6 @@ func DefaultHttpSettings() *HttpSettings {
 		ForcedCloseTimeout:          30 * time.Second,
 		GzipMinLength:               20,
 		GzipLevel:                   1,
+		AccessLogSampleInterval:     100,
 	}
 }
