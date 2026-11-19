@@ -143,8 +143,9 @@ type testLbAltEnv struct {
 	// every accepted QUIC connection's "<port kind> <result>"
 	quicResults chan string
 
-	// the upgraded websockets the websocket service's block holds
-	websocketUpstreamConns chan *websocket.Conn
+	// signaled each time the websocket service's block sees one of its
+	// upgraded websockets end
+	websocketUpstreamEnds chan struct{}
 }
 
 // Builds and starts connect's lb_alt front over a real exchange. Runs inside a
@@ -156,13 +157,13 @@ func newTestLbAltEnv(t testing.TB, envSettings *testLbAltEnvSettings) *testLbAlt
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	env := &testLbAltEnv{
-		t:                      t,
-		ctx:                    ctx,
-		cancel:                 cancel,
-		warpStatus:             &router.WarpStatusState{},
-		binds:                  newTestLbAltBinds(envSettings.failableUdp),
-		quicResults:            make(chan string, 256),
-		websocketUpstreamConns: make(chan *websocket.Conn, 16),
+		t:                     t,
+		ctx:                   ctx,
+		cancel:                cancel,
+		warpStatus:            &router.WarpStatusState{},
+		binds:                 newTestLbAltBinds(envSettings.failableUdp),
+		quicResults:           make(chan string, 256),
+		websocketUpstreamEnds: make(chan struct{}, 16),
 	}
 	t.Cleanup(cancel)
 
@@ -548,7 +549,7 @@ func newTestLbAltCertificateStore(t testing.TB, routeTable *nginx.RouteTable) (*
 }
 
 // The websocket service's block: it upgrades every request and echoes each
-// message, and hands the test each upgraded connection.
+// message, and signals websocketUpstreamEnds when an upgraded websocket ends.
 func (self *testLbAltEnv) websocketEchoHandler() http.Handler {
 	upgrader := &websocket.Upgrader{
 		CheckOrigin: func(*http.Request) bool { return true },
@@ -559,10 +560,12 @@ func (self *testLbAltEnv) websocketEchoHandler() http.Handler {
 			return
 		}
 		defer conn.Close()
-		select {
-		case self.websocketUpstreamConns <- conn:
-		default:
-		}
+		defer func() {
+			select {
+			case self.websocketUpstreamEnds <- struct{}{}:
+			default:
+			}
+		}()
 		for {
 			messageType, message, err := conn.ReadMessage()
 			if err != nil {
@@ -783,11 +786,9 @@ type testLbAltDial struct {
 
 // One connect client on one platform transport through the front.
 type testLbAltClient struct {
-	t           testing.TB
 	peer        *testLbAltPeer
 	carrier     testLbAltCarrier
 	client      *connect.Client
-	transport   *connect.PlatformTransport
 	h1Stats     *connect.H1ConnectionStats
 	received    chan *testLbAltMessage
 	closeOnce   sync.Once
@@ -885,13 +886,11 @@ func (self *testLbAltEnv) newClient(peer *testLbAltPeer, carrier testLbAltCarrie
 	)
 
 	lbAltClient := &testLbAltClient{
-		t:         self.t,
-		peer:      peer,
-		carrier:   carrier,
-		client:    client,
-		transport: transport,
-		h1Stats:   h1Stats,
-		received:  make(chan *testLbAltMessage, 4096),
+		peer:     peer,
+		carrier:  carrier,
+		client:   client,
+		h1Stats:  h1Stats,
+		received: make(chan *testLbAltMessage, 4096),
 	}
 	client.AddReceiveCallback(func(source connect.TransferPath, frames []*protocol.Frame, receivePeer connect.Peer) {
 		for _, frame := range frames {

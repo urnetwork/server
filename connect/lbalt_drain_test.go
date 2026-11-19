@@ -306,6 +306,8 @@ func TestLbAltDrainFinishesInFlightWorkAndHoldsWebsocketsToTheDeadline(t *testin
 				t.Fatalf("the websocket was not cut: %v", err)
 			}
 		}
+		// both sides of a forwarded websocket are the front's to cut
+		testLbAltWait(t, env.websocketUpstreamEnds, "the upstream side's end")
 		if !env.publicPortsReleased() {
 			t.Fatal("the forced close did not release the public sockets")
 		}
