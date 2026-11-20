@@ -13,10 +13,13 @@ package main
 //   - Tokens: network_dns_zone.report_token has no column yet (plan-DNS-rua-token's interim), so every
 //     <token>@ report is dropped unread;
 //   - Keys: plan-SMTP-report-seal-key's interim, so no raw report is sealed: its bytes drop and only its
-//     fields are kept;
-//   - Join: SMTP-M9-15's attribution, so no ARF report or role mail is attributable, and the listener answers
-//     role mail plan-ABUSE-auto-reply's 550. The Sink behind it is §21's real one (model.NewAbuseSmtpSink,
-//     ABUSE-M5-09), which sees nothing until a Join attributes a report.
+//     fields are kept.
+//
+// The Join and the halt ladder, SMTP-M9-15's attribution and SMTP-M9-16's ladder, are the block's to give
+// (attributeThrough, report_join.go), where its binary links MG9's send log, halts and keys and its vault holds the
+// X-UR-Ref keys; an intake given none attributes no ARF report or role mail, and the listener answers role mail
+// plan-ABUSE-auto-reply's 550. The Sink is §21's real one (model.NewAbuseSmtpSink, ABUSE-M5-09), which an
+// attributed role mail's case and a fraud complaint's review reach.
 //
 // <root>'s rows resolve through §12's label map (model.ResolveNetworkLabel), and reporters' DKIM keys come from
 // DNS through the process's resolver. The intake reads MG2's dns_label and writes MG5's report tables, so the
@@ -103,6 +106,9 @@ func newPlatformReportIntake(store smtpedgeservice.SmtpEdgeStore, settings *smtp
 	}
 	return &platformReportIntake{
 		intake:   intake,
+		host:     host,
+		store:    store,
+		deps:     deps,
 		root:     reportIntakeName(settings.Root),
 		settings: settings,
 		txt:      txt,
@@ -138,9 +144,13 @@ func newConfiguredReportIntake(mxEdgeSettings *mxedgeservice.MxEdgeSettings) (*p
 }
 
 // The intake as the platform listener reaches it. Safe for concurrent use, as the intake is, once
-// fileNoticesThrough has run, which it does before the listener has it.
+// fileNoticesThrough and attributeThrough have run, which they do before the listener has it.
 type platformReportIntake struct {
 	intake *smtpedgeservice.SmtpReportIntake
+	// what the intake was made with, which attributeThrough makes it again with
+	host  *sidecar.ServiceHost
+	store smtpedgeservice.SmtpEdgeStore
+	deps  *smtpedgeservice.SmtpReportIntakeDeps
 	// <root>, lowercased, whose abuse@ and postmaster@ are role mail
 	root string
 	// smtpedge.yml's bounds and the reporters' key source, which role mail's notice check reads too

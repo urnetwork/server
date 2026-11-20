@@ -1,8 +1,8 @@
-// T2 for server/cli/smtpedge (SMTP-M9-20): the block scrubs its logs first; its gate loads a network once on a
-// miss and answers from memory, its unwired row answering not loaded and §21.5's breaker following its source within
-// a refresh (ABUSE-M9-02); the X-UR-Ref key file lays its keys
-// over the settings and names no key when refused; and the block is not ready while a seam is missing, a
-// sending address with no FCrDNS included. Time is a fake clock and nothing waits on a sleep.
+// T2 for server/cli/smtpedge (SMTP-M9-20): the block scrubs its logs first and reads its urls from its environment;
+// its gate loads a network once on a miss and answers from memory, its unwired row answering not loaded and §21.5's
+// breaker following its source within a refresh (ABUSE-M9-02); and the block is not ready while a seam is missing, a
+// sending address with no FCrDNS included. The X-UR-Ref key file's reader is model's (smtp_x_ur_ref_key_file.go),
+// tested there. Time is a fake clock and nothing waits on a sleep.
 
 package main
 
@@ -234,34 +234,6 @@ func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	}
 	if state, ok := gate.Breaker(); ok || state != nil {
 		t.Fatal("a breaker whose source cannot read answered")
-	}
-}
-
-func TestXUrRefKeyFileLaysItsKeysOverTheSettings(t *testing.T) {
-	settings := smtpedgeservice.DefaultSmtpEdgeSettings()
-	settings.Root = "root.example"
-	settings.ReportHostName = "rpt.report.example"
-	file := "issue_key_id: 2\nkeys:\n  - {id: 1, key: " + strings.Repeat("QUFB", 11) + "}\n  - {id: 2, key: " + strings.Repeat("QkJC", 11) + "}\n"
-	if err := applyXUrRefKeys(settings, []byte(file)); err != nil {
-		t.Fatal(err)
-	}
-	if len(settings.XUrRefKeys) != 2 || settings.XUrRefIssueKeyId != 2 || settings.XUrRefKeys[1].KeyId != 2 || len(settings.XUrRefKeys[1].Key) != 33 {
-		t.Fatalf("keys %d, issue %d", len(settings.XUrRefKeys), settings.XUrRefIssueKeyId)
-	}
-	secret := "c2VjcmV0LXZhbHVlLW5vdC1iYXNlNjQ!!"
-	for _, bad := range []string{
-		"issue_key_id: 3\nkeys:\n  - {id: 1, key: " + strings.Repeat("QUFB", 11) + "}\n",
-		"issue_key_id: 1\nkeys:\n  - {id: 1, key: " + secret + "}\n",
-		"issue_key_id: 1\nkeys:\n  - {id: 300, key: " + strings.Repeat("QUFB", 11) + "}\n",
-		"issue_key_id: 1\nkeys:\n  - {id: 1, key: QUFB}\n",
-	} {
-		err := applyXUrRefKeys(settings, []byte(bad))
-		if err == nil {
-			t.Fatalf("%q was taken", bad)
-		}
-		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "QUFB") {
-			t.Fatalf("a refusal named a key: %v", err)
-		}
 	}
 }
 

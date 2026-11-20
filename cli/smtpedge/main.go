@@ -40,7 +40,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -52,8 +51,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
@@ -70,11 +67,9 @@ import (
 // The service as urnetwork_<svc>_* and the block's log name it.
 const hostService = "smtpedge"
 
-// The block's file under config/<env>, and its X-UR-Ref key file among its vault secret_files.
-const (
-	hostSettingsResourceName = "smtpedge.yml"
-	hostXUrRefResourceName   = "smtpedge-x-ur-ref.yml"
-)
+// The block's file under config/<env>. Its X-UR-Ref key file among its vault secret_files is
+// model.SmtpXUrRefKeyFileName, which mxedge's platform listener reads too.
+const hostSettingsResourceName = "smtpedge.yml"
 
 // The block's tunables beyond the engine's.
 type hostSettings struct {
@@ -348,39 +343,6 @@ func (self *smtpEdgeHost) Close() {
 	}
 }
 
-// The X-UR-Ref key file: the keys by id, base64, and the one new references are issued under.
-type hostXUrRefFile struct {
-	IssueKeyId int `yaml:"issue_key_id"`
-	Keys       []struct {
-		Id  int    `yaml:"id"`
-		Key string `yaml:"key"`
-	} `yaml:"keys"`
-}
-
-// Lays the key file in data over settings. A refusal names the part, never a key.
-func applyXUrRefKeys(settings *smtpedgeservice.SmtpEdgeSettings, data []byte) error {
-	file := &hostXUrRefFile{}
-	decoder := yaml.NewDecoder(strings.NewReader(string(data)))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(file); err != nil {
-		return fmt.Errorf("%s does not parse", hostXUrRefResourceName)
-	}
-	keys := []*smtpedgeservice.SmtpXUrRefKey{}
-	for _, entry := range file.Keys {
-		if entry.Id < 1 || 255 < entry.Id {
-			return fmt.Errorf("%s holds a key id past one octet", hostXUrRefResourceName)
-		}
-		key, err := base64.StdEncoding.DecodeString(entry.Key)
-		if err != nil {
-			return fmt.Errorf("%s holds a key that is not base64", hostXUrRefResourceName)
-		}
-		keys = append(keys, &smtpedgeservice.SmtpXUrRefKey{KeyId: uint8(entry.Id), Key: key})
-	}
-	settings.XUrRefKeys = keys
-	settings.XUrRefIssueKeyId = file.IssueKeyId
-	return settings.Validate()
-}
-
 // smtpedge.yml from config, with the X-UR-Ref keys from the vault, and the directory the file sits in.
 func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, string, error) {
 	resource, err := server.Config.SimpleResource(hostSettingsResourceName)
@@ -395,15 +357,8 @@ func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	keyResource, err := server.Vault.SimpleResource(hostXUrRefResourceName)
-	if err != nil {
-		return nil, "", fmt.Errorf("no %s", hostXUrRefResourceName)
-	}
-	keyData, err := keyResource.BytesE()
-	if err != nil {
-		return nil, "", fmt.Errorf("no %s", hostXUrRefResourceName)
-	}
-	if err := applyXUrRefKeys(config.Settings, keyData); err != nil {
+	// the X-UR-Ref keys, from the vault and never from the repository; a refusal names the part, never a key
+	if err := model.LoadSmtpXUrRefKeyFile(config.Settings); err != nil {
 		return nil, "", err
 	}
 	configHome := ""

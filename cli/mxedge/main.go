@@ -20,7 +20,10 @@
 // The platform role files role mail's notices at api (-api_url) on a gate bearer of its own,
 // internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612; QD-1121), which its block
 // mounts. Without the url or the file it files none, says so at start, and answers role mail as before; it stays
-// ready either way, since the intake's reports need neither.
+// ready either way, since the intake's reports need neither. Its intake attributes ARF reports and role mail by
+// SMTP-M9-15's join and halts by SMTP-M9-16's ladder (report_join.go), over the send log, the X-UR-Ref keys its block
+// mounts from M9 (smtpedge-x-ur-ref.yml, warp's mxedge-platform-x-ur-ref.yml) and a Quota over its own Postgres, where
+// its binary links MG9; without them it attributes nothing, says so at start, and serves the rest as before.
 //
 // Each URL flag's default is the variable the role's fragment, mxedge.yml or mxedge-platform.yml, gives a deployed
 // block in its env_vars, $UR_API_URL and for the router $UR_SOCKETS_URL (sidecarhost.ServiceUrlFlag).
@@ -111,8 +114,19 @@ func main() {
 			} else {
 				intake.fileNoticesThrough(gate, nil)
 			}
-			deps.Intake = intake
 			deps.IntakeGroups = reportIntakeGroups()
+			// SMTP-M9-15's join and SMTP-M9-16's ladder (report_join.go), their Quota on a context of its own,
+			// drained after the block
+			joinCtx, joinCancel := context.WithCancel(context.WithoutCancel(ctx))
+			defer joinCancel()
+			if end, err := attributeBlockReports(joinCtx, intake); err != nil {
+				// the error names what is missing, never a key
+				glog.Errorf("[mxedge]no ARF report or role mail is attributed, so none halts a network or reaches §21: %v\n", err)
+			} else {
+				defer end()
+				deps.IntakeGroups = append(deps.IntakeGroups, reportJoinGroups()...)
+			}
+			deps.Intake = intake
 		}
 	case mxedgehost.HostRoleRouter:
 		// on a context of its own, so a SIGTERM's drain can still send the open usage window, ended after the block
