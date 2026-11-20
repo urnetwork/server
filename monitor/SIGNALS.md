@@ -2903,7 +2903,7 @@ attribution and independent outcome controls for impact or recovery; an empty
 frame, a later reachable target or a quiet log window is not that evidence.
 
 For a Taskworker `connection-refused` alert, an INFO record from
-`extender_probe_diagnostics.go:509` can retain the first refusal exemplar’s
+`extender_probe_diagnostics.go` can retain the first refusal exemplar’s
 IP family and producer failure class in the alert sample. The reducer requires
 the matching Taskworker stream and Warp service, the complete reviewed
 `[extenderprobe]diagnostic` record, and refusal text in its quoted detail.

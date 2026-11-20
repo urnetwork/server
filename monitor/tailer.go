@@ -1498,7 +1498,7 @@ const (
 
 var extenderProbeRefusalRecordRe = regexp.MustCompile(
 	`^\[[A-Za-z0-9._-]+\]\[taskworker\]\[g[0-9]+\]\[cid:[0-9a-f]{12}\]\[I\]` + logTimestampRe.String() +
-		`\[extender_probe_diagnostics\.go:509\]\[extenderprobe\]diagnostic extender=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}` +
+		`\[extender_probe_diagnostics\.go:[1-9][0-9]{0,5}\]\[extenderprobe\]diagnostic extender=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}` +
 		` ipv=([46]) class=(` + extenderProbeLogClass + `) detail=("(?:[^"\\\x00-\x1f]|\\[^\r\n])*") server_name=` + extenderProbeLogLabel + `(?:\.` + extenderProbeLogLabel + `)*\.?` +
 		` (?:elapsed=\? connect=\? server_bytes=\?|elapsed=` + extenderProbeLogDuration + ` connect=(?:none|` + extenderProbeLogDuration + `) server_bytes=` + extenderProbeLogNumber + `)` +
 		` (?:since_activation=\? since_uptime_ok=\? failures_before=\?|since_activation=-?` + extenderProbeLogDuration + ` since_uptime_ok=(?:never|-?` + extenderProbeLogDuration + `) failures_before=` + extenderProbeLogNumber + `)$`,
