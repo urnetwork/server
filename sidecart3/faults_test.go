@@ -172,18 +172,26 @@ func awaitCall(t *testing.T, net *sidecartest.Net, what string, pending *pending
 // the catch-up was in flight.
 func awaitWaiting(t *testing.T, net *sidecartest.Net, driven *drivenCatchUps, name string, pending *pendingCall) {
 	t.Helper()
+	awaitWaitingOrDone(t, net, driven, name, pending.done, func() error {
+		return pending.err
+	})
+}
+
+// As awaitWaiting, for a request whose end done closes at, and err gives what it ended with once done has closed.
+func awaitWaitingOrDone(t *testing.T, net *sidecartest.Net, driven *drivenCatchUps, name string, done <-chan struct{}, err func() error) {
+	t.Helper()
 	waiting := driven.waiting(name)
 	either := newTestSignal()
 	go func() {
 		select {
 		case <-waiting.channel:
-		case <-pending.done:
+		case <-done:
 		}
 		either.fire()
 	}()
-	awaitSignal(t, net, name+" waiting for a catch-up or returning", either)
+	awaitSignal(t, net, name+" waiting for a catch-up or ending", either)
 	if !waiting.fired() {
-		t.Fatalf("%s went on while a catch-up was in flight, and returned %v", name, pending.err)
+		t.Fatalf("%s went on while a catch-up was in flight, and ended with %v", name, err())
 	}
 }
 
@@ -371,7 +379,7 @@ func TestAnActorKilledWaitingForAnAdminRereadGoesNoFurther(t *testing.T) {
 		returned.Store(true)
 		return err
 	})
-	awaitSignal(t, fixture.net, "B waiting for A's reread", driven.waiting("B"))
+	awaitWaitingOrDone(t, fixture.net, driven, "B", run.Ended(), run.Err)
 	actor.Kill()
 	if err := fixture.net.Barriers().AwaitChannel(t.Context(), "B's run", run.Ended()); err != nil {
 		t.Fatal(err)
