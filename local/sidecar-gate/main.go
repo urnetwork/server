@@ -17,8 +17,10 @@
 // before it is.
 //
 // A gate is G0, Mn-in for milestone n's entry review, Mn for its exit review,
-// every for each Gn-out's rows alone, or next. An exit review also runs every
-// and M1's FS-54; an entry review does not, since its Gn-out has not come.
+// held for §23.6's later-of cases, case by case once both their exits have
+// passed (TEST-M10-06), every for each Gn-out's rows alone, or next. An exit
+// review also runs every and M1's FS-54; an entry review does not, since its
+// Gn-out has not come, and nor does held, which is no Gn-out of its own.
 //
 // -list runs nothing: it reads each package's test files and reports a row
 // listed when every test it names is declared there, which is how a sweep is

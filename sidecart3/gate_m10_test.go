@@ -19,11 +19,12 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 )
 
-// The server tests M10's rows name outside the convention, each as an item of its own so gate_m6_test.go's check reads
-// it: a row's convention entry in this package is passed over, since a T3 test not written yet reads missing by design.
-func gateM10RowServerTests(catalog *fault.Catalog) []*fault.GateRow {
+// The server tests a gate's rows name outside the convention, each as an item of its own so gate_m6_test.go's check
+// reads it: a row's convention entry in this package is passed over, since a T3 test not written yet reads missing by
+// design. M10's exit and the held gate (gate_held_test.go) read their rows so.
+func gateRowServerTests(catalog *fault.Catalog, gate string) []*fault.GateRow {
 	rows := []*fault.GateRow{}
-	for _, row := range fault.GateRows(catalog, "M10") {
+	for _, row := range fault.GateRows(catalog, gate) {
 		if row.Row == "" {
 			continue
 		}
@@ -51,7 +52,7 @@ func gateM10RowServerTests(catalog *fault.Catalog) []*fault.GateRow {
 // declared only behind a tag its entry lacks, are both caught.
 func TestGateM10RowsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 	catalog := fault.DefaultCatalog()
-	rows := gateM10RowServerTests(catalog)
+	rows := gateRowServerTests(catalog, "M10")
 	for _, name := range gateItemServerTestsUndeclared(t, rows) {
 		t.Errorf("a row of M10 names %s, which is not declared so", name)
 	}

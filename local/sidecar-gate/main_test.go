@@ -525,10 +525,10 @@ func TestGateRefusesAMalformedTimeoutWhenGatesYmlLoads(t *testing.T) {
 	}
 }
 
-// The tool runs gates.yml's release fixture under 3h, as run.sh's BUILD_TEST runs it (QD-1056, QD-1058), and M10's
+// The tool runs gates.yml's release fixture under 3h, as run.sh's BUILD_TEST runs it (QD-1056, QD-1058), and the
 // reading of FS-86's card case at the Team limit, a whole peak hour in real time on T3's layouts, under 2h (D-TEST-17;
-// QD-1068), and every other entry it reads, in gates.yml, ops-matrix.yml, trace.yml and stages.yml, under the
-// settings' bound.
+// QD-1068), at M10's exit and the held gate, and every other entry it reads, in gates.yml, ops-matrix.yml, trace.yml and
+// stages.yml, under the settings' bound.
 func TestGatesYmlGivesOwnTimeoutsOnlyToTestsThatOutlastTheDefault(t *testing.T) {
 	gates := &gatesFile{}
 	if err := readYamlFile("gates.yml", gates); err != nil {
@@ -591,7 +591,9 @@ func TestGatesYmlGivesOwnTimeoutsOnlyToTestsThatOutlastTheDefault(t *testing.T) 
 			t.Errorf("%s %s's %v runs under %s", test.Repo, test.Package, test.Names, got)
 		}
 	}
-	if fixtures != 1 || layouts != 1 || len(tests) < 100 {
+	// FS-86's hour on the layouts is M10's exit's and the held gate's, its card case falling due at the later of M6's
+	// and M10's exits (TEST-M10-06)
+	if fixtures != 1 || layouts != 2 || len(tests) < 100 {
 		t.Fatalf("the files name the release fixture %d times and FS-86's hour on the layouts %d times among %d entries", fixtures, layouts, len(tests))
 	}
 }
@@ -816,6 +818,40 @@ func TestGateM8ListsOnThisTree(t *testing.T) {
 	swept, items := checkGateListsOnThisTree(t, "M8")
 	if swept != 4 || items < 11 {
 		t.Errorf("M8's sweep names %d cases and %d items", swept, items)
+	}
+}
+
+// sidecar-gate -list held on this tree (TEST-M10-06): see checkGateListsOnThisTree. The held gate is no Gn-out of its
+// own, so it runs neither FS-54 nor FS-55, and holds §23.6's 25 later-of cases, each a row: the hold cases' T3 runs in
+// model and FS-87's and FS-99's in the root package list, each test declared under its tags.
+func TestGateHeldListsOnThisTree(t *testing.T) {
+	swept, items := checkGateListsOnThisTree(t, "held")
+	if swept != 5 || items != 9 {
+		t.Errorf("held's sweep names %d cases elsewhere and %d items", swept, items)
+	}
+	report, rows := listGateOnThisTree(t, "held")
+	cases := 0
+	for _, row := range rows {
+		if row.Row != "" {
+			cases += 1
+		}
+	}
+	outcomes := map[string]string{}
+	for _, result := range report.rows {
+		outcomes[result.label] = result.outcome
+	}
+	if cases != 25 || len(report.rows) != cases+items {
+		t.Errorf("held runs %d rows for %d cases and %d items", len(report.rows), cases, items)
+	}
+	for _, label := range []string{"FS-66 (hold)", "FS-69", "FS-92", "FS-87 (index)", "FS-99 (cards)"} {
+		if outcomes[label] != gateListed {
+			t.Errorf("%s at held reads %q", label, outcomes[label])
+		}
+	}
+	for _, label := range []string{"FS-54", "FS-55"} {
+		if _, ran := outcomes[label]; ran {
+			t.Errorf("held ran %s, every Gn-out's", label)
+		}
 	}
 }
 

@@ -22,13 +22,20 @@ import (
 // The report token is the network's zone's in root, network_dns_zone's
 // report_token (plan-DNS-rua-token, plan-SMTP-net-token), which MG6 adds and
 // the zone's system set mints (DNS-M8-01), so a zone made before that has none
-// until its set is written again.
+// until its set is written again. The custom domains' facts, the verified
+// domains, their withhold time and the strict ones, are
+// smtp_custom_domain_model.go's (SMTP-M9-34).
 //
 // Not loaded here yet, each answering closed where the gate reads it: a live
 // alias's and a Team scope's zones (§12.7) and the names a reviewer allowed
 // (ABUSE-M5-08). The limits are Quota.Limits', which the gate reads beside
 // this.
 func GetSmtpGateFacts(ctx context.Context, networkId server.Id, root string) (*smtpedgeservice.SmtpGateFacts, error) {
+	return GetSmtpGateFactsWithSettings(ctx, networkId, root, DefaultSmtpCustomDomainSettings())
+}
+
+// GetSmtpGateFacts with the custom domains' settings.
+func GetSmtpGateFactsWithSettings(ctx context.Context, networkId server.Id, root string, settings *SmtpCustomDomainSettings) (*smtpedgeservice.SmtpGateFacts, error) {
 	facts := &smtpedgeservice.SmtpGateFacts{
 		Label: GetNetworkLabel(ctx, networkId, root),
 	}
@@ -44,22 +51,7 @@ func GetSmtpGateFacts(ctx context.Context, networkId server.Id, root string) (*s
 			})
 		})
 	}
-	if server.SidecarMg6Linked() {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`SELECT domain FROM network_domain WHERE network_id = $1 AND verify_time IS NOT NULL ORDER BY domain`,
-				networkId,
-			)
-			server.WithPgResult(result, err, func() {
-				for result.Next() {
-					var domain string
-					server.Raise(result.Scan(&domain))
-					facts.VerifiedDomains = append(facts.VerifiedDomains, domain)
-				}
-			})
-		})
-	}
+	fillSmtpGateCustomDomainFacts(ctx, networkId, facts, settings)
 	// network_dns_zone is MG5's and its report_token MG6's
 	if server.SidecarMg5Linked() && server.SidecarMg6Linked() {
 		server.Db(ctx, func(conn server.PgConn) {
