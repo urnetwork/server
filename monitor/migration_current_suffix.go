@@ -1097,6 +1097,8 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 		competitionEpochThreeSourceRecoveryMigrationContract,
 		competitionEpochThreeRuntimeCorrectionMigrationContract,
 		competitionEpochThreeExecutorBuilderCorrectionMigrationContract,
+		migrationCurrentSuffix(server.CompetitionEpochThreeGoofeAdmissionMigrationVersion(), "epoch-three exact Goofe retained admission exception",
+			snMainnetMigrationFunction("competition_executor_admission_exception_guard()", "trigger", "plpgsql", "v", false, server.CompetitionEpochThreeGoofeAdmissionBodySql())),
 	},
 ))
 

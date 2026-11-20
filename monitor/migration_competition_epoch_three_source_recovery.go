@@ -36,6 +36,8 @@ var competitionEpochThreeSourceRecoveryMigrationContract = func() snMainnetMigra
 	}
 	beforeCorrection(competitionEpochThreeExecutorBuilderCorrectionVersion, snMainnetMigrationFunction(competitionExecutorAmendmentGuardSignature,
 		"trigger", "plpgsql", "v", false, server.CompetitionExecutorControlAmendmentBodiesSql().AmendmentGuard))
+	beforeCorrection(server.CompetitionEpochThreeGoofeAdmissionMigrationVersion(), snMainnetMigrationFunction("competition_executor_admission_exception_guard()",
+		"trigger", "plpgsql", "v", false, server.CompetitionExecutorAdmissionExceptionBodiesSql().ExceptionGuard))
 	return migrationCurrentSuffix(server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), competitionEpochThreeSourceRecoveryCatalogName, query,
 		snMainnetMigrationFunction("competition_epoch_three_source_recovery_matches(uuid,jsonb,jsonb,timestamp without time zone)",
 			"boolean", "sql", "s", false, recovery, "round_uuid", "request", "checkpoint", "imported_at"),

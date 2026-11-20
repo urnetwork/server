@@ -398,13 +398,14 @@ func validateCompetitionExecutorReceiptWithException(settings *Settings, round *
 		}
 		expectedJobId, expectedRecovery = recovery.Authorization.ReplacementJobId, recovery.Sha256
 	}
+	goofeException := exception && isEpochThreeGoofeAdmissionReceipt(receipt)
 	if receipt == nil || receipt.Schema != 1 || receipt.Kind != "competition-executor-noop-admission/v1" || receipt.RoundId != round.RoundId.String() || receipt.HostId != host.HostId ||
 		receipt.RecoverySha256 != expectedRecovery ||
 		receipt.ControlAmendmentSha256 != competitionExecutorControlAmendmentSha256(settings) ||
 		receipt.BaselineSha256 != baseline.Sha256 || receipt.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || receipt.ProvidersSha256 != round.ProvidersSha256 ||
 		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
 		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || (!receipt.Passed && !exception) || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
-		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || receipt.RawScoreRelativeDifference > 0.05 || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
+		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || (receipt.RawScoreRelativeDifference > 0.05 && (!goofeException || receipt.RawScoreRelativeDifference > 0.053)) || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
 		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
 		receipt.QualificationJobId != expectedJobId.String() || receipt.QualificationStartedAt.IsZero() ||
 		!receipt.QualificationDeadlineAt.Equal(receipt.QualificationStartedAt.Add(3*time.Hour)) || receipt.CreatedAt.Before(receipt.QualificationStartedAt) ||
@@ -459,7 +460,9 @@ func validateCompetitionExecutorReceiptWithException(settings *Settings, round *
 			}
 		}
 		expected, err := compareCompetitionHostMetric(metric.Metric, metric.BaselineValues, metric.CandidateValues)
-		if err != nil || (expected.SignificantShift && (!exception || metric.Metric != "throughput_p50_bytes_per_s")) {
+		allowShift := exception && (metric.Metric == "throughput_p50_bytes_per_s" ||
+			(goofeException && (metric.Metric == "throughput_p95_bytes_per_s" || metric.Metric == "ttfb_p50_ms")))
+		if err != nil || (expected.SignificantShift && !allowShift) {
 			return errors.New("host admission contains a significant or unavailable metric shift")
 		}
 		excepted = excepted || expected.SignificantShift
