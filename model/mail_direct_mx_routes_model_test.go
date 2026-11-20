@@ -2,20 +2,25 @@
 
 package model
 
-// A Team's direct MX on a private database and Redis (mail_direct_mx_routes_model.go; MAIL-M7-23): NameMailDirectMx's
-// refusals (no Team, mail off, a receiver with no published key, a private address, a third receiver); the prober's
-// store pointing mx at a verified receiver and dropping the routes, a failure leaving a pending row pending and a
-// verified one failing with no revert; DELETE taking the rows and the records in one write; a receiver's removal
-// dropping its address and re-pointing mx at the other, then at the routers, applied twice as once; and the caller's
-// Admin role.
+// A Team's direct MX on a private database and Redis (mail_direct_mx_routes_model.go; MAIL-M7-23, QD-1103):
+// NameMailDirectMx's refusals (no Team, mail off, a receiver with no published key, a private address, a third
+// receiver); api's record of the prober's outcomes, behind the store's gate, pointing mx at a verified receiver and
+// dropping the routes, a failure leaving a pending row pending and a verified one failing with no revert; the record
+// refusing a network it does not know and writing nothing for a row that does not stand, a removal or a DELETE that
+// came between the prober's list and its record among them; the store's record going through its gate alone, reaching
+// no Postgres, a gate's error leaving the row as it was; DELETE taking the rows and the records in one write; a
+// receiver's removal dropping its address and re-pointing mx at the other, then at the routers, applied twice as
+// once; and the caller's Admin role. mail_direct_mx_probe_route_test.go runs the record through api's route itself.
 
 import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/urnetwork/sidecar"
@@ -23,6 +28,44 @@ import (
 
 	"github.com/urnetwork/server"
 )
+
+// The store's gate as api's route answers it, in process: the route's format check, then api's record in root. The
+// HTTP leg between the two is mail_direct_mx_probe_route_test.go's.
+type testMailDirectMxApiGate struct {
+	root string
+}
+
+func (self *testMailDirectMxApiGate) RecordMailDirectMxProbe(ctx context.Context, args *server.MailDirectMxProbeGateArgs) (*server.MailDirectMxProbeGateResult, error) {
+	address, err := args.Validate()
+	if err != nil {
+		return nil, err
+	}
+	recorded, err := RecordMailDirectMxProbe(ctx, &MailDirectMxProbe{
+		NetworkId: args.NetworkId, ReceiverSidecarId: args.ReceiverSidecarId, Address: address, Passed: args.Passed,
+	}, self.root)
+	if err != nil {
+		return nil, err
+	}
+	return &server.MailDirectMxProbeGateResult{Recorded: recorded}, nil
+}
+
+// A gate that keeps what it is asked and answers err, as a route that refused would.
+type testMailDirectMxRefusingGate struct {
+	err error
+
+	stateLock sync.Mutex
+	asked     []*server.MailDirectMxProbeGateArgs
+}
+
+func (self *testMailDirectMxRefusingGate) RecordMailDirectMxProbe(ctx context.Context, args *server.MailDirectMxProbeGateArgs) (*server.MailDirectMxProbeGateResult, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.asked = append(self.asked, args)
+	if self.err != nil {
+		return nil, self.err
+	}
+	return &server.MailDirectMxProbeGateResult{Recorded: true}, nil
+}
 
 // A team world with mail on and two receivers whose keys for mx are published.
 type testMailDirectMxWorld struct {
@@ -54,7 +97,7 @@ func newTestMailDirectMxWorld(t testing.TB, ctx context.Context) *testMailDirect
 // The row of receiverId the prober's store lists.
 func (self *testMailDirectMxWorld) listed(t testing.TB, ctx context.Context, receiverId server.Id) *mxedgeservice.MxDirectMxRow {
 	t.Helper()
-	rows, err := NewMxDirectMxStore(self.root).ListDirectMx(ctx)
+	rows, err := NewMxDirectMxStore(self.root, nil).ListDirectMx(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +173,7 @@ func TestMailDirectMxProbeVerifiesThenDeleteReverts(t *testing.T) {
 			t.Fatalf("no route before the verification: %v", err)
 		}
 
-		store := NewMxDirectMxStore(world.root)
+		store := NewMxDirectMxStore(world.root, &testMailDirectMxApiGate{root: world.root})
 		if err := store.RecordDirectMxProbe(ctx, listed, false); err != nil {
 			t.Fatal(err)
 		}
@@ -175,6 +218,182 @@ func TestMailDirectMxProbeVerifiesThenDeleteReverts(t *testing.T) {
 	})
 }
 
+// api's record refuses a network it has no row of and writes nothing for a row that does not stand: a network that
+// names no direct MX, a receiver it never named, and a named receiver at an address it did not name each answer
+// recorded false, the named row staying pending, mx keeping the routers and the routes standing; a probe naming no
+// network is refused before anything is read.
+func TestMailDirectMxProbeRecordRefusesAnUnknownNetworkOrRow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestMailDirectMxWorld(t, ctx)
+		defer Testing_SetDnsUserRoot(world.root)()
+		routers := testDirectMxRows(t, ctx, world.testDnsRecordsWorld)
+		record := func(networkId server.Id, receiverId server.Id, address netip.Addr) (bool, error) {
+			return RecordMailDirectMxProbe(ctx, &MailDirectMxProbe{NetworkId: networkId, ReceiverSidecarId: receiverId, Address: address, Passed: true}, world.root)
+		}
+		if recorded, err := record(server.NewId(), world.first, testDirectMxFirst); recorded || !errors.Is(err, ErrMailDirectMxProbeNetworkUnknown) {
+			t.Fatalf("an unknown network: %t, %v", recorded, err)
+		}
+		if recorded, err := record(world.networkId, world.first, testDirectMxFirst); recorded || err != nil {
+			t.Fatalf("a network naming no direct MX: %t, %v", recorded, err)
+		}
+		if _, err := NameMailDirectMx(ctx, world.networkId, []*MailDirectMxReceiver{{ReceiverSidecarId: world.first, Address: testDirectMxFirst}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ProjectMailRoutes(ctx, world.networkId, world.root); err != nil {
+			t.Fatal(err)
+		}
+		for name, probe := range map[string]*MailDirectMxProbe{
+			"a receiver never named":          {ReceiverSidecarId: world.second, Address: testDirectMxSecond},
+			"a receiver with no key":          {ReceiverSidecarId: server.NewId(), Address: testDirectMxFirst},
+			"the receiver at another address": {ReceiverSidecarId: world.first, Address: testDirectMxSecond},
+		} {
+			if recorded, err := record(world.networkId, probe.ReceiverSidecarId, probe.Address); recorded || err != nil {
+				t.Errorf("%s: %t, %v", name, recorded, err)
+			}
+		}
+		if rows := ListMailDirectMx(ctx, world.networkId); len(rows) != 1 || rows[0].State != MailDirectMxStatePending || !rows[0].VerifyTime.IsZero() {
+			t.Fatalf("a record of no row changed the rows: %+v", rows)
+		}
+		if rows := testDirectMxRows(t, ctx, world.testDnsRecordsWorld); rows[1] != routers[1] {
+			t.Fatalf("a record of no row moved mx: %v", rows)
+		}
+		if route, err := GetMailRoute(ctx, GetNetworkLabel(ctx, world.networkId, world.root)); err != nil || route == nil {
+			t.Fatalf("a record of no row dropped the routes: %v", err)
+		}
+		if _, err := RecordMailDirectMxProbe(ctx, &MailDirectMxProbe{ReceiverSidecarId: world.first, Address: testDirectMxFirst, Passed: true}, world.root); !errors.Is(err, ErrMailDirectMxInvalid) {
+			t.Errorf("a probe naming no network: %v", err)
+		}
+	})
+}
+
+// A receiver's removal, then a DELETE, each between the prober's list and its record: the record finds the row gone,
+// answers recorded false and writes nothing, a no-op success for the store, so a probe that raced a removal never
+// points mx back at the address the removal took away, and one that raced a DELETE leaves mx at the routers.
+func TestMailDirectMxProbeRecordOfARowGoneIsANoOp(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestMailDirectMxWorld(t, ctx)
+		defer Testing_SetDnsUserRoot(world.root)()
+		routers := testDirectMxRows(t, ctx, world.testDnsRecordsWorld)
+		if _, err := NameMailDirectMx(ctx, world.networkId, []*MailDirectMxReceiver{
+			{ReceiverSidecarId: world.first, Address: testDirectMxFirst}, {ReceiverSidecarId: world.second, Address: testDirectMxSecond},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		gate := &testMailDirectMxApiGate{root: world.root}
+		store := NewMxDirectMxStore(world.root, gate)
+		if err := store.RecordDirectMxProbe(ctx, world.listed(t, ctx, world.first), true); err != nil {
+			t.Fatal(err)
+		}
+		second := world.listed(t, ctx, world.second)
+		removal := &Removal{Subjects: []*RemovalSubject{{NetworkId: world.networkId, Kind: sidecar.RevocationKindSidecar, SubjectId: world.second}}}
+		err := dnsCatchRefusal(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				if err := applyMailDirectMxRemovalEffectInTx(ctx, tx, removal); err != nil {
+					panic(dnsWriteRefusal{err: err})
+				}
+			}, server.TxReadCommitted)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := testDirectMxRows(t, ctx, world.testDnsRecordsWorld)
+		result, err := gate.RecordMailDirectMxProbe(ctx, &server.MailDirectMxProbeGateArgs{
+			NetworkId: world.networkId, ReceiverSidecarId: world.second, Address: testDirectMxSecond.String(), Passed: true,
+		})
+		if err != nil || result.Recorded {
+			t.Fatalf("a removed receiver's probe: %+v, %v", result, err)
+		}
+		if err := store.RecordDirectMxProbe(ctx, second, true); err != nil {
+			t.Fatalf("a removed receiver's probe through the store: %v", err)
+		}
+		after := testDirectMxRows(t, ctx, world.testDnsRecordsWorld)
+		if after[1] != before[1] || strings.Contains(after[1], testDirectMxSecond.String()) || !strings.Contains(after[1], testDirectMxFirst.String()) {
+			t.Fatalf("mx after a removed receiver's probe %v, before %v", after, before)
+		}
+		if rows := ListMailDirectMx(ctx, world.networkId); len(rows) != 1 || rows[0].ReceiverSidecarId != world.first {
+			t.Fatalf("the rows after a removed receiver's probe: %+v", rows)
+		}
+
+		first := world.listed(t, ctx, world.first)
+		if _, err := ClearMailDirectMx(ctx, world.networkId, world.root); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RecordDirectMxProbe(ctx, first, true); err != nil {
+			t.Fatalf("a probe after DELETE: %v", err)
+		}
+		if rows := testDirectMxRows(t, ctx, world.testDnsRecordsWorld); rows[1] != routers[1] || 0 < len(ListMailDirectMx(ctx, world.networkId)) {
+			t.Fatalf("mx after a probe that raced DELETE %v, routers %v", rows, routers)
+		}
+		if route, err := GetMailRoute(ctx, GetNetworkLabel(ctx, world.networkId, world.root)); err != nil || route == nil {
+			t.Fatalf("no route after a probe that raced DELETE: %v", err)
+		}
+	})
+}
+
+// The store's record goes through its gate alone: the gate is asked the row's network, receiver and address and the
+// outcome, and nothing reaches Postgres; a gate's error, as a route's refusal reaches it, is the store's error and
+// leaves the row and mx as they were; with no gate nothing is recorded.
+func TestMxDirectMxStoreRecordsThroughItsGateAlone(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestMailDirectMxWorld(t, ctx)
+		defer Testing_SetDnsUserRoot(world.root)()
+		routers := testDirectMxRows(t, ctx, world.testDnsRecordsWorld)
+		if _, err := NameMailDirectMx(ctx, world.networkId, []*MailDirectMxReceiver{{ReceiverSidecarId: world.first, Address: testDirectMxIpv6}}); err != nil {
+			t.Fatal(err)
+		}
+		listed := world.listed(t, ctx, world.first)
+		gate := &testMailDirectMxRefusingGate{}
+		store := NewMxDirectMxStore(world.root, gate)
+
+		attempts, stop := server.DenyPostgresForTest(t)
+		for _, passed := range []bool{true, false} {
+			if err := store.RecordDirectMxProbe(ctx, listed, passed); err != nil {
+				t.Fatal(err)
+			}
+		}
+		stop()
+		if count := attempts(); count != 0 {
+			t.Errorf("the store's record reached Postgres %d times", count)
+		}
+		asked := func() []*server.MailDirectMxProbeGateArgs {
+			gate.stateLock.Lock()
+			defer gate.stateLock.Unlock()
+			return slices.Clone(gate.asked)
+		}()
+		if len(asked) != 2 {
+			t.Fatalf("the gate was asked %d times", len(asked))
+		}
+		for index, passed := range []bool{true, false} {
+			want := server.MailDirectMxProbeGateArgs{NetworkId: world.networkId, ReceiverSidecarId: world.first, Address: testDirectMxIpv6.String(), Passed: passed}
+			if *asked[index] != want {
+				t.Errorf("the gate was asked %+v, want %+v", asked[index], want)
+			}
+		}
+
+		refused := errors.New("api answered 403")
+		func() {
+			gate.stateLock.Lock()
+			defer gate.stateLock.Unlock()
+			gate.err = refused
+		}()
+		if err := store.RecordDirectMxProbe(ctx, listed, true); !errors.Is(err, refused) {
+			t.Fatalf("a refused record answered %v", err)
+		}
+		if rows := ListMailDirectMx(ctx, world.networkId); len(rows) != 1 || rows[0].State != MailDirectMxStatePending || !rows[0].VerifyTime.IsZero() {
+			t.Fatalf("a refused record changed the row: %+v", rows)
+		}
+		if rows := testDirectMxRows(t, ctx, world.testDnsRecordsWorld); !maps.Equal(rows, routers) {
+			t.Fatalf("a refused record moved mx: %v, routers %v", rows, routers)
+		}
+		if err := NewMxDirectMxStore(world.root, nil).RecordDirectMxProbe(ctx, listed, true); !errors.Is(err, ErrMailDirectMxProbeNoGate) {
+			t.Errorf("a store with no gate answered %v", err)
+		}
+	})
+}
+
 // A receiver's removal drops its rows and points mx at the other verified receiver, then back at the routers once
 // none is left; applied again it changes nothing (I-15).
 func TestMailDirectMxRemovalDropsTheReceiversAddress(t *testing.T) {
@@ -188,7 +407,7 @@ func TestMailDirectMxRemovalDropsTheReceiversAddress(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		store := NewMxDirectMxStore(world.root)
+		store := NewMxDirectMxStore(world.root, &testMailDirectMxApiGate{root: world.root})
 		for _, receiverId := range []server.Id{world.first, world.second} {
 			if err := store.RecordDirectMxProbe(ctx, world.listed(t, ctx, receiverId), true); err != nil {
 				t.Fatal(err)

@@ -13,7 +13,9 @@
 // surface (internal-gate-mxedge.yml), the edge bearer its platform clients are minted on (internal-gate-edge.yml)
 // and the feed credential (MAIL-M7-20). It routes by SNI through {mxr_<net>} and splices to receivers found at
 // the sockets service (-sockets_url), its quota and clients at api (-api_url), each Find on its first client's
-// sockets token, which api's edge client route answers beside the client's jwt (QD-1054).
+// sockets token, which api's edge client route answers beside the client's jwt (QD-1054). Its direct-MX prober reads
+// the rows it probes from Postgres and posts each outcome to api on the same edge bearer, through the same source,
+// so the router writes neither mail_direct_mx nor the zone (QD-1103, owner decision 639).
 //
 // The platform role files role mail's notices at api (-api_url) on a gate bearer of its own,
 // internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612; QD-1121), which its block
@@ -166,16 +168,15 @@ type routerPoolClients struct {
 }
 
 // The router's own deps: Quota over api's internal gate at apiUrl on the mxedge bearer, the store on the
-// block's Postgres role, the source on the edge bearer, and the pool and the dialer over it with Find at
-// socketsUrl. Each is left out, and said, when what it needs is missing, which leaves the block not ready.
+// block's Postgres role, the source on the edge bearer, the direct-MX prober's store recording through that
+// source, and the pool and the dialer over it with Find at socketsUrl. Each is left out, and said, when what it
+// needs is missing, which leaves the block not ready; with no source no prober runs, as it could record nothing.
 // quotaCtx outlives the drain, so the open usage window is sent. The returned call ends the quota's and
 // the source's loops.
 func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxEdgeSettings, apiUrl string, socketsUrl string) (*mxedgehost.RouterDeps, func()) {
 	deps := &mxedgehost.RouterDeps{
 		Store:       model.NewMxEdgeStore(nil),
 		StoreGroups: mxedgehost.RouterStoreGroups(),
-		// a Team direct MX's rows, read by the router's prober (MAIL-M7-23)
-		DirectMxStore: model.NewMxDirectMxStore(mxEdgeSettings.RouteRootDomainName),
 	}
 	ends := []func(){}
 	end := func() {
@@ -222,6 +223,9 @@ func routerBlockDeps(quotaCtx context.Context, mxEdgeSettings *mxedgeservice.MxE
 		return deps, end
 	}
 	ends = append(ends, source.Close)
+	// a Team direct MX's rows, read by the router's prober, each outcome posted to api's internal route on the edge
+	// bearer through the source (MAIL-M7-23; QD-1103)
+	deps.DirectMxStore = model.NewMxDirectMxStore(mxEdgeSettings.RouteRootDomainName, source)
 	if socketsUrl == "" {
 		glog.Errorf("[mxedge]no platform clients: no sockets url for Find\n")
 		return deps, end

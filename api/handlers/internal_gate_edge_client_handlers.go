@@ -1,12 +1,18 @@
 package handlers
 
 // api's end of an edge block's platform clients (TLS-M5-11; QD-812, QD-873, QD-1011, QD-1054; §6.10.1, §13.6,
-// §19.4): the route server.PlatformClientSource asks, under server.InternalGatePathPrefix, taking only the `edge`
-// class's bearer, verified by its hash in constant time (server.InternalGateVerifier), and answering every other
-// request 403 before anything is read:
+// §19.4): the routes server.PlatformClientSource calls, under server.InternalGatePathPrefix, each taking only the
+// `edge` class's bearer, verified by its hash in constant time (server.InternalGateVerifier), and answering every
+// other request 403 before anything is read:
 //
 //	POST /internal/gate/edge-client  edge  {block, host, slot, index}
 //	  -> {client_id, by_client_jwt, expire_time_millis, platform_url, sockets_token, sockets_token_expire_time_millis}
+//	POST /internal/gate/mail-direct-mx-probe  edge  {network_id, receiver_sidecar_id, address, passed}
+//	  -> {recorded}
+//
+// The second is mxedge's direct-MX prober's (QD-1103, owner decision 639), which records a probe's outcome in api so
+// mxedge writes neither mail_direct_mx nor the zone: internal_gate_mail_direct_mx_probe_handlers.go. This file is the
+// first.
 //
 // The client id is derived from (environment, host, block, slot, index), the environment api's own, never chosen
 // by the caller (server.DeriveEdgeClientId), and the client is created in sidecar.yml's urnetwork_edge network on
@@ -28,6 +34,7 @@ package handlers
 // Safe for concurrent use.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +68,8 @@ type InternalGateEdgeClientSettings struct {
 	Key *server.EdgeClientKeySettings
 	// The mint's. nil: model.DefaultEdgeClientMintSettings.
 	Mint *model.EdgeClientMintSettings
+	// The direct-MX probe route's. nil: DefaultInternalGateMailDirectMxProbeSettings.
+	MailDirectMxProbe *InternalGateMailDirectMxProbeSettings
 }
 
 func DefaultInternalGateEdgeClientSettings() *InternalGateEdgeClientSettings {
@@ -70,6 +79,7 @@ func DefaultInternalGateEdgeClientSettings() *InternalGateEdgeClientSettings {
 		UnavailableRetryAfter: 5 * time.Second,
 		Key:                   server.DefaultEdgeClientKeySettings(),
 		Mint:                  model.DefaultEdgeClientMintSettings(),
+		MailDirectMxProbe:     DefaultInternalGateMailDirectMxProbeSettings(),
 	}
 }
 
@@ -87,18 +97,26 @@ type InternalGateEdgeClientDeps struct {
 	// Mints a client's sockets token and says when it ends. nil: oauth.MintEdgeClientSocketsToken, under auth.yml's
 	// newest svc- key.
 	MintSocketsToken func(networkId server.Id, clientId server.Id) (string, time.Time, error)
+	// Records one direct-MX probe's outcome and says whether its row stood. nil: model.RecordMailDirectMxProbe in
+	// api's dns root, model.DnsUserRoot.
+	RecordMailDirectMxProbe func(ctx context.Context, probe *model.MailDirectMxProbe) (bool, error)
+	// Whether the mail routes are open in this process. nil: mailRoutesOpen, as the other mail routes read it.
+	MailOpen func() bool
 	// nil: the defaults.
 	Settings *InternalGateEdgeClientSettings
 }
 
 // See the file header.
 type InternalGateEdgeClientHandlers struct {
-	verifier         func() *server.InternalGateVerifier
-	loadConfig       func() (*server.EdgeClientsConfig, error)
-	edgeNetwork      func() (server.Id, bool)
-	environment      func() (string, error)
-	mintSocketsToken func(networkId server.Id, clientId server.Id) (string, time.Time, error)
-	settings         *InternalGateEdgeClientSettings
+	verifier                func() *server.InternalGateVerifier
+	loadConfig              func() (*server.EdgeClientsConfig, error)
+	edgeNetwork             func() (server.Id, bool)
+	environment             func() (string, error)
+	mintSocketsToken        func(networkId server.Id, clientId server.Id) (string, time.Time, error)
+	recordMailDirectMxProbe func(ctx context.Context, probe *model.MailDirectMxProbe) (bool, error)
+	mailOpen                func() bool
+	settings                *InternalGateEdgeClientSettings
+	mailDirectMxProbe       *InternalGateMailDirectMxProbeSettings
 
 	stateLock sync.Mutex
 	// the last edge.yml that parsed, and when the next read is due
@@ -149,28 +167,47 @@ func NewInternalGateEdgeClientHandlers(deps *InternalGateEdgeClientDeps) *Intern
 	if mintSocketsToken == nil {
 		mintSocketsToken = oauth.MintEdgeClientSocketsToken
 	}
+	recordMailDirectMxProbe := deps.RecordMailDirectMxProbe
+	if recordMailDirectMxProbe == nil {
+		recordMailDirectMxProbe = func(ctx context.Context, probe *model.MailDirectMxProbe) (bool, error) {
+			return model.RecordMailDirectMxProbe(ctx, probe, model.DnsUserRoot())
+		}
+	}
+	mailOpen := deps.MailOpen
+	if mailOpen == nil {
+		mailOpen = mailRoutesOpen
+	}
+	mailDirectMxProbe := settings.MailDirectMxProbe
+	if mailDirectMxProbe == nil {
+		mailDirectMxProbe = DefaultInternalGateMailDirectMxProbeSettings()
+	}
 	return &InternalGateEdgeClientHandlers{
-		verifier:         verifier,
-		loadConfig:       loadConfig,
-		edgeNetwork:      edgeNetwork,
-		environment:      environment,
-		mintSocketsToken: mintSocketsToken,
-		settings:         settings,
+		verifier:                verifier,
+		loadConfig:              loadConfig,
+		edgeNetwork:             edgeNetwork,
+		environment:             environment,
+		mintSocketsToken:        mintSocketsToken,
+		recordMailDirectMxProbe: recordMailDirectMxProbe,
+		mailOpen:                mailOpen,
+		settings:                settings,
+		mailDirectMxProbe:       mailDirectMxProbe,
 	}
 }
 
-// The one route, its pattern the client's path (server.EdgeClientMintPath), so both ends name one route.
+// The edge class's routes, each pattern the client's path (server.EdgeClientMintPath,
+// server.MailDirectMxProbeGatePath), so both ends name one route.
 func (self *InternalGateEdgeClientHandlers) Routes() []*router.Route {
 	return []*router.Route{
 		router.NewRoute("POST", server.EdgeClientMintPath, self.PostEdgeClient),
+		router.NewRoute("POST", server.MailDirectMxProbeGatePath, self.PostMailDirectMxProbe),
 	}
 }
 
-// Whether the request carries the edge class's bearer; otherwise it is answered 403 and counted, before anything is
-// read.
-func (self *InternalGateEdgeClientHandlers) authenticate(w http.ResponseWriter, r *http.Request) bool {
+// Whether the request carries the edge class's bearer; otherwise it is answered 403 and counted under route, before
+// anything is read.
+func (self *InternalGateEdgeClientHandlers) authenticate(w http.ResponseWriter, r *http.Request, route string) bool {
 	refuse := func(refusal string) bool {
-		quotaServiceRefusalCounter.WithLabelValues(internalGateRouteEdgeClient, refusal).Inc()
+		quotaServiceRefusalCounter.WithLabelValues(route, refusal).Inc()
 		http.Error(w, "Forbidden.", http.StatusForbidden)
 		return false
 	}
@@ -184,7 +221,7 @@ func (self *InternalGateEdgeClientHandlers) authenticate(w http.ResponseWriter, 
 	}
 	if caller != server.InternalGateCallerEdge {
 		if glog.V(1) {
-			glog.Infof("[internalgate]%s's bearer refused on %s\n", caller, internalGateRouteEdgeClient)
+			glog.Infof("[internalgate]%s's bearer refused on %s\n", caller, route)
 		}
 		return refuse("class")
 	}
@@ -222,7 +259,7 @@ func (self *InternalGateEdgeClientHandlers) unavailable(w http.ResponseWriter, r
 
 // POST /internal/gate/edge-client: one edge client's jwt and sockets token.
 func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter, r *http.Request) {
-	if !self.authenticate(w, r) {
+	if !self.authenticate(w, r, internalGateRouteEdgeClient) {
 		return
 	}
 	args := &server.EdgeClientMintArgs{}

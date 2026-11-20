@@ -466,6 +466,74 @@ type routerTestBufferedConn struct {
 
 func (self *routerTestBufferedConn) Read(b []byte) (int, error) { return self.reader.Read(b) }
 
+// Nothing the router's process runs writes mail_direct_mx or a DNS table (QD-1103, owner decision 639; QD-992,
+// D-OPS-1), by the SQL its stores can reach in model (router_sql_reach_test.go): the router's packages name model only
+// for its two stores; the direct-MX prober's store reaches only reads, of the rows it probes by, and its record
+// reaches no SQL at all, since api records each outcome; and the connection store's only writes are its
+// connection records. A model name the router's packages start to use fails here until the listing covers it.
+func TestRouterStoresWriteNoDirectMxOrDnsTable(t *testing.T) {
+	if names := routerModelNames(t); !slices.Equal(names, []string{"NewMxDirectMxStore", "NewMxEdgeStore"}) {
+		t.Fatalf("the router's packages name model's %v: list what each reaches here before it ships", names)
+	}
+	reachModel := loadRouterSqlReachModel(t, filepath.Join("..", "model"))
+
+	record := newRouterSqlReach(reachModel)
+	if !record.reachName("mxDirectMxStore.RecordDirectMxProbe") {
+		t.Fatal("model holds no direct-MX store record")
+	}
+	record.run()
+	if statements := record.sortedStatements(); 0 < len(statements) {
+		t.Errorf("the direct-MX store's record reaches SQL, where api records each outcome: %q", statements)
+	}
+
+	directMx := newRouterSqlReach(reachModel)
+	directMx.reachName("NewMxDirectMxStore")
+	if built := directMx.reachBuiltTypes("NewMxDirectMxStore"); !slices.Equal(built, []string{"mxDirectMxStore"}) {
+		t.Fatalf("NewMxDirectMxStore builds %v", built)
+	}
+	directMx.run()
+	directMxStatements := directMx.sortedStatements()
+	for _, statement := range directMxStatements {
+		t.Logf("direct mx: %s", statement)
+		if !routerSqlReadOnly(statement) {
+			t.Errorf("the direct-MX store reaches a statement that is not a read: %q", statement)
+		}
+	}
+	// the listing found the reads the prober lists by, so an empty listing cannot pass
+	for _, table := range []string{"mail_direct_mx", "mail_host_key", "dns_label"} {
+		if !slices.ContainsFunc(directMxStatements, func(statement string) bool { return strings.Contains(statement, "FROM "+table) }) {
+			t.Errorf("the direct-MX store's listing holds no read of %s: %q", table, directMxStatements)
+		}
+	}
+
+	edge := newRouterSqlReach(reachModel)
+	edge.reachName("NewMxEdgeStore")
+	if built := edge.reachBuiltTypes("NewMxEdgeStore"); !slices.Equal(built, []string{"MxEdgeStore"}) {
+		t.Fatalf("NewMxEdgeStore builds %v", built)
+	}
+	edge.run()
+	edgeWrites := []string{}
+	for _, statement := range edge.sortedStatements() {
+		t.Logf("edge: %s", statement)
+		if routerSqlReadOnly(statement) {
+			continue
+		}
+		tables := routerSqlWriteTables(statement)
+		if len(tables) == 0 {
+			t.Errorf("the connection store reaches a write whose table the listing cannot name: %q", statement)
+		}
+		for _, table := range tables {
+			if routerSqlZoneTable(table) || table != "mail_connection_record" {
+				t.Errorf("the connection store writes %q: %q", table, statement)
+			}
+			edgeWrites = append(edgeWrites, table)
+		}
+	}
+	if !slices.Contains(edgeWrites, "mail_connection_record") {
+		t.Errorf("the connection store's listing holds no insert of its records: %q", edge.sortedStatements())
+	}
+}
+
 // A mirror directory holding files, each modified at its time.
 func feedMirrorTestDirectory(t *testing.T, files map[string]string, modifiedTimes map[string]time.Time) string {
 	t.Helper()

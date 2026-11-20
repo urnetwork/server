@@ -77,7 +77,8 @@ const (
 	InternalGateCallerConnect InternalGateCaller = "connect"
 	// an edge block's platform credential (QD-812): tlsedge, mxedge's router and smtpedge each mount it, and it
 	// reaches only the route that mints the block's own urnetwork-edge clients' jwts and, beside each, the
-	// client's sockets token (EdgeClientMintPath; QD-1054)
+	// client's sockets token (EdgeClientMintPath; QD-1054), and the route mxedge's direct-MX prober records each
+	// probe's outcome on (MailDirectMxProbeGatePath; QD-1103), which moves only rows a Team's admin named
 	InternalGateCallerEdge InternalGateCaller = "edge"
 	// the platform listener's role-mail intake (owner decision 612; QD-1121): mxedge-platform alone mounts it, and it
 	// reaches only the route that files a role mail's notice (AbuseNoticeGatePath), whose one effect is a page at
