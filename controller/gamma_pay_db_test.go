@@ -519,6 +519,34 @@ func TestGammaUnavailableUntilTheOnChainSetupExists(t *testing.T) {
 				connect.AssertEqual(t, intent.Error.Code, PurchaseErrorCodeAssetUnavailable)
 			}
 		}
+		// the api's copy of gamma.yml names another deposit master than the
+		// biller signs for (a rollout half done): nothing is sold, since a
+		// hotkey it assigned could not be spent from
+		otherMaster, err := parseGammaSettings(gammaTestYaml(func(y *gammaYaml) {
+			y.Gamma.DepositHotkeySeed = ""
+			y.Gamma.DepositHotkeyMaster = gammaTestColdkey
+			y.Gamma.RpcUrls = []string{"sim://gamma"}
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		restoreOther := setGammaSettingsForTest(otherMaster, nil)
+		split, err := GammaTerms(clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, split.Available, false)
+		connect.AssertEqual(t, split.UnavailableReason, gammaNotConfigured)
+		refused := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib})
+		connect.AssertEqual(t, refused.Error.Code, PurchaseErrorCodeAssetUnavailable)
+		connect.AssertEqual(t, refused.Error.Message, gammaUnavailableMessage)
+		restoreOther()
+		agreed, err := GammaTerms(clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, agreed.Available, true)
+
 		// minting off (a stale oracle): terms say so, and a new purchase the
 		// deposit cannot already pay is refused as asset_unavailable
 		f.sim.priceAge = 301

@@ -254,16 +254,20 @@ var gammaAutoLastRun time.Time
 
 // gammaTerms is what /pay/gamma/terms shows, as the biller last judged it.
 type gammaTerms struct {
-	Netuid           uint16 `json:"netuid"`
-	ServiceHotkey    string `json:"service_hotkey"`
-	ServicesUrl      string `json:"services_url"`
-	FinalizedBlock   uint64 `json:"finalized_block"`
-	SpecVersion      uint32 `json:"spec_version"`
-	TaoUsdAccepted   uint64 `json:"tao_usd_accepted"`
-	PriceFedAt       uint64 `json:"price_fed_at"`
-	PriceAgeBlocks   uint64 `json:"price_age_blocks"`
-	GammaPerTao      uint64 `json:"gamma_per_tao"`
-	ServicePublished bool   `json:"service_published"`
+	Netuid        uint16 `json:"netuid"`
+	ServiceHotkey string `json:"service_hotkey"`
+	// the deposit master the biller signs for (its gamma.yml's): the api
+	// sells only while its own copy names the same one (gammaLoadView), so a
+	// hotkey it assigns is one the biller can spend from
+	DepositHotkeyMaster string `json:"deposit_hotkey_master"`
+	ServicesUrl         string `json:"services_url"`
+	FinalizedBlock      uint64 `json:"finalized_block"`
+	SpecVersion         uint32 `json:"spec_version"`
+	TaoUsdAccepted      uint64 `json:"tao_usd_accepted"`
+	PriceFedAt          uint64 `json:"price_fed_at"`
+	PriceAgeBlocks      uint64 `json:"price_age_blocks"`
+	GammaPerTao         uint64 `json:"gamma_per_tao"`
+	ServicePublished    bool   `json:"service_published"`
 }
 
 // RunGammaBiller is one run of the biller and the watcher.
@@ -465,11 +469,12 @@ func (self *gammaBiller) judge() (readiness string, mint string) {
 	runtime := self.runtime
 	at := self.head
 	self.terms = &gammaTerms{
-		Netuid:         settings.Netuid,
-		ServiceHotkey:  settings.ServiceAddress,
-		ServicesUrl:    settings.ServicesUrl,
-		FinalizedBlock: self.headNumber,
-		SpecVersion:    runtime.SpecVersion,
+		Netuid:              settings.Netuid,
+		ServiceHotkey:       settings.ServiceAddress,
+		DepositHotkeyMaster: gammaAddress(settings.DepositHotkeyMaster),
+		ServicesUrl:         settings.ServicesUrl,
+		FinalizedBlock:      self.headNumber,
+		SpecVersion:         runtime.SpecVersion,
 	}
 
 	mint = gammaReady

@@ -252,6 +252,14 @@ func gammaLoadView(clientSession *session.ClientSession) *gammaView {
 	if 0 < len(state.Terms) && json.Unmarshal(state.Terms, terms) == nil {
 		view.terms = terms
 	}
+	// Sell only while this copy of gamma.yml names the deposit master the
+	// biller signs for: a hotkey assigned from another master is one the
+	// biller cannot spend from (a rollout with the api and the taskworker on
+	// different gamma.yml, or terms from before the deposit seed). Until they
+	// agree, Gamma is not configured: "temporarily unavailable".
+	if view.terms == nil || view.terms.DepositHotkeyMaster != gammaAddress(settings.DepositHotkeyMaster) {
+		view.readiness, view.mint = gammaNotConfigured, gammaNotConfigured
+	}
 	return view
 }
 
