@@ -86,6 +86,7 @@ func m10Format2T3Cases() []*m10Format2T3Case {
 			},
 		},
 		{rowId: "FS-72", caseName: "rollback"},
+		{rowId: "FS-89", clauses: []*m10Format2T3Clause{{name: "now", build: fault.Fs89Now}}},
 		{rowId: "FS-91", clauses: []*m10Format2T3Clause{{name: "within the window", build: fault.Fs91ReleasedWithinTheWindow}}},
 		{rowId: "FS-94", clauses: []*m10Format2T3Clause{{name: "record class", build: fault.Fs94RecordClass}}},
 		{
@@ -100,6 +101,24 @@ func m10Format2T3Cases() []*m10Format2T3Case {
 			},
 		},
 	}
+}
+
+// FS-89's T3 tests by the gate's convention, for the schedule EVS2-M10-35 closes (sidecartest/fault/fs89.go), at the
+// nightly seeds: the registered case, and its --now clause with the store clock the row's case is flagged for.
+func TestFs89OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-89", "", nil)
+	})
+}
+
+func TestFs89NowOnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		settings := sidecart3.DefaultSettings()
+		if fault.DefaultCatalog().Case("FS-89", "").StoreClock {
+			settings.StoreClock = sidecart3.DefaultStoreClockSettings()
+		}
+		fault.RunClause(tb, "FS-89", "now", fault.Fs89Now, sidecart3.RuleSettings(tb, settings))
+	})
 }
 
 // T3's rules for testCase at a merge's seeds, with the store clock exactly when catalog.yml flags the case.
