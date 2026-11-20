@@ -1413,7 +1413,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 - The front counts `tls_handshake` server errors, 230–288/s on edge-3 and edge-4 and 38–39/s on edge-0 and edge-1 at the rollout and about 456/s fleet-wide by 15:20Z, which nginx never counted, so there is no baseline. `connect/front_metrics.go:frontHttpServerErrorsCounter` now labels each with a bounded `reason` (`connect/front_http.go:frontTlsHandshakeReason`: closed, timeout, version, cipher, certificate, unknown_name, alpn, not_tls, client_alert, other; `-` for the other kinds), read from crypto/tls's error text, which `TestFrontHttpsLabelsRealFailedHandshakesByReason` pins with real handshakes.
 - Handshake accounting (LBALTOPT1.md R4, R12; 2026-11-20, not deployed): QUIC `handshake_failed` gains a `reason` (idle_timeout, handshake_timeout, certificate, no_alpn, unknown_name, version, peer_closed, canceled, other), completed handshakes are counted over TCP and QUIC, and every QUIC ClientHello by the class of its name (§11.2). A name the front doesn't serve on QUIC fails before quic-go accepts the connection, so `handshake_failed` has only ever counted served names, and the failures of alt-named clients were counted nowhere until `urnetwork_front_quic_client_hellos_total`.
 - Peak-hour CPU, measured 2026-11-20 (§11.8): at or below the same hours of the day before under nginx on every fronted host. It is one day's comparison, with clients spread differently across the edges.
-- `urnetwork_connect_connection_new` has read 0 fleet-wide since the 05:06Z deploy, and fell after the 01:54Z canary deploy. It isn't lb_alt's; to investigate.
+- `urnetwork_connect_connection_new` isn't broken (corrected 2026-11-20, LBALTOPT2.md §3.9). It reads 0 for two hours after every connect start, by design: until `serviceTransitionTime`, the start plus 2 × `DrainAllTimeout` (60 minutes), the announce treats each new connection as established (`connect/transport.go:1103`), so a deploy's reconnects don't count against providers. Outside those windows it ran at 9–14 a second on 11-20. That day's five connect deploys kept it at 0 for much of the day, which read as a fault.
 - Edge-0's three interfaces were rolled back twice in production, unplanned (§11.8). The rollback worked each time, which covers Gate A item 2.
 - whodis on UDP 4053 is unverified from outside: probed from one workstation over IPv4, it timed out on every interface and on alt alike (§11.8).
 - crisp's and fireside's lb units still pass `--reservedudpports` for alt's UDP ports until their next run-edges.sh, which restarts each lb unit once.
@@ -1494,6 +1494,20 @@ Every non-transparent lb interface of edge-0, 1, 3 and 4 runs lb_alt since 2026-
 - Phase 2: `run-warp-units.sh connect <block>` for beta and g1 to g4, 15 restarts on edge-0, 3 and 4 (edge-1's units were current), giving their blocks fronts and `cores: 20`. Their reconnect waves took edge-3 and edge-4 to 89% and 93% CPU for a few minutes.
 - Phase 3: run-lb-unit.sh on edge-0 `eno2np1`, `eno3np2` and `eno4np3` (splits at 06:15:52 to 06:16:39Z), then edge-3 `eno1np0` and `eno2np1`, edge-4 `eno3np2` and `eno4np3`, and edge-1 `eno2np1` and `eno4` (06:19:18 to 06:21:31Z). Each found its blocks ready at its first reconcile and switched at once. The nginx containers drain for DrainTimeout, to about 07:16 to 07:22Z.
 - First readings, 06:22Z: the lb status route answers 2xx on every host, so Route53 keeps every interface. No forward errors; 5xx and retries at most 0.03 a second a host; api p99 138 to 178 ms. Connect QUIC connections, which nginx never carried, run 7 to 26 a second a host. Every front socket is up (480, 480, 320 and 320 on edge-0, 1, 3 and 4), with no restarts and no receive drops. CPU 56 to 78%; 256.6k clients.
+
+**Deploying connect** (LBALTOPT2.md §3.10). A connect deploy restarts every public front on the host, so it's a reconnect wave for all clients, api's included:
+- **Spaced waves:** one block per `warpctl deploy-local main connect --percent=…` step (20, 40, 60, 80, 100), at least 5–7 minutes apart, and longer before a large block (g2, g4).
+- **Drain-end switching:** while the previous generation is still draining, tag every block at once and let each switch as its own drain ends.
+
+What each way cost on 2026-11-20:
+
+| Way | Busy CPU peak (one minute) | Client dip |
+|---|---|---|
+| All at once | 90–91% | about 28k at once |
+| Spaced waves | 84–86% | per block, recovering within minutes |
+| Drain-end switching | 78.5–83.5% | 5% of the fleet at worst |
+
+Following one block 2.5 minutes after another pushed edge-3 to 89.5%. Refusals double during a wave, as reconnecting clients from shared addresses meet the per-address limits.
 
 **Rolling an interface back:** `lb.interfaces.<host>.<interface>.lb_alt: false` in services.yml, then `run-lb-unit.sh <host> <interface> --rollback` (xops 0560312 refuses an lb unit that would drop lb_alt without `--rollback`), which puts nginx's redirect back ahead of the split and then removes the split (§11.3 (d), D18). Once `alt.*` has moved, D20 applies.
 
