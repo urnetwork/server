@@ -14,6 +14,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -287,6 +288,107 @@ func TestDnsMtaStsRefreshWaitsOutASuspension(t *testing.T) {
 		want := map[string]string{dnsMtaStsLabel + "." + apex: testDnsMtaStsValue(apex)}
 		if rows := testDnsMtaStsRows(t, ctx, root, networkId); !maps.Equal(rows, want) {
 			t.Fatalf("after Restore and a refresh _mta-sts %v, want %v", rows, want)
+		}
+	})
+}
+
+// A refresh waits out a reconcile in flight: a reconcile that read the network verified and wrote _mta-sts is held
+// uncommitted while the verification is cleared and the clearing writer's refresh runs. That refresh waits on the
+// zone's lock, an observed lock wait, and once the reconcile commits it reads the record and takes it away, so the
+// zone never keeps a record its network has lost. A check that read around the writer would find no record, read
+// nothing stale and leave the reconcile's record standing.
+func TestDnsMtaStsRefreshWaitsOutAReconcileInFlight(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, adminUserId, apex := testDnsUnverifiedNetwork(t, ctx, root)
+		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {
+			t.Fatal(err)
+		}
+		testAddPasswordAuth(t, ctx, adminUserId, UserAuthTypeEmail, true)
+
+		reconcilePid := make(chan int32, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseReconcile := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseReconcile()
+		reconciled := make(chan any, 1)
+		go func() {
+			reconciled <- server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					if err := reconcileDnsZoneMailPolicyInTx(ctx, tx, networkId, root); err != nil {
+						panic(err)
+					}
+					reconcilePid <- lastOwnerTestBackendPid(ctx, tx)
+					<-release
+				}, server.TxReadCommitted)
+			})
+		}()
+		blockerPid := <-reconcilePid
+
+		testDnsSetPasswordAuthVerified(t, ctx, adminUserId, false)
+		refreshed := make(chan bool, 1)
+		go func() {
+			refreshed <- UpdateNetworkVerified(ctx, networkId)
+		}()
+		if _, err := waitForLastOwnerLockWaiter(ctx, blockerPid); err != nil {
+			t.Fatalf("the refresh never waited on the reconcile: %v", err)
+		}
+		releaseReconcile()
+		if r := <-reconciled; r != nil {
+			t.Fatalf("the reconcile in flight: %v", r)
+		}
+		if verified := <-refreshed; verified {
+			t.Fatal("the clearing refresh read verified")
+		}
+		if rows := testDnsMtaStsRows(t, ctx, root, networkId); len(rows) != 0 {
+			t.Fatalf("the zone kept %v after its network lost verification", rows)
+		}
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+			t.Fatalf("serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	})
+}
+
+// Checks hold the zone's lock shared and never wait on one another: one held open leaves another free to read,
+// within the transaction's lock bound.
+func TestDnsMtaStsChecksDoNotWaitOnOneAnother(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, adminUserId, _ := testDnsUnverifiedNetwork(t, ctx, root)
+		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {
+			t.Fatal(err)
+		}
+		testAddPasswordAuth(t, ctx, adminUserId, UserAuthTypeEmail, true)
+
+		held := make(chan bool, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseCheck := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseCheck()
+		checked := make(chan any, 1)
+		go func() {
+			checked <- server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					held <- isDnsZoneMailPolicyStaleInTx(ctx, tx, root, networkId, server.NowUtc())
+					<-release
+				}, server.TxReadCommitted)
+			})
+		}()
+		if stale := <-held; !stale {
+			t.Fatal("a verified network with no record read current")
+		}
+		stale := false
+		server.Tx(ctx, func(tx server.PgTx) {
+			stale = isDnsZoneMailPolicyStaleInTx(ctx, tx, root, networkId, server.NowUtc())
+		}, server.TxReadCommitted)
+		if !stale {
+			t.Fatal("the second check read current")
+		}
+		releaseCheck()
+		if r := <-checked; r != nil {
+			t.Fatalf("the held check: %v", r)
 		}
 	})
 }
