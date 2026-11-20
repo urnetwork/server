@@ -2677,6 +2677,7 @@ type reapHoldTestNetworks struct {
 	inactiveClientId server.Id
 }
 
+// The networks and clients, each idle or past its window as of now.
 func newReapHoldTestNetworks(ctx context.Context, t testing.TB, now time.Time) *reapHoldTestNetworks {
 	t.Helper()
 	networks := &reapHoldTestNetworks{
