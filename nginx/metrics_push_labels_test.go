@@ -33,6 +33,7 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	// the forwarder's metrics are the process's, in the default registry. This
 	// registry gathers them too, with one synthetic series each, removed after
 	registry.MustRegister(
+		upstreamConnectionsCounter,
 		upstreamAttemptsCounter,
 		upstreamRetriesCounter,
 		forwardErrorsCounter,
@@ -43,12 +44,14 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 		bodySpillFilesGauge,
 	)
 	serviceName := "push-labels-test"
+	upstreamConnectionsCounter.WithLabelValues(serviceName, upstreamConnectionReused).Inc()
 	upstreamAttemptsCounter.WithLabelValues(serviceName, "g1", upstreamAttemptResponse).Inc()
 	upstreamRetriesCounter.WithLabelValues(serviceName, upstreamAttemptHttp503).Inc()
 	forwardErrorsCounter.WithLabelValues(serviceName, "502").Inc()
 	forwardBodyRefusalsCounter.WithLabelValues(serviceName, "canceled").Inc()
 	forwardTunnelsGauge.WithLabelValues(serviceName).Inc()
 	defer func() {
+		upstreamConnectionsCounter.DeleteLabelValues(serviceName, upstreamConnectionReused)
 		upstreamAttemptsCounter.DeleteLabelValues(serviceName, "g1", upstreamAttemptResponse)
 		upstreamRetriesCounter.DeleteLabelValues(serviceName, upstreamAttemptHttp503)
 		forwardErrorsCounter.DeleteLabelValues(serviceName, "502")
