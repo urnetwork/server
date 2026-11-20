@@ -34,6 +34,9 @@
 --     from migration_audit's successful runs.
 --   - The session records, MxEdgeStore.InsertConnectionRecords (model.WriteMailConnectionRecords): one insert a
 --     batch into mail_connection_record, from the 10 s batch goroutine only (I-12).
+--   - The store's probe, MxEdgeStore.Ping, the router's readiness (QD-1133): whether mail_connection_record is a
+--     partitioned table, read from the catalog on the block's main pool (model's mailConnectionTablePartitionedInConn).
+--     pg_class and to_regclass answer any role, so the read needs no grant.
 --   - The direct MX's prober, mxDirectMxStore.ListDirectMx (MAIL-M7-23), in one read-only transaction: every
 --     mail_direct_mx row, each network's label (dns_label, GetNetworkLabel's read) and each network's published
 --     keys for mx (mail_host_key). Each probe's outcome goes to api's internal route on the edge bearer
@@ -59,11 +62,10 @@
 --     PostgreSQL 15 or later that is USAGE on schema public and TEMPORARY on the database, never CREATE on the
 --     schema, which an older database gave PUBLIC and the owner revokes there, if it still does.
 --
--- What this role does not fix: MxEdgeStore.Ping, the router's readiness probe of its store, reads the catalog
--- (model's mailConnectionTablePartitioned) on the maintenance pool, which the block does not have, so it fails
--- whatever this role grants and the router never reports ready. The read needs no grant: pg_class and to_regclass
--- answer any role. Ping has to read on the block's main pool (question pg-edge-roles-mxedge-ping-maintenance-pool);
--- until then the block stays not ready, the closed direction.
+-- So the router reports ready under this role: MxEdgeStore.Ping passes on the block's own vault, as
+-- server/db_edge_roles_test.go holds. The same catalog read on the maintenance pool is the partition family's
+-- Partitioned hook (model's mailConnectionTablePartitioned), which only the registry's runway and retirement call,
+-- in taskworker under the platform's role, never the router.
 
 \set ON_ERROR_STOP on
 

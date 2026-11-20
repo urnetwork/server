@@ -121,15 +121,27 @@ var mailConnectionRecordPartitionFamily = server.RegisterPartitionFamily(
 	newMailConnectionRecordPartitionFamily(DefaultMailConnectionSettings()),
 )
 
-// Whether mail_connection_record is a partitioned table in this database.
+// Whether mail_connection_record is a partitioned table in this database, read
+// on the maintenance pool: the partition family's Partitioned hook, which the
+// registry's runway and retirement call where that pool is. mxedge's probe
+// reads the same on the main pool (MxEdgeStore.Ping), since the router's block
+// has no maintenance pool (QD-1133).
 func mailConnectionTablePartitioned(ctx context.Context) (partitioned bool) {
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(
-			ctx,
-			`SELECT COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass($1)), false)`,
-			"public."+mailConnectionRecordTable,
-		).Scan(&partitioned))
+		partitioned = mailConnectionTablePartitionedInConn(ctx, conn)
 	})
+	return
+}
+
+// Whether mail_connection_record is a partitioned table in this database, read
+// on the caller's connection from the catalog, which any role may read: no
+// grant is needed.
+func mailConnectionTablePartitionedInConn(ctx context.Context, conn server.PgQuerier) (partitioned bool) {
+	server.Raise(conn.QueryRow(
+		ctx,
+		`SELECT COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass($1)), false)`,
+		"public."+mailConnectionRecordTable,
+	).Scan(&partitioned))
 	return
 }
 

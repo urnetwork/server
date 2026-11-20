@@ -109,13 +109,14 @@ var edgeRoleMxedge = &edgeRoleBlock{
 		"NewMxDirectMxStore": {"new:NewMxDirectMxStore"},
 	},
 	runs: map[string]string{
-		"writeMailConnectionRecordsAt":       "InsertConnectionRecords",
-		"mxDirectMxStore.ListDirectMx":       "ListDirectMx",
-		"getNetworkLabelInTx":                "ListDirectMx",
-		"mailDirectMxPublishedKeysWithQuery": "ListDirectMx",
+		"writeMailConnectionRecordsAt":         "InsertConnectionRecords",
+		"mailConnectionTablePartitionedInConn": "Ping, on the main pool (QD-1133)",
+		"mxDirectMxStore.ListDirectMx":         "ListDirectMx",
+		"getNetworkLabelInTx":                  "ListDirectMx",
+		"mailDirectMxPublishedKeysWithQuery":   "ListDirectMx",
 	},
 	notRun: map[string]string{
-		"mailConnectionTablePartitioned": "Ping's check, and the partition family's Partitioned hook, on the maintenance pool, which the block does not have, so Ping fails whatever the role grants (question pg-edge-roles-mxedge-ping-maintenance-pool)",
+		"mailConnectionTablePartitioned": "the partition family's Partitioned hook, on the maintenance pool, which the block does not have: the runway's and the retirement's in taskworker",
 		"connectionRecordRangeHold":      "the partition family's DropPrecondition: the retirement's, in taskworker",
 		"AbuseHoldCopyPending":           "the partition family's DropPrecondition: the retirement's, in taskworker",
 		"unregisteredHoldCopyPending":    "the partition family's DropPrecondition: the retirement's, in taskworker",
@@ -1093,10 +1094,10 @@ func TestEdgeRoleTlsedgeStoreRunsUnderItsGrants(t *testing.T) {
 }
 
 // mxedge's router under its role: its start's read of the migration head, ListDirectMx with a row, a label and a
-// published key, and a batch into an hour the runway made all pass. A batch into an hour with no partition fails and
-// makes none. Ping fails: it reads on the maintenance pool, which the block does not have, though its statement runs
-// under the role on the main pool. And what the role is not granted is refused: the direct MX's and the zone's
-// writes, which are api's (QD-1103), and §21's kick and cases.
+// published key, a batch into an hour the runway made, and Ping, the router's readiness, which reads the catalog on
+// the block's own pool with no grant (QD-1133), all pass. A batch into an hour with no partition fails and makes
+// none. And what the role is not granted is refused: the direct MX's and the zone's writes, which are api's
+// (QD-1103), and §21's kick and cases.
 func TestEdgeRoleMxedgeRouterRunsUnderItsGrants(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		if !server.SidecarMg7Linked() {
@@ -1166,13 +1167,10 @@ func TestEdgeRoleMxedgeRouterRunsUnderItsGrants(t *testing.T) {
 				t.Fatal("mxedge stored a batch whose hour has no partition, with no maintenance pool to make it")
 			}
 
-			// the gap Ping is (question pg-edge-roles-mxedge-ping-maintenance-pool): its catalog read needs no grant,
-			// and fails only for the pool it reads on
-			if err := store.Ping(ctx); err == nil {
-				t.Fatal("Ping answered with no maintenance pool: say in mxedge.sql that the router can now be ready")
-			}
-			if err := edgeRoleExec(ctx, `SELECT COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass('public.mail_connection_record')), false)`); err != nil {
-				t.Fatal("Ping's statement under mxedge's role on the main pool:", err)
+			// the router's readiness: Ping reads the catalog on the block's own pool, where the batch above found no
+			// maintenance pool, and answers that the table is partitioned under the role (QD-1133)
+			if err := store.Ping(ctx); err != nil {
+				t.Fatal("Ping under mxedge's role on the block's own vault:", err)
 			}
 
 			checkEdgeRoleRefuses(t, ctx, edgeRoleMxedge, []string{
