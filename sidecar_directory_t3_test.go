@@ -7,7 +7,9 @@
 // device parked for consent, an r token for the read_only sidecar; and X's ERASE of another writer's entry slots, its
 // ?closure=1 upload and its POST .../slots/delete are refused 403 SCOPE by the handler server runs, with every slot's
 // ETag in the store as it was, before a preservation hold and under one, beside the admin's ERASE and upload, which
-// are taken. The clause runs under every rule FS-99 takes with T3's nightly seeds (fault.RunClause).
+// are taken. The clause runs under every rule FS-99 takes with T3's nightly seeds (fault.RunRegisteredClause), a clause of
+// FS-99's entries case registered in sidecartest/fault's clauses_directory.go, so its test takes the gate's name for it
+// (QD-1084).
 //
 // The stack must be up (sidecar/local/stack.sh), and these fail rather than skip without it.
 //
@@ -36,9 +38,9 @@ func sidecarDirectoryT3TestEnv() *server.TestEnv {
 	return &server.TestEnv{ApplyDbMigrations: false}
 }
 
-func TestFs99EvsScopeOnT3(t *testing.T) {
+func TestFs99EntriesEvsScopeOnT3(t *testing.T) {
 	sidecarDirectoryT3TestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, "FS-99", "evs scope", fault.Fs99EvsScope, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, "FS-99", "evs scope", sidecart3.RuleSettings(tb, nil))
 	})
 }
 
