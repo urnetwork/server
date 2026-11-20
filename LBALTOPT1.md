@@ -7,12 +7,12 @@ Status: measured 2026-11-20, the day lb_alt reached all 10 non-transparent lb in
 **lb_alt saves about 17% of host CPU for the same traffic.**
 - **Within-host test:** the cleanest measurement comes from edge-0. One stale controller rolled it back to nginx from 09:08 to 14:08Z (LBALT.md §11.8), with the same connect build and config before and after. Its busy CPU per Gbps of NIC traffic, relative to the three edges that stayed on lb_alt:
   - 1.20× on nginx;
-  - 0.97× and 1.00× in its two lb_alt windows.
+  - 0.97× and 0.99× in its two lb_alt windows.
 - **Across the two days:** busy cores per Gbps fell 12–19% on edge-1, 3 and 4. Edge-0, on nginx in both windows, fell 1.5%.
 - **Where it comes from:** host CPU outside the Go services fell from 10.5–13.9 cores to about 2. System and softirq time carry most of the saving. nginx's loopback hop, 1.2–1.6 Gbps of loopback traffic per host, is gone.
 - **Fleet-wide:** about 35 cores at midday across the four edges.
 
-**The front costs connect very little.** On edge-0, connect's own CPU per Gbps was the same on nginx (8.20) as on lb_alt (8.09–8.37). connect does allocate 15–25% more per Gbps with the front. Without a profile that can't be attributed (§4).
+**The front costs connect very little.** On edge-0, connect's own CPU per Gbps was the same on nginx (8.20) as on lb_alt (7.99–8.37). connect does allocate 15–25% more per Gbps with the front. Without a profile that can't be attributed (§4).
 
 **At the morning peak, host CPU is at or below the day before.**
 
@@ -26,7 +26,7 @@ Window: 07:30–13:55Z. Edge-4 carried 80k clients, against 62k the day before. 
 
 **The issues worth fixing are mostly outside raw CPU** (§5):
 - **Refusals:** the per-address limits refuse 14% of front requests. connect's upgrade requests are refused about as often as they are accepted, as they were under nginx.
-- **Failed handshakes:** QUIC handshakes fail about 9 times as often as they complete. TLS handshakes fail 463 times a second. Neither has a reason in production yet; the TLS reason is merged to main in 5ba2c9f6f but not deployed.
+- **Failed handshakes:** QUIC handshakes fail about 9 times as often as they complete, and the QUIC failures have no reason. TLS handshakes fail 463 times a second. Their reason is counted since the connect hotfix of 15:36–15:42Z (5ba2c9f6f on main); §3.7 has the breakdown.
 - **Unalerted rollbacks:** edge-0 was rolled back twice with no alert.
 - **No way to profile:** nothing can profile the front in production, and api has no latency histogram.
 
@@ -42,11 +42,11 @@ Window: 07:30–13:55Z. Edge-4 carried 80k clients, against 62k the day before. 
 | Window | What it compares |
 |---|---|
 | 10:00–13:00Z, 11-20 against 11-19 | edge-1, 3 and 4 on lb_alt against the same hours on nginx. edge-0 was on nginx in both, so it is the control. |
-| edge-0, three windows on 11-20 | 08:20–09:05Z on lb_alt (after its re-apply's drain), 10:15–14:05Z on nginx (after the rollback's fronts drained), and 15:10–15:40Z on lb_alt (after the second drain). Each is compared with edge-1, 3 and 4 in the same window. |
+| edge-0, three windows on 11-20 | 08:20–09:05Z on lb_alt (after its re-apply's drain), 10:15–14:05Z on nginx (after the rollback's fronts drained), and 15:10–15:35Z on lb_alt (after the second drain, before the connect deploy). Each is compared with edge-1, 3 and 4 in the same window. |
 | 07:30–13:55Z, 11-20 against 11-19 | Peak and mean host CPU, after the rollout's nginx drains ended. |
 | 15:04–15:24Z, 11-20 | The front's request mix, latency, forwarder, limits and handshakes, with every interface fronted. |
 
-Reconnect waves are excluded: the rollout's drain ends at 07:16–07:22Z, edge-0's drain end at 15:08Z, and any connect deploy. Busy CPU is every mode but idle and iowait, from `node_cpu_seconds_total`. Traffic is NIC receive plus transmit on the `en*` devices. The node and process series come from the stats push and node exporter. Appendix A lists the queries.
+Reconnect waves are excluded: the rollout's drain ends at 07:16–07:22Z, edge-0's drain end at 15:08Z, and the connect hotfix that carries the TLS failure reasons. That hotfix is `2026.11.20-outerwerld+1103888290`, server 997b59696; it reached beta at 15:36:01–15:36:54Z and g1 to g4 at 15:39:58–15:41:51Z. Busy CPU is every mode but idle and iowait, from `node_cpu_seconds_total`. Traffic is NIC receive plus transmit on the `en*` devices. The node and process series come from the stats push and node exporter. Appendix A lists the queries.
 
 Two confounds limit the cross-day comparison:
 - connect's build changed overnight: the canary build at 01:54Z, then the metrics hotfix at 05:06Z.
@@ -73,7 +73,7 @@ Edge-0's three windows on 11-20. The ratio column is edge-0's cores per Gbps ove
 |---|---|---|---|---|---|---|
 | lb_alt, 08:20–09:05Z | 11.23 | 0.965 | 2.9 | 14.9 | 8.37 | 0.39 |
 | nginx, 10:15–14:05Z | 12.95 | 1.204 | 10.7 | 20.5 | 8.20 | 1.14 |
-| lb_alt, 15:10–15:40Z | 10.41 | 0.995 | 1.6 | 10.2 | 8.09 | 0.22 |
+| lb_alt, 15:10–15:35Z | 10.35 | 0.989 | 2.7 | 16.3 | 7.99 | 0.34 |
 
 ### 3.2 Where the CPU goes, by mode and process
 
@@ -107,7 +107,7 @@ Edge-0's three windows on 11-20. The ratio column is edge-0's cores per Gbps ove
   - none has a CPU quota (`cpu.max` is `max`), so `cores: 20` sets GOMAXPROCS only, and `nr_throttled` is 0;
   - CPU pressure averages at most 0.38% over 10 s, and memory pressure is 0;
   - resident memory per block is 2 GiB (beta), 44, 44, 75 and 79 GiB.
-- **Allocation on edge-0:** it allocated 240.7 and 237.2 MB per Gbps in its lb_alt windows, against 189.8 MB per Gbps on nginx (+25%). Allocations ran at 1.31–1.33M per Gbps against 1.15M (+15%), or about 0.45M more a second at 15:10–15:40Z.
+- **Allocation on edge-0:** it allocated 240.7 and 234.9 MB per Gbps in its lb_alt windows, against 189.8 MB per Gbps on nginx (+23–27%). Allocations ran at 1.29–1.33M per Gbps against 1.15M (+12–16%), or about 0.6M allocations and 190 MB more a second at 15:10–15:35Z.
 
 ### 3.4 Requests through the fronts
 
@@ -191,17 +191,17 @@ Steady state, 11:00–13:00Z on edge-1, 3 and 4:
 
 ## 4. Where connect's CPU goes, compared with nginx
 
-**nginx's share.** LBALT.md §7.1 put nginx at 9–10 cores and 17–24 GiB per services host. The measured non-Go CPU drop says the same: about 11 cores per host on 11-19 against about 2 on lb_alt, and 10.7 against 1.6–2.9 on edge-0. Those cores came out of system and softirq time, besides nginx's own user time. Two hops are gone:
+**nginx's share.** LBALT.md §7.1 put nginx at 9–10 cores and 17–24 GiB per services host. The measured non-Go CPU drop says the same: about 11 cores per host on 11-19 against about 2 on lb_alt, and 10.7 against 2.7–2.9 on edge-0. Those cores came out of system and softirq time, besides nginx's own user time. Two hops are gone:
 - nginx's TLS-to-loopback proxying of connect's websockets, which carried 1.2–1.6 Gbps of loopback traffic per host;
 - its UDP PROXY path.
 
-**The front inside connect.** On edge-0, connect's CPU per Gbps didn't move between nginx and lb_alt (8.20 against 8.09–8.37). The pieces the front added are each small at today's rates. These are estimates; R1's profile replaces them:
-- **TLS record crypto:** AES-128-GCM on 2.6–4.5 Gbps a host is about 0.3–0.6 cores with AES-NI.
+**The front inside connect.** On edge-0, connect's CPU per Gbps didn't move between nginx and lb_alt (8.20 against 7.99–8.37). The pieces the front added are each small at today's rates. These are estimates; R1's profile replaces them:
+- **TLS record crypto:** AES-128-GCM on 3.3–5.0 Gbps a host is about 0.3–0.6 cores with AES-NI.
 - **Handshakes:** about 500 a second per host, counting the accepted sessions, the canceled ones and the failures, at ECDSA P-256 plus X25519. That's about 0.1 core.
 - **h2 serving and forwarding:** 2–4k requests a second per host is about 0.1–0.3 cores.
 - **Per-write bookkeeping:** `frontTrackedConn.Write` (`connect/front_http.go`) takes one uncontended mutex per write. connect sets its own write deadline on every write (`connect/transport.go`, `connect/resident.go`), so the front's send_timeout bound is skipped. That's about 60k writes a second per host, negligible.
 
-**Allocation.** connect allocates 15–25% more per Gbps with the front, about 0.45M allocations and 136 MB a second per host. A plausible but unconfirmed list of sources:
+**Allocation.** connect allocates 15–25% more per Gbps with the front, about 0.6M allocations and 190 MB a second on edge-0. A plausible but unconfirmed list of sources:
 - each handshake: crypto/tls state, plus net/http's pooled bufio reader and writer, which a hijacked connection keeps;
 - h2 per-request state;
 - `forwardRequestHead`'s 1 KiB head;
@@ -217,7 +217,7 @@ At GOGC 100 with 36–41 GB heaps per block, GC runs about every 125 s per block
 - **P1. Host CPU per Gbps is 17% lower.** nginx's ~11 cores per host are gone (§3.1, §3.2).
 - **P2. The front is not a CPU problem today.** It is within noise of connect's per-Gbps CPU, but it allocates 15–25% more per Gbps (§4).
 - **P3. GC is infrequent and probably cheap,** but unmeasured. There is no GC CPU class in Mimir, and the 36–79 GiB per-block heaps make each cycle large (§3.3).
-- **P4. Each 72-CPU host runs up to 100 Go Ps:** 5 blocks at GOMAXPROCS 20, with no CPU quota. Pressure is low (§3.3), but at peaks the blocks compete with one another and with the kernel's softirq time. No scheduler latency is measured.
+- **P4. Every edge runs up to 100 connect Ps** (5 blocks at GOMAXPROCS 20) with no CPU quota, plus the other services' Ps. That's more than edge-1's, edge-3's and edge-4's 72 CPUs each, and about edge-0's 96. Pressure is low (§3.3), but at peaks the blocks compete with one another and with the kernel's softirq time. No scheduler latency is measured.
 - **P5. Refused requests are 14% of front requests** (§3.6). Each costs a request parse and often a handshake, and refused clients retry.
 - **P6. Failed handshakes dominate QUIC:** 210 a second against 24 completed. On TCP, 463 handshakes a second fail (§3.7).
 - **P7. connect sessions churn:** 920 a second fleet-wide, with a median life of 4–6 s, about as on 11-19 (§3.8). Every new session pays a handshake and connect's session setup. That setup, not TLS, is what the reconnect waves cost: edge-3 and edge-4 reached 89–93% CPU (LBALT.md §11.8).
@@ -225,7 +225,7 @@ At GOGC 100 with 36–41 GB heaps per block, GC runs about every 125 s per block
 
 **Correctness and operations**
 - **C1. Rollbacks without an alert.** A stale controller's run-lb-unit.sh rolled edge-0 back twice (LBALT.md §11.8). Nothing alerted, because monitor.yml's `lbalt_status` isn't enrolled (LBALT.md §11.6), and the second rollback was found 5 hours later by reading metrics.
-- **C2. Unexplained handshake failures.** The TLS failures have no reason in production until 5ba2c9f6f deploys. The QUIC failures have no reason at all: `frontQuicRun.serveConnect` and `serveApi` count `handshake_failed` without the error from `AwaitQuicHandshake`.
+- **C2. Unexplained QUIC handshake failures.** The TLS failures carry a bounded reason since the 15:42Z hotfix (§3.7). The QUIC failures have none: `frontQuicRun.serveConnect` and `serveApi` count `handshake_failed` without the error from `AwaitQuicHandshake`, so a timeout, a TLS alert and a version mismatch look the same.
 - **C3. A misfiled body failure.** A client gone mid-body counts as `incomplete` (400) when its read fails with a reset: `nginx/body.go:bodyReadRefusal` treats only a canceled context or a timeout differently. The client never sees the 400, so `canceled` undercounts clients that went away. This is metric accuracy only.
 - **C4. A connect deploy is now a front deploy.** It restarts every public listener on the host, api's h2 connections included, so every connect deploy is a reconnect wave for all clients, not only connect's. D12's drain softens it, and the waves' cost is P7's.
 - **C5. Observability gaps:**
@@ -245,8 +245,8 @@ Ranked by impact over effort, with risk.
 | R1 | An opt-in pprof listener on loopback per connect process, off by default, enabled by a setting and bound to 127.0.0.1 on a block-specific port; or a signal that writes a CPU and heap profile to a file in the container. | High: every CPU decision below needs it | S | L: loopback only, no new public surface | A 30 s CPU profile and a heap profile from one block at peak; attribute §4's allocation increase and connect's 8 cores per Gbps. |
 | R2 | Rollout safety. run-lb-unit.sh, run-warp-units.sh and run-edges.sh refuse to install when the controller's warp or vault checkout is behind origin's main, or when a rendered lb unit drops lb_alt flags the installed one has. Enroll `lbalt_status` (LBALT.md §11.6) so an interface leaving lb_alt alerts in minutes. | High: correctness | S–M | L | Re-run §11.8's stray case in a test: the stale render is refused. In production, alert latency for an interface leaving lb_alt. |
 | R3 | Refusal zones, then limits. Add a bounded `zone` label (the route zone, or the interface's default) to `urnetwork_front_limit_refusals_total` (`nginx/route_http.go:serveLocation`, `nginx/limit.go:frontLimits.acquireRequest`). Then decide whether connect upgrades from shared addresses deserve a higher or identity-keyed limit, applied after auth, where the client is known. | Medium to high: 14% of requests and client experience | M | M: abuse controls | Refusals by zone; the refused share of connect upgrades; `client_canceled` and session churn per active session. |
-| R4 | Handshake accounting. Count completed TLS handshakes by full or resumed (`tls.ConnectionState.DidResume`), version and ALPN, with a duration histogram. Give QUIC `handshake_failed` a bounded reason from `AwaitQuicHandshake`'s error: idle timeout, handshake timeout, crypto alert, version, canceled. Deploy 5ba2c9f6f's TLS reasons. | Medium | S | L | Full against resumed handshakes a second per host; the reasons of the 463 TLS and 210 QUIC failures a second. |
-| R5 | Runtime metrics. Export runtime/metrics `/cpu/classes/gc/total:cpu-seconds`, `/cpu/classes/total:cpu-seconds` and `/sched/latencies:seconds` from connect. Only then tune: raise GOGC to 200 with a GOMEMLIMIT backstop if GC exceeds about 5% of connect's CPU (the hosts have 450–700 GiB available), and consider GOMAXPROCS 16 on the 72-CPU hosts if scheduler p99 rises at peak. | Medium | S | L | GC share of connect CPU at peak; scheduler latency p99 by block. |
+| R4 | Handshake accounting. Count completed TLS handshakes by full or resumed (`tls.ConnectionState.DidResume`), version and ALPN, with a duration histogram. Give QUIC `handshake_failed` a bounded reason from `AwaitQuicHandshake`'s error: idle timeout, handshake timeout, crypto alert, version, canceled. The TLS failure reasons went out at 15:42Z (§3.7). | Medium | S | L | Full against resumed handshakes a second per host; the reasons of the 463 TLS and 210 QUIC failures a second. |
+| R5 | Runtime metrics. Export runtime/metrics `/cpu/classes/gc/total:cpu-seconds`, `/cpu/classes/total:cpu-seconds` and `/sched/latencies:seconds` from connect. Only then tune: raise GOGC to 200 with a GOMEMLIMIT backstop if GC exceeds about 5% of connect's CPU (the hosts have 450–700 GiB available), and consider GOMAXPROCS 16 on the 72-CPU edges (edge-1, 3 and 4; edge-0 has 96) if scheduler p99 rises at peak. | Medium | S | L | GC share of connect CPU at peak; scheduler latency p99 by block. |
 | R6 | Per-request trims, once R1 confirms them. `routeHttpStatusClass` formats its label with fmt.Sprintf on every request; use constants. `Front.observe` resolves two metric children per request; cache them per service, protocol, status class and block. Pool `forwardRequestHead`'s head buffer. | Low | S | L | Allocations per front request, from R1's heap profile and `go_memstats_mallocs_total`. |
 | R7 | Reconnect waves. Measure a connect deploy's wave with R4's counters, and space block restarts (warpctl's `--percent` rounds) by the measured CPU. Separately, decide whether the front should outlive connect's deploys (C4): a design question, not a fix. | Medium | M–L | M | Host CPU peak and handshakes a second during a deploy; the client count dip. |
 | R8 | `net.core.rmem_max` and `wmem_max` at 7.5 MiB through xops, so quic-go gets its desired UDP buffers. | Low | S | L | UDP socket drops per host (§3.9). |
