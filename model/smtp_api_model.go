@@ -245,16 +245,17 @@ func smtpDkimKeysArgsRefusal(args *sidecar.SmtpDkimKeysArgs, settings *SmtpApiSe
 }
 
 // Where a published selector's record goes in root, whose apex is the network's label there: the burner writer's
-// label for a replying burner's domain, "" for the network's own name and for a verified Team domain, whose
-// _domainkey CNAMEs each selector to the apex (§14.6). ok false for any other domain.
-func smtpDkimPublishTarget(domain string, apex string, verifiedDomains []string) (burnerLabel string, ok bool) {
+// label for a replying burner's domain, "" for the network's own name and for a Team custom domain the network may
+// send From now (GetSmtpDkimCustomDomains), whose delegated _domainkey or per-selector CNAMEs answer from the apex
+// (§14.6). ok false for any other domain; custom whether it is a custom domain's.
+func smtpDkimPublishTarget(domain string, apex string, customDomains []string) (burnerLabel string, custom bool, ok bool) {
 	if burnerLabel, ok := smtpDkimBurnerLabelOf(domain, apex); ok {
-		return burnerLabel, true
+		return burnerLabel, false, true
 	}
-	if slices.Contains(verifiedDomains, domain) {
-		return "", true
+	if slices.Contains(customDomains, domain) {
+		return "", true, true
 	}
-	return "", false
+	return "", false, false
 }
 
 // A row of the network's selectors the call reads.
@@ -349,8 +350,8 @@ func PublishSmtpDkimKeys(
 			return nil, smtpApiRefusal(http.StatusForbidden, SmtpApiCodeMailSend, "The sidecar holds no mail_send grant.")
 		}
 	}
-	// read before the transaction, which holds the one connection
-	verifiedDomains := GetNetworkVerifiedDomains(ctx, caller.NetworkId)
+	// read before the transaction, which holds the one connection: the Team custom domains the gate would send From
+	customDomains := GetSmtpDkimCustomDomains(ctx, caller.NetworkId, root, now, DefaultSmtpCustomDomainSettings())
 
 	result := &sidecar.SmtpDkimKeysResult{Published: []string{}, Retired: []string{}}
 	err := dnsCatchRefusal(func() {
@@ -368,12 +369,14 @@ func PublishSmtpDkimKeys(
 
 			// each new selector's place, refusing a domain before anything is written
 			targets := map[string]string{}
+			customPublished := false
 			for _, publish := range args.Publish {
-				burnerLabel, ok := smtpDkimPublishTarget(publish.Domain, apex, verifiedDomains)
+				burnerLabel, custom, ok := smtpDkimPublishTarget(publish.Domain, apex, customDomains)
 				if !ok {
-					refuse(smtpApiRefusal(http.StatusBadRequest, SmtpApiCodeDomain, "A domain is not the network's, a replying burner's or a verified Team domain."))
+					refuse(smtpApiRefusal(http.StatusBadRequest, SmtpApiCodeDomain, "A domain is not the network's, a replying burner's or a verified Team domain the network may send from."))
 				}
 				targets[publish.Selector] = burnerLabel
+				customPublished = customPublished || custom
 			}
 
 			// the device selectors published now, burners' never counted (§12.7)
@@ -458,6 +461,14 @@ func PublishSmtpDkimKeys(
 					refuse(err)
 				}
 				result.Published = append(result.Published, publish.Selector)
+			}
+
+			// a custom domain's selectors answer under its delegated _domainkey from the apex's rows: the network's
+			// delegated row names each of its verified domains (smtp_custom_domain_model.go)
+			if customPublished {
+				if _, err := setSmtpCustomDomainDelegationsInTx(ctx, tx, root, caller.NetworkId); err != nil {
+					refuse(err)
+				}
 			}
 		}, server.TxReadCommitted)
 	})

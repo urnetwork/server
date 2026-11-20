@@ -735,6 +735,9 @@ func (self *networkDomains) remove(args *NetworkDomainArgs, clientSession *sessi
 		))
 		answer = &NetworkDomainResult{Removed: tag.RowsAffected() != 0}
 		if answer.Removed {
+			// no delegated _domainkey zone outlives its domain (§14.6; SMTP-M9-34), written ahead of the custom
+			// hosts' map, as a zone write takes its zone's lock before dns_root's
+			SmtpWithdrawCustomDomainDelegationInTx(ctx, tx, networkId)
 			// no custom host outlives its domain (§12.8; DNS-M6-02)
 			DnsRemoveDomainCustomHostsInTx(ctx, tx, networkId, domain)
 			AddAdminEventInTx(ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionDomainRemove, AdminEventTargetDomain, nil))
@@ -908,6 +911,11 @@ func (self *networkDomains) settle(ctx context.Context, examined *NetworkDomain,
 				current.NetworkId,
 				current.Domain,
 			))
+			if current.VerifyTime != nil {
+				// no delegated _domainkey zone outlives its domain (§14.6; SMTP-M9-34), ahead of the custom hosts'
+				// map, as a zone write takes its zone's lock before dns_root's
+				SmtpWithdrawCustomDomainDelegationInTx(ctx, tx, current.NetworkId)
+			}
 			// no custom host outlives its domain (§12.8; DNS-M6-02)
 			DnsRemoveDomainCustomHostsInTx(ctx, tx, current.NetworkId, current.Domain)
 			AddAdminEventInTx(ctx, tx, &AdminEvent{
