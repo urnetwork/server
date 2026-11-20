@@ -115,10 +115,15 @@ type FrontServerSettings struct {
 	startedObserverForTest func()
 }
 
-// A new instance on every call, with its own nginx front defaults.
+// A new instance on every call, with its own nginx front defaults, and the
+// front's requests identified for the identity limit by their bearer tokens
+// (frontRequestIdentifier), which only an interface whose rate_limit turns
+// the identity limit on asks for.
 func DefaultFrontServerSettings() *FrontServerSettings {
+	frontSettings := nginx.DefaultFrontSettings()
+	frontSettings.Limit.IdentifyRequest = newFrontRequestIdentifier().identify
 	return &FrontServerSettings{
-		Front:                     nginx.DefaultFrontSettings(),
+		Front:                     frontSettings,
 		SocketsPerPort:            4,
 		SocketRestartInitialDelay: 100 * time.Millisecond,
 		SocketRestartMaxDelay:     5 * time.Second,

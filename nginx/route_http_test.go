@@ -306,7 +306,7 @@ func TestRouteHttpUnmatchedPathAnswersByMethod(t *testing.T) {
 	if forwards := testFront.forwarders["api"].recordedForwards(); len(forwards) != 0 {
 		t.Errorf("an unmatched path reached the api %d times", len(forwards))
 	}
-	if refusals := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone)); refusals != 0 {
+	if refusals := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone, "api")); refusals != 0 {
 		t.Fatalf("%v requests refused by the limits before the check", refusals)
 	}
 

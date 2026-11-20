@@ -58,6 +58,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +70,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/nginx"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // The nginx.Front methods connect calls (LBALT-IMPL.md §2.7). *nginx.Front
@@ -80,7 +82,7 @@ type nginxFront interface {
 	HttpsHandler(interfaceName string) http.Handler
 	HttpHandler(interfaceName string) http.Handler
 	H3ApiHandler(interfaceName string) http.Handler
-	AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool)
+	AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass nginx.NameClass) (release func(), ok bool)
 	ConfigureServer(httpServer *http.Server)
 	BeginDrain()
 	Close() error
@@ -106,6 +108,82 @@ type frontConnectQuic interface {
 }
 
 var _ frontConnectQuic = (*ConnectHandler)(nil)
+
+// Identifies requests for the nginx front's identity limit
+// (nginx.LimitSettings.IdentifyRequest, LBALTOPT2 R15), which an interface's
+// rate_limit turns on: a request to the api or connect is its bearer token's
+// client, or its network for a network token, once the token verifies for
+// that upstream's audience. DefaultFrontServerSettings wires identify into
+// the front's settings. Safe for concurrent use.
+type frontRequestIdentifier struct {
+	// verifies a token for an audience: session.ParseByJwtForAudience, whose
+	// verified-claims cache keyed by the token makes a client's repeated
+	// requests cheap to verify, or a test's
+	parseByJwt func(ctx context.Context, token string, audience string) (*session.ByJwt, error)
+}
+
+// The identifier of connect's front, over session.ParseByJwtForAudience.
+func newFrontRequestIdentifier() *frontRequestIdentifier {
+	return &frontRequestIdentifier{
+		parseByJwt: session.ParseByJwtForAudience,
+	}
+}
+
+// See nginx.LimitSettings.IdentifyRequest: the client id of a verified client
+// token, or the network id of a verified network token, with the api's
+// audience for an api request and connect's for a connect request. Not
+// identified, and so charged by its address alone, as before the identity
+// limit: a request with no Authorization, another scheme or a bearer value
+// that isn't a jwt, such as an api key; a token that doesn't verify, which
+// session counts as any refused verification and logs only at V(1); a token
+// that names neither a client nor a network; and any other upstream.
+func (self *frontRequestIdentifier) identify(r *http.Request, upstream nginx.NameClass) (nginx.LimitIdentity, bool) {
+	var audience string
+	switch upstream {
+	case nginx.NameClassApi:
+		audience = session.ByJwtAudienceApi
+	case nginx.NameClassConnect:
+		audience = session.ByJwtAudienceConnect
+	default:
+		return nginx.LimitIdentity{}, false
+	}
+	token, ok := frontBearerJwt(r.Header.Get("Authorization"))
+	if !ok {
+		return nginx.LimitIdentity{}, false
+	}
+	byJwt, err := self.parseByJwt(r.Context(), token, audience)
+	if err != nil {
+		return nginx.LimitIdentity{}, false
+	}
+	if byJwt.ClientId != nil {
+		return nginx.LimitIdentity{
+			Id: *byJwt.ClientId,
+		}, true
+	}
+	if byJwt.NetworkId != (server.Id{}) {
+		return nginx.LimitIdentity{
+			Id:      byJwt.NetworkId,
+			Network: true,
+		}, true
+	}
+	return nginx.LimitIdentity{}, false
+}
+
+// The jwt of an Authorization header's bearer credential, with the scheme
+// matched in any case, as connect's transport reads it, or false: another
+// scheme, an empty value, or a value that isn't three dot-separated parts,
+// such as an api key, which the identity limit doesn't resolve.
+func frontBearerJwt(authorization string) (string, bool) {
+	const bearerPrefix = "bearer "
+	if len(authorization) <= len(bearerPrefix) || !strings.EqualFold(authorization[:len(bearerPrefix)], bearerPrefix) {
+		return "", false
+	}
+	token := authorization[len(bearerPrefix):]
+	if strings.Count(token, ".") != 2 {
+		return "", false
+	}
+	return token, true
+}
 
 // The kinds of public port (LBALT-IMPL.md §2.3), as metric labels name them.
 const (

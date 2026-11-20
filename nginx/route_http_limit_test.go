@@ -108,7 +108,7 @@ func TestRouteHttpLimitsFollowNginxPhaseOrder(t *testing.T) {
 			t.Errorf("after %s, a request = %d, want 429: it was charged", c.name, response.Code)
 		}
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone)); count != 4 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone, "api")); count != 4 {
 		t.Errorf("%v request refusals counted, want 4", count)
 	}
 }
@@ -228,32 +228,35 @@ func TestRouteHttpRouteZonesApplyOnServiceNamesOnly(t *testing.T) {
 	if response := serveTestRequest(https, newTestRequestFrom(lbAddr, "POST", "test-lb.service.example", "/hidden-example/by/service/api/connect/control", true)); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("the route through an lb route, again = %d, want the shared zone's 429", response.Code)
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("route", "route_api_connect_control")); count != 1 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("route", "route_api_connect_control", "api")); count != 1 {
 		t.Errorf("%v route refusals counted, want 1", count)
 	}
 }
 
-// Every series of the refusal counter, by its limit and zone labels.
-func testLimitRefusalSeries(t *testing.T, metrics *frontMetrics) map[[2]string]float64 {
+// Every series of the refusal counter, by its limit, zone and name_class
+// labels.
+func testLimitRefusalSeries(t *testing.T, metrics *frontMetrics) map[[3]string]float64 {
 	t.Helper()
 	collected := make(chan prometheus.Metric)
 	go func() {
 		metrics.limitRefusals.Collect(collected)
 		close(collected)
 	}()
-	series := map[[2]string]float64{}
+	series := map[[3]string]float64{}
 	for collectedMetric := range collected {
 		metric := &dto.Metric{}
 		if err := collectedMetric.Write(metric); err != nil {
 			t.Fatal(err)
 		}
-		labels := [2]string{}
+		labels := [3]string{}
 		for _, labelPair := range metric.GetLabel() {
 			switch labelPair.GetName() {
 			case "limit":
 				labels[0] = labelPair.GetValue()
 			case "zone":
 				labels[1] = labelPair.GetValue()
+			case "name_class":
+				labels[2] = labelPair.GetValue()
 			default:
 				t.Errorf("the refusal counter has a label %q", labelPair.GetName())
 			}
@@ -287,8 +290,11 @@ func TestLimitRouteZoneName(t *testing.T) {
 // path on the service's names, for its own bucket, the concurrency cap and
 // the state cap alike; the default zone everywhere else, the same route
 // through an lb route and a case variant of its path included. A refused QUIC
-// connection counts in the default zone, and one on an unknown interface in
-// none. Every zone label comes from the route table, none from a request.
+// connection counts in the default zone, and one on an unknown interface, or
+// of a class the front doesn't serve on QUIC, in none. Each is counted by the
+// class of the name it asked for: a QUIC connection by its class, each with
+// a cap of its own. Every zone label comes from the route table, none from a
+// request.
 func TestRouteHttpLimitRefusalsCountTheirZone(t *testing.T) {
 	routeTable := loadTestRouteTable(t)
 	// two requests per address at once, then one a minute; one in flight
@@ -373,29 +379,41 @@ func TestRouteHttpLimitRefusalsCountTheirZone(t *testing.T) {
 	}
 
 	quicAddr := netip.MustParseAddr("2001:db8::57")
-	quicRelease, ok := testFront.front.AcquireQuicConnection("eth1", quicAddr)
-	if !ok {
-		t.Fatal("the first QUIC connection was refused")
+	quicReleases := []func(){}
+	for _, nameClass := range []NameClass{NameClassConnect, NameClassApi} {
+		quicRelease, ok := testFront.front.AcquireQuicConnection("eth1", quicAddr, nameClass)
+		if !ok {
+			t.Fatalf("the first %s QUIC connection was refused", nameClass)
+		}
+		quicReleases = append(quicReleases, quicRelease)
+		if _, ok := testFront.front.AcquireQuicConnection("eth1", quicAddr, nameClass); ok {
+			t.Fatalf("a %s QUIC connection past the cap was admitted", nameClass)
+		}
 	}
-	if _, ok := testFront.front.AcquireQuicConnection("eth1", quicAddr); ok {
-		t.Fatal("a QUIC connection past the cap was admitted")
+	for _, quicRelease := range quicReleases {
+		quicRelease()
 	}
-	quicRelease()
-	if _, ok := testFront.front.AcquireQuicConnection("eth9", quicAddr); ok {
+	if _, ok := testFront.front.AcquireQuicConnection("eth9", quicAddr, NameClassConnect); ok {
 		t.Fatal("an unknown interface admitted a QUIC connection")
 	}
+	if _, ok := testFront.front.AcquireQuicConnection("eth1", quicAddr, NameClassForwarded); ok {
+		t.Fatal("a QUIC connection of a class the front doesn't serve on QUIC was admitted")
+	}
 
-	want := map[[2]string]float64{
-		{"request", limitDefaultZone}:                3,
-		{"route", "route_api_connect_control"}:       1,
-		{"concurrency", "route_api_connect_control"}: 1,
-		{"concurrency", limitDefaultZone}:            1,
-		{"state", "route_api_connect_control"}:       1,
-		{"quic", limitDefaultZone}:                   1,
-		{"interface", routeHttpNoLabel}:              1,
+	want := map[[3]string]float64{
+		{"request", limitDefaultZone, "api"}:                2,
+		{"request", limitDefaultZone, "lb"}:                 1,
+		{"route", "route_api_connect_control", "api"}:       1,
+		{"concurrency", "route_api_connect_control", "api"}: 1,
+		{"concurrency", limitDefaultZone, "api"}:            1,
+		{"state", "route_api_connect_control", "api"}:       1,
+		{"quic", limitDefaultZone, "connect"}:               1,
+		{"quic", limitDefaultZone, "api"}:                   1,
+		{"interface", routeHttpNoLabel, "connect"}:          1,
+		{"class", routeHttpNoLabel, "forwarded"}:            1,
 	}
 	if series := testLimitRefusalSeries(t, testFront.metrics); !maps.Equal(series, want) {
-		t.Errorf("refusals by limit and zone %v, want %v", series, want)
+		t.Errorf("refusals by limit, zone and name class %v, want %v", series, want)
 	}
 }
 
