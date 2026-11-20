@@ -351,6 +351,88 @@ func TestFrontHttpsCountsCompletedHandshakesByVersionResumptionAndAlpn(t *testin
 	}
 }
 
+// One completed TLS handshake as front_tls_handshake_offers_total counted it.
+type testFrontTlsHandshakeOffer struct {
+	alpn       string
+	resumed    string
+	nameClass  string
+	resumption string
+	versions   string
+}
+
+// Every TLS handshake that completes on a public TCP socket is counted again
+// by what its ClientHello offered (LBALTOPT2 R22): a client offering no
+// protocol, with a served name or none, whatever its protocol and
+// resumption; and a connect client's full handshake, which offers PSK modes,
+// then its resumption, which offers its ticket. No name or address reaches a
+// label.
+func TestFrontHttpsCountsTheClientOfferOfEachCompletedHandshake(t *testing.T) {
+	offers := make(chan testFrontTlsHandshakeOffer, 64)
+	connectHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.tlsHandshakeOfferObserverForTest = func(alpn string, resumed string, nameClass string, resumption string, versions string) {
+			select {
+			case offers <- testFrontTlsHandshakeOffer{alpn: alpn, resumed: resumed, nameClass: nameClass, resumption: resumption, versions: versions}:
+			default:
+			}
+		}
+	}, connectHandler)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+
+	noNameTlsConfig := env.clientTlsConfig("", nil)
+	noNameTlsConfig.InsecureSkipVerify = true
+	sessionCache := newTestFrontSessionCache()
+	connectTlsConfig := env.clientTlsConfig(testFrontConnectName, []string{"http/1.1"})
+	connectTlsConfig.ClientSessionCache = sessionCache
+	cases := []struct {
+		what      string
+		tlsConfig *tls.Config
+		resumed   bool
+		want      testFrontTlsHandshakeOffer
+	}{
+		{
+			what:      "an api client offering no protocol and keeping no tickets",
+			tlsConfig: env.clientTlsConfig(testFrontApiName, nil),
+			want:      testFrontTlsHandshakeOffer{alpn: frontTlsAlpnNone, resumed: "false", nameClass: "api", resumption: "none", versions: "tls13_tls12"},
+		},
+		{
+			what:      "a client presenting no name, offering no protocol",
+			tlsConfig: noNameTlsConfig,
+			want:      testFrontTlsHandshakeOffer{alpn: frontTlsAlpnNone, resumed: "false", nameClass: "none", resumption: "none", versions: "tls13_tls12"},
+		},
+		{
+			what:      "a connect client's full handshake",
+			tlsConfig: connectTlsConfig,
+			want:      testFrontTlsHandshakeOffer{alpn: frontTlsAlpnHttp1, resumed: "false", nameClass: "connect", resumption: "psk_modes", versions: "tls13_tls12"},
+		},
+		{
+			what:      "a connect client's resumption",
+			tlsConfig: connectTlsConfig,
+			resumed:   true,
+			want:      testFrontTlsHandshakeOffer{alpn: frontTlsAlpnHttp1, resumed: "true", nameClass: "connect", resumption: "psk", versions: "tls13_tls12"},
+		},
+	}
+	for _, c := range cases {
+		counter := frontTlsHandshakeOffersCounter.WithLabelValues(c.want.alpn, c.want.resumed, c.want.nameClass, c.want.resumption, c.want.versions)
+		before := testutil.ToFloat64(counter)
+		clientState := env.completeTlsHandshake(address, c.tlsConfig, testFrontConnectName)
+		if clientState.DidResume != c.resumed {
+			t.Fatalf("%s: the client resumed %t", c.what, clientState.DidResume)
+		}
+		if offer := nextTestFrontObserved(t, offers, c.what); offer != c.want {
+			t.Fatalf("%s was counted as %+v, want %+v", c.what, offer, c.want)
+		}
+		if after := testutil.ToFloat64(counter); after < before+1 {
+			t.Fatalf("%s counted %v times", c.what, after-before)
+		}
+		if c.tlsConfig == connectTlsConfig && !c.resumed {
+			testFrontWait(t, sessionCache.stored, c.what+"'s session ticket")
+		}
+	}
+}
+
 // A handshake that fails is counted only by its reason, never as completed:
 // a TLS 1.3 client that refuses the front's certificate, which fails the
 // handshake after the front sent its Finished, and so after crypto/tls ran

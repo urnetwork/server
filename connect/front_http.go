@@ -22,7 +22,8 @@ package connect
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
 // logged, with the address cut out. The TLS listener reports each handshake
-// that completes, which is counted by version, resumption and protocol.
+// that completes, which is counted by version, resumption and protocol, and
+// again by what its ClientHello offered (LBALTOPT2 R22).
 
 import (
 	"context"
@@ -92,15 +93,21 @@ func (self *frontTcpRun) serve() error {
 }
 
 // Counts one TLS handshake on a public TCP socket that completed, by version,
-// whether it resumed a session and the application protocol. Called once per
+// whether it resumed a session and the application protocol, and by the
+// protocol, the resumption and what its ClientHello offered. Called once per
 // connection, on its serving goroutine, before its first request.
-func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState) {
+func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState, clientOffer nginx.TlsClientOffer) {
 	version := frontTlsVersionLabel(connectionState.Version)
 	resumed := strconv.FormatBool(connectionState.DidResume)
 	alpn := frontTlsAlpnLabel(connectionState.NegotiatedProtocol)
 	frontTlsHandshakesCounter.WithLabelValues(version, resumed, alpn).Inc()
+	nameClass, resumption, versions := clientOffer.Labels()
+	frontTlsHandshakeOffersCounter.WithLabelValues(alpn, resumed, nameClass, resumption, versions).Inc()
 	if observer := self.settings.tlsHandshakeObserverForTest; observer != nil {
 		observer(version, resumed, alpn)
+	}
+	if observer := self.settings.tlsHandshakeOfferObserverForTest; observer != nil {
+		observer(alpn, resumed, nameClass, resumption, versions)
 	}
 }
 
