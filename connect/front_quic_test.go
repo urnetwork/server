@@ -64,10 +64,10 @@ func TestFrontQuicDispatchesConnectNamesToConnect(t *testing.T) {
 	}
 	acquired := env.front.acquired()
 	wantAcquired := []string{
-		testFrontInterfaceA + " 127.0.0.1",
-		testFrontInterfaceA + " 127.0.0.1",
-		testFrontInterfaceB + " ::1",
-		testFrontInterfaceB + " ::1",
+		testFrontInterfaceA + " 127.0.0.1 connect",
+		testFrontInterfaceA + " 127.0.0.1 connect",
+		testFrontInterfaceB + " ::1 connect",
+		testFrontInterfaceB + " ::1 connect",
 	}
 	if !slices.Equal(acquired, wantAcquired) {
 		t.Fatalf("connection cap charged to %v, want %v", acquired, wantAcquired)
@@ -207,10 +207,12 @@ func TestFrontQuicConnectionCapRefusesWithRateLimited(t *testing.T) {
 	env.nextHandled()
 }
 
-// An api connection over the address's cap is closed with 0x1001 before
-// any request, as a connect connection is: the cap counts every api
-// connection an address holds, and a connect connection shares it. Once the
-// admitted api connection ends, its slot admits the next.
+// An api connection over the address's cap of api connections is closed
+// with 0x1001 before any request, as a connect connection over its own cap
+// is, but the two classes are capped apart (LBALTOPT2 R15): an address at its
+// api cap still gets its connect connection, and one at its connect cap still
+// gets its api connection. Once the admitted api connection ends, its slot
+// admits the next.
 func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T) {
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		env.front.connectionCap = 1
@@ -223,26 +225,37 @@ func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T
 	}
 	env.nextDispatch()
 
-	for _, c := range []struct {
-		serverName string
-		nextProtos []string
-	}{
-		{serverName: testFrontApiName, nextProtos: []string{http3.NextProtoH3}},
-		{serverName: testFrontConnectName, nextProtos: nil},
-	} {
-		conn, err := env.dialQuic(address, frontPortQuic, c.serverName, c.nextProtos)
-		if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeRateLimited {
-			t.Fatalf("%s over the cap closed with %#x, want %#x", c.serverName, code, frontQuicErrorCodeRateLimited)
-		}
-		env.nextDispatch()
+	// at its api cap: a second api connection is refused
+	refused, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if code := testFrontApplicationCode(t, refused, err); code != frontQuicErrorCodeRateLimited {
+		t.Fatalf("an api connection over the cap closed with %#x, want %#x", code, frontQuicErrorCodeRateLimited)
 	}
+	env.nextDispatch()
+
+	// the connect transport has a cap of its own
+	connectConn, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if err != nil {
+		t.Fatalf("a connect connection with the api cap full: %v", err)
+	}
+	defer connectConn.CloseWithError(0, "")
+	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassConnect {
+		t.Fatalf("connect dispatch = %+v", dispatch)
+	}
+	env.nextHandled()
+
+	// and is refused only past its own
+	overConnect, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if code := testFrontApplicationCode(t, overConnect, err); code != frontQuicErrorCodeRateLimited {
+		t.Fatalf("a connect connection over its cap closed with %#x, want %#x", code, frontQuicErrorCodeRateLimited)
+	}
+	env.nextDispatch()
 	select {
 	case <-env.connectQuic.handled:
 		t.Fatal("an over-cap connection reached connect's handler")
 	default:
 	}
 
-	// the admitted connection ends and releases its slot
+	// the admitted api connection ends and releases its slot
 	client.Transport.(*http3.Transport).Close()
 	select {
 	case <-env.front.released:
@@ -253,8 +266,10 @@ func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T
 	if status, _, err := testFrontGet(t, next, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
 		t.Fatalf("the api request after the release = %d %v", status, err)
 	}
-	if acquired := env.front.acquired(); len(acquired) != 4 || !slices.Equal(slices.Compact(acquired), []string{testFrontInterfaceA + " 127.0.0.1"}) {
-		t.Fatalf("connections charged to %v, want each of the four to eth1's address", acquired)
+	apiKey := testFrontInterfaceA + " 127.0.0.1 api"
+	connectKey := testFrontInterfaceA + " 127.0.0.1 connect"
+	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{apiKey, apiKey, connectKey, connectKey, apiKey}) {
+		t.Fatalf("connections charged to %v, want each to eth1's address under its own class", acquired)
 	}
 }
 
@@ -415,7 +430,7 @@ func TestFrontPublicSocketIgnoresAProxyProtocolHeader(t *testing.T) {
 		t.Fatalf("a second connection was dispatched: %+v", dispatch)
 	default:
 	}
-	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{testFrontInterfaceA + " 127.0.0.1"}) {
+	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{testFrontInterfaceA + " 127.0.0.1 connect"}) {
 		t.Fatalf("connections charged to %v, want only the plain client's", acquired)
 	}
 }

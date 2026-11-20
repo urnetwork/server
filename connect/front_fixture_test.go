@@ -284,7 +284,8 @@ type testFront struct {
 	tlsConfig       *tls.Config
 	quicTlsConfig   *tls.Config
 
-	// connections admitted per (interface, address); zero is no cap
+	// connections admitted per (interface, address, class), each class
+	// counted apart as the nginx front counts them; zero is no cap
 	connectionCap int
 	// replace the default handlers when set
 	httpsHandler func(interfaceName string) http.Handler
@@ -303,7 +304,7 @@ type testFront struct {
 
 	stateLock        sync.Mutex
 	connectionCounts map[string]int
-	// "<interface> <address>" of every AcquireQuicConnection
+	// "<interface> <address> <class>" of every AcquireQuicConnection
 	acquiredKeys []string
 	events       []string
 	// every server ConfigureServer was given, in order
@@ -447,8 +448,8 @@ func (self *testFront) H3ApiHandler(interfaceName string) http.Handler {
 }
 
 // nginxFront
-func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Addr) (func(), bool) {
-	key := interfaceName + " " + addr.String()
+func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass nginx.NameClass) (func(), bool) {
+	key := interfaceName + " " + addr.String() + " " + nameClass.String()
 	admitted := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -478,7 +479,7 @@ func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Ad
 	}, true
 }
 
-// "<interface> <address>" of every AcquireQuicConnection so far.
+// "<interface> <address> <class>" of every AcquireQuicConnection so far.
 func (self *testFront) acquired() []string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
