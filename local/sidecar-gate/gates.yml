@@ -1571,38 +1571,44 @@ gates:
       external: 'production: real accounts at each provider and sends from the shared lb addresses'
     - item: 'D-SMTP-16''s gate whole, or burner email launches receive-only (owner decisions 9, 35; BS1): the soundness, speed, coverage and interop rows above pass on their own evidence, and a miss is reported for the owner, never hidden by a smoke run on this host'
       external: 'people: the owner hears where the proofs stand against D-SMTP-16, and BS1 stays receive-only until every row passes'
-    - item: §22.7's S6 on T2 (SMTP-M9-31; §3.7's F5), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it; no test is registered to it on T2, so it reads missing
-    - item: §22.7's S6 on T3 (SMTP-M9-31; §3.7's F5), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it; no test is registered to it on T3, so it reads missing
-    - item: §22.7's S6 on T6 (SMTP-M9-31; §22.4's T6, tests/test-main.sh in main, dark)
-      external: 'production: the main test environment, once the sidecar branches merge to main at a Gn-out (§22.4, §23.9)'
-    - item: §22.7's S10's burned-label-550-no-dns-change on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+    - item: §22.7's S6 on T2 (F5; SMTP-M9-31)
+    - item: §22.7's S6 on T3 (F5; SMTP-M9-31)
+    - item: §22.7's S6 on T6 (F5; SMTP-M9-31)
+      external: 'T6: tests/test-main.sh in main, dark, on test roots and LE staging, at each milestone (TEST-M4-03), which this build never runs'
+    - item: §22.7's S10's burned-label-550-no-dns-change on T2 (F10; MAIL-M8-10, MAIL-M9-06)
       tests:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReceiveOnlyBurner]}
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
-    - item: §22.7's S10's receive-only-burner-creates-no-child on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+    - item: §22.7's S10's burned-label-550-no-dns-change on T3 (F10; MAIL-M8-10, MAIL-M9-06)
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReceiveOnlyOnT3]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
+    - item: §22.7's S10's burned-label-550-no-dns-change on T6 (F10; MAIL-M8-10, MAIL-M9-06)
+      external: 'T6: tests/test-main.sh in main, dark, on test roots and LE staging, at each milestone (TEST-M4-03), which this build never runs'
+    - item: §22.7's S10's receive-only-burner-creates-no-child on T2 (F10; MAIL-M8-10, MAIL-M9-06)
       tests:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReceiveOnlyBurner]}
-    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
-      tests:
-        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
-    - item: §22.7's S10's last-selector-restores-wildcard-only on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
-      tests:
-        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
-    - item: §22.7's S10's burned-label-550-no-dns-change on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+    - item: §22.7's S10's receive-only-burner-creates-no-child on T3 (F10; MAIL-M8-10, MAIL-M9-06)
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReceiveOnlyOnT3]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
-    - item: §22.7's S10's receive-only-burner-creates-no-child on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+    - item: §22.7's S10's receive-only-burner-creates-no-child on T6 (F10; MAIL-M8-10, MAIL-M9-06)
+      external: 'T6: tests/test-main.sh in main, dark, on test roots and LE staging, at each milestone (TEST-M4-03), which this build never runs'
+    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T2 (F10; MAIL-M8-10, MAIL-M9-06)
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReceiveOnlyOnT3]}
-    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
-      tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
-    - item: §22.7's S10's last-selector-restores-wildcard-only on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
+    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T3 (F10; MAIL-M8-10, MAIL-M9-06)
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
-    - item: §22.7's S10 on T6 (MAIL-M8-10, MAIL-M9-06; §22.4's T6, tests/test-main.sh in main, dark)
-      external: 'production: the main test environment, once the sidecar branches merge to main at a Gn-out (§22.4, §23.9)'
+    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T6 (F10; MAIL-M8-10, MAIL-M9-06)
+      external: 'T6: tests/test-main.sh in main, dark, on test roots and LE staging, at each milestone (TEST-M4-03), which this build never runs'
+    - item: §22.7's S10's last-selector-restores-wildcard-only on T2 (F10; MAIL-M8-10, MAIL-M9-06)
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
+    - item: §22.7's S10's last-selector-restores-wildcard-only on T3 (F10; MAIL-M8-10, MAIL-M9-06)
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
+    - item: §22.7's S10's last-selector-restores-wildcard-only on T6 (F10; MAIL-M8-10, MAIL-M9-06)
+      external: 'T6: tests/test-main.sh in main, dark, on test roots and LE staging, at each milestone (TEST-M4-03), which this build never runs'
     - item: 'S6, send mail, as its owners'' tests run it on SmtpSendWorld and M9World, outside RunScenario (§22.7; §3.7''s F5; SMTP-M9-31, MAIL-M9-06): no record forwarded before its proof verifies, no unauthenticated MX, a message over the DATA cap too_large for the non-CHUNKING domain alone, and §15.10''s forwarding code, forwards and relays through MAIL''s code, on T2; the first three on T3'
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestS6NoRecordReachesTheMxBeforeItsPart, TestS6NoUnauthenticatedMx, TestS6TooLargeForTheNonChunkingDomainAlone]}
