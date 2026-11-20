@@ -271,8 +271,8 @@ func SmtpReconcileTaskPost(
 // §21's half of the RUA check: a day that exceeds opens, or adds to, the network's spam case on §21.8's review
 // clock of a low join, which reviews and never acts by machine (§14.8's "no halt"; D-SMTP-23), named by the
 // network itself. The case keeps §21's fields alone: the day's counts stay in smtp_dmarc_daily and smtp_send for
-// the reviewer, and no count, domain or address reaches the case or a log. ABUSE-M9-01 may take this over in its
-// mail controller; until then it is this.
+// the reviewer, and no count, domain or address reaches the case or a log. ABUSE-M9-01's mail controller leaves it
+// here: a case with no halt and no machine action is all D-SMTP-23 asks of §21 (abuse_mail_controller.go's RUA row).
 type smtpReconcileCaseSink struct {
 	now      func() time.Time
 	settings func() *model.AbuseSettings

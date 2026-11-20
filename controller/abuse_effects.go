@@ -1,6 +1,6 @@
 package controller
 
-// §21's real effects (ABUSE-M5-06; D-ABUSE-1, D-ABUSE-3, D-TLS-9, I-14, I-15):
+// §21's real effects (ABUSE-M5-06, ABUSE-M9-01; D-ABUSE-1, D-ABUSE-3, D-TLS-9, D-SMTP-9, I-12, I-14, I-15):
 // what an abuse action does outside its own row, each kind through its owner's
 // hook (§21.16's Consumes), and what a lift returns.
 //
@@ -16,14 +16,26 @@ package controller
 //	                 network_abuse_state = suspended, a * kill, SuspendZone, and
 //	                 every open contract closed, one subject at a time. No rev/,
 //	                 nothing at evs or gkm, and no certificate revoked unless the
-//	                 case orders a cert_revoke of its own. The mail halt joins at
-//	                 M9 (ABUSE-M9-01)
+//	                 case orders a cert_revoke of its own. Its mail halt from M9
+//	                 (ABUSE-M9-01): the send gate refuses a suspended standing
+//	                 at every preamble from ServiceHost.Abuse's memory, which the
+//	                 suspended row reaches within the hard deny's reload, and
+//	                 the network's queues are held SuspensionMailHoldTimeout on
+//	                 topic mail, then released at the lift; no smtp_halt row is
+//	                 written, since one would count as a halt toward the
+//	                 ladder's own rungs
 //	notice_forward   nothing outside Postgres
 //	limit_tighten    its network_sidecar_limit row citing the case, which its
 //	                 lift clears (ABUSE-M5-19, abuse_limit_controller.go)
 //	mail_halt, mail_label_halt
-//	                 SMTP's, from M9 (ABUSE-M9-01): refused here, so one stays
-//	                 owed and never reads as applied
+//	                 SMTP's halt (§14.8, ABUSE-M9-01): its Redis flag and
+//	                 smtp_halt row are SMTP's ladder's, written before §21
+//	                 records the halt under the halt's id, so the effect leaves a
+//	                 row that is there as it is and writes one, under §21's
+//	                 trigger, only where §19.10's restore lost a halt still
+//	                 holding (model.EnsureAbuseSmtpHalt), holding the network's
+//	                 queues until the halt ends; a lift removes the row, so every
+//	                 edge drops the halt at its next reload, and releases them
 //	lift             returns what the lifted action withheld, less every unit
 //	                 another standing action of the network still holds, so a
 //	                 lift restores exactly what its action suspended. A
@@ -42,8 +54,11 @@ package controller
 // A standing change prompts the network's sidecars with a core hint (§21.16),
 // unless the case is barred. The sock topic's prompt is the kill's own
 // {tes_<network_id>}n trigger, which sockets' KillChanged follows to its
-// revocation sweep (SOCK-M5-07), and the mail topic's comes with M9's halts. A
-// hint is a prompt only: one that fails is counted and never fails the effect.
+// revocation sweep (SOCK-M5-07). The mail topic's SmtpStatus hint is written
+// for what §21 changes and SMTP's ladder did not hint: a halt written back, a
+// halt's lift, a suspension and its lift (model.AbuseSmtpStatusHint, QD-479),
+// to the clients that sent within MailHintWindow. A hint is a prompt only: one
+// that fails is counted and never fails the effect.
 //
 // A host is named as the case names it: under one of abuse.yml's roots, as
 // shop.<label>.<root> through the network's label or an alias, or already
@@ -62,6 +77,8 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
+	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -76,6 +93,7 @@ const (
 	AbuseEffectStepCert  = "abuse.effect.cert"
 	AbuseEffectStepClose = "abuse.effect.close"
 	AbuseEffectStepHint  = "abuse.effect.hint"
+	AbuseEffectStepMail  = "abuse.effect.mail"
 )
 
 // What every reason starts with, before the case id (§13.9's tls-4 shows it).
@@ -89,8 +107,7 @@ const abuseEffectApexHost = "@"
 // its network's. The action stays owed. The message names no target (I-13).
 var ErrAbuseEffectTarget = errors.New("abuse effect target refused")
 
-// A kind whose effect another task builds (the mail halts, ABUSE-M9-01). The
-// action stays owed.
+// A kind the effects do not know. The action stays owed.
 var ErrAbuseEffectKindUnbuilt = errors.New("abuse effect kind not built")
 
 // Tunables of the effects.
@@ -106,20 +123,31 @@ type AbuseEffectsSettings struct {
 	// restricted, from the suspension's start (§21.7,
 	// plan-ABUSE-small-readings #4): AbuseSettings.RestrictedWindow's 30 days.
 	RestrictedWindow time.Duration
+	// The clients a mail hint reaches: those with a send started this long
+	// before it, 24 hours, §14.8's halt window, as SMTP's ladder hints them.
+	MailHintWindow time.Duration
+	// How long a suspension holds the network's queues on topic mail (§21.7's
+	// mail halt): 24 hours, §21.8's review clock for a machine action, so a
+	// queue held at the suspension outlasts its first review; its lift
+	// releases them sooner. Non-positive holds none.
+	SuspensionMailHoldTimeout time.Duration
 }
 
 // The effects' numbers.
 func DefaultAbuseEffectsSettings() *AbuseEffectsSettings {
 	return &AbuseEffectsSettings{
-		SubjectPageSize:    256,
-		HintClientMaxCount: 10000,
-		RestrictedWindow:   model.DefaultAbuseSettings().RestrictedWindow,
+		SubjectPageSize:           256,
+		HintClientMaxCount:        10000,
+		RestrictedWindow:          model.DefaultAbuseSettings().RestrictedWindow,
+		MailHintWindow:            24 * time.Hour,
+		SuspensionMailHoldTimeout: 24 * time.Hour,
 	}
 }
 
 // Each owner's hook as the effects call it: the real ones from
-// DefaultAbuseEffectsDeps, or a test's fakes. Every member but Step is
-// required: effects built on a set missing one refuse every action.
+// DefaultAbuseEffectsDeps, or a test's fakes. Every member but Step and the
+// two SMTP halt hooks is required: effects built on a set missing one refuse
+// every action, and a set missing an SMTP halt hook refuses the mail halts.
 type AbuseEffectsDeps struct {
 	// TLS-M5-13's kill switch.
 	SetTlsSuspension  func(ctx context.Context, args *sidecar.TlsSuspendArgs) error
@@ -145,7 +173,15 @@ type AbuseEffectsDeps struct {
 	// PROTO-M1-07's hint to the network's sidecar clients.
 	HintClientIds func(ctx context.Context, networkId server.Id, limit int) []server.Id
 	Hint          func(ctx context.Context, clientIds []server.Id, hint *sidecar.ClientHint) error
-	Now           func() time.Time
+	// SMTP's halt rows (§14.8, ABUSE-M9-01): a mail halt's row written back
+	// where a restore lost it, and removed at its lift. nil refuses the mail
+	// halts, which stay owed.
+	EnsureSmtpHalt func(ctx context.Context, halt *smtpedgeservice.SmtpHalt, now time.Time) (bool, error)
+	DeleteSmtpHalt func(ctx context.Context, haltId server.Id) error
+	// The SmtpStatus hint on topic mail to the network's clients that sent
+	// since since. nil writes no mail hint.
+	SmtpStatusHint func(ctx context.Context, networkId server.Id, kind protocol.SmtpStatusKind, retryAfter time.Duration, since time.Time, now time.Time) error
+	Now            func() time.Time
 	// Called before each owner's call with an AbuseEffectStep. nil in
 	// production.
 	Step func(step string, detail string)
@@ -184,9 +220,12 @@ func DefaultAbuseEffectsDeps() *AbuseEffectsDeps {
 		RootNames: func() []string {
 			return server.GetAbuseConfig().RootNames()
 		},
-		HintClientIds: model.AbuseNetworkHintClientIds,
-		Hint:          model.SidecarHint,
-		Now:           server.NowUtc,
+		HintClientIds:  model.AbuseNetworkHintClientIds,
+		Hint:           model.SidecarHint,
+		EnsureSmtpHalt: model.EnsureAbuseSmtpHalt,
+		DeleteSmtpHalt: model.DeleteSmtpHalt,
+		SmtpStatusHint: model.AbuseSmtpStatusHint,
+		Now:            server.NowUtc,
 	}
 }
 
@@ -257,12 +296,15 @@ type abuseEffectUnits struct {
 	dnsHosts []string
 	// every issued certificate's revocation, which no lift returns
 	revoke bool
+	// SMTP's halts a mail halt stands for, by its own id
+	smtpHalts []*smtpedgeservice.SmtpHalt
 }
 
 // Whether the action changes what the network's sidecars can reach or how it
 // stands, and so prompts them.
 func (self *abuseEffectUnits) changesStanding() bool {
-	return self.suspended || 0 < len(self.tlsHosts) || self.dnsZone || 0 < len(self.dnsHosts) || self.revoke
+	return self.suspended || 0 < len(self.tlsHosts) || self.dnsZone || 0 < len(self.dnsHosts) || self.revoke ||
+		0 < len(self.smtpHalts)
 }
 
 // The reason every hook records for a case's action: its case id and no free
@@ -352,12 +394,37 @@ func (self *abuseEffects) ApplyAbuseEffect(ctx context.Context, effect *AbuseEff
 			return err
 		}
 	}
+	// how long the network's queues are held on topic mail: a halt written back until it ends, a suspension for
+	// SuspensionMailHoldTimeout
+	var mailHold time.Duration
+	if 0 < len(units.smtpHalts) && action.ReviewState != model.AbuseReviewStateLifted && action.ReviewState != model.AbuseReviewStateLiftedWrong {
+		// an action lifted before its effect ran writes no halt back
+		if self.deps.EnsureSmtpHalt == nil {
+			return ErrAbuseEffectsUnavailable
+		}
+		for _, halt := range units.smtpHalts {
+			self.step(AbuseEffectStepMail, "")
+			now := self.deps.Now()
+			written, err := self.deps.EnsureSmtpHalt(ctx, halt, now)
+			if err != nil {
+				return err
+			}
+			if written {
+				// SMTP's ladder hinted the halt it wrote; one a restore lost was hinted by no one
+				mailHold = max(mailHold, halt.StartTime.Add(smtpedgeservice.SmtpHaltDuration).Sub(now))
+			}
+		}
+	}
 	if units.suspended {
+		mailHold = max(mailHold, self.settings.SuspensionMailHoldTimeout)
 		if err := self.closeNetworkContracts(ctx, networkId); err != nil {
 			return err
 		}
 	}
 	self.hint(ctx, networkId, effect.Barred)
+	if 0 < mailHold {
+		self.mailHint(ctx, networkId, protocol.SmtpStatusKind_SMTP_STATUS_HALTED, mailHold, effect.Barred)
+	}
 	return nil
 }
 
@@ -402,7 +469,10 @@ func (self *abuseEffects) lift(ctx context.Context, effect *AbuseEffect) error {
 		held.dnsHosts = append(held.dnsHosts, otherUnits.dnsHosts...)
 	}
 
+	// whether the network's queues are released on topic mail: a halt's lift, or the last standing suspension's
+	releaseMail := false
 	if units.suspended {
+		releaseMail = !held.suspended
 		self.step(AbuseEffectStepState, "")
 		if held.suspended {
 			// the row names a suspension that stands
@@ -444,8 +514,24 @@ func (self *abuseEffects) lift(ctx context.Context, effect *AbuseEffect) error {
 			return err
 		}
 	}
+	if 0 < len(units.smtpHalts) {
+		// each halt is its own row, which no other action holds
+		if self.deps.DeleteSmtpHalt == nil {
+			return ErrAbuseEffectsUnavailable
+		}
+		for _, halt := range units.smtpHalts {
+			self.step(AbuseEffectStepMail, "")
+			if err := self.deps.DeleteSmtpHalt(ctx, server.Id(halt.HaltId)); err != nil {
+				return err
+			}
+		}
+		releaseMail = true
+	}
 	// a revocation stands: nothing returns a revoked certificate
 	self.hint(ctx, networkId, effect.Barred)
+	if releaseMail {
+		self.mailHint(ctx, networkId, protocol.SmtpStatusKind_SMTP_STATUS_CLEAR, 0, effect.Barred)
+	}
 	return nil
 }
 
@@ -458,8 +544,6 @@ func (self *abuseEffects) unitsOf(ctx context.Context, action *model.AbuseAction
 		// a tightening's row is no unit a lift of another action frees, and a screen allow is read where names
 		// are screened (abuse_screen_model.go)
 		return units, nil
-	case model.AbuseActionKindMailHalt, model.AbuseActionKindMailLabelHalt:
-		return nil, fmt.Errorf("%w: %s", ErrAbuseEffectKindUnbuilt, action.Kind)
 	}
 	if action.NetworkId == nil {
 		return nil, fmt.Errorf("%w: no network", ErrAbuseEffectTarget)
@@ -495,6 +579,12 @@ func (self *abuseEffects) unitsOf(ctx context.Context, action *model.AbuseAction
 		units.suspended = true
 		units.tlsHosts = []string{sidecar.TlsKillAllHosts}
 		units.dnsZone = true
+	case model.AbuseActionKindMailHalt, model.AbuseActionKindMailLabelHalt:
+		halt, err := abuseMailHaltOf(action)
+		if err != nil {
+			return nil, err
+		}
+		units.smtpHalts = []*smtpedgeservice.SmtpHalt{halt}
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrAbuseEffectKindUnbuilt, action.Kind)
 	}
@@ -601,6 +691,29 @@ func (self *abuseEffects) hint(ctx context.Context, networkId server.Id, barred 
 	abuseActionStepCounter.WithLabelValues("hint", "failed").Inc()
 	if suppressedCount, ok := self.hintFailures.Allow(time.Now()); ok {
 		glog.Infof("[abuse]a standing hint was not written, and its sidecars learn at their resync; %d more since the last report\n", suppressedCount)
+	}
+}
+
+// Holds or releases the network's queues on topic mail, as hint does the core prompt: a barred case prompts no one,
+// a process with no mail hook writes none, and a failure is counted and reported and nothing more.
+func (self *abuseEffects) mailHint(ctx context.Context, networkId server.Id, kind protocol.SmtpStatusKind, retryAfter time.Duration, barred bool) {
+	if barred || self.deps.SmtpStatusHint == nil {
+		return
+	}
+	self.step(AbuseEffectStepHint, "mail")
+	now := self.deps.Now()
+	var err error
+	if r := server.HandleError(func() {
+		err = self.deps.SmtpStatusHint(ctx, networkId, kind, retryAfter, now.Add(-self.settings.MailHintWindow), now)
+	}); r != nil {
+		err = fmt.Errorf("%v", r)
+	}
+	if err == nil {
+		return
+	}
+	abuseActionStepCounter.WithLabelValues("hint", "failed").Inc()
+	if suppressedCount, ok := self.hintFailures.Allow(time.Now()); ok {
+		glog.Infof("[abuse]a mail hint was not written, and its sidecars meet the change at their next preamble; %d more since the last report\n", suppressedCount)
 	}
 }
 

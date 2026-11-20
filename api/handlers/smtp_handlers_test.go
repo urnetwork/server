@@ -27,6 +27,7 @@ import (
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -324,8 +325,19 @@ func TestSmtpAppealRoute(t *testing.T) {
 		smtpAppealLadderOf = func() (smtpAppealLadder, error) {
 			return ladder, nil
 		}
+		// §21's record of each halt the recheck lifted, and of none it kept (ABUSE-M9-01)
+		abuseLifts := []server.Id{}
+		previousAbuseLift := smtpAppealAbuseLift
+		smtpAppealAbuseLift = func(ctx context.Context, networkId server.Id, haltId server.Id) (*controller.AbuseActionResult, error) {
+			if networkId != world.networkId {
+				t.Errorf("§21's lift for another network")
+			}
+			abuseLifts = append(abuseLifts, haltId)
+			return nil, nil
+		}
 		t.Cleanup(func() {
 			smtpAppealLadderOf = previous
+			smtpAppealAbuseLift = previousAbuseLift
 		})
 
 		// a client token, a child of the network, never appeals
@@ -343,6 +355,9 @@ func TestSmtpAppealRoute(t *testing.T) {
 		}
 		if !lifted[server.Id(duplicate.HaltId)] || lifted[server.Id(holding.HaltId)] {
 			t.Fatalf("lifted %v", lifted)
+		}
+		if len(abuseLifts) != 1 || abuseLifts[0] != server.Id(duplicate.HaltId) {
+			t.Fatalf("§21 lifted %v", abuseLifts)
 		}
 		halts, err := model.FindSmtpHalts(ctx, world.networkId, now.Add(-time.Hour*48))
 		if err != nil || len(halts) != 2 {
