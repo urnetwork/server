@@ -157,6 +157,25 @@ var frontTlsHandshakesCounter = prometheus.NewCounterVec(
 	[]string{"version", "resumed", "alpn"},
 )
 
+// The completed TLS handshakes of front_tls_handshakes_total by what their
+// ClientHello offered (nginx.TlsClientOffer; LBALTOPT2 R22 (b)), beside the
+// protocol and the resumption: the class of the server name, what the client
+// offered to resume with and the shape of its supported_versions. It tells
+// apart the handshakes those labels leave alike, such as the full handshakes
+// that offer no protocol, and shows which resumption offers fail. Every label
+// is a closed set: at most 4 x 2 x 7 x 4 x 8 series, and 4 x 2 more for a
+// ClientHello the front never read, whose offer labels are all -. No server
+// name or address is one.
+var frontTlsHandshakeOffersCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "front_tls_handshake_offers_total",
+		Help:      "TLS handshakes on the public lb_alt TCP sockets that completed, as front_tls_handshakes_total counts them, by the application protocol (h2, http/1.1, none, other), whether the client resumed a session (true, false) and what its ClientHello offered: name_class, the class of its server name (none for no name; connect, api, lb, forwarded, redirect; unknown for any other); resumption (psk: a TLS 1.3 pre_shared_key; psk_modes: TLS 1.3 PSK modes without one; ticket: only TLS 1.2's session_ticket; none); and versions, its supported_versions (tls13, tls13_tls12 or tls12, each with _grease when it lists a GREASE value; legacy without the extension; other). - for a ClientHello the front never read. No server name or address is a label (LBALTOPT2 R22)",
+	},
+	[]string{"alpn", "resumed", "name_class", "resumption", "versions"},
+)
+
 // Kinds of message net/http writes to a public server's error log, as the
 // metric labels them.
 const (
@@ -228,4 +247,5 @@ func init() {
 	prometheus.MustRegister(frontHttpServerErrorsCounter)
 	prometheus.MustRegister(frontQuicConnectionsByFamilyCounter)
 	prometheus.MustRegister(frontTlsHandshakesCounter)
+	prometheus.MustRegister(frontTlsHandshakeOffersCounter)
 }

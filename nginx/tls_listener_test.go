@@ -63,11 +63,18 @@ func TestH2HeaderDeadlineFollowsFrameBoundaries(t *testing.T) {
 	}
 }
 
+// One handshake the listener reported.
+type testTlsObservedHandshake struct {
+	connectionState tls.ConnectionState
+	clientOffer     TlsClientOffer
+}
+
 // The listener reports each handshake that completes, once, with the state
-// net/http then serves, however often HandshakeContext runs, with the h2
-// header bound and without it, full and resumed. A handshake that fails is
-// never reported, a TLS 1.3 client's that refuses the certificate after the
-// server's flight was out included.
+// net/http then serves and the offer the front's config read from its
+// ClientHello, however often HandshakeContext runs, with the h2 header bound
+// and without it, full and resumed. A handshake that fails is never reported,
+// a TLS 1.3 client's that refuses the certificate after the server's flight
+// was out included.
 func TestTlsListenerObservesEachCompletedHandshakeOnce(t *testing.T) {
 	vault := newTestTlsVault(t)
 	tlsConfig, _ := vault.newTlsConfigs(t, DefaultTlsSettings())
@@ -79,9 +86,12 @@ func TestTlsListenerObservesEachCompletedHandshakeOnce(t *testing.T) {
 		t.Cleanup(func() {
 			tcpListener.Close()
 		})
-		observed := make(chan tls.ConnectionState, 8)
-		listener := NewTlsListener(tcpListener, tlsConfig, headerTimeout, func(connectionState tls.ConnectionState) {
-			observed <- connectionState
+		observed := make(chan testTlsObservedHandshake, 8)
+		listener := NewTlsListener(tcpListener, tlsConfig, headerTimeout, func(connectionState tls.ConnectionState, clientOffer TlsClientOffer) {
+			observed <- testTlsObservedHandshake{
+				connectionState: connectionState,
+				clientOffer:     clientOffer,
+			}
 		})
 		// serves one connection as net/http does, the handshake first, here
 		// twice; the client reads a byte, after any session ticket. The
@@ -139,15 +149,15 @@ func TestTlsListenerObservesEachCompletedHandshakeOnce(t *testing.T) {
 		// the one state reported since the last call, nil for none; the
 		// exchange has waited for the server, which reports before its
 		// handshake returns
-		reported := func() *tls.ConnectionState {
+		reported := func() *testTlsObservedHandshake {
 			select {
-			case connectionState := <-observed:
+			case handshake := <-observed:
 				select {
 				case <-observed:
 					t.Fatalf("header timeout %s: one handshake was reported twice", headerTimeout)
 				default:
 				}
-				return &connectionState
+				return &handshake
 			default:
 				return nil
 			}
@@ -167,12 +177,26 @@ func TestTlsListenerObservesEachCompletedHandshakeOnce(t *testing.T) {
 			if clientState.DidResume != resumed {
 				t.Fatalf("header timeout %s: the client resumed %t", headerTimeout, clientState.DidResume)
 			}
-			serverState := reported()
-			if serverState == nil {
+			handshake := reported()
+			if handshake == nil {
 				t.Fatalf("header timeout %s, resumed %t: the handshake wasn't reported", headerTimeout, resumed)
 			}
+			serverState := handshake.connectionState
 			if serverState.Version != tls.VersionTLS13 || serverState.DidResume != resumed || serverState.NegotiatedProtocol != "h2" || !serverState.HandshakeComplete {
 				t.Fatalf("header timeout %s, resumed %t: reported %#x resumed %t %q complete %t", headerTimeout, resumed, serverState.Version, serverState.DidResume, serverState.NegotiatedProtocol, serverState.HandshakeComplete)
+			}
+			// a Go client with a session cache offers PSK modes, and its ticket
+			// once it holds one
+			wantOffer := TlsClientOffer{
+				NameClass:  "api",
+				Resumption: tlsClientOfferResumptionPskModes,
+				Versions:   tlsClientOfferVersionsTls13Tls12,
+			}
+			if resumed {
+				wantOffer.Resumption = tlsClientOfferResumptionPsk
+			}
+			if handshake.clientOffer != wantOffer {
+				t.Fatalf("header timeout %s, resumed %t: reported the offer %+v, want %+v", headerTimeout, resumed, handshake.clientOffer, wantOffer)
 			}
 			if !resumed {
 				sessionCache.awaitSession(t)

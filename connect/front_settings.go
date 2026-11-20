@@ -102,6 +102,10 @@ type FrontServerSettings struct {
 	// socket is counted with, as it is counted, before the connection is
 	// served.
 	tlsHandshakeObserverForTest func(version string, resumed string, alpn string)
+	// Nil outside package tests. Called with the protocol, resumption and
+	// offer labels each completed TLS handshake on a public TCP socket is
+	// counted with in front_tls_handshake_offers_total, as it is counted.
+	tlsHandshakeOfferObserverForTest func(alpn string, resumed string, nameClass string, resumption string, versions string)
 	// Nil outside package tests. Called with the port kind, kind and reason of
 	// each message a public HTTP server wrote to its error log, as it is
 	// counted, and the text the front logged for it, empty when it logged

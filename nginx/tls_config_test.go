@@ -420,7 +420,7 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 		t.Fatal("the store covers extra-api.service.example, so the test shows nothing")
 	}
 	metrics := newFrontMetrics(prometheus.NewRegistry())
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], matcherTable.Listen, DefaultTlsSettings(), metrics)
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], matcherTable.Listen, DefaultTlsSettings(), metrics, time.Now)
 
 	config, err := tlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "extra-api.service.example"})
 	if err != nil {
@@ -440,7 +440,7 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 		t.Fatalf("the ClientHello of a name without a certificate counted %v times as unknown", count)
 	}
 
-	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", vault.routeTable.Listen, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()))
+	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", vault.routeTable.Listen, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()), time.Now)
 	if _, err := noDefaultTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "unknown.example"}); err == nil {
 		t.Fatalf("an unknown name got a config with no default certificate")
 	}

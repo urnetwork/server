@@ -5,10 +5,12 @@ package nginx
 // before a request reaches its handler. net/http still owns the handshake,
 // frame validation, flow control and graceful shutdown.
 //
-// The listener also reports each handshake that completes. net/http runs the
-// handshake through the connection's HandshakeContext, which it finds by
-// interface (go1.27 net/http server.go, conn.serve), and a nil return means
-// the client's Finished was verified. crypto/tls's VerifyConnection is
+// The listener also reports each handshake that completes, with what its
+// ClientHello offered (TlsClientOffer), which the front's TCP config reads
+// into a slot the handshake's context carries. net/http runs the handshake
+// through the connection's HandshakeContext, which it finds by interface
+// (go1.27 net/http server.go, conn.serve), and a nil return means the
+// client's Finished was verified. crypto/tls's VerifyConnection is
 // earlier: a TLS 1.3 server calls it once its own flight is flushed, before
 // it reads anything of the client's (readClientCertificate), and a TLS 1.2
 // server resuming a session calls it right after its ServerHello
@@ -29,13 +31,15 @@ import (
 // A TLS listener using the front's shared TLS configuration and the public
 // server's header timeout. Zero or negative disables the additional bound.
 // handshakeObserver, when set, is given the state of each connection whose
-// handshake completes, once, on the goroutine that ran the handshake, before
-// the connection is served.
+// handshake completes and its ClientHello's offer, once, on the goroutine
+// that ran the handshake, before the connection is served. The offer is
+// read by the front's TCP config (Front.TlsConfig); under another config it
+// is the zero offer.
 func NewTlsListener(
 	listener net.Listener,
 	config *tls.Config,
 	headerTimeout time.Duration,
-	handshakeObserver func(connectionState tls.ConnectionState),
+	handshakeObserver func(connectionState tls.ConnectionState, clientOffer TlsClientOffer),
 ) net.Listener {
 	return &frontTlsListener{
 		Listener:          listener,
@@ -50,7 +54,7 @@ type frontTlsListener struct {
 	net.Listener
 	config            *tls.Config
 	headerTimeout     time.Duration
-	handshakeObserver func(connectionState tls.ConnectionState)
+	handshakeObserver func(connectionState tls.ConnectionState, clientOffer TlsClientOffer)
 }
 
 // Accepts without waiting for TLS or an HTTP/2 preface.
@@ -74,29 +78,37 @@ type frontTlsConn struct {
 	// non-positive bounds no header block
 	headerTimeout time.Duration
 	// nil when nothing observes the handshake
-	handshakeObserver func(connectionState tls.ConnectionState)
+	handshakeObserver func(connectionState tls.ConnectionState, clientOffer TlsClientOffer)
 	// set once the completed handshake was observed
 	handshakeObserved bool
-	h2                bool
-	prefaceLeft       int
-	frameHeader       [9]byte
-	headerBytes       int
-	payloadLeft       int
-	headerBlock       bool
-	endHeaders        bool
-	deadlineSet       bool
+	// the ClientHello's offer, which the TCP config's GetConfigForClient
+	// writes through the handshake's context on this goroutine
+	clientOffer TlsClientOffer
+	h2          bool
+	prefaceLeft int
+	frameHeader [9]byte
+	headerBytes int
+	payloadLeft int
+	headerBlock bool
+	endHeaders  bool
+	deadlineSet bool
 }
 
 // net/http finishes the handshake before starting its HTTP/2 frame reader. A
-// handshake that completes is observed once, however often this is called.
+// handshake that completes is observed once, however often this is called,
+// with the offer its ClientHello made.
 func (self *frontTlsConn) HandshakeContext(ctx context.Context) error {
+	observe := self.handshakeObserver != nil && !self.handshakeObserved
+	if observe {
+		ctx = withTlsClientOffer(ctx, &self.clientOffer)
+	}
 	if err := self.Conn.HandshakeContext(ctx); err != nil {
 		return err
 	}
 	connectionState := self.ConnectionState()
-	if self.handshakeObserver != nil && !self.handshakeObserved {
+	if observe {
 		self.handshakeObserved = true
-		self.handshakeObserver(connectionState)
+		self.handshakeObserver(connectionState, self.clientOffer)
 	}
 	self.h2 = 0 < self.headerTimeout && connectionState.NegotiatedProtocol == http2.NextProtoTLS
 	self.prefaceLeft = len(http2.ClientPreface)

@@ -1,0 +1,10300 @@
+package redis_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/sha1"
+	"encoding/json"
+	"fmt"
+	"math"
+	"reflect"
+	"strconv"
+	"time"
+
+	. "github.com/bsm/ginkgo/v2"
+	. "github.com/bsm/gomega"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/internal/proto"
+	"github.com/redis/go-redis/v9/internal/routing"
+)
+
+type TimeValue struct {
+	time.Time
+}
+
+func (t *TimeValue) ScanRedis(s string) (err error) {
+	t.Time, err = time.Parse(time.RFC3339Nano, s)
+	return
+}
+
+var _ = Describe("Commands", func() {
+	ctx := context.TODO()
+	// client is the UniversalClient under test (the raw client or an
+	// autopipeliner, per GOREDIS_TEST_SUBJECT — see newUniversalSubject).
+	// rawClient is always the underlying *redis.Client, used for setup/teardown
+	// and the admin/connection-only calls (FlushDB, Config*, Ping, PoolStats,
+	// Conn, ...) that are not part of the UniversalClient interface.
+	var client redis.UniversalClient
+	var rawClient *redis.Client
+	var closeSubject func() error
+
+	BeforeEach(func() {
+		rawClient = redis.NewClient(redisOptions())
+		// Build the subject (and its closer) BEFORE any assertion: if the
+		// FlushDB Expect fails, AfterEach still runs and must have a valid
+		// closer for THIS spec's clients, not nil or the previous spec's.
+		client, closeSubject = newUniversalSubject(rawClient)
+		Expect(rawClient.FlushDB(ctx).Err()).NotTo(HaveOccurred())
+	})
+
+	AfterEach(func() {
+		Expect(closeSubject()).NotTo(HaveOccurred())
+	})
+
+	Describe("server", func() {
+		It("should Auth", func() {
+			// A failed AUTH is reported as "ERR AUTH ..." by a passwordless OSS
+			// Redis and as "WRONGPASS invalid username-password pair" by a
+			// password-protected server (e.g. Redis Enterprise); accept both.
+			//
+			// The two failing AUTH commands are deliberately issued in separate
+			// pipelines: on a password-protected server a second failed AUTH in
+			// the same pipeline is throttled by the server's brute-force
+			// protection and never answered, stalling the read until the client
+			// times out.
+			authErr := SatisfyAny(ContainSubstring("ERR AUTH"), ContainSubstring("WRONGPASS"))
+
+			cmds, err := client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Auth(ctx, "password")
+				return nil
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(authErr)
+			Expect(cmds[0].Err().Error()).To(authErr)
+
+			cmds, err = client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Auth(ctx, "")
+				return nil
+			})
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(authErr)
+			Expect(cmds[0].Err().Error()).To(authErr)
+
+			stats := rawClient.PoolStats()
+			if stats.PipelineStats != nil {
+				// The autopipeline subject faces create the dedicated pipeline
+				// pool lazily, so the two Pipelined calls above ran there: the
+				// first dialed (miss), the second reused (hit). The main pool
+				// served only the BeforeEach FlushDB.
+				Expect(stats.PipelineStats.Hits).To(Equal(uint32(1)))
+				Expect(stats.PipelineStats.Misses).To(Equal(uint32(1)))
+				Expect(stats.PipelineStats.Timeouts).To(Equal(uint32(0)))
+				Expect(stats.PipelineStats.TotalConns).To(Equal(uint32(1)))
+				Expect(stats.PipelineStats.IdleConns).To(Equal(uint32(1)))
+				Expect(stats.Hits).To(Equal(uint32(0)))
+				Expect(stats.Misses).To(Equal(uint32(1)))
+			} else {
+				// No dedicated pipeline pool: FlushDB dialed the one connection
+				// (miss) and both Pipelined calls reused it (hits).
+				Expect(stats.Hits).To(Equal(uint32(2)))
+				Expect(stats.Misses).To(Equal(uint32(1)))
+				Expect(stats.Timeouts).To(Equal(uint32(0)))
+				Expect(stats.TotalConns).To(Equal(uint32(1)))
+				Expect(stats.IdleConns).To(Equal(uint32(1)))
+			}
+		})
+
+		It("should hello", func() {
+			cmds, err := client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.Hello(ctx, 3, "", "", "")
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			m, err := cmds[0].(*redis.MapStringInterfaceCmd).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(m["proto"]).To(Equal(int64(3)))
+		})
+
+		It("should Echo", func() {
+			pipe := client.Pipeline()
+			echo := pipe.Echo(ctx, "hello")
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(echo.Err()).NotTo(HaveOccurred())
+			Expect(echo.Val()).To(Equal("hello"))
+		})
+
+		It("should Ping", func() {
+			ping := rawClient.Ping(ctx)
+			Expect(ping.Err()).NotTo(HaveOccurred())
+			Expect(ping.Val()).To(Equal("PONG"))
+		})
+
+		It("should Ping with Do method", func() {
+			result := rawClient.Conn().Do(ctx, "PING")
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("PONG"))
+		})
+
+		It("should Wait", func() {
+			const wait = 3 * time.Second
+
+			// assume testing on single redis instance
+			start := time.Now()
+			val, err := rawClient.Wait(ctx, 1, wait).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal(int64(0)))
+			Expect(time.Now()).To(BeTemporally("~", start.Add(wait), 3*time.Second))
+		})
+
+		It("should WaitAOF", func() {
+			const waitAOF = 3 * time.Second
+
+			// No replicas here, so WAITAOF blocks until timeout and returns
+			// the two counts [numlocal, numreplicas]. numLocal=0 skips AOF.
+			start := time.Now()
+			val, err := rawClient.WaitAOF(ctx, 0, 1, waitAOF).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(HaveLen(2))
+			Expect(val[1]).To(Equal(int64(0)))
+			Expect(time.Now()).To(BeTemporally("~", start.Add(waitAOF), 3*time.Second))
+		})
+
+		It("should Select", Label("NonRedisEnterprise"), func() {
+			pipe := client.Pipeline()
+			sel := pipe.Select(ctx, 1)
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(sel.Err()).NotTo(HaveOccurred())
+			Expect(sel.Val()).To(Equal("OK"))
+		})
+
+		It("should SwapDB", Label("NonRedisEnterprise"), func() {
+			pipe := client.Pipeline()
+			sel := pipe.SwapDB(ctx, 1, 2)
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(sel.Err()).NotTo(HaveOccurred())
+			Expect(sel.Val()).To(Equal("OK"))
+		})
+
+		It("should BgRewriteAOF", func() {
+			Skip("flaky test")
+
+			val, err := rawClient.BgRewriteAOF(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(ContainSubstring("Background append only file rewriting"))
+		})
+
+		It("should BgSave", func() {
+			Skip("flaky test")
+
+			// workaround for "ERR Can't BGSAVE while AOF log rewriting is in progress"
+			Eventually(func() string {
+				return rawClient.BgSave(ctx).Val()
+			}, "30s").Should(Equal("Background saving started"))
+		})
+
+		It("Should CommandGetKeys", func() {
+			keys, err := rawClient.CommandGetKeys(ctx, "MSET", "a", "b", "c", "d", "e", "f").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).To(Equal([]string{"a", "c", "e"}))
+
+			keys, err = rawClient.CommandGetKeys(ctx, "EVAL", "not consulted", "3", "key1", "key2", "key3", "arg1", "arg2", "arg3", "argN").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).To(Equal([]string{"key1", "key2", "key3"}))
+
+			keys, err = rawClient.CommandGetKeys(ctx, "SORT", "mylist", "ALPHA", "STORE", "outlist").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).To(Equal([]string{"mylist", "outlist"}))
+
+			_, err = rawClient.CommandGetKeys(ctx, "FAKECOMMAND", "arg1", "arg2").Result()
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError("ERR Invalid command specified"))
+		})
+
+		It("should CommandGetKeysAndFlags", func() {
+			keysAndFlags, err := rawClient.CommandGetKeysAndFlags(ctx, "LMOVE", "mylist1", "mylist2", "left", "left").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keysAndFlags).To(Equal([]redis.KeyFlags{
+				{
+					Key:   "mylist1",
+					Flags: []string{"RW", "access", "delete"},
+				},
+				{
+					Key:   "mylist2",
+					Flags: []string{"RW", "insert"},
+				},
+			}))
+
+			_, err = rawClient.CommandGetKeysAndFlags(ctx, "FAKECOMMAND", "arg1", "arg2").Result()
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError("ERR Invalid command specified"))
+		})
+
+		It("should ClientKill", func() {
+			r := rawClient.ClientKill(ctx, "1.1.1.1:1111")
+			Expect(r.Err()).To(MatchError("ERR No such client"))
+			Expect(r.Val()).To(Equal(""))
+		})
+
+		It("should ClientKillByFilter", func() {
+			r := rawClient.ClientKillByFilter(ctx, "TYPE", "test")
+			Expect(r.Err()).To(MatchError("ERR Unknown client type 'test'"))
+			Expect(r.Val()).To(Equal(int64(0)))
+		})
+
+		It("should ClientKillByFilter with kill myself", func() {
+			opt := redisOptions()
+			opt.ClientName = "killmyid"
+			db := redis.NewClient(opt)
+			Expect(db.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			defer func() {
+				Expect(db.Close()).NotTo(HaveOccurred())
+			}()
+			val, err := rawClient.ClientList(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).Should(ContainSubstring("name=killmyid"))
+
+			myid := db.ClientID(ctx).Val()
+			killed := rawClient.ClientKillByFilter(ctx, "ID", strconv.FormatInt(myid, 10))
+			Expect(killed.Err()).NotTo(HaveOccurred())
+			Expect(killed.Val()).To(BeNumerically("==", 1))
+
+			val, err = rawClient.ClientList(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).ShouldNot(ContainSubstring("name=killmyid"))
+		})
+
+		It("should ClientKillByFilter with MAXAGE", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			var s []string
+			started := make(chan bool)
+			done := make(chan bool)
+
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				blpop := client.BLPop(ctx, 0, "list")
+				Expect(blpop.Val()).To(Equal(s))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BLPOP is not blocked.")
+			case <-time.After(1100 * time.Millisecond):
+				// ok
+			}
+
+			killed := rawClient.ClientKillByFilter(ctx, "MAXAGE", "1")
+			Expect(killed.Err()).NotTo(HaveOccurred())
+			Expect(killed.Val()).To(BeNumerically(">=", 1))
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(200 * time.Millisecond):
+				Fail("BLPOP is still blocked.")
+			}
+		})
+
+		It("should ClientID", func() {
+			err := rawClient.ClientID(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rawClient.ClientID(ctx).Val()).To(BeNumerically(">=", 0))
+		})
+
+		It("should ClientUnblock", func() {
+			id := rawClient.ClientID(ctx).Val()
+			r, err := rawClient.ClientUnblock(ctx, id).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r).To(Equal(int64(0)))
+		})
+
+		It("should ClientUnblockWithError", func() {
+			id := rawClient.ClientID(ctx).Val()
+			r, err := rawClient.ClientUnblockWithError(ctx, id).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(r).To(Equal(int64(0)))
+		})
+
+		// NonRedisEnterprise: Redis Enterprise CLIENT INFO advertises an extra
+		// connection flag ("m") that the OSS client-info parser does not recognize.
+		It("should ClientInfo", Label("NonRedisEnterprise"), func() {
+			info, err := rawClient.ClientInfo(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info).NotTo(BeNil())
+		})
+
+		It("should ClientPause", Label("NonRedisEnterprise"), func() {
+			err := rawClient.ClientPause(ctx, time.Second).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			start := time.Now()
+			err = rawClient.Ping(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(time.Now()).To(BeTemporally("~", start.Add(time.Second), 800*time.Millisecond))
+		})
+
+		It("should ClientSetName and ClientGetName", func() {
+			pipe := client.Pipeline()
+			set := pipe.ClientSetName(ctx, "theclientname")
+			get := pipe.ClientGetName(ctx)
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(BeTrue())
+
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("theclientname"))
+		})
+
+		// NonRedisEnterprise: CLIENT SETINFO against Redis Enterprise triggers a nil-pointer
+		// panic in the client (RE response not handled); skipped pending investigation.
+		It("should ClientSetInfo", Label("NonRedisEnterprise"), func() {
+			pipe := client.Pipeline()
+
+			// Test setting the libName
+			libName := "go-redis"
+			libInfo := redis.WithLibraryName(libName)
+			setInfo := pipe.ClientSetInfo(ctx, libInfo)
+			_, err := pipe.Exec(ctx)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(setInfo.Err()).NotTo(HaveOccurred())
+			Expect(setInfo.Val()).To(Equal("OK"))
+
+			// Test setting the libVer
+			libVer := "vX.x"
+			libInfo = redis.WithLibraryVersion(libVer)
+			setInfo = pipe.ClientSetInfo(ctx, libInfo)
+			_, err = pipe.Exec(ctx)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(setInfo.Err()).NotTo(HaveOccurred())
+			Expect(setInfo.Val()).To(Equal("OK"))
+
+			// Test setting both fields, expect a panic
+			libInfo = redis.LibraryInfo{LibName: &libName, LibVer: &libVer}
+
+			Expect(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err := r.(error)
+						Expect(err).To(MatchError("both LibName and LibVer cannot be set at the same time"))
+					}
+				}()
+				pipe.ClientSetInfo(ctx, libInfo)
+			}).To(Panic())
+
+			// Test setting neither field, expect a panic
+			libInfo = redis.LibraryInfo{}
+
+			Expect(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						err := r.(error)
+						Expect(err).To(MatchError("at least one of LibName and LibVer should be set"))
+					}
+				}()
+				pipe.ClientSetInfo(ctx, libInfo)
+			}).To(Panic())
+			// Test setting the default options for libName, libName suffix and libVer.
+			// CLIENT SETINFO is per-connection state, so read CLIENT INFO through the
+			// same pipeline path that issued the SETINFOs above: when the client has a
+			// dedicated pipeline pool (the autopipeline subject faces create one
+			// lazily), those ran on a pipeline-pool connection and rawClient.ClientInfo
+			// would inspect a different, main-pool connection.
+			infoCmd := pipe.ClientInfo(ctx)
+			_, err = pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			clientInfo := infoCmd.Val()
+			Expect(clientInfo.LibName).To(ContainSubstring("go-redis(go-redis,"))
+			// Test setting the libName suffix in options
+			opt := redisOptions()
+			opt.IdentitySuffix = "suffix"
+			client2 := redis.NewClient(opt)
+			defer client2.Close()
+			clientInfo = client2.ClientInfo(ctx).Val()
+			Expect(clientInfo.LibName).To(ContainSubstring("go-redis(suffix,"))
+		})
+
+		It("should ClientTracking ON/OFF", func() {
+			skipIfClientTrackingUnavailable(ctx, rawClient)
+
+			conn := rawClient.Conn()
+			defer conn.Close()
+
+			status, err := conn.ClientTrackingOn(ctx, nil).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			info, err := conn.ClientInfo(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			// Redis Enterprise's proxy does not surface the client-tracking flag in
+			// CLIENT INFO, so assert it only against a direct server. Tracking still
+			// works on RE (the command returns OK and CSC operates).
+			if !RECluster {
+				Expect(info.Flags & redis.ClientTracking).NotTo(BeZero())
+			}
+
+			status, err = conn.ClientTrackingOff(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			info, err = conn.ClientInfo(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.Flags & redis.ClientTracking).To(BeZero())
+		})
+
+		It("should ClientTracking with BCAST and NOLOOP", func() {
+			skipIfClientTrackingUnavailable(ctx, rawClient)
+
+			conn := rawClient.Conn()
+			defer conn.Close()
+
+			status, err := conn.ClientTracking(ctx, true, &redis.ClientTrackingOptions{
+				Bcast:    true,
+				Prefixes: []string{"cache:"},
+				NoLoop:   true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			info, err := conn.ClientInfo(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			// Redis Enterprise's proxy does not surface tracking flags in CLIENT
+			// INFO, so assert them only against a direct server (tracking still
+			// works on RE).
+			if !RECluster {
+				Expect(info.Flags & redis.ClientTracking).NotTo(BeZero())
+				Expect(info.Flags & redis.ClientTrackingBCAST).NotTo(BeZero())
+			}
+			// Redis does not expose the NOLOOP flag in CLIENT INFO; it is only
+			// observable via CLIENT TRACKINGINFO.
+
+			Expect(conn.ClientTrackingOff(ctx).Err()).NotTo(HaveOccurred())
+		})
+
+		It("should reject invalid ClientTracking option combinations", func() {
+			err := client.ClientTrackingOn(ctx, &redis.ClientTrackingOptions{
+				OptIn:  true,
+				OptOut: true,
+			}).Err()
+			Expect(err).To(MatchError(ContainSubstring("OPTIN and OPTOUT")))
+
+			err = client.ClientTrackingOn(ctx, &redis.ClientTrackingOptions{
+				Bcast: true,
+				OptIn: true,
+			}).Err()
+			Expect(err).To(MatchError(ContainSubstring("BCAST cannot be combined")))
+
+			err = client.ClientTrackingOn(ctx, &redis.ClientTrackingOptions{
+				Prefixes: []string{"k:"},
+			}).Err()
+			Expect(err).To(MatchError(ContainSubstring("PREFIX requires BCAST")))
+		})
+
+		It("should ConfigGet", func() {
+			val, err := rawClient.ConfigGet(ctx, "*").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).NotTo(BeEmpty())
+		})
+
+		// NonRedisEnterprise: module configuration is not exposed via CONFIG GET on
+		// Redis Enterprise the way it is on OSS Redis.
+		It("should ConfigGet Modules", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "Config doesn't include modules before Redis 8")
+			expected := map[string]string{
+				"search-*": "search-timeout",
+				"ts-*":     "ts-retention-policy",
+				"bf-*":     "bf-error-rate",
+				"cf-*":     "cf-initial-size",
+			}
+
+			for prefix, lookup := range expected {
+				val, err := rawClient.ConfigGet(ctx, prefix).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(val).NotTo(BeEmpty())
+				Expect(val[lookup]).NotTo(BeEmpty())
+			}
+		})
+
+		It("should ConfigResetStat", Label("NonRedisEnterprise"), func() {
+			r := rawClient.ConfigResetStat(ctx)
+			Expect(r.Err()).NotTo(HaveOccurred())
+			Expect(r.Val()).To(Equal("OK"))
+		})
+
+		It("should ConfigSet", Label("NonRedisEnterprise"), func() {
+			configGet := rawClient.ConfigGet(ctx, "maxmemory")
+			Expect(configGet.Err()).NotTo(HaveOccurred())
+			Expect(configGet.Val()).To(HaveLen(1))
+			_, ok := configGet.Val()["maxmemory"]
+			Expect(ok).To(BeTrue())
+
+			configSet := rawClient.ConfigSet(ctx, "maxmemory", configGet.Val()["maxmemory"])
+			Expect(configSet.Err()).NotTo(HaveOccurred())
+			Expect(configSet.Val()).To(Equal("OK"))
+		})
+
+		It("should ConfigGet with Modules", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "config get won't return modules configs before redis 8")
+			configGet := rawClient.ConfigGet(ctx, "*")
+			Expect(configGet.Err()).NotTo(HaveOccurred())
+			Expect(configGet.Val()).To(HaveKey("maxmemory"))
+			Expect(configGet.Val()).To(HaveKey("search-timeout"))
+			Expect(configGet.Val()).To(HaveKey("ts-retention-policy"))
+			Expect(configGet.Val()).To(HaveKey("bf-error-rate"))
+			Expect(configGet.Val()).To(HaveKey("cf-initial-size"))
+		})
+
+		// NonRedisEnterprise: FT.CONFIG is not available on Redis Enterprise
+		// (superseded by CONFIG GET/SET in Redis 8), so this OSS-only path errors.
+		It("should ConfigSet FT DIALECT", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "config doesn't include modules before Redis 8")
+			defaultState, err := rawClient.ConfigGet(ctx, "search-default-dialect").Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			// set to 3
+			res, err := rawClient.ConfigSet(ctx, "search-default-dialect", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(BeEquivalentTo("OK"))
+
+			defDialect, err := client.FTConfigGet(ctx, "DEFAULT_DIALECT").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defDialect).To(BeEquivalentTo(map[string]interface{}{"DEFAULT_DIALECT": "3"}))
+
+			resGet, err := rawClient.ConfigGet(ctx, "search-default-dialect").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resGet).To(BeEquivalentTo(map[string]string{"search-default-dialect": "3"}))
+
+			// set to 2
+			res, err = rawClient.ConfigSet(ctx, "search-default-dialect", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(BeEquivalentTo("OK"))
+
+			defDialect, err = client.FTConfigGet(ctx, "DEFAULT_DIALECT").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defDialect).To(BeEquivalentTo(map[string]interface{}{"DEFAULT_DIALECT": "2"}))
+
+			// set to 1
+			res, err = rawClient.ConfigSet(ctx, "search-default-dialect", "1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(BeEquivalentTo("OK"))
+
+			defDialect, err = client.FTConfigGet(ctx, "DEFAULT_DIALECT").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(defDialect).To(BeEquivalentTo(map[string]interface{}{"DEFAULT_DIALECT": "1"}))
+
+			resGet, err = rawClient.ConfigGet(ctx, "search-default-dialect").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resGet).To(BeEquivalentTo(map[string]string{"search-default-dialect": "1"}))
+
+			// set to default
+			res, err = rawClient.ConfigSet(ctx, "search-default-dialect", defaultState["search-default-dialect"]).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(BeEquivalentTo("OK"))
+		})
+
+		It("should ConfigSet fail for ReadOnly", func() {
+			SkipBeforeRedisVersion("8", "Config doesn't include modules before Redis 8")
+			_, err := rawClient.ConfigSet(ctx, "search-max-doctablesize", "100000").Result()
+			Expect(err).To(HaveOccurred())
+		})
+
+		// NonRedisEnterprise: the "search-timeout" module CONFIG parameter is not
+		// supported on Redis Enterprise.
+		It("should ConfigSet Modules", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "Config doesn't include modules before Redis 8")
+			defaults := map[string]string{}
+			expected := map[string]string{
+				"search-timeout":      "100",
+				"ts-retention-policy": "2",
+				"bf-error-rate":       "0.13",
+				"cf-initial-size":     "64",
+			}
+
+			// read the defaults to set them back later
+			for setting := range expected {
+				val, err := rawClient.ConfigGet(ctx, setting).Result()
+				Expect(err).NotTo(HaveOccurred())
+				defaults[setting] = val[setting]
+			}
+
+			// check if new values can be set
+			for setting, value := range expected {
+				val, err := rawClient.ConfigSet(ctx, setting, value).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(val).NotTo(BeEmpty())
+				Expect(val).To(Equal("OK"))
+			}
+
+			for setting, value := range expected {
+				val, err := rawClient.ConfigGet(ctx, setting).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(val).NotTo(BeEmpty())
+				Expect(val[setting]).To(Equal(value))
+			}
+
+			// set back to the defaults
+			for setting, value := range defaults {
+				val, err := rawClient.ConfigSet(ctx, setting, value).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(val).NotTo(BeEmpty())
+				Expect(val).To(Equal("OK"))
+			}
+		})
+
+		It("should Fail ConfigSet Modules", func() {
+			SkipBeforeRedisVersion("8", "Config doesn't include modules before Redis 8")
+			expected := map[string]string{
+				"search-timeout":      "-100",
+				"ts-retention-policy": "-10",
+				"bf-error-rate":       "1.5",
+				"cf-initial-size":     "-10",
+			}
+
+			for setting, value := range expected {
+				val, err := rawClient.ConfigSet(ctx, setting, value).Result()
+				Expect(err).To(HaveOccurred())
+				Expect(err).To(MatchError(ContainSubstring(setting)))
+				Expect(val).To(BeEmpty())
+			}
+		})
+
+		It("should ConfigRewrite", Label("NonRedisEnterprise"), func() {
+			configRewrite := rawClient.ConfigRewrite(ctx)
+			Expect(configRewrite.Err()).NotTo(HaveOccurred())
+			Expect(configRewrite.Val()).To(Equal("OK"))
+		})
+
+		It("should DBSize", func() {
+			size, err := rawClient.DBSize(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(0)))
+		})
+
+		It("should Info", func() {
+			info := rawClient.Info(ctx)
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(Equal(""))
+		})
+
+		It("should InfoMap", Label("redis.info"), func() {
+			info := rawClient.InfoMap(ctx)
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(BeNil())
+
+			info = rawClient.InfoMap(ctx, "dummy")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).To(BeNil())
+
+			info = rawClient.InfoMap(ctx, "server")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).To(HaveLen(1))
+		})
+
+		// NonRedisEnterprise: Redis Enterprise reports loaded modules in a different
+		// INFO shape, so the OSS module-name assertions do not hold.
+		It("should Info Modules", Label("redis.info", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "modules are included in info for Redis Version >= 8")
+			info := rawClient.Info(ctx)
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(BeNil())
+
+			info = rawClient.Info(ctx, "search")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).To(ContainSubstring("search"))
+
+			info = rawClient.Info(ctx, "modules")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).To(ContainSubstring("search"))
+			Expect(info.Val()).To(ContainSubstring("ReJSON"))
+			Expect(info.Val()).To(ContainSubstring("timeseries"))
+			Expect(info.Val()).To(ContainSubstring("bf"))
+
+			info = rawClient.Info(ctx, "everything")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).To(ContainSubstring("search"))
+			Expect(info.Val()).To(ContainSubstring("ReJSON"))
+			Expect(info.Val()).To(ContainSubstring("timeseries"))
+			Expect(info.Val()).To(ContainSubstring("bf"))
+		})
+
+		// NonRedisEnterprise: see "should Info Modules" - RE reports modules in a
+		// different INFO layout from OSS, so the parsed module map is empty here.
+		It("should InfoMap Modules", Label("redis.info", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8", "modules are included in info for Redis Version >= 8")
+			info := rawClient.InfoMap(ctx)
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(BeNil())
+
+			info = rawClient.InfoMap(ctx, "search")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(len(info.Val())).To(BeNumerically(">=", 2))
+			Expect(info.Val()["search_version"]).ToNot(BeNil())
+
+			info = rawClient.InfoMap(ctx, "modules")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			val := info.Val()
+			modules, ok := val["Modules"]
+			Expect(ok).To(BeTrue())
+			Expect(len(val)).To(BeNumerically(">=", 2))
+			Expect(val["search_version"]).ToNot(BeNil())
+			Expect(modules["search"]).ToNot(BeNil())
+			Expect(modules["ReJSON"]).ToNot(BeNil())
+			Expect(modules["timeseries"]).ToNot(BeNil())
+			Expect(modules["bf"]).ToNot(BeNil())
+
+			info = rawClient.InfoMap(ctx, "everything")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(len(info.Val())).To(BeNumerically(">=", 10))
+		})
+
+		It("should Info cpu", func() {
+			info := rawClient.Info(ctx, "cpu")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(Equal(""))
+			Expect(info.Val()).To(ContainSubstring(`used_cpu_sys`))
+		})
+
+		It("should Info cpu and memory", func() {
+			info := rawClient.Info(ctx, "cpu", "memory")
+			Expect(info.Err()).NotTo(HaveOccurred())
+			Expect(info.Val()).NotTo(Equal(""))
+			Expect(info.Val()).To(ContainSubstring(`used_cpu_sys`))
+			Expect(info.Val()).To(ContainSubstring(`memory`))
+		})
+
+		It("should LastSave", Label("NonRedisEnterprise"), func() {
+			lastSave := rawClient.LastSave(ctx)
+			Expect(lastSave.Err()).NotTo(HaveOccurred())
+			Expect(lastSave.Val()).NotTo(Equal(0))
+		})
+
+		It("should Save", Label("NonRedisEnterprise"), func() {
+			// workaround for "ERR Background save already in progress"
+			Eventually(func() string {
+				return rawClient.Save(ctx).Val()
+			}, "10s").Should(Equal("OK"))
+		})
+
+		It("should SlaveOf", Label("NonRedisEnterprise"), func() {
+			slaveOf := rawClient.SlaveOf(ctx, "localhost", "8888")
+			Expect(slaveOf.Err()).NotTo(HaveOccurred())
+			Expect(slaveOf.Val()).To(Equal("OK"))
+
+			slaveOf = rawClient.SlaveOf(ctx, "NO", "ONE")
+			Expect(slaveOf.Err()).NotTo(HaveOccurred())
+			Expect(slaveOf.Val()).To(Equal("OK"))
+		})
+
+		It("should ReplicaOf", Label("NonRedisEnterprise"), func() {
+			replicaOf := rawClient.ReplicaOf(ctx, "localhost", "8888")
+			Expect(replicaOf.Err()).NotTo(HaveOccurred())
+			Expect(replicaOf.Val()).To(Equal("OK"))
+
+			replicaOf = rawClient.ReplicaOf(ctx, "NO", "ONE")
+			Expect(replicaOf.Err()).NotTo(HaveOccurred())
+			Expect(replicaOf.Val()).To(Equal("OK"))
+		})
+
+		It("should Time", func() {
+			tm, err := rawClient.Time(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(tm).To(BeTemporally("~", time.Now(), 3*time.Second))
+		})
+
+		It("should Command", Label("NonRedisEnterprise"), func() {
+			cmds, err := rawClient.Command(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := cmds["mget"]
+			Expect(cmd.Name).To(Equal("mget"))
+			Expect(cmd.Arity).To(Equal(int8(-2)))
+			Expect(cmd.Flags).To(ContainElement("readonly"))
+			Expect(cmd.FirstKeyPos).To(Equal(int8(1)))
+			Expect(cmd.LastKeyPos).To(Equal(int8(-1)))
+			Expect(cmd.StepCount).To(Equal(int8(1)))
+
+			cmd = cmds["ping"]
+			Expect(cmd.Name).To(Equal("ping"))
+			Expect(cmd.Arity).To(Equal(int8(-1)))
+			Expect(cmd.Flags).To(ContainElement("fast"))
+			Expect(cmd.FirstKeyPos).To(Equal(int8(0)))
+			Expect(cmd.LastKeyPos).To(Equal(int8(0)))
+			Expect(cmd.StepCount).To(Equal(int8(0)))
+		})
+
+		It("should Command Tips", Label("NonRedisEnterprise"), func() {
+			SkipAfterRedisVersion("7.9", "Redis 8 changed the COMMAND reply format")
+			cmds, err := rawClient.Command(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			cmd := cmds["touch"]
+			Expect(cmd.Name).To(Equal("touch"))
+			Expect(cmd.CommandPolicy.Request).To(Equal(routing.ReqMultiShard))
+			Expect(cmd.CommandPolicy.Response).To(Equal(routing.RespAggSum))
+
+			cmd = cmds["flushall"]
+			Expect(cmd.Name).To(Equal("flushall"))
+			Expect(cmd.CommandPolicy.Request).To(Equal(routing.ReqAllShards))
+			Expect(cmd.CommandPolicy.Response).To(Equal(routing.RespAllSucceeded))
+		})
+
+		It("should return all command names", func() {
+			cmdList := rawClient.CommandList(ctx, nil)
+			Expect(cmdList.Err()).NotTo(HaveOccurred())
+			cmdNames := cmdList.Val()
+
+			Expect(cmdNames).NotTo(BeEmpty())
+
+			// Assert that some expected commands are present in the list
+			Expect(cmdNames).To(ContainElement("get"))
+			Expect(cmdNames).To(ContainElement("set"))
+			Expect(cmdNames).To(ContainElement("hset"))
+		})
+
+		It("should filter commands by module", func() {
+			filter := &redis.FilterBy{
+				Module: "JSON",
+			}
+			cmdList := rawClient.CommandList(ctx, filter)
+			Expect(cmdList.Err()).NotTo(HaveOccurred())
+			Expect(cmdList.Val()).To(HaveLen(0))
+		})
+
+		It("should filter commands by ACL category", func() {
+			filter := &redis.FilterBy{
+				ACLCat: "admin",
+			}
+
+			cmdList := rawClient.CommandList(ctx, filter)
+			Expect(cmdList.Err()).NotTo(HaveOccurred())
+			cmdNames := cmdList.Val()
+
+			// Assert that the returned list only contains commands from the admin ACL category
+			Expect(len(cmdNames)).To(BeNumerically(">", 10))
+		})
+
+		It("should filter commands by pattern", func() {
+			filter := &redis.FilterBy{
+				Pattern: "*GET*",
+			}
+			cmdList := rawClient.CommandList(ctx, filter)
+			Expect(cmdList.Err()).NotTo(HaveOccurred())
+			cmdNames := cmdList.Val()
+
+			// Assert that the returned list only contains commands that match the given pattern
+			Expect(cmdNames).To(ContainElement("get"))
+			Expect(cmdNames).To(ContainElement("getbit"))
+			Expect(cmdNames).To(ContainElement("getrange"))
+			Expect(cmdNames).NotTo(ContainElement("set"))
+		})
+	})
+
+	Describe("debugging", Label("NonRedisEnterprise"), func() {
+		It("should DebugObject", func() {
+			err := rawClient.DebugObject(ctx, "foo").Err()
+			Expect(err).To(MatchError("ERR no such key"))
+
+			err = client.Set(ctx, "foo", "bar", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			s, err := rawClient.DebugObject(ctx, "foo").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s).To(ContainSubstring("serializedlength:4"))
+		})
+
+		It("should MemoryUsage", func() {
+			err := rawClient.MemoryUsage(ctx, "foo").Err()
+			Expect(err).To(Equal(redis.Nil))
+
+			err = client.Set(ctx, "foo", "bar", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := rawClient.MemoryUsage(ctx, "foo").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).NotTo(BeZero())
+
+			n, err = rawClient.MemoryUsage(ctx, "foo", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).NotTo(BeZero())
+
+			_, err = rawClient.MemoryUsage(ctx, "foo", 0, 1).Result()
+			Expect(err).Should(MatchError("MemoryUsage expects single sample count"))
+		})
+	})
+
+	Describe("keys", func() {
+		It("should Del", func() {
+			err := client.Set(ctx, "key1", "Hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.Set(ctx, "key2", "World", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := client.Del(ctx, "key1", "key2", "key3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+		})
+
+		It("should Unlink", func() {
+			err := client.Set(ctx, "key1", "Hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.Set(ctx, "key2", "World", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := client.Unlink(ctx, "key1", "key2", "key3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+		})
+
+		It("should Dump", func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			dump := client.Dump(ctx, "key")
+			Expect(dump.Err()).NotTo(HaveOccurred())
+			Expect(dump.Val()).NotTo(BeEmpty())
+		})
+
+		It("should Exists", func() {
+			set := client.Set(ctx, "key1", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			n, err := client.Exists(ctx, "key1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1)))
+
+			n, err = client.Exists(ctx, "key2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(0)))
+
+			n, err = client.Exists(ctx, "key1", "key2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1)))
+
+			n, err = client.Exists(ctx, "key1", "key1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+		})
+
+		It("should Expire", func() {
+			set := client.Set(ctx, "key", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expire := client.Expire(ctx, "key", 10*time.Second)
+			Expect(expire.Err()).NotTo(HaveOccurred())
+			Expect(expire.Val()).To(Equal(true))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(10 * time.Second))
+
+			set = client.Set(ctx, "key", "Hello World", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			ttl = client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(time.Duration(-1)))
+
+			ttl = client.TTL(ctx, "nonexistent_key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(time.Duration(-2)))
+		})
+
+		It("should ExpireAt", func() {
+			setCmd := client.Set(ctx, "key", "Hello", 0)
+			Expect(setCmd.Err()).NotTo(HaveOccurred())
+			Expect(setCmd.Val()).To(Equal("OK"))
+
+			n, err := client.Exists(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1)))
+
+			// Check correct expiration time is set in the future
+			expireAt := time.Now().Add(time.Minute)
+			expireAtCmd := client.ExpireAt(ctx, "key", expireAt)
+			Expect(expireAtCmd.Err()).NotTo(HaveOccurred())
+			Expect(expireAtCmd.Val()).To(Equal(true))
+
+			timeCmd := client.ExpireTime(ctx, "key")
+			Expect(timeCmd.Err()).NotTo(HaveOccurred())
+			Expect(timeCmd.Val().Seconds()).To(BeNumerically("==", expireAt.Unix()))
+
+			// Check correct expiration in the past
+			expireAtCmd = client.ExpireAt(ctx, "key", time.Now().Add(-time.Hour))
+			Expect(expireAtCmd.Err()).NotTo(HaveOccurred())
+			Expect(expireAtCmd.Val()).To(Equal(true))
+
+			n, err = client.Exists(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(0)))
+		})
+
+		It("should Keys", func() {
+			mset := client.MSet(ctx, "one", "1", "two", "2", "three", "3", "four", "4")
+			Expect(mset.Err()).NotTo(HaveOccurred())
+			Expect(mset.Val()).To(Equal("OK"))
+
+			keys := client.Keys(ctx, "*o*")
+			Expect(keys.Err()).NotTo(HaveOccurred())
+			Expect(keys.Val()).To(ConsistOf([]string{"four", "one", "two"}))
+
+			keys = client.Keys(ctx, "t??")
+			Expect(keys.Err()).NotTo(HaveOccurred())
+			Expect(keys.Val()).To(Equal([]string{"two"}))
+
+			keys = client.Keys(ctx, "*")
+			Expect(keys.Err()).NotTo(HaveOccurred())
+			Expect(keys.Val()).To(ConsistOf([]string{"four", "one", "three", "two"}))
+		})
+
+		It("should Migrate", Label("NonRedisEnterprise"), func() {
+			migrate := client.Migrate(ctx, "localhost", redisSecondaryPort, "key", 0, 0)
+			Expect(migrate.Err()).NotTo(HaveOccurred())
+			Expect(migrate.Val()).To(Equal("NOKEY"))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			migrate = client.Migrate(ctx, "localhost", redisSecondaryPort, "key", 0, 0)
+			Expect(migrate.Err()).To(MatchError("IOERR error or timeout writing to target instance"))
+			Expect(migrate.Val()).To(Equal(""))
+		})
+
+		It("should Move", Label("NonRedisEnterprise"), func() {
+			move := client.Move(ctx, "key", 2)
+			Expect(move.Err()).NotTo(HaveOccurred())
+			Expect(move.Val()).To(Equal(false))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			move = client.Move(ctx, "key", 2)
+			Expect(move.Err()).NotTo(HaveOccurred())
+			Expect(move.Val()).To(Equal(true))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).To(Equal(redis.Nil))
+			Expect(get.Val()).To(Equal(""))
+
+			pipe := client.Pipeline()
+			pipe.Select(ctx, 2)
+			get = pipe.Get(ctx, "key")
+			pipe.FlushDB(ctx)
+
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should Object", Label("NonRedisEnterprise"), func() {
+			start := time.Now()
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			refCount := client.ObjectRefCount(ctx, "key")
+			Expect(refCount.Err()).NotTo(HaveOccurred())
+			Expect(refCount.Val()).To(Equal(int64(1)))
+
+			rawClient.ConfigSet(ctx, "maxmemory-policy", "volatile-lfu")
+			freq := client.ObjectFreq(ctx, "key")
+			Expect(freq.Err()).NotTo(HaveOccurred())
+			rawClient.ConfigSet(ctx, "maxmemory-policy", "noeviction") // default
+
+			err := client.ObjectEncoding(ctx, "key").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			idleTime := client.ObjectIdleTime(ctx, "key")
+			Expect(idleTime.Err()).NotTo(HaveOccurred())
+
+			// Redis returned milliseconds/1000, which may cause ObjectIdleTime to be at a critical value,
+			// should be +1s to deal with the critical value problem.
+			// if too much time (>1s) is used during command execution, it may also cause the test to fail.
+			// so the ObjectIdleTime result should be <=now-start+1s
+			// link: https://github.com/redis/redis/blob/5b48d900498c85bbf4772c1d466c214439888115/src/object.c#L1265-L1272
+			Expect(idleTime.Val()).To(BeNumerically("<=", time.Since(start)+time.Second))
+		})
+
+		It("should Persist", func() {
+			set := client.Set(ctx, "key", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expire := client.Expire(ctx, "key", 10*time.Second)
+			Expect(expire.Err()).NotTo(HaveOccurred())
+			Expect(expire.Val()).To(Equal(true))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(10 * time.Second))
+
+			persist := client.Persist(ctx, "key")
+			Expect(persist.Err()).NotTo(HaveOccurred())
+			Expect(persist.Val()).To(Equal(true))
+
+			ttl = client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val() < 0).To(Equal(true))
+		})
+
+		// NonRedisEnterprise: asserts the remaining TTL within 100ms, which is unreliable
+		// against a remote Redis Enterprise endpoint due to network round-trip latency.
+		It("should PExpire", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expiration := 900 * time.Millisecond
+			pexpire := client.PExpire(ctx, "key", expiration)
+			Expect(pexpire.Err()).NotTo(HaveOccurred())
+			Expect(pexpire.Val()).To(Equal(true))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(time.Second))
+
+			pttl := client.PTTL(ctx, "key")
+			Expect(pttl.Err()).NotTo(HaveOccurred())
+			Expect(pttl.Val()).To(BeNumerically("~", expiration, 100*time.Millisecond))
+		})
+
+		// NonRedisEnterprise: asserts the remaining TTL within 100ms, which is unreliable
+		// against a remote Redis Enterprise endpoint due to network round-trip latency.
+		It("should PExpireAt", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expiration := 900 * time.Millisecond
+			pexpireat := client.PExpireAt(ctx, "key", time.Now().Add(expiration))
+			Expect(pexpireat.Err()).NotTo(HaveOccurred())
+			Expect(pexpireat.Val()).To(Equal(true))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(time.Second))
+
+			pttl := client.PTTL(ctx, "key")
+			Expect(pttl.Err()).NotTo(HaveOccurred())
+			Expect(pttl.Val()).To(BeNumerically("~", expiration, 100*time.Millisecond))
+		})
+
+		It("should PExpireAt beyond the nanosecond timestamp range", func() {
+			deadline := time.Date(2270, time.January, 2, 3, 4, 5, 123000000, time.UTC)
+			Expect(client.Set(ctx, "key", "hello", 0).Err()).NotTo(HaveOccurred())
+			Expect(client.PExpireAt(ctx, "key", deadline).Result()).To(BeTrue())
+			Expect(client.Get(ctx, "key").Result()).To(Equal("hello"))
+			Expect(client.Do(ctx, "PEXPIRETIME", "key").Result()).To(Equal(int64(9467204645123)))
+		})
+
+		It("should PExpireTime", func() {
+			// The command returns -1 if the key exists but has no associated expiration time.
+			// The command returns -2 if the key does not exist.
+			pExpireTime := client.PExpireTime(ctx, "key")
+			Expect(pExpireTime.Err()).NotTo(HaveOccurred())
+			Expect(pExpireTime.Val() < 0).To(Equal(true))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			timestamp := time.Now().Add(time.Minute)
+			expireAt := client.PExpireAt(ctx, "key", timestamp)
+			Expect(expireAt.Err()).NotTo(HaveOccurred())
+			Expect(expireAt.Val()).To(Equal(true))
+
+			pExpireTime = client.PExpireTime(ctx, "key")
+			Expect(pExpireTime.Err()).NotTo(HaveOccurred())
+			Expect(pExpireTime.Val().Milliseconds()).To(BeNumerically("==", timestamp.UnixMilli()))
+		})
+
+		It("should PTTL", func() {
+			set := client.Set(ctx, "key", "Hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expiration := time.Second
+			expire := client.Expire(ctx, "key", expiration)
+			Expect(expire.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			pttl := client.PTTL(ctx, "key")
+			Expect(pttl.Err()).NotTo(HaveOccurred())
+			Expect(pttl.Val()).To(BeNumerically("~", expiration, 100*time.Millisecond))
+		})
+
+		It("should RandomKey", func() {
+			randomKey := client.RandomKey(ctx)
+			Expect(randomKey.Err()).To(Equal(redis.Nil))
+			Expect(randomKey.Val()).To(Equal(""))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			randomKey = client.RandomKey(ctx)
+			Expect(randomKey.Err()).NotTo(HaveOccurred())
+			Expect(randomKey.Val()).To(Equal("key"))
+		})
+
+		It("should Rename", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			status := client.Rename(ctx, "key", "key1")
+			Expect(status.Err()).NotTo(HaveOccurred())
+			Expect(status.Val()).To(Equal("OK"))
+
+			get := client.Get(ctx, "key1")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should RenameNX", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			renameNX := client.RenameNX(ctx, "key", "key1")
+			Expect(renameNX.Err()).NotTo(HaveOccurred())
+			Expect(renameNX.Val()).To(Equal(true))
+
+			get := client.Get(ctx, "key1")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should Restore", func() {
+			err := client.Set(ctx, "key", "hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			dump := client.Dump(ctx, "key")
+			Expect(dump.Err()).NotTo(HaveOccurred())
+
+			err = client.Del(ctx, "key").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			restore, err := client.Restore(ctx, "key", 0, dump.Val()).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restore).To(Equal("OK"))
+
+			type_, err := client.Type(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(type_).To(Equal("string"))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+		})
+
+		It("should RestoreReplace", func() {
+			err := client.Set(ctx, "key", "hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			dump := client.Dump(ctx, "key")
+			Expect(dump.Err()).NotTo(HaveOccurred())
+
+			restore, err := client.RestoreReplace(ctx, "key", 0, dump.Val()).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restore).To(Equal("OK"))
+
+			type_, err := client.Type(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(type_).To(Equal("string"))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+		})
+
+		It("should Sort RO", func() {
+			size, err := client.LPush(ctx, "list", "1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(1)))
+
+			size, err = client.LPush(ctx, "list", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(2)))
+
+			size, err = client.LPush(ctx, "list", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(3)))
+
+			els, err := client.SortRO(ctx, "list", &redis.Sort{
+				Offset: 0,
+				Count:  2,
+				Order:  "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(els).To(Equal([]string{"1", "2"}))
+		})
+
+		It("should Sort", func() {
+			size, err := client.LPush(ctx, "list", "1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(1)))
+
+			size, err = client.LPush(ctx, "list", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(2)))
+
+			size, err = client.LPush(ctx, "list", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(3)))
+
+			els, err := client.Sort(ctx, "list", &redis.Sort{
+				Offset: 0,
+				Count:  2,
+				Order:  "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(els).To(Equal([]string{"1", "2"}))
+		})
+
+		It("should Sort and Get", Label("NonRedisEnterprise"), func() {
+			size, err := client.LPush(ctx, "list", "1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(1)))
+
+			size, err = client.LPush(ctx, "list", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(2)))
+
+			size, err = client.LPush(ctx, "list", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(3)))
+
+			err = client.Set(ctx, "object_2", "value2", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			{
+				els, err := client.Sort(ctx, "list", &redis.Sort{
+					Get: []string{"object_*"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(els).To(Equal([]string{"", "value2", ""}))
+			}
+
+			{
+				els, err := client.SortInterfaces(ctx, "list", &redis.Sort{
+					Get: []string{"object_*"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(els).To(Equal([]interface{}{nil, "value2", nil}))
+			}
+		})
+
+		It("should Sort and Store", Label("NonRedisEnterprise"), func() {
+			size, err := client.LPush(ctx, "list", "1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(1)))
+
+			size, err = client.LPush(ctx, "list", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(2)))
+
+			size, err = client.LPush(ctx, "list", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(size).To(Equal(int64(3)))
+
+			n, err := client.SortStore(ctx, "list", "list2", &redis.Sort{
+				Offset: 0,
+				Count:  2,
+				Order:  "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			els, err := client.LRange(ctx, "list2", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(els).To(Equal([]string{"1", "2"}))
+		})
+
+		It("should Touch", func() {
+			set1 := client.Set(ctx, "touch1", "hello", 0)
+			Expect(set1.Err()).NotTo(HaveOccurred())
+			Expect(set1.Val()).To(Equal("OK"))
+
+			set2 := client.Set(ctx, "touch2", "hello", 0)
+			Expect(set2.Err()).NotTo(HaveOccurred())
+			Expect(set2.Val()).To(Equal("OK"))
+
+			touch := client.Touch(ctx, "touch1", "touch2", "touch3")
+			Expect(touch.Err()).NotTo(HaveOccurred())
+			Expect(touch.Val()).To(Equal(int64(2)))
+		})
+
+		It("should ExpireTime", func() {
+			// The command returns -1 if the key exists but has no associated expiration time.
+			// The command returns -2 if the key does not exist.
+			expireTimeCmd := client.ExpireTime(ctx, "key")
+			Expect(expireTimeCmd.Err()).NotTo(HaveOccurred())
+			Expect(expireTimeCmd.Val() < 0).To(Equal(true))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expireAt := time.Now().Add(time.Minute)
+			expireAtCmd := client.ExpireAt(ctx, "key", expireAt)
+			Expect(expireAtCmd.Err()).NotTo(HaveOccurred())
+			Expect(expireAtCmd.Val()).To(Equal(true))
+
+			expireTimeCmd = client.ExpireTime(ctx, "key")
+			Expect(expireTimeCmd.Err()).NotTo(HaveOccurred())
+			Expect(expireTimeCmd.Val().Seconds()).To(BeNumerically("==", expireAt.Unix()))
+		})
+
+		It("should TTL", func() {
+			// The command returns -1 if the key exists but has no associated expire
+			// The command returns -2 if the key does not exist.
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val() < 0).To(Equal(true))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			expire := client.Expire(ctx, "key", 60*time.Second)
+			Expect(expire.Err()).NotTo(HaveOccurred())
+			Expect(expire.Val()).To(Equal(true))
+
+			ttl = client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(Equal(60 * time.Second))
+		})
+
+		It("should Type", func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			type_ := client.Type(ctx, "key")
+			Expect(type_.Err()).NotTo(HaveOccurred())
+			Expect(type_.Val()).To(Equal("string"))
+		})
+	})
+
+	Describe("scanning", func() {
+		It("should Scan", func() {
+			for i := 0; i < 1000; i++ {
+				set := client.Set(ctx, fmt.Sprintf("key%d", i), "hello", 0)
+				Expect(set.Err()).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.Scan(ctx, 0, "", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).NotTo(BeEmpty())
+			Expect(cursor).NotTo(BeZero())
+		})
+
+		It("should ScanType", func() {
+			for i := 0; i < 1000; i++ {
+				set := client.Set(ctx, fmt.Sprintf("key%d", i), "hello", 0)
+				Expect(set.Err()).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.ScanType(ctx, 0, "", 0, "string").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).NotTo(BeEmpty())
+			Expect(cursor).NotTo(BeZero())
+		})
+
+		It("should SScan", func() {
+			for i := 0; i < 1000; i++ {
+				sadd := client.SAdd(ctx, "myset", fmt.Sprintf("member%d", i))
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.SScan(ctx, "myset", 0, "", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).NotTo(BeEmpty())
+			Expect(cursor).NotTo(BeZero())
+		})
+
+		It("should HScan", func() {
+			for i := 0; i < 1000; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.HScan(ctx, "myhash", 0, "", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			// If we don't get at least two items back, it's really strange.
+			Expect(cursor).To(BeNumerically(">=", 2))
+			Expect(len(keys)).To(BeNumerically(">=", 2))
+			Expect(keys[0]).To(HavePrefix("key"))
+			Expect(keys[1]).To(Equal("hello"))
+		})
+
+		It("should HScan without values", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			for i := 0; i < 1000; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.HScanNoValues(ctx, "myhash", 0, "", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			// If we don't get at least two items back, it's really strange.
+			Expect(cursor).To(BeNumerically(">=", 2))
+			Expect(len(keys)).To(BeNumerically(">=", 2))
+			Expect(keys[0]).To(HavePrefix("key"))
+			Expect(keys[1]).To(HavePrefix("key"))
+			Expect(keys).NotTo(BeEmpty())
+			Expect(cursor).NotTo(BeZero())
+		})
+
+		It("should ZScan", func() {
+			for i := 0; i < 1000; i++ {
+				err := client.ZAdd(ctx, "myset", redis.Z{
+					Score:  float64(i),
+					Member: fmt.Sprintf("member%d", i),
+				}).Err()
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			keys, cursor, err := client.ZScan(ctx, "myset", 0, "", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).NotTo(BeEmpty())
+			Expect(cursor).NotTo(BeZero())
+		})
+	})
+
+	Describe("strings", func() {
+		It("should Append", func() {
+			n, err := client.Exists(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(0)))
+
+			appendRes := client.Append(ctx, "key", "Hello")
+			Expect(appendRes.Err()).NotTo(HaveOccurred())
+			Expect(appendRes.Val()).To(Equal(int64(5)))
+
+			appendRes = client.Append(ctx, "key", " World")
+			Expect(appendRes.Err()).NotTo(HaveOccurred())
+			Expect(appendRes.Val()).To(Equal(int64(11)))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("Hello World"))
+		})
+
+		It("should BitCount", func() {
+			set := client.Set(ctx, "key", "foobar", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitCount := client.BitCount(ctx, "key", nil)
+			Expect(bitCount.Err()).NotTo(HaveOccurred())
+			Expect(bitCount.Val()).To(Equal(int64(26)))
+
+			bitCount = client.BitCount(ctx, "key", &redis.BitCount{
+				Start: 0,
+				End:   0,
+			})
+			Expect(bitCount.Err()).NotTo(HaveOccurred())
+			Expect(bitCount.Val()).To(Equal(int64(4)))
+
+			bitCount = client.BitCount(ctx, "key", &redis.BitCount{
+				Start: 1,
+				End:   1,
+			})
+			Expect(bitCount.Err()).NotTo(HaveOccurred())
+			Expect(bitCount.Val()).To(Equal(int64(6)))
+		})
+
+		It("should BitOpAnd", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key1", "1", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "0", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpAnd := client.BitOpAnd(ctx, "dest", "key1", "key2")
+			Expect(bitOpAnd.Err()).NotTo(HaveOccurred())
+			Expect(bitOpAnd.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("0"))
+		})
+
+		It("should BitOpOr", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key1", "1", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "0", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpOr := client.BitOpOr(ctx, "dest", "key1", "key2")
+			Expect(bitOpOr.Err()).NotTo(HaveOccurred())
+			Expect(bitOpOr.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("1"))
+		})
+
+		It("should BitOpXor", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key1", "\xff", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "\x0f", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpXor := client.BitOpXor(ctx, "dest", "key1", "key2")
+			Expect(bitOpXor.Err()).NotTo(HaveOccurred())
+			Expect(bitOpXor.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\xf0"))
+		})
+
+		It("should BitOpDiff", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.2", "BITOP DIFF is available since Redis 8.2")
+			set := client.Set(ctx, "key1", "\xff", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "\x0f", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpDiff := client.BitOpDiff(ctx, "dest", "key1", "key2")
+			Expect(bitOpDiff.Err()).NotTo(HaveOccurred())
+			Expect(bitOpDiff.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\xf0"))
+		})
+
+		It("should BitOpDiff1", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.2", "BITOP DIFF is available since Redis 8.2")
+			set := client.Set(ctx, "key1", "\xff", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "\x0f", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpDiff1 := client.BitOpDiff1(ctx, "dest", "key1", "key2")
+			Expect(bitOpDiff1.Err()).NotTo(HaveOccurred())
+			Expect(bitOpDiff1.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\x00"))
+		})
+
+		It("should BitOpAndOr", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.2", "BITOP ANDOR is available since Redis 8.2")
+			set := client.Set(ctx, "key1", "\xff", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "\x0f", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpAndOr := client.BitOpAndOr(ctx, "dest", "key1", "key2")
+			Expect(bitOpAndOr.Err()).NotTo(HaveOccurred())
+			Expect(bitOpAndOr.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\x0f"))
+		})
+
+		It("should BitOpOne", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.2", "BITOP ONE is available since Redis 8.2")
+			set := client.Set(ctx, "key1", "\xff", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			set = client.Set(ctx, "key2", "\x0f", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpOne := client.BitOpOne(ctx, "dest", "key1", "key2")
+			Expect(bitOpOne.Err()).NotTo(HaveOccurred())
+			Expect(bitOpOne.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\xf0"))
+		})
+
+		It("should BitOpNot", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key1", "\x00", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			bitOpNot := client.BitOpNot(ctx, "dest", "key1")
+			Expect(bitOpNot.Err()).NotTo(HaveOccurred())
+			Expect(bitOpNot.Val()).To(Equal(int64(1)))
+
+			get := client.Get(ctx, "dest")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("\xff"))
+		})
+
+		It("should BitPos", func() {
+			err := client.Set(ctx, "mykey", "\xff\xf0\x00", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			pos, err := client.BitPos(ctx, "mykey", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(12)))
+
+			pos, err = client.BitPos(ctx, "mykey", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(0)))
+
+			pos, err = client.BitPos(ctx, "mykey", 0, 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(16)))
+
+			pos, err = client.BitPos(ctx, "mykey", 1, 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(-1)))
+
+			pos, err = client.BitPos(ctx, "mykey", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(16)))
+
+			pos, err = client.BitPos(ctx, "mykey", 1, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(-1)))
+
+			pos, err = client.BitPos(ctx, "mykey", 0, 2, 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(-1)))
+
+			pos, err = client.BitPos(ctx, "mykey", 0, 0, -3).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(-1)))
+
+			pos, err = client.BitPos(ctx, "mykey", 0, 0, 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(-1)))
+
+			_, err = client.BitPos(ctx, "mykey", 0, 0, 0, 0, 0).Result()
+			Expect(err).Should(MatchError("too many arguments"))
+		})
+
+		It("should BitPosSpan", func() {
+			err := client.Set(ctx, "mykey", "\x00\xff\x00", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			pos, err := client.BitPosSpan(ctx, "mykey", 0, 1, 3, "byte").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(16)))
+
+			pos, err = client.BitPosSpan(ctx, "mykey", 0, 1, 3, "bit").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(Equal(int64(1)))
+		})
+
+		It("should BitField", func() {
+			nn, err := client.BitField(ctx, "mykey", "INCRBY", "i5", 100, 1, "GET", "u4", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nn).To(Equal([]int64{1, 0}))
+
+			nn, err = client.BitField(ctx, "mykey", "set", "i1", 1, 1, "GET", "u4", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nn).To(Equal([]int64{0, 4}))
+		})
+
+		It("should BitFieldRO", func() {
+			nn, err := client.BitField(ctx, "mykey", "SET", "u8", 8, 255).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nn).To(Equal([]int64{0}))
+
+			nn, err = client.BitFieldRO(ctx, "mykey", "u8", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nn).To(Equal([]int64{0}))
+
+			nn, err = client.BitFieldRO(ctx, "mykey", "u8", 0, "u4", 8, "u4", 12, "u4", 13).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(nn).To(Equal([]int64{0, 15, 15, 14}))
+
+			_, err = client.BitFieldRO(ctx, "mykey", "u8", 0, "u4", 8, "u4", 12, "u4").Result()
+			Expect(err).Should(MatchError("BitFieldRO: invalid number of arguments, must be even"))
+		})
+
+		It("should Decr", func() {
+			set := client.Set(ctx, "key", "10", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			decr := client.Decr(ctx, "key")
+			Expect(decr.Err()).NotTo(HaveOccurred())
+			Expect(decr.Val()).To(Equal(int64(9)))
+
+			set = client.Set(ctx, "key", "234293482390480948029348230948", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			decr = client.Decr(ctx, "key")
+			Expect(decr.Err()).To(MatchError("ERR value is not an integer or out of range"))
+			Expect(decr.Val()).To(Equal(int64(0)))
+		})
+
+		It("should DecrBy", func() {
+			set := client.Set(ctx, "key", "10", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			decrBy := client.DecrBy(ctx, "key", 5)
+			Expect(decrBy.Err()).NotTo(HaveOccurred())
+			Expect(decrBy.Val()).To(Equal(int64(5)))
+		})
+
+		It("should Get", func() {
+			get := client.Get(ctx, "_")
+			Expect(get.Err()).To(Equal(redis.Nil))
+			Expect(get.Val()).To(Equal(""))
+
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			get = client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should GetBit", func() {
+			setBit := client.SetBit(ctx, "key", 7, 1)
+			Expect(setBit.Err()).NotTo(HaveOccurred())
+			Expect(setBit.Val()).To(Equal(int64(0)))
+
+			getBit := client.GetBit(ctx, "key", 0)
+			Expect(getBit.Err()).NotTo(HaveOccurred())
+			Expect(getBit.Val()).To(Equal(int64(0)))
+
+			getBit = client.GetBit(ctx, "key", 7)
+			Expect(getBit.Err()).NotTo(HaveOccurred())
+			Expect(getBit.Val()).To(Equal(int64(1)))
+
+			getBit = client.GetBit(ctx, "key", 100)
+			Expect(getBit.Err()).NotTo(HaveOccurred())
+			Expect(getBit.Val()).To(Equal(int64(0)))
+		})
+
+		It("should GetRange", func() {
+			set := client.Set(ctx, "key", "This is a string", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			getRange := client.GetRange(ctx, "key", 0, 3)
+			Expect(getRange.Err()).NotTo(HaveOccurred())
+			Expect(getRange.Val()).To(Equal("This"))
+
+			getRange = client.GetRange(ctx, "key", -3, -1)
+			Expect(getRange.Err()).NotTo(HaveOccurred())
+			Expect(getRange.Val()).To(Equal("ing"))
+
+			getRange = client.GetRange(ctx, "key", 0, -1)
+			Expect(getRange.Err()).NotTo(HaveOccurred())
+			Expect(getRange.Val()).To(Equal("This is a string"))
+
+			getRange = client.GetRange(ctx, "key", 10, 100)
+			Expect(getRange.Err()).NotTo(HaveOccurred())
+			Expect(getRange.Val()).To(Equal("string"))
+		})
+
+		It("should GetSet", func() {
+			incr := client.Incr(ctx, "key")
+			Expect(incr.Err()).NotTo(HaveOccurred())
+			Expect(incr.Val()).To(Equal(int64(1)))
+
+			getSet := client.GetSet(ctx, "key", "0")
+			Expect(getSet.Err()).NotTo(HaveOccurred())
+			Expect(getSet.Val()).To(Equal("1"))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("0"))
+		})
+
+		It("should GetToBuffer", func() {
+			// Missing key returns redis.Nil.
+			buf := make([]byte, 64)
+			miss := client.GetToBuffer(ctx, "missing", buf)
+			Expect(miss.Err()).To(Equal(redis.Nil))
+			Expect(miss.Val()).To(Equal(0))
+
+			Expect(client.Set(ctx, "key", "hello", 0).Err()).NotTo(HaveOccurred())
+
+			get := client.GetToBuffer(ctx, "key", buf)
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal(5))
+			Expect(get.Bytes()).To(Equal([]byte("hello")))
+		})
+
+		It("should GetToBuffer with buffer too small", func() {
+			Expect(client.Set(ctx, "key", "hello world", 0).Err()).NotTo(HaveOccurred())
+
+			small := make([]byte, 4)
+			get := client.GetToBuffer(ctx, "key", small)
+			Expect(get.Err()).To(HaveOccurred())
+			Expect(get.Err().Error()).To(ContainSubstring("buffer too small"))
+		})
+
+		It("should SetFromBuffer and GetToBuffer round-trip", func() {
+			payload := bytes.Repeat([]byte{'x'}, 1024)
+			set := client.SetFromBuffer(ctx, "key", payload)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			buf := make([]byte, len(payload))
+			get := client.GetToBuffer(ctx, "key", buf)
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal(len(payload)))
+			Expect(get.Bytes()).To(Equal(payload))
+		})
+
+		It("should SetFromBuffer and GetToBuffer with payload > read buffer", func() {
+			// Default read buffer is 32 KiB; pick something larger so the
+			// payload spills past the bufio buffer on the read path.
+			payload := bytes.Repeat([]byte{'z'}, 128*1024)
+			Expect(client.SetFromBuffer(ctx, "key", payload).Err()).NotTo(HaveOccurred())
+
+			buf := make([]byte, len(payload))
+			get := client.GetToBuffer(ctx, "key", buf)
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal(len(payload)))
+			Expect(get.Bytes()).To(Equal(payload))
+		})
+
+		It("should SetFromBuffer and GetToBuffer with 10 MiB payload", func() {
+			// Large-payload regression coverage: exercises many bufio
+			// refills on the read path and several direct socket writes
+			// on the write path. Uses crypto/rand so any byte-shift bug
+			// (e.g. the verbatim-misdetection issue addressed by
+			// commit fix(proto): avoid stale line[0] after bufio refill)
+			// surfaces as a mismatch rather than coincidentally aligning.
+			const size = 10 * 1024 * 1024
+			payload := make([]byte, size)
+			_, err := rand.Read(payload)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(client.SetFromBuffer(ctx, "key", payload).Err()).NotTo(HaveOccurred())
+
+			buf := make([]byte, size)
+			get := client.GetToBuffer(ctx, "key", buf)
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal(size))
+			// Use bytes.Equal rather than gomega's Equal to keep the
+			// diff out of the failure message if a single byte is off.
+			Expect(bytes.Equal(get.Bytes(), payload)).To(BeTrue(),
+				"round-tripped 10 MiB payload does not match")
+		})
+
+		It("should reject cloned GetToBuffer with a clear error", func() {
+			// A cloned ZeroCopyStringCmd has no usable destination
+			// buffer — see the godoc on Clone. Processing the clone
+			// must fail with an explicit error rather than silently
+			// writing the reply somewhere the caller can't see, and
+			// the underlying connection must remain usable for the
+			// follow-up GetToBuffer below.
+			Expect(client.Set(ctx, "key", "value", 0).Err()).NotTo(HaveOccurred())
+
+			buf := make([]byte, 16)
+			orig := client.GetToBuffer(ctx, "key", buf)
+			Expect(orig.Err()).NotTo(HaveOccurred())
+			Expect(string(orig.Bytes())).To(Equal("value"))
+
+			clone := orig.Clone()
+			Expect(rawClient.Process(ctx, clone)).To(MatchError(ContainSubstring("cannot be cloned")))
+
+			// Follow-up call on the same client must work: the clone's
+			// readReply drained the network reply so the connection
+			// stays aligned.
+			buf2 := make([]byte, 16)
+			again := client.GetToBuffer(ctx, "key", buf2)
+			Expect(again.Err()).NotTo(HaveOccurred())
+			Expect(string(again.Bytes())).To(Equal("value"))
+		})
+
+		It("should GetEX", func() {
+			set := client.Set(ctx, "key", "value", 100*time.Second)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(BeNumerically("~", 100*time.Second, 3*time.Second))
+
+			getEX := client.GetEx(ctx, "key", 200*time.Second)
+			Expect(getEX.Err()).NotTo(HaveOccurred())
+			Expect(getEX.Val()).To(Equal("value"))
+
+			ttl = client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).To(BeNumerically("~", 200*time.Second, 3*time.Second))
+		})
+
+		It("should GetDel", func() {
+			set := client.Set(ctx, "key", "value", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			getDel := client.GetDel(ctx, "key")
+			Expect(getDel.Err()).NotTo(HaveOccurred())
+			Expect(getDel.Val()).To(Equal("value"))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should DelExArgs when value matches", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "lock", "token-123", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Delete only if value matches
+			deleted := client.DelExArgs(ctx, "lock", redis.DelExArgs{
+				Mode:       "IFEQ",
+				MatchValue: "token-123",
+			})
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(1)))
+
+			// Verify key was deleted
+			get := client.Get(ctx, "lock")
+			Expect(get.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should DelExArgs fail when value does not match", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "lock", "token-123", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Try to delete with wrong value
+			deleted := client.DelExArgs(ctx, "lock", redis.DelExArgs{
+				Mode:       "IFEQ",
+				MatchValue: "wrong-token",
+			})
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(0)))
+
+			// Verify key was NOT deleted
+			val, err := client.Get(ctx, "lock").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("token-123"))
+		})
+
+		It("should DelExArgs on non-existent key", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Try to delete non-existent key
+			deleted := client.DelExArgs(ctx, "nonexistent", redis.DelExArgs{
+				Mode:       "IFEQ",
+				MatchValue: "any-value",
+			})
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(0)))
+		})
+
+		It("should DelExArgs with IFEQ", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "temp-key", "temp-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Delete with IFEQ
+			args := redis.DelExArgs{
+				Mode:       "IFEQ",
+				MatchValue: "temp-value",
+			}
+			deleted := client.DelExArgs(ctx, "temp-key", args)
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(1)))
+
+			// Verify key was deleted
+			get := client.Get(ctx, "temp-key")
+			Expect(get.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should DelExArgs with IFNE", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "temporary", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Delete only if value is NOT "permanent"
+			args := redis.DelExArgs{
+				Mode:       "IFNE",
+				MatchValue: "permanent",
+			}
+			deleted := client.DelExArgs(ctx, "key", args)
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(1)))
+
+			// Verify key was deleted
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should DelExArgs with IFNE fail when value matches", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "permanent", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Try to delete but value matches (should fail)
+			args := redis.DelExArgs{
+				Mode:       "IFNE",
+				MatchValue: "permanent",
+			}
+			deleted := client.DelExArgs(ctx, "key", args)
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(0)))
+
+			// Verify key was NOT deleted
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("permanent"))
+		})
+
+		It("should Digest", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set a value
+			err := client.Set(ctx, "my-key", "my-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest (returns uint64)
+			digest := client.Digest(ctx, "my-key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+			Expect(digest.Val()).NotTo(BeZero())
+
+			// Digest should be consistent
+			digest2 := client.Digest(ctx, "my-key")
+			Expect(digest2.Err()).NotTo(HaveOccurred())
+			Expect(digest2.Val()).To(Equal(digest.Val()))
+		})
+
+		It("should Digest on non-existent key", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Get digest of non-existent key
+			digest := client.Digest(ctx, "nonexistent")
+			Expect(digest.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should use Digest with SetArgs IFDEQ", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest
+			digest := client.Digest(ctx, "key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+
+			// Update using digest
+			args := redis.SetArgs{
+				Mode:        "IFDEQ",
+				MatchDigest: digest.Val(),
+			}
+			result := client.SetArgs(ctx, "key", "value2", args)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value2"))
+		})
+
+		It("should use Digest with DelExArgs IFDEQ", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest
+			digest := client.Digest(ctx, "key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+
+			// Delete using digest
+			args := redis.DelExArgs{
+				Mode:        "IFDEQ",
+				MatchDigest: digest.Val(),
+			}
+			deleted := client.DelExArgs(ctx, "key", args)
+			Expect(deleted.Err()).NotTo(HaveOccurred())
+			Expect(deleted.Val()).To(Equal(int64(1)))
+
+			// Verify key was deleted
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should Incr", func() {
+			set := client.Set(ctx, "key", "10", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			incr := client.Incr(ctx, "key")
+			Expect(incr.Err()).NotTo(HaveOccurred())
+			Expect(incr.Val()).To(Equal(int64(11)))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("11"))
+		})
+
+		It("should IncrBy", func() {
+			set := client.Set(ctx, "key", "10", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			incrBy := client.IncrBy(ctx, "key", 5)
+			Expect(incrBy.Err()).NotTo(HaveOccurred())
+			Expect(incrBy.Val()).To(Equal(int64(15)))
+		})
+
+		It("should IncrByFloat", func() {
+			set := client.Set(ctx, "key", "10.50", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			incrByFloat := client.IncrByFloat(ctx, "key", 0.1)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(10.6))
+
+			set = client.Set(ctx, "key", "5.0e3", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			incrByFloat = client.IncrByFloat(ctx, "key", 2.0e2)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(float64(5200)))
+		})
+
+		It("should IncrByFloatOverflow", func() {
+			incrByFloat := client.IncrByFloat(ctx, "key", 996945661)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(float64(996945661)))
+		})
+
+		It("should IncrEXInt default", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "10", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(11)))
+			Expect(res.AppliedIncrement).To(Equal(int64(1)))
+
+			Expect(client.Get(ctx, "key").Val()).To(Equal("11"))
+		})
+
+		It("should IncrEXInt BYINT", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "20", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{By: 4, HasBy: true}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(24)))
+			Expect(res.AppliedIncrement).To(Equal(int64(4)))
+		})
+
+		It("should IncrEXFloat with bounds", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "1.5", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXFloat(ctx, "key", redis.IncrEXFloatArgs{
+				By:        0.25,
+				LBound:    0,
+				HasLBound: true,
+				UBound:    2,
+				HasUBound: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(BeNumerically("~", 1.75, 1e-9))
+			Expect(res.AppliedIncrement).To(BeNumerically("~", 0.25, 1e-9))
+		})
+
+		It("should IncrEXFloat saturating overflow", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "1.8", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXFloat(ctx, "key", redis.IncrEXFloatArgs{
+				By:        0.7,
+				UBound:    2,
+				HasUBound: true,
+				Saturate:  true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(BeNumerically("~", 2.0, 1e-9))
+			Expect(res.AppliedIncrement).To(BeNumerically("~", 0.2, 1e-9))
+		})
+
+		It("should IncrEXInt out-of-bounds default rejects", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "10", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 5, HasBy: true,
+				UBound: 12, HasUBound: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(10)))
+			Expect(res.AppliedIncrement).To(Equal(int64(0)))
+
+			Expect(client.Get(ctx, "key").Val()).To(Equal("10"))
+		})
+
+		It("should IncrEXInt out-of-bounds with LBOUND default rejects", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "5", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 1, HasBy: true,
+				LBound: 10, HasLBound: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(5)))
+			Expect(res.AppliedIncrement).To(Equal(int64(0)))
+
+			Expect(client.Get(ctx, "key").Val()).To(Equal("5"))
+		})
+
+		It("should IncrEXInt with EX expiration and ENX", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "40", 0).Err()).NotTo(HaveOccurred())
+			Expect(client.TTL(ctx, "key").Val()).To(Equal(time.Duration(-1)))
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 2, HasBy: true,
+				Expiration: &redis.ExpirationOption{Mode: redis.EX, Value: 60},
+				ENX:        true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(42)))
+			Expect(res.AppliedIncrement).To(Equal(int64(2)))
+
+			ttl1 := client.TTL(ctx, "key").Val()
+			Expect(ttl1).To(BeNumerically(">", 0))
+			Expect(ttl1).To(BeNumerically("<=", 60*time.Second))
+
+			// ENX should NOT replace an existing TTL.
+			res, err = client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 3, HasBy: true,
+				Expiration: &redis.ExpirationOption{Mode: redis.EX, Value: 600},
+				ENX:        true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(45)))
+
+			ttl2 := client.TTL(ctx, "key").Val()
+			Expect(ttl2).To(BeNumerically(">", 0))
+			Expect(ttl2).To(BeNumerically("<=", ttl1))
+		})
+
+		It("should IncrEXInt SATURATE clamps to LBOUND with negative increment", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "credits", "50", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "credits", redis.IncrEXIntArgs{
+				By: -1, HasBy: true,
+				LBound: 0, HasLBound: true,
+				Saturate: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(49)))
+			Expect(res.AppliedIncrement).To(Equal(int64(-1)))
+		})
+
+		It("should IncrEXInt PERSIST removes TTL", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "1", 60*time.Second).Err()).NotTo(HaveOccurred())
+			Expect(client.TTL(ctx, "key").Val()).To(BeNumerically(">", 0))
+
+			_, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 1, HasBy: true,
+				Expiration: &redis.ExpirationOption{Mode: redis.PERSIST},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(client.TTL(ctx, "key").Val()).To(Equal(time.Duration(-1)))
+		})
+
+		It("should IncrEXInt SATURATE without bounds clamps to LLONG_MAX", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			// Start near LLONG_MAX; with no UBOUND the server should clamp to LLONG_MAX.
+			Expect(client.Set(ctx, "key", "9223372036854775800", 0).Err()).NotTo(HaveOccurred())
+
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 1000, HasBy: true,
+				Saturate: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(math.MaxInt64)))
+			Expect(res.AppliedIncrement).To(Equal(int64(math.MaxInt64 - 9223372036854775800)))
+		})
+
+		It("should IncrEXInt default reject leaves TTL untouched", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "10", 60*time.Second).Err()).NotTo(HaveOccurred())
+			ttlBefore := client.TTL(ctx, "key").Val()
+			Expect(ttlBefore).To(BeNumerically(">", 0))
+
+			// Out-of-bounds increment with an EX clause — server should reject
+			// and NOT apply the new TTL.
+			res, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 5, HasBy: true,
+				UBound: 12, HasUBound: true,
+				Expiration: &redis.ExpirationOption{Mode: redis.EX, Value: 6000},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.Value).To(Equal(int64(10)))
+			Expect(res.AppliedIncrement).To(Equal(int64(0)))
+
+			ttlAfter := client.TTL(ctx, "key").Val()
+			// Original TTL was ~60s; rejected EX 6000s must not have been applied.
+			Expect(ttlAfter).To(BeNumerically("<=", ttlBefore))
+			Expect(ttlAfter).To(BeNumerically(">", 0))
+			Expect(ttlAfter).To(BeNumerically("<=", 60*time.Second))
+		})
+
+		It("should IncrEXInt on non-numeric key returns error", func() {
+			SkipBeforeRedisVersion("8.8", "IncrEX is available since Redis 8.8")
+
+			Expect(client.Set(ctx, "key", "not-a-number", 0).Err()).NotTo(HaveOccurred())
+
+			_, err := client.IncrEXInt(ctx, "key", redis.IncrEXIntArgs{
+				By: 1, HasBy: true,
+			}).Result()
+			Expect(err).To(HaveOccurred())
+			Expect(client.Get(ctx, "key").Val()).To(Equal("not-a-number"))
+		})
+
+		It("should MSetMGet", func() {
+			mSet := client.MSet(ctx, "key1", "hello1", "key2", "hello2")
+			Expect(mSet.Err()).NotTo(HaveOccurred())
+			Expect(mSet.Val()).To(Equal("OK"))
+
+			mGet := client.MGet(ctx, "key1", "key2", "_")
+			Expect(mGet.Err()).NotTo(HaveOccurred())
+			Expect(mGet.Val()).To(Equal([]interface{}{"hello1", "hello2", nil}))
+
+			// MSet struct
+			type set struct {
+				Set1 string                 `redis:"set1"`
+				Set2 int16                  `redis:"set2"`
+				Set3 time.Duration          `redis:"set3"`
+				Set4 interface{}            `redis:"set4"`
+				Set5 map[string]interface{} `redis:"-"`
+			}
+			mSet = client.MSet(ctx, &set{
+				Set1: "val1",
+				Set2: 1024,
+				Set3: 2 * time.Millisecond,
+				Set4: nil,
+				Set5: map[string]interface{}{"k1": 1},
+			})
+			Expect(mSet.Err()).NotTo(HaveOccurred())
+			Expect(mSet.Val()).To(Equal("OK"))
+
+			mGet = client.MGet(ctx, "set1", "set2", "set3", "set4")
+			Expect(mGet.Err()).NotTo(HaveOccurred())
+			Expect(mGet.Val()).To(Equal([]interface{}{
+				"val1",
+				"1024",
+				strconv.Itoa(int(2 * time.Millisecond.Nanoseconds())),
+				"",
+			}))
+		})
+
+		It("should scan Mget", func() {
+			now := time.Now()
+
+			err := client.MSet(ctx, "key1", "hello1", "key2", 123, "time", now.Format(time.RFC3339Nano)).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			res := client.MGet(ctx, "key1", "key2", "_", "time")
+			Expect(res.Err()).NotTo(HaveOccurred())
+
+			type data struct {
+				Key1 string    `redis:"key1"`
+				Key2 int       `redis:"key2"`
+				Time TimeValue `redis:"time"`
+			}
+			var d data
+			Expect(res.Scan(&d)).NotTo(HaveOccurred())
+			Expect(d.Time.UnixNano()).To(Equal(now.UnixNano()))
+			d.Time.Time = time.Time{}
+			Expect(d).To(Equal(data{
+				Key1: "hello1",
+				Key2: 123,
+				Time: TimeValue{Time: time.Time{}},
+			}))
+		})
+
+		It("should MSetNX", Label("NonRedisEnterprise"), func() {
+			mSetNX := client.MSetNX(ctx, "key1", "hello1", "key2", "hello2")
+			Expect(mSetNX.Err()).NotTo(HaveOccurred())
+			Expect(mSetNX.Val()).To(Equal(true))
+
+			mSetNX = client.MSetNX(ctx, "key2", "hello1", "key3", "hello2")
+			Expect(mSetNX.Err()).NotTo(HaveOccurred())
+			Expect(mSetNX.Val()).To(Equal(false))
+
+			// set struct
+			// MSet struct
+			type set struct {
+				Set1 string                 `redis:"set1"`
+				Set2 int16                  `redis:"set2"`
+				Set3 time.Duration          `redis:"set3"`
+				Set4 interface{}            `redis:"set4"`
+				Set5 map[string]interface{} `redis:"-"`
+			}
+			mSetNX = client.MSetNX(ctx, &set{
+				Set1: "val1",
+				Set2: 1024,
+				Set3: 2 * time.Millisecond,
+				Set4: nil,
+				Set5: map[string]interface{}{"k1": 1},
+			})
+			Expect(mSetNX.Err()).NotTo(HaveOccurred())
+			Expect(mSetNX.Val()).To(Equal(true))
+		})
+
+		It("should MSetEX", func() {
+			SkipBeforeRedisVersion("8.3", "MSetEX is available since redis 8.4")
+			args := redis.MSetEXArgs{
+				Expiration: &redis.ExpirationOption{
+					Mode:  redis.EX,
+					Value: 1,
+				},
+			}
+			mSetEX := client.MSetEX(ctx, args, "key1", "hello1", "key2", "hello2")
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(1)))
+
+			// Verify keys were set
+			val1 := client.Get(ctx, "key1")
+			Expect(val1.Err()).NotTo(HaveOccurred())
+			Expect(val1.Val()).To(Equal("hello1"))
+
+			val2 := client.Get(ctx, "key2")
+			Expect(val2.Err()).NotTo(HaveOccurred())
+			Expect(val2.Val()).To(Equal("hello2"))
+
+			// Verify TTL was set
+			ttl1 := client.TTL(ctx, "key1")
+			Expect(ttl1.Err()).NotTo(HaveOccurred())
+			Expect(ttl1.Val()).To(BeNumerically(">", 0))
+			Expect(ttl1.Val()).To(BeNumerically("<=", 1*time.Second))
+
+			ttl2 := client.TTL(ctx, "key2")
+			Expect(ttl2.Err()).NotTo(HaveOccurred())
+			Expect(ttl2.Val()).To(BeNumerically(">", 0))
+			Expect(ttl2.Val()).To(BeNumerically("<=", 1*time.Second))
+		})
+
+		It("should MSetEX with NX mode", func() {
+			SkipBeforeRedisVersion("8.3", "MSetEX is available since redis 8.4")
+
+			client.Set(ctx, "key1", "existing", 0)
+
+			// Try to set with NX mode - should fail because key1 exists
+			args := redis.MSetEXArgs{
+				Condition: redis.NX,
+				Expiration: &redis.ExpirationOption{
+					Mode:  redis.EX,
+					Value: 1,
+				},
+			}
+			mSetEX := client.MSetEX(ctx, args, "key1", "new1", "key2", "new2")
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(0)))
+
+			val1 := client.Get(ctx, "key1")
+			Expect(val1.Err()).NotTo(HaveOccurred())
+			Expect(val1.Val()).To(Equal("existing"))
+
+			val2 := client.Get(ctx, "key2")
+			Expect(val2.Err()).To(Equal(redis.Nil))
+
+			client.Del(ctx, "key1")
+
+			// Now try with NX mode when keys don't exist - should succeed
+			mSetEX = client.MSetEX(ctx, args, "key1", "new1", "key2", "new2")
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(1)))
+
+			val1 = client.Get(ctx, "key1")
+			Expect(val1.Err()).NotTo(HaveOccurred())
+			Expect(val1.Val()).To(Equal("new1"))
+
+			val2 = client.Get(ctx, "key2")
+			Expect(val2.Err()).NotTo(HaveOccurred())
+			Expect(val2.Val()).To(Equal("new2"))
+		})
+
+		It("should MSetEX with XX mode", func() {
+			SkipBeforeRedisVersion("8.3", "MSetEX is available since redis 8.4")
+
+			args := redis.MSetEXArgs{
+				Condition: redis.XX,
+				Expiration: &redis.ExpirationOption{
+					Mode:  redis.EX,
+					Value: 1,
+				},
+			}
+			mSetEX := client.MSetEX(ctx, args, "key1", "new1", "key2", "new2")
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(0)))
+
+			client.Set(ctx, "key1", "existing1", 0)
+			client.Set(ctx, "key2", "existing2", 0)
+
+			mSetEX = client.MSetEX(ctx, args, "key1", "new1", "key2", "new2")
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(1)))
+
+			val1 := client.Get(ctx, "key1")
+			Expect(val1.Err()).NotTo(HaveOccurred())
+			Expect(val1.Val()).To(Equal("new1"))
+
+			val2 := client.Get(ctx, "key2")
+			Expect(val2.Err()).NotTo(HaveOccurred())
+			Expect(val2.Val()).To(Equal("new2"))
+
+			ttl1 := client.TTL(ctx, "key1")
+			Expect(ttl1.Err()).NotTo(HaveOccurred())
+			Expect(ttl1.Val()).To(BeNumerically(">", 0))
+		})
+
+		It("should MSetEX with map", func() {
+			SkipBeforeRedisVersion("8.3", "MSetEX is available since redis 8.4")
+			args := redis.MSetEXArgs{
+				Expiration: &redis.ExpirationOption{
+					Mode:  redis.EX,
+					Value: 1,
+				},
+			}
+			mSetEX := client.MSetEX(ctx, args, map[string]interface{}{
+				"key1": "value1",
+				"key2": "value2",
+			})
+			Expect(mSetEX.Err()).NotTo(HaveOccurred())
+			Expect(mSetEX.Val()).To(Equal(int64(1)))
+
+			val1 := client.Get(ctx, "key1")
+			Expect(val1.Err()).NotTo(HaveOccurred())
+			Expect(val1.Val()).To(Equal("value1"))
+
+			val2 := client.Get(ctx, "key2")
+			Expect(val2.Err()).NotTo(HaveOccurred())
+			Expect(val2.Val()).To(Equal("value2"))
+		})
+
+		It("should SetWithArgs with TTL", func() {
+			args := redis.SetArgs{
+				TTL: 500 * time.Millisecond,
+			}
+			err := client.SetArgs(ctx, "key", "hello", args).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+
+			Eventually(func() error {
+				return client.Get(ctx, "key").Err()
+			}, "2s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should SetWithArgs with expiration date", func() {
+			expireAt := time.Now().AddDate(1, 1, 1)
+			args := redis.SetArgs{
+				ExpireAt: expireAt,
+			}
+			err := client.SetArgs(ctx, "key", "hello", args).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+
+			// check the key has an expiration date
+			// (so a TTL value different of -1)
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val()).ToNot(Equal(-1))
+		})
+
+		It("should SetWithArgs with negative expiration date", func() {
+			args := redis.SetArgs{
+				ExpireAt: time.Now().AddDate(-3, 1, 1),
+			}
+			// redis accepts a timestamp less than the current date
+			// but returns nil when trying to get the key
+			err := client.SetArgs(ctx, "key", "hello", args).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with keepttl", func() {
+			// Set with ttl
+			argsWithTTL := redis.SetArgs{
+				TTL: 5 * time.Second,
+			}
+			set := client.SetArgs(ctx, "key", "hello", argsWithTTL)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Result()).To(Equal("OK"))
+
+			// Set with keepttl
+			argsWithKeepTTL := redis.SetArgs{
+				KeepTTL: true,
+			}
+			set = client.SetArgs(ctx, "key", "hello", argsWithKeepTTL)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Result()).To(Equal("OK"))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			// set keepttl will Retain the ttl associated with the key
+			Expect(ttl.Val().Nanoseconds()).NotTo(Equal(-1))
+		})
+
+		It("should SetWithArgs with NX mode and key exists", func() {
+			err := client.Set(ctx, "key", "hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				Mode: "nx",
+			}
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with NX mode and key does not exist", func() {
+			args := redis.SetArgs{
+				Mode: "nx",
+			}
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("OK"))
+		})
+
+		It("should SetWithArgs with NX mode and GET option", func() {
+			args := redis.SetArgs{
+				Mode: "nx",
+				Get:  true,
+			}
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with expiration, NX mode, and key does not exist", func() {
+			args := redis.SetArgs{
+				TTL:  500 * time.Millisecond,
+				Mode: "nx",
+			}
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("OK"))
+
+			Eventually(func() error {
+				return client.Get(ctx, "key").Err()
+			}, "1s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should SetWithArgs with expiration, NX mode, and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0)
+			Expect(e.Err()).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				TTL:  500 * time.Millisecond,
+				Mode: "nx",
+			}
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with expiration, NX mode, and GET option", func() {
+			args := redis.SetArgs{
+				TTL:  500 * time.Millisecond,
+				Mode: "nx",
+				Get:  true,
+			}
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with XX mode and key does not exist", func() {
+			args := redis.SetArgs{
+				Mode: "xx",
+			}
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with XX mode and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0).Err()
+			Expect(e).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				Mode: "xx",
+			}
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("OK"))
+		})
+
+		It("should SetWithArgs with XX mode and GET option, and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0).Err()
+			Expect(e).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				Mode: "xx",
+				Get:  true,
+			}
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+		})
+
+		It("should SetWithArgs with XX mode and GET option, and key does not exist", func() {
+			args := redis.SetArgs{
+				Mode: "xx",
+				Get:  true,
+			}
+
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with expiration, XX mode, GET option, and key does not exist", func() {
+			args := redis.SetArgs{
+				TTL:  500 * time.Millisecond,
+				Mode: "xx",
+				Get:  true,
+			}
+
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with expiration, XX mode, GET option, and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0)
+			Expect(e.Err()).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				TTL:  500 * time.Millisecond,
+				Mode: "xx",
+				Get:  true,
+			}
+
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+
+			Eventually(func() error {
+				return client.Get(ctx, "key").Err()
+			}, "1s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should SetWithArgs with Get and key does not exist yet", func() {
+			args := redis.SetArgs{
+				Get: true,
+			}
+
+			val, err := client.SetArgs(ctx, "key", "hello", args).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(Equal(""))
+		})
+
+		It("should SetWithArgs with Get and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0)
+			Expect(e.Err()).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				Get: true,
+			}
+
+			val, err := client.SetArgs(ctx, "key", "world", args).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+		})
+
+		It("should Pipelined SetArgs with Get and key exists", func() {
+			e := client.Set(ctx, "key", "hello", 0)
+			Expect(e.Err()).NotTo(HaveOccurred())
+
+			args := redis.SetArgs{
+				Get: true,
+			}
+
+			pipe := client.Pipeline()
+			setArgs := pipe.SetArgs(ctx, "key", "world", args)
+			_, err := pipe.Exec(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(setArgs.Err()).NotTo(HaveOccurred())
+			Expect(setArgs.Val()).To(Equal("hello"))
+		})
+
+		It("should Set with expiration", func() {
+			err := client.Set(ctx, "key", "hello", 100*time.Millisecond).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+
+			Eventually(func() error {
+				return client.Get(ctx, "key").Err()
+			}, "1s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should Set with keepttl", func() {
+			// set with ttl
+			set := client.Set(ctx, "key", "hello", 5*time.Second)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			// set with keepttl
+			set = client.Set(ctx, "key", "hello1", redis.KeepTTL)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			// set keepttl will Retain the ttl associated with the key
+			Expect(ttl.Val().Nanoseconds()).NotTo(Equal(-1))
+		})
+
+		It("should SetGet", func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should SetEX", func() {
+			err := client.SetEx(ctx, "key", "hello", 1*time.Second).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+
+			Eventually(func() error {
+				return client.Get(ctx, "foo").Err()
+			}, "2s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should SetNX", func() {
+			setNX := client.SetNX(ctx, "key", "hello", 0)
+			Expect(setNX.Err()).NotTo(HaveOccurred())
+			Expect(setNX.Val()).To(Equal(true))
+
+			setNX = client.SetNX(ctx, "key", "hello2", 0)
+			Expect(setNX.Err()).NotTo(HaveOccurred())
+			Expect(setNX.Val()).To(Equal(false))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("hello"))
+		})
+
+		It("should SetNX with expiration", func() {
+			isSet, err := client.SetNX(ctx, "key", "hello", time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			isSet, err = client.SetNX(ctx, "key", "hello2", time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(false))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello"))
+		})
+
+		It("should SetNX with keepttl", func() {
+			isSet, err := client.SetNX(ctx, "key", "hello1", redis.KeepTTL).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			ttl := client.TTL(ctx, "key")
+			Expect(ttl.Err()).NotTo(HaveOccurred())
+			Expect(ttl.Val().Nanoseconds()).To(Equal(int64(-1)))
+		})
+
+		It("should SetXX", func() {
+			isSet, err := client.SetXX(ctx, "key", "hello2", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(false))
+
+			err = client.Set(ctx, "key", "hello", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			isSet, err = client.SetXX(ctx, "key", "hello2", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello2"))
+		})
+
+		It("should SetXX with expiration", func() {
+			isSet, err := client.SetXX(ctx, "key", "hello2", time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(false))
+
+			err = client.Set(ctx, "key", "hello", time.Second).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			isSet, err = client.SetXX(ctx, "key", "hello2", time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello2"))
+		})
+
+		It("should SetXX with keepttl", func() {
+			isSet, err := client.SetXX(ctx, "key", "hello2", time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(false))
+
+			err = client.Set(ctx, "key", "hello", time.Second).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			isSet, err = client.SetXX(ctx, "key", "hello2", 5*time.Second).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			isSet, err = client.SetXX(ctx, "key", "hello3", redis.KeepTTL).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(isSet).To(Equal(true))
+
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("hello3"))
+
+			// set keepttl will Retain the ttl associated with the key
+			ttl, err := client.TTL(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ttl).NotTo(Equal(-1))
+		})
+
+		It("should SetIFEQ when value matches", func() {
+			if !redisVersionAtLeast("8.4") {
+				Skip("CAS/CAD commands require Redis >= 8.4")
+			}
+
+			// Set initial value
+			err := client.Set(ctx, "key", "old-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update only if current value is "old-value"
+			result := client.SetIFEQ(ctx, "key", "new-value", "old-value", 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("new-value"))
+		})
+
+		It("should SetIFEQ fail when value does not match", func() {
+			if !redisVersionAtLeast("8.4") {
+				Skip("CAS/CAD commands require Redis >= 8.4")
+			}
+
+			// Set initial value
+			err := client.Set(ctx, "key", "current-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Try to update with wrong match value
+			result := client.SetIFEQ(ctx, "key", "new-value", "wrong-value", 0)
+			Expect(result.Err()).To(Equal(redis.Nil))
+
+			// Verify value was NOT updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("current-value"))
+		})
+
+		It("should SetIFEQ with expiration", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "token-123", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update with expiration
+			result := client.SetIFEQ(ctx, "key", "token-456", "token-123", 500*time.Millisecond)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("token-456"))
+
+			// Wait for expiration
+			Eventually(func() error {
+				return client.Get(ctx, "key").Err()
+			}, "1s", "100ms").Should(Equal(redis.Nil))
+		})
+
+		It("should SetIFNE when value does not match", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "pending", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update only if current value is NOT "completed"
+			result := client.SetIFNE(ctx, "key", "processing", "completed", 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("processing"))
+		})
+
+		It("should SetIFNE fail when value matches", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "completed", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Try to update but value matches (should fail)
+			result := client.SetIFNE(ctx, "key", "processing", "completed", 0)
+			Expect(result.Err()).To(Equal(redis.Nil))
+
+			// Verify value was NOT updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("completed"))
+		})
+
+		It("should SetArgs with IFEQ", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "counter", "100", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update with IFEQ
+			args := redis.SetArgs{
+				Mode:       "IFEQ",
+				MatchValue: "100",
+				TTL:        1 * time.Hour,
+			}
+			result := client.SetArgs(ctx, "counter", "200", args)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "counter").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("200"))
+		})
+
+		It("should SetArgs with IFEQ and GET", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "old", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update with IFEQ and GET old value
+			args := redis.SetArgs{
+				Mode:       "IFEQ",
+				MatchValue: "old",
+				Get:        true,
+			}
+			result := client.SetArgs(ctx, "key", "new", args)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("old"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("new"))
+		})
+
+		It("should SetArgs with IFNE", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "status", "pending", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update with IFNE
+			args := redis.SetArgs{
+				Mode:       "IFNE",
+				MatchValue: "completed",
+				TTL:        30 * time.Minute,
+			}
+			result := client.SetArgs(ctx, "status", "processing", args)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "status").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("processing"))
+		})
+
+		It("should SetIFEQGet return previous value", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "old-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update and get previous value
+			result := client.SetIFEQGet(ctx, "key", "new-value", "old-value", 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("old-value"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("new-value"))
+		})
+
+		It("should SetIFNEGet return previous value", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "pending", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Update and get previous value
+			result := client.SetIFNEGet(ctx, "key", "processing", "completed", 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("pending"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("processing"))
+		})
+
+		It("should SetIFDEQ when digest matches", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest
+			digest := client.Digest(ctx, "key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+
+			// Update using digest
+			result := client.SetIFDEQ(ctx, "key", "value2", digest.Val(), 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value2"))
+		})
+
+		It("should SetIFDEQ fail when digest does not match", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest of a different value to use as wrong digest
+			err = client.Set(ctx, "temp-key", "different-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+			wrongDigest := client.Digest(ctx, "temp-key")
+			Expect(wrongDigest.Err()).NotTo(HaveOccurred())
+
+			// Try to update with wrong digest
+			result := client.SetIFDEQ(ctx, "key", "value2", wrongDigest.Val(), 0)
+			Expect(result.Err()).To(Equal(redis.Nil))
+
+			// Verify value was NOT updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value1"))
+		})
+
+		It("should SetIFDEQGet return previous value", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest
+			digest := client.Digest(ctx, "key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+
+			// Update using digest and get previous value
+			result := client.SetIFDEQGet(ctx, "key", "value2", digest.Val(), 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("value1"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value2"))
+		})
+
+		It("should SetIFDNE when digest does not match", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest of a different value
+			err = client.Set(ctx, "temp-key", "different-value", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+			differentDigest := client.Digest(ctx, "temp-key")
+			Expect(differentDigest.Err()).NotTo(HaveOccurred())
+
+			// Update with different digest (should succeed because digest doesn't match)
+			result := client.SetIFDNE(ctx, "key", "value2", differentDigest.Val(), 0)
+			Expect(result.Err()).NotTo(HaveOccurred())
+			Expect(result.Val()).To(Equal("OK"))
+
+			// Verify value was updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value2"))
+		})
+
+		It("should SetIFDNE fail when digest matches", func() {
+			SkipBeforeRedisVersion("8.4", "CAS/CAD commands require Redis >= 8.4")
+
+			// Set initial value
+			err := client.Set(ctx, "key", "value1", 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Get digest
+			digest := client.Digest(ctx, "key")
+			Expect(digest.Err()).NotTo(HaveOccurred())
+
+			// Try to update but digest matches (should fail)
+			result := client.SetIFDNE(ctx, "key", "value2", digest.Val(), 0)
+			Expect(result.Err()).To(Equal(redis.Nil))
+
+			// Verify value was NOT updated
+			val, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal("value1"))
+		})
+
+		It("should SetRange", func() {
+			set := client.Set(ctx, "key", "Hello World", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			range_ := client.SetRange(ctx, "key", 6, "Redis")
+			Expect(range_.Err()).NotTo(HaveOccurred())
+			Expect(range_.Val()).To(Equal(int64(11)))
+
+			get := client.Get(ctx, "key")
+			Expect(get.Err()).NotTo(HaveOccurred())
+			Expect(get.Val()).To(Equal("Hello Redis"))
+		})
+
+		It("should StrLen", func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			strLen := client.StrLen(ctx, "key")
+			Expect(strLen.Err()).NotTo(HaveOccurred())
+			Expect(strLen.Val()).To(Equal(int64(5)))
+
+			strLen = client.StrLen(ctx, "_")
+			Expect(strLen.Err()).NotTo(HaveOccurred())
+			Expect(strLen.Val()).To(Equal(int64(0)))
+		})
+
+		It("should Copy", Label("NonRedisEnterprise"), func() {
+			set := client.Set(ctx, "key", "hello", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+			Expect(set.Val()).To(Equal("OK"))
+
+			copy := client.Copy(ctx, "key", "newKey", redisOptions().DB, false)
+			Expect(copy.Err()).NotTo(HaveOccurred())
+			Expect(copy.Val()).To(Equal(int64(1)))
+
+			// Value is available by both keys now
+			getOld := client.Get(ctx, "key")
+			Expect(getOld.Err()).NotTo(HaveOccurred())
+			Expect(getOld.Val()).To(Equal("hello"))
+			getNew := client.Get(ctx, "newKey")
+			Expect(getNew.Err()).NotTo(HaveOccurred())
+			Expect(getNew.Val()).To(Equal("hello"))
+
+			// Overwriting an existing key should not succeed
+			overwrite := client.Copy(ctx, "newKey", "key", redisOptions().DB, false)
+			Expect(overwrite.Val()).To(Equal(int64(0)))
+
+			// Overwrite is allowed when replace=rue
+			replace := client.Copy(ctx, "newKey", "key", redisOptions().DB, true)
+			Expect(replace.Val()).To(Equal(int64(1)))
+		})
+
+		It("should fail module loadex", Label("NonRedisEnterprise"), func() {
+			dryRun := rawClient.ModuleLoadex(ctx, &redis.ModuleLoadexConfig{
+				Path: "/path/to/non-existent-library.so",
+				Conf: map[string]interface{}{
+					"param1": "value1",
+				},
+				Args: []interface{}{
+					"arg1",
+				},
+			})
+			Expect(dryRun.Err()).To(HaveOccurred())
+			Expect(dryRun.Err().Error()).To(Equal("ERR Error loading the extension. Please check the server logs."))
+		})
+
+		It("converts the module loadex configuration to a slice of arguments correctly", func() {
+			conf := &redis.ModuleLoadexConfig{
+				Path: "/path/to/your/module.so",
+				Conf: map[string]interface{}{
+					"param1": "value1",
+				},
+				Args: []interface{}{
+					"arg1",
+					"arg2",
+					3,
+				},
+			}
+
+			args := conf.ToArgs()
+
+			// Test if the arguments are in the correct order
+			expectedArgs := []interface{}{
+				"MODULE",
+				"LOADEX",
+				"/path/to/your/module.so",
+				"CONFIG",
+				"param1",
+				"value1",
+				"ARGS",
+				"arg1",
+				"ARGS",
+				"arg2",
+				"ARGS",
+				3,
+			}
+
+			Expect(args).To(Equal(expectedArgs))
+		})
+
+		It("should IncrByFloat with edge cases", func() {
+			// Test with negative increment
+			set := client.Set(ctx, "key", "10.5", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			incrByFloat := client.IncrByFloat(ctx, "key", -2.3)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(BeNumerically("~", 8.2, 0.0001))
+
+			// Test with zero increment (should return current value)
+			incrByFloat = client.IncrByFloat(ctx, "key", 0.0)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(BeNumerically("~", 8.2, 0.0001))
+
+			// Test with very small increment (precision test)
+			incrByFloat = client.IncrByFloat(ctx, "key", 0.0001)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(BeNumerically("~", 8.2001, 0.00001))
+
+			// Test with non-existent key (should start from 0)
+			incrByFloat = client.IncrByFloat(ctx, "nonexistent", 5.5)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(5.5))
+
+			// Test with integer value stored as string
+			set = client.Set(ctx, "intkey", "42", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			incrByFloat = client.IncrByFloat(ctx, "intkey", 0.5)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(42.5))
+
+			// Test with scientific notation
+			set = client.Set(ctx, "scikey", "1.5e2", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			incrByFloat = client.IncrByFloat(ctx, "scikey", 5.0)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(155.0))
+
+			// Test with negative scientific notation
+			incrByFloat = client.IncrByFloat(ctx, "scikey", -1.5e1)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(Equal(140.0))
+
+			// Test error case: non-numeric value
+			set = client.Set(ctx, "stringkey", "notanumber", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			incrByFloat = client.IncrByFloat(ctx, "stringkey", 1.0)
+			Expect(incrByFloat.Err()).To(HaveOccurred())
+			Expect(incrByFloat.Err().Error()).To(ContainSubstring("value is not a valid float"))
+
+			// Test with very large numbers
+			set = client.Set(ctx, "largekey", "1.7976931348623157e+308", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			// This should work as it's within float64 range
+			incrByFloat = client.IncrByFloat(ctx, "largekey", -1.0e+308)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(BeNumerically("~", 7.976931348623157e+307, 1e+300))
+
+			// Test with very small numbers (near zero)
+			set = client.Set(ctx, "smallkey", "1e-10", 0)
+			Expect(set.Err()).NotTo(HaveOccurred())
+
+			incrByFloat = client.IncrByFloat(ctx, "smallkey", 1e-10)
+			Expect(incrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(incrByFloat.Val()).To(BeNumerically("~", 2e-10, 1e-15))
+		})
+	})
+
+	Describe("hashes", func() {
+		It("should HDel", func() {
+			hSet := client.HSet(ctx, "hash", "key", "hello")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hDel := client.HDel(ctx, "hash", "key")
+			Expect(hDel.Err()).NotTo(HaveOccurred())
+			Expect(hDel.Val()).To(Equal(int64(1)))
+
+			hDel = client.HDel(ctx, "hash", "key")
+			Expect(hDel.Err()).NotTo(HaveOccurred())
+			Expect(hDel.Val()).To(Equal(int64(0)))
+		})
+
+		It("should HExists", func() {
+			hSet := client.HSet(ctx, "hash", "key", "hello")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hExists := client.HExists(ctx, "hash", "key")
+			Expect(hExists.Err()).NotTo(HaveOccurred())
+			Expect(hExists.Val()).To(Equal(true))
+
+			hExists = client.HExists(ctx, "hash", "key1")
+			Expect(hExists.Err()).NotTo(HaveOccurred())
+			Expect(hExists.Val()).To(Equal(false))
+		})
+
+		It("should HGet", func() {
+			hSet := client.HSet(ctx, "hash", "key", "hello")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hGet := client.HGet(ctx, "hash", "key")
+			Expect(hGet.Err()).NotTo(HaveOccurred())
+			Expect(hGet.Val()).To(Equal("hello"))
+
+			hGet = client.HGet(ctx, "hash", "key1")
+			Expect(hGet.Err()).To(Equal(redis.Nil))
+			Expect(hGet.Val()).To(Equal(""))
+		})
+
+		It("should HGetAll", func() {
+			err := client.HSet(ctx, "hash", "key1", "hello1").Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.HSet(ctx, "hash", "key2", "hello2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			m, err := client.HGetAll(ctx, "hash").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(m).To(Equal(map[string]string{"key1": "hello1", "key2": "hello2"}))
+		})
+
+		It("should scan", func() {
+			now := time.Now()
+
+			err := client.HMSet(ctx, "hash", "key1", "hello1", "key2", 123, "time", now.Format(time.RFC3339Nano)).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			res := client.HGetAll(ctx, "hash")
+			Expect(res.Err()).NotTo(HaveOccurred())
+
+			type data struct {
+				Key1 string    `redis:"key1"`
+				Key2 int       `redis:"key2"`
+				Time TimeValue `redis:"time"`
+			}
+			var d data
+			Expect(res.Scan(&d)).NotTo(HaveOccurred())
+			Expect(d.Time.UnixNano()).To(Equal(now.UnixNano()))
+			d.Time.Time = time.Time{}
+			Expect(d).To(Equal(data{
+				Key1: "hello1",
+				Key2: 123,
+				Time: TimeValue{Time: time.Time{}},
+			}))
+
+			type data2 struct {
+				Key1 string    `redis:"key1"`
+				Key2 int       `redis:"key2"`
+				Time time.Time `redis:"time"`
+			}
+			err = client.HSet(ctx, "hash", &data2{
+				Key1: "hello2",
+				Key2: 200,
+				Time: now,
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			var d2 data2
+			err = client.HMGet(ctx, "hash", "key1", "key2", "time").Scan(&d2)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(d2.Key1).To(Equal("hello2"))
+			Expect(d2.Key2).To(Equal(200))
+			Expect(d2.Time.Unix()).To(Equal(now.Unix()))
+		})
+
+		It("should HIncrBy", func() {
+			hSet := client.HSet(ctx, "hash", "key", "5")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hIncrBy := client.HIncrBy(ctx, "hash", "key", 1)
+			Expect(hIncrBy.Err()).NotTo(HaveOccurred())
+			Expect(hIncrBy.Val()).To(Equal(int64(6)))
+
+			hIncrBy = client.HIncrBy(ctx, "hash", "key", -1)
+			Expect(hIncrBy.Err()).NotTo(HaveOccurred())
+			Expect(hIncrBy.Val()).To(Equal(int64(5)))
+
+			hIncrBy = client.HIncrBy(ctx, "hash", "key", -10)
+			Expect(hIncrBy.Err()).NotTo(HaveOccurred())
+			Expect(hIncrBy.Val()).To(Equal(int64(-5)))
+		})
+
+		It("should HIncrByFloat", func() {
+			hSet := client.HSet(ctx, "hash", "field", "10.50")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(1)))
+
+			hIncrByFloat := client.HIncrByFloat(ctx, "hash", "field", 0.1)
+			Expect(hIncrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(hIncrByFloat.Val()).To(Equal(10.6))
+
+			hSet = client.HSet(ctx, "hash", "field", "5.0e3")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(0)))
+
+			hIncrByFloat = client.HIncrByFloat(ctx, "hash", "field", 2.0e2)
+			Expect(hIncrByFloat.Err()).NotTo(HaveOccurred())
+			Expect(hIncrByFloat.Val()).To(Equal(float64(5200)))
+		})
+
+		It("should HKeys", func() {
+			hkeys := client.HKeys(ctx, "hash")
+			Expect(hkeys.Err()).NotTo(HaveOccurred())
+			Expect(hkeys.Val()).To(Equal([]string{}))
+
+			hset := client.HSet(ctx, "hash", "key1", "hello1")
+			Expect(hset.Err()).NotTo(HaveOccurred())
+			hset = client.HSet(ctx, "hash", "key2", "hello2")
+			Expect(hset.Err()).NotTo(HaveOccurred())
+
+			hkeys = client.HKeys(ctx, "hash")
+			Expect(hkeys.Err()).NotTo(HaveOccurred())
+			Expect(hkeys.Val()).To(Equal([]string{"key1", "key2"}))
+		})
+
+		It("should HLen", func() {
+			hSet := client.HSet(ctx, "hash", "key1", "hello1")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			hSet = client.HSet(ctx, "hash", "key2", "hello2")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hLen := client.HLen(ctx, "hash")
+			Expect(hLen.Err()).NotTo(HaveOccurred())
+			Expect(hLen.Val()).To(Equal(int64(2)))
+		})
+
+		It("should HMGet", func() {
+			err := client.HSet(ctx, "hash", "key1", "hello1", "key2", "hello2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.HMGet(ctx, "hash", "key1", "key2", "_").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]interface{}{"hello1", "hello2", nil}))
+		})
+
+		It("should HSet", func() {
+			ok, err := client.HSet(ctx, "hash", map[string]interface{}{
+				"key1": "hello1",
+				"key2": "hello2",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(Equal(int64(2)))
+
+			v, err := client.HGet(ctx, "hash", "key1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal("hello1"))
+
+			v, err = client.HGet(ctx, "hash", "key2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal("hello2"))
+
+			keys, err := client.HKeys(ctx, "hash").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(keys).To(ConsistOf([]string{"key1", "key2"}))
+		})
+
+		It("should HSet", func() {
+			hSet := client.HSet(ctx, "hash", "key", "hello")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(1)))
+
+			hGet := client.HGet(ctx, "hash", "key")
+			Expect(hGet.Err()).NotTo(HaveOccurred())
+			Expect(hGet.Val()).To(Equal("hello"))
+
+			// set struct
+			// MSet struct
+			type set struct {
+				Set1 string                 `redis:"set1"`
+				Set2 int16                  `redis:"set2"`
+				Set3 time.Duration          `redis:"set3"`
+				Set4 interface{}            `redis:"set4"`
+				Set5 map[string]interface{} `redis:"-"`
+				Set6 string                 `redis:"set6,omitempty"`
+			}
+
+			hSet = client.HSet(ctx, "hash", &set{
+				Set1: "val1",
+				Set2: 1024,
+				Set3: 2 * time.Millisecond,
+				Set4: nil,
+				Set5: map[string]interface{}{"k1": 1},
+			})
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(4)))
+
+			hMGet := client.HMGet(ctx, "hash", "set1", "set2", "set3", "set4", "set5", "set6")
+			Expect(hMGet.Err()).NotTo(HaveOccurred())
+			Expect(hMGet.Val()).To(Equal([]interface{}{
+				"val1",
+				"1024",
+				strconv.Itoa(int(2 * time.Millisecond.Nanoseconds())),
+				"",
+				nil,
+				nil,
+			}))
+
+			hSet = client.HSet(ctx, "hash2", &set{
+				Set1: "val2",
+				Set6: "val",
+			})
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(5)))
+
+			hMGet = client.HMGet(ctx, "hash2", "set1", "set6")
+			Expect(hMGet.Err()).NotTo(HaveOccurred())
+			Expect(hMGet.Val()).To(Equal([]interface{}{
+				"val2",
+				"val",
+			}))
+
+			type setOmitEmpty struct {
+				Set1 string        `redis:"set1"`
+				Set2 int           `redis:"set2,omitempty"`
+				Set3 time.Duration `redis:"set3,omitempty"`
+				Set4 string        `redis:"set4,omitempty"`
+				Set5 time.Time     `redis:"set5,omitempty"`
+				Set6 *numberStruct `redis:"set6,omitempty"`
+				Set7 numberStruct  `redis:"set7,omitempty"`
+			}
+
+			hSet = client.HSet(ctx, "hash3", &setOmitEmpty{
+				Set1: "val",
+			})
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			// both set1 and set7 are set
+			// custom struct is not omitted
+			Expect(hSet.Val()).To(Equal(int64(2)))
+
+			hGetAll := client.HGetAll(ctx, "hash3")
+			Expect(hGetAll.Err()).NotTo(HaveOccurred())
+			Expect(hGetAll.Val()).To(Equal(map[string]string{
+				"set1": "val",
+				"set7": `{"Number":0}`,
+			}))
+			var hash3 setOmitEmpty
+			Expect(hGetAll.Scan(&hash3)).NotTo(HaveOccurred())
+			Expect(hash3.Set1).To(Equal("val"))
+			Expect(hash3.Set2).To(Equal(0))
+			Expect(hash3.Set3).To(Equal(time.Duration(0)))
+			Expect(hash3.Set4).To(Equal(""))
+			Expect(hash3.Set5).To(Equal(time.Time{}))
+			Expect(hash3.Set6).To(BeNil())
+			Expect(hash3.Set7).To(Equal(numberStruct{}))
+
+			now := time.Now()
+			hSet = client.HSet(ctx, "hash4", setOmitEmpty{
+				Set1: "val",
+				Set5: now,
+				Set6: &numberStruct{
+					Number: 5,
+				},
+				Set7: numberStruct{
+					Number: 3,
+				},
+			})
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+			Expect(hSet.Val()).To(Equal(int64(4)))
+
+			hGetAll = client.HGetAll(ctx, "hash4")
+			Expect(hGetAll.Err()).NotTo(HaveOccurred())
+			Expect(hGetAll.Val()).To(Equal(map[string]string{
+				"set1": "val",
+				"set5": now.Format(time.RFC3339Nano),
+				"set6": `{"Number":5}`,
+				"set7": `{"Number":3}`,
+			}))
+		})
+
+		It("should HSetNX", func() {
+			hSetNX := client.HSetNX(ctx, "hash", "key", "hello")
+			Expect(hSetNX.Err()).NotTo(HaveOccurred())
+			Expect(hSetNX.Val()).To(Equal(true))
+
+			hSetNX = client.HSetNX(ctx, "hash", "key", "hello")
+			Expect(hSetNX.Err()).NotTo(HaveOccurred())
+			Expect(hSetNX.Val()).To(Equal(false))
+
+			hGet := client.HGet(ctx, "hash", "key")
+			Expect(hGet.Err()).NotTo(HaveOccurred())
+			Expect(hGet.Val()).To(Equal("hello"))
+		})
+
+		It("should HVals", func() {
+			err := client.HSet(ctx, "hash", "key1", "hello1").Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.HSet(ctx, "hash", "key2", "hello2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.HVals(ctx, "hash").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal([]string{"hello1", "hello2"}))
+
+			var slice []string
+			err = client.HVals(ctx, "hash").ScanSlice(&slice)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(slice).To(Equal([]string{"hello1", "hello2"}))
+		})
+
+		It("should HRandField", func() {
+			err := client.HSet(ctx, "hash", "key1", "hello1").Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.HSet(ctx, "hash", "key2", "hello2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v := client.HRandField(ctx, "hash", 1)
+			Expect(v.Err()).NotTo(HaveOccurred())
+			Expect(v.Val()).To(Or(Equal([]string{"key1"}), Equal([]string{"key2"})))
+
+			v = client.HRandField(ctx, "hash", 0)
+			Expect(v.Err()).NotTo(HaveOccurred())
+			Expect(v.Val()).To(HaveLen(0))
+
+			kv, err := client.HRandFieldWithValues(ctx, "hash", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(kv).To(Or(
+				Equal([]redis.KeyValue{{Key: "key1", Value: "hello1"}}),
+				Equal([]redis.KeyValue{{Key: "key2", Value: "hello2"}}),
+			))
+		})
+
+		It("should HStrLen", func() {
+			hSet := client.HSet(ctx, "hash", "key", "hello")
+			Expect(hSet.Err()).NotTo(HaveOccurred())
+
+			hStrLen := client.HStrLen(ctx, "hash", "key")
+			Expect(hStrLen.Err()).NotTo(HaveOccurred())
+			Expect(hStrLen.Val()).To(Equal(int64(len("hello"))))
+
+			nonHStrLen := client.HStrLen(ctx, "hash", "keyNon")
+			Expect(hStrLen.Err()).NotTo(HaveOccurred())
+			Expect(nonHStrLen.Val()).To(Equal(int64(0)))
+
+			hDel := client.HDel(ctx, "hash", "key")
+			Expect(hDel.Err()).NotTo(HaveOccurred())
+			Expect(hDel.Val()).To(Equal(int64(1)))
+		})
+
+		It("should HExpire", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			res, err := client.HExpire(ctx, "no_such_key", 10*time.Second, "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(res).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err = client.HExpire(ctx, "myhash", 10*time.Second, "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, 1, -2}))
+		})
+
+		It("should HPExpire", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			res, err := client.HPExpire(ctx, "no_such_key", 10*time.Second, "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(res).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err = client.HPExpire(ctx, "myhash", 10*time.Second, "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, 1, -2}))
+		})
+
+		It("should HExpireAt", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HExpireAt(ctx, "no_such_key", time.Now().Add(10*time.Second), "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HExpireAt(ctx, "myhash", time.Now().Add(10*time.Second), "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, 1, -2}))
+		})
+
+		It("should HPExpireAt", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HPExpireAt(ctx, "no_such_key", time.Now().Add(10*time.Second), "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HPExpireAt(ctx, "myhash", time.Now().Add(10*time.Second), "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, 1, -2}))
+		})
+
+		It("should HPExpireAt beyond the nanosecond timestamp range", Label("hash-expiration"), func() {
+			SkipBeforeRedisVersion("7.4", "requires hash field expiration")
+			deadline := time.Date(2270, time.January, 2, 3, 4, 5, 123000000, time.UTC)
+			Expect(client.HSet(ctx, "myhash", "key1", "hello", "key2", "world").Err()).NotTo(HaveOccurred())
+			Expect(client.HPExpireAt(ctx, "myhash", deadline, "key1").Result()).To(Equal([]int64{1}))
+			Expect(client.HPExpireAtWithArgs(ctx, "myhash", deadline, redis.HExpireArgs{NX: true}, "key2").Result()).To(Equal([]int64{1}))
+			Expect(client.HMGet(ctx, "myhash", "key1", "key2").Result()).To(Equal([]interface{}{"hello", "world"}))
+			Expect(client.HPExpireTime(ctx, "myhash", "key1", "key2").Result()).To(Equal([]int64{9467204645123, 9467204645123}))
+		})
+
+		It("should HPersist", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HPersist(ctx, "no_such_key", "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HPersist(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{-1, -1, -2}))
+
+			res, err = client.HExpire(ctx, "myhash", 10*time.Second, "key1", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -2}))
+
+			res, err = client.HPersist(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -1, -2}))
+		})
+
+		It("should HExpireTime", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HExpireTime(ctx, "no_such_key", "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HExpire(ctx, "myhash", 10*time.Second, "key1", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -2}))
+
+			res, err = client.HExpireTime(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res[0]).To(BeNumerically("~", time.Now().Add(10*time.Second).Unix(), 1))
+		})
+
+		It("should HPExpireTime", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HPExpireTime(ctx, "no_such_key", "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			expireAt := time.Now().Add(10 * time.Second)
+			res, err := client.HPExpireAt(ctx, "myhash", expireAt, "key1", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -2}))
+
+			res, err = client.HPExpireTime(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(BeEquivalentTo([]int64{expireAt.UnixMilli(), -1, -2}))
+		})
+
+		It("should HTTL", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HTTL(ctx, "no_such_key", "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HExpire(ctx, "myhash", 10*time.Second, "key1", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -2}))
+
+			res, err = client.HTTL(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{10, -1, -2}))
+		})
+
+		It("should HPTTL", Label("hash-expiration", "NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			resEmpty, err := client.HPTTL(ctx, "no_such_key", "field1", "field2", "field3").Result()
+			Expect(err).To(BeNil())
+			Expect(resEmpty).To(BeEquivalentTo([]int64{-2, -2, -2}))
+
+			for i := 0; i < 100; i++ {
+				sadd := client.HSet(ctx, "myhash", fmt.Sprintf("key%d", i), "hello")
+				Expect(sadd.Err()).NotTo(HaveOccurred())
+			}
+
+			res, err := client.HExpire(ctx, "myhash", 10*time.Second, "key1", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]int64{1, -2}))
+
+			res, err = client.HPTTL(ctx, "myhash", "key1", "key2", "key200").Result()
+			Expect(err).NotTo(HaveOccurred())
+			// overhead of the push notification check is about 1-2ms for 100 commands
+			Expect(res[0]).To(BeNumerically("~", 10*time.Second.Milliseconds(), 2))
+		})
+
+		It("should HGETDEL", Label("hash", "HGETDEL"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			err := client.HSet(ctx, "myhash", "f1", "val1", "f2", "val2", "f3", "val3").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Execute HGETDEL on fields f1 and f2.
+			res, err := client.HGetDel(ctx, "myhash", "f1", "f2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			// Expect the returned values for f1 and f2.
+			Expect(res).To(Equal([]string{"val1", "val2"}))
+
+			// Verify that f1 and f2 have been deleted, while f3 remains.
+			remaining, err := client.HMGet(ctx, "myhash", "f1", "f2", "f3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(remaining[0]).To(BeNil())
+			Expect(remaining[1]).To(BeNil())
+			Expect(remaining[2]).To(Equal("val3"))
+		})
+
+		It("should return nil responses for HGETDEL on non-existent key", Label("hash", "HGETDEL"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+			// HGETDEL on a key that does not exist.
+			res, err := client.HGetDel(ctx, "nonexistent", "f1", "f2").Result()
+			Expect(err).To(BeNil())
+			Expect(res).To(Equal([]string{"", ""}))
+		})
+
+		// -----------------------------
+		// HGETEX with various TTL options
+		// -----------------------------
+		It("should HGETEX with EX option", Label("hash", "HGETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			err := client.HSet(ctx, "myhash", "f1", "val1", "f2", "val2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Call HGETEX with EX option and 60 seconds TTL.
+			opt := redis.HGetEXOptions{
+				ExpirationType: redis.HGetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err := client.HGetEXWithArgs(ctx, "myhash", &opt, "f1", "f2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"val1", "val2"}))
+		})
+
+		It("should HGETEX with PERSIST option", Label("hash", "HGETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			err := client.HSet(ctx, "myhash", "f1", "val1", "f2", "val2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Call HGETEX with PERSIST (no TTL value needed).
+			opt := redis.HGetEXOptions{ExpirationType: redis.HGetEXExpirationPERSIST}
+			res, err := client.HGetEXWithArgs(ctx, "myhash", &opt, "f1", "f2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"val1", "val2"}))
+		})
+
+		It("should HGETEX with EXAT option", Label("hash", "HGETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			err := client.HSet(ctx, "myhash", "f1", "val1", "f2", "val2").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Set expiration at a specific Unix timestamp (60 seconds from now).
+			expireAt := time.Now().Add(60 * time.Second).Unix()
+			opt := redis.HGetEXOptions{
+				ExpirationType: redis.HGetEXExpirationEXAT,
+				ExpirationVal:  expireAt,
+			}
+			res, err := client.HGetEXWithArgs(ctx, "myhash", &opt, "f1", "f2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"val1", "val2"}))
+		})
+
+		// -----------------------------
+		// HSETEX with FNX/FXX options
+		// -----------------------------
+		It("should HSETEX with FNX condition", Label("hash", "HSETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			opt := redis.HSetEXOptions{
+				Condition:      redis.HSetEXFNX,
+				ExpirationType: redis.HSetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err := client.HSetEXWithArgs(ctx, "myhash", &opt, "f1", "val1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(int64(1)))
+
+			opt = redis.HSetEXOptions{
+				Condition:      redis.HSetEXFNX,
+				ExpirationType: redis.HSetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err = client.HSetEXWithArgs(ctx, "myhash", &opt, "f1", "val2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(int64(0)))
+		})
+
+		It("should HSETEX with FXX condition", Label("hash", "HSETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			err := client.HSet(ctx, "myhash", "f2", "val1").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			opt := redis.HSetEXOptions{
+				Condition:      redis.HSetEXFXX,
+				ExpirationType: redis.HSetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err := client.HSetEXWithArgs(ctx, "myhash", &opt, "f2", "val2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(int64(1)))
+			opt = redis.HSetEXOptions{
+				Condition:      redis.HSetEXFXX,
+				ExpirationType: redis.HSetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err = client.HSetEXWithArgs(ctx, "myhash", &opt, "f3", "val3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(int64(0)))
+		})
+
+		It("should HSETEX with multiple field operations", Label("hash", "HSETEX"), func() {
+			SkipBeforeRedisVersion("7.9", "requires Redis 8.x")
+
+			opt := redis.HSetEXOptions{
+				ExpirationType: redis.HSetEXExpirationEX,
+				ExpirationVal:  60,
+			}
+			res, err := client.HSetEXWithArgs(ctx, "myhash", &opt, "f1", "val1", "f2", "val2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal(int64(1)))
+
+			values, err := client.HMGet(ctx, "myhash", "f1", "f2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(values).To(Equal([]interface{}{"val1", "val2"}))
+		})
+	})
+
+	Describe("hyperloglog", func() {
+		It("should PFMerge", Label("NonRedisEnterprise"), func() {
+			pfAdd := client.PFAdd(ctx, "hll1", "1", "2", "3", "4", "5")
+			Expect(pfAdd.Err()).NotTo(HaveOccurred())
+
+			pfCount := client.PFCount(ctx, "hll1")
+			Expect(pfCount.Err()).NotTo(HaveOccurred())
+			Expect(pfCount.Val()).To(Equal(int64(5)))
+
+			pfAdd = client.PFAdd(ctx, "hll2", "a", "b", "c", "d", "e")
+			Expect(pfAdd.Err()).NotTo(HaveOccurred())
+
+			pfMerge := client.PFMerge(ctx, "hllMerged", "hll1", "hll2")
+			Expect(pfMerge.Err()).NotTo(HaveOccurred())
+
+			pfCount = client.PFCount(ctx, "hllMerged")
+			Expect(pfCount.Err()).NotTo(HaveOccurred())
+			Expect(pfCount.Val()).To(Equal(int64(10)))
+
+			pfCount = client.PFCount(ctx, "hll1", "hll2")
+			Expect(pfCount.Err()).NotTo(HaveOccurred())
+			Expect(pfCount.Val()).To(Equal(int64(10)))
+		})
+	})
+
+	Describe("lists", func() {
+		It("should BLPop", Label("NonRedisEnterprise"), func() {
+			rPush := client.RPush(ctx, "list1", "a", "b", "c")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			bLPop := client.BLPop(ctx, 0, "list1", "list2")
+			Expect(bLPop.Err()).NotTo(HaveOccurred())
+			Expect(bLPop.Val()).To(Equal([]string{"list1", "a"}))
+		})
+
+		It("should BLPopBlocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				bLPop := client.BLPop(ctx, 0, "list")
+				Expect(bLPop.Err()).NotTo(HaveOccurred())
+				Expect(bLPop.Val()).To(Equal([]string{"list", "a"}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BLPop is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			rPush := client.RPush(ctx, "list", "a")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BLPop is still blocked")
+			}
+		})
+
+		It("should BLPop timeout", func() {
+			val, err := client.BLPop(ctx, time.Second, "list1").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+
+		It("should BRPop", Label("NonRedisEnterprise"), func() {
+			rPush := client.RPush(ctx, "list1", "a", "b", "c")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			bRPop := client.BRPop(ctx, 0, "list1", "list2")
+			Expect(bRPop.Err()).NotTo(HaveOccurred())
+			Expect(bRPop.Val()).To(Equal([]string{"list1", "c"}))
+		})
+
+		It("should BRPop blocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				brpop := client.BRPop(ctx, 0, "list")
+				Expect(brpop.Err()).NotTo(HaveOccurred())
+				Expect(brpop.Val()).To(Equal([]string{"list", "a"}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BRPop is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			rPush := client.RPush(ctx, "list", "a")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BRPop is still blocked")
+				// ok
+			}
+		})
+
+		It("should BRPopLPush", Label("NonRedisEnterprise"), func() {
+			_, err := client.BRPopLPush(ctx, "list1", "list2", time.Second).Result()
+			Expect(err).To(Equal(redis.Nil))
+
+			err = client.RPush(ctx, "list1", "a", "b", "c").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.BRPopLPush(ctx, "list1", "list2", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal("c"))
+		})
+
+		It("should LCS", Label("NonRedisEnterprise"), func() {
+			err := client.MSet(ctx, "key1", "ohmytext", "key2", "mynewtext").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			lcs, err := client.LCS(ctx, &redis.LCSQuery{
+				Key1: "key1",
+				Key2: "key2",
+			}).Result()
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lcs.MatchString).To(Equal("mytext"))
+
+			lcs, err = client.LCS(ctx, &redis.LCSQuery{
+				Key1: "nonexistent_key1",
+				Key2: "key2",
+			}).Result()
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lcs.MatchString).To(Equal(""))
+
+			lcs, err = client.LCS(ctx, &redis.LCSQuery{
+				Key1: "key1",
+				Key2: "key2",
+				Len:  true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lcs.MatchString).To(Equal(""))
+			Expect(lcs.Len).To(Equal(int64(6)))
+
+			lcs, err = client.LCS(ctx, &redis.LCSQuery{
+				Key1: "key1",
+				Key2: "key2",
+				Idx:  true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lcs.MatchString).To(Equal(""))
+			Expect(lcs.Len).To(Equal(int64(6)))
+			Expect(lcs.Matches).To(Equal([]redis.LCSMatchedPosition{
+				{
+					Key1:     redis.LCSPosition{Start: 4, End: 7},
+					Key2:     redis.LCSPosition{Start: 5, End: 8},
+					MatchLen: 0,
+				},
+				{
+					Key1:     redis.LCSPosition{Start: 2, End: 3},
+					Key2:     redis.LCSPosition{Start: 0, End: 1},
+					MatchLen: 0,
+				},
+			}))
+
+			lcs, err = client.LCS(ctx, &redis.LCSQuery{
+				Key1:         "key1",
+				Key2:         "key2",
+				Idx:          true,
+				MinMatchLen:  3,
+				WithMatchLen: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lcs.MatchString).To(Equal(""))
+			Expect(lcs.Len).To(Equal(int64(6)))
+			Expect(lcs.Matches).To(Equal([]redis.LCSMatchedPosition{
+				{
+					Key1:     redis.LCSPosition{Start: 4, End: 7},
+					Key2:     redis.LCSPosition{Start: 5, End: 8},
+					MatchLen: 4,
+				},
+			}))
+
+			_, err = client.Set(ctx, "keywithstringvalue", "golang", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = client.LPush(ctx, "keywithnonstringvalue", "somevalue").Result()
+			Expect(err).NotTo(HaveOccurred())
+			_, err = client.LCS(ctx, &redis.LCSQuery{
+				Key1: "keywithstringvalue",
+				Key2: "keywithnonstringvalue",
+			}).Result()
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(Equal("ERR The specified keys must contain string values"))
+		})
+
+		It("should LIndex", func() {
+			lPush := client.LPush(ctx, "list", "World")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+			lPush = client.LPush(ctx, "list", "Hello")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+
+			lIndex := client.LIndex(ctx, "list", 0)
+			Expect(lIndex.Err()).NotTo(HaveOccurred())
+			Expect(lIndex.Val()).To(Equal("Hello"))
+
+			lIndex = client.LIndex(ctx, "list", -1)
+			Expect(lIndex.Err()).NotTo(HaveOccurred())
+			Expect(lIndex.Val()).To(Equal("World"))
+
+			lIndex = client.LIndex(ctx, "list", 3)
+			Expect(lIndex.Err()).To(Equal(redis.Nil))
+			Expect(lIndex.Val()).To(Equal(""))
+		})
+
+		It("should LInsert", func() {
+			rPush := client.RPush(ctx, "list", "Hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "World")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lInsert := client.LInsert(ctx, "list", "BEFORE", "World", "There")
+			Expect(lInsert.Err()).NotTo(HaveOccurred())
+			Expect(lInsert.Val()).To(Equal(int64(3)))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"Hello", "There", "World"}))
+		})
+
+		It("should LMPop", Label("NonRedisEnterprise"), func() {
+			err := client.LPush(ctx, "list1", "one", "two", "three", "four", "five").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.LPush(ctx, "list2", "a", "b", "c", "d", "e").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, val, err := client.LMPop(ctx, "left", 3, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list1"))
+			Expect(val).To(Equal([]string{"five", "four", "three"}))
+
+			key, val, err = client.LMPop(ctx, "right", 3, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list1"))
+			Expect(val).To(Equal([]string{"one", "two"}))
+
+			key, val, err = client.LMPop(ctx, "left", 1, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list2"))
+			Expect(val).To(Equal([]string{"e"}))
+
+			key, val, err = client.LMPop(ctx, "right", 10, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list2"))
+			Expect(val).To(Equal([]string{"a", "b", "c", "d"}))
+
+			err = client.LMPop(ctx, "left", 10, "list1", "list2").Err()
+			Expect(err).To(Equal(redis.Nil))
+
+			err = client.Set(ctx, "list3", 1024, 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.LMPop(ctx, "left", 10, "list1", "list2", "list3").Err()
+			Expect(err.Error()).To(Equal("WRONGTYPE Operation against a key holding the wrong kind of value"))
+
+			err = client.LMPop(ctx, "right", 0, "list1", "list2").Err()
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("should BLMPop", Label("NonRedisEnterprise"), func() {
+			err := client.LPush(ctx, "list1", "one", "two", "three", "four", "five").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.LPush(ctx, "list2", "a", "b", "c", "d", "e").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, val, err := client.BLMPop(ctx, 0, "left", 3, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list1"))
+			Expect(val).To(Equal([]string{"five", "four", "three"}))
+
+			key, val, err = client.BLMPop(ctx, 0, "right", 3, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list1"))
+			Expect(val).To(Equal([]string{"one", "two"}))
+
+			key, val, err = client.BLMPop(ctx, 0, "left", 1, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list2"))
+			Expect(val).To(Equal([]string{"e"}))
+
+			key, val, err = client.BLMPop(ctx, 0, "right", 10, "list1", "list2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("list2"))
+			Expect(val).To(Equal([]string{"a", "b", "c", "d"}))
+		})
+
+		It("should BLMPopBlocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				key, val, err := client.BLMPop(ctx, 0, "left", 1, "list_list").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(key).To(Equal("list_list"))
+				Expect(val).To(Equal([]string{"a"}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BLMPop is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			_, err := client.LPush(ctx, "list_list", "a").Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BLMPop is still blocked")
+			}
+		})
+
+		It("should BLMPop timeout", func() {
+			_, val, err := client.BLMPop(ctx, time.Second, "left", 1, "list1").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+
+		It("should LLen", func() {
+			lPush := client.LPush(ctx, "list", "World")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+			lPush = client.LPush(ctx, "list", "Hello")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+
+			lLen := client.LLen(ctx, "list")
+			Expect(lLen.Err()).NotTo(HaveOccurred())
+			Expect(lLen.Val()).To(Equal(int64(2)))
+		})
+
+		It("should LPop", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lPop := client.LPop(ctx, "list")
+			Expect(lPop.Err()).NotTo(HaveOccurred())
+			Expect(lPop.Val()).To(Equal("one"))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"two", "three"}))
+		})
+
+		It("should LPopCount", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "four")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lPopCount := client.LPopCount(ctx, "list", 2)
+			Expect(lPopCount.Err()).NotTo(HaveOccurred())
+			Expect(lPopCount.Val()).To(Equal([]string{"one", "two"}))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"three", "four"}))
+		})
+
+		It("should LPos", func() {
+			rPush := client.RPush(ctx, "list", "a")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "b")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "c")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "b")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lPos := client.LPos(ctx, "list", "b", redis.LPosArgs{})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal(int64(1)))
+
+			lPos = client.LPos(ctx, "list", "b", redis.LPosArgs{Rank: 2})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal(int64(3)))
+
+			lPos = client.LPos(ctx, "list", "b", redis.LPosArgs{Rank: -2})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal(int64(1)))
+
+			lPos = client.LPos(ctx, "list", "b", redis.LPosArgs{Rank: 2, MaxLen: 1})
+			Expect(lPos.Err()).To(Equal(redis.Nil))
+
+			lPos = client.LPos(ctx, "list", "z", redis.LPosArgs{})
+			Expect(lPos.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should LPosCount", func() {
+			rPush := client.RPush(ctx, "list", "a")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "b")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "c")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "b")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lPos := client.LPosCount(ctx, "list", "b", 2, redis.LPosArgs{})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal([]int64{1, 3}))
+
+			lPos = client.LPosCount(ctx, "list", "b", 2, redis.LPosArgs{Rank: 2})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal([]int64{3}))
+
+			lPos = client.LPosCount(ctx, "list", "b", 1, redis.LPosArgs{Rank: 1, MaxLen: 1})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal([]int64{}))
+
+			lPos = client.LPosCount(ctx, "list", "b", 1, redis.LPosArgs{Rank: 1, MaxLen: 0})
+			Expect(lPos.Err()).NotTo(HaveOccurred())
+			Expect(lPos.Val()).To(Equal([]int64{1}))
+		})
+
+		It("should LPush", func() {
+			lPush := client.LPush(ctx, "list", "World")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+			lPush = client.LPush(ctx, "list", "Hello")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"Hello", "World"}))
+		})
+
+		It("should LPushX", func() {
+			lPush := client.LPush(ctx, "list", "World")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+
+			lPushX := client.LPushX(ctx, "list", "Hello")
+			Expect(lPushX.Err()).NotTo(HaveOccurred())
+			Expect(lPushX.Val()).To(Equal(int64(2)))
+
+			lPush = client.LPush(ctx, "list1", "three")
+			Expect(lPush.Err()).NotTo(HaveOccurred())
+			Expect(lPush.Val()).To(Equal(int64(1)))
+
+			lPushX = client.LPushX(ctx, "list1", "two", "one")
+			Expect(lPushX.Err()).NotTo(HaveOccurred())
+			Expect(lPushX.Val()).To(Equal(int64(3)))
+
+			lPushX = client.LPushX(ctx, "list2", "Hello")
+			Expect(lPushX.Err()).NotTo(HaveOccurred())
+			Expect(lPushX.Val()).To(Equal(int64(0)))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"Hello", "World"}))
+
+			lRange = client.LRange(ctx, "list1", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			lRange = client.LRange(ctx, "list2", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{}))
+		})
+
+		It("should LRange", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lRange := client.LRange(ctx, "list", 0, 0)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one"}))
+
+			lRange = client.LRange(ctx, "list", -3, 2)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			lRange = client.LRange(ctx, "list", -100, 100)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			lRange = client.LRange(ctx, "list", 5, 10)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{}))
+		})
+
+		It("should LRem", func() {
+			rPush := client.RPush(ctx, "list", "hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "key")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lRem := client.LRem(ctx, "list", -2, "hello")
+			Expect(lRem.Err()).NotTo(HaveOccurred())
+			Expect(lRem.Val()).To(Equal(int64(2)))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"hello", "key"}))
+		})
+
+		It("should LSet", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lSet := client.LSet(ctx, "list", 0, "four")
+			Expect(lSet.Err()).NotTo(HaveOccurred())
+			Expect(lSet.Val()).To(Equal("OK"))
+
+			lSet = client.LSet(ctx, "list", -2, "five")
+			Expect(lSet.Err()).NotTo(HaveOccurred())
+			Expect(lSet.Val()).To(Equal("OK"))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"four", "five", "three"}))
+		})
+
+		It("should LTrim", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			lTrim := client.LTrim(ctx, "list", 1, -1)
+			Expect(lTrim.Err()).NotTo(HaveOccurred())
+			Expect(lTrim.Val()).To(Equal("OK"))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"two", "three"}))
+		})
+
+		It("should RPop", func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			rPop := client.RPop(ctx, "list")
+			Expect(rPop.Err()).NotTo(HaveOccurred())
+			Expect(rPop.Val()).To(Equal("three"))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two"}))
+		})
+
+		It("should RPopCount", func() {
+			rPush := client.RPush(ctx, "list", "one", "two", "three", "four")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(4)))
+
+			rPopCount := client.RPopCount(ctx, "list", 2)
+			Expect(rPopCount.Err()).NotTo(HaveOccurred())
+			Expect(rPopCount.Val()).To(Equal([]string{"four", "three"}))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two"}))
+		})
+
+		It("should RPopLPush", Label("NonRedisEnterprise"), func() {
+			rPush := client.RPush(ctx, "list", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "two")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			rPush = client.RPush(ctx, "list", "three")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+
+			rPopLPush := client.RPopLPush(ctx, "list", "list2")
+			Expect(rPopLPush.Err()).NotTo(HaveOccurred())
+			Expect(rPopLPush.Val()).To(Equal("three"))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two"}))
+
+			lRange = client.LRange(ctx, "list2", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"three"}))
+		})
+
+		It("should RPush", func() {
+			rPush := client.RPush(ctx, "list", "Hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(1)))
+
+			rPush = client.RPush(ctx, "list", "World")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(2)))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"Hello", "World"}))
+		})
+
+		It("should RPushX", func() {
+			rPush := client.RPush(ctx, "list", "Hello")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(1)))
+
+			rPushX := client.RPushX(ctx, "list", "World")
+			Expect(rPushX.Err()).NotTo(HaveOccurred())
+			Expect(rPushX.Val()).To(Equal(int64(2)))
+
+			rPush = client.RPush(ctx, "list1", "one")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(1)))
+
+			rPushX = client.RPushX(ctx, "list1", "two", "three")
+			Expect(rPushX.Err()).NotTo(HaveOccurred())
+			Expect(rPushX.Val()).To(Equal(int64(3)))
+
+			rPushX = client.RPushX(ctx, "list2", "World")
+			Expect(rPushX.Err()).NotTo(HaveOccurred())
+			Expect(rPushX.Val()).To(Equal(int64(0)))
+
+			lRange := client.LRange(ctx, "list", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"Hello", "World"}))
+
+			lRange = client.LRange(ctx, "list1", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			lRange = client.LRange(ctx, "list2", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{}))
+		})
+
+		It("should LMove", Label("NonRedisEnterprise"), func() {
+			rPush := client.RPush(ctx, "lmove1", "ichi")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(1)))
+
+			rPush = client.RPush(ctx, "lmove1", "ni")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(2)))
+
+			rPush = client.RPush(ctx, "lmove1", "san")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(3)))
+
+			lMove := client.LMove(ctx, "lmove1", "lmove2", "RIGHT", "LEFT")
+			Expect(lMove.Err()).NotTo(HaveOccurred())
+			Expect(lMove.Val()).To(Equal("san"))
+
+			lRange := client.LRange(ctx, "lmove2", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"san"}))
+		})
+
+		It("should BLMove", Label("NonRedisEnterprise"), func() {
+			rPush := client.RPush(ctx, "blmove1", "ichi")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(1)))
+
+			rPush = client.RPush(ctx, "blmove1", "ni")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(2)))
+
+			rPush = client.RPush(ctx, "blmove1", "san")
+			Expect(rPush.Err()).NotTo(HaveOccurred())
+			Expect(rPush.Val()).To(Equal(int64(3)))
+
+			blMove := client.BLMove(ctx, "blmove1", "blmove2", "RIGHT", "LEFT", time.Second)
+			Expect(blMove.Err()).NotTo(HaveOccurred())
+			Expect(blMove.Val()).To(Equal("san"))
+
+			lRange := client.LRange(ctx, "blmove2", 0, -1)
+			Expect(lRange.Err()).NotTo(HaveOccurred())
+			Expect(lRange.Val()).To(Equal([]string{"san"}))
+		})
+
+		It("should LMoveM", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			// OBO: order reversed at destination.
+			Expect(client.RPush(ctx, "lmovem_l", "1", "2", "3", "4", "5").Err()).NotTo(HaveOccurred())
+			Expect(client.RPush(ctx, "lmovem_m", "6", "7", "8", "9", "10").Err()).NotTo(HaveOccurred())
+
+			res, err := client.LMoveM(ctx, "lmovem_l", "lmovem_m", "LEFT", "LEFT",
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 3, Order: redis.LMoveMOBO}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"3", "2", "1"}))
+			Expect(client.LRange(ctx, "lmovem_m", 0, -1).Val()).To(Equal([]string{"3", "2", "1", "6", "7", "8", "9", "10"}))
+			Expect(client.LRange(ctx, "lmovem_l", 0, -1).Val()).To(Equal([]string{"4", "5"}))
+
+			// BULK: order preserved.
+			Expect(client.FlushDB(ctx).Err()).NotTo(HaveOccurred())
+			Expect(client.RPush(ctx, "lmovem_l", "1", "2", "3", "4", "5").Err()).NotTo(HaveOccurred())
+			Expect(client.RPush(ctx, "lmovem_m", "6", "7", "8", "9", "10").Err()).NotTo(HaveOccurred())
+
+			res, err = client.LMoveM(ctx, "lmovem_l", "lmovem_m", "LEFT", "LEFT",
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 3, Order: redis.LMoveMBulk}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"1", "2", "3"}))
+			Expect(client.LRange(ctx, "lmovem_m", 0, -1).Val()).To(Equal([]string{"1", "2", "3", "6", "7", "8", "9", "10"}))
+			Expect(client.LRange(ctx, "lmovem_l", 0, -1).Val()).To(Equal([]string{"4", "5"}))
+
+			// COUNT moves fewer when the source has fewer.
+			res, err = client.LMoveM(ctx, "lmovem_l", "lmovem_m", "LEFT", "RIGHT",
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 10, Order: redis.LMoveMBulk}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"4", "5"}))
+
+			// Empty source -> nil reply.
+			err = client.LMoveM(ctx, "lmovem_l", "lmovem_m", "LEFT", "RIGHT",
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 1, Order: redis.LMoveMBulk}).Err()
+			Expect(err).To(Equal(redis.Nil))
+		})
+
+		It("should LMoveM single element", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			Expect(client.RPush(ctx, "lmovem1_l", "1", "2", "3").Err()).NotTo(HaveOccurred())
+
+			// Count 0 omits the group: moves one element, still an array reply.
+			res, err := client.LMoveM(ctx, "lmovem1_l", "lmovem1_m", "LEFT", "RIGHT", redis.LMoveMArgs{}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"1"}))
+			Expect(client.LRange(ctx, "lmovem1_l", 0, -1).Val()).To(Equal([]string{"2", "3"}))
+			Expect(client.LRange(ctx, "lmovem1_m", 0, -1).Val()).To(Equal([]string{"1"}))
+		})
+
+		It("should LMoveM EXACTLY", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			// Enough elements: moves exactly Count.
+			Expect(client.RPush(ctx, "lmovem_names", "john", "doe").Err()).NotTo(HaveOccurred())
+			res, err := client.LMoveM(ctx, "lmovem_names", "lmovem_processed", "LEFT", "RIGHT",
+				redis.LMoveMArgs{Mode: redis.LMoveMExactly, Count: 2, Order: redis.LMoveMBulk}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"john", "doe"}))
+			Expect(client.LRange(ctx, "lmovem_processed", 0, -1).Val()).To(Equal([]string{"john", "doe"}))
+
+			// Too few: nothing moved. The 8.10 server returns redis.Nil here, though
+			// the spec also allows an error; both satisfy HaveOccurred() and the
+			// source stays unchanged.
+			Expect(client.RPush(ctx, "lmovem_names", "john").Err()).NotTo(HaveOccurred())
+			err = client.LMoveM(ctx, "lmovem_names", "lmovem_processed2", "LEFT", "RIGHT",
+				redis.LMoveMArgs{Mode: redis.LMoveMExactly, Count: 2, Order: redis.LMoveMBulk}).Err()
+			Expect(err).To(HaveOccurred())
+			Expect(client.LRange(ctx, "lmovem_names", 0, -1).Val()).To(Equal([]string{"john"}))
+			Expect(client.Exists(ctx, "lmovem_processed2").Val()).To(Equal(int64(0)))
+		})
+
+		It("should LMoveM WRONGTYPE", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			Expect(client.RPush(ctx, "lmovem_src", "a", "b").Err()).NotTo(HaveOccurred())
+			Expect(client.Set(ctx, "lmovem_str", "1024", 0).Err()).NotTo(HaveOccurred())
+
+			err := client.LMoveM(ctx, "lmovem_src", "lmovem_str", "LEFT", "RIGHT",
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 1, Order: redis.LMoveMBulk}).Err()
+			Expect(err.Error()).To(Equal("WRONGTYPE Operation against a key holding the wrong kind of value"))
+			// Source is untouched.
+			Expect(client.LRange(ctx, "lmovem_src", 0, -1).Val()).To(Equal([]string{"a", "b"}))
+		})
+
+		It("should BLMoveM", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			Expect(client.RPush(ctx, "blmovem1", "ichi", "ni", "san").Err()).NotTo(HaveOccurred())
+
+			res, err := client.BLMoveM(ctx, "blmovem1", "blmovem2", "RIGHT", "LEFT", time.Second,
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 2, Order: redis.LMoveMBulk}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]string{"ni", "san"}))
+			Expect(client.LRange(ctx, "blmovem2", 0, -1).Val()).To(Equal([]string{"ni", "san"}))
+			Expect(client.LRange(ctx, "blmovem1", 0, -1).Val()).To(Equal([]string{"ichi"}))
+		})
+
+		It("should BLMoveM blocks", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				res, err := client.BLMoveM(ctx, "blmovem_src", "blmovem_dst", "LEFT", "LEFT", 0,
+					redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 1, Order: redis.LMoveMBulk}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]string{"a"}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BLMoveM is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			_, err := client.RPush(ctx, "blmovem_src", "a").Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BLMoveM is still blocked")
+			}
+		})
+
+		It("should BLMoveM timeout", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "LMOVEM/BLMOVEM require Redis >= 8.10")
+
+			val, err := client.BLMoveM(ctx, "blmovem_empty", "blmovem_dst", "LEFT", "LEFT", time.Second,
+				redis.LMoveMArgs{Mode: redis.LMoveMCount, Count: 1, Order: redis.LMoveMBulk}).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+	})
+
+	Describe("sets", func() {
+		It("should SAdd", func() {
+			sAdd := client.SAdd(ctx, "set", "Hello")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(1)))
+
+			sAdd = client.SAdd(ctx, "set", "World")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(1)))
+
+			sAdd = client.SAdd(ctx, "set", "World")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(0)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"Hello", "World"}))
+		})
+
+		It("should SAdd strings", func() {
+			set := []string{"Hello", "World", "World"}
+			sAdd := client.SAdd(ctx, "set", set)
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(2)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"Hello", "World"}))
+		})
+
+		It("should SCard", func() {
+			sAdd := client.SAdd(ctx, "set", "Hello")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(1)))
+
+			sAdd = client.SAdd(ctx, "set", "World")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			Expect(sAdd.Val()).To(Equal(int64(1)))
+
+			sCard := client.SCard(ctx, "set")
+			Expect(sCard.Err()).NotTo(HaveOccurred())
+			Expect(sCard.Val()).To(Equal(int64(2)))
+		})
+
+		It("should SDiff", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sDiff := client.SDiff(ctx, "set1", "set2")
+			Expect(sDiff.Err()).NotTo(HaveOccurred())
+			Expect(sDiff.Val()).To(ConsistOf([]string{"a", "b"}))
+		})
+
+		It("should SDiffStore", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sDiffStore := client.SDiffStore(ctx, "set", "set1", "set2")
+			Expect(sDiffStore.Err()).NotTo(HaveOccurred())
+			Expect(sDiffStore.Val()).To(Equal(int64(2)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"a", "b"}))
+		})
+
+		It("should SInter", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sInter := client.SInter(ctx, "set1", "set2")
+			Expect(sInter.Err()).NotTo(HaveOccurred())
+			Expect(sInter.Val()).To(Equal([]string{"c"}))
+		})
+
+		It("should SInterCard", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			// limit 0 means no limit,see https://redis.io/commands/sintercard/ for more details
+			sInterCard := client.SInterCard(ctx, 0, "set1", "set2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(2)))
+
+			sInterCard = client.SInterCard(ctx, 1, "set1", "set2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(1)))
+
+			sInterCard = client.SInterCard(ctx, 3, "set1", "set2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(2)))
+		})
+
+		It("should SUnionCard", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "SUNIONCARD is available since Redis 8.10")
+
+			sAdd := client.SAdd(ctx, "set1", "a", "b", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "c", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			// exact union {a, b, c, d}
+			sUnionCard := client.SUnionCard(ctx, nil, "set1", "set2")
+			Expect(sUnionCard.Err()).NotTo(HaveOccurred())
+			Expect(sUnionCard.Val()).To(Equal(int64(4)))
+
+			// exact with LIMIT capped at 3
+			sUnionCard = client.SUnionCard(ctx, &redis.SUnionCardOptions{Limit: 3}, "set1", "set2")
+			Expect(sUnionCard.Err()).NotTo(HaveOccurred())
+			Expect(sUnionCard.Val()).To(Equal(int64(3)))
+
+			// missing key is treated as an empty set
+			sUnionCard = client.SUnionCard(ctx, nil, "set1", "missing")
+			Expect(sUnionCard.Err()).NotTo(HaveOccurred())
+			Expect(sUnionCard.Val()).To(Equal(int64(3)))
+
+			// APPROX: for small sets the approximate result matches the exact value
+			sUnionCard = client.SUnionCard(ctx, &redis.SUnionCardOptions{Approx: true}, "set1", "set2")
+			Expect(sUnionCard.Err()).NotTo(HaveOccurred())
+			Expect(sUnionCard.Val()).To(Equal(int64(4)))
+		})
+
+		It("should SDiffCard", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "SDIFFCARD is available since Redis 8.10")
+
+			sAdd := client.SAdd(ctx, "set0", "a", "b", "c", "d", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c", "d", "x")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e", "y")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			// s0 \ (s1 ∪ s2) = {a, b}
+			sDiffCard := client.SDiffCard(ctx, nil, "set0", "set1", "set2")
+			Expect(sDiffCard.Err()).NotTo(HaveOccurred())
+			Expect(sDiffCard.Val()).To(Equal(int64(2)))
+
+			// exact with LIMIT capped at 1
+			sDiffCard = client.SDiffCard(ctx, &redis.SDiffCardOptions{Limit: 1}, "set0", "set1", "set2")
+			Expect(sDiffCard.Err()).NotTo(HaveOccurred())
+			Expect(sDiffCard.Val()).To(Equal(int64(1)))
+
+			// missing subtrahend key does not affect the result
+			sDiffCard = client.SDiffCard(ctx, nil, "set0", "missing")
+			Expect(sDiffCard.Err()).NotTo(HaveOccurred())
+			Expect(sDiffCard.Val()).To(Equal(int64(5)))
+
+			// missing first key yields an empty base set
+			sDiffCard = client.SDiffCard(ctx, nil, "missing", "set0")
+			Expect(sDiffCard.Err()).NotTo(HaveOccurred())
+			Expect(sDiffCard.Val()).To(Equal(int64(0)))
+		})
+
+		It("should SInterStore", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sInterStore := client.SInterStore(ctx, "set", "set1", "set2")
+			Expect(sInterStore.Err()).NotTo(HaveOccurred())
+			Expect(sInterStore.Val()).To(Equal(int64(1)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(Equal([]string{"c"}))
+		})
+
+		It("should IsMember", func() {
+			sAdd := client.SAdd(ctx, "set", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sIsMember := client.SIsMember(ctx, "set", "one")
+			Expect(sIsMember.Err()).NotTo(HaveOccurred())
+			Expect(sIsMember.Val()).To(Equal(true))
+
+			sIsMember = client.SIsMember(ctx, "set", "two")
+			Expect(sIsMember.Err()).NotTo(HaveOccurred())
+			Expect(sIsMember.Val()).To(Equal(false))
+		})
+
+		It("should SMIsMember", func() {
+			sAdd := client.SAdd(ctx, "set", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sMIsMember := client.SMIsMember(ctx, "set", "one", "two")
+			Expect(sMIsMember.Err()).NotTo(HaveOccurred())
+			Expect(sMIsMember.Val()).To(Equal([]bool{true, false}))
+		})
+
+		It("should SMembers", func() {
+			sAdd := client.SAdd(ctx, "set", "Hello")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "World")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"Hello", "World"}))
+		})
+
+		It("should SMembersMap", func() {
+			sAdd := client.SAdd(ctx, "set", "Hello")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "World")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sMembersMap := client.SMembersMap(ctx, "set")
+			Expect(sMembersMap.Err()).NotTo(HaveOccurred())
+			Expect(sMembersMap.Val()).To(Equal(map[string]struct{}{"Hello": {}, "World": {}}))
+		})
+
+		It("should SMove", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "two")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "three")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sMove := client.SMove(ctx, "set1", "set2", "two")
+			Expect(sMove.Err()).NotTo(HaveOccurred())
+			Expect(sMove.Val()).To(Equal(true))
+
+			sMembers := client.SMembers(ctx, "set1")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(Equal([]string{"one"}))
+
+			sMembers = client.SMembers(ctx, "set2")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"three", "two"}))
+		})
+
+		It("should SPop", func() {
+			sAdd := client.SAdd(ctx, "set", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "two")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "three")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sPop := client.SPop(ctx, "set")
+			Expect(sPop.Err()).NotTo(HaveOccurred())
+			Expect(sPop.Val()).NotTo(Equal(""))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(HaveLen(2))
+		})
+
+		It("should SPopN", func() {
+			sAdd := client.SAdd(ctx, "set", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "two")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "three")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "four")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sPopN := client.SPopN(ctx, "set", 1)
+			Expect(sPopN.Err()).NotTo(HaveOccurred())
+			Expect(sPopN.Val()).NotTo(Equal([]string{""}))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(HaveLen(3))
+
+			sPopN = client.SPopN(ctx, "set", 4)
+			Expect(sPopN.Err()).NotTo(HaveOccurred())
+			Expect(sPopN.Val()).To(HaveLen(3))
+
+			sMembers = client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(HaveLen(0))
+		})
+
+		It("should SRandMember and SRandMemberN", func() {
+			err := client.SAdd(ctx, "set", "one").Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.SAdd(ctx, "set", "two").Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.SAdd(ctx, "set", "three").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			members, err := client.SMembers(ctx, "set").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(HaveLen(3))
+
+			member, err := client.SRandMember(ctx, "set").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(member).NotTo(Equal(""))
+
+			members, err = client.SRandMemberN(ctx, "set", 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(HaveLen(2))
+		})
+
+		It("should SRem", func() {
+			sAdd := client.SAdd(ctx, "set", "one")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "two")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set", "three")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sRem := client.SRem(ctx, "set", "one")
+			Expect(sRem.Err()).NotTo(HaveOccurred())
+			Expect(sRem.Val()).To(Equal(int64(1)))
+
+			sRem = client.SRem(ctx, "set", "four")
+			Expect(sRem.Err()).NotTo(HaveOccurred())
+			Expect(sRem.Val()).To(Equal(int64(0)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(ConsistOf([]string{"three", "two"}))
+		})
+
+		It("should SUnion", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sUnion := client.SUnion(ctx, "set1", "set2")
+			Expect(sUnion.Err()).NotTo(HaveOccurred())
+			Expect(sUnion.Val()).To(HaveLen(5))
+		})
+
+		It("should SUnionStore", Label("NonRedisEnterprise"), func() {
+			sAdd := client.SAdd(ctx, "set1", "a")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "b")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set1", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sAdd = client.SAdd(ctx, "set2", "c")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "d")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+			sAdd = client.SAdd(ctx, "set2", "e")
+			Expect(sAdd.Err()).NotTo(HaveOccurred())
+
+			sUnionStore := client.SUnionStore(ctx, "set", "set1", "set2")
+			Expect(sUnionStore.Err()).NotTo(HaveOccurred())
+			Expect(sUnionStore.Val()).To(Equal(int64(5)))
+
+			sMembers := client.SMembers(ctx, "set")
+			Expect(sMembers.Err()).NotTo(HaveOccurred())
+			Expect(sMembers.Val()).To(HaveLen(5))
+		})
+	})
+
+	Describe("sorted sets", func() {
+		It("should BZPopMax", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			member, err := client.BZPopMax(ctx, 0, "zset1", "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(member).To(Equal(&redis.ZWithKey{
+				Z: redis.Z{
+					Score:  3,
+					Member: "three",
+				},
+				Key: "zset1",
+			}))
+		})
+
+		It("should BZPopMax blocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				bZPopMax := client.BZPopMax(ctx, 0, "zset")
+				Expect(bZPopMax.Err()).NotTo(HaveOccurred())
+				Expect(bZPopMax.Val()).To(Equal(&redis.ZWithKey{
+					Z: redis.Z{
+						Member: "a",
+						Score:  1,
+					},
+					Key: "zset",
+				}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BZPopMax is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			zAdd := client.ZAdd(ctx, "zset", redis.Z{
+				Member: "a",
+				Score:  1,
+			})
+			Expect(zAdd.Err()).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BZPopMax is still blocked")
+			}
+		})
+
+		It("should BZPopMax timeout", func() {
+			val, err := client.BZPopMax(ctx, time.Second, "zset1").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+
+		It("should BZPopMin", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			member, err := client.BZPopMin(ctx, 0, "zset1", "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(member).To(Equal(&redis.ZWithKey{
+				Z: redis.Z{
+					Score:  1,
+					Member: "one",
+				},
+				Key: "zset1",
+			}))
+		})
+
+		It("should BZPopMin blocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				bZPopMin := client.BZPopMin(ctx, 0, "zset")
+				Expect(bZPopMin.Err()).NotTo(HaveOccurred())
+				Expect(bZPopMin.Val()).To(Equal(&redis.ZWithKey{
+					Z: redis.Z{
+						Member: "a",
+						Score:  1,
+					},
+					Key: "zset",
+				}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BZPopMin is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			zAdd := client.ZAdd(ctx, "zset", redis.Z{
+				Member: "a",
+				Score:  1,
+			})
+			Expect(zAdd.Err()).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BZPopMin is still blocked")
+			}
+		})
+
+		It("should BZPopMin timeout", func() {
+			val, err := client.BZPopMin(ctx, time.Second, "zset1").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+
+		It("should ZAdd", func() {
+			added, err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "uno",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "two",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  1,
+				Member: "uno",
+			}, {
+				Score:  3,
+				Member: "two",
+			}}))
+		})
+
+		It("should ZAdd bytes", func() {
+			added, err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: []byte("one"),
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: []byte("uno"),
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: []byte("two"),
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: []byte("two"),
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  1,
+				Member: "uno",
+			}, {
+				Score:  3,
+				Member: "two",
+			}}))
+		})
+
+		It("should ZAddArgsGTAndLT", func() {
+			// Test only the GT+LT options.
+			added, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				GT:      true,
+				Members: []redis.Z{{Score: 1, Member: "one"}},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			added, err = client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				GT:      true,
+				Members: []redis.Z{{Score: 2, Member: "one"}},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+
+			added, err = client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				LT:      true,
+				Members: []redis.Z{{Score: 1, Member: "one"}},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+		})
+
+		It("should ZAddArgsLT", func() {
+			added, err := client.ZAddLT(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+
+			added, err = client.ZAddLT(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+
+			added, err = client.ZAddLT(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+		})
+
+		It("should ZAddArgsGT", func() {
+			added, err := client.ZAddGT(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+
+			added, err = client.ZAddGT(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 3, Member: "one"}}))
+
+			added, err = client.ZAddGT(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 3, Member: "one"}}))
+		})
+
+		It("should ZAddArgsNX", func() {
+			added, err := client.ZAddNX(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			added, err = client.ZAddNX(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+		})
+
+		It("should ZAddArgsXX", func() {
+			added, err := client.ZAddXX(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(BeEmpty())
+
+			added, err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			added, err = client.ZAddXX(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+		})
+
+		It("should ZAddArgsCh", func() {
+			changed, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(1)))
+
+			changed, err = client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(0)))
+		})
+
+		It("should ZAddArgsNXCh", func() {
+			changed, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				NX: true,
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			changed, err = client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				NX: true,
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 2, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+		})
+
+		It("should ZAddArgsXXCh", func() {
+			changed, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				XX: true,
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(0)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(BeEmpty())
+
+			added, err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			changed, err = client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				XX: true,
+				Ch: true,
+				Members: []redis.Z{
+					{Score: 2, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changed).To(Equal(int64(1)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+		})
+
+		It("should ZAddArgsIncr", func() {
+			score, err := client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(score).To(Equal(float64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			score, err = client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(score).To(Equal(float64(2)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+		})
+
+		It("should ZAddArgsIncrNX", func() {
+			score, err := client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				NX: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(score).To(Equal(float64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			score, err = client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				NX: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(score).To(Equal(float64(0)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+		})
+
+		It("should ZAddArgsIncrXX", func() {
+			score, err := client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				XX: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(score).To(Equal(float64(0)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(BeEmpty())
+
+			added, err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(1)))
+
+			score, err = client.ZAddArgsIncr(ctx, "zset", redis.ZAddArgs{
+				XX: true,
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(score).To(Equal(float64(2)))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "one"}}))
+		})
+
+		It("should ZCard", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			card, err := client.ZCard(ctx, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(card).To(Equal(int64(2)))
+		})
+
+		It("should ZCount", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			count, err := client.ZCount(ctx, "zset", "-inf", "+inf").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).To(Equal(int64(3)))
+
+			count, err = client.ZCount(ctx, "zset", "(1", "3").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).To(Equal(int64(2)))
+
+			count, err = client.ZLexCount(ctx, "zset", "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(count).To(Equal(int64(3)))
+		})
+
+		It("should ZIncrBy", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := client.ZIncrBy(ctx, "zset", 2, "one").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(float64(3)))
+
+			val, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.Z{{
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "one",
+			}}))
+		})
+
+		It("should ZInterStore", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset3", redis.Z{Score: 3, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := client.ZInterStore(ctx, "out", &redis.ZStore{
+				Keys:    []string{"zset1", "zset2"},
+				Weights: []float64{2, 3},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			vals, err := client.ZRangeWithScores(ctx, "out", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  5,
+				Member: "one",
+			}, {
+				Score:  10,
+				Member: "two",
+			}}))
+		})
+
+		It("should ZMPop", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, elems, err := client.ZMPop(ctx, "min", 1, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("zset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+
+			_, _, err = client.ZMPop(ctx, "min", 1, "nosuchkey").Result()
+			Expect(err).To(Equal(redis.Nil))
+
+			err = client.ZAdd(ctx, "myzset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "myzset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "myzset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, elems, err = client.ZMPop(ctx, "min", 1, "myzset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("myzset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+
+			key, elems, err = client.ZMPop(ctx, "max", 10, "myzset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("myzset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}}))
+
+			err = client.ZAdd(ctx, "myzset2", redis.Z{Score: 4, Member: "four"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "myzset2", redis.Z{Score: 5, Member: "five"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "myzset2", redis.Z{Score: 6, Member: "six"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, elems, err = client.ZMPop(ctx, "min", 10, "myzset", "myzset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("myzset2"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  4,
+				Member: "four",
+			}, {
+				Score:  5,
+				Member: "five",
+			}, {
+				Score:  6,
+				Member: "six",
+			}}))
+		})
+
+		It("should BZMPop", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, elems, err := client.BZMPop(ctx, 0, "min", 1, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("zset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+			key, elems, err = client.BZMPop(ctx, 0, "max", 1, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("zset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}}))
+			key, elems, err = client.BZMPop(ctx, 0, "min", 10, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("zset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  2,
+				Member: "two",
+			}}))
+
+			key, elems, err = client.BZMPop(ctx, 0, "max", 10, "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("zset2"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+
+			err = client.ZAdd(ctx, "myzset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			key, elems, err = client.BZMPop(ctx, 0, "min", 10, "myzset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("myzset"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+
+			err = client.ZAdd(ctx, "myzset2", redis.Z{Score: 4, Member: "four"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "myzset2", redis.Z{Score: 5, Member: "five"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			key, elems, err = client.BZMPop(ctx, 0, "min", 10, "myzset", "myzset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(key).To(Equal("myzset2"))
+			Expect(elems).To(Equal([]redis.Z{{
+				Score:  4,
+				Member: "four",
+			}, {
+				Score:  5,
+				Member: "five",
+			}}))
+		})
+
+		It("should BZMPopBlocks", func() {
+			started := make(chan bool)
+			done := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				started <- true
+				key, elems, err := client.BZMPop(ctx, 0, "min", 1, "list_list").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(key).To(Equal("list_list"))
+				Expect(elems).To(Equal([]redis.Z{{
+					Score:  1,
+					Member: "one",
+				}}))
+				done <- true
+			}()
+			<-started
+
+			select {
+			case <-done:
+				Fail("BZMPop is not blocked")
+			case <-time.After(time.Second):
+				// ok
+			}
+
+			err := client.ZAdd(ctx, "list_list", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			select {
+			case <-done:
+				// ok
+			case <-time.After(time.Second):
+				Fail("BZMPop is still blocked")
+			}
+		})
+
+		It("should BZMPop timeout", func() {
+			_, val, err := client.BZMPop(ctx, time.Second, "min", 1, "list1").Result()
+			Expect(err).To(Equal(redis.Nil))
+			Expect(val).To(BeNil())
+
+			Expect(rawClient.Ping(ctx).Err()).NotTo(HaveOccurred())
+
+			stats := rawClient.PoolStats()
+			Expect(stats.Hits).To(Equal(uint32(2)))
+			Expect(stats.Misses).To(Equal(uint32(1)))
+			Expect(stats.Timeouts).To(Equal(uint32(0)))
+		})
+
+		It("should ZMScore", func() {
+			zmScore := client.ZMScore(ctx, "zset", "one", "three")
+			Expect(zmScore.Err()).NotTo(HaveOccurred())
+			Expect(zmScore.Val()).To(HaveLen(2))
+			Expect(zmScore.Val()[0]).To(Equal(float64(0)))
+
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zmScore = client.ZMScore(ctx, "zset", "one", "three")
+			Expect(zmScore.Err()).NotTo(HaveOccurred())
+			Expect(zmScore.Val()).To(HaveLen(2))
+			Expect(zmScore.Val()[0]).To(Equal(float64(1)))
+
+			zmScore = client.ZMScore(ctx, "zset", "four")
+			Expect(zmScore.Err()).NotTo(HaveOccurred())
+			Expect(zmScore.Val()).To(HaveLen(1))
+
+			zmScore = client.ZMScore(ctx, "zset", "four", "one")
+			Expect(zmScore.Err()).NotTo(HaveOccurred())
+			Expect(zmScore.Val()).To(HaveLen(2))
+		})
+
+		It("should ZPopMax", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			members, err := client.ZPopMax(ctx, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}}))
+
+			// adding back 3
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			members, err = client.ZPopMax(ctx, "zset", 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}}))
+
+			// adding back 2 & 3
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			members, err = client.ZPopMax(ctx, "zset", 10).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+
+			_, err = client.ZPopMax(ctx, "zset", 10, 11).Result()
+			Expect(err).Should(MatchError("too many arguments"))
+		})
+
+		It("should ZPopMin", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  3,
+				Member: "three",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			members, err := client.ZPopMin(ctx, "zset").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}}))
+
+			// adding back 1
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			members, err = client.ZPopMin(ctx, "zset", 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  2,
+				Member: "two",
+			}}))
+
+			// adding back 1 & 2
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  1,
+				Member: "one",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  2,
+				Member: "two",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			members, err = client.ZPopMin(ctx, "zset", 10).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(members).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+
+			_, err = client.ZPopMin(ctx, "zset", 10, 11).Result()
+			Expect(err).Should(MatchError("too many arguments"))
+		})
+
+		It("should ZRange", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRange := client.ZRange(ctx, "zset", 0, -1)
+			Expect(zRange.Err()).NotTo(HaveOccurred())
+			Expect(zRange.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			zRange = client.ZRange(ctx, "zset", 2, 3)
+			Expect(zRange.Err()).NotTo(HaveOccurred())
+			Expect(zRange.Val()).To(Equal([]string{"three"}))
+
+			zRange = client.ZRange(ctx, "zset", -2, -1)
+			Expect(zRange.Err()).NotTo(HaveOccurred())
+			Expect(zRange.Val()).To(Equal([]string{"two", "three"}))
+		})
+
+		It("should ZRangeWithScores", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", 2, 3).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 3, Member: "three"}}))
+
+			vals, err = client.ZRangeWithScores(ctx, "zset", -2, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+		})
+
+		It("should ZRangeArgs", func() {
+			added, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+					{Score: 2, Member: "two"},
+					{Score: 3, Member: "three"},
+					{Score: 4, Member: "four"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(4)))
+
+			zRange, err := client.ZRangeArgs(ctx, redis.ZRangeArgs{
+				Key:     "zset",
+				Start:   4,
+				Stop:    1,
+				ByScore: true,
+				Rev:     true,
+				Offset:  1,
+				Count:   2,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zRange).To(Equal([]string{"three", "two"}))
+
+			zRange, err = client.ZRangeArgs(ctx, redis.ZRangeArgs{
+				Key:    "zset",
+				Start:  "+",
+				Stop:   "-",
+				ByLex:  true,
+				Rev:    true,
+				Offset: 2,
+				Count:  2,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zRange).To(Equal([]string{"two", "one"}))
+
+			zRange, err = client.ZRangeArgs(ctx, redis.ZRangeArgs{
+				Key:     "zset",
+				Start:   "(1",
+				Stop:    "(4",
+				ByScore: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zRange).To(Equal([]string{"two", "three"}))
+
+			// withScores.
+			zSlice, err := client.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+				Key:     "zset",
+				Start:   4,
+				Stop:    1,
+				ByScore: true,
+				Rev:     true,
+				Offset:  1,
+				Count:   2,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zSlice).To(Equal([]redis.Z{
+				{Score: 3, Member: "three"},
+				{Score: 2, Member: "two"},
+			}))
+		})
+
+		It("should ZRangeByScore", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRangeByScore := client.ZRangeByScore(ctx, "zset", &redis.ZRangeBy{
+				Min: "-inf",
+				Max: "+inf",
+			})
+			Expect(zRangeByScore.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByScore.Val()).To(Equal([]string{"one", "two", "three"}))
+
+			zRangeByScore = client.ZRangeByScore(ctx, "zset", &redis.ZRangeBy{
+				Min: "1",
+				Max: "2",
+			})
+			Expect(zRangeByScore.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByScore.Val()).To(Equal([]string{"one", "two"}))
+
+			zRangeByScore = client.ZRangeByScore(ctx, "zset", &redis.ZRangeBy{
+				Min: "(1",
+				Max: "2",
+			})
+			Expect(zRangeByScore.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByScore.Val()).To(Equal([]string{"two"}))
+
+			zRangeByScore = client.ZRangeByScore(ctx, "zset", &redis.ZRangeBy{
+				Min: "(1",
+				Max: "(2",
+			})
+			Expect(zRangeByScore.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByScore.Val()).To(Equal([]string{}))
+		})
+
+		It("should ZRangeByLex", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{
+				Score:  0,
+				Member: "a",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  0,
+				Member: "b",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{
+				Score:  0,
+				Member: "c",
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRangeByLex := client.ZRangeByLex(ctx, "zset", &redis.ZRangeBy{
+				Min: "-",
+				Max: "+",
+			})
+			Expect(zRangeByLex.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByLex.Val()).To(Equal([]string{"a", "b", "c"}))
+
+			zRangeByLex = client.ZRangeByLex(ctx, "zset", &redis.ZRangeBy{
+				Min: "[a",
+				Max: "[b",
+			})
+			Expect(zRangeByLex.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByLex.Val()).To(Equal([]string{"a", "b"}))
+
+			zRangeByLex = client.ZRangeByLex(ctx, "zset", &redis.ZRangeBy{
+				Min: "(a",
+				Max: "[b",
+			})
+			Expect(zRangeByLex.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByLex.Val()).To(Equal([]string{"b"}))
+
+			zRangeByLex = client.ZRangeByLex(ctx, "zset", &redis.ZRangeBy{
+				Min: "(a",
+				Max: "(b",
+			})
+			Expect(zRangeByLex.Err()).NotTo(HaveOccurred())
+			Expect(zRangeByLex.Val()).To(Equal([]string{}))
+		})
+
+		It("should ZRangeByScoreWithScoresMap", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRangeByScoreWithScores(ctx, "zset", &redis.ZRangeBy{
+				Min: "-inf",
+				Max: "+inf",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+
+			vals, err = client.ZRangeByScoreWithScores(ctx, "zset", &redis.ZRangeBy{
+				Min: "1",
+				Max: "2",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  2,
+				Member: "two",
+			}}))
+
+			vals, err = client.ZRangeByScoreWithScores(ctx, "zset", &redis.ZRangeBy{
+				Min: "(1",
+				Max: "2",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "two"}}))
+
+			vals, err = client.ZRangeByScoreWithScores(ctx, "zset", &redis.ZRangeBy{
+				Min: "(1",
+				Max: "(2",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{}))
+		})
+
+		It("should ZRangeStore", Label("NonRedisEnterprise"), func() {
+			added, err := client.ZAddArgs(ctx, "zset", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+					{Score: 2, Member: "two"},
+					{Score: 3, Member: "three"},
+					{Score: 4, Member: "four"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added).To(Equal(int64(4)))
+
+			rangeStore, err := client.ZRangeStore(ctx, "new-zset", redis.ZRangeArgs{
+				Key:     "zset",
+				Start:   4,
+				Stop:    1,
+				ByScore: true,
+				Rev:     true,
+				Offset:  1,
+				Count:   2,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rangeStore).To(Equal(int64(2)))
+
+			zRange, err := client.ZRange(ctx, "new-zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zRange).To(Equal([]string{"two", "three"}))
+
+			// Test the exact scenario from the bug report: ZRangeStore with ByScore+Rev
+			// where Start > Stop (high to low) should return all matching members.
+			added2, err := client.ZAddArgs(ctx, "myzset", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "a"},
+					{Score: 2, Member: "b"},
+					{Score: 3, Member: "c"},
+					{Score: 4, Member: "d"},
+					{Score: 5, Member: "e"},
+				},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(added2).To(Equal(int64(5)))
+
+			rangeStore2, err := client.ZRangeStore(ctx, "myzset2", redis.ZRangeArgs{
+				Key:     "myzset",
+				Start:   5,
+				Stop:    3,
+				ByScore: true,
+				Rev:     true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rangeStore2).To(Equal(int64(3)))
+
+			zRange2, err := client.ZRange(ctx, "myzset2", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(zRange2).To(Equal([]string{"c", "d", "e"}))
+		})
+
+		It("should ZRank", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRank := client.ZRank(ctx, "zset", "three")
+			Expect(zRank.Err()).NotTo(HaveOccurred())
+			Expect(zRank.Val()).To(Equal(int64(2)))
+
+			zRank = client.ZRank(ctx, "zset", "four")
+			Expect(zRank.Err()).To(Equal(redis.Nil))
+			Expect(zRank.Val()).To(Equal(int64(0)))
+		})
+
+		It("should ZRankWithScore", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRankWithScore := client.ZRankWithScore(ctx, "zset", "one")
+			Expect(zRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 0, Score: 1}))
+
+			zRankWithScore = client.ZRankWithScore(ctx, "zset", "two")
+			Expect(zRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 1, Score: 2}))
+
+			zRankWithScore = client.ZRankWithScore(ctx, "zset", "three")
+			Expect(zRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 2, Score: 3}))
+
+			zRankWithScore = client.ZRankWithScore(ctx, "zset", "four")
+			Expect(zRankWithScore.Err()).To(HaveOccurred())
+			Expect(zRankWithScore.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should ZRem", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRem := client.ZRem(ctx, "zset", "two")
+			Expect(zRem.Err()).NotTo(HaveOccurred())
+			Expect(zRem.Val()).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  1,
+				Member: "one",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+		})
+
+		It("should ZRemRangeByRank", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRemRangeByRank := client.ZRemRangeByRank(ctx, "zset", 0, 1)
+			Expect(zRemRangeByRank.Err()).NotTo(HaveOccurred())
+			Expect(zRemRangeByRank.Val()).To(Equal(int64(2)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}}))
+		})
+
+		It("should ZRemRangeByScore", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRemRangeByScore := client.ZRemRangeByScore(ctx, "zset", "-inf", "(2")
+			Expect(zRemRangeByScore.Err()).NotTo(HaveOccurred())
+			Expect(zRemRangeByScore.Val()).To(Equal(int64(1)))
+
+			vals, err := client.ZRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  3,
+				Member: "three",
+			}}))
+		})
+
+		It("should ZRemRangeByLex", func() {
+			zz := []redis.Z{
+				{Score: 0, Member: "aaaa"},
+				{Score: 0, Member: "b"},
+				{Score: 0, Member: "c"},
+				{Score: 0, Member: "d"},
+				{Score: 0, Member: "e"},
+				{Score: 0, Member: "foo"},
+				{Score: 0, Member: "zap"},
+				{Score: 0, Member: "zip"},
+				{Score: 0, Member: "ALPHA"},
+				{Score: 0, Member: "alpha"},
+			}
+			for _, z := range zz {
+				err := client.ZAdd(ctx, "zset", z).Err()
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			n, err := client.ZRemRangeByLex(ctx, "zset", "[alpha", "[omega").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(6)))
+
+			vals, err := client.ZRange(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{"ALPHA", "aaaa", "zap", "zip"}))
+		})
+
+		It("should ZRevRange", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRevRange := client.ZRevRange(ctx, "zset", 0, -1)
+			Expect(zRevRange.Err()).NotTo(HaveOccurred())
+			Expect(zRevRange.Val()).To(Equal([]string{"three", "two", "one"}))
+
+			zRevRange = client.ZRevRange(ctx, "zset", 2, 3)
+			Expect(zRevRange.Err()).NotTo(HaveOccurred())
+			Expect(zRevRange.Val()).To(Equal([]string{"one"}))
+
+			zRevRange = client.ZRevRange(ctx, "zset", -2, -1)
+			Expect(zRevRange.Err()).NotTo(HaveOccurred())
+			Expect(zRevRange.Val()).To(Equal([]string{"two", "one"}))
+		})
+
+		It("should ZRevRangeWithScoresMap", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.ZRevRangeWithScores(ctx, "zset", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+
+			val, err = client.ZRevRangeWithScores(ctx, "zset", 2, 3).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.Z{{Score: 1, Member: "one"}}))
+
+			val, err = client.ZRevRangeWithScores(ctx, "zset", -2, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.Z{{
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+		})
+
+		It("should ZRevRangeByScore", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRevRangeByScore(
+				ctx, "zset", &redis.ZRangeBy{Max: "+inf", Min: "-inf"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{"three", "two", "one"}))
+
+			vals, err = client.ZRevRangeByScore(
+				ctx, "zset", &redis.ZRangeBy{Max: "2", Min: "(1"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{"two"}))
+
+			vals, err = client.ZRevRangeByScore(
+				ctx, "zset", &redis.ZRangeBy{Max: "(2", Min: "(1"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{}))
+		})
+
+		It("should ZRevRangeByLex", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 0, Member: "a"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 0, Member: "b"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 0, Member: "c"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRevRangeByLex(
+				ctx, "zset", &redis.ZRangeBy{Max: "+", Min: "-"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{"c", "b", "a"}))
+
+			vals, err = client.ZRevRangeByLex(
+				ctx, "zset", &redis.ZRangeBy{Max: "[b", Min: "(a"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{"b"}))
+
+			vals, err = client.ZRevRangeByLex(
+				ctx, "zset", &redis.ZRangeBy{Max: "(b", Min: "(a"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]string{}))
+		})
+
+		It("should ZRevRangeByScoreWithScores", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRevRangeByScoreWithScores(
+				ctx, "zset", &redis.ZRangeBy{Max: "+inf", Min: "-inf"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+		})
+
+		It("should ZRevRangeByScoreWithScoresMap", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.ZRevRangeByScoreWithScores(
+				ctx, "zset", &redis.ZRangeBy{Max: "+inf", Min: "-inf"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}, {
+				Score:  2,
+				Member: "two",
+			}, {
+				Score:  1,
+				Member: "one",
+			}}))
+
+			vals, err = client.ZRevRangeByScoreWithScores(
+				ctx, "zset", &redis.ZRangeBy{Max: "2", Min: "(1"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{Score: 2, Member: "two"}}))
+
+			vals, err = client.ZRevRangeByScoreWithScores(
+				ctx, "zset", &redis.ZRangeBy{Max: "(2", Min: "(1"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{}))
+		})
+
+		It("should ZRevRank", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRevRank := client.ZRevRank(ctx, "zset", "one")
+			Expect(zRevRank.Err()).NotTo(HaveOccurred())
+			Expect(zRevRank.Val()).To(Equal(int64(2)))
+
+			zRevRank = client.ZRevRank(ctx, "zset", "four")
+			Expect(zRevRank.Err()).To(Equal(redis.Nil))
+			Expect(zRevRank.Val()).To(Equal(int64(0)))
+		})
+
+		It("should ZRevRankWithScore", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			zRevRankWithScore := client.ZRevRankWithScore(ctx, "zset", "one")
+			Expect(zRevRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRevRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 2, Score: 1}))
+
+			zRevRankWithScore = client.ZRevRankWithScore(ctx, "zset", "two")
+			Expect(zRevRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRevRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 1, Score: 2}))
+
+			zRevRankWithScore = client.ZRevRankWithScore(ctx, "zset", "three")
+			Expect(zRevRankWithScore.Err()).NotTo(HaveOccurred())
+			Expect(zRevRankWithScore.Result()).To(Equal(redis.RankScore{Rank: 0, Score: 3}))
+
+			zRevRankWithScore = client.ZRevRankWithScore(ctx, "zset", "four")
+			Expect(zRevRankWithScore.Err()).To(HaveOccurred())
+			Expect(zRevRankWithScore.Err()).To(Equal(redis.Nil))
+		})
+
+		It("should ZScore", func() {
+			zAdd := client.ZAdd(ctx, "zset", redis.Z{Score: 1.001, Member: "one"})
+			Expect(zAdd.Err()).NotTo(HaveOccurred())
+
+			zScore := client.ZScore(ctx, "zset", "one")
+			Expect(zScore.Err()).NotTo(HaveOccurred())
+			Expect(zScore.Val()).To(Equal(1.001))
+		})
+
+		It("should ZUnion", Label("NonRedisEnterprise"), func() {
+			err := client.ZAddArgs(ctx, "zset1", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+					{Score: 2, Member: "two"},
+				},
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAddArgs(ctx, "zset2", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 1, Member: "one"},
+					{Score: 2, Member: "two"},
+					{Score: 3, Member: "three"},
+				},
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			union, err := client.ZUnion(ctx, redis.ZStore{
+				Keys:      []string{"zset1", "zset2"},
+				Weights:   []float64{2, 3},
+				Aggregate: "sum",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(union).To(Equal([]string{"one", "three", "two"}))
+
+			unionScores, err := client.ZUnionWithScores(ctx, redis.ZStore{
+				Keys:      []string{"zset1", "zset2"},
+				Weights:   []float64{2, 3},
+				Aggregate: "sum",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unionScores).To(Equal([]redis.Z{
+				{Score: 5, Member: "one"},
+				{Score: 9, Member: "three"},
+				{Score: 10, Member: "two"},
+			}))
+		})
+
+		It("should ZUnionStore", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			n, err := client.ZUnionStore(ctx, "out", &redis.ZStore{
+				Keys:    []string{"zset1", "zset2"},
+				Weights: []float64{2, 3},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+
+			val, err := client.ZRangeWithScores(ctx, "out", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.Z{{
+				Score:  5,
+				Member: "one",
+			}, {
+				Score:  9,
+				Member: "three",
+			}, {
+				Score:  10,
+				Member: "two",
+			}}))
+		})
+
+		It("should support COUNT aggregate for ZUnion and ZInter", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.8", "COUNT aggregate requires Redis 8.8+")
+
+			err := client.ZAddArgs(ctx, "zset1", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 100, Member: "foo"},
+					{Score: 100, Member: "bar"},
+				},
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAddArgs(ctx, "zset2", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 200, Member: "foo"},
+					{Score: 200, Member: "bar"},
+				},
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.ZAddArgs(ctx, "zset3", redis.ZAddArgs{
+				Members: []redis.Z{
+					{Score: 300, Member: "foo"},
+				},
+			}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			keys := []string{"zset1", "zset2", "zset3"}
+
+			union, err := client.ZUnion(ctx, redis.ZStore{
+				Keys:      keys,
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(union).To(Equal([]string{"bar", "foo"}))
+
+			unionScores, err := client.ZUnionWithScores(ctx, redis.ZStore{
+				Keys:      keys,
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unionScores).To(Equal([]redis.Z{
+				{Score: 2, Member: "bar"},
+				{Score: 3, Member: "foo"},
+			}))
+
+			n, err := client.ZUnionStore(ctx, "out", &redis.ZStore{
+				Keys:      keys,
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			storedUnion, err := client.ZRangeWithScores(ctx, "out", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(storedUnion).To(Equal([]redis.Z{
+				{Score: 2, Member: "bar"},
+				{Score: 3, Member: "foo"},
+			}))
+
+			n, err = client.ZUnionStore(ctx, "weighted_out", &redis.ZStore{
+				Keys:      keys,
+				Weights:   []float64{10, 5, 3},
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			weightedUnion, err := client.ZRangeWithScores(ctx, "weighted_out", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(weightedUnion).To(Equal([]redis.Z{
+				{Score: 15, Member: "bar"},
+				{Score: 18, Member: "foo"},
+			}))
+
+			inter, err := client.ZInter(ctx, &redis.ZStore{
+				Keys:      keys,
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(inter).To(Equal([]string{"foo"}))
+
+			interScores, err := client.ZInterWithScores(ctx, &redis.ZStore{
+				Keys:      keys,
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(interScores).To(Equal([]redis.Z{
+				{Score: 3, Member: "foo"},
+			}))
+
+			n, err = client.ZInterStore(ctx, "inter_out", &redis.ZStore{
+				Keys:      keys,
+				Weights:   []float64{10, 5, 3},
+				Aggregate: "COUNT",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(1)))
+
+			storedInter, err := client.ZRangeWithScores(ctx, "inter_out", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(storedInter).To(Equal([]redis.Z{
+				{Score: 18, Member: "foo"},
+			}))
+		})
+
+		It("should ZRandMember", func() {
+			err := client.ZAdd(ctx, "zset", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v := client.ZRandMember(ctx, "zset", 1)
+			Expect(v.Err()).NotTo(HaveOccurred())
+			Expect(v.Val()).To(Or(Equal([]string{"one"}), Equal([]string{"two"})))
+
+			v = client.ZRandMember(ctx, "zset", 0)
+			Expect(v.Err()).NotTo(HaveOccurred())
+			Expect(v.Val()).To(HaveLen(0))
+
+			kv, err := client.ZRandMemberWithScores(ctx, "zset", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(kv).To(Or(
+				Equal([]redis.Z{{Member: "one", Score: 1}}),
+				Equal([]redis.Z{{Member: "two", Score: 2}}),
+			))
+		})
+
+		It("should ZDiff", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.ZDiff(ctx, "zset1", "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal([]string{"two", "three"}))
+		})
+
+		It("should ZDiffWithScores", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.ZDiffWithScores(ctx, "zset1", "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal([]redis.Z{
+				{
+					Member: "two",
+					Score:  2,
+				},
+				{
+					Member: "three",
+					Score:  3,
+				},
+			}))
+		})
+
+		It("should ZInter", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.ZInter(ctx, &redis.ZStore{
+				Keys: []string{"zset1", "zset2"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal([]string{"one", "two"}))
+		})
+
+		It("should ZInterCard", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// limit 0 means no limit
+			sInterCard := client.ZInterCard(ctx, 0, "zset1", "zset2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(2)))
+
+			sInterCard = client.ZInterCard(ctx, 1, "zset1", "zset2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(1)))
+
+			sInterCard = client.ZInterCard(ctx, 3, "zset1", "zset2")
+			Expect(sInterCard.Err()).NotTo(HaveOccurred())
+			Expect(sInterCard.Val()).To(Equal(int64(2)))
+		})
+
+		It("should ZInterWithScores", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			v, err := client.ZInterWithScores(ctx, &redis.ZStore{
+				Keys:      []string{"zset1", "zset2"},
+				Weights:   []float64{2, 3},
+				Aggregate: "Max",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal([]redis.Z{
+				{
+					Member: "one",
+					Score:  3,
+				},
+				{
+					Member: "two",
+					Score:  6,
+				},
+			}))
+		})
+
+		It("should ZDiffStore", Label("NonRedisEnterprise"), func() {
+			err := client.ZAdd(ctx, "zset1", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset1", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 1, Member: "one"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 2, Member: "two"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.ZAdd(ctx, "zset2", redis.Z{Score: 3, Member: "three"}).Err()
+			Expect(err).NotTo(HaveOccurred())
+			v, err := client.ZDiffStore(ctx, "out1", "zset1", "zset2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal(int64(0)))
+			v, err = client.ZDiffStore(ctx, "out1", "zset2", "zset1").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(v).To(Equal(int64(1)))
+			vals, err := client.ZRangeWithScores(ctx, "out1", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.Z{{
+				Score:  3,
+				Member: "three",
+			}}))
+		})
+	})
+
+	Describe("streams", func() {
+		BeforeEach(func() {
+			id, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				ID:     "1-0",
+				Values: map[string]interface{}{"uno": "un"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id).To(Equal("1-0"))
+
+			// Values supports []interface{}.
+			id, err = client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				ID:     "2-0",
+				Values: []interface{}{"dos", "deux"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id).To(Equal("2-0"))
+
+			// Value supports []string.
+			id, err = client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				ID:     "3-0",
+				Values: []string{"tres", "troix"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id).To(Equal("3-0"))
+		})
+
+		It("should XTrimMaxLen", func() {
+			n, err := client.XTrimMaxLen(ctx, "stream", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XTrimMaxLenApprox", func() {
+			n, err := client.XTrimMaxLenApprox(ctx, "stream", 0, 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XTrimMinID", func() {
+			n, err := client.XTrimMinID(ctx, "stream", "4-0").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XTrimMinIDApprox", func() {
+			n, err := client.XTrimMinIDApprox(ctx, "stream", "4-0", 0).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XTrimMaxLenMode", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			n, err := client.XTrimMaxLenMode(ctx, "stream", 0, "KEEPREF").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeNumerically(">=", 0))
+		})
+
+		It("should XTrimMaxLenApproxMode", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			n, err := client.XTrimMaxLenApproxMode(ctx, "stream", 0, 0, "KEEPREF").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeNumerically(">=", 0))
+		})
+
+		It("should XTrimMinIDMode", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			n, err := client.XTrimMinIDMode(ctx, "stream", "4-0", "KEEPREF").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeNumerically(">=", 0))
+		})
+
+		It("should XTrimMinIDApproxMode", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			n, err := client.XTrimMinIDApproxMode(ctx, "stream", "4-0", 0, "KEEPREF").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(BeNumerically(">=", 0))
+		})
+
+		It("should XAdd", func() {
+			id, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				Values: map[string]interface{}{"quatro": "quatre"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.XRange(ctx, "stream", "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.XMessage{
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+				{ID: id, Values: map[string]interface{}{"quatro": "quatre"}},
+			}))
+		})
+
+		It("should XAdd with MaxLen", func() {
+			id, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				MaxLen: 1,
+				Values: map[string]interface{}{"quatro": "quatre"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			vals, err := client.XRange(ctx, "stream", "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]redis.XMessage{
+				{ID: id, Values: map[string]interface{}{"quatro": "quatre"}},
+			}))
+		})
+
+		It("should XAdd with MinID", func() {
+			id, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream: "stream",
+				MinID:  "5-0",
+				ID:     "4-0",
+				Values: map[string]interface{}{"quatro": "quatre"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id).To(Equal("4-0"))
+
+			vals, err := client.XRange(ctx, "stream", "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(HaveLen(0))
+		})
+
+		It("should XAdd with IDMP (idempotent production)", func() {
+			SkipBeforeRedisVersion("8.6", "IDMP requires Redis 8.6+")
+			streamName := "idmp-stream"
+			defer client.Del(ctx, streamName)
+
+			// First add with IDMP
+			id1, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:       streamName,
+				ProducerID:   "producer1",
+				IdempotentID: "msg1",
+				Values:       map[string]interface{}{"field": "value1"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id1).NotTo(BeEmpty())
+
+			// Add the same message again - should return the same ID (duplicate detection)
+			id2, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:       streamName,
+				ProducerID:   "producer1",
+				IdempotentID: "msg1",
+				Values:       map[string]interface{}{"field": "value2"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id2).To(Equal(id1)) // Should return the same entry ID
+
+			// Verify only one message was added
+			vals, err := client.XRange(ctx, streamName, "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(HaveLen(1))
+			Expect(vals[0].ID).To(Equal(id1))
+
+			// Add a different message with different idempotent ID
+			id3, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:       streamName,
+				ProducerID:   "producer1",
+				IdempotentID: "msg2",
+				Values:       map[string]interface{}{"field": "value3"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id3).NotTo(Equal(id1)) // Should be a different entry ID
+
+			// Verify two messages now exist
+			vals, err = client.XRange(ctx, streamName, "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(HaveLen(2))
+
+			// Verify XINFO STREAM shows idempotent stats
+			info, err := client.XInfoStream(ctx, streamName).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.PIDsTracked).To(Equal(int64(1)))
+			Expect(info.IIDsTracked).To(BeNumerically(">", 0))
+			Expect(info.IIDsAdded).To(Equal(int64(2)))
+			Expect(info.IIDsDuplicates).To(Equal(int64(1)))
+		})
+
+		It("should XAdd with IDMPAUTO (auto-generated idempotent ID)", func() {
+			SkipBeforeRedisVersion("8.6", "IDMPAUTO requires Redis 8.6+")
+			streamName := "idmpauto-stream"
+			defer client.Del(ctx, streamName)
+
+			id1, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:         streamName,
+				ProducerID:     "producer1",
+				IdempotentAuto: true,
+				Values:         map[string]interface{}{"field": "value1", "order": "123"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id1).NotTo(BeEmpty())
+
+			// Add the same message again - should return the same ID (duplicate detection)
+			// Redis will calculate the same idempotent ID based on content
+			id2, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:         streamName,
+				ProducerID:     "producer1",
+				IdempotentAuto: true,
+				Values:         map[string]interface{}{"field": "value1", "order": "123"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id2).To(Equal(id1)) // Should return the same entry ID
+
+			// Verify only one message was added
+			vals, err := client.XRange(ctx, streamName, "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(HaveLen(1))
+
+			// Add a different message - should create a new entry
+			id3, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream:         streamName,
+				ProducerID:     "producer1",
+				IdempotentAuto: true,
+				Values:         map[string]interface{}{"field": "value2", "order": "456"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(id3).NotTo(Equal(id1))
+
+			// Verify two messages now exist
+			vals, err = client.XRange(ctx, streamName, "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(HaveLen(2))
+
+			// Verify XINFO STREAM shows idempotent stats
+			info, err := client.XInfoStream(ctx, streamName).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.IIDsAdded).To(Equal(int64(2)))
+			Expect(info.IIDsDuplicates).To(Equal(int64(1)))
+		})
+
+		It("should XCfgSet configure idempotent production settings", func() {
+			SkipBeforeRedisVersion("8.6", "XCFGSET requires Redis 8.6+")
+			streamName := "xcfgset-stream"
+			defer client.Del(ctx, streamName)
+
+			_, err := client.XAdd(ctx, &redis.XAddArgs{
+				Stream: streamName,
+				Values: map[string]interface{}{"field": "value"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Configure IDMP settings
+			status, err := client.XCfgSet(ctx, &redis.XCfgSetArgs{
+				Stream:   streamName,
+				Duration: 200, // 200 seconds
+				MaxSize:  500, // 500 idempotent IDs
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			// Verify the settings were applied
+			info, err := client.XInfoStream(ctx, streamName).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.IDMPDuration).To(Equal(int64(200)))
+			Expect(info.IDMPMaxSize).To(Equal(int64(500)))
+
+			status, err = client.XCfgSet(ctx, &redis.XCfgSetArgs{
+				Stream:   streamName,
+				Duration: 300,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			info, err = client.XInfoStream(ctx, streamName).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.IDMPDuration).To(Equal(int64(300)))
+
+			status, err = client.XCfgSet(ctx, &redis.XCfgSetArgs{
+				Stream:  streamName,
+				MaxSize: 1000,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(status).To(Equal("OK"))
+
+			info, err = client.XInfoStream(ctx, streamName).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(info.IDMPMaxSize).To(Equal(int64(1000)))
+		})
+
+		It("should XDel", func() {
+			n, err := client.XDel(ctx, "stream", "1-0", "2-0", "3-0").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XAckDel", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			// First, create a consumer group
+			err := client.XGroupCreate(ctx, "stream", "testgroup", "0").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Read messages to create pending entries
+			_, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{
+				Group:    "testgroup",
+				Consumer: "testconsumer",
+				Streams:  []string{"stream", ">"},
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Test XAckDel with KEEPREF mode
+			n, err := client.XAckDel(ctx, "stream", "testgroup", "KEEPREF", "1-0", "2-0").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(HaveLen(2))
+
+			// Clean up
+			client.XGroupDestroy(ctx, "stream", "testgroup")
+		})
+
+		It("should XDelEx", func() {
+			SkipBeforeRedisVersion("8.2", "doesn't work with older redis stack images")
+			// Test XDelEx with KEEPREF mode
+			n, err := client.XDelEx(ctx, "stream", "KEEPREF", "1-0", "2-0").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(HaveLen(2))
+		})
+
+		It("should XLen", func() {
+			n, err := client.XLen(ctx, "stream").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(3)))
+		})
+
+		It("should XRange", func() {
+			msgs, err := client.XRange(ctx, "stream", "-", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+			}))
+
+			msgs, err = client.XRange(ctx, "stream", "2", "+").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+			}))
+
+			msgs, err = client.XRange(ctx, "stream", "-", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+			}))
+		})
+
+		It("should XRangeN", func() {
+			msgs, err := client.XRangeN(ctx, "stream", "-", "+", 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+			}))
+
+			msgs, err = client.XRangeN(ctx, "stream", "2", "+", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+			}))
+
+			msgs, err = client.XRangeN(ctx, "stream", "-", "2", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+			}))
+		})
+
+		It("should XRevRange", func() {
+			msgs, err := client.XRevRange(ctx, "stream", "+", "-").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+				{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+			}))
+
+			msgs, err = client.XRevRange(ctx, "stream", "+", "2").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+			}))
+		})
+
+		It("should XRevRangeN", func() {
+			msgs, err := client.XRevRangeN(ctx, "stream", "+", "-", 2).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+				{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+			}))
+
+			msgs, err = client.XRevRangeN(ctx, "stream", "+", "2", 1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(msgs).To(Equal([]redis.XMessage{
+				{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+			}))
+		})
+
+		It("should XRead", func() {
+			res, err := client.XReadStreams(ctx, "stream", "0").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]redis.XStream{
+				{
+					Stream: "stream",
+					Messages: []redis.XMessage{
+						{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+						{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+						{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+					},
+				},
+			}))
+
+			_, err = client.XReadStreams(ctx, "stream", "3").Result()
+			Expect(err).To(Equal(redis.Nil))
+		})
+
+		It("should XRead", func() {
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"stream", "0"},
+				Count:   2,
+				Block:   100 * time.Millisecond,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]redis.XStream{
+				{
+					Stream: "stream",
+					Messages: []redis.XMessage{
+						{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+						{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+					},
+				},
+			}))
+
+			_, err = client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"stream", "3"},
+				Count:   1,
+				Block:   100 * time.Millisecond,
+			}).Result()
+			Expect(err).To(Equal(redis.Nil))
+		})
+
+		It("should XRead with MAXCOUNT capping cumulative entries across streams", func() {
+			SkipBeforeRedisVersion("8.10", "XREAD MAXCOUNT requires Redis 8.10+")
+
+			for _, id := range []string{"1-0", "2-0", "3-0"} {
+				_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: "s1", ID: id, Values: map[string]interface{}{"f": "v"}}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: "s2", ID: id, Values: map[string]interface{}{"f": "v"}}).Result()
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// MAXCOUNT is cumulative across all streams. Streams are served in
+			// caller order, so s1 contributes its 3 entries and s2 contributes 1,
+			// reaching the total cap of 4.
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams:  []string{"s1", "s2", "0", "0"},
+				MaxCount: 4,
+				Block:    -1,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			total := 0
+			for _, s := range res {
+				total += len(s.Messages)
+			}
+			Expect(total).To(Equal(4))
+		})
+
+		It("should XRead with MAXSIZE returning at least the first available entry", func() {
+			SkipBeforeRedisVersion("8.10", "XREAD MAXSIZE requires Redis 8.10+")
+
+			// MAXSIZE is a soft cap; even a value smaller than a single entry must
+			// still return the first available entry (never suppress all output).
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"stream", "0"},
+				MaxSize: 1,
+				Block:   -1,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(1))
+			Expect(res[0].Stream).To(Equal("stream"))
+			Expect(len(res[0].Messages)).To(BeNumerically(">=", 1))
+		})
+
+		It("should XReadGroup with MAXCOUNT capping cumulative entries across streams", func() {
+			SkipBeforeRedisVersion("8.10", "XREADGROUP MAXCOUNT requires Redis 8.10+")
+
+			for _, id := range []string{"1-0", "2-0", "3-0"} {
+				_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: "g1", ID: id, Values: map[string]interface{}{"f": "v"}}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.XAdd(ctx, &redis.XAddArgs{Stream: "g2", ID: id, Values: map[string]interface{}{"f": "v"}}).Result()
+				Expect(err).NotTo(HaveOccurred())
+			}
+			Expect(client.XGroupCreate(ctx, "g1", "grp", "0").Err()).NotTo(HaveOccurred())
+			Expect(client.XGroupCreate(ctx, "g2", "grp", "0").Err()).NotTo(HaveOccurred())
+
+			res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+				Group:    "grp",
+				Consumer: "consumer",
+				Streams:  []string{"g1", "g2", ">", ">"},
+				MaxCount: 4,
+				Block:    -1,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			total := 0
+			for _, s := range res {
+				total += len(s.Messages)
+			}
+			Expect(total).To(Equal(4))
+		})
+
+		It("should XRead LastEntry", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"stream"},
+				Count:   2, // we expect 1 message
+				ID:      "+",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]redis.XStream{
+				{
+					Stream: "stream",
+					Messages: []redis.XMessage{
+						{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+					},
+				},
+			}))
+		})
+
+		It("should XRead LastEntry from two streams", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"stream", "stream"},
+				ID:      "+",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(Equal([]redis.XStream{
+				{
+					Stream: "stream",
+					Messages: []redis.XMessage{
+						{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+					},
+				},
+				{
+					Stream: "stream",
+					Messages: []redis.XMessage{
+						{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+					},
+				},
+			}))
+		})
+
+		It("should XRead LastEntry blocks", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			start := time.Now()
+			// Wait for the goroutine to finish before the spec returns so it
+			// can't outlive AfterEach's client.Close() and trip "use of closed
+			// network connection" during the next spec's BeforeEach.
+			done := make(chan struct{})
+			defer func() { Eventually(done, 5*time.Second).Should(BeClosed()) }()
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+
+				time.Sleep(100 * time.Millisecond)
+				id, err := client.XAdd(ctx, &redis.XAddArgs{
+					Stream: "empty",
+					ID:     "4-0",
+					Values: map[string]interface{}{"quatro": "quatre"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(id).To(Equal("4-0"))
+			}()
+
+			res, err := client.XRead(ctx, &redis.XReadArgs{
+				Streams: []string{"empty"},
+				Block:   500 * time.Millisecond,
+				ID:      "+",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			// Ensure that the XRead call with LastEntry option blocked for at least 100ms.
+			Expect(time.Since(start)).To(BeNumerically(">=", 100*time.Millisecond))
+			Expect(res).To(Equal([]redis.XStream{
+				{
+					Stream: "empty",
+					Messages: []redis.XMessage{
+						{ID: "4-0", Values: map[string]interface{}{"quatro": "quatre"}},
+					},
+				},
+			}))
+		})
+
+		Describe("group", func() {
+			BeforeEach(func() {
+				err := client.XGroupCreate(ctx, "stream", "group", "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer",
+					Streams:  []string{"stream", ">"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XStream{
+					{
+						Stream: "stream",
+						Messages: []redis.XMessage{
+							{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+							{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+							{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+						},
+					},
+				}))
+			})
+
+			AfterEach(func() {
+				n, err := client.XGroupDestroy(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+			})
+
+			It("should XReadGroup skip empty", func() {
+				n, err := client.XDel(ctx, "stream", "2-0").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer",
+					Streams:  []string{"stream", "0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XStream{
+					{
+						Stream: "stream",
+						Messages: []redis.XMessage{
+							{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+							{ID: "2-0", Values: nil},
+							{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+						},
+					},
+				}))
+			})
+
+			It("should XGroupCreateMkStream", func() {
+				err := client.XGroupCreateMkStream(ctx, "stream2", "group", "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				err = client.XGroupCreateMkStream(ctx, "stream2", "group", "0").Err()
+				Expect(err).To(Equal(proto.RedisError("BUSYGROUP Consumer Group name already exists")))
+
+				n, err := client.XGroupDestroy(ctx, "stream2", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				n, err = client.Del(ctx, "stream2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+			})
+
+			It("should XPending", func() {
+				info, err := client.XPending(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info).To(Equal(&redis.XPending{
+					Count:     3,
+					Lower:     "1-0",
+					Higher:    "3-0",
+					Consumers: map[string]int64{"consumer": 3},
+				}))
+				args := &redis.XPendingExtArgs{
+					Stream:   "stream",
+					Group:    "group",
+					Start:    "-",
+					End:      "+",
+					Count:    10,
+					Consumer: "consumer",
+				}
+				infoExt, err := client.XPendingExt(ctx, args).Result()
+				Expect(err).NotTo(HaveOccurred())
+				for i := range infoExt {
+					infoExt[i].Idle = 0
+				}
+				Expect(infoExt).To(Equal([]redis.XPendingExt{
+					{ID: "1-0", Consumer: "consumer", Idle: 0, RetryCount: 1},
+					{ID: "2-0", Consumer: "consumer", Idle: 0, RetryCount: 1},
+					{ID: "3-0", Consumer: "consumer", Idle: 0, RetryCount: 1},
+				}))
+
+				args.Idle = 72 * time.Hour
+				infoExt, err = client.XPendingExt(ctx, args).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(infoExt).To(HaveLen(0))
+			})
+
+			It("should XGroup Create Delete Consumer", func() {
+				n, err := client.XGroupCreateConsumer(ctx, "stream", "group", "c1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				n, err = client.XGroupDelConsumer(ctx, "stream", "group", "consumer").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(3)))
+			})
+
+			It("should XAutoClaim", func() {
+				xca := &redis.XAutoClaimArgs{
+					Stream:   "stream",
+					Group:    "group",
+					Consumer: "consumer",
+					Start:    "-",
+					Count:    2,
+				}
+				msgs, start, err := client.XAutoClaim(ctx, xca).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(start).To(Equal("3-0"))
+				Expect(msgs).To(Equal([]redis.XMessage{{
+					ID:     "1-0",
+					Values: map[string]interface{}{"uno": "un"},
+				}, {
+					ID:     "2-0",
+					Values: map[string]interface{}{"dos": "deux"},
+				}}))
+
+				xca.Start = start
+				msgs, start, err = client.XAutoClaim(ctx, xca).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(start).To(Equal("0-0"))
+				Expect(msgs).To(Equal([]redis.XMessage{{
+					ID:     "3-0",
+					Values: map[string]interface{}{"tres": "troix"},
+				}}))
+
+				ids, start, err := client.XAutoClaimJustID(ctx, xca).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(start).To(Equal("0-0"))
+				Expect(ids).To(Equal([]string{"3-0"}))
+			})
+
+			It("should XAutoClaim return deletedIDs", func() {
+				xca := &redis.XAutoClaimArgs{
+					Stream:   "stream",
+					Group:    "group",
+					Consumer: "consumer",
+					Start:    "-",
+					Count:    3,
+				}
+				err := client.XDel(ctx, "stream", "2-0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				msgs, start, ids, err := client.XAutoClaimWithDeleted(ctx, xca).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(start).To(Equal("0-0"))
+				Expect(msgs).To(Equal([]redis.XMessage{{
+					ID:     "1-0",
+					Values: map[string]interface{}{"uno": "un"},
+				}, {
+					ID:     "3-0",
+					Values: map[string]interface{}{"tres": "troix"},
+				}}))
+				Expect(ids).To(Equal([]string{"2-0"}))
+			})
+
+			It("should XClaim", func() {
+				msgs, err := client.XClaim(ctx, &redis.XClaimArgs{
+					Stream:   "stream",
+					Group:    "group",
+					Consumer: "consumer",
+					Messages: []string{"1-0", "2-0", "3-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(msgs).To(Equal([]redis.XMessage{{
+					ID:     "1-0",
+					Values: map[string]interface{}{"uno": "un"},
+				}, {
+					ID:     "2-0",
+					Values: map[string]interface{}{"dos": "deux"},
+				}, {
+					ID:     "3-0",
+					Values: map[string]interface{}{"tres": "troix"},
+				}}))
+
+				ids, err := client.XClaimJustID(ctx, &redis.XClaimArgs{
+					Stream:   "stream",
+					Group:    "group",
+					Consumer: "consumer",
+					Messages: []string{"1-0", "2-0", "3-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ids).To(Equal([]string{"1-0", "2-0", "3-0"}))
+			})
+
+			It("should XAck", func() {
+				n, err := client.XAck(ctx, "stream", "group", "1-0", "2-0", "4-0").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(2)))
+			})
+
+			It("should not XNack with no mode", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// Mode is required by Redis; omitting it should return a server-side error.
+				_, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					IDs:    []string{"1-0", "2-0"},
+				}).Result()
+				Expect(err).To(HaveOccurred())
+			})
+
+			It("should XNack with SILENT mode", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// All 3 messages are pending (delivered by BeforeEach), each with delivery_count=1.
+				// SILENT: consumer shutting down; delivery counter decremented by 1 (1 → 0).
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					Mode:   "SILENT",
+					IDs:    []string{"1-0", "2-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(2)))
+
+				// NACKed messages move to unassigned "nacked" state in the PEL.
+				// Total PEL count stays 3; only 3-0 remains assigned to consumer.
+				pendingInfo, err := client.XPending(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pendingInfo.Count).To(Equal(int64(3)))
+				Expect(pendingInfo.Consumers).To(Equal(map[string]int64{"consumer": 1}))
+
+				// Verify the delivery counter was decremented from 1 to 0 for the NACKed messages.
+				infoExt, err := client.XPendingExt(ctx, &redis.XPendingExtArgs{
+					Stream: "stream",
+					Group:  "group",
+					Start:  "-",
+					End:    "+",
+					Count:  10,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				for _, e := range infoExt {
+					if e.ID == "1-0" || e.ID == "2-0" {
+						Expect(e.RetryCount).To(Equal(int64(0)), "SILENT should decrement delivery counter to 0 for %s", e.ID)
+					}
+				}
+			})
+
+			It("should XNack with FAIL mode", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// FAIL: delivery counter stays the same (1 → 1).
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					Mode:   "FAIL",
+					IDs:    []string{"1-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				// NACKed message moves to unassigned "nacked" state.
+				// Only 2 messages (2-0, 3-0) remain assigned to consumer.
+				pendingInfo, err := client.XPending(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pendingInfo.Count).To(Equal(int64(3)))
+				Expect(pendingInfo.Consumers).To(Equal(map[string]int64{"consumer": 2}))
+
+				// Verify the delivery counter was left unchanged at 1.
+				infoExt, err := client.XPendingExt(ctx, &redis.XPendingExtArgs{
+					Stream: "stream",
+					Group:  "group",
+					Start:  "-",
+					End:    "+",
+					Count:  10,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				for _, e := range infoExt {
+					if e.ID == "1-0" {
+						Expect(e.RetryCount).To(Equal(int64(1)), "FAIL should leave delivery counter unchanged")
+					}
+				}
+			})
+
+			It("should XNack with FATAL mode", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// FATAL: delivery counter set to MAXINT (for invalid/malicious messages).
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					Mode:   "FATAL",
+					IDs:    []string{"1-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				// NACKed message moves to unassigned state; 2-0 and 3-0 remain assigned.
+				pendingInfo, err := client.XPending(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pendingInfo.Count).To(Equal(int64(3)))
+				Expect(pendingInfo.Consumers).To(Equal(map[string]int64{"consumer": 2}))
+
+				// Verify the delivery counter was set to MAXINT (math.MaxInt64).
+				infoExt, err := client.XPendingExt(ctx, &redis.XPendingExtArgs{
+					Stream: "stream",
+					Group:  "group",
+					Start:  "-",
+					End:    "+",
+					Count:  10,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				for _, e := range infoExt {
+					if e.ID == "1-0" {
+						Expect(e.RetryCount).To(Equal(int64(math.MaxInt64)), "FATAL should set delivery counter to MAXINT")
+					}
+				}
+			})
+
+			It("should XNack nacked-count reflected in XINFO STREAM FULL", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// NACK two messages.
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					Mode:   "FAIL",
+					IDs:    []string{"1-0", "2-0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(2)))
+
+				// Verify nacked-count in XINFO STREAM FULL.
+				info, err := client.XInfoStreamFull(ctx, "stream", 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(info.Groups).To(HaveLen(1))
+				Expect(info.Groups[0].NackedCount).To(Equal(uint64(2)))
+			})
+
+			It("should XNack with RetryCount", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				retryCount := uint64(5)
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream:     "stream",
+					Group:      "group",
+					Mode:       "FAIL",
+					IDs:        []string{"1-0"},
+					RetryCount: &retryCount,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				// Verify the delivery counter was set to the explicit RetryCount value,
+				// overriding the mode's default adjustment.
+				infoExt, err := client.XPendingExt(ctx, &redis.XPendingExtArgs{
+					Stream: "stream",
+					Group:  "group",
+					Start:  "-",
+					End:    "+",
+					Count:  10,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				// Find 1-0 and verify its delivery counter.
+				var entry redis.XPendingExt
+				for _, e := range infoExt {
+					if e.ID == "1-0" {
+						entry = e
+						break
+					}
+				}
+				Expect(entry.ID).To(Equal("1-0"))
+				Expect(entry.RetryCount).To(Equal(int64(retryCount)))
+			})
+
+			It("should XNack with Force", func() {
+				SkipBeforeRedisVersion("8.8", "XNACK requires Redis 8.8+")
+
+				// Force creates a new NACKed PEL entry for an ID that was never
+				// delivered to a consumer via XREADGROUP. Without Force this would
+				// be a no-op (the ID is not in any consumer's PEL).
+				n, err := client.XNack(ctx, &redis.XNackArgs{
+					Stream: "stream",
+					Group:  "group",
+					Mode:   "FAIL",
+					IDs:    []string{"1-0"},
+					Force:  true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+
+				// The entry is now in the group's PEL as an unassigned NACKed entry.
+				pendingInfo, err := client.XPending(ctx, "stream", "group").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pendingInfo.Count).To(Equal(int64(3)))
+				Expect(pendingInfo.Consumers).To(Equal(map[string]int64{"consumer": 2}))
+			})
+
+			It("should XReadGroup with CLAIM argument", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				time.Sleep(100 * time.Millisecond)
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer2",
+					Streams:  []string{"stream", ">"},
+					Claim:    50 * time.Millisecond,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(HaveLen(1))
+				Expect(res[0].Stream).To(Equal("stream"))
+
+				messages := res[0].Messages
+				Expect(len(messages)).To(BeNumerically(">=", 1))
+
+				for _, msg := range messages {
+					if msg.MillisElapsedFromDelivery > 0 {
+						Expect(msg.MillisElapsedFromDelivery).To(BeNumerically(">=", 50))
+						Expect(msg.DeliveredCount).To(BeNumerically(">=", 1))
+					}
+				}
+			})
+
+			It("should XReadGroup with CLAIM and COUNT", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				time.Sleep(100 * time.Millisecond)
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer3",
+					Streams:  []string{"stream", ">"},
+					Claim:    50 * time.Millisecond,
+					Count:    2,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				if len(res) > 0 && len(res[0].Messages) > 0 {
+					Expect(len(res[0].Messages)).To(BeNumerically("<=", 2))
+				}
+			})
+
+			It("should XReadGroup with CLAIM and NOACK", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				time.Sleep(100 * time.Millisecond)
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer4",
+					Streams:  []string{"stream", ">"},
+					Claim:    50 * time.Millisecond,
+					NoAck:    true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				if len(res) > 0 {
+					Expect(res[0].Stream).To(Equal("stream"))
+				}
+			})
+
+			It("should XReadGroup CLAIM empties PEL after acknowledgment", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				time.Sleep(100 * time.Millisecond)
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer5",
+					Streams:  []string{"stream", ">"},
+					Claim:    50 * time.Millisecond,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				if len(res) > 0 && len(res[0].Messages) > 0 {
+					ids := make([]string, len(res[0].Messages))
+					for i, msg := range res[0].Messages {
+						ids[i] = msg.ID
+					}
+
+					n, err := client.XAck(ctx, "stream", "group", ids...).Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeNumerically(">=", 1))
+
+					pending, err := client.XPending(ctx, "stream", "group").Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(pending.Count).To(BeNumerically("<", 3))
+				}
+			})
+
+			It("should XReadGroup backward compatibility without CLAIM", func() {
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group",
+					Consumer: "consumer_compat",
+					Streams:  []string{"stream", "0"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(HaveLen(1))
+				Expect(res[0].Stream).To(Equal("stream"))
+
+				for _, msg := range res[0].Messages {
+					Expect(msg.MillisElapsedFromDelivery).To(Equal(int64(0)))
+					Expect(msg.DeliveredCount).To(Equal(int64(0)))
+				}
+			})
+
+			It("should XReadGroup CLAIM with multiple streams", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				id, err := client.XAdd(ctx, &redis.XAddArgs{
+					Stream: "stream2",
+					ID:     "1-0",
+					Values: map[string]interface{}{"field1": "value1"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(id).To(Equal("1-0"))
+
+				id, err = client.XAdd(ctx, &redis.XAddArgs{
+					Stream: "stream2",
+					ID:     "2-0",
+					Values: map[string]interface{}{"field2": "value2"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(id).To(Equal("2-0"))
+
+				err = client.XGroupCreate(ctx, "stream2", "group2", "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group2",
+					Consumer: "consumer1",
+					Streams:  []string{"stream2", ">"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				time.Sleep(100 * time.Millisecond)
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group2",
+					Consumer: "consumer2",
+					Streams:  []string{"stream2", ">"},
+					Claim:    50 * time.Millisecond,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				if len(res) > 0 {
+					Expect(res[0].Stream).To(Equal("stream2"))
+					if len(res[0].Messages) > 0 {
+						for _, msg := range res[0].Messages {
+							if msg.MillisElapsedFromDelivery > 0 {
+								Expect(msg.DeliveredCount).To(BeNumerically(">=", 1))
+							}
+						}
+					}
+				}
+			})
+
+			It("should XReadGroup CLAIM work consistently on RESP2 and RESP3", func() {
+				SkipBeforeRedisVersion("8.3", "XREADGROUP CLAIM requires Redis 8.3+")
+
+				streamName := "stream-resp-test"
+				err := client.XAdd(ctx, &redis.XAddArgs{
+					Stream: streamName,
+					Values: map[string]interface{}{"field1": "value1"},
+				}).Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				err = client.XAdd(ctx, &redis.XAddArgs{
+					Stream: streamName,
+					Values: map[string]interface{}{"field2": "value2"},
+				}).Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				groupName := "resp-test-group"
+				err = client.XGroupCreate(ctx, streamName, groupName, "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    groupName,
+					Consumer: "consumer1",
+					Streams:  []string{streamName, ">"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				time.Sleep(100 * time.Millisecond)
+
+				// Test with RESP2 (protocol 2)
+				resp2Client := reNewClient(2, false)
+				defer resp2Client.Close()
+
+				resp2Result, err := resp2Client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    groupName,
+					Consumer: "consumer2",
+					Streams:  []string{streamName, "0"},
+					Claim:    50 * time.Millisecond,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp2Result).To(HaveLen(1))
+
+				// Test with RESP3 (protocol 3)
+				resp3Client := reNewClient(3, false)
+				defer resp3Client.Close()
+
+				resp3Result, err := resp3Client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    groupName,
+					Consumer: "consumer3",
+					Streams:  []string{streamName, "0"},
+					Claim:    50 * time.Millisecond,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp3Result).To(HaveLen(1))
+
+				Expect(len(resp2Result[0].Messages)).To(Equal(len(resp3Result[0].Messages)))
+
+				for i := range resp2Result[0].Messages {
+					msg2 := resp2Result[0].Messages[i]
+					msg3 := resp3Result[0].Messages[i]
+
+					Expect(msg2.ID).To(Equal(msg3.ID))
+
+					if msg2.MillisElapsedFromDelivery > 0 {
+						Expect(msg3.MillisElapsedFromDelivery).To(BeNumerically(">", 0))
+						Expect(msg2.DeliveredCount).To(Equal(msg3.DeliveredCount))
+					}
+				}
+			})
+		})
+
+		Describe("xinfo", func() {
+			BeforeEach(func() {
+				err := client.XGroupCreate(ctx, "stream", "group1", "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				res, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group1",
+					Consumer: "consumer1",
+					Streams:  []string{"stream", ">"},
+					Count:    2,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XStream{
+					{
+						Stream: "stream",
+						Messages: []redis.XMessage{
+							{ID: "1-0", Values: map[string]interface{}{"uno": "un"}},
+							{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+						},
+					},
+				}))
+
+				res, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group1",
+					Consumer: "consumer2",
+					Streams:  []string{"stream", ">"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XStream{
+					{
+						Stream: "stream",
+						Messages: []redis.XMessage{
+							{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+						},
+					},
+				}))
+
+				err = client.XGroupCreate(ctx, "stream", "group2", "1-0").Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				res, err = client.XReadGroup(ctx, &redis.XReadGroupArgs{
+					Group:    "group2",
+					Consumer: "consumer1",
+					Streams:  []string{"stream", ">"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XStream{
+					{
+						Stream: "stream",
+						Messages: []redis.XMessage{
+							{ID: "2-0", Values: map[string]interface{}{"dos": "deux"}},
+							{ID: "3-0", Values: map[string]interface{}{"tres": "troix"}},
+						},
+					},
+				}))
+			})
+
+			AfterEach(func() {
+				n, err := client.XGroupDestroy(ctx, "stream", "group1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+				n, err = client.XGroupDestroy(ctx, "stream", "group2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(1)))
+			})
+
+			// NonRedisEnterprise: Redis Enterprise returns different stream radix-tree fields in
+			// XINFO STREAM than the OSS values this spec asserts.
+			It("should XINFO STREAM", Label("NonRedisEnterprise"), func() {
+				res, err := client.XInfoStream(ctx, "stream").Result()
+				Expect(err).NotTo(HaveOccurred())
+				res.RadixTreeKeys = 0
+				res.RadixTreeNodes = 0
+				expectedRes := &redis.XInfoStream{
+					Length:            3,
+					RadixTreeKeys:     0,
+					RadixTreeNodes:    0,
+					Groups:            2,
+					LastGeneratedID:   "3-0",
+					MaxDeletedEntryID: "0-0",
+					EntriesAdded:      3,
+					FirstEntry: redis.XMessage{
+						ID:     "1-0",
+						Values: map[string]interface{}{"uno": "un"},
+					},
+					LastEntry: redis.XMessage{
+						ID:     "3-0",
+						Values: map[string]interface{}{"tres": "troix"},
+					},
+					RecordedFirstEntryID: "1-0",
+					IDMPDuration:         100,
+					IDMPMaxSize:          100,
+					PIDsTracked:          0,
+					IIDsTracked:          0,
+					IIDsAdded:            0,
+					IIDsDuplicates:       0,
+				}
+				if !redisVersionAtLeast("8.6") {
+					expectedRes.IDMPDuration = 0
+					expectedRes.IDMPMaxSize = 0
+					expectedRes.PIDsTracked = 0
+					expectedRes.IIDsTracked = 0
+					expectedRes.IIDsAdded = 0
+					expectedRes.IIDsDuplicates = 0
+				}
+				Expect(res).To(Equal(expectedRes))
+
+				// stream is empty
+				n, err := client.XDel(ctx, "stream", "1-0", "2-0", "3-0").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(n).To(Equal(int64(3)))
+
+				res, err = client.XInfoStream(ctx, "stream").Result()
+				Expect(err).NotTo(HaveOccurred())
+				res.RadixTreeKeys = 0
+				res.RadixTreeNodes = 0
+				expectedRes = &redis.XInfoStream{
+					Length:               0,
+					RadixTreeKeys:        0,
+					RadixTreeNodes:       0,
+					Groups:               2,
+					LastGeneratedID:      "3-0",
+					MaxDeletedEntryID:    "3-0",
+					EntriesAdded:         3,
+					FirstEntry:           redis.XMessage{},
+					LastEntry:            redis.XMessage{},
+					RecordedFirstEntryID: "0-0",
+					IDMPDuration:         100,
+					IDMPMaxSize:          100,
+					PIDsTracked:          0,
+					IIDsTracked:          0,
+					IIDsAdded:            0,
+					IIDsDuplicates:       0,
+				}
+				if !redisVersionAtLeast("8.6") {
+					expectedRes.IDMPDuration = 0
+					expectedRes.IDMPMaxSize = 0
+					expectedRes.PIDsTracked = 0
+					expectedRes.IIDsTracked = 0
+					expectedRes.IIDsAdded = 0
+					expectedRes.IIDsDuplicates = 0
+				}
+
+				Expect(res).To(Equal(expectedRes))
+			})
+
+			It("should XINFO GROUPS", func() {
+				res, err := client.XInfoGroups(ctx, "stream").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XInfoGroup{
+					{Name: "group1", Consumers: 2, Pending: 3, LastDeliveredID: "3-0", EntriesRead: 3},
+					{Name: "group2", Consumers: 1, Pending: 2, LastDeliveredID: "3-0", EntriesRead: 3},
+				}))
+			})
+
+			It("should return -1 for nil lag in XINFO GROUPS", func() {
+				_, err := client.XAdd(ctx, &redis.XAddArgs{Stream: "s", ID: "0-1", Values: []string{"foo", "1"}}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				client.XAdd(ctx, &redis.XAddArgs{Stream: "s", ID: "0-2", Values: []string{"foo", "2"}})
+				Expect(err).NotTo(HaveOccurred())
+				client.XAdd(ctx, &redis.XAddArgs{Stream: "s", ID: "0-3", Values: []string{"foo", "3"}})
+				Expect(err).NotTo(HaveOccurred())
+
+				err = client.XGroupCreate(ctx, "s", "g", "0").Err()
+				Expect(err).NotTo(HaveOccurred())
+				err = client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: "g", Consumer: "c", Streams: []string{"s", ">"}, Count: 1, Block: -1, NoAck: false}).Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				client.XDel(ctx, "s", "0-2")
+
+				res, err := client.XInfoGroups(ctx, "s").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(Equal([]redis.XInfoGroup{
+					{
+						Name:            "g",
+						Consumers:       1,
+						Pending:         1,
+						LastDeliveredID: "0-1",
+						EntriesRead:     1,
+						Lag:             -1, // nil lag from Redis is reported as -1
+					},
+				}))
+			})
+
+			It("should XINFO CONSUMERS", func() {
+				res, err := client.XInfoConsumers(ctx, "stream", "group1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				for i := range res {
+					res[i].Idle = 0
+					res[i].Inactive = 0
+				}
+
+				Expect(res).To(Equal([]redis.XInfoConsumer{
+					{Name: "consumer1", Pending: 2, Idle: 0, Inactive: 0},
+					{Name: "consumer2", Pending: 1, Idle: 0, Inactive: 0},
+				}))
+			})
+		})
+	})
+
+	Describe("Geo add and radius search", func() {
+		BeforeEach(func() {
+			n, err := client.GeoAdd(
+				ctx,
+				"Sicily",
+				&redis.GeoLocation{Longitude: 13.361389, Latitude: 38.115556, Name: "Palermo"},
+				&redis.GeoLocation{Longitude: 15.087269, Latitude: 37.502669, Name: "Catania"},
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+		})
+
+		It("should not add same geo location", func() {
+			geoAdd := client.GeoAdd(
+				ctx,
+				"Sicily",
+				&redis.GeoLocation{Longitude: 13.361389, Latitude: 38.115556, Name: "Palermo"},
+			)
+			Expect(geoAdd.Err()).NotTo(HaveOccurred())
+			Expect(geoAdd.Val()).To(Equal(int64(0)))
+		})
+
+		It("should search geo radius", func() {
+			res, err := client.GeoRadius(ctx, "Sicily", 15, 37, &redis.GeoRadiusQuery{
+				Radius: 200,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(2))
+			Expect(res[0].Name).To(Equal("Palermo"))
+			Expect(res[1].Name).To(Equal("Catania"))
+		})
+
+		It("should geo radius and store the result", Label("NonRedisEnterprise"), func() {
+			n, err := client.GeoRadiusStore(ctx, "Sicily", 15, 37, &redis.GeoRadiusQuery{
+				Radius: 200,
+				Store:  "result",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			res, err := client.ZRangeWithScores(ctx, "result", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(ContainElement(redis.Z{
+				Score:  3.479099956230698e+15,
+				Member: "Palermo",
+			}))
+			Expect(res).To(ContainElement(redis.Z{
+				Score:  3.479447370796909e+15,
+				Member: "Catania",
+			}))
+		})
+
+		It("should geo radius and store dist", Label("NonRedisEnterprise"), func() {
+			n, err := client.GeoRadiusStore(ctx, "Sicily", 15, 37, &redis.GeoRadiusQuery{
+				Radius:    200,
+				StoreDist: "result",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(n).To(Equal(int64(2)))
+
+			res, err := client.ZRangeWithScores(ctx, "result", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(res)).To(Equal(2))
+			var palermo, catania redis.Z
+			Expect(res).To(ContainElement(HaveField("Member", "Palermo"), &palermo))
+			Expect(res).To(ContainElement(HaveField("Member", "Catania"), &catania))
+			Expect(palermo.Score).To(BeNumerically("~", 190, 1))
+			Expect(catania.Score).To(BeNumerically("~", 56, 1))
+		})
+
+		It("should search geo radius with options", func() {
+			res, err := client.GeoRadius(ctx, "Sicily", 15, 37, &redis.GeoRadiusQuery{
+				Radius:      200,
+				Unit:        "km",
+				WithGeoHash: true,
+				WithCoord:   true,
+				WithDist:    true,
+				Count:       2,
+				Sort:        "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(2))
+			Expect(res[1].Name).To(Equal("Palermo"))
+			Expect(res[1].Dist).To(Equal(190.4424))
+			Expect(res[1].GeoHash).To(Equal(int64(3479099956230698)))
+			Expect(res[1].Longitude).To(Equal(13.361389338970184))
+			Expect(res[1].Latitude).To(Equal(38.115556395496299))
+			Expect(res[0].Name).To(Equal("Catania"))
+			Expect(res[0].Dist).To(Equal(56.4413))
+			Expect(res[0].GeoHash).To(Equal(int64(3479447370796909)))
+			Expect(res[0].Longitude).To(Equal(15.087267458438873))
+			Expect(res[0].Latitude).To(Equal(37.50266842333162))
+		})
+
+		It("should search geo radius with WithDist=false", func() {
+			res, err := client.GeoRadius(ctx, "Sicily", 15, 37, &redis.GeoRadiusQuery{
+				Radius:      200,
+				Unit:        "km",
+				WithGeoHash: true,
+				WithCoord:   true,
+				Count:       2,
+				Sort:        "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(2))
+			Expect(res[1].Name).To(Equal("Palermo"))
+			Expect(res[1].Dist).To(Equal(float64(0)))
+			Expect(res[1].GeoHash).To(Equal(int64(3479099956230698)))
+			Expect(res[1].Longitude).To(Equal(13.361389338970184))
+			Expect(res[1].Latitude).To(Equal(38.115556395496299))
+			Expect(res[0].Name).To(Equal("Catania"))
+			Expect(res[0].Dist).To(Equal(float64(0)))
+			Expect(res[0].GeoHash).To(Equal(int64(3479447370796909)))
+			Expect(res[0].Longitude).To(Equal(15.087267458438873))
+			Expect(res[0].Latitude).To(Equal(37.50266842333162))
+		})
+
+		It("should search geo radius by member with options", func() {
+			res, err := client.GeoRadiusByMember(ctx, "Sicily", "Catania", &redis.GeoRadiusQuery{
+				Radius:      200,
+				Unit:        "km",
+				WithGeoHash: true,
+				WithCoord:   true,
+				WithDist:    true,
+				Count:       2,
+				Sort:        "ASC",
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(2))
+			Expect(res[0].Name).To(Equal("Catania"))
+			Expect(res[0].Dist).To(Equal(0.0))
+			Expect(res[0].GeoHash).To(Equal(int64(3479447370796909)))
+			Expect(res[0].Longitude).To(Equal(15.087267458438873))
+			Expect(res[0].Latitude).To(Equal(37.50266842333162))
+			Expect(res[1].Name).To(Equal("Palermo"))
+			Expect(res[1].Dist).To(Equal(166.2742))
+			Expect(res[1].GeoHash).To(Equal(int64(3479099956230698)))
+			Expect(res[1].Longitude).To(Equal(13.361389338970184))
+			Expect(res[1].Latitude).To(Equal(38.115556395496299))
+		})
+
+		It("should search geo radius with no results", func() {
+			res, err := client.GeoRadius(ctx, "Sicily", 99, 37, &redis.GeoRadiusQuery{
+				Radius:      200,
+				Unit:        "km",
+				WithGeoHash: true,
+				WithCoord:   true,
+				WithDist:    true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(HaveLen(0))
+		})
+
+		It("should get geo distance with unit options", func() {
+			// From Redis CLI, note the difference in rounding in m vs
+			// km on Redis itself.
+			//
+			// GEOADD Sicily 13.361389 38.115556 "Palermo" 15.087269 37.502669 "Catania"
+			// GEODIST Sicily Palermo Catania m
+			// "166274.15156960033"
+			// GEODIST Sicily Palermo Catania km
+			// "166.27415156960032"
+			dist, err := client.GeoDist(ctx, "Sicily", "Palermo", "Catania", "km").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dist).To(BeNumerically("~", 166.27, 0.01))
+
+			dist, err = client.GeoDist(ctx, "Sicily", "Palermo", "Catania", "m").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dist).To(BeNumerically("~", 166274.15, 0.01))
+		})
+
+		It("should get geo hash in string representation", func() {
+			hashes, err := client.GeoHash(ctx, "Sicily", "Palermo", "Catania").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(hashes).To(ConsistOf([]string{"sqc8b49rny0", "sqdtr74hyu0"}))
+		})
+
+		It("should return geo position", func() {
+			pos, err := client.GeoPos(ctx, "Sicily", "Palermo", "Catania", "NonExisting").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pos).To(ConsistOf([]*redis.GeoPos{
+				{
+					Longitude: 13.361389338970184,
+					Latitude:  38.1155563954963,
+				},
+				{
+					Longitude: 15.087267458438873,
+					Latitude:  37.50266842333162,
+				},
+				nil,
+			}))
+		})
+
+		It("should geo search", func() {
+			q := &redis.GeoSearchQuery{
+				Member:    "Catania",
+				BoxWidth:  400,
+				BoxHeight: 100,
+				BoxUnit:   "km",
+				Sort:      "asc",
+			}
+			val, err := client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.BoxHeight = 400
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania", "Palermo"}))
+
+			q.Count = 1
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.CountAny = true
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Palermo"}))
+
+			q = &redis.GeoSearchQuery{
+				Member:     "Catania",
+				Radius:     100,
+				RadiusUnit: "km",
+				Sort:       "asc",
+			}
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.Radius = 400
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania", "Palermo"}))
+
+			q.Count = 1
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.CountAny = true
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Palermo"}))
+
+			q = &redis.GeoSearchQuery{
+				Longitude: 15,
+				Latitude:  37,
+				BoxWidth:  200,
+				BoxHeight: 200,
+				BoxUnit:   "km",
+				Sort:      "asc",
+			}
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.BoxWidth, q.BoxHeight = 400, 400
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania", "Palermo"}))
+
+			q.Count = 1
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.CountAny = true
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Palermo"}))
+
+			q = &redis.GeoSearchQuery{
+				Longitude:  15,
+				Latitude:   37,
+				Radius:     100,
+				RadiusUnit: "km",
+				Sort:       "asc",
+			}
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.Radius = 200
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania", "Palermo"}))
+
+			q.Count = 1
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Catania"}))
+
+			q.CountAny = true
+			val, err = client.GeoSearch(ctx, "Sicily", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]string{"Palermo"}))
+		})
+
+		It("should geo search with options", func() {
+			q := &redis.GeoSearchLocationQuery{
+				GeoSearchQuery: redis.GeoSearchQuery{
+					Longitude:  15,
+					Latitude:   37,
+					Radius:     200,
+					RadiusUnit: "km",
+					Sort:       "asc",
+				},
+				WithHash:  true,
+				WithDist:  true,
+				WithCoord: true,
+			}
+			cmd := client.GeoSearchLocation(ctx, "Sicily", q)
+			Expect(cmd.Args()).To(Equal([]interface{}{
+				"geosearch", "Sicily",
+				"fromlonlat", float64(15), float64(37),
+				"byradius", float64(200), "km",
+				"asc",
+				"withcoord", "withdist", "withhash",
+			}))
+
+			val, err := cmd.Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal([]redis.GeoLocation{
+				{
+					Name:      "Catania",
+					Longitude: 15.08726745843887329,
+					Latitude:  37.50266842333162032,
+					Dist:      56.4413,
+					GeoHash:   3479447370796909,
+				},
+				{
+					Name:      "Palermo",
+					Longitude: 13.36138933897018433,
+					Latitude:  38.11555639549629859,
+					Dist:      190.4424,
+					GeoHash:   3479099956230698,
+				},
+			}))
+		})
+
+		It("should geo search store", Label("NonRedisEnterprise"), func() {
+			q := &redis.GeoSearchStoreQuery{
+				GeoSearchQuery: redis.GeoSearchQuery{
+					Longitude:  15,
+					Latitude:   37,
+					Radius:     200,
+					RadiusUnit: "km",
+					Sort:       "asc",
+				},
+				StoreDist: false,
+			}
+
+			val, err := client.GeoSearchStore(ctx, "Sicily", "key1", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal(int64(2)))
+
+			q.StoreDist = true
+			val, err = client.GeoSearchStore(ctx, "Sicily", "key2", q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(Equal(int64(2)))
+
+			loc, err := client.GeoSearchLocation(ctx, "key1", &redis.GeoSearchLocationQuery{
+				GeoSearchQuery: q.GeoSearchQuery,
+				WithCoord:      true,
+				WithDist:       true,
+				WithHash:       true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(loc).To(Equal([]redis.GeoLocation{
+				{
+					Name:      "Catania",
+					Longitude: 15.08726745843887329,
+					Latitude:  37.50266842333162032,
+					Dist:      56.4413,
+					GeoHash:   3479447370796909,
+				},
+				{
+					Name:      "Palermo",
+					Longitude: 13.36138933897018433,
+					Latitude:  38.11555639549629859,
+					Dist:      190.4424,
+					GeoHash:   3479099956230698,
+				},
+			}))
+
+			v, err := client.ZRangeWithScores(ctx, "key2", 0, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(len(v)).To(Equal(2))
+			var palermo, catania redis.Z
+			Expect(v).To(ContainElement(HaveField("Member", "Palermo"), &palermo))
+			Expect(v).To(ContainElement(HaveField("Member", "Catania"), &catania))
+			Expect(palermo.Score).To(BeNumerically("~", 190, 1))
+			Expect(catania.Score).To(BeNumerically("~", 56, 1))
+		})
+	})
+
+	Describe("marshaling/unmarshaling", func() {
+		type convTest struct {
+			value  interface{}
+			wanted string
+			dest   interface{}
+		}
+
+		convTests := []convTest{
+			{nil, "", nil},
+			{"hello", "hello", new(string)},
+			{[]byte("hello"), "hello", new([]byte)},
+			{1, "1", new(int)},
+			{int8(1), "1", new(int8)},
+			{int16(1), "1", new(int16)},
+			{int32(1), "1", new(int32)},
+			{int64(1), "1", new(int64)},
+			{uint(1), "1", new(uint)},
+			{uint8(1), "1", new(uint8)},
+			{uint16(1), "1", new(uint16)},
+			{uint32(1), "1", new(uint32)},
+			{uint64(1), "1", new(uint64)},
+			{float32(1.0), "1", new(float32)},
+			{1.0, "1", new(float64)},
+			{true, "1", new(bool)},
+			{false, "0", new(bool)},
+		}
+
+		It("should convert to string", func() {
+			for _, test := range convTests {
+				err := client.Set(ctx, "key", test.value, 0).Err()
+				Expect(err).NotTo(HaveOccurred())
+
+				s, err := client.Get(ctx, "key").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(s).To(Equal(test.wanted))
+
+				if test.dest == nil {
+					continue
+				}
+
+				err = client.Get(ctx, "key").Scan(test.dest)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(deref(test.dest)).To(Equal(test.value))
+			}
+		})
+	})
+
+	Describe("json marshaling/unmarshaling", func() {
+		BeforeEach(func() {
+			value := &numberStruct{Number: 42}
+			err := client.Set(ctx, "key", value, 0).Err()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("should marshal custom values using json", func() {
+			s, err := client.Get(ctx, "key").Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s).To(Equal(`{"Number":42}`))
+		})
+
+		It("should scan custom values using json", func() {
+			value := &numberStruct{}
+			err := client.Get(ctx, "key").Scan(value)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(value.Number).To(Equal(42))
+		})
+	})
+
+	Describe("Eval", func() {
+		It("returns keys and values", func() {
+			vals, err := client.Eval(
+				ctx,
+				"return {KEYS[1],ARGV[1]}",
+				[]string{"key"},
+				"hello",
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]interface{}{"key", "hello"}))
+		})
+
+		It("returns all values after an error", func() {
+			vals, err := client.Eval(
+				ctx,
+				`return {12, {err="error"}, "abc"}`,
+				nil,
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]interface{}{int64(12), proto.RedisError("error"), "abc"}))
+		})
+
+		It("returns empty values when args are nil", func() {
+			vals, err := client.Eval(
+				ctx,
+				"return {ARGV[1]}",
+				[]string{},
+				nil,
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(BeEmpty())
+		})
+
+		It("propagates NOSCRIPT errors on EVALSHA of an unknown digest", func() {
+			digest := make([]byte, 32)
+			_, err := rand.Read(digest)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = client.EvalSha(
+				ctx,
+				fmt.Sprintf("%x", sha1.Sum(digest)),
+				[]string{},
+				nil,
+			).Result()
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(redis.ErrNoScript))
+		})
+	})
+
+	Describe("EvalRO", func() {
+		It("returns keys and values", func() {
+			vals, err := client.EvalRO(
+				ctx,
+				"return {KEYS[1],ARGV[1]}",
+				[]string{"key"},
+				"hello",
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]interface{}{"key", "hello"}))
+		})
+
+		It("returns all values after an error", func() {
+			vals, err := client.EvalRO(
+				ctx,
+				`return {12, {err="error"}, "abc"}`,
+				nil,
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(Equal([]interface{}{int64(12), proto.RedisError("error"), "abc"}))
+		})
+
+		It("returns empty values when args are nil", func() {
+			vals, err := client.EvalRO(
+				ctx,
+				"return {ARGV[1]}",
+				[]string{},
+				nil,
+			).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(vals).To(BeEmpty())
+		})
+
+		It("propagates NOSCRIPT errors on EVALSHA_RO of an unknown digest", func() {
+			digest := make([]byte, 32)
+			_, err := rand.Read(digest)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = client.EvalShaRO(
+				ctx,
+				fmt.Sprintf("%x", sha1.Sum(digest)),
+				[]string{},
+				nil,
+			).Result()
+			Expect(err).To(HaveOccurred())
+			Expect(err).To(MatchError(redis.ErrNoScript))
+		})
+	})
+
+	Describe("Functions", func() {
+		var (
+			q        redis.FunctionListQuery
+			lib1Code string
+			lib2Code string
+			lib1     redis.Library
+			lib2     redis.Library
+		)
+
+		BeforeEach(func() {
+			flush := client.FunctionFlush(ctx)
+			Expect(flush.Err()).NotTo(HaveOccurred())
+
+			lib1 = redis.Library{
+				Name:   "mylib1",
+				Engine: "LUA",
+				Functions: []redis.Function{
+					{
+						Name:        "lib1_func1",
+						Description: "This is the func-1 of lib 1",
+						Flags:       []string{"allow-oom", "allow-stale"},
+					},
+				},
+				Code: `#!lua name=%s
+					
+                     local function f1(keys, args)
+                        local hash = keys[1]  -- Get the key name
+                        local time = redis.call('TIME')[1]  -- Get the current time from the Redis server
+
+                        -- Add the current timestamp to the arguments that the user passed to the function, stored in args
+                        table.insert(args, '_updated_at')
+                        table.insert(args, time)
+
+                        -- Run HSET with the updated argument list
+                        return redis.call('HSET', hash, unpack(args))
+                     end
+
+					redis.register_function{
+						function_name='%s',
+						description ='%s',
+						callback=f1,
+						flags={'%s', '%s'}
+					}`,
+			}
+
+			lib2 = redis.Library{
+				Name:   "mylib2",
+				Engine: "LUA",
+				Functions: []redis.Function{
+					{
+						Name:  "lib2_func1",
+						Flags: []string{},
+					},
+					{
+						Name:        "lib2_func2",
+						Description: "This is the func-2 of lib 2",
+						Flags:       []string{"no-writes"},
+					},
+				},
+				Code: `#!lua name=%s
+
+					local function f1(keys, args)
+						 return 'Function 1'
+					end
+					
+					local function f2(keys, args)
+						 return 'Function 2'
+					end
+					
+					redis.register_function('%s', f1)
+					redis.register_function{
+						function_name='%s',
+						description ='%s',
+						callback=f2,
+						flags={'%s'}
+					}`,
+			}
+
+			lib1Code = fmt.Sprintf(lib1.Code, lib1.Name, lib1.Functions[0].Name,
+				lib1.Functions[0].Description, lib1.Functions[0].Flags[0], lib1.Functions[0].Flags[1])
+			lib2Code = fmt.Sprintf(lib2.Code, lib2.Name, lib2.Functions[0].Name,
+				lib2.Functions[1].Name, lib2.Functions[1].Description, lib2.Functions[1].Flags[0])
+
+			q = redis.FunctionListQuery{}
+		})
+
+		It("Loads a new library", Label("NonRedisEnterprise"), func() {
+			functionLoad := client.FunctionLoad(ctx, lib1Code)
+			Expect(functionLoad.Err()).NotTo(HaveOccurred())
+			Expect(functionLoad.Val()).To(Equal(lib1.Name))
+
+			functionList := client.FunctionList(ctx, q)
+			Expect(functionList.Err()).NotTo(HaveOccurred())
+			Expect(functionList.Val()).To(HaveLen(1))
+		})
+
+		It("Loads and replaces a new library", Label("NonRedisEnterprise"), func() {
+			// Load a library for the first time
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			newFuncName := "replaces_func_name"
+			newFuncDesc := "replaces_func_desc"
+			flag1, flag2 := "allow-stale", "no-cluster"
+			newCode := fmt.Sprintf(lib1.Code, lib1.Name, newFuncName, newFuncDesc, flag1, flag2)
+
+			// And then replace it
+			functionLoadReplace := client.FunctionLoadReplace(ctx, newCode)
+			Expect(functionLoadReplace.Err()).NotTo(HaveOccurred())
+			Expect(functionLoadReplace.Val()).To(Equal(lib1.Name))
+
+			lib, err := client.FunctionList(ctx, q).First()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lib.Functions).To(Equal([]redis.Function{
+				{
+					Name:        newFuncName,
+					Description: newFuncDesc,
+					Flags:       []string{flag1, flag2},
+				},
+			}))
+		})
+
+		It("Deletes a library", func() {
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.FunctionDelete(ctx, lib1.Name).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.FunctionList(ctx, redis.FunctionListQuery{
+				LibraryNamePattern: lib1.Name,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(HaveLen(0))
+		})
+
+		It("Flushes all libraries", func() {
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.FunctionLoad(ctx, lib2Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			err = client.FunctionFlush(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.FunctionList(ctx, q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(HaveLen(0))
+		})
+
+		It("Flushes all libraries asynchronously", func() {
+			functionLoad := client.FunctionLoad(ctx, lib1Code)
+			Expect(functionLoad.Err()).NotTo(HaveOccurred())
+
+			// we only verify the command result.
+			functionFlush := client.FunctionFlushAsync(ctx)
+			Expect(functionFlush.Err()).NotTo(HaveOccurred())
+		})
+
+		It("Kills a running function", func() {
+			functionKill := client.FunctionKill(ctx)
+			Expect(functionKill.Err()).To(MatchError("NOTBUSY No scripts in execution right now."))
+
+			// Add test for a long-running function, once we make the test for `function stats` pass
+		})
+
+		It("Lists registered functions", Label("NonRedisEnterprise"), func() {
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err := client.FunctionList(ctx, redis.FunctionListQuery{
+				LibraryNamePattern: "*",
+				WithCode:           true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(HaveLen(1))
+			Expect(val[0].Name).To(Equal(lib1.Name))
+			Expect(val[0].Engine).To(Equal(lib1.Engine))
+			Expect(val[0].Code).To(Equal(lib1Code))
+			Expect(val[0].Functions).Should(ConsistOf(lib1.Functions))
+
+			err = client.FunctionLoad(ctx, lib2Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			val, err = client.FunctionList(ctx, redis.FunctionListQuery{
+				WithCode: true,
+			}).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(val).To(HaveLen(2))
+
+			lib, err := client.FunctionList(ctx, redis.FunctionListQuery{
+				LibraryNamePattern: lib2.Name,
+				WithCode:           false,
+			}).First()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lib.Name).To(Equal(lib2.Name))
+			Expect(lib.Code).To(Equal(""))
+
+			_, err = client.FunctionList(ctx, redis.FunctionListQuery{
+				LibraryNamePattern: "non_lib",
+				WithCode:           true,
+			}).First()
+			Expect(err).To(Equal(redis.Nil))
+		})
+
+		It("Dump and restores all libraries", Label("NonRedisEnterprise"), func() {
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+			err = client.FunctionLoad(ctx, lib2Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			dump, err := client.FunctionDump(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(dump).NotTo(BeEmpty())
+
+			err = client.FunctionRestore(ctx, dump).Err()
+			Expect(err).To(HaveOccurred())
+
+			err = client.FunctionFlush(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			list, err := client.FunctionList(ctx, q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(list).To(HaveLen(0))
+
+			err = client.FunctionRestore(ctx, dump).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			list, err = client.FunctionList(ctx, q).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(list).To(HaveLen(2))
+		})
+
+		It("Calls a function", func() {
+			lib1Code = fmt.Sprintf(lib1.Code, lib1.Name, lib1.Functions[0].Name,
+				lib1.Functions[0].Description, lib1.Functions[0].Flags[0], lib1.Functions[0].Flags[1])
+
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			x := client.FCall(ctx, lib1.Functions[0].Name, []string{"my_hash"}, "a", 1, "b", 2)
+			Expect(x.Err()).NotTo(HaveOccurred())
+			Expect(x.Int()).To(Equal(3))
+		})
+
+		It("Calls a function as read-only", func() {
+			lib1Code = fmt.Sprintf(lib1.Code, lib1.Name, lib1.Functions[0].Name,
+				lib1.Functions[0].Description, lib1.Functions[0].Flags[0], lib1.Functions[0].Flags[1])
+
+			err := client.FunctionLoad(ctx, lib1Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// This function doesn't have a "no-writes" flag
+			x := client.FCallRo(ctx, lib1.Functions[0].Name, []string{"my_hash"}, "a", 1, "b", 2)
+
+			Expect(x.Err()).To(HaveOccurred())
+
+			lib2Code = fmt.Sprintf(lib2.Code, lib2.Name, lib2.Functions[0].Name, lib2.Functions[1].Name,
+				lib2.Functions[1].Description, lib2.Functions[1].Flags[0])
+
+			// This function has a "no-writes" flag
+			err = client.FunctionLoad(ctx, lib2Code).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			x = client.FCallRo(ctx, lib2.Functions[1].Name, []string{})
+
+			Expect(x.Err()).NotTo(HaveOccurred())
+			Expect(x.Text()).To(Equal("Function 2"))
+		})
+
+		It("Shows function stats", func() {
+			SkipBeforeRedisVersion("7.4", "doesn't work with older redis stack images")
+			defer client.FunctionKill(ctx)
+
+			// We can not run blocking commands in Redis functions, so we're using an infinite loop,
+			// but we're killing the function after calling FUNCTION STATS
+			lib := redis.Library{
+				Name:   "mylib1",
+				Engine: "LUA",
+				Functions: []redis.Function{
+					{
+						Name:        "lib1_func1",
+						Description: "This is the func-1 of lib 1",
+						Flags:       []string{"no-writes"},
+					},
+				},
+				Code: `#!lua name=%s
+					local function f1(keys, args)
+						local i = 0
+					   	while true do
+							i = i + 1
+					   	end
+					end
+
+					redis.register_function{
+						function_name='%s',
+						description ='%s',
+						callback=f1,
+						flags={'%s'}
+					}`,
+			}
+			libCode := fmt.Sprintf(lib.Code, lib.Name, lib.Functions[0].Name,
+				lib.Functions[0].Description, lib.Functions[0].Flags[0])
+			err := client.FunctionLoad(ctx, libCode).Err()
+
+			Expect(err).NotTo(HaveOccurred())
+
+			r, err := client.FunctionStats(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(r.Engines)).To(Equal(1))
+			Expect(r.Running()).To(BeFalse())
+
+			started := make(chan bool)
+			go func() {
+				defer GinkgoRecover()
+
+				client2 := redis.NewClient(redisOptions())
+
+				started <- true
+				_, err = client2.FCall(ctx, lib.Functions[0].Name, nil).Result()
+				Expect(err).To(HaveOccurred())
+			}()
+
+			<-started
+			time.Sleep(1 * time.Second)
+			r, err = client.FunctionStats(ctx).Result()
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(r.Engines)).To(Equal(1))
+			rs, isRunning := r.RunningScript()
+			Expect(isRunning).To(BeTrue())
+			Expect(rs.Name).To(Equal(lib.Functions[0].Name))
+			Expect(rs.Duration > 0).To(BeTrue())
+
+			close(started)
+		})
+	})
+
+	Describe("SlowLog", func() {
+		It("returns slow query result", func() {
+			const key = "slowlog-log-slower-than"
+
+			old := rawClient.ConfigGet(ctx, key).Val()
+			rawClient.ConfigSet(ctx, key, "0")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			err := rawClient.Do(ctx, "slowlog", "reset").Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(client.Set(ctx, "test", "true", 0).Err()).NotTo(HaveOccurred())
+
+			result, err := rawClient.SlowLogGet(ctx, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).NotTo(BeZero())
+		})
+
+		It("returns the number of slow queries", Label("NonRedisEnterprise"), func() {
+			// Warm the autopipeline face's dedicated pipeline pool before lowering
+			// the slowlog threshold. That pool dials lazily on the first flush, so
+			// its HELLO + CLIENT SETINFO handshake would otherwise be recorded as
+			// slow queries once slowlog-log-slower-than is 0 and inflate the count.
+			// Read the result so the dial has completed before we reset. Harmless
+			// on the default (non-autopipeline) subject.
+			Expect(client.Set(ctx, "test", "true", 0).Err()).NotTo(HaveOccurred())
+
+			// Reset slowlog
+			err := rawClient.SlowLogReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			const key = "slowlog-log-slower-than"
+
+			old := rawClient.ConfigGet(ctx, key).Val()
+			// first slowlog entry is the config set command itself
+			rawClient.ConfigSet(ctx, key, "0")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			// Set a key to trigger a slow query, and this is the second slowlog entry.
+			// Read the result so the command has actually executed before we count
+			// (required on the deferred autopipeline face, harmless otherwise).
+			Expect(client.Set(ctx, "test", "true", 0).Err()).NotTo(HaveOccurred())
+			result, err := rawClient.SlowLogLen(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).Should(Equal(int64(2)))
+
+			// Reset slowlog
+			err = rawClient.SlowLogReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Check if slowlog is empty, this is the first slowlog entry after reset
+			result, err = rawClient.SlowLogLen(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result).Should(Equal(int64(1)))
+		})
+
+		It("returns the command argument count", Label("NonRedisEnterprise"), func() {
+			SkipBeforeRedisVersion("8.10", "SLOWLOG GET reports the command argument count since Redis 8.10")
+
+			// Config*/SlowLog/Do stay on the raw client: on the deferred
+			// autopipeline face a Do runs outside the pipeline and could
+			// execute before a just-enqueued unread ConfigSet flushes.
+			const key = "slowlog-log-slower-than"
+			old := rawClient.ConfigGet(ctx, key).Val()
+			rawClient.ConfigSet(ctx, key, "0")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			// A short command: CommandArgc matches the number of stored Args.
+			Expect(rawClient.Do(ctx, "slowlog", "reset").Err()).NotTo(HaveOccurred())
+			// The measured command goes through the subject; assert the write
+			// so the deferred face has executed it before SlowLogGet reads.
+			Expect(client.Set(ctx, "test", "true", 0).Err()).NotTo(HaveOccurred())
+
+			result, err := rawClient.SlowLogGet(ctx, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			var setEntry *redis.SlowLog
+			for i := range result {
+				if len(result[i].Args) > 0 && result[i].Args[0] == "set" {
+					setEntry = &result[i]
+				}
+			}
+			Expect(setEntry).NotTo(BeNil())
+			Expect(setEntry.CommandArgc).To(Equal(int64(3))) // SET test true
+
+			// A long command: Redis truncates the stored Args at slowlog-max-argc,
+			// but CommandArgc still reports the full original argument count.
+			maxArgc := rawClient.ConfigGet(ctx, "slowlog-max-argc").Val()["slowlog-max-argc"]
+			rawClient.ConfigSet(ctx, "slowlog-max-argc", "32")
+			defer rawClient.ConfigSet(ctx, "slowlog-max-argc", maxArgc)
+			Expect(rawClient.Do(ctx, "slowlog", "reset").Err()).NotTo(HaveOccurred())
+
+			args := []interface{}{"rpush", "slowlog-big-list"}
+			for i := 0; i < 50; i++ {
+				args = append(args, fmt.Sprintf("v%d", i))
+			}
+			Expect(rawClient.Do(ctx, args...).Err()).NotTo(HaveOccurred())
+
+			result, err = rawClient.SlowLogGet(ctx, -1).Result()
+			Expect(err).NotTo(HaveOccurred())
+			var pushEntry *redis.SlowLog
+			for i := range result {
+				if len(result[i].Args) > 0 && result[i].Args[0] == "rpush" {
+					pushEntry = &result[i]
+				}
+			}
+			Expect(pushEntry).NotTo(BeNil())
+			// "rpush" + key + 50 values = 52 arguments.
+			Expect(pushEntry.CommandArgc).To(Equal(int64(52)))
+			// Stored Args are truncated, so the full count is only available via CommandArgc.
+			Expect(int64(len(pushEntry.Args))).To(BeNumerically("<", pushEntry.CommandArgc))
+		})
+	})
+
+	Describe("Latency", Label("NonRedisEnterprise"), func() {
+		It("returns latencies", func() {
+			const key = "latency-monitor-threshold"
+
+			// reset all latencies first to ensure clean state
+			err := rawClient.LatencyReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			old := rawClient.ConfigGet(ctx, key).Val()
+			rawClient.ConfigSet(ctx, key, "1")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			err = rawClient.Do(ctx, "DEBUG", "SLEEP", 0.01).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			result, err := rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).NotTo(BeZero())
+		})
+
+		It("reset all latencies", func() {
+			const key = "latency-monitor-threshold"
+
+			// reset all latencies
+			err := rawClient.LatencyReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			old := rawClient.ConfigGet(ctx, key).Val()
+			// Use a higher threshold (100ms) to avoid capturing normal operations
+			// that could cause flakiness due to timing variations on busy CI runners.
+			rawClient.ConfigSet(ctx, key, "100")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			// get latency after reset
+			result, err := rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).Should(Equal(0))
+
+			// create a new latency event by sleeping past the threshold
+			err = rawClient.Do(ctx, "DEBUG", "SLEEP", 0.15).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// get latency after create a new latency
+			result, err = rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).Should(BeNumerically(">=", 1))
+			triggered := result[0].Name
+
+			// reset all latencies again
+			err = rawClient.LatencyReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// get latency after reset again. Don't assert total length is 0:
+			// other operations on the connection may briefly land in the
+			// latency log on a slow CI runner. Instead verify the specific
+			// event we triggered is gone.
+			result, err = rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			for _, event := range result {
+				if event.Name == triggered {
+					Fail("Event " + triggered + " should have been reset")
+				}
+			}
+		})
+
+		It("reset latencies by add event name args", func() {
+			const key = "latency-monitor-threshold"
+
+			// reset all latencies first to ensure clean state
+			err := rawClient.LatencyReset(ctx).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			old := rawClient.ConfigGet(ctx, key).Val()
+			// Use a higher threshold (100ms) to avoid capturing normal operations
+			// that could cause flakiness due to timing variations
+			rawClient.ConfigSet(ctx, key, "100")
+			defer rawClient.ConfigSet(ctx, key, old[key])
+
+			result, err := rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).Should(Equal(0))
+
+			// Use a longer sleep (150ms) to ensure it exceeds the 100ms threshold
+			err = rawClient.Do(ctx, "DEBUG", "SLEEP", 0.15).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			result, err = rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(len(result)).Should(BeNumerically(">=", 1))
+
+			// reset latency by event name
+			eventName := result[0].Name
+			err = rawClient.LatencyReset(ctx, eventName).Err()
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify the specific event was reset (not that all events are gone)
+			// This avoids flakiness from other operations triggering latency events
+			result, err = rawClient.Latency(ctx).Result()
+			Expect(err).NotTo(HaveOccurred())
+			for _, event := range result {
+				if event.Name == eventName {
+					Fail("Event " + eventName + " should have been reset")
+				}
+			}
+		})
+	})
+})
+
+type numberStruct struct {
+	Number int
+}
+
+func (n numberStruct) MarshalBinary() ([]byte, error) {
+	return json.Marshal(n)
+}
+
+func (n *numberStruct) UnmarshalBinary(b []byte) error {
+	return json.Unmarshal(b, n)
+}
+
+func (n *numberStruct) ScanRedis(str string) error {
+	return json.Unmarshal([]byte(str), n)
+}
+
+func deref(viface interface{}) interface{} {
+	v := reflect.ValueOf(viface)
+	for v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	return v.Interface()
+}

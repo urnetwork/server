@@ -6,8 +6,10 @@ package nginx
 // zone and the class of the name, the earliest expiry of the certificates it
 // serves, a counter of the
 // QUIC ClientHellos its QUIC TLS config reads, by port kind, the class of the
-// name and whether h3 was offered, and an optional access log at V(1),
-// sampled, that honors no_access_log and no_success_access_log.
+// name and whether h3 was offered, gauges of how its connect connections
+// concentrate on source addresses (concentration.go), by family and bound,
+// and an optional access log at V(1), sampled, that honors no_access_log and
+// no_success_access_log.
 //
 // The service and block labels are upstream_service and upstream_block: the
 // process's stats push adds its own service and block to every series, and
@@ -52,6 +54,10 @@ type frontMetrics struct {
 	certificateExpiry *prometheus.GaugeVec
 	// every ClientHello the QUIC TLS config reads (newTlsConfigs)
 	quicClientHellos *prometheus.CounterVec
+	// the source addresses holding connect connections, and the connections
+	// they hold, by family and bound (frontConcentration)
+	connectAddresses          *prometheus.GaugeVec
+	connectAddressConnections *prometheus.GaugeVec
 }
 
 // Builds and registers one independent set of the front's metric families.
@@ -90,6 +96,18 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Name:      "quic_client_hellos_total",
 			Help:      "QUIC ClientHellos the lb_alt front read, by port kind (quic, whodis, other), the class of the server name (connect, api, lb, forwarded, redirect for a served name; alt for alt, alt-v4 or alt-v6 on any domain, unknown for another name and none for a missing or invalid one, which the front doesn't serve on QUIC, so their handshakes fail) and whether the client offered h3 (true, false). The name itself is never a label",
 		}, []string{"port", "name_class", "h3_offered"}),
+		connectAddresses: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "connect_addresses",
+			Help:      "Source addresses holding active connect connections through the lb_alt front (h1 upgrades to connect names served in-process, and connect's QUIC connections), by family (ipv4, ipv6) and over (0, 10, 100, 1000): the addresses holding more connections than that, so over 0 counts every address holding one. The address itself is never a label (LBALTOPT2 R16)",
+		}, []string{"family", "over"}),
+		connectAddressConnections: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "connect_address_connections",
+			Help:      "Active connect connections through the lb_alt front held by the source addresses urnetwork_front_connect_addresses counts, by family (ipv4, ipv6) and over (0, 10, 100, 1000): over 0 is every connection, so over N divided by over 0 is the share of a block's connections that its addresses with more than N hold (LBALTOPT2 R16)",
+		}, []string{"family", "over"}),
 	}
 	registerer.MustRegister(
 		metrics.requests,
@@ -97,6 +115,8 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 		metrics.limitRefusals,
 		metrics.certificateExpiry,
 		metrics.quicClientHellos,
+		metrics.connectAddresses,
+		metrics.connectAddressConnections,
 	)
 	return metrics
 }
