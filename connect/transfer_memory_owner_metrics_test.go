@@ -183,3 +183,17 @@ func TestTransferMemoryOwnerRunSettingsCapture(t *testing.T) {
 		t.Fatal("residents did not retain the captured Exchange ledger with independent settings")
 	}
 }
+
+// A resident's client stays out of the process-wide network quality listener
+// list, which every add and remove clones (LBALTOPT2 R13).
+func TestResidentClientSettingsSkipTheNetworkQualityListenerList(t *testing.T) {
+	settings := exchangeSettingsForRun(RunOptions{})
+	settings.KeyEventDelivery.Enabled = false
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	exchange := NewExchange(ctx, "synthetic", "connect", "synthetic", nil, nil, settings)
+	defer exchange.Close()
+	if !exchange.residentClientSettings().SkipNetworkQualityListener {
+		t.Fatal("a resident's client joins the network quality listener list")
+	}
+}
