@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"golang.org/x/net/http2"
+
+	"github.com/urnetwork/server/nginx"
 )
 
 // TCP 443 terminates TLS with the front's config and serves the interface's
@@ -111,21 +114,22 @@ func TestFrontHttpErrorLogKeepsClientAddressesOut(t *testing.T) {
 	cases := []struct {
 		message string
 		kind    string
+		reason  string
 	}{
-		{message: "http: TLS handshake error from 203.0.113.7:4242: EOF\n", kind: frontHttpErrorTlsHandshake},
-		{message: "http: panic serving [2001:db8::7]:4242: synthetic\ngoroutine 1 [running]:\n", kind: frontHttpErrorPanic},
-		{message: "http: Accept error: synthetic; retrying in 5ms\n", kind: frontHttpErrorAccept},
-		{message: "http2: server: error reading preface from client 198.51.100.7:4242: EOF\n", kind: frontHttpErrorOther},
+		{message: "http: TLS handshake error from 203.0.113.7:4242: EOF\n", kind: frontHttpErrorTlsHandshake, reason: frontTlsHandshakeReasonClosed},
+		{message: "http: panic serving [2001:db8::7]:4242: synthetic\ngoroutine 1 [running]:\n", kind: frontHttpErrorPanic, reason: frontHttpErrorReasonNone},
+		{message: "http: Accept error: synthetic; retrying in 5ms\n", kind: frontHttpErrorAccept, reason: frontHttpErrorReasonNone},
+		{message: "http2: server: error reading preface from client 198.51.100.7:4242: EOF\n", kind: frontHttpErrorOther, reason: frontHttpErrorReasonNone},
 	}
 	errorLog := &frontHttpErrorLog{portKind: frontPortHttps}
 	for _, c := range cases {
-		counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, c.kind)
+		counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, c.kind, c.reason)
 		before := testutil.ToFloat64(counter)
 		if n, err := errorLog.Write([]byte(c.message)); err != nil || n != len(c.message) {
 			t.Fatalf("write = %d %v", n, err)
 		}
 		if after := testutil.ToFloat64(counter); after != before+1 {
-			t.Fatalf("%q counted %v times as %s", c.message, after-before, c.kind)
+			t.Fatalf("%q counted %v times as %s %s", c.message, after-before, c.kind, c.reason)
 		}
 	}
 
@@ -141,11 +145,78 @@ func TestFrontHttpErrorLogKeepsClientAddressesOut(t *testing.T) {
 	}
 }
 
+// The reason of a failed handshake comes from the error after the client's
+// address alone, whatever addresses the error itself quotes, and every
+// reason is one of the closed set.
+func TestFrontTlsHandshakeReasonReadsOnlyTheError(t *testing.T) {
+	const prefix4 = "http: TLS handshake error from 203.0.113.7:4242: "
+	const prefix6 = "http: TLS handshake error from [2001:db8::7]:4242: "
+	cases := []struct {
+		message string
+		reason  string
+	}{
+		{message: prefix4 + "EOF\n", reason: frontTlsHandshakeReasonClosed},
+		{message: prefix6 + "EOF\n", reason: frontTlsHandshakeReasonClosed},
+		{message: prefix4 + "unexpected EOF\n", reason: frontTlsHandshakeReasonClosed},
+		{message: prefix6 + "read tcp [2001:db8::1]:443->[2001:db8::7]:4242: read: connection reset by peer\n", reason: frontTlsHandshakeReasonClosed},
+		{message: prefix4 + "write tcp 192.0.2.1:443->203.0.113.7:4242: write: broken pipe\n", reason: frontTlsHandshakeReasonClosed},
+		{message: prefix4 + "read tcp 192.0.2.1:443->203.0.113.7:4242: i/o timeout\n", reason: frontTlsHandshakeReasonTimeout},
+		{message: prefix6 + "context deadline exceeded\n", reason: frontTlsHandshakeReasonTimeout},
+		{message: prefix4 + "client sent an HTTP request to an HTTPS server\n", reason: frontTlsHandshakeReasonNotTls},
+		{message: prefix4 + "tls: first record does not look like a TLS handshake\n", reason: frontTlsHandshakeReasonNotTls},
+		{message: prefix6 + "tls: oversized record received with length 20527\n", reason: frontTlsHandshakeReasonNotTls},
+		{message: prefix4 + "tls: unsupported SSLv2 handshake received\n", reason: frontTlsHandshakeReasonVersion},
+		{message: prefix4 + "tls: client offered only unsupported versions: [302 301]\n", reason: frontTlsHandshakeReasonVersion},
+		{message: prefix6 + "remote error: tls: protocol version not supported\n", reason: frontTlsHandshakeReasonVersion},
+		{message: prefix4 + "tls: no cipher suite supported by both client and server; client offered: [9c]\n", reason: frontTlsHandshakeReasonCipher},
+		{message: prefix4 + "tls: no key exchanges supported by both client and server\n", reason: frontTlsHandshakeReasonCipher},
+		{message: prefix6 + "tls: peer doesn't support any of the certificate's signature algorithms\n", reason: frontTlsHandshakeReasonCipher},
+		{message: prefix4 + "tls: client requested unsupported application protocols ([\"acme-tls/1\"])\n", reason: frontTlsHandshakeReasonAlpn},
+		{message: prefix4 + "remote error: tls: no application protocol\n", reason: frontTlsHandshakeReasonAlpn},
+		{message: prefix4 + "remote error: tls: bad certificate\n", reason: frontTlsHandshakeReasonCertificate},
+		{message: prefix6 + "remote error: tls: unknown certificate authority\n", reason: frontTlsHandshakeReasonCertificate},
+		{message: prefix4 + "remote error: tls: expired certificate\n", reason: frontTlsHandshakeReasonCertificate},
+		{message: prefix4 + nginx.TlsNoCertificateMessage + "\n", reason: frontTlsHandshakeReasonUnknownName},
+		{message: prefix4 + "remote error: tls: handshake failure\n", reason: frontTlsHandshakeReasonClientAlert},
+		{message: prefix6 + "remote error: tls: user canceled\n", reason: frontTlsHandshakeReasonClientAlert},
+		// the front's own certificate problem is not the client refusing it
+		{message: prefix4 + "tls: unsupported certificate curve (P-521)\n", reason: frontTlsHandshakeReasonOther},
+		{message: prefix4 + "local error: tls: bad record MAC\n", reason: frontTlsHandshakeReasonOther},
+		{message: "http: TLS handshake error from 203.0.113.7:4242\n", reason: frontTlsHandshakeReasonOther},
+	}
+	reasons := map[string]bool{
+		frontTlsHandshakeReasonClosed:      true,
+		frontTlsHandshakeReasonTimeout:     true,
+		frontTlsHandshakeReasonVersion:     true,
+		frontTlsHandshakeReasonCipher:      true,
+		frontTlsHandshakeReasonCertificate: true,
+		frontTlsHandshakeReasonUnknownName: true,
+		frontTlsHandshakeReasonAlpn:        true,
+		frontTlsHandshakeReasonNotTls:      true,
+		frontTlsHandshakeReasonClientAlert: true,
+		frontTlsHandshakeReasonOther:       true,
+	}
+	seenReasons := map[string]bool{}
+	for _, c := range cases {
+		reason := frontTlsHandshakeReason(c.message)
+		if reason != c.reason {
+			t.Errorf("%q has reason %s, want %s", c.message, reason, c.reason)
+		}
+		seenReasons[reason] = true
+	}
+	for reason := range reasons {
+		if !seenReasons[reason] {
+			t.Errorf("no case has reason %s", reason)
+		}
+	}
+}
+
 // One message a public server wrote to its error log, as the front's
 // observer saw it.
 type testFrontHttpError struct {
 	portKind string
 	kind     string
+	reason   string
 	logged   string
 }
 
@@ -153,9 +224,9 @@ type testFrontHttpError struct {
 // are counted.
 func observeTestFrontHttpErrors(env *testFrontEnv) chan testFrontHttpError {
 	httpErrors := make(chan testFrontHttpError, 64)
-	env.settings.httpErrorObserverForTest = func(portKind string, kind string, logged string) {
+	env.settings.httpErrorObserverForTest = func(portKind string, kind string, reason string, logged string) {
 		select {
-		case httpErrors <- testFrontHttpError{portKind: portKind, kind: kind, logged: logged}:
+		case httpErrors <- testFrontHttpError{portKind: portKind, kind: kind, reason: reason, logged: logged}:
 		default:
 		}
 	}
@@ -215,7 +286,7 @@ func TestFrontHttpsCountsAFailedHandshakeWithoutLoggingTheAddress(t *testing.T) 
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		httpErrors = observeTestFrontHttpErrors(env)
 	})
-	counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, frontHttpErrorTlsHandshake)
+	counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonNotTls)
 	before := testutil.ToFloat64(counter)
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
 	conn, err := net.Dial("tcp", env.bindAddress(address, frontPortHttps))
@@ -230,7 +301,7 @@ func TestFrontHttpsCountsAFailedHandshakeWithoutLoggingTheAddress(t *testing.T) 
 	testFrontReadEnd(t, conn, "the failed handshake's connection")
 
 	httpError := nextTestFrontHttpError(t, httpErrors, "the failed handshake")
-	if want := (testFrontHttpError{portKind: frontPortHttps, kind: frontHttpErrorTlsHandshake}); httpError != want {
+	if want := (testFrontHttpError{portKind: frontPortHttps, kind: frontHttpErrorTlsHandshake, reason: frontTlsHandshakeReasonNotTls}); httpError != want {
 		t.Fatalf("the failed handshake was %+v, want %+v", httpError, want)
 	}
 	if after := testutil.ToFloat64(counter); after < before+1 {
@@ -238,6 +309,127 @@ func TestFrontHttpsCountsAFailedHandshakeWithoutLoggingTheAddress(t *testing.T) 
 	}
 	if text := standardLog.String(); strings.Contains(text, clientAddress) || strings.Contains(text, "TLS handshake error") {
 		t.Fatalf("the standard logger got the failed handshake: %q", text)
+	}
+}
+
+// Real clients that fail the handshake in each common way are counted under
+// the reason their failure gives. The reasons read crypto/tls's texts, so a Go
+// release that rewords one fails here.
+func TestFrontHttpsLabelsRealFailedHandshakesByReason(t *testing.T) {
+	var httpErrors chan testFrontHttpError
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		httpErrors = observeTestFrontHttpErrors(env)
+	})
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	bindAddress := env.bindAddress(address, frontPortHttps)
+	// a handshake the front must refuse
+	failHandshake := func(what string, tlsConfig *tls.Config) {
+		t.Helper()
+		dialer := &net.Dialer{Timeout: testFrontProgressTimeout}
+		tlsConn, err := tls.DialWithDialer(dialer, "tcp", bindAddress, tlsConfig)
+		if err == nil {
+			tlsConn.Close()
+			t.Fatalf("%s: the handshake succeeded", what)
+		}
+	}
+
+	cases := []struct {
+		what   string
+		reason string
+		fail   func(what string)
+	}{
+		{
+			what:   "a connection closed before its ClientHello",
+			reason: frontTlsHandshakeReasonClosed,
+			fail: func(what string) {
+				conn, err := net.Dial("tcp", bindAddress)
+				if err != nil {
+					t.Fatal(err)
+				}
+				conn.Close()
+			},
+		},
+		{
+			what:   "a client of TLS 1.1 at most",
+			reason: frontTlsHandshakeReasonVersion,
+			fail: func(what string) {
+				tlsConfig := env.clientTlsConfig(testFrontApiName, []string{"http/1.1"})
+				tlsConfig.MinVersion = tls.VersionTLS10
+				tlsConfig.MaxVersion = tls.VersionTLS11
+				failHandshake(what, tlsConfig)
+			},
+		},
+		{
+			// RSA key exchange is neither in the front's suites nor in Go's
+			// server defaults, which the fixture's servers keep
+			what:   "a TLS 1.2 client of RSA key exchange suites only",
+			reason: frontTlsHandshakeReasonCipher,
+			fail: func(what string) {
+				tlsConfig := env.clientTlsConfig(testFrontApiName, []string{"http/1.1"})
+				tlsConfig.MaxVersion = tls.VersionTLS12
+				tlsConfig.CipherSuites = []uint16{
+					tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+				}
+				failHandshake(what, tlsConfig)
+			},
+		},
+		{
+			what:   "a client of an application protocol the front doesn't speak",
+			reason: frontTlsHandshakeReasonAlpn,
+			fail: func(what string) {
+				failHandshake(what, env.clientTlsConfig(testFrontApiName, []string{"acme-tls/1"}))
+			},
+		},
+		{
+			what:   "a client that refuses the front's certificate",
+			reason: frontTlsHandshakeReasonCertificate,
+			fail: func(what string) {
+				tlsConfig := env.clientTlsConfig(testFrontApiName, []string{"http/1.1"})
+				tlsConfig.RootCAs = x509.NewCertPool()
+				failHandshake(what, tlsConfig)
+			},
+		},
+	}
+	for _, c := range cases {
+		counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, frontHttpErrorTlsHandshake, c.reason)
+		before := testutil.ToFloat64(counter)
+		c.fail(c.what)
+		httpError := nextTestFrontHttpError(t, httpErrors, c.what)
+		if want := (testFrontHttpError{portKind: frontPortHttps, kind: frontHttpErrorTlsHandshake, reason: c.reason}); httpError != want {
+			t.Fatalf("%s was %+v, want %+v", c.what, httpError, want)
+		}
+		if after := testutil.ToFloat64(counter); after < before+1 {
+			t.Fatalf("%s counted %v times", c.what, after-before)
+		}
+	}
+}
+
+// A connection that sends no ClientHello within the client header timeout,
+// which bounds the handshake, is counted as a timeout.
+func TestFrontHttpsCountsAStalledHandshakeAsATimeout(t *testing.T) {
+	var httpErrors chan testFrontHttpError
+	env := newTestFrontEnv(t, func(env *testFrontEnv) {
+		env.settings.Front.Http.ClientHeaderTimeout = 100 * time.Millisecond
+		httpErrors = observeTestFrontHttpErrors(env)
+	})
+	counter := frontHttpServerErrorsCounter.WithLabelValues(frontPortHttps, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonTimeout)
+	before := testutil.ToFloat64(counter)
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	conn, err := net.Dial("tcp", env.bindAddress(address, frontPortHttps))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(testFrontProgressTimeout))
+	testFrontReadEnd(t, conn, "the stalled handshake's connection")
+
+	httpError := nextTestFrontHttpError(t, httpErrors, "the stalled handshake")
+	if want := (testFrontHttpError{portKind: frontPortHttps, kind: frontHttpErrorTlsHandshake, reason: frontTlsHandshakeReasonTimeout}); httpError != want {
+		t.Fatalf("the stalled handshake was %+v, want %+v", httpError, want)
+	}
+	if after := testutil.ToFloat64(counter); after < before+1 {
+		t.Fatalf("the stalled handshake counted %v times", after-before)
 	}
 }
 

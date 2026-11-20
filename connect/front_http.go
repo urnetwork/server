@@ -371,31 +371,84 @@ func (self *frontTrackedConn) Close() error {
 type frontHttpErrorLog struct {
 	portKind string
 	// FrontServerSettings.httpErrorObserverForTest
-	observer func(portKind string, kind string, logged string)
+	observer func(portKind string, kind string, reason string, logged string)
 }
 
-// Counts one message by its kind, logging only a panic, scrubbed.
+// Counts one message by its kind, and a failed handshake by its reason,
+// logging only a panic, scrubbed.
 func (self *frontHttpErrorLog) Write(message []byte) (int, error) {
 	text := string(message)
 	kind := frontHttpErrorOther
+	reason := frontHttpErrorReasonNone
 	switch {
 	case strings.Contains(text, "TLS handshake error"):
 		kind = frontHttpErrorTlsHandshake
+		reason = frontTlsHandshakeReason(text)
 	case strings.Contains(text, "panic serving"):
 		kind = frontHttpErrorPanic
 	case strings.Contains(text, "Accept error"):
 		kind = frontHttpErrorAccept
 	}
-	frontHttpServerErrorsCounter.WithLabelValues(self.portKind, kind).Inc()
+	frontHttpServerErrorsCounter.WithLabelValues(self.portKind, kind, reason).Inc()
 	logged := ""
 	if kind == frontHttpErrorPanic {
 		logged = scrubFrontHttpPanic(text)
 		glog.Errorf("[front]%s handler panic: %s\n", self.portKind, logged)
 	}
 	if self.observer != nil {
-		self.observer(self.portKind, kind, logged)
+		self.observer(self.portKind, kind, reason, logged)
 	}
 	return len(message), nil
+}
+
+// The reason in net/http's "http: TLS handshake error from <address>:
+// <error>". Only the error is read: it starts after the address's first
+// ": ", which an IPv6 address in brackets never holds, and it may quote the
+// connection's addresses, which never reach a label. The error is
+// crypto/tls's, the kernel's through the connection, or the front's own
+// (nginx.TlsNoCertificateMessage), and net/http says "client sent an HTTP
+// request to an HTTPS server" for a request on the TLS port. The specific
+// texts are checked before the client's other alerts.
+func frontTlsHandshakeReason(text string) string {
+	_, addressError, found := strings.Cut(text, "TLS handshake error from ")
+	if !found {
+		return frontTlsHandshakeReasonOther
+	}
+	_, handshakeError, found := strings.Cut(addressError, ": ")
+	if !found {
+		return frontTlsHandshakeReasonOther
+	}
+	handshakeError = strings.TrimSpace(handshakeError)
+	containsAny := func(substrings ...string) bool {
+		for _, substring := range substrings {
+			if strings.Contains(handshakeError, substring) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case containsAny(nginx.TlsNoCertificateMessage):
+		return frontTlsHandshakeReasonUnknownName
+	case containsAny("i/o timeout", "deadline exceeded"):
+		return frontTlsHandshakeReasonTimeout
+	case handshakeError == "EOF" || containsAny("unexpected EOF", "connection reset by peer", "broken pipe"):
+		return frontTlsHandshakeReasonClosed
+	case containsAny("client sent an HTTP request to an HTTPS server", "does not look like a TLS handshake", "oversized record received"):
+		return frontTlsHandshakeReasonNotTls
+	case containsAny("offered only unsupported versions", "protocol version not supported", "unsupported SSLv2 handshake"):
+		return frontTlsHandshakeReasonVersion
+	case containsAny("no cipher suite supported", "no key exchanges supported", "peer doesn't support"):
+		return frontTlsHandshakeReasonCipher
+	case containsAny("unsupported application protocols", "no application protocol"):
+		return frontTlsHandshakeReasonAlpn
+	case strings.HasPrefix(handshakeError, "remote error: tls: ") && containsAny("certificate"):
+		return frontTlsHandshakeReasonCertificate
+	case strings.HasPrefix(handshakeError, "remote error: tls: "):
+		return frontTlsHandshakeReasonClientAlert
+	default:
+		return frontTlsHandshakeReasonOther
+	}
 }
 
 // A net/http panic message without the client address it quotes: the

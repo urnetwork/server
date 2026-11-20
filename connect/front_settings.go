@@ -93,10 +93,11 @@ type FrontServerSettings struct {
 	// Nil outside package tests. Called with the port kind and result each
 	// accepted QUIC connection is counted with, as it is counted.
 	connectionResultObserverForTest func(portKind string, result string)
-	// Nil outside package tests. Called with the port kind and kind of each
-	// message a public HTTP server wrote to its error log, as it is counted,
-	// and the text the front logged for it, empty when it logged nothing.
-	httpErrorObserverForTest func(portKind string, kind string, logged string)
+	// Nil outside package tests. Called with the port kind, kind and reason of
+	// each message a public HTTP server wrote to its error log, as it is
+	// counted, and the text the front logged for it, empty when it logged
+	// nothing.
+	httpErrorObserverForTest func(portKind string, kind string, reason string, logged string)
 	// Nil outside package tests. Called with the name of each forced close
 	// step reported as not closed within ForcedCloseTimeout, as it is logged.
 	forcedCloseReportObserverForTest func(step string)
