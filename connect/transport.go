@@ -1092,6 +1092,9 @@ func newConnectHandlerWithPacketConns(
 	// The exchange flag is the single drain-excuse switch: the exchange side
 	// writes the markers on drain, the announce side consumes them.
 	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
+	// One timer sweep per process: the announcements' and the authorization
+	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
+	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
@@ -1772,7 +1775,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	// the lease's final check before admission is one of the handshake's queries
 	lease, leaseErr := session.StartConnectionAuthorizationLease(
-		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -2822,7 +2825,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 			// the lease's final check before admission is one of the handshake's queries
 			lease, leaseErr = session.StartConnectionAuthorizationLease(
-				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)

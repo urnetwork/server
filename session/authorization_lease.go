@@ -25,6 +25,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/timersweep"
 )
 
 const AuthorizationLeaseDuration = 90 * time.Second
@@ -173,6 +174,9 @@ type AuthorizationLease struct {
 	// admitted without a verified check, or without its published connection
 	// authority: the first recheck runs on the unavailable backoff
 	admittedUnverified bool
+	// the horizon timer and the recheck ticker wait on it, outside the
+	// runtime's timer heaps; nil gives each a sweep of its own
+	timerSweep *timersweep.Sweep
 }
 
 // A recheck whose revocation check Redis did not answer: the credential was
@@ -195,20 +199,29 @@ func (self *AuthorizationLease) retryDelay(interval time.Duration) time.Duration
 // Registration into the owning connection map must happen before calling this.
 // The final check closes the earlier-auth/registration race before admission.
 func StartAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransport func(int)) (*AuthorizationLease, error) {
-	return startAuthorizationLease(ctx, credential, closeTransport, nil)
+	return startAuthorizationLease(ctx, credential, closeTransport, nil, nil)
 }
-func StartConnectionAuthorizationLease(ctx context.Context, credential *ByJwt, generation server.Id, version uint32, closeTransport func(int)) (*AuthorizationLease, error) {
+
+// The lease's horizon timer and recheck ticker wait on timerSweep, the
+// process's sweep (LBALTOPT2.md §8.1): the horizon retires the transport at
+// the credential's horizon or at most one sweep tick after it, and each
+// recheck comes at most a tick after its place in the 60 second cadence.
+func StartConnectionAuthorizationLease(ctx context.Context, credential *ByJwt, generation server.Id, version uint32, timerSweep *timersweep.Sweep, closeTransport func(int)) (*AuthorizationLease, error) {
 	return startAuthorizationLease(ctx, credential, closeTransport, func(ctx context.Context, deadline time.Time) error {
 		return PublishConnectionAuthority(ctx, credential, generation, version, deadline)
-	})
+	}, timerSweep)
 }
-func startAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error) (*AuthorizationLease, error) {
-	return startAuthorizationLeaseWithCheck(ctx, credential, closeTransport, publish, checkLeaseCredential)
+func startAuthorizationLease(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error, timerSweep *timersweep.Sweep) (*AuthorizationLease, error) {
+	return startAuthorizationLeaseWithSweep(ctx, credential, closeTransport, publish, checkLeaseCredential, timerSweep)
 }
 
 // The check performs every authoritative credential read: the final check
 // before admission and each recheck that can renew the lease.
 func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error, check func(context.Context, *ByJwt) error) (*AuthorizationLease, error) {
+	return startAuthorizationLeaseWithSweep(ctx, credential, closeTransport, publish, check, nil)
+}
+
+func startAuthorizationLeaseWithSweep(ctx context.Context, credential *ByJwt, closeTransport func(int), publish func(context.Context, time.Time) error, check func(context.Context, *ByJwt) error, timerSweep *timersweep.Sweep) (*AuthorizationLease, error) {
 	start := time.Now()
 	terminal := credential.AcceptUntil()
 	if credential.SessionId == nil && credential.RootClientId == nil && !rejectExpired() {
@@ -252,7 +265,7 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 	// that source does not describe and no other covers yet, so they count as
 	// unknown.
 	leaseCtx, cancel := context.WithCancel(WithStateQuerySource(ctx, StateQueryUnknown))
-	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check, started: start, admittedUnverified: unchecked}
+	lease := &AuthorizationLease{ctx: leaseCtx, cancel: cancel, state: authorizationLeaseState{deadline: deadline, generation: 1}, wake: make(chan struct{}, 1), terminal: terminal, credential: credential, closeTransport: closeTransport, publish: publish, check: check, started: start, admittedUnverified: unchecked, timerSweep: timerSweep}
 	go lease.runTimer()
 	go lease.runChecks()
 	return lease, nil
@@ -297,12 +310,15 @@ func (self *AuthorizationLease) closeWithCause(code int) {
 
 // Retires the transport at the credential's acceptance horizon, a definitive
 // expiry that needs no store. Without a horizon only a definitive check retires.
+// The horizon already carries the clock leeway past the token's expiry, and
+// the wait is on the sweep, so the retirement comes at most a sweep tick after
+// the horizon, never before it.
 func (self *AuthorizationLease) runTimer() {
 	if self.terminal.IsZero() {
 		<-self.ctx.Done()
 		return
 	}
-	timer := time.NewTimer(max(0, time.Until(self.terminal)))
+	timer := self.timerSweep.NewTimer(time.Until(self.terminal))
 	defer timer.Stop()
 	select {
 	case <-self.ctx.Done():
@@ -317,7 +333,9 @@ func (self *AuthorizationLease) runTimer() {
 	}
 }
 func (self *AuthorizationLease) runChecks() {
-	ticker := time.NewTicker(AuthorizationRecheckInterval)
+	// keeps the cadence from the lease's start, each recheck at most a sweep
+	// tick late against a lease of AuthorizationLeaseDuration
+	ticker := self.timerSweep.NewTicker(AuthorizationRecheckInterval)
 	defer ticker.Stop()
 	// armed only after an unanswered check; a nil channel never fires
 	var retry <-chan time.Time
@@ -399,6 +417,19 @@ func (self *AuthorizationLease) runChecks() {
 			return
 		}
 	}
+}
+
+// Starts a connection's lease, as StartConnectionAuthorizationLease does, but
+// with check as its authoritative credential check and no published
+// connection authority, so a test outside the package runs the real lease
+// goroutines without the authorization store.
+func Testing_StartConnectionAuthorizationLease(ctx context.Context, credential *ByJwt, timerSweep *timersweep.Sweep, check func(context.Context, *ByJwt) error, closeTransport func(int)) (*AuthorizationLease, error) {
+	return startAuthorizationLeaseWithSweep(ctx, credential, closeTransport, nil, check, timerSweep)
+}
+
+// The sweep the lease's timers wait on, nil for a sweep of each timer's own.
+func (self *AuthorizationLease) Testing_TimerSweep() *timersweep.Sweep {
+	return self.timerSweep
 }
 
 // Routes every later recheck through interpose(check), so a test outside the

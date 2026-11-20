@@ -34,7 +34,7 @@ func TestConnectAdmissionAcceptsATaggedClientWhileRedisDialsTimeOut(t *testing.T
 		}
 		start = time.Now()
 		closed := make(chan int, 1)
-		lease, err := session.StartConnectionAuthorizationLease(ctx, client, server.NewId(), 1, func(code int) { closed <- code })
+		lease, err := session.StartConnectionAuthorizationLease(ctx, client, server.NewId(), 1, nil, func(code int) { closed <- code })
 		if err != nil {
 			t.Fatalf("the lease's final check refused admission during the Redis dial outage: %v", err)
 		}
