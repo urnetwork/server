@@ -143,10 +143,10 @@ func TestFrontServesItsBuiltPartsPerInterface(t *testing.T) {
 			t.Errorf("an unknown interface's handler = %d, want 503", response.Code)
 		}
 	}
-	if release, ok := front.AcquireQuicConnection("eth9", netip.MustParseAddr("198.51.100.7")); ok || release != nil {
+	if release, ok := front.AcquireQuicConnection("eth9", netip.MustParseAddr("198.51.100.7"), NameClassConnect); ok || release != nil {
 		t.Error("an unknown interface admitted a QUIC connection")
 	}
-	if count := testCounterValue(t, metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel)); count != 1 {
+	if count := testCounterValue(t, metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, "connect")); count != 1 {
 		t.Errorf("%v unknown interface refusals counted, want 1", count)
 	}
 }
@@ -198,20 +198,20 @@ func TestFrontAcquireQuicConnection(t *testing.T) {
 
 	releases := []func(){}
 	for i := range 2 {
-		release, ok := front.AcquireQuicConnection("eth1", addr)
+		release, ok := front.AcquireQuicConnection("eth1", addr, NameClassConnect)
 		if !ok {
 			t.Fatalf("connection %d refused", i)
 		}
 		releases = append(releases, release)
 	}
-	if release, ok := front.AcquireQuicConnection("eth1", addr); ok || release != nil {
+	if release, ok := front.AcquireQuicConnection("eth1", addr, NameClassConnect); ok || release != nil {
 		t.Fatal("a third connection was admitted")
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("quic", limitDefaultZone)); count != 1 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("quic", limitDefaultZone, "connect")); count != 1 {
 		t.Errorf("%v quic refusals counted, want 1", count)
 	}
 	// another interface is another quota, and HTTP isn't touched
-	if _, ok := front.AcquireQuicConnection("eth2", addr); !ok {
+	if _, ok := front.AcquireQuicConnection("eth2", addr, NameClassConnect); !ok {
 		t.Error("eth2 refused the same address")
 	}
 	r := newTestRequestFrom("[2001:db8::81]:1", "GET", "api.service.example", "/v1", true)
@@ -219,14 +219,14 @@ func TestFrontAcquireQuicConnection(t *testing.T) {
 		t.Errorf("an HTTP request with two QUIC connections open = %d, want 200", response.Code)
 	}
 	releases[0]()
-	release, ok := front.AcquireQuicConnection("eth1", addr)
+	release, ok := front.AcquireQuicConnection("eth1", addr, NameClassConnect)
 	if !ok {
 		t.Fatal("refused after a release")
 	}
 	release()
 	releases[1]()
 	for i := range 5 {
-		if _, ok := front.AcquireQuicConnection("eth1", netip.MustParseAddr("203.0.113.8")); !ok {
+		if _, ok := front.AcquireQuicConnection("eth1", netip.MustParseAddr("203.0.113.8"), NameClassConnect); !ok {
 			t.Fatalf("excluded connection %d refused", i)
 		}
 	}

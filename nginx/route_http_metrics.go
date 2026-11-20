@@ -2,8 +2,9 @@ package nginx
 
 // What the front records of its requests (owner: s-http; D17): bounded
 // counters and response-head latency histograms by service, protocol,
-// status class and upstream block, a counter of limit refusals by limit and
-// zone, the earliest expiry of the certificates it serves, a counter of the
+// status class and upstream block, a counter of limit refusals by limit,
+// zone and the class of the name, the earliest expiry of the certificates it
+// serves, a counter of the
 // QUIC ClientHellos its QUIC TLS config reads, by port kind, the class of the
 // name and whether h3 was offered, and an optional access log at V(1),
 // sampled, that honors no_access_log and no_success_access_log.
@@ -75,8 +76,8 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "limit_refusals_total",
-			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list) and zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, or default for the interface's shared zone, which a refused QUIC connection is counted in too; - for interface",
-		}, []string{"limit", "zone"}),
+			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state; identity, identity_concurrency, ceiling and ceiling_concurrency for the identity limit; interface for a QUIC connection on an interface the route table doesn't list, class for one of a class the front doesn't serve on QUIC), zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, identity for a request charged to its verified identity, or default for the interface's shared zone, which a refused QUIC connection is counted in too, - for interface and class; and name_class, the class of the name the request or connection named (connect, api, lb, forwarded, redirect, unknown): a QUIC connection's is api or connect, each class with a cap of its own",
+		}, []string{"limit", "zone", "name_class"}),
 		certificateExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
 			Subsystem: "front",

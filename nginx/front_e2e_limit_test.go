@@ -230,3 +230,34 @@ func TestFrontE2eCountsTheHeaderLinesGoAdds(t *testing.T) {
 		}
 	}
 }
+
+// A refusal reaches the client as a 429 with Retry-After over real h1 and h2
+// connections: a token every 100 minutes is the longest, 60. The address's
+// first request is served.
+func TestFrontE2eRefusalsCarryRetryAfterOverH1AndH2(t *testing.T) {
+	e2e := newE2eFront(t, nil, func(routeTable *RouteTable) {
+		for _, routeInterface := range routeTable.Interfaces {
+			routeInterface.RateLimit.RequestsPerMinute = 0.01
+			routeInterface.RateLimit.Burst = 0
+			routeInterface.RateLimit.NetConnections = 0
+		}
+	})
+	eth1 := e2e.iface(t, "eth1")
+	h1Client := e2e.newH1Client(t, eth1.httpsAddr, "api.service.example")
+	response, _ := e2eDo(t, h1Client, newE2eRequest(t, "GET", "https://api.service.example/first", nil))
+	if response.StatusCode != http.StatusOK || response.Header.Get("Retry-After") != "" {
+		t.Fatalf("the first request = %d, Retry-After %q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	response, _ = e2eDo(t, h1Client, newE2eRequest(t, "GET", "https://api.service.example/second", nil))
+	if response.ProtoMajor != 1 || response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "60" {
+		t.Errorf("h1 past the burst = HTTP/%d %d, Retry-After %q, want 429 and 60", response.ProtoMajor, response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	clientConn, _ := e2e.newH2ClientConn(t, eth1.httpsAddr, "api.service.example")
+	response, _ = e2eRoundTripH2(t, clientConn, newE2eRequest(t, "GET", "https://api.service.example/third", nil))
+	if response.ProtoMajor != 2 || response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "60" {
+		t.Errorf("h2 past the burst = HTTP/%d %d, Retry-After %q, want 429 and 60", response.ProtoMajor, response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	if forwarded := len(e2e.serviceRequests("api")); forwarded != 1 {
+		t.Errorf("%d requests reached the api, want the first only", forwarded)
+	}
+}

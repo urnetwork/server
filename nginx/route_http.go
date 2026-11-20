@@ -208,7 +208,11 @@ func (self *routeHttpServer) find(path string) *routeHttpLocation {
 
 // One service as routing sees it. Read-only once built.
 type routeHttpService struct {
-	service   *RouteService
+	service *RouteService
+	// NameClassConnect, NameClassApi or NameClassForwarded
+	// (RouteTable.serviceClass): what the identity limit identifies requests
+	// for
+	class     NameClass
 	forwarder serviceForwarder
 	// the server of the service's own names; nil when it isn't exposed
 	server *routeHttpServer
@@ -289,6 +293,7 @@ func newRouteHttpTable(routeTable *RouteTable, serviceForwarders map[string]serv
 		}
 		routeService := &routeHttpService{
 			service:                 service,
+			class:                   routeTable.serviceClass(service.Name),
 			forwarder:               forwarder,
 			cors:                    newResponseCors(service.CorsOrigins),
 			blockNames:              map[string]bool{},
@@ -636,12 +641,18 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 		if location != nil {
 			routeZone = location.routeZone
 		}
-		release, outcome := self.front.limits.acquireRequest(self.frontInterface.limits, request.clientAddrPort.Addr(), routeZone)
+		identity := self.identify(r, location)
+		release, outcome, wait := self.front.limits.acquireRequest(self.frontInterface.limits, request.clientAddrPort.Addr(), routeZone, identity)
 		if outcome != limitOutcomeAdmitted {
 			// the zone the request was charged to, whichever limit refused it:
-			// the location's, from the route table
-			self.front.metrics.limitRefusals.WithLabelValues(outcome.String(), limitZoneLabel(routeZone)).Inc()
-			exchange.respondError(http.StatusTooManyRequests)
+			// the location's, from the route table, or the identity's; and
+			// the class of the name it asked for
+			nameClass := NameClassUnknown
+			if request.hostMatched {
+				nameClass = request.hostMatch.class
+			}
+			self.front.metrics.limitRefusals.WithLabelValues(outcome.String(), limitRefusalZoneLabel(routeZone, outcome), nameClass.String()).Inc()
+			exchange.respondLimited(wait)
 			return
 		}
 		exchange.response.holdSlot(release)
@@ -680,6 +691,31 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 	default:
 		exchange.respondError(http.StatusNotFound)
 	}
+}
+
+// The identity a request is charged to under the identity limit, or none:
+// only on an interface whose rate_limit turns it on, only for a location of
+// the shared zone that proxies to the api or the connect service, and only
+// when LimitSettings.IdentifyRequest verifies the request's credential.
+// Every other request is charged by its address alone, as before the
+// identity limit.
+func (self *routeHttpHandler) identify(r *http.Request, location *routeHttpLocation) LimitIdentity {
+	identifyRequest := self.front.settings.Limit.IdentifyRequest
+	if identifyRequest == nil || !self.frontInterface.limits.identityEnabled() {
+		return LimitIdentity{}
+	}
+	if location == nil || location.routeZone != nil || location.service == nil {
+		return LimitIdentity{}
+	}
+	upstream := location.service.class
+	if upstream != NameClassApi && upstream != NameClassConnect {
+		return LimitIdentity{}
+	}
+	identity, ok := identifyRequest(r, upstream)
+	if !ok {
+		return LimitIdentity{}
+	}
+	return identity
 }
 
 // Proxies a request: forwarded to its service's blocks with nginx's request
@@ -863,6 +899,16 @@ func (self *routeHttpExchange) respondError(statusCode int) {
 	}
 	writer.WriteHeader(statusCode)
 	writer.Write([]byte(body))
+}
+
+// Answers a refusal of the limits: a 429 with Retry-After, the whole seconds
+// until the refused bucket would admit the request, from 1 to 60, and 1 for
+// a refusal of a cap or of the state, which reports no wait
+// (limitRetryAfterSeconds). nginx's own 429 has no Retry-After; a client
+// that honors it spreads its retries instead of returning at once.
+func (self *routeHttpExchange) respondLimited(wait time.Duration) {
+	self.writer().Header().Set("Retry-After", strconv.Itoa(limitRetryAfterSeconds(wait)))
+	self.respondError(http.StatusTooManyRequests)
 }
 
 // Answers a 301 to location.

@@ -22,12 +22,13 @@ package connect
 //     name to connect's handler with the transport's carrier, an api name to
 //     an h3 server of the front's H3ApiHandler, each once the handshake
 //     proves the source's address and under the nginx front's per-address
-//     connection cap (0x1001); any other served name closed with 0x1000. A
-//     name the front doesn't serve, or none, never reaches the dispatch: the
-//     nginx front's QUIC TLS config has no certificate for it, so its
-//     handshake fails, as alt's did, and quic-go never accepts the
-//     connection. That config counts every ClientHello by the class of its
-//     name (urnetwork_front_quic_client_hellos_total);
+//     connection cap of its class, api or connect (0x1001); any other
+//     served name closed with 0x1000. A name the front doesn't serve, or
+//     none, never reaches the dispatch: the nginx front's QUIC TLS config
+//     has no certificate for it, so its handshake fails, as alt's did, and
+//     quic-go never accepts the connection. That config counts every
+//     ClientHello by the class of its name
+//     (urnetwork_front_quic_client_hellos_total);
 //   - the dispatch counts each accepted connection's handshake once: a
 //     completed one by QUIC version and resumption, and a failed one as
 //     handshake_failed with its reason, read from quic-go's typed errors
@@ -479,10 +480,12 @@ func frontQuicVersionLabel(version quic.Version) string {
 	}
 }
 
-// Admits one connect connection under the per-address connection cap and
-// hands it to connect's handler, which applies its own connection rate
-// limit. The cap is charged only once the handshake proves the source receives
-// packets at its address, so a spoofed source can't take a victim's slots.
+// Admits one connect connection under the per-address cap of connect
+// connections, which the address's api connections don't touch (LBALTOPT2
+// R15), and hands it to connect's handler, which applies its own connection
+// rate limit. The cap is charged only once the handshake proves the source
+// receives packets at its address, so a spoofed source can't take a victim's
+// slots.
 // Reports whether connect's handler served the connection, and so owns
 // returning its window.
 //
@@ -500,7 +503,7 @@ func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
 		return false
 	}
-	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap())
+	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap(), nginx.NameClassConnect)
 	if !ok {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")
@@ -528,10 +531,10 @@ func (self *ConnectHandler) releaseQuicWindow(conn *quic.Conn) {
 // Serves one api connection as h3, once its handshake completes: a request
 // sent in 0-RTT could otherwise arrive before the source's address is proved.
 // The public config refuses early data anyway (D9). The connection is charged
-// to its address's connection cap, as a connect connection is, once the
-// handshake proves the address, so a spoofed source can't take a victim's
-// slots. The nginx front's handler applies the limits per request and admits
-// only api authorities (D3).
+// to its address's cap of api connections, apart from its connect
+// connections (LBALTOPT2 R15), once the handshake proves the address, so a
+// spoofed source can't take a victim's slots. The nginx front's handler
+// applies the limits per request and admits only api authorities (D3).
 func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 	if !self.awaitHandshake(conn) {
 		return
@@ -542,7 +545,7 @@ func (self *frontQuicRun) serveApi(conn *quic.Conn) {
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "unknown client address")
 		return
 	}
-	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap())
+	release, ok := self.frontServer.front.AcquireQuicConnection(self.group.key.interfaceName, addrPort.Addr().Unmap(), nginx.NameClassApi)
 	if !ok {
 		self.countConnection(frontQuicResultRateLimited)
 		conn.CloseWithError(frontQuicErrorCodeRateLimited, "too many connections")

@@ -413,22 +413,32 @@ func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
 // Admits one QUIC connection from addr on the interface, under alt's
 // per-address connection cap (D8): the interface's rate_limit.net_connections,
 // counted per (interface name, normalized client IP) apart from HTTP
-// concurrency, with exclude_subnets exempt and zero meaning no cap. ok is false
-// when the address is at its cap, and connect then closes the connection with
-// application error 0x1001. A true result must be paired with exactly one call
-// of release, when the connection ends. A refusal is counted in the
-// interface's default zone. An interface the route table doesn't list admits
-// nothing, counted under the limit "interface" and no zone rather than
-// logged, since connections set its pace.
-func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) {
+// concurrency, with exclude_subnets exempt and zero meaning no cap. nameClass
+// is the class the connection was dispatched by, NameClassApi or
+// NameClassConnect, and each class is counted apart against the cap, so an
+// address's api connections never refuse its connect transport (LBALTOPT2
+// R15). ok is false when the address is at its cap for the class, and connect
+// then closes the connection with application error 0x1001. A true result
+// must be paired with exactly one call of release, when the connection ends.
+// A refusal is counted in the interface's default zone, by the class. An
+// interface the route table doesn't list admits nothing, counted under the
+// limit "interface" and no zone, and so does a class the front doesn't serve
+// on QUIC, under the limit "class", rather than logged, since connections set
+// their pace.
+func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass NameClass) (release func(), ok bool) {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		self.metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel).Inc()
+		self.metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, nameClass.String()).Inc()
 		return nil, false
 	}
-	release, outcome := self.limits.acquireQuicConnection(frontInterface.limits, addr)
+	quicClass, ok := limitQuicClassOf(nameClass)
+	if !ok {
+		self.metrics.limitRefusals.WithLabelValues("class", routeHttpNoLabel, nameClass.String()).Inc()
+		return nil, false
+	}
+	release, outcome := self.limits.acquireQuicConnection(frontInterface.limits, addr, quicClass)
 	if outcome != limitOutcomeAdmitted {
-		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone).Inc()
+		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone, nameClass.String()).Inc()
 		return nil, false
 	}
 	return release, true

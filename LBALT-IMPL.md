@@ -262,7 +262,7 @@ func (self *Front) QuicTlsConfig() *tls.Config  // one long-lived base config fo
 func (self *Front) HttpsHandler(interfaceName string) http.Handler // TCP 443: routes by authority
 func (self *Front) HttpHandler(interfaceName string) http.Handler  // TCP 80: lb status routes, 301s
 func (self *Front) H3ApiHandler(interfaceName string) http.Handler // h3: only api authorities
-func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) // alt's per-address QUIC cap (0x1001)
+func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass NameClass) (release func(), ok bool) // alt's per-address QUIC cap (0x1001), api and connect counted apart (LBALTOPT2 R15)
 func (self *Front) ConfigureServer(httpServer *http.Server) // every HttpSettings-derived field of a public TCP server (§7)
 func (self *Front) BeginDrain()                 // stop admitting new HTTP work; responses carry Connection: close
 func (self *Front) Close() error                // release pools and spill files

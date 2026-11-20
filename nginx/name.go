@@ -194,13 +194,7 @@ func newNameMatcher(routeTable *RouteTable) *nameMatcher {
 		if !service.Exposed {
 			continue
 		}
-		class := NameClassForwarded
-		switch service.Name {
-		case routeTable.Front.ConnectService:
-			class = NameClassConnect
-		case routeTable.Front.ApiService:
-			class = NameClassApi
-		}
+		class := routeTable.serviceClass(service.Name)
 		for _, name := range service.Names {
 			addName(name, nameMatch{
 				service: service,
