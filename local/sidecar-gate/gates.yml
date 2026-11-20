@@ -379,7 +379,7 @@ gates:
     - row: FS-53
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs53]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs53OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs53OnT3]}
       store_clock: true
     - row: FS-57
       tests:
@@ -401,7 +401,9 @@ gates:
     - row: FS-60
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs60]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs60OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs60OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs60ParcelsPackAtSevenDays, TestFs60PendingRecordFencedThenDropped]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs60ParcelsPackAtSevenDaysOnT3, TestFs60PendingRecordFencedThenDroppedOnT3]}
       store_clock: true
     - row: FS-61
       tests:
