@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestEpochThreeGoofeAdmissionCorrectionChangesOnlyArchiveBinding(t *testing.T) {
+	const actual = "817098326c0eb08af42df2456ae689735928fb2106a5772f5b2e8a9b369b3ca5"
+	const old = "d8925103a48981c2a6d3e34c18963fc6886393042270e65b945ecabfb21b5486"
+	corrected := competitionEpochThreeGoofeArchiveBindingCorrectionSql()
+	if strings.Count(corrected, actual) != 1 || strings.Contains(corrected, old) ||
+		strings.Replace(corrected, actual, old, 1) != competitionEpochThreeGoofeAdmissionSql() {
+		t.Fatal("correction must replace only the archive digest inside the exact retained receipt")
+	}
+	if CompetitionEpochThreeGoofeArchiveBindingCorrectionMigrationVersion() != CompetitionEpochThreeGoofeAdmissionMigrationVersion()+1 {
+		t.Fatal("archive binding correction must be a new migration immediately after the original")
+	}
+}
+
 func TestEpochThreeGoofeAdmissionMigrationScopesException(t *testing.T) {
 	sql := competitionEpochThreeGoofeAdmissionSql()
 	for _, predicate := range []string{

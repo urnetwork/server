@@ -399,18 +399,32 @@ func validateCompetitionExecutorReceiptWithException(settings *Settings, round *
 		expectedJobId, expectedRecovery = recovery.Authorization.ReplacementJobId, recovery.Sha256
 	}
 	goofeException := exception && isEpochThreeGoofeAdmissionReceipt(receipt)
-	if receipt == nil || receipt.Schema != 1 || receipt.Kind != "competition-executor-noop-admission/v1" || receipt.RoundId != round.RoundId.String() || receipt.HostId != host.HostId ||
-		receipt.RecoverySha256 != expectedRecovery ||
+	if receipt != nil && receipt.QualificationSha256 != host.QualificationSha256 {
+		return errors.New("retained host admission receipt has a different host qualification identity")
+	}
+	if receipt != nil && receipt.QualificationJobId != expectedJobId.String() {
+		return errors.New("retained host admission receipt has a different qualification job identity")
+	}
+	if receipt == nil || receipt.Schema != 1 || receipt.Kind != "competition-executor-noop-admission/v1" || receipt.RoundId != round.RoundId.String() || receipt.HostId != host.HostId {
+		return errors.New("retained host admission receipt has a different scope")
+	}
+	if receipt.RecoverySha256 != expectedRecovery ||
 		receipt.ControlAmendmentSha256 != competitionExecutorControlAmendmentSha256(settings) ||
 		receipt.BaselineSha256 != baseline.Sha256 || receipt.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || receipt.ProvidersSha256 != round.ProvidersSha256 ||
-		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
-		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || (!receipt.Passed && !exception) || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
+		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
+		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 {
+		return errors.New("retained host admission receipt has different frozen inputs or authority")
+	}
+	if !receipt.Noop || (!receipt.Passed && !exception) || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
 		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || (receipt.RawScoreRelativeDifference > 0.05 && (!goofeException || receipt.RawScoreRelativeDifference > 0.053)) || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
-		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
-		receipt.QualificationJobId != expectedJobId.String() || receipt.QualificationStartedAt.IsZero() ||
+		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
+		return errors.New("retained host admission receipt has an invalid statistical screen")
+	}
+	if !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) ||
+		receipt.QualificationStartedAt.IsZero() ||
 		!receipt.QualificationDeadlineAt.Equal(receipt.QualificationStartedAt.Add(3*time.Hour)) || receipt.CreatedAt.Before(receipt.QualificationStartedAt) ||
 		receipt.Retention == nil || receipt.Retention.Mode != "COMPLIANCE" || receipt.Retention.RetainUntil.Before(settings.RetainUntil) {
-		return errors.New("retained host admission receipt does not match the frozen round")
+		return errors.New("retained host admission receipt has an invalid evidence window or retention")
 	}
 	content, err := competitionExecutorReceiptBytes(receipt)
 	if err != nil {

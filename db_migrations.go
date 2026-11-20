@@ -11926,6 +11926,7 @@ var migrations = []any{
 	// replacement agent executable where that executable did not change.
 	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
 	newSqlMigration(competitionEpochThreeGoofeAdmissionSql()),
+	newSqlMigration(competitionEpochThreeGoofeArchiveBindingCorrectionSql()),
 }
 
 // The deleted_network backfill (the migration above): every network an App
