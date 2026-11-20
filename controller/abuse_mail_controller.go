@@ -71,6 +71,9 @@ type AbuseMailSettings struct {
 	HaltHorizon time.Duration
 	// The most rows one read takes, by a cursor.
 	ReadBatchSize int
+	// The most of a network's complaints read at a fraud halt's start, to find the one that set it: 16, past the
+	// reports one arrival time can carry for one network.
+	HaltComplaintReadMaxCount int
 	// One pass's bound; a pass that runs out leaves the rest to the next, sooner.
 	PassMaxTime time.Duration
 	// The task runner's bound on one pass, past PassMaxTime.
@@ -89,6 +92,8 @@ func DefaultAbuseMailSettings() *AbuseMailSettings {
 		PassMaxTime:      5 * time.Minute,
 		PassTaskMaxTime:  10 * time.Minute,
 		RetryInterval:    10 * time.Second,
+
+		HaltComplaintReadMaxCount: 16,
 	}
 }
 
@@ -225,7 +230,7 @@ complaints:
 				break
 			}
 			haltCursor = model.AbuseSmtpHaltCursor{StartTime: halt.StartTime, HaltId: server.Id(halt.HaltId)}
-			record, err := RecordAbuseSmtpHalt(ctx, halt, now, abuseSettings)
+			record, err := RecordAbuseSmtpHalt(ctx, halt, now, abuseSettings, settings)
 			if err != nil {
 				// the halt stays unrecorded, and the next pass takes it again
 				result.FailedCount += 1
@@ -309,11 +314,11 @@ func abuseMailSendingDomain(ctx context.Context, networkId server.Id, roots []st
 
 // §21.4's category of a halt's case. A fraud halt takes the type of the complaint that set it, which arrived at the
 // halt's start: a virus is malware, and anything else phishing (RFC 5965's fraud); every other halt is spam's.
-func abuseMailHaltCategory(ctx context.Context, halt *smtpedgeservice.SmtpHalt, settings *model.AbuseSettings) model.AbuseCategory {
+func abuseMailHaltCategory(ctx context.Context, halt *smtpedgeservice.SmtpHalt, settings *AbuseMailSettings) model.AbuseCategory {
 	if halt.Trigger != smtpedgeservice.SmtpHaltTriggerFraud {
 		return model.AbuseCategorySpam
 	}
-	complaints, err := model.FindSmtpComplaints(ctx, &smtpedgeservice.SmtpComplaintKey{NetworkId: halt.NetworkId, Since: halt.StartTime}, settings.LookupRowLimit)
+	complaints, err := model.FindSmtpComplaints(ctx, &smtpedgeservice.SmtpComplaintKey{NetworkId: halt.NetworkId, Since: halt.StartTime}, settings.HaltComplaintReadMaxCount)
 	if err == nil {
 		for _, complaint := range complaints {
 			if complaint.ArrivalTime.Equal(halt.StartTime) && complaint.Type == smtpedgeservice.SmtpComplaintTypeVirus {
@@ -341,7 +346,7 @@ func abuseMailHaltJoinedByHeaders(trigger string) bool {
 // own id, which ApplyAbuseAction records, applies, notices and mails. The case names the network's sending domain,
 // or for a label halt the burner's, <blabel>.<label>.<root>, or the network itself when it has no label in a root. A
 // raise from the store is an error, so one halt never ends the pass.
-func RecordAbuseSmtpHalt(ctx context.Context, halt *smtpedgeservice.SmtpHalt, now time.Time, settings *model.AbuseSettings) (record *AbuseSmtpHaltRecord, returnErr error) {
+func RecordAbuseSmtpHalt(ctx context.Context, halt *smtpedgeservice.SmtpHalt, now time.Time, settings *model.AbuseSettings, mailSettings *AbuseMailSettings) (record *AbuseSmtpHaltRecord, returnErr error) {
 	if !server.SidecarMg5Linked() {
 		return nil, model.ErrAbuseUnlinked
 	}
@@ -379,7 +384,7 @@ func RecordAbuseSmtpHalt(ctx context.Context, halt *smtpedgeservice.SmtpHalt, no
 	if abuseMailHaltJoinedByHeaders(halt.Trigger) {
 		joinKind = model.AbuseJoinKindHeaders
 	}
-	category := abuseMailHaltCategory(ctx, halt, settings)
+	category := abuseMailHaltCategory(ctx, halt, mailSettings)
 
 	reportCase, err := model.OpenAbuseReportCase(
 		ctx,
