@@ -1,7 +1,21 @@
 // Decoded score pages are shared by every provider search in the process. A
 // page is found by the sha256 of its bytes, which the reader has verified or
-// computed for the bytes it just read, so a hit is the decode of exactly those
+// computed for the bytes it read, so a hit is the decode of exactly those
 // bytes: a republished page is new bytes and a new decode.
+//
+// A native page whose manifest checksum the cache holds is not read again:
+// the reader reads only its slot's generation and answers the decode while
+// that generation is the manifest's (clientScoreCursor.readWithClient). The
+// decode is trusted for the page's bytes within that generation, which no
+// writer changes once it is published: a slot's pages are written only while
+// it is staged under its generation, behind the pointer it does not yet hold
+// (clientScoreNativePagesScript), a commit freezes them, and the next staging
+// of the slot first deletes it and writes a new generation
+// (clientScoreNativeBeginScript). So a reused, restaged or expired slot fails
+// the generation read, and a manifest that names another checksum is a page
+// the cache does not hold, read and verified in full. Bytes written into a
+// published generation out of protocol are refused by every reader that reads
+// them, and never reach a reader that holds the page's verified decode.
 package model
 
 import (
@@ -130,13 +144,18 @@ func decodeClientScorePage(data []byte, checksum [sha256.Size]byte) ([]*ClientSc
 		}
 		clientScorePages.put(checksum, sample, clientScorePageDecodedBytesPerByte*int64(len(data)))
 	}
+	return copyClientScorePage(sample), nil
+}
+
+// A reader's own copies of a cached page's scores (decodeClientScorePage).
+func copyClientScorePage(sample []*ClientScore) []*ClientScore {
 	copies := make([]ClientScore, len(sample))
 	scores := make([]*ClientScore, len(sample))
 	for i, score := range sample {
 		copies[i] = *score
 		scores[i] = &copies[i]
 	}
-	return scores, nil
+	return scores
 }
 
 func init() {
