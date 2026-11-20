@@ -532,8 +532,14 @@ type testFrontConnectQuic struct {
 	// signaled after each handshake the limit counted
 	counted chan struct{}
 	tracer  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace
-	handled chan testFrontHandledQuic
-	release chan struct{}
+	// replaces the config's handshake idle timeout when positive
+	handshakeIdleTimeout time.Duration
+	// when set, given the context of every connection a transport creates,
+	// accepted or not, which quic-go cancels with the connection's close
+	// cause
+	connContexts chan context.Context
+	handled      chan testFrontHandledQuic
+	release      chan struct{}
 	// refuses each connection while set, as a closing handler does
 	refusing atomic.Bool
 	// the connections whose window grants the front returned so far
@@ -586,9 +592,21 @@ func (self *testFrontConnectQuic) NewQuicTransport(conn net.PacketConn) *quic.Tr
 		self.transportConns = append(self.transportConns, conn)
 	}()
 	transport := &quic.Transport{Conn: conn}
-	if limit := self.handshakeLimit; limit != nil {
+	limit := self.handshakeLimit
+	if limit != nil {
 		transport.VerifySourceAddress = limit.verifySourceAddress
+	}
+	if limit != nil || self.connContexts != nil {
 		transport.ConnContext = func(ctx context.Context, info *quic.ClientInfo) (context.Context, error) {
+			if self.connContexts != nil {
+				select {
+				case self.connContexts <- ctx:
+				default:
+				}
+			}
+			if limit == nil {
+				return ctx, nil
+			}
 			ctx, err := limit.connContext(ctx, info)
 			if !info.AddrVerified {
 				self.counted <- struct{}{}
@@ -630,8 +648,12 @@ func (self *testFrontConnectQuic) builtTransportConns() []net.PacketConn {
 
 // frontConnectQuic
 func (self *testFrontConnectQuic) NewQuicConfig() *quic.Config {
+	handshakeIdleTimeout := testFrontProgressTimeout
+	if 0 < self.handshakeIdleTimeout {
+		handshakeIdleTimeout = self.handshakeIdleTimeout
+	}
 	return &quic.Config{
-		HandshakeIdleTimeout: testFrontProgressTimeout,
+		HandshakeIdleTimeout: handshakeIdleTimeout,
 		MaxIdleTimeout:       time.Minute,
 		Allow0RTT:            true,
 		EnableDatagrams:      true,
@@ -1069,6 +1091,17 @@ func (self *testFrontEnv) dialQuicTo(
 	portKind string,
 	tlsConfig *tls.Config,
 ) (*quic.Conn, error) {
+	return self.dialQuicToWithConfig(packetConn, target, portKind, tlsConfig, testFrontClientQuicConfig())
+}
+
+// As dialQuicTo, with the client's QUIC config.
+func (self *testFrontEnv) dialQuicToWithConfig(
+	packetConn net.PacketConn,
+	target *net.UDPAddr,
+	portKind string,
+	tlsConfig *tls.Config,
+	quicConfig *quic.Config,
+) (*quic.Conn, error) {
 	if portKind == frontPortWhodis {
 		ptSettings := connect.DefaultPacketTranslationSettings()
 		ptSettings.DnsTlds = [][]byte{[]byte(testFrontWhodisTld)}
@@ -1088,7 +1121,7 @@ func (self *testFrontEnv) dialQuicTo(
 	self.t.Cleanup(func() { quicTransport.Close() })
 	ctx, cancel := context.WithTimeout(self.ctx, testFrontProgressTimeout)
 	defer cancel()
-	return quicTransport.Dial(ctx, target, tlsConfig, testFrontClientQuicConfig())
+	return quicTransport.Dial(ctx, target, tlsConfig, quicConfig)
 }
 
 // Dials QUIC from a new client socket.

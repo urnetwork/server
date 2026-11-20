@@ -3,8 +3,10 @@ package nginx
 // What the front records of its requests (owner: s-http; D17): bounded
 // counters and response-head latency histograms by service, protocol,
 // status class and upstream block, a counter of limit refusals by limit, the
-// earliest expiry of the certificates it serves, and an optional access log
-// at V(1), sampled, that honors no_access_log and no_success_access_log.
+// earliest expiry of the certificates it serves, a counter of the QUIC
+// ClientHellos its QUIC TLS config reads, by port kind, the class of the
+// name and whether h3 was offered, and an optional access log at V(1),
+// sampled, that honors no_access_log and no_success_access_log.
 //
 // The service and block labels are upstream_service and upstream_block: the
 // process's stats push adds its own service and block to every series, and
@@ -42,6 +44,8 @@ type frontMetrics struct {
 	// builds no front, as connect without a route file, exports none: a
 	// gauge's 0 would read as a certificate that lapsed in 1970
 	certificateExpiry *prometheus.GaugeVec
+	// every ClientHello the QUIC TLS config reads (newTlsConfigs)
+	quicClientHellos *prometheus.CounterVec
 }
 
 // Builds and registers one independent set of the front's metric families.
@@ -74,12 +78,19 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Name:      "certificate_expiry_timestamp_seconds",
 			Help:      "The earliest NotAfter of the certificates the lb_alt front serves, as a Unix time; in the past when a served name's certificate has lapsed, which the front serves all the same, as nginx does. Absent from a process that builds no front",
 		}, nil),
+		quicClientHellos: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "quic_client_hellos_total",
+			Help:      "QUIC ClientHellos the lb_alt front read, by port kind (quic, whodis, other), the class of the server name (connect, api, lb, forwarded, redirect for a served name; alt for alt, alt-v4 or alt-v6 on any domain, unknown for another name and none for a missing or invalid one, which the front doesn't serve on QUIC, so their handshakes fail) and whether the client offered h3 (true, false). The name itself is never a label",
+		}, []string{"port", "name_class", "h3_offered"}),
 	}
 	registerer.MustRegister(
 		metrics.requests,
 		metrics.responseHeaderSeconds,
 		metrics.limitRefusals,
 		metrics.certificateExpiry,
+		metrics.quicClientHellos,
 	)
 	return metrics
 }

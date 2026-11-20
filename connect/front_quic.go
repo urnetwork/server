@@ -25,7 +25,13 @@ package connect
 //     connection cap (0x1001); any other served name closed with 0x1000. A
 //     name the front doesn't serve, or none, never reaches the dispatch: the
 //     nginx front's QUIC TLS config has no certificate for it, so its
-//     handshake fails, as alt's did.
+//     handshake fails, as alt's did, and quic-go never accepts the
+//     connection. That config counts every ClientHello by the class of its
+//     name (urnetwork_front_quic_client_hellos_total);
+//   - the dispatch counts each accepted connection's handshake once: a
+//     completed one by QUIC version and resumption, and a failed one as
+//     handshake_failed with its reason, read from quic-go's typed errors
+//     (frontQuicHandshakeReason).
 //
 // A socket's run is its place in its group (frontQuicSocketRun), supervised
 // like any socket (front_socket.go): a lost socket leaves its group, costing
@@ -59,11 +65,13 @@ package connect
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -349,13 +357,126 @@ func (self *frontQuicRun) serverName(conn *quic.Conn) string {
 // the server's handshake flight arrives without its code (RFC 9000 §10.2.3),
 // and the code is what tells a client this refusal from a failure.
 func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
-	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
-		self.countConnection(frontQuicResultHandshakeFailed)
-		conn.CloseWithError(0, "")
+	if !self.awaitHandshake(conn) {
 		return
 	}
 	self.countConnection(frontQuicResultUnknownName)
 	conn.CloseWithError(frontQuicErrorCodeUnknownServerName, "unknown server name")
+}
+
+// Waits for an accepted connection's handshake (AwaitQuicHandshake) and counts
+// it: a completed one by QUIC version and whether it resumed a session, and a
+// failed one as handshake_failed, by its reason, closing the connection.
+// Reports whether the handshake completed.
+func (self *frontQuicRun) awaitHandshake(conn *quic.Conn) bool {
+	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
+		self.countConnectionReason(frontQuicResultHandshakeFailed, frontQuicHandshakeReason(err))
+		conn.CloseWithError(0, "")
+		return false
+	}
+	connectionState := conn.ConnectionState()
+	version := frontQuicVersionLabel(connectionState.Version)
+	resumed := strconv.FormatBool(connectionState.TLS.DidResume)
+	frontQuicHandshakesCounter.WithLabelValues(self.group.key.portKind, version, resumed).Inc()
+	if observer := self.frontServer.settings.quicHandshakeObserverForTest; observer != nil {
+		observer(self.group.key.portKind, version, resumed)
+	}
+	return true
+}
+
+// The TLS alerts the QUIC handshake reasons read (RFC 8446 §6, and IANA's TLS
+// Alerts registry). QUIC carries an alert as CRYPTO_ERROR 0x100 plus the alert
+// (RFC 9001 §4.8).
+const (
+	frontTlsAlertBadCertificate               tls.AlertError = 42
+	frontTlsAlertUnsupportedCertificate       tls.AlertError = 43
+	frontTlsAlertCertificateRevoked           tls.AlertError = 44
+	frontTlsAlertCertificateExpired           tls.AlertError = 45
+	frontTlsAlertCertificateUnknown           tls.AlertError = 46
+	frontTlsAlertUnknownCa                    tls.AlertError = 48
+	frontTlsAlertProtocolVersion              tls.AlertError = 70
+	frontTlsAlertCertificateUnobtainable      tls.AlertError = 111
+	frontTlsAlertBadCertificateStatusResponse tls.AlertError = 113
+	frontTlsAlertBadCertificateHashValue      tls.AlertError = 114
+	frontTlsAlertCertificateRequired          tls.AlertError = 116
+	frontTlsAlertNoApplicationProtocol        tls.AlertError = 120
+)
+
+// The reason an accepted connection's handshake failed, from the error
+// AwaitQuicHandshake returned: the front's context error, or the connection's
+// close cause, as quic-go types it. A CRYPTO_ERROR quic-go marks remote is
+// the client's TLS alert, and a local one the front's own: the certificate
+// alerts count only as the client's, the alerts about the application
+// protocol and the version as either's. The certificate alerts are the ones
+// whose text, as crypto/tls words it, names a certificate, the same the TCP
+// reasons read (frontTlsHandshakeReason). The front's ErrTlsNoCertificate,
+// which quic-go wraps in the CRYPTO_ERROR for internal_error, is
+// unknown_name.
+func frontQuicHandshakeReason(err error) string {
+	var idleTimeoutErr *quic.IdleTimeoutError
+	var handshakeTimeoutErr *quic.HandshakeTimeoutError
+	var versionNegotiationErr *quic.VersionNegotiationError
+	var statelessResetErr *quic.StatelessResetError
+	var applicationErr *quic.ApplicationError
+	var transportErr *quic.TransportError
+	switch {
+	case errors.As(err, &idleTimeoutErr):
+		return frontQuicHandshakeReasonIdleTimeout
+	case errors.As(err, &handshakeTimeoutErr):
+		return frontQuicHandshakeReasonHandshakeTimeout
+	case errors.Is(err, nginx.ErrTlsNoCertificate):
+		return frontQuicHandshakeReasonUnknownName
+	case errors.As(err, &versionNegotiationErr):
+		return frontQuicHandshakeReasonVersion
+	case errors.As(err, &transportErr):
+		if transportErr.ErrorCode.IsCryptoError() {
+			switch tls.AlertError(transportErr.ErrorCode - 0x100) {
+			case frontTlsAlertBadCertificate,
+				frontTlsAlertUnsupportedCertificate,
+				frontTlsAlertCertificateRevoked,
+				frontTlsAlertCertificateExpired,
+				frontTlsAlertCertificateUnknown,
+				frontTlsAlertUnknownCa,
+				frontTlsAlertCertificateUnobtainable,
+				frontTlsAlertBadCertificateStatusResponse,
+				frontTlsAlertBadCertificateHashValue,
+				frontTlsAlertCertificateRequired:
+				if transportErr.Remote {
+					return frontQuicHandshakeReasonCertificate
+				}
+			case frontTlsAlertNoApplicationProtocol:
+				return frontQuicHandshakeReasonNoAlpn
+			case frontTlsAlertProtocolVersion:
+				return frontQuicHandshakeReasonVersion
+			}
+		}
+		if transportErr.Remote {
+			return frontQuicHandshakeReasonPeerClosed
+		}
+		return frontQuicHandshakeReasonOther
+	case errors.As(err, &applicationErr) && applicationErr.Remote:
+		return frontQuicHandshakeReasonPeerClosed
+	case errors.As(err, &statelessResetErr):
+		return frontQuicHandshakeReasonPeerClosed
+	case errors.Is(err, quic.ErrTransportClosed),
+		errors.Is(err, context.Canceled),
+		errors.Is(err, context.DeadlineExceeded):
+		return frontQuicHandshakeReasonCanceled
+	default:
+		return frontQuicHandshakeReasonOther
+	}
+}
+
+// The version label of a completed QUIC handshake.
+func frontQuicVersionLabel(version quic.Version) string {
+	switch version {
+	case quic.Version1:
+		return frontQuicVersionV1
+	case quic.Version2:
+		return frontQuicVersionV2
+	default:
+		return frontQuicVersionOther
+	}
 }
 
 // Admits one connect connection under the per-address connection cap and
@@ -370,9 +491,7 @@ func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
 // does with it, serving it or refusing it while it drains or closes, is
 // connect's to count.
 func (self *frontQuicRun) serveConnect(conn *quic.Conn) bool {
-	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
-		self.countConnection(frontQuicResultHandshakeFailed)
-		conn.CloseWithError(0, "")
+	if !self.awaitHandshake(conn) {
 		return false
 	}
 	addrPort, err := server.ParseClientAddress(conn.RemoteAddr().String())
@@ -414,9 +533,7 @@ func (self *ConnectHandler) releaseQuicWindow(conn *quic.Conn) {
 // slots. The nginx front's handler applies the limits per request and admits
 // only api authorities (D3).
 func (self *frontQuicRun) serveApi(conn *quic.Conn) {
-	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
-		self.countConnection(frontQuicResultHandshakeFailed)
-		conn.CloseWithError(0, "")
+	if !self.awaitHandshake(conn) {
 		return
 	}
 	addrPort, err := server.ParseClientAddress(conn.RemoteAddr().String())
@@ -598,10 +715,16 @@ func closeFrontApiServers(apiServers []*http3.Server, timeout time.Duration) {
 	}
 }
 
-// Counts one accepted connection's result.
+// Counts one accepted connection's result, which has no reason.
 func (self *frontQuicRun) countConnection(result string) {
-	frontQuicConnectionsCounter.WithLabelValues(self.group.key.portKind, result).Inc()
+	self.countConnectionReason(result, frontQuicResultReasonNone)
+}
+
+// Counts one accepted connection's result and its reason: why the handshake
+// failed for handshake_failed, - for every other result.
+func (self *frontQuicRun) countConnectionReason(result string, reason string) {
+	frontQuicConnectionsCounter.WithLabelValues(self.group.key.portKind, result, reason).Inc()
 	if observer := self.frontServer.settings.connectionResultObserverForTest; observer != nil {
-		observer(self.group.key.portKind, result)
+		observer(self.group.key.portKind, result, reason)
 	}
 }
