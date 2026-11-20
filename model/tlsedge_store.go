@@ -54,13 +54,17 @@ func (self *TlsEdgeStore) callContext(ctx context.Context) (context.Context, con
 	return context.WithTimeout(ctx, self.settings.CallTimeout)
 }
 
-// Runs callback and returns what it raised, as an error.
+// Runs callback and returns what it raised, as an error, a context that ended
+// under it included (QD-1090). The store's callers are tlsedge's own
+// goroutines, its names and kills loops and its record batches, which run
+// under no server handler, so a raise that left here would end the process: a
+// call past the engine's StoreTimeout or RecordWriteTimeout on a slow
+// Postgres, or one the engine's close ended, fails instead. The engine keeps
+// what it held and reads again at its next pass, and a failed batch waits at
+// the front for the next flush.
 func tlsEdgeStoreRun(callback func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
-			}
 			if recoveredErr, ok := r.(error); ok {
 				err = recoveredErr
 			} else {
