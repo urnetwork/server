@@ -714,12 +714,17 @@ func TestLegalHoldStaffKinds(t *testing.T) {
 			hold.Hold.ExpireTimeMs != testHoldDay(90).UnixMilli() {
 			t.Fatalf("placed %+v", hold.Hold)
 		}
+		// the placement says when the hold binds every deleter: the readers' 5 s cache after it (owner decision 629)
+		if bindTime := world.clock.Now().Add(sidecar.DefaultHoldSetSettings().RereadInterval); hold.BindTimeMs != bindTime.UnixMilli() {
+			t.Fatalf("the placement binds deleters at %d, not %d", hold.BindTimeMs, bindTime.UnixMilli())
+		}
 		if _, err := AbuseStaffAction(ctx, legal, []byte(strings.Replace(placeBody, `"preserve_2703f"}`, `"preserve_2703f","report_time_ms":1}`, 1))); !errors.Is(err, ErrAbuseStaffRequestInvalid) {
 			t.Fatalf("a §2703(f) report time: %v", err)
 		}
 		world.clock.AdvanceTo(testHoldDay(80))
 		renewed, err := AbuseStaffAction(ctx, legal, []byte(`{"kind":"renew_hold","case_id":"`+caseId.String()+`","network_id":"`+networkId.String()+`"}`))
-		if err != nil || renewed.Result.(*AbuseStaffHoldResult).Hold.ExpireTimeMs != testHoldDay(180).UnixMilli() {
+		if err != nil || renewed.Result.(*AbuseStaffHoldResult).Hold.ExpireTimeMs != testHoldDay(180).UnixMilli() ||
+			renewed.Result.(*AbuseStaffHoldResult).BindTimeMs != testHoldDay(80).Add(sidecar.DefaultHoldSetSettings().RereadInterval).UnixMilli() {
 			t.Fatalf("renewed %+v, %v", renewed, err)
 		}
 
@@ -731,7 +736,7 @@ func TestLegalHoldStaffKinds(t *testing.T) {
 		}
 		report := reported.Result.(*AbuseStaffReportCsamResult)
 		if !report.HoldPlaced || report.Hold.Kind != string(sidecar.HoldKindReport2258a) || !report.Case.Barred ||
-			report.Suspension.Action.Kind != string(model.AbuseActionKindNetworkSuspend) {
+			report.Suspension.Action.Kind != string(model.AbuseActionKindNetworkSuspend) || report.HoldBindTimeMs == 0 {
 			t.Fatalf("reported %+v", report)
 		}
 		if abuseCase := model.GetAbuseCase(ctx, csamCase); !abuseCase.Barred {
