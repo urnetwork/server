@@ -163,8 +163,9 @@ var frontTlsHandshakesCounter = prometheus.NewCounterVec(
 // offered to resume with and the shape of its supported_versions. It tells
 // apart the handshakes those labels leave alike, such as the full handshakes
 // that offer no protocol, and shows which resumption offers fail. Every label
-// is a closed set, at most 4 x 2 x 8 x 4 x 9 series, and no server name or
-// address is one.
+// is a closed set: at most 4 x 2 x 7 x 4 x 8 series, and 4 x 2 more for a
+// ClientHello the front never read, whose offer labels are all -. No server
+// name or address is one.
 var frontTlsHandshakeOffersCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
