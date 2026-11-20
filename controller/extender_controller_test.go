@@ -603,7 +603,7 @@ func TestExtenderActivateRateLimitIsPerClient(t *testing.T) {
 		secondSession := newTestExtenderAccountSession(ctx, firstSession)
 
 		settings := DefaultExtenderActivateSettings()
-		settings.AddressRateLimit = 64
+		settings.AddressIpv4RateLimit = 64
 		service := newExtenderActivateService(settings)
 
 		rateLimited := func(result *ExtenderActivateResult) bool {
