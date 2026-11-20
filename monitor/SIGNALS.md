@@ -2953,6 +2953,37 @@ UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
 
+For a Taskworker top shape reporting TLS `completeHandshake failed: context
+canceled`, the Taskworker stats pusher exposes a process counter in builds
+carrying the cancellation-source collector. Query the same UTC interval and
+local role as the retained sample. For the server-role companion cohort:
+
+```promql
+sum by (source) (
+  increase(urnetwork_taskworker_tls_handshake_cancellations_total{
+    env="main", job="taskworker", role="server", companion="true"
+  }[5m])
+)
+```
+
+Each process reports all seven sources for both roles and companion flags.
+`parent_lifetime` means cancellation inherited from outside the encryption
+manager. The other source names identify explicit manager, session or epoch
+retirement, rejected control enqueue, a recovered worker, or `unknown` when
+the canceled result lacks a canceled context at completion. The counter
+tracks coalesced current-epoch diagnostics and preserves their failure
+streaks. A quiet zero requires a fresh, complete same-artifact process cohort.
+An absent family, a missing process or a window too short for two samples
+leaves visibility unknown. `increase` estimates changes over the query
+window, including across counter resets.
+
+The source mix can distinguish a cleanup-heavy interval from a rise in local
+control rejection. Exact attribution still requires the same-attempt event,
+caller intent, terminal identity proof and independent flow outcome. An
+intentional shutdown can interrupt a live handshake; sampling and coalescing
+can also hide failures of intended flows. Keep alert #131 open until the
+corresponding attempt and outcome have been established.
+
 False-positive qualifier for `novel`: the prober's per-provider egress-health
 result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit`
 (qualityprobe/prober), names in `failed=` the destinations one provider failed
