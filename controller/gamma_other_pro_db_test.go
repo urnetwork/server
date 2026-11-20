@@ -152,7 +152,7 @@ func TestGammaOpenRenewalIsNotChargedOnceAnotherProSubscriptionStarts(t *testing
 		termEnd := gammaRenewal.endTime.Add(-manualPaymentGracePeriod)
 
 		// the renewal is made while the deposit is empty
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 0})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 0})
 		f.now = termEnd.Add(-30 * time.Minute)
 		f.autoNow()
 		f.run()
@@ -161,7 +161,7 @@ func TestGammaOpenRenewalIsNotChargedOnceAnotherProSubscriptionStarts(t *testing
 
 		// an App Store subscription starts, then the customer mints
 		gammaOtherProTestWindow(t, ctx, networkId, model.SubscriptionMarketApple, termEnd.Add(time.Hour), termEnd.Add(31*24*time.Hour))
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: gammaDeletedTestDepositBalance})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: gammaDeletedTestDepositBalance})
 		f.now = termEnd.Add(2 * time.Hour)
 		f.run()
 		f.run()
@@ -308,7 +308,7 @@ func TestGammaOpenPurchaseIsNotChargedOnceAnotherProSubscriptionStarts(t *testin
 
 		gammaOtherProTestWindow(t, ctx, networkId, model.SubscriptionMarketStripe, f.now.Add(-time.Hour), f.now.Add(60*24*time.Hour))
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: gammaDeletedTestDepositBalance})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: gammaDeletedTestDepositBalance})
 		f.run()
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 0)

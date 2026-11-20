@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-gamma-pay",
   "title": "urnetwork / gamma payments",
-  "description": "Pay with Gamma (mmm/BTCPAY.md §18): the taskworker's biller and watcher. SN25 gamma deposits are charged by our spender through the GammaSpend billing key; a purchase is credited only on our own finalized GammaSpent.",
+  "description": "Pay with Gamma (mmm/BTCPAY.md §18): the taskworker's biller and watcher. Since runtime 493 each charge is a fee-free spend_gamma at our service, signed by the SN25 deposit's own hotkey (its key derived from the deposit seed); a purchase is credited only on the finalized GammaSpent our own extrinsic emitted.",
   "tags": [
     "urnetwork",
     "payments"
@@ -37,10 +37,10 @@
       "id": 1,
       "type": "stat",
       "title": "biller readiness",
-      "description": "The biller's readiness: 1 for the current reason. Anything but ready pauses new charges (not_configured until gamma.yml and the on-chain setup exist; runtime_unsupported pauses on an unreviewed runtime; batch_in_review waits for an operator).",
+      "description": "The biller's readiness: 1 for the current reason. Anything but ready pauses new charges (not_configured until gamma.yml with the deposit seed is on the taskworker; service_not_published while SN25 lists no service for its owner hotkey; runtime_unsupported pauses on an unreviewed runtime; batch_in_review waits for an operator).",
       "gridPos": {
         "h": 5,
-        "w": 8,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -63,45 +63,14 @@
       }
     },
     {
-      "id": 2,
-      "type": "stat",
-      "title": "billing key fee float",
-      "description": "What the GammaSpend billing key can pay fees from. Purchases pause below min_float_rao (gamma.yml, 0.001 TAO by default); a one-entry spend costs about 0.0002 TAO.",
-      "gridPos": {
-        "h": 5,
-        "w": 8,
-        "x": 8,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "warp-mimir"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(urnetwork_gamma_pay_billing_float_rao{env=\"$env\",service=\"taskworker\",instance!=\"\"}) / 1e9",
-          "legendFormat": "TAO",
-          "instant": true,
-          "range": false
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 3,
       "type": "stat",
       "title": "TAO/USD oracle age",
       "description": "Blocks since the chain's TAO/USD oracle last fed. Every mint fails past 300 (TaoUsdPriceUnavailable); spending existing deposits does not need it.",
       "gridPos": {
         "h": 5,
-        "w": 8,
-        "x": 16,
+        "w": 12,
+        "x": 12,
         "y": 0
       },
       "datasource": {
@@ -157,7 +126,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "alarms / s by kind",
-      "description": "Watcher alarms: unknown_reference (a spend from our spender we never issued: the earliest sign of a leaked billing key), duplicate_reference, spender_proxy_changed, unknown_billing_transaction, unexpected_nonce, runtime_unsupported, undecodable_block, service_changed, and stray_tao (plain TAO sent to a deposit hotkey, recoverable). Any but stray_tao needs the owner.",
+      "description": "Watcher alarms: unknown_reference (a GammaSpent by one of our deposit hotkeys that is none of our spends, at our service or another: the earliest sign of a leaked deposit seed), spend_mismatch, unexpected_nonce, runtime_unsupported, undecodable_block, service_changed, and stray_tao (plain TAO sent to a deposit hotkey, recoverable). Any but stray_tao needs the owner.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -215,7 +184,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "charges resolved / s",
-      "description": "Charges resolved by a finalized event: spent, or skipped with the chain's reason (insufficient_gamma, daily_cap_exceeded, wrong_spender, no_deposit).",
+      "description": "Charges resolved: spent (our finalized GammaSpent), or skipped before anything was sent, with the reason (insufficient_gamma, daily_cap_exceeded, daily_cap_too_low, no_deposit, refused); and foreign, a spend at our service from a hotkey we never assigned (no charge of ours; it stays in that hotkey's GammaSpent total).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -272,8 +241,8 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "batches submitted and their fees",
-      "description": "Spend batches signed and submitted (at most one live at a time), and the mean fee of the batches that landed, in rao.",
+      "title": "spends submitted and their fees",
+      "description": "Spends signed (each as its deposit's hotkey) and submitted, at most one live at a time; since runtime 493 a spend pays no fee.",
       "gridPos": {
         "h": 8,
         "w": 12,

@@ -3,33 +3,42 @@ package controller
 // Pay with Gamma: the biller and the watcher (mmm/BTCPAY.md §18.4).
 //
 // One taskworker chain, RunOnce "gamma_biller", runs this every few seconds,
-// so exactly one process owns the billing key's nonce. Each run:
+// so exactly one process signs with the deposit hotkeys' keys and owns their
+// nonces. Since runtime 493 a charge is one spend_gamma(our service, 25,
+// price) signed by the deposit's own hotkey (gamma_chain.go); it pays no fee.
+// Each run:
 //
 //  1. reads the finalized head and judges readiness: the runtime's shapes,
-//     the published service and its spender, the billing key's GammaSpend
-//     proxy and fee float, and (for the terms only) whether minting works:
+//     our published service, and (for the terms only) whether minting works:
 //     gamma on network-wide and on the subnet, a TAO/USD feed at most 300
 //     blocks old
 //  2. the watcher: reads every finalized block after its cursor, each with the
-//     runtime that executed it. Our spender's GammaSpent and GammaSpendSkipped
-//     resolve our charges by reference; our billing key's fee events place our
-//     batch; anything that must not happen raises an alarm: a spend from our
-//     spender with a reference we never issued, a reference spent twice, any
-//     change to the spender's proxies, a billing-key transaction that is none
-//     of our batches. Plain TAO sent to a deposit hotkey is recorded as a
-//     recoverable customer mistake. A block the runtime cannot decode stops
-//     the cursor there and pauses the biller, with an alarm: never a crash
-//     loop, never a guess.
-//  3. the live batch: resubmitted while its era runs; expired, its charges
-//     released to the next batch with their references unchanged, once its
-//     era is over, every block it could land in was read, and the billing
-//     key's nonce shows it never landed; held for review when the nonce moved
-//     without it.
+//     runtime that executed it. A GammaSpent emitted by one of our spends
+//     (the extrinsic with the hash we recorded) resolves its charge; anything
+//     that must not happen raises an alarm: a spend by one of our deposit
+//     hotkeys that is none of our spends (at our service or another), a spend
+//     of ours that landed other than we signed it. A spend at our service from
+//     a hotkey we never assigned is counted and logged: what it spent stays in
+//     the chain's GammaSpent total for that hotkey. Plain TAO sent to a
+//     deposit hotkey is recorded as a recoverable customer mistake. A block the
+//     runtime cannot decode stops the cursor there and pauses the biller, with
+//     an alarm: never a crash loop, never a guess. A block a retired runtime
+//     ran (older than 493) is read only for what kept its names, and only
+//     while none of our spends is in flight.
+//  3. the live spend: resubmitted while its era runs; expired, its charge
+//     released for another spend with its reference unchanged, once its era
+//     is over, every block it could land in was read, and the deposit
+//     hotkey's nonce shows it never landed; held for review when the nonce
+//     moved without it.
 //  4. looks at the deposits of the open intents and of the paying accounts
 //  5. charges: re-arms a skipped charge once its deposit changed; records a
-//     charge for each open intent its deposit can pay (spendable, our
-//     spender, nothing else pending ahead of it); then signs at most one batch
-//     of up to 512 charges, records it with its exact bytes, and submits it
+//     charge for each open intent its deposit can pay (spendable, nothing else
+//     pending ahead of it); then, for the oldest charge the chain would take
+//     now, signs one spend as the deposit's hotkey, has the chain judge it
+//     (validate_transaction), records it with its exact bytes, and submits
+//     it. A charge the deposit or the chain refuses before anything is signed
+//     or recorded is skipped, and goes out again only once its deposit
+//     changed.
 //  6. credits every intent whose charge was spent (the one-shot); voids the
 //     automatic intents whose switch the account turned off, unless their
 //     charge is already in flight; and sends the notice of a skipped
@@ -40,8 +49,10 @@ package controller
 //     within the account's monthly limit
 //
 // Credit is only ever on our own finalized GammaSpent: until it lands, the
-// customer's coldkey can move the gamma, change the spender or pause the
-// deposit, and a skipped spend buys nothing.
+// customer's coldkey can move the gamma or pause the deposit, and a spend the
+// chain refuses buys nothing. A signed spend stays live until it lands or its
+// era is proven over: its charge is never signed again before that, so no
+// charge is ever spent twice.
 
 import (
 	"context"
@@ -63,18 +74,17 @@ import (
 )
 
 // Readiness reasons. "ready" sells; anything else pauses new charges (and new
-// intents) until it clears; a charge already recorded waits.
+// intents) until it clears; a charge already recorded waits. Runtime 493
+// retired the spender's (service_spender_mismatch, billing_proxy_missing,
+// fee_float_low): a spend names no spender, needs no proxy and pays no fee.
 const (
-	gammaReady                  = "ready"
-	gammaNotConfigured          = "not_configured"
-	gammaChainUnreachable       = "chain_unreachable"
-	gammaRuntimeUnsupported     = "runtime_unsupported"
-	gammaServiceNotPublished    = "service_not_published"
-	gammaServiceSpenderMismatch = "service_spender_mismatch"
-	gammaBillingProxyMissing    = "billing_proxy_missing"
-	gammaFeeFloatLow            = "fee_float_low"
-	gammaWatcherBehind          = "watcher_behind"
-	gammaBatchInReview          = "batch_in_review"
+	gammaReady               = "ready"
+	gammaNotConfigured       = "not_configured"
+	gammaChainUnreachable    = "chain_unreachable"
+	gammaRuntimeUnsupported  = "runtime_unsupported"
+	gammaServiceNotPublished = "service_not_published"
+	gammaWatcherBehind       = "watcher_behind"
+	gammaBatchInReview       = "batch_in_review"
 )
 
 // Minting reasons (the terms' minting flag).
@@ -84,7 +94,17 @@ const (
 	gammaMintPriceStale     = "price_stale"
 )
 
-// Alarm kinds.
+// Alarm kinds. The kind strings are kept from runtime 492's spender model, so
+// the monitor reads them unchanged (SIGNALS.md §2.22b); since runtime 493:
+//   - unknown_reference: a GammaSpent by one of our deposit hotkeys that is
+//     none of our spends, at our service or another: we hold those keys and
+//     record every spend before we sign it, so this is the first sign of a
+//     leaked deposit seed, or of a second process signing with it
+//   - spend_mismatch: one of our spends landed other than we signed it
+//   - unexpected_nonce: a deposit hotkey's nonce moved without our spend
+//   - duplicate_reference, spender_proxy_changed, unknown_billing_transaction:
+//     no longer raised (a spend carries no reference; there is no spender and
+//     no billing key)
 const (
 	gammaAlarmUnknownReference    = "unknown_reference"
 	gammaAlarmDuplicateReference  = "duplicate_reference"
@@ -164,6 +184,19 @@ func GammaReadinessReasons() []string {
 // The credits each run tries, the fewest failures first.
 const gammaCreditsPerRun = 200
 
+// The open intents each run may record a charge for.
+const gammaChargeablePerRun = 512
+
+// The charges each run looks through for the one spend it sends: the oldest
+// the deposit and the chain take now.
+const gammaSpendCandidatesPerRun = 50
+
+// The charge-results state of a GammaSpent at our service from a hotkey we
+// never assigned (charges_resolved_total): no charge of ours, but what it
+// spent stays in the chain's GammaSpent total for that hotkey, to be credited
+// once its holder proves it is theirs.
+const gammaForeignSpendState = "foreign"
+
 // The credits held for review each run retries besides, the least retried
 // first: each is retried in turn, and one whose cause was fixed is credited.
 const gammaCreditReviewRetries = 10
@@ -223,16 +256,13 @@ var gammaAutoLastRun time.Time
 type gammaTerms struct {
 	Netuid           uint16 `json:"netuid"`
 	ServiceHotkey    string `json:"service_hotkey"`
-	Spender          string `json:"spender"`
 	ServicesUrl      string `json:"services_url"`
-	BillingAddress   string `json:"billing_address"`
 	FinalizedBlock   uint64 `json:"finalized_block"`
 	SpecVersion      uint32 `json:"spec_version"`
 	TaoUsdAccepted   uint64 `json:"tao_usd_accepted"`
 	PriceFedAt       uint64 `json:"price_fed_at"`
 	PriceAgeBlocks   uint64 `json:"price_age_blocks"`
 	GammaPerTao      uint64 `json:"gamma_per_tao"`
-	FloatRao         uint64 `json:"float_rao"`
 	ServicePublished bool   `json:"service_published"`
 }
 
@@ -250,11 +280,12 @@ func RunGammaBiller(clientSession *session.ClientSession) (result *GammaBillerRe
 		return result, nil
 	}
 	if !settings.canSign {
-		// a serving copy of gamma.yml (no billing_key_seed): nothing here bills
+		// a serving copy of gamma.yml (no deposit_hotkey_seed): nothing here
+		// bills
 		result.Readiness = gammaNotConfigured
 		gammaRecordReadiness(ctx, nil, gammaNotConfigured, gammaNotConfigured, nil)
-		gammaReports.report("no_billing_key", func() {
-			glog.Infof("[gamma]not configured: gamma.yml names no billing_key_seed, so this process does not bill\n")
+		gammaReports.report("no_deposit_seed", func() {
+			glog.Infof("[gamma]not configured: gamma.yml names no deposit_hotkey_seed, so this process does not bill\n")
 		})
 		return result, nil
 	}
@@ -296,7 +327,6 @@ type gammaBiller struct {
 	terms      *gammaTerms
 	readiness  string
 	mint       string
-	billing    *gammaAccount
 	// hotkeys an event touched this run
 	touched map[string]bool
 }
@@ -318,6 +348,7 @@ func (self *gammaBiller) run(result *GammaBillerResult) {
 	self.runtime = runtime
 	if err := runtime.Supported(); err != nil {
 		self.alarm(fmt.Sprintf("runtime/%d", runtime.SpecVersion), gammaAlarmRuntimeUnsupported, nil, err.Error())
+		self.reportScanLag()
 		self.pause(result, gammaRuntimeUnsupported, err)
 		return
 	}
@@ -327,6 +358,7 @@ func (self *gammaBiller) run(result *GammaBillerResult) {
 	scanned, scanErr := self.scan()
 	result.Scanned = scanned
 	if scanErr != nil {
+		self.reportScanLag()
 		self.pause(result, gammaReadinessFor(scanErr), scanErr)
 		return
 	}
@@ -353,6 +385,16 @@ func (self *gammaBiller) run(result *GammaBillerResult) {
 	result.Readiness = self.readiness
 	gammaReadyGauge(self.readiness)
 	gammaRecordReadiness(ctx, self.chainState(), self.readiness, self.mint, self.terms)
+}
+
+// reportScanLag sets the scan lag gauge from the cursor while the watcher
+// holds still: a paused watcher falls behind, and the gauge says by how much.
+func (self *gammaBiller) reportScanLag() {
+	state := model.GetGammaChainState(self.ctx)
+	if state == nil || state.ScannedBlock == nil || self.headNumber == 0 {
+		return
+	}
+	gammaScanLagGauge.Set(float64(self.headNumber - min(self.headNumber, uint64(*state.ScannedBlock))))
 }
 
 func (self *gammaBiller) pause(result *GammaBillerResult, reason string, err error) {
@@ -425,9 +467,7 @@ func (self *gammaBiller) judge() (readiness string, mint string) {
 	self.terms = &gammaTerms{
 		Netuid:         settings.Netuid,
 		ServiceHotkey:  settings.ServiceAddress,
-		Spender:        settings.SpenderAddress,
 		ServicesUrl:    settings.ServicesUrl,
-		BillingAddress: settings.BillingAddress,
 		FinalizedBlock: self.headNumber,
 		SpecVersion:    runtime.SpecVersion,
 	}
@@ -474,47 +514,20 @@ func (self *gammaBiller) judge() (readiness string, mint string) {
 	}
 	gammaPriceAgeGauge.Set(float64(self.terms.PriceAgeBlocks))
 
+	// a spend at a hotkey with no service on the subnet is refused: our
+	// service must be published (SubtensorModule.Services, its url only)
 	service, err := self.chain.Service(ctx, runtime, at, settings.Netuid, settings.ServiceHotkey)
 	if err != nil {
 		return gammaChainUnreachable, mint
 	}
 	if service == nil {
-		readiness = gammaServiceNotPublished
-	} else {
-		self.terms.ServicePublished = true
-		if service.Spender != settings.Spender {
-			readiness = gammaServiceSpenderMismatch
-		} else if service.Url != settings.ServicesUrl {
-			self.alarm("service_url/"+service.Url, gammaAlarmServiceChanged, nil, fmt.Sprintf("the published service's url is %q, not %q", service.Url, settings.ServicesUrl))
-		}
+		return gammaServiceNotPublished, mint
 	}
-	proxies, err := self.chain.Proxies(ctx, runtime, at, settings.Spender)
-	if err != nil {
-		return gammaChainUnreachable, mint
+	self.terms.ServicePublished = true
+	if service.Url != settings.ServicesUrl {
+		self.alarm("service_url/"+service.Url, gammaAlarmServiceChanged, nil, fmt.Sprintf("the published service's url is %q, not %q", service.Url, settings.ServicesUrl))
 	}
-	proxyOk := false
-	for _, proxy := range proxies {
-		if proxy.Delegate == settings.BillingPublicKey && proxy.ProxyType == runtime.shape.gammaSpendProxyType && proxy.Delay == 0 {
-			proxyOk = true
-		}
-	}
-	billing, err := self.chain.Account(ctx, runtime, at, settings.BillingPublicKey)
-	if err != nil {
-		return gammaChainUnreachable, mint
-	}
-	self.billing = billing
-	self.terms.FloatRao = billing.Usable()
-	gammaFloatGauge.Set(float64(billing.Usable()))
-	switch {
-	case readiness != "":
-	case !proxyOk:
-		readiness = gammaBillingProxyMissing
-	case billing.Usable() < settings.MinFloatRao:
-		readiness = gammaFeeFloatLow
-	default:
-		readiness = gammaReady
-	}
-	return readiness, mint
+	return gammaReady, mint
 }
 
 // ----- the watcher -----
@@ -568,37 +581,46 @@ func (self *gammaBiller) scanBlock(number uint64) error {
 	if err != nil {
 		return err
 	}
+	retired := false
 	if err := block.Runtime.Supported(); err != nil {
-		self.alarm(fmt.Sprintf("runtime/%d", block.Runtime.SpecVersion), gammaAlarmRuntimeUnsupported, gammaBlockRef(number), err.Error())
-		return err
+		// a block an older runtime ran (the last blocks before an upgrade):
+		// read for what kept its names, while none of our spends is in
+		// flight. Anything else holds the cursor here.
+		if !block.Runtime.Retired() || model.GetLiveGammaSpendBatch(ctx) != nil {
+			self.alarm(fmt.Sprintf("runtime/%d", block.Runtime.SpecVersion), gammaAlarmRuntimeUnsupported, gammaBlockRef(number), err.Error())
+			return err
+		}
+		retired = true
 	}
 	events, err := self.chain.Events(ctx, block)
 	if err != nil {
 		self.alarm(fmt.Sprintf("undecodable/%d", number), gammaAlarmUndecodableBlock, gammaBlockRef(number), err.Error())
 		return fmt.Errorf("%w: block %d: %v", errGammaRuntimeUnsupported, number, err)
 	}
+	if retired {
+		gammaReports.report(fmt.Sprintf("retired/%d", block.Runtime.SpecVersion), func() {
+			glog.Infof("[gamma]block %d ran retired runtime %d: read for mints, moves and transfers only\n", number, block.Runtime.SpecVersion)
+		})
+	}
 
 	var spends []*gammaSpendEvent
-	ourExtrinsics := map[int64]uint64{}
 	transfers := map[string]uint64{}
 	for _, event := range events {
 		switch event.Name {
-		case "SubtensorModule.GammaSpent", "SubtensorModule.GammaSpendSkipped":
-			spend, err := gammaSpendEventFrom(block.Runtime, event)
+		case "SubtensorModule.GammaSpent":
+			if retired {
+				// the spender model's spend (no service, a reference): none
+				// of ours, since no spend of ours was in flight
+				continue
+			}
+			spend, err := gammaSpendEventFrom(event)
 			if err != nil {
 				return fmt.Errorf("%w: block %d event %d: %v", errGammaRuntimeUnsupported, number, event.Index, err)
 			}
-			if spend.Spender == settings.Spender {
+			if spend.Netuid == settings.Netuid {
 				spends = append(spends, spend)
 			}
-		case "TransactionPayment.TransactionFeePaid":
-			who, err := gammaEventBytes32(event, "who")
-			if err == nil && who == settings.BillingPublicKey {
-				fee, _ := gammaEventUint(event, "actual_fee")
-				ourExtrinsics[event.ExtrinsicIndex] = fee
-			}
-		case "SubtensorModule.GammaMinted", "SubtensorModule.GammaDepositSpenderSet",
-			"SubtensorModule.GammaDepositDailySpendCapSet", "SubtensorModule.GammaDepositClosed":
+		case "SubtensorModule.GammaMinted", "SubtensorModule.GammaDepositDailySpendCapSet", "SubtensorModule.GammaDepositClosed":
 			if netuid, err := gammaEventUint(event, "netuid"); err == nil && uint16(netuid) == settings.Netuid {
 				if hotkey, err := gammaEventBytes32(event, "hotkey"); err == nil {
 					self.touched[gammaAddress(hotkey)] = true
@@ -611,17 +633,6 @@ func (self *gammaBiller) scanBlock(number uint64) error {
 						self.touched[gammaAddress(hotkey)] = true
 					}
 				}
-			}
-		case "Proxy.ProxyAdded", "Proxy.ProxyRemoved":
-			delegator, err := gammaEventBytes32(event, "delegator")
-			if err == nil && delegator == settings.Spender {
-				delegatee, _ := gammaEventBytes32(event, "delegatee")
-				self.alarm(
-					fmt.Sprintf("proxy/%d/%d", number, event.Index),
-					gammaAlarmSpenderProxyChanged,
-					gammaBlockRef(number),
-					fmt.Sprintf("%s for delegate %s", event.Name, gammaAddress(delegatee)),
-				)
 			}
 		case "Balances.Transfer":
 			to, err := gammaEventBytes32(event, "to")
@@ -649,8 +660,8 @@ func (self *gammaBiller) scanBlock(number uint64) error {
 		}
 	}
 
-	if 0 < len(ourExtrinsics) || 0 < len(spends) {
-		if err := self.resolveBlock(block, ourExtrinsics, spends); err != nil {
+	if 0 < len(spends) {
+		if err := self.resolveBlock(block, spends); err != nil {
 			return err
 		}
 	}
@@ -658,126 +669,118 @@ func (self *gammaBiller) scanBlock(number uint64) error {
 	return nil
 }
 
-// resolveBlock records, for one block, where our batches landed and what each
-// of our spend entries did.
-func (self *gammaBiller) resolveBlock(block *gammaBlock, ourExtrinsics map[int64]uint64, spends []*gammaSpendEvent) error {
+// gammaLandedSpend is one of our spends found in a block, with its charge.
+type gammaLandedSpend struct {
+	spend  *gammaSpendEvent
+	batch  *model.GammaSpendBatch
+	charge *model.GammaCharge
+}
+
+// resolveBlock records what each GammaSpent on our subnet in one block means
+// to us. A spend by one of our deposit hotkeys is ours only when the
+// extrinsic that emitted it is one of our recorded spends, by hash: it
+// resolves that spend's one charge and places the spend in the block. Any
+// other spend by one of our deposit hotkeys, at our service or another, is
+// one we never issued: an alarm. A spend at our service from a hotkey we
+// never assigned is counted and logged; what it spent stays in the chain's
+// GammaSpent total for that hotkey.
+func (self *gammaBiller) resolveBlock(block *gammaBlock, spends []*gammaSpendEvent) error {
 	ctx := self.ctx
 	settings := self.settings
 	number := block.Number
 
-	// our batches in this block, by extrinsic index
-	batches := map[int64]*model.GammaSpendBatch{}
-	if 0 < len(ourExtrinsics) {
-		extrinsics, err := self.chain.Extrinsics(ctx, block.Hash)
-		if err != nil {
-			return err
-		}
-		for index, fee := range ourExtrinsics {
-			if index < 0 || int64(len(extrinsics)) <= index {
-				continue
-			}
-			hash := gammaExtrinsicHash(extrinsics[index]).Hex()
-			batch := model.GetGammaSpendBatchByExtrinsicHash(ctx, hash)
-			if batch == nil {
-				self.alarm(
-					fmt.Sprintf("billing_tx/%d/%d", number, index),
-					gammaAlarmUnknownBillingTx,
-					gammaBlockRef(number),
-					fmt.Sprintf("extrinsic %s paid for by the billing key is none of our batches", hash),
-				)
-				continue
-			}
-			batch.FeeRao = gammaInt64Ref(int64(fee))
-			batches[index] = batch
-		}
-	}
-
-	references := [][]byte{}
+	addresses := []string{}
 	for _, spend := range spends {
-		references = append(references, spend.Reference[:])
+		addresses = append(addresses, gammaAddress(spend.Hotkey))
 	}
-	charges := model.GetGammaChargesByReferences(ctx, references)
+	ours := model.GetGammaDepositHotkeysByAddresses(ctx, addresses)
+
+	var extrinsics [][]byte
+	landed := []*gammaLandedSpend{}
+	for _, spend := range spends {
+		address := gammaAddress(spend.Hotkey)
+		eventRef := fmt.Sprintf("%d/%d", number, spend.Event.Index)
+		if _, ok := ours[address]; !ok {
+			if spend.Service == settings.ServiceHotkey {
+				gammaChargeResults.WithLabelValues(gammaForeignSpendState, "").Inc()
+				glog.Warningf("[gamma]%s gamma spent at our service by %s, a hotkey we never assigned (block %d, event %d): no charge of ours; it stays in that hotkey's GammaSpent total\n", gammaFormatUnits(int64(spend.Amount)), address, number, spend.Event.Index)
+			}
+			continue
+		}
+		// the extrinsic that emitted it, by hash
+		var batch *model.GammaSpendBatch
+		if 0 <= spend.Event.ExtrinsicIndex {
+			if extrinsics == nil {
+				var err error
+				if extrinsics, err = self.chain.Extrinsics(ctx, block.Hash); err != nil {
+					return err
+				}
+			}
+			if spend.Event.ExtrinsicIndex < int64(len(extrinsics)) {
+				batch = model.GetGammaSpendBatchByExtrinsicHash(ctx, gammaExtrinsicHash(extrinsics[spend.Event.ExtrinsicIndex]).Hex())
+			}
+		}
+		if batch == nil {
+			self.alarm("spend/"+eventRef, gammaAlarmUnknownReference, gammaBlockRef(number), fmt.Sprintf(
+				"deposit hotkey %s spent %s gamma at %s in block %d (event %d), and it is none of our spends: we hold that hotkey's key and record every spend before we sign it, so the deposit seed may have leaked",
+				address, gammaFormatUnits(int64(spend.Amount)), gammaAddress(spend.Service), number, spend.Event.Index,
+			))
+			continue
+		}
+		charges := model.ListGammaChargesForBatch(ctx, batch.BatchId)
+		if len(charges) != 1 || charges[0].State != model.GammaChargePending || charges[0].Hotkey != address ||
+			charges[0].Amount != int64(spend.Amount) || spend.Service != settings.ServiceHotkey {
+			// our model of the chain is wrong: the spend is held for an
+			// operator with its charge, and nothing is signed meanwhile
+			note := fmt.Sprintf(
+				"our spend %s landed in block %d (event %d) as %s gamma from %s at %s, not as its %d charge(s) were recorded",
+				batch.ExtrinsicHash, number, spend.Event.Index, gammaFormatUnits(int64(spend.Amount)), address, gammaAddress(spend.Service), len(charges),
+			)
+			self.alarm("mismatch/"+eventRef, gammaAlarmSpendMismatch, gammaBlockRef(number), note)
+			model.ReviewGammaSpendBatch(ctx, batch.BatchId, note, self.now)
+			continue
+		}
+		landed = append(landed, &gammaLandedSpend{spend: spend, batch: batch, charge: charges[0]})
+	}
+	if len(landed) == 0 {
+		return nil
+	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		for _, spend := range spends {
-			charge := charges[string(spend.Reference[:])]
-			eventRef := fmt.Sprintf("%d/%d", number, spend.Event.Index)
-			if charge == nil {
-				self.alarm("reference/"+eventRef, gammaAlarmUnknownReference, gammaBlockRef(number), fmt.Sprintf(
-					"%s from our spender with reference %s we never issued: %d units from %s",
-					spend.Event.Name, gammaHex(spend.Reference[:]), spend.Amount, gammaAddress(spend.Hotkey),
-				))
-				continue
-			}
-			if charge.State != model.GammaChargePending {
-				self.alarm("duplicate/"+eventRef, gammaAlarmDuplicateReference, gammaBlockRef(number), fmt.Sprintf(
-					"%s with reference %s, whose charge is already %s",
-					spend.Event.Name, gammaHex(spend.Reference[:]), charge.State,
-				))
-				continue
-			}
-			if spend.Netuid != settings.Netuid || gammaAddress(spend.Hotkey) != charge.Hotkey || int64(spend.Amount) != charge.Amount {
-				self.alarm("mismatch/"+eventRef, gammaAlarmSpendMismatch, gammaBlockRef(number), fmt.Sprintf(
-					"%s with reference %s spent %d units on netuid %d from %s; the charge is %d from %s",
-					spend.Event.Name, gammaHex(spend.Reference[:]), spend.Amount, spend.Netuid, gammaAddress(spend.Hotkey), charge.Amount, charge.Hotkey,
-				))
-				continue
-			}
+		for _, our := range landed {
 			resolution := &model.GammaChargeResolution{
 				State:       model.GammaChargeSpent,
 				BlockNumber: int64(number),
 				BlockHash:   block.Hash.Hex(),
-				EventIndex:  spend.Event.Index,
+				EventIndex:  our.spend.Event.Index,
 			}
-			if spend.Skipped {
-				resolution.State = model.GammaChargeSkipped
-				resolution.SkipReason = gammaSkipReasonCode(spend.Reason)
-				// the deposit as of the skip is recorded at the first look
-				// after it (charge)
+			if model.ResolveGammaChargeInTx(tx, ctx, our.charge.Reference, resolution, self.now) {
+				gammaChargeResults.WithLabelValues(resolution.State, "").Inc()
+				glog.Infof("[gamma]charge %s spent at block %d\n", gammaHex(our.charge.Reference), number)
 			}
-			if model.ResolveGammaChargeInTx(tx, ctx, spend.Reference[:], resolution, self.now) {
-				gammaChargeResults.WithLabelValues(resolution.State, resolution.SkipReason).Inc()
-				glog.Infof("[gamma]charge %s %s at block %d (%s)\n", gammaHex(spend.Reference[:]), resolution.State, number, resolution.SkipReason)
-			}
-		}
-		for index, batch := range batches {
-			fee := int64(0)
-			if batch.FeeRao != nil {
-				fee = *batch.FeeRao
-			}
-			if model.IncludeGammaSpendBatchInTx(tx, ctx, batch.BatchId, &model.GammaBatchInclusion{
+			// a spend pays no fee
+			if model.IncludeGammaSpendBatchInTx(tx, ctx, our.batch.BatchId, &model.GammaBatchInclusion{
 				BlockNumber:    int64(number),
 				BlockHash:      block.Hash.Hex(),
-				ExtrinsicIndex: int(index),
-				FeeRao:         fee,
+				ExtrinsicIndex: int(our.spend.Event.ExtrinsicIndex),
 			}, "", self.now) {
-				gammaBatchFees.Observe(float64(fee))
-				glog.Infof("[gamma]batch %s landed in block %d at %d (fee %d rao)\n", batch.BatchId, number, index, fee)
+				gammaBatchFees.Observe(0)
+				glog.Infof("[gamma]spend %s landed in block %d at %d\n", our.batch.BatchId, number, our.spend.Event.ExtrinsicIndex)
 			}
 		}
 	}, server.TxReadCommitted)
 	return nil
 }
 
-// gammaSkipReasonCode is the API's code for the chain's skip reason.
-func gammaSkipReasonCode(reason string) string {
-	switch reason {
-	case "GammaDepositDoesNotExist":
-		return GammaErrorCodeNoDeposit
-	case "NotGammaDepositSpender":
-		return GammaErrorCodeWrongSpender
-	case "InsufficientGammaBalance":
-		return GammaErrorCodeInsufficientGamma
-	case "GammaDepositDailySpendCapExceeded":
-		return GammaErrorCodeDailyCapExceeded
-	case "AmountTooLow":
-		return GammaErrorCodeInvalidAmount
-	}
-	return "skipped"
-}
+// ----- the live spend -----
 
-// ----- the live batch -----
-
+// handleLiveBatch looks after the one live spend (a batch of one charge,
+// signed by that charge's deposit hotkey): resubmitted while its era runs,
+// expired once its era is over and the hotkey's nonce shows it never landed,
+// held for review when that nonce moved without it. A spend the chain now
+// refuses (the deposit was emptied after it was signed) stays live until its
+// era ends: it could still land if the deposit is refilled, so its charge is
+// never signed again before then.
 func (self *gammaBiller) handleLiveBatch() {
 	ctx := self.ctx
 	batch := model.GetLiveGammaSpendBatch(ctx)
@@ -791,18 +794,30 @@ func (self *gammaBiller) handleLiveBatch() {
 		scannedThrough = uint64(*state.ScannedBlock)
 	}
 	if eraEnd <= self.headNumber && eraEnd <= scannedThrough {
-		// every block the batch could have landed in is read and it is not
-		// among them; the billing key's nonce must say the same
-		if self.billing == nil {
+		// every block the spend could have landed in is read and it is not
+		// among them; its deposit hotkey's nonce must say the same
+		charges := model.ListGammaChargesForBatch(ctx, batch.BatchId)
+		if len(charges) != 1 {
+			note := fmt.Sprintf("the era ended and the spend was not seen; it carries %d charges, not 1", len(charges))
+			model.ReviewGammaSpendBatch(ctx, batch.BatchId, note, self.now)
 			return
 		}
-		if int64(self.billing.Nonce) == batch.Nonce {
-			if model.ExpireGammaSpendBatch(ctx, batch.BatchId, "the era ended without the batch landing", self.now) {
-				glog.Infof("[gamma]batch %s expired; its charges go to the next batch\n", batch.BatchId)
+		signer, err := model.DecodeBittensorAddress(charges[0].Hotkey)
+		if err != nil {
+			model.ReviewGammaSpendBatch(ctx, batch.BatchId, "the era ended and the spend was not seen; its charge's hotkey does not decode", self.now)
+			return
+		}
+		account, err := self.chain.Account(ctx, self.runtime, self.head, signer)
+		if err != nil {
+			return
+		}
+		if int64(account.Nonce) == batch.Nonce {
+			if model.ExpireGammaSpendBatch(ctx, batch.BatchId, "the era ended without the spend landing", self.now) {
+				glog.Infof("[gamma]spend %s expired; its charge can be spent again\n", batch.BatchId)
 			}
 			return
 		}
-		note := fmt.Sprintf("the era ended and the batch was not seen, but the billing key's nonce is %d, not %d", self.billing.Nonce, batch.Nonce)
+		note := fmt.Sprintf("the era ended and the spend was not seen, but deposit hotkey %s's nonce is %d, not %d", charges[0].Hotkey, account.Nonce, batch.Nonce)
 		self.alarm("nonce/"+batch.BatchId.String(), gammaAlarmUnexpectedNonce, nil, note)
 		model.ReviewGammaSpendBatch(ctx, batch.BatchId, note, self.now)
 		return
@@ -881,9 +896,9 @@ func (self *gammaBiller) observe() {
 			observation.HotkeyOwner = gammaAddress(*owner)
 		}
 		if deposit != nil {
+			// since runtime 493 a deposit names no spender
 			observation.Exists = true
 			observation.Coldkey = gammaAddress(deposit.Coldkey)
-			observation.Spender = gammaAddress(deposit.Spender)
 			observation.Balance = int64(deposit.Balance)
 			observation.Spendable = int64(deposit.Spendable(self.headNumber))
 			if deposit.DailySpendCap != nil {
@@ -900,7 +915,8 @@ func (self *gammaBiller) observe() {
 // ----- charging -----
 
 // charge re-arms the skipped charges whose deposit changed, records a charge
-// for each intent its deposit can pay, and signs and submits one batch.
+// for each intent its deposit can pay, and signs and submits one spend: the
+// oldest charge the deposit and the chain take now.
 func (self *gammaBiller) charge() (charged int) {
 	ctx := self.ctx
 	settings := self.settings
@@ -935,7 +951,7 @@ func (self *gammaBiller) charge() (charged int) {
 	}
 
 	hotkeys := map[string]*model.GammaDepositHotkey{}
-	for _, intent := range model.ListChargeableGammaPaymentIntents(ctx, self.now, gammaMaxSpendsPerCall) {
+	for _, intent := range model.ListChargeableGammaPaymentIntents(ctx, self.now, gammaChargeablePerRun) {
 		hotkey, ok := hotkeys[intent.Hotkey]
 		if !ok {
 			hotkey = model.GetGammaDepositHotkey(ctx, intent.Hotkey)
@@ -954,66 +970,114 @@ func (self *gammaBiller) charge() (charged int) {
 		}
 	}
 
-	charges := model.ListUnbatchedGammaCharges(ctx, gammaMaxSpendsPerCall)
+	charges := model.ListUnbatchedGammaCharges(ctx, gammaSpendCandidatesPerRun)
 	if len(charges) == 0 {
-		return 0
-	}
-	if self.billing == nil {
-		return 0
-	}
-	// the nonce at the finalized head; nothing of ours may be in the pool
-	var poolNonce uint64
-	if err := self.chain.rpc.Call(ctx, &poolNonce, "system_accountNextIndex", settings.BillingAddress); err == nil && poolNonce != uint64(self.billing.Nonce) {
-		gammaReports.report("pool_nonce", func() {
-			glog.Warningf("[gamma]the billing key's pool nonce is %d, its finalized nonce %d: waiting\n", poolNonce, self.billing.Nonce)
-		})
-		return 0
-	}
-	entries := []gammaSpendEntry{}
-	references := [][]byte{}
-	for _, charge := range charges {
-		publicKey, err := model.DecodeBittensorAddress(charge.Hotkey)
-		if err != nil || len(charge.Reference) != 32 || charge.Amount <= 0 {
-			continue
-		}
-		var reference [32]byte
-		copy(reference[:], charge.Reference)
-		entries = append(entries, gammaSpendEntry{Hotkey: publicKey, Amount: uint64(charge.Amount), Reference: reference})
-		references = append(references, charge.Reference)
-	}
-	if len(entries) == 0 {
-		return 0
-	}
-	call, err := gammaSpendCall(self.runtime, settings.Netuid, settings.Spender, entries)
-	if err != nil {
-		glog.Errorf("[gamma]could not build the spend: %s\n", err)
 		return 0
 	}
 	genesis, err := self.chain.GenesisHash(ctx)
 	if err != nil {
 		return 0
 	}
-	signed, err := gammaSignSpend(self.runtime, genesis, self.headNumber, self.head, settings.EraPeriod, self.billing.Nonce, call, settings.billingKey)
+	for _, charge := range charges {
+		sent, stop := self.spend(charge, genesis)
+		if sent {
+			return 1
+		}
+		if stop {
+			return 0
+		}
+	}
+	return 0
+}
+
+// spend sends one charge: it reads the deposit and the hotkey's nonce at the
+// finalized head, signs spend_gamma(our service, netuid, amount) as the
+// deposit's hotkey, has the chain judge it, records it with its exact bytes,
+// and submits it. sent when it went out (or was recorded to go out); stop
+// when no other charge should be tried this run. A charge the deposit or the
+// chain refuses before anything is recorded is skipped: nothing was sent, so
+// it can be signed again later, once its deposit changed.
+func (self *gammaBiller) spend(charge *model.GammaCharge, genesis types.Hash) (sent bool, stop bool) {
+	ctx := self.ctx
+	settings := self.settings
+	hotkey := model.GetGammaDepositHotkey(ctx, charge.Hotkey)
+	if hotkey == nil || len(charge.Reference) != 32 || charge.Amount <= 0 {
+		return false, false
+	}
+	publicKey, err := model.DecodeBittensorAddress(charge.Hotkey)
+	if err != nil {
+		return false, false
+	}
+	signer, err := gammaDepositSigner(settings, hotkey.DerivationIndex, publicKey)
+	if err != nil {
+		// a hotkey of another deposit master: nothing here can spend it
+		gammaReports.report("unsignable/"+charge.Hotkey, func() {
+			glog.Errorf("[gamma]charge %s: deposit hotkey %s (index %d) is not derivable from this deposit seed\n", gammaHex(charge.Reference), charge.Hotkey, hotkey.DerivationIndex)
+		})
+		return false, false
+	}
+	amount := uint64(charge.Amount)
+
+	deposit, err := self.chain.Deposit(ctx, self.runtime, self.head, settings.Netuid, publicKey)
+	if err != nil {
+		return false, true
+	}
+	if refusal := gammaSpendRefusal(deposit, amount, self.headNumber); refusal != "" {
+		self.skip(charge, hotkey, refusal)
+		return false, false
+	}
+	account, err := self.chain.Account(ctx, self.runtime, self.head, publicKey)
+	if err != nil {
+		return false, true
+	}
+	// the nonce at the finalized head; nothing of this hotkey's may be in the
+	// pool
+	var poolNonce uint64
+	if err := self.chain.rpc.Call(ctx, &poolNonce, "system_accountNextIndex", charge.Hotkey); err != nil {
+		return false, true
+	}
+	if poolNonce != uint64(account.Nonce) {
+		gammaReports.report("pool_nonce/"+charge.Hotkey, func() {
+			glog.Warningf("[gamma]deposit hotkey %s's pool nonce is %d, its finalized nonce %d: waiting\n", charge.Hotkey, poolNonce, account.Nonce)
+		})
+		return false, false
+	}
+
+	call, err := gammaSpendCall(self.runtime, settings.ServiceHotkey, settings.Netuid, amount)
+	if err != nil {
+		glog.Errorf("[gamma]could not build the spend: %s\n", err)
+		return false, true
+	}
+	signed, err := gammaSignSpend(self.runtime, genesis, self.headNumber, self.head, settings.EraPeriod, account.Nonce, call, signer)
 	if err != nil {
 		glog.Errorf("[gamma]could not sign the spend: %s\n", err)
-		return 0
+		return false, true
 	}
-	fee, err := self.chain.QueryFee(ctx, signed.Encoded, self.head)
+	// the chain's own judgment, before anything is recorded or sent
+	validity, err := self.chain.ValidateTransaction(ctx, signed.Encoded, self.head)
 	if err != nil {
-		gammaReports.report("fee", func() {
-			glog.Warningf("[gamma]could not price the spend: %s\n", err)
+		gammaReports.report("validate", func() {
+			glog.Warningf("[gamma]could not have the spend judged: %s\n", err)
 		})
-		return 0
+		return false, true
 	}
-	if settings.MaxFeeRao < fee || self.billing.Usable() < fee {
-		gammaReports.report("fee_limit", func() {
-			glog.Errorf("[gamma]the spend would pay %d rao in fees (limit %d, float %d): not sent\n", fee, settings.MaxFeeRao, self.billing.Usable())
+	if !validity.Valid {
+		if validity.Refused() {
+			// the chain refuses the spend itself (the deposit, the amount or
+			// the service as it sees them)
+			self.skip(charge, hotkey, "refused")
+			return false, false
+		}
+		// a signature, nonce or era the chain does not take: not sent
+		gammaReports.report("invalid/"+validity.Verdict, func() {
+			glog.Errorf("[gamma]the chain judges our spend for %s %s: not sent\n", charge.Hotkey, validity.Verdict)
 		})
-		return 0
+		return false, true
 	}
+
 	batch := &model.GammaSpendBatch{
 		BatchId:       server.NewId(),
-		Nonce:         int64(self.billing.Nonce),
+		Nonce:         int64(account.Nonce),
 		EraBirth:      int64(self.headNumber),
 		EraPeriod:     int(settings.EraPeriod),
 		Extrinsic:     signed.Encoded,
@@ -1021,29 +1085,49 @@ func (self *gammaBiller) charge() (charged int) {
 		CreateTime:    self.now,
 	}
 	// recorded before it is ever sent
-	if err := model.CreateGammaSpendBatch(ctx, batch, references); err != nil {
-		glog.Warningf("[gamma]batch not recorded: %s\n", err)
-		return 0
+	if err := model.CreateGammaSpendBatch(ctx, batch, [][]byte{charge.Reference}); err != nil {
+		glog.Warningf("[gamma]spend not recorded: %s\n", err)
+		return false, true
 	}
 	if err := self.chain.Submit(ctx, signed.Encoded); err != nil && !gammaSubmitAccepted(err) {
 		// the next run resubmits the recorded bytes while the era runs
-		glog.Warningf("[gamma]batch %s submit: %s\n", batch.BatchId, err)
-		return len(entries)
+		glog.Warningf("[gamma]spend %s submit: %s\n", batch.BatchId, err)
+		return true, true
 	}
 	model.MarkGammaSpendBatchSubmitted(ctx, batch.BatchId, self.now)
 	gammaBatches.Inc()
-	glog.Infof("[gamma]batch %s: %d charges, nonce %d, fee %d rao\n", batch.BatchId, len(entries), batch.Nonce, fee)
-	return len(entries)
+	glog.Infof("[gamma]spend %s: charge %s, %s gamma from %s, nonce %d\n", batch.BatchId, gammaHex(charge.Reference), gammaFormatUnits(charge.Amount), charge.Hotkey, batch.Nonce)
+	return true, true
+}
+
+// skip resolves a charge nothing was signed or recorded for as skipped, as
+// of the finalized head, with the deposit as observed then: it goes out again,
+// same reference, only once its deposit changed and can pay it.
+func (self *gammaBiller) skip(charge *model.GammaCharge, hotkey *model.GammaDepositHotkey, reason string) {
+	ctx := self.ctx
+	server.Tx(ctx, func(tx server.PgTx) {
+		if model.ResolveGammaChargeInTx(tx, ctx, charge.Reference, &model.GammaChargeResolution{
+			State:       model.GammaChargeSkipped,
+			BlockNumber: int64(self.headNumber),
+			BlockHash:   self.head.Hex(),
+			EventIndex:  -1,
+			SkipReason:  reason,
+			SkipDeposit: hotkey.Fingerprint(),
+		}, self.now) {
+			gammaChargeResults.WithLabelValues(model.GammaChargeSkipped, reason).Inc()
+			glog.Infof("[gamma]charge %s skipped at block %d (%s): nothing was sent\n", gammaHex(charge.Reference), self.headNumber, reason)
+		}
+	})
 }
 
 // gammaDepositCanPay reports whether a hotkey's deposit, as last observed,
-// names our spender and has amount spendable beyond what is already pending
-// on it.
+// has amount spendable beyond what is already pending on it, and the hotkey
+// is one the configured deposit master derives (we hold its key).
 func gammaDepositCanPay(hotkey *model.GammaDepositHotkey, settings *gammaSettings, pending int64, amount int64) bool {
-	if hotkey.ObservedBlock == nil || hotkey.DepositSpendable == nil || hotkey.DepositSpender == nil {
+	if hotkey.ObservedBlock == nil || hotkey.DepositSpendable == nil {
 		return false
 	}
-	if *hotkey.DepositSpender != settings.SpenderAddress {
+	if !gammaDepositHotkeyCurrent(settings, hotkey) {
 		return false
 	}
 	return amount <= *hotkey.DepositSpendable-pending
