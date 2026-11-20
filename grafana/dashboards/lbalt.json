@@ -752,6 +752,135 @@
           "legendFormat": "{{host}}"
         }
       ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "connect connections by block: share at addresses over 10, 100 and 1,000",
+      "description": "Of each block's active connect connections (h1 upgrades and QUIC), the share held by source addresses with more than 10, 100 or 1,000 of them. warpctl's split hashes the whole source address, so a block whose surplus sits on a few addresses shows a high share here (LBALTOPT2 R16). No address is a label.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block, over) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over!=\"0\"}) / ignoring (over) group_left sum by (block) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} over {{over}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "connect source addresses over 10, 100 and 1,000 connections",
+      "description": "Source addresses holding more than 10, 100 or 1,000 active connect connections, by block, summed over hosts (LBALTOPT2 R16).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block, over) (urnetwork_front_connect_addresses{env=\"$env\",block=~\"$block\",host=~\"$host\",over!=\"0\"})",
+          "legendFormat": "{{block}} over {{over}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "connect connections and source addresses by block",
+      "description": "Every active connect connection through the front, and every source address holding one, by block (over 0 of the R16 gauges).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} connections"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (block) (urnetwork_front_connect_addresses{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} addresses"
+        }
+      ]
     }
   ]
 }
