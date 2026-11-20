@@ -14,7 +14,8 @@ package mxedgehost
 //     posts each outcome to api's internal route on the edge bearer, through Source's platform client source, and
 //     api records it (QD-1103, owner decision 639). So nothing this block runs writes mail_direct_mx or a DNS table:
 //     its Postgres role reads what it routes and probes by and inserts only its connection records (QD-992), and
-//     the zone's writers stay api and the dns block (D-OPS-1).
+//     the zone's writers stay api and the dns block (D-OPS-1). router_test.go holds it by the SQL the block's
+//     stores can reach.
 //   - The dialer: K platform clients in urnetwork-edge (sidecar.NewEdgeClientPool) made in the background,
 //     tried again each ClientsRetryInterval until the source answers, and sidecar.NewSocketEdgeDialer over
 //     them with Find at the sockets service, adapted to mxedgeservice.MxEdgeDialer (routerDialer). Until

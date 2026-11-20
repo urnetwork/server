@@ -18,8 +18,9 @@ package model
 //     routers when none is left, in the deactivation's transaction (I-15): RemovalEffectMailDirectMx.
 //
 // So mxedge's process writes nothing here: its store reads, in a read-only transaction, and records through api, and
-// the zone's writers stay api and the dns block (D-OPS-1). Nothing here logs an address (I-13). Nothing runs unless
-// the binary links MG7: a read answers none and a write ErrMailUnlinked.
+// the zone's writers stay api and the dns block (D-OPS-1). mxedgehost's router tests hold it by the SQL mxedge's
+// stores can reach. Nothing here logs an address (I-13). Nothing runs unless the binary links MG7: a read answers
+// none and a write ErrMailUnlinked.
 
 import (
 	"context"
