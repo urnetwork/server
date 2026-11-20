@@ -2,12 +2,32 @@ package server
 
 import "strings"
 
+// Archive manifest identity inside the pinned retained qualification receipt.
+const CompetitionEpochThreeGoofeRetainedArchiveSha256 = "817098326c0eb08af42df2456ae689735928fb2106a5772f5b2e8a9b369b3ca5"
+
+func competitionEpochThreeGoofeArchiveBindingCorrectionSql() string {
+	const original = "receipt->>'archive_manifest_sha256'='d8925103a48981c2a6d3e34c18963fc6886393042270e65b945ecabfb21b5486'"
+	sql := competitionEpochThreeGoofeAdmissionSql()
+	if strings.Count(sql, original) != 1 {
+		panic("published Goofe archive binding changed")
+	}
+	return strings.Replace(sql, original, "receipt->>'archive_manifest_sha256'='"+CompetitionEpochThreeGoofeRetainedArchiveSha256+"'", 1)
+}
+
 func CompetitionEpochThreeGoofeAdmissionMigrationVersion() int {
 	return migrationVersionOf(competitionEpochThreeGoofeAdmissionSql())
 }
 
 func CompetitionEpochThreeGoofeAdmissionBodySql() string {
 	return strings.Split(competitionEpochThreeGoofeAdmissionSql(), "$admission_exception$")[1]
+}
+
+func CompetitionEpochThreeGoofeArchiveBindingCorrectionMigrationVersion() int {
+	return migrationVersionOf(competitionEpochThreeGoofeArchiveBindingCorrectionSql())
+}
+
+func CompetitionEpochThreeGoofeArchiveBindingCorrectionBodySql() string {
+	return strings.Split(competitionEpochThreeGoofeArchiveBindingCorrectionSql(), "$admission_exception$")[1]
 }
 
 // Replace only the insert guard. Previously recorded evidence and its
