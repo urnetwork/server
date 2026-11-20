@@ -12548,6 +12548,26 @@ response body does not prove a nonempty picker. The deprecated
 remain actionable below any metric volume floor; the floor is not a dismissal
 of an individual report.
 
+For instrumented API processes, `urnetwork_provider_picker_search_empty_total{stage}`
+breaks down successful empty search POSTs. A blank or whitespace-only POST
+reads the browse document and counts as `blank_query`. For nonblank text,
+`no_index_matches` means the search returned zero IDs. An index match with
+no loaded location records counts as `no_location_metadata`. Loaded records
+with no positive caller/rank filter entry count as `no_positive_filter`.
+A positive entry followed by an empty model result under the shared SDK's
+row rules counts as `positive_filter_no_rendered_rows`. A successful empty
+search outside the measured path counts as `unobserved`. All six counters
+start at zero. Initial GETs, direct IDs and model errors keep their existing
+outcomes. The API dashboard shows this breakdown alongside the parent outcome.
+
+These counts describe the inputs available to that request. Missing metadata,
+caller exclusions, rank policy and an unmatched term can all yield a valid
+empty result. Filter freshness, expected matches for that caller, HTTP
+delivery and app rendering require separate evidence. Compare the breakdown
+with `search/empty` on the same continuously observed instrumented processes.
+An older producer lacks the breakdown. The standing eleven-field query and
+its initial-empty and request-error thresholds continue to cover mixed builds.
+
 Latency needs the same route distinction. The shared SDK's empty browse filter
 uses the initial GET; a nonempty text filter uses the search POST. The Android
 browse control also debounces text for 250ms before sending it; verify the

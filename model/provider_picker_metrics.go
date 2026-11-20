@@ -10,6 +10,7 @@ import (
 
 type providerPickerMetricSet struct {
 	outcomes                 *prometheus.CounterVec
+	searchEmpty              *prometheus.CounterVec
 	reads                    *prometheus.CounterVec
 	children                 map[string]prometheus.Counter
 	readInitial, readFilters prometheus.Counter
@@ -33,6 +34,7 @@ type providerPickerPhaseMetrics struct {
 func newProviderPickerMetricSet() *providerPickerMetricSet {
 	metrics := &providerPickerMetricSet{
 		outcomes:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_provider_picker_outcomes_total", Help: "Picker model outcomes by fixed request surface and rendered-row emptiness; not HTTP delivery"}, []string{"surface", "outcome"}),
+		searchEmpty:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_provider_picker_search_empty_total", Help: "Successful empty search POST model returns by observed stage. One stage per empty, including blank POSTs."}, []string{"stage"}),
 		reads:         prometheus.NewCounterVec(prometheus.CounterOpts{Name: "urnetwork_provider_picker_read_errors_total", Help: "Non-missing Redis picker read or decode failures by fixed phase; not missing keys or all endpoint errors"}, []string{"phase"}),
 		children:      map[string]prometheus.Counter{},
 		phaseSeconds:  prometheus.NewSummaryVec(prometheus.SummaryOpts{Name: "urnetwork_provider_picker_phase_seconds", Help: "Exclusive picker model phase residence including errors and cancellation; not HTTP delivery or server CPU"}, []string{"surface", "phase"}),
@@ -52,6 +54,9 @@ func newProviderPickerMetricSet() *providerPickerMetricSet {
 			}
 		}
 	}
+	for _, stage := range []string{"unobserved", "blank_query", "no_index_matches", "no_location_metadata", "no_positive_filter", "positive_filter_no_rendered_rows"} {
+		metrics.searchEmpty.WithLabelValues(stage)
+	}
 	metrics.readInitial = metrics.reads.WithLabelValues("initial")
 	metrics.readFilters = metrics.reads.WithLabelValues("filters")
 	return metrics
@@ -60,7 +65,7 @@ func newProviderPickerMetricSet() *providerPickerMetricSet {
 var providerPickerMetrics = newProviderPickerMetricSet()
 
 func init() {
-	prometheus.MustRegister(providerPickerMetrics.outcomes, providerPickerMetrics.reads, providerPickerMetrics.phaseSeconds, providerPickerMetrics.phaseInflight)
+	prometheus.MustRegister(providerPickerMetrics.outcomes, providerPickerMetrics.searchEmpty, providerPickerMetrics.reads, providerPickerMetrics.phaseSeconds, providerPickerMetrics.phaseInflight)
 }
 
 // One request owns this state. Finishing is idempotent so deferred cleanup
@@ -126,7 +131,7 @@ func pickerHasRenderedRows(result *FindLocationsResult, search bool) bool {
 }
 
 // A nil result (including a panic unwind) is never counted as successful empty.
-func (self *providerPickerMetricSet) observe(surface string, result *FindLocationsResult, err error) {
+func (self *providerPickerMetricSet) observe(surface string, result *FindLocationsResult, err error) string {
 	outcome := "empty"
 	if err != nil || result == nil {
 		outcome = "error"
@@ -136,4 +141,38 @@ func (self *providerPickerMetricSet) observe(surface string, result *FindLocatio
 	if child := self.children[surface+"/"+outcome]; child != nil {
 		child.Inc()
 	}
+	return outcome
+}
+
+// Presence at the existing search reads. The request keeps no query, location
+// identifier, caller, rank or filter payload in its diagnostic.
+type providerPickerSearchInputs struct {
+	blankQuery       bool
+	indexMatches     bool
+	locationMetadata bool
+	positiveFilter   bool
+}
+
+// Subdivides only the successful empty POST outcomes counted above. A nil
+// observation means the completed return did not pass the measured read path.
+func (self *providerPickerMetricSet) observeFindLocations(surface string, result *FindLocationsResult, err error, inputs *providerPickerSearchInputs) {
+	if self.observe(surface, result, err) != "empty" || surface != "search" {
+		return
+	}
+	var stage string
+	switch {
+	case inputs == nil:
+		stage = "unobserved"
+	case inputs.blankQuery:
+		stage = "blank_query"
+	case !inputs.indexMatches:
+		stage = "no_index_matches"
+	case !inputs.locationMetadata:
+		stage = "no_location_metadata"
+	case !inputs.positiveFilter:
+		stage = "no_positive_filter"
+	default:
+		stage = "positive_filter_no_rendered_rows"
+	}
+	self.searchEmpty.WithLabelValues(stage).Inc()
 }
