@@ -22,12 +22,28 @@ package main
 // DNS through the process's resolver. The intake reads MG2's dns_label and writes MG5's report tables, so the
 // block is ready only in a binary that links both (reportIntakeGroups, HostDeps.IntakeGroups), and every store
 // call answers model.ErrSmtpReportUnlinked in one that does not.
+//
+// Role mail is also checked for a notice (owner decisions 530, 612; QD-1070). For mail to abuse@ or postmaster@
+// on <root>, each DKIM signature of the mail's own header block is verified, its body hash over the raw bytes and
+// its key from DNS within smtpedge.yml's report bounds, and api's notice route (server.AbuseNoticeGatePath) is sent
+// the recipient's local part, <root> and each signature's d= and result, on the platform listener's own gate
+// bearer, and never a byte of the message. api files the notice when a signature passed under a domain abuse.yml's
+// notice_senders lists, and pages the rota. A mail filed as a notice is taken, 250, as attributed role mail is,
+// since a case was made of it; one api could not judge or file now is the intake's error, 451, so the sender sends
+// it again and the notice is not lost to a moment's outage. Mail with no signature that passed or met a key that
+// did not answer cannot page under any listing and costs api no call. One message to both role addresses files one
+// notice: the answer is kept by the message's hash and arrival for the listener's next recipient. Without api's url
+// or the bearer the block files no notice, says so at start, and answers role mail as it did.
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
@@ -86,8 +102,11 @@ func newPlatformReportIntake(store smtpedgeservice.SmtpEdgeStore, settings *smtp
 		return nil, err
 	}
 	return &platformReportIntake{
-		intake: intake,
-		root:   reportIntakeName(settings.Root),
+		intake:   intake,
+		root:     reportIntakeName(settings.Root),
+		settings: settings,
+		txt:      txt,
+		clock:    host.Clock,
 	}, nil
 }
 
@@ -118,28 +137,60 @@ func newConfiguredReportIntake(mxEdgeSettings *mxedgeservice.MxEdgeSettings) (*p
 	return newPlatformReportIntake(model.NewSmtpEdgeStore(nil), settings, &smtpedgeservice.SmtpResolverTxtSource{}, nil)
 }
 
-// The intake as the platform listener reaches it. Safe for concurrent use, as the intake is.
+// The intake as the platform listener reaches it. Safe for concurrent use, as the intake is, once
+// fileNoticesThrough has run, which it does before the listener has it.
 type platformReportIntake struct {
 	intake *smtpedgeservice.SmtpReportIntake
 	// <root>, lowercased, whose abuse@ and postmaster@ are role mail
 	root string
+	// smtpedge.yml's bounds and the reporters' key source, which role mail's notice check reads too
+	settings *smtpedgeservice.SmtpEdgeSettings
+	txt      smtpedgeservice.SmtpDnsTxtSource
+	clock    sidecar.Clock
+	// role mail's notice check; nil files no notice
+	notices *platformNoticeFiler
 }
 
 var _ mxedgeservice.PlatformIntake = (*platformReportIntake)(nil)
 
-// Whether recipient is abuse@ or postmaster@ on <root>, as the listener lowercased it.
-func (self *platformReportIntake) roleRecipient(recipient string) bool {
-	local, domain, ok := strings.Cut(strings.ToLower(recipient), "@")
-	if !ok {
-		return false
+// Files role mail's notices through gate from now on, under settings, nil taking the defaults.
+func (self *platformReportIntake) fileNoticesThrough(gate platformNoticeGate, settings *platformNoticeSettings) {
+	if settings == nil {
+		settings = defaultPlatformNoticeSettings()
 	}
-	return (local == "abuse" || local == "postmaster") && strings.TrimSuffix(domain, ".") == self.root
+	format := gate.Format()
+	if format == nil {
+		format = server.DefaultAbuseNoticeGateFormatSettings()
+	}
+	self.notices = &platformNoticeFiler{
+		gate:     gate,
+		verifier: smtpedgeservice.NewSmtpDkimVerifier(self.settings, self.txt, nil, self.clock),
+		settings: settings,
+		format:   format,
+		intake:   self.settings,
+		root:     self.root,
+		recent:   map[platformNoticeMessageKey]bool{},
+	}
 }
 
-// See mxedgeservice.PlatformIntake. A role mail the intake could not make a case of is unread, which the
-// listener answers with plan-ABUSE-auto-reply's 550 when every recipient's ends so; everything else the intake
-// finished with is taken, counted, stored or dropped, which tells the sender nothing. An error is the intake's,
-// a store or DNS that did not answer, which carries no report text, and the listener answers it 451.
+// The local part when recipient is abuse@ or postmaster@ on <root>, as the listener lowercased it.
+func (self *platformReportIntake) roleRecipient(recipient string) (string, bool) {
+	local, domain, ok := strings.Cut(strings.ToLower(recipient), "@")
+	if !ok {
+		return "", false
+	}
+	if (local == "abuse" || local == "postmaster") && strings.TrimSuffix(domain, ".") == self.root {
+		return local, true
+	}
+	return "", false
+}
+
+// See mxedgeservice.PlatformIntake. A role mail the intake could not make a case of, and that api did not file as
+// a notice, is unread, which the listener answers with plan-ABUSE-auto-reply's 550 when every recipient's ends
+// so; everything else the intake finished with is taken, counted, stored or dropped, which tells the sender
+// nothing. An error is the intake's, a store or DNS that did not answer, or a notice api could not judge or file
+// now, which carries no report text, and the listener answers it 451. The notice is checked after the intake, so
+// an intake error leaves no notice filed for the sender's retry to file again.
 func (self *platformReportIntake) Accept(ctx context.Context, message *mxedgeservice.PlatformMessage) (mxedgeservice.PlatformOutcome, error) {
 	outcome, err := self.intake.Accept(ctx, &smtpedgeservice.SmtpReportMessage{
 		Recipient:   message.Recipient,
@@ -149,10 +200,188 @@ func (self *platformReportIntake) Accept(ctx context.Context, message *mxedgeser
 	if err != nil {
 		return 0, err
 	}
-	if self.roleRecipient(message.Recipient) && outcome != smtpedgeservice.SmtpReportOutcomeCase {
+	localPart, ok := self.roleRecipient(message.Recipient)
+	if !ok {
+		return mxedgeservice.PlatformOutcomeTaken, nil
+	}
+	notice, err := self.notices.file(ctx, localPart, message)
+	if err != nil {
+		return 0, err
+	}
+	if outcome != smtpedgeservice.SmtpReportOutcomeCase && !notice {
 		return mxedgeservice.PlatformOutcomeUnread, nil
 	}
 	return mxedgeservice.PlatformOutcomeTaken, nil
+}
+
+// api's notice route as role mail's check reaches it: server.AbuseNoticeGateClient, and a fake in tests. Safe for
+// concurrent use.
+type platformNoticeGate interface {
+	// See server.AbuseNoticeGateClient.FileNotice.
+	FileNotice(ctx context.Context, args *server.AbuseNoticeGateArgs) (*server.AbuseNoticeGateResult, error)
+	// The route's format the gate sends in.
+	Format() *server.AbuseNoticeGateFormatSettings
+}
+
+// Tunables of role mail's notice check.
+type platformNoticeSettings struct {
+	// How many messages' answers are kept for the listener's next recipient of the same message, so one message
+	// to abuse@ and postmaster@ files one notice: 1,024, past the role mail the listener's buffers hold at once.
+	// The oldest goes first. Not positive keeps none, and each recipient's check stands alone.
+	RecentMessageCount int
+}
+
+func defaultPlatformNoticeSettings() *platformNoticeSettings {
+	return &platformNoticeSettings{
+		RecentMessageCount: 1024,
+	}
+}
+
+// One message, by its bytes' hash and its arrival, which the listener gives each of its recipients alike.
+type platformNoticeMessageKey struct {
+	rawSha256   [sha256.Size]byte
+	arrivalTime time.Time
+}
+
+// Role mail's notice check, the file header's. Safe for concurrent use.
+type platformNoticeFiler struct {
+	gate     platformNoticeGate
+	verifier *smtpedgeservice.SmtpDkimVerifier
+	settings *platformNoticeSettings
+	format   *server.AbuseNoticeGateFormatSettings
+	// smtpedge.yml's bounds, its header block's among them
+	intake *smtpedgeservice.SmtpEdgeSettings
+	// <root>, lowercased
+	root string
+
+	stateLock sync.Mutex
+	// recent messages' answers, whether each was filed as a notice, and their keys oldest first
+	recent     map[platformNoticeMessageKey]bool
+	recentKeys []platformNoticeMessageKey
+}
+
+// Whether api filed the message as a notice for localPart's role address, checking it at the message's first role
+// recipient and answering that for the rest. An error is a check that could not finish or api not filing now.
+func (self *platformNoticeFiler) file(ctx context.Context, localPart string, message *mxedgeservice.PlatformMessage) (bool, error) {
+	if self == nil {
+		return false, nil
+	}
+	key := platformNoticeMessageKey{rawSha256: sha256.Sum256(message.Raw), arrivalTime: message.ArrivalTime}
+	if filed, ok := self.recalled(key); ok {
+		return filed, nil
+	}
+	signatures, err := self.verdicts(ctx, message.Raw)
+	if err != nil {
+		return false, err
+	}
+	mayPage := false
+	for _, signature := range signatures {
+		if signature.Result == server.AbuseNoticeDkimResultPass || signature.Result == server.AbuseNoticeDkimResultTempError {
+			mayPage = true
+		}
+	}
+	if !mayPage {
+		self.remember(key, false)
+		return false, nil
+	}
+	result, err := self.gate.FileNotice(ctx, &server.AbuseNoticeGateArgs{
+		RecipientLocalPart: localPart,
+		Root:               self.root,
+		Signatures:         signatures,
+	})
+	if err != nil {
+		// the error names api's answer or the part refused, never a domain or the bearer
+		return false, fmt.Errorf("report intake: a role mail's notice was not judged: %w", err)
+	}
+	self.remember(key, result.Notice)
+	return result.Notice, nil
+}
+
+// The answer kept for key, if any.
+func (self *platformNoticeFiler) recalled(key platformNoticeMessageKey) (bool, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	filed, ok := self.recent[key]
+	return filed, ok
+}
+
+// Keeps key's answer, dropping the oldest past RecentMessageCount.
+func (self *platformNoticeFiler) remember(key platformNoticeMessageKey, filed bool) {
+	if self.settings.RecentMessageCount <= 0 {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if _, ok := self.recent[key]; !ok {
+		self.recentKeys = append(self.recentKeys, key)
+	}
+	self.recent[key] = filed
+	for self.settings.RecentMessageCount < len(self.recentKeys) {
+		delete(self.recent, self.recentKeys[0])
+		self.recentKeys = self.recentKeys[1:]
+	}
+}
+
+// Each DKIM signature of the message's own header block, d= and result, in header order and at most the format's
+// count, a d= the format cannot carry sent as none, since no listing can name it. None for a message whose header
+// block does not end within smtpedge.yml's bound or does not parse. The error is only ctx's.
+func (self *platformNoticeFiler) verdicts(ctx context.Context, raw []byte) ([]*server.AbuseNoticeGateSignature, error) {
+	headerBlock, ok := platformNoticeHeaderBlock(raw, self.intake.ReportHeaderByteCount)
+	if !ok {
+		return nil, nil
+	}
+	bodyHash, err := self.verifier.NewBodyHash(headerBlock)
+	if err != nil {
+		return nil, nil
+	}
+	// the body hash skips the header block itself and never keeps a byte
+	bodyHash.Write(raw)
+	results, err := self.verifier.Verify(ctx, bodyHash)
+	if err != nil {
+		return nil, err
+	}
+	signatures := []*server.AbuseNoticeGateSignature{}
+	for _, result := range results {
+		if self.format.SignatureMaxCount <= len(signatures) {
+			break
+		}
+		domain := result.Domain
+		if !self.format.DomainValid(domain) {
+			domain = ""
+		}
+		signatures = append(signatures, &server.AbuseNoticeGateSignature{Domain: domain, Result: result.Result})
+	}
+	return signatures, nil
+}
+
+// The message's own header block through the CRLF CRLF that ends it, as smtpedgeservice's walk cuts it, or false
+// when it does not end within maxByteCount.
+func platformNoticeHeaderBlock(raw []byte, maxByteCount int) ([]byte, bool) {
+	if bytes.HasPrefix(raw, []byte("\r\n")) {
+		return raw[:2], true
+	}
+	end := bytes.Index(raw[:min(len(raw), maxByteCount)], []byte("\r\n\r\n"))
+	if end < 0 {
+		return nil, false
+	}
+	return raw[:end+4], true
+}
+
+// A notice gate on api at apiUrl with the platform listener's bearer from the block's secret files, or the part
+// that is missing, never the bearer.
+func newPlatformNoticeGate(apiUrl string) (platformNoticeGate, error) {
+	if apiUrl == "" {
+		return nil, errors.New("no api url")
+	}
+	bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerMxedgePlatform)
+	if err != nil {
+		return nil, err
+	}
+	client, err := server.NewAbuseNoticeGateClient(&server.AbuseNoticeGateClientArgs{ApiUrl: apiUrl, Bearer: bearer})
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // §12's label map as the intake reads <root>'s rows: the network a <net> label or alias names in root, a

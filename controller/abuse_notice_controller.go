@@ -14,12 +14,16 @@ package controller
 // production orders and other data requests go to abuse.yml's counsel_contact.
 //
 // A notice reaches here two ways and no other (owner decision 530): a person
-// files it through the staff route's file_notice, or a role mail's DKIM
-// verifies under a domain abuse.yml's notice_senders lists
-// (FileAbuseNoticeOfMail), with no body read. The public form reaches neither,
-// so a forged notice pages nothing. Nothing here kills anything: the host a
-// registrar's or registry's URL names is the rota's to kill, through the staff
-// route's action under the notice's case, which is §21's one action path.
+// files it through the staff route's file_notice, which `sidecarctl abuse
+// file_notice` posts, or a role mail's DKIM verifies under a domain abuse.yml's
+// notice_senders lists (FileAbuseNoticeOfMail), with no body read. The platform
+// listener's role-mail intake sends api that mail's header facts alone, its
+// recipient's local part, its root and each signature's d= and verdict, through
+// api's internal route (FileAbuseNoticeOfMailVerdicts; owner decision 612). The
+// public form reaches neither, so a forged notice pages nothing. Nothing here
+// kills anything: the host a registrar's or registry's URL names is the rota's
+// to kill, through the staff route's action under the notice's case, which is
+// §21's one action path.
 //
 // A lost page is the worst failure here, so nothing swallows the pager's
 // error. FileAbuseNotice returns it beside the case it opened, and a caller
@@ -38,7 +42,8 @@ package controller
 // then every page is refused, the notice's case stands, and the pass of a
 // process that has one pages it. api and taskworker install it at start
 // (InstallAbuseNoticePager; QD-1070): a pager.RetrySink over the webhook the
-// monitor pages through, read from the monitor's own vault file.
+// monitor pages through, read from the monitor's own vault file, which warp's
+// api and taskworker blocks mount (warp/services/sidecar-blocks).
 
 import (
 	"context"
@@ -352,6 +357,45 @@ func FileAbuseNoticeOfMail(ctx context.Context, mail *model.AbuseNoticeMail, rec
 		return nil, nil
 	}
 	return FileAbuseNotice(ctx, &AbuseNoticeArgs{Class: class, Target: recipientDomain})
+}
+
+// A role mail that cannot be judged yet: a signature under a listed notice sender met a key that did not answer
+// (temperror), and none verified under a listed one. The listener asks the sender to send the mail again, so the
+// notice is judged then and never lost to a DNS that did not answer. Nothing is opened or paged.
+var ErrAbuseNoticeMailDeferred = errors.New("abuse notice: a listed sender's key did not answer")
+
+// One DKIM signature of a role mail as its listener judged it (owner decision 612): its d= and RFC 8601's result,
+// one of server's AbuseNoticeDkimResult words.
+type AbuseNoticeMailVerdict struct {
+	Domain string
+	Result string
+}
+
+// Files the notice a role mail is, from the verdicts its listener sends through api's internal route (owner
+// decisions 530, 612; QD-1070): a signature that passed is FileAbuseNoticeOfMail's verified one, and the mail pages
+// or not as it does there, about root. A mail that is no notice only for want of a key, one whose temperror
+// signature would have paged had it passed, answers ErrAbuseNoticeMailDeferred. No body is an argument here.
+func FileAbuseNoticeOfMailVerdicts(ctx context.Context, recipientLocalPart string, root string, verdicts []AbuseNoticeMailVerdict) (*AbuseNoticeResult, error) {
+	mail := &model.AbuseNoticeMail{RecipientLocalPart: recipientLocalPart}
+	// the signatures whose keys did not answer, as though each had passed
+	unanswered := &model.AbuseNoticeMail{RecipientLocalPart: recipientLocalPart}
+	for _, verdict := range verdicts {
+		mail.Signatures = append(mail.Signatures, model.AbuseNoticeSignature{
+			Domain:   verdict.Domain,
+			Verified: verdict.Result == server.AbuseNoticeDkimResultPass,
+		})
+		if verdict.Result == server.AbuseNoticeDkimResultTempError {
+			unanswered.Signatures = append(unanswered.Signatures, model.AbuseNoticeSignature{Domain: verdict.Domain, Verified: true})
+		}
+	}
+	result, err := FileAbuseNoticeOfMail(ctx, mail, root)
+	if result != nil || err != nil {
+		return result, err
+	}
+	if model.ClassifyAbuseNotice(unanswered, server.GetAbuseConfig()).Pages() {
+		return nil, ErrAbuseNoticeMailDeferred
+	}
+	return nil, nil
 }
 
 // Pages both rota members for one notice under its case's key. The error is

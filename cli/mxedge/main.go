@@ -15,6 +15,11 @@
 // the sockets service (-sockets_url), its quota and clients at api (-api_url), each Find on its first client's
 // sockets token, which api's edge client route answers beside the client's jwt (QD-1054).
 //
+// The platform role files role mail's notices at api (-api_url) on a gate bearer of its own,
+// internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612; QD-1121), which its block
+// mounts. Without the url or the file it files none, says so at start, and answers role mail as before; it stays
+// ready either way, since the intake's reports need neither.
+//
 // Which Postgres file each role reads: server's main pool reads the file of the process's own service where its
 // vault holds one, and the platform's pg.yml only where it holds none (QD-992; server/db.go's
 // pgServiceVaultResourceName). The router's service is mxedge, so it reads pg-mxedge.yml and never pg.yml, which
@@ -49,7 +54,7 @@ var (
 	port       = flag.Int("port", 80, "the block's status port")
 	smtpPort   = flag.Int("smtp_port", 25, "the block's TCP 25 port, behind the lb's PROXY header")
 	secretDir  = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
-	apiUrl     = flag.String("api_url", "", "router: api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the router not ready")
+	apiUrl     = flag.String("api_url", "", "api's base URL: the router reads its quota surface and edge client route from api's internal gate, and empty leaves it not ready; the platform listener files role mail's notices there, and empty files none")
 	socketsUrl = flag.String("sockets_url", "", "router: the sockets service's base URL, which every Find is sent to; empty leaves the router not ready")
 	feedDir    = flag.String("feed_dir", "", "router: the IP listing feed's mirror directory; empty rejects no sender at the banner")
 )
@@ -94,6 +99,13 @@ func main() {
 		if err != nil {
 			glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
 		} else {
+			// role mail's notices at api, on the platform listener's own bearer (QD-1070)
+			if gate, err := newPlatformNoticeGate(*apiUrl); err != nil {
+				// the error names what is missing, never the bearer
+				glog.Errorf("[mxedge]no role mail pages the rota, since role mail's notices cannot reach api: %v\n", err)
+			} else {
+				intake.fileNoticesThrough(gate, nil)
+			}
 			deps.Intake = intake
 			deps.IntakeGroups = reportIntakeGroups()
 		}

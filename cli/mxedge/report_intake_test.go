@@ -1,11 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http/httptest"
 	"net/netip"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,12 +24,16 @@ import (
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/api/handlers"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
 )
 
 // The platform block's report intake (SMTP-M5-06): the listener's outcomes over the intake's, config's
 // smtpedge.yml, and FS-39's report-intake cases at T3, on the private Postgres through the real store and
-// §12's real label map. Names are .example and addresses RFC 5737's.
+// §12's real label map; and role mail's notice check (QD-1070, owner decision 612), on a fake notice route and
+// through api's real one. Names are .example and addresses RFC 5737's.
 
 // smtpedge.yml's values for these tests.
 func testReportIntakeSettings() *smtpedgeservice.SmtpEdgeSettings {
@@ -333,4 +346,336 @@ func TestReportLabelSourceSaysUnknownOrFails(t *testing.T) {
 			t.Fatalf("a held label: %v, %t, %v", resolved, ok, err)
 		}
 	})
+}
+
+// A notice route that records each call and answers what the test sets.
+type testNoticeGate struct {
+	stateLock sync.Mutex
+	calls     []*server.AbuseNoticeGateArgs
+	result    *server.AbuseNoticeGateResult
+	err       error
+}
+
+func (self *testNoticeGate) FileNotice(ctx context.Context, args *server.AbuseNoticeGateArgs) (*server.AbuseNoticeGateResult, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.calls = append(self.calls, args)
+	if self.err != nil {
+		return nil, self.err
+	}
+	return self.result, nil
+}
+
+func (self *testNoticeGate) Format() *server.AbuseNoticeGateFormatSettings {
+	return server.DefaultAbuseNoticeGateFormatSettings()
+}
+
+// Sets what the route answers from the next call on.
+func (self *testNoticeGate) answer(result *server.AbuseNoticeGateResult, err error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.result = result
+	self.err = err
+}
+
+// The calls the route received, in order.
+func (self *testNoticeGate) received() []*server.AbuseNoticeGateArgs {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.calls)
+}
+
+// The world's intake with its notice check on gate.
+func (self *testReportWorld) noticeIntake(t testing.TB, gate platformNoticeGate) (*platformReportIntake, *sidecartest.FakeSmtpEdgeStore) {
+	t.Helper()
+	store := sidecartest.NewFakeSmtpEdgeStore(nil, nil)
+	intake, err := newPlatformReportIntake(store, testReportIntakeSettings(), self.txt, self.tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intake.fileNoticesThrough(gate, nil)
+	return intake, store
+}
+
+// A DKIM key of a notice sender at domain, in the world's DNS.
+func (self *testReportWorld) senderKey(name string, domain string) *sidecartest.SmtpDkimFixtureKey {
+	key := sidecartest.NewSmtpDkimFixtureEd25519Key(name, "sel1", domain)
+	self.txt.Set(key.RecordName(), key.TxtRecord())
+	return key
+}
+
+// The text of testRoleMail that no call to api may carry.
+var testRoleMailText = []string{"Please look at the attached", "spam from your network", "person@person.example", "A Person", "quietnet"}
+
+// A role mail whose DKIM passed under a registrar's domain goes to api as its local part, <root> and each
+// signature's d= and result, with no byte of the message; api filing it as a notice takes it, 250, where it would
+// otherwise be answered unread. The same message to postmaster@ beside abuse@ files once.
+func TestReportIntakeFilesARoleMailsNoticeAndTakesIt(t *testing.T) {
+	world := newTestReportWorld()
+	gate := &testNoticeGate{}
+	gate.answer(&server.AbuseNoticeGateResult{Notice: true, Paged: true}, nil)
+	intake, store := world.noticeIntake(t, gate)
+	registrarKey := world.senderKey("registrar", "registrar.example")
+	raw := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), registrarKey, &sidecartest.SmtpDkimFixtureOptions{HeaderRelaxed: true, BodyRelaxed: true})
+
+	for _, recipient := range []string{"abuse@root.example", "Postmaster@Root.Example."} {
+		outcome, err := world.accept(t, intake, recipient, raw)
+		if err != nil || outcome != mxedgeservice.PlatformOutcomeTaken {
+			t.Fatalf("%s: %v, %v, want taken", recipient, outcome, err)
+		}
+	}
+	calls := gate.received()
+	if len(calls) != 1 {
+		t.Fatalf("%d calls for one message to both role addresses, want 1", len(calls))
+	}
+	call := calls[0]
+	if call.RecipientLocalPart != "abuse" || call.Root != "root.example" || len(call.Signatures) != 1 ||
+		*call.Signatures[0] != (server.AbuseNoticeGateSignature{Domain: "registrar.example", Result: server.AbuseNoticeDkimResultPass}) {
+		t.Fatalf("api was sent %+v", call)
+	}
+	sent, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range testRoleMailText {
+		if strings.Contains(string(sent), text) {
+			t.Fatalf("api was sent %q of the message: %s", text, sent)
+		}
+	}
+	if len(store.Complaints()) != 0 {
+		t.Fatal("a notice left a complaint row")
+	}
+
+	// a message api answers as no notice stays unread, as role mail the intake cannot attribute is
+	gate.answer(&server.AbuseNoticeGateResult{}, nil)
+	world.arrival = world.arrival.Add(time.Minute)
+	outcome, err := world.accept(t, intake, "abuse@root.example", raw)
+	if err != nil || outcome != mxedgeservice.PlatformOutcomeUnread {
+		t.Fatalf("no notice: %v, %v, want unread", outcome, err)
+	}
+	if count := len(gate.received()); count != 2 {
+		t.Fatalf("%d calls, want 2", count)
+	}
+}
+
+// A notice api could not judge or file now is the intake's error, which the listener answers 451, so the sender
+// sends the message again and the retry files it.
+func TestReportIntakeAsksForARetryWhenANoticeIsNotJudged(t *testing.T) {
+	world := newTestReportWorld()
+	gate := &testNoticeGate{}
+	gate.answer(nil, fmt.Errorf("%w: api answered 503", server.ErrAbuseNoticeGate))
+	intake, _ := world.noticeIntake(t, gate)
+	registrarKey := world.senderKey("registrar", "registrar.example")
+	raw := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), registrarKey, nil)
+
+	if _, err := world.accept(t, intake, "abuse@root.example", raw); !errors.Is(err, server.ErrAbuseNoticeGate) {
+		t.Fatalf("a notice api did not judge: %v", err)
+	}
+	gate.answer(&server.AbuseNoticeGateResult{Notice: true}, nil)
+	outcome, err := world.accept(t, intake, "abuse@root.example", raw)
+	if err != nil || outcome != mxedgeservice.PlatformOutcomeTaken {
+		t.Fatalf("the sender's retry: %v, %v", outcome, err)
+	}
+	if count := len(gate.received()); count != 2 {
+		t.Fatalf("%d calls, want the refused one and the retry", count)
+	}
+}
+
+// Each signature's verdict is sent as the verifier reached it, in header order: a pass, a key DNS did not answer
+// for (temperror), and a key DNS does not hold (permerror). Mail whose signatures cannot pass under any listing,
+// unsigned or holding only a failed key, costs api no call and is answered unread, while a temperror alone is sent,
+// since it may pass when the sender sends the message again.
+func TestReportIntakeSendsEachSignaturesVerdict(t *testing.T) {
+	world := newTestReportWorld()
+	gate := &testNoticeGate{}
+	gate.answer(&server.AbuseNoticeGateResult{}, nil)
+	intake, _ := world.noticeIntake(t, gate)
+	registrarKey := world.senderKey("registrar", "registrar.example")
+	silentKey := world.senderKey("silent", "silent.example")
+	world.txt.SetFailing(silentKey.RecordName(), true)
+	// a key DNS holds no record for
+	missingKey := sidecartest.NewSmtpDkimFixtureEd25519Key("missing", "sel1", "missing.example")
+
+	raw := testRoleMail("quietnet.root.example")
+	raw = sidecartest.SignSmtpDkimFixture(raw, registrarKey, nil)
+	raw = sidecartest.SignSmtpDkimFixture(raw, silentKey, nil)
+	raw = sidecartest.SignSmtpDkimFixture(raw, missingKey, nil)
+	if _, err := world.accept(t, intake, "postmaster@root.example", raw); err != nil {
+		t.Fatal(err)
+	}
+	calls := gate.received()
+	if len(calls) != 1 {
+		t.Fatalf("%d calls, want 1", len(calls))
+	}
+	got := []server.AbuseNoticeGateSignature{}
+	for _, signature := range calls[0].Signatures {
+		got = append(got, *signature)
+	}
+	want := []server.AbuseNoticeGateSignature{
+		{Domain: "missing.example", Result: server.AbuseNoticeDkimResultPermError},
+		{Domain: "silent.example", Result: server.AbuseNoticeDkimResultTempError},
+		{Domain: "registrar.example", Result: server.AbuseNoticeDkimResultPass},
+	}
+	if !slices.Equal(got, want) || calls[0].RecipientLocalPart != "postmaster" {
+		t.Fatalf("api was sent %+v, want %+v", got, want)
+	}
+
+	world.arrival = world.arrival.Add(time.Minute)
+	for _, mail := range [][]byte{
+		testRoleMail("quietnet.root.example"),
+		sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), missingKey, nil),
+	} {
+		outcome, err := world.accept(t, intake, "abuse@root.example", mail)
+		if err != nil || outcome != mxedgeservice.PlatformOutcomeUnread {
+			t.Fatalf("mail that cannot page: %v, %v", outcome, err)
+		}
+	}
+	if count := len(gate.received()); count != 1 {
+		t.Fatalf("mail that cannot page under any listing reached api: %d calls", count)
+	}
+	// the same message's other role recipient takes the answer kept for it, with no second key read
+	lookupCount := len(world.txt.Lookups())
+	failed := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), missingKey, nil)
+	outcome, err := world.accept(t, intake, "postmaster@root.example", failed)
+	if err != nil || outcome != mxedgeservice.PlatformOutcomeUnread || len(world.txt.Lookups()) != lookupCount {
+		t.Fatalf("the message's second role recipient: %v, %v, %d key reads", outcome, err, len(world.txt.Lookups())-lookupCount)
+	}
+	onlyTemperror := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), silentKey, nil)
+	if _, err := world.accept(t, intake, "abuse@root.example", onlyTemperror); err != nil {
+		t.Fatal(err)
+	}
+	calls = gate.received()
+	if len(calls) != 2 || len(calls[1].Signatures) != 1 || calls[1].Signatures[0].Result != server.AbuseNoticeDkimResultTempError {
+		t.Fatalf("a temperror alone: %+v", calls[len(calls)-1])
+	}
+}
+
+// Only mail to a role address on <root> is checked: a token's report, abuse@ on another domain and a block with
+// no notice gate send api nothing, and role mail is answered as it was.
+func TestReportIntakeChecksOnlyRoleMailForANotice(t *testing.T) {
+	world := newTestReportWorld()
+	gate := &testNoticeGate{}
+	gate.answer(&server.AbuseNoticeGateResult{Notice: true, Paged: true}, nil)
+	intake, _ := world.noticeIntake(t, gate)
+	registrarKey := world.senderKey("registrar", "registrar.example")
+	raw := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), registrarKey, nil)
+	for _, recipient := range []string{"abuse@other.example", world.tokens.Add(sidecar.NewId()) + "@rpt.report.example", "sales@root.example"} {
+		if _, err := world.accept(t, intake, recipient, raw); err != nil {
+			t.Fatalf("%s: %v", recipient, err)
+		}
+	}
+	if count := len(gate.received()); count != 0 {
+		t.Fatalf("mail to no role address reached api: %d calls", count)
+	}
+	plain, err := newPlatformReportIntake(sidecartest.NewFakeSmtpEdgeStore(nil, nil), testReportIntakeSettings(), world.txt, world.tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := world.accept(t, plain, "abuse@root.example", raw)
+	if err != nil || outcome != mxedgeservice.PlatformOutcomeUnread {
+		t.Fatalf("a block with no notice gate: %v, %v", outcome, err)
+	}
+}
+
+// The gate the block builds: api's url and the platform listener's own bearer file, mxedge-platform's class, each
+// required and each missing one said by name, never the bearer.
+func TestPlatformNoticeGateNeedsTheUrlAndItsOwnBearer(t *testing.T) {
+	if _, err := newPlatformNoticeGate(""); err == nil || !strings.Contains(err.Error(), "no api url") {
+		t.Fatalf("no api url: %v", err)
+	}
+	fileName := server.InternalGateCredentialFileName(server.InternalGateCallerMxedgePlatform)
+	if fileName != "internal-gate-mxedge-platform.yml" {
+		t.Fatalf("the platform listener's bearer file is %s", fileName)
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if _, err := newPlatformNoticeGate("https://api.report.example"); err == nil || !strings.Contains(err.Error(), fileName) {
+			t.Fatalf("no bearer file: %v", err)
+		}
+		bearer := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, server.DefaultInternalGateSettings().BearerByteCount))
+		pop := server.Vault.PushSimpleResource(fileName, []byte("current: "+bearer+"\n"))
+		defer pop()
+		gate, err := newPlatformNoticeGate("https://api.report.example")
+		if err != nil || gate == nil {
+			t.Fatalf("with the bearer: %v", err)
+		}
+		if _, err := newPlatformNoticeGate("api.report.example/"); err == nil || strings.Contains(err.Error(), bearer) {
+			t.Fatalf("an api url that cannot be used: %v", err)
+		}
+	})
+}
+
+// Through api's real route, served on a verify file holding the platform listener's digest, and the real client
+// the block builds: a registrar's signed role mail reaches the filer as its local part, <root> and verdicts, and
+// its notice takes the mail; the edge class's bearer in its place is refused, which the intake answers as a mail
+// to send again.
+func TestReportIntakeFilesThroughApisRoute(t *testing.T) {
+	newBearer := func() (string, string) {
+		raw := make([]byte, server.DefaultInternalGateSettings().BearerByteCount)
+		if _, err := rand.Read(raw); err != nil {
+			t.Fatal(err)
+		}
+		bearer := base64.RawURLEncoding.EncodeToString(raw)
+		digest := sha256.Sum256([]byte(bearer))
+		return bearer, hex.EncodeToString(digest[:])
+	}
+	platform, platformDigest := newBearer()
+	edge, edgeDigest := newBearer()
+	verifier, err := server.NewInternalGateVerifier([]byte(
+		"mxedge-platform: {class: mxedge-platform, sha256: [" + platformDigest + "]}\nedge: {class: edge, sha256: [" + edgeDigest + "]}\n",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filedLock := sync.Mutex{}
+	filed := [][]controller.AbuseNoticeMailVerdict{}
+	routes := handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{
+		Verifier: verifier,
+		File: func(ctx context.Context, recipientLocalPart string, root string, verdicts []controller.AbuseNoticeMailVerdict) (*controller.AbuseNoticeResult, error) {
+			filedLock.Lock()
+			defer filedLock.Unlock()
+			if recipientLocalPart != "abuse" || root != "root.example" {
+				return nil, fmt.Errorf("the route filed %s@%s", recipientLocalPart, root)
+			}
+			filed = append(filed, verdicts)
+			return &controller.AbuseNoticeResult{CaseId: server.NewId(), Opened: true, Paged: true}, nil
+		},
+	}).Routes()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := httptest.NewServer(router.NewRouter(ctx, routes))
+	defer api.Close()
+
+	world := newTestReportWorld()
+	registrarKey := world.senderKey("registrar", "registrar.example")
+	raw := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), registrarKey, nil)
+	for _, c := range []struct {
+		bearer  string
+		taken   bool
+		refused bool
+	}{
+		{bearer: edge, refused: true},
+		{bearer: platform, taken: true},
+	} {
+		client, err := server.NewAbuseNoticeGateClient(&server.AbuseNoticeGateClientArgs{ApiUrl: api.URL, Bearer: c.bearer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		intake, _ := world.noticeIntake(t, client)
+		outcome, err := world.accept(t, intake, "abuse@root.example", raw)
+		if c.refused {
+			if !errors.Is(err, server.ErrAbuseNoticeGate) || strings.Contains(err.Error(), c.bearer) {
+				t.Fatalf("another class's bearer: %v, %v", outcome, err)
+			}
+			continue
+		}
+		if err != nil || outcome != mxedgeservice.PlatformOutcomeTaken {
+			t.Fatalf("the platform listener's bearer: %v, %v", outcome, err)
+		}
+	}
+	filedLock.Lock()
+	defer filedLock.Unlock()
+	want := []controller.AbuseNoticeMailVerdict{{Domain: "registrar.example", Result: server.AbuseNoticeDkimResultPass}}
+	if len(filed) != 1 || !slices.Equal(filed[0], want) {
+		t.Fatalf("the route filed %+v", filed)
+	}
 }

@@ -281,6 +281,27 @@ func testAbuseKindCases() []*testAbuseKindCase {
 				"kind": "clear_restore_flag", "root": "sidecarctl-test.example", "incident_id": testAbuseKindIncidentId, "network_id": testAbuseKindNetworkId,
 			},
 		},
+		{
+			kind: "file_notice",
+			args: []string{"-class=registrar", "-target= sidecarctl-test.example ", "-category= phishing ", "-barred"},
+			wantBody: map[string]any{
+				"kind": "file_notice", "class": "registrar", "target": "sidecarctl-test.example", "category": "phishing", "barred": true,
+			},
+		},
+		{
+			kind: "file_notice",
+			args: []string{"-class=production_order", "-target=www.sidecarctl-test.example"},
+			wantBody: map[string]any{
+				"kind": "file_notice", "class": "production_order", "target": "www.sidecarctl-test.example", "barred": false,
+			},
+		},
+		{
+			kind: "file_notice",
+			args: []string{"-class=registry", "-case-id=" + strings.ToUpper(testAbuseKindCaseId)},
+			wantBody: map[string]any{
+				"kind": "file_notice", "class": "registry", "case_id": testAbuseKindCaseId,
+			},
+		},
 	}
 }
 
@@ -357,6 +378,14 @@ func TestAbuseStaffKindsRefuseWhatTheyCannotBuild(t *testing.T) {
 		{kind: "clear_restore_flag", args: []string{"-incident-id=" + testAbuseKindIncidentId, "-network-id=" + testAbuseKindNetworkId}, want: "-root is required"},
 		{kind: "clear_restore_flag", args: []string{"-root=sidecarctl-test.example", "-network-id=" + testAbuseKindNetworkId}, want: "-incident-id is required"},
 		{kind: "clear_restore_flag", args: []string{"-root=sidecarctl-test.example", "-incident-id=" + testAbuseKindIncidentId}, want: "-network-id is required"},
+		{kind: "file_notice", args: []string{"-target=sidecarctl-test.example"}, want: "-class must be one of registrar, registry, law_enforcement_emergency, eu_removal_order, production_order"},
+		{kind: "file_notice", args: []string{"-class=search_console", "-target=sidecarctl-test.example"}, want: "-class must be one of"},
+		{kind: "file_notice", args: []string{"-class=registrar"}, want: "-target is required"},
+		{kind: "file_notice", args: []string{"-class=registrar", "-target=  "}, want: "-target is required"},
+		{kind: "file_notice", args: []string{"-class=registrar", "-case-id=case-not-an-id"}, want: "-case-id must be an id"},
+		{kind: "file_notice", args: []string{"-class=registrar", caseFlag, "-target=sidecarctl-test.example"}, want: "-target is not taken here"},
+		{kind: "file_notice", args: []string{"-class=registrar", caseFlag, "-category=phishing"}, want: "-category is not taken here"},
+		{kind: "file_notice", args: []string{"-class=registrar", caseFlag, "-barred"}, want: "-barred is not taken here"},
 	}
 	for _, c := range cases {
 		_, _, err := parseAbuseStaffKindArgs(testAbuseKindSpec(t, c.kind), c.args, defaultAbuseStaffKindSettings(), testAbuseKindDeps(""))
@@ -752,7 +781,7 @@ func TestAbuseStaffKindsMatchTheRoute(t *testing.T) {
 			t.Errorf("%s sends %v, and bringyour.yml documents %v", kindSpec.kind, sentFields, documentedFields)
 		}
 	}
-	if len(abuseStaffKindSpecs()) != 7 {
-		t.Fatalf("%d kinds, want the seven ABUSE-M5-12 documents", len(abuseStaffKindSpecs()))
+	if len(abuseStaffKindSpecs()) != 8 {
+		t.Fatalf("%d kinds, want the seven ABUSE-M5-12 documents and file_notice (owner decision 612)", len(abuseStaffKindSpecs()))
 	}
 }

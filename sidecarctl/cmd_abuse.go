@@ -1,12 +1,16 @@
 // `sidecarctl abuse <kind>`: the abuse role's client of POST /abuse/action (§21.10, §21.16; ABUSE-M5-12; QD-126,
 // QD-896, owner decision 532), one subcommand per kind connect/api/bringyour.yml documents for the route: lookup_case,
-// lookup_join, action, lift, review, decide_appeal and clear_restore_flag. Each builds {kind, ...} from its flags, one
-// flag per field of the kind's body, posts it to <api>/abuse/action with the staff bearer, and prints the answer's
-// result as JSON. There is no web UI (owner rule 6). The route decides what a body asks and refuses what it cannot
-// do; this checks only what building a body needs: each required flag given, each id in its 8-4-4-4-12 form, each
-// decision one the route takes, and which of review's flags its decision takes. Kinds added later, holds and limit
-// rows among them, take a subcommand each in their own task, as `abuse production` and `abuse transparency-report`
-// did (cmd_abuse_production.go, whose client helpers these share).
+// lookup_join, action, lift, review, decide_appeal, clear_restore_flag and file_notice (§21.8; owner decision 612).
+// Each builds {kind, ...} from its flags, one flag per field of the kind's body, posts it to <api>/abuse/action with
+// the staff bearer, and prints the answer's result as JSON. There is no web UI (owner rule 6). The route decides what
+// a body asks and refuses what it cannot do; this checks only what building a body needs: each required flag given,
+// each id in its 8-4-4-4-12 form, each decision or class one the route takes, and which of review's and file_notice's
+// flags go together. Kinds added later, holds and limit rows among them, take a subcommand each in their own task, as
+// `abuse production` and `abuse transparency-report` did (cmd_abuse_production.go, whose client helpers these share).
+//
+// file_notice files a notice the company mailbox paged, which pages both rota members at once under its case's key.
+// An answer with paged false is a page the pager did not take: the case stands, taskworker's clock pass pages it
+// within the minute, and the filer may send it again with -case-id, which opens nothing.
 //
 // The bearer is read from the file -bearer-file or UR_ABUSE_STAFF_BEARER_FILE names, never from an argument: -bearer
 // is refused by name, as is any positional. It is never printed or logged: a refusal prints the route's status and
@@ -124,6 +128,17 @@ func registerAbuseStaffReasonFlags(flags *flag.FlagSet) *abuseStaffReasonFlags {
 func abuseStaffKindSpecs() []*abuseStaffKindSpec {
 	reviewDecisions := []string{abuseStaffReviewUphold, abuseStaffReviewLift, abuseStaffReviewLiftWrong, abuseStaffReviewNoAction}
 	appealDecisions := []string{string(model.AbuseAppealStateGranted), string(model.AbuseAppealStateDenied)}
+	// the classes that page, as model.AbuseNoticeClass names them
+	noticeClasses := []string{}
+	for _, class := range []model.AbuseNoticeClass{
+		model.AbuseNoticeClassRegistrar,
+		model.AbuseNoticeClassRegistry,
+		model.AbuseNoticeClassLawEnforcementEmergency,
+		model.AbuseNoticeClassEuRemovalOrder,
+		model.AbuseNoticeClassProductionOrder,
+	} {
+		noticeClasses = append(noticeClasses, string(class))
+	}
 	return []*abuseStaffKindSpec{
 		{
 			kind:    "lookup_case",
@@ -246,6 +261,36 @@ func abuseStaffKindSpecs() []*abuseStaffKindSpec {
 					body.text("root", "root", *root)
 					body.id("incident_id", "incident-id", *incidentId)
 					body.id("network_id", "network-id", *networkId)
+				}
+			},
+		},
+		{
+			kind:    "file_notice",
+			usage:   "-class=<" + strings.Join(noticeClasses, "|") + "> (-target=<name> [-category=<category>] [-barred] | -case-id=<case_id>)",
+			summary: "File a notice the company mailbox paged (reviewer or legal; §21.8): opens its case due within the hour and pages both rota members together, keyed by the case. -case-id pages a notice filed before again and opens nothing, as one that answered paged false may be.",
+			register: func(flags *flag.FlagSet) func(body *abuseStaffKindBody) {
+				class := flags.String("class", "", "the notice's class: "+strings.Join(noticeClasses, ", "))
+				target := flags.String("target", "", "the root, or a host under one, the notice is about")
+				category := flags.String("category", "", "§21.4's row, when the notice names one; other when unset")
+				barred := flags.Bool("barred", false, "a sealing order bars every notice to the network")
+				caseId := flags.String("case-id", "", "a notice filed before, whose page is sent again")
+				return func(body *abuseStaffKindBody) {
+					body.choice("class", "class", *class, noticeClasses)
+					if *caseId != "" {
+						// a notice filed before pages again as it was filed, so nothing of a new filing goes with it
+						body.id("case_id", "case-id", *caseId)
+						body.refuseGiven("target", *target, "-case-id pages its notice again as it was filed")
+						body.refuseGiven("category", *category, "-case-id pages its notice again as it was filed")
+						if *barred {
+							body.refuseGiven("barred", "true", "-case-id pages its notice again as it was filed")
+						}
+						return
+					}
+					body.text("target", "target", *target)
+					if strings.TrimSpace(*category) != "" {
+						body.text("category", "category", *category)
+					}
+					body.set("barred", *barred)
 				}
 			},
 		},
