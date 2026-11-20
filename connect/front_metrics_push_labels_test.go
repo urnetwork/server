@@ -30,6 +30,7 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 		frontQuicHandshakesCounter,
 		frontHttpServerErrorsCounter,
 		frontTlsHandshakesCounter,
+		frontQuicConnectionsByFamilyCounter,
 	)
 	// a synthetic value in every series, so the deletes after can't touch a
 	// series another test counts in
@@ -39,6 +40,7 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	frontSocketBindFailuresCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
 	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout).Inc()
 	frontQuicHandshakesCounter.WithLabelValues(interfaceName, frontQuicVersionV1, "true").Inc()
+	frontQuicConnectionsByFamilyCounter.WithLabelValues(interfaceName, frontFamilyIpv6, frontQuicResultConnect).Inc()
 	frontHttpServerErrorsCounter.WithLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed).Inc()
 	frontTlsHandshakesCounter.WithLabelValues(frontTlsVersionTls13, "true", interfaceName).Inc()
 	defer func() {
@@ -47,6 +49,7 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 		frontSocketBindFailuresCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
 		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout)
 		frontQuicHandshakesCounter.DeleteLabelValues(interfaceName, frontQuicVersionV1, "true")
+		frontQuicConnectionsByFamilyCounter.DeleteLabelValues(interfaceName, frontFamilyIpv6, frontQuicResultConnect)
 		frontHttpServerErrorsCounter.DeleteLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed)
 		frontTlsHandshakesCounter.DeleteLabelValues(frontTlsVersionTls13, "true", interfaceName)
 	}()
