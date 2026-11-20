@@ -1,6 +1,6 @@
 # LBALT: connect fronts the edge interfaces (`lb_alt`)
 
-Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4) and merged to main the same day (server a3f37e085, warp 6aaace2), with D22 (b) after. In production since 2026-11-20 (§11.8): a canary on edge-1 `eno3` from 04:35Z, then every other non-transparent lb interface at 06:15–06:21Z. The `alt.*` DNS move (§8 step 6) is next. §11 holds the implementation notes for code review.
+Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4) and merged to main the same day (server a3f37e085, warp 6aaace2), with D22 (b) after. In production since 2026-11-20 (§11.8): a canary on edge-1 `eno3` from 04:35Z, then every other non-transparent lb interface at 06:15–06:21Z. The `alt.*` names moved to the edges at 06:32Z; alt's removal (D14 step 4) is next. §11 holds the implementation notes for code review.
 
 Questions D1–D22 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
 
@@ -1416,8 +1416,8 @@ Each is open, checked against the code at a297487df and bdacae4.
 - No interface has been rolled back in production (Gate A item 2).
 
 **Owner actions not taken.**
-- Done 2026-11-19 and 2026-11-20 (§11.8): services.yml loaded with this warpctl, `services.connect.lb_alt: false` declared, then `true`; connect's `cores: 20` (D15) deployed. The vault commits (bf649ee, 17efc49, d8661b3) are local and unpushed.
-- Still open: the `alt.*` `dns_aliases` move (Gate B, §8 step 6), next; monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry.
+- Done 2026-11-19 and 2026-11-20 (§11.8): services.yml loaded with this warpctl, `services.connect.lb_alt: false` declared, then `true`; connect's `cores: 20` (D15) deployed. The `alt.*` `dns_aliases` moved from alt to connect (Gate B, §8 step 6; §11.8). The vault commits (bf649ee, 17efc49, d8661b3, c17bf1f) are local and unpushed.
+- Still open: alt's removal (D14 step 4); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry.
 
 ### 11.7 Review focus
 
@@ -1492,4 +1492,11 @@ Every non-transparent lb interface of edge-0, 1, 3 and 4 runs lb_alt since 2026-
 
 **Rolling an interface back:** `lb.interfaces.<host>.<interface>.lb_alt: false` in services.yml, then `run-lb-unit.sh <host> <interface>`, which puts nginx's redirect back ahead of the split and then removes the split (§11.3 (d), D18). Once `alt.*` has moved, D20 applies.
 
-Still open after the rollout: §11.6's "After the rollout" items, and Gate B with the `alt.*` move (§8 step 6).
+**The `alt.*` move (Gate B, §8 step 6), 2026-11-20 06:32Z.**
+- The vault moved `alt`, `alt-v4` and `alt-v6` under bringyour.com from the alt service's `dns_aliases` to connect's (c17bf1f). Every lb interface is lb_alt, so `dns.go:dnsDerivation.domain` derives each as an alias of `main-lb.bringyour.com`, with `-v4` A only and `-v6` AAAA only. The 142 rendered units were unchanged, so the names carry no certificate or route. `main-alt.*` stay on the proxy hosts until alt is removed.
+- `warpctl dns sync` was not used. The live Route53 zones predate the generator, and `warpctl dns plan main` would rebuild every `main-lb` record and swap the health checks on bringyour.com and ur.network, and add records on the five Cloudflare domains. A targeted change batch per zone deleted the plain records and created the aliases in one atomic change instead, matching how `connect.bringyour.com` already aliases `main-lb`. A full sync later finds them already in the derived form.
+- ur.network had the same three alt names, which services.yml doesn't declare and the generator doesn't derive. They moved to aliases of `main-lb.ur.network` in the same way, so no alt name points at the proxy hosts. Clients there use `connect.prod.ur.network` and would derive `alt.prod.ur.network`, which doesn't exist. No Cloudflare domain has alt names.
+- Verified: both changes INSYNC, and the authoritative servers answer every alt name with edge interfaces, in the name's family. Public resolvers cleared the old 300-second answers within the TTL.
+- Before the move, alt served 65 to 75 requests a second and had no connect clients. Most of it was `/hello` and `/connect/control` at about 25 a second each, probe traffic, plus about 7 a second of client api calls. D14 step 3 watches that fall before step 4 removes alt: the service, its external UDP ports, the router rules for UDP 443, 53 and 4053 on fireside and crisp, the `main-alt.*` records, and the probes that target alt.
+
+Still open after the rollout: §11.6's "After the rollout" items, and alt's removal (D14 step 4).
