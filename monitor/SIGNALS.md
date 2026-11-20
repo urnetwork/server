@@ -8018,9 +8018,10 @@ measurement, and neither this section nor §2.4b closes the disk-runway gap.
 
 The 2026-10-19 explicit future policy is WARN at **48 hours or less** to the
 100,000,000,000-byte safety line after two qualified observations. Qualification
-requires **six complete hourly intervals** of aligned filesystem, resident
-temp, WAL and recovery/vacuum history. The fitting rule and full producer
-contract still need qualification; a raw free-space slope or hourly maxima
+requires **six complete hourly intervals** pairing root availability, temp
+bytes physically allocated on that filesystem, WAL occupancy and retention,
+and recovery/vacuum state at their original collection times. The producer and
+fitting rule still need qualification. A raw free-space slope or hourly maxima
 alone cannot establish net growth. Fresh current SQL rows cannot backfill
 missing historical temp or WAL samples. Cumulative `temp_bytes` counts bytes
 written rather than resident temp allocation, and relation size omits retained
@@ -8040,15 +8041,15 @@ Storage additions, retention changes and workload changes remain owner actions.
 
 2026-10-22: this coverage WARN was open from 10-13 to 10-22 while edge-2's root
 filesystem fell from about 700 GB to 145 GB, and it never became a forecast.
-§2.4f now selects the estimator and thresholds so the forecast can exist;
-replace this visibility-only observation with it. A perfect net-growth model is
-not a precondition for warning: the raw max-of-windows decline would have
-warned from 10-20 and paged at about 15:00Z on 10-21.
-`storage-runway` (§2.4f) now measures that raw max-of-windows runway for the
-database root against the same 100,000,000,000-byte line. This
-visibility-only observation still reports the qualified net-growth forecast of
-this section (temp, WAL and vacuum netted out) as unknown; retiring it in favor
-of §2.4f is an owner decision.
+§2.4f selected an estimator and thresholds for raw runway and proposed
+replacing the visibility-only warning. The raw max-of-windows decline would
+have warned from 10-20 and paged at about 15:00Z on 10-21.
+
+The coverage warning directs operators to `pg-disk-space` (§2.4b) for current
+root headroom and `storage-runway` (§2.4f) for estimated time to the same
+100,000,000,000-byte line at the fastest raw decline over 1, 6 and 24 hours.
+The qualified net-growth forecast remains unknown. Retiring this warning in
+favor of §2.4f remains an owner decision.
 
 ### 2.4d Configured freeze-age risk
 Probe: `pg-freeze-age`
@@ -12547,6 +12548,26 @@ response body does not prove a nonempty picker. The deprecated
 `/network/find-locations` endpoint is not included. Empty-picker user reports
 remain actionable below any metric volume floor; the floor is not a dismissal
 of an individual report.
+
+For instrumented API processes, `urnetwork_provider_picker_search_empty_total{stage}`
+breaks down successful empty search POSTs. A blank or whitespace-only POST
+reads the browse document and counts as `blank_query`. For nonblank text,
+`no_index_matches` means the search returned zero IDs. An index match with
+no loaded location records counts as `no_location_metadata`. Loaded records
+with no positive caller/rank filter entry count as `no_positive_filter`.
+A positive entry followed by an empty model result under the shared SDK's
+row rules counts as `positive_filter_no_rendered_rows`. A successful empty
+search outside the measured path counts as `unobserved`. All six counters
+start at zero. Initial GETs, direct IDs and model errors keep their existing
+outcomes. The API dashboard shows this breakdown alongside the parent outcome.
+
+These counts describe the inputs available to that request. Missing metadata,
+caller exclusions, rank policy and an unmatched term can all yield a valid
+empty result. Filter freshness, expected matches for that caller, HTTP
+delivery and app rendering require separate evidence. Compare the breakdown
+with `search/empty` on the same continuously observed instrumented processes.
+An older producer lacks the breakdown. The standing eleven-field query and
+its initial-empty and request-error thresholds continue to cover mixed builds.
 
 Latency needs the same route distinction. The shared SDK's empty browse filter
 uses the initial GET; a nonempty text filter uses the search POST. The Android

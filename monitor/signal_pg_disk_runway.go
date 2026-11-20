@@ -40,10 +40,10 @@ func (pgDiskRunwayProbe) check(ctx context.Context, _ *probeEnv) ([]finding, err
 		mechanism: "A complete paired history of filesystem availability, resident temp bytes, WAL and recovery/vacuum state has not been implemented. Raw decline or hourly maxima cannot prove continuing net growth.",
 		baseline:  "Approved future policy: WARN after two qualified observations of runway <=48 hours to the 100000000000-byte safety line, at a fifteen-minute cadence.",
 		observed:  "forecast=unknown reason=paired-history-not-implemented qualification_window_hours=6 complete_hourly_intervals_required=6",
-		evidence:  "This coverage observation makes no remote query, samples no archive volume and does not calculate a slope. The separate pg-disk-space signal measures only present root headroom.",
+		evidence:  "The independent pg-disk-space signal measures current root headroom against the 100 GB line. The storage-runway signal estimates time to that line from the fastest raw decline over 1, 6 and 24 hours.",
 		context:   "False-positive qualifiers: hourly temp spills can recover and vacuum completion can release held space; neither raw decline nor cumulative temp bytes establishes lasting net growth. False-negative qualifiers: WAL retained outside relation size, missing tablespace coverage and incomplete recovery history leave runway unknown even when current root space is above its safety line.",
-		action:    "Complete and qualify the paired historical source contract for six complete hourly intervals before enabling a forecast; keep storage and retention actions with their owners.",
+		action:    "Check pg-disk-space for a floor crossing and storage-runway for a raw runway warning or page on the primary root. With the database and storage owners, qualify six complete hourly intervals pairing root availability, temp bytes physically allocated on that filesystem, WAL occupancy and retention, and vacuum/recovery state at their original collection times.",
 		verify:    "A future implementation must prove complete aligned history, temp recovery and WAL/vacuum authority with healthy, true-depletion and missing-source controls. This visibility-only implementation cannot certify runway or clear an earlier forecast incident.",
-		playbook:  "SIGNALS.md §2.4b and §2.4c",
+		playbook:  "SIGNALS.md §2.4b, §2.4c and §2.4f",
 	}}, nil
 }

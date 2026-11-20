@@ -4819,7 +4819,8 @@ func FindProviderLocations(
 	session *session.ClientSession,
 ) (result *FindLocationsResult, returnErr error) {
 	surface := "search"
-	defer func() { providerPickerMetrics.observe(surface, result, returnErr) }()
+	var searchInputs *providerPickerSearchInputs
+	defer func() { providerPickerMetrics.observeFindLocations(surface, result, returnErr, searchInputs) }()
 	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: surface}
 	defer observation.finish()
 	query := strings.TrimSpace(findLocations.Query)
@@ -4863,6 +4864,7 @@ func FindProviderLocations(
 
 		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
 
+		var indexMatches bool
 		var matchDistances map[server.Id]int
 		var clientLocations map[server.Id]*ClientLocation
 		if query == "" {
@@ -4889,6 +4891,7 @@ func FindProviderLocations(
 				search.OptMostLikley(30),
 			)
 
+			indexMatches = len(locationSearchResults) > 0
 			locationIds := map[server.Id]bool{}
 			for locationId, _ := range locationSearchResults {
 				locationIds[locationId] = true
@@ -4962,6 +4965,12 @@ func FindProviderLocations(
 			Devices:   []*LocationDeviceResult{},
 		}
 		result.SetStats()
+		searchInputs = &providerPickerSearchInputs{
+			blankQuery:       query == "",
+			indexMatches:     indexMatches,
+			locationMetadata: len(clientLocations) > 0,
+			positiveFilter:   len(locationStables) > 0, // A false value is a positive count below the stability threshold.
+		}
 
 		return result, nil
 	}
