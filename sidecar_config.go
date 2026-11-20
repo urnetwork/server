@@ -74,6 +74,13 @@ import (
 // read is logged at every reread; only a file the resolver finds absent from
 // every home (ErrResourceNotFound) reads as absent, quietly: a dangling link, a
 // directory or an inaccessible home is unavailable, not absent.
+// The zero value a failed read answers before any read succeeded says so
+// (FailedFirstRead; QD-1079), for a reader whose zero value is not the closed
+// direction: it names no urnetwork_edge, so taskworker's idle top-level marking,
+// which leaves that network's clients alone, marks nothing while it holds. The
+// first good read clears it. An absent file is no failed read: before a good
+// read it answers the plain zero value, after a failed one too, since the
+// environment then names no edge network to protect.
 // Taking a gate back off is an edit to the file, not its removal: a removal
 // holds until the process restarts. Within a file that parses, one bad entry
 // costs only itself: an id that does not parse is skipped, a percent out of
@@ -152,8 +159,15 @@ type sidecarConfigYaml struct {
 }
 
 // One read of sidecar.yml. Immutable once read. The zero value, what a first
-// read of an absent or broken file answers, previews nothing and opens nothing.
+// read of an absent or broken file answers, previews nothing and opens nothing;
+// a broken one's also says it failed (FailedFirstRead).
 type SidecarConfig struct {
+	// the file was read and parsed: a good read, which a later failed read keeps
+	parsed bool
+	// stands in for a file that is there but could not be read or parsed, with no
+	// good read to keep (QD-1079)
+	failedFirstRead bool
+
 	// the networks that may hold strict_exp clients before stage 2 (D-TRUST-3)
 	previewNetworkIds map[Id]bool
 
@@ -182,6 +196,17 @@ type SidecarConfig struct {
 // Whether the network is listed in preview_networks.
 func (self *SidecarConfig) PreviewNetwork(networkId Id) bool {
 	return self.previewNetworkIds[networkId]
+}
+
+// Whether this is the zero value of a failed read with no good read before it
+// (QD-1079): the file is there but could not be read or parsed, and the process
+// does not know what it says. Every gate answers closed, as for an absent file.
+// A reader whose zero value is the destructive direction holds off instead, as
+// taskworker's idle top-level marking does (model.RemoveDisconnectedNetworkClients),
+// since this read names no urnetwork_edge whatever the file does. A good read
+// never carries it, nor does an absent file's.
+func (self *SidecarConfig) FailedFirstRead() bool {
+	return self.failedFirstRead
 }
 
 // The ids of a list, each that does not parse skipped and logged, so one bad
@@ -221,6 +246,7 @@ func parseSidecarConfigEvsBlocks(node *yaml.Node) int {
 // One bad entry costs only that entry.
 func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 	config := &SidecarConfig{
+		parsed:            true,
 		previewNetworkIds: map[Id]bool{},
 		serviceGates:      map[string]*SidecarServiceGate{},
 		switches:          map[string]bool{},
@@ -304,16 +330,19 @@ func parseSidecarConfig(data []byte) (*SidecarConfig, error) {
 	return newSidecarConfig(y), nil
 }
 
-// Reads the file, keeping previous when the read fails. See the file's header
-// for what a failure answers.
+// Reads the file, keeping previous when the read fails and previous is a good
+// read. See the file's header for what a failure answers.
 func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 	failed := func(err any) *SidecarConfig {
 		glog.Errorf("[sidecar]could not read %s: %v\n", sidecarConfigResourceName, err)
-		if previous != nil {
+		if previous != nil && (previous.parsed || previous.failedFirstRead) {
+			// the latest good read, or the failed first read itself, so a second
+			// failure answers the same read
 			return previous
 		}
-		// the zero value, never what the file partly parsed
-		return &SidecarConfig{}
+		// the zero value, never what the file partly parsed, and the process
+		// knows nothing of what the file says
+		return &SidecarConfig{failedFirstRead: true}
 	}
 	if r := HandleError(func() {
 		resource, err := Config.SimpleResource(sidecarConfigResourceName)
@@ -323,8 +352,11 @@ func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 				config = failed(err)
 				return
 			}
-			config = previous
-			if config == nil {
+			// absent: a good read holds, as an earlier absent read does, and a
+			// failed one gives way to the zero value, which is no failed read
+			if previous != nil && !previous.failedFirstRead {
+				config = previous
+			} else {
 				config = &SidecarConfig{}
 			}
 			return
@@ -403,6 +435,28 @@ func CurrentSidecarConfig() *SidecarConfig {
 func Testing_PushSidecarConfig(yaml string) func() {
 	pop := Config.PushSimpleResource(sidecarConfigResourceName, []byte(yaml))
 	defaultSidecarConfigReader.latest.Store(nil)
+	return func() {
+		pop()
+		defaultSidecarConfigReader.latest.Store(nil)
+	}
+}
+
+// Forgets every read, so the process's next read of sidecar.yml is a first read.
+func Testing_ForgetSidecarConfig() {
+	defaultSidecarConfigReader.latest.Store(nil)
+}
+
+// Stands in for sidecar.yml until the returned pop, as a config push changes the
+// file under a running process: the next read rereads it, as the end of the
+// reread interval does, with the latest read as its previous, so a broken file
+// keeps a good read and a good file replaces a failed one. The pop forgets every
+// read, as Testing_PushSidecarConfig's does, so no read outlives the test.
+func Testing_RereadSidecarConfig(yaml string) func() {
+	pop := Config.PushSimpleResource(sidecarConfigResourceName, []byte(yaml))
+	if read := defaultSidecarConfigReader.latest.Load(); read != nil {
+		// a zero read time is always older than the interval
+		defaultSidecarConfigReader.latest.Store(&sidecarConfigRead{config: read.config})
+	}
 	return func() {
 		pop()
 		defaultSidecarConfigReader.latest.Store(nil)
