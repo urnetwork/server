@@ -20,9 +20,9 @@
 -- Postgres as the platform's role whatever user it logged in as, which would void every grant below. PgBouncer
 -- authenticates its clients from userlist.txt, which xops copies from vault/main/pgbouncer/userlist.txt, and logs in
 -- to Postgres as an entry's user with that user's line, so the file needs the role's line: "tlsedge" and the password
--- given at \password. PgBouncer does not tie a user to an entry, so until it holds the role to its own entry, that
--- line also lets a client that holds the password name bringyour (question
--- pgbouncer-edge-role-entries-user-names-any-entry).
+-- given at \password. PgBouncer does not tie a user to an entry, so the line would also let a client that holds the
+-- password name bringyour. It waits until the HBA rules that admit tlsedge to its own entry alone are deployed
+-- (QD-1136), and until then the block cannot connect, the closed direction.
 --
 -- What the role may do is what tlsedge's process reaches, read from its code, and nothing else.
 -- server/db_edge_roles_test.go creates the role from exactly this file, runs the block's store calls under it, and
