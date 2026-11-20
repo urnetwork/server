@@ -638,7 +638,9 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 		}
 		release, outcome := self.front.limits.acquireRequest(self.frontInterface.limits, request.clientAddrPort.Addr(), routeZone)
 		if outcome != limitOutcomeAdmitted {
-			self.front.metrics.limitRefusals.WithLabelValues(outcome.String()).Inc()
+			// the zone the request was charged to, whichever limit refused it:
+			// the location's, from the route table
+			self.front.metrics.limitRefusals.WithLabelValues(outcome.String(), limitZoneLabel(routeZone)).Inc()
 			exchange.respondError(http.StatusTooManyRequests)
 			return
 		}

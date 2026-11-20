@@ -2,9 +2,10 @@ package nginx
 
 // What the front records of its requests (owner: s-http; D17): bounded
 // counters and response-head latency histograms by service, protocol,
-// status class and upstream block, a counter of limit refusals by limit, the
-// earliest expiry of the certificates it serves, and an optional access log
-// at V(1), sampled, that honors no_access_log and no_success_access_log.
+// status class and upstream block, a counter of limit refusals by limit and
+// zone, the earliest expiry of the certificates it serves, and an optional
+// access log at V(1), sampled, that honors no_access_log and
+// no_success_access_log.
 //
 // The service and block labels are upstream_service and upstream_block: the
 // process's stats push adds its own service and block to every series, and
@@ -66,8 +67,8 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "limit_refusals_total",
-			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit: request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list",
-		}, []string{"limit"}),
+			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list) and zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, or default for the interface's shared zone, which a refused QUIC connection is counted in too; - for interface",
+		}, []string{"limit", "zone"}),
 		certificateExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
 			Subsystem: "front",
