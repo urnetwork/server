@@ -417,6 +417,11 @@ func quicNegotiableNextProtos(offeredNextProtos []string) []string {
 // invalid or unknown SNI gets no certificate, as in alt, so its handshake
 // fails. QUIC itself requires TLS 1.3.
 //
+// tlsConfig reads each ClientHello's offer (TlsClientOffer) into the slot its
+// handshake's context carries, when it carries one (NewTlsListener), with the
+// class of its server name: a served name's class, none for no name, and
+// unknown for any other name.
+//
 // quicTlsConfig counts every ClientHello it reads in metrics'
 // quicClientHellos, once each, since crypto/tls calls GetConfigForClient once
 // per handshake, a HelloRetryRequest's included: by the port kind its local
@@ -473,18 +478,32 @@ func newTlsConfigs(
 		defaultTlsConfig = newNameTlsConfig(certificate, slices.Clone(otherNextProtos))
 	}
 
+	// the config for a TCP ClientHello's server name, nil for the default
+	// server's, and the class its offer is counted under: a served name's,
+	// none for no name, or unknown
+	tcpNameTlsConfig := func(serverName string) (*tls.Config, string) {
+		if serverName == "" {
+			return nil, tlsClientOfferNameNone
+		}
+		if name, ok := normalizeHost(serverName); ok {
+			if match, ok := matcher.match(name); ok {
+				if nameTlsConfig, ok := tcpNameTlsConfigs[match.name]; ok {
+					return nameTlsConfig, match.class.String()
+				}
+			}
+		}
+		return nil, NameClassUnknown.String()
+	}
 	tlsConfig = &tls.Config{
 		NextProtos:       slices.Clone(otherNextProtos),
 		MinVersion:       settings.MinVersion,
 		CipherSuites:     slices.Clone(settings.CipherSuites),
 		CurvePreferences: slices.Clone(settings.CurvePreferences),
 		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			if serverName, ok := normalizeHost(clientHello.ServerName); ok {
-				if match, ok := matcher.match(serverName); ok {
-					if nameTlsConfig, ok := tcpNameTlsConfigs[match.name]; ok {
-						return nameTlsConfig, nil
-					}
-				}
+			nameTlsConfig, nameClass := tcpNameTlsConfig(clientHello.ServerName)
+			recordTlsClientOffer(clientHello, nameClass)
+			if nameTlsConfig != nil {
+				return nameTlsConfig, nil
 			}
 			if defaultTlsConfig == nil {
 				return nil, ErrTlsNoCertificate
