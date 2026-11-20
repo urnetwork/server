@@ -274,7 +274,7 @@ func newParityHarness(t *testing.T, settings *parityHarnessSettings) *parityHarn
 		}
 		httpsServer := newParityFrontHttpServer(ctx, front, front.HttpsHandler(routeInterface.Name), discardLog)
 		harness.httpServers = append(harness.httpServers, httpsServer)
-		go httpsServer.Serve(nginx.NewTlsListener(httpsListener, front.TlsConfig(), httpsServer.ReadHeaderTimeout))
+		go httpsServer.Serve(nginx.NewTlsListener(httpsListener, front.TlsConfig(), httpsServer.ReadHeaderTimeout, nil))
 
 		httpListener, err := net.Listen("tcp", netip.AddrPortFrom(addr, uint16(routeTable.Listen.HttpPort)).String())
 		if err != nil {

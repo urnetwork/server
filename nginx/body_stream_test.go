@@ -1,10 +1,12 @@
 package nginx
 
 // Tests of a streamed body on its own: what its first read keeps for a retry
-// (D7, D19), and which failures it keeps as the client's.
+// (D7, D19), and which failures it keeps as the client's, a client's reset
+// as canceled.
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -12,6 +14,8 @@ import (
 	"testing/iotest"
 	"testing/synctest"
 	"time"
+
+	"github.com/quic-go/quic-go/http3"
 )
 
 // A streamed body's first read keeps a declared body it returns whole, as
@@ -188,6 +192,29 @@ func TestStreamedBodyEndingShortOfItsLengthFails(t *testing.T) {
 			if !streamedBody.isWhole() {
 				t.Errorf("%s: the body read to its end isn't whole", c.name)
 			}
+		}
+	}
+}
+
+// Regression test: a streamed body whose read fails because its client reset
+// it is the client's failure as canceled, with no response, while the
+// request's context is still live, as an h3 client's reset of its request's
+// side leaves it; the read's error passes to the request's writer. Before,
+// it was an incomplete body's 400.
+func TestStreamedBodyResetByItsClientIsCanceled(t *testing.T) {
+	for _, resetErr := range []error{
+		testConnectionResetReadError(t),
+		&http3.Error{Remote: true, ErrorCode: http3.ErrCodeRequestCanceled},
+	} {
+		streamedBody := newForwardStreamedBody(testContext(t), io.MultiReader(bytes.NewReader([]byte("partial")), errorReader{err: resetErr}), 100, 0, 0, nil, nil)
+		if _, err := io.ReadAll(streamedBody); !errors.Is(err, resetErr) {
+			t.Errorf("the read ended with %v, want the reset's %v", err, resetErr)
+		}
+		if refusal := streamedBody.failure(); refusal == nil || refusal.status != 0 || refusal.reason != bodyRefusalCanceled {
+			t.Errorf("a body its client reset (%v): failure %v, want canceled with no response", resetErr, refusal)
+		}
+		if streamedBody.isWhole() {
+			t.Errorf("the reset body is marked whole")
 		}
 	}
 }

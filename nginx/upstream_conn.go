@@ -49,7 +49,11 @@ package nginx
 //     the block closed, or that holds bytes nobody asked for, is dropped
 //     before any request is written to it;
 //   - dialed connections have SO_KEEPALIVE on with the system's probe
-//     timing, nginx's `proxy_socket_keepalive on`.
+//     timing, nginx's `proxy_socket_keepalive on`;
+//   - every connection an attempt takes is counted by service, as reused
+//     from the pool, dialed, or a failed dial
+//     (urnetwork_lbalt_upstream_connections_total), so the pools' reuse can
+//     be read.
 
 import (
 	"bufio"
@@ -142,7 +146,8 @@ func (self *upstreamPool) expiredWithLock(upstreamConn *upstreamConnection, now 
 }
 
 // A live idle connection, the most recently used first, or nil. Expired
-// connections, and ones the block closed, are closed on the way.
+// connections, and ones the block closed, are closed on the way; only the
+// one taken counts as reused.
 func (self *upstreamPool) takeIdle() *upstreamConnection {
 	now := time.Now()
 	for {
@@ -171,6 +176,7 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 			return nil
 		}
 		if upstreamConnAlive(upstreamConn.conn) {
+			self.group.reusedConnections.Inc()
 			return upstreamConn
 		}
 		self.forget(upstreamConn)
@@ -182,7 +188,8 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 // context or the group's close, whichever comes first, and close waits for
 // it, so no connection outlives a close that never saw it: a dial that
 // finds the pool closed once it has a connection closes it. The error is the
-// dial's, or net.ErrClosed for a closed pool.
+// dial's, or net.ErrClosed for a closed pool. Every dial counts as dialed or
+// dial_failed by whether it connected; a closed pool dials nothing.
 func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error) {
 	open := func() bool {
 		self.stateLock.Lock()
@@ -204,8 +211,10 @@ func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error)
 
 	conn, err := self.group.dialContext(dialCtx, "tcp", self.block.target)
 	if err != nil {
+		self.group.dialFailedConnections.Inc()
 		return nil, err
 	}
+	self.group.dialedConnections.Inc()
 	upstreamConn := &upstreamConnection{
 		pool:          self,
 		conn:          conn,
@@ -469,9 +478,11 @@ func upstreamIoFailure(err error) upstreamFailure {
 	return upstreamFailureError
 }
 
-// One request as the upstream sees it, the same for every attempt.
+// One request as the upstream sees it, the same for every attempt but for
+// its latest exchange.
 type upstreamRequest struct {
-	// the request line and headers
+	// the request line and headers. The write of each of the request's
+	// exchanges reads it, until the exchange is finished
 	head []byte
 	// the method, for parsing the response (a HEAD's has no body)
 	method string
@@ -485,6 +496,11 @@ type upstreamRequest struct {
 	upgrade      bool
 	readTimeout  time.Duration
 	writeTimeout time.Duration
+	// the latest exchange, set as it begins: each attempt's exchange is
+	// finished before the next attempt's begins (a failed one by exchange, a
+	// retried 503 by forward), so this is the only one whose write may still
+	// run. Kept by the request's goroutine
+	exchange *upstreamExchange
 }
 
 // One request and its response on one connection. The request write runs
@@ -547,6 +563,7 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		// write on it; a cut connection is never reused
 		stopCancel: context.AfterFunc(ctx, upstreamConn.close),
 	}
+	request.exchange = exchange
 	go func() {
 		err := exchange.writeRequest()
 		switch {

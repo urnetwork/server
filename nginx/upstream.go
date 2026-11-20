@@ -36,7 +36,8 @@ package nginx
 //
 // Every physical attempt is counted (urnetwork_lbalt_upstream_attempts_total),
 // so the parity harness can compare attempt counts with a recording
-// upstream.
+// upstream, and so is how it got its connection, reused or dialed
+// (urnetwork_lbalt_upstream_connections_total, upstream_conn.go).
 
 import (
 	"context"
@@ -49,6 +50,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // A service's blocks and their pools. Safe for concurrent use.
@@ -70,8 +73,15 @@ type upstreamGroup struct {
 	// barriers
 	waitAfter   func(d time.Duration) <-chan time.Time
 	copyBuffers sync.Pool
-	ctx         context.Context
-	cancel      context.CancelFunc
+	// buffers of ForwardSettings.RequestHeadBufferBytes for request heads,
+	// each held from its request's head to its last exchange's end
+	requestHeads sync.Pool
+	// the service's series of upstreamConnectionsCounter, by result
+	reusedConnections     prometheus.Counter
+	dialedConnections     prometheus.Counter
+	dialFailedConnections prometheus.Counter
+	ctx                   context.Context
+	cancel                context.CancelFunc
 
 	stateLock sync.Mutex
 	closed    bool
@@ -117,19 +127,26 @@ func newUpstreamGroup(routeTable *RouteTable, service *RouteService, bodyStore *
 		},
 	}
 	group := &upstreamGroup{
-		service:         service,
-		settings:        settings,
-		bodyStore:       bodyStore,
-		blocks:          []*upstreamBlock{},
-		blockNameBlocks: map[string]*upstreamBlock{},
-		dialContext:     dialer.DialContext,
-		waitAfter:       time.After,
-		ctx:             ctx,
-		cancel:          cancel,
-		tunnels:         map[*forwardTunnel]bool{},
+		service:               service,
+		settings:              settings,
+		bodyStore:             bodyStore,
+		blocks:                []*upstreamBlock{},
+		blockNameBlocks:       map[string]*upstreamBlock{},
+		dialContext:           dialer.DialContext,
+		waitAfter:             time.After,
+		reusedConnections:     upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionReused),
+		dialedConnections:     upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionDialed),
+		dialFailedConnections: upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionDialFailed),
+		ctx:                   ctx,
+		cancel:                cancel,
+		tunnels:               map[*forwardTunnel]bool{},
 	}
 	group.copyBuffers.New = func() any {
 		buffer := make([]byte, max(settings.Forward.CopyBufferBytes, 1))
+		return &buffer
+	}
+	group.requestHeads.New = func() any {
+		buffer := make([]byte, 0, max(settings.Forward.RequestHeadBufferBytes, 1))
 		return &buffer
 	}
 
@@ -266,7 +283,21 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			}
 		}
 	}
-	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
+	// the head is built in a pooled buffer, which goes back once nothing can
+	// read it: only an exchange's write reads the head, and every exchange
+	// but the latest has been finished by the time the next begins. The
+	// latest is finished on every exit too, relay's and tunnel's included,
+	// and here when a panic left it running, finish being once only. A head
+	// that outgrew its buffer grew into one of its own, and only the pooled
+	// one goes back
+	requestHead := self.requestHeads.Get().(*[]byte)
+	defer func() {
+		if request.exchange != nil {
+			request.exchange.finish(false)
+		}
+		self.requestHeads.Put(requestHead)
+	}()
+	request.head = forwardRequestHead((*requestHead)[:0], r, &options, upgrade, request.bodyFraming)
 	self.forward(w, r, responseController, request, &options)
 }
 
@@ -607,7 +638,8 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 // ngx_http_finalize_request answers with ngx_http_terminate_request), so the
 // front's default 200 for a handler that wrote nothing never goes out. On h1
 // a client that ends its body early is one: Go's server reports its closed
-// side by canceling the request.
+// side by canceling the request. So is one that resets its connection or its
+// h2 or h3 stream mid-body (bodyReadClientGone).
 //
 // Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
 // finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,

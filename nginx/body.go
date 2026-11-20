@@ -27,9 +27,12 @@ package nginx
 //   - a client that goes away ends the request with no response too. On h1
 //     that includes one that ends its body early, since Go's server reports
 //     the closed side by canceling the request, as nginx terminates a
-//     request whose connection closed under its body. Elsewhere a body that
-//     ends early, on h2 or h3, or an h1 chunked body that breaks its framing,
-//     is a 400;
+//     request whose connection closed under its body. A client that resets
+//     its connection, its h2 stream or its h3 request stream mid-body has
+//     gone away too, by the read's error, which can come before the
+//     request's context ends or, on h3, without it (bodyReadClientGone).
+//     Elsewhere a body that ends early, on h2 or h3, or an h1 chunked body
+//     that breaks its framing, is a 400;
 //   - a stored body replays byte for byte, memory then file, once per
 //     attempt.
 //
@@ -51,7 +54,12 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/net/http2"
 )
 
 // Refusal reasons, the refusal counter's label values. A closed set.
@@ -252,16 +260,71 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 // The refusal for a failed client body read: its read timed out (408), the
 // client went away, or its body ended early or broke its framing (400). The
 // timeout is checked first: Go's HTTP/1.1 server cancels the request's
-// context on any failed read, a timed out one included.
+// context on any failed read, a timed out one included. The client went away
+// when the request's context has ended, or when the read's own error says so
+// (bodyReadClientGone), which can come before the context ends, or without
+// it.
 func bodyReadRefusal(ctx context.Context, err error) *bodyRefusal {
 	var netErr net.Error
 	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		return &bodyRefusal{status: http.StatusRequestTimeout, reason: bodyRefusalTimeout}
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || bodyReadClientGone(err) {
 		return &bodyRefusal{status: 0, reason: bodyRefusalCanceled}
 	}
 	return &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
+}
+
+// The text of the error Go's h2 server fails each open stream's body with
+// once its connection has ended, before it cancels the stream's context
+// (net/http/internal/http2's errClientDisconnected). The error isn't
+// exported, so it is matched by its text, which
+// TestBodyReadClientGoneOfRealClientResets pins with Go's own h2 server.
+const bodyHttp2ClientDisconnectedText = "client disconnected"
+
+// Whether a failed body read's error says the client reset or lost its
+// request: its connection, or its h2 or h3 stream. Each of these can fail
+// the read before the request's context ends:
+//   - a TCP reset (ECONNRESET);
+//   - an h2 stream the client reset with CANCEL, the code a client abandons
+//     a request with and Go's h2 server never sends. That server cancels the
+//     request's context before it fails the body for a client's reset of any
+//     code, so the other codes count by the context; for its own resets, for
+//     a client's protocol error, it cancels the context just after, and the
+//     error leaves those to the context too;
+//   - an h2 connection that ended (bodyHttp2ClientDisconnectedText): Go's
+//     server fails the body first;
+//   - an h3 request stream the client reset, or a QUIC connection it closed
+//     or reset: the vendored http3 fails the body with a remote http3.Error,
+//     or quic's own error, and cancels the request's context only once the
+//     response's side is stopped too, so a client that resets only its
+//     request's side never ends it. A local error is the front's own doing.
+func bodyReadClientGone(err error) bool {
+	if errors.Is(err, syscall.ECONNRESET) || err.Error() == bodyHttp2ClientDisconnectedText {
+		return true
+	}
+	var http2StreamErr http2.StreamError
+	if errors.As(err, &http2StreamErr) {
+		return http2StreamErr.Code == http2.ErrCodeCancel
+	}
+	var http3Err *http3.Error
+	if errors.As(err, &http3Err) {
+		return http3Err.Remote
+	}
+	var quicStreamErr *quic.StreamError
+	if errors.As(err, &quicStreamErr) {
+		return quicStreamErr.Remote
+	}
+	var quicApplicationErr *quic.ApplicationError
+	if errors.As(err, &quicApplicationErr) {
+		return quicApplicationErr.Remote
+	}
+	var quicTransportErr *quic.TransportError
+	if errors.As(err, &quicTransportErr) {
+		return quicTransportErr.Remote
+	}
+	var quicStatelessResetErr *quic.StatelessResetError
+	return errors.As(err, &quicStatelessResetErr)
 }
 
 // Registers a new body with its memory prefix reserved, or refuses with a

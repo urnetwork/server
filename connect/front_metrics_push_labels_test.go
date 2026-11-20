@@ -27,20 +27,28 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 		frontSocketRestartsCounter,
 		frontSocketBindFailuresCounter,
 		frontQuicConnectionsCounter,
+		frontQuicHandshakesCounter,
 		frontHttpServerErrorsCounter,
+		frontTlsHandshakesCounter,
 	)
+	// a synthetic value in every series, so the deletes after can't touch a
+	// series another test counts in
 	interfaceName := "push-labels-test"
 	frontSocketsUpGauge.WithLabelValues(interfaceName, "ipv4", "tcp", "443").Set(4)
 	frontSocketRestartsCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
 	frontSocketBindFailuresCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
-	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontQuicResultConnect).Inc()
+	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout).Inc()
+	frontQuicHandshakesCounter.WithLabelValues(interfaceName, frontQuicVersionV1, "true").Inc()
 	frontHttpServerErrorsCounter.WithLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed).Inc()
+	frontTlsHandshakesCounter.WithLabelValues(frontTlsVersionTls13, "true", interfaceName).Inc()
 	defer func() {
 		frontSocketsUpGauge.DeleteLabelValues(interfaceName, "ipv4", "tcp", "443")
 		frontSocketRestartsCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
 		frontSocketBindFailuresCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
-		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontQuicResultConnect)
+		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout)
+		frontQuicHandshakesCounter.DeleteLabelValues(interfaceName, frontQuicVersionV1, "true")
 		frontHttpServerErrorsCounter.DeleteLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed)
+		frontTlsHandshakesCounter.DeleteLabelValues(frontTlsVersionTls13, "true", interfaceName)
 	}()
 
 	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

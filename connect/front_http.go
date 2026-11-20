@@ -21,15 +21,18 @@ package connect
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
-// logged, with the address cut out.
+// logged, with the address cut out. The TLS listener reports each handshake
+// that completes, which is counted by version, resumption and protocol.
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,9 +81,53 @@ func (self *frontTcpRun) serve() error {
 		frontServer: self.frontServer,
 	}
 	if self.socket.key.portKind == frontPortHttps {
-		listener = nginx.NewTlsListener(listener, self.frontServer.tlsConfig, self.socket.httpServer.ReadHeaderTimeout)
+		listener = nginx.NewTlsListener(
+			listener,
+			self.frontServer.tlsConfig,
+			self.socket.httpServer.ReadHeaderTimeout,
+			self.frontServer.countTlsHandshake,
+		)
 	}
 	return self.socket.httpServer.Serve(listener)
+}
+
+// Counts one TLS handshake on a public TCP socket that completed, by version,
+// whether it resumed a session and the application protocol. Called once per
+// connection, on its serving goroutine, before its first request.
+func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState) {
+	version := frontTlsVersionLabel(connectionState.Version)
+	resumed := strconv.FormatBool(connectionState.DidResume)
+	alpn := frontTlsAlpnLabel(connectionState.NegotiatedProtocol)
+	frontTlsHandshakesCounter.WithLabelValues(version, resumed, alpn).Inc()
+	if observer := self.settings.tlsHandshakeObserverForTest; observer != nil {
+		observer(version, resumed, alpn)
+	}
+}
+
+// The version label of a completed TLS handshake.
+func frontTlsVersionLabel(version uint16) string {
+	switch version {
+	case tls.VersionTLS12:
+		return frontTlsVersionTls12
+	case tls.VersionTLS13:
+		return frontTlsVersionTls13
+	default:
+		return frontTlsVersionOther
+	}
+}
+
+// The application protocol label of a completed TLS handshake.
+func frontTlsAlpnLabel(negotiatedProtocol string) string {
+	switch negotiatedProtocol {
+	case "h2":
+		return frontTlsAlpnH2
+	case "http/1.1":
+		return frontTlsAlpnHttp1
+	case "":
+		return frontTlsAlpnNone
+	default:
+		return frontTlsAlpnOther
+	}
 }
 
 // The tcp drain is its server's (frontServer.beginDrain), which reaches every

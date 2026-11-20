@@ -1,6 +1,6 @@
 # LBALTOPT1: lb_alt in production, measured, and what to improve next
 
-Status: measured 2026-11-20, the day lb_alt reached all 10 non-transparent lb interfaces of edge-0, 1, 3 and 4 (LBALT.md §11.8). Read-only: Mimir, the edges' cgroup and /proc files read as an unprivileged user, and two public TLS probes. Nothing in §6 is implemented. Times are UTC.
+Status: measured 2026-11-20, the day lb_alt reached all 10 non-transparent lb interfaces of edge-0, 1, 3 and 4 (LBALT.md §11.8). Read-only: Mimir, the edges' cgroup and /proc files read as an unprivileged user, and two public TLS probes. Of §6, R10 is deployed (api, 2026-11-20); R1, R5, R6, R9, R11, R3's zone label and parts of R4 and R12 are implemented and not yet deployed; nothing else is. Times are UTC.
 
 ## 1. Summary
 
@@ -31,12 +31,12 @@ Window: 07:30–13:55Z. Edge-4 carried 80k clients, against 62k the day before. 
 - **No way to profile:** nothing can profile the front in production, and api has no latency histogram.
 
 **First recommendations** (§6):
-- R1: a loopback-only pprof endpoint, which every later CPU decision needs.
+- R1: a loopback-only pprof endpoint, which every later CPU decision needs. Implemented (Appendix C).
 - R2: rollout safety. run-*.sh would refuse a stale controller, and the monitor's `lbalt_status` would be enrolled.
 - R3: refusal zones, then limits that know a client rather than only its address.
 - R12: the alt path's QUIC failures, a possible cause of the h3 failures users report.
 - R4: handshake accounting.
-- R5: runtime metrics before any GOGC or GOMAXPROCS change.
+- R5: runtime metrics before any GOGC or GOMAXPROCS change. Implemented (Appendix C).
 
 ## 2. Method and windows
 
@@ -150,7 +150,7 @@ api has no latency histogram of its own in Mimir: `urnetwork_http_request_durati
 - The HTTP refusals are 13.9% of the front's 11,578 requests a second, and nearly every 4xx.
 - The connect route refuses about as many upgrade requests as it accepts: 926 against 926.
 - Nginx refused the same, about 1,147 a second on edge-3 and edge-4 before the switch (LBALT.md §11.8), so this isn't a regression.
-- `urnetwork_front_limit_refusals_total` has only a `limit` label, so which route zone refuses can't be read.
+- `urnetwork_front_limit_refusals_total` has only a `limit` label, so which route zone refuses can't be read (R3 adds a `zone` label).
 
 ### 3.7 TLS and QUIC
 
@@ -245,7 +245,7 @@ At GOGC 100 with 36–41 GB heaps per block, GC runs about every 125 s per block
 **Correctness and operations**
 - **C1. Rollbacks without an alert.** A stale controller's run-lb-unit.sh rolled edge-0 back twice (LBALT.md §11.8). Nothing alerted, because monitor.yml's `lbalt_status` isn't enrolled (LBALT.md §11.6), and the second rollback was found 5 hours later by reading metrics.
 - **C2. Most alt-path QUIC handshakes fail.** They have done so since the `alt.*` move at 06:32Z (§3.7): 443 completes about 20% of handshakes and whodis 1–2%. The failures carry no reason: `frontQuicRun.serveConnect` and `serveApi` count `handshake_failed` without the error from `AwaitQuicHandshake`. So an alt-named SNI (no certificate on QUIC), a timeout, a TLS alert and a version mismatch all look the same. The TLS failures over TCP do carry a reason since the 15:42Z hotfix (§3.7). This may be the h3 failure users report.
-- **C3. A misfiled body failure.** A client gone mid-body counts as `incomplete` (400) when its read fails with a reset: `nginx/body.go:bodyReadRefusal` treats only a canceled context or a timeout differently. The client never sees the 400, so `canceled` undercounts clients that went away. This is metric accuracy only.
+- **C3. A misfiled body failure.** A client gone mid-body counts as `incomplete` (400) when its read fails with a reset: `nginx/body.go:bodyReadRefusal` treats only a canceled context or a timeout differently. The client never sees the 400, so `canceled` undercounts clients that went away. This is metric accuracy only. R9 fixes it.
 - **C4. A connect deploy is now a front deploy.** It restarts every public listener on the host, api's h2 connections included, so every connect deploy is a reconnect wave for all clients, not only connect's. D12's drain softens it, and the waves' cost is P7's. The 15:36–15:42Z hotfix shows the cost:
   - fleet clients fell from 261.4k at 15:30Z to 231.9k at 15:46Z and recovered by about 15:56Z;
   - one-minute busy CPU peaked at 90.2% on edge-4 (15:49Z, against 74.2% before), 85.9% on edge-1, 81.5% on edge-3 and 71.7% on edge-0;
@@ -254,8 +254,8 @@ At GOGC 100 with 36–41 GB heaps per block, GC runs about every 125 s per block
   - no production profiling;
   - no api latency histogram;
   - no count of completed handshakes, resumed or full;
-  - no route zone on refusals;
-  - no upstream dial count, so keepalive reuse can't be read;
+  - no route zone on refusals (R3 adds it);
+  - no upstream dial count, so keepalive reuse can't be read (R11 adds it);
   - no GC CPU or scheduler latency.
 
 ## 6. Recommendations
@@ -264,18 +264,18 @@ Ranked by impact over effort, with risk.
 
 | # | Recommendation | Impact | Effort | Risk | How to measure |
 |---|---|---|---|---|---|
-| R1 | An opt-in pprof listener on loopback per connect process, off by default, enabled by a setting and bound to 127.0.0.1 on a block-specific port; or a signal that writes a CPU and heap profile to a file in the container. | High: every CPU decision below needs it | S | L: loopback only, no new public surface | A 30 s CPU profile and a heap profile from one block at peak; attribute §4's allocation increase and connect's 8 cores per Gbps. |
+| R1 | A pprof listener on loopback per connect process. Implemented, not deployed: bound to 127.0.0.1 on a port the kernel picks, published as `urnetwork_connect_pprof_port`, on unless `CONNECT_PPROF=0`; serves only the CPU profile (`seconds` cut to 60), heap, allocs, mutex and block. Taking a profile: Appendix C. | High: every CPU decision below needs it | S | L: loopback only, no new public surface | A 30 s CPU profile and a heap profile from one block at peak; attribute §4's allocation increase and connect's 8 cores per Gbps. |
 | R2 | Rollout safety. run-lb-unit.sh, run-warp-units.sh and run-edges.sh refuse to install when the controller's warp or vault checkout is behind origin's main, or when a rendered lb unit drops lb_alt flags the installed one has. Enroll `lbalt_status` (LBALT.md §11.6) so an interface leaving lb_alt alerts in minutes. | High: correctness | S–M | L | Re-run §11.8's stray case in a test: the stale render is refused. In production, alert latency for an interface leaving lb_alt. |
-| R3 | Refusal zones, then limits. Add a bounded `zone` label (the route zone, or the interface's default) to `urnetwork_front_limit_refusals_total` (`nginx/route_http.go:serveLocation`, `nginx/limit.go:frontLimits.acquireRequest`). Then decide whether connect upgrades from shared addresses deserve a higher or identity-keyed limit, applied after auth, where the client is known. | Medium to high: 14% of requests and client experience | M | M: abuse controls | Refusals by zone; the refused share of connect upgrades; `client_canceled` and session churn per active session. |
-| R4 | Handshake accounting. Count completed TLS handshakes by full or resumed (`tls.ConnectionState.DidResume`), version and ALPN, with a duration histogram. Give QUIC `handshake_failed` a bounded reason from `AwaitQuicHandshake`'s error: idle timeout, handshake timeout, crypto alert, version, canceled. The TLS failure reasons went out at 15:42Z (§3.7). | Medium | S | L | Full against resumed handshakes a second per host; the reasons of the 463 TLS and 210 QUIC failures a second. |
-| R5 | Runtime metrics. Export runtime/metrics `/cpu/classes/gc/total:cpu-seconds`, `/cpu/classes/total:cpu-seconds` and `/sched/latencies:seconds` from connect. Only then tune: raise GOGC to 200 with a GOMEMLIMIT backstop if GC exceeds about 5% of connect's CPU (the hosts have 450–700 GiB available), and consider GOMAXPROCS 16 on the 72-CPU edges (edge-1, 3 and 4; edge-0 has 96) if scheduler p99 rises at peak. | Medium | S | L | GC share of connect CPU at peak; scheduler latency p99 by block. |
-| R6 | Per-request trims, once R1 confirms them. `routeHttpStatusClass` formats its label with fmt.Sprintf on every request; use constants. `Front.observe` resolves two metric children per request; cache them per service, protocol, status class and block. Pool `forwardRequestHead`'s head buffer. | Low | S | L | Allocations per front request, from R1's heap profile and `go_memstats_mallocs_total`. |
+| R3 | Refusal zones, then limits. Add a bounded `zone` label (the route zone, or the interface's default) to `urnetwork_front_limit_refusals_total` (`nginx/route_http.go:serveLocation`, `nginx/limit.go:frontLimits.acquireRequest`). Then decide whether connect upgrades from shared addresses deserve a higher or identity-keyed limit, applied after auth, where the client is known. **The zone label is implemented** (not deployed): nginx's name for a route zone, `route_<service>_<path>`, or `default` for the interface's shared zone, which refused QUIC connections count in too. The limits decision is open. | Medium to high: 14% of requests and client experience | M | M: abuse controls | Refusals by zone; the refused share of connect upgrades; `client_canceled` and session churn per active session. |
+| R4 | Handshake accounting. Count completed TLS handshakes by full or resumed (`tls.ConnectionState.DidResume`), version and ALPN, with a duration histogram. Give QUIC `handshake_failed` a bounded reason from `AwaitQuicHandshake`'s error: idle timeout, handshake timeout, crypto alert, version, canceled. The TLS failure reasons went out at 15:42Z (§3.7). **Implemented, 2026-11-20, not deployed, without the histogram:** `urnetwork_connect_front_tls_handshakes_total` by `version`, `resumed` and `alpn`, counted once net/http's handshake returns, not in VerifyConnection, which a TLS 1.3 server runs before the client's Finished; `urnetwork_connect_front_quic_handshakes_total` by `port`, `version` (v1, v2) and `resumed`; and a `reason` on `urnetwork_connect_front_quic_connections_total` (idle_timeout, handshake_timeout, certificate, no_alpn, unknown_name, version, peer_closed, canceled, other; `-` for the other results) (LBALT.md §11.2). | Medium | S | L | Full against resumed handshakes a second per host; the reasons of the 463 TLS and 210 QUIC failures a second. |
+| R5 | Runtime metrics. Implemented, not deployed, in every service: the `/cpu/classes/*` family as `go_cpu_classes_*_cpu_seconds_total` and `/sched/latencies:seconds` as `go_sched_latencies_seconds`, 21 series a process, beside the existing `go_gc_gogc_percent` and `go_sched_gomaxprocs_threads` (Appendix C). Only then tune: raise GOGC to 200 with a GOMEMLIMIT backstop if GC exceeds about 5% of connect's CPU (the hosts have 450–700 GiB available), and consider GOMAXPROCS 16 on the 72-CPU edges (edge-1, 3 and 4; edge-0 has 96) if scheduler p99 rises at peak. | Medium | S | L | GC share of connect CPU at peak; scheduler latency p99 by block (queries in Appendix C). |
+| R6 | Per-request trims, once R1 confirms them. `routeHttpStatusClass` formats its label with fmt.Sprintf on every request; use constants. `Front.observe` resolves two metric children per request; cache them per service, protocol, status class and block. Pool `forwardRequestHead`'s head buffer. **Implemented without waiting for R1** (not deployed), all three. Benchmarks with ReportAllocs: the status class 1 alloc to 0, `Front.observe` 1 to 0 and about 215 to 34 ns, the head 1,184 B and 6 allocs to 160 B and 5, an h2 request through the TCP 443 handler 28 allocs to 27. | Low | S | L | Allocations per front request, from R1's heap profile and `go_memstats_mallocs_total`. |
 | R7 | Reconnect waves. Measure a connect deploy's wave with R4's counters, and space block restarts (warpctl's `--percent` rounds) by the measured CPU. Separately, decide whether the front should outlive connect's deploys (C4): a design question, not a fix. | Medium | M–L | M | Host CPU peak and handshakes a second during a deploy; the client count dip. |
 | R8 | `net.core.rmem_max` and `wmem_max` at 7.5 MiB through xops, so quic-go gets its desired UDP buffers. | Low | S | L | UDP socket drops per host (§3.9). |
-| R9 | Count a reset mid-body as `canceled`, not `incomplete` (C3). | Low | S | L | The two reasons' rates. |
+| R9 | Count a reset mid-body as `canceled`, not `incomplete` (C3). **Implemented** (not deployed): `bodyReadClientGone` reads the error, whatever the context says yet: ECONNRESET, an h2 CANCEL reset or lost connection, a remote h3 or QUIC error. An h3 client that reset only its request side was always counted as `incomplete` and answered 400. | Low | S | L | The two reasons' rates. |
 | R10 | Restore an api latency histogram with bounded route labels, so forwarding overhead is the front's header time minus api's own. Done 2026-11-20: api's `urnetwork_http_request_duration_seconds` is a 10-bound histogram again; its mean was always available from the summary's `_sum` and `_count` (api's own handling 11.2 ms against the front's 13.6 ms header time at 16:50Z). | Medium: observability | S | L | Front against api p99 per route. |
-| R11 | Add an upstream pool counter of dials and reuses per service (`nginx/upstream.go`). | Low | S | L | Reuse ratio; dials a second. |
-| R12 | The alt path's QUIC: before anything else in R4, give `handshake_failed` its reason and count failures by SNI class (api, connect, alt, unknown, none). If the failing clients present alt names, serve the `alt.*` names on QUIC as api names, with a certificate and api routing, as alt did. Otherwise follow the reason that dominates. | High: client connectivity | S–M | L | whodis and 443 handshake success rates against the 1–2% and 20% of §3.7. |
+| R11 | Add an upstream pool counter of dials and reuses per service (`nginx/upstream.go`). **Implemented** (not deployed): `urnetwork_lbalt_upstream_connections_total` by `upstream_service` and `result`, `reused`, `dialed` or `dial_failed`. | Low | S | L | Reuse ratio; dials a second. |
+| R12 | The alt path's QUIC: before anything else in R4, give `handshake_failed` its reason and count failures by SNI class (api, connect, alt, unknown, none). If the failing clients present alt names, serve the `alt.*` names on QUIC as api names, with a certificate and api routing, as alt did. Otherwise follow the reason that dominates. **The counting is implemented, 2026-11-20, not deployed:** the reasons (R4), and `urnetwork_front_quic_client_hellos_total`, every QUIC ClientHello by `port`, `name_class` (connect, api, lb, forwarded, redirect; alt, unknown, none) and `h3_offered`. An alt, unknown or missing name fails before quic-go accepts the connection, so §3.7's `handshake_failed` rates are all served names', and alt-named clients' failures were never counted: the ClientHello counts decide the `alt.*` question. | High: client connectivity | S–M | L | whodis and 443 handshake success rates against the 1–2% and 20% of §3.7. |
 
 Not recommended now:
 - **Shrinking the body budget or spill caps:** reserving is accounting, and nothing is preallocated.
@@ -324,3 +324,31 @@ Run as an unprivileged user, with no sudo:
 - the drops column of `/proc/net/udp` and `/proc/net/udp6`;
 - `ss -s`;
 - `sysctl` for `net.core.rmem_max`, `wmem_max`, `netdev_max_backlog`, and the conntrack timeouts.
+
+## Appendix C. Profiles and runtime metrics (R1, R5)
+
+Implemented on `feat/connect-pprof-runtime-metrics-1120`, not yet deployed.
+
+**Taking a profile of one connect block.** connect serves pprof on 127.0.0.1 only, on a port the kernel picks for each process (`connect/pprof_listener.go`). connect runs with host networking, so the edge's own loopback reaches it, and nothing off the host does.
+1. Read the block's port from `urnetwork_connect_pprof_port{host="<host>", block="<block>"}`. During a deploy's drain a block has two processes, each with its own `instance` and port; the newer has the later `process_start_time_seconds`. Without Mimir, the block's log says `[connect]loopback pprof on port <port>`.
+2. On the edge, for 30 s of CPU: `curl -s 'http://127.0.0.1:<port>/debug/pprof/profile?seconds=30' -o /tmp/connect.cpu`. `seconds` is cut to 60.
+3. A heap snapshot the same way: `curl -s 'http://127.0.0.1:<port>/debug/pprof/heap' -o /tmp/connect.heap`, or `allocs`, `mutex` or `block`. Read the files with `go tool pprof`.
+
+What it serves and refuses:
+- GET only: `profile`, `heap`, `allocs`, `mutex` and `block`.
+- 404 for the rest: `goroutine`, whose dump of about 4 million goroutines stops the world, `trace`, `cmdline`, `symbol`, `threadcreate` and the index.
+- A snapshot takes `debug=1` for text but no `seconds`. For the allocations over a window, take two `allocs` snapshots and compare them with `go tool pprof -base <first> <second>`.
+- One CPU profile at a time in a process (a second gets 409), and at most two requests at once (a third gets 503).
+- The mutex and block profiles are empty: their sampling stays off.
+- The kill switch: `CONNECT_PPROF=0` in connect's services.yml `env_vars`. A process started with it binds nothing and logs that the listener is off.
+- A CPU profile at peak can also replace `cli/connect/default.pgo`, the build's profile-guided optimization input.
+
+**Runtime metrics.** Every service exports these through the stats push, 21 series a process, none labeled:
+- `go_cpu_classes_<class>_cpu_seconds_total`, 11 counters: `gc_total` and its parts `gc_mark_assist`, `gc_mark_dedicated`, `gc_mark_idle` and `gc_pause`; `scavenge_total`, `scavenge_assist` and `scavenge_background`; `user`, `idle` and `total`;
+- `go_sched_latencies_seconds`, a histogram of 7 buckets, powers of ten from 64 ns to 117 ms, then +Inf;
+- already exported before: `go_gc_gogc_percent`, `go_gc_gomemlimit_bytes` and `go_sched_gomaxprocs_threads`.
+
+Reading them:
+- The CPU classes step at each GC cycle's start and end, about every 125 s per connect block (§4), so read rates over 30 minutes or more.
+- `total` is GOMAXPROCS times wall time, not the CPU used. The GC's share of connect's busy CPU, against R5's 5%: `sum by (host, block) (rate(go_cpu_classes_gc_total_cpu_seconds_total{service="connect"}[30m])) / sum by (host, block) (rate(go_cpu_classes_total_cpu_seconds_total{service="connect"}[30m]) - rate(go_cpu_classes_idle_cpu_seconds_total{service="connect"}[30m]))`
+- Scheduler latency p99 by block: `histogram_quantile(0.99, sum by (host, block, le) (rate(go_sched_latencies_seconds_bucket{service="connect"}[10m])))`. The buckets are a decade wide, so the quantile is coarse. The histogram's sum is client_golang's lower-bound estimate, so sum over count understates the mean.

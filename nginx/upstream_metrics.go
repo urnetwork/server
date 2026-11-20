@@ -3,7 +3,9 @@ package nginx
 // The forwarder's metrics (owner: s-forward; D17): bounded counters by
 // service, block and outcome. Every label value comes from the route file or
 // a closed set in the code, never from a request, so no client address or
-// route prefix can reach a label.
+// route prefix can reach a label. A group resolves its service's series of
+// the connections counter once, when it is built, so taking a connection
+// looks up no labels.
 //
 // The service and block labels are upstream_service and upstream_block, as
 // the front's are (route_http_metrics.go): the stats push owns the names
@@ -23,6 +25,32 @@ const (
 	// a reused connection failed before any request byte was written; it is
 	// redone on a fresh connection and not counted as one of D7's attempts
 	upstreamAttemptStaleRedo = "stale_redo"
+)
+
+// How an attempt got its connection to a block, the connections counter's
+// label values. A closed set.
+const (
+	// an idle keepalive connection from the block's pool that passed its
+	// liveness check
+	upstreamConnectionReused = "reused"
+	// a dial that connected
+	upstreamConnectionDialed = "dialed"
+	// a dial that connected nothing: refused, unreachable, past
+	// proxy_connect_timeout, or ended by its request's end or the group's
+	// close
+	upstreamConnectionDialFailed = "dial_failed"
+)
+
+// Every connection an attempt took, by service and how it got it, so the
+// keepalive pools' reuse can be read.
+var upstreamConnectionsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "lbalt",
+		Name:      "upstream_connections_total",
+		Help:      "Connections the front took for its physical attempts to upstream blocks, a stale keepalive connection's redo included, by service and result: reused, an idle keepalive connection of the block's pool that passed its liveness check; dialed, a new connection; dial_failed, a dial that connected nothing, refused, unreachable, past proxy_connect_timeout, or ended by its request's end or the front's close. reused over reused plus dialed is the keepalive reuse ratio",
+	},
+	[]string{"upstream_service", "result"},
 )
 
 // Every physical attempt, by service, block and result.
@@ -113,6 +141,7 @@ var bodySpillFilesGauge = prometheus.NewGauge(
 // Registers the metrics with the default registry once per process.
 func init() {
 	prometheus.MustRegister(
+		upstreamConnectionsCounter,
 		upstreamAttemptsCounter,
 		upstreamRetriesCounter,
 		forwardErrorsCounter,
