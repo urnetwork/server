@@ -115,8 +115,8 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 	if err != nil || len(program) > settings.MaximumProgramBytes {
 		t.Fatal("bounded source lost its finite program admission", err)
 	}
-	// The exact predecessor differs in SQL only by the additive suffix. This
-	// comparison is offline and does not claim a production OOM observation.
+	// Reconstruct the historical Sille-recovery source measured by this control.
+	// Its v844 readiness guard predated the runtime-correction boundary.
 	priorContracts := []snMainnetMigrationContract{}
 	priorHead := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	for _, contract := range migrationCurrentSuffixContracts {
@@ -131,6 +131,12 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 		t.Fatal("predecessor comparison cannot locate the exact source-owned suffix")
 	}
 	prior := strings.Replace(query, currentSuffix, migrationCurrentSuffixVersionQueries(priorContracts), 1)
+	readiness := snMainnetMigrationFunction("competition_v2_source_readiness_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2SourceReadinessGuardBody)
+	boundedReadiness := migrationCompetitionBefore(competitionEpochThreeRuntimeCorrectionVersion, readiness)
+	if strings.Count(prior, boundedReadiness) != 1 {
+		t.Fatal("predecessor comparison cannot restore the historical readiness predicate")
+	}
+	prior = strings.Replace(prior, boundedReadiness, readiness, 1)
 	priorPlan, err := planMigrationCensus(prior, settings)
 	if err != nil {
 		t.Fatal("predecessor source is not admitted by the same bounded planner", err)

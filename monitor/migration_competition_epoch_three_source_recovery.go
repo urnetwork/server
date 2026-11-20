@@ -19,6 +19,23 @@ var competitionEpochThreeSourceRecoveryMigrationContract = func() snMainnetMigra
 		}
 		query = strings.Replace(query, before, snMainnetMigrationLiteral(change[1]), 1)
 	}
+	// Later corrections replace individual guards. The source recovery index,
+	// grading quorum and all other checks keep their original owner.
+	beforeCorrection := func(version int, pin string) {
+		if strings.Count(query, pin) != 1 {
+			panic("epoch-three correction catalog predecessor absent or ambiguous")
+		}
+		query = strings.Replace(query, pin, migrationCompetitionBefore(version, pin), 1)
+	}
+	for _, function := range server.CompetitionIntakeFirstFunctionsSql() {
+		switch function.Signature {
+		case competitionIntakeRuntimeReadySignature, competitionIntakeBaselineValidSignature:
+			pin := snMainnetMigrationFunction(function.Signature, function.Result, "plpgsql", "v", false, function.Body, function.Arguments...)
+			beforeCorrection(competitionEpochThreeRuntimeCorrectionVersion, pin)
+		}
+	}
+	beforeCorrection(competitionEpochThreeExecutorBuilderCorrectionVersion, snMainnetMigrationFunction(competitionExecutorAmendmentGuardSignature,
+		"trigger", "plpgsql", "v", false, server.CompetitionExecutorControlAmendmentBodiesSql().AmendmentGuard))
 	return migrationCurrentSuffix(server.CompetitionEpochThreeSourceRecoveryMigrationVersion(), competitionEpochThreeSourceRecoveryCatalogName, query,
 		snMainnetMigrationFunction("competition_epoch_three_source_recovery_matches(uuid,jsonb,jsonb,timestamp without time zone)",
 			"boolean", "sql", "s", false, recovery, "round_uuid", "request", "checkpoint", "imported_at"),

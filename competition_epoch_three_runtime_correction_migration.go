@@ -4,6 +4,41 @@ package server
 
 import "strings"
 
+// The catalog follows the unique position of the published correction SQL.
+func CompetitionEpochThreeRuntimeCorrectionMigrationVersion() int {
+	return migrationVersionOf(competitionEpochThreeRuntimeCorrectionSql())
+}
+
+// The five executable bodies installed by the runtime correction.
+type CompetitionEpochThreeRuntimeCorrectionBodies struct {
+	CorrectionGuard      string
+	ReceiptValid         string
+	SourceReadinessGuard string
+	IntakeRuntimeReady   string
+	IntakeBaselineValid  string
+}
+
+// PostgreSQL stores the bytes between the migration's dollar-quote delimiters.
+func competitionEpochThreeCorrectionBody(sql, tag string) string {
+	parts := strings.Split(sql, "$"+tag+"$")
+	if len(parts) != 3 {
+		panic("epoch-three correction function body absent or ambiguous: " + tag)
+	}
+	return parts[1]
+}
+
+// Read every body from the same composed SQL installed by the migration.
+func CompetitionEpochThreeRuntimeCorrectionBodiesSql() CompetitionEpochThreeRuntimeCorrectionBodies {
+	sql := competitionEpochThreeRuntimeCorrectionSql()
+	return CompetitionEpochThreeRuntimeCorrectionBodies{
+		CorrectionGuard:      competitionEpochThreeCorrectionBody(sql, "runtime_correction"),
+		ReceiptValid:         competitionEpochThreeCorrectionBody(sql, "runtime_receipt"),
+		SourceReadinessGuard: competitionEpochThreeCorrectionBody(sql, "guard"),
+		IntakeRuntimeReady:   competitionEpochThreeCorrectionBody(sql, "intake_runtime_ready"),
+		IntakeBaselineValid:  competitionEpochThreeCorrectionBody(sql, "intake_baseline_valid"),
+	}
+}
+
 // Derive only the three targeted guards. Grading readiness itself stays
 // unchanged so its nine-run and two-host requirements cannot be weakened.
 func competitionEpochThreeRuntimeCorrectionSql() string {
