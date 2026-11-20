@@ -301,26 +301,26 @@ func TestFs92HoldsPlacedByApiOnT3(t *testing.T) {
 }
 
 // FS-92 (b): a hold api places between the job's verify and its deletes.
-func TestFs92HoldBetweenVerifyAndDeleteOnT3(t *testing.T) {
+func TestFs92BetweenVerifyAndDeleteOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-92", "between verify and delete", fault.Fs92HoldBetweenVerifyAndDelete, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-92", "between verify and delete", holdT3RuleSettings(tb))
 	})
 }
 
 // FS-92 (b): a hold api places between two of the job's DELETEs.
-func TestFs92HoldBetweenDeletesOnT3(t *testing.T) {
+func TestFs92BetweenDeletesOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-92", "between deletes", fault.Fs92HoldBetweenDeletes, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-92", "between deletes", holdT3RuleSettings(tb))
 	})
 }
 
 // FS-92 (b): a DELETE issued as api places the hold completes, and none follows it.
-func TestFs92DeleteInFlightOnT3(t *testing.T) {
+func TestFs92ADeleteInFlightOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-92", "a delete in flight", fault.Fs92DeleteInFlight, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-92", "a delete in flight", holdT3RuleSettings(tb))
 	})
 }
 

@@ -63,8 +63,8 @@ func TestGateHeldRowsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 	for packagePath, names := range map[string][]string{
 		"./model": {
 			"TestFs66HoldPlacedByApiOnT3",
-			"TestFs69HoldsPlacedByApiOnT3", "TestFs69HoldBetweenSweepDeletesOnT3", "TestFs69EraseUnderTheHoldOnT3", "TestFs6NowShredUnderAHoldOnT3",
-			"TestFs92HoldsPlacedByApiOnT3", "TestFs92HoldBetweenVerifyAndDeleteOnT3", "TestFs92HoldBetweenDeletesOnT3", "TestFs92DeleteInFlightOnT3",
+			"TestFs69HoldsPlacedByApiOnT3", "TestFs69BetweenSweepDeletesOnT3", "TestFs69AnEraseUnderTheHoldOnT3", "TestFs6ANowShredUnderAHoldOnT3",
+			"TestFs92HoldsPlacedByApiOnT3", "TestFs92BetweenVerifyAndDeleteOnT3", "TestFs92BetweenDeletesOnT3", "TestFs92ADeleteInFlightOnT3",
 			"TestFs92SealedHoldAnswersEqualANoHoldTwinOnT3",
 		},
 		".":           {"TestFs87IndexOnT3", "TestFs99CardsOnT3"},

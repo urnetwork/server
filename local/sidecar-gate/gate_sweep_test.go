@@ -155,7 +155,7 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"M2 FS-1 ./evshost TestFs1OnT3",
 		"M2 FS-5 ./evshost TestFs5OnT3",
 		"M2 FS-10 ./evshost TestFs10TwinOnT3",
-		"M2 FS-10 ./evshost TestFs10RollbackTwinOnT3",
+		"M2 FS-10 ./evshost TestFs10RollbackRefusedOnT3",
 		"M2 FS-113 ./evshost TestFs113OnT3",
 		"M2 FS-14 ./sidecart3 TestFs14OnT3",
 		"M2 FS-19's config-read ./sidecart3 TestFs19ConfigReadOnT3",

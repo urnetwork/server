@@ -4,8 +4,8 @@
 // run on T3's Nets, where sidecart3 names this package's block as each evs world's instances (sidecart3/evs_tier.go),
 // so every push goes through server/cli/evs's handler and evshost's segment route on the private Redis and the local
 // stack's MinIO, its devices presenting tokens server's oauth mints. Each row's registered case runs under every rule
-// it takes with T3's nightly seeds (sidecart3.RunRow), and each clause beside it under the same rules
-// (fault.RunClause). The schedules hold instances at barriers, so this needs sidecar_testhooks; the stack must be up
+// it takes with T3's nightly seeds (sidecart3.RunRow), and each clause registered beside it under the same rules
+// (fault.RunRegisteredClause), each test named for its clause by the gate's convention (QD-1084). The schedules hold instances at barriers, so this needs sidecar_testhooks; the stack must be up
 // (sidecar/local/stack.sh), and these fail rather than skip without it.
 
 package evshost_test
@@ -24,10 +24,11 @@ func fsCommitTestEnv() *server.TestEnv {
 	return &server.TestEnv{ApplyDbMigrations: false}
 }
 
-// A row's clause on T3 under every rule the row takes, with the nightly seeds.
-func runClauseOnT3(t *testing.T, rowId string, clause string, builder fault.Builder) {
+// A row's registered clause on T3 under every rule the row takes, with the nightly seeds: for a forged case's clause, its
+// twin, which must succeed.
+func runClauseOnT3(t *testing.T, rowId string, clause string) {
 	fsCommitTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, rowId, clause, builder, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, rowId, clause, sidecart3.RuleSettings(tb, nil))
 	})
 }
 
@@ -37,12 +38,12 @@ func TestFs1OnT3(t *testing.T) {
 	})
 }
 
-func TestFs1ConcurrentRetriesCommitOnceOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-1", "concurrent retries", fault.Fs1ConcurrentRetries)
+func TestFs1ConcurrentRetriesOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-1", "concurrent retries")
 }
 
 func TestFs1UnknownDeletesNothingOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-1", "unknown deletes nothing", fault.Fs1UnknownDeletesNothing)
+	runClauseOnT3(t, "FS-1", "unknown deletes nothing")
 }
 
 func TestFs2OnT3(t *testing.T) {
@@ -69,8 +70,8 @@ func TestFs57OnT3(t *testing.T) {
 	})
 }
 
-func TestFs57StoreUnreachableCommitsNothingOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-57", "store unreachable", fault.Fs57StoreUnreachable)
+func TestFs57StoreUnreachableOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-57", "store unreachable")
 }
 
 func TestFs113OnT3(t *testing.T) {

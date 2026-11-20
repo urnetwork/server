@@ -29,18 +29,18 @@ func TestFs69HoldsPlacedByApiOnT3(t *testing.T) {
 }
 
 // FS-69: a hold api places between two of the sweep's DELETEs.
-func TestFs69HoldBetweenSweepDeletesOnT3(t *testing.T) {
+func TestFs69BetweenSweepDeletesOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-69", "between sweep deletes", fault.Fs69HoldBetweenSweepDeletes, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-69", "between sweep deletes", holdT3RuleSettings(tb))
 	})
 }
 
 // FS-69: an ERASE of a versionless record-class entry under a hold api placed destroys its keys at once.
-func TestFs69EraseUnderTheHoldOnT3(t *testing.T) {
+func TestFs69AnEraseUnderTheHoldOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-69", "an erase under the hold", fault.Fs69EraseUnderTheHold, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-69", "an erase under the hold", holdT3RuleSettings(tb))
 	})
 }
 
@@ -55,9 +55,9 @@ func TestFs66HoldPlacedByApiOnT3(t *testing.T) {
 
 // FS-6's clause: a --now shred under a hold api placed stops with the keys gone and the ciphertext kept, its records
 // packed, until api's expiry ends the hold.
-func TestFs6NowShredUnderAHoldOnT3(t *testing.T) {
+func TestFs6ANowShredUnderAHoldOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunClause(tb, "FS-6", "a --now shred under a hold", fault.Fs6NowShredUnderAHold, holdT3RuleSettings(tb))
+		fault.RunRegisteredClause(tb, "FS-6", "a --now shred under a hold", holdT3RuleSettings(tb))
 	})
 }
