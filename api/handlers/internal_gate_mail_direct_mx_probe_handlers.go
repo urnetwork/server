@@ -10,7 +10,10 @@ package handlers
 //
 // The prober probes from the edge, since owner decision 33's check of public TCP 25, STARTTLS and the receiver's
 // mail_host_key SPKI has to run there, and api records what it found, so mxedge's restricted role writes neither
-// mail_direct_mx nor the zone, whose writers stay api and the dns block (D-OPS-1).
+// mail_direct_mx nor the zone, whose writers stay api and the dns block (D-OPS-1). api believes the outcome it is
+// sent, so what the edge bearer can do here, stolen from any edge block that mounts it, is bounded by what the rows
+// hold: it can mark a row a Team's Owner or Admin named verified or failing, so mx points only at an address that
+// admin named and §12.7's A rules take, never at one the caller chooses, and only DELETE or a removal takes a row.
 //
 // The body is the route's format (server.MailDirectMxProbeGateArgs) and nothing more: a field beyond it, a second
 // value, a zero id or an address not in its canonical text is refused 400 with nothing written. The handler records
