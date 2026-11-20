@@ -101,7 +101,7 @@ func TestSidecarConfigIsInertWhenAbsent(t *testing.T) {
 // A file that is there but cannot be read is not an absent one, though a first
 // read answers alike: it previews nothing and opens no gate, and after a good
 // read it keeps that read. The same holds when what cannot be read is the home
-// the file would be in.
+// the file would be in. Only the first read says it failed (QD-1079).
 func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
 	networkId := NewId()
 	for _, c := range []struct {
@@ -136,11 +136,17 @@ func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
 			t.Fatalf("%s: the resolver answers %v, want an unavailable resource", c.name, err)
 		}
 
-		requireSidecarConfigOpensNothing(t, "a first read of "+c.name, loadSidecarConfig(nil), networkId)
+		firstRead := loadSidecarConfig(nil)
+		requireSidecarConfigOpensNothing(t, "a first read of "+c.name, firstRead, networkId)
+		if !firstRead.FailedFirstRead() {
+			t.Errorf("%s: the first read does not say it failed", c.name)
+		}
+		// a good read, as newSidecarConfig makes one
 		previous := &SidecarConfig{
+			parsed:            true,
 			previewNetworkIds: map[Id]bool{networkId: true},
 		}
-		if loadSidecarConfig(previous) != previous {
+		if config := loadSidecarConfig(previous); config != previous || config.FailedFirstRead() {
 			t.Errorf("%s: a later read replaced the latest good read", c.name)
 		}
 	}
@@ -331,5 +337,190 @@ func TestSidecarConfigFailsClosed(t *testing.T) {
 		if config := loadSidecarConfig(previous); config != previous {
 			t.Fatal("an absent file replaced the latest good read")
 		}
+	}
+}
+
+// A first read of a file that is there but cannot be read or parsed answers the
+// zero value and says so (QD-1079), even when the part it could parse names an
+// urnetwork_edge, so a reader whose zero value is the destructive direction can
+// hold off. A second failed read keeps that read. A first read of an absent file,
+// or of a good one, is no failed read.
+func TestSidecarConfigMarksAFailedFirstRead(t *testing.T) {
+	edgeNetworkId := NewId()
+	home := newTestSidecarConfigHome(t)
+
+	if loadSidecarConfig(nil).FailedFirstRead() {
+		t.Fatal("a first read of an absent file is marked")
+	}
+	func() {
+		defer Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", edgeNetworkId))()
+		config := loadSidecarConfig(nil)
+		if config.FailedFirstRead() {
+			t.Fatal("a first good read is marked")
+		}
+		if networkId, ok := config.UrnetworkEdge(); !ok || networkId != edgeNetworkId {
+			t.Fatal("the good file's urnetwork_edge was not read")
+		}
+	}()
+
+	requireFailedFirstRead := func(name string, config *SidecarConfig) {
+		t.Helper()
+		if !config.FailedFirstRead() {
+			t.Fatalf("%s: not marked", name)
+		}
+		if _, ok := config.UrnetworkEdge(); ok {
+			t.Fatalf("%s: names an urnetwork_edge", name)
+		}
+		requireSidecarConfigOpensNothing(t, name, config, edgeNetworkId)
+		if loadSidecarConfig(config) != config {
+			t.Fatalf("%s: a second failed read replaced the first", name)
+		}
+	}
+	for _, broken := range []string{
+		"sidecar: [unterminated\n",
+		// names the edge before a later key fails, which a reader keeping its
+		// partial decoding would answer
+		fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n  evs: {enabled: true, percent: fifty}\n", edgeNetworkId),
+	} {
+		func() {
+			defer Testing_PushSidecarConfig(broken)()
+			requireFailedFirstRead(fmt.Sprintf("a first read of %q", broken), loadSidecarConfig(nil))
+		}()
+	}
+	if err := os.Mkdir(filepath.Join(home, sidecarConfigResourceName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requireFailedFirstRead("a first read of a directory", loadSidecarConfig(nil))
+}
+
+// The first good read replaces a failed first read, and with it the mark: the
+// file is known now, and its urnetwork_edge is what a holder reads.
+func TestSidecarConfigGoodReadClearsAFailedFirstRead(t *testing.T) {
+	edgeNetworkId := NewId()
+	newTestSidecarConfigHome(t)
+
+	var failed *SidecarConfig
+	func() {
+		defer Testing_PushSidecarConfig("sidecar: [unterminated\n")()
+		failed = loadSidecarConfig(nil)
+	}()
+	if !failed.FailedFirstRead() {
+		t.Fatal("the broken first read is not marked")
+	}
+	func() {
+		defer Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", edgeNetworkId))()
+		config := loadSidecarConfig(failed)
+		if config == failed || config.FailedFirstRead() {
+			t.Fatal("the good read kept the failed first read")
+		}
+		if networkId, ok := config.UrnetworkEdge(); !ok || networkId != edgeNetworkId {
+			t.Fatal("the good read's urnetwork_edge was not read")
+		}
+	}()
+}
+
+// After a good read a failed read keeps it, as it did before QD-1079, unmarked:
+// the good read's urnetwork_edge stands, so that network stays out of the idle
+// marking. An absent read between them changes nothing.
+func TestSidecarConfigFailedReadKeepsTheGoodReadUnmarked(t *testing.T) {
+	edgeNetworkId := NewId()
+	newTestSidecarConfigHome(t)
+
+	var good *SidecarConfig
+	func() {
+		defer Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", edgeNetworkId))()
+		good = loadSidecarConfig(nil)
+	}()
+	if loadSidecarConfig(good) != good {
+		t.Fatal("an absent file replaced the good read")
+	}
+	func() {
+		defer Testing_PushSidecarConfig("sidecar: [unterminated\n")()
+		config := loadSidecarConfig(good)
+		if config != good || config.FailedFirstRead() {
+			t.Fatal("a failed read after a good one did not keep it unmarked")
+		}
+		if networkId, ok := config.UrnetworkEdge(); !ok || networkId != edgeNetworkId {
+			t.Fatal("the kept read lost its urnetwork_edge")
+		}
+	}()
+}
+
+// An absent file is no failed read (QD-1079): after a failed first read it
+// answers the zero value unmarked, since the environment then names no edge
+// network to protect. A file that breaks after an absent read has no good read
+// before it, so its read is marked.
+func TestSidecarConfigAbsentFileIsNoFailedRead(t *testing.T) {
+	newTestSidecarConfigHome(t)
+
+	absent := loadSidecarConfig(nil)
+	if absent.FailedFirstRead() {
+		t.Fatal("an absent file's read is marked")
+	}
+	if loadSidecarConfig(absent) != absent {
+		t.Fatal("a second absent read replaced the first")
+	}
+
+	var failed *SidecarConfig
+	func() {
+		defer Testing_PushSidecarConfig("sidecar: [unterminated\n")()
+		failed = loadSidecarConfig(absent)
+	}()
+	if !failed.FailedFirstRead() {
+		t.Fatal("a broken file after an absent one is not marked")
+	}
+	requireSidecarConfigOpensNothing(t, "a broken file after an absent one", failed)
+
+	config := loadSidecarConfig(failed)
+	if config.FailedFirstRead() {
+		t.Fatal("an absent file after a failed first read kept the mark")
+	}
+	requireSidecarConfigOpensNothing(t, "an absent file after a failed first read", config)
+}
+
+// The process's reader passes its latest read on as previous, so the mark
+// follows the reads a config push makes under a running process, which
+// Testing_RereadSidecarConfig stands in for: a broken file keeps a good read,
+// a good file clears a failed first read, and the pop forgets every read.
+func TestSidecarConfigRereadPassesTheLatestRead(t *testing.T) {
+	edgeNetworkId := NewId()
+	good := fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", edgeNetworkId)
+	broken := "sidecar: [unterminated\n"
+	newTestSidecarConfigHome(t)
+
+	func() {
+		defer Testing_PushSidecarConfig(good)()
+		goodRead := CurrentSidecarConfig()
+		func() {
+			defer Testing_RereadSidecarConfig(broken)()
+			if CurrentSidecarConfig() != goodRead {
+				t.Fatal("a reread of a broken file did not keep the good read")
+			}
+		}()
+		if config := CurrentSidecarConfig(); config == goodRead || config.FailedFirstRead() {
+			t.Fatal("the pop did not forget the reads")
+		}
+	}()
+
+	func() {
+		defer Testing_PushSidecarConfig(broken)()
+		if !CurrentSidecarConfig().FailedFirstRead() {
+			t.Fatal("a broken first read is not marked")
+		}
+		func() {
+			defer Testing_RereadSidecarConfig(good)()
+			config := CurrentSidecarConfig()
+			if config.FailedFirstRead() {
+				t.Fatal("the first good read kept the mark")
+			}
+			if networkId, ok := config.UrnetworkEdge(); !ok || networkId != edgeNetworkId {
+				t.Fatal("the first good read's urnetwork_edge was not read")
+			}
+		}()
+	}()
+
+	Testing_ForgetSidecarConfig()
+	if config := CurrentSidecarConfig(); config.FailedFirstRead() {
+		t.Fatal("a first read of the absent file is marked")
 	}
 }
