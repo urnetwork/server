@@ -1812,7 +1812,7 @@ gates:
       case: hold
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs66Hold]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs66HoldOnT3]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs66HoldPlacedByApiOnT3]}
       store_clock: true
     - row: FS-67
       tests:
@@ -1820,11 +1820,11 @@ gates:
     - row: FS-68
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs68]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs68OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs68OnT3]}
     - row: FS-69
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69OnT3]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69HoldsPlacedByApiOnT3]}
       store_clock: true
     - row: FS-70
       tests:
@@ -1838,7 +1838,7 @@ gates:
       case: migration
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Migration]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3]}
     - row: FS-72
       case: rollback
       tests:
@@ -1850,12 +1850,12 @@ gates:
       store_clock: true
     - row: FS-74
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs74]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs74OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs74OnEvs]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs74OnT3]}
     - row: FS-75
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs75]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs75OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs75OnEvs]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs75OnT3]}
     - row: FS-76
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs76]}
@@ -1919,7 +1919,7 @@ gates:
     - row: FS-83
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs83]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs83OnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs83OnT3]}
     - row: FS-83
       case: app-host
       tests:
@@ -1945,7 +1945,7 @@ gates:
       case: index
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs87Index]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs87IndexOnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs87IndexOnT3]}
     - row: FS-88
       case: searches
       tests:
@@ -1953,7 +1953,7 @@ gates:
     - row: FS-89
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs89]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs89OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs89OnT3]}
       store_clock: true
     - row: FS-90
       tests:
@@ -1962,12 +1962,12 @@ gates:
     - row: FS-91
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs91]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs91OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs91OnT3]}
       store_clock: true
     - row: FS-92
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92OnT3]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92HoldsPlacedByApiOnT3]}
       store_clock: true
     - row: FS-93
       tests:
@@ -1976,11 +1976,11 @@ gates:
     - row: FS-94
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs94]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs94OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs94OnT3]}
     - row: FS-95
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs95]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs95OnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs95OnT3]}
     - row: FS-96
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs96]}
@@ -1989,7 +1989,7 @@ gates:
       case: cards
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs99Cards]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99CardsOnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99CardsOnT3]}
     - row: FS-100
       case: format-2
       tests:
@@ -1998,15 +1998,15 @@ gates:
     - row: FS-101
       case: r-file
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs101RFile]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs101File]}
     - row: FS-107
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs107]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs107OnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs107OnT3]}
     - row: FS-108
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs108]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs108OnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs108OnT3]}
     - row: FS-109
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs109]}
@@ -2028,7 +2028,7 @@ gates:
     - row: FS-111
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs111]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs111OnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs111OnT3]}
       store_clock: true
     - row: FS-111
       case: mailbox
@@ -2054,11 +2054,11 @@ gates:
     - row: FS-114
       case: purge
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs114PurgeOnT3]}
+        - {repo: server, package: ., tags: sidecar_filecluster_t3, names: [TestFileClusterSuitePassesOnT3]}
     - row: FS-114
       case: drop
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs114DropOnT3]}
+        - {repo: server, package: ., tags: sidecar_filecluster_t3, names: [TestFileClusterSuitePassesOnT3]}
     - row: FS-125
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs125]}
@@ -2069,6 +2069,159 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs125AppHost]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs125AppHostOnT3]}
       external: its T4 part, which SDK-M8-15's and SDK-M10-06's cells run and this tool does not
+    - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (FS-65, FS-72, FS-75) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules]}
+        - {repo: server, package: ./sidecart3, names: [TestGateT3RunsTheNightlySeeds]}
+    - item: 'every case of M10''s rows written: a builder registered on T2 and on T3 wherever its row runs there, its schedule stepping and naming the invariants it checks after every step, its twin too where it refuses or is forged (TEST.md''s contract for schedule authors, rules 1 to 4; fault.Missing at M10-out); FS-73 and FS-114''s purge and drop cases are named by their tests in place of a builder, and T4''s parts are SDK-M10-06''s cells'' to run'
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10CasesWritten$, ./sidecartest/fault, -fault.gate-m10-written]}
+    - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M10-out]}
+    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-66''s hold, FS-69, FS-71, FS-73, FS-81, FS-86''s cards, FS-89, FS-91, FS-92, FS-111, FS-111''s mailbox, FS-111''s team-record read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
+        - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
+    - item: 'EvsCommit.tla with the purger and the drop extension, and IndexRollup.tla, passing TLC at their bounds, their mutants refused and their liveness held, the drop extension''s F2DropsEnd under weak fairness among them, by the runs sidecartest/model/modelled.yml records at these sources of each mode M10''s exit needs (§22.10''s format 2 row, §23.6''s M10 row; D-PHASE-7, R-TEST-10, D-TEST-18; TEST-M2-08, EVSB-M10-07, SEARCH-M10-02; QD-1116, QD-1119); a mode''s record stands only at its sources'' digest, so where one does not, open: this report runs no TLC itself'
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10ModelsPassTlc$, ./sidecartest/fault, -fault.gate-m10-tlc]}
+    - item: 'testdata/index/ fixed, its vectors byte-equal on every leg (§22.10''s format 2 row, §22.9''s Index determinism row; D-TEST-15, R-TEST-10, FI-22; SEARCH-M10-41, SDK-M10-06): every file reproduced by the tests its README names, under GOMAXPROCS 1 and 16 and other time zones and locales, the header a writer records held to the linked build and to normalizer 1, each leg this host has running them, the sdk''s module graph linking normalizer 1, and every leg selecting normalizer 1''s golang.org/x/text'
+      tests:
+        - {repo: sidecar, package: ., names: [TestIndexVectorFilesAreAllReproduced, TestIndexVectorsUnderEveryRuntime, TestIndexHeadersRecordTheLinkedBuild]}
+        - {repo: sidecar, package: ./sidecartest/legs, tags: sidecar_legs, names: [TestIndexVectorLegsCoverEveryTarget, TestIndexVectorsOnEveryLeg]}
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestDeps, TestRowsThatStartLaterHoldNow]}
+        - {repo: sdk, package: ., names: [TestSdkLinksNormalizerOne, TestSdkLinksNormalizerOneFailsOnAnotherTextModule]}
+        - {repo: sdk, package: ., tags: sidecar_testhooks, names: [TestSdkReproducesTheIndexVectors]}
+      external: 'hardware: the legs this host cannot run, which the runner reads not run and passes over: windows/amd64 with no attested runner (§22.9''s peers), linux/amd64 and arm64 unless SIDECAR_LEGS_IMAGE names a container image, and the gomobile legs, which SDK-M10-06''s T4 cells run on surrogates (sdk/test-t4.sh), never this tool'
+    - item: D-TEST-13's projection of format 2's drive writes, computed from M2's price table and T3's index counts and never measured on new drives, the index on in every eligible repo, purges and staging on, each companion push charged to the content pushes it indexes, the directory's pushes and drops among the increments, held to D-TEST-11's gate on the block size M2 chose; with no price table or with inferred counts it reads open and holds format 2's freeze (§22.10's format 2 row, §23.4's M10 exit; R-TEST-11, R-PHASE-11, D-TEST-17; owner decision 174; EVSB-M10-08)
+      tests:
+        - {repo: server, package: ./cli/filecluster-bench, names: [TestProjectionOnT3CountsThatFitPasses, TestProjectionMissFailsTheGate, TestProjectionReadsOpenOnInferredRows, TestProjectionReadsOpenOnAnIndexRowThatIsNoEvidence, TestProjectionReadsOpenWithoutM2sChoice, TestProjectionJudgesTheBlockSizeM2Chose, TestProjectionModeExitsByItsVerdict]}
+      external: 'hardware and production: M2''s nvme run on the production hosts'' PM9A3 set (D-TEST-11), whose measured price table the projection multiplies, and the index row''s run on T3''s clusters, which this report does not start; after the freeze, production''s measured over priced bytes within 10% while §19.11''s format2 gate holds format 2 to internal networks and design partners'
+    - item: 'D-TEST-12''s observe check: under purge: observe every candidate is kept and checked against every retained version that could name it, a candidate a later version names caught and paged, and taskworker''s soak counts and sidecarctl''s evs observe report saying when a threshold is unmet (EVS2-M10-33)'
+      tests:
+        - {repo: sidecar, package: ./evsservice, names: [TestPurgeObserveCleanOnAnHonestHistory, TestPurgeObserveCatchesACandidateALaterVersionNames, TestPurgeObserveCountsAMarkedListUnchecked, TestSweepUnderObserveRunsTheCheckAndKeepsEverything]}
+        - {repo: server, package: ./taskworker/work, names: [TestEvsObserveSoaksMet, TestEvsObserveSoaksStateEachUnmetThreshold, TestEvsObserveSoaksFailOnAFinding, TestEvsObserveSoakReadsARestartAsANewStart, TestEvsObserveSoakReadsEachSeriesAlone]}
+        - {repo: server, package: ./sidecarctl, names: [TestEvsObserveReportPrintsBothSoaksMet, TestEvsObserveReportStatesEachUnmetThresholdAndExitsZero]}
+    - item: 'D-TEST-12''s observe evidence on T3 (§22.10''s format 2 row): the observe check run at evacuation''s sweep on T3''s stores under purge: observe, finding no retained version naming a candidate; no T3 run of it is written (EVS2-M10-33''s report), so no test shows it yet'
+    - item: 'purge and drops stay in observe by default, deletes on being a production soak''s and then the owner''s (§19.11''s format2 gate; D-TEST-12, D-TEST-18; TEST-M10-05''s trap): the engine''s gate and the host''s read an absent file, an absent block, a file that does not parse and any mode but exactly on as observe, a host with no gates is closed, and every checked-in config/<env>/sidecar.yml keeps format2 closed with purge and drop in observe'
+      tests:
+        - {repo: sidecar, package: ./evsservice, names: [TestFormat2GateTable, TestFormat2GateFollowsTheHostAndFailsClosed]}
+        - {repo: server, package: ./evshost, names: [TestHostFormat2GateReadsServersSidecarYml, TestHostFormat2GateWithoutGatesIsClosed]}
+        - {repo: server, package: ., names: [TestSidecarConfigFilesAreDark]}
+    - item: 'D-TEST-18''s check before any drop deletes: taskworker''s verify, written apart from mark and sharing none of its scan code, agreeing with an honest mark in observe, a seeded mark bug refused as {verify}, and the soak counting jobs on repos with both a rename and a cross-ref copy (EVSB-M10-05, EVS2-M10-33)'
+      tests:
+        - {repo: sidecar, package: ./evsservice/dropverify, names: [TestVerifyAgreesWithAnHonestMark, TestVerifyRefusesASeededMarkBug, TestVerifySharesNoScanCodeWithMark]}
+        - {repo: server, package: ./taskworker/work, names: [TestEvsObserveDropSoakSharesJobsWithBothARenameAndACopy]}
+    - item: 'a migration of a format-1 repo and a rollback to format-1 binaries (§22.10''s format 2 row; FS-72''s M10 cases; R-TEST-10; EVS2-M10-30, QD-854): a repo migrated while a format-1 client pushes and reads, the migration killed at each step, and evs and taskworker rolled back with format-2 data, on T2 and on T3 through the block''s config and on the binaries testdata/evs/format1_build.txt pins'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Migration, TestFs72MigrationKilledAtStepSix, TestFs72MigrationKilledBeforeTheRaise, TestFs72MigrationKilledAfterTheRaise, TestFs72MigrationKilledBeforeTheHeadCas, TestFs72MigrationKilledAfterTheHeadCas, TestFs72Rollback]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3, TestFs72MigrationKilledAtStepSixOnT3, TestFs72MigrationKilledBeforeTheRaiseOnT3, TestFs72MigrationKilledAfterTheRaiseOnT3, TestFs72MigrationKilledBeforeTheHeadCasOnT3, TestFs72MigrationKilledAfterTheHeadCasOnT3, TestFs72RollbackOnT3, TestFs72RollbackThroughTheBlockConfigOnT3, TestFs72RollbackOnThePinnedBuildOnT3]}
+    - item: 'the migration of a format-1 repo set (§22.10''s format 2 row): each world FS-72''s cases run on holds one repo, so no run migrates a set (EVS2-M10-30''s report), and no test shows it yet'
+    - item: 'a format-1 repo''s first index build, its search equal to D-TEST-14''s oracle (§23.4''s M10 exit; R-TEST-10; SEARCH-M10-35): FS-79''s migration clause, a ref a format-1 client wrote holding no index, every push not yet searchable until the first build, then every push indexed and found as SearchOracle finds it, on the search world''s stand-in for evs'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs79MigrationEndsWithItsFirstBuild]}
+    - item: 'a format-1 repo migrated through evs and then indexed, in one run: FS-72''s migration runs on the evs world with no index and FS-79''s first build on the search world with no migration, so no run joins them (§23.4''s M10 exit), and no test shows it yet'
+    - item: 'format 2''s fuzz seeds, run as ordinary tests (§22.10''s format 2 row, §22.6; D-TEST-4, D-TEST-14): every §22.6 target registered with its seeds and each target''s seeds run under test.sh, and each target testdata/fuzz/registry.yml gives M10, the oracle''s extractor held equal to the index''s among them, its seeds run here; long campaigns run nowhere (owner decision 101)'
+      tests:
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestFuzzRegistry, TestFuzzSeedsRunUnderTestSh]}
+        - {repo: sidecar, package: ., names: [FuzzEvsDrop, FuzzEvsFormat2Batch, FuzzEvsKind5Segment, FuzzEvsPurgeList, FuzzEvsStaged, FuzzEvsDropStatus, FuzzEvsReadState, FuzzIndexSlot, FuzzIndexEntry, FuzzIndexShard, FuzzIndexSmallFile, FuzzIndexLoneShard, FuzzIndexLayoutWrites, FuzzIndexNormalize, FuzzIndexExtractMail, FuzzIndexExtractFile, FuzzIndexExtractAttachment, FuzzIndexExtractStreamEqualsWhole, FuzzSearchQuery, FuzzSearchRequestBody, FuzzSearchReplyBody, FuzzSearchRemoteMerge, FuzzDirectoryDecode]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [FuzzExtractOracleEqualsIndex]}
+        - {repo: sidecar, package: ./mcp, names: [FuzzSearchToolArguments]}
+        - {repo: sidecar, dir: cli, package: ., names: [FuzzUrSearchFlags]}
+    - item: '§2.8 carries M10''s rows before format 2''s release (§23.4''s M10 exit; I-18): connect-5, remote search''s relay view; evs-26, the index''s view; evs-27, the team directory with its cards; and evs-28, the drop job''s state, each live with the line saying when its values land, and metadata_list.yml as §2.8''s block'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuardCarriesV8sRows, TestSchemaGuardMapsFormat2sValues, TestSearchMetadataRowsNameTheIndex]}
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestMetadataListIsSection2sBlock]}
+    - item: 'servers get only §2.8''s fields: the schema guard over every proto field, object family and Redis family format 2, the index, remote search and the directory''s cards add (§22.7''s guard; I-18; TEST-M2-10)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuard, TestSchemaGuardPassesACleanTree, TestSchemaGuardFailsOnAProtoFieldNoRowNames, TestSchemaGuardFailsOnANewObjectFamily, TestSchemaGuardFailsOnANewRedisFamily, TestCheckStoresReadsTheRealList]}
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestSchemaGuard, TestMetadataListRefusesAHandEdit]}
+    - item: '§22.7''s leak leg: a sidecar_leaktest build leaks into every class the scan covers, and the scan catches each, on T2 and on T3''s stores (TEST-M2-09)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_leaktest, names: [TestEveryClassCatchesItsLeak, TestAClassWithNoLeakFails, TestRemovingAFormFromTheScannerFailsTheSelfTest]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack,sidecar_leaktest', stores: true, names: [TestT3EveryStoreClassCatchesItsLeak]}
+    - item: '§22.7''s query-canaries assertion (SEARCH-M10-39): no query canary in CC1, CC3 or CC4'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestPrivacySearchQueryCanaries]}
+    - item: '§22.7''s shards-dbreach assertion (TEST-M10-03): every shard, bucket and all, is sealed at a Padmé size'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestDbreachFixtureRecoversNoCodeOnTheIndex]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestDbreachFixtureRecoversTheCodeWithoutTheKeyedPad]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestDbreachFixtureRecoversTheCodeWithCompressionOn]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFi22CatchesAShardWithoutItsKeyedPad]}
+    - item: '§22.7''s request-traces assertion (TEST-M10-02): two different queries from equal sync states'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs83]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs77]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs110]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFiSearchReadsAHealthyRunOfFs74sShapeClean]}
+        - {repo: sidecar, package: ./sidecartest/fault, names: [TestFi23CatchesAFetchThatDependsOnTheQuery]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestARequestTraceThatDependsOnTheQueryFails]}
+    - item: §22.7's S11 on T2 (F11; SEARCH-M10-39)
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS11]}
+    - item: §22.7's S11 on T3 (F11; SEARCH-M10-39)
+    - item: §22.7's S12 on T2 (F12; SEARCH-M10-39)
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS12]}
+    - item: §22.7's S12 on T3 (F12; SEARCH-M10-39)
+    - item: 'the CROSSSLOT lints: every script and multi-key call keeps its keys in one slot, read from the code and from T3''s engines'' calls, M10''s engines among them (§22.4)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/crossslot, names: [TestThisModuleKeepsTheRule, TestTheModuleWalkReachesTheCodeItGuards, TestPlantedCallsReadAsTheirNamesSay]}
+        - {repo: server, package: ./sidecart3, names: [TestCrossslotKeysSpreadOverTheMasters, TestCrossslotCallsKeepEachShapeOnce, TestRunCrossslotRefusesOneNode]}
+    - item: 'budgets.yml: §22.5''s hot-path gates and §22.9''s budgets, a raise only with a reviewed line, the inline paths run with no Postgres and op-counted Redis (D-TEST-3; TEST-M1-09)'
+      tests:
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestBudgetsRiseOnlyWithAReviewedLine, TestBudgetSizeRowsHoldTheSizeGatesNumbers, TestBudgetBenchmarksHoldTheirAllocations]}
+        - {repo: server, package: ./sidecart3, stores: true, names: [TestEveryPathRowResolvesOrReadsMissing, TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow]}
+    - item: 'targets.yml: R-TEST-7''s numbers, §11.15''s and §16.10''s search targets among them, each with the test that shows it, the tier it runs on and its owner, a number nothing verified reading open (D-TEST-7; TEST-M2-13)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestTargetLedgerRowsResolveOrReadOpen, TestTargetLedgerResolvesTestsByName]}
+      external: 'hardware and production: the targets T5''s performance host and production show, which this host does not run (targets.yml''s tier column)'
+    - item: 'peers.yml and §22.9''s git-lfs row: every conformance peer pinned and rerun on each pin change, and stock git-lfs on the matrix''s rows this host holds, each pointer byte-exact against the format git-lfs documents, export keeping git''s oid, the required objects R finding every object the pointers name, the report naming what ran and what was skipped (D-TEST-7; X19; TEST-M2-17, EVS2-M10-29)'
+      tests:
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestConformanceLedger]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestGitLfsMatrixRunsEveryRowItsBinariesAnswer, TestGitLfsMatrixSkipsWhatTheHostLacksSayingWhy, TestGitLfsMatrixOnThisHost]}
+        - {repo: server, package: ./evshost, names: [TestLfsConformanceAcrossTheMatrix]}
+      external: 'hardware: the peers this host lacks (§22.9), git-lfs 3.0.2 and 3.4.1 with git 2.34 and 2.43 as Ubuntu 22.04 and 24.04 ship them, over ssh from a machine with no local ur; the flows through the daemon''s transfer agent wait on the daemon''s composition of its EvsClient and are not run'
+    - item: '§22.8''s search, remote and phone rows at reduced scale on T2, with production settings: search p50 and p99 over buckets and all, ranking and typo quality, a missed query failing; remote search''s tap to first and next page and the indexer''s service time; the phone''s searches within its working set (SEARCH-M10-40)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/bench, tags: sidecar_testhooks, names: [TestSearchBenchGivesTheRowsFieldsAtReducedScale, TestSearchBenchQualityFailsAMissedQuery, TestRemoteBenchGivesTheRowsFieldsAtReducedScale, TestPhoneBenchGivesTheRowsFieldsAtReducedScale]}
+      external: 'hardware: the rows at §22.8''s scale on T5''s performance host (five years at 100 and 300 messages a day, real relays and netem for remote search), which a reduced run here stands for and is no evidence of'
+    - item: '§22.8''s index row: the index writers'' load driven through filecluster-bench''s index mode, each leg''s metadata writes counted through the counting store, a failed leg a smoke, and the off and indexed legs whose increments D-TEST-13''s projection reads (SEARCH-M10-40, EVSB-M10-08)'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/bench, tags: sidecar_testhooks, names: [TestIndexLoadRunsTheOffAndIndexedLegs, TestIndexLoadRefusesAClassItDoesNotRun]}
+        - {repo: server, package: ./cli/filecluster-bench, names: [TestIndexRunCountsEachLegsWritesThroughTheCountingStore, TestCountedOutcomesCountWhatMayHaveWritten, TestIndexRunStopsAtAFailedLegAndIsASmoke, TestIndexModeRefusesWithoutALoad]}
+        - {repo: server, package: ./cli/filecluster-bench, tags: sidecar_testhooks, names: [TestIndexModeRunsTheSearchNotesLoad]}
+      external: 'hardware: the index row''s run on T3''s clusters and on M2''s staging PM9A3 set, whose counts are the projection''s evidence; this report runs neither'
+    - item: '§22.8''s directory row with FS-86''s card case against §16.11''s cost table (D-TEST-17; RECORD-M10-07): DirectoryCostOracle''s cards, its three mutants failing, a fake-clock day at 500, 2,000 and 5,000 members within the table''s M10 row and the cards ref''s ceilings, priced bytes within §11.13''s directory rows, and the cards ref''s commits on T3''s local stack at reduced scale; a miss at the Team limit blocks this gate and the owner hears then, so it is an item of its own, read apart from every other failure'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestDirectoryCostOracleFetchesEachChangedCardsNewestVersion, TestDirectoryCostOracleReadsCardsSixtyFourToARequest, TestDirectoryCostOracleCardRemovalsAndVersionlessNotices, TestDirectoryLoadCardDayHoldsToTheOracle, TestDirectoryLoadCardMutantNoCoalescingFails, TestDirectoryLoadCardMutantNoHeadReproductionFails, TestDirectoryLoadCardMutantRefetchingUnchangedCardsFails, TestDirectoryLoadCardDayAtFiveHundredMembers, TestDirectoryLoadCardDayAtFiveThousandMembers, TestDirectoryLoadCardQueueCountsARerunBehindACommit, TestDirectoryLoadCardQueueAnswersBusyPastItsWaitingCommits, TestDirectoryLoadCardCommitsFailUnderAnInjectedHeadDelay, TestDirectoryLoadDrivePushesPriceEveryPush]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestDirectoryLoadCardDayAtTheTeamLimit], args: [-directory-load-full]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs86CardCommitsAtTheTeamLimitOnT3, TestFs86CardCommitsAtTheStressCaseOnT3, TestFs86CardCommitsOnTheLocalStackLogTheirP99MissesAndHoldTheRest]}
+      external: 'hardware: the reading is a whole peak hour at the Team limit''s rate on T3''s 4-host file-cluster layouts with nothing else running on the machine (owner decision 598; server''s TestFs86CardCommitsAtTheTeamLimitOnTheLayouts under sidecar_filecluster_t3), which a shared build host cannot give, and the local stack''s run logs a p99 miss and fails nothing'
+    - item: '§22.8''s drop row: drop scan rates and a 60 GB history''s job time from the drop mode''s windows, the load''s pause holding past its line (EVSB-M10-08)'
+      tests:
+        - {repo: server, package: ./cli/filecluster-bench, names: [TestDropBenchRunsEachWindowAndComputesTheRow, TestDropFiguresComputeTheHistorysJobTime, TestLoadPauseHoldsPastItsLineAndKeepsTheTimeHeld]}
+      external: 'hardware: the drop row on a segment cluster of production''s HDDs (§22.8), which a run here stands for and is no evidence of'
+    - item: '§22.8''s hdd and trash rows at M10: purges at year two''s rate on synthetic objects in a bucket of their own beside the mix under the 50% pause, and slot purges beside the trash run''s overwrites (EVSB-M10-08)'
+      tests:
+        - {repo: server, package: ./cli/filecluster-bench, names: [TestHddM10RunsTheMixWithPurgesBesideIt, TestHddM10RefusesWithoutCapacityOrABucketOfItsOwn, TestPurgeLoadDeletesEachObjectItsAllowanceAfterItsPut, TestPurgeLoadDefaultsAreYearTwos, TestTrashM10RunsSlotPurgesBesideTheOverwrites]}
+      external: 'production: the hdd run on the production segment cluster with purges in their own bucket (TEST.md''s External, M10), and the trash run on the PM9A3 set'
+    - item: 'D-OPS-21''s drop job bounds: one job a segment cluster, its start gated, its pause past half the HDD drives'' measured capacity or while none is known (EVSB-M10-03, EVSB-M10-06)'
+      tests:
+        - {repo: sidecar, package: ./evsservice, names: [TestDropJobTakeIsOneInstances, TestDropJobGatesStartNothing]}
+    - item: 'D-OPS-21''s drop job pace: at most 32 MB/s of reads and 10 DELETEs a second; no test holds a job''s reads to DropSettings.ReadBytesPerSecond or its DELETEs to DeletesPerSecond (EVSB-M10-03''s and EVSB-M10-06''s reports), so no test shows it yet'
+    - item: 'T4 at M10 (§22.4''s T4 from M10, §18.4''s search working sets; SDK-M10-06): the ios32 and Android cells with search on, each searching, downloading and asking through the app''s own calls within §18.4''s working set, a deliberate per-search key collection failing them; the T4 rows of FS-77, FS-83, FS-109 and FS-110 run through these cells'
+      tests:
+        - {repo: sdk, package: ., tags: sidecar_testhooks, names: [TestIos32CellSearchesDownloadsAndAsks, TestAndroidCellSearchesDownloadsAndAsks, TestT4SearchBudgetCatchesAPerSearchKeyCollection, TestIos32CellSearchesWithinItsWorkingSet, TestAndroidCellSearchesWithinItsWorkingSet]}
+      external: 'devices: T4''s physical runs on the ios32 and Android surrogates and Safari''s wasm engine (owner decision 100), which no figure here stands for'
+    - item: 'FS-125 held with PROTO-M10-05 (owner decision 609; QD-1038): C19''s window accounting is withdrawn, the remote-search pair''s contracts being accounted like any peer''s, as FS-83 checks; the row keeps its number and its sweep runs only if the windows return, so its cases above read missing with no test'
+      external: 'people: the owner, should C19''s windows return'
+    - item: 'D-TEST-12''s and D-TEST-18''s production soaks before deletes turn on: at least 14 days and 10,000 candidates with none a retained version names before purge: on, and at least 30 days and 200 jobs, half on repos with renames and cross-ref copies, with no delete-set member a retained version names before drop: on'
+      external: 'production: internal networks and design partners after format 2''s final freeze, then the owner'
+    - item: 'format 2''s bytes freeze at M10''s Gn-out (§23.8, §22.10''s format 2 row; D-PHASE-7, D-PHASE-10, owner decision 169): the owner''s approval of this report and the merge of sidecar into main in §23.9''s order, production only after, dark first, where D-TEST-13 confirms the projection (owner decision 174)'
+      external: 'people: the owner''s sign-off at M10''s Gn-out, which owner decision 194 lets the build move past'
   every:
     - row: FS-55
       tests:
