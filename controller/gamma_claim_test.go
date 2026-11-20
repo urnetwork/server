@@ -125,10 +125,12 @@ func TestGammaDailyCapOf(t *testing.T) {
 	}{
 		// a year at 40 (the largest standard charge)
 		{40 * g, 50 * g},
-		// a gift code at 39.99
+		// one gift code, at 39.99
 		{39_990_000_000, 50 * g},
-		// twelve gift codes
-		{479_880_000_000, 600 * g},
+		// three gift codes at 29.99
+		{89_970_000_000, 113 * g},
+		// the largest gift order, 20 codes at 23.99
+		{479_800_000_000, 600 * g},
 		// a 1 TiB pack alone
 		{3 * g, 4 * g},
 		{0, 1 * g},
