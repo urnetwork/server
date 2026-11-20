@@ -17,7 +17,11 @@
 //   - Redis, Metrics, Gates and the service token Authenticator from sidecarhost.NewServiceHost;
 //   - the segment route's receipt keys (HostReceiptKeysFileName), storage gate, HDD share and usage producer, and
 //     the cohort limit (evsservice.ClusterLimit, EVSB-M3-02) over the write budget's at_limit flags, so a repo on a
-//     metadata cluster at 80% raw or 70% inodes gets 507 CLUSTER_FULL for what §20.7's storage limit refuses.
+//     metadata cluster at 80% raw or 70% inodes gets 507 CLUSTER_FULL for what §20.7's storage limit refuses;
+//   - the versionless purge (EVSB-M10-01's evsservice.Purger, purge_wiring.go), which the engine hands each certain
+//     commit's candidates and which deletes them once the readers' 60 s have passed, on the engine's format2 gate,
+//     newest-version reader and hold cache and the usage producer the engine counts with. It runs on the host's
+//     context, drains with the block and ends at Close.
 //
 // Ready is §19.4's evs row: the engine's probe of the first cluster, every cluster's sentinel read with this
 // block's credentials and one pool shown (server.FileClusters.Ready), and every seam no request is honored without.
@@ -95,6 +99,9 @@ type HostSettings struct {
 	// not the host's to set: NewHost takes the count from sidecar.yml's evs gate (QD-639), and keeps this one only
 	// for a block that starts under a disabled gate with no count, which serves nothing.
 	QuotaGate *evsservice.QuotaGateSettings
+	// The versionless purge's: §11.13's 60 s allowance, 200 deletes a second, 1M ids queued and a 70 s drain. nil:
+	// evsservice.DefaultPurgerSettings. Settings past §11.13's floors are an error: the block does not start.
+	Purger *evsservice.PurgerSettings
 }
 
 // The defaults.
@@ -104,6 +111,7 @@ func DefaultHostSettings() *HostSettings {
 		Chrony:            server.DefaultChronyClockCheckSettings(),
 		UsageDrainTimeout: 10 * time.Second,
 		QuotaGate:         evsservice.DefaultQuotaGateSettings(),
+		Purger:            evsservice.DefaultPurgerSettings(),
 	}
 }
 
@@ -177,6 +185,8 @@ type Host struct {
 	hdd          *evsservice.HddAdmission
 	usage        *evsservice.UsageBatcher
 	clusterLimit *evsservice.ClusterLimit
+	// the versionless purge, nil when the host could not build it, which leaves the block not ready
+	purger *evsservice.Purger
 	// what RunHost built for the engine, ended after it, in this order
 	closeAfter []func()
 	closeOnce  sync.Once
@@ -185,12 +195,13 @@ type Host struct {
 var _ sidecar.HttpEngine = (*Host)(nil)
 
 // The engine on host, with the segment route's parts built here: the storage gate and usage producer over
-// host.Quota, and the HDD share over host.Redis for the segment cluster. host needs Blobs, Metrics and Budget;
-// a missing Quota, segment cluster, deps' AuthState or receipt keys leaves the host not ready, never an error, so
-// a block serves /status and says why. A host whose env enables the evs gate with no blocks count is an error, and
-// so is one whose block config does not read or names an instance format this code does not know: see the package's
-// header. The engine runs as the config's format, never settings'. ctx bounds everything built here and should
-// outlive the drain: RunHost gives one that ends only at Close.
+// host.Quota, the HDD share over host.Redis for the segment cluster, and the versionless purge the engine hands each
+// certain commit. host needs Blobs, Metrics and Budget; a missing Quota, segment cluster, deps' AuthState or receipt
+// keys, or a purge the host cannot build, leaves the host not ready, never an error, so a block serves /status and
+// says why. A host whose env enables the evs gate with no blocks count is an error, and so is one whose block config
+// does not read or names an instance format this code does not know, or whose purge settings break §11.13's floors:
+// see the package's header. The engine runs as the config's format, never settings'. ctx bounds everything built
+// here and should outlive the drain: RunHost gives one that ends only at Close.
 func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (*Host, error) {
 	if host == nil || host.Blobs == nil {
 		return nil, errors.New("evs host: no clusters")
@@ -200,6 +211,14 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	}
 	if deps == nil {
 		deps = &HostDeps{}
+	}
+	purgerSettings := settings.Purger
+	if purgerSettings == nil {
+		purgerSettings = evsservice.DefaultPurgerSettings()
+	}
+	// as the engine's own settings are: a block whose purge could never run does not start
+	if err := purgerSettings.Validate(); err != nil {
+		return nil, fmt.Errorf("evs host: %w", err)
 	}
 	// the env's count, never one a host works out from its peers (QD-639)
 	sidecarConfig := server.CurrentSidecarConfig()
@@ -289,17 +308,24 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		self.hdd = hdd
 		uploads.Hdd = hdd
 	}
+	// hold/ as the engine's slot takeovers and the purge's DELETEs read it: one read at most 5 s old serves both
+	holds := evsservice.NewHoldCache(host.Blobs, self.clock, nil)
+	// the purge takes the engine's newest-version reader, so the engine starts with the sink the purge fills below
+	purgeSink := &hostPurgeSink{}
 	engine, err := evsservice.NewEvsEngine(ctx, host, evsSettings, &evsservice.EvsEngineDeps{
 		AuthState:  deps.AuthState,
 		ServiceLog: deps.ServiceLog,
 		Log:        hostLogger{},
 		Uploads:    uploads,
 		GateViews:  deps.GateViews,
+		Purge:      purgeSink,
+		Holds:      holds,
 	})
 	if err != nil {
 		return fail(err)
 	}
 	self.engine = engine
+	self.startPurger(ctx, host, purgerSettings, holds, purgeSink)
 	if 0 < len(self.missing) {
 		glog.Errorf("[evs]not ready without %s\n", strings.Join(self.missing, "; "))
 	}
@@ -380,10 +406,14 @@ func (self *Host) Handler() http.Handler {
 	return self.engine.Handler()
 }
 
-// The engine finishes what is in flight, then the usage producer sends its open window, within
-// UsageDrainTimeout.
+// The engine finishes what is in flight, then the purge deletes what falls due within its DrainTimeout, taking no
+// new commit, and the usage producer sends its open window, with what the purge freed, within UsageDrainTimeout.
+// What the purge leaves is the sweep's.
 func (self *Host) Drain() {
 	self.engine.Drain()
+	if self.purger != nil {
+		self.purger.Drain()
+	}
 	if self.usage == nil || self.settings.UsageDrainTimeout <= 0 {
 		return
 	}
@@ -396,8 +426,8 @@ func (self *Host) Drain() {
 	}
 }
 
-// Ends the engine, then what it used: the segment route's parts, then what RunHost built for it. Safe after
-// Drain, and more than once.
+// Ends the engine, then what it used: the purge, whose queue is the sweep's, the segment route's parts, then what
+// RunHost built for it. Safe after Drain, and more than once.
 func (self *Host) Close() {
 	self.closeOnce.Do(func() {
 		self.engine.Close()
@@ -405,8 +435,12 @@ func (self *Host) Close() {
 	})
 }
 
-// Ends the segment route's parts and what RunHost built, the engine already ended or never started.
+// Ends the purge, the segment route's parts and what RunHost built, the engine already ended or never started: the
+// purge before the usage producer it reports to.
 func (self *Host) closeParts() {
+	if self.purger != nil {
+		self.purger.Close()
+	}
 	if self.quotaGate != nil {
 		self.quotaGate.Close()
 	}
