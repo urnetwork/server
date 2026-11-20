@@ -47,9 +47,15 @@ type redisDialFunc func(ctx context.Context, network string, addr string) (net.C
 // every node: nodes announce their own lan ips and each node port is unique
 // across the cluster.
 func redisClusterDialer(authority string, nodeRoutes map[string]string, dial redisDialFunc) redisDialFunc {
-	authorityHost, _, _ := net.SplitHostPort(authority)
+	authorityHost, authorityPort, _ := net.SplitHostPort(authority)
 	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
-		return dial(ctx, network, redisNodeDialAddr(authorityHost, nodeRoutes, addr))
+		dialAddr := redisNodeDialAddr(authorityHost, nodeRoutes, addr)
+		conn, err := dial(ctx, network, dialAddr)
+		if err != nil {
+			route := redisDialFailureRoute(authorityHost, authorityPort, addr, dialAddr)
+			redisDialFailures.WithLabelValues(route, redisDialFailureReason(err)).Inc()
+		}
+		return conn, err
 	}
 }
 
@@ -389,6 +395,7 @@ func init() {
 		}
 	}
 	prometheus.MustRegister(
+		redisDialFailures,
 		redisKeyEventMergeDrops,
 		redisKeyEventStartupDrops,
 		redisKeyEventIgnored,
