@@ -107,6 +107,10 @@ type AbuseHoldSettings struct {
 	RecordMailRetryDelay time.Duration
 	// The task runner's bound on one record mail.
 	RecordMailTaskMaxTime time.Duration
+	// How long after api saw a placement's or renewal's object acknowledged every deleter is bound by it: a deleter
+	// reads hold/ through §11.13's cache, which answers at most this old (owner decision 629), so this is that cache's
+	// bound, the readers' HoldSetSettings.RereadInterval. Placement and renewal report the time.
+	BindTimeout time.Duration
 }
 
 func DefaultAbuseHoldSettings() *AbuseHoldSettings {
@@ -118,6 +122,7 @@ func DefaultAbuseHoldSettings() *AbuseHoldSettings {
 		ListPageCount:         1000,
 		RecordMailRetryDelay:  time.Minute,
 		RecordMailTaskMaxTime: 5 * time.Minute,
+		BindTimeout:           sidecar.DefaultHoldSetSettings().RereadInterval,
 	}
 }
 

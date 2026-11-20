@@ -4859,7 +4859,9 @@ const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 // FindActiveClientNetwork), and the reap hard deletes it
 // `NetworkClientReapAfterDeactivate` later. A returning user logs in again
 // with a fresh client id. The clients of sidecar.yml's urnetwork_edge are
-// never marked (owner decision 591): see RemoveDisconnectedNetworkClients.
+// never marked (owner decision 591), and no client is while the process has
+// only a failed first read of the file (QD-1079): see
+// RemoveDisconnectedNetworkClients.
 //
 // Tightened 90d -> 30d (2026-07-18). A top-level client stays active for this
 // whole window, so under identity churn (a fresh device_id per login) or a
@@ -4941,8 +4943,9 @@ func DefaultRemoveDisconnectedNetworkClientsSettings() *RemoveDisconnectedNetwor
 // child clients (e.g. proxy devices, see `proxy_device_config`) cannot
 // recover from a reaped client_id. `minTopLevelAuthTime` bounds the idle
 // top-level marker (TopLevelClientIdleExpiration), which leaves the clients of
-// sidecar.yml's urnetwork_edge alone (owner decision 591). Under the default
-// settings.
+// sidecar.yml's urnetwork_edge alone (owner decision 591), and marks nothing
+// while the process has only a failed first read of the file (QD-1079). Under
+// the default settings.
 func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime time.Time, minClientTime time.Time, minTopLevelAuthTime time.Time) {
 	RemoveDisconnectedNetworkClientsWithSettings(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime, DefaultRemoveDisconnectedNetworkClientsSettings())
 }
@@ -4993,11 +4996,24 @@ func RemoveDisconnectedNetworkClientsWithSettings(
 	// at most that many rows. An operator's removal still ends one: it is
 	// inactive, and the inactive reap below takes it like any other. With no
 	// urnetwork_edge in sidecar.yml, $3 is null and no network is left out.
+	//
+	// A run whose read is a failed first read marks nothing (QD-1079): the
+	// file is there but the process has never read it, so that read names no
+	// urnetwork_edge whatever the file does, and marking would retire the edge's
+	// idle slots, which the mint then refuses until the hard reap. Ordinary idle
+	// clients wait for the first good read, minutes against the 30-day
+	// threshold. An absent file is no failed read and lets the pass run. The
+	// other passes run either way.
+	sidecarConfig := server.CurrentSidecarConfig()
 	var edgeNetworkId *server.Id
-	if networkId, ok := server.CurrentSidecarConfig().UrnetworkEdge(); ok {
+	if networkId, ok := sidecarConfig.UrnetworkEdge(); ok {
 		edgeNetworkId = &networkId
 	}
-	for 0 < settings.MarkTopLevelBatchCount {
+	markTopLevel := !sidecarConfig.FailedFirstRead()
+	if !markTopLevel {
+		glog.Warningf("[ncm]sidecar.yml is there but has not been read, so no idle top level client is marked this run\n")
+	}
+	for markTopLevel && 0 < settings.MarkTopLevelBatchCount {
 		var batchCount int64
 		server.MaintenanceTx(ctx, func(tx server.PgTx) {
 			// an attempt that does not commit marked nothing

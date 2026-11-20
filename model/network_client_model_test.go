@@ -2665,6 +2665,207 @@ func TestRemoveDisconnectedNetworkClientsMarksEdgeClientsSidecarYmlDoesNotName(t
 	})
 }
 
+// What the QD-1079 tests reap around: urnetwork-edge with one client whose slot
+// no process has held for TopLevelClientIdleExpiration, an ordinary network's
+// top-level client idle as long, and that network's inactive client past the
+// reap window, which the inactive reap takes whatever sidecar.yml reads.
+type reapHoldTestNetworks struct {
+	edgeNetworkId    server.Id
+	edgeKey          *EdgeClientKey
+	edgeClientId     server.Id
+	idleClientId     server.Id
+	inactiveClientId server.Id
+}
+
+// The networks and clients, each idle or past its window as of now.
+func newReapHoldTestNetworks(ctx context.Context, t testing.TB, now time.Time) *reapHoldTestNetworks {
+	t.Helper()
+	networks := &reapHoldTestNetworks{
+		edgeNetworkId: server.NewId(),
+		edgeKey:       &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 3, Index: 0},
+	}
+	idleAuthTime := now.Add(-TopLevelClientIdleExpiration - 24*time.Hour)
+
+	Testing_CreateNetwork(ctx, networks.edgeNetworkId, "urnetwork-edge-hold-test", server.NewId())
+	mint, err := MintEdgeClient(ctx, networks.edgeNetworkId, networks.edgeKey, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	networks.edgeClientId = mint.ClientId
+	reapTestSetAuthTime(ctx, networks.edgeClientId, idleAuthTime)
+
+	networkId := server.NewId()
+	Testing_CreateNetwork(ctx, networkId, "ordinary-hold-test", server.NewId())
+	networks.idleClientId = server.NewId()
+	Testing_CreateDevice(ctx, networkId, server.NewId(), networks.idleClientId, "synthetic", "synthetic")
+	reapTestSetAuthTime(ctx, networks.idleClientId, idleAuthTime)
+	networks.inactiveClientId = server.NewId()
+	Testing_CreateDevice(ctx, networkId, server.NewId(), networks.inactiveClientId, "synthetic", "synthetic")
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET active = false WHERE client_id = $1`, networks.inactiveClientId))
+	})
+	reapTestSetDeactivateTime(ctx, networks.inactiveClientId, now.Add(-NetworkClientReapAfterDeactivate-24*time.Hour))
+	return networks
+}
+
+// Fails t unless the client is there and active, never deactivated.
+func requireReapTestClientActive(ctx context.Context, t testing.TB, name string, clientId server.Id) {
+	t.Helper()
+	if exists, active, deactivateTime := reapTestClientState(ctx, clientId); !exists || !active || deactivateTime != nil {
+		t.Fatalf("%s: exists %t, active %t, deactivate_time %v", name, exists, active, deactivateTime)
+	}
+}
+
+// Fails t unless the client is there and marked inactive.
+func requireReapTestClientMarked(ctx context.Context, t testing.TB, name string, clientId server.Id) {
+	t.Helper()
+	if exists, active, deactivateTime := reapTestClientState(ctx, clientId); !exists || active || deactivateTime == nil {
+		t.Fatalf("%s: exists %t, active %t, deactivate_time %v", name, exists, active, deactivateTime)
+	}
+}
+
+// A taskworker that starts while sidecar.yml is there but broken marks nothing
+// (QD-1079): its first read names no urnetwork_edge, though the file's broken
+// part comes after the key, so marking would retire the edge's idle slot and
+// the mint would refuse its next deploy until the hard reap. The ordinary idle
+// client waits too, run after run, while the other passes run: the inactive
+// client past its window is reaped.
+func TestRemoveDisconnectedNetworkClientsHoldsMarkingOnFailedFirstRead(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networks := newReapHoldTestNetworks(ctx, t, now)
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+
+		t.Cleanup(server.Testing_PushSidecarConfig(fmt.Sprintf(
+			"sidecar:\n  urnetwork_edge: %q\n  evs: {enabled: true, percent: fifty}\n",
+			networks.edgeNetworkId,
+		)))
+		for run := 0; run < 2; run += 1 {
+			RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+			requireReapTestClientActive(ctx, t, fmt.Sprintf("run %d: the idle edge client", run), networks.edgeClientId)
+			requireReapTestClientActive(ctx, t, fmt.Sprintf("run %d: the idle ordinary client", run), networks.idleClientId)
+		}
+		if config := server.CurrentSidecarConfig(); !config.FailedFirstRead() {
+			t.Fatal("the runs' read is not the failed first read")
+		}
+		if exists, _, _ := reapTestClientState(ctx, networks.inactiveClientId); exists {
+			t.Fatal("the inactive reap did not run beside the held marking")
+		}
+		mint, err := MintEdgeClient(ctx, networks.edgeNetworkId, networks.edgeKey, nil)
+		if err != nil {
+			t.Fatalf("the idle edge client is not minted after the held runs: %v", err)
+		}
+		if mint.ClientId != networks.edgeClientId {
+			t.Fatalf("the idle edge client minted as %s, want %s", mint.ClientId, networks.edgeClientId)
+		}
+	})
+}
+
+// The first good read after a failed first read releases the marking
+// (QD-1079): the run on it marks the ordinary idle client the held run left,
+// and the edge client, whose network the good read names as urnetwork_edge,
+// stays active and mints again.
+func TestRemoveDisconnectedNetworkClientsFirstGoodReadReleasesMarking(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networks := newReapHoldTestNetworks(ctx, t, now)
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+
+		t.Cleanup(server.Testing_PushSidecarConfig("sidecar: [unterminated\n"))
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		requireReapTestClientActive(ctx, t, "held: the idle ordinary client", networks.idleClientId)
+		requireReapTestClientActive(ctx, t, "held: the idle edge client", networks.edgeClientId)
+
+		// the fixed push lands: the next run rereads the file, the failed read
+		// as its previous
+		t.Cleanup(server.Testing_RereadSidecarConfig(fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", networks.edgeNetworkId)))
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		if config := server.CurrentSidecarConfig(); config.FailedFirstRead() {
+			t.Fatal("the run's read is still the failed first read")
+		}
+		requireReapTestClientMarked(ctx, t, "released: the idle ordinary client", networks.idleClientId)
+		requireReapTestClientActive(ctx, t, "released: the idle edge client", networks.edgeClientId)
+		if _, err := MintEdgeClient(ctx, networks.edgeNetworkId, networks.edgeKey, nil); err != nil {
+			t.Fatalf("the idle edge client is not minted after the release: %v", err)
+		}
+	})
+}
+
+// An absent sidecar.yml is no failed read (QD-1079), and the marking runs as
+// before: the file names no urnetwork_edge, so the environment has no edge
+// network to protect, and the edge network's idle client is marked like the
+// ordinary one, its mint then refused.
+func TestRemoveDisconnectedNetworkClientsMarksUnderAbsentSidecarYml(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networks := newReapHoldTestNetworks(ctx, t, now)
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+
+		// the test env's config home holds no sidecar.yml, and the run's read is
+		// the process's first
+		if _, err := server.Config.SimpleResource("sidecar.yml"); !errors.Is(err, server.ErrResourceNotFound) {
+			t.Fatalf("the test env's sidecar.yml is not absent: %v", err)
+		}
+		server.Testing_ForgetSidecarConfig()
+		t.Cleanup(server.Testing_ForgetSidecarConfig)
+
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		config := server.CurrentSidecarConfig()
+		if config.FailedFirstRead() {
+			t.Fatal("the absent file's read is a failed first read")
+		}
+		if _, ok := config.UrnetworkEdge(); ok {
+			t.Fatal("the absent file's read names an urnetwork_edge")
+		}
+		requireReapTestClientMarked(ctx, t, "the idle ordinary client", networks.idleClientId)
+		requireReapTestClientMarked(ctx, t, "the edge network's idle client", networks.edgeClientId)
+		if _, err := MintEdgeClient(ctx, networks.edgeNetworkId, networks.edgeKey, nil); !errors.Is(err, ErrEdgeClientRetired) {
+			t.Fatalf("a marked edge client was minted for: %v", err)
+		}
+		if exists, _, _ := reapTestClientState(ctx, networks.inactiveClientId); exists {
+			t.Fatal("the inactive client outlived its window")
+		}
+	})
+}
+
+// A failed read after a good one keeps the good read, as before QD-1079, so
+// the marking runs and still leaves out the edge network that read names: the
+// ordinary idle client is marked, and the edge client stays active and mints
+// again.
+func TestRemoveDisconnectedNetworkClientsFailedRereadKeepsTheGoodReadsEdge(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networks := newReapHoldTestNetworks(ctx, t, now)
+		minConnectionTime := now.Add(-8 * time.Hour)
+		minClientTime := now.Add(-NetworkClientReapAfterDeactivate)
+		minTopLevelAuthTime := now.Add(-TopLevelClientIdleExpiration)
+
+		t.Cleanup(server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  urnetwork_edge: %q\n", networks.edgeNetworkId)))
+		goodRead := server.CurrentSidecarConfig()
+		// a broken push lands under the running process: the run rereads it
+		t.Cleanup(server.Testing_RereadSidecarConfig("sidecar: [unterminated\n"))
+		RemoveDisconnectedNetworkClients(ctx, minConnectionTime, minClientTime, minTopLevelAuthTime)
+		if config := server.CurrentSidecarConfig(); config != goodRead || config.FailedFirstRead() {
+			t.Fatal("the failed reread did not keep the good read")
+		}
+		requireReapTestClientMarked(ctx, t, "the idle ordinary client", networks.idleClientId)
+		requireReapTestClientActive(ctx, t, "the idle edge client", networks.edgeClientId)
+		if _, err := MintEdgeClient(ctx, networks.edgeNetworkId, networks.edgeKey, nil); err != nil {
+			t.Fatalf("the idle edge client is not minted after the run: %v", err)
+		}
+	})
+}
+
 // A pass whose batch bound is not positive is skipped rather than looping on
 // LIMIT 0: under zeroed settings an idle top-level client stays active and an
 // inactive client past the reap window stays, and under the defaults the one
