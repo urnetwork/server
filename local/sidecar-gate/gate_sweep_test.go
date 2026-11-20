@@ -9,11 +9,12 @@ package main
 // sidecart3 under its tags, the local stack's among them, since every sidecart3 FS test file is behind it (QD-1085).
 //
 // A row whose test is renamed, or whose file's build tags drift from the entry's, reads missing at the gate, never
-// pass. checkGateServerTestsDeclared fails first, on every entry whose package declares its test, the convention's
-// included: each test must be declared in its package, in a file that go test builds on this host with the entry's
-// tags. A convention entry whose test nobody has written yet is left out, since it reads missing by design. A fixture
-// shows the check failing a convention test behind a tag the convention lacks, and a real run of the convention's
-// entries on a stand-in for sidecart3 shows each test built in under their tags.
+// pass, while -list, which reads no tags, reads it listed. checkGateServerTestsDeclared fails first, on every entry whose
+// package declares its test, the convention's included, and on every server test an item names, at every gate: each
+// test must be declared in its package, in a file that go test builds on this host with the entry's tags. A convention
+// entry whose test nobody has written yet is left out, since it reads missing by design. Fixtures show the check
+// failing a convention test behind a tag the convention lacks and an item's test behind a tag its entry lacks, and a
+// real run of the convention's entries on a stand-in for sidecart3 shows each test built in under their tags.
 
 import (
 	"context"
@@ -72,31 +73,38 @@ func gateTestFilesBuild(directory string, files []string, tags string) bool {
 	})
 }
 
-// Holds each server test gates names for an FS case to the test files under serverDirectory: each must be declared in
-// its package, in a file go test builds on this host with the entry's tags. A convention entry, the case's
-// TestFs<n><Case>OnT3 in ./sidecart3 under whatever tags, whose test nobody has written yet is left out, since it reads
-// missing by design; once its package declares the test, it is held like any other. Returns each entry checked, as
-// "<gate> <case> <package> <name>", and each fault found; the error is a test file it could not read.
+// Holds each server test gates names, for an FS case or in an item, to the test files under serverDirectory: each must
+// be declared in its package, in a file go test builds on this host with the entry's tags. A convention entry, the
+// case's TestFs<n><Case>OnT3 in ./sidecart3 under whatever tags, whose test nobody has written yet is left out, since it
+// reads missing by design; once its package declares the test, it is held like any other. An item names its tests
+// outright, so none of them is left out. Returns each entry checked, as "<gate> <case> <package> <name>", an item's as
+// "<gate> item <package> <name>", and each fault found; the error is a test file it could not read.
 func checkGateServerTestsDeclared(gates *gatesFile, catalog *fault.Catalog, serverDirectory string) ([]string, []string, error) {
 	directoryNameFiles := map[string]map[string][]string{}
 	checked := []string{}
 	faults := []string{}
 	for _, gate := range fault.GateNames() {
 		for _, row := range gates.Gates[gate] {
-			if row.Row == "" {
-				continue
-			}
-			testCase := catalog.Case(row.Row, row.Case)
-			if testCase == nil {
-				faults = append(faults, fmt.Sprintf("%s holds %s %q, which the catalog does not", gate, row.Row, row.Case))
-				continue
+			// what checked names the row by, what a fault names it by, and its case's convention T3 test
+			checkedLabel := "item"
+			faultLabel := fmt.Sprintf("item %q", row.Item)
+			conventionName := ""
+			if row.Row != "" {
+				testCase := catalog.Case(row.Row, row.Case)
+				if testCase == nil {
+					faults = append(faults, fmt.Sprintf("%s holds %s %q, which the catalog does not", gate, row.Row, row.Case))
+					continue
+				}
+				checkedLabel = testCase.String()
+				faultLabel = testCase.String()
+				conventionName = fault.GateT3TestName(testCase)
 			}
 			for _, test := range row.Tests {
 				if test.Repo != "server" {
 					continue
 				}
 				// the convention's name in its package, whatever the tags: a test not written yet reads missing
-				conventional := test.Package == "./sidecart3" && slices.Equal(test.Names, []string{fault.GateT3TestName(testCase)})
+				conventional := conventionName != "" && test.Package == "./sidecart3" && slices.Equal(test.Names, []string{conventionName})
 				directory := filepath.Join(serverDirectory, test.Dir, filepath.FromSlash(test.Package))
 				nameFiles, ok := directoryNameFiles[directory]
 				if !ok {
@@ -112,13 +120,13 @@ func checkGateServerTestsDeclared(gates *gatesFile, catalog *fault.Catalog, serv
 						continue
 					}
 					if len(files) == 0 {
-						faults = append(faults, fmt.Sprintf("%s's %s names server/%s's %s, which no test file there declares", gate, testCase, test.Package, name))
+						faults = append(faults, fmt.Sprintf("%s's %s names server/%s's %s, which no test file there declares", gate, faultLabel, test.Package, name))
 						continue
 					}
 					if !gateTestFilesBuild(directory, files, test.Tags) {
-						faults = append(faults, fmt.Sprintf("%s's %s names server/%s's %s, declared in %v, which go test does not build here with tags %q", gate, testCase, test.Package, name, files, test.Tags))
+						faults = append(faults, fmt.Sprintf("%s's %s names server/%s's %s, declared in %v, which go test does not build here with tags %q", gate, faultLabel, test.Package, name, files, test.Tags))
 					}
-					checked = append(checked, gate+" "+testCase.String()+" "+test.Package+" "+name)
+					checked = append(checked, gate+" "+checkedLabel+" "+test.Package+" "+name)
 				}
 			}
 		}
@@ -182,6 +190,13 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"M10 FS-114's purge . TestFileClusterSuitePassesOnT3",
 		"M10 FS-114's drop . TestFileClusterSuitePassesOnT3",
 		"every FS-55 ./local/fs55 TestFs55OnServerBinaries",
+		// items, which no sidecart3 gate test holds before M4's
+		"M2 item ./sidecart3 TestT3StoreClockReadsAgesOnTheScheduleClock",
+		"M2 item ./sidecart3 TestFs1HistoriesLinearizeOnT3",
+		"M2 item ./api TestAdmissionSignersOnT3",
+		"M3 item ./sidecart3 TestFi12RunsAfterEveryStepOnT3",
+		"next item . TestFileClustersConformOnTheLocalStack",
+		"next item ./sidecart3 TestT3LayoutTakesRequestsOnAFakeClock",
 	} {
 		if !slices.Contains(checked, want) {
 			t.Errorf("%q was not checked; checked %v", want, checked)
@@ -250,6 +265,49 @@ func TestGateSweepCheckFailsAConventionTestBehindATagTheConventionLacks(t *testi
 	}
 	if len(checked) != 0 || len(faults) != 1 || !strings.Contains(faults[0], "TestFs1OnT3, which no test file there declares") {
 		t.Errorf("a sweep's test no file declares: checked %v, found %q", checked, faults)
+	}
+}
+
+// The check holds an item's server tests as it holds a row's, with nothing left out, since an item names its tests
+// outright. A fixture server holds the store clock's T3 test in sidecart3 behind the local stack, as the real file has
+// it, and an M2 item names it beside a test nobody wrote. Under the convention's tags from before QD-1085 the check
+// finds the written test built out, under today's it finds that test clean, and the unwritten one fails either way.
+func TestGateSweepCheckHoldsAnItemsServerTestsToTheirTags(t *testing.T) {
+	catalog := fault.DefaultCatalog()
+	for _, c := range []struct {
+		tags     string
+		builtOut bool
+	}{
+		{tags: gateConventionT3TagsBeforeLocalStack, builtOut: true},
+		{tags: gateConventionT3Tags, builtOut: false},
+	} {
+		serverDirectory := t.TempDir()
+		directory := filepath.Join(serverDirectory, "sidecart3")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		content := "//go:build sidecar_localstack\n\npackage sidecart3\n\nimport \"testing\"\n\nfunc TestT3StoreClockReadsAgesOnTheScheduleClock(t *testing.T) {\n}\n"
+		if err := os.WriteFile(filepath.Join(directory, "clock_t3_test.go"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gates := &gatesFile{Gates: map[string][]gateRow{"M2": {{
+			Item:  "T3's store clock",
+			Tests: []gateTest{{Repo: "server", Package: "./sidecart3", Tags: c.tags, Stores: true, Names: []string{"TestT3StoreClockReadsAgesOnTheScheduleClock", "TestT3StoreClockNobodyWrote"}}},
+		}}}}
+		checked, faults, err := checkGateServerTestsDeclared(gates, catalog, serverDirectory)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(checked, []string{"M2 item ./sidecart3 TestT3StoreClockReadsAgesOnTheScheduleClock"}) {
+			t.Errorf("under tags %q: checked %v, want the written test alone", c.tags, checked)
+		}
+		wantFaults := []string{`M2's item "T3's store clock" names server/./sidecart3's TestT3StoreClockNobodyWrote, which no test file there declares`}
+		if c.builtOut {
+			wantFaults = append([]string{fmt.Sprintf(`M2's item "T3's store clock" names server/./sidecart3's TestT3StoreClockReadsAgesOnTheScheduleClock, declared in [clock_t3_test.go], which go test does not build here with tags %q`, c.tags)}, wantFaults...)
+		}
+		if !slices.Equal(faults, wantFaults) {
+			t.Errorf("under tags %q: found %q, want %q", c.tags, faults, wantFaults)
+		}
 	}
 }
 
