@@ -11,7 +11,8 @@ import (
 // write for the DNS permission (route_authz.go, route_permission.go). The dns block serves the sidecar routes,
 // POST /dns/records and GET /dns/zone, beside them.
 
-// GET /network/dns: label, alias, records and quota.
+// GET /network/dns: label, alias, records and quota, the custom hosts, and each verified domain's challenge target
+// and the DKIM CNAMEs it owes (QD-1130), which the read looks up after its transaction (model.GetNetworkDns).
 func GetNetworkDns(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(controller.GetNetworkDns, w, r)
 }

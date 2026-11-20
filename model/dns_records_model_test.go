@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -738,6 +740,146 @@ func TestDnsRecordsDecisionSpentOnce(t *testing.T) {
 		}
 		if world.serial(t, ctx) != serial {
 			t.Fatalf("a spent decision wrote")
+		}
+	})
+}
+
+// The DKIM CNAMEs GET /network/dns names for domain now, failing the test when the domain is not listed.
+func testNetworkDnsDkimCnames(t testing.TB, ctx context.Context, root string, networkId server.Id, domain string) []sidecar.DnsDkimCname {
+	t.Helper()
+	view, err := GetNetworkDns(ctx, root, networkId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, customDomain := range view.CustomDomains {
+		if customDomain.Domain == domain {
+			return customDomain.DkimCnames
+		}
+	}
+	t.Fatalf("%s is not among the custom domains %+v", domain, view.CustomDomains)
+	return nil
+}
+
+// GET /network/dns names the CNAME a custom domain owes for a published selector of a sending sidecar, <sel>._domainkey
+// .<domain> to <sel>._domainkey.<label>.<root>, while the resolver does not find the selector's key under the domain,
+// and stops once the customer's CNAME, or a delegated _domainkey, answers it (QD-1130). A failed lookup or a record of
+// another key reads owed; the network's own selector is never named nor looked up; a retired selector is owed nothing.
+func TestNetworkDnsNamesOwedDkimCnamesUntilPublished(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newSmtpApiWorld(t, ctx)
+		testSmtpVerifyDomain(ctx, world.networkId, testSmtpCustomDomain)
+		// the token domain-verify mints at the first verification (§7.6), which GET /network/dns lists the domain by
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_domain SET acme_token = $3 WHERE network_id = $1 AND domain = $2`,
+				world.networkId, testSmtpCustomDomain, strings.Repeat("a", 26),
+			))
+		})
+		testSmtpCustomDomainClock(t, NetworkTierTeam, time.Time{}, false)
+		resolver := newTestDomainResolver()
+		SetNetworkDomainResolver(resolver)
+		t.Cleanup(func() { SetNetworkDomainResolver(nil) })
+
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); len(cnames) != 0 {
+			t.Fatalf("owed before any selector: %+v", cnames)
+		}
+		signer := newTestSmtpCustomDomainSigner(t, testSmtpCustomDomain)
+		if _, err := testSmtpPublishSigner(t, ctx, world.caller, signer); err != nil {
+			t.Fatal(err)
+		}
+		// the network's own selector, which its own zone answers
+		if _, err := world.call(ctx, []string{smtpTestSelector()}, world.domain, nil); err != nil {
+			t.Fatal(err)
+		}
+		name := signer.selector + "._domainkey." + testSmtpCustomDomain
+		owed := []sidecar.DnsDkimCname{{Name: name, Target: signer.selector + "._domainkey." + world.domain}}
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); !slices.Equal(cnames, owed) {
+			t.Fatalf("owed %+v, want %+v", cnames, owed)
+		}
+		resolver.stateLock.Lock()
+		lookups := slices.Clone(resolver.lookups)
+		resolver.stateLock.Unlock()
+		if !slices.Equal(lookups, []string{name}) {
+			t.Fatalf("looked up %v", lookups)
+		}
+
+		// a lookup that fails, and a record of another key, read owed
+		resolver.fail(errors.New("synthetic resolver failure"))
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); !slices.Equal(cnames, owed) {
+			t.Fatalf("a failed lookup: %+v", cnames)
+		}
+		resolver.fail(nil)
+		resolver.set(name, smtpDkimRecordValue(newTestSmtpCustomDomainSigner(t, testSmtpCustomDomain).publicKey(t)))
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); !slices.Equal(cnames, owed) {
+			t.Fatalf("another key: %+v", cnames)
+		}
+
+		// the customer's CNAME, which the resolver follows to the record the publish wrote
+		resolver.set(name, smtpDkimRecordValue(signer.publicKey(t)))
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); len(cnames) != 0 {
+			t.Fatalf("owed once published: %+v", cnames)
+		}
+
+		// a rotation's new selector is owed in its turn, and the selector it retired is owed nothing
+		resolver.set(name)
+		next := newTestSmtpCustomDomainSigner(t, testSmtpCustomDomain)
+		if _, err := testSmtpPublishSigner(t, ctx, world.caller, next); err != nil {
+			t.Fatal(err)
+		}
+		_, err := PublishSmtpDkimKeys(ctx, world.caller, &sidecar.SmtpDkimKeysArgs{
+			Retire: []*sidecar.SmtpDkimKeyRetire{{Selector: signer.selector, Domain: testSmtpCustomDomain}},
+		}, smtpTestAllowed, server.NowUtc(), DefaultSmtpApiSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		owed = []sidecar.DnsDkimCname{{Name: next.selector + "._domainkey." + testSmtpCustomDomain, Target: next.selector + "._domainkey." + world.domain}}
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); !slices.Equal(cnames, owed) {
+			t.Fatalf("after the rotation %+v, want %+v", cnames, owed)
+		}
+	})
+}
+
+// With every lookup past the read's bound, or no time for one, each selector reads owed, never hidden.
+func TestNetworkDnsOwedDkimCnamesUnlookedReadOwed(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newSmtpApiWorld(t, ctx)
+		testSmtpVerifyDomain(ctx, world.networkId, testSmtpCustomDomain)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_domain SET acme_token = $3 WHERE network_id = $1 AND domain = $2`,
+				world.networkId, testSmtpCustomDomain, strings.Repeat("b", 26),
+			))
+		})
+		testSmtpCustomDomainClock(t, NetworkTierTeam, time.Time{}, false)
+		resolver := newTestDomainResolver()
+		SetNetworkDomainResolver(resolver)
+		t.Cleanup(func() { SetNetworkDomainResolver(nil) })
+		signer := newTestSmtpCustomDomainSigner(t, testSmtpCustomDomain)
+		if _, err := testSmtpPublishSigner(t, ctx, world.caller, signer); err != nil {
+			t.Fatal(err)
+		}
+		resolver.set(signer.selector+"._domainkey."+testSmtpCustomDomain, smtpDkimRecordValue(signer.publicKey(t)))
+		for _, adjust := range []func(settings *DnsRecordsSettings){
+			func(settings *DnsRecordsSettings) { settings.DkimCnameLookupMaxCount = 0 },
+			func(settings *DnsRecordsSettings) { settings.DkimCnameLookupTimeout = 0 },
+		} {
+			settings := DefaultDnsRecordsSettings()
+			adjust(settings)
+			restore := Testing_SetDnsRecordsSettings(settings)
+			if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); len(cnames) != 1 {
+				t.Errorf("%+v: %+v", settings, cnames)
+			}
+			restore()
+		}
+		if resolver.lookupCount() != 0 {
+			t.Errorf("%d lookups past the bound", resolver.lookupCount())
+		}
+		if cnames := testNetworkDnsDkimCnames(t, ctx, world.root, world.networkId, testSmtpCustomDomain); len(cnames) != 0 {
+			t.Errorf("answered, yet owed %+v", cnames)
 		}
 	})
 }
