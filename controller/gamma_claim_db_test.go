@@ -299,7 +299,7 @@ func TestGammaChargeWaitsForTheDailyCapToRefill(t *testing.T) {
 		status := gammaDbStatus(t, clientSession, intent)
 		connect.AssertEqual(t, status.Status, gammaStatusSeen)
 		connect.AssertEqual(t, status.Error.Code, GammaErrorCodeDailyCapExceeded)
-		connect.AssertEqual(t, status.Error.Message, "The deposit's daily spend cap allows 10 gamma now and refills over a day, so this payment goes through in about 15 hours, on its own. To pay at once, raise the cap.")
+		connect.AssertEqual(t, status.Error.Message, "The deposit's daily spend cap allows 10 gamma now and refills over a day, so this payment goes through in about 15 hours, on its own. To pay sooner, raise the cap, which refills faster, or remove it.")
 		// a mint into the existing deposit keeps its cap
 		again := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib})
 		connect.AssertEqual(t, again.MintDailyCapGamma, "")

@@ -1147,12 +1147,15 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 		result.Status = gammaStatusSeen
 		result.Error = &CryptoPaymentError{Code: GammaErrorCodeDailyCapTooLow, Message: fmt.Sprintf("The deposit's daily spend cap is below the price. Raise it to at least %s gamma.", gammaFormatUnits(amount))}
 	case spendable < amount:
-		// the cap refills; the charge goes when it allows the price
+		// the cap refills; the charge goes when it allows the price. A
+		// changed cap keeps what it allows now (gamma.rs
+		// do_set_gamma_deposit_daily_spend_cap), so a higher cap only
+		// refills faster; a removed cap allows the whole balance.
 		result.Status = gammaStatusSeen
 		if hotkey.DepositDailyCap != nil {
 			wait := gammaCapRefillWait(*hotkey.DepositDailyCap, spendable, amount)
 			result.Error = &CryptoPaymentError{Code: GammaErrorCodeDailyCapExceeded, Message: fmt.Sprintf(
-				"The deposit's daily spend cap allows %s gamma now and refills over a day, so this payment goes through in %s, on its own. To pay at once, raise the cap.",
+				"The deposit's daily spend cap allows %s gamma now and refills over a day, so this payment goes through in %s, on its own. To pay sooner, raise the cap, which refills faster, or remove it.",
 				gammaFormatUnits(max(spendable, 0)), gammaWaitText(wait),
 			)}
 		}
