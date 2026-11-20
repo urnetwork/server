@@ -200,6 +200,38 @@ func TestMigrationCensusOwnerBoundsRefuseWithoutPartialPlan(t *testing.T) {
 	}
 }
 
+// Every expression is four bytes including the outer spaces. With two per
+// batch, the decimal offset widens at batch 5 and the index widens at batch 10.
+func TestMigrationCensusStatementBytesIncludeFrameDigitsAndSeparators(t *testing.T) {
+	query := "WITH version AS (SELECT 1) SELECT 'a'," + strings.Repeat("'é',", 23) + "'a' FROM version;"
+	settings := DefaultMigrationCensusSettings()
+	settings.MaximumColumnsPerStatement = 2
+	control, err := planMigrationCensus(query, settings)
+	if err != nil || len(control.batches) != 13 {
+		t.Fatal("expected twelve pairs followed by one column", err)
+	}
+	for _, index := range []int{5, 10} {
+		boundary := control.batches[index]
+		if len(boundary.query) != len(control.batches[index-1].query)+1 {
+			t.Fatal("fixture did not cross a decimal frame boundary", index)
+		}
+		for _, shortBy := range []int{0, 1} {
+			settings.MaximumStatementBytes = len(boundary.query) - shortBy
+			plan, err := planMigrationCensus(query, settings)
+			if err != nil || len(plan.batches) <= index {
+				t.Fatal("bounded plan omitted the boundary batch", index, err)
+			}
+			batch := plan.batches[index]
+			if batch.offset != boundary.offset || batch.columns != 2-shortBy || len(batch.query) > settings.MaximumStatementBytes {
+				t.Fatalf("batch %d at %d bytes has offset %d and %d columns", index, settings.MaximumStatementBytes, batch.offset, batch.columns)
+			}
+			if shortBy == 0 && batch.query != boundary.query {
+				t.Fatal("an exact fit changed the original batch SQL", index)
+			}
+		}
+	}
+}
+
 // Exact output reassembly preserves ordinary text, booleans and identities.
 func TestMigrationCensusFramesReassembleOnlyCompleteObservation(t *testing.T) {
 	plan, query := migrationCensusTestPlan(t)
