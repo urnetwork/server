@@ -31,6 +31,14 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Whether status is want, its strict domains in order and never null, as GET /mail/status answers them.
+func testMailStatusIs(status *MailStatus, want MailStatus) bool {
+	if status == nil || status.StrictDomains == nil || !slices.Equal(status.StrictDomains, want.StrictDomains) {
+		return false
+	}
+	return status.Enabled == want.Enabled && status.StorageFull == want.StorageFull && status.Spent == want.Spent && status.DirectMx == want.DirectMx
+}
+
 // The route name stands at.
 func testMailRoute(t testing.TB, ctx context.Context, name string) *MailRoute {
 	t.Helper()
@@ -95,7 +103,7 @@ func TestMailEnableRoutesTheNetworkWithinOneProjection(t *testing.T) {
 		_, otherApex := testDnsNetwork(t, ctx, root)
 		otherLabel := strings.TrimSuffix(otherApex, "."+root)
 
-		if status, err := GetMailStatus(ctx, networkId); err != nil || *status != (MailStatus{}) {
+		if status, err := GetMailStatus(ctx, networkId); err != nil || !testMailStatusIs(status, MailStatus{}) {
 			t.Fatalf("status before: %+v %v", status, err)
 		}
 		mailNetwork, err := EnableMail(ctx, networkId, root)
@@ -119,7 +127,7 @@ func TestMailEnableRoutesTheNetworkWithinOneProjection(t *testing.T) {
 		if !mx {
 			t.Error("the zone names no mail host after the enable")
 		}
-		if status, err := GetMailStatus(ctx, networkId); err != nil || *status != (MailStatus{Enabled: true}) {
+		if status, err := GetMailStatus(ctx, networkId); err != nil || !testMailStatusIs(status, MailStatus{Enabled: true}) {
 			t.Fatalf("status after: %+v %v", status, err)
 		}
 
@@ -645,4 +653,92 @@ func TestMailHostKeyRemovalEffectIsRegistered(t *testing.T) {
 	if removalEffects[RemovalEffectMailHostKey] == nil {
 		t.Fatal("no mail_host_key removal effect")
 	}
+}
+
+// GET /mail/status and the gate's facts name one set of strict domains at every read (QD-1129), from the network's
+// strict-mode MX hosts as POST /network/dns/custom-host-add maps them and custom-host-remove unmaps them, so the
+// envelope the edge derives for a From and the bounce address a sending sidecar picks agree: a strict domain at
+// b.<domain>, a custom domain that is not strict and a subdomain under a strict domain at b.<net>.<root>, and a
+// domain whose MX host is unmapped between two reads back at b.<net>.<root> at both ends. Every name is synthetic.
+func TestMailStatusAndTheGateNameOneStrictSet(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestDnsCustomHostWorld(t, ctx)
+		subdomain := "mail." + world.domain
+		plain := "plain" + strings.TrimPrefix(world.domain, "corp")
+		testDnsNetworkDomain(t, ctx, world.networkId, subdomain, true)
+		testDnsNetworkDomain(t, ctx, world.networkId, plain, true)
+		zone := strings.TrimSuffix(world.apex, ".")
+		networkEnvelope := "b." + zone
+
+		// one read at each end: the gate's facts as smtpedge loads them and the status as api answers it
+		read := func(name string, want []string, envelopes map[string]string) {
+			t.Helper()
+			facts, err := GetSmtpGateFacts(ctx, world.networkId, world.root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := GetMailStatus(ctx, world.networkId)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.StrictDomains == nil || !slices.Equal(status.StrictDomains, want) || !slices.Equal(facts.StrictDomains, want) {
+				t.Fatalf("%s: GET /mail/status names %v and the gate %v, want %v", name, status.StrictDomains, facts.StrictDomains, want)
+			}
+			for from, envelope := range envelopes {
+				edge := sidecar.SmtpEnvelopeDomain(zone, sidecar.SmtpStrictCustomDomain(from, facts.StrictDomains, world.root))
+				sender := sidecar.SmtpEnvelopeDomain(zone, sidecar.SmtpStrictCustomDomain(from, status.StrictDomains, world.root))
+				if edge != envelope || sender != envelope {
+					t.Errorf("%s, From %s: the edge derives %s and the sender sends at %s, want %s", name, from, edge, sender, envelope)
+				}
+			}
+		}
+		mapMx := func(host string) {
+			t.Helper()
+			answer, err := world.add(ctx, &sidecar.DnsCustomHostAddRequest{Host: host, Owner: "mx." + world.apex})
+			if err != nil || answer.CustomHost.State != sidecar.DnsCustomHostStateActive {
+				t.Fatalf("mapping %s: %+v, %v", host, answer, err)
+			}
+		}
+		unmapMx := func(host string) {
+			t.Helper()
+			answer, err := RemoveDnsCustomHost(ctx, &DnsCustomHostRequest{
+				Root: world.root, NetworkId: world.networkId, Remove: &sidecar.DnsCustomHostRemoveRequest{Host: host}, ActorKind: AdminEventActorSystem,
+			})
+			if err != nil || !answer.Removed {
+				t.Fatalf("unmapping %s: %+v, %v", host, answer, err)
+			}
+		}
+
+		read("no strict-mode MX host", []string{}, map[string]string{world.domain: networkEnvelope, zone: networkEnvelope})
+
+		// the customer's MX host for its domain: the domain is strict, and its subdomain and another domain are not
+		mapMx("mx1." + world.domain)
+		read("an MX host under the domain", []string{world.domain}, map[string]string{
+			world.domain: "b." + world.domain,
+			subdomain:    networkEnvelope,
+			plain:        networkEnvelope,
+			zone:         networkEnvelope,
+		})
+
+		// an MX host under the subdomain makes both strict
+		mapMx("mx." + subdomain)
+		read("an MX host under the subdomain", []string{world.domain, subdomain}, map[string]string{
+			world.domain: "b." + world.domain,
+			subdomain:    "b." + subdomain,
+			plain:        networkEnvelope,
+		})
+
+		// the domain's own MX host unmapped between two reads: the subdomain's host still stands at or under it
+		unmapMx("mx1." + world.domain)
+		read("the domain's MX host unmapped", []string{world.domain, subdomain}, map[string]string{
+			world.domain: "b." + world.domain,
+			subdomain:    "b." + subdomain,
+		})
+		unmapMx("mx." + subdomain)
+		read("every MX host unmapped", []string{}, map[string]string{
+			world.domain: networkEnvelope,
+			subdomain:    networkEnvelope,
+		})
+	})
 }

@@ -3,8 +3,9 @@
 package model
 
 // §14.6's Team custom domains, their model half, on a private database (SMTP-M9-34; D-SMTP-15, D-SMTP-5, §20.7,
-// QD-1080, QD-1129): the gate's facts carry a network's verified domains, their withhold time and, only while strict
-// mode's envelope is on, the strict ones; POST /smtp/dkim-keys takes a selector under a verified domain only while
+// QD-1080, QD-1129): the gate's facts carry a network's verified domains, their withhold time and, while strict mode's
+// envelope is on, as it is by default, the strict ones, which GET /mail/status names alike; POST /smtp/dkim-keys takes
+// a selector under a verified domain only while
 // the network may send From it, and writes the network's delegated _domainkey row with it; the delegated zone answers
 // the network's own selectors and no other network's, so at a receiver's checker its mail passes DMARC at adkim=s and
 // another network's fails; and removing or dropping the domain withdraws the delegation, so a network that verifies it
@@ -153,7 +154,8 @@ func newTestSmtpOtherNetwork(t testing.TB, ctx context.Context, root string) (ca
 }
 
 // The gate's facts carry the verified domains and no unverified one, the withhold time from the downgrade clock, and
-// the strict domains only while strict mode's envelope is on: those at or above an active strict-mode MX host.
+// the strict domains while strict mode's envelope is on, as it is by default: those at or above an active strict-mode
+// MX host. GET /mail/status names the same set under the same settings, and none while the envelope is off.
 func TestSmtpGateFactsCarryTheCustomDomains(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -182,24 +184,33 @@ func TestSmtpGateFactsCarryTheCustomDomains(t *testing.T) {
 		if !slices.Equal(facts.VerifiedDomains, []string{testSmtpCustomDomain, "plain.example"}) {
 			t.Fatalf("verified %v", facts.VerifiedDomains)
 		}
-		if len(facts.StrictDomains) != 0 {
-			t.Fatalf("strict mode's envelope is off, yet the feed names %v", facts.StrictDomains)
+		if !DefaultSmtpCustomDomainSettings().StrictEnvelope || !slices.Equal(facts.StrictDomains, []string{testSmtpCustomDomain}) {
+			t.Fatalf("strict %v", facts.StrictDomains)
 		}
 		if want := downgradeTime.Add(DefaultSmtpCustomDomainSettings().DowngradeGrace); !facts.CustomDomainWithholdTime.Equal(want) {
 			t.Fatalf("withhold at %v, want %v", facts.CustomDomainWithholdTime, want)
 		}
+		status, err := GetMailStatus(ctx, world.networkId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(status.StrictDomains, facts.StrictDomains) {
+			t.Fatalf("GET /mail/status names %v and the gate %v", status.StrictDomains, facts.StrictDomains)
+		}
 
+		// with the envelope off, neither names any, so every custom domain keeps b.<net>.<root> at both ends
 		settings := DefaultSmtpCustomDomainSettings()
-		settings.StrictEnvelope = true
+		settings.StrictEnvelope = false
 		facts, err = GetSmtpGateFactsWithSettings(ctx, world.networkId, world.root, settings)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(facts.StrictDomains, []string{testSmtpCustomDomain}) {
-			t.Fatalf("strict %v", facts.StrictDomains)
+		if facts.StrictDomains == nil || len(facts.StrictDomains) != 0 {
+			t.Fatalf("strict mode's envelope is off, yet the feed names %v", facts.StrictDomains)
 		}
-		if !slices.Equal(GetSmtpStrictCustomDomains(ctx, world.networkId, settings), facts.StrictDomains) {
-			t.Fatal("GET /mail/status's set and the gate's differ")
+		status, err = GetMailStatusWithSettings(ctx, world.networkId, settings)
+		if err != nil || status.StrictDomains == nil || len(status.StrictDomains) != 0 {
+			t.Fatalf("strict mode's envelope is off, yet GET /mail/status names %+v, %v", status, err)
 		}
 
 		// a network that left no tier carries no withhold time

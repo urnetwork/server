@@ -10,9 +10,10 @@ package model
 //	             mode (GetSmtpStrictCustomDomains)
 //	strict       a verified domain at or above an active strict-mode MX host the network maps (§12.8 step 4; QD-1129),
 //	             whose envelope is b.<domain>. The gate's feed and GET /mail/status must name the same set, since an
-//	             envelope the edge does not expect fails its part and cuts the connection, so both read it here, and
-//	             it stays empty while SmtpCustomDomainSettings.StrictEnvelope is off, until MAIL's bounce address
-//	             follows it
+//	             envelope the edge does not expect fails its part and cuts the connection, so both read it here
+//	             (GetSmtpStrictCustomDomains, under DefaultSmtpCustomDomainSettings in both), and MAIL's bounce address
+//	             follows it (sidecar mail_bounce.go). Mapping the MX host moves the envelope whether or not mail.strict
+//	             is signed yet, since api never reads the config repo (§7.9)
 //	selectors    POST /smtp/dkim-keys takes a selector with d=<domain> only for a verified domain outside the root
 //	             the gate would send From now (GetSmtpDkimCustomDomains, smtpedgeservice.SmtpCustomDomainSendable),
 //	             its record written at <sel>._domainkey.<net>.<root> as the network's own are
@@ -50,15 +51,16 @@ type SmtpCustomDomainSettings struct {
 	// web hosts are withheld together (owner decision 420).
 	DowngradeGrace time.Duration
 	// Whether strict mode's envelope is on: the gate's feed and GET /mail/status name the strict domains
-	// (QD-1129). Off by default until MAIL's bounce address follows the set, since the edge deriving b.<domain>
-	// while the sender's MAIL FROM is at b.<net>.<root> fails the envelope's part and cuts the connection.
+	// (QD-1129). On, since MAIL's bounce address follows the set GET /mail/status names. Both read it under the
+	// same settings, so turning it off empties the set at the edge and at the sender together, and every custom
+	// domain keeps b.<net>.<root>.
 	StrictEnvelope bool
 }
 
 func DefaultSmtpCustomDomainSettings() *SmtpCustomDomainSettings {
 	return &SmtpCustomDomainSettings{
 		DowngradeGrace: DefaultNetworkDowngradeSettings().DowngradeGrace,
-		StrictEnvelope: false,
+		StrictEnvelope: true,
 	}
 }
 

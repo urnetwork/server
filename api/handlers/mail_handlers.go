@@ -76,9 +76,18 @@ func MailEnable(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireClient(router.PrivateErrors(impl), w, r)
 }
 
-// GET /mail/status: {enabled, storage_full, spent, direct_mx} for the bearer's
-// network (model.MailStatus). A receiver reads it at most every 30 s for
-// RCPT's 452 4.2.2.
+// GET /mail/status: {enabled, storage_full, spent, direct_mx, strict_domains}
+// for the bearer's network (model.MailStatus). A receiver reads it at most
+// every 30 s for RCPT's 452 4.2.2. A sending sidecar reads strict_domains, the
+// network's verified custom domains in strict mode (QD-1129), at each send of
+// a custom domain's mail: the set smtpedge's gate derives envelope_domain from,
+// read through the same model function (model.GetSmtpStrictCustomDomains), so
+// the sidecar's MAIL FROM, bounces+<token>@b.<domain> for a strict domain and
+// b.<net>.<root> for any other, is where the edge holds Z4 to. A domain is
+// strict while the network maps an active strict-mode MX host at or under it
+// (POST /network/dns/custom-host-add naming the network's mail host): mapping
+// it moves the envelope whether or not mail.strict is signed yet, and
+// removing it moves the envelope back.
 func GetMailStatus(w http.ResponseWriter, r *http.Request) {
 	if !mailRoutesOpen() {
 		server.WriteGateClosed(w, 0)

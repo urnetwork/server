@@ -622,8 +622,9 @@ func EnableMail(ctx context.Context, networkId server.Id, root string) (*MailNet
 }
 
 // GET /mail/status's body (QD-478): what a receiver reads at most every 30 s
-// for RCPT's 452 4.2.2, and what a device that missed a receiver_needed hint
-// reads direct_mx from.
+// for RCPT's 452 4.2.2, what a device that missed a receiver_needed hint
+// reads direct_mx from, and what a sending sidecar reads the network's strict
+// custom domains from (QD-1129).
 type MailStatus struct {
 	// The network has a mail_network row.
 	Enabled bool `json:"enabled"`
@@ -633,12 +634,28 @@ type MailStatus struct {
 	Spent bool `json:"spent"`
 	// The network names a direct MX, in any state (§15.4).
 	DirectMx bool `json:"direct_mx"`
+	// The network's verified custom domains in strict mode (QD-1129): each at
+	// or above an active strict-mode MX host the network maps (§12.8 step 4),
+	// whose mail's envelope is b.<domain>. The set smtpedge's gate derives
+	// envelope_domain from (GetSmtpGateFacts), read through the same function
+	// under the same settings, so the edge and the sender's bounce address
+	// agree. Lowercase with no final dot, never null.
+	StrictDomains []string `json:"strict_domains"`
 }
 
 // The network's mail status. A binary that does not link MG7 answers a status
-// with mail off.
+// with mail off, and the strict domains as the gate's facts carry them.
 func GetMailStatus(ctx context.Context, networkId server.Id) (*MailStatus, error) {
-	status := &MailStatus{}
+	return GetMailStatusWithSettings(ctx, networkId, DefaultSmtpCustomDomainSettings())
+}
+
+// GetMailStatus with the custom domains' settings, which must be the ones the
+// gate's facts are read under (GetSmtpGateFactsWithSettings).
+func GetMailStatusWithSettings(ctx context.Context, networkId server.Id, settings *SmtpCustomDomainSettings) (*MailStatus, error) {
+	status := &MailStatus{
+		// the gate's own read: one set for the edge and the sender (QD-1129)
+		StrictDomains: GetSmtpStrictCustomDomains(ctx, networkId, settings),
+	}
 	if !server.SidecarMg7Linked() {
 		return status, nil
 	}

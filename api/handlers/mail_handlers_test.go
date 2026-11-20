@@ -6,7 +6,8 @@ package handlers
 // MAIL-M7-22, QD-478) on a private database and Redis: a client's bearer turns
 // mail on once and reads its status; a closed mxedge gate and a process with
 // no dns root answer 503 with nothing written; a bearer with no client is
-// refused.
+// refused. The status names the network's strict custom domains (QD-1129),
+// never null, the set the gate's facts carry.
 
 import (
 	"context"
@@ -14,8 +15,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -81,6 +85,9 @@ func TestMailEnableAndStatusRoutes(t *testing.T) {
 		if status != http.StatusOK || body["enabled"] != false || body["storage_full"] != false || body["spent"] != false || body["direct_mx"] != false {
 			t.Fatalf("status before the enable: %d %v", status, body)
 		}
+		if strictDomains, ok := body["strict_domains"].([]any); !ok || len(strictDomains) != 0 {
+			t.Fatalf("strict domains before any: %v", body)
+		}
 
 		defer server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  mxedge: {enabled: true, networks: [%q]}\n", networkId))()
 		if status, _ := testMailCall(t, ctx, "POST", "/mail/enable", ""); status != http.StatusUnauthorized {
@@ -110,6 +117,34 @@ func TestMailEnableAndStatusRoutes(t *testing.T) {
 		status, body = testMailCall(t, ctx, "GET", "/mail/status", clientBearer)
 		if status != http.StatusOK || body["enabled"] != true || body["direct_mx"] != false {
 			t.Fatalf("status after the enable: %d %v", status, body)
+		}
+
+		// a verified domain whose strict-mode MX host the network maps (§12.8 step 4): the status names it, as the
+		// gate's facts do, whether or not mail.strict is signed, which api never reads
+		domain := "brand" + strings.ReplaceAll(networkId.String()[24:], "-", "") + ".example"
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_domain (network_id, domain, challenge, verify_time, check_time) VALUES ($1, $2, $3, $4, $4)`,
+				networkId, domain, "challenge", server.NowUtc(),
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_dns_custom_host (host, root, network_id, owner, state, caa_mode, effective_caa_chain_ok, create_time)
+					VALUES ($1, $2, $3, $4, $5, $6, false, $7)
+				`,
+				"mx1."+domain, root, networkId, "mx."+label+"."+root, sidecar.DnsCustomHostStateActive, sidecar.DnsCustomHostModeStrong, server.NowUtc(),
+			))
+		})
+		status, body = testMailCall(t, ctx, "GET", "/mail/status", clientBearer)
+		strictDomains, _ := body["strict_domains"].([]any)
+		if status != http.StatusOK || len(strictDomains) != 1 || strictDomains[0] != domain {
+			t.Fatalf("status with a strict domain: %d %v", status, body)
+		}
+		facts, err := model.GetSmtpGateFacts(ctx, networkId, root)
+		if err != nil || !slices.Equal(facts.StrictDomains, []string{domain}) {
+			t.Fatalf("the gate's facts %+v, %v", facts, err)
 		}
 
 		// a spent network at its storage limit says so, which a receiver turns into 452 4.2.2
