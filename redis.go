@@ -227,6 +227,8 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 			maxActiveConnections = 0
 		}
 
+		skipConnCheckWithin := redisSkipConnCheckWithin(maxRetries)
+
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
@@ -241,15 +243,16 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 
 		if cluster {
 			options := &redis.ClusterOptions{
-				Addrs:           []string{authority},
-				Password:        password,
-				MaxRetries:      maxRetries,
-				MinIdleConns:    minConnections,
-				MaxIdleConns:    maxConnections,
-				PoolSize:        maxConnections,
-				MaxActiveConns:  maxActiveConnections,
-				ConnMaxLifetime: connectionMaxLifetimeDuration,
-				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
+				Addrs:               []string{authority},
+				Password:            password,
+				MaxRetries:          maxRetries,
+				MinIdleConns:        minConnections,
+				MaxIdleConns:        maxConnections,
+				PoolSize:            maxConnections,
+				MaxActiveConns:      maxActiveConnections,
+				ConnMaxLifetime:     connectionMaxLifetimeDuration,
+				ConnMaxIdleTime:     connectionMaxIdleTimeDuration,
+				SkipConnCheckWithin: skipConnCheckWithin,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
 				ContextTimeoutEnabled: self.socketDeadlineFromContext(),
@@ -277,13 +280,14 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				// Addr: "192.168.208.135:6379",
 				// Password: "",
 				// DB: 0,
-				MaxRetries:      maxRetries,
-				MinIdleConns:    minConnections,
-				MaxIdleConns:    maxConnections,
-				PoolSize:        maxConnections,
-				MaxActiveConns:  maxActiveConnections,
-				ConnMaxLifetime: connectionMaxLifetimeDuration,
-				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
+				MaxRetries:          maxRetries,
+				MinIdleConns:        minConnections,
+				MaxIdleConns:        maxConnections,
+				PoolSize:            maxConnections,
+				MaxActiveConns:      maxActiveConnections,
+				ConnMaxLifetime:     connectionMaxLifetimeDuration,
+				ConnMaxIdleTime:     connectionMaxIdleTimeDuration,
+				SkipConnCheckWithin: skipConnCheckWithin,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
 				ContextTimeoutEnabled: self.socketDeadlineFromContext(),
@@ -302,6 +306,30 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 	}
 	return self.client
 }
+
+// How long after a pooled connection was put back its next checkout skips
+// go-redis's socket check (SkipConnCheckWithin; third_party/go-redis
+// URNETWORK.md; LBALTOPT2 R19), where a pool may skip it.
+const redisSkipConnCheckWindow = time.Second
+
+// The SkipConnCheckWithin of a pool whose commands go-redis retries
+// maxRetries times. go-redis checks a pooled connection's socket at every
+// checkout, a non-blocking peek, about 0.8% of connect's CPU on 2026-11-20
+// (LBALTOPT2 §3.3). A pool that retries its commands skips the check for a
+// connection put back within redisSkipConnCheckWindow: one the server closed
+// within the window fails the command it serves with EOF, which go-redis
+// retries on another connection, and that removal has every checkout check
+// again for the window, so one command per pool, not each, meets a closed
+// connection. A pool without command retries, maxRetries -1 or 0, checks
+// every checkout: there the closed connection's failure would be its
+// caller's, and its callers count on the check (redisWithClient).
+func redisSkipConnCheckWithin(maxRetries int) time.Duration {
+	if maxRetries <= 0 {
+		return 0
+	}
+	return redisSkipConnCheckWindow
+}
+
 func (self *safeRedisClient) current() redis.UniversalClient {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()

@@ -1,0 +1,745 @@
+package redis
+
+import (
+	"crypto/tls"
+	"errors"
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/redis/go-redis/v9/internal"
+	"github.com/redis/go-redis/v9/maintnotifications"
+)
+
+func TestParseURL(t *testing.T) {
+	cases := []struct {
+		url string
+		o   *Options // expected value
+		err error
+	}{
+		{
+			url: "redis://localhost:123/1",
+			o:   &Options{Addr: "localhost:123", DB: 1},
+		}, {
+			url: "redis://localhost:123",
+			o:   &Options{Addr: "localhost:123"},
+		}, {
+			url: "redis://localhost/1",
+			o:   &Options{Addr: "localhost:6379", DB: 1},
+		}, {
+			url: "redis://12345",
+			o:   &Options{Addr: "12345:6379"},
+		}, {
+			// IPv6 literal without a port keeps a single pair of brackets
+			url: "redis://[::1]",
+			o:   &Options{Addr: "[::1]:6379"},
+		}, {
+			// IPv6 literal with a port
+			url: "redis://[::1]:6380",
+			o:   &Options{Addr: "[::1]:6380"},
+		}, {
+			// IPv6 literal without a port, with a db number
+			url: "redis://[2001:db8::1]/2",
+			o:   &Options{Addr: "[2001:db8::1]:6379", DB: 2},
+		}, {
+			url: "rediss://localhost:123",
+			o:   &Options{Addr: "localhost:123", TLSConfig: &tls.Config{ /* no deep comparison */ }},
+		}, {
+			url: "rediss://localhost:123/?skip_verify=true",
+			o:   &Options{Addr: "localhost:123", TLSConfig: &tls.Config{InsecureSkipVerify: true}},
+		}, {
+			url: "redis://:bar@localhost:123",
+			o:   &Options{Addr: "localhost:123", Password: "bar"},
+		}, {
+			url: "redis://foo@localhost:123",
+			o:   &Options{Addr: "localhost:123", Username: "foo"},
+		}, {
+			url: "redis://foo:bar@localhost:123",
+			o:   &Options{Addr: "localhost:123", Username: "foo", Password: "bar"},
+		}, {
+			// multiple params
+			url: "redis://localhost:123/?db=2&read_timeout=2&pool_fifo=true",
+			o:   &Options{Addr: "localhost:123", DB: 2, ReadTimeout: 2 * time.Second, PoolFIFO: true},
+		}, {
+			// special case handling for disabled timeouts
+			url: "redis://localhost:123/?db=2&conn_max_idle_time=0",
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: -1},
+		}, {
+			// negative values disable timeouts as well
+			url: "redis://localhost:123/?db=2&conn_max_idle_time=-1",
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: -1},
+		}, {
+			// a zero or negative duration written with a unit disables the timeout,
+			// the same as the plain "0" / "-1" forms above
+			url: "redis://localhost:123/?db=2&conn_max_idle_time=0s",
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: -1},
+		}, {
+			url: "redis://localhost:123/?db=2&conn_max_idle_time=-1s",
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: -1},
+		}, {
+			// absent timeout values will use defaults
+			url: "redis://localhost:123/?db=2&conn_max_idle_time=",
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: 0},
+		}, {
+			url: "redis://localhost:123/?db=2&conn_max_idle_time", // missing "=" at the end
+			o:   &Options{Addr: "localhost:123", DB: 2, ConnMaxIdleTime: 0},
+		}, {
+			url: "redis://localhost:123/?db=2&client_name=hi", // client name
+			o:   &Options{Addr: "localhost:123", DB: 2, ClientName: "hi"},
+		}, {
+			url: "redis://localhost:123/?db=2&protocol=2", // RESP Protocol
+			o:   &Options{Addr: "localhost:123", DB: 2, Protocol: 2},
+		}, {
+			url: "redis://localhost:123/?max_concurrent_dials=5", // MaxConcurrentDials parameter
+			o:   &Options{Addr: "localhost:123", MaxConcurrentDials: 5},
+		}, {
+			url: "redis://localhost:123/?max_concurrent_dials=0", // MaxConcurrentDials zero value
+			o:   &Options{Addr: "localhost:123", MaxConcurrentDials: 0},
+		}, {
+			url: "redis://localhost:123/?conn_max_lifetime=1h&conn_max_lifetime_jitter=6m",
+			o:   &Options{Addr: "localhost:123", ConnMaxLifetime: time.Hour, ConnMaxLifetimeJitter: 6 * time.Minute},
+		}, {
+			// jitter > lifetime should be capped
+			url: "redis://localhost:123/?conn_max_lifetime=30m&conn_max_lifetime_jitter=1h",
+			o:   &Options{Addr: "localhost:123", ConnMaxLifetime: 30 * time.Minute, ConnMaxLifetimeJitter: 30 * time.Minute},
+		}, {
+			// jitter without lifetime should be capped to 0
+			url: "redis://localhost:123/?conn_max_lifetime_jitter=6m",
+			o:   &Options{Addr: "localhost:123", ConnMaxLifetimeJitter: 0},
+		}, {
+			url: "unix:///tmp/redis.sock",
+			o:   &Options{Addr: "/tmp/redis.sock"},
+		}, {
+			url: "unix://foo:bar@/tmp/redis.sock",
+			o:   &Options{Addr: "/tmp/redis.sock", Username: "foo", Password: "bar"},
+		}, {
+			url: "unix://foo:bar@/tmp/redis.sock?db=3",
+			o:   &Options{Addr: "/tmp/redis.sock", Username: "foo", Password: "bar", DB: 3},
+		}, {
+			// invalid db format
+			url: "unix://foo:bar@/tmp/redis.sock?db=test",
+			err: errors.New(`redis: invalid database number: strconv.Atoi: parsing "test": invalid syntax`),
+		}, {
+			// invalid int value
+			url: "redis://localhost/?pool_size=five",
+			err: errors.New(`redis: invalid pool_size number: strconv.Atoi: parsing "five": invalid syntax`),
+		}, {
+			// invalid bool value
+			url: "redis://localhost/?pool_fifo=yes",
+			err: errors.New(`redis: invalid pool_fifo boolean: expected true/false/1/0 or an empty string, got "yes"`),
+		}, {
+			// invalid skip_verify value
+			url: "rediss://localhost/?skip_verify=yes",
+			err: errors.New(`redis: invalid skip_verify boolean: expected true/false/1/0 or an empty string, got "yes"`),
+		}, {
+			// it returns first error
+			url: "redis://localhost/?db=foo&pool_size=five",
+			err: errors.New(`redis: invalid database number: strconv.Atoi: parsing "foo": invalid syntax`),
+		}, {
+			url: "redis://localhost/?abc=123",
+			err: errors.New("redis: unexpected option: abc"),
+		}, {
+			url: "redis://foo@localhost/?username=bar",
+			err: errors.New("redis: unexpected option: username"),
+		}, {
+			url: "redis://localhost/?wrte_timout=10s&abc=123",
+			err: errors.New("redis: unexpected option: abc, wrte_timout"),
+		}, {
+			url: "http://google.com",
+			err: errors.New("redis: invalid URL scheme: http"),
+		}, {
+			url: "redis://localhost/1/2/3/4",
+			err: errors.New("redis: invalid URL path: /1/2/3/4"),
+		}, {
+			url: "12345",
+			err: errors.New("redis: invalid URL scheme: "),
+		}, {
+			url: "redis://localhost/iamadatabase",
+			err: errors.New(`redis: invalid database number: "iamadatabase"`),
+		},
+	}
+
+	for i := range cases {
+		tc := cases[i]
+		t.Run(tc.url, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := ParseURL(tc.url)
+			if tc.err == nil && err != nil {
+				t.Fatalf("unexpected error: %q", err)
+				return
+			}
+			if tc.err != nil && err != nil {
+				if tc.err.Error() != err.Error() {
+					t.Fatalf("got %q, expected %q", err, tc.err)
+				}
+				return
+			}
+			comprareOptions(t, actual, tc.o)
+		})
+	}
+}
+
+func TestParseURLIPv6TLSServerName(t *testing.T) {
+	// For rediss:// the TLS SNI ServerName must be the bare IPv6 host, not the
+	// bracketed form, otherwise the handshake is attempted with an invalid
+	// server name.
+	o, err := ParseURL("rediss://[2001:db8::1]")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if o.Addr != "[2001:db8::1]:6379" {
+		t.Errorf("Addr: got %q, want %q", o.Addr, "[2001:db8::1]:6379")
+	}
+	if o.TLSConfig == nil {
+		t.Fatal("expected a TLSConfig for the rediss scheme")
+	}
+	if got, want := o.TLSConfig.ServerName, "2001:db8::1"; got != want {
+		t.Errorf("TLSConfig.ServerName: got %q, want %q", got, want)
+	}
+}
+
+func comprareOptions(t *testing.T, actual, expected *Options) {
+	t.Helper()
+
+	if actual.Addr != expected.Addr {
+		t.Errorf("got %q, want %q", actual.Addr, expected.Addr)
+	}
+	if actual.DB != expected.DB {
+		t.Errorf("DB: got %d, expected %d", actual.DB, expected.DB)
+	}
+	if actual.TLSConfig == nil && expected.TLSConfig != nil {
+		t.Errorf("got nil TLSConfig, expected a TLSConfig")
+	}
+	if actual.TLSConfig != nil && expected.TLSConfig == nil {
+		t.Errorf("got TLSConfig, expected no TLSConfig")
+	}
+	if actual.Username != expected.Username {
+		t.Errorf("Username: got %q, expected %q", actual.Username, expected.Username)
+	}
+	if actual.Password != expected.Password {
+		t.Errorf("Password: got %q, expected %q", actual.Password, expected.Password)
+	}
+	if actual.MaxRetries != expected.MaxRetries {
+		t.Errorf("MaxRetries: got %v, expected %v", actual.MaxRetries, expected.MaxRetries)
+	}
+	if actual.MinRetryBackoff != expected.MinRetryBackoff {
+		t.Errorf("MinRetryBackoff: got %v, expected %v", actual.MinRetryBackoff, expected.MinRetryBackoff)
+	}
+	if actual.MaxRetryBackoff != expected.MaxRetryBackoff {
+		t.Errorf("MaxRetryBackoff: got %v, expected %v", actual.MaxRetryBackoff, expected.MaxRetryBackoff)
+	}
+	if actual.DialTimeout != expected.DialTimeout {
+		t.Errorf("DialTimeout: got %v, expected %v", actual.DialTimeout, expected.DialTimeout)
+	}
+	if actual.ReadTimeout != expected.ReadTimeout {
+		t.Errorf("ReadTimeout: got %v, expected %v", actual.ReadTimeout, expected.ReadTimeout)
+	}
+	if actual.WriteTimeout != expected.WriteTimeout {
+		t.Errorf("WriteTimeout: got %v, expected %v", actual.WriteTimeout, expected.WriteTimeout)
+	}
+	if actual.PoolFIFO != expected.PoolFIFO {
+		t.Errorf("PoolFIFO: got %v, expected %v", actual.PoolFIFO, expected.PoolFIFO)
+	}
+	if actual.PoolSize != expected.PoolSize {
+		t.Errorf("PoolSize: got %v, expected %v", actual.PoolSize, expected.PoolSize)
+	}
+	if actual.PoolTimeout != expected.PoolTimeout {
+		t.Errorf("PoolTimeout: got %v, expected %v", actual.PoolTimeout, expected.PoolTimeout)
+	}
+	if actual.MinIdleConns != expected.MinIdleConns {
+		t.Errorf("MinIdleConns: got %v, expected %v", actual.MinIdleConns, expected.MinIdleConns)
+	}
+	if actual.MaxIdleConns != expected.MaxIdleConns {
+		t.Errorf("MaxIdleConns: got %v, expected %v", actual.MaxIdleConns, expected.MaxIdleConns)
+	}
+	if actual.ConnMaxIdleTime != expected.ConnMaxIdleTime {
+		t.Errorf("ConnMaxIdleTime: got %v, expected %v", actual.ConnMaxIdleTime, expected.ConnMaxIdleTime)
+	}
+	if actual.ConnMaxLifetime != expected.ConnMaxLifetime {
+		t.Errorf("ConnMaxLifetime: got %v, expected %v", actual.ConnMaxLifetime, expected.ConnMaxLifetime)
+	}
+	if actual.ConnMaxLifetimeJitter != expected.ConnMaxLifetimeJitter {
+		t.Errorf("ConnMaxLifetimeJitter: got %v, expected %v", actual.ConnMaxLifetimeJitter, expected.ConnMaxLifetimeJitter)
+	}
+	if actual.MaxConcurrentDials != expected.MaxConcurrentDials {
+		t.Errorf("MaxConcurrentDials: got %v, expected %v", actual.MaxConcurrentDials, expected.MaxConcurrentDials)
+	}
+}
+
+// Test ReadTimeout option initialization, including special values -1 and 0.
+// And also test behaviour of WriteTimeout option, when it is not explicitly set and use
+// ReadTimeout value.
+func TestReadTimeoutOptions(t *testing.T) {
+	testDataInputOutputMap := map[time.Duration]time.Duration{
+		-1: 0 * time.Second,
+		0:  5 * time.Second,
+		1:  1 * time.Nanosecond,
+		3:  3 * time.Nanosecond,
+	}
+
+	for in, out := range testDataInputOutputMap {
+		o := &Options{ReadTimeout: in}
+		o.init()
+		if o.ReadTimeout != out {
+			t.Errorf("got %d instead of %d as ReadTimeout option", o.ReadTimeout, out)
+		}
+
+		if o.WriteTimeout != o.ReadTimeout {
+			t.Errorf("got %d instead of %d as WriteTimeout option", o.WriteTimeout, o.ReadTimeout)
+		}
+	}
+}
+
+// Pin the retry backoff defaults shared by Options, ClusterOptions and
+// RingOptions, including the -1 escape hatch.
+func TestRetryBackoffOptions(t *testing.T) {
+	check := func(t *testing.T, kind string, min, max time.Duration) {
+		t.Helper()
+		if min != 10*time.Millisecond {
+			t.Errorf("%s: got %s as default MinRetryBackoff, want 10ms", kind, min)
+		}
+		if max != time.Second {
+			t.Errorf("%s: got %s as default MaxRetryBackoff, want 1s", kind, max)
+		}
+	}
+
+	o := &Options{}
+	o.init()
+	check(t, "Options", o.MinRetryBackoff, o.MaxRetryBackoff)
+
+	co := &ClusterOptions{}
+	co.init()
+	check(t, "ClusterOptions", co.MinRetryBackoff, co.MaxRetryBackoff)
+
+	ro := &RingOptions{}
+	ro.init()
+	check(t, "RingOptions", ro.MinRetryBackoff, ro.MaxRetryBackoff)
+
+	disabled := &Options{MinRetryBackoff: -1, MaxRetryBackoff: -1}
+	disabled.init()
+	if disabled.MinRetryBackoff != 0 || disabled.MaxRetryBackoff != 0 {
+		t.Errorf("-1 must disable backoff, got min=%s max=%s",
+			disabled.MinRetryBackoff, disabled.MaxRetryBackoff)
+	}
+}
+
+func TestClusterStateReloadIntervalOption(t *testing.T) {
+	o := &ClusterOptions{}
+	o.init()
+	if o.ClusterStateReloadInterval != 60*time.Second {
+		t.Errorf("got %s as default ClusterStateReloadInterval, want 60s",
+			o.ClusterStateReloadInterval)
+	}
+
+	o = &ClusterOptions{ClusterStateReloadInterval: 5 * time.Minute}
+	o.init()
+	if o.ClusterStateReloadInterval != 5*time.Minute {
+		t.Errorf("explicit ClusterStateReloadInterval overridden: got %s",
+			o.ClusterStateReloadInterval)
+	}
+}
+
+// The keep-alive policy is shared by the default dialer (options.go) and the
+// sentinel master/replica dialer (sentinel.go); pin it so a change shows up
+// in review instead of drifting silently.
+func TestDefaultKeepAliveConfig(t *testing.T) {
+	want := net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     30 * time.Second,
+		Interval: 5 * time.Second,
+		Count:    3,
+	}
+	if defaultKeepAliveConfig != want {
+		t.Errorf("defaultKeepAliveConfig = %+v, want %+v", defaultKeepAliveConfig, want)
+	}
+}
+
+func TestProtocolOptions(t *testing.T) {
+	testCasesMap := map[int]int{
+		0: 3,
+		1: 3,
+		2: 2,
+		3: 3,
+	}
+
+	o := &Options{}
+	o.init()
+	if o.Protocol != 3 {
+		t.Errorf("got %d instead of %d as protocol option", o.Protocol, 3)
+	}
+
+	for set, want := range testCasesMap {
+		o := &Options{Protocol: set}
+		o.init()
+		if o.Protocol != want {
+			t.Errorf("got %d instead of %d as protocol option", o.Protocol, want)
+		}
+	}
+}
+
+func TestMaxConcurrentDialsOptions(t *testing.T) {
+	// Test cases for MaxConcurrentDials initialization logic
+	testCases := []struct {
+		name                    string
+		poolSize                int
+		maxConcurrentDials      int
+		expectedConcurrentDials int
+	}{
+		// Edge cases and invalid values - negative/zero values set to PoolSize
+		{
+			name:                    "negative value gets set to pool size",
+			poolSize:                10,
+			maxConcurrentDials:      -1,
+			expectedConcurrentDials: 10, // negative values are set to PoolSize
+		},
+		// Zero value tests - MaxConcurrentDials should be set to PoolSize
+		{
+			name:                    "zero value with positive pool size",
+			poolSize:                1,
+			maxConcurrentDials:      0,
+			expectedConcurrentDials: 1, // MaxConcurrentDials = PoolSize when 0
+		},
+		// Explicit positive value tests
+		{
+			name:                    "explicit value within limit",
+			poolSize:                10,
+			maxConcurrentDials:      3,
+			expectedConcurrentDials: 3, // should remain unchanged when < PoolSize
+		},
+		// Capping tests - values exceeding PoolSize should be capped
+		{
+			name:                    "value exceeding pool size",
+			poolSize:                5,
+			maxConcurrentDials:      10,
+			expectedConcurrentDials: 5, // should be capped at PoolSize
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := &Options{
+				PoolSize:           tc.poolSize,
+				MaxConcurrentDials: tc.maxConcurrentDials,
+			}
+			opts.init()
+
+			if opts.MaxConcurrentDials != tc.expectedConcurrentDials {
+				t.Errorf("MaxConcurrentDials: got %v, expected %v (PoolSize=%v)",
+					opts.MaxConcurrentDials, tc.expectedConcurrentDials, opts.PoolSize)
+			}
+
+			// Ensure MaxConcurrentDials never exceeds PoolSize (for all inputs)
+			if opts.MaxConcurrentDials > opts.PoolSize {
+				t.Errorf("MaxConcurrentDials (%v) should not exceed PoolSize (%v)",
+					opts.MaxConcurrentDials, opts.PoolSize)
+			}
+
+			// Ensure MaxConcurrentDials is always positive (for all inputs)
+			if opts.MaxConcurrentDials <= 0 {
+				t.Errorf("MaxConcurrentDials should be positive, got %v", opts.MaxConcurrentDials)
+			}
+		})
+	}
+}
+
+func TestClusterOptionsDialerRetries(t *testing.T) {
+	clusterOpt := &ClusterOptions{
+		DialerRetries:      10,
+		DialerRetryTimeout: 200 * time.Millisecond,
+	}
+
+	opt := clusterOpt.clientOptions()
+
+	if opt.DialerRetries != 10 {
+		t.Errorf("expected DialerRetries=10, got %d", opt.DialerRetries)
+	}
+	if opt.DialerRetryTimeout != 200*time.Millisecond {
+		t.Errorf("expected DialerRetryTimeout=200ms, got %v", opt.DialerRetryTimeout)
+	}
+}
+
+func TestClusterOptionsNodeTimeouts(t *testing.T) {
+	cases := []struct {
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{timeout: -1, want: 0},
+		{timeout: -2, want: -1},
+		{timeout: 0, want: 5 * time.Second},
+		{timeout: 3 * time.Second, want: 3 * time.Second},
+	}
+
+	for _, tc := range cases {
+		opt := &ClusterOptions{
+			ReadTimeout:  tc.timeout,
+			WriteTimeout: tc.timeout,
+		}
+		opt.init()
+		nodes := newClusterNodes(opt)
+
+		node, err := nodes.GetOrCreate("127.0.0.1:7000")
+		if err != nil {
+			t.Fatalf("GetOrCreate failed: %v", err)
+		}
+
+		nodeOpt := node.Client.Options()
+		if nodeOpt.ReadTimeout != tc.want {
+			t.Errorf("timeout %v: expected node ReadTimeout=%v, got %v", tc.timeout, tc.want, nodeOpt.ReadTimeout)
+		}
+		if nodeOpt.WriteTimeout != tc.want {
+			t.Errorf("timeout %v: expected node WriteTimeout=%v, got %v", tc.timeout, tc.want, nodeOpt.WriteTimeout)
+		}
+		_ = nodes.Close()
+	}
+}
+
+func TestRingOptionsDialerRetries(t *testing.T) {
+	ringOpt := &RingOptions{
+		DialerRetries:      10,
+		DialerRetryTimeout: 200 * time.Millisecond,
+	}
+
+	opt := ringOpt.clientOptions()
+
+	if opt.DialerRetries != 10 {
+		t.Errorf("expected DialerRetries=10, got %d", opt.DialerRetries)
+	}
+	if opt.DialerRetryTimeout != 200*time.Millisecond {
+		t.Errorf("expected DialerRetryTimeout=200ms, got %v", opt.DialerRetryTimeout)
+	}
+}
+
+func TestFailoverOptionsDialerRetries(t *testing.T) {
+	failoverOpt := &FailoverOptions{
+		DialerRetries:      10,
+		DialerRetryTimeout: 200 * time.Millisecond,
+	}
+
+	opt := failoverOpt.clientOptions()
+
+	if opt.DialerRetries != 10 {
+		t.Errorf("expected DialerRetries=10, got %d", opt.DialerRetries)
+	}
+	if opt.DialerRetryTimeout != 200*time.Millisecond {
+		t.Errorf("expected DialerRetryTimeout=200ms, got %v", opt.DialerRetryTimeout)
+	}
+
+	// Also verify sentinelOptions passes them through
+	sentinelOpt := failoverOpt.sentinelOptions("localhost:26379")
+	if sentinelOpt.DialerRetries != 10 {
+		t.Errorf("expected sentinel DialerRetries=10, got %d", sentinelOpt.DialerRetries)
+	}
+	if sentinelOpt.DialerRetryTimeout != 200*time.Millisecond {
+		t.Errorf("expected sentinel DialerRetryTimeout=200ms, got %v", sentinelOpt.DialerRetryTimeout)
+	}
+}
+
+// TestOptionsCloneMaintNotificationsRace verifies that cloning options via
+// baseClient is safe when initConn concurrently writes MaintNotificationsConfig.Mode.
+// Run with -race to detect the data race.
+func TestOptionsCloneMaintNotificationsRace(t *testing.T) {
+	opt := &Options{
+		Addr: "localhost:6379",
+		MaintNotificationsConfig: &maintnotifications.Config{
+			Mode: maintnotifications.ModeAuto,
+		},
+	}
+
+	bc := baseClient{opt: opt}
+
+	var wg sync.WaitGroup
+	const iterations = 1000
+
+	// Writer: simulates initConn toggling MaintNotificationsConfig.Mode under optLock
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			bc.optLock.Lock()
+			bc.opt.MaintNotificationsConfig.Mode = maintnotifications.ModeDisabled
+			bc.optLock.Unlock()
+
+			bc.optLock.Lock()
+			bc.opt.MaintNotificationsConfig.Mode = maintnotifications.ModeAuto
+			bc.optLock.Unlock()
+		}
+	}()
+
+	// Reader: simulates newTx / withTimeout calling cloneOpt() (acquires RLock)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			cloned := bc.cloneOpt()
+			_ = cloned
+		}
+	}()
+
+	wg.Wait()
+}
+
+// TestOptionsInitSkipsEndpointDetectWhenMaintDisabled ensures Options.init does
+// not call DetectEndpointType when maintenance notifications are disabled.
+// DetectEndpointType never returns EndpointTypeAuto, so leaving Auto unchanged
+// is a deterministic signal that detection was skipped (no wall-clock bound).
+func TestOptionsInitSkipsEndpointDetectWhenMaintDisabled(t *testing.T) {
+	const addr = "go-redis-maint-disabled-must-not-resolve.invalid:6379"
+
+	t.Run("disabled leaves EndpointTypeAuto", func(t *testing.T) {
+		opt := &Options{
+			Addr: addr,
+			MaintNotificationsConfig: &maintnotifications.Config{
+				Mode:         maintnotifications.ModeDisabled,
+				EndpointType: maintnotifications.EndpointTypeAuto,
+			},
+		}
+		opt.init()
+		if got := opt.MaintNotificationsConfig.EndpointType; got != maintnotifications.EndpointTypeAuto {
+			t.Fatalf("EndpointType = %q, want %q (unchanged when ModeDisabled)", got, maintnotifications.EndpointTypeAuto)
+		}
+	})
+
+	t.Run("auto replaces EndpointTypeAuto", func(t *testing.T) {
+		opt := &Options{
+			Addr: addr,
+			MaintNotificationsConfig: &maintnotifications.Config{
+				Mode:         maintnotifications.ModeAuto,
+				EndpointType: maintnotifications.EndpointTypeAuto,
+			},
+		}
+		opt.init()
+		if got := opt.MaintNotificationsConfig.EndpointType; got == "" || got == maintnotifications.EndpointTypeAuto {
+			t.Fatalf("EndpointType = %q, want a concrete type after DetectEndpointType", got)
+		}
+	})
+
+	t.Run("explicit EndpointType is preserved", func(t *testing.T) {
+		opt := &Options{
+			Addr: addr,
+			MaintNotificationsConfig: &maintnotifications.Config{
+				Mode:         maintnotifications.ModeAuto,
+				EndpointType: maintnotifications.EndpointTypeInternalFQDN,
+			},
+		}
+		opt.init()
+		if got := opt.MaintNotificationsConfig.EndpointType; got != maintnotifications.EndpointTypeInternalFQDN {
+			t.Fatalf("EndpointType = %q, want %q", got, maintnotifications.EndpointTypeInternalFQDN)
+		}
+	})
+}
+
+func TestNewClientSkipsEndpointDetectWhenMaintDisabled(t *testing.T) {
+	c := NewClient(&Options{
+		Addr: "go-redis-maint-disabled-must-not-resolve.invalid:6379",
+		MaintNotificationsConfig: &maintnotifications.Config{
+			Mode:         maintnotifications.ModeDisabled,
+			EndpointType: maintnotifications.EndpointTypeAuto,
+		},
+	})
+	defer c.Close()
+
+	if got := c.Options().MaintNotificationsConfig.EndpointType; got != maintnotifications.EndpointTypeAuto {
+		t.Fatalf("EndpointType = %q, want %q", got, maintnotifications.EndpointTypeAuto)
+	}
+}
+
+func TestClientSideCacheRESP2Warning(t *testing.T) {
+	origLogger := internal.Logger.Load()
+	defer func() { internal.Logger.Store(origLogger) }()
+
+	cases := []struct {
+		name     string
+		opt      *Options
+		wantWarn bool
+	}{
+		{
+			name:     "RESP2 with cache config warns",
+			opt:      &Options{Protocol: 2, ClientSideCacheConfig: &ClientSideCacheConfig{}},
+			wantWarn: true,
+		},
+		{
+			name:     "RESP2 with explicit cache warns",
+			opt:      &Options{Protocol: 2, ClientSideCache: NewLocalCache(CacheConfig{})},
+			wantWarn: true,
+		},
+		{
+			name:     "RESP2 without cache does not warn",
+			opt:      &Options{Protocol: 2},
+			wantWarn: false,
+		},
+		{
+			name:     "RESP3 with cache config does not warn",
+			opt:      &Options{Protocol: 3, ClientSideCacheConfig: &ClientSideCacheConfig{}},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := &capturingLogger{}
+			internal.Logger.Store(logger)
+
+			tc.opt.init()
+
+			if got := logger.contains("client-side caching requires Protocol: 3"); got != tc.wantWarn {
+				t.Errorf("warning logged = %v, want %v (logs: %v)", got, tc.wantWarn, logger.logs)
+			}
+		})
+	}
+}
+
+func TestUniversalOptionsSimpleCopiesClientSideCache(t *testing.T) {
+	cfg := &ClientSideCacheConfig{MaxEntries: 10}
+	cache := NewLocalCache(CacheConfig{MaxEntries: 20})
+	const strategy = CSCStrategy(42)
+
+	opt := (&UniversalOptions{
+		ClientSideCacheConfig:   cfg,
+		ClientSideCache:         cache,
+		ClientSideCacheStrategy: strategy,
+	}).Simple()
+
+	if opt.ClientSideCacheConfig != cfg {
+		t.Fatal("Simple did not copy ClientSideCacheConfig")
+	}
+	if opt.ClientSideCache != cache {
+		t.Fatal("Simple did not copy ClientSideCache")
+	}
+	if opt.ClientSideCacheStrategy != strategy {
+		t.Fatal("Simple did not copy ClientSideCacheStrategy")
+	}
+}
+
+// TestParseURLPipelinePoolOptions verifies the URL parsers accept the pipeline
+// pool settings — notably pipeline_pool_size=-1 to opt out of the now-default
+// dedicated pipeline pool — instead of rejecting them as unexpected options
+// (#3959). Covers ParseURL, ParseClusterURL and ParseFailoverURL.
+func TestParseURLPipelinePoolOptions(t *testing.T) {
+	const q = "pipeline_pool_size=-1&pipeline_read_buffer_size=131072&pipeline_write_buffer_size=65536"
+
+	o, err := ParseURL("redis://localhost:6379?" + q)
+	if err != nil {
+		t.Fatalf("ParseURL: %v", err)
+	}
+	if o.PipelinePoolSize != -1 || o.PipelineReadBufferSize != 131072 || o.PipelineWriteBufferSize != 65536 {
+		t.Fatalf("ParseURL pipeline opts: size=%d rbuf=%d wbuf=%d", o.PipelinePoolSize, o.PipelineReadBufferSize, o.PipelineWriteBufferSize)
+	}
+
+	co, err := ParseClusterURL("redis://localhost:6379?" + q)
+	if err != nil {
+		t.Fatalf("ParseClusterURL: %v", err)
+	}
+	if co.PipelinePoolSize != -1 || co.PipelineReadBufferSize != 131072 || co.PipelineWriteBufferSize != 65536 {
+		t.Fatalf("ParseClusterURL pipeline opts: size=%d rbuf=%d wbuf=%d", co.PipelinePoolSize, co.PipelineReadBufferSize, co.PipelineWriteBufferSize)
+	}
+
+	fo, err := ParseFailoverURL("redis://localhost:6379?master_name=mymaster&" + q)
+	if err != nil {
+		t.Fatalf("ParseFailoverURL: %v", err)
+	}
+	if fo.PipelinePoolSize != -1 || fo.PipelineReadBufferSize != 131072 || fo.PipelineWriteBufferSize != 65536 {
+		t.Fatalf("ParseFailoverURL pipeline opts: size=%d rbuf=%d wbuf=%d", fo.PipelinePoolSize, fo.PipelineReadBufferSize, fo.PipelineWriteBufferSize)
+	}
+}
