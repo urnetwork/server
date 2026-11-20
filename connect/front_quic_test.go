@@ -571,13 +571,19 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 	}
 }
 
-// The results the env's QUIC connections are counted with, as "<port kind>
-// <result>".
-func observeTestFrontConnectionResults(env *testFrontEnv) chan string {
-	results := make(chan string, 64)
-	env.settings.connectionResultObserverForTest = func(portKind string, result string) {
+// One accepted QUIC connection's result, as the front counted it.
+type testFrontConnectionResult struct {
+	portKind string
+	result   string
+	reason   string
+}
+
+// The results the env's QUIC connections are counted with.
+func observeTestFrontConnectionResults(env *testFrontEnv) chan testFrontConnectionResult {
+	results := make(chan testFrontConnectionResult, 64)
+	env.settings.connectionResultObserverForTest = func(portKind string, result string, reason string) {
 		select {
-		case results <- portKind + " " + result:
+		case results <- testFrontConnectionResult{portKind: portKind, result: result, reason: reason}:
 		default:
 		}
 	}
@@ -585,14 +591,14 @@ func observeTestFrontConnectionResults(env *testFrontEnv) chan string {
 }
 
 // The next result a QUIC connection was counted with.
-func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
+func nextTestFrontConnectionResult(t testing.TB, results chan testFrontConnectionResult) testFrontConnectionResult {
 	t.Helper()
 	select {
 	case result := <-results:
 		return result
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("no QUIC connection was counted")
-		return ""
+		return testFrontConnectionResult{}
 	}
 }
 
@@ -601,9 +607,11 @@ func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
 // failed handshake, and only one whose handshake completed is refused with
 // 0x1000 and counted as an unknown name. The first client refuses the
 // handshake only once the front has dispatched its connection, so the front
-// decides while the handshake is still under way.
+// decides while the handshake is still under way; its refusal is the
+// bad_certificate alert crypto/tls sends for a VerifyConnection error, so the
+// failure's reason is certificate.
 func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
-	var results chan string
+	var results chan testFrontConnectionResult
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		results = observeTestFrontConnectionResults(env)
 	})
@@ -635,8 +643,9 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("the refusing dial never ended")
 	}
-	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultHandshakeFailed {
-		t.Fatalf("a refused name whose handshake failed counted as %q", result)
+	wantFailed := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCertificate}
+	if result := nextTestFrontConnectionResult(t, results); result != wantFailed {
+		t.Fatalf("a refused name whose handshake failed counted as %+v, want %+v", result, wantFailed)
 	}
 
 	tlsConfig = env.clientTlsConfig(testFrontForwardedName, []string{http3.NextProtoH3})
@@ -645,8 +654,9 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 		t.Fatalf("closed with %#x", code)
 	}
 	env.nextDispatch()
-	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultUnknownName {
-		t.Fatalf("a name refused with 0x1000 counted as %q", result)
+	wantRefused := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultUnknownName, reason: frontQuicResultReasonNone}
+	if result := nextTestFrontConnectionResult(t, results); result != wantRefused {
+		t.Fatalf("a name refused with 0x1000 counted as %+v, want %+v", result, wantRefused)
 	}
 }
 

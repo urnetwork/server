@@ -243,7 +243,7 @@ func newTestLbAltEnv(t testing.TB, envSettings *testLbAltEnvSettings) *testLbAlt
 	env.settings = DefaultFrontServerSettings()
 	env.settings.ListenPacket = env.binds.listenPacket
 	env.settings.Listen = env.binds.listen
-	env.settings.connectionResultObserverForTest = func(portKind string, result string) {
+	env.settings.connectionResultObserverForTest = func(portKind string, result string, reason string) {
 		select {
 		case env.quicResults <- portKind + " " + result:
 		default:

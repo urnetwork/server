@@ -142,7 +142,7 @@ func serveE2eLinger(t *testing.T, e2e *e2eFront, handler http.Handler, overTls b
 	})
 	var served net.Listener = listener
 	if overTls {
-		served = NewTlsListener(listener, e2e.front.TlsConfig(), httpServer.ReadHeaderTimeout)
+		served = NewTlsListener(listener, e2e.front.TlsConfig(), httpServer.ReadHeaderTimeout, nil)
 	}
 	go httpServer.Serve(served)
 	return listener, httpServer
