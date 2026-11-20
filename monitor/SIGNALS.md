@@ -29699,6 +29699,26 @@ immutable identity/catalog faults still page. Synthetic public-path controls
 exercise complete older predicates, a replaced artifact, independent immutable
 fault and unchanged real numeric lag without changing global source catalogs.
 
+The epoch-three runtime correction at source version 1003 replaces the source
+readiness trigger function and two intake functions that validate runtime and
+baseline readiness. Through 1002 their previous bodies are required. From
+publication, 1003 owns all three exact replacements, the new receipt validator
+and insert guard, and the journal's columns, keys, canonical JSON and digest
+checks, and insert, update/delete and truncate triggers. The original v844
+readiness trigger wiring and atomic outbox checks remain active, as do the
+v1002 source recovery and intake grading checks. A pre-1003 function restored
+at 1003 is immediate schema drift. A newer unrecognized head remains
+`cannot-observe`. These catalog reads establish the installed schema. Approval,
+worker readiness and activation each require their own evidence.
+
+Version 1004 changes only the executor control amendment insert function. Its
+previous body remains required through 1003. From 1004 the exact guard admits
+the scoped builder correction and keeps the existing lease, job-start and
+qualification evidence checks. Its original owner still checks the enabled
+insert trigger and amendment journal. Restoring the previous guard at 1004
+pages even if the trigger is wired correctly. The independent runtime
+correction checks published at 1003 continue to apply.
+
 The unresolved-predicate statistics migration (currently version 926, resolved
 from its position in the server list) has an explicit artifact contract in this
 catalog. It requires `public.transfer_contract_unresolved_predicate` on

@@ -1095,6 +1095,8 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 		competitionOfficialReviewEpochTwoAstra62MigrationContract.removedAt(server.CompetitionSilleStorageRecoveryMigrationVersion()),
 		competitionSilleStorageRecoveryMigrationContract.removedAt(server.CompetitionEpochThreeSourceRecoveryMigrationVersion()),
 		competitionEpochThreeSourceRecoveryMigrationContract,
+		competitionEpochThreeRuntimeCorrectionMigrationContract,
+		competitionEpochThreeExecutorBuilderCorrectionMigrationContract,
 	},
 ))
 

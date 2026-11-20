@@ -2,6 +2,16 @@ package server
 
 import "strings"
 
+// The monitor binds the correction to its unique published position.
+func CompetitionEpochThreeExecutorBuilderCorrectionMigrationVersion() int {
+	return migrationVersionOf(competitionEpochThreeExecutorBuilderCorrectionSql())
+}
+
+// The only function replaced by the builder correction.
+func CompetitionEpochThreeExecutorBuilderCorrectionBodySql() string {
+	return competitionEpochThreeCorrectionBody(competitionEpochThreeExecutorBuilderCorrectionSql(), "executor_control_amendment")
+}
+
 // Preserve the prior guard, including its lease, clock, scope and evidence
 // predicates. Only the exact epoch-three builder repair may retain its agent.
 func competitionEpochThreeExecutorBuilderCorrectionSql() string {
