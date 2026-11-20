@@ -2,9 +2,13 @@ package server
 
 // api's internal surface for the hosts with no Postgres (QD-055: plan-SOCK-gate-data, plan-QUOTA-host-reach):
 // every route under InternalGatePathPrefix takes one caller's bearer, verified by hash. QD-055 also has the lb
-// refuse the prefix from outside, which warp does not do yet, so until it does the bearer is the gate alone. The
-// scheme is the one plan-TLS-internal-credentials and plan-DNS-internal-route-credential settle for the dns API's
-// internal routes (QD-027):
+// refuse the prefix from outside: warp's api.yml gives api internal_routes for it, and the lb answers 403 under it,
+// on every name it serves api by, to every source outside the site's ranges the fragment lists (W8, QD-027), so a
+// bearer that leaked is no use from outside the site. The blocks reach the prefix through the lb at
+// https://api.<domain>, the url their fragments give them as UR_API_URL (sidecarhost.ServiceUrlFlag). An lb built
+// by a warpctl older than internal_routes refuses nothing there, and the bearer is then the gate alone. The scheme
+// is the one plan-TLS-internal-credentials and plan-DNS-internal-route-credential settle for the dns API's internal
+// routes (QD-027):
 //
 //   - each caller holds 256 random bits, its current bearer and during a rotation its previous one, in
 //     InternalGateCredentialFileName(<service>) among its secret_files, read once at start, and sends the
