@@ -6,6 +6,11 @@ package nginx
 // earliest expiry of the certificates it serves, and an optional access log
 // at V(1), sampled, that honors no_access_log and no_success_access_log.
 //
+// The service and block labels are upstream_service and upstream_block: the
+// process's stats push adds its own service and block to every series, and
+// the push client refuses a whole push, every metric of the process, when a
+// metric has a label of a name it adds (server.StatsPushReservedLabelNames).
+//
 // No label or log line carries a client address or a hidden route prefix:
 // labels come from the route table or fixed sets, never from a request, and
 // the access log replaces every hidden prefix it finds in what the client
@@ -41,7 +46,7 @@ type frontMetrics struct {
 
 // Builds and registers one independent set of the front's metric families.
 func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
-	labels := []string{"service", "protocol", "status_class", "block"}
+	labels := []string{"upstream_service", "protocol", "status_class", "upstream_block"}
 	metrics := &frontMetrics{
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "urnetwork",
