@@ -162,9 +162,11 @@ type Front struct {
 	// the request metrics' series, by service and block (observe)
 	requestMetrics *frontRequestMetricsTable
 	limits         *frontLimits
-	interfaces     map[string]*frontInterface
-	lbStatusBody   []byte
-	gzipWriters    sync.Pool
+	// the connect connections by source address (LBALTOPT2 R16)
+	concentration *frontConcentration
+	interfaces    map[string]*frontInterface
+	lbStatusBody  []byte
+	gzipWriters   sync.Pool
 	// requests the access log has considered, for its sampling
 	accessLogCount atomic.Uint64
 
@@ -277,6 +279,7 @@ func newFront(ctx context.Context, routeTable *RouteTable, revision string, depe
 		routes:            routes,
 		requestMetrics:    newFrontRequestMetricsTable(dependencies.metrics, routes),
 		limits:            newFrontLimits(frontCtx, settings.Limit, dependencies.now),
+		concentration:     newFrontConcentration(dependencies.metrics),
 		interfaces:        map[string]*frontInterface{},
 		lbStatusBody:      append(lbStatusBody, '\n'),
 		hijackedConns:     map[*responseHijackedConn]bool{},
@@ -424,7 +427,8 @@ func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
 // interface the route table doesn't list admits nothing, counted under the
 // limit "interface" and no zone, and so does a class the front doesn't serve
 // on QUIC, under the limit "class", rather than logged, since connections set
-// their pace.
+// their pace. An admitted connect connection counts against its address in
+// the concentration gauges until its release (LBALTOPT2 R16).
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass NameClass) (release func(), ok bool) {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
@@ -440,6 +444,15 @@ func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, 
 	if outcome != limitOutcomeAdmitted {
 		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone, nameClass.String()).Inc()
 		return nil, false
+	}
+	if quicClass == limitQuicClassConnect {
+		// each release is safe to call more than once, so the pair is too
+		limitRelease := release
+		concentrationRelease := self.concentration.acquire(addr)
+		release = func() {
+			limitRelease()
+			concentrationRelease()
+		}
 	}
 	return release, true
 }

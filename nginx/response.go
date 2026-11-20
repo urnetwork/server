@@ -73,8 +73,13 @@ type upstreamBlockRecorder interface {
 // request hijacks its connection, by the connection: released when both have
 // let go. Safe for concurrent use.
 type responseSlot struct {
-	release   func()
-	holdCount atomic.Int32
+	release func()
+	// a connect upgrade's count in the concentration gauges
+	// (frontConcentration), released with the slot; nil for any other
+	// request. Set on the request's goroutine before any hijack, so before
+	// the count of holders can reach zero elsewhere
+	concentrationRelease func()
+	holdCount            atomic.Int32
 }
 
 // A slot held once, by the request.
@@ -95,6 +100,9 @@ func (self *responseSlot) acquireHold() {
 func (self *responseSlot) releaseHold() {
 	if self.holdCount.Add(-1) == 0 {
 		self.release()
+		if self.concentrationRelease != nil {
+			self.concentrationRelease()
+		}
 	}
 }
 
@@ -167,6 +175,18 @@ func (self *responseState) writer() http.ResponseWriter {
 // after a hijack, when the connection closes, whichever is later.
 func (self *responseState) holdSlot(release func()) {
 	self.slot = newResponseSlot(release)
+}
+
+// Holds a connect upgrade's count in the concentration gauges with the
+// request's slot, released as the slot is: when the request ends or, after a
+// hijack, when the connection closes, whichever is later. Called on the
+// request's goroutine before any hijack. A request without a slot gets one
+// that holds only the count.
+func (self *responseState) holdConcentration(release func()) {
+	if self.slot == nil {
+		self.slot = newResponseSlot(func() {})
+	}
+	self.slot.concentrationRelease = release
 }
 
 // Lets go of the request's hold on its slot, once its handler has returned.

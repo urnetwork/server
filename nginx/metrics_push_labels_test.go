@@ -29,6 +29,8 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	frontMetrics.limitRefusals.WithLabelValues("request", limitDefaultZone, NameClassApi.String()).Inc()
 	frontMetrics.certificateExpiry.WithLabelValues().Set(1)
 	frontMetrics.quicClientHellos.WithLabelValues(tlsQuicPortWhodis, tlsQuicNameClassAlt, "true").Inc()
+	frontMetrics.connectAddresses.WithLabelValues("ipv4", "100").Set(2)
+	frontMetrics.connectAddressConnections.WithLabelValues("ipv6", "0").Set(250)
 
 	// the forwarder's metrics are the process's, in the default registry. This
 	// registry gathers them too, with one synthetic series each, removed after
