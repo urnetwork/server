@@ -1,13 +1,14 @@
 package main
 
-// The server tests a gate's sweep names for an FS case in place of the convention's sidecart3 test (owner decision
-// 548; QD-1081): FS-54's and FS-55's OPS tests, the T3 tests in evshost, FS-5's, FS-73's, FS-72's rollback case's
-// and M2's (gate_m2_out.go), M3's restores, FS-25's api legs and FS-50's monitor tests (gate_m3.go), and M4's bridge
-// rows in controller and FS-37's clauses in taskworker/work (gate_m4.go); and the convention's own sidecart3 entries
-// wherever their package declares the test (QD-1085). A row whose test is renamed, or whose file's build tags drift
-// from the entry's, reads missing at the gate, never pass. This test fails first: each test must be declared in its
-// package, in a file that go test builds on this host with the entry's tags. A convention entry whose test nobody has
-// written yet is left out, since it reads missing by design.
+// The server tests a gate's sweep names for an FS case in place of the convention's sidecart3 test (owner decision 548;
+// QD-1081): FS-54's and FS-55's OPS tests, the T3 tests in evshost, FS-5's, FS-73's, FS-72's rollback case's and M2's
+// (gate_m2_out.go), M3's restores, FS-25's api legs and FS-50's monitor tests (gate_m3.go), M4's bridge rows in
+// controller and FS-37's clauses in taskworker/work (gate_m4.go), and M10's T3 runs in evshost, model and the root
+// package, FS-114's purge and drop cases by the file-cluster suite among them (gate_m10_out.go); and the convention's
+// own sidecart3 entries wherever their package declares the test (QD-1085). A row whose test is renamed, or whose
+// file's build tags drift from the entry's, reads missing at the gate, never pass. This test fails first: each test
+// must be declared in its package, in a file that go test builds on this host with the entry's tags. A convention entry
+// whose test nobody has written yet is left out, since it reads missing by design.
 
 import (
 	"go/ast"
@@ -124,6 +125,20 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"M4 FS-56 ./controller TestFs56OnT3",
 		"M10 FS-73 ./evshost TestFs73OnT3",
 		"M10 FS-72's rollback ./evshost TestFs72RollbackOnT3",
+		"M10 FS-72's migration ./evshost TestFs72MigrationOnT3",
+		"M10 FS-68 ./evshost TestFs68OnT3",
+		"M10 FS-89 ./evshost TestFs89OnT3",
+		"M10 FS-95 ./evshost TestFs95OnT3",
+		"M10 FS-66's hold ./model TestFs66HoldPlacedByApiOnT3",
+		"M10 FS-69 ./model TestFs69HoldsPlacedByApiOnT3",
+		"M10 FS-92 ./model TestFs92HoldsPlacedByApiOnT3",
+		"M10 FS-74 . TestFs74OnT3",
+		"M10 FS-75 . TestFs75OnT3",
+		"M10 FS-83 . TestFs83OnT3",
+		"M10 FS-87's index . TestFs87IndexOnT3",
+		"M10 FS-111 . TestFs111OnT3",
+		"M10 FS-114's purge . TestFileClusterSuitePassesOnT3",
+		"M10 FS-114's drop . TestFileClusterSuitePassesOnT3",
 		"every FS-55 ./local/fs55 TestFs55OnServerBinaries",
 	} {
 		if !slices.Contains(checked, want) {
