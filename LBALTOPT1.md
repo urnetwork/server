@@ -291,6 +291,68 @@ Not recommended now:
 - Is a connect deploy's reconnect wave acceptable at peak now that it carries api's connections too? (R7)
 - Are GC or scheduling a measurable share of connect's CPU at peak? (R5)
 
+## 8. The first round in production (2026-11-20)
+
+Times are UTC.
+
+**What shipped.**
+- **connect `2026.11.20-outerwerld+1103971130`** (server 63d940e85): the running source plus the code of R1, R3's zone label, R4 and R12's handshake accounting, R5, R6, R9 and R11. Its base was rebuilt byte-identical to the running binary first, and the symbol diff named only the changed packages.
+- **api `2026.11.20-outerwerld+1103950870`** (server db4bbbbb1): R10's route histogram. Its 25–30k bucket series fit under Mimir's 2,000,000-series limit; an ingester held about 356k series against its local limit of 1,000,000.
+- **xops 0560312:** R2's stale-controller and lb_alt-drop guards, and R8's 7.5 MiB UDP buffer ceilings, applied to every host in `edges`.
+- **monitor.yml:** `lbalt_status` enrolled (vault 105f57f): 10 interfaces and 108 probe requests.
+
+**R7, spaced restarts.**
+- connect went out one block per wave: beta at 17:55, g1 at 18:00, g2 at 18:07, g3 at 18:16 and g4 at 18:24.
+- The host CPU peaked at 84–86%, and each block's clients dipped and recovered on their own: g4 lost about 13k for 4 minutes.
+- The all-at-once deploy at 15:40 peaked at 90–91% and dropped about 28k clients at once.
+- api went out the same way, in five waves from 17:22 to 17:31. 5xx stayed at 0.10/s, and Redis node 6416's EVAL load stayed at 0.07–0.09 CPU-seconds a second.
+
+**R4 and R12, QUIC** (fleet-wide, 10-minute rates at 18:30).
+
+| Port | ClientHellos/s | Completed/s | `idle_timeout`/s | Other failures/s |
+|---|---|---|---|---|
+| quic (443) | 140 (api h3 100, connect 41) | 57 | 82 | 0.2 |
+| whodis (53, 4053) | 100 (api h3 69, connect 31) | 1.2 | 94 | 0.2 |
+
+- No ClientHello presents an `alt` name, and unknown names are 0.06/s.
+- The failures are not certificates, versions or ALPN. A client sends its first flight, and then nothing reaches the front until the idle timeout.
+- On 443, part of the gap is the client's own dial race. `connect/transport_family.go:raceH3DialProgressive` starts the next candidate after a stagger and cancels the losers, and a quic-go dial canceled mid-handshake sends no CONNECTION_CLOSE.
+- whodis completes about 1%, which no race explains. Port 53 is often intercepted on client networks; 4053 has no router rules on edge-0 and edge-1.
+- Alt never had a connect client over h3 or whodis (`urnetwork_connect_connected_clients{service="alt"}` was 0), so the failure predates lb_alt.
+- The next step is the address family (`urnetwork_connect_front_quic_connections_by_family_total`). The whodis ports can't be told apart at the front, since the split sends 53 and 4053 to one socket.
+
+**R4, TLS over TCP.** About 4.9k completed handshakes a second during the waves, 37% resumed, all TLS 1.3.
+
+**R3.**
+- 2,205 refusals a second come from the request limit of the interface's `default` zone, and 160 from its concurrency limit.
+- api's `/connect/control` route zone refuses 30 a second on concurrency.
+- So the bulk is per-address request rate at the interface, not a route zone.
+
+**R11.** api's upstream connections are reused 99.4% of the time: 7,440 reused, 49 dialed and 1.3 failed dials a second.
+
+**R5.**
+- GC is 3.3–3.9% of connect's busy CPU, from `go_cpu_classes_gc_total_cpu_seconds_total` over total less idle, on g2 and g3.
+- Scheduler latency has a p50 of 4.4 µs and a p99 of 0.8–1.1 ms.
+- So neither GOGC nor GOMAXPROCS is worth tuning now.
+
+**R1, the first profile** (g2 on edge-3, 30 s at about 8.7 cores):
+- **The Go runtime is 55% of flat time:**
+  - timer upkeep: `runtime.(*timers).check` is 8.8% cumulative, `adjust` 7.2%;
+  - select: `runtime.selectgo`, 8.9%;
+  - work stealing: `runtime.stealWork`, 7.2%;
+  - GC marking: background mark workers, 11.7%, including idle-priority marking.
+- **Everything else:**
+  - syscalls are 19%;
+  - connect's own code 7%;
+  - crypto 3%;
+  - Redis 1.4%;
+  - the front's `nginx` package is under 0.4%.
+
+**What the timer cost is not.**
+- Go 1.27 runs the O(n) `timers.adjust` only for a timer moved earlier, or once deleted timers pass a quarter of a heap. Extending a deadline is a cheap later move.
+- So rounding the per-message deadlines (`exchangeDeadline.refresh`, `readConnectH1PooledWithDeadline`, `writeConnectH1UserReadyBatch`) would save little. The hot sends (`sendPooledMessage`, `sendPooledReceive`) already arm a reused timer only on their slow path.
+- The source of the earlier moves and the deletions isn't attributable from a CPU profile, and needs a targeted measurement first.
+
 ## Appendix A. Queries
 
 All are instant queries over the window's range at its end time, against Mimir's Prometheus API.
