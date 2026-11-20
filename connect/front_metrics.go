@@ -81,14 +81,42 @@ const (
 	frontHttpErrorOther        = "other"
 )
 
+// Why a TLS handshake on a public socket failed, as the metric labels it,
+// read from the error net/http logs (frontTlsHandshakeReason). A closed set.
+const (
+	// the client closed or reset the connection during the handshake, or
+	// before its ClientHello
+	frontTlsHandshakeReasonClosed = "closed"
+	// the handshake outlasted the client header timeout, which bounds it
+	frontTlsHandshakeReasonTimeout = "timeout"
+	// the client offers only versions the front doesn't speak, or refuses the
+	// front's
+	frontTlsHandshakeReasonVersion = "version"
+	// no cipher suite, key exchange or signature algorithm in common
+	frontTlsHandshakeReasonCipher = "cipher"
+	// the client refused the front's certificate
+	frontTlsHandshakeReasonCertificate = "certificate"
+	// the front has no certificate for the server name the client asked for
+	frontTlsHandshakeReasonUnknownName = "unknown_name"
+	// no application protocol in common
+	frontTlsHandshakeReasonAlpn = "alpn"
+	// bytes that are not a TLS handshake, such as plain HTTP or a probe
+	frontTlsHandshakeReasonNotTls = "not_tls"
+	// another alert the client sent
+	frontTlsHandshakeReasonClientAlert = "client_alert"
+	frontTlsHandshakeReasonOther       = "other"
+	// the reason of every kind but tls_handshake
+	frontHttpErrorReasonNone = "-"
+)
+
 var frontHttpServerErrorsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "front_http_server_errors_total",
-		Help:      "Messages the public lb_alt HTTP servers logged, counted instead of logged since they quote client addresses, by port kind and kind: tls_handshake, panic, accept, other",
+		Help:      "Messages the public lb_alt HTTP servers logged, counted instead of logged since they quote client addresses, by port kind, kind (tls_handshake, panic, accept, other) and, for tls_handshake, the reason (closed, timeout, version, cipher, certificate, unknown_name, alpn, not_tls, client_alert, other; - for the other kinds)",
 	},
-	[]string{"port", "kind"},
+	[]string{"port", "kind", "reason"},
 )
 
 // Registers the front's metrics with the default registry.

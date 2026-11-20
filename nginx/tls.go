@@ -52,11 +52,15 @@ const (
 	tlsNextProtoH3    = "h3"
 )
 
+// The text of errTlsNoCertificate, which connect's error log reads to label
+// the failed handshake.
+const TlsNoCertificateMessage = "lbalt: no certificate for the server name"
+
 // The handshake error when the front has no certificate for a ClientHello:
 // on QUIC a missing, invalid or unknown server name, and on TCP any name the
 // default server can't stand in for. It names no server name, since the
 // client chose it.
-var errTlsNoCertificate = errors.New("lbalt: no certificate for the server name")
+var errTlsNoCertificate = errors.New(TlsNoCertificateMessage)
 
 // Every served name's certificate and key. Read-only once loaded, so safe
 // for concurrent use.

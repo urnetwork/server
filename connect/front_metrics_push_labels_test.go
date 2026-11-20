@@ -34,13 +34,13 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	frontSocketRestartsCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
 	frontSocketBindFailuresCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
 	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontQuicResultConnect).Inc()
-	frontHttpServerErrorsCounter.WithLabelValues(interfaceName, frontHttpErrorOther).Inc()
+	frontHttpServerErrorsCounter.WithLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed).Inc()
 	defer func() {
 		frontSocketsUpGauge.DeleteLabelValues(interfaceName, "ipv4", "tcp", "443")
 		frontSocketRestartsCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
 		frontSocketBindFailuresCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
 		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontQuicResultConnect)
-		frontHttpServerErrorsCounter.DeleteLabelValues(interfaceName, frontHttpErrorOther)
+		frontHttpServerErrorsCounter.DeleteLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed)
 	}()
 
 	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
