@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quic-go/quic-go"
 )
 
@@ -222,10 +223,17 @@ func (self *testTlsVault) load(t *testing.T) *CertificateStore {
 }
 
 // A new pair of base configs over the fixture, with the first lb name as the
-// default server, as the front builds them.
+// default server, as the front builds them, counting into metrics of their
+// own.
 func (self *testTlsVault) newTlsConfigs(t *testing.T, settings *TlsSettings) (tlsConfig *tls.Config, quicTlsConfig *tls.Config) {
 	t.Helper()
-	return newTlsConfigs(self.load(t), newNameMatcher(self.routeTable), self.routeTable.Lb.Names[0], settings)
+	return self.newTlsConfigsWithMetrics(t, settings, newFrontMetrics(prometheus.NewRegistry()))
+}
+
+// As newTlsConfigs, counting into metrics.
+func (self *testTlsVault) newTlsConfigsWithMetrics(t *testing.T, settings *TlsSettings, metrics *frontMetrics) (tlsConfig *tls.Config, quicTlsConfig *tls.Config) {
+	t.Helper()
+	return newTlsConfigs(self.load(t), newNameMatcher(self.routeTable), self.routeTable.Lb.Names[0], self.routeTable.Listen, settings, metrics)
 }
 
 // A client session cache that reports each session it stores, so a test

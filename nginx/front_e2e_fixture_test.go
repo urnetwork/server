@@ -673,10 +673,10 @@ func (self *e2eFront) serveInterface(t *testing.T, interfaceName string) *e2eInt
 		t.Fatal(err)
 	}
 	e2eInterface.httpsAddr = httpsListener.Addr().String()
-	go httpsServer.Serve(NewTlsListener(httpsListener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout))
+	go httpsServer.Serve(NewTlsListener(httpsListener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout, nil))
 	if httpsIpv6Listener, err := net.Listen("tcp6", "[::1]:0"); err == nil {
 		e2eInterface.httpsIpv6Addr = httpsIpv6Listener.Addr().String()
-		go httpsServer.Serve(NewTlsListener(httpsIpv6Listener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout))
+		go httpsServer.Serve(NewTlsListener(httpsIpv6Listener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout, nil))
 	}
 	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
