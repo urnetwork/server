@@ -126,6 +126,38 @@ func newStatsPusher(pushUrl string, service string, username string, password st
 		BasicAuth(username, password)
 }
 
+// The label names the stats push puts on every series of a process: job, and
+// the grouping labels that key the process's series (newGroupedStatsPusher).
+// The push client refuses a whole push when any gathered metric has a label
+// of one of these names, so one such metric stops every metric of its
+// process from the moment it has a series, as the lb_alt front's request
+// counter did on its first requests. A metric of a pushing process names its
+// labels otherwise, for example upstream_service and upstream_block.
+func StatsPushReservedLabelNames() []string {
+	return []string{"job", "env", "service", "block", "host", "instance"}
+}
+
+// The pusher of a process: its default registry keyed by job service and the
+// grouping labels env, service, block, host and instance, each of them in
+// StatsPushReservedLabelNames.
+func newGroupedStatsPusher(
+	pushUrl string,
+	env string,
+	service string,
+	block string,
+	host string,
+	instance string,
+	username string,
+	password string,
+) *push.Pusher {
+	return newStatsPusher(pushUrl, service, username, password).
+		Grouping("env", env).
+		Grouping("service", service).
+		Grouping("block", block).
+		Grouping("host", host).
+		Grouping("instance", instance)
+}
+
 var buildInfoGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -245,13 +277,16 @@ func StartStatsPusher(ctx context.Context) (flush func()) {
 	}
 	instance := hex.EncodeToString(instanceBytes)
 
-	pusher := newStatsPusher(fmt.Sprintf("http://127.0.0.1:%d", localPort), service, username, password).
-		Client(NewHttpClient(10*time.Second)).
-		Grouping("env", env).
-		Grouping("service", service).
-		Grouping("block", block).
-		Grouping("host", host).
-		Grouping("instance", instance)
+	pusher := newGroupedStatsPusher(
+		fmt.Sprintf("http://127.0.0.1:%d", localPort),
+		env,
+		service,
+		block,
+		host,
+		instance,
+		username,
+		password,
+	).Client(NewHttpClient(10 * time.Second))
 
 	glog.Infof("[stats]publishing to http://127.0.0.1:%d\n", localPort)
 
