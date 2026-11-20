@@ -166,6 +166,35 @@ func TestInternalGateCallersAreTheClassesTheGateTakes(t *testing.T) {
 	}
 }
 
+// A file that does not parse is refused with the line the decoder names and none of its words, which quote the start
+// of a value: a bearer written alone, where the file's format wants a map, or as an entry of the verify file.
+func TestInternalGateRefusalsQuoteNoValue(t *testing.T) {
+	bearer, digest := newTestInternalGateBearer(t)
+	_, err := ParseInternalGateCredential([]byte(bearer + "\n"))
+	if !errors.Is(err, ErrInternalGateCredentialRefused) || !strings.Contains(err.Error(), "line 1") {
+		t.Fatalf("a bearer alone answered %v", err)
+	}
+	if strings.Contains(err.Error(), bearer[:7]) {
+		t.Fatal("the refusal quotes the bearer's start")
+	}
+	for _, file := range []string{
+		"evs: " + bearer + "\n",
+		"evs: {class: evs, sha256: [" + digest + "]}\ngkm: " + bearer + "\n",
+	} {
+		_, err := NewInternalGateVerifier([]byte(file))
+		if !errors.Is(err, ErrInternalGateCredentialRefused) || !strings.Contains(err.Error(), "line ") {
+			t.Fatalf("a bearer as an entry answered %v", err)
+		}
+		if strings.Contains(err.Error(), bearer[:7]) {
+			t.Fatal("the refusal quotes the bearer's start")
+		}
+	}
+	// a file that is not YAML at all is refused alike
+	if _, err := ParseInternalGateCredential([]byte("current: [" + bearer + "\n")); !errors.Is(err, ErrInternalGateCredentialRefused) || strings.Contains(err.Error(), bearer[:7]) {
+		t.Fatalf("a file that is not YAML answered %v", err)
+	}
+}
+
 // A process reads its own file from its vault, and a vault without one holds no credential.
 func TestInternalGateFilesLoadFromTheVault(t *testing.T) {
 	current, digest := newTestInternalGateBearer(t)
