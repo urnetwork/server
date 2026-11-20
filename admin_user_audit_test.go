@@ -82,7 +82,14 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 		"<decl>": {count: 5, class: adminUserIdOwner, why: "the column and its indexes"},
 	},
 	"model/abuse_action_model.go": {
-		"AbuseNoticeRecipientsInTx": {count: 3, class: adminUserIdOwner, why: "§21's notices go to the account"},
+		"AbuseNoticeRecipientsInTx": {count: 1, class: adminUserIdOwner, why: "§21's notices go to the account, and from MG6 to each live Owner and Admin by network_member"},
+	},
+	"model/abuse_production_model.go": {
+		"<decl>":                        {count: 1, class: adminUserIdOwner, why: "a legal production's account record (api-1)"},
+		"exportAbuseProductionAccounts": {count: 3, class: adminUserIdOwner, why: "a legal production's account and its sign-ins; a team's members come from network_member"},
+	},
+	"model/abuse_retention_model.go": {
+		"holdDeletionTables": {count: 1, class: adminUserIdOwner, why: "a hold's copy of the deleted network's row"},
 	},
 	"model/account_api_key_model.go": {
 		"Test_GetNetworkByApiKey": {count: 1, class: adminUserIdOwner, why: "a test helper reading the key's network"},
@@ -109,8 +116,14 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 		"getUserAuth":           {count: 1, class: adminUserIdOwner, why: "the account's sign-in"},
 		"handleLoginWallet":     {count: 1, class: adminUserIdNetwork, why: "a wallet sign-in mints for the user's own network"},
 	},
+	"model/config_log_restore.go": {
+		"ConfigReseedAdminSidecar": {count: 1, class: adminUserIdMember, why: "a re-seed's admin: a personal network's owner; in a team only an Owner's or Admin's live membership"},
+	},
 	"model/device_association_model.go": {
 		"DeviceConfirmAdopt": {count: 1, class: adminUserIdOwner, why: "the adopting account's sign-in kind"},
+	},
+	"model/edge_client_model.go": {
+		"MintEdgeClient": {count: 1, class: adminUserIdOwner, why: "the platform's urnetwork-edge network that sidecar.yml names: its clients' jwts carry its account, as a prober's do"},
 	},
 	"model/lag_guest_model.go": {
 		"CreateLagGuestNetwork": {count: 1, class: adminUserIdOwner, why: "a guest network's creation"},
@@ -146,6 +159,9 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 	"model/network_user_model.go": {
 		"FindNetworkIdByWalletAddress": {count: 1, class: adminUserIdNetwork, why: "the network a wallet sign-in owns"},
 		"GetNetworkUser":               {count: 1, class: adminUserIdNetwork, why: "the user's account and the name of the network it owns"},
+	},
+	"model/network_verified_model.go": {
+		"<decl>": {count: 2, class: adminUserIdMember, why: "the owner's verified sign-in verifies the network (QD-350): a team's owner of record has none, so only payment verifies a team, failing closed"},
 	},
 	"model/network_wallet_mapping_consent.go": {
 		"checkNetworkWalletMappingOwner": {count: 1, class: adminUserIdOwner, why: "the account's wallet consent"},
@@ -203,6 +219,9 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 	},
 	"session/session_operation.go": {
 		"EnforceSessionOperation": {count: 1, class: adminUserIdMember, why: "an owner's operation: a member actor is cancelled, failing closed"},
+	},
+	"sidecart3/recovery_snapshot.go": {
+		"AddRecoveryIdentities": {count: 1, class: adminUserIdOwner, why: "T3's snapshot of the account's row and sign-ins, which §19.10's restore brings back"},
 	},
 }
 
