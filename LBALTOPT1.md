@@ -26,7 +26,7 @@ Window: 07:30–13:55Z. Edge-4 carried 80k clients, against 62k the day before. 
 
 **The issues worth fixing are mostly outside raw CPU** (§5):
 - **Refusals:** the per-address limits refuse 14% of front requests. connect's upgrade requests are refused about as often as they are accepted, as they were under nginx.
-- **Failed handshakes:** QUIC handshakes fail about 9 times as often as they complete, and the QUIC failures have no reason. TLS handshakes fail 463 times a second. Their reason is counted since the connect hotfix of 15:36–15:42Z (5ba2c9f6f on main); §3.7 has the breakdown.
+- **Failed handshakes:** since the `alt.*` move at 06:32Z, most QUIC handshakes on the alt path fail. 443 completes about 20% of them and whodis 1–2%, and the QUIC failures have no reason. TLS handshakes over TCP fail 463 times a second; their reason is counted since the connect hotfix of 15:36–15:42Z (5ba2c9f6f on main), and the failures are clients closing (60%) or timing out (40%), with no version, cipher or ALPN failures (§3.7).
 - **Unalerted rollbacks:** edge-0 was rolled back twice with no alert.
 - **No way to profile:** nothing can profile the front in production, and api has no latency histogram.
 
@@ -34,6 +34,7 @@ Window: 07:30–13:55Z. Edge-4 carried 80k clients, against 62k the day before. 
 - R1: a loopback-only pprof endpoint, which every later CPU decision needs.
 - R2: rollout safety. run-*.sh would refuse a stale controller, and the monitor's `lbalt_status` would be enrolled.
 - R3: refusal zones, then limits that know a client rather than only its address.
+- R12: the alt path's QUIC failures, a possible cause of the h3 failures users report.
 - R4: handshake accounting.
 - R5: runtime metrics before any GOGC or GOMAXPROCS change.
 
@@ -157,6 +158,13 @@ api has no latency histogram of its own in Mimir: `urnetwork_http_request_durati
   - The SDK keeps a utls LRU session cache (`connect/net_tls_hello.go`), so clients resume when they return to their block. HMARK keys on the source address, so they do return.
   - D6c's per-process ticket keys mean a block restart invalidates its tickets.
 - **TLS handshake errors:** 463 a second over TCP. At about 15:20Z that was edge-0 78, edge-1 65, edge-3 148 and edge-4 167. Another 1.6 a second fall under `other`.
+- **TLS failure reasons**, counted since the 15:42Z hotfix (connect `2026.11.20-outerwerld+1103888290`). At 16:05–16:25Z, 20–40 minutes after the deploy, with the failure rate back at its pre-deploy level, 418 failures a second:
+  - `closed`: 252 a second (60%);
+  - `timeout`: 166 a second (40%);
+  - `certificate` 0.30, `other` 0.21, `not_tls` 0.12;
+  - `version`, `cipher`, `alpn` and `client_alert`: none.
+
+  These are clients that hang up or stall mid-handshake, not incompatible clients. Timeouts run 62–71 a second on edge-3 and edge-4 against 14–20 on edge-0 and edge-1, and `closed` runs 45–81 a second per host.
 - **QUIC connections, a second:**
 
   | Port | api | connect | rate_limited | handshake_failed |
@@ -165,6 +173,17 @@ api has no latency histogram of its own in Mimir: `urnetwork_http_request_durati
   | whodis (53, 4053) | 1.26 | 0.19 | 0.16 | 105.8 |
 
 - **Sockets:** 1,600 front sockets up, with no restart and no bind failure since the processes started.
+- **When the QUIC failures began.** `handshake_failed` was 0.2 a second at 06:30Z, after the 06:15–06:21Z switch. By 07:00Z it was 89 a second on 443 and 89 on whodis together. So it began with the `alt.*` move at 06:32Z, when the SDK's alt h3 and alt whodis dialers (`connect/net_http_alt.go`) started reaching the fronts. It has run since:
+  - 443: 68–112 a second failed, against 13–22 completed for api and 2–20 for connect;
+  - whodis: 83–105 a second failed, against about 1.5 completed, so 1–2% of whodis handshakes complete.
+- **By host, 14:30–15:30Z:**
+  - 443 failures run 22–29 a second on each edge;
+  - whodis failures run 13–14 a second on edge-0 and edge-1, which have no router rules for 4053, and 37–38 on edge-3 and edge-4.
+- **Probes from outside**, over IPv4, pinned to one edge:
+  - h3 `/hello` answers 200 with SNI `api`, `api-v4` and `api-v6.bringyour.com`;
+  - the QUIC handshake fails with SNI `alt.bringyour.com` or `alt-v4.bringyour.com`, names the fronts don't serve on QUIC. `nginx/tls.go:newTlsConfigs` gives an unknown SNI no certificate on QUIC, as alt did for names it didn't serve, while TCP gives it the default server's certificate;
+  - the client has presented the api name rather than the alt one since fc3da5a0 (2026-09-13). Older builds that present an alt name can't complete h3 or whodis through the fronts.
+- **connect's own h3 transport recovered:** `urnetwork_connect_h3_datagram_events_total` ran 53–79k events a second before the switch, dipped to about 22k during the rollout, and reached 95k by 16:00Z.
 
 ### 3.8 connect sessions
 
@@ -219,15 +238,18 @@ At GOGC 100 with 36–41 GB heaps per block, GC runs about every 125 s per block
 - **P3. GC is infrequent and probably cheap,** but unmeasured. There is no GC CPU class in Mimir, and the 36–79 GiB per-block heaps make each cycle large (§3.3).
 - **P4. Every edge runs up to 100 connect Ps** (5 blocks at GOMAXPROCS 20) with no CPU quota, plus the other services' Ps. That's more than edge-1's, edge-3's and edge-4's 72 CPUs each, and about edge-0's 96. Pressure is low (§3.3), but at peaks the blocks compete with one another and with the kernel's softirq time. No scheduler latency is measured.
 - **P5. Refused requests are 14% of front requests** (§3.6). Each costs a request parse and often a handshake, and refused clients retry.
-- **P6. Failed handshakes dominate QUIC:** 210 a second against 24 completed. On TCP, 463 handshakes a second fail (§3.7).
+- **P6. Failed handshakes dominate QUIC:** 210 a second against 24 completed. On TCP, 418–463 handshakes a second fail, all but 0.2% because the client closed (60%) or timed out (40%) mid-handshake. That costs little CPU (§3.7).
 - **P7. connect sessions churn:** 920 a second fleet-wide, with a median life of 4–6 s, about as on 11-19 (§3.8). Every new session pays a handshake and connect's session setup. That setup, not TLS, is what the reconnect waves cost: edge-3 and edge-4 reached 89–93% CPU (LBALT.md §11.8).
 - **P8. Nearly idle limits:** the body budget and spill caps are nearly unused (§3.5). UDP drops are negligible, though `rmem_max` (1 MiB) is below what quic-go asks for (§3.9).
 
 **Correctness and operations**
 - **C1. Rollbacks without an alert.** A stale controller's run-lb-unit.sh rolled edge-0 back twice (LBALT.md §11.8). Nothing alerted, because monitor.yml's `lbalt_status` isn't enrolled (LBALT.md §11.6), and the second rollback was found 5 hours later by reading metrics.
-- **C2. Unexplained QUIC handshake failures.** The TLS failures carry a bounded reason since the 15:42Z hotfix (§3.7). The QUIC failures have none: `frontQuicRun.serveConnect` and `serveApi` count `handshake_failed` without the error from `AwaitQuicHandshake`, so a timeout, a TLS alert and a version mismatch look the same.
+- **C2. Most alt-path QUIC handshakes fail.** They have done so since the `alt.*` move at 06:32Z (§3.7): 443 completes about 20% of handshakes and whodis 1–2%. The failures carry no reason: `frontQuicRun.serveConnect` and `serveApi` count `handshake_failed` without the error from `AwaitQuicHandshake`. So an alt-named SNI (no certificate on QUIC), a timeout, a TLS alert and a version mismatch all look the same. The TLS failures over TCP do carry a reason since the 15:42Z hotfix (§3.7). This may be the h3 failure users report.
 - **C3. A misfiled body failure.** A client gone mid-body counts as `incomplete` (400) when its read fails with a reset: `nginx/body.go:bodyReadRefusal` treats only a canceled context or a timeout differently. The client never sees the 400, so `canceled` undercounts clients that went away. This is metric accuracy only.
-- **C4. A connect deploy is now a front deploy.** It restarts every public listener on the host, api's h2 connections included, so every connect deploy is a reconnect wave for all clients, not only connect's. D12's drain softens it, and the waves' cost is P7's.
+- **C4. A connect deploy is now a front deploy.** It restarts every public listener on the host, api's h2 connections included, so every connect deploy is a reconnect wave for all clients, not only connect's. D12's drain softens it, and the waves' cost is P7's. The 15:36–15:42Z hotfix shows the cost:
+  - fleet clients fell from 261.4k at 15:30Z to 231.9k at 15:46Z and recovered by about 15:56Z;
+  - one-minute busy CPU peaked at 90.2% on edge-4 (15:49Z, against 74.2% before), 85.9% on edge-1, 81.5% on edge-3 and 71.7% on edge-0;
+  - refusals peaked at 3,130 a second (three-minute rate, 15:44Z) and stayed 25–30% above their pre-deploy rate through 16:24Z.
 - **C5. Observability gaps:**
   - no production profiling;
   - no api latency histogram;
@@ -253,6 +275,7 @@ Ranked by impact over effort, with risk.
 | R9 | Count a reset mid-body as `canceled`, not `incomplete` (C3). | Low | S | L | The two reasons' rates. |
 | R10 | Restore an api latency histogram with bounded route labels, so forwarding overhead is the front's header time minus api's own. | Medium: observability | S | L | Front against api p99 per route. |
 | R11 | Add an upstream pool counter of dials and reuses per service (`nginx/upstream.go`). | Low | S | L | Reuse ratio; dials a second. |
+| R12 | The alt path's QUIC: before anything else in R4, give `handshake_failed` its reason and count failures by SNI class (api, connect, alt, unknown, none). If the failing clients present alt names, serve the `alt.*` names on QUIC as api names, with a certificate and api routing, as alt did. Otherwise follow the reason that dominates. | High: client connectivity | S–M | L | whodis and 443 handshake success rates against the 1–2% and 20% of §3.7. |
 
 Not recommended now:
 - **Shrinking the body budget or spill caps:** reserving is accounting, and nothing is preallocated.
@@ -262,8 +285,8 @@ Not recommended now:
 ## 7. Open questions
 
 - What makes up the 15–25% extra allocation per Gbps? (R1)
-- Why do about 90% of QUIC handshakes fail, and how much of whodis's 106 a second on ports 53 and 4053 is non-whodis traffic? (R4)
-- What are the 463 TLS handshake failures a second? (5ba2c9f6f, once deployed)
+- Why do most QUIC handshakes on the alt path fail since the 06:32Z `alt.*` move: alt-named SNIs from older builds, or something in the whodis translation or the QUIC parameters? (R12)
+- Why do edge-3 and edge-4 see 3–5 times the TLS handshake timeouts of edge-0 and edge-1 (62–71 a second against 14–20): a different client mix on their addresses, or scanners?
 - Who is refused: real users behind shared addresses, or abusive sources? (R3)
 - Is a connect deploy's reconnect wave acceptable at peak now that it carries api's connections too? (R7)
 - Are GC or scheduling a measurable share of connect's CPU at peak? (R5)
