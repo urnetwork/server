@@ -76,6 +76,12 @@ type ForwardSettings struct {
 	// (body_stream.go), so a longer declared body streams unkept. Values
 	// below 1 mean 1.
 	CopyBufferBytes int
+	// the buffer each upstream request head is built in, in bytes, pooled per
+	// service: one 4 KiB page, the response head's limit, which holds a
+	// request line and headers with long tokens whole. A head that outgrows
+	// it is built in a buffer of its own, which no pool keeps, so a pooled
+	// buffer never grows. Values below 1 mean 1.
+	RequestHeadBufferBytes int
 }
 
 // A new instance on every call, with nginx's values.
@@ -92,5 +98,6 @@ func DefaultForwardSettings() *ForwardSettings {
 		KeepaliveWriteWait:             50 * time.Millisecond,
 		UpstreamBufferBytes:            4 * 1024,
 		CopyBufferBytes:                32 * 1024,
+		RequestHeadBufferBytes:         4 * 1024,
 	}
 }

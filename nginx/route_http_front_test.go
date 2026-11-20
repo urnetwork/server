@@ -9,11 +9,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -383,6 +385,125 @@ func TestFrontMetricsLabelsAreBounded(t *testing.T) {
 		if count := testCounterValue(t, testFront.metrics.requests.WithLabelValues(c.labels...)); count != c.count {
 			t.Errorf("requests_total%v = %v, want %v", c.labels, count, c.count)
 		}
+	}
+}
+
+// The status class and protocol labels, each one of a closed set of
+// constants.
+func TestRouteHttpStatusClassAndProtocolLabels(t *testing.T) {
+	for _, c := range []struct {
+		statusCode  int
+		statusClass string
+	}{
+		{statusCode: 0, statusClass: "none"},
+		{statusCode: 100, statusClass: "1xx"},
+		{statusCode: 199, statusClass: "1xx"},
+		{statusCode: 200, statusClass: "2xx"},
+		{statusCode: 301, statusClass: "3xx"},
+		{statusCode: 404, statusClass: "4xx"},
+		{statusCode: 503, statusClass: "5xx"},
+		{statusCode: 599, statusClass: "5xx"},
+		{statusCode: 600, statusClass: "other"},
+		{statusCode: 99, statusClass: "other"},
+		{statusCode: -1, statusClass: "other"},
+	} {
+		if statusClass := routeHttpStatusClasses[routeHttpStatusClassIndex(c.statusCode)]; statusClass != c.statusClass {
+			t.Errorf("the status class of %d = %q, want %q", c.statusCode, statusClass, c.statusClass)
+		}
+	}
+	for _, c := range []struct {
+		protoMajor int
+		protocol   string
+	}{
+		{protoMajor: 0, protocol: "other"},
+		{protoMajor: 1, protocol: "h1"},
+		{protoMajor: 2, protocol: "h2"},
+		{protoMajor: 3, protocol: "h3"},
+		{protoMajor: 4, protocol: "other"},
+		{protoMajor: -1, protocol: "other"},
+	} {
+		if protocol := routeHttpProtocols[routeHttpProtocolIndex(c.protoMajor)]; protocol != c.protocol {
+			t.Errorf("the protocol of major version %d = %q, want %q", c.protoMajor, protocol, c.protocol)
+		}
+	}
+}
+
+// An ended request records its metrics through the series kept for its
+// label set, the vectors' own series, each resolved once: requests ending
+// at once on label sets not resolved yet, the same and different ones,
+// count exactly, and once resolved a request's metrics allocate nothing.
+func TestFrontObserveKeepsEachLabelSetsSeries(t *testing.T) {
+	testFront := newTestFront(t, loadTestRouteTable(t), testFrontSettings())
+	front := testFront.front
+	// the access log is the production one, off below V(1)
+	front.accessLog = &testDisabledFrontAccessLog{}
+	now := testFront.clock.now()
+	newExchange := func(serviceName string, upstreamBlock string, protoMajor int, statusCode int) *routeHttpExchange {
+		r := httptest.NewRequest(http.MethodGet, "/v1", nil)
+		r.ProtoMajor = protoMajor
+		return &routeHttpExchange{
+			front:          front,
+			frontInterface: front.interfaces["eth1"],
+			r:              r,
+			response: &responseState{
+				front:         front,
+				statusCode:    statusCode,
+				headerTime:    now.Add(time.Millisecond),
+				upstreamBlock: upstreamBlock,
+			},
+			startTime:   now,
+			serviceName: serviceName,
+		}
+	}
+	exchanges := []*routeHttpExchange{
+		newExchange("api", "g1", 2, http.StatusOK),
+		newExchange("api", "g1", 2, http.StatusOK),
+		newExchange("api", "g2", 1, http.StatusNotFound),
+		newExchange("api", "not-a-block", 3, http.StatusServiceUnavailable),
+		newExchange("connect", routeHttpInProcessBlock, 1, http.StatusSwitchingProtocols),
+		newExchange("not-a-service", "g1", 1, 0),
+	}
+	const observations = 100
+	start := make(chan struct{})
+	var observers sync.WaitGroup
+	for _, exchange := range exchanges {
+		observers.Go(func() {
+			<-start
+			for range observations {
+				front.observe(exchange)
+			}
+		})
+	}
+	close(start)
+	observers.Wait()
+	for _, c := range []struct {
+		labels []string
+		count  float64
+	}{
+		{labels: []string{"api", "h2", "2xx", "g1"}, count: 2 * observations},
+		{labels: []string{"api", "h1", "4xx", "g2"}, count: observations},
+		{labels: []string{"api", "h3", "5xx", "-"}, count: observations},
+		{labels: []string{"connect", "h1", "1xx", "local"}, count: observations},
+		{labels: []string{"-", "h1", "none", "-"}, count: observations},
+	} {
+		if count := testCounterValue(t, testFront.metrics.requests.WithLabelValues(c.labels...)); count != c.count {
+			t.Errorf("requests_total%v = %v, want %v", c.labels, count, c.count)
+		}
+		if count, _ := testResponseHeaderSeconds(t, testFront.metrics, c.labels...); float64(count) != c.count {
+			t.Errorf("response_header_seconds%v count = %v, want %v", c.labels, count, c.count)
+		}
+	}
+	// AllocsPerRun counts the whole process's allocations, so another
+	// goroutine, such as an earlier test's teardown, can only add to one
+	// measurement: the least of a few is the request's own
+	leastAllocs := math.Inf(1)
+	for range 5 {
+		leastAllocs = min(leastAllocs, testing.AllocsPerRun(1000, func() {
+			front.observe(exchanges[0])
+		}))
+	}
+	if leastAllocs != 0 {
+		t.Errorf("a request's metrics allocate %v times, want none", leastAllocs)
 	}
 }
 

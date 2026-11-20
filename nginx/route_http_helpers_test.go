@@ -306,6 +306,17 @@ func (self *testFrontAccessLog) writtenLines() []string {
 	return append([]string{}, self.lines...)
 }
 
+// An access log that is off, as glog's V(1) is in production.
+type testDisabledFrontAccessLog struct{}
+
+// See frontAccessLog.
+func (self *testDisabledFrontAccessLog) enabled() bool {
+	return false
+}
+
+// See frontAccessLog.
+func (self *testDisabledFrontAccessLog) write(line string) {}
+
 // A clock tests move by hand.
 type testClock struct {
 	stateLock sync.Mutex
