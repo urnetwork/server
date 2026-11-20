@@ -151,6 +151,8 @@ var edgeRoleSmtpedge = &edgeRoleBlock{
 		"Pro":                      {"Pro"},
 		"NetworkTierFree":          {},
 		"NewAbuseSmtpSink":         {"NewAbuseSmtpSink", "abuseSmtpSink.RequestSmtpSuspension"},
+		// the X-UR-Ref keys, from the block's vault: no SQL
+		"LoadSmtpXUrRefKeyFile": {"LoadSmtpXUrRefKeyFile"},
 	},
 	runs: map[string]string{
 		"GetActiveSmtpHalts":              "ActiveHalts",
