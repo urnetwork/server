@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -83,18 +85,42 @@ const (
 	InternalGateCallerMxedgePlatform InternalGateCaller = "mxedge-platform"
 )
 
+// Every class this release knows, in the order declared: the one list a class joins, which known reads and
+// `sidecarctl internal bearer-keygen` draws for (QD-1102), so a class added here needs no change there.
+func InternalGateCallers() []InternalGateCaller {
+	return []InternalGateCaller{
+		InternalGateCallerEvs,
+		InternalGateCallerGkm,
+		InternalGateCallerSockets,
+		InternalGateCallerTlsedge,
+		InternalGateCallerMxedge,
+		InternalGateCallerSmtpedge,
+		InternalGateCallerConnect,
+		InternalGateCallerEdge,
+		InternalGateCallerMxedgePlatform,
+	}
+}
+
 // Whether a class is one this release knows.
 func (self InternalGateCaller) known() bool {
-	switch self {
-	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
-		InternalGateCallerSmtpedge, InternalGateCallerConnect, InternalGateCallerEdge, InternalGateCallerMxedgePlatform:
-		return true
-	}
-	return false
+	return slices.Contains(InternalGateCallers(), self)
 }
 
 // A credential file or verify file that cannot be used. The text names the part, never a bearer.
 var ErrInternalGateCredentialRefused = errors.New("internal gate credential refused")
+
+// The line number a YAML decoder's error names first, which is the line it failed at.
+var internalGateYamlLinePattern = regexp.MustCompile(`line ([0-9]+)`)
+
+// What a refusal says of a file the YAML decoder refuses: that it does not parse, and at which line. The decoder's
+// own words quote the start of a value, which in these files can be a bearer written where the format wants a map,
+// so they are not passed on.
+func internalGateYamlRefusal(err error) string {
+	if match := internalGateYamlLinePattern.FindStringSubmatch(err.Error()); match != nil {
+		return "does not parse at line " + match[1]
+	}
+	return "does not parse"
+}
 
 // One caller's entry in the verify file.
 type internalGateVerifyEntryYaml struct {
@@ -125,7 +151,7 @@ func NewInternalGateVerifier(data []byte) (*InternalGateVerifier, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&entries); err != nil {
-		return nil, refuse("%v", err)
+		return nil, refuse("%s", internalGateYamlRefusal(err))
 	}
 	self := &InternalGateVerifier{}
 	for callerName, entry := range entries {
@@ -198,7 +224,7 @@ func ParseInternalGateCredential(data []byte) (string, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(credential); err != nil {
-		return "", fmt.Errorf("%w: credential file: %v", ErrInternalGateCredentialRefused, err)
+		return "", fmt.Errorf("%w: credential file: %s", ErrInternalGateCredentialRefused, internalGateYamlRefusal(err))
 	}
 	for _, bearer := range []string{credential.Current, credential.Previous} {
 		if bearer == "" {

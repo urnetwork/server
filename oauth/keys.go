@@ -130,7 +130,9 @@ var configSignerKeys = sync.OnceValue(func() []*SignerKey {
 
 		// the kid must be the set's prefix and the thumbprint of this key. A
 		// mismatch means the config and the file have drifted, which would
-		// publish a jwks that cannot verify the tokens actually being signed
+		// publish a jwks that cannot verify the tokens actually being signed.
+		// The message names the key's thumbprint, as it did before the sets,
+		// and the kid that thumbprint gives in the set the listed kid names
 		set := SignerKeySetOfKid(keyConfig.Kid)
 		thumbprint, err := SignerKid(&privateKey.PublicKey)
 		if err != nil {
@@ -138,9 +140,10 @@ var configSignerKeys = sync.OnceValue(func() []*SignerKey {
 		}
 		if kid := set.KidPrefix() + thumbprint; kid != keyConfig.Kid {
 			panic(fmt.Errorf(
-				"oauth signer key %s: the key at %s is %s",
+				"oauth signer key %s: the key at %s has thumbprint %s, so its kid is %s",
 				keyConfig.Kid,
 				keyConfig.Path,
+				thumbprint,
 				kid,
 			))
 		}
