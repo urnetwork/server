@@ -35,7 +35,7 @@ func newStoreClockFixture(t *testing.T) *storeClockFixture {
 	// the store's clock runs months past the schedule's, as real time runs past DefaultClockStart
 	storeClock := sidecartest.NewFakeClock(net.Clock().Now().Add(311 * 24 * time.Hour))
 	store := sidecartest.NewFakeBlobs(storeClock, sidecartest.NewFaultQueue(), nil, nil)
-	clock := newStoreClock(net, DefaultStoreClockSettings(), storeClock)
+	clock := newStoreClock(net, DefaultStoreClockSettings(), storeClock, nil)
 	netClockNets.Store(net, &netClocks{store: storeClock, storeClock: clock})
 	t.Cleanup(func() { netClockNets.Delete(net) })
 	cluster, err := (&storeClockBlobs{blobs: store, clock: clock}).FirstCluster()

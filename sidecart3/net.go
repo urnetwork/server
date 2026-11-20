@@ -83,6 +83,10 @@ type Settings struct {
 	AclExchangeTier *AclExchangeTierSettings
 	// The evs tier each Net names (evs_tier.go). nil: its defaults.
 	EvsTier *EvsTierSettings
+
+	// What this package's tests see of each Net's catch-ups with its clock: the admin info reread (faults.go) and
+	// the store clock's aging (clock.go). nil: nothing.
+	catchUpHooks *catchUpHooks
 }
 
 func DefaultSettings() *Settings {
@@ -197,7 +201,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	clocks := &netClocks{store: settings.Store}
 	var blobs sidecar.BlobStore = clusters
 	if settings.StoreClock != nil {
-		clocks.storeClock = newStoreClock(net, settings.StoreClock, settings.Store)
+		clocks.storeClock = newStoreClock(net, settings.StoreClock, settings.Store, settings.catchUpHooks)
 		blobs = &storeClockBlobs{blobs: clusters, clock: clocks.storeClock}
 	}
 	netClockNets.Store(net, clocks)
@@ -207,7 +211,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	fakes := net.Fakes()
 	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
 		Postgres:      true,
-		Blobs:         newFaultBlobs(blobs, clusters, net, layoutFaults),
+		Blobs:         newFaultBlobs(blobs, clusters.Check, net, layoutFaults, settings.catchUpHooks),
 		Push:          fakes.Push,
 		Quota:         fakes.Quota,
 		ServiceClient: fakes.ServiceClient,
