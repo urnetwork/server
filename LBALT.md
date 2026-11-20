@@ -1,6 +1,6 @@
 # LBALT: connect fronts the edge interfaces (`lb_alt`)
 
-Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4) and merged to main the same day (server a3f37e085, warp 6aaace2), with D22 (b) after. In production since 2026-11-20 (§11.8): a canary on edge-1 `eno3` from 04:35Z, then every other non-transparent lb interface at 06:15–06:21Z. The `alt.*` names moved to the edges at 06:32Z; alt's removal (D14 step 4) is next. §11 holds the implementation notes for code review.
+Status: designed 2026-11-18; implemented 2026-11-19 on `lbalt/integrate` (server a297487df, warp bdacae4) and merged to main the same day (server a3f37e085, warp 6aaace2), with D22 (b) after. In production since 2026-11-20 (§11.8): a canary on edge-1 `eno3` from 04:35Z, then every other non-transparent lb interface at 06:15–06:21Z. The `alt.*` names moved to the edges at 06:32Z, and alt was removed by 14:26Z (D14 step 4). §11 holds the implementation notes for code review.
 
 Questions D1–D22 in §6 have owner decisions (2026-11-18). Each keeps its options for the record.
 
@@ -1411,13 +1411,15 @@ Each is open, checked against the code at a297487df and bdacae4.
 
 **After the rollout** (2026-11-20, §11.8).
 - The front counts `tls_handshake` server errors, 230–288/s on edge-3 and edge-4 and 38–39/s on edge-0 and edge-1, which nginx never counted, so there is no baseline. `connect/front_metrics.go:frontHttpServerErrorsCounter` has no reason label to tell a client's abort from an incompatibility; a bounded one (closed early, timeout, version or cipher, other) is proposed.
-- Peak-hour CPU with every interface fronted is unmeasured. Edge-4 peaked at 85% on 2026-11-19 under nginx, and the reconnect waves of the rollout's connect restarts took edge-3 and edge-4 to 89% and 93% for a few minutes.
+- Peak-hour CPU, measured 2026-11-20 (§11.8): at or below the same hours of the day before under nginx on every fronted host. It is one day's comparison, with clients spread differently across the edges.
 - `urnetwork_connect_connection_new` has read 0 fleet-wide since the 05:06Z deploy, and fell after the 01:54Z canary deploy. It isn't lb_alt's; to investigate.
-- No interface has been rolled back in production (Gate A item 2).
+- Edge-0's three interfaces were rolled back twice in production, unplanned (§11.8). The rollback worked each time, which covers Gate A item 2.
+- whodis on UDP 4053 is unverified from outside: probed from one workstation over IPv4, it timed out on every interface and on alt alike (§11.8).
+- crisp's and fireside's lb units still pass `--reservedudpports` for alt's UDP ports until their next run-edges.sh, which restarts each lb unit once.
 
 **Owner actions not taken.**
-- Done 2026-11-19 and 2026-11-20 (§11.8): services.yml loaded with this warpctl, `services.connect.lb_alt: false` declared, then `true`; connect's `cores: 20` (D15) deployed. The `alt.*` `dns_aliases` moved from alt to connect (Gate B, §8 step 6; §11.8). The vault commits (bf649ee, 17efc49, d8661b3, c17bf1f) are local and unpushed.
-- Still open: alt's removal (D14 step 4); monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry.
+- Done 2026-11-19 and 2026-11-20 (§11.8): services.yml loaded with this warpctl, `services.connect.lb_alt: false` declared, then `true`; connect's `cores: 20` (D15) deployed. The `alt.*` `dns_aliases` moved from alt to connect (Gate B, §8 step 6; §11.8), and alt was removed (D14 step 4; §11.8). The vault commits are pushed; dd23fa3 removes alt.
+- Still open: monitor.yml's enrollment; the 4053 router rules on the two edges with no `router:` entry.
 
 ### 11.7 Review focus
 
@@ -1458,7 +1460,7 @@ Where a reviewer's time is best spent, and why; "(final review)" marks the final
 
 ### 11.8 Production canary and rollout (2026-11-19 to 2026-11-20)
 
-Every non-transparent lb interface of edge-0, 1, 3 and 4 runs lb_alt since 2026-11-20 06:21Z: a canary on edge-1 `eno3`, a fix it found, then the other nine interfaces at the daily low. Times are UTC. The services.yml edits are vault commits bf649ee, 17efc49 and d8661b3, not yet pushed; every host change went through xops scripts.
+Every non-transparent lb interface of edge-0, 1, 3 and 4 runs lb_alt since 2026-11-20 06:21Z, apart from two unplanned rollbacks of edge-0's: a canary on edge-1 `eno3`, a fix it found, then the other nine interfaces at the daily low. Alt was removed the same day. Times are UTC. The services.yml edits are vault commits bf649ee, 17efc49 and d8661b3, pushed that morning; every host change went through xops scripts.
 
 **Builds.**
 - The canary build, `main-connect:2026.11.19-outerwerld+1103291390`, is server 3ce6f9c51. Beta took it at 2026-11-20 01:47Z and every block at 01:54Z, through `warpctl deploy-local main connect --percent`, before lb_alt was declared, so no restart would run an lb_alt unit on an older build.
@@ -1499,4 +1501,39 @@ Every non-transparent lb interface of edge-0, 1, 3 and 4 runs lb_alt since 2026-
 - Verified: both changes INSYNC, and the authoritative servers answer every alt name with edge interfaces, in the name's family. Public resolvers cleared the old 300-second answers within the TTL.
 - Before the move, alt served 65 to 75 requests a second and had no connect clients. Most of it was `/hello` and `/connect/control` at about 25 a second each, probe traffic, plus about 7 a second of client api calls. D14 step 3 watches that fall before step 4 removes alt: the service, its external UDP ports, the router rules for UDP 443, 53 and 4053 on fireside and crisp, the `main-alt.*` records, and the probes that target alt.
 
-Still open after the rollout: §11.6's "After the rollout" items, and alt's removal (D14 step 4).
+**Probes after the switch**, at about 06:50Z, over IPv4 from one workstation with no IPv6. Every interface answered connect QUIC, api h3 (`/hello`, 200) and whodis on UDP 53; edge-3 `eno2np1` answered whodis in 3 of 4 tries. UDP 4053 timed out on every interface and on alt alike, so from there a closed port and a filtered path look the same.
+
+**Two unplanned rollbacks of edge-0.**
+- At 06:18:50 to 06:21:11Z, and again at 09:06 to 09:08Z, edge-0's three lb units were reinstalled without `--lbalt` and `--lbaltblocks`. Both came from a second xops controller. Its xops was current, so it had run-lb-unit.sh, but its warp (2026-11-18) and vault (2026-11-17) checkouts predated lb_alt. run-lb-unit.sh renders with the controller's own `../../../warp` and vault, whatever origin holds, so the vault push at about 06:50Z didn't prevent the second. The same controller ran it again at 11:04 and 13:46Z, which changed nothing, since edge-0 was already on nginx.
+- Each was §11.3 (d)'s rollback, run by the host's current warpctl from a unit without lb_alt: nginx's redirect came back ahead of the split, the split came out, and edge-0 kept its 70 to 77k clients. That covers Gate A item 2, unplanned.
+- The source was found from the unit files, which differed from another edge's only in the lb_alt flags, and from the edge's auth log and journal, which showed run-lb-unit.sh's task sequence for each interface. Edge-0 was re-applied at 06:48 to 06:49Z and at 14:07:57 to 14:08:48Z, and its nginx had finished draining by 15:11Z. The other controller's checkouts were brought to origin by 14:51Z.
+- Every controller that can run xops's run-*.sh is part of the rollout's state. One with an older warp or vault reverts lb_alt silently. run-edges.sh from it would revert every interface and the connect fronts' flags, and would bring alt back. Before re-applying a reverted unit, find and update its source.
+
+**Load through the first day.**
+- From 07:30 to 13:55Z, after the drains ended, compared with the same hours of 2026-11-19 under nginx:
+
+  | Host | Peak | Peak, 2026-11-19 |
+  |---|---|---|
+  | edge-1 | 80.7% | 80.7% |
+  | edge-3 | 67.3% | 81.0% |
+  | edge-4 | 76.6% | 80.5% |
+
+  The means were 4 to 15 points lower. Edge-4 carried 80k clients, against 62k the day before. Edge-0 is left out, since it spent 09:08 to 14:08Z on nginx. It is one day's comparison, with clients spread differently across the edges.
+- The drain ends at 07:16 to 07:22Z sent nginx's remaining long-lived connections to the fronts at once. Edge-1 and edge-3 briefly lost 11 to 13k clients, edge-4 reached 83 to 85% CPU, and api p99 spiked for one sample; everything recovered within minutes.
+- At 15:11Z, with every interface fronted again: about 11,800 front requests a second, 5xx at 0.011 a second, no forward errors, and 265k clients.
+
+**Alt's removal (D14 step 4), 2026-11-20.**
+- After the `alt.*` move, alt's traffic fell to about 1 request a second, with no clients, by 14:00Z.
+- xops's new run-retire-warp-unit.sh (f29e4a5) retired alt's unit on crisp, then on fireside, finishing at 14:25Z. It refuses to run if the vault still renders the unit, or if any remaining unit uses its label or nat chain.
+  - On each host it stopped and disabled the unit, removed its one container (a 15 s stop), deleted `WARP-MAIN-ALT-G1` (59 rules in each family) with its two jumps in each family, and removed the unit files.
+  - The 13 other warp units on each host stayed active.
+  - Alt's per-port SNAT rules in nat POSTROUTING stay until a reboot; nothing binds those ports.
+- `main-alt`, `main-alt-v4` and `main-alt-v6` were deleted on bringyour.com and ur.network at 14:25:55Z, with one targeted change batch per zone, and the authoritative servers answer NXDOMAIN. The `alt.*` names stay aliases of `main-lb`.
+- The step that would remove alt's UDP 443, 53 and 4053 forwards from fireside's and crisp's router was dropped. That router's live config predates its generator, so applying the generated config would carry a large unrelated change. The forwards reach no listener now.
+- Config changes, pushed 2026-11-20:
+  - vault dd23fa3 removes the service, its host_services and the monitor's dns_aliases check for it;
+  - warp ae6022b moves the vault tests to alt's absence. `config.go:NewNginxConfig` now refuses a host_services name that the services config doesn't define, where it used to dereference a nil service;
+  - the build repo's 8e71599 builds no alt image, leaves alt out of the release preflight and refuses an alt deploy;
+  - xops f29e4a5 adds the retire script and drops alt from the writer cutover.
+
+Still open: §11.6's "After the rollout" items.
