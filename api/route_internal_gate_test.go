@@ -59,6 +59,8 @@ func TestInternalGateRoutesReachTheirHandlerOnlyWithAHostsBearer(t *testing.T) {
 		{method: "GET", path: "/internal/gate/rows/" + networkId + "/" + hex.EncodeToString(rowsSha256[:]), evsCode: http.StatusForbidden, connectCode: http.StatusServiceUnavailable},
 		// an edge block's client mint takes the edge class alone (QD-812)
 		{method: "POST", path: "/internal/gate/edge-client", evsCode: http.StatusForbidden, connectCode: http.StatusForbidden},
+		// a role mail's notice takes the platform listener's class alone (QD-1070)
+		{method: "POST", path: "/internal/gate/abuse-notice", evsCode: http.StatusForbidden, connectCode: http.StatusForbidden},
 	}
 	for _, call := range calls {
 		if w := serveRouteAccess(handler, call.method, call.path, "Bearer "+evs); w.Code != call.evsCode {

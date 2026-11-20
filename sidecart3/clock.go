@@ -99,24 +99,24 @@ type StoreClock struct {
 	stateLock sync.Mutex
 	// each write the wrapper saw, by cluster and key, in the order sent
 	keyWrites map[storeClockKey][]*storeClockWrite
-	// the schedule's time the Redis families were last aged to
-	agedTime time.Time
 	// reads of an object no recorded write made, each translated by its age on the store's clock alone
 	untranslated []string
 	// what aging the Redis families failed on
 	ageErrs []error
 
-	// held while the Redis families age, so a move is applied once
-	ageLock sync.Mutex
+	// the aging after each move of the schedule's clock, once a move, which every Redis call after the move waits
+	// for (faults.go)
+	aging *clockCatchUp
 }
 
-func newStoreClock(net *sidecartest.Net, settings *StoreClockSettings, store sidecar.Clock) *StoreClock {
+// hooks nil tells no test anything.
+func newStoreClock(net *sidecartest.Net, settings *StoreClockSettings, store sidecar.Clock, hooks *catchUpHooks) *StoreClock {
 	return &StoreClock{
 		net:       net,
 		settings:  settings,
 		store:     store,
 		keyWrites: map[storeClockKey][]*storeClockWrite{},
-		agedTime:  net.Clock().Now(),
+		aging:     newClockCatchUp(net, "store clock aging", net.Clock().Now(), hooks),
 	}
 }
 
@@ -287,41 +287,25 @@ func (self *StoreClock) unmodified(ctx context.Context, clusterId string, key st
 }
 
 // Shortens the Redis families' ttls by how far the schedule's clock has moved since they were last aged, deleting a
-// key or field the move passed. A failure is kept for Errors and returned.
+// key or field the move passed, or waits for the aging in flight: a call that went on during it would read a ttl the
+// move had not shortened yet, or a key it passed. An aging that fails is not run again: its failure is kept for
+// Errors and returned to the call that ran it. An error is also ctx's, which ended while the call waited.
 func (self *StoreClock) age(ctx context.Context) error {
 	if len(self.settings.RedisFamilies) == 0 {
 		return nil
 	}
-	moved := func() bool {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.agedTime.Before(self.net.Clock().Now())
-	}()
-	if !moved {
-		return nil
-	}
-	self.ageLock.Lock()
-	defer self.ageLock.Unlock()
-	now := self.net.Clock().Now()
-	timeout := func() time.Duration {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		timeout := now.Sub(self.agedTime)
-		if 0 < timeout {
-			self.agedTime = now
+	var ageErr error
+	if err := self.aging.catchUp(ctx, func(fromTime time.Time, toTime time.Time) {
+		ageErr = self.ageRedis(context.WithoutCancel(ctx), toTime.Sub(fromTime))
+		if ageErr != nil {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.ageErrs = append(self.ageErrs, ageErr)
 		}
-		return timeout
-	}()
-	if timeout <= 0 {
-		return nil
+	}); err != nil {
+		return err
 	}
-	err := self.ageRedis(context.WithoutCancel(ctx), timeout)
-	if err != nil {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.ageErrs = append(self.ageErrs, err)
-	}
-	return err
+	return ageErr
 }
 
 // One pass of aging over every master: each family's keys found by SCAN, their ttls and their fields' shortened by

@@ -13,7 +13,10 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/router"
@@ -32,7 +35,8 @@ import (
 //	GET /smtp/reports      the network's reports and sealed copies, a page at a time, to a sidecar §8 grants read
 //	                       on the repo that holds the network mail key
 //	POST /smtp/appeal      rechecks the network's halts on §14.8's ladder (smtpedgeservice.SmtpHaltLadder.Lift),
-//	                       lifting duplicates and not-spam cancellations; §21 reviews the rest (ABUSE-M9-01)
+//	                       lifting duplicates and not-spam cancellations, each lifted halt's §21 action lifted as
+//	                       wrong with it (controller.LiftAbuseSmtpHaltOnRecheck); §21 reviews the rest (ABUSE-M9-01)
 //
 // Each answers 503 with Retry-After, before the body is read or the caller authenticated, while the binary does
 // not link its groups, as a closed gate does; a §8 check this process has not installed (model.SetSmtpApiGate)
@@ -227,6 +231,11 @@ var defaultSmtpAppealLadder = sync.OnceValues(func() (smtpAppealLadder, error) {
 	}, settings)
 })
 
+// §21's lift of a halt the recheck lifted; replaced by tests.
+var smtpAppealAbuseLift = func(ctx context.Context, networkId server.Id, haltId server.Id) (*controller.AbuseActionResult, error) {
+	return controller.LiftAbuseSmtpHaltOnRecheck(ctx, networkId, haltId)
+}
+
 // POST /smtp/appeal: SmtpAppealArgs; rechecks the named halt, or each of the network's holding now, and answers
 // which lifted.
 func SmtpAppeal(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +266,13 @@ func SmtpAppeal(w http.ResponseWriter, r *http.Request) {
 			lifted, err := ladder.Lift(ctx, sidecar.Id(networkId), halt.HaltId)
 			if err != nil {
 				return nil, router.PrivateCause(http.StatusServiceUnavailable, "Appeals cannot be taken right now.", err)
+			}
+			if lifted {
+				// §21's record goes with the halt, out of every count and the restricted window; one that fails
+				// here is lifted by §21's mail pass, which finds the halt's row gone (ABUSE-M9-01)
+				if _, err := smtpAppealAbuseLift(ctx, networkId, server.Id(halt.HaltId)); err != nil && glog.V(1) {
+					glog.Infof("[smtp]an appeal's lifted halt is left to §21's mail pass: %s\n", err)
+				}
 			}
 			result.Halts = append(result.Halts, &SmtpAppealHalt{HaltId: server.Id(halt.HaltId), Lifted: lifted})
 		}

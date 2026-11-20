@@ -306,6 +306,8 @@ func registry() []specEndpoint {
 		{"GET", "/internal/gate/rows/{network_id}/{rows_sha256}", nil, nil},
 		// an edge block's client mint (TLS-M5-11, QD-812)
 		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
+		// a role mail's notice from the platform listener (QD-1070, owner decision 612)
+		{"POST", "/internal/gate/abuse-notice", rt(server.AbuseNoticeGateArgs{}), rt(server.AbuseNoticeGateResult{})},
 		// §21.16's customer routes (ABUSE-M5-11)
 		{"POST", "/abuse/report", rt(handlers.AbuseReportArgs{}), rt(handlers.AbuseReportResult{})},
 		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},

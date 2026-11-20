@@ -39,17 +39,6 @@ func runT3MailM10(t *testing.T, row func(world *mailworld.M10World)) {
 			Stores: func(service string) *sidecar.ServiceHost {
 				return net.Host()
 			},
-			// one request alone after each move of the clock, which has the Net read its clusters' admin info again
-			// (faults.go's fresh) before a deposit's uploads go side by side: of two requests at once after a move,
-			// the second goes on while the first's read is in flight, is refused on stale admin info, and its
-			// client's retry waits on a clock no one moves. What the key answers is not read.
-			Advanced: func() {
-				cluster, err := net.Host().Blobs.FirstCluster()
-				if err != nil {
-					t.Fatal(err)
-				}
-				cluster.Head(t.Context(), "mail-m10/advanced")
-			},
 		}))
 	})
 }

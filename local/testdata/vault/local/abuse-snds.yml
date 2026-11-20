@@ -1,0 +1,6 @@
+# Public, throwaway stand-in for the local test stack only (QD-1069): the shape of vault's Microsoft SNDS
+# credential, which the mail breakers' SNDS source reads (server/mail_measures_snds.go): the account's automated
+# data access key. The value is synthetic and names no SNDS account: a local taskworker that runs the breakers
+# builds the source from this file, and no account's data can be had with it. The real file is the owner's, in
+# vault only.
+key: urnetwork-local-test-snds-key

@@ -59,8 +59,8 @@ func DefaultInternalGateSettings() *InternalGateSettings {
 // A bearer's encoding.
 var internalGateBearerEncoding = base64.RawURLEncoding
 
-// Who calls an internal route, by the bearer it carries: §19.4's services with no Postgres. Each route lists the
-// classes it takes.
+// Who calls an internal route, by the bearer it carries: §19.4's services with no Postgres, and the platform
+// listener, whose role-mail notices only api files (§21.8). Each route lists the classes it takes.
 type InternalGateCaller string
 
 const (
@@ -77,13 +77,17 @@ const (
 	// reaches only the route that mints the block's own urnetwork-edge clients' jwts and, beside each, the
 	// client's sockets token (EdgeClientMintPath; QD-1054)
 	InternalGateCallerEdge InternalGateCaller = "edge"
+	// the platform listener's role-mail intake (owner decision 612; QD-1121): mxedge-platform alone mounts it, and it
+	// reaches only the route that files a role mail's notice (AbuseNoticeGatePath), whose one effect is a page at
+	// any hour, so no edge block's bearer can page the rota
+	InternalGateCallerMxedgePlatform InternalGateCaller = "mxedge-platform"
 )
 
 // Whether a class is one this release knows.
 func (self InternalGateCaller) known() bool {
 	switch self {
 	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
-		InternalGateCallerSmtpedge, InternalGateCallerConnect, InternalGateCallerEdge:
+		InternalGateCallerSmtpedge, InternalGateCallerConnect, InternalGateCallerEdge, InternalGateCallerMxedgePlatform:
 		return true
 	}
 	return false

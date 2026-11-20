@@ -50,7 +50,7 @@ var retentionSweepHoldLines = []retentionSweepHoldLine{
 	{sweep: RetentionTableTlsConnectionDay, row: "tls-3", how: retentionSweepHonors, detail: "removeExpiredTlsConnectionDaysSql skips a network with a live part 0"},
 	{sweep: "tls_connection_record", row: "tls-3", how: retentionSweepHonors, detail: "its hourly drop waits on AbuseHoldCopyPending until each hold has copied"},
 	{sweep: "mail_connection_record", row: "mx-2", how: retentionSweepHonors, detail: "its hourly drop keeps a held hour while the hold lives, no copy being registered until ABUSE-M7-01"},
-	{sweep: "smtp_send", row: "smtp-3", how: retentionSweepHonors, detail: "its daily drop keeps a held day while the hold lives, no copy being registered until ABUSE-M9-01"},
+	{sweep: "smtp_send", row: "smtp-3", how: retentionSweepHonors, detail: "its daily drop waits on AbuseHoldCopyPending until each hold has copied (ABUSE-M9-01's registration)"},
 	{sweep: RetentionTableMailHostKey, row: "mx-3", how: retentionSweepHonors, detail: "removeRetiredMailHostKeysSql skips a network with a live part 0"},
 	{sweep: RetentionTableSmtpComplaint, row: "smtp-5", how: retentionSweepHonors, detail: "removeExpiredSmtpComplaintsSql and the sealed copies' clearing skip a network with a live part 0"},
 	{sweep: RetentionTableSmtpDmarcDaily, row: "smtp-5", how: retentionSweepHonors, detail: "removeExpiredSmtpDmarcDaysSql skips a network with a live part 0"},
@@ -161,8 +161,10 @@ func TestEveryRetentionSweepHonorsHolds(t *testing.T) {
 			t.Errorf("%s's sql reads no hold", name)
 		}
 	}
-	if !HoldCopyRegistered("tls_connection_record") {
-		t.Error("tls_connection_record honors holds by its copy, which is not registered")
+	for _, table := range []string{"tls_connection_record", "smtp_send"} {
+		if !HoldCopyRegistered(table) {
+			t.Errorf("%s honors holds by its copy, which is not registered", table)
+		}
 	}
 	// the outside lines name their reason in the design, or say no row lists the table
 	for _, line := range retentionSweepHoldLines {

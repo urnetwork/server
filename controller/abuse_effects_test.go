@@ -767,11 +767,11 @@ func TestAbuseEffectHintsEachStandingChange(t *testing.T) {
 	}
 }
 
-// What the effects refuse, each leaving the owners untouched: a kind another
-// task builds, an action with no network, a host of another network or of
-// none, a custom host, a wildcard, an apex's host suspension, a lift with no
-// lifted action, and hooks that are not all there. An owner that raises is an
-// error, never a panic.
+// What the effects refuse, each leaving the owners untouched: a mail halt with
+// no until or no SMTP hook, a kind they do not know, an action with no network,
+// a host of another network or of none, a custom host, a wildcard, an apex's
+// host suspension, a lift with no lifted action, and hooks that are not all
+// there. An owner that raises is an error, never a panic.
 func TestAbuseEffectRefusals(t *testing.T) {
 	ctx := context.Background()
 	owners := newTestAbuseOwners()
@@ -781,14 +781,21 @@ func TestAbuseEffectRefusals(t *testing.T) {
 		effect func() *AbuseEffect
 		want   error
 	}{
-		{name: "a mail halt", want: ErrAbuseEffectKindUnbuilt, effect: func() *AbuseEffect {
-			return &AbuseEffect{Action: owners.action(model.AbuseActionKindMailHalt, "mail.abcdefghij.root.example")}
+		{name: "a mail halt with no until", want: ErrAbuseEffectTarget, effect: func() *AbuseEffect {
+			return &AbuseEffect{Action: owners.action(model.AbuseActionKindMailHalt, "abcdefghij.root.example")}
 		}},
-		{name: "a label's mail halt", want: ErrAbuseEffectKindUnbuilt, effect: func() *AbuseEffect {
+		{name: "a label's mail halt with no until", want: ErrAbuseEffectTarget, effect: func() *AbuseEffect {
 			return &AbuseEffect{Action: owners.action(model.AbuseActionKindMailLabelHalt, "blue-42.abcdefghij.root.example")}
 		}},
-		{name: "a mail halt's lift", want: ErrAbuseEffectKindUnbuilt, effect: func() *AbuseEffect {
-			return testAbuseLiftEffect(owners.action(model.AbuseActionKindMailHalt, "mail.abcdefghij.root.example"), model.AbuseReviewStateLifted)
+		{name: "a mail halt's lift with no until", want: ErrAbuseEffectTarget, effect: func() *AbuseEffect {
+			return testAbuseLiftEffect(owners.action(model.AbuseActionKindMailHalt, "abcdefghij.root.example"), model.AbuseReviewStateLifted)
+		}},
+		{name: "a mail halt with no SMTP hook", want: ErrAbuseEffectsUnavailable, effect: func() *AbuseEffect {
+			// ABUSE-M9-01's halts, which a set of hooks without SMTP's refuses so they stay owed
+			action := owners.action(model.AbuseActionKindMailHalt, "abcdefghij.root.example")
+			until := owners.now.Add(time.Hour)
+			action.UntilTime = &until
+			return &AbuseEffect{Action: action}
 		}},
 		{name: "an unknown kind", want: ErrAbuseEffectKindUnbuilt, effect: func() *AbuseEffect {
 			// a breaker level, ABUSE-M9-02's

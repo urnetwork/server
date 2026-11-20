@@ -1,0 +1,9 @@
+# Public, throwaway stand-in for the local test stack only (QD-1069): the shape of vault's Google Postmaster Tools
+# credential, which the mail breakers' Postmaster source reads (server/mail_measures_postmaster.go): an OAuth 2
+# client and the refresh token of the account verified for <root>. Every value is synthetic and names no Google
+# client or account: a local taskworker that runs the breakers builds the source from this file, and the token
+# endpoint gives no token for these values, so the Postmaster rate stays unknown, holding the breakers. The real file
+# is the owner's, in vault only.
+client_id: urnetwork-local-test-postmaster-client
+client_secret: urnetwork-local-test-postmaster-client-secret
+refresh_token: urnetwork-local-test-postmaster-refresh-token
