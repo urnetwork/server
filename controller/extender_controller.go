@@ -122,24 +122,29 @@ type ExtenderActivateSettings struct {
 	// doubling (connect/net_extender_activate.go), so a client that keeps
 	// failing posts three a family in its first hour and fewer after
 	ClientRateLimit int
-	// activations per caller address per family per window, over every client
-	// and every account: the address is what the probe dials. The address is
-	// the /32 of an ipv4 caller and the /64 of an ipv6 one, kept only as a
-	// keyed hash. One client's whole budget, so a host posting alone never
-	// meets it; a shared address, a NAT or a relay, does, and an extender
-	// behind NAT cannot pass activation anyway.
-	AddressRateLimit          int
+	// activations per caller address per window, over every client and every
+	// account, each family with its own limit: the address is what the probe
+	// dials. The address is the /32 of an ipv4 caller and the /64 of an ipv6
+	// one, kept only as a keyed hash. The default is one client's whole
+	// budget, so a host posting alone never meets it; a shared address, a NAT
+	// or a relay, does, and an extender behind NAT cannot pass activation
+	// anyway. The operator's config sets each family's limit and prefix
+	// (extender_activate_config.go), so an ipv6 /64, a subnet that can hold
+	// many hosts, can have a limit apart from an ipv4 /32's.
+	AddressIpv4RateLimit      int
+	AddressIpv6RateLimit      int
 	AddressIpv4PrefixBitCount int
 	AddressIpv6PrefixBitCount int
-	// activations per family per window of a key its network already proved
-	// at the caller's address, which spend this budget, kept for that key at
-	// that address, rather than the address's (connect#230). A public
-	// extender relays posts to the api from its own address, so other
-	// accounts' posts through it spend the address's budget; its own
-	// re-activation spends one no other post can. Proved means the key's
-	// last pass on the family was from the same /32 or /64, at most
-	// ProvenHostMaxAge ago.
-	ProvenAddressRateLimit int
+	// activations per window of a key its network already proved at the
+	// caller's address, each family with its own limit, which spend this
+	// budget, kept for that key at that address, rather than the address's
+	// (connect#230). A public extender relays posts to the api from its own
+	// address, so other accounts' posts through it spend the address's
+	// budget; its own re-activation spends one no other post can. Proved
+	// means the key's last pass on the family was from the same /32 or /64,
+	// at most ProvenHostMaxAge ago.
+	ProvenAddressIpv4RateLimit int
+	ProvenAddressIpv6RateLimit int
 	// the floor of the account's activations per family per window, over all
 	// of its clients: a new account's limit. A client refused by its own
 	// budget does not spend this one, and a client refused by this one does
@@ -417,8 +422,56 @@ func (self *ExtenderActivateSettings) addressBudgetId(clientIp netip.Addr) serve
 	return server.Id([16]byte(addressHash[:16]))
 }
 
+// The limit of a caller address's budget on one family
+// (AddressIpv4RateLimit, AddressIpv6RateLimit).
+func (self *ExtenderActivateSettings) addressRateLimit(ipVersion int) int {
+	if ipVersion == 6 {
+		return self.AddressIpv6RateLimit
+	}
+	return self.AddressIpv4RateLimit
+}
+
+// The limit of the budget of a key its network proved at the caller's address
+// on one family (ProvenAddressIpv4RateLimit, ProvenAddressIpv6RateLimit).
+func (self *ExtenderActivateSettings) provenAddressRateLimit(ipVersion int) int {
+	if ipVersion == 6 {
+		return self.ProvenAddressIpv6RateLimit
+	}
+	return self.ProvenAddressIpv4RateLimit
+}
+
+// The budget of the caller's address an activation of one family spends
+// (connect#230): the address's own, with the family's limit, or, for a key its
+// network already proved at the address (`provenAtAddress`,
+// keyProvenAtAddress), that key's at the address, with the family's limit for
+// a proven key.
+func (self *ExtenderActivateSettings) addressBudget(
+	clientIp netip.Addr,
+	ipVersion int,
+	publicKey []byte,
+	provenAtAddress bool,
+) model.AccountActionBudget {
+	if provenAtAddress {
+		return model.AccountActionBudget{
+			Id:                self.provenAddressBudgetId(clientIp, publicKey),
+			Action:            extenderActivateProvenAddressRateLimitAction(ipVersion),
+			Limit:             self.provenAddressRateLimit(ipVersion),
+			Window:            self.RateLimitWindow,
+			AttemptTimeSpread: self.BudgetAttemptTimeSpread,
+		}
+	}
+	_, addressRateLimitAction, _ := extenderActivateRateLimitActions(ipVersion)
+	return model.AccountActionBudget{
+		Id:                self.addressBudgetId(clientIp),
+		Action:            addressRateLimitAction,
+		Limit:             self.addressRateLimit(ipVersion),
+		Window:            self.RateLimitWindow,
+		AttemptTimeSpread: self.BudgetAttemptTimeSpread,
+	}
+}
+
 // The action of the budget of a key its network proved at the caller's
-// address (ProvenAddressRateLimit).
+// address (ProvenAddressIpv4RateLimit, ProvenAddressIpv6RateLimit).
 func extenderActivateProvenAddressRateLimitAction(ipVersion int) string {
 	if ipVersion == 6 {
 		return model.AccountActionExtenderActivateProvenAddressV6
@@ -427,9 +480,9 @@ func extenderActivateProvenAddressRateLimitAction(ipVersion int) string {
 }
 
 // The id the budget of one key at one caller address is recorded under
-// (ProvenAddressRateLimit): the hash of the address's peppered hash and the
-// key, cut to an id, so it is the key's at that /32 or /64 alone and holds no
-// address.
+// (ProvenAddressIpv4RateLimit, ProvenAddressIpv6RateLimit): the hash of the
+// address's peppered hash and the key, cut to an id, so it is the key's at
+// that /32 or /64 alone and holds no address.
 func (self *ExtenderActivateSettings) provenAddressBudgetId(clientIp netip.Addr, publicKey []byte) server.Id {
 	addressHash := server.ClientIpHashForAddrPrefix(
 		clientIp.WithZone(""),
@@ -443,7 +496,7 @@ func (self *ExtenderActivateSettings) provenAddressBudgetId(clientIp netip.Addr,
 }
 
 // Whether a post of a key from `clientIp` by `networkId` is the network's own
-// extender re-activating where it proved itself (ProvenAddressRateLimit): the
+// extender re-activating where it proved itself (addressBudget): the
 // key's network is the caller's, its last pass on the family was from the
 // same /32 or /64, and that pass was at most ProvenHostMaxAge ago.
 func (self *ExtenderActivateSettings) keyProvenAtAddress(
@@ -503,13 +556,17 @@ func extenderActivateHostIpVersion(host string) int {
 	}
 }
 
+// The settings an activation is judged by where the operator's config sets
+// none of them (EnvExtenderActivateSettings).
 func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 	return &ExtenderActivateSettings{
 		ClientRateLimit:                   6,
-		AddressRateLimit:                  6,
+		AddressIpv4RateLimit:              6,
+		AddressIpv6RateLimit:              6,
 		AddressIpv4PrefixBitCount:         32,
 		AddressIpv6PrefixBitCount:         64,
-		ProvenAddressRateLimit:            6,
+		ProvenAddressIpv4RateLimit:        6,
+		ProvenAddressIpv6RateLimit:        6,
 		AccountRateLimit:                  60,
 		AccountRateLimitPerProvenHost:     6,
 		AccountRateLimitCeiling:           1200,
@@ -1265,8 +1322,11 @@ func (self *extenderActivateService) busyRetryAfter() time.Duration {
 	return retryAfterMin + mathrand.N(retryAfterMax-retryAfterMin+1)
 }
 
+// The process's service, under the settings of the operator's config as the
+// process first read them, at its first activation
+// (EnvExtenderActivateSettings).
 var defaultExtenderActivateService = sync.OnceValue(func() *extenderActivateService {
-	return newExtenderActivateService(DefaultExtenderActivateSettings())
+	return newExtenderActivateService(EnvExtenderActivateSettings())
 })
 
 // ExtenderActivate under other settings, on a service of its own.
@@ -1514,34 +1574,25 @@ func (self *extenderActivateService) activate(
 	// refusal says when the budget that refused has room again, which the
 	// activator waits out (`retry_after_seconds`).
 	stage = extenderActivationStageBudget
-	clientRateLimitAction, addressRateLimitAction, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
-	addressBudget := model.AccountActionBudget{
-		Id:                settings.addressBudgetId(clientIp),
-		Action:            addressRateLimitAction,
-		Limit:             settings.AddressRateLimit,
-		Window:            settings.RateLimitWindow,
-		AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
-	}
-	// a key its network already proved at this address is the network's own
-	// extender re-activating where it lives. A public extender relays posts
-	// to the api from its own address, so any account's posts through it
-	// spend the address's budget; the key's own posts there spend a budget
-	// of their own, which no other post can, so others cannot hold its
-	// re-activation off (connect#230)
-	if settings.keyProvenAtAddress(
-		model.GetNetworkExtenderKeyAddress(clientSession.Ctx, publicKey, ipVersion),
-		networkId,
+	clientRateLimitAction, _, accountRateLimitAction := extenderActivateRateLimitActions(ipVersion)
+	// the address's budget, with the family's limit. A key its network
+	// already proved at this address is the network's own extender
+	// re-activating where it lives. A public extender relays posts to the api
+	// from its own address, so any account's posts through it spend the
+	// address's budget; the key's own posts there spend a budget of their
+	// own, which no other post can, so others cannot hold its re-activation
+	// off (connect#230)
+	addressBudget := settings.addressBudget(
 		clientIp,
-		server.NowUtc(),
-	) {
-		addressBudget = model.AccountActionBudget{
-			Id:                settings.provenAddressBudgetId(clientIp, publicKey),
-			Action:            extenderActivateProvenAddressRateLimitAction(ipVersion),
-			Limit:             settings.ProvenAddressRateLimit,
-			Window:            settings.RateLimitWindow,
-			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
-		}
-	}
+		ipVersion,
+		publicKey,
+		settings.keyProvenAtAddress(
+			model.GetNetworkExtenderKeyAddress(clientSession.Ctx, publicKey, ipVersion),
+			networkId,
+			clientIp,
+			server.NowUtc(),
+		),
+	)
 	// whether the account's limit past its floor was read, and whether any of
 	// its hosts had passed activation on the family when it was
 	// (accountPassed). The spend reads its budgets again under the locks, and
