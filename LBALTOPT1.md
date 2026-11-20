@@ -389,7 +389,7 @@ Run as an unprivileged user, with no sudo:
 
 ## Appendix C. Profiles and runtime metrics (R1, R5)
 
-Implemented on `feat/connect-pprof-runtime-metrics-1120`, not yet deployed.
+Deployed 2026-11-20 in connect `2026.11.20-outerwerld+1103971130` (§8).
 
 **Taking a profile of one connect block.** connect serves pprof on 127.0.0.1 only, on a port the kernel picks for each process (`connect/pprof_listener.go`). connect runs with host networking, so the edge's own loopback reaches it, and nothing off the host does.
 1. Read the block's port from `urnetwork_connect_pprof_port{host="<host>", block="<block>"}`. During a deploy's drain a block has two processes, each with its own `instance` and port; the newer has the later `process_start_time_seconds`. Without Mimir, the block's log says `[connect]loopback pprof on port <port>`.
