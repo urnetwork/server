@@ -847,11 +847,13 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs66Hold]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs66HoldOnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - row: FS-69
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69OnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - row: FS-76
       case: hold
       tests:
@@ -869,6 +871,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92OnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
+      store_clock: true
     - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (FS-25) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules]}
@@ -883,6 +886,10 @@ gates:
     - item: '§22.7''s certificates assertion (TLS-M5-25, TLS-M6-03): no certificate whose key URnetwork holds names *.<root> or *.<net>.<root>'
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestTlsNoCertificateRestsOnAKeyUrnetworkHolds]}
+    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-66''s hold, FS-69, FS-92 read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
+        - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
     - item: 'CC4''s M5 sources (§22.7; TEST-M5-01): edge records, report parse output, Find calls, dns edge queries and a fake upstream resolver, each read by the scan and each path into each class catching a canary put through it, a private name never reaching the upstream resolver; on T3 the edge records are the rows server''s own stores wrote'
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestEdgeSourcesCatchEachPathsLeakInEachForm, TestEdgeSourcesReadACleanWorldClean, TestEdgeRecordItemsHoldEveryField, TestFindTransportCapturesACallAndChangesNothing, TestFakeUpstreamResolverHoldsEveryQuery, TestEdgeQueryValueDeclaredAgainstDns2PassesAtAnEdgeAlone, TestDnsHarnessCapturesEveryEdgeQuery]}
@@ -1489,6 +1496,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs66Hold]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs66HoldOnT3]}
+      store_clock: true
     - row: FS-67
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs67]}
@@ -1500,6 +1508,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69OnT3]}
+      store_clock: true
     - row: FS-70
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs70]}
@@ -1642,6 +1651,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92OnT3]}
+      store_clock: true
     - row: FS-93
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs93]}
