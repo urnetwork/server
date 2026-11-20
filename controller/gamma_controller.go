@@ -173,6 +173,65 @@ func gammaMaxSpend() int64 {
 	return largest
 }
 
+// A new deposit's daily spend cap is the largest charge it is opened for,
+// plus this headroom (the owner, 2026-11-20: "Yes, with headroom"): a price
+// raised by up to a quarter, or a smaller second charge the same day, still
+// passes without the customer raising the cap. Gamma is one US dollar, so
+// the cap moves only with our own prices, never with TAO's.
+const gammaDailyCapHeadroomPercent = 125
+
+// gammaDailyCapFor is the daily spend cap, in gamma units, a new deposit
+// opens with for a purchase of amount: the larger of the purchase and the
+// largest automatic charge (gammaMaxSpend: a yearly renewal, a data top-up,
+// a seat upgrade), plus the headroom, rounded up to a whole gamma. A spend
+// larger than its deposit's cap can never pass, so every charge the deposit
+// is opened for must fit within one day's cap.
+func gammaDailyCapFor(amount int64) int64 {
+	return gammaDailyCapOf(max(amount, gammaMaxSpend()))
+}
+
+// gammaDailyCapOf is the cap for a largest charge: plus the headroom, rounded
+// up to a whole gamma.
+func gammaDailyCapOf(largest int64) int64 {
+	scaled := new(big.Int).Mul(big.NewInt(max(largest, 0)), big.NewInt(gammaDailyCapHeadroomPercent))
+	unit := big.NewInt(100 * gammaUnitsPerGamma)
+	gammas := new(big.Int).Div(scaled.Add(scaled, new(big.Int).Sub(unit, big.NewInt(1))), unit)
+	return max(gammas.Int64(), 1) * gammaUnitsPerGamma
+}
+
+// The seconds a Subtensor block takes, for the time a daily cap needs to
+// refill.
+const gammaBlockSeconds = 12
+
+// gammaCapRefillWait is how long a deposit's daily cap, allowing spendable
+// now, takes to allow amount: the cap refills linearly over 7200 blocks.
+func gammaCapRefillWait(dailyCap int64, spendable int64, amount int64) time.Duration {
+	if dailyCap <= 0 || amount <= spendable {
+		return 0
+	}
+	blocks := new(big.Int).Mul(big.NewInt(amount-max(spendable, 0)), big.NewInt(gammaRefillBlocks))
+	blocks.Add(blocks, big.NewInt(dailyCap-1))
+	blocks.Div(blocks, big.NewInt(dailyCap))
+	return time.Duration(blocks.Int64()*gammaBlockSeconds) * time.Second
+}
+
+// gammaWaitText is a wait in plain words, rounded up: "40 minutes",
+// "about 3 hours".
+func gammaWaitText(wait time.Duration) string {
+	if wait < time.Hour {
+		minutes := max(1, int64((wait+time.Minute-1)/time.Minute))
+		if minutes == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", minutes)
+	}
+	hours := int64((wait + time.Hour - 1) / time.Hour)
+	if hours == 1 {
+		return "about 1 hour"
+	}
+	return fmt.Sprintf("about %d hours", hours)
+}
+
 // GammaServicesHandler serves the services document with
 // Access-Control-Allow-Origin: *, as the services guide requires.
 func GammaServicesCors(w http.ResponseWriter) {
@@ -214,10 +273,14 @@ type GammaTermsResult struct {
 	Items             []*GammaTermsItem `json:"items"`
 	// the daily cap that lets every automatic charge (a yearly renewal, a
 	// seat upgrade, a top-up) be spent
-	AutoMinDailyCapGamma string     `json:"auto_min_daily_cap_gamma"`
-	Disclaimer           string     `json:"disclaimer"`
-	AutomaticNotice      string     `json:"automatic_notice"`
-	UpdatedAt            *time.Time `json:"updated_at"`
+	AutoMinDailyCapGamma string `json:"auto_min_daily_cap_gamma"`
+	// the daily spend cap a new deposit opens with for a plan or a data pack
+	// (the mint command names it): the largest of those charges plus
+	// headroom, in gamma
+	DailyCapGamma   string     `json:"daily_cap_gamma"`
+	Disclaimer      string     `json:"disclaimer"`
+	AutomaticNotice string     `json:"automatic_notice"`
+	UpdatedAt       *time.Time `json:"updated_at"`
 }
 
 // gammaView is what the API knows of Gamma: the settings and the biller's
@@ -336,6 +399,7 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 		})
 	}
 	result.AutoMinDailyCapGamma = gammaFormatUnits(largest)
+	result.DailyCapGamma = gammaFormatUnits(gammaDailyCapFor(largest))
 	return result, nil
 }
 
@@ -390,8 +454,12 @@ type GammaPaymentIntentResult struct {
 	Spender string `json:"spender"`
 	// the daily cap the deposit needs for this purchase, and for every
 	// automatic charge after it
-	MinDailyCapGamma      string                    `json:"min_daily_cap_gamma"`
-	AutoMinDailyCapGamma  string                    `json:"auto_min_daily_cap_gamma"`
+	MinDailyCapGamma     string `json:"min_daily_cap_gamma"`
+	AutoMinDailyCapGamma string `json:"auto_min_daily_cap_gamma"`
+	// the daily spend cap the mint command opens a new deposit with (that,
+	// plus headroom); "" when the deposit exists, whose own cap the mint
+	// keeps (naming another fails: GammaDepositDailySpendCapMismatch)
+	MintDailyCapGamma     string                    `json:"mint_daily_cap_gamma"`
 	MinMintGamma          string                    `json:"min_mint_gamma"`
 	IndicativeTao         string                    `json:"indicative_tao"`
 	MintAvailable         bool                      `json:"mint_available"`
@@ -867,6 +935,14 @@ func gammaIntentResult(
 		"btcli tx mint-gamma --netuid %d --hotkey %s --amount-tao %s",
 		settings.Netuid, hotkey.Hotkey, amountArg,
 	)
+	// a new deposit opens with its daily spend cap, so it never runs without
+	// one; a mint into an existing deposit keeps that deposit's cap (naming
+	// another fails the mint: GammaDepositDailySpendCapMismatch)
+	mintDailyCap := ""
+	if hotkey.DepositColdkey == nil {
+		mintDailyCap = gammaFormatUnits(gammaDailyCapFor(amount))
+		command += " --daily-spend-cap-gamma " + mintDailyCap
+	}
 	expiresAt := intent.ExpiresAt
 	result := &GammaPaymentIntentResult{
 		IntentId:             intent.IntentId.String(),
@@ -885,6 +961,7 @@ func gammaIntentResult(
 		ServiceHotkey:        settings.ServiceAddress,
 		MinDailyCapGamma:     gammaFormatUnits(amount),
 		AutoMinDailyCapGamma: gammaFormatUnits(max(amount, gammaMaxSpend())),
+		MintDailyCapGamma:    mintDailyCap,
 		MinMintGamma:         gammaFormatUnits(gammaMinMintUnits),
 		IndicativeTao:        indicative,
 		MintAvailable:        view.mint == gammaReady,
@@ -1072,6 +1149,13 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 	case spendable < amount:
 		// the cap refills; the charge goes when it allows the price
 		result.Status = gammaStatusSeen
+		if hotkey.DepositDailyCap != nil {
+			wait := gammaCapRefillWait(*hotkey.DepositDailyCap, spendable, amount)
+			result.Error = &CryptoPaymentError{Code: GammaErrorCodeDailyCapExceeded, Message: fmt.Sprintf(
+				"The deposit's daily spend cap allows %s gamma now and refills over a day, so this payment goes through in %s, on its own. To pay at once, raise the cap.",
+				gammaFormatUnits(max(spendable, 0)), gammaWaitText(wait),
+			)}
+		}
 	default:
 		// covered: the next biller run charges it
 		result.Status = gammaStatusConfirming

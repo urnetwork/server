@@ -132,8 +132,16 @@ func TestGammaPurchaseIsChargedOnceAndCreditedOnTheSpend(t *testing.T) {
 		connect.AssertEqual(t, intent.MinDailyCapGamma, "40")
 		connect.AssertEqual(t, intent.Status.Status, gammaStatusPending)
 		connect.AssertEqual(t, len(intent.Reference), 66)
-		// the mint names the deposit hotkey only (bittensor 11.3.5)
-		connect.AssertEqual(t, intent.MintCommand, "btcli tx mint-gamma --netuid 25 --hotkey "+firstHotkey+" --amount-tao "+intent.IndicativeTao+" -w <your_coldkey>")
+		// the mint names the deposit hotkey only (bittensor 11.3.5), and opens
+		// the new deposit with a daily spend cap: the year, the largest charge,
+		// plus a quarter
+		connect.AssertEqual(t, intent.MintDailyCapGamma, "50")
+		connect.AssertEqual(t, intent.MintCommand, "btcli tx mint-gamma --netuid 25 --hotkey "+firstHotkey+" --amount-tao "+intent.IndicativeTao+" --daily-spend-cap-gamma 50 -w <your_coldkey>")
+		terms, err := GammaTerms(clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, terms.DailyCapGamma, "50")
 
 		// the same purchase again is the same intent, with a new token
 		again := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanYearly})

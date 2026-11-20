@@ -707,8 +707,7 @@ func (self *gammaBiller) resolveBlock(block *gammaBlock, spends []*gammaSpendEve
 		eventRef := fmt.Sprintf("%d/%d", number, spend.Event.Index)
 		if _, ok := ours[address]; !ok {
 			if spend.Service == settings.ServiceHotkey {
-				gammaChargeResults.WithLabelValues(gammaForeignSpendState, "").Inc()
-				glog.Warningf("[gamma]%s gamma spent at our service by %s, a hotkey we never assigned (block %d, event %d): no charge of ours; it stays in that hotkey's GammaSpent total\n", gammaFormatUnits(int64(spend.Amount)), address, number, spend.Event.Index)
+				self.recordDirectPayment(block, spend, address)
 			}
 			continue
 		}
@@ -775,6 +774,35 @@ func (self *gammaBiller) resolveBlock(block *gammaBlock, spends []*gammaSpendEve
 		}
 	}, server.TxReadCommitted)
 	return nil
+}
+
+// recordDirectPayment keeps a direct payment: a GammaSpent at our service from
+// a hotkey we never assigned. It is recorded once (gamma_alarm, kind
+// direct_payment, keyed by the payer's hotkey, the block and the event) and
+// posted once to the sales channel, so support sees a payment no account is
+// credited for until its payer claims it (gamma_claim.go). The claim reads the
+// chain's own total, so it does not depend on this record.
+func (self *gammaBiller) recordDirectPayment(block *gammaBlock, spend *gammaSpendEvent, address string) {
+	ctx := self.ctx
+	number := int64(block.Number)
+	gammaChargeResults.WithLabelValues(gammaForeignSpendState, "").Inc()
+	glog.Warningf("[gamma]%s gamma spent at our service by %s, a hotkey we never assigned (block %d, event %d): a direct payment, credited once its payer claims it\n", gammaFormatUnits(int64(spend.Amount)), address, number, spend.Event.Index)
+	key := model.GammaDirectPaymentKey(address, number, spend.Event.Index)
+	detail := fmt.Sprintf("amount=%d hotkey=%s service=%s extrinsic=%d block_hash=%s", spend.Amount, address, gammaAddress(spend.Service), spend.Event.ExtrinsicIndex, block.Hash.Hex())
+	server.Tx(ctx, func(tx server.PgTx) {
+		if !model.AddGammaAlarmInTx(tx, ctx, key, model.GammaRecordKindDirectPayment, &number, detail, self.now) {
+			return
+		}
+		addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+			return &model.SalesPaymentNotice{
+				RecordKey: "gamma_direct/" + address + "/" + fmt.Sprintf("%d/%d", number, spend.Event.Index),
+				Item:      "unclaimed: no account yet",
+				Kind:      "direct payment, waiting for its payer's claim (ur.io/gamma)",
+				Amount:    fmt.Sprintf("%s gamma (burned on SN25) from hotkey %s at block %d", gammaFormatUnits(int64(spend.Amount)), address, number),
+				Method:    "SN25 Gamma, spent straight at our service",
+			}
+		})
+	})
 }
 
 // ----- the live spend -----

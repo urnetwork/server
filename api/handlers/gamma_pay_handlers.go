@@ -43,3 +43,16 @@ func GammaSettings(w http.ResponseWriter, r *http.Request) {
 func GammaSetSettings(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.SetGammaSettings, w, r)
 }
+
+// GammaClaimChallenge is the line the caller signs with the hotkey that paid
+// URnetwork's service directly, and what that hotkey can claim
+// (controller/gamma_claim.go).
+func GammaClaimChallenge(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.GammaClaimChallenge, w, r)
+}
+
+// GammaClaim claims a direct payment for the caller's network with the signed
+// challenge.
+func GammaClaim(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.GammaClaim, w, r)
+}

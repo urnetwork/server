@@ -42,6 +42,8 @@ type gammaSimDeposit struct {
 	coldkey [32]byte
 	balance uint64
 	cap     *uint64
+	// what the cap allows at the head; nil is the whole cap (a full bucket)
+	available *uint64
 }
 
 // gammaSimSpend is a submitted spend, as the chain reads it.
@@ -85,6 +87,8 @@ type gammaSimChain struct {
 	unsupportedParent map[uint64]bool
 	// a block whose parent state runs a retired runtime (490, the spender model)
 	retiredParent map[uint64]bool
+	// GammaSpent reads fail (an endpoint that does not answer them)
+	failSpentReads bool
 	// extra events the next mined block carries
 	extraEvents [][]byte
 
@@ -205,7 +209,11 @@ func (self *gammaSimChain) storageValue(keyText string) string {
 			} else {
 				b = append(b, 1)
 				b = binary.LittleEndian.AppendUint64(b, *deposit.cap)
-				b = binary.LittleEndian.AppendUint64(b, *deposit.cap)
+				available := *deposit.cap
+				if deposit.available != nil {
+					available = *deposit.available
+				}
+				b = binary.LittleEndian.AppendUint64(b, available)
 				b = binary.LittleEndian.AppendUint64(b, self.head)
 			}
 			return gammaHex(b)
@@ -285,6 +293,9 @@ func (self *gammaSimChain) Call(ctx context.Context, result any, method string, 
 				answer = "0x00"
 			}
 			break
+		}
+		if self.failSpentReads && strings.HasPrefix(keyText, self.key("SubtensorModule", "GammaSpent", []byte{0, 0}, make([]byte, 32), make([]byte, 32))[:2+64]) {
+			return fmt.Errorf("GammaSpent read refused")
 		}
 		if value := self.storageValue(keyText); value != "" {
 			answer = value
@@ -510,6 +521,22 @@ func (self *gammaSimChain) advance(n int) {
 		self.lock.Lock()
 		self.head++
 		self.lock.Unlock()
+	}
+}
+
+// directPayment is a hotkey's spend at our service from its own deposit, not
+// through us: its GammaSpent total grows, and the next mined block carries
+// the event unless withEvent is false (a payment from before the watcher
+// read the block it is in).
+func (self *gammaSimChain) directPayment(hotkey [32]byte, amount uint64, withEvent bool) {
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	var key [64]byte
+	copy(key[:32], self.serviceHotkey[:])
+	copy(key[32:], hotkey[:])
+	self.spent[key] += amount
+	if withEvent {
+		self.extraEvents = append(self.extraEvents, self.event(5, "SubtensorModule", "GammaSpent", self.spentFields(hotkey, self.serviceHotkey, amount)))
 	}
 }
 
