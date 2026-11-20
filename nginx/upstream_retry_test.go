@@ -345,6 +345,8 @@ func TestStaleKeepaliveRedoIsNotAnAttempt(t *testing.T) {
 		t.Errorf("attempts: stale_redo %v response %v retries %v; want 1, 2 and 0",
 			attemptCount(serviceName, "g1", "stale_redo"), attemptCount(serviceName, "g1", "response"), retryCount(serviceName, "error"))
 	}
+	// the stale connection counts as reused, and the redo's as dialed
+	checkConnectionCounts(t, serviceName, "after the redo", 1, 2, 0)
 }
 
 // A reused keepalive connection that fails after the request was written,

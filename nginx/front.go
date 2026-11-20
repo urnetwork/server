@@ -158,11 +158,13 @@ type Front struct {
 	accessLog         frontAccessLog
 	clock             func() time.Time
 
-	routes       *routeHttpTable
-	limits       *frontLimits
-	interfaces   map[string]*frontInterface
-	lbStatusBody []byte
-	gzipWriters  sync.Pool
+	routes *routeHttpTable
+	// the request metrics' series, by service and block (observe)
+	requestMetrics *frontRequestMetricsTable
+	limits         *frontLimits
+	interfaces     map[string]*frontInterface
+	lbStatusBody   []byte
+	gzipWriters    sync.Pool
 	// requests the access log has considered, for its sampling
 	accessLogCount atomic.Uint64
 
@@ -273,6 +275,7 @@ func newFront(ctx context.Context, routeTable *RouteTable, revision string, depe
 		accessLog:         dependencies.accessLog,
 		clock:             dependencies.now,
 		routes:            routes,
+		requestMetrics:    newFrontRequestMetricsTable(dependencies.metrics, routes),
 		limits:            newFrontLimits(frontCtx, settings.Limit, dependencies.now),
 		interfaces:        map[string]*frontInterface{},
 		lbStatusBody:      append(lbStatusBody, '\n'),
@@ -413,18 +416,19 @@ func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
 // concurrency, with exclude_subnets exempt and zero meaning no cap. ok is false
 // when the address is at its cap, and connect then closes the connection with
 // application error 0x1001. A true result must be paired with exactly one call
-// of release, when the connection ends. An interface the route table doesn't
-// list admits nothing, counted under the limit "interface" rather than
+// of release, when the connection ends. A refusal is counted in the
+// interface's default zone. An interface the route table doesn't list admits
+// nothing, counted under the limit "interface" and no zone rather than
 // logged, since connections set its pace.
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr) (release func(), ok bool) {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		self.metrics.limitRefusals.WithLabelValues("interface").Inc()
+		self.metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel).Inc()
 		return nil, false
 	}
 	release, outcome := self.limits.acquireQuicConnection(frontInterface.limits, addr)
 	if outcome != limitOutcomeAdmitted {
-		self.metrics.limitRefusals.WithLabelValues(outcome.String()).Inc()
+		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone).Inc()
 		return nil, false
 	}
 	return release, true

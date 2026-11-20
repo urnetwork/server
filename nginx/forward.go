@@ -384,9 +384,9 @@ func forwardRequestHasBody(r *http.Request) bool {
 // Renders the upstream request line and headers, in nginx's order: Host,
 // then the set headers, then the client's headers that pass, sorted by name
 // since Go keeps no client order. Each client header line passes as its own
-// line.
-func forwardRequestHead(r *http.Request, options *forwardOptions, upgrade bool, bodyFraming forwardBodyFraming) []byte {
-	head := make([]byte, 0, 1024)
+// line. The head is appended to head, the caller's buffer, which grows into
+// a new one when it is too small.
+func forwardRequestHead(head []byte, r *http.Request, options *forwardOptions, upgrade bool, bodyFraming forwardBodyFraming) []byte {
 	addLine := func(name string, value string) {
 		head = append(head, name...)
 		head = append(head, ": "...)

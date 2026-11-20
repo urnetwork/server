@@ -14,7 +14,9 @@ package nginx
 //     exactly: nginx's excess, kept in milli-requests, is the bucket read
 //     from the other side, and a refused request isn't charged. A route with
 //     a zone of its own (route_rate_limits, on service names only) charges
-//     its bucket instead of the shared one.
+//     its bucket instead of the shared one. A refused request is counted by
+//     the zone it was charged to, whichever limit refused it
+//     (limitZoneLabel): the route zone's nginx name, or default.
 //   - The concurrency cap counts requests in flight per (interface,
 //     address): every h2 and h3 stream is a request, and an upgraded
 //     connection holds its slot until its tunnel closes. The bucket is
@@ -39,6 +41,7 @@ import (
 	"context"
 	"math"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +104,9 @@ type limitRouteZone struct {
 	serviceName string
 	// service-relative, as the route file writes it
 	path string
+	// nginx's name for the zone (limitRouteZoneName), the refusal counter's
+	// zone label for the requests it charges
+	name string
 	// always positive: nginx refuses a zero rate
 	milliRequestsPerSecond float64
 	burst                  int
@@ -111,9 +117,40 @@ func newLimitRouteZone(serviceName string, routeRateLimit *RouteRateLimitRule) *
 	return &limitRouteZone{
 		serviceName:            serviceName,
 		path:                   routeRateLimit.Path,
+		name:                   limitRouteZoneName(serviceName, routeRateLimit.Path),
 		milliRequestsPerSecond: limitMilliRequestsPerSecond(routeRateLimit.RequestsPerMinute),
 		burst:                  routeRateLimit.Burst,
 	}
+}
+
+// The zone label of a refusal under the interface's shared request zone,
+// which every request outside a route zone charges, and of a refused QUIC
+// connection, which the interface's own cap refuses.
+const limitDefaultZone = "default"
+
+// nginx's name for a route zone, as the nginx generator declares it
+// (warp/services/services.go:RouteRateLimitZoneName): route_, the service,
+// _, then the path without its leading /, every rune but an ASCII letter or
+// digit replaced by _. Built from the route table only, so as a label it is
+// bounded by the table's route_rate_limits and never carries a request's
+// path or a hidden route prefix.
+func limitRouteZoneName(serviceName string, path string) string {
+	zonePath := strings.Map(func(r rune) rune {
+		if ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') || ('0' <= r && r <= '9') {
+			return r
+		}
+		return '_'
+	}, strings.TrimPrefix(path, "/"))
+	return "route_" + serviceName + "_" + zonePath
+}
+
+// The refusal counter's zone label of a request charged to routeZone: its
+// name, or the default zone's when nil, the shared zone charging it.
+func limitZoneLabel(routeZone *limitRouteZone) string {
+	if routeZone == nil {
+		return limitDefaultZone
+	}
+	return routeZone.name
 }
 
 // How one limiter call ended. Each refusal is a 429 (or 0x1001 for QUIC).
