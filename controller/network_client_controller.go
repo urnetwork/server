@@ -280,6 +280,13 @@ func freshProviderEgressLocationForConnection(
 // -- then a fresh egress probe (subject to probedLocationPreferred), then the
 // mmdb lookup on the control ip, which is the genesis every derivation starts
 // from.
+//
+// A provider with a fresh probe is judged by its exit
+// (model/provider_egress_exit_model.go): every path stores the exit's ARIN
+// Quality facts, and when its exit is in none of the networks it connects
+// from, the probe places it ahead of a derived location and however coarse
+// (probePlacesConnection), since both other answers then describe the network
+// it connects from, not the one its users' traffic leaves from.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -332,6 +339,29 @@ func SetConnectionLocation(
 	// connections. The probed location is an optimisation over mmdb, never a
 	// requirement, so mmdb is the correct answer whenever it is unavailable.
 	egress := freshProviderEgressLocationForConnection(ctx, connectionId)
+
+	// The provider's judgement by its exit, kept by the probe's ingest while
+	// the probe is fresh. Non-fatal like the probe lookup: on any failure, or
+	// without one, the connection is judged by its own address, as before.
+	var exit *model.ProviderEgressExitJudgement
+	if egress != nil {
+		exit = server.HandleError1(
+			func() *model.ProviderEgressExitJudgement {
+				return model.GetProviderEgressExitJudgement(ctx, egress.ClientId)
+			},
+			func(err error) *model.ProviderEgressExitJudgement {
+				glog.Infof(
+					"[ncc][%s]exit judgement lookup failed, judging the connection's own address. err = %s\n",
+					connectionId,
+					err,
+				)
+				return nil
+			},
+		)
+	}
+	// the lookup's scores, which the derived and mmdb paths store, carry the
+	// exit's Quality facts
+	exit.ApplyArinFacts(connectionLocationScores)
 
 	// A fresh probe decides the location only. It used to carry hosting and
 	// proxy verdicts onto the connection's net-type scores as well, and those
@@ -395,14 +425,17 @@ func SetConnectionLocation(
 			}
 			return true
 		}
-		if derived := derivedLocation(); derived != nil {
+		// a provider whose exit is in none of the networks it connects from is
+		// placed by its probe: its derived location refines the lookup of its
+		// connection's address, another network than the exit
+		if derived := derivedLocation(); derived != nil && !exit.Differs() {
 			if setDerivedLocation(derived) {
 				return nil
 			}
 		}
 	}
 
-	if egress != nil && probedLocationPreferred(egress, location) {
+	if probePlacesConnection(egress, exit, location) {
 		// no AccuracyKm: the probed location is not GeoLite2's, so its radius
 		// does not describe it. The row stores NULL, and the derive phase
 		// gives a probed genesis its own radius (connect/GEOMAP.md §5.1)
@@ -412,12 +445,14 @@ func SetConnectionLocation(
 			return parseErr
 		}
 		// both databases classify the connection address on this path too,
-		// so a probed provider carries the same two slots as an unprobed one
-		arinInfo, oldArinInfo, arinErr := server.GetArinInfoPair(addr)
+		// so a probed provider carries the same two slots as an unprobed one,
+		// and then its Quality facts are its exit's
+		arinInfo, oldArinInfo, arinErr := arinInfoPairForAddr(addr)
 		if arinErr != nil {
 			return arinErr
 		}
 		setArinConnectionFacts(scores, arinInfo, oldArinInfo)
+		exit.ApplyArinFacts(scores)
 
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent
@@ -500,6 +535,10 @@ func SetConnectionLocation(
 //     reports: the probe agrees with mmdb and adds nothing except a loss of
 //     granularity. mmdb wins.
 //
+// All of this assumes the exit is the connection's own network. When the
+// provider's exit is in none of the networks it connects from, the probe wins
+// before this rule is asked (probePlacesConnection).
+//
 // CityConfident is used as the probed row's granularity because the schema
 // invariant is that provider_egress_location.location_id is a city row exactly
 // when city_confident is set (see the provider_egress_location migration and
@@ -524,6 +563,23 @@ func probedLocationPreferred(
 	// location table also stores lowercased -- but fold anyway rather than let
 	// a casing difference read as a country disagreement and silently coarsen.
 	return !strings.EqualFold(egress.CountryCode, mmdbLocation.CountryCode)
+}
+
+// Whether a fresh probe (egress, nil without one) places the connection. When
+// the provider's exit is in none of the networks it connects from (exit, nil
+// without a judgement), always: the lookup of the connection's own address
+// then describes another network than the one its users' traffic leaves from,
+// so its finer place is no evidence about the exit, and never coarsening does
+// not apply. Otherwise probedLocationPreferred decides.
+func probePlacesConnection(
+	egress *model.ProviderEgressLocation,
+	exit *model.ProviderEgressExitJudgement,
+	mmdbLocation *model.Location,
+) bool {
+	if egress == nil {
+		return false
+	}
+	return exit.Differs() || probedLocationPreferred(egress, mmdbLocation)
 }
 
 /*
