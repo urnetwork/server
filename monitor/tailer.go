@@ -1608,8 +1608,14 @@ func storeNotificationRefusalMeaning(frame, sample, fallback string) string {
 	return fallback
 }
 
-// Glog and warpctl both end the producer's source header with its file and line.
-var storeNotificationLogSite = regexp.MustCompile(`(?:^|[ \[/])store_notification_flow\.go:[0-9]+\] ?$`)
+// Match the whole warning header. Another logger can quote the recorder's
+// complete line in its message. Warpctl may omit identity fields, and the
+// abbreviated bracket format omits the journal timestamp.
+var storeNotificationLogSite = regexp.MustCompile(`^(?:` +
+	`W[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} +[0-9]+ ` +
+	`|(?:\[[A-Za-z0-9._-]+\]){0,3}(?:\[cid:[0-9A-Fa-f]+\])?\[W\]` +
+	`(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}(?:Z|[+-][0-9]{2}:[0-9]{2})\])?\[` +
+	`)store_notification_flow\.go:[1-9][0-9]*\] ?$`)
 
 // Only a complete, fixed suffix can add detail to the retained sample.
 func storeNotificationRefusedSample(line string) string {
