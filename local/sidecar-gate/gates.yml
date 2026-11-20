@@ -367,15 +367,18 @@ gates:
     - row: FS-44
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs44]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs44OnT3]}
+        - {repo: server, package: ./quotahost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs44T3Producer, TestFs44T3LeaseRows]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs44ApiUnavailableElevenMinutes, TestFs44DrainLosesNothing, TestFs44EdgeKilledBeforeItsPost, TestFs44KilledWithAnAppliedBatchUnanswered, TestFs44LostResponseRetried, TestFs44TwoHostsOnOneBalance]}
     - row: FS-45
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs45]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs45OnT3]}
+        - {repo: server, package: ./quotahost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs45T3RelayedPairs]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs45OneDebitPerContract, TestFs45RedisLossOverAdmitsByTheOutstandingGrants, TestFs45StreamBoundPairIsUnaffected]}
     - row: FS-47
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs47]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs47OnT3]}
+        - {repo: server, package: ./quotahost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs47T3QuotaClauses]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs47OneEraserKeepsItsOwnRate]}
     - row: FS-53
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs53]}
@@ -409,6 +412,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs61]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs61OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs61BudgetKeysPassTheSchemaGuard, TestFs61GovernorKilledProcessesFallBack, TestFs61P0ProceedsAtOnceWithItsBytesByKind]}
       store_clock: true
     - row: FS-62
       tests:
@@ -478,6 +482,7 @@ gates:
     - row: FS-116
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs116]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs116AllowanceRampsBackAfterAStorm, TestFs116KilledProcessesPayDeferredWorkOnce, TestFs116LostStateRestartsTheWalletAtZero, TestFs116LowPricesConvergeAndHoldTheBound, TestFs116PausedP2DrainsTheWalletWithoutStallingPushes, TestFs116UnfundedBacklogTakesOnlyItsShare]}
     - row: FS-117
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs117]}
