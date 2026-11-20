@@ -376,6 +376,7 @@ func TestBlockAttributesOnlyWithMg9AndItsKeyFile(t *testing.T) {
 		intake := newIntake()
 		end, err := attributeBlockReports(ctx, intake)
 		end()
+		t.Logf("MG9 linked: %v", server.SidecarMg9Linked())
 		if !server.SidecarMg9Linked() {
 			if err == nil || !strings.Contains(err.Error(), "MG9") || intake.deps.Join != nil {
 				t.Fatalf("without MG9: %v", err)
