@@ -27,7 +27,9 @@ package model
 //     mail host, mx.<label>.<root>: the customer's own <mx>.<domain>, with its MX, TLSA and addresses in
 //     its own signed zone, mapped here for mxedge (§2.8 mx-3). dns publishes nothing for it, since only
 //     that path carries strict mode's claim; it is active at once, never in the TLS map, and
-//     DnsStrictMxHostRows lists it.
+//     DnsStrictMxHostRows lists it. Mapping one also moves the envelope of mail sent From each verified
+//     domain it stands at or under to b.<domain>, whether or not mail.strict is signed yet, and removing it
+//     moves the envelope back (QD-1129; GetSmtpStrictCustomDomains, which the gate and GET /mail/status read).
 //   - A custom host counts against no dns_entries (§20.7's only limit here is Team), and a network maps at
 //     most SocketsSettings.CertifiedNameMaxCount custom hosts to one owner, since a listener lists every
 //     custom host of its owner it is certified for (DESIGN-DETAILS 17.2.10).

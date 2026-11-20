@@ -37,6 +37,10 @@ func ReleaseNetworkDnsAlias(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /network/dns/custom-host-add: maps a verified domain's host to a host owner of the network, Team only.
+// Naming the network's mail host maps a strict-mode MX host (§12.8 step 4), and that moves the envelope of mail
+// sent From each verified domain it stands at or under to b.<domain> at once, whether or not mail.strict is signed
+// yet, since api never reads the config repo; removing it moves the envelope back to b.<net>.<root> (QD-1129;
+// GET /mail/status's strict_domains).
 func AddNetworkDnsCustomHost(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.AddNetworkDnsCustomHost, w, r)
 }
