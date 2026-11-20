@@ -61,7 +61,8 @@ Options:
 	server.SetServicePgBouncerPath("connect")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
-	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {
+	// the loopback pprof listener, off with CONNECT_PPROF=0 (connect/pprof_listener.go)
+	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget, LoopbackPprof: true}); err != nil {
 		panic(err)
 	}
 }

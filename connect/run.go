@@ -28,6 +28,10 @@ type RunOptions struct {
 	// Optional exact host/block diagnostic scope. Empty reads the optional
 	// startup Config resource; "disabled" explicitly installs no socket.
 	PrivateHeapProfileTarget string
+	// Serves pprof on a loopback port for the run (pprof_listener.go), unless
+	// CONNECT_PPROF turns it off. The connect command sets it; a process
+	// composing several runners and the tests leave it off.
+	LoopbackPprof bool
 	// Optional owners for a process composing multiple service runners.
 	WarpStatus       *router.WarpStatusState
 	StartStatsPusher func(context.Context) func()
@@ -150,6 +154,16 @@ func runWithDependencies(
 		return fmt.Errorf("load the lb_alt front: %w", frontErr)
 	}
 	ConfigureMessagePools()
+	if options.LoopbackPprof {
+		// up before readiness, so a stuck start can be profiled, and closed
+		// last, after the drain
+		pprofListener, err := newPprofListenerFromEnv(defaultPprofListenerSettings(), prometheus.DefaultRegisterer)
+		if err != nil {
+			// Optional diagnostics must not gate serving.
+			glog.Errorf("[connect]loopback pprof unavailable (%s); continuing primary startup\n", err)
+		}
+		defer pprofListener.Close()
+	}
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
