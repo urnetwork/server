@@ -16,12 +16,16 @@
 --     authority: <host:port of the PgBouncer listener the platform's pg.yml names>
 --     user: mxedge
 --     password: <the password given at \password>
---     db: <a PgBouncer database entry that reaches the database as mxedge>
+--     db: bringyour_mxedge
 --
--- PgBouncer (xops' pgbouncer.ini.j2) authenticates its clients from userlist.txt, so the role needs a line there.
--- Its one database entry, bringyour, sets user=bringyour, and a client of that entry reaches Postgres as the
--- platform's role whatever user it logged in as, which would void every grant below. db must name an entry that
--- reaches Postgres as mxedge (question pg-edge-roles-pgbouncer-forced-user).
+-- db must name bringyour_mxedge, the role's own PgBouncer database entry (xops' pgbouncer.ini.j2; QD-1134), which
+-- reaches Postgres as mxedge. The platform's entry, bringyour, sets user=bringyour, so a client of it reaches
+-- Postgres as the platform's role whatever user it logged in as, which would void every grant below. PgBouncer
+-- authenticates its clients from userlist.txt, which xops copies from vault/main/pgbouncer/userlist.txt, and logs in
+-- to Postgres as an entry's user with that user's line, so the file needs the role's line: "mxedge" and the password
+-- given at \password. PgBouncer does not tie a user to an entry, so the line would also let a client that holds the
+-- password name bringyour. It waits until the HBA rules that admit mxedge to its own entry alone are deployed
+-- (QD-1136), and until then the block cannot connect, the closed direction.
 --
 -- What the role may do is what the router's process reaches, read from its code, and nothing else.
 -- server/db_edge_roles_test.go creates the role from exactly this file, runs the block's calls under it, and holds
