@@ -506,7 +506,8 @@ gates:
     - item: 'the CROSSSLOT lints: every script and multi-key call keeps its keys in one slot, read from the code and from T3''s engines'' calls (§22.4)'
       tests:
         - {repo: sidecar, package: ./sidecartest/crossslot, names: [TestThisModuleKeepsTheRule, TestTheModuleWalkReachesTheCodeItGuards, TestPlantedCallsReadAsTheirNamesSay]}
-        - {repo: server, package: ./sidecart3, names: [TestCrossslotKeysSpreadOverTheMasters, TestCrossslotCallsKeepEachShapeOnce, TestRunCrossslotRefusesOneNode]}
+        - {repo: server, package: ./sidecart3, names: [TestCrossslotKeysSpreadOverTheMasters, TestCrossslotCallsKeepEachShapeOnce]}
+        - {repo: server, package: ./sidecart3, stores: true, names: [TestRunCrossslotRefusesOneNode]}
     - item: 'budgets.yml: §22.5''s hot-path gates and §22.9''s budgets, a raise only with a reviewed line, the inline paths run with no Postgres and op-counted Redis (D-TEST-3; TEST-M1-09)'
       tests:
         - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestBudgetsRiseOnlyWithAReviewedLine, TestBudgetSizeRowsHoldTheSizeGatesNumbers, TestBudgetBenchmarksHoldTheirAllocations]}
@@ -2000,7 +2001,8 @@ gates:
     - item: 'the CROSSSLOT lints: every script and multi-key call keeps its keys in one slot, read from the code and from T3''s engines'' calls, M10''s engines among them (§22.4)'
       tests:
         - {repo: sidecar, package: ./sidecartest/crossslot, names: [TestThisModuleKeepsTheRule, TestTheModuleWalkReachesTheCodeItGuards, TestPlantedCallsReadAsTheirNamesSay]}
-        - {repo: server, package: ./sidecart3, names: [TestCrossslotKeysSpreadOverTheMasters, TestCrossslotCallsKeepEachShapeOnce, TestRunCrossslotRefusesOneNode]}
+        - {repo: server, package: ./sidecart3, names: [TestCrossslotKeysSpreadOverTheMasters, TestCrossslotCallsKeepEachShapeOnce]}
+        - {repo: server, package: ./sidecart3, stores: true, names: [TestRunCrossslotRefusesOneNode]}
     - item: 'budgets.yml: §22.5''s hot-path gates and §22.9''s budgets, a raise only with a reviewed line, the inline paths run with no Postgres and op-counted Redis (D-TEST-3; TEST-M1-09)'
       tests:
         - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestBudgetsRiseOnlyWithAReviewedLine, TestBudgetSizeRowsHoldTheSizeGatesNumbers, TestBudgetBenchmarksHoldTheirAllocations]}
@@ -2072,5 +2074,5 @@ gates:
     - item: '§22.9''s file-cluster suite on the new cluster, D-OPS-20''s in-house MinIO build at its pinned commit (peers.yml''s File clusters row): the store suite on the local stack and on T3''s 4-host layouts, then on the new cluster''s own hosts'
       tests:
         - {repo: server, package: ., tags: sidecar_localstack, names: [TestFileClustersConformOnTheLocalStack]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_filecluster_t3', names: [TestT3LayoutTakesRequestsOnAFakeClock, TestT3QuorumLossGives503AndAnUnknownOutcome, TestT3DriveMissLeavesTheObjectReadableUntilASecondHostGoesDown, TestT3AHostReturningHeals]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_filecluster_t3', stores: true, names: [TestT3LayoutTakesRequestsOnAFakeClock, TestT3QuorumLossGives503AndAnUnknownOutcome, TestT3DriveMissLeavesTheObjectReadableUntilASecondHostGoesDown, TestT3AHostReturningHeals]}
       external: 'production: the new cluster''s own hosts, before place_new names it, each build and upgrade on them a run'
