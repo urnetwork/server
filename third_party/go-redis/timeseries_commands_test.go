@@ -1,0 +1,2224 @@
+package redis_test
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+
+	. "github.com/bsm/ginkgo/v2"
+	. "github.com/bsm/gomega"
+
+	"github.com/redis/go-redis/v9"
+)
+
+var _ = Describe("RedisTimeseries commands", Label("timeseries"), func() {
+	ctx := context.TODO()
+
+	setupRedisClient := func(protocolVersion int) *redis.Client {
+		opt := &redis.Options{
+			Addr:          "localhost:6379",
+			DB:            0,
+			Protocol:      protocolVersion,
+			UnstableResp3: true,
+		}
+		applyREConnection(opt)
+		return redis.NewClient(opt)
+	}
+
+	protocols := []int{2, 3}
+	for _, protocol := range protocols {
+		protocol := protocol // capture loop variable for each context
+
+		Context(fmt.Sprintf("with protocol version %d", protocol), func() {
+			var client redis.UniversalClient
+			var rawClient *redis.Client
+			var closeSubject func() error
+
+			BeforeEach(func() {
+				rawClient = setupRedisClient(protocol)
+				client, closeSubject = newUniversalSubject(rawClient)
+				Expect(rawClient.FlushAll(ctx).Err()).NotTo(HaveOccurred())
+			})
+
+			AfterEach(func() {
+				if client != nil {
+					// Flush through the SUBJECT: ordered after queued writes
+					// (see json_test.go); awaiting Err() forces it to execute, and
+					// both steps are asserted so a failed teardown cannot silently
+					// leak state into later specs.
+					Expect(client.FlushDB(ctx).Err()).NotTo(HaveOccurred())
+					Expect(closeSubject()).NotTo(HaveOccurred())
+				}
+			})
+
+			It("should TSCreate and TSCreateWithArgs", Label("timeseries", "tscreate", "tscreateWithArgs", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("7.4", "older redis stack has different results for timeseries module")
+				result, err := client.TSCreate(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				// Test TSCreateWithArgs
+				opt := &redis.TSOptions{Retention: 5}
+				result, err = client.TSCreateWithArgs(ctx, "2", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"Redis": "Labs"}}
+				result, err = client.TSCreateWithArgs(ctx, "3", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"Time": "Series"}, Retention: 20}
+				result, err = client.TSCreateWithArgs(ctx, "4", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				resultInfo, err := client.TSInfo(ctx, "4").Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(resultInfo["labels"].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"Time", "Series"}))
+				} else {
+					Expect(resultInfo["labels"].(map[interface{}]interface{})["Time"]).To(BeEquivalentTo("Series"))
+				}
+				// Test chunk size
+				opt = &redis.TSOptions{ChunkSize: 128}
+				result, err = client.TSCreateWithArgs(ctx, "ts-cs-1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				resultInfo, err = client.TSInfo(ctx, "ts-cs-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["chunkSize"]).To(BeEquivalentTo(128))
+				// Test duplicate policy
+				duplicate_policies := []string{"BLOCK", "LAST", "FIRST", "MIN", "MAX"}
+				for _, dup := range duplicate_policies {
+					keyName := "ts-dup-" + dup
+					opt = &redis.TSOptions{DuplicatePolicy: dup}
+					result, err = client.TSCreateWithArgs(ctx, keyName, opt).Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result).To(BeEquivalentTo("OK"))
+					resultInfo, err = client.TSInfo(ctx, keyName).Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(strings.ToUpper(resultInfo["duplicatePolicy"].(string))).To(BeEquivalentTo(dup))
+				}
+				// Test insertion filters
+				opt = &redis.TSOptions{IgnoreMaxTimeDiff: 5, DuplicatePolicy: "LAST", IgnoreMaxValDiff: 10.0}
+				result, err = client.TSCreateWithArgs(ctx, "ts-if-1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				resultAdd, err := client.TSAdd(ctx, "ts-if-1", 1000, 1.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1000))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1010, 11.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1010))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1013, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1010))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1020, 11.5).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1020))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1021, 22.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1021))
+
+				rangePoints, err := client.TSRange(ctx, "ts-if-1", 1000, 1021).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(4))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{
+					{Timestamp: 1000, Value: 1.0},
+					{Timestamp: 1010, Value: 11.0},
+					{Timestamp: 1020, Value: 11.5},
+					{Timestamp: 1021, Value: 22.0}}))
+				// Test insertion filters with other duplicate policy
+				opt = &redis.TSOptions{IgnoreMaxTimeDiff: 5, IgnoreMaxValDiff: 10.0}
+				result, err = client.TSCreateWithArgs(ctx, "ts-if-2", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				resultAdd1, err := client.TSAdd(ctx, "ts-if-1", 1000, 1.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd1).To(BeEquivalentTo(1000))
+				resultAdd1, err = client.TSAdd(ctx, "ts-if-1", 1010, 11.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd1).To(BeEquivalentTo(1010))
+				resultAdd1, err = client.TSAdd(ctx, "ts-if-1", 1013, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd1).To(BeEquivalentTo(1013))
+
+				rangePoints, err = client.TSRange(ctx, "ts-if-1", 1000, 1013).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(3))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{
+					{Timestamp: 1000, Value: 1.0},
+					{Timestamp: 1010, Value: 11.0},
+					{Timestamp: 1013, Value: 10.0}}))
+			})
+			It("should TSAdd and TSAddWithArgs", Label("timeseries", "tsadd", "tsaddWithArgs", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("7.4", "older redis stack has different results for timeseries module")
+				result, err := client.TSAdd(ctx, "1", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				// Test TSAddWithArgs
+				opt := &redis.TSOptions{Retention: 10}
+				result, err = client.TSAddWithArgs(ctx, "2", 2, 3, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(2))
+				opt = &redis.TSOptions{Labels: map[string]string{"Redis": "Labs"}}
+				result, err = client.TSAddWithArgs(ctx, "3", 3, 2, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(3))
+				opt = &redis.TSOptions{Labels: map[string]string{"Redis": "Labs", "Time": "Series"}, Retention: 10}
+				result, err = client.TSAddWithArgs(ctx, "4", 4, 2, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(4))
+				resultInfo, err := client.TSInfo(ctx, "4").Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(resultInfo["labels"].([]interface{})).To(ContainElement([]interface{}{"Time", "Series"}))
+				} else {
+					Expect(resultInfo["labels"].(map[interface{}]interface{})["Time"]).To(BeEquivalentTo("Series"))
+				}
+				// Test chunk size
+				opt = &redis.TSOptions{ChunkSize: 128}
+				result, err = client.TSAddWithArgs(ctx, "ts-cs-1", 1, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				resultInfo, err = client.TSInfo(ctx, "ts-cs-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["chunkSize"]).To(BeEquivalentTo(128))
+				// Test duplicate policy
+				// LAST
+				opt = &redis.TSOptions{DuplicatePolicy: "LAST"}
+				result, err = client.TSAddWithArgs(ctx, "tsal-1", 1, 5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				result, err = client.TSAddWithArgs(ctx, "tsal-1", 1, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				resultGet, err := client.TSGet(ctx, "tsal-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet.Value).To(BeEquivalentTo(10))
+				// FIRST
+				opt = &redis.TSOptions{DuplicatePolicy: "FIRST"}
+				result, err = client.TSAddWithArgs(ctx, "tsaf-1", 1, 5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				result, err = client.TSAddWithArgs(ctx, "tsaf-1", 1, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				resultGet, err = client.TSGet(ctx, "tsaf-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet.Value).To(BeEquivalentTo(5))
+				// MAX
+				opt = &redis.TSOptions{DuplicatePolicy: "MAX"}
+				result, err = client.TSAddWithArgs(ctx, "tsam-1", 1, 5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				result, err = client.TSAddWithArgs(ctx, "tsam-1", 1, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				resultGet, err = client.TSGet(ctx, "tsam-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet.Value).To(BeEquivalentTo(10))
+				// MIN
+				opt = &redis.TSOptions{DuplicatePolicy: "MIN"}
+				result, err = client.TSAddWithArgs(ctx, "tsami-1", 1, 5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				result, err = client.TSAddWithArgs(ctx, "tsami-1", 1, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1))
+				resultGet, err = client.TSGet(ctx, "tsami-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet.Value).To(BeEquivalentTo(5))
+				// Insertion filters
+				opt = &redis.TSOptions{IgnoreMaxTimeDiff: 5, IgnoreMaxValDiff: 10.0, DuplicatePolicy: "LAST"}
+				result, err = client.TSAddWithArgs(ctx, "ts-if-1", 1000, 1.0, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1000))
+
+				result, err = client.TSAddWithArgs(ctx, "ts-if-1", 1004, 3.0, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1000))
+
+				rangePoints, err := client.TSRange(ctx, "ts-if-1", 1000, 1004).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(1))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1000, Value: 1.0}}))
+			})
+
+			It("should TSAlter", Label("timeseries", "tsalter", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("7.4", "older redis stack has different results for timeseries module")
+				result, err := client.TSCreate(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				resultInfo, err := client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["retentionTime"]).To(BeEquivalentTo(0))
+
+				opt := &redis.TSAlterOptions{Retention: 10}
+				resultAlter, err := client.TSAlter(ctx, "1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAlter).To(BeEquivalentTo("OK"))
+
+				resultInfo, err = client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["retentionTime"]).To(BeEquivalentTo(10))
+
+				resultInfo, err = client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(resultInfo["labels"]).To(BeEquivalentTo([]interface{}{}))
+				} else {
+					Expect(resultInfo["labels"]).To(BeEquivalentTo(map[interface{}]interface{}{}))
+				}
+
+				opt = &redis.TSAlterOptions{Labels: map[string]string{"Time": "Series"}}
+				resultAlter, err = client.TSAlter(ctx, "1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAlter).To(BeEquivalentTo("OK"))
+
+				resultInfo, err = client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(resultInfo["labels"].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"Time", "Series"}))
+					Expect(resultInfo["retentionTime"]).To(BeEquivalentTo(10))
+					if redisVersionAtLeast("8") {
+						Expect(resultInfo["duplicatePolicy"]).To(BeEquivalentTo("block"))
+					} else {
+						// Older versions of Redis had a bug where the duplicate policy was not set correctly
+						Expect(resultInfo["duplicatePolicy"]).To(BeEquivalentTo(redis.Nil))
+					}
+				} else {
+					Expect(resultInfo["labels"].(map[interface{}]interface{})["Time"]).To(BeEquivalentTo("Series"))
+					Expect(resultInfo["retentionTime"]).To(BeEquivalentTo(10))
+					if redisVersionAtLeast("8") {
+						Expect(resultInfo["duplicatePolicy"]).To(BeEquivalentTo("block"))
+					} else {
+						// Older versions of Redis had a bug where the duplicate policy was not set correctly
+						Expect(resultInfo["duplicatePolicy"]).To(BeEquivalentTo(redis.Nil))
+					}
+				}
+				opt = &redis.TSAlterOptions{DuplicatePolicy: "min"}
+				resultAlter, err = client.TSAlter(ctx, "1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAlter).To(BeEquivalentTo("OK"))
+
+				resultInfo, err = client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["duplicatePolicy"]).To(BeEquivalentTo("min"))
+				// Test insertion filters
+				resultAdd, err := client.TSAdd(ctx, "ts-if-1", 1000, 1.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1000))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1010, 11.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1010))
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1013, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1013))
+
+				alterOpt := &redis.TSAlterOptions{IgnoreMaxTimeDiff: 5, IgnoreMaxValDiff: 10.0, DuplicatePolicy: "LAST"}
+				resultAlter, err = client.TSAlter(ctx, "ts-if-1", alterOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAlter).To(BeEquivalentTo("OK"))
+
+				resultAdd, err = client.TSAdd(ctx, "ts-if-1", 1015, 11.5).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(1013))
+
+				rangePoints, err := client.TSRange(ctx, "ts-if-1", 1000, 1013).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(3))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{
+					{Timestamp: 1000, Value: 1.0},
+					{Timestamp: 1010, Value: 11.0},
+					{Timestamp: 1013, Value: 10.0}}))
+			})
+
+			// NonRedisEnterprise: TS.CREATERULE targets two keys that hash to different slots,
+			// which a sharded Redis Enterprise database rejects with CROSSSLOT.
+			It("should TSCreateRule and TSDeleteRule", Label("timeseries", "tscreaterule", "tsdeleterule", "NonRedisEnterprise"), func() {
+				result, err := client.TSCreate(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				result, err = client.TSCreate(ctx, "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				result, err = client.TSCreateRule(ctx, "1", "2", redis.Avg, 100).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo("OK"))
+				for i := 0; i < 50; i++ {
+					resultAdd, err := client.TSAdd(ctx, "1", 100+i*2, 1).Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(resultAdd).To(BeEquivalentTo(100 + i*2))
+					resultAdd, err = client.TSAdd(ctx, "1", 100+i*2+1, 2).Result()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(resultAdd).To(BeEquivalentTo(100 + i*2 + 1))
+
+				}
+				resultAdd, err := client.TSAdd(ctx, "1", 100*2, 1.5).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultAdd).To(BeEquivalentTo(100 * 2))
+				resultGet, err := client.TSGet(ctx, "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet.Value).To(BeEquivalentTo(1.5))
+				Expect(resultGet.Timestamp).To(BeEquivalentTo(100))
+
+				resultDeleteRule, err := client.TSDeleteRule(ctx, "1", "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultDeleteRule).To(BeEquivalentTo("OK"))
+				resultInfo, err := client.TSInfo(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(resultInfo["rules"]).To(BeEquivalentTo([]interface{}{}))
+				} else {
+					Expect(resultInfo["rules"]).To(BeEquivalentTo(map[interface{}]interface{}{}))
+				}
+			})
+
+			It("should TSIncrBy, TSIncrByWithArgs, TSDecrBy and TSDecrByWithArgs", Label("timeseries", "tsincrby", "tsdecrby", "tsincrbyWithArgs", "tsdecrbyWithArgs", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("7.4", "older redis stack has different results for timeseries module")
+				for i := 0; i < 100; i++ {
+					_, err := client.TSIncrBy(ctx, "1", 1).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				result, err := client.TSGet(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Value).To(BeEquivalentTo(100))
+
+				for i := 0; i < 100; i++ {
+					_, err := client.TSDecrBy(ctx, "1", 1).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				result, err = client.TSGet(ctx, "1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Value).To(BeEquivalentTo(0))
+
+				opt := &redis.TSIncrDecrOptions{Timestamp: 5}
+				_, err = client.TSIncrByWithArgs(ctx, "2", 1.5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err = client.TSGet(ctx, "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(5))
+				Expect(result.Value).To(BeEquivalentTo(1.5))
+
+				opt = &redis.TSIncrDecrOptions{Timestamp: 7}
+				_, err = client.TSIncrByWithArgs(ctx, "2", 2.25, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err = client.TSGet(ctx, "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(7))
+				Expect(result.Value).To(BeEquivalentTo(3.75))
+
+				opt = &redis.TSIncrDecrOptions{Timestamp: 15}
+				_, err = client.TSDecrByWithArgs(ctx, "2", 1.5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err = client.TSGet(ctx, "2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(15))
+				Expect(result.Value).To(BeEquivalentTo(2.25))
+
+				// Test chunk size INCRBY
+				opt = &redis.TSIncrDecrOptions{ChunkSize: 128}
+				_, err = client.TSIncrByWithArgs(ctx, "3", 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				resultInfo, err := client.TSInfo(ctx, "3").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["chunkSize"]).To(BeEquivalentTo(128))
+
+				// Test chunk size DECRBY
+				opt = &redis.TSIncrDecrOptions{ChunkSize: 128}
+				_, err = client.TSDecrByWithArgs(ctx, "4", 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				resultInfo, err = client.TSInfo(ctx, "4").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultInfo["chunkSize"]).To(BeEquivalentTo(128))
+
+				// Test insertion filters INCRBY
+				opt = &redis.TSIncrDecrOptions{Timestamp: 1000, IgnoreMaxTimeDiff: 5, IgnoreMaxValDiff: 10.0, DuplicatePolicy: "LAST"}
+				res, err := client.TSIncrByWithArgs(ctx, "ts-if-1", 1.0, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				res, err = client.TSIncrByWithArgs(ctx, "ts-if-1", 3.0, &redis.TSIncrDecrOptions{Timestamp: 1000}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				rangePoints, err := client.TSRange(ctx, "ts-if-1", 1000, 1004).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(1))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1000, Value: 1.0}}))
+
+				res, err = client.TSIncrByWithArgs(ctx, "ts-if-1", 10.1, &redis.TSIncrDecrOptions{Timestamp: 1000}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				rangePoints, err = client.TSRange(ctx, "ts-if-1", 1000, 1004).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(1))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1000, Value: 11.1}}))
+
+				// Test insertion filters DECRBY
+				opt = &redis.TSIncrDecrOptions{Timestamp: 1000, IgnoreMaxTimeDiff: 5, IgnoreMaxValDiff: 10.0, DuplicatePolicy: "LAST"}
+				res, err = client.TSDecrByWithArgs(ctx, "ts-if-2", 1.0, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				res, err = client.TSDecrByWithArgs(ctx, "ts-if-2", 3.0, &redis.TSIncrDecrOptions{Timestamp: 1000}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				rangePoints, err = client.TSRange(ctx, "ts-if-2", 1000, 1004).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(1))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1000, Value: -1.0}}))
+
+				res, err = client.TSDecrByWithArgs(ctx, "ts-if-2", 10.1, &redis.TSIncrDecrOptions{Timestamp: 1000}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res).To(BeEquivalentTo(1000))
+
+				rangePoints, err = client.TSRange(ctx, "ts-if-2", 1000, 1004).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangePoints)).To(BeEquivalentTo(1))
+				Expect(rangePoints).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1000, Value: -11.1}}))
+			})
+
+			It("should TSGet", Label("timeseries", "tsget"), func() {
+				opt := &redis.TSOptions{DuplicatePolicy: "max"}
+				resultGet, err := client.TSAddWithArgs(ctx, "foo", 2265985, 151, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet).To(BeEquivalentTo(2265985))
+				result, err := client.TSGet(ctx, "foo").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(2265985))
+				Expect(result.Value).To(BeEquivalentTo(151))
+			})
+
+			It("should TSGet Latest", Label("timeseries", "tsgetlatest", "NonRedisEnterprise"), func() {
+				resultGet, err := client.TSCreate(ctx, "tsgl-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet).To(BeEquivalentTo("OK"))
+				resultGet, err = client.TSCreate(ctx, "tsgl-2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet).To(BeEquivalentTo("OK"))
+
+				resultGet, err = client.TSCreateRule(ctx, "tsgl-1", "tsgl-2", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				Expect(resultGet).To(BeEquivalentTo("OK"))
+				_, err = client.TSAdd(ctx, "tsgl-1", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "tsgl-1", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "tsgl-1", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "tsgl-1", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				result, errGet := client.TSGet(ctx, "tsgl-2").Result()
+				Expect(errGet).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(0))
+				Expect(result.Value).To(BeEquivalentTo(4))
+				result, errGet = client.TSGetWithArgs(ctx, "tsgl-2", &redis.TSGetOptions{Latest: true}).Result()
+				Expect(errGet).NotTo(HaveOccurred())
+				Expect(result.Timestamp).To(BeEquivalentTo(10))
+				Expect(result.Value).To(BeEquivalentTo(8))
+			})
+
+			It("should TSInfo", Label("timeseries", "tsinfo"), func() {
+				resultGet, err := client.TSAdd(ctx, "foo", 2265985, 151).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet).To(BeEquivalentTo(2265985))
+				result, err := client.TSInfo(ctx, "foo").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result["firstTimestamp"]).To(BeEquivalentTo(2265985))
+			})
+
+			It("should TSMAdd", Label("timeseries", "tsmadd"), func() {
+				resultGet, err := client.TSCreate(ctx, "a").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultGet).To(BeEquivalentTo("OK"))
+				ktvSlices := make([][]interface{}, 3)
+				for i := 0; i < 3; i++ {
+					ktvSlices[i] = make([]interface{}, 3)
+					ktvSlices[i][0] = "a"
+					for j := 1; j < 3; j++ {
+						ktvSlices[i][j] = (i + j) * j
+					}
+				}
+				result, err := client.TSMAdd(ctx, ktvSlices).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]int64{1, 2, 3}))
+			})
+
+			It("should TSMGet and TSMGetWithArgs", Label("timeseries", "tsmget", "tsmgetWithArgs", "NonRedisEnterprise"), func() {
+				opt := &redis.TSOptions{Labels: map[string]string{"Test": "This"}}
+				resultCreate, err := client.TSCreateWithArgs(ctx, "a", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"Test": "This", "Taste": "That"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				_, err = client.TSAdd(ctx, "a", "*", 15).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "b", "*", 25).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err := client.TSMGet(ctx, []string{"Test=This"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1].([]interface{})[1]).To(BeEquivalentTo("15"))
+					Expect(result["b"][1].([]interface{})[1]).To(BeEquivalentTo("25"))
+				} else {
+					Expect(result["a"][1].([]interface{})[1]).To(BeEquivalentTo(15))
+					Expect(result["b"][1].([]interface{})[1]).To(BeEquivalentTo(25))
+				}
+				mgetOpt := &redis.TSMGetOptions{WithLabels: true}
+				result, err = client.TSMGetWithArgs(ctx, []string{"Test=This"}, mgetOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["b"][0]).To(ConsistOf([]interface{}{"Test", "This"}, []interface{}{"Taste", "That"}))
+				} else {
+					Expect(result["b"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"Test": "This", "Taste": "That"}))
+				}
+
+				resultCreate, err = client.TSCreate(ctx, "c").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"is_compaction": "true"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "d", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				resultCreateRule, err := client.TSCreateRule(ctx, "c", "d", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreateRule).To(BeEquivalentTo("OK"))
+				_, err = client.TSAdd(ctx, "c", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				result, err = client.TSMGet(ctx, []string{"is_compaction=true"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["d"][1]).To(BeEquivalentTo([]interface{}{int64(0), "4"}))
+				} else {
+					Expect(result["d"][1]).To(BeEquivalentTo([]interface{}{int64(0), 4.0}))
+				}
+				mgetOpt = &redis.TSMGetOptions{Latest: true}
+				result, err = client.TSMGetWithArgs(ctx, []string{"is_compaction=true"}, mgetOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["d"][1]).To(BeEquivalentTo([]interface{}{int64(10), "8"}))
+				} else {
+					Expect(result["d"][1]).To(BeEquivalentTo([]interface{}{int64(10), 8.0}))
+				}
+			})
+
+			It("should TSQueryIndex", Label("timeseries", "tsqueryindex"), func() {
+				opt := &redis.TSOptions{Labels: map[string]string{"Test": "This"}}
+				resultCreate, err := client.TSCreateWithArgs(ctx, "a", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"Test": "This", "Taste": "That"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				result, err := client.TSQueryIndex(ctx, []string{"Test=This"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				result, err = client.TSQueryIndex(ctx, []string{"Taste=That"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+			})
+
+			It("should TSDel and TSRange", Label("timeseries", "tsdel", "tsrange"), func() {
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				resultDelete, err := client.TSDel(ctx, "a", 0, 21).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultDelete).To(BeEquivalentTo(22))
+
+				resultRange, err := client.TSRange(ctx, "a", 0, 21).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange).To(BeEquivalentTo([]redis.TSTimestampValue{}))
+
+				resultRange, err = client.TSRange(ctx, "a", 22, 22).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 22, Value: 1}))
+			})
+
+			It("should TSRange, TSRangeWithArgs", Label("timeseries", "tsrange", "tsrangeWithArgs", "NonRedisEnterprise"), func() {
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+
+				}
+				result, err := client.TSRange(ctx, "a", 0, 200).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(100))
+				for i := 0; i < 100; i++ {
+					client.TSAdd(ctx, "a", i+200, float64(i%7))
+				}
+				result, err = client.TSRange(ctx, "a", 0, 500).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(200))
+				fts := make([]int, 0)
+				for i := 10; i < 20; i++ {
+					fts = append(fts, i)
+				}
+				opt := &redis.TSRangeOptions{FilterByTS: fts, FilterByValue: []int{1, 2}}
+				result, err = client.TSRangeWithArgs(ctx, "a", 0, 500, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				opt = &redis.TSRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "+"}
+				result, err = client.TSRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 0, Value: 10}, {Timestamp: 10, Value: 1}}))
+				opt = &redis.TSRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "5"}
+				result, err = client.TSRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 0, Value: 5}, {Timestamp: 5, Value: 6}}))
+				opt = &redis.TSRangeOptions{Aggregator: redis.Twa, BucketDuration: 10}
+				result, err = client.TSRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 0, Value: 2.55}, {Timestamp: 10, Value: 3}}))
+				// Test Range Latest
+				resultCreate, err := client.TSCreate(ctx, "t1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				resultCreate, err = client.TSCreate(ctx, "t2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				resultRule, err := client.TSCreateRule(ctx, "t1", "t2", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRule).To(BeEquivalentTo("OK"))
+				_, errAdd := client.TSAdd(ctx, "t1", 1, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 2, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 11, 7).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 13, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				resultRange, err := client.TSRange(ctx, "t1", 0, 20).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 1, Value: 1}))
+
+				opt = &redis.TSRangeOptions{Latest: true}
+				resultRange, err = client.TSRangeWithArgs(ctx, "t2", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 0, Value: 4}))
+				// Test Bucket Timestamp
+				resultCreate, err = client.TSCreate(ctx, "t3").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				_, errAdd = client.TSAdd(ctx, "t3", 15, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 17, 4).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 51, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 73, 5).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 75, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+
+				opt = &redis.TSRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10}
+				resultRange, err = client.TSRangeWithArgs(ctx, "t3", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 10, Value: 4}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+
+				opt = &redis.TSRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10, BucketTimestamp: "+"}
+				resultRange, err = client.TSRangeWithArgs(ctx, "t3", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 20, Value: 4}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+				// Test Empty
+				_, errAdd = client.TSAdd(ctx, "t4", 15, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 17, 4).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 51, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 73, 5).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 75, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+
+				opt = &redis.TSRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10}
+				resultRange, err = client.TSRangeWithArgs(ctx, "t4", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 10, Value: 4}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+
+				opt = &redis.TSRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10, Empty: true}
+				resultRange, err = client.TSRangeWithArgs(ctx, "t4", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 10, Value: 4}))
+				Expect(len(resultRange)).To(BeEquivalentTo(7))
+			})
+
+			It("should TSRangeWithArgs support multiple aggregators", Label("timeseries", "tsrange", "tsrangeWithArgs", "aggregators", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.8", "multiple aggregators require Redis 8.8+")
+
+				_, err := client.TSCreate(ctx, "multi-range").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSMAdd(ctx, [][]interface{}{
+					{"multi-range", 1000, 100},
+					{"multi-range", 1010, 110},
+					{"multi-range", 1020, 120},
+					{"multi-range", 1030, 130},
+					{"multi-range", 1040, 140},
+					{"multi-range", 1050, 150},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err := client.TSRangeWithArgs(ctx, "multi-range", 0, 2000, &redis.TSRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Max},
+					BucketDuration: 20,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 1000, Values: []float64{100, 110}},
+					{Timestamp: 1020, Values: []float64{120, 130}},
+					{Timestamp: 1040, Values: []float64{140, 150}},
+				}))
+
+				cmd := client.TSRangeWithArgs(ctx, "multi-range", 0, 2000, &redis.TSRangeOptions{
+					Aggregator:     redis.Avg,
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Max},
+					BucketDuration: 20,
+				})
+				Expect(cmd.Err()).To(MatchError("redis: setting both Aggregator and Aggregators is not allowed; use Aggregators instead because Aggregator is deprecated"))
+
+				cmd = client.TSRangeWithArgs(ctx, "multi-range", 0, 2000, &redis.TSRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Invalid, redis.Max},
+					BucketDuration: 20,
+				})
+				Expect(cmd.Err()).To(MatchError("redis: invalid timeseries aggregator at index 1: Invalid (0)"))
+
+				cmd = client.TSRangeWithArgs(ctx, "multi-range", 0, 2000, &redis.TSRangeOptions{
+					Aggregator:     redis.Aggregator(999),
+					BucketDuration: 20,
+				})
+				Expect(cmd.Err()).To(MatchError("redis: invalid timeseries aggregator: 999"))
+
+				cmd = client.TSRangeWithArgs(ctx, "multi-range", 0, 2000, &redis.TSRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Aggregator(999), redis.Max},
+					BucketDuration: 20,
+				})
+				Expect(cmd.Err()).To(MatchError("redis: invalid timeseries aggregator at index 1: 999"))
+			})
+
+			It("should TSRevRange, TSRevRangeWithArgs", Label("timeseries", "tsrevrange", "tsrevrangeWithArgs", "NonRedisEnterprise"), func() {
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+
+				}
+				result, err := client.TSRange(ctx, "a", 0, 200).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(100))
+				for i := 0; i < 100; i++ {
+					client.TSAdd(ctx, "a", i+200, float64(i%7))
+				}
+				result, err = client.TSRange(ctx, "a", 0, 500).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(200))
+
+				opt := &redis.TSRevRangeOptions{Aggregator: redis.Avg, BucketDuration: 10}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 500, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(20))
+
+				opt = &redis.TSRevRangeOptions{Count: 10}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 500, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(10))
+
+				fts := make([]int, 0)
+				for i := 10; i < 20; i++ {
+					fts = append(fts, i)
+				}
+				opt = &redis.TSRevRangeOptions{FilterByTS: fts, FilterByValue: []int{1, 2}}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 500, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "+"}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 10, Value: 1}, {Timestamp: 0, Value: 10}}))
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "1"}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 1, Value: 10}, {Timestamp: 0, Value: 1}}))
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Twa, BucketDuration: 10}
+				result, err = client.TSRevRangeWithArgs(ctx, "a", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo([]redis.TSTimestampValue{{Timestamp: 10, Value: 3}, {Timestamp: 0, Value: 2.55}}))
+				// Test Range Latest
+				resultCreate, err := client.TSCreate(ctx, "t1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				resultCreate, err = client.TSCreate(ctx, "t2").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				resultRule, err := client.TSCreateRule(ctx, "t1", "t2", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRule).To(BeEquivalentTo("OK"))
+				_, errAdd := client.TSAdd(ctx, "t1", 1, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 2, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 11, 7).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t1", 13, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				resultRange, err := client.TSRange(ctx, "t2", 0, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 0, Value: 4}))
+				opt = &redis.TSRevRangeOptions{Latest: true}
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t2", 0, 10, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 10, Value: 8}))
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t2", 0, 9, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 0, Value: 4}))
+				// Test Bucket Timestamp
+				resultCreate, err = client.TSCreate(ctx, "t3").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				_, errAdd = client.TSAdd(ctx, "t3", 15, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 17, 4).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 51, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 73, 5).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t3", 75, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10}
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t3", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 70, Value: 5}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10, BucketTimestamp: "+"}
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t3", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 80, Value: 5}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+				// Test Empty
+				_, errAdd = client.TSAdd(ctx, "t4", 15, 1).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 17, 4).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 51, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 73, 5).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+				_, errAdd = client.TSAdd(ctx, "t4", 75, 3).Result()
+				Expect(errAdd).NotTo(HaveOccurred())
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10}
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t4", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 70, Value: 5}))
+				Expect(len(resultRange)).To(BeEquivalentTo(3))
+
+				opt = &redis.TSRevRangeOptions{Aggregator: redis.Max, Align: 0, BucketDuration: 10, Empty: true}
+				resultRange, err = client.TSRevRangeWithArgs(ctx, "t4", 0, 100, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultRange[0]).To(BeEquivalentTo(redis.TSTimestampValue{Timestamp: 70, Value: 5}))
+				Expect(len(resultRange)).To(BeEquivalentTo(7))
+			})
+
+			It("should TSRevRangeWithArgs support multiple aggregators", Label("timeseries", "tsrevrange", "tsrevrangeWithArgs", "aggregators", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.8", "multiple aggregators require Redis 8.8+")
+
+				_, err := client.TSCreate(ctx, "multi-revrange").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSMAdd(ctx, [][]interface{}{
+					{"multi-revrange", 1000, 100},
+					{"multi-revrange", 1010, 110},
+					{"multi-revrange", 1020, 120},
+					{"multi-revrange", 1030, 130},
+					{"multi-revrange", 1040, 140},
+					{"multi-revrange", 1050, 150},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err := client.TSRevRangeWithArgs(ctx, "multi-revrange", 0, 2000, &redis.TSRevRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Max},
+					BucketDuration: 20,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 1040, Values: []float64{140, 150}},
+					{Timestamp: 1020, Values: []float64{120, 130}},
+					{Timestamp: 1000, Values: []float64{100, 110}},
+				}))
+			})
+
+			It("should TSMRange and TSMRangeWithArgs", Label("timeseries", "tsmrange", "tsmrangeWithArgs"), func() {
+				createOpt := &redis.TSOptions{Labels: map[string]string{"Test": "This", "team": "ny"}}
+				resultCreate, err := client.TSCreateWithArgs(ctx, "a", createOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				createOpt = &redis.TSOptions{Labels: map[string]string{"Test": "This", "Taste": "That", "team": "sf"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", createOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+					_, err = client.TSAdd(ctx, "b", i, float64(i%11)).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				result, err := client.TSMRange(ctx, 0, 200, []string{"Test=This"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(100))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(100))
+				}
+				// Test Count
+				mrangeOpt := &redis.TSMRangeOptions{Count: 10}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(10))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(10))
+				}
+				// Test Aggregation and BucketDuration
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i+200, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				mrangeOpt = &redis.TSMRangeOptions{Aggregator: redis.Avg, BucketDuration: 10}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 500, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(20))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(20))
+				}
+				// Test WithLabels
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][0]).To(BeEquivalentTo([]interface{}{}))
+				} else {
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{}))
+				}
+				mrangeOpt = &redis.TSMRangeOptions{WithLabels: true}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][0]).To(ConsistOf([]interface{}{[]interface{}{"Test", "This"}, []interface{}{"team", "ny"}}))
+				} else {
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"Test": "This", "team": "ny"}))
+				}
+				// Test SelectedLabels
+				mrangeOpt = &redis.TSMRangeOptions{SelectedLabels: []interface{}{"team"}}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][0].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"team", "ny"}))
+					Expect(result["b"][0].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"team", "sf"}))
+				} else {
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"team": "ny"}))
+					Expect(result["b"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"team": "sf"}))
+				}
+				// Test FilterBy
+				fts := make([]int, 0)
+				for i := 10; i < 20; i++ {
+					fts = append(fts, i)
+				}
+				mrangeOpt = &redis.TSMRangeOptions{FilterByTS: fts, FilterByValue: []int{1, 2}}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1].([]interface{})).To(BeEquivalentTo([]interface{}{[]interface{}{int64(15), "1"}, []interface{}{int64(16), "2"}}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(15), 1.0}, []interface{}{int64(16), 2.0}}))
+				}
+				// Test GroupBy
+				mrangeOpt = &redis.TSMRangeOptions{GroupByLabel: "Test", Reducer: "sum"}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["Test=This"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "0"}, []interface{}{int64(1), "2"}, []interface{}{int64(2), "4"}, []interface{}{int64(3), "6"}}))
+				} else {
+					Expect(result["Test=This"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 0.0}, []interface{}{int64(1), 2.0}, []interface{}{int64(2), 4.0}, []interface{}{int64(3), 6.0}}))
+				}
+				mrangeOpt = &redis.TSMRangeOptions{GroupByLabel: "Test", Reducer: "max"}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["Test=This"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "0"}, []interface{}{int64(1), "1"}, []interface{}{int64(2), "2"}, []interface{}{int64(3), "3"}}))
+				} else {
+					Expect(result["Test=This"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 0.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(3), 3.0}}))
+				}
+
+				mrangeOpt = &redis.TSMRangeOptions{GroupByLabel: "team", Reducer: "min"}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["team=ny"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "0"}, []interface{}{int64(1), "1"}, []interface{}{int64(2), "2"}, []interface{}{int64(3), "3"}}))
+					Expect(result["team=sf"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "0"}, []interface{}{int64(1), "1"}, []interface{}{int64(2), "2"}, []interface{}{int64(3), "3"}}))
+				} else {
+					Expect(result["team=ny"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 0.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(3), 3.0}}))
+					Expect(result["team=sf"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 0.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(3), 3.0}}))
+				}
+				// Test Align
+				mrangeOpt = &redis.TSMRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "-"}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 10, []string{"team=ny"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "10"}, []interface{}{int64(10), "1"}}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 10.0}, []interface{}{int64(10), 1.0}}))
+				}
+
+				mrangeOpt = &redis.TSMRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: 5}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 10, []string{"team=ny"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), "5"}, []interface{}{int64(5), "6"}}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 5.0}, []interface{}{int64(5), 6.0}}))
+				}
+			})
+
+			It("should TSMRangeWithArgs Latest", Label("timeseries", "tsmrangeWithArgs", "tsmrangelatest", "NonRedisEnterprise"), func() {
+				resultCreate, err := client.TSCreate(ctx, "a").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt := &redis.TSOptions{Labels: map[string]string{"is_compaction": "true"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				resultCreate, err = client.TSCreate(ctx, "c").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"is_compaction": "true"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "d", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				resultCreateRule, err := client.TSCreateRule(ctx, "a", "b", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreateRule).To(BeEquivalentTo("OK"))
+				resultCreateRule, err = client.TSCreateRule(ctx, "c", "d", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreateRule).To(BeEquivalentTo("OK"))
+
+				_, err = client.TSAdd(ctx, "a", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSAdd(ctx, "c", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				mrangeOpt := &redis.TSMRangeOptions{Latest: true}
+				result, err := client.TSMRangeWithArgs(ctx, 0, 10, []string{"is_compaction=true"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["b"][1]).To(ConsistOf([]interface{}{int64(0), "4"}, []interface{}{int64(10), "8"}))
+					Expect(result["d"][1]).To(ConsistOf([]interface{}{int64(0), "4"}, []interface{}{int64(10), "8"}))
+				} else {
+					Expect(result["b"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 4.0}, []interface{}{int64(10), 8.0}}))
+					Expect(result["d"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(0), 4.0}, []interface{}{int64(10), 8.0}}))
+				}
+			})
+			It("should TSMRangeWithArgs support multiple aggregators", Label("timeseries", "tsmrange", "tsmrangeWithArgs", "aggregators", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.8", "multiple aggregators require Redis 8.8+")
+
+				_, err := client.TSCreateWithArgs(ctx, "multi-mrange-a", &redis.TSOptions{
+					Labels: map[string]string{"type": "sensor", "name": "a"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSCreateWithArgs(ctx, "multi-mrange-b", &redis.TSOptions{
+					Labels: map[string]string{"type": "sensor", "name": "b"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSMAdd(ctx, [][]interface{}{
+					{"multi-mrange-a", 1000, 10},
+					{"multi-mrange-a", 1010, 20},
+					{"multi-mrange-a", 1020, 30},
+					{"multi-mrange-a", 1030, 40},
+					{"multi-mrange-b", 1000, 15},
+					{"multi-mrange-b", 1010, 25},
+					{"multi-mrange-b", 1020, 35},
+					{"multi-mrange-b", 1030, 45},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err := client.TSMRangeWithArgs(ctx, 0, 2000, []string{"type=sensor"}, &redis.TSMRangeOptions{
+					WithLabels:     true,
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Max},
+					BucketDuration: 20,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(Equal(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["multi-mrange-a"][1]).To(Equal([]interface{}{
+						[]interface{}{int64(1000), "10", "20"},
+						[]interface{}{int64(1020), "30", "40"},
+					}))
+					Expect(result["multi-mrange-b"][1]).To(Equal([]interface{}{
+						[]interface{}{int64(1000), "15", "25"},
+						[]interface{}{int64(1020), "35", "45"},
+					}))
+				} else {
+					Expect(result["multi-mrange-a"][2]).To(Equal([]interface{}{
+						[]interface{}{int64(1000), 10.0, 20.0},
+						[]interface{}{int64(1020), 30.0, 40.0},
+					}))
+					Expect(result["multi-mrange-b"][2]).To(Equal([]interface{}{
+						[]interface{}{int64(1000), 15.0, 25.0},
+						[]interface{}{int64(1020), 35.0, 45.0},
+					}))
+				}
+
+				cmd := client.TSMRangeWithArgs(ctx, 0, 2000, []string{"type=sensor"}, &redis.TSMRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Avg, redis.Count},
+					BucketDuration: 20,
+					GroupByLabel:   "type",
+					Reducer:        "max",
+				})
+				Expect(cmd.Err()).To(MatchError("redis: GROUPBY is not allowed when multiple aggregators are specified"))
+			})
+			It("should TSMRevRange and TSMRevRangeWithArgs", Label("timeseries", "tsmrevrange", "tsmrevrangeWithArgs"), func() {
+				createOpt := &redis.TSOptions{Labels: map[string]string{"Test": "This", "team": "ny"}}
+				resultCreate, err := client.TSCreateWithArgs(ctx, "a", createOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				createOpt = &redis.TSOptions{Labels: map[string]string{"Test": "This", "Taste": "That", "team": "sf"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", createOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+					_, err = client.TSAdd(ctx, "b", i, float64(i%11)).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				result, err := client.TSMRevRange(ctx, 0, 200, []string{"Test=This"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(100))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(100))
+				}
+				// Test Count
+				mrangeOpt := &redis.TSMRevRangeOptions{Count: 10}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(10))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(10))
+				}
+				// Test Aggregation and BucketDuration
+				for i := 0; i < 100; i++ {
+					_, err := client.TSAdd(ctx, "a", i+200, float64(i%7)).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{Aggregator: redis.Avg, BucketDuration: 10}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 500, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(len(result["a"][1].([]interface{}))).To(BeEquivalentTo(20))
+					Expect(result["a"][0]).To(BeEquivalentTo([]interface{}{}))
+				} else {
+					Expect(len(result["a"][2].([]interface{}))).To(BeEquivalentTo(20))
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{}))
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{WithLabels: true}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][0]).To(ConsistOf([]interface{}{[]interface{}{"Test", "This"}, []interface{}{"team", "ny"}}))
+				} else {
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"Test": "This", "team": "ny"}))
+				}
+				// Test SelectedLabels
+				mrangeOpt = &redis.TSMRevRangeOptions{SelectedLabels: []interface{}{"team"}}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][0].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"team", "ny"}))
+					Expect(result["b"][0].([]interface{})[0]).To(BeEquivalentTo([]interface{}{"team", "sf"}))
+				} else {
+					Expect(result["a"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"team": "ny"}))
+					Expect(result["b"][0]).To(BeEquivalentTo(map[interface{}]interface{}{"team": "sf"}))
+				}
+				// Test FilterBy
+				fts := make([]int, 0)
+				for i := 10; i < 20; i++ {
+					fts = append(fts, i)
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{FilterByTS: fts, FilterByValue: []int{1, 2}}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 200, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1].([]interface{})).To(ConsistOf([]interface{}{int64(16), "2"}, []interface{}{int64(15), "1"}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(16), 2.0}, []interface{}{int64(15), 1.0}}))
+				}
+				// Test GroupBy
+				mrangeOpt = &redis.TSMRevRangeOptions{GroupByLabel: "Test", Reducer: "sum"}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["Test=This"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), "6"}, []interface{}{int64(2), "4"}, []interface{}{int64(1), "2"}, []interface{}{int64(0), "0"}}))
+				} else {
+					Expect(result["Test=This"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), 6.0}, []interface{}{int64(2), 4.0}, []interface{}{int64(1), 2.0}, []interface{}{int64(0), 0.0}}))
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{GroupByLabel: "Test", Reducer: "max"}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["Test=This"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), "3"}, []interface{}{int64(2), "2"}, []interface{}{int64(1), "1"}, []interface{}{int64(0), "0"}}))
+				} else {
+					Expect(result["Test=This"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), 3.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(0), 0.0}}))
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{GroupByLabel: "team", Reducer: "min"}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 3, []string{"Test=This"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["team=ny"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), "3"}, []interface{}{int64(2), "2"}, []interface{}{int64(1), "1"}, []interface{}{int64(0), "0"}}))
+					Expect(result["team=sf"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), "3"}, []interface{}{int64(2), "2"}, []interface{}{int64(1), "1"}, []interface{}{int64(0), "0"}}))
+				} else {
+					Expect(result["team=ny"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), 3.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(0), 0.0}}))
+					Expect(result["team=sf"][3]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(3), 3.0}, []interface{}{int64(2), 2.0}, []interface{}{int64(1), 1.0}, []interface{}{int64(0), 0.0}}))
+				}
+				// Test Align
+				mrangeOpt = &redis.TSMRevRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: "-"}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 10, []string{"team=ny"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), "1"}, []interface{}{int64(0), "10"}}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), 1.0}, []interface{}{int64(0), 10.0}}))
+				}
+				mrangeOpt = &redis.TSMRevRangeOptions{Aggregator: redis.Count, BucketDuration: 10, Align: 1}
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 10, []string{"team=ny"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["a"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(1), "10"}, []interface{}{int64(0), "1"}}))
+				} else {
+					Expect(result["a"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(1), 10.0}, []interface{}{int64(0), 1.0}}))
+				}
+			})
+
+			It("should TSMRevRangeWithArgs support multiple aggregators", Label("timeseries", "tsmrevrange", "tsmrevrangeWithArgs", "aggregators", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.8", "multiple aggregators require Redis 8.8+")
+
+				_, err := client.TSCreateWithArgs(ctx, "multi-mrevrange-a", &redis.TSOptions{
+					Labels: map[string]string{"type": "sensor", "name": "a"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSCreateWithArgs(ctx, "multi-mrevrange-b", &redis.TSOptions{
+					Labels: map[string]string{"type": "sensor", "name": "b"},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSMAdd(ctx, [][]interface{}{
+					{"multi-mrevrange-a", 1000, 10},
+					{"multi-mrevrange-a", 1010, 20},
+					{"multi-mrevrange-a", 1020, 30},
+					{"multi-mrevrange-a", 1030, 40},
+					{"multi-mrevrange-b", 1000, 15},
+					{"multi-mrevrange-b", 1010, 25},
+					{"multi-mrevrange-b", 1020, 35},
+					{"multi-mrevrange-b", 1030, 45},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				result, err := client.TSMRevRangeWithArgs(ctx, 0, 2000, []string{"type=sensor"}, &redis.TSMRevRangeOptions{
+					WithLabels:     true,
+					Aggregators:    []redis.Aggregator{redis.Min, redis.Max},
+					BucketDuration: 20,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(Equal(2))
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["multi-mrevrange-a"][1]).To(Equal([]interface{}{
+						[]interface{}{int64(1020), "30", "40"},
+						[]interface{}{int64(1000), "10", "20"},
+					}))
+					Expect(result["multi-mrevrange-b"][1]).To(Equal([]interface{}{
+						[]interface{}{int64(1020), "35", "45"},
+						[]interface{}{int64(1000), "15", "25"},
+					}))
+				} else {
+					Expect(result["multi-mrevrange-a"][2]).To(Equal([]interface{}{
+						[]interface{}{int64(1020), 30.0, 40.0},
+						[]interface{}{int64(1000), 10.0, 20.0},
+					}))
+					Expect(result["multi-mrevrange-b"][2]).To(Equal([]interface{}{
+						[]interface{}{int64(1020), 35.0, 45.0},
+						[]interface{}{int64(1000), 15.0, 25.0},
+					}))
+				}
+
+				cmd := client.TSMRevRangeWithArgs(ctx, 0, 2000, []string{"type=sensor"}, &redis.TSMRevRangeOptions{
+					Aggregators:    []redis.Aggregator{redis.Avg, redis.Count},
+					BucketDuration: 20,
+					GroupByLabel:   "type",
+					Reducer:        "max",
+				})
+				Expect(cmd.Err()).To(MatchError("redis: GROUPBY is not allowed when multiple aggregators are specified"))
+			})
+
+			It("should TSMRange and TSMRevRange with ExcludeEmpty", Label("timeseries", "tsmrange", "tsmrevrange", "excludeempty", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "EXCLUDEEMPTY requires Redis 8.10+")
+
+				for _, key := range []string{"s", "t", "u"} {
+					opt := &redis.TSOptions{Labels: map[string]string{"sensor": "1", "type": "demo"}}
+					_, err := client.TSCreateWithArgs(ctx, key, opt).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+				_, err := client.TSMAdd(ctx, [][]interface{}{
+					{"s", 100, 100}, {"t", 100, 100},
+					{"s", 200, 200}, {"t", 300, 300},
+					{"s", 400, 400}, {"t", 400, 400},
+					{"u", 2000, 2000},
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Without ExcludeEmpty, "u" is returned with an empty samples array.
+				result, err := client.TSMRange(ctx, 0, 500, []string{"sensor=1"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(HaveLen(3))
+				Expect(result).To(HaveKey("u"))
+
+				// With ExcludeEmpty, "u" is omitted because it has no samples in range.
+				result, err = client.TSMRangeWithArgs(ctx, 0, 500, []string{"sensor=1"}, &redis.TSMRangeOptions{
+					WithLabels:   true,
+					ExcludeEmpty: true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(HaveLen(2))
+				Expect(result).To(HaveKey("s"))
+				Expect(result).To(HaveKey("t"))
+				Expect(result).NotTo(HaveKey("u"))
+
+				// ExcludeEmpty composes with AGGREGATION.
+				result, err = client.TSMRangeWithArgs(ctx, 0, 500, []string{"sensor=1"}, &redis.TSMRangeOptions{
+					Aggregator:     redis.Min,
+					BucketDuration: 100,
+					ExcludeEmpty:   true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(HaveLen(2))
+				Expect(result).NotTo(HaveKey("u"))
+
+				// TSMRevRange with ExcludeEmpty behaves the same.
+				result, err = client.TSMRevRangeWithArgs(ctx, 0, 500, []string{"sensor=1"}, &redis.TSMRevRangeOptions{
+					ExcludeEmpty: true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(HaveLen(2))
+				Expect(result).NotTo(HaveKey("u"))
+
+				// When every matching series is empty, the reply is empty.
+				result, err = client.TSMRangeWithArgs(ctx, 1, 50, []string{"sensor=1"}, &redis.TSMRangeOptions{
+					ExcludeEmpty: true,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEmpty())
+			})
+			It("should reject ExcludeEmpty combined with GroupBy", Label("timeseries", "tsmrange", "tsmrevrange", "excludeempty"), func() {
+				mrangeCmd := client.TSMRangeWithArgs(ctx, 0, 500, []string{"sensor=1"}, &redis.TSMRangeOptions{
+					ExcludeEmpty: true,
+					GroupByLabel: "sensor",
+					Reducer:      "max",
+				})
+				Expect(mrangeCmd.Err()).To(MatchError("redis: EXCLUDEEMPTY is not allowed with GROUPBY"))
+
+				mrevrangeCmd := client.TSMRevRangeWithArgs(ctx, 0, 500, []string{"sensor=1"}, &redis.TSMRevRangeOptions{
+					ExcludeEmpty: true,
+					GroupByLabel: "sensor",
+					Reducer:      "max",
+				})
+				Expect(mrevrangeCmd.Err()).To(MatchError("redis: EXCLUDEEMPTY is not allowed with GROUPBY"))
+			})
+			It("should TSMRevRangeWithArgs Latest", Label("timeseries", "tsmrevrangeWithArgs", "tsmrevrangelatest", "NonRedisEnterprise"), func() {
+				resultCreate, err := client.TSCreate(ctx, "a").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt := &redis.TSOptions{Labels: map[string]string{"is_compaction": "true"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "b", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				resultCreate, err = client.TSCreate(ctx, "c").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+				opt = &redis.TSOptions{Labels: map[string]string{"is_compaction": "true"}}
+				resultCreate, err = client.TSCreateWithArgs(ctx, "d", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreate).To(BeEquivalentTo("OK"))
+
+				resultCreateRule, err := client.TSCreateRule(ctx, "a", "b", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreateRule).To(BeEquivalentTo("OK"))
+				resultCreateRule, err = client.TSCreateRule(ctx, "c", "d", redis.Sum, 10).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resultCreateRule).To(BeEquivalentTo("OK"))
+
+				_, err = client.TSAdd(ctx, "a", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "a", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSAdd(ctx, "c", 1, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 2, 3).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 11, 7).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "c", 13, 1).Result()
+				Expect(err).NotTo(HaveOccurred())
+				mrangeOpt := &redis.TSMRevRangeOptions{Latest: true}
+				result, err := client.TSMRevRangeWithArgs(ctx, 0, 10, []string{"is_compaction=true"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				if rawClient.Options().Protocol == 2 {
+					Expect(result["b"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), "8"}, []interface{}{int64(0), "4"}}))
+					Expect(result["d"][1]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), "8"}, []interface{}{int64(0), "4"}}))
+				} else {
+					Expect(result["b"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), 8.0}, []interface{}{int64(0), 4.0}}))
+					Expect(result["d"][2]).To(BeEquivalentTo([]interface{}{[]interface{}{int64(10), 8.0}, []interface{}{int64(0), 4.0}}))
+				}
+			})
+
+			// NaN Value Support Tests
+			It("should support NaN values in TSAdd and TSAddWithArgs", Label("timeseries", "tsadd", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Test basic NaN insertion with TSAdd
+				result, err := client.TSAdd(ctx, "nan-test-1", 1000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(1000))
+
+				// Test NaN insertion with TSAddWithArgs
+				opt := &redis.TSOptions{Labels: map[string]string{"sensor": "broken"}}
+				result, err = client.TSAddWithArgs(ctx, "nan-test-2", 2000, math.NaN(), opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result).To(BeEquivalentTo(2000))
+
+				// Verify NaN value can be retrieved
+				getResult, err := client.TSGet(ctx, "nan-test-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(getResult.Timestamp).To(BeEquivalentTo(1000))
+				Expect(math.IsNaN(getResult.Value)).To(BeTrue())
+			})
+
+			It("should support NaN values in TSMAdd", Label("timeseries", "tsmadd", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Create time series
+				_, err := client.TSCreate(ctx, "nan-madd-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSCreate(ctx, "nan-madd-2").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add multiple values including NaN
+				ktvSlices := [][]interface{}{
+					{"nan-madd-1", 1000, 10.5},
+					{"nan-madd-1", 2000, math.NaN()},
+					{"nan-madd-2", 1000, math.NaN()},
+					{"nan-madd-2", 2000, 20.3},
+				}
+				result, err := client.TSMAdd(ctx, ktvSlices).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(4))
+
+				// Verify NaN values in range query
+				rangeResult, err := client.TSRange(ctx, "nan-madd-1", 0, 3000).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangeResult)).To(BeEquivalentTo(2))
+				Expect(rangeResult[0].Value).To(BeEquivalentTo(10.5))
+				Expect(math.IsNaN(rangeResult[1].Value)).To(BeTrue())
+			})
+
+			It("should retrieve NaN values with TSGet and TSMGet", Label("timeseries", "tsget", "tsmget", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Add NaN values to multiple time series
+				opt := &redis.TSOptions{Labels: map[string]string{"type": "sensor"}}
+				_, err := client.TSAddWithArgs(ctx, "sensor-1", 1000, math.NaN(), opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAddWithArgs(ctx, "sensor-2", 1000, 42.5, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test TSGet with NaN
+				getResult, err := client.TSGet(ctx, "sensor-1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(math.IsNaN(getResult.Value)).To(BeTrue())
+
+				// Test TSMGet with NaN values
+				mgetResult, err := client.TSMGet(ctx, []string{"type=sensor"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(mgetResult)).To(BeEquivalentTo(2))
+
+				// One should be NaN, one should be 42.5
+				foundNaN := false
+				foundValue := false
+				for _, v := range mgetResult {
+					tsVal := v[1].([]interface{})
+					if len(tsVal) == 2 {
+						val := tsVal[1]
+						if strVal, ok := val.(string); ok {
+							// RESP2 returns NaN as string
+							if strVal == "nan" || strVal == "NaN" || strVal == "-nan" {
+								foundNaN = true
+							} else if parsedVal, err := strconv.ParseFloat(strVal, 64); err == nil && parsedVal == 42.5 {
+								foundValue = true
+							}
+						} else if floatVal, ok := val.(float64); ok {
+							// RESP3 returns NaN as float64
+							if math.IsNaN(floatVal) {
+								foundNaN = true
+							} else if floatVal == 42.5 {
+								foundValue = true
+							}
+						}
+					}
+				}
+				Expect(foundNaN && foundValue).To(BeTrue())
+			})
+
+			It("should support NaN values in TSRange and TSRevRange", Label("timeseries", "tsrange", "tsrevrange", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Create time series with mixed NaN and regular values
+				_, err := client.TSCreate(ctx, "mixed-values").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add mixed values
+				_, err = client.TSAdd(ctx, "mixed-values", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mixed-values", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mixed-values", 3000, 20.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mixed-values", 4000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mixed-values", 5000, 30.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test TSRange
+				rangeResult, err := client.TSRange(ctx, "mixed-values", 0, 6000).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(rangeResult)).To(BeEquivalentTo(5))
+				Expect(rangeResult[0].Value).To(BeEquivalentTo(10.0))
+				Expect(math.IsNaN(rangeResult[1].Value)).To(BeTrue())
+				Expect(rangeResult[2].Value).To(BeEquivalentTo(20.0))
+				Expect(math.IsNaN(rangeResult[3].Value)).To(BeTrue())
+				Expect(rangeResult[4].Value).To(BeEquivalentTo(30.0))
+
+				// Test TSRevRange
+				revRangeResult, err := client.TSRevRange(ctx, "mixed-values", 0, 6000).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(revRangeResult)).To(BeEquivalentTo(5))
+				Expect(revRangeResult[0].Value).To(BeEquivalentTo(30.0))
+				Expect(math.IsNaN(revRangeResult[1].Value)).To(BeTrue())
+				Expect(revRangeResult[2].Value).To(BeEquivalentTo(20.0))
+				Expect(math.IsNaN(revRangeResult[3].Value)).To(BeTrue())
+				Expect(revRangeResult[4].Value).To(BeEquivalentTo(10.0))
+			})
+
+			It("should support CountNaN and CountAll aggregators", Label("timeseries", "aggregator", "nan", "countnan", "countall", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN aggregators require Redis 8.6+")
+
+				// Create time series with mixed NaN and regular values
+				_, err := client.TSCreate(ctx, "agg-test").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add values: 3 regular values and 2 NaN values
+				_, err = client.TSAdd(ctx, "agg-test", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-test", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-test", 3000, 20.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-test", 4000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-test", 5000, 30.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test CountNaN aggregator
+				opt := &redis.TSRangeOptions{
+					Aggregator:     redis.CountNaN,
+					BucketDuration: 10000,
+				}
+				result, err := client.TSRangeWithArgs(ctx, "agg-test", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(2.0)) // 2 NaN values
+
+				// Test CountAll aggregator
+				opt = &redis.TSRangeOptions{
+					Aggregator:     redis.CountAll,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSRangeWithArgs(ctx, "agg-test", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(5.0)) // 5 total values
+			})
+
+			It("should ignore NaN values in existing aggregators", Label("timeseries", "aggregator", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Create time series with mixed NaN and regular values
+				_, err := client.TSCreate(ctx, "agg-ignore-nan").Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add values: 10, NaN, 20, NaN, 30
+				_, err = client.TSAdd(ctx, "agg-ignore-nan", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-ignore-nan", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-ignore-nan", 3000, 20.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-ignore-nan", 4000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "agg-ignore-nan", 5000, 30.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test AVG aggregator (should ignore NaN: (10+20+30)/3 = 20)
+				opt := &redis.TSRangeOptions{
+					Aggregator:     redis.Avg,
+					BucketDuration: 10000,
+				}
+				result, err := client.TSRangeWithArgs(ctx, "agg-ignore-nan", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(20.0))
+
+				// Test SUM aggregator (should ignore NaN: 10+20+30 = 60)
+				opt = &redis.TSRangeOptions{
+					Aggregator:     redis.Sum,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSRangeWithArgs(ctx, "agg-ignore-nan", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(60.0))
+
+				// Test MIN aggregator (should ignore NaN: min = 10)
+				opt = &redis.TSRangeOptions{
+					Aggregator:     redis.Min,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSRangeWithArgs(ctx, "agg-ignore-nan", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(10.0))
+
+				// Test MAX aggregator (should ignore NaN: max = 30)
+				opt = &redis.TSRangeOptions{
+					Aggregator:     redis.Max,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSRangeWithArgs(ctx, "agg-ignore-nan", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(30.0))
+
+				// Test COUNT aggregator (should ignore NaN: count = 3)
+				opt = &redis.TSRangeOptions{
+					Aggregator:     redis.Count,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSRangeWithArgs(ctx, "agg-ignore-nan", 0, 10000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(1))
+				Expect(result[0].Value).To(BeEquivalentTo(3.0))
+			})
+
+			It("should support NaN values in TSMRange and TSMRevRange", Label("timeseries", "tsmrange", "tsmrevrange", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Create multiple time series with NaN values
+				opt := &redis.TSOptions{Labels: map[string]string{"location": "sensor-room"}}
+				_, err := client.TSCreateWithArgs(ctx, "mrange-1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSCreateWithArgs(ctx, "mrange-2", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add mixed values to both series
+				_, err = client.TSAdd(ctx, "mrange-1", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mrange-1", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mrange-2", 1000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "mrange-2", 2000, 20.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test TSMRange
+				mrangeResult, err := client.TSMRange(ctx, 0, 3000, []string{"location=sensor-room"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(mrangeResult)).To(BeEquivalentTo(2))
+
+				// Test TSMRevRange
+				mrevrangeResult, err := client.TSMRevRange(ctx, 0, 3000, []string{"location=sensor-room"}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(mrevrangeResult)).To(BeEquivalentTo(2))
+			})
+
+			It("should support NaN with CountNaN and CountAll in TSMRange", Label("timeseries", "tsmrange", "aggregator", "nan", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN aggregators require Redis 8.6+")
+
+				// Create multiple time series with NaN values
+				opt := &redis.TSOptions{Labels: map[string]string{"device": "temp-sensor"}}
+				_, err := client.TSCreateWithArgs(ctx, "multi-agg-1", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSCreateWithArgs(ctx, "multi-agg-2", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Add values with NaN
+				_, err = client.TSAdd(ctx, "multi-agg-1", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "multi-agg-1", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "multi-agg-1", 3000, 20.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSAdd(ctx, "multi-agg-2", 1000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "multi-agg-2", 2000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+				_, err = client.TSAdd(ctx, "multi-agg-2", 3000, 30.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Test CountNaN with TSMRange
+				mrangeOpt := &redis.TSMRangeOptions{
+					Aggregator:     redis.CountNaN,
+					BucketDuration: 10000,
+				}
+				result, err := client.TSMRangeWithArgs(ctx, 0, 10000, []string{"device=temp-sensor"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+
+				// Test CountAll with TSMRange
+				mrangeOpt = &redis.TSMRangeOptions{
+					Aggregator:     redis.CountAll,
+					BucketDuration: 10000,
+				}
+				result, err = client.TSMRangeWithArgs(ctx, 0, 10000, []string{"device=temp-sensor"}, mrangeOpt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeEquivalentTo(2))
+			})
+
+			It("should handle duplicate policy with NaN values", Label("timeseries", "nan", "duplicatepolicy", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.6", "NaN support requires Redis 8.6+")
+
+				// Test BLOCK duplicate policy with NaN (should work - just blocks duplicates)
+				opt := &redis.TSOptions{DuplicatePolicy: "BLOCK"}
+				_, err := client.TSCreateWithArgs(ctx, "dup-block", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSAdd(ctx, "dup-block", 1000, math.NaN()).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				getResult, err := client.TSGet(ctx, "dup-block").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(math.IsNaN(getResult.Value)).To(BeTrue())
+
+				// Trying to add another value at the same timestamp should be blocked
+				_, err = client.TSAdd(ctx, "dup-block", 1000, 20.0).Result()
+				Expect(err).To(HaveOccurred())
+
+				// Test that MIN/MAX/SUM policies error when mixing NaN and non-NaN
+				opt = &redis.TSOptions{DuplicatePolicy: "MIN"}
+				_, err = client.TSCreateWithArgs(ctx, "dup-min", opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				_, err = client.TSAdd(ctx, "dup-min", 1000, 10.0).Result()
+				Expect(err).NotTo(HaveOccurred())
+
+				// Adding NaN to existing non-NaN value should error for MIN policy
+				_, err = client.TSAdd(ctx, "dup-min", 1000, math.NaN()).Result()
+				Expect(err).To(HaveOccurred())
+			})
+
+			It("should verify Aggregator.String() returns correct values for CountNaN and CountAll", Label("timeseries", "aggregator", "unit"), func() {
+				// Unit test for aggregator string representation
+				Expect(redis.CountNaN.String()).To(Equal("COUNTNAN"))
+				Expect(redis.CountAll.String()).To(Equal("COUNTALL"))
+
+				// Verify other aggregators still work
+				Expect(redis.Avg.String()).To(Equal("AVG"))
+				Expect(redis.Sum.String()).To(Equal("SUM"))
+				Expect(redis.Count.String()).To(Equal("COUNT"))
+			})
+
+			It("should TSNRange, TSNRangeWithArgs", Label("timeseries", "tsnrange", "tsnrangeWithArgs", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				keys := []string{"{ts}:open", "{ts}:high", "{ts}:low"}
+				for _, k := range keys {
+					Expect(client.TSCreate(ctx, k).Err()).NotTo(HaveOccurred())
+				}
+				Expect(client.TSMAdd(ctx, [][]interface{}{
+					{"{ts}:open", 1000, 10.0},
+					{"{ts}:high", 1000, 13.0},
+					{"{ts}:low", 1000, 9.0},
+					{"{ts}:open", 2000, 12.0},
+					{"{ts}:high", 2000, 15.0},
+					// {ts}:low intentionally missing at 2000
+					{"{ts}:open", 3000, 11.0},
+					{"{ts}:high", 3000, 14.0},
+					{"{ts}:low", 3000, 8.0},
+				}).Err()).NotTo(HaveOccurred())
+
+				// Basic forward range
+				result, err := client.TSNRange(ctx, keys, 1000, 3000).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(Equal(3))
+				Expect(result[0].Timestamp).To(BeEquivalentTo(1000))
+				Expect(result[2].Timestamp).To(BeEquivalentTo(3000))
+				// Ascending order
+				Expect(result[0].Timestamp).To(BeNumerically("<", result[1].Timestamp))
+				Expect(result[1].Timestamp).To(BeNumerically("<", result[2].Timestamp))
+				// Values follow key order
+				Expect(result[0].Values[0]).To(BeEquivalentTo(10.0)) // open
+				Expect(result[0].Values[1]).To(BeEquivalentTo(13.0)) // high
+				Expect(result[0].Values[2]).To(BeEquivalentTo(9.0))  // low
+				// Missing low at t=2000 is NaN
+				Expect(math.IsNaN(result[1].Values[2])).To(BeTrue())
+
+				// COUNT limits rows
+				opt := &redis.TSNRangeOptions{Count: 2}
+				resultCount, err := client.TSNRangeWithArgs(ctx, keys, 1000, 3000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultCount)).To(Equal(2))
+				// COUNT limits in ascending order: first two rows
+				Expect(resultCount[0].Timestamp).To(BeEquivalentTo(1000))
+				Expect(resultCount[1].Timestamp).To(BeEquivalentTo(2000))
+
+				// FILTER_BY_TS
+				opt = &redis.TSNRangeOptions{FilterByTS: []int{1000, 3000}}
+				resultFilter, err := client.TSNRangeWithArgs(ctx, keys, 1000, 3000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultFilter)).To(Equal(2))
+				Expect(resultFilter[0].Timestamp).To(BeEquivalentTo(1000))
+				Expect(resultFilter[1].Timestamp).To(BeEquivalentTo(3000))
+
+				// Sentinel timestamps ("-" and "+")
+				resultSentinel, err := client.TSNRange(ctx, keys, "-", "+").Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultSentinel)).To(Equal(3))
+
+				// Aggregation: one aggregator spec per key
+				optAgg := &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {redis.Max}, {redis.Sum}},
+					BucketDuration: 2000,
+				}
+				resultAgg, err := client.TSNRangeWithArgs(ctx, keys, 1000, 3000, optAgg).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultAgg)).To(BeNumerically(">", 0))
+				// Each row has exactly 3 values (one per key)
+				for _, row := range resultAgg {
+					Expect(len(row.Values)).To(Equal(3))
+				}
+
+				// EMPTY flag (emit empty buckets)
+				optEmpty := &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {redis.Max}, {redis.Sum}},
+					BucketDuration: 500,
+					Empty:          true,
+				}
+				resultEmpty, err := client.TSNRangeWithArgs(ctx, keys, 1000, 3000, optEmpty).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultEmpty)).To(BeNumerically(">=", 3))
+			})
+
+			It("should TSNRevRange, TSNRevRangeWithArgs", Label("timeseries", "tsnrevrange", "tsnrevrangeWithArgs", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NREVRANGE requires Redis 8.10+")
+
+				keys := []string{"{ts2}:a", "{ts2}:b"}
+				for _, k := range keys {
+					Expect(client.TSCreate(ctx, k).Err()).NotTo(HaveOccurred())
+				}
+				Expect(client.TSMAdd(ctx, [][]interface{}{
+					{"{ts2}:a", 1000, 1.0},
+					{"{ts2}:b", 1000, 2.0},
+					{"{ts2}:a", 2000, 3.0},
+					{"{ts2}:b", 2000, 4.0},
+					{"{ts2}:a", 3000, 5.0},
+					{"{ts2}:b", 3000, 6.0},
+				}).Err()).NotTo(HaveOccurred())
+
+				// Basic reverse range: rows in descending order
+				result, err := client.TSNRevRange(ctx, keys, 1000, 3000).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(Equal(3))
+				Expect(result[0].Timestamp).To(BeEquivalentTo(3000))
+				Expect(result[1].Timestamp).To(BeEquivalentTo(2000))
+				Expect(result[2].Timestamp).To(BeEquivalentTo(1000))
+				// Descending order
+				Expect(result[0].Timestamp).To(BeNumerically(">", result[1].Timestamp))
+				Expect(result[1].Timestamp).To(BeNumerically(">", result[2].Timestamp))
+
+				// COUNT limits rows in descending order: most recent rows first
+				opt := &redis.TSNRevRangeOptions{Count: 2}
+				resultCount, err := client.TSNRevRangeWithArgs(ctx, keys, 1000, 3000, opt).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultCount)).To(Equal(2))
+				Expect(resultCount[0].Timestamp).To(BeEquivalentTo(3000))
+				Expect(resultCount[1].Timestamp).To(BeEquivalentTo(2000))
+
+				// Aggregation in reverse order
+				optAgg := &redis.TSNRevRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Max}, {redis.Min}},
+					BucketDuration: 2000,
+				}
+				resultAgg, err := client.TSNRevRangeWithArgs(ctx, keys, 1000, 3000, optAgg).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(resultAgg)).To(BeNumerically(">", 0))
+				for _, row := range resultAgg {
+					Expect(len(row.Values)).To(Equal(2))
+				}
+				// Reverse: last bucket row first
+				if len(resultAgg) > 1 {
+					Expect(resultAgg[0].Timestamp).To(BeNumerically(">", resultAgg[1].Timestamp))
+				}
+			})
+
+			It("should TSNRange preserve key order and support duplicate keys", Label("timeseries", "tsnrange", "duplicatekeys", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				Expect(client.TSCreate(ctx, "{dup}:x").Err()).NotTo(HaveOccurred())
+				Expect(client.TSMAdd(ctx, [][]interface{}{
+					{"{dup}:x", 1000, 5.0},
+					{"{dup}:x", 2000, 10.0},
+				}).Err()).NotTo(HaveOccurred())
+
+				// Same key twice with different aggregators: two value columns from one physical series
+				dupKeys := []string{"{dup}:x", "{dup}:x"}
+				optAgg := &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {redis.Max}},
+					BucketDuration: 2000,
+				}
+				result, err := client.TSNRangeWithArgs(ctx, dupKeys, 1000, 2000, optAgg).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeNumerically(">", 0))
+				for _, row := range result {
+					Expect(len(row.Values)).To(Equal(2))
+				}
+			})
+
+			It("should TSNRange support multiple aggregators per key", Label("timeseries", "tsnrange", "multiaggregators", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				keys := []string{"{multi}:a", "{multi}:b"}
+				for _, k := range keys {
+					Expect(client.TSCreate(ctx, k).Err()).NotTo(HaveOccurred())
+				}
+				Expect(client.TSMAdd(ctx, [][]interface{}{
+					{"{multi}:a", 1000, 1.0},
+					{"{multi}:b", 1000, 10.0},
+					{"{multi}:a", 1500, 3.0},
+					{"{multi}:b", 1500, 20.0},
+				}).Err()).NotTo(HaveOccurred())
+
+				// Two aggregators for the first key, one for the second:
+				// AGGREGATION MIN,MAX SUM <bucketDuration>
+				optAgg := &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min, redis.Max}, {redis.Sum}},
+					BucketDuration: 2000,
+				}
+				cmd := client.TSNRangeWithArgs(ctx, keys, 0, 2000, optAgg)
+				// Each per-key spec is a single comma-joined wire token
+				Expect(cmd.Args()).To(ContainElements("MIN,MAX", "SUM"))
+
+				result, err := cmd.Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(len(result)).To(BeNumerically(">", 0))
+				// Row width is the total number of aggregators, flattened key by key
+				for _, row := range result {
+					Expect(len(row.Values)).To(Equal(3))
+				}
+				// The bucket [0, 2000) holds both samples: min(a)=1, max(a)=3, sum(b)=30
+				Expect(result[0].Values[0]).To(BeEquivalentTo(1.0))
+				Expect(result[0].Values[1]).To(BeEquivalentTo(3.0))
+				Expect(result[0].Values[2]).To(BeEquivalentTo(30.0))
+			})
+
+			It("should TSNRangeWithArgs validate aggregator spec count", Label("timeseries", "tsnrange", "validation", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				keys := []string{"{val}:a", "{val}:b", "{val}:c"}
+				// 2 aggregator specs for 3 keys: must error
+				cmd := client.TSNRangeWithArgs(ctx, keys, 0, 1000, &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {redis.Max}},
+					BucketDuration: 100,
+				})
+				Expect(cmd.Err()).To(MatchError(ContainSubstring("requires exactly 3 aggregator spec(s), got 2")))
+			})
+
+			It("should TSNRangeWithArgs reject empty aggregator specs", Label("timeseries", "tsnrange", "validation", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				keys := []string{"{val3}:a", "{val3}:b"}
+				cmd := client.TSNRangeWithArgs(ctx, keys, 0, 1000, &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {}},
+					BucketDuration: 100,
+				})
+				Expect(cmd.Err()).To(MatchError(ContainSubstring("empty timeseries aggregator spec at index 1")))
+			})
+
+			It("should TSNRangeWithArgs reject Invalid aggregators", Label("timeseries", "tsnrange", "validation", "NonRedisEnterprise"), func() {
+				SkipBeforeRedisVersion("8.10", "TS.NRANGE requires Redis 8.10+")
+
+				keys := []string{"{val2}:a", "{val2}:b"}
+				cmd := client.TSNRangeWithArgs(ctx, keys, 0, 1000, &redis.TSNRangeOptions{
+					Aggregators:    [][]redis.Aggregator{{redis.Min}, {redis.Sum, redis.Invalid}},
+					BucketDuration: 100,
+				})
+				Expect(cmd.Err()).To(MatchError(ContainSubstring("invalid timeseries aggregator at index 1[1]: Invalid")))
+			})
+
+			It("should TSRead and TSReadWithArgs", Label("timeseries", "tsread", "tsreadWithArgs", "NonRedisEnterprise"), func() {
+				// TS.READ was added in Redis 8.10.
+				SkipBeforeRedisVersion("8.10", "TS.READ was added in Redis 8.10")
+
+				_, err := client.TSCreate(ctx, "tsread:1").Result()
+				Expect(err).NotTo(HaveOccurred())
+				for _, s := range []redis.TSTimestampValue{
+					{Timestamp: 100, Value: 1.0},
+					{Timestamp: 200, Value: 2.0},
+					{Timestamp: 300, Value: 3.0},
+				} {
+					_, err := client.TSAdd(ctx, "tsread:1", s.Timestamp, s.Value).Result()
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				// Read everything at or after the cursor.
+				samples, err := client.TSRead(ctx, "tsread:1", 0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(samples).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 100, Value: 1.0},
+					{Timestamp: 200, Value: 2.0},
+					{Timestamp: 300, Value: 3.0},
+				}))
+
+				// Page in bounded batches, advancing the cursor to lastTimestamp + 1.
+				page, err := client.TSReadWithArgs(ctx, "tsread:1", redis.TSReadEarliest, &redis.TSReadOptions{MaxCount: 2}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(page).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 100, Value: 1.0},
+					{Timestamp: 200, Value: 2.0},
+				}))
+				next := page[len(page)-1].Timestamp + 1
+				page, err = client.TSReadWithArgs(ctx, "tsread:1", next, &redis.TSReadOptions{MaxCount: 2}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(page).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 300, Value: 3.0},
+				}))
+
+				// Past the newest sample, or a missing key, returns empty.
+				empty, err := client.TSRead(ctx, "tsread:1", 301).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(empty).To(BeEmpty())
+				empty, err = client.TSRead(ctx, "tsread-missing", 0).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(empty).To(BeEmpty())
+
+				// "+" returns the latest sample, inclusive, even without BLOCK.
+				latest, err := client.TSRead(ctx, "tsread:1", redis.TSReadLatest).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(latest).To(Equal([]redis.TSTimestampValue{{Timestamp: 300, Value: 3.0}}))
+
+				// "$" without BLOCK always returns empty.
+				fresh, err := client.TSRead(ctx, "tsread:1", redis.TSReadNew).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(fresh).To(BeEmpty())
+
+				// Timeout flush: MinCount can't be reached, so the samples >= 101
+				// are returned after the timeout.
+				flush, err := client.TSReadWithArgs(ctx, "tsread:1", 101, &redis.TSReadOptions{
+					Block:    true,
+					Timeout:  500 * time.Millisecond,
+					MinCount: 10,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(flush).To(Equal([]redis.TSTimestampValue{
+					{Timestamp: 200, Value: 2.0},
+					{Timestamp: 300, Value: 3.0},
+				}))
+
+				// Wake-up: a concurrent append unblocks a "$" tail read.
+				producer := setupRedisClient(protocol)
+				done := make(chan struct{})
+				// Defers run LIFO: join the producer before closing its client.
+				defer producer.Close()
+				defer func() { <-done }()
+				go func() {
+					defer GinkgoRecover()
+					defer close(done)
+					time.Sleep(200 * time.Millisecond)
+					_, addErr := producer.TSAdd(ctx, "tsread:1", 400, 4.0).Result()
+					Expect(addErr).NotTo(HaveOccurred())
+				}()
+				tail, err := client.TSReadWithArgs(ctx, "tsread:1", redis.TSReadNew, &redis.TSReadOptions{
+					Block:    true,
+					Timeout:  5 * time.Second,
+					MinCount: 1,
+				}).Result()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(tail).To(Equal([]redis.TSTimestampValue{{Timestamp: 400, Value: 4.0}}))
+			})
+		})
+	}
+})

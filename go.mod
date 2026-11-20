@@ -245,3 +245,8 @@ replace github.com/jackc/pgx/v5 => ./third_party/pgx
 // new timer for another, instead of resetting one still in the runtime's timer
 // heap (third_party/quic-go/URNETWORK.md).
 replace github.com/quic-go/quic-go => ./third_party/quic-go
+
+// The pool can skip its per-checkout socket check for a connection put back
+// within a window, SkipConnCheckWithin, which the pools with command retries
+// set (third_party/go-redis/URNETWORK.md; LBALTOPT2 R19).
+replace github.com/redis/go-redis/v9 => ./third_party/go-redis
