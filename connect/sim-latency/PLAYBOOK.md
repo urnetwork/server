@@ -173,14 +173,15 @@ Published source pins alone do not mean the competition is ready or active.
 The season uses six weekly admission windows and automatic FIFO scoring once
 the current evaluation hold is safely released.
 After close and authoritative drain, publish the provisional reward decision,
-perform the isolated two-model Snow honesty/safety review under
-`elected_winner_snow_union_v2`, replace substantiated
+perform code and honesty/safety review with GPT-6.2 Astra at `max` under the
+round's authorized review path, replace substantiated
 dishonest winners in rank order, and build/qualify/promote the approved elected
 winner before opening the next round. Exhaustion carries the incumbent forward;
 uncertainty or infrastructure failure pauses and alerts instead of fabricating
 a decision. Review and promotion do not require an agent to poll a running job.
-Qwen and Gemma must both approve; retain the union of their findings.
-Historical three-member Snow v1, Mini and Sol/max records remain unchanged. Independent tests use Sol
+Do not plan new Qwen/Gemma qualification. Keep frozen Snow policy and historical
+evidence intact; where needed, authorize the Astra import before closing.
+Historical Snow, Mini and Sol/max records remain unchanged. Independent tests use Sol
 6.1 low; implementation/debugging/merges use Sol 6.1 max. The accepted
 three-pair reduction freezes 26.9% prospectively. The corrected R9/R9 bridge
 has native acceptance as an operational witness, not proof of statistical

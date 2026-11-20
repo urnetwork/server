@@ -191,19 +191,17 @@ and non-SQL passes do not qualify a skipped SQL body. Retain each attempt's
 pre/post container inventory and owned cleanup evidence; preserve failed or
 skipped attempts without relabeling them as accepted qualification.
 
-The prospective production policy uses Snow's two reviewers:
-`qwen3.8-27b` (`xhigh`) and `gemma-4-26b-a4b` (`high`).
-Run them serially because Snow has one resident
-model at a time; allow model-swap latency inside the original shared deadline.
-Both must approve. Retain the union of all attributed findings; a concrete
-substantiated rejection rejects, while missing, malformed, unavailable or
-uncertain evidence holds progression without inventing approval or dishonesty.
-Snow replaces external model calls for automated test attestations too: the
-prescribed deterministic Go suite runs once, and both models attest to
-the same authenticated result. Models do not choose commands or rerun tests.
-The selected endpoint requires no API key. Qualification, fixed egress,
-immutable settings, member journals and protected evidence are still mandatory.
-Historical Mini and Sol records retain their original provider identities.
+Use GPT-6.2 Astra at `max` for competition code review and honesty/safety
+review. Review the authenticated patch and frozen evidence, including useful
+traffic preservation and production-client benefit. Record the actual reviewer
+model and reasoning effort. Missing evidence holds progression; it is not an
+approval or a finding of dishonesty.
+
+Qwen/Gemma rollout is no longer planned. Preserve historical provider evidence
+and frozen policy records. Where a frozen round still requires Snow evidence,
+use an authorized Astra import for that round; if no such path is authorized,
+hold review and obtain the policy change before closing. Never label Astra
+findings as Snow output or waive independent evaluator qualification.
 Sol 6.1 max retains implementation, debugging, and source/config merge/push
 ownership after the required independent review. The reviewer must inspect the
 exact materialized patch and score evidence before invoking this harness. The
@@ -281,10 +279,10 @@ This legacy staging path is not the v2 staging supervisor described below.
 
 ### Adopted automatic closing policy (review-provider update 2026-10-28)
 
-New seasons should freeze `winner_review_policy: elected_winner_snow_union_v2`.
-Qwen and Gemma must both approve; retain both members' complete findings.
-Historical Snow v1 records retain their three-member policy and evidence.
-This is a prospective opt-in, not a reinterpretation of an already-open round.
+Do not select `elected_winner_snow_union_v2` for new seasons. Retain it only as
+a compatibility contract for historical or already-frozen rounds; its evidence
+requirements remain exact. Before opening a new season, qualify and freeze an
+Astra 6.2 max review path rather than relying on the legacy Snow broker.
 The empty policy retains the historical independent source-choice flow described
 below. Do not change an existing season's policy approval or running worker pins
 to activate this flow in place.
@@ -390,12 +388,11 @@ qualified isolated build broker. Tests retain independent Sol 6.1 low ownership.
 The tool-free provider client is `sim-latency review-broker`; its scratch-image
 wrapper and deployment/qualification procedure are in
 [`evaluator/review/README.md`](evaluator/review/README.md). Implementation is not
-live provider access or genuine qualification. Configure the adopted Qwen/Gemma
-endpoints and their network boundary; current Snow access is keyless and does
-not require a provider-key file. Build/install the contained broker and qualify
-it, and independently
-provision/qualify the build broker before enabling the new season. A test receipt
-or this runbook alone does not satisfy those requirements.
+live provider access or genuine qualification. The Snow broker documentation
+is historical compatibility material, not a deployment task. Independently
+qualify the Astra review handoff and build broker before enabling automation
+under a new season policy. A test receipt or this runbook alone does not
+satisfy those requirements.
 
 The supervisor-facing offline build entry point is
 `sim-latency source-build-broker --build-settings=<private-json> --build-settings-sha256=<digest>`.
