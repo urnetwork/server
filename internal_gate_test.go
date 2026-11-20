@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,6 +117,51 @@ func TestInternalGateCredentialSendsItsCurrentBearer(t *testing.T) {
 		// the reason names the part, never a bearer
 		if strings.Contains(err.Error(), current) || strings.Contains(err.Error(), previous) {
 			t.Errorf("a refusal quoted a bearer: %v", err)
+		}
+	}
+}
+
+// The class list is the gate's own: each class it lists, once each and none named as the verify file, has an entry
+// api's verifier takes as that class's and a file of its own name its services load, and a name it does not list
+// has neither. The edge and platform listener classes, which sidecarctl's bearer keygen draws first, are listed.
+func TestInternalGateCallersAreTheClassesTheGateTakes(t *testing.T) {
+	callers := InternalGateCallers()
+	for _, caller := range []InternalGateCaller{InternalGateCallerEdge, InternalGateCallerMxedgePlatform} {
+		if !slices.Contains(callers, caller) {
+			t.Errorf("%q is not listed", caller)
+		}
+	}
+	fileNames := map[string]bool{}
+	for _, caller := range callers {
+		fileName := InternalGateCredentialFileName(caller)
+		if fileNames[fileName] || fileName == InternalGateVerifyFileName {
+			t.Errorf("%q is listed twice or named as the verify file", caller)
+		}
+		fileNames[fileName] = true
+		current, digest := newTestInternalGateBearer(t)
+		verifier, err := NewInternalGateVerifier([]byte(string(caller) + ": {class: " + string(caller) + ", sha256: [" + digest + "]}\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", caller, err)
+		}
+		request := httptest.NewRequest("GET", InternalGatePathPrefix+"over-limit", nil)
+		request.Header.Set("Authorization", "Bearer "+current)
+		if verified, ok := verifier.Authenticate(request); !ok || verified != caller {
+			t.Errorf("%s: verified as %q %t", caller, verified, ok)
+		}
+		pop := Vault.PushSimpleResource(fileName, []byte("current: "+current+"\n"))
+		bearer, err := LoadInternalGateCredential(caller)
+		pop()
+		if err != nil || bearer != current {
+			t.Errorf("%s: its file does not load: %v", caller, err)
+		}
+	}
+	for _, stranger := range []InternalGateCaller{"", "dns", "verify", "EDGE", "../pg"} {
+		if stranger.known() {
+			t.Errorf("%q is known", stranger)
+		}
+		_, digest := newTestInternalGateBearer(t)
+		if _, err := NewInternalGateVerifier([]byte("stranger: {class: \"" + string(stranger) + "\", sha256: [" + digest + "]}\n")); !errors.Is(err, ErrInternalGateCredentialRefused) {
+			t.Errorf("%q: an entry of it answered %v", stranger, err)
 		}
 	}
 }

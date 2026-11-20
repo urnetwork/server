@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -83,14 +84,25 @@ const (
 	InternalGateCallerMxedgePlatform InternalGateCaller = "mxedge-platform"
 )
 
+// Every class this release knows, in the order declared: the one list a class joins, which known reads and
+// `sidecarctl internal bearer-keygen` draws for (QD-1102), so a class added here needs no change there.
+func InternalGateCallers() []InternalGateCaller {
+	return []InternalGateCaller{
+		InternalGateCallerEvs,
+		InternalGateCallerGkm,
+		InternalGateCallerSockets,
+		InternalGateCallerTlsedge,
+		InternalGateCallerMxedge,
+		InternalGateCallerSmtpedge,
+		InternalGateCallerConnect,
+		InternalGateCallerEdge,
+		InternalGateCallerMxedgePlatform,
+	}
+}
+
 // Whether a class is one this release knows.
 func (self InternalGateCaller) known() bool {
-	switch self {
-	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
-		InternalGateCallerSmtpedge, InternalGateCallerConnect, InternalGateCallerEdge, InternalGateCallerMxedgePlatform:
-		return true
-	}
-	return false
+	return slices.Contains(InternalGateCallers(), self)
 }
 
 // A credential file or verify file that cannot be used. The text names the part, never a bearer.
