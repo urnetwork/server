@@ -239,7 +239,7 @@ func TestGateSweepCheckFailsAConventionTestBehindATagTheConventionLacks(t *testi
 		}
 	}
 
-	// the leave is the convention's alone: a sweep's test that no file declares fails
+	// only a convention entry may name a test nobody wrote: a sweep's test that no file declares fails
 	gates := &gatesFile{Gates: map[string][]gateRow{"M2": {{
 		Row:   "FS-1",
 		Tests: []gateTest{{Repo: "server", Package: "./evshost", Tags: gateConventionT3Tags, Stores: true, Names: []string{"TestFs1OnT3"}}},
