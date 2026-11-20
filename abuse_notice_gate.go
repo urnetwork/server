@@ -117,13 +117,18 @@ func abuseNoticeGateNameValid(name string, maxByteCount int) bool {
 	return true
 }
 
+// Whether the format carries domain as a root or a d=: printable ASCII with no space, at most DomainMaxByteCount.
+func (self *AbuseNoticeGateFormatSettings) DomainValid(domain string) bool {
+	return abuseNoticeGateNameValid(domain, self.DomainMaxByteCount)
+}
+
 // Checks the request against the format: a local part and a root, each a bounded name, and at most
 // SignatureMaxCount signatures, each a known result and a bounded d= or none.
 func (self *AbuseNoticeGateArgs) Validate(settings *AbuseNoticeGateFormatSettings) error {
 	switch {
 	case !abuseNoticeGateNameValid(self.RecipientLocalPart, settings.LocalPartMaxByteCount):
 		return fmt.Errorf("%w: the recipient's local part", ErrAbuseNoticeGateArgsInvalid)
-	case !abuseNoticeGateNameValid(self.Root, settings.DomainMaxByteCount):
+	case !settings.DomainValid(self.Root):
 		return fmt.Errorf("%w: the root", ErrAbuseNoticeGateArgsInvalid)
 	case settings.SignatureMaxCount < len(self.Signatures):
 		return fmt.Errorf("%w: more signatures than the format's bound", ErrAbuseNoticeGateArgsInvalid)
@@ -134,7 +139,7 @@ func (self *AbuseNoticeGateArgs) Validate(settings *AbuseNoticeGateFormatSetting
 			return fmt.Errorf("%w: a signature with nothing in it", ErrAbuseNoticeGateArgsInvalid)
 		case !AbuseNoticeDkimResultKnown(signature.Result):
 			return fmt.Errorf("%w: a signature's result is no RFC 8601 dkim result", ErrAbuseNoticeGateArgsInvalid)
-		case signature.Domain != "" && !abuseNoticeGateNameValid(signature.Domain, settings.DomainMaxByteCount):
+		case signature.Domain != "" && !settings.DomainValid(signature.Domain):
 			return fmt.Errorf("%w: a signature's domain", ErrAbuseNoticeGateArgsInvalid)
 		}
 	}
