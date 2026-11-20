@@ -24,6 +24,7 @@ import (
 	"github.com/urnetwork/sidecar/gkmservice"
 
 	"github.com/urnetwork/server/oauth"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // The state over a gate cache of its own on host, which needs Redis and Blobs, and what ends the cache and its watch.
@@ -52,16 +53,10 @@ func NewAuthState(ctx context.Context, host *sidecar.ServiceHost, settings *Host
 	if revocationSettings.Clock == nil {
 		revocationSettings.Clock = host.Clock
 	}
-	cache := sidecar.NewAclGateCache(ctx, sidecar.NewAclGateDirectSource(host.Redis, host.Blobs, gateSettings), host.Clock, gateSettings)
-	removeWatch, err := cache.Watch(host.Redis)
+	cache, closeCache, err := sidecarhost.WatchAclGate(ctx, host, nil, gateSettings)
 	if err != nil {
-		// with no events a revocation would wait for the poll: the block does not start on that
-		cache.Close()
 		return nil, nil, err
 	}
 	revocations := sidecar.NewRevocationChecker(host.Blobs, oauth.VerifyRevocation, revocationSettings)
-	return gkmservice.NewAclGkmAuthState(cache, revocations, host.Clock), func() {
-		removeWatch()
-		cache.Close()
-	}, nil
+	return gkmservice.NewAclGkmAuthState(cache, revocations, host.Clock), closeCache, nil
 }

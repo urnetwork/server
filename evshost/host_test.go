@@ -660,8 +660,6 @@ func TestRunHostServesStatusOnThePrivateStores(t *testing.T) {
 		runClock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 		clusters := newHostTestClusters(engineClock)
 		deps := &HostDeps{
-			AuthState:   hostTestAuthState{},
-			GateViews:   hostTestGateViews{},
 			ReceiptKeys: hostTestReceiptKeys(tb, engineClock.Now()),
 			Clusters:    clusters,
 			ClockCheck:  sidecartest.NewFakeClockCheck(nil),

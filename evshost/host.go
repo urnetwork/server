@@ -27,9 +27,8 @@
 // block's credentials and one pool shown (server.FileClusters.Ready), and every seam no request is honored without.
 // ServiceHost.Quota is server/cli/evs's quotahost.NewBlockQuota over api's internal gate (QUOTA-M2-11, QD-055), which
 // a block builds only once it holds its bearer and api's url, and which is ready only once it has read its first
-// over-limit list; and the EvsAuthState ACL-M2-14 builds over AclGateCache has no implementation yet (C-09: a real
-// host with no projection source stays not ready), so a real block stays not ready, failing closed, until it lands.
-// HostDeps hands each to a test, or to the change that lands it.
+// over-limit list. The block reads signed revocations on its first cluster and verifies
+// authorization and write facts from a single watched cache of the network log.
 //
 // A spent network reads at evs_unpaid_read_rate across the env's evs blocks with no shared counter (§20.6), so each
 // process paces at the rate ÷ the env's block count, which only the operator knows: sidecar.yml's evs gate carries
@@ -65,6 +64,7 @@ import (
 	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -127,12 +127,10 @@ type HostClusters interface {
 // The seams a test, or the change that lands a missing one, fills. Each nil takes the block's own, or, where
 // server has none yet, leaves the block not ready.
 type HostDeps struct {
-	// The newest verified authorization state. nil: none until ACL-M2-14's over AclGateCache, and the block
-	// stays not ready, since the engine honors nothing without it.
+	// The newest verified state. RunHost builds it over the block's cache and signed revocations.
 	AuthState evsservice.EvsAuthState
 	// The newest verified state of each network as a push's 5b and 5d read it (evsservice.NewAclGateViews over the
-	// process's AclGateCache, C-09). nil: none until a process hosts the cache (ACL-M2-14), and the block stays not
-	// ready, since every push answers 503 without it.
+	// process's AclGateCache, C-09). RunHost builds it over the same cache as AuthState.
 	GateViews evsservice.EvsGateViews
 	// The upload receipts' keys. nil: HostReceiptKeysFileName from the block's vault, and a block whose file
 	// does not load stays not ready.
@@ -565,6 +563,22 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 	}
 	host.Push = push
 	hostDeps := *deps
+	if hostDeps.AuthState == nil || hostDeps.GateViews == nil {
+		cache, closeCache, err := sidecarhost.WatchAclGate(hostCtx, host, nil, nil)
+		if err != nil {
+			return notReady(fmt.Errorf("the authorization cache: %w", err))
+		}
+		closers = append(closers, closeCache)
+		if hostDeps.AuthState == nil {
+			revSettings := sidecar.DefaultRevocationSettings()
+			revSettings.Clock = host.Clock
+			checker := sidecar.NewRevocationChecker(host.Blobs, oauth.VerifyRevocation, revSettings)
+			hostDeps.AuthState = evsservice.NewAclEvsAuthState(cache, checker)
+		}
+		if hostDeps.GateViews == nil {
+			hostDeps.GateViews = evsservice.NewAclGateViews(cache)
+		}
+	}
 	if hostDeps.ClustersReady == nil {
 		hostDeps.ClustersReady = clusters.Ready
 	}
