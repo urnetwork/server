@@ -55,7 +55,7 @@ func isEpochThreeGoofeAdmissionReceipt(receipt *competitionExecutorEquivalenceRe
 		receipt.HostId == "goofe" &&
 		receipt.QualificationJobId == "0196802b-b5d9-3dfe-a52a-b9eb97dd118b" &&
 		receipt.BaselineSha256 == "3b6c73d5cb2fd3c370ed5e79990184500fc9bef9358c36ffb2062d746212bc02" &&
-		receipt.ArchiveManifestSha256 == "d8925103a48981c2a6d3e34c18963fc6886393042270e65b945ecabfb21b5486" &&
+		receipt.ArchiveManifestSha256 == server.CompetitionEpochThreeGoofeRetainedArchiveSha256 &&
 		receipt.Retention != nil &&
 		receipt.Retention.Sha256 == "f48570db8860e5fcfac81eae5fdf04128e15fba4f94b24c051693c0ba56e3d3f" &&
 		receipt.Retention.VersionId == "7b18931c-57c4-4cc3-989d-1256c0b8e04d"
@@ -107,6 +107,10 @@ func (self PostgresStore) RecordExecutorAdmissionException(ctx context.Context, 
 		return err
 	}
 	frozen.automationRoundId, frozen.automationLease = value.RoundId, &lease
+	frozen.epochThreeRuntimeCorrection, err = readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return err
+	}
 	if err := self.loadExecutorControlAmendment(ctx, frozen, round); err != nil {
 		return err
 	}

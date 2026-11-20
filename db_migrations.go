@@ -11926,6 +11926,7 @@ var migrations = []any{
 	// replacement agent executable where that executable did not change.
 	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
 	newSqlMigration(competitionEpochThreeGoofeAdmissionSql()),
+	newSqlMigration(competitionEpochThreeGoofeArchiveBindingCorrectionSql()),
 
 	// The per client and day record of probed exits that differ from every
 	// network their provider connects from: a new table, which no running
