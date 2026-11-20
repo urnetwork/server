@@ -287,6 +287,40 @@ func TestLogErrorsSignalClassifiesStoreNotificationLines(t *testing.T) {
 		}
 	}
 
+	// A sample belongs to its own producer line, even when the frame combines errors.
+	for _, test := range []struct {
+		lines  []string
+		want   string
+		prefix string
+	}{
+		{lines: []string{"google error stage=token_info", "google error stage=verified_processing"}, want: " stage=token_info"},
+		{lines: []string{"google error stage=verified_processing", "google error"}, want: " stage=verified_processing"},
+		{lines: []string{"google error", "google error stage=token_info"}},
+		{lines: []string{"google error stage=private-value"}},
+		{lines: []string{"google error stage=token_info extra=private-value"}},
+		{lines: []string{"google error stage=verified_processing [store-notification]google error stage=token_info"}},
+		{lines: []string{"google error stage=token_info"}, prefix: "[api][W][store_notification_flow.go:101]", want: " stage=token_info"},
+		{lines: []string{"google error stage=token_info"}, prefix: "other.go:101] quoted diagnostic: "},
+	} {
+		header := prefix
+		if test.prefix != "" {
+			header = test.prefix
+		}
+		lines := make([]string, len(test.lines))
+		for i, line := range test.lines {
+			lines[i] = header + "[store-notification]" + line
+		}
+		alerts := run(lines)
+		alert := requireAlertClass(t, alerts, "store-notification-refused")
+		sample := "\nsample: [store-notification]store=google outcome=error" + test.want
+		if requireAlertClassCount(alerts, "store-notification-refused") != 1 || alert.Frame != "store=google outcome=error" ||
+			alert.Severity != SeverityPage || !strings.Contains(alert.Observed, fmt.Sprintf("rate=%d/min ", len(lines))) || !strings.HasSuffix(alert.Evidence, sample) ||
+			strings.Contains(alert.Evidence, "The stage for this attempt is unknown.") != (test.want == "") {
+			t.Errorf("Play error stage or original aggregate changed for %q: %q", test.lines, alert.Evidence)
+		}
+		requireAlertOmits(t, alert, "private-value")
+	}
+
 	// one unverified push is anyone's; a sustained rate warns
 	unverified := prefix + "[store-notification]google refused_auth"
 	if alerts := run([]string{unverified}); requireAlertClassCount(alerts, "store-notification-unverified") != 0 {
