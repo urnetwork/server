@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +126,57 @@ func TestUrlProbeCoverageSourceDiagnosticsHealthyFallbackStops(t *testing.T) {
 		if len(alerts) != 0 || record.CensusReason != "ok" || !record.SourceCoverageComplete || record.Mature == nil ||
 			record.KnownMatureQuotaPercent == nil || *record.KnownMatureQuotaPercent != 100 {
 			t.Fatal("source diagnostics contaminated healthy first-success census")
+		}
+	}
+}
+
+// Qualify each client report at the native command that produced it, before
+// the URL signal joins gateway failures with different statuses and stderr.
+func TestUrlProbeCoverageReportsGatewaySshConnectTimeout(t *testing.T) {
+	directory := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' \"$TEST_SSH_STDOUT\"\nprintf '%s\\n' \"$TEST_SSH_STDERR\" >&2\nexit \"$TEST_SSH_EXIT\"\n"
+	if err := os.WriteFile(filepath.Join(directory, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	runner := newRunner(&monitorConfig{addressMode: addressModeOverlay, commandTimeout: time.Minute})
+	target := &host{name: "private-url.example", overlayIp: "192.0.2.91"}
+	read := func(status, stdout, stderr string) urlProbeCoverageSourceReply {
+		t.Setenv("TEST_SSH_EXIT", status)
+		t.Setenv("TEST_SSH_STDOUT", stdout)
+		t.Setenv("TEST_SSH_STDERR", stderr)
+		body, err := mimirShell(context.Background(), runner, target, "synthetic-command", 65536)
+		if body != "" || err == nil {
+			t.Fatal("failed synthetic SSH returned usable output")
+		}
+		return urlProbeCoverageSourceReply{err: err}
+	}
+	report := "ssh: connect to host 192.0.2.91 port 22: Connection timed out"
+	matched := read("255", "", report)
+	wrongTarget := read("255", "", strings.ReplaceAll(report, "192.0.2.91", "192.0.2.92"))
+	wrongStatus := read("28", "", report)
+	partial := read("255", "private-body", report)
+	deadline := urlProbeCoverageSourceReply{err: context.DeadlineExceeded}
+	for _, test := range []struct {
+		name    string
+		replies []urlProbeCoverageSourceReply
+		reports int
+	}{
+		{name: "selected-address", replies: []urlProbeCoverageSourceReply{matched}, reports: 1},
+		{name: "later-gateway", replies: []urlProbeCoverageSourceReply{wrongTarget, matched}, reports: 1},
+		{name: "deadline-with-sibling-report", replies: []urlProbeCoverageSourceReply{matched, deadline}, reports: 1},
+		{name: "different-gateways", replies: []urlProbeCoverageSourceReply{wrongTarget, wrongStatus}},
+		{name: "response-bytes", replies: []urlProbeCoverageSourceReply{partial}},
+		{name: "deadline-alone", replies: []urlProbeCoverageSourceReply{deadline}},
+	} {
+		alerts, record := runUrlProbeCoverageSourceReplies(t, len(test.replies), test.replies...)
+		alert := requireAlertClass(t, alerts, "url-probe-coverage-unobservable")
+		if got := strings.Count(alert.Observed, " ssh_diagnostic=selected-address-connect-timeout"); got != test.reports {
+			t.Errorf("%s: unexpected report in %q", test.name, alert.Observed)
+		}
+		requireAlertOmits(t, alert, target.name, target.overlayIp, "Connection timed out", "private-body")
+		if record.CensusReason != "transport_unavailable" || record.SourceCoverageComplete || record.AllCurrent != nil || record.Mature != nil {
+			t.Errorf("%s: unavailable census produced measurements", test.name)
 		}
 	}
 }

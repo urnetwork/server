@@ -20682,6 +20682,15 @@ markers remain unknown when the bounded intake discards stderr; absence is not
 proof that no remote work ran. A later diagnostic must not be joined to the
 original joined gateway errors without same-attempt authority.
 
+The URL warning includes `ssh_diagnostic=selected-address-connect-timeout`
+when a gateway's bounded native SSH child returns exit 255 with empty stdout
+and its stderr matches the existing selected-address diagnostic while the
+caller and command contexts are live. A joined warning can carry this field
+for any qualifying attempt. Its order, the gateway identity and whether the
+loopback HTTP request began remain unknown. A remote command can reproduce the
+same text and status. A command deadline alone supplies no such diagnostic.
+An accepted fallback still reports its own census.
+
 A local route lookup and up selected VPN link are point metadata, not a current
 peer/session, packet-delivery or remote-listener control. Preserve unknown
 namespace, UID-rule, source-address, mark and VRF equivalence. Prioritize the

@@ -396,10 +396,18 @@ type sshCommandRunner func(ctx context.Context, args []string, stdin string) (st
 type sshCommandError struct {
 	err                      error
 	connectTimeoutDiagnostic bool
+	boundedMimirExit255      bool
 }
 
 func (e *sshCommandError) Error() string { return e.err.Error() }
 func (e *sshCommandError) Unwrap() error { return e.err }
+
+var errMimirSshConnectTimeoutDiagnostic = errors.New("Mimir SSH selected-address connect-timeout diagnostic")
+
+// Keep the raw spelling and status on their own attempt when errors are joined.
+func (e *sshCommandError) Is(target error) bool {
+	return target == errMimirSshConnectTimeoutDiagnostic && e.connectTimeoutDiagnostic && e.boundedMimirExit255
+}
 
 // Start followed by exactly one Wait preserves Run's lifecycle while allowing
 // the optional PG observer to distinguish an attempted start from a child.
@@ -576,14 +584,18 @@ func (self *runner) sshTimeout(ctx context.Context, h *host, remoteCmd string, s
 		}
 		connectTimeoutDiagnostic := sshConnectTimeoutDiagnostic(addr, out, stderr)
 
+		var boundedMimirExit255 bool
 		if boundedFailure != nil {
 			stderr = ""
+			status, ok := boundedFailure.err.(*exec.ExitError)
+			boundedMimirExit255 = ok && status.ExitCode() == 255
 		}
 		// Retain native SSH status for the fixed error classifier. Neither 255
 		// nor stderr alone proves a local VPN, network, or remote-host cause.
 		return out, &sshCommandError{
 			err:                      fmt.Errorf("%s: %w: %s", h.name, err, stderr),
 			connectTimeoutDiagnostic: connectTimeoutDiagnostic,
+			boundedMimirExit255:      boundedMimirExit255,
 		}
 	}
 	return out, nil
