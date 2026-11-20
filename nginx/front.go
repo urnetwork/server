@@ -202,8 +202,12 @@ func NewFront(ctx context.Context, routeTable *RouteTable, revision string, cert
 		return nil, err
 	}
 
+	if err := checkTlsTicketSecrets(settings.Tls.SessionTicketSecrets); err != nil {
+		return nil, err
+	}
+
 	matcher := newNameMatcher(routeTable)
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, settings.Tls, defaultFrontMetrics)
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, settings.Tls, defaultFrontMetrics, time.Now)
 	bodyStore := newBodyStore(settings.Body)
 	serviceForwarders := map[string]serviceForwarder{}
 	for _, service := range routeTable.Services {
@@ -335,7 +339,9 @@ func (self *Front) ClassifyName(name string) NameClass {
 }
 
 // The base TLS config for every TCP 443 socket: one long-lived config, so
-// session tickets resume across the block's sockets (D6c).
+// session tickets resume across the block's sockets (D6c), and with
+// TlsSettings.SessionTicketSecrets across every front holding the same
+// secrets (tls_ticket.go).
 // GetConfigForClient picks the certificate by SNI, the default server's for
 // a missing or unknown one, and ALPN by class: http/1.1 only for connect
 // names, h2 and http/1.1 for the rest. NewTlsListener and http.Server.Serve
