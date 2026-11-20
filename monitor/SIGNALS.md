@@ -35167,6 +35167,16 @@ evidence: identify the running artifacts and verify the five `_bucket`
 families stop receiving samples while `_sum`, `_count`, and the paired maximum
 families remain fresh.
 
+On 2026-11-20 `urnetwork_http_request_duration_seconds` became a classic
+histogram again, with 10 bucket bounds and the route as its only label, for
+api's per-route percentiles (server LBALTOPT1.md R10). Its `_sum` and `_count`
+are the summary's series, so the route signals that read them are unchanged.
+The buckets add 11 series per route and instance, about 27.7k series over the
+2,515 `_count` series at the change. Mimir's per-user limit was then 2,000,000,
+with about 356k series in memory on an ingester against its local limit of
+1,000,000, and no `per_user_series_limit` discards. The other four families
+stay sum/count-only.
+
 The 2026-09-15 series-limit incident isolated another steady-growth branch.
 At 05:21:07Z one unchanged Mimir child began rejecting series and eventually
 reported 281,460 exact `per_user_series_limit` discard units while its

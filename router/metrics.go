@@ -20,11 +20,16 @@ const httpMetricsInterval = time.Minute
 // httpMetrics owns the bounded route-level metrics shared by every HTTP
 // service. The process pusher supplies env/service/block/host/instance; route
 // is always a configured Route id or one of the two fixed unmatched labels.
+// Bucket bounds of the route duration histogram, in seconds: api's routes
+// run from well under a millisecond (/hello) to tens of milliseconds
+// (/connect/control), with a tail past a second.
+var httpDurationBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1, 5}
+
 type httpMetrics struct {
 	requests      *prometheus.CounterVec
 	requestBytes  *prometheus.CounterVec
 	responseBytes *prometheus.CounterVec
-	duration      *prometheus.SummaryVec
+	duration      *prometheus.HistogramVec
 	inflight      *prometheus.GaugeVec
 
 	intervalMaxDesc      *prometheus.Desc
@@ -63,12 +68,17 @@ func newHttpMetrics(registerer prometheus.Registerer) *httpMetrics {
 			Name:      "response_bytes_total",
 			Help:      "HTTP response-body bytes successfully written, by configured route.",
 		}, []string{"route"}),
-		duration: prometheus.NewSummaryVec(prometheus.SummaryOpts{
-			Namespace:  "urnetwork",
-			Subsystem:  "http",
-			Name:       "request_duration_seconds",
-			Help:       "HTTP handler duration by configured route.",
-			Objectives: nil,
+		// a classic histogram again for per-route percentiles (LBALTOPT1.md
+		// R10): its _sum and _count are the series the summary had, and the
+		// buckets add 11 series per route and instance, within Mimir's
+		// per-user limit since it was raised after the 2026-09-11 incident
+		// (monitor/SIGNALS.md)
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "urnetwork",
+			Subsystem: "http",
+			Name:      "request_duration_seconds",
+			Help:      "HTTP handler duration by configured route.",
+			Buckets:   httpDurationBuckets,
 		}, []string{"route"}),
 		inflight: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
