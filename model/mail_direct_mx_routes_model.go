@@ -1,22 +1,25 @@
 package model
 
-// A Team's direct MX, the routes' and the prober's writes (§15.4, §12.8, §15.15; R-MAIL-2, D-MAIL-12, I-8, I-15,
-// FS-33; owner decisions 33, 98; MAIL-M7-23).
+// A Team's direct MX, the routes' and the probe outcomes' writes (§15.4, §12.8, §15.15; R-MAIL-2, D-MAIL-12, I-8,
+// I-15, FS-33; owner decisions 33, 98, 639; MAIL-M7-23, QD-1103).
 //
 //   - NameMailDirectMx is POST /mail/direct-mx's write: Team only, mail on, each named receiver holding a published
 //     mail_host_key for the network's mx and its address held to §12.7's A rules, written pending, at most
 //     MailDirectMxSettings.MaxReceiverCount receivers. Nothing points at a pending row.
-//   - The prober (mxedgeservice.MxDirectMxProber, through NewMxDirectMxStore) verifies each row and records it here:
-//     a pass marks it verified, and every verified or failing address of the network becomes §12.8's records at mx
-//     (DnsSetDirectMxInTx), so the network's {mxr_} routes drop at the next projection; a failure marks a verified row
-//     failing and changes no record, since a direct MX reverts only on DELETE.
+//   - The prober (mxedgeservice.MxDirectMxProber) verifies each row from mxedge, which reads the rows through
+//     NewMxDirectMxStore and posts each outcome on api's internal route (server.MailDirectMxProbeGatePath), whose
+//     handler records it here (RecordMailDirectMxProbe), only while the row still stands: a pass marks it verified,
+//     and every verified or failing address of the network becomes §12.8's records at mx (DnsSetDirectMxInTx), so the
+//     network's {mxr_} routes drop; a failure marks a verified row failing and changes no record, since a direct MX
+//     reverts only on DELETE.
 //   - ClearMailDirectMx is DELETE /mail/direct-mx's write: every row and §12.8's direct records, the router rows back,
 //     in one transaction, then the routes.
 //   - A receiver's removal deletes its rows and points mx at the network's other verified receivers, or back at the
 //     routers when none is left, in the deactivation's transaction (I-15): RemovalEffectMailDirectMx.
 //
-// Nothing here logs an address (I-13). Nothing runs unless the binary links MG7: a read answers none and a write
-// ErrMailUnlinked.
+// So mxedge's process writes nothing here: its store reads, in a read-only transaction, and records through api, and
+// the zone's writers stay api and the dns block (D-OPS-1). Nothing here logs an address (I-13). Nothing runs unless
+// the binary links MG7: a read answers none and a write ErrMailUnlinked.
 
 import (
 	"context"
@@ -24,6 +27,8 @@ import (
 	"net/netip"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/glog"
 
@@ -40,6 +45,10 @@ var (
 	ErrMailDirectMxMailOff = errors.New("mail direct mx: mail is off")
 	// A named receiver holds no published mail_host_key for the network's mx: no key a probe could hold it to.
 	ErrMailDirectMxNoReceiver = errors.New("mail direct mx: not a receiver with a published key")
+	// A probe outcome names a network api has no row of: refused, with nothing written.
+	ErrMailDirectMxProbeNetworkUnknown = errors.New("mail direct mx: the probe's network is unknown")
+	// mxedge's store was given no route to record an outcome through: nothing is recorded.
+	ErrMailDirectMxProbeNoGate = errors.New("mail direct mx: no route to record the probe through")
 )
 
 // One receiver POST /mail/direct-mx names.
@@ -197,6 +206,85 @@ func mailDirectMxRepointInTx(ctx context.Context, tx server.PgTx, networkId serv
 	return err
 }
 
+// One probe's outcome, as api's internal route takes it from mxedge's prober (server.MailDirectMxProbeGateArgs).
+type MailDirectMxProbe struct {
+	NetworkId         server.Id
+	ReceiverSidecarId server.Id
+	Address           netip.Addr
+	Passed            bool
+}
+
+// Whether the row stands, its lock taken in tx, so a DELETE or a receiver's removal either came first or waits for
+// tx's end.
+func mailDirectMxRowLockInTx(ctx context.Context, tx server.PgTx, networkId server.Id, receiverSidecarId server.Id, address netip.Addr) (stands bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT true FROM mail_direct_mx
+		WHERE network_id = $1 AND receiver_sidecar_id = $2 AND address = $3
+		FOR UPDATE
+		`,
+		networkId,
+		receiverSidecarId,
+		address.Unmap().String(),
+	)
+	server.WithPgResult(result, err, func() {
+		stands = result.Next()
+	})
+	return
+}
+
+// api's record of one probe's outcome (the file header's prober row; QD-1103, owner decision 639), what the prober's
+// store once wrote from mxedge: in one transaction, the row's lock, its state (SetMailDirectMxProbeInTx) and, on a
+// pass, §12.8's records at every verified or failing address of the network in root; then, on a pass, the network's
+// routes, which the pass takes up when Redis cannot. recorded false is a row that no longer stands, a DELETE or a
+// receiver's removal that came first, and writes nothing, so a probe that raced a removal never points mx back at an
+// address the removal took away; a network with no row in network is ErrMailDirectMxProbeNetworkUnknown. A records
+// write the zone refuses, the tier or mail gone, rolls the state back with it and is the error, as it was: the next
+// probe tries again.
+func RecordMailDirectMxProbe(ctx context.Context, probe *MailDirectMxProbe, root string) (recorded bool, returnErr error) {
+	if !server.SidecarMg7Linked() {
+		return false, ErrMailUnlinked
+	}
+	if probe == nil || probe.NetworkId == (server.Id{}) || probe.ReceiverSidecarId == (server.Id{}) || !probe.Address.IsValid() {
+		return false, ErrMailDirectMxInvalid
+	}
+	address := probe.Address.Unmap()
+	returnErr = dnsCatchRefusal(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			// a rerun of the transaction starts over
+			recorded = false
+			refuse := func(err error) {
+				panic(dnsWriteRefusal{err: err})
+			}
+			if !mailDirectMxRowLockInTx(ctx, tx, probe.NetworkId, probe.ReceiverSidecarId, address) {
+				if !networkExistsInTx(ctx, tx, probe.NetworkId) {
+					refuse(ErrMailDirectMxProbeNetworkUnknown)
+				}
+				return
+			}
+			if err := SetMailDirectMxProbeInTx(ctx, tx, probe.NetworkId, probe.ReceiverSidecarId, address, probe.Passed); err != nil {
+				refuse(err)
+			}
+			if probe.Passed {
+				if err := mailDirectMxRepointInTx(ctx, tx, probe.NetworkId, root); err != nil {
+					refuse(err)
+				}
+			}
+			recorded = true
+		}, server.TxReadCommitted)
+	})
+	if returnErr != nil {
+		return false, returnErr
+	}
+	if recorded && probe.Passed && root != "" {
+		if _, projectErr := ProjectMailRoutes(ctx, probe.NetworkId, root); projectErr != nil {
+			glog.Infof("[mail]a direct mx verified; the routes wait for the pass: %s", projectErr)
+		}
+	}
+	return recorded, nil
+}
+
 // The name the direct-MX removal effect registers under.
 const RemovalEffectMailDirectMx = "mail_direct_mx"
 
@@ -234,29 +322,65 @@ func init() {
 	RegisterRemovalEffect(RemovalEffectMailDirectMx, applyMailDirectMxRemovalEffectInTx)
 }
 
-// mxedgeservice.MxDirectMxStore over Postgres for one dns root (the file header's prober row). Safe for concurrent
+// What mxedge's direct-MX store records each probe's outcome through: api's internal route on the block's edge
+// bearer, server.PlatformClientSource's RecordMailDirectMxProbe (QD-1103, owner decision 639). Safe for concurrent
 // use.
+type MxDirectMxProbeGate interface {
+	RecordMailDirectMxProbe(ctx context.Context, args *server.MailDirectMxProbeGateArgs) (*server.MailDirectMxProbeGateResult, error)
+}
+
+// mxedgeservice.MxDirectMxStore for mxedge's prober in one dns root (the file header's prober row): the rows read
+// from Postgres in a read-only transaction, each outcome posted to api through the gate, so nothing it does writes
+// Postgres. Safe for concurrent use.
 type mxDirectMxStore struct {
 	root     string
+	gate     MxDirectMxProbeGate
 	settings *MailDirectMxSettings
 }
 
 var _ mxedgeservice.MxDirectMxStore = (*mxDirectMxStore)(nil)
 
-// The prober's store for root.
-func NewMxDirectMxStore(root string) mxedgeservice.MxDirectMxStore {
-	return &mxDirectMxStore{root: dnsLabelRoot(root), settings: DefaultMailDirectMxSettings()}
+// The prober's store for root, recording through gate: the block's platform client source. gate nil records
+// nothing, each outcome then ErrMailDirectMxProbeNoGate, which the prober logs.
+func NewMxDirectMxStore(root string, gate MxDirectMxProbeGate) mxedgeservice.MxDirectMxStore {
+	return &mxDirectMxStore{root: dnsLabelRoot(root), gate: gate, settings: DefaultMailDirectMxSettings()}
+}
+
+// The network's published keys for mx, newest first, as ListMailHostKeys orders them.
+func mailDirectMxPublishedKeysWithQuery(ctx context.Context, query server.PgCanQuery, networkId server.Id) []*MailHostKey {
+	keys := []*MailHostKey{}
+	result, err := query.Query(
+		ctx,
+		`
+		SELECT network_id, host, receiver_sidecar_id, spki_sha256, state, publish_time, retire_time
+		FROM mail_host_key
+		WHERE network_id = $1 AND host = $2 AND state = $3
+		ORDER BY publish_time DESC, receiver_sidecar_id, spki_sha256
+		`,
+		networkId,
+		mailRouteHost,
+		string(MailHostKeyStatePublished),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			keys = append(keys, scanMailHostKey(result))
+		}
+	})
+	return keys
 }
 
 // See mxedgeservice.MxDirectMxStore: every row, with its network's mail host, the receiver's published keys for mx
-// and the network's published receivers.
+// and the network's published receivers, all read in one read-only transaction, so Postgres refuses any write in it
+// and the reads share one snapshot.
 func (self *mxDirectMxStore) ListDirectMx(ctx context.Context) ([]*mxedgeservice.MxDirectMxRow, error) {
 	if !server.SidecarMg7Linked() {
 		return nil, ErrMailUnlinked
 	}
-	rows := []*mxedgeservice.MxDirectMxRow{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+	var rows []*mxedgeservice.MxDirectMxRow
+	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		rows = []*mxedgeservice.MxDirectMxRow{}
+		result, err := tx.Query(
 			ctx,
 			`
 			SELECT network_id, receiver_sidecar_id, address, state, verify_time
@@ -285,50 +409,55 @@ func (self *mxDirectMxStore) ListDirectMx(ctx context.Context) ([]*mxedgeservice
 				rows = append(rows, row)
 			}
 		})
-	})
-	for _, row := range rows {
-		networkId := server.Id(row.NetworkId)
-		if label := GetNetworkLabel(ctx, networkId, self.root); label != "" {
-			row.Host = mailRouteHost + "." + label + "." + self.root
+		// each network's label and keys, read once for its rows
+		networkLabels := map[server.Id]string{}
+		networkKeys := map[server.Id][]*MailHostKey{}
+		for _, row := range rows {
+			networkId := server.Id(row.NetworkId)
+			label, ok := networkLabels[networkId]
+			if !ok {
+				// GetNetworkLabel's read, in this transaction
+				if server.SidecarMg2Linked() {
+					label = getNetworkLabelInTx(ctx, tx, networkId, self.root)
+				}
+				networkLabels[networkId] = label
+			}
+			if label != "" {
+				row.Host = mailRouteHost + "." + label + "." + self.root
+			}
+			keys, ok := networkKeys[networkId]
+			if !ok {
+				keys = mailDirectMxPublishedKeysWithQuery(ctx, tx, networkId)
+				networkKeys[networkId] = keys
+			}
+			for _, key := range keys {
+				if key.ReceiverSidecarId == server.Id(row.ReceiverSidecarId) {
+					row.SpkiSha256s = append(row.SpkiSha256s, slices.Clone(key.SpkiSha256))
+				}
+				if !slices.Contains(row.HintSidecarIds, sidecar.Id(key.ReceiverSidecarId)) {
+					row.HintSidecarIds = append(row.HintSidecarIds, sidecar.Id(key.ReceiverSidecarId))
+				}
+			}
 		}
-		for _, key := range ListMailHostKeys(ctx, networkId) {
-			if key.Host != mailRouteHost || key.State != MailHostKeyStatePublished {
-				continue
-			}
-			if key.ReceiverSidecarId == server.Id(row.ReceiverSidecarId) {
-				row.SpkiSha256s = append(row.SpkiSha256s, slices.Clone(key.SpkiSha256))
-			}
-			if !slices.Contains(row.HintSidecarIds, sidecar.Id(key.ReceiverSidecarId)) {
-				row.HintSidecarIds = append(row.HintSidecarIds, sidecar.Id(key.ReceiverSidecarId))
-			}
-		}
-	}
+	}, pgx.ReadOnly)
 	return rows, nil
 }
 
-// See mxedgeservice.MxDirectMxStore: the row's state, and on a pass §12.8's records at every verified or failing
-// address, in one transaction; then the network's routes, which the pass takes up when Redis cannot.
-func (self *mxDirectMxStore) RecordDirectMxProbe(ctx context.Context, row *mxedgeservice.MxDirectMxRow, passed bool) (err error) {
-	if !server.SidecarMg7Linked() {
-		return ErrMailUnlinked
+// See mxedgeservice.MxDirectMxStore: the outcome posted to api's route through the gate, whose handler records it
+// (RecordMailDirectMxProbe). Reaches no Postgres. An error, the route's refusal among them, leaves the row as it was,
+// for the next probe; a row gone in between answers recorded false, a no-op success.
+func (self *mxDirectMxStore) RecordDirectMxProbe(ctx context.Context, row *mxedgeservice.MxDirectMxRow, passed bool) error {
+	if self.gate == nil {
+		return ErrMailDirectMxProbeNoGate
 	}
-	networkId := server.Id(row.NetworkId)
-	err = dnsCatchRefusal(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			err := SetMailDirectMxProbeInTx(ctx, tx, networkId, server.Id(row.ReceiverSidecarId), row.Address, passed)
-			if err == nil && passed {
-				err = mailDirectMxRepointInTx(ctx, tx, networkId, self.root)
-			}
-			if err != nil {
-				panic(dnsWriteRefusal{err: err})
-			}
-		}, server.TxReadCommitted)
+	if row == nil {
+		return ErrMailDirectMxInvalid
+	}
+	_, err := self.gate.RecordMailDirectMxProbe(ctx, &server.MailDirectMxProbeGateArgs{
+		NetworkId:         server.Id(row.NetworkId),
+		ReceiverSidecarId: server.Id(row.ReceiverSidecarId),
+		Address:           row.Address.Unmap().String(),
+		Passed:            passed,
 	})
-	if err != nil || !passed {
-		return err
-	}
-	if _, projectErr := ProjectMailRoutes(ctx, networkId, self.root); projectErr != nil {
-		glog.Infof("[mail]a direct mx verified; the routes wait for the pass: %s", projectErr)
-	}
-	return nil
+	return err
 }

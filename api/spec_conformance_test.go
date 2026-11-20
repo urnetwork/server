@@ -308,6 +308,8 @@ func registry() []specEndpoint {
 		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
 		// a role mail's notice from the platform listener (QD-1070, owner decision 612)
 		{"POST", "/internal/gate/abuse-notice", rt(server.AbuseNoticeGateArgs{}), rt(server.AbuseNoticeGateResult{})},
+		// a Team direct MX's probe outcome from mxedge's prober (QD-1103, owner decision 639)
+		{"POST", "/internal/gate/mail-direct-mx-probe", rt(server.MailDirectMxProbeGateArgs{}), rt(server.MailDirectMxProbeGateResult{})},
 		// §21.16's customer routes (ABUSE-M5-11)
 		{"POST", "/abuse/report", rt(handlers.AbuseReportArgs{}), rt(handlers.AbuseReportResult{})},
 		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},

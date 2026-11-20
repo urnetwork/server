@@ -10,6 +10,11 @@ package mxedgehost
 //     builds and hands in as RouterDeps.
 //   - The store: model.NewMxEdgeStore, read only by the engine's probe and its 10 s record batches, never by
 //     a session (I-12), so the block holds a Postgres pool and needs MG7.
+//   - A Team direct MX's prober (MAIL-M7-23): model.NewMxDirectMxStore reads the rows it probes from Postgres and
+//     posts each outcome to api's internal route on the edge bearer, through Source's platform client source, and
+//     api records it (QD-1103, owner decision 639). So nothing this block runs writes mail_direct_mx or a DNS table:
+//     its Postgres role reads what it routes and probes by and inserts only its connection records (QD-992), and
+//     the zone's writers stay api and the dns block (D-OPS-1).
 //   - The dialer: K platform clients in urnetwork-edge (sidecar.NewEdgeClientPool) made in the background,
 //     tried again each ClientsRetryInterval until the source answers, and sidecar.NewSocketEdgeDialer over
 //     them with Find at the sockets service, adapted to mxedgeservice.MxEdgeDialer (routerDialer). Until
@@ -109,8 +114,9 @@ type RouterDeps struct {
 	// The listing feed's mirror (feed_mirror.go). nil: none, so nothing is rejected at the banner, as with
 	// the feed down.
 	Listings mxedgeservice.MxListingSource
-	// A Team direct MX's rows (MAIL-M7-23): model.NewMxDirectMxStore on the route root. nil: no prober runs, so
-	// no direct MX is verified and mx keeps the routers.
+	// A Team direct MX's rows (MAIL-M7-23): model.NewMxDirectMxStore on the route root and the block's platform
+	// client source, which reads the rows and records each outcome through api's internal route (QD-1103). nil: no
+	// prober runs, so no direct MX is verified and mx keeps the routers.
 	DirectMxStore mxedgeservice.MxDirectMxStore
 	// TCP to a direct-MX receiver. nil: the host's dialer.
 	DirectMxDial func(ctx context.Context, address netip.AddrPort) (net.Conn, error)
