@@ -14,7 +14,9 @@
 # The platform role reads platform-mail.pem and platform-mail.key from --secret_dir: unless one is given,
 # this makes a throwaway self-signed pair for the local report host in a temporary directory. Without
 # config/local/smtpedge.yml the block has no report intake (report_intake.go) and every recipient it
-# answers for gets 451 4.3.0.
+# answers for gets 451 4.3.0. It files role mail's notices at api's internal gate at -api_url on
+# internal-gate-mxedge-platform.yml from the local vault (QD-1070); without either it files none and
+# answers role mail as before.
 #
 # The router reads mxedge.yml's route_root, internal-gate-mxedge.yml and internal-gate-edge.yml from the
 # local vault, api's internal gate at -api_url for the quota surface and its platform clients' jwts

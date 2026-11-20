@@ -281,6 +281,7 @@ func (self *platformNoticeFiler) file(ctx context.Context, localPart string, mes
 		}
 	}
 	if !mayPage {
+		self.remember(key, false)
 		return false, nil
 	}
 	result, err := self.gate.FileNotice(ctx, &server.AbuseNoticeGateArgs{

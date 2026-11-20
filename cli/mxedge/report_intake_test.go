@@ -533,6 +533,13 @@ func TestReportIntakeSendsEachSignaturesVerdict(t *testing.T) {
 	if count := len(gate.received()); count != 1 {
 		t.Fatalf("mail that cannot page under any listing reached api: %d calls", count)
 	}
+	// the same message's other role recipient takes the answer kept for it, with no second key read
+	lookupCount := len(world.txt.Lookups())
+	failed := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), missingKey, nil)
+	outcome, err := world.accept(t, intake, "postmaster@root.example", failed)
+	if err != nil || outcome != mxedgeservice.PlatformOutcomeUnread || len(world.txt.Lookups()) != lookupCount {
+		t.Fatalf("the message's second role recipient: %v, %v, %d key reads", outcome, err, len(world.txt.Lookups())-lookupCount)
+	}
 	onlyTemperror := sidecartest.SignSmtpDkimFixture(testRoleMail("quietnet.root.example"), silentKey, nil)
 	if _, err := world.accept(t, intake, "abuse@root.example", onlyTemperror); err != nil {
 		t.Fatal(err)
