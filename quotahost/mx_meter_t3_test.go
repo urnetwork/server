@@ -72,7 +72,7 @@ const (
 	mxMeterProbeInterval = 7 * time.Second
 )
 
-// A sender address and another in its /24, and a sender of another /24, RFC 5737's.
+// Two senders in two /24s, each with a sibling address in its own /24, RFC 5737's.
 const (
 	mxMeterSenderAddress        = "198.51.100.10"
 	mxMeterSenderSiblingAddress = "198.51.100.11"
