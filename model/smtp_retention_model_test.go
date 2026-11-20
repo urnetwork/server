@@ -90,8 +90,8 @@ func TestSmtpSendDaysAreMadeAheadAndDroppedAtThirtyDays(t *testing.T) {
 }
 
 // A day holding rows of a network a live hold covers stays past its 30 days, said in Blocked each run, and holds
-// back no other network's day; once the hold ends the day drops. smtp_send registers no copy until ABUSE-M9-01, so
-// the hold keeps the day whole while it lives: the closed direction, which loses no row.
+// back no other network's day; once the hold ends the day drops. The hold here never copies, so it keeps the day
+// whole while it lives: the closed direction, which loses no row (abuse_hold_copy_smtp_test.go has the copy).
 func TestSmtpSendHeldDayStaysUntilItsHoldEnds(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

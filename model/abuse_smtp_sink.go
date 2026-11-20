@@ -95,13 +95,11 @@ func (self *abuseSmtpSink) OpenSmtpCase(ctx context.Context, report *smtpedgeser
 		return fmt.Errorf("%w: no domain", ErrAbuseReportInvalid)
 	}
 	defer func() {
-		// the store raises a failed read or write, which reaches the intake as
-		// an error, so its sender retries
+		// the store raises a failed read or write, an ended context's included,
+		// and each reaches the intake or the ladder as an error, so its sender
+		// retries (QD-1090)
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
-			}
-			returnErr = fmt.Errorf("abuse smtp sink: %v", r)
+			returnErr = abuseSmtpSinkRecovered(r)
 		}
 	}()
 
@@ -138,6 +136,19 @@ func (self *abuseSmtpSink) OpenSmtpCase(ctx context.Context, report *smtpedgeser
 	}
 	_, err := OpenAbuseReportCase(ctx, abuseReport, join, signal, self.now(report), settings)
 	return err
+}
+
+// What the sink answers for a value the store raised: an error, every value
+// alike, an ended context's included, wrapping a raised error so errors.Is
+// still reads it (QD-1090). The sink's callers are engine goroutines with no
+// server handler above them, smtpedge's halt ladder under its StoreTimeout and
+// mxedge's report intake, so a raise that left here would end the process,
+// where an error is a failure each of them already retries.
+func abuseSmtpSinkRecovered(r any) error {
+	if err, ok := r.(error); ok {
+		return fmt.Errorf("abuse smtp sink: %w", err)
+	}
+	return fmt.Errorf("abuse smtp sink: %v", r)
 }
 
 // When the report's case opens.
