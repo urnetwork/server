@@ -41,8 +41,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/mxedgeservice"
+	"github.com/urnetwork/sidecar/smtpedgeservice"
 	"github.com/urnetwork/sidecar/tlsedgeservice"
 
 	"github.com/urnetwork/server"
@@ -116,6 +119,62 @@ var edgeRoleMxedge = &edgeRoleBlock{
 		"connectionRecordRangeHold":      "the partition family's DropPrecondition: the retirement's, in taskworker",
 		"AbuseHoldCopyPending":           "the partition family's DropPrecondition: the retirement's, in taskworker",
 		"unregisteredHoldCopyPending":    "the partition family's DropPrecondition: the retirement's, in taskworker",
+	},
+}
+
+// smtpedge (server/cli/smtpedge): its store as the engine calls it in this process, the send gate's facts and the
+// mail breaker (gate.go), §21.7's abuse gate, and the abuse sink's suspension request. The store's other methods are
+// other processes': complaints, aggregates, DKIM keys and the join are the report intake's (mxedge-platform), the
+// reconcile is taskworker's, a halt's lift is api's appeal, and SendingClients is the status hints', which need a
+// Push this block's host is not given. The sink's OpenSmtpCase is the report intake's, and a ladder's only for a
+// complaint event, which smtpedge's ladder is never given (it judges cuts and hard bounces), so it is no root here,
+// and the test holds that the role refuses it.
+var edgeRoleSmtpedge = &edgeRoleBlock{
+	service: "smtpedge",
+	files:   edgeRoleGoFiles("cli/smtpedge"),
+	names: map[string][]string{
+		"NewSmtpEdgeStore": {
+			"NewSmtpEdgeStore",
+			"SmtpEdgeStore.ActiveHalts",
+			"SmtpEdgeStore.InsertSends",
+			"SmtpEdgeStore.FindHalts",
+			"SmtpEdgeStore.CountSends",
+			"SmtpEdgeStore.RecipientCount",
+			"SmtpEdgeStore.SetHalt",
+		},
+		"SmtpEdgeStore":            {},
+		"NewAbuseGate":             {"NewAbuseGate", "new:newAbuseGate"},
+		"NewAbuseHardDenySnapshot": {"NewAbuseHardDenySnapshot", "new:newAbuseHardDenySnapshot"},
+		"GetSmtpGateFacts":         {"GetSmtpGateFacts"},
+		"GetMailBreakerState":      {"GetMailBreakerState"},
+		"Pro":                      {"Pro"},
+		"NetworkTierFree":          {},
+		"NewAbuseSmtpSink":         {"NewAbuseSmtpSink", "abuseSmtpSink.RequestSmtpSuspension"},
+	},
+	runs: map[string]string{
+		"GetActiveSmtpHalts":              "ActiveHalts",
+		"FindSmtpHalts":                   "FindHalts",
+		"SetSmtpHaltInTx":                 "SetHalt",
+		"insertSmtpSendsAt":               "InsertSends",
+		"CountSmtpSends":                  "CountSends",
+		"SmtpRecipientCount":              "RecipientCount",
+		"GetSmtpGateFactsWithSettings":    "GetSmtpGateFactsWithSettings",
+		"getNetworkLabelInTx":             "GetSmtpGateFactsWithSettings",
+		"GetNetworkVerifiedDomains":       "GetSmtpGateFactsWithSettings",
+		"getDnsCustomHostRowsInTx":        "GetSmtpGateFactsWithSettings with strict_envelope on, DnsStrictMxHostRows' where clause",
+		"NetworkDowngradeTime":            "GetSmtpGateFactsWithSettings",
+		"loadNetworkTierWithConn":         "GetSmtpGateFactsWithSettings, through NetworkDowngradeTime",
+		"loadProNetworkWithConn":          "loadNetworkTierWithConn in a binary without MG6, planned here",
+		"GetMailBreakerRows":              "GetMailBreakerState",
+		"loadAbuseHardDeny":               "the hard-deny snapshot's load",
+		"loadNetworkAbuseFactsWithConn":   "the abuse gate's load, whose columns and joins its binary's groups choose",
+		"loadNetworkAbuseTrustedWithConn": "the abuse gate's load",
+	},
+	notRun: map[string]string{
+		"smtpSendTablePartitioned":    "the partition family's Partitioned hook, on the maintenance pool, which the block does not have: the runway's and the retirement's in taskworker, and EnsureRangeFor's in a batch whose day has no partition, which fails",
+		"connectionRecordRangeHold":   "the partition family's DropPrecondition: the retirement's, in taskworker",
+		"AbuseHoldCopyPending":        "the partition family's DropPrecondition: the retirement's, in taskworker",
+		"unregisteredHoldCopyPending": "the partition family's DropPrecondition: the retirement's, in taskworker",
 	},
 }
 
@@ -805,8 +864,8 @@ func ensureEdgeRoleRunway(t testing.TB, ctx context.Context, familyName string, 
 	}
 }
 
-// Whether the hour of t has its leaf of table.
-func edgeRoleHourLeafExists(t testing.TB, ctx context.Context, table string, at time.Time) (exists bool) {
+// Whether the range of at, an hour or a day as table's family has them, has its leaf of table.
+func edgeRoleLeafExists(t testing.TB, ctx context.Context, table string, at time.Time) (exists bool) {
 	t.Helper()
 	family := server.GetPartitionFamily(table)
 	leaf := family.LeafName(table, family.RangeAt(at))
@@ -915,7 +974,7 @@ func TestEdgeRoleTlsedgeStoreRunsUnderItsGrants(t *testing.T) {
 		ensureEdgeRoleRunway(t, ctx, "tls_connection_record", now)
 		// an hour within the records' retention that the runway, which creates from an hour back, did not make
 		unmadeHour := now.Add(-3 * time.Hour)
-		if edgeRoleHourLeafExists(t, ctx, "tls_connection_record", unmadeHour) {
+		if edgeRoleLeafExists(t, ctx, "tls_connection_record", unmadeHour) {
 			t.Fatal("the hour three hours back already has its partition")
 		}
 		connectionId := server.NewId()
@@ -1027,7 +1086,7 @@ func TestEdgeRoleTlsedgeStoreRunsUnderItsGrants(t *testing.T) {
 		if len(records) != 1 || records[0].ConnectionId != connectionId {
 			t.Fatalf("the records stored under tlsedge's role: %+v", records)
 		}
-		if edgeRoleHourLeafExists(t, ctx, "tls_connection_record", unmadeHour) {
+		if edgeRoleLeafExists(t, ctx, "tls_connection_record", unmadeHour) {
 			t.Fatal("tlsedge's role made an hour's partition")
 		}
 	})
@@ -1062,7 +1121,7 @@ func TestEdgeRoleMxedgeRouterRunsUnderItsGrants(t *testing.T) {
 		})
 		ensureEdgeRoleRunway(t, ctx, "mail_connection_record", now)
 		unmadeHour := now.Add(-3 * time.Hour)
-		if edgeRoleHourLeafExists(t, ctx, "mail_connection_record", unmadeHour) {
+		if edgeRoleLeafExists(t, ctx, "mail_connection_record", unmadeHour) {
 			t.Fatal("the hour three hours back already has its partition")
 		}
 
@@ -1145,8 +1204,252 @@ func TestEdgeRoleMxedgeRouterRunsUnderItsGrants(t *testing.T) {
 		if len(records) != 1 || records[0].ByteCount != 2048 {
 			t.Fatalf("the records stored under mxedge's role: %+v", records)
 		}
-		if edgeRoleHourLeafExists(t, ctx, "mail_connection_record", unmadeHour) {
+		if edgeRoleLeafExists(t, ctx, "mail_connection_record", unmadeHour) {
 			t.Fatal("mxedge's role made an hour's partition")
+		}
+	})
+}
+
+func TestEdgeRoleSmtpedgeListsWhatItsProcessReaches(t *testing.T) {
+	reach := reachEdgeRoleBlock(t, edgeRoleSmtpedge)
+	checkEdgeRoleReachLists(t, edgeRoleSmtpedge, reach)
+	for name := range edgeRoleSmtpedge.runs {
+		t.Logf("smtpedge runs %s: %q %q", name, reach.statements[name], reach.built[name])
+	}
+	// ABUSE-M9-01's question: the sink's suspension request reaches no SQL of model's own, its kick being
+	// server/task's UPDATE of pending_task, and its cases are not reached at all
+	for _, name := range []string{"abuseSmtpSink.OpenSmtpCase", "OpenAbuseReportCase"} {
+		if reach.reached[name] {
+			t.Errorf("smtpedge reaches %s", name)
+		}
+	}
+	if !reach.reached["KickAbuseMailPass"] {
+		t.Error("smtpedge's suspension request reaches no kick of the mail pass")
+	}
+}
+
+func TestEdgeRoleSmtpedgePlansEveryStatementItRuns(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg9Linked() {
+			return
+		}
+		ctx := context.Background()
+		reach := reachEdgeRoleBlock(t, edgeRoleSmtpedge)
+		session := newEdgeRoleSession(t, ctx, edgeRoleSmtpedge)
+		defer session.drop(t, ctx)
+		session.asBlock(func() {
+			checkEdgeRoleStatementsPlan(t, ctx, edgeRoleSmtpedge, reach)
+		})
+	})
+}
+
+// The longest a test waits for a hook it started, so one that never runs fails the test rather than hanging it.
+const edgeRoleAwaitTimeout = 2 * time.Minute
+
+// Waits for one value a hook sent.
+func edgeRoleAwait[T any](t testing.TB, values chan T, what string) T {
+	t.Helper()
+	select {
+	case value := <-values:
+		return value
+	case <-time.After(edgeRoleAwaitTimeout):
+		t.Fatalf("no %s", what)
+		panic("unreachable")
+	}
+}
+
+// smtpedge under its role: its start's read of the migration head, the store's calls the engine makes here, the
+// send gate's facts with strict_envelope on, the mail breaker, and the abuse gate's and the hard-deny snapshot's
+// loads all pass, the loads seen through their OnLoad hooks. A batch into a day with no partition fails and makes
+// none. The sink's suspension request fails on its kick of the mail pass, an owned transaction the block has no
+// maintenance resource for, which leaves the suspension to the pass's next minute, and the kick's UPDATE of
+// pending_task is refused besides. Its OpenSmtpCase, which never runs here, is refused too. And what the role is not
+// granted is refused.
+func TestEdgeRoleSmtpedgeRunsUnderItsGrants(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg9Linked() {
+			return
+		}
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "roles"+edgeRoleRandomHex(t, 4), server.NewId())
+		edgeRoleSetup(t, ctx, map[string][]any{
+			`INSERT INTO dns_label (root, label, network_id, kind, state, state_time) VALUES ($1, 'abcdefghij', $2, $3, $4, $5)`: {
+				edgeRoleRoot, networkId, model.DnsLabelKindLabel, model.DnsLabelStateLive, now,
+			},
+			`INSERT INTO mail_network (network_id, create_time) VALUES ($1, $2)`: {networkId, now},
+			`INSERT INTO network_domain (network_id, domain, challenge, verify_time) VALUES ($1, 'customer.example', 'challenge', $2)`: {
+				networkId, now,
+			},
+			`INSERT INTO network_dns_zone (root, network_id, create_time, report_token) VALUES ($1, $2, $3, 'token')`: {
+				edgeRoleRoot, networkId, now,
+			},
+			`INSERT INTO network_dns_custom_host (host, root, network_id, owner, state, caa_mode, create_time) VALUES ('mail.customer.example.', $1, $2, $3, $4, 'weak', $5)`: {
+				edgeRoleRoot, networkId, "mx.abcdefghij." + edgeRoleRoot, sidecar.DnsCustomHostStateActive, now,
+			},
+		})
+		ensureEdgeRoleRunway(t, ctx, "smtp_send", now)
+		unmadeDay := now.AddDate(0, 0, -2)
+		if edgeRoleLeafExists(t, ctx, "smtp_send", unmadeDay) {
+			t.Fatal("the day two days back already has its partition")
+		}
+		haltId := server.NewId()
+		sendId := make([]byte, 12)
+		sendId[0] = 1
+
+		session := newEdgeRoleSession(t, ctx, edgeRoleSmtpedge)
+		defer session.drop(t, ctx)
+		session.asBlock(func() {
+			if err := router.CheckStartupReadiness(ctx); err != nil {
+				t.Fatal("smtpedge's start under its role:", err)
+			}
+
+			store := model.NewSmtpEdgeStore(nil)
+			halt := &smtpedgeservice.SmtpHalt{HaltId: haltId, NetworkId: networkId, Trigger: smtpedgeservice.SmtpHaltTriggerRecordCuts, StartTime: now}
+			if err := store.SetHalt(ctx, halt); err != nil {
+				t.Fatal("SetHalt under smtpedge's role:", err)
+			}
+			// the same halt again takes the upsert's update
+			if err := store.SetHalt(ctx, halt); err != nil {
+				t.Fatal("SetHalt again under smtpedge's role:", err)
+			}
+			if halts, err := store.ActiveHalts(ctx); err != nil || len(halts) != 1 || halts[0].HaltId != haltId {
+				t.Fatal("ActiveHalts under smtpedge's role:", halts, err)
+			}
+			if halts, err := store.FindHalts(ctx, networkId, now.Add(-time.Hour)); err != nil || len(halts) != 1 {
+				t.Fatal("FindHalts under smtpedge's role:", halts, err)
+			}
+			send := &smtpedgeservice.SmtpSendRecord{
+				SendId:           sendId,
+				NetworkId:        networkId,
+				ClientId:         server.NewId(),
+				SendingAddress:   netip.MustParseAddr("192.0.2.25"),
+				RecipientDomain:  "recipient.example",
+				MxHost:           "mx.recipient.example",
+				StartTime:        now.Add(-time.Second),
+				EndTime:          now,
+				ByteCount:        4096,
+				RecipientCount:   3,
+				MessageByteCount: 2048,
+				TlsVersion:       0x0304,
+				TlsLevel:         2,
+				Result:           "cut",
+			}
+			if err := store.InsertSends(ctx, []*smtpedgeservice.SmtpSendRecord{send}); err != nil {
+				t.Fatal("InsertSends under smtpedge's role:", err)
+			}
+			// a retried batch stores nothing twice, through the key the role reads
+			if err := store.InsertSends(ctx, []*smtpedgeservice.SmtpSendRecord{send}); err != nil {
+				t.Fatal("a retried InsertSends under smtpedge's role:", err)
+			}
+			if count, err := store.CountSends(ctx, networkId, now.Add(-time.Hour), "cut"); err != nil || count != 1 {
+				t.Fatal("CountSends under smtpedge's role:", count, err)
+			}
+			if count, err := store.RecipientCount(ctx, networkId, now.Add(-time.Hour)); err != nil || count != 3 {
+				t.Fatal("RecipientCount under smtpedge's role:", count, err)
+			}
+			late := *send
+			late.SendId = append([]byte{2}, sendId[1:]...)
+			late.StartTime = unmadeDay
+			late.EndTime = unmadeDay.Add(time.Second)
+			if err := store.InsertSends(ctx, []*smtpedgeservice.SmtpSendRecord{&late}); err == nil {
+				t.Fatal("smtpedge stored a batch whose day has no partition, with no maintenance pool to make it")
+			}
+
+			customDomainSettings := model.DefaultSmtpCustomDomainSettings()
+			customDomainSettings.StrictEnvelope = true
+			facts, err := model.GetSmtpGateFactsWithSettings(ctx, networkId, edgeRoleRoot, customDomainSettings)
+			if err != nil {
+				t.Fatal("GetSmtpGateFactsWithSettings under smtpedge's role:", err)
+			}
+			if facts.Label != "abcdefghij" || facts.MailEnableTime.IsZero() || !slices.Equal(facts.VerifiedDomains, []string{"customer.example"}) ||
+				!slices.Equal(facts.StrictDomains, []string{"customer.example"}) || facts.ReportToken != "token" {
+				t.Fatalf("the gate's facts under smtpedge's role: %+v", facts)
+			}
+			if _, ok := model.GetMailBreakerState(ctx); !ok {
+				t.Fatal("GetMailBreakerState under smtpedge's role did not read whole")
+			}
+
+			hardDenyLoads := make(chan error, 16)
+			hardDenySettings := model.DefaultAbuseHardDenySettings()
+			hardDenySettings.OnLoad = func(count int, err error) {
+				select {
+				case hardDenyLoads <- err:
+				default:
+				}
+			}
+			hardDeny := model.NewAbuseHardDenySnapshot(ctx, hardDenySettings)
+			defer hardDeny.Close()
+			if err := edgeRoleAwait(t, hardDenyLoads, "load of the hard-deny snapshot"); err != nil {
+				t.Fatal("the hard-deny snapshot's load under smtpedge's role:", err)
+			}
+			gateLoads := make(chan error, 16)
+			gateSettings := model.DefaultAbuseGateSettings()
+			gateSettings.OnLoad = func(networkIds []server.Id, err error) {
+				select {
+				case gateLoads <- err:
+				default:
+				}
+			}
+			gate := model.NewAbuseGate(ctx, hardDeny, gateSettings)
+			defer gate.Close()
+			// a miss asks for the network's load
+			gate.Verified(connect.Id(networkId))
+			if err := edgeRoleAwait(t, gateLoads, "load of the abuse gate"); err != nil {
+				t.Fatal("the abuse gate's load under smtpedge's role:", err)
+			}
+
+			// the kick is an owned transaction, which needs the direct maintenance resource the block does not have, so
+			// it fails before it reaches Postgres; its UPDATE of pending_task is refused below besides
+			sink := model.NewAbuseSmtpSink(nil)
+			err = sink.RequestSmtpSuspension(ctx, &smtpedgeservice.SmtpSuspensionRequest{NetworkId: networkId, HaltIds: []sidecar.Id{haltId}, RequestTime: now})
+			if err == nil || !strings.Contains(err.Error(), "maintenance resource") {
+				t.Fatal("the suspension request's kick of the mail pass in smtpedge's block:", err)
+			}
+			err = sink.OpenSmtpCase(ctx, &smtpedgeservice.SmtpAbuseReport{
+				ComplaintId:   server.NewId(),
+				NetworkId:     networkId,
+				Domain:        "customer.example",
+				Category:      smtpedgeservice.SmtpComplaintTypeAbuse,
+				JoinResult:    "high",
+				ReporterClass: smtpedgeservice.SmtpReporterClassLoop,
+				ArrivalTime:   now,
+			})
+			if !edgeRoleRefused(err) {
+				t.Fatal("a case opened under smtpedge's role:", err)
+			}
+
+			checkEdgeRoleRefuses(t, ctx, edgeRoleSmtpedge, []string{
+				// §21's: the mail pass's kick and the cases
+				`UPDATE pending_task SET run_at = run_at WHERE false`,
+				`INSERT INTO abuse_case (case_id) SELECT case_id FROM abuse_case WHERE false`,
+				`UPDATE abuse_action SET review_state = review_state WHERE false`,
+				`UPDATE network_abuse_state SET state = state WHERE false`,
+				// a halt's lift is api's, and a send is never rewritten
+				`DELETE FROM smtp_halt WHERE false`,
+				`UPDATE smtp_send SET result = result WHERE false`,
+				`DELETE FROM smtp_send WHERE false`,
+				// the intake's tables
+				`SELECT 1 FROM smtp_complaint LIMIT 1`,
+				`SELECT 1 FROM smtp_dkim_key LIMIT 1`,
+				`INSERT INTO smtp_complaint (complaint_id) SELECT complaint_id FROM smtp_complaint WHERE false`,
+				// no column the reads do not name: a send's addresses, a user's secrets, a network's name
+				`SELECT sending_address FROM smtp_send LIMIT 1`,
+				`SELECT password_hash FROM network_user_auth_password LIMIT 1`,
+				`SELECT user_auth FROM network_user_auth_password LIMIT 1`,
+				`SELECT network_name FROM network LIMIT 1`,
+				`SELECT challenge FROM network_domain LIMIT 1`,
+				// no table the block does not read
+				`SELECT 1 FROM network_user LIMIT 1`,
+				`SELECT 1 FROM mail_direct_mx LIMIT 1`,
+				// no object of its own
+				`CREATE TABLE edge_role_probe (probe int)`,
+			})
+		})
+
+		if edgeRoleLeafExists(t, ctx, "smtp_send", unmadeDay) {
+			t.Fatal("smtpedge's role made a day's partition")
 		}
 	})
 }
