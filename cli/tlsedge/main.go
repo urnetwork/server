@@ -16,7 +16,8 @@
 //     ServiceClient, server.NewPlatformClientSource over api's edge client route on the edge bearer, for the
 //     deploy slot warp hands the process in WARP_SLOT (server.LoadEdgeClientSlot, QD-873, QD-1011), one no other
 //     running tlsedge process on the host holds, so beta's and g1's processes and a deploy's new process beside
-//     either each hold clients of their own.
+//     either each hold clients of their own. Each URL flag's default is the variable tlsedge.yml's env_vars give a
+//     deployed block, $UR_API_URL and $UR_SOCKETS_URL (sidecarhost.ServiceUrlFlag).
 //   - The store: model.NewTlsEdgeStore on the block's Postgres role, pg-tlsedge.yml's, read only by the engine's
 //     loops and record batches, never by a connection (I-12).
 //   - The clients: sidecar.NewEdgeClientPool, K platform clients in urnetwork-edge, Required and relay-only,
@@ -702,8 +703,8 @@ func setProcessEnv(host *sidecar.ServiceHost) {
 
 var (
 	port       = flag.Int("port", 80, "the block's status port")
-	apiUrl     = flag.String("api_url", "", "api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the block not ready")
-	socketsUrl = flag.String("sockets_url", "", "the sockets service's base URL, which every Find is sent to; empty leaves the block not ready")
+	apiUrl     = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the block not ready")
+	socketsUrl = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "sockets_url", sidecarhost.SocketsUrlEnvName, "the sockets service's base URL, which every Find is sent to; empty leaves the block not ready")
 )
 
 func main() {
@@ -731,7 +732,7 @@ func main() {
 		// on a context of its own, so a SIGTERM's drain can still send the open usage window, ended after the block
 		quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer quotaCancel()
-		deps, end := blockDeps(quotaCtx, options.Settings, *apiUrl, *socketsUrl)
+		deps, end := blockDeps(quotaCtx, options.Settings, apiUrl.Url(), socketsUrl.Url())
 		defer end()
 		options.Deps = deps
 	}

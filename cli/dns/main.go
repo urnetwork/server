@@ -1,7 +1,9 @@
 // server/cli/dns (DNS-M5-18; §12.6, §19.4): the dns engine's one binary in two roles, --role api for
 // the API blocks on dns.bringyour.com and --role edge for dnsedge on the dns edge hosts, each a block
 // run by sidecarhost.Run with GET /status on port 80, {vault: no, config: yes, site: no} and user 65532.
-// server/cli/dnsedge builds this same main and picks the edge role.
+// server/cli/dnsedge builds this same main and picks the edge role. An edge feeds from the dns API block at
+// -api_url, whose default is the $UR_API_URL dnsedge.yml's env_vars give a deployed edge, the API's
+// https://dns.<domain> (sidecarhost.ServiceUrlFlag).
 package main
 
 import (
@@ -26,7 +28,7 @@ var (
 	port          = flag.Int("port", 80, "the block's status port")
 	dnsPort       = flag.Int("dns_port", 53, "edge: the block's UDP and TCP port for DNS")
 	secretDir     = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
-	apiUrl        = flag.String("api_url", "", "edge: the dns API block's base URL")
+	apiUrl        = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "edge: the dns API block's base URL")
 	snapshotDir   = flag.String("snapshot_dir", "/srv/warp/data/dnsedge", "edge: where each root's local snapshot lives")
 	credential    = flag.String("credential_file", "", "edge: its bearer's file in secret_dir; empty is internal-<WARP_SERVICE>.yml")
 	requireReload = flag.Bool("require_reload", false, "edge: serve nothing until a reload (§19.10's start for a stopped NS)")
@@ -61,7 +63,7 @@ func main() {
 		Dns:                settings,
 		SecretDirectory:    *secretDir,
 		CredentialFileName: *credential,
-		ApiUrl:             *apiUrl,
+		ApiUrl:             apiUrl.Url(),
 		SnapshotDirectory:  *snapshotDir,
 		RequireReload:      *requireReload,
 	}

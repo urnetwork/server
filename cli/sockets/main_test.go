@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,18 @@ import (
 func TestMainScrubsLogsFirst(t *testing.T) {
 	if err := sidecarhost.CheckMainScrubsLogsFirst("main.go"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A deployed block is given api's base URL in its environment, $UR_API_URL, from sockets.yml's env_vars, which -api_url
+// reads as its default (sidecarhost.ServiceUrlFlag).
+func TestApiUrlFlagDefaultsToTheBlocksEnvironment(t *testing.T) {
+	if err := sidecarhost.CheckServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(sidecarhost.ApiUrlEnvName, "https://api.example.com")
+	if apiUrl.Url() != "https://api.example.com" {
+		t.Fatalf("-api_url reads %q", apiUrl.Url())
 	}
 }
 

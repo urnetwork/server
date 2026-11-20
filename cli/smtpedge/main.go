@@ -10,14 +10,15 @@
 //     WARP_FWMARK (server.RequireFwMark) for a sending address that names no mark, and the X-UR-Ref keys from the
 //     vault secret file smtpedge-x-ur-ref.yml, read at run time and never from the repository;
 //   - ServiceHost: sidecarhost's, with its Postgres pool (config/main/db.yml's 4), Quota over api's internal gate
-//     and the AbuseGate on the pool (model.NewAbuseGate);
+//     at -api_url and the AbuseGate on the pool (model.NewAbuseGate);
 //   - the store: model.NewSmtpEdgeStore, the send log, halts, DKIM keys and the halt rule's reads, never on a
 //     preamble's path (I-12);
 //   - the gate: gate.go's, from memory filled off the path;
 //   - the clients: sidecar.NewEdgeClientPool, one platform client in urnetwork-edge (§14.9), its credential from
 //     server.NewPlatformClientSource on the edge bearer; once it exists the engine serves ur/smtpedge on it,
-//     registering at sockets on the client's sockets token, the service token of audience sockets api's edge
-//     client route answers beside its jwt (QD-1054);
+//     registering at sockets (-sockets_url) on the client's sockets token, the service token of audience sockets
+//     api's edge client route answers beside its jwt (QD-1054). Each URL flag's default is the variable
+//     smtpedge.yml's env_vars give a deployed block, $UR_API_URL and $UR_SOCKETS_URL (sidecarhost.ServiceUrlFlag);
 //   - the dialer: smtpedgeservice.SmtpMxNetDialer, SO_MARK per sending address;
 //   - the proof verifier: smtpproof.NewVerifier over smtpedge.yml's proof_key_sets (OPS-M9-02; DESIGN-DETAILS
 //     3.2.7), each set's directory opened against its id, a set past its not_after dropped at start. A file
@@ -585,8 +586,8 @@ func setProcessEnv(host *sidecar.ServiceHost) {
 
 var (
 	port       = flag.Int("port", 80, "the block's status port")
-	apiUrl     = flag.String("api_url", "", "api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the block not ready")
-	socketsUrl = flag.String("sockets_url", "", "the sockets service's base URL, which ur/smtpedge registers with; empty leaves the block not ready")
+	apiUrl     = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api's base URL, whose internal gate the quota surface and the edge client route are read from; empty leaves the block not ready")
+	socketsUrl = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "sockets_url", sidecarhost.SocketsUrlEnvName, "the sockets service's base URL, which ur/smtpedge registers with; empty leaves the block not ready")
 )
 
 func main() {
@@ -617,7 +618,7 @@ func main() {
 		depsCtx, depsCancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer depsCancel()
 		var end func()
-		deps, end = blockDeps(depsCtx, settings, *apiUrl, *socketsUrl)
+		deps, end = blockDeps(depsCtx, settings, apiUrl.Url(), socketsUrl.Url())
 		defer end()
 		defer depsCancel()
 	}

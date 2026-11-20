@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,30 @@ import (
 func TestMainScrubsLogsFirst(t *testing.T) {
 	if err := sidecarhost.CheckMainScrubsLogsFirst("main.go"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A deployed block is given api's base URL in its environment, $UR_API_URL, from mxedge.yml and mxedge-platform.yml's
+// env_vars, which -api_url reads as its default (sidecarhost.ServiceUrlFlag).
+func TestApiUrlFlagDefaultsToTheBlocksEnvironment(t *testing.T) {
+	if err := sidecarhost.CheckServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(sidecarhost.ApiUrlEnvName, "https://api.example.com")
+	if apiUrl.Url() != "https://api.example.com" {
+		t.Fatalf("-api_url reads %q", apiUrl.Url())
+	}
+}
+
+// A deployed block is given the sockets service's base URL in its environment, $UR_SOCKETS_URL, from mxedge.yml's
+// env_vars, which -sockets_url reads as its default (sidecarhost.ServiceUrlFlag).
+func TestSocketsUrlFlagDefaultsToTheBlocksEnvironment(t *testing.T) {
+	if err := sidecarhost.CheckServiceUrlFlag(flag.CommandLine, "sockets_url", sidecarhost.SocketsUrlEnvName); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(sidecarhost.SocketsUrlEnvName, "https://sockets.example.com")
+	if socketsUrl.Url() != "https://sockets.example.com" {
+		t.Fatalf("-sockets_url reads %q", socketsUrl.Url())
 	}
 }
 

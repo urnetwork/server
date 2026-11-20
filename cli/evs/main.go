@@ -3,7 +3,8 @@
 // site: no}, user 65532 and no Postgres. Its secret_files hold the audience's public JWKS, redis.yml,
 // file-clusters-evs.yml, the receipt keys, its internal gate bearer (internal-gate-evs.yml) and grafana-push.yml;
 // segments arrive on the block's streamable_paths. ServiceHost.Quota reaches api's internal gate at -api_url on
-// that bearer (QUOTA-M2-11, QD-055); a block without either has no Quota and stays not ready. The storage format the
+// that bearer (QUOTA-M2-11, QD-055), the flag's default the $UR_API_URL evs.yml's env_vars give a deployed block
+// (sidecarhost.ServiceUrlFlag); a block without either has no Quota and stays not ready. The storage format the
 // block runs as is its config's: evs.yml's instance_format, 2 where the file is absent and 1 in a rollback's (QD-854;
 // evshost/block_config.go), and a block whose file names any other does not start.
 package main
@@ -28,7 +29,7 @@ import (
 var (
 	port          = flag.Int("port", 80, "the block's status port, which also serves evs's routes")
 	chronyAddress = flag.String("chrony_address", "", "chronyd's NTP address as host:port; empty is the services network's")
-	apiUrl        = flag.String("api_url", "", "api's base URL, whose internal gate ServiceHost.Quota reads and posts usage to; empty leaves the block with no Quota, not ready")
+	apiUrl        = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api's base URL, whose internal gate ServiceHost.Quota reads and posts usage to; empty leaves the block with no Quota, not ready")
 )
 
 func main() {
@@ -54,7 +55,7 @@ func main() {
 	// on a context of its own, so a SIGTERM's drain can still send the open usage window, drained after the block
 	quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer quotaCancel()
-	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerEvs, *apiUrl, nil); err != nil {
+	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerEvs, apiUrl.Url(), nil); err != nil {
 		// the error names what is missing, never the bearer
 		glog.Errorf("[evs]no ServiceHost.Quota: %v\n", err)
 	} else {

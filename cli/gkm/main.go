@@ -2,8 +2,9 @@
 // gkm.Run through sidecarhost.Run, with GET /status and gkm's routes on port 80, {vault: no, config: yes, site: no},
 // user 65532 and no Postgres. Its secret_files hold the audience's public JWKS, redis.yml, file-clusters-gkm.yml, its
 // internal gate bearer (internal-gate-gkm.yml) and grafana-push.yml. ServiceHost.Quota reaches api's internal gate at
-// -api_url on that bearer for the write budget's weights (QUOTA-M2-11, QD-055); without either, every network weighs
-// as Community's.
+// -api_url on that bearer for the write budget's weights (QUOTA-M2-11, QD-055), the flag's default the $UR_API_URL
+// gkm.yml's env_vars give a deployed block (sidecarhost.ServiceUrlFlag); without either, every network weighs as
+// Community's.
 package main
 
 import (
@@ -25,7 +26,7 @@ import (
 
 var (
 	port   = flag.Int("port", 80, "the block's status port, which also serves gkm's routes")
-	apiUrl = flag.String("api_url", "", "api's base URL, whose internal gate ServiceHost.Quota reads limits from; empty weighs every network's writes as Community's")
+	apiUrl = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api's base URL, whose internal gate ServiceHost.Quota reads limits from; empty weighs every network's writes as Community's")
 )
 
 func main() {
@@ -47,7 +48,7 @@ func main() {
 	// on a context of its own, which the drain does not end, drained after the block
 	quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer quotaCancel()
-	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerGkm, *apiUrl, nil); err != nil {
+	if quota, err := quotahost.NewBlockQuota(quotaCtx, server.InternalGateCallerGkm, apiUrl.Url(), nil); err != nil {
 		// the error names what is missing, never the bearer
 		glog.Errorf("[gkm]no ServiceHost.Quota, so every network's writes weigh as Community's: %v\n", err)
 	} else {

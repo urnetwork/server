@@ -11,6 +11,7 @@
 //
 //   - ServiceHost: sidecarhost's, with Quota over api's internal gate at -api_url (quotahost.NewBlockQuota, whose
 //     OverLimit is Find's spent list) and Push, pushservice's hint writer, which carries SOCKET_HINT on topic sock.
+//     The flag's default is the $UR_API_URL sockets.yml's env_vars give a deployed block (sidecarhost.ServiceUrlFlag).
 //   - The Authenticator: sidecarhost's NewRevocationAuthenticator, verifying the callers' 15-minute service tokens
 //     of audience sockets (QD-1029) offline against oauth-jwks-svc.json, their ur_sidecar_id the caller's sidecar,
 //     then §7.8's rev/ objects for each token's client, sidecar and member, read by sidecar.RevocationChecker from
@@ -600,7 +601,7 @@ func setProcessEnv(host *sidecar.ServiceHost) {
 
 var (
 	port   = flag.Int("port", 80, "the block's status port, which also serves the /socket/* routes")
-	apiUrl = flag.String("api_url", "", "api's base URL, whose internal gate the projection and the over-limit list are read from; empty leaves the block not ready")
+	apiUrl = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api's base URL, whose internal gate the projection and the over-limit list are read from; empty leaves the block not ready")
 )
 
 func main() {
@@ -621,7 +622,7 @@ func main() {
 	// on a context of its own, so a SIGTERM's drain can still send the open usage window, drained after the block
 	quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer quotaCancel()
-	deps, drainQuota := blockDeps(quotaCtx, *apiUrl)
+	deps, drainQuota := blockDeps(quotaCtx, apiUrl.Url())
 	defer drainQuota()
 	if err := run(ctx, &runOptions{Port: *port, Deps: deps}); err != nil {
 		panic(err)
