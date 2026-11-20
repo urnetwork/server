@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // logCanonical counts one canonical line per logical event while the parent
@@ -61,6 +62,8 @@ type logClass struct {
 	// left truncation would hide. It receives an already-redacted line and must
 	// return a bounded human-readable sample.
 	sample func(string) string
+	// An optional service that must be selected before using the sample formatter.
+	sampleService string
 	// frame optionally selects attribution from the first counted exemplar,
 	// without changing its service/class count. Empty means unknown and must
 	// not fall back to an unrelated address elsewhere in the line.
@@ -579,6 +582,8 @@ var logClasses = []logClass{
 		match: func(line string) bool {
 			return !strings.Contains(line, "[family]dial tag=doh observable=") || parseDohDialObservation(line) != nil
 		},
+		sample:        extenderProbeRefusalSample,
+		sampleService: "taskworker",
 		rateThreshold: 10, tier: tierPage, playbook: "SIGNALS.md §1.5 and §4",
 		meaning:   "the selected log stream reported a TCP connection-refused diagnostic; the target listener state and operation outcome are unknown",
 		mechanism: "The classifier counts matching diagnostic lines, not native socket results. An original connect refusal is consistent with active rejection by the target or an intermediary; the matched text alone does not establish an absent listener. Service-specific signatures earlier in this taxonomy take precedence.",
@@ -1478,6 +1483,49 @@ const netEscrowNegativePageRate = 100
 const dialEndpointPattern = `(?:[0-9.]+|\[(?:scrubbed|[0-9A-Fa-f:.]+(?:%[A-Za-z0-9_.-]+)?)\]):[0-9]+`
 
 var dialIoTimeoutRe = regexp.MustCompile(`\bdial tcp(?:4|6)? (?:` + dialEndpointPattern + `->)?(` + dialEndpointPattern + `): (?:connect: )?i/o timeout\b`)
+
+// The reviewed Taskworker logger emits one active extender probe failure. Warp's
+// outer service and source frame must introduce the message directly. Refusal
+// text inside a relayed message is still counted by the generic class.
+const (
+	extenderProbeLogDuration = `(?:[0-9]+ms|(?:[0-9]+h)?(?:[0-9]+m)?[0-9]+(?:\.[0-9]+)?s)`
+	extenderProbeLogNumber   = `(?:0|[1-9][0-9]{0,18})`
+	extenderProbeLogLabel    = `[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?`
+	// The HTTP admission/refused classes render only retry_after or status.
+	// Their producer detail cannot contain the generic TCP refusal phrase.
+	extenderProbeLogClass = `dial_timeout|dial_refused|dial_unreachable|dial_error|closed_before_tls|tls_no_answer|tls_identity|tls_error|challenge|closed|timeout|other`
+)
+
+var extenderProbeRefusalRecordRe = regexp.MustCompile(
+	`^\[[A-Za-z0-9._-]+\]\[taskworker\]\[g[0-9]+\]\[cid:[0-9a-f]{12}\]\[I\]` + logTimestampRe.String() +
+		`\[extender_probe_diagnostics\.go:[1-9][0-9]{0,5}\]\[extenderprobe\]diagnostic extender=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}` +
+		` ipv=([46]) class=(` + extenderProbeLogClass + `) detail=("(?:[^"\\\x00-\x1f]|\\[^\r\n])*") server_name=` + extenderProbeLogLabel + `(?:\.` + extenderProbeLogLabel + `)*\.?` +
+		` (?:elapsed=\? connect=\? server_bytes=\?|elapsed=` + extenderProbeLogDuration + ` connect=(?:none|` + extenderProbeLogDuration + `) server_bytes=` + extenderProbeLogNumber + `)` +
+		` (?:since_activation=\? since_uptime_ok=\? failures_before=\?|since_activation=-?` + extenderProbeLogDuration + ` since_uptime_ok=(?:never|-?` + extenderProbeLogDuration + `) failures_before=` + extenderProbeLogNumber + `)$`,
+)
+
+// Only the already-counted first exemplar gets the finite producer fields.
+// Generic and incomplete records preserve their existing bounded sample.
+func extenderProbeRefusalSample(line string) string {
+	// This covers the capped quoted detail, metadata, and the fixed schema.
+	if len(line) > 4096 {
+		return truncateLine(line)
+	}
+	fields := extenderProbeRefusalRecordRe.FindStringSubmatch(line)
+	if fields == nil {
+		return truncateLine(line)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, fields[1]); err != nil {
+		return truncateLine(line)
+	}
+	detail, err := strconv.Unquote(fields[4])
+	// Producer detail is a Go-quoted string, capped at 160 runes plus "...".
+	if err != nil || strconv.Quote(detail) != fields[4] || utf8.RuneCountInString(detail) > 163 ||
+		!strings.Contains(detail, "connect: connection refused") || strings.Contains(detail, "[extenderprobe]diagnostic") {
+		return truncateLine(line)
+	}
+	return "[extenderprobe]diagnostic exemplar ipv=" + fields[2] + " class=" + fields[3]
+}
 
 // A combined diagnostic has no single exemplar destination. Preserve the
 // existing IPv4 frame and expose only the port of scrubbed and IPv6 sources.
@@ -2530,12 +2578,12 @@ func (self *logTailer) classifyLocked(line string, deduplicate bool, count bool,
 			if c.aggregateWithGroup && key != c.name {
 				self.classCounts[c.name]++
 				if _, exists := self.classSamples[c.name]; !exists {
-					self.classSamples[c.name] = logClassSample(c, line)
+					self.classSamples[c.name] = logClassSample(c, self.service, line)
 				}
 			}
 			self.classCounts[key] += 1
 			if _, ok := self.classSamples[key]; !ok {
-				self.classSamples[key] = logClassSample(c, line)
+				self.classSamples[key] = logClassSample(c, self.service, line)
 				if attribution != "" {
 					self.classTargets[key] = attribution
 				} else if c.frame != nil && !c.aggregateWithGroup {
@@ -2854,11 +2902,11 @@ func truncateLinePreservingSuffix(line string, suffix string) string {
 	return strings.TrimSpace(prefix) + separator + suffix
 }
 
-func logClassSample(class logClass, line string) string {
+func logClassSample(class logClass, service, line string) string {
 	if class.redactIDs {
 		line = logIDRe.ReplaceAllString(line, "<id>")
 	}
-	if class.sample != nil {
+	if class.sample != nil && (class.sampleService == "" || class.sampleService == service) {
 		return class.sample(line)
 	}
 	return truncateLine(line)
