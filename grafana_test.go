@@ -182,7 +182,9 @@ func TestStatsPushRefusesReservedLabelNames(t *testing.T) {
 }
 
 // The reserved names are exactly the job and the grouping labels the process
-// pusher keys a push by, in order, so the list can't drift from the grouping.
+// pusher keys a push by, so the list can't drift from the grouping. The push
+// client writes the grouping labels into its URL in map order, so the names
+// compare as sets.
 func TestStatsPushReservedLabelNamesMatchGrouping(t *testing.T) {
 	pushPaths := make(chan string, 1)
 	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +217,10 @@ func TestStatsPushReservedLabelNamesMatchGrouping(t *testing.T) {
 	for i := 0; i+1 < len(pathParts); i += 2 {
 		labelNames = append(labelNames, pathParts[i])
 	}
-	if !slices.Equal(labelNames, StatsPushReservedLabelNames()) {
-		t.Fatalf("push keyed by %v, reserved names %v", labelNames, StatsPushReservedLabelNames())
+	slices.Sort(labelNames)
+	reservedLabelNames := StatsPushReservedLabelNames()
+	slices.Sort(reservedLabelNames)
+	if !slices.Equal(labelNames, reservedLabelNames) {
+		t.Fatalf("push keyed by %v, reserved names %v", labelNames, reservedLabelNames)
 	}
 }
