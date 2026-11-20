@@ -1102,6 +1102,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 		migrationCurrentSuffix(server.CompetitionEpochThreeGoofeArchiveBindingCorrectionMigrationVersion(), "epoch-three Goofe retained archive binding correction",
 			snMainnetMigrationFunction("competition_executor_admission_exception_guard()", "trigger", "plpgsql", "v", false, server.CompetitionEpochThreeGoofeArchiveBindingCorrectionBodySql())),
 	},
+	// the per client and day record of probed exits that differ from every
+	// network their provider connects from, versioned by its position
+	[]snMainnetMigrationContract{providerEgressExitDayMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -187,8 +187,9 @@ func providerEgressVerdict(
 // country an older prober asserted is not the server's own lookup.
 //
 // The provider is then judged by the exit (judgeProviderEgressExit): its ARIN
-// Quality and country are the exit's, and an exit in none of the networks it
-// connects from counts it at no unit. A replayed submission repeats the
+// Quality and country are the exit's, a risky exit makes it risky, and an exit
+// that differs from every network it connects from counts it at no unit and
+// is recorded for the settlement epoch. A replayed submission repeats the
 // judgement, so a retry completes one that failed part way.
 func SubmitProviderEgressLocation(
 	ctx context.Context,
@@ -273,12 +274,14 @@ func judgeProviderEgressExit(
 	if latest, old, err := arinInfoPairForAddr(exitIp); err == nil {
 		scores := &model.ConnectionLocationScores{}
 		setArinConnectionFacts(scores, latest, old)
+		judgement.ArinRisk = scores.ArinRisk
 		judgement.ArinNonQuality = scores.ArinNonQuality
 		judgement.ArinQualityVerified = scores.ArinQualityVerified
 		judgement.ArinDatabaseBuildEpoch = scores.ArinDatabaseBuildEpoch
 		if scores.ArinLookupAt != nil {
 			judgement.ArinLookupAt = *scores.ArinLookupAt
 		}
+		judgement.ArinOldRisk = scores.ArinOldRisk
 		judgement.ArinOldNonQuality = scores.ArinOldNonQuality
 		judgement.ArinOldQualityVerified = scores.ArinOldQualityVerified
 		judgement.ArinOldDatabaseBuildEpoch = scores.ArinOldDatabaseBuildEpoch

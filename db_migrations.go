@@ -11927,6 +11927,11 @@ var migrations = []any{
 	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
 	newSqlMigration(competitionEpochThreeGoofeAdmissionSql()),
 	newSqlMigration(competitionEpochThreeGoofeArchiveBindingCorrectionSql()),
+
+	// The per client and day record of probed exits that differ from every
+	// network their provider connects from: a new table, which no running
+	// release reads or writes.
+	newSqlMigration(providerEgressExitDaySchemaSql),
 }
 
 // The deleted_network backfill (the migration above): every network an App

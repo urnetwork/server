@@ -1695,8 +1695,9 @@ egress probe is judged by its exit instead (owner decision 2026-11-20,
 [provider_egress_exit_model.go](../model/provider_egress_exit_model.go)): the
 ingest classifies the probed exit with its own pair, and each of the provider's
 connections, live or new, stores the exit's subscriber verification, non-Quality
-state and epoch in both slots. Risk stays the connection address's, so Speed and
-Online admit exactly what they did. The exit address is never stored; the
+state and epoch in both slots, and its risk beside the connection address's own:
+a risky exit takes the provider out of Speed and Online as well (owner decision
+2026-11-20, "apply exit risk too"). The exit address is never stored; the
 judgement lives in Redis while the probe is fresh, and a lost one judges the
 connection address until the next probe. Existing stored
 facts are not rewritten merely because a new MMDB is selected. Fresh connection
