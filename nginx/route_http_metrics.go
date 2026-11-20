@@ -16,10 +16,15 @@ package nginx
 // labels come from the route table or fixed sets, never from a request, and
 // the access log replaces every hidden prefix it finds in what the client
 // sent and never writes the peer, X-UR-Forwarded-For or the query.
+//
+// A request's metrics cost no allocation and no lookup by labels: the label
+// values are constants, and each label set's series are resolved once and
+// kept per service and block (frontRequestMetrics).
 
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -108,61 +113,153 @@ func (self *glogFrontAccessLog) write(line string) {
 	glog.Infof("[front]%s\n", line)
 }
 
-// The status class label of a response: 1xx to 5xx, "none" when no head
-// was written, as when the handler panicked.
-func routeHttpStatusClass(statusCode int) string {
+// The status class labels, by routeHttpStatusClassIndex: "none" when no
+// head was written, as when the handler panicked, 1xx to 5xx, and "other"
+// for a status outside them.
+var routeHttpStatusClasses = [...]string{"none", "1xx", "2xx", "3xx", "4xx", "5xx", "other"}
+
+// The index of a response's status class label in routeHttpStatusClasses.
+func routeHttpStatusClassIndex(statusCode int) int {
 	switch {
-	case 100 <= statusCode && statusCode < 600:
-		return fmt.Sprintf("%dxx", statusCode/100)
 	case statusCode == 0:
-		return "none"
+		return 0
+	case 100 <= statusCode && statusCode < 600:
+		return statusCode / 100
 	default:
-		return "other"
+		return len(routeHttpStatusClasses) - 1
 	}
 }
 
-// The protocol label of a request.
-func routeHttpProtocol(protoMajor int) string {
-	switch protoMajor {
-	case 1:
-		return "h1"
-	case 2:
-		return "h2"
-	case 3:
-		return "h3"
-	default:
-		return "other"
+// The protocol labels, by routeHttpProtocolIndex: "other", then h1, h2 and
+// h3 at their major versions.
+var routeHttpProtocols = [...]string{"other", "h1", "h2", "h3"}
+
+// The index of a request's protocol label in routeHttpProtocols.
+func routeHttpProtocolIndex(protoMajor int) int {
+	if 1 <= protoMajor && protoMajor < len(routeHttpProtocols) {
+		return protoMajor
 	}
+	return 0
+}
+
+// The requests counter's and the latency histogram's series of one label
+// set.
+type frontRequestSeries struct {
+	requests              prometheus.Counter
+	responseHeaderSeconds prometheus.Observer
+}
+
+// The request metrics of one service and block label: the series of each
+// protocol and status class, each resolved by its labels on its first
+// request and kept, so a request's metrics take no lookup by labels. The
+// labels come from the route table and the closed sets above, so the series
+// are as bounded as before. Safe for concurrent use.
+type frontRequestMetrics struct {
+	metrics *frontMetrics
+	service string
+	block   string
+	series  [len(routeHttpProtocols)][len(routeHttpStatusClasses)]atomic.Pointer[frontRequestSeries]
+}
+
+// Request metrics for a service and block label of metrics, with nothing
+// resolved yet.
+func newFrontRequestMetrics(metrics *frontMetrics, service string, block string) *frontRequestMetrics {
+	return &frontRequestMetrics{
+		metrics: metrics,
+		service: service,
+		block:   block,
+	}
+}
+
+// The series of a protocol and status class index. Requests that race to
+// resolve one get the same series: the vectors keep one per label set, and
+// the first stored is kept.
+func (self *frontRequestMetrics) requestSeries(protocolIndex int, statusClassIndex int) *frontRequestSeries {
+	slot := &self.series[protocolIndex][statusClassIndex]
+	if series := slot.Load(); series != nil {
+		return series
+	}
+	protocol := routeHttpProtocols[protocolIndex]
+	statusClass := routeHttpStatusClasses[statusClassIndex]
+	series := &frontRequestSeries{
+		requests:              self.metrics.requests.WithLabelValues(self.service, protocol, statusClass, self.block),
+		responseHeaderSeconds: self.metrics.responseHeaderSeconds.WithLabelValues(self.service, protocol, statusClass, self.block),
+	}
+	if !slot.CompareAndSwap(nil, series) {
+		return slot.Load()
+	}
+	return series
+}
+
+// A service's request metrics, by the block label of the block that
+// answered: each of the service's blocks, and local for connect in-process.
+type frontServiceRequestMetrics struct {
+	blockRequestMetrics map[string]*frontRequestMetrics
+	// for a request no block of the service answered
+	noBlockRequestMetrics *frontRequestMetrics
+}
+
+// The request metrics of every service of a route table, by service name,
+// and of a request for no service. Only a block of the service, or connect
+// in-process, is a block label. Read-only once built.
+type frontRequestMetricsTable struct {
+	serviceRequestMetrics   map[string]*frontServiceRequestMetrics
+	noServiceRequestMetrics *frontRequestMetrics
+}
+
+// The request metrics of a route table's services, over metrics.
+func newFrontRequestMetricsTable(metrics *frontMetrics, routes *routeHttpTable) *frontRequestMetricsTable {
+	table := &frontRequestMetricsTable{
+		serviceRequestMetrics:   map[string]*frontServiceRequestMetrics{},
+		noServiceRequestMetrics: newFrontRequestMetrics(metrics, routeHttpNoLabel, routeHttpNoLabel),
+	}
+	for serviceName, routeService := range routes.services {
+		service := routeService.service.Name
+		serviceRequestMetrics := &frontServiceRequestMetrics{
+			blockRequestMetrics: map[string]*frontRequestMetrics{
+				routeHttpInProcessBlock: newFrontRequestMetrics(metrics, service, routeHttpInProcessBlock),
+			},
+			noBlockRequestMetrics: newFrontRequestMetrics(metrics, service, routeHttpNoLabel),
+		}
+		for blockName := range routeService.blockNames {
+			serviceRequestMetrics.blockRequestMetrics[blockName] = newFrontRequestMetrics(metrics, service, blockName)
+		}
+		table.serviceRequestMetrics[serviceName] = serviceRequestMetrics
+	}
+	return table
+}
+
+// The request metrics of a request for serviceName answered by
+// upstreamBlock: the service's, or no service's when the table has none of
+// that name, and the block's, or no block's when it is neither a block of
+// the service nor local.
+func (self *frontRequestMetricsTable) requestMetrics(serviceName string, upstreamBlock string) *frontRequestMetrics {
+	serviceRequestMetrics, ok := self.serviceRequestMetrics[serviceName]
+	if !ok {
+		return self.noServiceRequestMetrics
+	}
+	if blockRequestMetrics, ok := serviceRequestMetrics.blockRequestMetrics[upstreamBlock]; ok {
+		return blockRequestMetrics
+	}
+	return serviceRequestMetrics.noBlockRequestMetrics
 }
 
 // Records one ended request: its metrics, and its access log line when one
 // is due.
 func (self *Front) observe(exchange *routeHttpExchange) {
 	response := exchange.response
-	service := routeHttpNoLabel
-	block := routeHttpNoLabel
-	if routeService, ok := self.routes.services[exchange.serviceName]; ok {
-		service = routeService.service.Name
-		// only a block of the service, or connect in-process, is a label
-		switch {
-		case response.upstreamBlock == routeHttpInProcessBlock:
-			block = routeHttpInProcessBlock
-		case routeService.blockNames[response.upstreamBlock]:
-			block = response.upstreamBlock
-		}
-	}
-	protocol := routeHttpProtocol(exchange.r.ProtoMajor)
-	statusClass := routeHttpStatusClass(response.statusCode)
-	self.metrics.requests.WithLabelValues(service, protocol, statusClass, block).Inc()
+	requestMetrics := self.requestMetrics.requestMetrics(exchange.serviceName, response.upstreamBlock)
+	series := requestMetrics.requestSeries(routeHttpProtocolIndex(exchange.r.ProtoMajor), routeHttpStatusClassIndex(response.statusCode))
+	series.requests.Inc()
 	if !response.headerTime.IsZero() {
-		self.metrics.responseHeaderSeconds.WithLabelValues(service, protocol, statusClass, block).Observe(
-			response.headerTime.Sub(exchange.startTime).Seconds(),
-		)
+		series.responseHeaderSeconds.Observe(response.headerTime.Sub(exchange.startTime).Seconds())
 	}
 
 	if !self.accessLog.enabled() {
 		return
 	}
+	service := requestMetrics.service
+	block := requestMetrics.block
 	request := exchange.request
 	host := exchange.r.Host
 	path := routeHttpNoLabel

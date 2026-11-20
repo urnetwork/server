@@ -478,9 +478,11 @@ func upstreamIoFailure(err error) upstreamFailure {
 	return upstreamFailureError
 }
 
-// One request as the upstream sees it, the same for every attempt.
+// One request as the upstream sees it, the same for every attempt but for
+// its latest exchange.
 type upstreamRequest struct {
-	// the request line and headers
+	// the request line and headers. The write of each of the request's
+	// exchanges reads it, until the exchange is finished
 	head []byte
 	// the method, for parsing the response (a HEAD's has no body)
 	method string
@@ -494,6 +496,11 @@ type upstreamRequest struct {
 	upgrade      bool
 	readTimeout  time.Duration
 	writeTimeout time.Duration
+	// the latest exchange, set as it begins: each attempt's exchange is
+	// finished before the next attempt's begins (a failed one by exchange, a
+	// retried 503 by forward), so this is the only one whose write may still
+	// run. Kept by the request's goroutine
+	exchange *upstreamExchange
 }
 
 // One request and its response on one connection. The request write runs
@@ -556,6 +563,7 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		// write on it; a cut connection is never reused
 		stopCancel: context.AfterFunc(ctx, upstreamConn.close),
 	}
+	request.exchange = exchange
 	go func() {
 		err := exchange.writeRequest()
 		switch {

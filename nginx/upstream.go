@@ -73,6 +73,9 @@ type upstreamGroup struct {
 	// barriers
 	waitAfter   func(d time.Duration) <-chan time.Time
 	copyBuffers sync.Pool
+	// buffers of ForwardSettings.RequestHeadBufferBytes for request heads,
+	// each held from its request's head to its last exchange's end
+	requestHeads sync.Pool
 	// the service's series of upstreamConnectionsCounter, by result
 	reusedConnections     prometheus.Counter
 	dialedConnections     prometheus.Counter
@@ -140,6 +143,10 @@ func newUpstreamGroup(routeTable *RouteTable, service *RouteService, bodyStore *
 	}
 	group.copyBuffers.New = func() any {
 		buffer := make([]byte, max(settings.Forward.CopyBufferBytes, 1))
+		return &buffer
+	}
+	group.requestHeads.New = func() any {
+		buffer := make([]byte, 0, max(settings.Forward.RequestHeadBufferBytes, 1))
 		return &buffer
 	}
 
@@ -276,7 +283,21 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 			}
 		}
 	}
-	request.head = forwardRequestHead(r, &options, upgrade, request.bodyFraming)
+	// the head is built in a pooled buffer, which goes back once nothing can
+	// read it: only an exchange's write reads the head, and every exchange
+	// but the latest has been finished by the time the next begins. The
+	// latest is finished on every exit too, relay's and tunnel's included,
+	// and here when a panic left it running, finish being once only. A head
+	// that outgrew its buffer grew into one of its own, and only the pooled
+	// one goes back
+	requestHead := self.requestHeads.Get().(*[]byte)
+	defer func() {
+		if request.exchange != nil {
+			request.exchange.finish(false)
+		}
+		self.requestHeads.Put(requestHead)
+	}()
+	request.head = forwardRequestHead((*requestHead)[:0], r, &options, upgrade, request.bodyFraming)
 	self.forward(w, r, responseController, request, &options)
 }
 

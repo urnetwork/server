@@ -158,11 +158,13 @@ type Front struct {
 	accessLog         frontAccessLog
 	clock             func() time.Time
 
-	routes       *routeHttpTable
-	limits       *frontLimits
-	interfaces   map[string]*frontInterface
-	lbStatusBody []byte
-	gzipWriters  sync.Pool
+	routes *routeHttpTable
+	// the request metrics' series, by service and block (observe)
+	requestMetrics *frontRequestMetricsTable
+	limits         *frontLimits
+	interfaces     map[string]*frontInterface
+	lbStatusBody   []byte
+	gzipWriters    sync.Pool
 	// requests the access log has considered, for its sampling
 	accessLogCount atomic.Uint64
 
@@ -273,6 +275,7 @@ func newFront(ctx context.Context, routeTable *RouteTable, revision string, depe
 		accessLog:         dependencies.accessLog,
 		clock:             dependencies.now,
 		routes:            routes,
+		requestMetrics:    newFrontRequestMetricsTable(dependencies.metrics, routes),
 		limits:            newFrontLimits(frontCtx, settings.Limit, dependencies.now),
 		interfaces:        map[string]*frontInterface{},
 		lbStatusBody:      append(lbStatusBody, '\n'),

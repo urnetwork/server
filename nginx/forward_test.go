@@ -1352,6 +1352,110 @@ func TestForwardTarget(t *testing.T) {
 	}
 }
 
+// A head is appended to the buffer it is given, whatever that buffer held
+// past its length: in a pooled buffer that last held a longer head it is
+// byte for byte the head built in a new one, and in a buffer too small it
+// grows into a new one, the same bytes again.
+func TestForwardRequestHeadInAReusedBuffer(t *testing.T) {
+	options := &forwardOptions{
+		clientAddrPort: netip.MustParseAddrPort("192.0.2.10:40123"),
+		host:           "api.service.example",
+	}
+	longRequest := httptest.NewRequest(http.MethodPost, "/long", nil)
+	for i := range 20 {
+		longRequest.Header.Set("X-Long-"+strconv.Itoa(i), strings.Repeat("v", 100))
+	}
+	shortRequest := httptest.NewRequest(http.MethodGet, "/short", nil)
+	shortRequest.Header.Set("Accept", "*/*")
+	longFraming := forwardBodyFraming{known: true, length: 3}
+	wantLong := forwardRequestHead(nil, longRequest, options, false, longFraming)
+	wantShort := forwardRequestHead(nil, shortRequest, options, false, forwardBodyFraming{})
+
+	pooled := make([]byte, 0, DefaultForwardSettings().RequestHeadBufferBytes)
+	longHead := forwardRequestHead(pooled, longRequest, options, false, longFraming)
+	if !bytes.Equal(longHead, wantLong) || &longHead[0] != &pooled[:1][0] {
+		t.Fatalf("the long head wasn't built in the pooled buffer as in a new one")
+	}
+	if shortHead := forwardRequestHead(pooled[:0], shortRequest, options, false, forwardBodyFraming{}); !bytes.Equal(shortHead, wantShort) {
+		t.Errorf("the short head in the buffer the long one used\n%q\nwant\n%q", shortHead, wantShort)
+	}
+	small := make([]byte, 0, 8)
+	if grownHead := forwardRequestHead(small, longRequest, options, false, longFraming); !bytes.Equal(grownHead, wantLong) || cap(small) != 8 {
+		t.Errorf("the head past a small buffer\n%q\nwant\n%q", grownHead, wantLong)
+	}
+}
+
+// A dialed connection that tells when its first write has returned, over a
+// connection whose first write holds.
+type writeReturnedConn struct {
+	*holdWriteConn
+	writeReturned chan struct{}
+	returnOnce    sync.Once
+}
+
+// See net.Conn.
+func (self *writeReturnedConn) Write(p []byte) (int, error) {
+	n, err := self.holdWriteConn.Write(p)
+	self.returnOnce.Do(func() {
+		close(self.writeReturned)
+	})
+	return n, err
+}
+
+// A response writer that panics, as an abort does, when the forwarder names
+// the block that answered: after an exchange has its response head, before
+// relay has taken the exchange's end on itself.
+type panickingBlockRecorder struct {
+	http.ResponseWriter
+}
+
+// See upstreamBlockRecorder.
+func (self *panickingBlockRecorder) recordUpstreamBlock(blockName string) {
+	panic(http.ErrAbortHandler)
+}
+
+// A request's pooled head goes back only once no write can read it: a panic
+// that leaves the request's exchange running, its write held right after it
+// sent the head, has serveHttp finish the exchange, its write joined, before
+// it returns. Before, nothing finished it, and its write ran on.
+func TestForwardPanicEndsTheRequestWriteBeforeTheHeadGoesBack(t *testing.T) {
+	raw := newRawUpstream(t)
+	group, _ := newTestGroup(t, testForwardRouteService(testServiceName("head-pool-panic"), []testBlock{
+		{name: "g1", weight: 1, port: raw.port},
+	}), testForwardFrontSettings())
+	dialedConns := make(chan *writeReturnedConn, 1)
+	wrapGroupDials(group, func(conn net.Conn, address string) net.Conn {
+		writeConn := &writeReturnedConn{
+			holdWriteConn: newHoldWriteConn(t, conn),
+			writeReturned: make(chan struct{}),
+		}
+		dialedConns <- writeConn
+		return writeConn
+	})
+	front := newTestForwardFrontWrapping(t, group, func(w http.ResponseWriter) http.ResponseWriter {
+		return &panickingBlockRecorder{
+			ResponseWriter: w,
+		}
+	}, testForwardOptions)
+	go func() {
+		request, _ := http.NewRequest(http.MethodGet, front.url("/held-write"), nil)
+		testDo(t, request)
+	}()
+	writeConn := receiveBounded(t, dialedConns, "the dial")
+	waitClosed(t, writeConn.held, "the hold of the head's write")
+	conn, _, _ := raw.accept(t)
+	// the block answers while the request's write still holds
+	io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+	if recovered := front.waitServed(t); recovered != http.ErrAbortHandler {
+		t.Fatalf("serveHttp ended with %v, want the injected abort", recovered)
+	}
+	select {
+	case <-writeConn.writeReturned:
+	default:
+		t.Errorf("serveHttp returned, its head's buffer back in the pool, while the request's write still ran")
+	}
+}
+
 // The response head is sent before any body arrives, as nginx sends it
 // unbuffered, so a client of a streaming response sees it at once.
 func TestForwardResponseHeadSentBeforeBody(t *testing.T) {
