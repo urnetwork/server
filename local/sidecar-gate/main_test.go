@@ -525,9 +525,11 @@ func TestGateRefusesAMalformedTimeoutWhenGatesYmlLoads(t *testing.T) {
 	}
 }
 
-// The tool runs gates.yml's release fixture under 3h, as run.sh's BUILD_TEST runs it (QD-1056, QD-1058), and every
-// other entry it reads, in gates.yml, ops-matrix.yml, trace.yml and stages.yml, under the settings' bound.
-func TestGatesYmlGivesOnlyTheReleaseFixtureItsOwnTimeout(t *testing.T) {
+// The tool runs gates.yml's release fixture under 3h, as run.sh's BUILD_TEST runs it (QD-1056, QD-1058), and M10's
+// reading of FS-86's card case at the Team limit, a whole peak hour in real time on T3's layouts, under 2h (D-TEST-17;
+// QD-1068), and every other entry it reads, in gates.yml, ops-matrix.yml, trace.yml and stages.yml, under the
+// settings' bound.
+func TestGatesYmlGivesOwnTimeoutsOnlyToTestsThatOutlastTheDefault(t *testing.T) {
 	gates := &gatesFile{}
 	if err := readYamlFile("gates.yml", gates); err != nil {
 		t.Fatal(err)
@@ -571,20 +573,26 @@ func TestGatesYmlGivesOnlyTheReleaseFixtureItsOwnTimeout(t *testing.T) {
 		}
 	}
 	settings := defaultGateSettings()
-	fixtures := 0
+	fixtures, layouts := 0, 0
 	for _, test := range tests {
 		got := test.testTimeout(settings)
-		if slices.Contains(test.Names, "TestSidecarReleaseFixture") {
+		switch {
+		case slices.Contains(test.Names, "TestSidecarReleaseFixture"):
 			fixtures += 1
 			if got != 3*time.Hour || test.Tags != "sidecar_release_fixture" {
 				t.Errorf("the release fixture runs under %s with tags %q", got, test.Tags)
 			}
-		} else if got != settings.TestTimeout {
+		case slices.Contains(test.Names, "TestFs86CardCommitsAtTheTeamLimitOnTheLayouts"):
+			layouts += 1
+			if got != 2*time.Hour || !test.Stores || !slices.Equal(test.Names, []string{"TestFs86CardCommitsAtTheTeamLimitOnTheLayouts"}) {
+				t.Errorf("FS-86's hour on the layouts runs under %s, stores %t, beside %v", got, test.Stores, test.Names)
+			}
+		case got != settings.TestTimeout:
 			t.Errorf("%s %s's %v runs under %s", test.Repo, test.Package, test.Names, got)
 		}
 	}
-	if fixtures != 1 || len(tests) < 100 {
-		t.Fatalf("the files name the release fixture %d times among %d entries", fixtures, len(tests))
+	if fixtures != 1 || layouts != 1 || len(tests) < 100 {
+		t.Fatalf("the files name the release fixture %d times and FS-86's hour on the layouts %d times among %d entries", fixtures, layouts, len(tests))
 	}
 }
 

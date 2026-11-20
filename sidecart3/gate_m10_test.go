@@ -3,9 +3,16 @@ package sidecart3
 // M10's exit sweep on server's side (TEST-M10-05; sidecar's gate_m10_out.go): each server test its rows name outside
 // the convention's ./sidecart3, and each its items name, is declared where the entry says, in a file that builds under
 // the entry's tags (gate_m6_test.go's check), so a rename or a drifted tag fails here before its row or item reads
-// missing at the gate. Reading test files opens no store, so this runs at every merge.
+// missing at the gate. And at every gate, a server test that runs in server's test env is named on the private stores,
+// since off them its preflight fails the run before the test shows anything. Reading source files opens no store, so
+// this runs at every merge.
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -94,5 +101,130 @@ func TestGateM10ItemsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 				t.Errorf("no item of M10 names %s in %s", name, packagePath)
 			}
 		}
+	}
+}
+
+// Whether each function of a package's files, test files among them, runs in server's test env: its body names
+// server's TestEnv or DefaultTestEnv, or calls a function of the package that returns a *TestEnv or does either, to a
+// fixed point. Build tags are not read, so a function declared under two tags counts if either body does.
+func gateTestEnvFunctions(t *testing.T, directory string) map[string]bool {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(directory, "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// server's own names for the env, qualified outside its root package and bare inside it
+	isEnvName := func(name string) bool {
+		return name == "TestEnv" || name == "DefaultTestEnv"
+	}
+	fileSet := token.NewFileSet()
+	calls := map[string][]string{}
+	users := map[string]bool{}
+	for _, path := range paths {
+		file, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inServer := file.Name.Name == "server" || file.Name.Name == "server_test"
+		for _, declaration := range file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Recv != nil || function.Body == nil {
+				continue
+			}
+			name := function.Name.Name
+			// a constructor of the env: its results name *TestEnv
+			if function.Type.Results != nil {
+				for _, result := range function.Type.Results.List {
+					star, ok := result.Type.(*ast.StarExpr)
+					if !ok {
+						continue
+					}
+					switch named := star.X.(type) {
+					case *ast.SelectorExpr:
+						if base, ok := named.X.(*ast.Ident); ok && base.Name == "server" && named.Sel.Name == "TestEnv" {
+							users[name] = true
+						}
+					case *ast.Ident:
+						if inServer && named.Name == "TestEnv" {
+							users[name] = true
+						}
+					}
+				}
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				switch node := node.(type) {
+				case *ast.SelectorExpr:
+					if base, ok := node.X.(*ast.Ident); ok && base.Name == "server" && isEnvName(node.Sel.Name) {
+						users[name] = true
+					}
+				case *ast.Ident:
+					if inServer && isEnvName(node.Name) {
+						users[name] = true
+					}
+				case *ast.CallExpr:
+					if callee, ok := node.Fun.(*ast.Ident); ok {
+						calls[name] = append(calls[name], callee.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, callees := range calls {
+			if users[name] {
+				continue
+			}
+			if slices.ContainsFunc(callees, func(callee string) bool { return users[callee] }) {
+				users[name] = true
+				changed = true
+			}
+		}
+	}
+	return users
+}
+
+// Every server test a gate names off the private stores runs outside server's test env, whose preflight fails a run
+// with no WARP_ENV: a test that needs the env, named without stores, reads fail at every gate run whatever it would
+// show (as M2's and M10's CROSSSLOT items once named TestRunCrossslotRefusesOneNode). A fixture entry naming that
+// test without stores is caught.
+func TestGateServerTestsInTheTestEnvRunOnThePrivateStores(t *testing.T) {
+	catalog := fault.DefaultCatalog()
+	byDirectory := map[string]map[string]bool{}
+	usesEnv := func(packagePath string, name string) bool {
+		directory := filepath.Join("..", filepath.FromSlash(packagePath))
+		if _, ok := byDirectory[directory]; !ok {
+			byDirectory[directory] = gateTestEnvFunctions(t, directory)
+		}
+		return byDirectory[directory][name]
+	}
+	offStores := func(rows []*fault.GateRow) []string {
+		found := []string{}
+		for _, row := range rows {
+			for _, test := range row.Tests {
+				if test.Repo != "server" || test.Stores {
+					continue
+				}
+				for _, name := range test.Names {
+					if usesEnv(filepath.Join(test.Dir, test.Package), name) {
+						found = append(found, fmt.Sprintf("%s in %s", name, test.Package))
+					}
+				}
+			}
+		}
+		return found
+	}
+	for _, gate := range fault.GateNames() {
+		for _, found := range offStores(fault.GateRows(catalog, gate)) {
+			t.Errorf("%s names %s off the private stores, and it runs in server's test env", gate, found)
+		}
+	}
+	fixture := []*fault.GateRow{{Item: "a fixture", Tests: []*fault.GateTest{
+		{Repo: "server", Package: "./sidecart3", Names: []string{"TestRunCrossslotRefusesOneNode", "TestCrossslotKeysSpreadOverTheMasters"}},
+		{Repo: "server", Package: "./sidecart3", Stores: true, Names: []string{"TestRunCrossslotRefusesOneNode"}},
+	}}}
+	if got := offStores(fixture); !slices.Equal(got, []string{"TestRunCrossslotRefusesOneNode in ./sidecart3"}) {
+		t.Errorf("the fixture reads %v", got)
 	}
 }
