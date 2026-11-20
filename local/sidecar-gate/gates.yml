@@ -1478,6 +1478,154 @@ gates:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+    - item: 'peer review of format 2''s schemas: §11''s versionless fields and records, the index''s objects and encodings, the rule, lock and migration records, the DROP push and its states, search.proto, directory.proto''s cards, §11.14''s field registry and RECORD.md''s search fields (§22.10''s M10 entry; owner decision 169)'
+      external: 'people: the owning sections'' reviewers read and sign the schemas (owner decision 99: no external review stands in)'
+    - item: 'EvsCommit.tla with the purger and IndexRollup.tla passing TLC at their bounds, their mutants refused and their liveness held, by the runs sidecartest/model/modelled.yml records at these sources, EvsCommit''s stories, the purger''s, among them (§22.10''s M10 entry; D-PHASE-7, R-TEST-10; TEST-M2-08, EVSB-M10-07, SEARCH-M10-02); where none stands, open: this report runs no TLC itself; the drop extension''s pass is M10''s exit''s, though its twins and stories are recorded in the same runs'
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InModelsPassTlc$, ./sidecartest/fault, -fault.gate-m10-in-tlc]}
+    - item: FS-64 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-64]}
+    - item: FS-65 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-65]}
+    - item: FS-66 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-66]}
+    - item: FS-66's hold written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-66/hold]}
+    - item: FS-67 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-67]}
+    - item: FS-68 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-68]}
+    - item: FS-69 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-69]}
+    - item: FS-70 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-70]}
+    - item: FS-71 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-71]}
+    - item: FS-72's migration written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-72/migration]}
+    - item: FS-72's rollback written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-72/rollback]}
+    - item: FS-73 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-73]}
+    - item: FS-74 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-74]}
+    - item: FS-75 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-75]}
+    - item: FS-76 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-76]}
+    - item: FS-76's team-record written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-76/team-record]}
+    - item: FS-76's mailbox written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-76/mailbox]}
+    - item: FS-76's hold written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-76/hold]}
+    - item: FS-77 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-77]}
+    - item: FS-77's app-host written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-77/app-host]}
+    - item: FS-78 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-78]}
+    - item: FS-78's mailbox written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-78/mailbox]}
+    - item: FS-78's hold written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-78/hold]}
+    - item: FS-79 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-79]}
+    - item: FS-80 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-80]}
+    - item: FS-80's team-record written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-80/team-record]}
+    - item: FS-81 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-81]}
+    - item: FS-83 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-83]}
+    - item: FS-83's app-host written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-83/app-host]}
+    - item: FS-83's team written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-83/team]}
+    - item: FS-84's cards written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-84/cards]}
+    - item: FS-86's cards written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-86/cards]}
+    - item: FS-87's index written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-87/index]}
+    - item: FS-88's searches written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-88/searches]}
+    - item: FS-89 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-89]}
+    - item: FS-90 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-90]}
+    - item: FS-91 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-91]}
+    - item: FS-92 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-92]}
+    - item: FS-93 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-93]}
+    - item: FS-94 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-94]}
+    - item: FS-95 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-95]}
+    - item: FS-96 written as a test against the fakes (§22.10's M10 entry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM10InRowWritten$, ./sidecartest/fault, -fault.gate-m10-in-written=FS-96]}
+    - item: 'the vector schemas fixed, §11''s format 2: testdata/evs/format2/''s schema (its messages, enums, the numbers format 2 relies on and its layouts) and vectors, the kind-5 segments, batches, windows and the DROP payload, and the citation and purge vectors, with the tests that hold the code to them byte for byte (§22.10''s M10 entry; EVS2-M10-01, EVS2-M10-03, EVS2-M10-04)'
+      tests:
+        - {repo: sidecar, package: ., names: [TestEvsFormat2SegmentVectors, TestEvsFormat2BatchVectors, TestEvsFormat2LayoutsMatchTheSchema, TestEvsDropVectors, TestEvsFormat2VectorFilesMatchTheSchema, TestEvsCitationVectors]}
+        - {repo: sidecar, package: ./evsservice, names: [TestPurgeCandidateVectors]}
+        - {repo: sidecar, package: ./protocol, names: [TestEvsFormat2MessagesKeepTheirNumbers, TestEvsFormat2EnumsKeepTheirNumbers, TestEvsFormat2RelyOnFormat1sNumbers, TestEvsFormat2NamesNoKeepLastN, TestEvsFormat2MetadataRowsComplete, TestEvsFormat2MessagesRoundTrip]}
+    - item: 'the vector schemas fixed, the index (§11.14; D-TEST-15): every file of testdata/index/ reproduced by the test its README names, normalizer 1''s tables and extractor 1''s conformance among them, and the header a writer records held to the linked build, on this host; byte-equal on every leg is M10''s exit''s (§22.10''s right column)'
+      tests:
+        - {repo: sidecar, package: ., names: [TestIndexVectorFilesAreAllReproduced, TestIndexCharsetLabels, TestIndexReferenceTableIsCurrent, TestIndexReferenceTableIsEntitiesJson, TestIndexConformanceFile, TestIndexStreamConformanceFile, TestIndexConformanceMail, TestIndexStreamConformanceMail, TestSearchSizeVectors, TestIndexSkipVectors, TestEntryVectors, TestDocKeyVectors, TestExtractVectors, TestIndexHeadVectors, TestIndexMergeVectors, TestNormalizationVectors, TestLinkedTablesAreNormalizerOne, TestIndexRollupVectors, TestShardVectors, TestSlotVectors, TestIndexHeadersRecordTheLinkedBuild]}
+    - item: 'the vector schemas fixed, format 2''s protos: every fenced block, search.proto''s, evsindex.proto''s and directory.proto''s cards among them, declared as DESIGN.md writes it, evsindex.proto and search.proto held to the numbers §11.14 prints, and a directory card''s stored form, its 2 KiB steps, caps and file bound (§22.10''s M10 entry; SEARCH-M10-01, RECORD-M10-02)'
+      tests:
+        - {repo: sidecar, package: ./protocol, names: [TestDeclarationsMatchTheirFences, TestIndexAndSearchFieldNumbersAreAsPrinted, TestIndexAndSearchHoldNoOneof, TestOnlySearchRequestReservesNumbers, TestIndexAndSearchEnumsOpenUnspecified, TestRemoteSearchKeepsItsMessageTypes, TestIndexMessagesEncodeInFieldOrder]}
+        - {repo: sidecar, package: ., names: [TestDirectoryCardWrittenFoldedAndPadded, TestDirectoryCardCaps, TestDirectoryCardFileBound, TestDirectoryCardDecoders]}
+    - item: 'the vector schemas fixed, directory.proto''s cards and repo files: a vector file pinning a signed card''s and repo file''s bytes, as testdata/evs/format2/ and testdata/index/ pin theirs, whose bytes freeze with format 2 at M10''s exit (§23.8; D-PHASE-11): none is checked in, so no test shows it yet'
+    - item: '§23.6''s M10 design closure: versioning per version, kind-5 and staged content, the purge with its allowance and sweep, the migration and git-lfs''s store (§11), the network''s rule (§7) and the repo lock (§8); the drop-history action: the DROP push, fence, job and states (§11); the index''s objects, encodings, field registry, partitions, coverage, exclusions, roll-up and lock, erasure cuts and rewrites; search.proto and the remote rules (§11); directory.proto''s cards (§16); the search tools, scopes, caches and taint (§5, §16); the phone and page fetch rules (§18); §2.8''s v7 rows as v8 amends them; RECORD.md''s search fields'
+      external: 'people: the Gn-in review reads and signs the closure (§23.8)'
+    - item: the changes since the last gate and §22's exit-test plan for M10 reviewed (§23.8's Gn-in)
+      external: 'people: the Gn-in review reads them'
   M10:
     - row: FS-64
       tests:
