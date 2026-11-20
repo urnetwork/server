@@ -1100,6 +1100,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 		migrationCurrentSuffix(server.CompetitionEpochThreeGoofeAdmissionMigrationVersion(), "epoch-three exact Goofe retained admission exception",
 			snMainnetMigrationFunction("competition_executor_admission_exception_guard()", "trigger", "plpgsql", "v", false, server.CompetitionEpochThreeGoofeAdmissionBodySql())),
 	},
+	// the per client and day record of probed exits that differ from every
+	// network their provider connects from, versioned by its position
+	[]snMainnetMigrationContract{providerEgressExitDayMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

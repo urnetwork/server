@@ -12,19 +12,32 @@ package model
 //   - ARIN Quality is the exit's: each of its connections carries the exit's
 //     non-Quality and verified-subscriber facts, with their database build
 //     epochs, in both slots of the pair (ApplyArinFacts), instead of its own
-//     address's. Risk stays the connection address's: it is the one ARIN
-//     fact that also gates Speed and Online, which keep their providers.
+//     address's. Risk is either address's: a risky exit, a known VPN, Tor or
+//     proxy address, takes the provider out of every bucket, Speed and Online
+//     included, as its own risky address always has.
 //   - Country is the exit's: the probe corrects a lookup's country, as
-//     before, and when the exit is in none of the networks the provider
+//     before, and when the exit differs from every network the provider
 //     connects from, it places the provider ahead of a derived location and
 //     however coarse, since both then describe the network the provider
 //     connects from, not the exit.
-//   - Units: a provider whose exit is in none of the networks its
-//     connections came from at the probe (ExitDiffers) gets the mark of a
-//     declared proxy egress (MarkVerifyProxiedEgress), so it counts at no SN
-//     Top, capture the flag or extender unit. A network is the /29 of an IPv4
-//     address or the /56 of an IPv6 one, as each connection's address hash
-//     keeps it (server.ClientIpHashForAddr); the IPv4 /29 is the head unit.
+//   - Units and settlement: a provider whose exit differs from every network
+//     it connected from at the probe (ExitDiffers) gets the mark of a declared
+//     proxy egress (MarkVerifyProxiedEgress), so it counts at no SN Top,
+//     capture the flag or extender unit, and its day is recorded durably for
+//     the settlement epoch (provider_egress_exit_day).
+//
+// The exit differs only on positive evidence (compareProviderEgressExit): no
+// network the provider connected from at the probe is the exit's network in
+// its address family (the /29 of an IPv4 address, the /56 of an IPv6 one, as
+// each connection's address hash keeps it, server.ClientIpHashForAddr), none
+// is in the exit's autonomous system in either family, and every system is
+// known. So a carrier NAT or a second line of one ISP, and a provider that
+// connects over IPv6 while the probe exits over IPv4, are one network, while
+// a farm that connects through a proxy list in other systems than its exit is
+// not. The connect announce records the system of each network a probed
+// provider connects from (SetProviderConnectionNetworkAsn); a network without
+// that record is no evidence, so a provider is first judged to differ at a
+// probe after it has connected since an earlier one.
 //
 // The exit address is never stored. The ingest judges it once, and keeps the
 // judgement per client in Redis while the probe is fresh
@@ -35,12 +48,13 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
-	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -55,35 +69,42 @@ type ProviderEgressExitJudgement struct {
 	// The exit's ARIN facts in each slot of the ingest's database pair, as
 	// setArinConnectionFacts stamps a connection. A latest epoch of 0 is an
 	// exit no database classified: connections keep their own facts.
+	ArinRisk                  bool      `json:"arin_risk"`
 	ArinNonQuality            bool      `json:"arin_non_quality"`
 	ArinQualityVerified       bool      `json:"arin_quality_verified"`
 	ArinDatabaseBuildEpoch    int64     `json:"arin_database_build_epoch"`
 	ArinLookupAt              time.Time `json:"arin_lookup_at"`
+	ArinOldRisk               bool      `json:"arin_old_risk"`
 	ArinOldNonQuality         bool      `json:"arin_old_non_quality"`
 	ArinOldQualityVerified    bool      `json:"arin_old_quality_verified"`
 	ArinOldDatabaseBuildEpoch int64     `json:"arin_old_database_build_epoch"`
-	// the exit is in none of the networks the provider's connections came
-	// from at the probe
+	// the exit differs from every network the provider connected from at the
+	// probe (compareProviderEgressExit)
 	ExitDiffers bool `json:"exit_differs"`
 }
 
-// Replaces the Quality facts of a connection's own address with the exit's.
+// Judges a connection's ARIN facts by the exit as well as its own address.
 // Each slot's non-Quality and verified-subscriber facts and its epoch become
-// the exit's; risk stays the connection's, and a risky slot is never
-// verified. An exit without an old slot clears the connection's: under a
-// fallback to the old database, the connection's own address would otherwise
-// decide its Quality. A nil judgement, or an exit no database classified,
-// changes nothing.
+// the exit's. Risk is either address's (owner decision 2026-11-20, "apply exit
+// risk too"): a risky exit, a known VPN, Tor or proxy address among them,
+// makes the connection risky as if it connected from there, which excludes it
+// from every bucket, while the connection's own risk still holds; a risky
+// slot is never verified. An exit without an old slot clears the
+// connection's: under a fallback to the old database, the connection's own
+// address would otherwise decide its Quality. A nil judgement, or an exit no
+// database classified, changes nothing.
 func (self *ProviderEgressExitJudgement) ApplyArinFacts(scores *ConnectionLocationScores) {
 	if self == nil || scores == nil || self.ArinDatabaseBuildEpoch <= 0 {
 		return
 	}
+	scores.ArinRisk = scores.ArinRisk || self.ArinRisk
 	scores.ArinNonQuality = self.ArinNonQuality
 	scores.ArinQualityVerified = self.ArinQualityVerified && !scores.ArinRisk
 	scores.ArinDatabaseBuildEpoch = self.ArinDatabaseBuildEpoch
 	lookupAt := self.ArinLookupAt
 	scores.ArinLookupAt = &lookupAt
 	if 0 < self.ArinOldDatabaseBuildEpoch {
+		scores.ArinOldRisk = scores.ArinOldRisk || self.ArinOldRisk
 		scores.ArinOldNonQuality = self.ArinOldNonQuality
 		scores.ArinOldQualityVerified = self.ArinOldQualityVerified && !scores.ArinOldRisk
 		scores.ArinOldDatabaseBuildEpoch = self.ArinOldDatabaseBuildEpoch
@@ -95,8 +116,8 @@ func (self *ProviderEgressExitJudgement) ApplyArinFacts(scores *ConnectionLocati
 	}
 }
 
-// Whether the provider's exit is in none of the networks it connects from. A
-// nil judgement is no evidence that it is.
+// Whether the provider's exit differs from every network it connects from. A
+// nil judgement is no evidence that it does.
 func (self *ProviderEgressExitJudgement) Differs() bool {
 	return self != nil && self.ExitDiffers
 }
@@ -163,28 +184,163 @@ func GetProviderEgressExitJudgement(ctx context.Context, clientId server.Id) *Pr
 	return judgement
 }
 
-// Whether the exit's network is none of the connections' networks. Each hash
-// is server.ClientIpHashForAddr's. Without a connection to compare, it is
-// not: there is no evidence the provider connects from anywhere else.
-func providerEgressExitDiffers(exitIp netip.Addr, connectionAddressHashes [][32]byte) bool {
-	if len(connectionAddressHashes) == 0 {
-		return false
-	}
-	return !slices.Contains(connectionAddressHashes, server.ClientIpHashForAddr(exitIp.Unmap()))
+// One network a provider connected from, or its exit: the address family (4
+// or 6, 0 when unknown), the address hash (server.ClientIpHashForAddr: the /29
+// of an IPv4 address, the /56 of an IPv6 one) and the autonomous system (0
+// when unknown).
+type providerEgressNetwork struct {
+	family      int
+	addressHash [32]byte
+	asn         uint32
 }
 
-// The address hashes of the client's connections that were live at the
-// probe: every connected one, and every one that closed at or after the probe
-// less the clock skew the ingest allows the prober (skew). It reads
-// network_client_connection_client_id_connect_time, whose rows for one client
-// the closed-connection sweep bounds.
-func getProviderConnectionAddressHashesAt(ctx context.Context, clientId server.Id, observedAt time.Time, skew time.Duration) [][32]byte {
-	connectionAddressHashes := [][32]byte{}
+// How an exit compares with the networks its provider connected from at the
+// probe.
+type providerEgressExitComparison struct {
+	// on positive evidence only: there is a network to compare, none is the
+	// exit's network in its family or in the exit's system in either family,
+	// and every system is known
+	differs bool
+	// no network is in the exit's address family
+	crossFamily bool
+}
+
+// Compares an exit with the networks its provider connected from. A network
+// with an unknown system, or an exit with one, could be the exit's own, so it
+// is no evidence of a difference.
+func compareProviderEgressExit(exit providerEgressNetwork, networks []providerEgressNetwork) providerEgressExitComparison {
+	if len(networks) == 0 {
+		return providerEgressExitComparison{}
+	}
+	sameFamily := false
+	sameNetwork := false
+	sameAsn := false
+	unknownAsn := exit.asn == 0
+	for _, network := range networks {
+		if network.family == exit.family {
+			sameFamily = true
+			if network.addressHash == exit.addressHash {
+				sameNetwork = true
+			}
+		}
+		switch {
+		case network.asn == 0:
+			unknownAsn = true
+		case network.asn == exit.asn:
+			sameAsn = true
+		}
+	}
+	return providerEgressExitComparison{
+		differs:     !sameNetwork && !sameAsn && !unknownAsn,
+		crossFamily: !sameFamily,
+	}
+}
+
+// Replaces the GeoLite2 ASN lookup (server.GetIpAsn) while set. Tests only.
+var providerNetworkAsnOverride atomic.Pointer[func(netip.Addr) uint32]
+
+// The autonomous system of an address, 0 when unknown.
+func providerNetworkAsn(addr netip.Addr) uint32 {
+	if override := providerNetworkAsnOverride.Load(); override != nil {
+		return (*override)(addr)
+	}
+	if asn := server.GetIpAsn(addr); asn != nil {
+		return asn.Number
+	}
+	return 0
+}
+
+// Numbers addresses with asnOf in place of GeoLite2 ASN until restore is
+// called. Tests only; they number their synthetic addresses.
+func Testing_SetProviderNetworkAsn(asnOf func(netip.Addr) uint32) (restore func()) {
+	previous := providerNetworkAsnOverride.Swap(&asnOf)
+	return func() {
+		providerNetworkAsnOverride.Store(previous)
+	}
+}
+
+// The exit's network.
+func providerEgressNetworkOf(addr netip.Addr) providerEgressNetwork {
+	addr = addr.Unmap()
+	return providerEgressNetwork{
+		family:      server.IpVersionForAddr(addr),
+		addressHash: server.ClientIpHashForAddr(addr),
+		asn:         providerNetworkAsn(addr),
+	}
+}
+
+func providerConnectionNetworkAsnKey(clientId server.Id) string {
+	return fmt.Sprintf("{pnet_%s}", clientId)
+}
+
+// Records the autonomous system of the network a probed provider's connection
+// came from, by the connection row's own address hash (server.ClientIpHash),
+// for the comparison of the provider's next probe. One field per network,
+// kept while the provider's probes are fresh. An address whose system is
+// unknown records nothing, which is no evidence.
+func SetProviderConnectionNetworkAsn(ctx context.Context, clientId server.Id, clientIp string) {
+	addr, err := netip.ParseAddr(clientIp)
+	if err != nil {
+		return
+	}
+	asn := providerNetworkAsn(addr)
+	if asn == 0 {
+		return
+	}
+	addressHash, err := server.ClientIpHash(clientIp)
+	if err != nil {
+		return
+	}
+	key := providerConnectionNetworkAsnKey(clientId)
+	server.Redis(ctx, func(r server.RedisClient) {
+		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.HSet(ctx, key, hex.EncodeToString(addressHash[:]), strconv.FormatUint(uint64(asn), 10))
+			pipe.PExpire(ctx, key, ProviderEgressLocationMaxAge)
+			return nil
+		})
+		server.Raise(err)
+	})
+}
+
+// The recorded systems of the client's networks, by address hash. A
+// malformed field is skipped: it is only less evidence.
+func getProviderConnectionNetworkAsns(ctx context.Context, clientId server.Id) map[[32]byte]uint32 {
+	asns := map[[32]byte]uint32{}
+	server.Redis(ctx, func(r server.RedisClient) {
+		values, err := r.HGetAll(ctx, providerConnectionNetworkAsnKey(clientId)).Result()
+		if errors.Is(err, redis.Nil) {
+			return
+		}
+		server.Raise(err)
+		for field, value := range values {
+			addressHash, err := hex.DecodeString(field)
+			if err != nil || len(addressHash) != 32 {
+				continue
+			}
+			asn, err := strconv.ParseUint(value, 10, 32)
+			if err != nil {
+				continue
+			}
+			asns[[32]byte(addressHash)] = uint32(asn)
+		}
+	})
+	return asns
+}
+
+// The networks of the client's connections that were live at the probe:
+// every connected one, and every one that closed at or after the probe less
+// the clock skew the ingest allows the prober (skew), each with its recorded
+// system. It reads network_client_connection_client_id_connect_time, whose
+// rows for one client the closed-connection sweep bounds.
+func getProviderConnectionNetworksAt(ctx context.Context, clientId server.Id, observedAt time.Time, skew time.Duration) []providerEgressNetwork {
+	networks := []providerEgressNetwork{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT DISTINCT client_address_hash
+			SELECT DISTINCT
+				client_address_hash,
+				COALESCE(ip_version, 0)
 			FROM network_client_connection
 			WHERE
 				client_id = $1 AND
@@ -197,14 +353,64 @@ func getProviderConnectionAddressHashesAt(ctx context.Context, clientId server.I
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var addressHash []byte
-				server.Raise(result.Scan(&addressHash))
+				var family int
+				server.Raise(result.Scan(&addressHash, &family))
 				if len(addressHash) == 32 {
-					connectionAddressHashes = append(connectionAddressHashes, [32]byte(addressHash))
+					networks = append(networks, providerEgressNetwork{
+						family:      family,
+						addressHash: [32]byte(addressHash),
+					})
 				}
 			}
 		})
 	})
-	return connectionAddressHashes
+	if 0 < len(networks) {
+		asns := getProviderConnectionNetworkAsns(ctx, clientId)
+		for i := range networks {
+			networks[i].asn = asns[networks[i].addressHash]
+		}
+	}
+	return networks
+}
+
+// Counts a differing judgement in its client's row for the UTC day its probe
+// observed the exit. A replay of a probe already counted counts nothing.
+func recordProviderEgressExitDay(ctx context.Context, clientId server.Id, observedAt time.Time, crossFamily bool) {
+	observedAt = observedAt.UTC()
+	day := time.Date(observedAt.Year(), observedAt.Month(), observedAt.Day(), 0, 0, 0, 0, time.UTC)
+	crossFamilyCount := 0
+	if crossFamily {
+		crossFamilyCount = 1
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		server.RaisePgResult(conn.Exec(
+			ctx,
+			`
+			INSERT INTO provider_egress_exit_day (
+				day,
+				client_id,
+				network_id,
+				differs_count,
+				cross_family_count,
+				first_observed_at,
+				last_observed_at
+			)
+			SELECT $1, network_client.client_id, network_client.network_id, 1, $3, $4, $4
+			FROM network_client
+			WHERE network_client.client_id = $2
+			ON CONFLICT (day, client_id) DO UPDATE
+			SET
+				differs_count = provider_egress_exit_day.differs_count + 1,
+				cross_family_count = provider_egress_exit_day.cross_family_count + EXCLUDED.cross_family_count,
+				last_observed_at = EXCLUDED.last_observed_at
+			WHERE provider_egress_exit_day.last_observed_at < EXCLUDED.last_observed_at
+			`,
+			day,
+			clientId,
+			crossFamilyCount,
+			observedAt,
+		))
+	})
 }
 
 // Judges a provider by the exit a probe observed at judgement.ObservedAt,
@@ -212,11 +418,13 @@ func getProviderConnectionAddressHashesAt(ctx context.Context, clientId server.I
 // judgement with ExitDiffers set and whether it was the latest:
 //
 //  1. whether the exit differs from every network the provider connected
-//     from at the probe, allowing skew for the prober's clock;
+//     from at the probe, allowing skew for the prober's clock
+//     (compareProviderEgressExit);
 //  2. the judgement, kept for the connect announce, unless a later probe's is
 //     kept;
-//  3. for the latest judgement, the 11-19 mark of a declared proxy egress
-//     when the exit differs;
+//  3. for the latest judgement whose exit differs, the 11-19 mark of a
+//     declared proxy egress, and the day in the durable record
+//     (recordProviderEgressExitDay);
 //  4. and for the latest judgement, the provider's live connections, judged
 //     by it and placed by locationId, the probe's place
 //     (judgeProviderConnectionsByExit).
@@ -230,15 +438,17 @@ func JudgeProviderEgressExit(
 	locationId server.Id,
 	skew time.Duration,
 ) (judged ProviderEgressExitJudgement, latest bool) {
-	judgement.ExitDiffers = providerEgressExitDiffers(
-		exitIp,
-		getProviderConnectionAddressHashesAt(ctx, clientId, judgement.ObservedAt, skew),
+	comparison := compareProviderEgressExit(
+		providerEgressNetworkOf(exitIp),
+		getProviderConnectionNetworksAt(ctx, clientId, judgement.ObservedAt, skew),
 	)
+	judgement.ExitDiffers = comparison.differs
 	if !setProviderEgressExitJudgement(ctx, clientId, &judgement) {
 		return judgement, false
 	}
-	if judgement.ExitDiffers {
+	if comparison.differs {
 		MarkVerifyProxiedEgress(ctx, clientId)
+		recordProviderEgressExitDay(ctx, clientId, judgement.ObservedAt, comparison.crossFamily)
 	}
 	judgeProviderConnectionsByExit(ctx, clientId, &judgement, locationId)
 	return judgement, true
@@ -256,9 +466,9 @@ type providerExitConnectionRow struct {
 }
 
 // Judges the client's live connections by its exit, as SetConnectionLocation
-// in the connect announce judges a new one: their ARIN Quality facts become
-// the exit's (ApplyArinFacts), and when the exit differs, a row is placed at
-// the probe's place. A placed row, like one the probe placed at connect, has
+// in the connect announce judges a new one: their ARIN facts are judged by the
+// exit (ApplyArinFacts), and when the exit differs, a row is placed at the
+// probe's place. A placed row, like one the probe placed at connect, has
 // no genesis or radius of its own. A row already judged so is not written. A
 // row the connect announce rewrote since it was read, as its write token
 // shows, is left as written: that write judged it by the stored judgement.
@@ -347,7 +557,8 @@ func judgeProviderConnectionsByExit(ctx context.Context, clientId server.Id, jud
 		for _, row := range rows {
 			judgedScores := row.scores
 			judgement.ApplyArinFacts(&judgedScores)
-			factsChanged := judgedScores.ArinNonQuality != row.scores.ArinNonQuality ||
+			factsChanged := judgedScores.ArinRisk != row.scores.ArinRisk ||
+				judgedScores.ArinNonQuality != row.scores.ArinNonQuality ||
 				judgedScores.ArinQualityVerified != row.scores.ArinQualityVerified ||
 				judgedScores.ArinDatabaseBuildEpoch != row.scores.ArinDatabaseBuildEpoch ||
 				judgedScores.ArinOldRisk != row.scores.ArinOldRisk ||
@@ -385,7 +596,8 @@ func judgeProviderConnectionsByExit(ctx context.Context, clientId server.Id, jud
 					arin_old_non_quality = $12,
 					arin_old_quality_verified = $13,
 					arin_old_database_build_epoch = $14,
-					arin_old_quality_write_token = $15
+					arin_old_quality_write_token = $15,
+					arin_risk = $17
 				WHERE
 					connection_id = $1 AND
 					arin_quality_write_token IS NOT DISTINCT FROM $16
@@ -406,6 +618,7 @@ func judgeProviderConnectionsByExit(ctx context.Context, clientId server.Id, jud
 				judgedScores.ArinOldDatabaseBuildEpoch,
 				server.NewId(),
 				row.writeToken,
+				judgedScores.ArinRisk,
 			))
 		}
 	})
