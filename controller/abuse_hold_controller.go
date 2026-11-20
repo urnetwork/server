@@ -488,11 +488,20 @@ type LegalHoldResult struct {
 	Hold *model.LegalHold
 	// false when the hold stood already: a retry
 	Inserted bool
+	// From when the hold's terms bind every deleter, evs's purge and drop job among them: BindTimeout after the call
+	// returned, by when api had seen its object acknowledged (owner decision 629). Before it, a deleter may still act
+	// on a read of hold/ from before the write.
+	BindTime time.Time
+}
+
+// When terms api saw acknowledged by now bind every deleter (owner decision 629).
+func legalHoldBindTime(now time.Time) time.Time {
+	return now.Add(model.DefaultAbuseHoldSettings().BindTimeout)
 }
 
 // Places a hold (model.PlaceLegalHold): the object, then the row with its record owed, then the post-placement
 // hook, which runs for a hold that stood already too, since a retry after a crash finishes what the first call
-// began. Refuses unless holds_enabled.
+// began. Refuses unless holds_enabled. The result says from when the hold binds every deleter.
 func PlaceLegalHold(ctx context.Context, args *model.LegalHoldArgs) (*LegalHoldResult, error) {
 	_, placed, now := currentAbuseHoldDeps()
 	hold, inserted, err := model.PlaceLegalHold(ctx, args, now(), func(ctx context.Context, tx server.PgTx, hold *model.LegalHold) {
@@ -501,11 +510,14 @@ func PlaceLegalHold(ctx context.Context, args *model.LegalHoldArgs) (*LegalHoldR
 	if err != nil {
 		return nil, err
 	}
+	// the object was acknowledged before the row committed, so a time read now is at or after its acknowledgement
+	bindTime := legalHoldBindTime(now())
 	placed(ctx, hold)
-	return &LegalHoldResult{Hold: hold, Inserted: inserted}, nil
+	return &LegalHoldResult{Hold: hold, Inserted: inserted, BindTime: bindTime}, nil
 }
 
-// Renews a preserve_2703f hold once (model.RenewLegalHold), owing the renewed record.
+// Renews a preserve_2703f hold once (model.RenewLegalHold), owing the renewed record. The result says from when the
+// renewed terms bind every deleter.
 func RenewLegalHold(ctx context.Context, networkId server.Id, caseId server.Id) (*LegalHoldResult, error) {
 	_, _, now := currentAbuseHoldDeps()
 	hold, err := model.RenewLegalHold(ctx, networkId, caseId, now(), func(ctx context.Context, tx server.PgTx, hold *model.LegalHold) {
@@ -514,7 +526,7 @@ func RenewLegalHold(ctx context.Context, networkId server.Id, caseId server.Id) 
 	if err != nil {
 		return nil, err
 	}
-	return &LegalHoldResult{Hold: hold, Inserted: true}, nil
+	return &LegalHoldResult{Hold: hold, Inserted: true, BindTime: legalHoldBindTime(now())}, nil
 }
 
 // ----- the staff kinds -----
@@ -554,6 +566,9 @@ func abuseStaffHoldView(hold *model.LegalHold) *AbuseStaffHoldView {
 type AbuseStaffHoldResult struct {
 	Hold     *AbuseStaffHoldView `json:"hold"`
 	Inserted bool                `json:"inserted"`
+	// From when the hold's terms bind every deleter (LegalHoldResult.BindTime; owner decision 629): what api's
+	// placement says, so the person placing it knows a deleter may act on an older read of hold/ until then.
+	BindTimeMs int64 `json:"bind_time_ms"`
 }
 
 // place_hold's body.
@@ -595,6 +610,8 @@ type AbuseStaffReportCsamResult struct {
 	Hold        *AbuseStaffHoldView     `json:"hold,omitempty"`
 	HoldPlaced  bool                    `json:"hold_placed"`
 	HoldRefusal string                  `json:"hold_refusal,omitempty"`
+	// From when a placed hold binds every deleter (owner decision 629), 0 with no hold placed.
+	HoldBindTimeMs int64 `json:"hold_bind_time_ms,omitempty"`
 }
 
 // A staff body's scope: absent or "network" for the network, else a list of repo ids.
@@ -684,6 +701,7 @@ func abuseStaffReportCsam(ctx context.Context, staff *AbuseStaff, args *abuseSta
 	}
 	result.Hold = abuseStaffHoldView(placed.Hold)
 	result.HoldPlaced = true
+	result.HoldBindTimeMs = placed.BindTime.UnixMilli()
 	return result, nil
 }
 
@@ -719,7 +737,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return &AbuseStaffHoldResult{Hold: abuseStaffHoldView(result.Hold), Inserted: result.Inserted}, nil
+			return &AbuseStaffHoldResult{Hold: abuseStaffHoldView(result.Hold), Inserted: result.Inserted, BindTimeMs: result.BindTime.UnixMilli()}, nil
 		},
 	})
 
@@ -735,7 +753,7 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return &AbuseStaffHoldResult{Hold: abuseStaffHoldView(result.Hold), Inserted: result.Inserted}, nil
+			return &AbuseStaffHoldResult{Hold: abuseStaffHoldView(result.Hold), Inserted: result.Inserted, BindTimeMs: result.BindTime.UnixMilli()}, nil
 		},
 	})
 
