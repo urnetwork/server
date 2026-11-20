@@ -1700,6 +1700,47 @@
           "legendFormat": "{{event}} {{service}}"
         }
       ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Redis dial failures / s by service, route and reason",
+      "description": "Failed Redis pool dials from the Go services, by the address chosen relative to the configured authority and the error kind.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 84
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, route, reason) (rate(urnetwork_redis_dial_failures_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} {{route}} {{reason}}"
+        }
+      ]
     }
   ]
 }
