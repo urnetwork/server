@@ -186,27 +186,32 @@ func TestHostReadyWithEverySeam(t *testing.T) {
 
 // Each seam server has no implementation of yet keeps the block not ready, and says which: the quota and the
 // authorization state; so do the receipt keys, which a block reads from its vault, and a segment cluster, without
-// which every upload would answer 503.
+// which every upload would answer 503. With no quota there is no usage producer, so the versionless purge, which
+// reports what it frees there, is not built either and is named beside it.
 func TestHostNotReadyWithoutEachSeam(t *testing.T) {
 	t.Setenv("WARP_VAULT_HOME", filepath.Join(t.TempDir(), "vault"))
 	cases := []struct {
 		name   string
 		adjust func(host *sidecar.ServiceHost, deps *HostDeps)
-		want   string
+		wants  []string
 	}{
-		{"quota", func(host *sidecar.ServiceHost, deps *HostDeps) { host.Quota = nil }, "QUOTA-M2-11"},
-		{"auth state", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.AuthState = nil }, "ACL-M2-14"},
-		{"gate views", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.GateViews = nil }, "NewAclGateViews"},
-		{"receipt keys", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.ReceiptKeys = nil }, HostReceiptKeysFileName},
+		{"quota", func(host *sidecar.ServiceHost, deps *HostDeps) { host.Quota = nil }, []string{"QUOTA-M2-11", "EVSB-M10-01"}},
+		{"auth state", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.AuthState = nil }, []string{"ACL-M2-14"}},
+		{"gate views", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.GateViews = nil }, []string{"NewAclGateViews"}},
+		{"receipt keys", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.ReceiptKeys = nil }, []string{HostReceiptKeysFileName}},
 		{"segment cluster", func(host *sidecar.ServiceHost, deps *HostDeps) {
 			host.Blobs = hostTestNoSegmentBlobs{BlobStore: host.Blobs}
-		}, "segment cluster"},
+		}, []string{"segment cluster"}},
 	}
 	for _, c := range cases {
 		evsHost := newHostTestHost(t, c.adjust)
 		missing := evsHost.Missing()
-		if len(missing) != 1 || !strings.Contains(missing[0], c.want) {
-			t.Errorf("%s: missing %v, want one naming %s", c.name, missing, c.want)
+		named := len(missing) == len(c.wants)
+		for i := 0; named && i < len(missing); i += 1 {
+			named = strings.Contains(missing[i], c.wants[i])
+		}
+		if !named {
+			t.Errorf("%s: missing %v, want one each naming %v, in that order", c.name, missing, c.wants)
 		}
 		if evsHost.Ready() {
 			t.Errorf("%s: ready without it", c.name)
