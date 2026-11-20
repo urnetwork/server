@@ -161,7 +161,7 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 		"GetNetworkUser":               {count: 1, class: adminUserIdNetwork, why: "the user's account and the name of the network it owns"},
 	},
 	"model/network_verified_model.go": {
-		"<decl>": {count: 2, class: adminUserIdMember, why: "the owner's verified sign-in verifies the network (QD-350): a team's owner of record has none, so only payment verifies a team, failing closed"},
+		"networkVerifiedSql": {count: 1, class: adminUserIdMember, why: "a personal network's owner's verified sign-in verifies it (QD-350); a team's owner of record has none, so a team verifies by payment or a live Owner's verified sign-in read from network_member (§21.7), member-aware"},
 	},
 	"model/network_wallet_mapping_consent.go": {
 		"checkNetworkWalletMappingOwner": {count: 1, class: adminUserIdOwner, why: "the account's wallet consent"},

@@ -1,17 +1,24 @@
 package model
 
 // network_verified (§21.7, owner decisions 41 and 96; Q-ABUSE-2; ABUSE-M5-07): what public names (§12.8, §13.9)
-// and internet mail (§14.7) always need. A network is verified while either holds:
+// and internet mail (§14.7) always need, and what §12.7's _mta-sts waits for (owner decision 630). A network is
+// verified while either holds:
 //
 //   - a payment method: an in-window transfer_balance row with paid true (start_time <= now < end_time;
 //     server/db_migrations.go:1653-1655), never `active`, which is bytes left;
-//   - its owner user's verified phone or email, Apple and Google sign-ins counting: a network_user_auth_password
-//     row of the network's admin_user_id, email or phone, with verified true, or a network_user_auth_sso row of
-//     that user for Apple or Google (plan-ABUSE-small-readings #19). The owner is network.admin_user_id until
-//     TEAM-M6-02 names an Owner.
+//   - an owner user's verified phone or email, Apple and Google sign-ins counting: a network_user_auth_password
+//     row of the user, email or phone, with verified true, or a network_user_auth_sso row of that user for Apple
+//     or Google (plan-ABUSE-small-readings #19). A personal network's owner user is network.admin_user_id
+//     (QD-350). A team's is each live Owner, a network_member row with role owner that is not JIT pending
+//     (§7.5, §21.7: M6 names a team's Owner), read only where the binary links MG6; a team's admin_user_id is a
+//     synthetic owner of record with no sign-in row (network_team_model.go), so it never verifies a team.
 //
 // Wallet, seed phrase and guest sign-ins never count, so a network whose only sign-ins are anonymous stays
 // unverified while still leaving probation by age (owner decision 96).
+//
+// UpdateNetworkVerified also reconciles the network's zones whose _mta-sts no longer follows its verification
+// (ReconcileNetworkZoneMailPolicy, dns_zone_model.go), since a zone's set is otherwise recomputed only at a write
+// of its own.
 //
 // It is cached as Pro is (pro_model.go): an in-process tier in front of api-13's Redis key
 // {sq_<network_id>}verified, which §2.8's api-1 and api-13 rows list (plan-ABUSE-metadata-rows #1), holding
@@ -39,36 +46,63 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The network's verification as one boolean, beside the network row it reads from, for a query whose FROM names
-// `network` and whose $2 is the time it asks at. A missing admin user or balance reads false.
-const networkVerifiedSql = `
-	(
-		EXISTS (
-			SELECT 1
-			FROM transfer_balance
-			WHERE
-				transfer_balance.network_id = network.network_id AND
-				transfer_balance.paid AND
-				transfer_balance.start_time <= $2 AND
-				$2 < transfer_balance.end_time
-		) OR
-		EXISTS (
-			SELECT 1
-			FROM network_user_auth_password
-			WHERE
-				network_user_auth_password.user_id = network.admin_user_id AND
-				network_user_auth_password.auth_type IN ('email', 'phone') AND
-				network_user_auth_password.verified
-		) OR
-		EXISTS (
-			SELECT 1
-			FROM network_user_auth_sso
-			WHERE
-				network_user_auth_sso.user_id = network.admin_user_id AND
-				network_user_auth_sso.auth_type IN ('apple', 'google')
+// A verified sign-in of the user userIdColumn names, as one boolean: a password sign-in by email or phone with
+// verified true, or an Apple or Google sign-in. Wallet, seed phrase and guest sign-ins never count.
+func networkVerifiedSignInSql(userIdColumn string) string {
+	return `
+		(
+			EXISTS (
+				SELECT 1
+				FROM network_user_auth_password
+				WHERE
+					network_user_auth_password.user_id = ` + userIdColumn + ` AND
+					network_user_auth_password.auth_type IN ('email', 'phone') AND
+					network_user_auth_password.verified
+			) OR
+			EXISTS (
+				SELECT 1
+				FROM network_user_auth_sso
+				WHERE
+					network_user_auth_sso.user_id = ` + userIdColumn + ` AND
+					network_user_auth_sso.auth_type IN ('apple', 'google')
+			)
 		)
-	)
-`
+	`
+}
+
+// The network's verification as one boolean, beside the network row it reads from, for a query whose FROM names
+// `network` and whose $2 is the time it asks at. A missing owner user or balance reads false. A team's live Owners
+// are read only where the binary links MG6, whose table network_member is.
+func networkVerifiedSql() string {
+	ownerSignIn := networkVerifiedSignInSql("network.admin_user_id")
+	if server.SidecarMg6Linked() {
+		ownerSignIn += `
+			OR EXISTS (
+				SELECT 1
+				FROM network_member
+				WHERE
+					network_member.network_id = network.network_id AND
+					network_member.role = '` + string(NetworkMemberRoleOwner) + `' AND
+					NOT network_member.pending AND
+					` + networkVerifiedSignInSql("network_member.user_id") + `
+			)
+		`
+	}
+	return `
+		(
+			EXISTS (
+				SELECT 1
+				FROM transfer_balance
+				WHERE
+					transfer_balance.network_id = network.network_id AND
+					transfer_balance.paid AND
+					transfer_balance.start_time <= $2 AND
+					$2 < transfer_balance.end_time
+			) OR
+			` + ownerSignIn + `
+		)
+	`
+}
 
 // Tunables of network_verified's cache.
 type NetworkVerifiedSettings struct {
@@ -285,7 +319,7 @@ func loadNetworkVerifiedWithConn(ctx context.Context, query server.PgCanQuery, n
 		`
 			SELECT
 				COALESCE((
-					SELECT `+networkVerifiedSql+`
+					SELECT `+networkVerifiedSql()+`
 					FROM network
 					WHERE network.network_id = $1
 				), false),
@@ -304,23 +338,35 @@ func loadNetworkVerifiedWithConn(ctx context.Context, query server.PgCanQuery, n
 	return
 }
 
+// Whether the network is verified at now, read through query from the source of truth, never the cache, and writing
+// neither tier: for a writer in a transaction whose result must follow the verification as committed, as the zone's
+// mail policy does (dns_zone_model.go), where a cached answer could be a window stale and a transaction's own
+// uncommitted change must never be cached.
+func isNetworkVerifiedWithQuery(ctx context.Context, query server.PgCanQuery, networkId server.Id, now time.Time) bool {
+	return loadNetworkVerifiedWithConn(ctx, query, networkId, now).verified
+}
+
 // Whether the network is verified (§21.7): through this process's tier, then Redis, loading from Postgres only on a
 // miss of both. Not for an inline path, which reads NewAbuseGate's memory instead (I-12).
 func IsNetworkVerified(ctx context.Context, networkId server.Id) bool {
 	return networkVerified.isVerified(ctx, networkId)
 }
 
-// Recomputes the network's verification from Postgres and refreshes both tiers, returning it. Call it after the
-// transaction that changed a balance or a sign-in commits, never inside it, as UpdateProNetwork's doc says: inside, it
-// would cache what the transaction cannot see yet, and a rollback would leave the cache written. It can replace only
-// this process's tier; the others' live out LocalCacheTtl.
+// Recomputes the network's verification from Postgres and refreshes both tiers, returning it, then reconciles the
+// network's zones whose _mta-sts no longer follows it (ReconcileNetworkZoneMailPolicy; §12.7, owner decision 630).
+// Call it after the transaction that changed a balance or a sign-in commits, never inside it, as UpdateProNetwork's
+// doc says: inside, it would cache what the transaction cannot see yet, and a rollback would leave the cache written.
+// It can replace only this process's tier; the others' live out LocalCacheTtl.
 func UpdateNetworkVerified(ctx context.Context, networkId server.Id) bool {
-	return networkVerified.update(nil, ctx, networkId)
+	return UpdateNetworkVerifiedInConn(nil, ctx, networkId)
 }
 
-// UpdateNetworkVerified on the caller's Postgres session; nil selects the outer acquisition boundary.
+// UpdateNetworkVerified on the caller's Postgres session, which must hold no transaction; nil selects the outer
+// acquisition boundary.
 func UpdateNetworkVerifiedInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) bool {
-	return networkVerified.update(connOwner, ctx, networkId)
+	verified := networkVerified.update(connOwner, ctx, networkId)
+	ReconcileNetworkZoneMailPolicyInConn(connOwner, ctx, networkId)
+	return verified
 }
 
 // Both tiers of the network's entry, without loading or filling either, for tests that pin when a writer refreshes
