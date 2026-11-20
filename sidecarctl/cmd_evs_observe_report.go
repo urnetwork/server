@@ -293,13 +293,15 @@ func readEvsObserveReportRepoJobs(ctx context.Context, cluster sidecar.BlobClust
 	if err != nil {
 		return nil, fmt.Errorf("its drop table: %w", err)
 	}
-	encoded, err := io.ReadAll(io.LimitReader(object.Body, int64(settings.dropSettings.TableByteCount)+1))
+	// held entries take a table past TableByteCount, outside its bound (owner decision 643), as evs's own read takes in
+	readByteCount := settings.dropSettings.TableReadByteCount()
+	encoded, err := io.ReadAll(io.LimitReader(object.Body, readByteCount+1))
 	object.Body.Close()
 	if err != nil {
 		return nil, fmt.Errorf("its drop table: %w", err)
 	}
-	if settings.dropSettings.TableByteCount < len(encoded) {
-		return nil, fmt.Errorf("its drop table: %w: past %d bytes", evsservice.ErrDropTableInvalid, settings.dropSettings.TableByteCount)
+	if readByteCount < int64(len(encoded)) {
+		return nil, fmt.Errorf("its drop table: %w: past %d bytes", evsservice.ErrDropTableInvalid, readByteCount)
 	}
 	table, err := evsservice.DecodeDropTable(encoded)
 	if err != nil {

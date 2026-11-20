@@ -486,6 +486,32 @@ func TestEvsObserveReportCountsOracleRefusalsAndOnlyObservedJobs(t *testing.T) {
 	)
 }
 
+// Owner decision 643: held entries take a table past TableByteCount, outside its bound, and the report reads it as
+// evs does, counting its observed job.
+func TestEvsObserveReportReadsATableHeldEntriesTakePastItsBound(t *testing.T) {
+	world := newEvsObserveReportWorld(t)
+	repo := world.repo("meta-1", "meta-1")
+	world.job(repo, evsObserveReportTestObserved, evsservice.DropListedShape{Renames: true, CrossRefCopies: true})
+	place := &protocol.EvsPlace{Minute: 29000000, Instance: 1, Seq: 2, Length: 512}
+	tableByteCount := evsservice.DefaultDropSettings().TableByteCount
+	for i := 0; i <= tableByteCount/128; i += 1 {
+		repo.table.Drops = append(repo.table.Drops, &evsservice.DropTableEntry{
+			DropId: world.id("held drop"), RefId: world.id("ref"), Place: place, State: evsservice.DropStateHeld, EndedDay: 20000,
+		})
+	}
+	if encoded, err := evsservice.EncodeDropTable(repo.table); err != nil || len(encoded) <= tableByteCount {
+		t.Fatalf("a table of %d bytes does not pass %d: %v", len(encoded), tableByteCount, err)
+	}
+	world.writeTables()
+	world.clock.Advance(24 * time.Hour)
+
+	code, stdout, stderr := runEvsObserveReportTest(world.settings(), evsObserveReportTestEnv, "--days=1")
+	if code != 0 || stderr != "" {
+		t.Fatalf("exited %d: %s", code, stderr)
+	}
+	evsObserveReportTestWants(t, stdout, "and 1 drop jobs of 1 repos with a drop table\n")
+}
+
 // A drop table is read on the cluster its repo's place/ names. One on another cluster, and one of a repo place/ does
 // not name, are left out of the soak and counted in a line of the report; an object under drops/ that is no table's
 // key is passed over.
