@@ -21,7 +21,6 @@ package evshost_test
 import (
 	"testing"
 
-	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 
 	"github.com/urnetwork/server/sidecart3"
@@ -34,23 +33,23 @@ func TestFs68OnT3(t *testing.T) {
 }
 
 func TestFs68RulesOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-68", "rules", fault.Fs68Rules)
+	runClauseOnT3(t, "FS-68", "rules")
 }
 
 func TestFs68PlatformRuleOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-68", "platform rule", fault.Fs68PlatformRule)
+	runClauseOnT3(t, "FS-68", "platform rule")
 }
 
 func TestFs68ConfigOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-68", "config", fault.Fs68Kind(protocol.RepoKind_REPO_KIND_CONFIG))
+	runClauseOnT3(t, "FS-68", "config")
 }
 
 func TestFs68MailcfgOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-68", "mailcfg", fault.Fs68Kind(protocol.RepoKind_REPO_KIND_MAILCFG))
+	runClauseOnT3(t, "FS-68", "mailcfg")
 }
 
 func TestFs68LockOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-68", "lock", fault.Fs68LockedPastTheWindow)
+	runClauseOnT3(t, "FS-68", "lock")
 }
 
 func TestFs91OnT3(t *testing.T) {
@@ -78,7 +77,7 @@ func TestFs94OnT3(t *testing.T) {
 }
 
 func TestFs94RecordClassOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-94", "record class", fault.Fs94RecordClass)
+	runClauseOnT3(t, "FS-94", "record class")
 }
 
 func TestFs95OnT3(t *testing.T) {
@@ -88,25 +87,25 @@ func TestFs95OnT3(t *testing.T) {
 }
 
 func TestFs95LockedOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "locked", fault.Fs95Locked)
+	runClauseOnT3(t, "FS-95", "locked")
 }
 
 func TestFs95ConfigOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "config", fault.Fs95Kind(protocol.RepoKind_REPO_KIND_CONFIG))
+	runClauseOnT3(t, "FS-95", "config")
 }
 
 func TestFs95MailcfgOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "mailcfg", fault.Fs95Kind(protocol.RepoKind_REPO_KIND_MAILCFG))
+	runClauseOnT3(t, "FS-95", "mailcfg")
 }
 
 func TestFs95OwnerBoundOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "owner-bound", fault.Fs95OwnerBound)
+	runClauseOnT3(t, "FS-95", "owner-bound")
 }
 
 func TestFs95ListMissingAVersionOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "list missing a version", fault.Fs95ListMismatch(false))
+	runClauseOnT3(t, "FS-95", "list missing a version")
 }
 
 func TestFs95ListAddingAVersionOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-95", "list adding a version", fault.Fs95ListMismatch(true))
+	runClauseOnT3(t, "FS-95", "list adding a version")
 }

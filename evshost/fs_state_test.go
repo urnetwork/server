@@ -26,8 +26,8 @@ func TestFs58OnT3(t *testing.T) {
 	})
 }
 
-func TestFs58FoldKilledAndRacedOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-58", "folds killed and raced", fault.Fs58FoldKilledAndRaced)
+func TestFs58FoldsKilledAndRacedOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-58", "folds killed and raced")
 }
 
 func TestFs63OnT3(t *testing.T) {
@@ -43,11 +43,11 @@ func TestFs62OnT3(t *testing.T) {
 }
 
 func TestFs62LeaseHolderResyncOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-62", "lease holder resync", fault.Fs62LeaseHolderResync)
+	runClauseOnT3(t, "FS-62", "lease holder resync")
 }
 
 func TestFs4TwoSourcesOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-4", "two sources", fault.Fs4TwoSources)
+	runClauseOnT3(t, "FS-4", "two sources")
 }
 
 func TestFs6OnT3(t *testing.T) {
@@ -57,25 +57,28 @@ func TestFs6OnT3(t *testing.T) {
 }
 
 func TestFs6SevenDayStartOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-6", "seven-day start", fault.Fs6SevenDayStart)
+	runClauseOnT3(t, "FS-6", "seven-day start")
 }
 
 func TestFs6KilledAtEachPhaseOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-6", "killed at each phase", fault.Fs6KilledAtEachPhase)
+	runClauseOnT3(t, "FS-6", "killed at each phase")
 }
 
 func TestFs6StaleJobOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-6", "stale job", fault.Fs6StaleJob)
+	runClauseOnT3(t, "FS-6", "stale job")
 }
 
 // FS-10 forges server state, so its cases run on T2 alone and their twins, which must succeed, here (§22.8's cadence
-// rule).
+// rule): the registered case's twin under the name M2's sweep gives it, and the rollback clause's by the convention,
+// which runs a forged case's clause's twin on T3.
 func TestFs10TwinOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-10", "twin", fault.Fs10WriterChange)
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		fault.RunClause(tb, "FS-10", "twin", fault.Fs10WriterChange, sidecart3.RuleSettings(tb, nil))
+	})
 }
 
-func TestFs10RollbackTwinOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-10", "rollback refused twin", fault.Fs10RollbackTwin)
+func TestFs10RollbackRefusedOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-10", "rollback refused")
 }
 
 func TestFs12OnT3(t *testing.T) {
@@ -85,5 +88,5 @@ func TestFs12OnT3(t *testing.T) {
 }
 
 func TestFs4BatchedEpochOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-4", "batched epoch", fault.Fs4BatchedEpoch)
+	runClauseOnT3(t, "FS-4", "batched epoch")
 }

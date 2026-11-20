@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/sidecar/sidecartest/fault"
 )
 
 // The gate report on a fixture monoroot, and gates.yml against §23.6.
@@ -690,10 +692,11 @@ func listGateOnThisTree(t *testing.T, gate string) (*gateReport, []gateRow) {
 }
 
 // Holds a list of gate on this tree to its sweep: every case the sweep names where its tests run (a server entry
-// outside the convention's package or tags) lists, each of its tests declared; every item lists, or reads open on what
-// it waits on, or reads missing only when it names nothing to run; nothing fails; and at an exit review FS-54 and FS-55
-// ride along. A case the convention names may read missing, which its owner's tests close. Returns how many cases the
-// sweep names and how many items the gate holds.
+// outside the convention's package or tags, other than a registered clause's, which the convention names wherever the
+// clause's T3 test is: QD-1084) lists, each of its tests declared; every item lists, or reads open on what it waits on,
+// or reads missing only when it names nothing to run; nothing fails; and at an exit review FS-54 and FS-55 ride along.
+// A case the convention names may read missing, which its owner's tests close. Returns how many cases the sweep names
+// and how many items the gate holds.
 func checkGateListsOnThisTree(t *testing.T, gate string) (int, int) {
 	t.Helper()
 	report, rows := listGateOnThisTree(t, gate)
@@ -704,8 +707,15 @@ func checkGateListsOnThisTree(t *testing.T, gate string) (int, int) {
 			items[row.Item] = row
 			continue
 		}
+		clauseNames := map[string]bool{}
+		for _, registration := range fault.Clauses(row.Row, row.Case) {
+			for _, test := range fault.GateClauseTests(registration) {
+				clauseNames[test.Names[0]] = true
+			}
+		}
 		for _, test := range row.Tests {
-			if test.Repo == "server" && (test.Package != "./sidecart3" || test.Tags != gateConventionT3Tags) {
+			clauseEntry := !slices.ContainsFunc(test.Names, func(name string) bool { return !clauseNames[name] })
+			if test.Repo == "server" && (test.Package != "./sidecart3" || test.Tags != gateConventionT3Tags) && !clauseEntry {
 				swept[row.label()] = true
 			}
 		}

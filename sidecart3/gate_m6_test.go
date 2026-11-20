@@ -104,7 +104,7 @@ func TestGateM6ItemsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 	}
 	for _, name := range []string{
 		"TestEscrowBenchmarkMeasurements", "TestScenarioS3bOnT3", "TestScenarioS4bOnT3", "TestRevocationSuiteMemberFormOnT3",
-		"TestRevocationSuiteMemberFormOnServersSequencer", "TestTeamBillingFs46T3", "TestFs43StripeMeters", "TestFs85AclRepoRequestOnT3", "TestFs99EvsScopeOnT3",
+		"TestRevocationSuiteMemberFormOnServersSequencer", "TestTeamBillingFs46T3", "TestFs43StripeMeters", "TestFs99EvsScopeMutantExchangeMintingXAdminFailsOnT3",
 	} {
 		if !slices.Contains(named, name) {
 			t.Errorf("no item of M6's gates names %s", name)

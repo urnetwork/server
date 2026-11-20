@@ -54,7 +54,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
-	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 
 	"github.com/urnetwork/server/evshost"
@@ -120,24 +119,24 @@ func TestFs72RollbackThroughTheBlockConfigOnT3(t *testing.T) {
 	})
 }
 
-func TestFs72MigrationKilledAtStepSixOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-72", "migration killed after step 6", fault.Fs72MigrationKilledAt(evsservice.BarrierPushStep6After))
+func TestFs72MigrationMigrationKilledAfterStep6OnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-72", "migration killed after step 6")
 }
 
-func TestFs72MigrationKilledBeforeTheRaiseOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-72", "migration killed before the raise", fault.Fs72MigrationKilledAt(evsservice.BarrierMigrateRaiseBefore))
+func TestFs72MigrationMigrationKilledBeforeTheRaiseOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-72", "migration killed before the raise")
 }
 
-func TestFs72MigrationKilledAfterTheRaiseOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-72", "migration killed after the raise", fault.Fs72MigrationKilledAt(evsservice.BarrierMigrateRaiseAfter))
+func TestFs72MigrationMigrationKilledAfterTheRaiseOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-72", "migration killed after the raise")
 }
 
-func TestFs72MigrationKilledBeforeTheHeadCasOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-72", "migration killed before the head CAS", fault.Fs72MigrationKilledAt(evsservice.BarrierHeadCasBefore))
+func TestFs72MigrationMigrationKilledBeforeTheHeadCasOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-72", "migration killed before the head CAS")
 }
 
-func TestFs72MigrationKilledAfterTheHeadCasOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-72", "migration killed after the head CAS", fault.Fs72MigrationKilledAt(evsservice.BarrierHeadCasAfter))
+func TestFs72MigrationMigrationKilledAfterTheHeadCasOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-72", "migration killed after the head CAS")
 }
 
 // format1_build.txt's path from this package, in the sibling sidecar checkout.

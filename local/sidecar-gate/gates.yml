@@ -17,7 +17,9 @@
 # store_clock: true says the case's T3 run reads stored ages through T3's store clock (QD-264), which the report
 # names beside its outcome. A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test
 # TestFs<n><Case>OnT3 in server's sidecart3 under sidecar_localstack too, by convention, so this file does not
-# change as rows land.
+# change as rows land. Each clause registered for a case (fault.RegisterClause; QD-1084) adds its tests to the
+# case's row by the same convention, TestFs<n><Case><Clause> in sidecar's sidecartest/fault and, where it runs on
+# T3, TestFs<n><Case><Clause>OnT3 in the server package it names, so a case passes only when every clause does.
 gates:
   G0:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
@@ -264,6 +266,8 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs1]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs1OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs1ConcurrentRetries, TestFs1UnknownDeletesNothing]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs1ConcurrentRetriesOnT3, TestFs1UnknownDeletesNothingOnT3]}
     - row: FS-2
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs2]}
@@ -272,10 +276,13 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs3]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs3OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs3Step7Past5S]}
     - row: FS-4
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs4]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs4OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs4BatchedEpoch, TestFs4BatchedEpochReadBeforeCopy, TestFs4TwoSources]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs4BatchedEpochOnT3, TestFs4TwoSourcesOnT3]}
     - row: FS-5
       tests:
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs5OnT3]}
@@ -283,11 +290,15 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs6OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6ANowShredUnderAHold, TestFs6KilledAtEachPhase, TestFs6ReadsRefusedWhileDeleted, TestFs6SevenDayStart, TestFs6StaleJob]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs6ANowShredUnderAHoldOnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs6KilledAtEachPhaseOnT3, TestFs6SevenDayStartOnT3, TestFs6StaleJobOnT3]}
       store_clock: true
     - row: FS-7
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs7]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs7OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs7EvacuatedWindowAfterARestart, TestFs7FoldLostWithItsInstance]}
     - row: FS-8
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs8]}
@@ -296,10 +307,13 @@ gates:
     - row: FS-9
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs9]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs9UnfoldedListing]}
     - row: FS-10
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs10]}
-        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs10TwinOnT3, TestFs10RollbackTwinOnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs10TwinOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs10RollbackRefused]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs10RollbackRefusedOnT3]}
     - row: FS-11
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs11]}
@@ -312,6 +326,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs14]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs14OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs14AclForkedReaders, TestFs14AclOwnerConfirm, TestFs14AclRepoRevoke, TestFs14AclSuspendOrders, TestFs14AclTwoRemovals]}
     - row: FS-15
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs15]}
@@ -370,10 +385,14 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs57]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs57OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs57StoreUnreachable]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs57StoreUnreachableOnT3]}
     - row: FS-58
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs58]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs58OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs58FoldsKilledAndRaced, TestFs58ReCreatedAfterACollection]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs58FoldsKilledAndRacedOnT3]}
     - row: FS-59
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs59]}
@@ -393,6 +412,9 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs62]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs62OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs62AclGate, TestFs62LeaseHolderResync]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs62AclGateOnT3]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs62LeaseHolderResyncOnT3]}
     - row: FS-63
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs63]}
@@ -546,7 +568,7 @@ gates:
         - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateM2InModelsPassTlc$, ./sidecartest/fault, -fault.gate-tlc]}
     - item: 'the ledger''s named gaps in this area ran (HANDOFF §10): FS-14''s RepoRevoke, OwnerConfirm and rotation covering one of two same-base removals (ACL-M2-16), and FS-17''s two peers advancing independently with no conflict (PROTO-M2-02)'
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs14AclConfigWritersRepoRevokeStands, TestFs14AclOwnerConfirmAtEveryReader, TestFs14AclRotationCoveringOneOfTwoRemovals, TestFs17CatchUpRefreshesAndStaleDoesNot]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs14AclRepoRevoke, TestFs14AclOwnerConfirm, TestFs14AclTwoRemovals, TestFs17CatchUpRefreshesAndStaleDoesNot]}
     - item: §22.7's admission suite, consent and the recovery veto included, on T2 and T3 (§23.6's M2 exit; TEAM-M2-19)
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestAdmissionSigners, TestAdmissionOutsideTheAdminSet, TestAdmissionRecoveryWindow, TestAdmissionTwoFirstDevicesRacing, TestAdmissionOwnerConsent, TestAdmissionCommitters, TestAdmissionSeats, TestAdmissionAgentsCostNoCommit, TestAdmissionReadOnlyPageWorkers, TestAdmissionCompromiseCascade, TestAdmissionAuthKeys]}
@@ -854,6 +876,8 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69AnEraseUnderTheHold, TestFs69BetweenSweepDeletes]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69AnEraseUnderTheHoldOnT3, TestFs69BetweenSweepDeletesOnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
       store_clock: true
     - row: FS-76
@@ -872,6 +896,8 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92ADeleteInFlight, TestFs92AHoldThatOutlastsTheDropTable, TestFs92ASecondDropDuringTheHold, TestFs92BetweenDeletes, TestFs92BetweenVerifyAndDelete]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92ADeleteInFlightOnT3, TestFs92BetweenDeletesOnT3, TestFs92BetweenVerifyAndDeleteOnT3]}
       external: the later of M5-out and M10-out, where it passes (§23.6)
       store_clock: true
     - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (FS-25) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
@@ -1073,8 +1099,10 @@ gates:
       external: the later of M6-out and M10-out, where it passes (§23.6)
     - row: FS-85
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs85M6, TestFs85AclRepoRequest, TestFs85AclOwnerBoundRequest, TestFs85AclWorkerRequest, TestFs85AclCopiedDecision]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs85M6]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs85OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs85AclCopiedDecision, TestFs85AclOwnerBoundRequest, TestFs85AclRepoRequest, TestFs85AclWorkerRequest]}
+        - {repo: server, package: ./api, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs85AclCopiedDecisionOnT3, TestFs85AclOwnerBoundRequestOnT3, TestFs85AclRepoRequestOnT3, TestFs85AclWorkerRequestOnT3]}
     - row: FS-86
       case: announce-entries
       tests:
@@ -1119,8 +1147,10 @@ gates:
     - row: FS-99
       case: entries
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs99M6, TestFs99EvsScope]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs99M6]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99EntriesOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs99EntriesEvsScope]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99EntriesEvsScopeOnT3]}
     - row: FS-99
       case: cards
       tests:
@@ -1212,10 +1242,9 @@ gates:
     - item: 'FS-51 as QUOTA-M6-05 and DNS-M6-07 wrote it, on Postgres: a Team and a Pro lapse, a renewal inside the grace, releases in order under a lower tier, a killed pass resumed, and custom hosts withheld and released with mail still arriving; the row above stays the catalog''s T2 run, which nothing has written'
       tests:
         - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestApplyNetworkDowngradesTeamLapse, TestApplyNetworkDowngradesRenewalInsideTheGraceCancels, TestApplyNetworkDowngradesReleasesInOrderUnderALowerTier, TestApplyNetworkDowngradesProLapse, TestApplyNetworkDowngradesResumesAKilledPass, TestDnsWithholdCustomHostsAndReleaseThem, TestDnsWithholdCustomHostsKeepsMailArriving]}
-    - item: 'what is written of the directory rows'' T3 runs, whose rows above wait on the convention''s tests: FS-85''s ACL legs in server''s api (ACL-M6-05) and FS-99''s evs scope with its mutant in server''s root package (RECORD-M6-25)'
+    - item: 'what is written of the directory rows'' T3 runs beside their rows, which wait on the convention''s tests: FS-99''s evs scope''s mutant in server''s root package (RECORD-M6-25); FS-85''s ACL legs (ACL-M6-05) and FS-99''s evs scope itself run with their rows, registered clauses whose T3 tests are server''s api''s and root package''s (QD-1084)'
       tests:
-        - {repo: server, package: ./api, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs85AclRepoRequestOnT3, TestFs85AclOwnerBoundRequestOnT3, TestFs85AclWorkerRequestOnT3, TestFs85AclCopiedDecisionOnT3]}
-        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99EvsScopeOnT3, TestFs99EvsScopeMutantExchangeMintingXAdminFailsOnT3]}
+        - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs99EvsScopeMutantExchangeMintingXAdminFailsOnT3]}
     - item: 'Team billing under FS-46''s order (§20.7, §23.6''s M6 row; QUOTA-M6-06): a Team''s lease takes the grant, the pack and then the line, bytes at apply draw the line last, a killed edge on the line leaves the living lease, and a renewal and a downgrade keep the lines last'
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs46TeamLeaseTakesTheGrantThePackAndThenTheLine, TestFs46TeamBytesAtApplyDrawTheLineLast, TestFs46TeamKilledEdgeOnTheLineLeavesTheLivingLease, TestFs46TeamRenewalAndDowngradeKeepTheLinesLast]}
@@ -1385,6 +1414,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs85Wakes]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs85WakesOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs85WakesAclWakes]}
     - row: FS-98
       case: app-host
       tests:
@@ -1829,11 +1859,15 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs68]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs68OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs68Config, TestFs68Lock, TestFs68Mailcfg, TestFs68PlatformRule, TestFs68Rules]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs68ConfigOnT3, TestFs68LockOnT3, TestFs68MailcfgOnT3, TestFs68PlatformRuleOnT3, TestFs68RulesOnT3]}
     - row: FS-69
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
-        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69HoldsPlacedByApiOnT3, TestFs69HoldBetweenSweepDeletesOnT3, TestFs69EraseUnderTheHoldOnT3, TestFs6NowShredUnderAHoldOnT3]}
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69HoldBetweenSweepDeletes, TestFs69EraseUnderTheHold, TestFs6NowShredUnderAHold]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69HoldsPlacedByApiOnT3, TestFs6ANowShredUnderAHoldOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6ANowShredUnderAHold]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69AnEraseUnderTheHold, TestFs69BetweenSweepDeletes]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69AnEraseUnderTheHoldOnT3, TestFs69BetweenSweepDeletesOnT3]}
       store_clock: true
     - row: FS-70
       tests:
@@ -1848,6 +1882,8 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Migration]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72MigrationMigrationKilledAfterStep6, TestFs72MigrationMigrationKilledAfterTheHeadCas, TestFs72MigrationMigrationKilledAfterTheRaise, TestFs72MigrationMigrationKilledBeforeTheHeadCas, TestFs72MigrationMigrationKilledBeforeTheRaise]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationMigrationKilledAfterStep6OnT3, TestFs72MigrationMigrationKilledAfterTheHeadCasOnT3, TestFs72MigrationMigrationKilledAfterTheRaiseOnT3, TestFs72MigrationMigrationKilledBeforeTheHeadCasOnT3, TestFs72MigrationMigrationKilledBeforeTheRaiseOnT3]}
     - row: FS-72
       case: rollback
       tests:
@@ -1969,6 +2005,8 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs89]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs89OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs89Now]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs89NowOnT3]}
       store_clock: true
     - row: FS-90
       tests:
@@ -1982,8 +2020,10 @@ gates:
     - row: FS-92
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
-        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92HoldsPlacedByApiOnT3, TestFs92HoldBetweenVerifyAndDeleteOnT3, TestFs92HoldBetweenDeletesOnT3, TestFs92DeleteInFlightOnT3, TestFs92SealedHoldAnswersEqualANoHoldTwinOnT3]}
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92HoldBetweenVerifyAndDelete, TestFs92HoldBetweenDeletes, TestFs92DeleteInFlight, TestFs92HoldOutlastsTheDropTable, TestFs92SecondDropDuringTheHold, TestFs92SecondDropListsAsItsTwin, TestFs92SealedHoldAnswersEqualANoHoldTwin, TestFs92AHoldKeepsWhatTheDropWouldDeleteUntilItEnds, TestFs92ASealedHoldsAnswersEqualANoHoldTwin]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92HoldsPlacedByApiOnT3, TestFs92SealedHoldAnswersEqualANoHoldTwinOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92SecondDropListsAsItsTwin, TestFs92SealedHoldAnswersEqualANoHoldTwin, TestFs92AHoldKeepsWhatTheDropWouldDeleteUntilItEnds, TestFs92ASealedHoldsAnswersEqualANoHoldTwin]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92ADeleteInFlight, TestFs92AHoldThatOutlastsTheDropTable, TestFs92ASecondDropDuringTheHold, TestFs92BetweenDeletes, TestFs92BetweenVerifyAndDelete]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92ADeleteInFlightOnT3, TestFs92BetweenDeletesOnT3, TestFs92BetweenVerifyAndDeleteOnT3]}
       store_clock: true
     - row: FS-93
       tests:
@@ -1993,10 +2033,14 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs94]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs94OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs94RecordClass]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs94RecordClassOnT3]}
     - row: FS-95
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs95]}
         - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs95OnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs95Config, TestFs95ListAddingAVersion, TestFs95ListMissingAVersion, TestFs95Locked, TestFs95Mailcfg, TestFs95OwnerBound]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs95ConfigOnT3, TestFs95ListAddingAVersionOnT3, TestFs95ListMissingAVersionOnT3, TestFs95LockedOnT3, TestFs95MailcfgOnT3, TestFs95OwnerBoundOnT3]}
     - row: FS-96
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs96]}
@@ -2135,8 +2179,8 @@ gates:
         - {repo: server, package: ./taskworker/work, names: [TestEvsObserveDropSoakSharesJobsWithBothARenameAndACopy]}
     - item: 'a migration of a format-1 repo and a rollback to format-1 binaries (§22.10''s format 2 row; FS-72''s M10 cases; R-TEST-10; EVS2-M10-30, QD-854): a repo migrated while a format-1 client pushes and reads, the migration killed at each step, and evs and taskworker rolled back with format-2 data, on T2 and on T3 through the block''s config and on the binaries testdata/evs/format1_build.txt pins'
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Migration, TestFs72MigrationKilledAtStepSix, TestFs72MigrationKilledBeforeTheRaise, TestFs72MigrationKilledAfterTheRaise, TestFs72MigrationKilledBeforeTheHeadCas, TestFs72MigrationKilledAfterTheHeadCas, TestFs72Rollback]}
-        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3, TestFs72MigrationKilledAtStepSixOnT3, TestFs72MigrationKilledBeforeTheRaiseOnT3, TestFs72MigrationKilledAfterTheRaiseOnT3, TestFs72MigrationKilledBeforeTheHeadCasOnT3, TestFs72MigrationKilledAfterTheHeadCasOnT3, TestFs72RollbackOnT3, TestFs72RollbackThroughTheBlockConfigOnT3, TestFs72RollbackOnThePinnedBuildOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs72Migration, TestFs72MigrationMigrationKilledAfterStep6, TestFs72MigrationMigrationKilledBeforeTheRaise, TestFs72MigrationMigrationKilledAfterTheRaise, TestFs72MigrationMigrationKilledBeforeTheHeadCas, TestFs72MigrationMigrationKilledAfterTheHeadCas, TestFs72Rollback]}
+        - {repo: server, package: ./evshost, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs72MigrationOnT3, TestFs72MigrationMigrationKilledAfterStep6OnT3, TestFs72MigrationMigrationKilledBeforeTheRaiseOnT3, TestFs72MigrationMigrationKilledAfterTheRaiseOnT3, TestFs72MigrationMigrationKilledBeforeTheHeadCasOnT3, TestFs72MigrationMigrationKilledAfterTheHeadCasOnT3, TestFs72RollbackOnT3, TestFs72RollbackThroughTheBlockConfigOnT3, TestFs72RollbackOnThePinnedBuildOnT3]}
     - item: 'the migration of a format-1 repo set (§22.10''s format 2 row): each world FS-72''s cases run on holds one repo, so no run migrates a set (EVS2-M10-30''s report), and no test shows it yet'
     - item: 'a format-1 repo''s first index build, its search equal to D-TEST-14''s oracle (§23.4''s M10 exit; R-TEST-10; SEARCH-M10-35): FS-79''s migration clause, a ref a format-1 client wrote holding no index, every push not yet searchable until the first build, then every push indexed and found as SearchOracle finds it, on the search world''s stand-in for evs'
       tests:
@@ -2258,8 +2302,10 @@ gates:
     - row: FS-69
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69]}
-        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69HoldsPlacedByApiOnT3, TestFs69HoldBetweenSweepDeletesOnT3, TestFs69EraseUnderTheHoldOnT3, TestFs6NowShredUnderAHoldOnT3]}
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69HoldBetweenSweepDeletes, TestFs69EraseUnderTheHold, TestFs6NowShredUnderAHold]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69HoldsPlacedByApiOnT3, TestFs6ANowShredUnderAHoldOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs6ANowShredUnderAHold]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs69AnEraseUnderTheHold, TestFs69BetweenSweepDeletes]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs69AnEraseUnderTheHoldOnT3, TestFs69BetweenSweepDeletesOnT3]}
       store_clock: true
     - row: FS-76
       case: team-record
@@ -2335,8 +2381,10 @@ gates:
     - row: FS-92
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92]}
-        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92HoldsPlacedByApiOnT3, TestFs92HoldBetweenVerifyAndDeleteOnT3, TestFs92HoldBetweenDeletesOnT3, TestFs92DeleteInFlightOnT3, TestFs92SealedHoldAnswersEqualANoHoldTwinOnT3]}
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92HoldBetweenVerifyAndDelete, TestFs92HoldBetweenDeletes, TestFs92DeleteInFlight, TestFs92HoldOutlastsTheDropTable, TestFs92SecondDropDuringTheHold, TestFs92SecondDropListsAsItsTwin, TestFs92SealedHoldAnswersEqualANoHoldTwin, TestFs92AHoldKeepsWhatTheDropWouldDeleteUntilItEnds, TestFs92ASealedHoldsAnswersEqualANoHoldTwin]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92HoldsPlacedByApiOnT3, TestFs92SealedHoldAnswersEqualANoHoldTwinOnT3]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92SecondDropListsAsItsTwin, TestFs92SealedHoldAnswersEqualANoHoldTwin, TestFs92AHoldKeepsWhatTheDropWouldDeleteUntilItEnds, TestFs92ASealedHoldsAnswersEqualANoHoldTwin]}
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs92ADeleteInFlight, TestFs92AHoldThatOutlastsTheDropTable, TestFs92ASecondDropDuringTheHold, TestFs92BetweenDeletes, TestFs92BetweenVerifyAndDelete]}
+        - {repo: server, package: ./model, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs92ADeleteInFlightOnT3, TestFs92BetweenDeletesOnT3, TestFs92BetweenVerifyAndDeleteOnT3]}
       store_clock: true
     - row: FS-99
       case: cards

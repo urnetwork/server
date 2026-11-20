@@ -40,25 +40,25 @@ func TestFs21TeamOnT3(t *testing.T) {
 
 func TestFs85AclRepoRequestOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, "FS-85", "acl repo request", fault.Fs85AclRepoRequest, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, "FS-85", "acl repo request", sidecart3.RuleSettings(tb, nil))
 	})
 }
 
 func TestFs85AclOwnerBoundRequestOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, "FS-85", "acl owner-bound request", fault.Fs85AclOwnerBoundRequest, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, "FS-85", "acl owner-bound request", sidecart3.RuleSettings(tb, nil))
 	})
 }
 
 func TestFs85AclWorkerRequestOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, "FS-85", "acl worker request", fault.Fs85AclWorkerRequest, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, "FS-85", "acl worker request", sidecart3.RuleSettings(tb, nil))
 	})
 }
 
 func TestFs85AclCopiedDecisionOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunClause(tb, "FS-85", "acl copied decision", fault.Fs85AclCopiedDecision, sidecart3.RuleSettings(tb, nil))
+		fault.RunRegisteredClause(tb, "FS-85", "acl copied decision", sidecart3.RuleSettings(tb, nil))
 	})
 }
 

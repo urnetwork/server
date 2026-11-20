@@ -3,7 +3,8 @@
 // M10's format-2 schedules swept on T3 (EVS2-M10-35; §23.6's M10 row for §11's format 2, §22.8's rules): the T3 half
 // of sidecar's sidecartest/fault/m10_format2_sweep_test.go, which holds the sweep's list of cases, the T2 report and
 // the gate list for M10's Gn-out. Here, each case of FS-64 to FS-73 and FS-89 to FS-96 whose T3 run is this package's,
-// with the clauses this package's own T3 tests run beside it, runs under every rule §22.8 gives its row on T3's Nets,
+// with the clauses registered beside it whose T3 tests are this package's (QD-1084), and any its owner still runs
+// unregistered, runs under every rule §22.8 gives its row on T3's Nets,
 // where sidecart3 names this package's block as each world's instances, so every push, dry run, DROP and read goes
 // through server/cli/evs's handler on the private Redis and the local stack's MinIO: the fixed schedule, its twin, the
 // explorer at a merge's 10 seeds over both, every write's lost answer for a row on §22.8's unknown list, and each
@@ -32,8 +33,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/urnetwork/sidecar/evsservice"
-	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 
 	"github.com/urnetwork/server/sidecart3"
@@ -48,58 +47,43 @@ func m10Format2T3RowIds() []string {
 }
 
 // A clause beside a case's registered schedule, by the name this package's own T3 test runs it under, so its traces
-// are that test's.
+// are that test's: registered (sidecartest/fault's clauses.go), or one its owner has not registered yet.
 type m10Format2T3Clause struct {
-	name  string
-	build fault.Builder
+	name       string
+	build      fault.Builder
+	registered bool
 }
 
-// A case this package runs on T3, with the clauses its own T3 tests run beside it.
+// A case this package runs on T3, with the clauses its owners run beside it that are not registered.
 type m10Format2T3Case struct {
-	rowId    string
-	caseName string
-	clauses  []*m10Format2T3Clause
+	rowId               string
+	caseName            string
+	unregisteredClauses []*m10Format2T3Clause
+}
+
+// The clauses run beside the case: the registered ones whose T3 tests are this package's, by name, then those its
+// owners run unregistered.
+func (self *m10Format2T3Case) caseClauses() []*m10Format2T3Clause {
+	clauses := []*m10Format2T3Clause{}
+	for _, registration := range fault.Clauses(self.rowId, self.caseName) {
+		if slices.Contains(registration.Tiers, fault.TierT3) && registration.T3Package == "./evshost" {
+			clauses = append(clauses, &m10Format2T3Clause{name: registration.Name, build: registration.Build, registered: true})
+		}
+	}
+	return append(clauses, self.unregisteredClauses...)
 }
 
 // The cases whose T3 run is this package's, as fs_format2_test.go and fs72_rollback_test.go run them.
 func m10Format2T3Cases() []*m10Format2T3Case {
 	return []*m10Format2T3Case{
-		{
-			rowId: "FS-68",
-			clauses: []*m10Format2T3Clause{
-				{name: "rules", build: fault.Fs68Rules},
-				{name: "platform rule", build: fault.Fs68PlatformRule},
-				{name: "config", build: fault.Fs68Kind(protocol.RepoKind_REPO_KIND_CONFIG)},
-				{name: "mailcfg", build: fault.Fs68Kind(protocol.RepoKind_REPO_KIND_MAILCFG)},
-				{name: "lock", build: fault.Fs68LockedPastTheWindow},
-			},
-		},
-		{
-			rowId:    "FS-72",
-			caseName: "migration",
-			clauses: []*m10Format2T3Clause{
-				{name: "migration killed after step 6", build: fault.Fs72MigrationKilledAt(evsservice.BarrierPushStep6After)},
-				{name: "migration killed before the raise", build: fault.Fs72MigrationKilledAt(evsservice.BarrierMigrateRaiseBefore)},
-				{name: "migration killed after the raise", build: fault.Fs72MigrationKilledAt(evsservice.BarrierMigrateRaiseAfter)},
-				{name: "migration killed before the head CAS", build: fault.Fs72MigrationKilledAt(evsservice.BarrierHeadCasBefore)},
-				{name: "migration killed after the head CAS", build: fault.Fs72MigrationKilledAt(evsservice.BarrierHeadCasAfter)},
-			},
-		},
+		{rowId: "FS-68"},
+		{rowId: "FS-72", caseName: "migration"},
 		{rowId: "FS-72", caseName: "rollback"},
-		{rowId: "FS-89", clauses: []*m10Format2T3Clause{{name: "now", build: fault.Fs89Now}}},
-		{rowId: "FS-91", clauses: []*m10Format2T3Clause{{name: "within the window", build: fault.Fs91ReleasedWithinTheWindow}}},
-		{rowId: "FS-94", clauses: []*m10Format2T3Clause{{name: "record class", build: fault.Fs94RecordClass}}},
-		{
-			rowId: "FS-95",
-			clauses: []*m10Format2T3Clause{
-				{name: "locked", build: fault.Fs95Locked},
-				{name: "config", build: fault.Fs95Kind(protocol.RepoKind_REPO_KIND_CONFIG)},
-				{name: "mailcfg", build: fault.Fs95Kind(protocol.RepoKind_REPO_KIND_MAILCFG)},
-				{name: "owner-bound", build: fault.Fs95OwnerBound},
-				{name: "list missing a version", build: fault.Fs95ListMismatch(false)},
-				{name: "list adding a version", build: fault.Fs95ListMismatch(true)},
-			},
-		},
+		{rowId: "FS-89"},
+		// fs91_test.go's owner has not registered it (QD-1084's sweep left FS-91 to fi27-cached-head-clause)
+		{rowId: "FS-91", unregisteredClauses: []*m10Format2T3Clause{{name: "within the window", build: fault.Fs91ReleasedWithinTheWindow}}},
+		{rowId: "FS-94"},
+		{rowId: "FS-95"},
 	}
 }
 
@@ -117,7 +101,7 @@ func TestFs89NowOnT3(t *testing.T) {
 		if fault.DefaultCatalog().Case("FS-89", "").StoreClock {
 			settings.StoreClock = sidecart3.DefaultStoreClockSettings()
 		}
-		fault.RunClause(tb, "FS-89", "now", fault.Fs89Now, sidecart3.RuleSettings(tb, settings))
+		fault.RunRegisteredClause(tb, "FS-89", "now", sidecart3.RuleSettings(tb, settings))
 	})
 }
 
@@ -159,11 +143,16 @@ func TestM10Format2SweepOnT3NamesItsCases(t *testing.T) {
 		}
 		seen = append(seen, testCase.String())
 		clauseNames := []string{}
-		for _, clause := range sweepCase.clauses {
+		for _, clause := range sweepCase.caseClauses() {
 			if clause.name == "" || clause.build == nil || slices.Contains(clauseNames, clause.name) {
 				t.Errorf("%s's clause %q is unnamed, unbuilt or named twice", testCase, clause.name)
 			}
 			clauseNames = append(clauseNames, clause.name)
+		}
+		for _, clause := range sweepCase.unregisteredClauses {
+			if registration := fault.LookupClause(testCase.Row.Id, clause.name); registration != nil {
+				t.Errorf("%s is registered: take %q off the sweep's unregistered clauses", registration, clause.name)
+			}
 		}
 	}
 }
@@ -197,9 +186,14 @@ func TestM10Format2SweepOnT3(t *testing.T) {
 				}
 				fmt.Fprintf(&report, "  T3: run, %s and its clauses under §22.8's rules at a merge's seeds%s:\n", registration, storeClock)
 				m10Format2T3WriteRun(&report, "registered case", sidecart3.RunRow(tb, testCase.Row.Id, testCase.Name, m10Format2T3RuleSettings(tb, testCase)))
-				for _, clause := range sweepCase.clauses {
+				for _, clause := range sweepCase.caseClauses() {
 					clauseCount += 1
-					clauseReport := fault.RunClause(tb, testCase.Row.Id, clause.name, clause.build, m10Format2T3RuleSettings(tb, testCase))
+					var clauseReport *fault.RowReport
+					if clause.registered {
+						clauseReport = fault.RunRegisteredClause(tb, testCase.Row.Id, clause.name, m10Format2T3RuleSettings(tb, testCase))
+					} else {
+						clauseReport = fault.RunClause(tb, testCase.Row.Id, clause.name, clause.build, m10Format2T3RuleSettings(tb, testCase))
+					}
 					m10Format2T3WriteRun(&report, "clause "+clause.name, clauseReport)
 				}
 			case registration != nil:
