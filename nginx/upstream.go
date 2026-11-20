@@ -36,7 +36,8 @@ package nginx
 //
 // Every physical attempt is counted (urnetwork_lbalt_upstream_attempts_total),
 // so the parity harness can compare attempt counts with a recording
-// upstream.
+// upstream, and so is how it got its connection, reused or dialed
+// (urnetwork_lbalt_upstream_connections_total, upstream_conn.go).
 
 import (
 	"context"
@@ -49,6 +50,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // A service's blocks and their pools. Safe for concurrent use.
@@ -70,8 +73,12 @@ type upstreamGroup struct {
 	// barriers
 	waitAfter   func(d time.Duration) <-chan time.Time
 	copyBuffers sync.Pool
-	ctx         context.Context
-	cancel      context.CancelFunc
+	// the service's series of upstreamConnectionsCounter, by result
+	reusedConnections     prometheus.Counter
+	dialedConnections     prometheus.Counter
+	dialFailedConnections prometheus.Counter
+	ctx                   context.Context
+	cancel                context.CancelFunc
 
 	stateLock sync.Mutex
 	closed    bool
@@ -117,16 +124,19 @@ func newUpstreamGroup(routeTable *RouteTable, service *RouteService, bodyStore *
 		},
 	}
 	group := &upstreamGroup{
-		service:         service,
-		settings:        settings,
-		bodyStore:       bodyStore,
-		blocks:          []*upstreamBlock{},
-		blockNameBlocks: map[string]*upstreamBlock{},
-		dialContext:     dialer.DialContext,
-		waitAfter:       time.After,
-		ctx:             ctx,
-		cancel:          cancel,
-		tunnels:         map[*forwardTunnel]bool{},
+		service:               service,
+		settings:              settings,
+		bodyStore:             bodyStore,
+		blocks:                []*upstreamBlock{},
+		blockNameBlocks:       map[string]*upstreamBlock{},
+		dialContext:           dialer.DialContext,
+		waitAfter:             time.After,
+		reusedConnections:     upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionReused),
+		dialedConnections:     upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionDialed),
+		dialFailedConnections: upstreamConnectionsCounter.WithLabelValues(service.Name, upstreamConnectionDialFailed),
+		ctx:                   ctx,
+		cancel:                cancel,
+		tunnels:               map[*forwardTunnel]bool{},
 	}
 	group.copyBuffers.New = func() any {
 		buffer := make([]byte, max(settings.Forward.CopyBufferBytes, 1))

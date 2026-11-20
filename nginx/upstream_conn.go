@@ -49,7 +49,11 @@ package nginx
 //     the block closed, or that holds bytes nobody asked for, is dropped
 //     before any request is written to it;
 //   - dialed connections have SO_KEEPALIVE on with the system's probe
-//     timing, nginx's `proxy_socket_keepalive on`.
+//     timing, nginx's `proxy_socket_keepalive on`;
+//   - every connection an attempt takes is counted by service, as reused
+//     from the pool, dialed, or a failed dial
+//     (urnetwork_lbalt_upstream_connections_total), so the pools' reuse can
+//     be read.
 
 import (
 	"bufio"
@@ -142,7 +146,8 @@ func (self *upstreamPool) expiredWithLock(upstreamConn *upstreamConnection, now 
 }
 
 // A live idle connection, the most recently used first, or nil. Expired
-// connections, and ones the block closed, are closed on the way.
+// connections, and ones the block closed, are closed on the way; only the
+// one taken counts as reused.
 func (self *upstreamPool) takeIdle() *upstreamConnection {
 	now := time.Now()
 	for {
@@ -171,6 +176,7 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 			return nil
 		}
 		if upstreamConnAlive(upstreamConn.conn) {
+			self.group.reusedConnections.Inc()
 			return upstreamConn
 		}
 		self.forget(upstreamConn)
@@ -182,7 +188,8 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 // context or the group's close, whichever comes first, and close waits for
 // it, so no connection outlives a close that never saw it: a dial that
 // finds the pool closed once it has a connection closes it. The error is the
-// dial's, or net.ErrClosed for a closed pool.
+// dial's, or net.ErrClosed for a closed pool. Every dial counts as dialed or
+// dial_failed by whether it connected; a closed pool dials nothing.
 func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error) {
 	open := func() bool {
 		self.stateLock.Lock()
@@ -204,8 +211,10 @@ func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error)
 
 	conn, err := self.group.dialContext(dialCtx, "tcp", self.block.target)
 	if err != nil {
+		self.group.dialFailedConnections.Inc()
 		return nil, err
 	}
+	self.group.dialedConnections.Inc()
 	upstreamConn := &upstreamConnection{
 		pool:          self,
 		conn:          conn,
