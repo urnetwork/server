@@ -19,7 +19,9 @@ package sidecart3
 // (checkPlan). QuorumLoss and DriveMiss run on T3's 4-host file-cluster layouts alone (cluster_faults.go),
 // and a Net on the local stack's one MinIO process refuses both. Every blob request carries its deadline in
 // the store's time, and the store clock, when on, sits beneath these wrappers, so what a plan lets through
-// is recorded on the schedule's clock (clock.go). Wrappers are safe for concurrent use.
+// is recorded on the schedule's clock (clock.go). After a move of the Net's clock, the clusters' admin info is
+// read again once, before the first request, and every request arriving meanwhile waits for that reread
+// (clockCatchUp). Wrappers are safe for concurrent use.
 
 import (
 	"context"
@@ -84,15 +86,17 @@ type catchUpHooks struct {
 }
 
 // The work a move of the Net's clock calls for before any request after it goes on to the stores (QD-1111):
-// faultBlobs' reread of the clusters' admin info, without which a cluster refuses every write once its admin info
-// is CheckStaleAfter old on the Net's clock, and the store clock's aging of the Redis families' ttls (clock.go).
+// faultBlobs' reread of the clusters' admin info, without which a cluster refuses every write and delete once its
+// admin info is CheckStaleAfter old on the Net's clock, and the store clock's aging of the Redis families' ttls
+// (clock.go).
 //
 // The first request to find the clock moved past the last catch-up runs the work up to that time, and every request
 // that arrives while it is in flight waits for it to finish and then looks at the clock again, so no request after a
 // move goes on before the work that move called for has finished, whatever their order. One that went on during a
-// reread would be refused 503 UNAVAILABLE on admin info still stale, and its client's retry would wait on a fake
-// clock no one moves. The work runs once a move, with no lock held, and the time is recorded only once it has
-// finished.
+// reread would be refused on admin info still stale (ErrFileClusterPools, which evs answers 503 UNAVAILABLE), and its
+// client's retry would wait on a fake clock no one moves. The work runs once a move, with no lock held, and the time
+// is recorded only once it has finished. This is QD-1111's lock held across the check, built so that a wait still
+// ends with its request's ctx and a killed actor parks holding nothing.
 //
 // A request waits with the baton given up, as a fake that parks a caller does, and stops waiting when its ctx ends.
 // Requests queue behind the work for its real duration, which on a layout under a cluster fault may be a check's
@@ -120,8 +124,10 @@ func newClockCatchUp(net *sidecartest.Net, what string, caughtUpTime time.Time, 
 // further, and a dead actor's goroutine parks here as it would at a fake.
 func (self *clockCatchUp) catchUp(ctx context.Context, work func(fromTime time.Time, toTime time.Time)) error {
 	for {
+		// read outside the lock, which calls no one: a move after this read is the next request's to catch up, as a
+		// move after the lock is released would be
+		now := self.net.Clock().Now()
 		var fromTime time.Time
-		var toTime time.Time
 		var inFlight chan struct{}
 		run := func() bool {
 			self.stateLock.Lock()
@@ -130,20 +136,18 @@ func (self *clockCatchUp) catchUp(ctx context.Context, work func(fromTime time.T
 				inFlight = self.inFlight
 				return false
 			}
-			now := self.net.Clock().Now()
 			if !self.caughtUpTime.Before(now) {
 				return false
 			}
 			fromTime = self.caughtUpTime
-			toTime = now
 			self.inFlight = make(chan struct{})
 			return true
 		}()
 		switch {
 		case run:
 			self.runWork(ctx, func() {
-				work(fromTime, toTime)
-			}, toTime)
+				work(fromTime, now)
+			}, now)
 			return nil
 		case inFlight == nil:
 			return nil
