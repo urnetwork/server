@@ -204,6 +204,20 @@ var frontHttpServerErrorsCounter = prometheus.NewCounterVec(
 	[]string{"port", "kind", "reason"},
 )
 
+// Accepted public QUIC connections by port kind, address family and result,
+// the results front_quic_connections_total counts without its reasons: the
+// families' success can differ when one family's path drops the front's
+// replies, which leaves its handshakes to time out.
+var frontQuicConnectionsByFamilyCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "front_quic_connections_by_family_total",
+		Help:      "Accepted public lb_alt QUIC connections by port kind, address family (ipv4, ipv6) and result, the results front_quic_connections_total counts",
+	},
+	[]string{"port", "family", "result"},
+)
+
 // Registers the front's metrics with the default registry.
 func init() {
 	prometheus.MustRegister(frontSocketsUpGauge)
@@ -212,5 +226,6 @@ func init() {
 	prometheus.MustRegister(frontQuicConnectionsCounter)
 	prometheus.MustRegister(frontQuicHandshakesCounter)
 	prometheus.MustRegister(frontHttpServerErrorsCounter)
+	prometheus.MustRegister(frontQuicConnectionsByFamilyCounter)
 	prometheus.MustRegister(frontTlsHandshakesCounter)
 }

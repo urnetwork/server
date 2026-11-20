@@ -721,9 +721,11 @@ func (self *frontQuicRun) countConnection(result string) {
 }
 
 // Counts one accepted connection's result and its reason: why the handshake
-// failed for handshake_failed, - for every other result.
+// failed for handshake_failed, - for every other result; and its result by
+// the group's address family.
 func (self *frontQuicRun) countConnectionReason(result string, reason string) {
 	frontQuicConnectionsCounter.WithLabelValues(self.group.key.portKind, result, reason).Inc()
+	frontQuicConnectionsByFamilyCounter.WithLabelValues(self.group.key.portKind, self.group.key.family, result).Inc()
 	if observer := self.frontServer.settings.connectionResultObserverForTest; observer != nil {
 		observer(self.group.key.portKind, result, reason)
 	}
