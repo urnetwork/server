@@ -179,6 +179,79 @@ func TestNetworkVerifiedSources(t *testing.T) {
 	})
 }
 
+// A team's admin_user_id is a synthetic owner of record with no sign-in, so a team verifies by payment or a live
+// Owner's verified sign-in (§21.7: M6 names a team's Owner; §7.5): an Owner's verified email or Apple sign-in
+// verifies it; a JIT pending Owner's, an Admin's, or an Owner's unverified email never does. The cache's load and
+// the gate's statement read it alike.
+func TestNetworkVerifiedCountsATeamsLiveOwner(t *testing.T) {
+	if !server.SidecarMg6Linked() {
+		t.Skip("network_member is MG6's: run with -tags sidecar_pending")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, c := range []struct {
+			name     string
+			role     NetworkMemberRole
+			pending  bool
+			signIn   func(userId server.Id)
+			verified bool
+		}{
+			{name: "an Owner's verified email", role: NetworkMemberRoleOwner, signIn: func(userId server.Id) {
+				testAddPasswordAuth(t, ctx, userId, UserAuthTypeEmail, true)
+			}, verified: true},
+			{name: "an Owner's Apple sign-in", role: NetworkMemberRoleOwner, signIn: func(userId server.Id) {
+				testAddSsoAuth(t, ctx, userId, AuthTypeApple)
+			}, verified: true},
+			{name: "an Owner's unverified email", role: NetworkMemberRoleOwner, signIn: func(userId server.Id) {
+				testAddPasswordAuth(t, ctx, userId, UserAuthTypeEmail, false)
+			}, verified: false},
+			{name: "a pending Owner's verified email", role: NetworkMemberRoleOwner, pending: true, signIn: func(userId server.Id) {
+				testAddPasswordAuth(t, ctx, userId, UserAuthTypeEmail, true)
+			}, verified: false},
+			{name: "an Admin's verified email", role: NetworkMemberRoleAdmin, signIn: func(userId server.Id) {
+				testAddPasswordAuth(t, ctx, userId, UserAuthTypeEmail, true)
+			}, verified: false},
+		} {
+			now := server.NowUtc()
+			// the team's owner of record: no sign-in
+			networkId, _ := testVerifiedNetwork(t, ctx, now)
+			memberUserId := server.NewId()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_team (network_id) VALUES ($1)`, networkId))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_user (user_id, user_name, auth_type) VALUES ($1, $2, $3)`,
+					memberUserId,
+					"member",
+					AuthTypePassword,
+				))
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`INSERT INTO network_member (member_id, network_id, user_id, role, pending) VALUES ($1, $2, $3, $4, $5)`,
+					server.NewId(),
+					networkId,
+					memberUserId,
+					string(c.role),
+					c.pending,
+				))
+			})
+			c.signIn(memberUserId)
+			var loaded networkVerifiedEntitlement
+			var networkIdFacts map[server.Id]*networkAbuseFacts
+			server.Db(ctx, func(conn server.PgConn) {
+				loaded = loadNetworkVerifiedWithConn(ctx, conn, networkId, now)
+				networkIdFacts = loadNetworkAbuseFactsWithConn(ctx, conn, []server.Id{networkId}, now, true)
+			})
+			if loaded.verified != c.verified {
+				t.Errorf("%s: the cache's load read %t", c.name, loaded.verified)
+			}
+			if facts := networkIdFacts[networkId]; facts == nil || facts.verified != c.verified {
+				t.Errorf("%s: the gate's statement read %+v", c.name, facts)
+			}
+		}
+	})
+}
+
 // A paid balance's window ends with no writer: past it the source reads false, the in-process entry is gone after
 // LocalCacheTtl, and the Redis entry lives at most CacheTtl, past which a read loads false.
 func TestNetworkVerifiedExpiredBalanceWithNoWriter(t *testing.T) {
