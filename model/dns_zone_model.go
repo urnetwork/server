@@ -6,6 +6,11 @@ package model
 // order, or /mail/enable. Every change of its state recomputes the whole set
 // (dns_system_records_model.go) and writes one journal row when it changed and
 // none otherwise.
+//
+// One input of the set is not the zone's own: _mta-sts follows the network's
+// verification (owner decision 630), which changes with no write to the zone,
+// so a verification refresh reconciles the network's zones whose _mta-sts it
+// would change (ReconcileNetworkZoneMailPolicy).
 
 import (
 	"context"
@@ -14,8 +19,10 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -158,8 +165,22 @@ func newDnsReportToken() (string, error) {
 // (DNS-M8-01). The zone's row must exist and its lock be held. A binary that
 // does not link MG6, where the column lives, has no token, so its zones
 // publish no rua.
+//
+// The MTA-STS policy is the network's only while it is verified (§12.7, §15.5;
+// owner decision 630, QD-1092): network_verified is read here, in the caller's
+// transaction, from the source of truth, never the cache, so an unverified
+// network's zone and Team scopes publish no _mta-sts, whose mode: enforce
+// policy no receiver may serve for it (§13.9's ValidateListen), and
+// DnsSystemRecords publishes it only with mail on besides. A verification
+// change reaches a zone written earlier through
+// ReconcileNetworkZoneMailPolicy. The receivers' certificates are no condition
+// yet: that waits for the review phase (DESIGN-DEFER.md's
+// dns-mta-sts-certificate-gate).
 func getDnsZoneMailPolicyInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id) *DnsZoneMailPolicy {
-	policy := &DnsZoneMailPolicy{MtaSts: sidecar.DefaultMtaStsSettings()}
+	policy := &DnsZoneMailPolicy{}
+	if isNetworkVerifiedWithQuery(ctx, tx, networkId, server.NowUtc()) {
+		policy.MtaSts = sidecar.DefaultMtaStsSettings()
+	}
 	if records := dnsZoneSettings().RootRecords[root]; records != nil && records.ReportMx != "" {
 		policy.ReportHost = strings.TrimSuffix(dns.CanonicalName(records.ReportMx), ".")
 	}
@@ -282,4 +303,241 @@ func DnsSyncEdgeRecords(ctx context.Context, networkId server.Id, root string, w
 // state rather than a failure: restoring or suspended.
 func IsDnsZoneWaiting(err error) bool {
 	return errors.Is(err, dnsservice.ErrDnsRestoring) || errors.Is(err, ErrDnsZoneSuspended)
+}
+
+// Reconciles the network's zones whose _mta-sts no longer follows its
+// verification (§12.7, §15.5; owner decision 630, QD-1092): the half of the
+// gate a verification change needs, since getDnsZoneMailPolicyInTx reads the
+// verification only when a zone's set is written. UpdateNetworkVerified runs
+// it after each refresh, wherever a balance lands or ends or a sign-in
+// verifies, so verifying a network with mail on publishes the record at that
+// refresh and losing verification takes it away.
+//
+//   - Only an unsuspended zone with mail on, or one still holding an _mta-sts
+//     row, is looked at: one indexed read for a network with none. A Team
+//     scope's mail rides on its network's (§15's ValidateSmtpListen needs a
+//     mail_network row).
+//   - Each such zone is checked first, under its lock held shared, which waits
+//     out a writer in flight: a reconcile that read the verification before it
+//     changed commits before the check reads the rows, so the check sees what
+//     that reconcile wrote. Checks never wait on one another.
+//   - Only a zone whose _mta-sts would change is written, in a transaction of
+//     its own, the label's lock first as every zone writer takes them: its own
+//     set (EnsureNetworkZoneInTx) and each mail scope's, so the whole set is
+//     recomputed, never the one row patched.
+//   - A suspended zone is left: its writes are refused until Restore, which
+//     returns what it withheld, and the network's next refresh or write
+//     reconciles it. A restoring root waits likewise.
+//
+// Nothing here fails its caller, a sign-in or a payment: a refusal or a failure
+// is logged, and the next refresh checks again. A verification that changes
+// with no writer, a paid balance's window ending, reaches the zone at the
+// network's next refresh or write.
+func ReconcileNetworkZoneMailPolicy(ctx context.Context, networkId server.Id) {
+	ReconcileNetworkZoneMailPolicyInConn(nil, ctx, networkId)
+}
+
+// ReconcileNetworkZoneMailPolicy on the caller's Postgres session, which must
+// hold no transaction; nil selects the outer acquisition boundary. A zone
+// write's post (DnsWritePost) still reads the network's sidecars on a pooled
+// connection after its commit.
+func ReconcileNetworkZoneMailPolicyInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) {
+	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
+		return
+	}
+	server.HandleError(func() {
+		var roots []string
+		server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+			roots = getDnsMailPolicyZoneRootsInTx(ctx, conn, networkId)
+		})
+		for _, root := range roots {
+			stale := false
+			server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+				stale = isDnsZoneMailPolicyStaleInTx(ctx, tx, root, networkId, server.NowUtc())
+			}, server.TxReadCommitted, server.TxLockTimeout(server.PgLockTimeout))
+			if !stale {
+				continue
+			}
+			var returnErr error
+			err := dnsCatchRefusal(func() {
+				server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+					returnErr = reconcileDnsZoneMailPolicyInTx(ctx, tx, networkId, root)
+					if returnErr != nil {
+						panic(dnsWriteRefusal{err: returnErr})
+					}
+				}, server.TxReadCommitted, server.TxLockTimeout(server.PgLockTimeout))
+			})
+			switch {
+			case err == nil:
+			case IsDnsZoneWaiting(err) || errors.Is(err, ErrDnsHostSuspended):
+				if glog.V(1) {
+					glog.Infof("[dns]network %s's _mta-sts in %s waits for its zone: %v\n", networkId, root, err)
+				}
+			default:
+				glog.Warningf("[dns]network %s's _mta-sts in %s is not reconciled, its next refresh tries again: %v\n", networkId, root, err)
+			}
+		}
+	})
+}
+
+// The roots of the network's unsuspended zones whose _mta-sts can follow its
+// verification: mail on, or an _mta-sts row still held.
+func getDnsMailPolicyZoneRootsInTx(ctx context.Context, query server.PgCanQuery, networkId server.Id) []string {
+	roots := []string{}
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT network_dns_zone.root
+			FROM network_dns_zone
+			WHERE
+				network_dns_zone.network_id = $1 AND
+				network_dns_zone.suspend_reason IS NULL AND (
+					network_dns_zone.mail OR
+					EXISTS (
+						SELECT 1
+						FROM network_dns_record
+						WHERE
+							network_dns_record.network_id = network_dns_zone.network_id AND
+							network_dns_record.root = network_dns_zone.root AND
+							network_dns_record.rrtype = $2 AND
+							starts_with(network_dns_record.owner, $3)
+					)
+				)
+			ORDER BY network_dns_zone.root
+		`,
+		networkId,
+		int32(dns.TypeTXT),
+		dnsMtaStsLabel+".",
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var root string
+			server.Raise(result.Scan(&root))
+			roots = append(roots, root)
+		}
+	})
+	return roots
+}
+
+// Takes the zone's lock shared to the end of the transaction: the key
+// lockDnsZoneInTx takes, so it waits out a writer holding that, and never
+// another shared holder.
+func lockDnsZoneSharedInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock_shared(hashtextextended('dns_zone:' || $1 || ':' || $2::uuid::text, 0))`,
+		root,
+		networkId,
+	))
+}
+
+// The Team scopes whose sets the zone's rows hold: each label directly below
+// apex whose owner holds a system MX, which every scope's set writes
+// (dnsScopeWritten), but b, the envelope domain, whose MX is the zone's own.
+func dnsZoneWrittenScopes(apex string, rows []*dnsStoredRow) []string {
+	scopes := []string{}
+	for _, row := range rows {
+		if row.set.Type != dns.TypeMX || row.set.Kind != dnsservice.DnsRecordKindSystem {
+			continue
+		}
+		scope, found := strings.CutSuffix(row.set.Owner, "."+apex)
+		if found && scope != dnsMailEnvelopeLabel && isDnsCtLabel(scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	slices.Sort(scopes)
+	return slices.Compact(scopes)
+}
+
+// The row rows hold at owner of rrType, nil for none.
+func dnsZoneRowAt(rows []*dnsStoredRow, owner string, rrType uint16) *dnsStoredRow {
+	for _, row := range rows {
+		if row.set.Owner == owner && row.set.Type == rrType {
+			return row
+		}
+	}
+	return nil
+}
+
+// Whether a reconcile would change the zone's _mta-sts rows: at its apex and at
+// each Team scope's its rows hold (dns_scope_model.go), one wherever mail is on
+// while the network is verified at now, and none elsewhere. It takes the zone's
+// lock shared first, so a writer in flight commits before the rows are read. A
+// user row at the owner is the record API's, which no reconcile writes over,
+// and an owner at or below a withheld one takes no write until its suspension
+// lifts (§12.9), so neither counts. A zone with no row or no label has nothing
+// to change.
+func isDnsZoneMailPolicyStaleInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, now time.Time) bool {
+	lockDnsZoneSharedInTx(ctx, tx, root, networkId)
+	state := getDnsZoneStateInTx(ctx, tx, root, networkId)
+	if state == nil {
+		return false
+	}
+	label := getNetworkLabelInTx(ctx, tx, networkId, root)
+	if label == "" {
+		return false
+	}
+	apex := label + "." + root
+	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
+	verified := isNetworkVerifiedWithQuery(ctx, tx, networkId, now)
+	apexMails := map[string]bool{apex: state.Mail}
+	for _, scope := range dnsZoneWrittenScopes(apex, stored) {
+		scopeState := &DnsScopeState{Root: root, Apex: apex, Scope: scope}
+		dnsScopeStateFromRows(scopeState, stored)
+		apexMails[dnsservice.DnsScopeApex(apex, scope)] = scopeState.Mail
+	}
+	for mailApex, mail := range apexMails {
+		owner := dnsMtaStsLabel + "." + mailApex
+		withheld := slices.ContainsFunc(stored, func(row *dnsStoredRow) bool {
+			return row.set.Kind == dnsservice.DnsRecordKindWithheld && dnsOwnerAtOrBelow(owner, row.set.Owner)
+		})
+		row := dnsZoneRowAt(stored, owner, dns.TypeTXT)
+		switch {
+		case withheld:
+		case row != nil && row.set.Kind == dnsservice.DnsRecordKindUser:
+		case (row != nil) != (mail && verified):
+			return true
+		}
+	}
+	return false
+}
+
+// The zone's set and each Team scope's that has mail on or holds _mta-sts,
+// recomputed with the network's mail policy as it stands, in the caller's
+// transaction, which must be read committed: what
+// ReconcileNetworkZoneMailPolicy writes for a zone whose _mta-sts is stale. A
+// scope's state is read back from its rows, as DnsSetScopeRecordsInTx reads
+// it, so only what the policy changes moves, one journal row a set changed.
+func reconcileDnsZoneMailPolicyInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string) error {
+	if _, err := EnsureNetworkZoneInTx(ctx, tx, networkId, root, nil); err != nil {
+		return err
+	}
+	// the label's lock and the zone's are held from here to the commit
+	apex := getNetworkLabelInTx(ctx, tx, networkId, root) + "." + root
+	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
+	var policy *DnsZoneMailPolicy
+	for _, scope := range dnsZoneWrittenScopes(apex, stored) {
+		scopeApex := dnsservice.DnsScopeApex(apex, scope)
+		state := &DnsScopeState{Root: root, Apex: apex, Scope: scope}
+		dnsScopeStateFromRows(state, stored)
+		if !state.Mail && dnsZoneRowAt(stored, dnsMtaStsLabel+"."+scopeApex, dns.TypeTXT) == nil {
+			continue
+		}
+		if policy == nil {
+			policy = getDnsZoneMailPolicyInTx(ctx, tx, root, networkId)
+		}
+		state.MailPolicy = policy
+		desired, err := DnsScopeRecords(state, dnsZoneTtl())
+		if err != nil {
+			return err
+		}
+		result, err := reconcileDnsSystemRowsInTx(ctx, tx, root, networkId, dnsZoneSystemKeys(scopeApex), desired)
+		if err != nil {
+			return err
+		}
+		if result != nil && 0 < result.Serial {
+			touchDnsLabelMapInTx(ctx, tx, root, networkId, result.Serial)
+		}
+	}
+	return nil
 }

@@ -157,7 +157,7 @@ func loadNetworkAbuseFactsWithConn(
 	verifiedColumn := `false`
 	args := []any{networkIds}
 	if withVerified {
-		verifiedColumn = networkVerifiedSql
+		verifiedColumn = networkVerifiedSql()
 		args = append(args, now.UTC())
 	}
 	result, err := query.Query(
