@@ -30,11 +30,7 @@ import (
 // family is registered in every binary and reports itself not partitioned
 // without the group.
 
-const (
-	mailConnectionRecordTable = "mail_connection_record"
-	// the longest result word a row holds, a metric label's
-	mailConnectionResultMaxByteCount = 32
-)
+const mailConnectionRecordTable = "mail_connection_record"
 
 // Tunables of the session records.
 type MailConnectionSettings struct {
@@ -51,14 +47,20 @@ type MailConnectionSettings struct {
 	// A record starting further ahead of the writer's clock than this is
 	// refused as a clock fault, so no partition is made far ahead of time.
 	MaxFutureSkew time.Duration
+	// The longest result word a row holds, in bytes: 32, the width of the
+	// result column, varchar(32), and a metric label's. A format limit, so it
+	// changes only with the column: a longer word would fail its whole batch's
+	// insert. A record past it is refused and counted.
+	ResultMaxByteCount int
 }
 
 func DefaultMailConnectionSettings() *MailConnectionSettings {
 	return &MailConnectionSettings{
-		RecordRetention: 23 * time.Hour,
-		AheadHours:      6,
-		CreateBehind:    1 * time.Hour,
-		MaxFutureSkew:   5 * time.Minute,
+		RecordRetention:    23 * time.Hour,
+		AheadHours:         6,
+		CreateBehind:       1 * time.Hour,
+		MaxFutureSkew:      5 * time.Minute,
+		ResultMaxByteCount: 32,
 	}
 }
 
@@ -121,21 +123,33 @@ var mailConnectionRecordPartitionFamily = server.RegisterPartitionFamily(
 	newMailConnectionRecordPartitionFamily(DefaultMailConnectionSettings()),
 )
 
-// Whether mail_connection_record is a partitioned table in this database.
+// Whether mail_connection_record is a partitioned table in this database, read
+// on the maintenance pool: the partition family's Partitioned hook, which the
+// registry's runway and retirement call where that pool is. mxedge's probe
+// reads the same on the main pool (MxEdgeStore.Ping), since the router's block
+// has no maintenance pool (QD-1133).
 func mailConnectionTablePartitioned(ctx context.Context) (partitioned bool) {
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(
-			ctx,
-			`SELECT COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass($1)), false)`,
-			"public."+mailConnectionRecordTable,
-		).Scan(&partitioned))
+		partitioned = mailConnectionTablePartitionedInConn(ctx, conn)
 	})
 	return
 }
 
-// Whether result is a closed-set word.
-func mailConnectionResultValid(result string) bool {
-	if result == "" || mailConnectionResultMaxByteCount < len(result) {
+// Whether mail_connection_record is a partitioned table in this database, read
+// on the caller's connection from the catalog, which any role may read: no
+// grant is needed.
+func mailConnectionTablePartitionedInConn(ctx context.Context, conn server.PgQuerier) (partitioned bool) {
+	server.Raise(conn.QueryRow(
+		ctx,
+		`SELECT COALESCE((SELECT relkind = 'p' FROM pg_class WHERE oid = to_regclass($1)), false)`,
+		"public."+mailConnectionRecordTable,
+	).Scan(&partitioned))
+	return
+}
+
+// Whether result is a closed-set word a row holds.
+func mailConnectionResultValid(result string, settings *MailConnectionSettings) bool {
+	if result == "" || settings.ResultMaxByteCount < len(result) {
 		return false
 	}
 	for i := range len(result) {
@@ -171,7 +185,7 @@ func writeMailConnectionRecordsAt(ctx context.Context, records []*MailConnection
 	results := []string{}
 	hours := map[time.Time]bool{}
 	for _, record := range records {
-		if record == nil || record.NetworkId == (server.Id{}) || record.ByteCount < 0 || !mailConnectionResultValid(record.Result) {
+		if record == nil || record.NetworkId == (server.Id{}) || record.ByteCount < 0 || !mailConnectionResultValid(record.Result, settings) {
 			result.RefusedCount += 1
 			continue
 		}

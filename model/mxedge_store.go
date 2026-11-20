@@ -52,13 +52,17 @@ func (self *MxEdgeStore) callContext(ctx context.Context) (context.Context, cont
 	return context.WithTimeout(ctx, self.settings.CallTimeout)
 }
 
-// Runs callback and returns what it raised, as an error.
+// Runs callback and returns what it raised, as an error, a context that ended
+// under it included (QD-1090). The store's callers are mxedge's own
+// goroutines, its probe and its record batches, which run under no server
+// handler, so a raise that left here would end the process: a call past the
+// engine's StoreTimeout or RecordWriteTimeout on a slow Postgres, or one the
+// engine's close ended, fails instead. A failed probe leaves the engine not
+// ready until the next one, and a failed batch waits at the front for the next
+// flush.
 func mxEdgeStoreRun(callback func()) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
-			}
 			if recoveredErr, ok := r.(error); ok {
 				err = recoveredErr
 			} else {
@@ -71,7 +75,12 @@ func mxEdgeStoreRun(callback func()) (err error) {
 }
 
 // Whether the table answers: the binary links MG7 and mail_connection_record
-// is a partitioned table in this database.
+// is a partitioned table in this database. The catalog is read on the main
+// pool (QD-1133), which in the router's block connects as the block's own role
+// (pg-mxedge.yml): the block mounts no file for the maintenance pool, and the
+// read needs no grant, since pg_class and to_regclass answer any role. The
+// partition family's Partitioned hook reads the same on the maintenance pool,
+// where the registry's work runs.
 func (self *MxEdgeStore) Ping(ctx context.Context) error {
 	if !server.SidecarMg7Linked() {
 		return ErrMailUnlinked
@@ -80,7 +89,9 @@ func (self *MxEdgeStore) Ping(ctx context.Context) error {
 	defer cancel()
 	var partitioned bool
 	err := mxEdgeStoreRun(func() {
-		partitioned = mailConnectionTablePartitioned(callCtx)
+		server.Db(callCtx, func(conn server.PgConn) {
+			partitioned = mailConnectionTablePartitionedInConn(callCtx, conn)
+		})
 	})
 	if err != nil {
 		return err
