@@ -450,6 +450,43 @@ Ranked by impact over effort, with risk.
 - `./grafana` with promtool;
 - R15's own suites.
 
+### 8.1 R14's second half: logical timers on a sweep
+
+Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrinks the heaps the walks visit (§3.4) by taking a connection's logical timers out of them. Socket deadlines and heartbeats stay as they are.
+
+**The sweep** (`internal/timersweep`):
+- **One per process.** `newExchange` makes it. The handler gives it to every announcement and authorization lease, and the exchange's residents and forwards use it.
+- **Sharded:** one hashed timing wheel per P, GOMAXPROCS shards, each with its own lock. New timers take the shards in turn. A wheel has 1024 slots of one tick, so a rotation is 102.4 s, and a deadline further out waits in its slot through the earlier passes.
+- **Fixed tick, 100 ms.** A timer fires at the first tick boundary at or after its deadline: never early, and at most 100 ms late, before the scheduling delay every timer has. A timer re-armed when it fires drifts by at most a tick a period. A ticker keeps its cadence from its start, as a `time.Ticker` does.
+- **Driven by one runtime timer per shard,** re-armed only after it fires. A timer that's in no heap when it's re-armed is simply added, so the drivers never set off a walk. A shard's driver runs only while the shard holds an armed timer, so an idle sweep has no goroutine and no runtime timer, and needs no close.
+- **A fire never blocks the sweep.** It's a non-blocking send on the owner's one-slot channel, made under the shard's lock, and the owner's goroutine does the work. A fire the owner hasn't received absorbs later ones. The sweep never calls owner code or logging.
+- **Cancellation and teardown:** each owner stops its timer as it returns. Arming, re-arming and stopping each unlink or link one entry, O(1), and a stopped timer leaves no entry behind. As with a Go 1.23 timer, `Reset` and `Stop` discard a fire not yet received, so no stale fire arrives after either returns.
+- **Memory:** a 72-byte entry and its 96-byte channel, 176 bytes with size classes, plus each shard's 8 KiB of slots. That's less than a runtime timer with its channel.
+- **Without a sweep,** an owner built directly, as tests build them, gives each timer a sweep of its own with the same tick. Inside a synctest bubble that sweep's driver stays in the bubble.
+
+**Converted.** Each fires at its deadline or at most 100 ms after it, never before:
+
+| Timer | Deadline | Why a 100 ms delay is harmless |
+|---|---|---|
+| Announce window, two halves | 2.5 s each | Registration comes at most 200 ms later. The pending marker has 5 s of slack beyond the window. |
+| Announce sync round | 30 s, retries up to 120 s | A round's stats cover the time from the last round's end to its own, so a late round loses nothing. It still writes only the current and previous 60 s blocks. |
+| Announce test schedule | 12–24 h, random | Against a random 12–24 h. |
+| Announce verify egress refresh | 2 min | The lease lives 10 min. |
+| Passive speed sample | 5 s window | A window runs 5.0–5.1 s, and the sample divides by its measured length. |
+| Resident idle watch | 300 s from the last activity | Retirement comes at most 100 ms after the idle deadline, never before it. Activity still moves the deadline. |
+| Resident registration refresh | 75 s after the last refresh | The registration's ttl is 300 s. |
+| Forward idle watch | 3 min from the last payload | As for the resident. |
+| Lease horizon | the credential's horizon | The horizon already carries the 30 s clock leeway past the token's expiry, and a recheck also retires a credential past it. |
+| Lease recheck ticker | every 60 s from the lease's start | A lease's deadline is 90 s after its last check starts. |
+
+**Left as they are:**
+- **Socket deadlines,** native, by the 2026-10-30 rule (CPUOPT-KEEPALIVE.md).
+- **Heartbeats:** the h1 writer's ping, reset per idle transition; the exchange writer's pinger (`newExchangePinger`); and a forward's ping worker (`handleExchangeConnection`, the 81k in §3.4). Each promises the peer a frame at least every ping interval, and the exchange's TCP keepalive idles out only 1 s after it. A tick late would break that promise. Arming a tick early would keep it, at about 1% more pings, but that's a change to a heartbeat and isn't made here.
+- **Per-message bounds:** a forward's write timer (`runWithResidentLookup`) bounds one send into a full queue, and it's in a heap only while such a send waits.
+- **The client library's timers** (`resetOrCreateTimer`, `sequenceDeadlineTimer`) and quic-go's.
+- **Retries during an outage:** the measurement write retry and the lease's unanswered-recheck retry, which run only after a failure.
+- **`registerWhenResident`,** whose first poll is 100 ms: a tick would double it, and it lives at most 30 s.
+
 ## Appendix A. Queries and profile commands
 
 **Queries.** Instant queries over the window, at its end, against Mimir. LBALTOPT1 Appendix A has the CPU, traffic and runtime queries. New here:
