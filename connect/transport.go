@@ -1092,6 +1092,9 @@ func newConnectHandlerWithPacketConns(
 	// The exchange flag is the single drain-excuse switch: the exchange side
 	// writes the markers on drain, the announce side consumes them.
 	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
+	// One timer sweep per process: the announcements' and the authorization
+	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
+	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,

@@ -34,6 +34,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
 )
 
@@ -803,7 +804,13 @@ type Exchange struct {
 	// the edge inventory moves target; nil while moves are disabled
 	edgeInventory *EdgeInventory
 
-	settings              *ExchangeSettings
+	settings *ExchangeSettings
+	// the process's logical timers: the residents' idle watches and
+	// registration refreshes, the forwards' idle watches, and the timers of
+	// the handler's announcements and authorization leases. Nil in an
+	// exchange a test builds without newExchange, which gives each such timer
+	// a sweep of its own (LBALTOPT2.md §8.1).
+	timerSweep            *timersweep.Sweep
 	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
 	payloadOwnerLedger    *residentPayloadLedger
 	sdkPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
@@ -834,6 +841,9 @@ type Exchange struct {
 	// Nil in production; registration tests wait for a resident's teardown,
 	// its peer registration cleanup included, to finish.
 	afterResidentTeardownForTest func(*Resident)
+	// Nil in production; refresh tests replace a resident's registration
+	// refresh and observe when each one comes.
+	refreshResidentRegistrationForTest func(*Resident) bool
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -983,6 +993,7 @@ func newExchange(
 		hostToServicePorts:    hostToServicePorts,
 		routes:                routes,
 		settings:              settings,
+		timerSweep:            timersweep.New(timersweep.DefaultTick),
 		memoryOwnerLedger:     settings.MemoryOwnerLedger,
 		payloadOwnerLedger:    settings.payloadOwnerLedger,
 		sdkPayloadOwnerLedger: settings.SDKPayloadOwnerLedger,
@@ -1366,20 +1377,8 @@ func (self *Exchange) nominateLocalResident(
 		}
 	})
 	go server.HandleError(resident.runIdleWatcher)
-	// poll the resident the same as exchange connections
 	go server.HandleError(func() {
-		defer resident.Cancel()
-		for {
-			select {
-			case <-resident.Done():
-				return
-			case <-time.After(self.settings.ExchangeResidentTtl / 4):
-			}
-
-			if !self.refreshResidentRegistration(resident) {
-				return
-			}
-		}
+		self.runResidentRegistrationRefresh(resident)
 	})
 	if afterStarted := self.afterResidentWorkersStartedForTest; afterStarted != nil {
 		afterStarted(resident)
@@ -1405,6 +1404,33 @@ func residentReplaced(ctx context.Context, clientId server.Id, residentId server
 		current := model.GetResidentForClient(ctx, clientId, 0)
 		return current != nil && current.ResidentId != residentId
 	})
+}
+
+// Polls the resident the same as exchange connections: refreshes its
+// registration every ExchangeResidentTtl/4 after the last refresh ends, until
+// the resident ends or a refresh finds it replaced. The wait is on the
+// exchange's timer sweep, so a refresh may come one sweep tick late, against a
+// registration ttl four refreshes long (LBALTOPT2.md §8.1).
+func (self *Exchange) runResidentRegistrationRefresh(resident *Resident) {
+	defer resident.Cancel()
+	refreshTimer := self.timerSweep.NewTimer(self.settings.ExchangeResidentTtl / 4)
+	defer refreshTimer.Stop()
+	for {
+		select {
+		case <-resident.Done():
+			return
+		case <-refreshTimer.C:
+		}
+
+		refresh := self.refreshResidentRegistration
+		if self.refreshResidentRegistrationForTest != nil {
+			refresh = self.refreshResidentRegistrationForTest
+		}
+		if !refresh(resident) {
+			return
+		}
+		refreshTimer.Reset(self.settings.ExchangeResidentTtl / 4)
+	}
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change
@@ -4268,9 +4294,11 @@ func (self *ResidentForward) CancelIfIdle() bool {
 }
 
 // Owns idle expiry independently from socket liveness. Forward activity is
-// payload admission; exchange keepalives do not extend this deadline.
+// payload admission; exchange keepalives do not extend this deadline. The
+// wait is on the exchange's timer sweep, so expiry comes at the idle deadline
+// or at most one sweep tick after it, never before (LBALTOPT2.md §8.1).
 func (self *ResidentForward) runIdleWatcher(sourceId server.Id) {
-	timer := time.NewTimer(self.exchange.settings.ForwardIdleTimeout)
+	timer := self.exchange.timerSweep.NewTimer(self.exchange.settings.ForwardIdleTimeout)
 	defer timer.Stop()
 	for {
 		if self.CancelIfIdle() {
@@ -5602,9 +5630,12 @@ func (self *Resident) CancelIfIdle() bool {
 // between timer wakes must not round that deadline up by another whole TTL.
 // Activity can move the deadline after arming; rechecking on wake preserves
 // that activity's full allowance without changing accepted control teardown.
+//
+// The wait is on the exchange's timer sweep: retirement comes at the idle
+// deadline or at most one sweep tick after it, never before.
 func (self *Resident) runIdleWatcher() {
 	defer self.Cancel()
-	timer := time.NewTimer(self.exchange.settings.ExchangeResidentTtl)
+	timer := self.exchange.timerSweep.NewTimer(self.exchange.settings.ExchangeResidentTtl)
 	defer timer.Stop()
 	for {
 		if self.CancelIfIdle() {
