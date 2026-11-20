@@ -387,7 +387,8 @@ func TestGammaMovedNonceWithoutOurBatchHoldsForReview(t *testing.T) {
 // service or at another, raises an alarm (we hold those keys, so it is the
 // first sign of a leaked deposit seed) and credits nothing. A spend at our
 // service from a hotkey we never assigned is no alarm and no credit: it stays
-// in that hotkey's GammaSpent total.
+// in that hotkey's GammaSpent total, and is recorded as a direct payment its
+// payer can claim (gamma_claim.go).
 func TestGammaSpendWeNeverIssuedRaisesAnAlarm(t *testing.T) {
 	skipWithoutProYml(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -407,7 +408,10 @@ func TestGammaSpendWeNeverIssuedRaisesAnAlarm(t *testing.T) {
 		f.sim.mine()
 		f.run()
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_alarm WHERE kind = $1`, gammaAlarmUnknownReference), 2)
-		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_alarm`), 2)
+		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_alarm WHERE kind <> $1`, model.GammaRecordKindDirectPayment), 2)
+		payments := model.ListGammaDirectPayments(ctx, gammaTestColdkey)
+		connect.AssertEqual(t, len(payments), 1)
+		connect.AssertEqual(t, payments[0].Amount, int64(3_000_000_000))
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent WHERE credited_at IS NOT NULL`), 0)
 		// the cursor moved on
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_charge WHERE state = 'spent'`), 0)

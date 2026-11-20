@@ -2266,14 +2266,17 @@ func AddGammaAlarmInTx(tx server.PgTx, ctx context.Context, alarmKey string, kin
 	return tag.RowsAffected() == 1
 }
 
-// ListGammaAlarms are the alarms since a time, newest first.
+// ListGammaAlarms are the alarms since a time, newest first. Direct payments,
+// recorded in the same table for their claims (GammaRecordKindDirectPayment),
+// are records and not alarms.
 func ListGammaAlarms(ctx context.Context, since time.Time, limit int) (alarms []*GammaAlarm) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time ORDER BY create_time DESC LIMIT $2`,
+			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time AND kind <> $3 ORDER BY create_time DESC LIMIT $2`,
 			since,
 			limit,
+			GammaRecordKindDirectPayment,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
