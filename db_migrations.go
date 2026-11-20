@@ -11921,6 +11921,10 @@ var migrations = []any{
 	// Bind an independently approved runtime correction to epoch three
 	// without changing its original intake or grading policy.
 	newSqlMigration(competitionEpochThreeRuntimeCorrectionSql()),
+
+	// Record the exact epoch-three builder correction without claiming a
+	// replacement agent executable where that executable did not change.
+	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
 }
 
 // The deleted_network backfill (the migration above): every network an App

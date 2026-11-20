@@ -75,7 +75,10 @@ func validateCompetitionExecutorControlAmendment(settings *Settings, round *roun
 	}
 	for index, host := range value.Hosts {
 		previous := settings.DistributedEvaluationPolicy.Hosts[index]
-		if host.HostId != previous.HostId || host.PreviousQualificationSha256 != previous.QualificationSha256 || host.QualificationSha256 == previous.QualificationSha256 || host.PreviousAgentSha256 == host.AgentSha256 {
+		builderCorrection := round.Epoch == 3 && value.Environment == "main" &&
+			value.RoundId.String() == "01a1f4d0-47c9-ac2d-ce45-55ef159a9b41" && host.PreviousBuilderSha256 != host.BuilderSha256
+		if host.HostId != previous.HostId || host.PreviousQualificationSha256 != previous.QualificationSha256 || host.QualificationSha256 == previous.QualificationSha256 ||
+			(host.PreviousAgentSha256 == host.AgentSha256 && !builderCorrection) {
 			return errors.New("executor control amendment changed host membership or omitted a real replacement")
 		}
 		for _, digest := range []string{host.PreviousQualificationSha256, host.QualificationSha256, host.PreviousAgentSha256, host.AgentSha256, host.PreviousBuilderSha256, host.BuilderSha256} {
