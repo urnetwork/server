@@ -38,6 +38,12 @@ package model
 // The standing and network_verified come from the AbuseGate the process installs (SetDnsRecordsAbuseGate), memory
 // ABUSE-M5-07's model.NewAbuseGate fills; until a process installs one every write answers unavailable, the closed
 // direction. The limits come from QUOTA's NetworkSidecarLimits through DnsLimits, which a test replaces.
+//
+// GET /network/dns also names each custom domain's owed DKIM CNAMEs (§14.6, QD-1130): every published selector of a
+// sending sidecar under a verified domain that the domain does not answer at <sel>._domainkey.<domain>, by a
+// delegated _domainkey or the customer's CNAME to <sel>._domainkey.<label>.<root>, which is the CNAME owed. Its read
+// takes the selectors in the zone's transaction and looks each one up after it, through the process's resolver
+// (NetworkDomainResolver, domain-verify's), holding no connection; nothing of a lookup is stored.
 
 import (
 	"context"
@@ -83,13 +89,25 @@ type DnsRecordsSettings struct {
 	WriteMaxRecordSetCount int
 	// The most values one upsert names. §12.7's own caps per type are lower; this bounds the parse.
 	UpsertMaxValueCount int
+	// How long GET /network/dns's lookup of one custom-domain selector, <sel>._domainkey.<domain>, may take before
+	// its CNAME reads owed: 5 s, so a slow customer zone holds the console's read that long at most (QD-1130).
+	// Non-positive reads every one owed.
+	DkimCnameLookupTimeout time.Duration
+	// The most selectors one GET /network/dns looks up: 64, dns_dkim_selectors' cap on a network's device selectors
+	// (§12.7), so a read looks up every one; past it the rest read owed. Non-positive looks up none.
+	DkimCnameLookupMaxCount int
+	// How many of one read's lookups run at once: 8. Non-positive runs one at a time.
+	DkimCnameLookupConcurrency int
 }
 
 func DefaultDnsRecordsSettings() *DnsRecordsSettings {
 	return &DnsRecordsSettings{
-		ChangesWindow:          time.Hour,
-		WriteMaxRecordSetCount: 256,
-		UpsertMaxValueCount:    64,
+		ChangesWindow:              time.Hour,
+		WriteMaxRecordSetCount:     256,
+		UpsertMaxValueCount:        64,
+		DkimCnameLookupTimeout:     5 * time.Second,
+		DkimCnameLookupMaxCount:    64,
+		DkimCnameLookupConcurrency: 8,
 	}
 }
 
@@ -918,7 +936,7 @@ func getDnsZoneViewInTx(ctx context.Context, tx server.PgTx, root string, networ
 
 // GET /network/dns's body: the zone as GetDnsZoneView reads it, with dns_entries' count and the network's limit, -1
 // for none or while sidecar limits are dark, and from M6 each custom host and each verified domain's challenge
-// target.
+// target, with from M9 the DKIM CNAMEs the domain owes (see the file header).
 func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*sidecar.NetworkDns, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, dnsRecordsUnavailable("the zone tables are not linked")
@@ -926,6 +944,7 @@ func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*side
 	root = dnsLabelRoot(root)
 	_, limits := currentDnsRecordsDeps()
 	var networkDns *sidecar.NetworkDns
+	var selectors []*dnsDkimSelectorRow
 	var returnErr error
 	err := dnsCatchRefusal(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -941,6 +960,8 @@ func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*side
 			}
 			// M6's custom hosts and the verified domains' challenge targets (DNS-M6-02)
 			networkDns.CustomHosts, networkDns.CustomDomains = getNetworkDnsCustomInTx(ctx, tx, root, networkId)
+			// their selectors, looked up once the transaction has ended (QD-1130)
+			selectors = getNetworkDnsDkimSelectorsInTx(ctx, tx, networkId, networkDns.CustomDomains)
 			if limit, enforced := limits.LimitInTx(ctx, tx, networkId, DnsEntriesLimitKey); enforced {
 				networkDns.EntryLimit = limit
 			}
@@ -949,7 +970,102 @@ func GetNetworkDns(ctx context.Context, root string, networkId server.Id) (*side
 	if err != nil {
 		return nil, dnsRecordsApiError(err)
 	}
+	if networkDns != nil {
+		fillNetworkDnsDkimCnames(ctx, networkDns, selectors, currentDnsRecordsSettings())
+	}
 	return networkDns, returnErr
+}
+
+// A sending sidecar's selector under a custom domain, as GET /network/dns checks it: published, so its key record is
+// at <sel>._domainkey.<label>.<root>.
+type dnsDkimSelectorRow struct {
+	selector  string
+	domain    string
+	publicKey []byte
+}
+
+// The published selectors of domains, the network's verified domains as the read lists them, in domain then selector
+// order, read in the caller's transaction. None in a binary that does not link MG9, whose smtp_dkim_key holds them.
+func getNetworkDnsDkimSelectorsInTx(ctx context.Context, query server.PgCanQuery, networkId server.Id, domains []sidecar.DnsCustomDomain) []*dnsDkimSelectorRow {
+	rows := []*dnsDkimSelectorRow{}
+	if len(domains) == 0 || !server.SidecarMg9Linked() {
+		return rows
+	}
+	listed := map[string]bool{}
+	for _, domain := range domains {
+		listed[domain.Domain] = true
+	}
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT selector, domain, public_key FROM smtp_dkim_key
+			WHERE network_id = $1 AND state = $2
+			ORDER BY domain, selector
+		`,
+		networkId,
+		SmtpDkimKeyStatePublished,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			row := &dnsDkimSelectorRow{}
+			server.Raise(result.Scan(&row.selector, &row.domain, &row.publicKey))
+			if listed[row.domain] {
+				rows = append(rows, row)
+			}
+		}
+	})
+	return rows
+}
+
+// Fills each custom domain's owed DKIM CNAMEs from selectors (see the file header): each one the domain does not answer
+// with its key by the process's resolver, looked up with no connection held, at most DkimCnameLookupConcurrency at
+// once, each within DkimCnameLookupTimeout. A failed lookup, and a selector past DkimCnameLookupMaxCount, reads owed,
+// so no CNAME a receiver could not follow is left out.
+func fillNetworkDnsDkimCnames(ctx context.Context, networkDns *sidecar.NetworkDns, selectors []*dnsDkimSelectorRow, settings *DnsRecordsSettings) {
+	if len(selectors) == 0 {
+		return
+	}
+	resolver := currentNetworkDomainResolver()
+	answered := make([]bool, len(selectors))
+	lookupSlots := make(chan struct{}, max(settings.DkimCnameLookupConcurrency, 1))
+	var lookups sync.WaitGroup
+	for index, row := range selectors {
+		if settings.DkimCnameLookupMaxCount <= index || settings.DkimCnameLookupTimeout <= 0 {
+			break
+		}
+		lookups.Add(1)
+		go func() {
+			defer lookups.Done()
+			lookupSlots <- struct{}{}
+			defer func() { <-lookupSlots }()
+			lookupCtx, cancel := context.WithTimeout(ctx, settings.DkimCnameLookupTimeout)
+			defer cancel()
+			values, err := resolver.LookupTxt(lookupCtx, sidecar.SmtpDkimKeyName(row.selector, row.domain))
+			if err != nil {
+				return
+			}
+			// each goroutine writes its own index, read only after the wait
+			answered[index] = slices.ContainsFunc(values, func(value string) bool {
+				return sidecar.SmtpDkimKeyRecordHolds(value, row.publicKey)
+			})
+		}()
+	}
+	lookups.Wait()
+	apex := networkDns.Apex()
+	for index, row := range selectors {
+		if answered[index] {
+			continue
+		}
+		for domainIndex := range networkDns.CustomDomains {
+			domain := &networkDns.CustomDomains[domainIndex]
+			if domain.Domain == row.domain {
+				domain.DkimCnames = append(domain.DkimCnames, sidecar.DnsDkimCname{
+					Name:   sidecar.SmtpDkimKeyName(row.selector, row.domain),
+					Target: sidecar.SmtpDkimKeyName(row.selector, apex),
+				})
+			}
+		}
+	}
 }
 
 // The user root api's /network/dns routes serve: dns.yml's one root, read once a process, as dnsZoneTtl reads its
