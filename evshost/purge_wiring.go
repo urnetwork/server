@@ -40,6 +40,7 @@ type hostPurgeSink struct {
 
 var _ evsservice.PurgeSink = (*hostPurgeSink)(nil)
 
+// Queues commit's candidates on the block's Purger, or, before it is built, nowhere: the sweep's.
 func (self *hostPurgeSink) Certain(commit *evsservice.PurgeCommit) {
 	if purger := self.purger.Load(); purger != nil {
 		purger.Certain(commit)

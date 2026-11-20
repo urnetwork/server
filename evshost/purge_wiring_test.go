@@ -131,6 +131,7 @@ type purgeWiringVersion struct {
 	storedByteCount int64
 }
 
+// p.bin's ordinal-th committed version, from 1, as the segment cluster holds it now.
 func (self *purgeWiringWorld) version(ctx context.Context, ordinal int) (*purgeWiringVersion, error) {
 	entries, err := self.world.CommittedEntries("p.bin")
 	if err != nil {
@@ -430,8 +431,9 @@ func TestHostRunsItsPurgeWithItsLifecycle(t *testing.T) {
 	// the commit is not due until the allowance has passed, so the drain waits on it: pass it
 	drained.clock.(*sidecartest.FakeClock).Advance(evsservice.DefaultPurgerSettings().Allowance)
 	drained.Drain()
-	if purger.QueuedIdCount() != 0 {
-		t.Fatalf("the drain left %d ids queued", purger.QueuedIdCount())
+	// the host gives no gates, so the purge reads observe: the drain took the due commit through it, deleting nothing
+	if stats := purger.Stats(); purger.QueuedIdCount() != 0 || stats.ObservedCount != 1 || stats.DeletedCount != 0 {
+		t.Fatalf("the drain left %d ids queued: %+v", purger.QueuedIdCount(), stats)
 	}
 	purger.Certain(purgeWiringTestCommit())
 	if purger.QueuedIdCount() != 0 || purger.Stats().SweepCount == 0 {
