@@ -51267,12 +51267,12 @@ taskworker's uptime probe) posts a webrtc offer to the extender client's
 Redis offer set. The connect process holding the client's resident takes
 it and relays it to the client as exchange signals. The client's extender
 answerer (connect net_extender_webrtc_signal.go) answers on the same
-exchange, and the resident posts the answer for the prober (server
-connect/extender_webrtc_relay.go). The prober offers only to extenders
-whose builds serve the carrier: an activation tests webrtc only for an
-extender that offers the carrier (under S8's rules, only when tcp failed or
-was not offered), and the uptime task probes webrtc only on addresses
-accepted on it.
+exchange. The resident then tries to write the answer to Redis for the
+waiting prober (server connect/extender_webrtc_relay.go). The prober offers
+only to extenders whose builds serve the carrier: an activation tests webrtc
+only for an extender that offers the carrier (under S8's rules, only when
+tcp failed or was not offered), and the uptime task probes webrtc only on
+addresses accepted on it.
 
 Source: `urnetwork_extender_webrtc_relay_offers_total`, the offers each
 connect process's residents took for their clients, by outcome. Every
@@ -51281,8 +51281,8 @@ reads its increase over the trailing hour, summed over the processes by
 outcome, at one-minute evaluations of one bounded Mimir range read (the §26
 history read), every 5 minutes. The total counts every outcome:
 
-- `answered`: the client answered, and the answer was posted for the
-  prober;
+- `answered` records a relay outcome with no error, before the resident
+  attempts the Redis answer write.
 - `no_answer`: the client sent no answer before the offer's deadline, or
   its answer failed;
 - `expired`: the prober's deadline had passed when the offer was taken;
@@ -51299,11 +51299,11 @@ sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="bu
   / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
 ```
 
-Healthy: no history yet. As designed, nearly every offer is answered,
-since the prober offers only to builds that serve the carrier, and `busy`
-is about zero: the prober holds far fewer offers open than the bound (the
-uptime pass probes 16 addresses at a time per taskworker, and a client may
-have at most two offers pending).
+Healthy: no history yet. The relay should record `answered` for nearly
+every offer, since the prober offers only to builds that serve the carrier.
+The `busy` share should be about zero. The prober holds far fewer offers
+open than the bound (the uptime pass probes 16 addresses at a time per
+taskworker, and a client may have at most two offers pending).
 
 Thresholds (each judged at every one-minute evaluation of its hold, with at
 least 20 offers in the trailing hour):
@@ -51340,6 +51340,10 @@ False-negative qualifiers:
   nowhere, so the relay reads as idle, under the minimum. The webrtc step
   of the extenders dashboard's activation panels shows those probes
   failing.
+- **An answer the prober misses.** A failed Redis answer write or an
+  expired prober wait can leave `answered` high while probes time out.
+  Check the prober's answer-wait result for the same offer to confirm
+  receipt.
 - **A prober the failures quieted.** If deactivating the addresses accepted
   on webrtc alone leaves the prober fewer than 20 offers an hour, the relay
   reads as healthy again. `extender-supply-falling` (§28.5) and the

@@ -292,6 +292,10 @@ func TestExtenderWebRtcRelayAlertsNameShareCountsAndWhereToLook(t *testing.T) {
 			!strings.Contains(alert.Observed, counts) {
 			t.Fatalf("alert %+v", alert)
 		}
+		if !strings.Contains(alert.Evidence, "before it attempts the Redis answer write") ||
+			!strings.Contains(alert.Evidence, "prober's answer-wait result for the same offer") {
+			t.Fatalf("%s omits the answer counter's observation boundary: %s", alert.Class, alert.Evidence)
+		}
 		var wants []string
 		switch alert.Class {
 		case "extender-webrtc-relay-no-answer-high":
