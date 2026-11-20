@@ -1140,7 +1140,7 @@ func PlayWebhook(
 ) (*PlayWebhookResult, error) {
 	result, err := playWebhook(webhookArgs, clientSession)
 	if err != nil {
-		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError)
+		storeNotifications.recordWithStage(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError, playNotificationVerifiedProcessingStage)
 	} else {
 		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationAccepted)
 	}
@@ -2166,12 +2166,14 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (body io.Reader
 			return
 		}
 		outcome := StoreNotificationRefusedMalformed
+		stage := ""
 		if returnErr == errWebhookVerificationUnavailable {
 			outcome = StoreNotificationRefusedUnavailable
 		} else if refused, ok := returnErr.(*playAuthError); ok {
 			outcome = refused.outcome
+			stage = refused.stage
 		}
-		RecordStoreNotificationOutcome(req.Context(), model.SubscriptionMarketGoogle, outcome)
+		storeNotifications.recordWithStage(req.Context(), model.SubscriptionMarketGoogle, outcome, stage)
 	}()
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
@@ -2221,8 +2223,8 @@ func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, aud
 				// Google answered: the token is not one it issued, or expired
 				return &playAuthError{outcome: StoreNotificationRefusedAuth, message: err.Error()}
 			}
-			// Google could not be asked: the push is unverified, not refused
-			return &playAuthError{outcome: StoreNotificationError, message: err.Error()}
+			// The lookup or its response decode failed before the claims checks.
+			return &playAuthError{outcome: StoreNotificationError, stage: playNotificationTokenInfoStage, message: err.Error()}
 		}
 		// Google's tokeninfo endpoint verifies the signature. Bind that token
 		// to this subscription and its verified service account as well.

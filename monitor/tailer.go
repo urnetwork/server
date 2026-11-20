@@ -398,9 +398,7 @@ var logClasses = []logClass{
 		verify:    "Require fresh complete log coverage with no matching refusals for two log-errors cadences after ingestion delay, independently successful verification and intended webhook handling, and the actual provider backlog/reconciliation outcome. Quiet logs, credential shape alone or an unrelated 2xx do not certify payment recovery.",
 	},
 	{name: "store-notification-refused", re: storeNotificationRefusedRe,
-		sample: func(line string) string {
-			return "[store-notification]" + storeNotificationLogGroup(storeNotificationRefusedRe)(line)
-		},
+		sample:        storeNotificationRefusedSample,
 		groupBy:       storeNotificationLogGroup(storeNotificationRefusedRe),
 		rateThreshold: 1, tier: tierPage, playbook: "SIGNALS.md §2.22c",
 		meaning:   "The diagnostic contains the displayed store and outcome. The producer stage for this combination is unknown.",
@@ -1590,18 +1588,49 @@ var storeNotificationRefusedRe = regexp.MustCompile(`\[store-notification\](goog
 var storeNotificationUnverifiedRe = regexp.MustCompile(`\[store-notification\](google|apple) (refused_auth|refused_signature|refused_malformed)\b`)
 
 // The producer establishes different stages for the same outcome across stores.
-func storeNotificationRefusalMeaning(frame string, fallback string) string {
+func storeNotificationRefusalMeaning(frame, sample, fallback string) string {
 	switch frame {
 	case "store=apple outcome=error":
 		return "The App Store handler completed notification verification and processing returned an error. Transaction claims, product policy, account binding and a missing destination can share this outcome. The reason for this attempt is unknown."
 	case "store=apple outcome=refused_claims":
 		return "The App Store handler checked the outer signature and rejected decoded claims. Missing required data and mismatched app identities can share this outcome."
 	case "store=google outcome=error":
+		switch {
+		case strings.HasSuffix(sample, " stage=token_info"):
+			return "The sampled Play push failed while obtaining or decoding token information before publisher verification. The frame rate includes errors from either stage."
+		case strings.HasSuffix(sample, " stage=verified_processing"):
+			return "The sampled Play handler returned an error while processing a verified push. The frame rate includes errors from either stage."
+		}
 		return "The Play handler can record this error during token lookup before publisher verification or during processing of a verified push. The stage for this attempt is unknown."
 	case "store=google outcome=refused_audience":
 		return "The Play token matched the configured publisher and its audience differed from the configured audience."
 	}
 	return fallback
+}
+
+// Match the whole warning header. Another logger can quote the recorder's
+// complete line in its message. Warpctl may omit identity fields, and the
+// abbreviated bracket format omits the journal timestamp.
+var storeNotificationLogSite = regexp.MustCompile(`^(?:` +
+	`W[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} +[0-9]+ ` +
+	`|(?:\[[A-Za-z0-9._-]+\]){0,3}(?:\[cid:[0-9A-Fa-f]+\])?\[W\]` +
+	`(?:\[[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}(?:Z|[+-][0-9]{2}:[0-9]{2})\])?\[` +
+	`)store_notification_flow\.go:[1-9][0-9]*\] ?$`)
+
+// Only a complete, fixed suffix can add detail to the retained sample.
+func storeNotificationRefusedSample(line string) string {
+	sample := "[store-notification]" + storeNotificationLogGroup(storeNotificationRefusedRe)(line)
+	prefix, message, _ := strings.Cut(line, "[store-notification]")
+	if prefix != "" && !storeNotificationLogSite.MatchString(prefix) {
+		return sample
+	}
+	switch strings.TrimRight(message, " \t\r\n") {
+	case "google error stage=token_info":
+		return sample + " stage=token_info"
+	case "google error stage=verified_processing":
+		return sample + " stage=verified_processing"
+	}
+	return sample
 }
 
 // The store and outcome of a store notification line.
@@ -2713,7 +2742,7 @@ func (self *logTailer) drainWindow() []finding {
 			attribution := self.classTargets[key]
 			meaning := c.meaning
 			if c.name == "store-notification-refused" {
-				meaning = storeNotificationRefusalMeaning(attribution, meaning)
+				meaning = storeNotificationRefusalMeaning(attribution, self.classSamples[key], meaning)
 				baseline = "baseline ~0 matching store notification diagnostic lines/minute. Retry count and purchase impact are unknown."
 			}
 			if c.observationOnly {

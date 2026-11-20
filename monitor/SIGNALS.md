@@ -23081,6 +23081,18 @@ dashboard's "store notifications" panels show both.
   can escape before the marker. Classify the original attempt in its emitting
   build, then match its delivery receipt and any applicable entitlement
   decision. A store-wide accepted outcome can come from a different attempt.
+  The Play producer appends `stage=token_info` to its existing Google error
+  line when token information lookup or decoding fails before the publisher
+  and audience checks. It appends `stage=verified_processing` when processing
+  a verified push returns an error. The monitor retains a recognized stage on
+  the frame's first sampled line. Its rate counts every matching Google error
+  line across stages and producer versions. Legacy, unknown or malformed
+  suffixes leave the sample stage unknown. The parser accepts a bare message
+  or a complete glog or warpctl warning header naming the notification
+  recorder. A line from another logger quoting the recorder still counts
+  toward the Google error frame and leaves its sample stage unknown. HTTP
+  delivery, redelivery and entitlement require separate receipts. Panics can
+  escape before the outcome.
 - `store-notification-unverified` (WARN, from the log tail at five lines a
   minute): the same line for `refused_auth`, `refused_signature` or
   `refused_malformed`. Anyone can post to the routes, so these alone are not
