@@ -1461,19 +1461,188 @@ gates:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
         - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+    - item: '§23.6''s M9 design closure: the SMTP server-state relation (§14); 22.10''s M9 evidence; the send-capability and result model (§14, §15, §18)'
+      external: 'people: the Gn-in review reads and signs the closure (§23.8)'
+    - item: 'smtpproof/SPEC.md''s specification freeze (§22.10''s M9 row, Gn-in; D-SMTP-16, D-SMTP-22; SMTP-M9-33): the relation, its public inputs and E1-E3 and Z1-Z9 (§14.5), each check with its section, its tests and a mutated witness, the argument''s steps S1 to S7 and K1 to K4 with theirs, and the header scan''s literals each shorter than a header record'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestSpecNamesEveryCheck, TestSpecHeaderRecordsOutlastEveryLiteral]}
+      external: 'people: the entry review reads SMTP-M9-33''s draft 3, the freeze candidate, and freezes it (§23.8; D-PHASE-7)'
+    - item: HE's TCP 25 egress, reverse delegation and feedback loops, due at M9's entry (§23.7; owner decision 124)
+      external: 'people and production: asked at M0, unknown until Hurricane Electric answers'
   M9:
     - row: FS-31
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs31]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs31OnT3]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31MatrixTable, TestFs31TranscriptOracleSeesARecordTheSenderDidNotWrite, FuzzSmtpTranscript]}
+        - {repo: sidecar, dir: smtpproof, package: ., tags: sidecar_testhooks, names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31TheSenderKeepsAMessageTheEdgeForgedSent]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
     - row: FS-42
       case: m9
       tests:
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs42M9OnT3]}
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestSmtpDkimRevokedAfterTheDumpHasNoSelectorOnceTheReplayEnds, TestSmtpDkimRemovalDeletesSelectorsInItsOwnWrite, TestDnsDkimDeleteInTheCallersTransaction]}
     - row: FS-123
       tests:
-        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs123]}
-        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestFs123OnT3]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestFs123SentFromADesktop, TestFs123QueuedFromAPhone, TestFs123OtherOutcomesReachTheResult, TestFs123RunnerNamesTheSendItsEntryNames]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestFs123MailOutcomesStandInTheSendingMailbox, TestFs123CoverageCopySaysNothingOfSending]}
+        - {repo: sidecar, package: ., names: [TestMailCheckSendHandsTheBoundSenderTheMessageSendWouldMake, TestMailCheckSendWithNoSenderPricesOnTheMembersProverRecords, TestMailSendResultReadsASendByItsId, TestMailSendWatchRaisesOncePerChangedOutcome, TestDaemonMailCheckSendAnswersADraftsDomains, TestDaemonMailSendResultAnswersAKnownSendAndRefusesAnUnknownId]}
+        - {repo: sdk, package: ., names: [TestCheckSendPredictsPerDomain, TestSendResultsReachGetSendResultAndMailSend, TestSendCopyNamesNoIndexer]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs123SentFromADesktop, TestT3Fs123QueuedFromAPhone, TestT3Fs123OtherOutcomesReachTheResult]}
+    - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, every write''s lost answer for the unknown list (none at this gate) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
+      tests:
+        - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules]}
+        - {repo: server, package: ./sidecart3, names: [TestGateT3RunsTheNightlySeeds]}
+    - item: 'the rows that pass on their owners'' tests alone, with no registered builder: FS-31, FS-42''s m9, FS-123 run their owners'' fixed cells, each refusal beside its honest control, under none of §22.8''s explorer seeds and no FI check after each step, so §22.8''s rules above reach none of M9''s rows until each has a builder (QD-1084''s clause registry)'
+    - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M9-out]}
+    - item: 'FS-31''s FI-11 and FS-42''s M9 step''s FI-12 through their oracles (TEST-M4-01''s fault.FI(11) over sidecartest.MxProofLedger, TEST-M3-01''s fault.FI(12)): no test this sweep found runs either on M9''s rows, FS-31''s cells asserting on ScriptedMx''s and RecordMx''s own records and feeding no MxProofLedger (SMTP-M9-30), and the M9 step asserting on its own rows (SMTP-M9-19), so the item above shows the oracles bound, never run here'
+    - item: '§22.10''s mutated witnesses for E1, each refused by E1 alone, the gate''s relationCheckPart and smtpproof/checker each naming E1 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a client record of another type after the handshake, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA; a server record of type handshake after the handshake, renegotiation in 1.2, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessE1]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for E2, each refused by E2 alone, the gate''s relationCheckPart and smtpproof/checker each naming E2 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a disclosed SHTS one bit off, refused at the gate, by edgeSession on its own before any circuit is asked, in TLS 1.3''s two legs, BDAT and DATA; a ServerKeyExchange whose signature is one bit off, refused at the gate, by edgeSession on its own before any circuit is asked, in TLS 1.2''s leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessE2]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for E3, each refused by E3 alone, the gate''s relationCheckPart and smtpproof/checker each naming E3 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a record one bit off the ciphertext its part proved, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA; a part''s record of another outer type, which the circuit cannot see, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA; a part opening one record more, which its position gives a role the part cannot open, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA; the msg part covers none of the envelope''s replies, its own count of them 0, so only the EHLO reply is proven, refused at the gate, by edgeSession on its own before any circuit is asked, in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessE3]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z1, each refused by Z1 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z1 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): another HS or master secret, the keys it gave kept, refused at part 1 (key), on its production shape, in every TLS leg, BDAT and DATA; the env part''s client key one bit off, its records sealed again under that key, refused at part 2 (env), in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ1]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z2, each refused by Z2 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z2 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a MAIL record whose first ciphertext octet no longer opens to the claimed M, refused at part 2 (env), in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ2]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z3, each refused by Z3 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z3 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): the msg part''s first record sealed with inner type 22 under the true key, refused at part 3 (msg), in TLS 1.3''s two legs, BDAT and DATA; no witness can break Z3 alone in TLS 1.2 BDAT and TLS 1.2 DATA, as the table says why'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ3]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z4, each refused by Z4 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z4 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a command of its template''s length that says another: BDAT''s count, or DATB, refused at part 3 (msg), in every TLS leg, BDAT; a command of its template''s length that says another: BDAT''s count, or DATB, refused at part 2 (env), in every TLS leg, DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ4]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z5, each refused by Z5 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z5 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): a header block whose Feedback-ID field is renamed, so it has none, refused at part 3 (msg), in every TLS leg, BDAT and DATA; header record 2 scanned from the start state, where record 1 ended inside a field''s name, refused at part 4 (hdr), in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ5]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z6, each refused by Z6 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z6 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): QUIX in QUIT''s place at last_record, refused at part 3 (msg), in every TLS leg, BDAT; a body record ending the message early, as long as its honest twin, refused at part 4 (body), in every TLS leg, DATA; body record 2 scanned from the start state, where record 1 ended inside a line, refused at part 5 (body), in every TLS leg, DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ6]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z7, each refused by Z7 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z7 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): an RCPT reply''s record replaced by a server KeyUpdate, refused at part 3 (msg), in TLS 1.3''s two legs, BDAT and DATA; no witness can break Z7 alone in TLS 1.2 BDAT and TLS 1.2 DATA, as the table says why'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ7]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z8, each refused by Z8 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z8 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): an RCPT reply refused, 550 in 250''s place, refused at part 3 (msg), in every TLS leg, BDAT and DATA; reply_count one fewer than the records hold: the first RCPT''s reply rewritten as two replies, in its length, refused at part 3 (msg), in every TLS leg, BDAT and DATA; reply_count one more than the records hold: MAIL''s reply continued into the first RCPT''s, in its length, refused at part 3 (msg), in every TLS leg, BDAT and DATA; an env part''s own reply_count one fewer on the wire than its records hold, the envelope one command a group, refused at part 3 (env), in every TLS leg, BDAT and DATA'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ8]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: '§22.10''s mutated witnesses for Z9, each refused by Z9 alone, the gate''s relationCheckPart and smtpproof/checker each naming Z9 and no other check (SMTP-M9-29; smtpproof/testdata/mutations/table.md): an EHLO reply whose CHUNKING line is misspelled CHUNKINX, refused at part 2 (env), in every TLS leg, BDAT; no witness can break Z9 alone in TLS 1.3 DATA and TLS 1.2 DATA, as the table says why'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessZ9]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestMutatedWitnessHonestTwins, TestMutatedWitnessTable]}
+    - item: the mutated witnesses M9's items list are smtpproof/testdata/mutations/table.md's, check by check, each break with what refused it and its legs and modes, and the cells no witness can break alone are the table's (SMTP-M9-29's evidence table, which TestMutatedWitnessTable holds to the suite's registry)
+      commands:
+        - {repo: sidecar, command: [go, test, -count=1, -v, -run, ^TestGateM9WitnessesAreTheTablesRows$, ./sidecartest/fault, -fault.gate-m9-witnesses]}
+    - item: 'the checker of the public relation written apart from the prover tree (§22.10''s M9 row; SMTP-M9-28): plain Go importing nothing of smtpproof, deriving the public inputs from the ciphertext transcript and the edge''s own values, its key schedule against RFC 8448, and agreeing with the gate and the relation on every honest send and on each break by the check it names, through smtpproof''s own MX and sidecartest''s ScriptedMx and RecordMx'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ./checker, names: [TestKeyScheduleReproducesRfc8448, TestEveryFixedHonestConnectionPasses, TestTheCheckerRefusesEachBreakByItsCheck, TestTheCheckerReadsTheHeaderBlockAsSpecDoes, TestTheCheckerReadsDataAndRepliesAsSpecDoes, TestTheCheckerImportsNothingFromTheProverTree, TestTheCheckerHoldsTheIssuedValuesToTheirSpelling, TestTheCheckerReadsTheScanStateByItsDefinition, TestTheCheckerRefusesEachHeaderRuleAtItsRecord, TestTheCheckerRefusesKeysOfOtherWidths]}
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestCheckerAgreesThatEveryHonestSendPasses, TestCheckerAgreesOverSeveralEnvelopeGroups, TestCheckerAndTheGateNameTheSameChecks, TestCheckerAgreesOnHonestSendsThroughSidecartestsMxs, TestCheckerAgreesThroughALateTicketAndSplitReplies, TestCheckerAndTheGateNameTheSameChecksThroughARecordMx, TestCheckerAndTheGateNameTheSameChecksOnTheDetailsCellsThroughARecordMx, TestCheckerAgreesOnTheHeaderCarryAtEveryCut, TestCheckerAgreesOnTheBodyCarryAtEveryCut, TestCheckerAgreesOnASingleFieldEndingTheFirstRecord, TestHeaderCircuitTheGateAndTheCheckerRefuseAlike]}
+      external: 'people: §22.10 asks for the checker apart from the prover tree, and SMTP-M9-28 for an author who wrote neither the circuits nor relation.go; this checker and the circuits are both the build''s drafts, so an engineer outside both reads it, or writes their own, before the bytes freeze'
+    - item: 'FS-31''s scripted MXs as §22.10''s M9 evidence: no CHUNKING, CHUNKING only before TLS, no PIPELINING, MAIL or RCPT refused, mixed recipients, no 354 and a late NewSessionTicket, each mismatch failing before any effect in every leg and mode, as FS-31''s row above runs them and smtpproof/testdata/fs31/matrix.md lists them'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31MatrixTable, TestFs31TranscriptOracleSeesARecordTheSenderDidNotWrite, FuzzSmtpTranscript]}
+        - {repo: sidecar, dir: smtpproof, package: ., tags: sidecar_testhooks, names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31TheSenderKeepsAMessageTheEdgeForgedSent]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
+    - item: 'the bytes M9''s exit freezes reproduce (§23.8''s M9 freeze; SMTP-M9-33): each part''s statement as field elements, its counts and carries, the edge''s templates and a key-part proof under a test setup''s verifying key, from fixed connections that prove under every production shape and set every flag a shape reads'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ., names: [TestSpecVectorsReproduce, TestSpecVectorsCoverEveryShape, TestSpecPi1ProofVectorVerifies]}
+    - item: two engineers who did not write the circuits argue SPEC.md's soundness in writing, its steps S1 to S7 and K1 to K4 (§22.10's M9 row; D-SMTP-16)
+      external: 'people: two non-authors'' written argument; no external audit stands in for it or is asked for (owner decisions 99, 119)'
+    - item: '§22.9''s ZK row and D-SMTP-16''s speed: p95 per part and per send, BDAT for a 4 KiB header block and 10 recipients and DATA for a 100 KiB message, through smtpproof/bench, whose harness runs one small case here and refuses what it cannot run (SMTP-M9-32)'
+      tests:
+        - {repo: sidecar, dir: smtpproof, package: ./bench, names: [TestBenchRunsASmallCaseAndPrintsAUnitsRow, TestBenchRefusesWhatItCannotRun, TestBenchPercentilesAreNearestRank]}
+      external: 'hardware: D-SMTP-16''s runs on an Apple M1 MacBook Air (8 GB) and an AWS m5.large, under a key set smtpproof/setup wrote, at production sizes; this host''s run is a smoke, which is no evidence'
+    - item: 'D-SMTP-16''s coverage: Gmail, Outlook.com, Exchange Online, Yahoo, AOL, iCloud and at least 95% of the census''s MX domains offer a TLS version and suite the circuits cover (§14.5; the M7 census, D-MAIL-9)'
+      external: 'production: the census''s probe of the Tranco top 10,000''s MXs from the production edges'
+    - item: 'D-SMTP-16''s interop and §22.9''s MTA row: through the sidecar''s own client, strict DMARC passes at Gmail, Outlook.com, Microsoft 365, Yahoo, iCloud, SES, Proton and Fastmail in both modes, DATA forced where CHUNKING is offered and TLS 1.2 to Exchange Online included, with §14.4''s levels, DKIM, FCrDNS, and JMRP and CFL joins'
+      external: 'production: real accounts at each provider and sends from the shared lb addresses'
+    - item: 'D-SMTP-16''s gate whole, or burner email launches receive-only (owner decisions 9, 35; BS1): the soundness, speed, coverage and interop rows above pass on their own evidence, and a miss is reported for the owner, never hidden by a smoke run on this host'
+      external: 'people: the owner hears where the proofs stand against D-SMTP-16, and BS1 stays receive-only until every row passes'
+    - item: §22.7's S6 on T2 (SMTP-M9-31; §3.7's F5), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it; no test is registered to it on T2, so it reads missing
+    - item: §22.7's S6 on T3 (SMTP-M9-31; §3.7's F5), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it; no test is registered to it on T3, so it reads missing
+    - item: §22.7's S6 on T6 (SMTP-M9-31; §22.4's T6, tests/test-main.sh in main, dark)
+      external: 'production: the main test environment, once the sidecar branches merge to main at a Gn-out (§22.4, §23.9)'
+    - item: §22.7's S10's burned-label-550-no-dns-change on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReceiveOnlyBurner]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
+    - item: §22.7's S10's receive-only-burner-creates-no-child on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReceiveOnlyBurner]}
+    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
+    - item: §22.7's S10's last-selector-restores-wildcard-only on T2 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS10ReplyingBurner]}
+    - item: §22.7's S10's burned-label-550-no-dns-change on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReceiveOnlyOnT3]}
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
+    - item: §22.7's S10's receive-only-burner-creates-no-child on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReceiveOnlyOnT3]}
+    - item: §22.7's S10's first-selector-keeps-blabel-mx-and-a on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
+    - item: §22.7's S10's last-selector-restores-wildcard-only on T3 (MAIL-M8-10, MAIL-M9-06; §3.7's F10), run under RunScenario's canaries, scan and schema guard as the scenario registry ties tests to it
+      tests:
+        - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestScenarioS10ReplyingOnT3]}
+    - item: §22.7's S10 on T6 (MAIL-M8-10, MAIL-M9-06; §22.4's T6, tests/test-main.sh in main, dark)
+      external: 'production: the main test environment, once the sidecar branches merge to main at a Gn-out (§22.4, §23.9)'
+    - item: 'S6, send mail, as its owners'' tests run it on SmtpSendWorld and M9World, outside RunScenario (§22.7; §3.7''s F5; SMTP-M9-31, MAIL-M9-06): no record forwarded before its proof verifies, no unauthenticated MX, a message over the DATA cap too_large for the non-CHUNKING domain alone, and §15.10''s forwarding code, forwards and relays through MAIL''s code, on T2; the first three on T3'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestS6NoRecordReachesTheMxBeforeItsPart, TestS6NoUnauthenticatedMx, TestS6TooLargeForTheNonChunkingDomainAlone]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestS6ForwardingAddressIsConfirmedByACodeThroughSmtp, TestS6ForwardAndRelayThroughMailsCode]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
+    - item: 'S6''s §15.10 forwarding rows on T3 (§22.7''s S6 tiers; MAIL-M9-06): no test this sweep found runs the forwarding code, forwards and relays on server''s stores, which MAIL-M9-06 ran on T2 alone'
+    - item: 'S10''s records (§22.7; §14.6; DNS-M9-01): a replying burner''s first selector writing <blabel>''s copies of the wildcard''s MX, A and AAAA in its journal write and its last deleting them, a receive-only burner creating no child, a copy answering the wildcard''s current records, and S10 registered whole on T2 and T3'
+      tests:
+        - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestDnsBurnerSelectorsKeepTheLabelsMail, TestDnsDkimSelectorWrites]}
+        - {repo: sidecar, package: ./dnsservice, names: [TestPlanCopyRowsBurnerSelectors, TestBurnerSelectorCopyAnswersTheWildcardsCurrentRecords]}
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestS10IsRegisteredWholeOnT2AndT3]}
+    - item: 'DANE-only MXs reached and unauthenticated ones refused (§23.4''s M9 exit; TL1, owner decision 38; SMTP-M9-05, SMTP-M9-06): DANE-EE and DANE-TA matched, PKIX usages ignored, a mismatch and an unproven TLSA no authentication, a self-signed MX no PKIX root vouches for reached through TL1 alone, by the dialog and by a send through the edge, a mismatch never overridden and a stripped TLSA under a TL1 pin sending no DATA; S6''s unauthenticated MX getting no byte inside TLS on T2 and T3'
+      tests:
+        - {repo: sidecar, package: ., names: [TestSmtpDaneEeMatchesTheLeafWhateverItsNameAndExpiry, TestSmtpDaneTaAnchorsTheLeafsChain, TestSmtpDanePkixUsagesAreIgnored, TestSmtpDaneMismatchRefusesTheMx, TestSmtpDaneWithoutAProvenTlsaIsNoAuthentication, TestSmtpDaneOnlyMxIsReached, TestSmtpTlsReachesTl1ByDane, TestSmtpTlsDaneMismatchIsNotOverridden, TestSmtpTlsStrippedTlsaUnderATl1PinSendsNoData]}
+        - {repo: sidecar, package: ./sidecartest, names: [TestS6NoUnauthenticatedMx]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
+      external: 'production: DANE-only MXs among real recipients, which no local run reaches'
+    - item: 'halt, ARF and RUA joins (§23.4''s M9 exit; §14.8; SMTP-M9-15, SMTP-M9-16, SMTP-M9-17, ABUSE-M9-01): high, medium and low joins against the send log, replays and forgeries dropped and no Received address kept; an allowlisted loop''s ARF a complaint once its join lands; a halt reaching the edge within one reload and the sender holding its message deferred; an aggregate counted once a reporter and report id; RUA counts past proven sends by over 20% and 5 opening a case with no halt; and §21 taking each halt to a case and an action, each complaint to review and the RUA case to no action'
+      tests:
+        - {repo: sidecar, package: ./smtpedgeservice, names: [TestAttributionHighJoin, TestAttributionMediumJoin, TestAttributionLowJoinNeverHalts, TestAttributionXUrRefReplayUnderAnotherNetworksDkimIsDropped, TestAttributionReplayFromAnotherAddressOrTimeIsDropped, TestAttributionForgeriesAreDropped, TestAttributionStoresNoReceivedAddress, TestReportIntakeArfIsUnattributedUntilAJoinLands, TestReportIntakeArfFromAnAllowlistedLoopIsAComplaint, TestReportIntakeCountsAGzipXmlAggregateOncePerReporterAndReportId, TestHaltCommunityFirstComplaintHaltsTheNetwork, TestHaltFraudHaltsAnyTierWithReview, TestHaltReachesTheEdgeAndALiftAdmitsAgain, TestHaltThreeHaltsInThirtyDaysReachTheSinkOnce, TestSmtpSenderHaltReachesTheNextSendWithinAReload, TestSmtpReconcileOpensACaseAboveTwentyPercentAndFive, TestSmtpReconcileOneConnectionTenRecipientsRaisesNothing]}
+        - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestSmtpReconcileOpensACaseOverTwentyOnePercentAndFive, TestAbuseMailHaltBecomesACaseAndAnAction, TestAbuseMailComplaintsReachReview, TestAbuseMailRuaOpensACaseWithNoHalt, TestAbuseMailOnSmtpsLadder]}
+    - item: '§14''s privacy rows (§22.7; R-SMTP-7, R-SMTP-10, I-2, I-13; SMTP-M9-31): canaries in a mail body, its subject, its From display name and a recipient''s local part found in nothing the edge read, answered or kept, and no DKIM key anywhere, on T2 and T3; a feedback loop''s report and an abuse@ mail''s canaries only in mx-4''s listener input and in copies sealed to the network''s mail key, on T2'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestSmtpSendCarriesNoCanaryPastTheDevice, TestSmtpReportCanariesStayInTheListenerInput, TestSmtpAttributedReportCanariesStaySealed]}
+        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3SmtpSendCarriesNoCanaryPastTheDevice]}
+    - item: '§14''s report canary rows on T3 (SMTP-M9-31): no test this sweep found scans a report''s canaries on server''s stores, since mxedge''s platform intake attributes and seals nothing there yet'
+    - item: 'the schema guard at M9 (I-18; SMTP-M9-31): every smtp field maps to its row, smtp-1 to smtp-6 among them with smtp-3, smtp-5 and smtp-6 on server''s tables, and {smq_} is a Redis family of its own'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuard, TestMetadataListKeepsRedisSuffixesApart]}
+        - {repo: sidecar, package: ./check, tags: sidecar_check, names: [TestSchemaGuard]}
+    - item: 'the preamble on its inline path and the CROSSSLOT lint (§22.5''s hot-path gates, §22.4; I-12; SMTP-M9-10, SMTP-M9-11): a preamble asking no store and one {smq_} script, the quota''s scripts each in one slot'
+      tests:
+        - {repo: sidecar, package: ./smtpedgeservice, names: [TestPreamblePathAsksNoStoreAndOneScript, TestQuotaOneScriptPerPreamble, TestQuotaScriptsPassTheCrossslotLint]}
+    - item: 'the preamble gate on server''s host through InlinePath, held to budgets.yml''s smtp-preamble-gate row with PostgreSQL refused and its Redis calls counted (§22.5; SMTP-M9-10): its InlinePath has not landed, so the row reads missing'
+    - item: 'smtpedge''s load harness (§22.8''s smtpedge row; SMTP-M9-32): Team quota held across many networks and halts within a minute with no overrun, and each network''s day taken and no more, at a small size on a fake clock'
+      tests:
+        - {repo: sidecar, package: ./sidecartest, names: [TestLoadSmtpEdgeHoldsTeamQuotaAndHaltsWithinAMinute, TestLoadSmtpEdgeTakesEachNetworksDayAndNoMore]}
+      external: 'hardware: the evidence run on T5''s performance host, a deployed smtpedge through ur/smtpedge streams at the 1,000-network default on a real Redis; this host''s run is a smoke'
+    - item: HE's TCP 25 egress, reverse delegation and feedback loops, before any send from the shared lb addresses (§23.7's M9 entry; owner decision 124; §14.9), with the breakers' Postmaster Tools and SNDS accounts (owner decision 611)
+      external: 'people and production: Hurricane Electric''s answer on TCP 25, the PTRs and the loops, and the owner''s accounts placed in vault'
   M10-in:
     - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
       commands:
