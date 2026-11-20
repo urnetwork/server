@@ -1416,6 +1416,7 @@ Each is open, checked against the code at a297487df and bdacae4.
 - Edge-0's three interfaces were rolled back twice in production, unplanned (§11.8). The rollback worked each time, which covers Gate A item 2.
 - whodis on UDP 4053 is unverified from outside: probed from one workstation over IPv4, it timed out on every interface and on alt alike (§11.8).
 - crisp's and fireside's lb units still pass `--reservedudpports` for alt's UDP ports until their next run-edges.sh, which restarts each lb unit once.
+- Nothing could profile the front in production, and no GC CPU or scheduler latency was measured (LBALTOPT1.md C5). LBALTOPT1.md R1 and R5 are implemented on `feat/connect-pprof-runtime-metrics-1120`, not yet deployed. connect serves pprof on 127.0.0.1 only, on a port the kernel picks per process, published as `urnetwork_connect_pprof_port` (`connect/pprof_listener.go`; off with `CONNECT_PPROF=0`). Every service exports the runtime's CPU classes and scheduler latency (`runtime_metrics.go`). Taking a profile: LBALTOPT1.md Appendix C.
 
 **Owner actions not taken.**
 - Done 2026-11-19 and 2026-11-20 (§11.8): services.yml loaded with this warpctl, `services.connect.lb_alt: false` declared, then `true`; connect's `cores: 20` (D15) deployed. The `alt.*` `dns_aliases` moved from alt to connect (Gate B, §8 step 6; §11.8), and alt was removed (D14 step 4; §11.8). The vault commits are pushed; dd23fa3 removes alt.
