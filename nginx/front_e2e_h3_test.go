@@ -19,10 +19,18 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-// An h3 client of the front's api handler for eth1, served by an http3
-// server on a loopback socket, as connect serves api names on QUIC. The
-// server, its socket and the client close when the test ends.
-func newE2eH3ApiClient(t *testing.T, e2e *e2eFront) *http.Client {
+// The front's api handler for eth1, served by an http3 server on a loopback
+// socket, as connect serves api names on QUIC.
+type e2eH3ApiServer struct {
+	// the server's socket address
+	addr string
+	// the requests the front's handler has finished
+	servedLog *e2eServedLog
+}
+
+// Serves the front's api handler for eth1 over h3. The server and its
+// socket close when the test ends.
+func newE2eH3ApiServer(t *testing.T, e2e *e2eFront) *e2eH3ApiServer {
 	t.Helper()
 	// quic-go warns once per process when it can't raise the socket buffers
 	t.Setenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING", "true")
@@ -38,22 +46,57 @@ func newE2eH3ApiClient(t *testing.T, e2e *e2eFront) *http.Client {
 		udpConn.Close()
 		t.Fatal(err)
 	}
+	servedLog := newE2eServedLog()
 	h3Server := &http3.Server{
-		Handler: e2e.front.H3ApiHandler("eth1"),
+		Handler: newE2eServedHandler(e2e.front.H3ApiHandler("eth1"), servedLog),
 	}
 	go h3Server.ServeListener(listener)
-	h3Transport := &http3.Transport{
-		TLSClientConfig: e2e.clientTlsConfig("api.service.example", nil),
-		Dial: func(ctx context.Context, _ string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
-			return quic.DialAddr(ctx, udpConn.LocalAddr().String(), tlsConfig, quicConfig)
-		},
-	}
 	t.Cleanup(func() {
-		h3Transport.Close()
 		h3Server.Close()
 		listener.Close()
 		quicTransport.Close()
 		udpConn.Close()
+	})
+	return &e2eH3ApiServer{
+		addr:      udpConn.LocalAddr().String(),
+		servedLog: servedLog,
+	}
+}
+
+// A request stream of a new h3 connection to the server, by its own QUIC
+// client, with nothing sent yet, so a test can send a head, its body and its
+// end as it chooses. The connection closes when the test ends.
+func (self *e2eH3ApiServer) openRequestStream(t *testing.T, e2e *e2eFront) *http3.RequestStream {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), e2eWaitTimeout)
+	defer cancel()
+	quicConn, err := quic.DialAddr(ctx, self.addr, e2e.clientTlsConfig("api.service.example", []string{http3.NextProtoH3}), &quic.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		quicConn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+	})
+	str, err := (&http3.Transport{}).NewClientConn(quicConn).OpenRequestStream(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return str
+}
+
+// An h3 client of the front's api handler for eth1 (newE2eH3ApiServer).
+// The server, its socket and the client close when the test ends.
+func newE2eH3ApiClient(t *testing.T, e2e *e2eFront) *http.Client {
+	t.Helper()
+	h3ApiServer := newE2eH3ApiServer(t, e2e)
+	h3Transport := &http3.Transport{
+		TLSClientConfig: e2e.clientTlsConfig("api.service.example", nil),
+		Dial: func(ctx context.Context, _ string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+			return quic.DialAddr(ctx, h3ApiServer.addr, tlsConfig, quicConfig)
+		},
+	}
+	t.Cleanup(func() {
+		h3Transport.Close()
 	})
 	return &http.Client{
 		Transport: h3Transport,

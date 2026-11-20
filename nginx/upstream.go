@@ -617,7 +617,8 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 // ngx_http_finalize_request answers with ngx_http_terminate_request), so the
 // front's default 200 for a handler that wrote nothing never goes out. On h1
 // a client that ends its body early is one: Go's server reports its closed
-// side by canceling the request.
+// side by canceling the request. So is one that resets its connection or its
+// h2 or h3 stream mid-body (bodyReadClientGone).
 //
 // Nor does a body that stalled past client_body_timeout, on h1 and h2: nginx
 // finalizes that request with NGX_HTTP_REQUEST_TIME_OUT and c->timedout set,
