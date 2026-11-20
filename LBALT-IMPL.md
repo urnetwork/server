@@ -525,10 +525,10 @@ As of 2026-11-19, `lbalt/integrate` at server a297487df and warp bdacae4. LBALT.
 - [ ] the code review (LBALT.md §11.7)
 - [x] merge, 2026-11-19: origin/main into `lbalt/integrate` (server 30b6935b7), then `lbalt/integrate` into main in both repos (server a3f37e085, warp 6aaace2), verified on main: builds and vets, the unit and race suites, parity (257 cases), the DB suite (23 tests) and the netns harness
 - [ ] the owner's config:
-  - services.yml: load the edited file with this warpctl first, then declare `services.connect.lb_alt: false` before any override (LBALT.md §11.3 (d)), and connect's `cores: 20` (D15)
+  - [x] services.yml, 2026-11-19 and 2026-11-20: `services.connect.lb_alt: false` declared, then `true`, and connect's `cores: 20` (D15) (LBALT.md §11.8)
   - monitor.yml: the `lbalt_status` and `public_udp` enrollment (LBALT.md §11.6)
   - the 4053 router rules of the two edges with no `router:` entry
-- [ ] Gate A (LBALT.md §8 step 4). Nothing is deployed.
+- [ ] Gate A (LBALT.md §8 step 4): items 1 to 6 by tests (LBALT.md §11.5). The owner ran the canary and then switched every non-transparent lb interface on 2026-11-20 without a production rollback (item 2) or item 7's thresholds (LBALT.md §11.8)
 
 ## 7. Integration decisions (2026-11-18)
 
