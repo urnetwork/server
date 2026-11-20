@@ -480,6 +480,11 @@ from zsh; do not source `run-local-state.sh` directly into stock zsh.
   ledger settlement select an explicit zero-subsidy copy. These files stay
   under `testdata/*/local` and are selected by the existing local-resource
   rules; they neither load Main resources nor change application policy.
+- It also holds throwaway stand-ins for the mail breakers' Postmaster Tools
+  and SNDS credentials (`abuse-postmaster-tools.yml`, `abuse-snds.yml`;
+  QD-1069), in the real files' shapes and naming no account, so a local
+  taskworker that runs the breakers builds both sources from them, and their
+  requests reach no account. The real files are the owner's, in vault only.
 - Startup authenticates with the selected application password and checks
   `CREATEDB`. Container health and an open port alone do not prove that the
   selected profile matches an existing PostgreSQL volume.

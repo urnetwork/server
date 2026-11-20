@@ -19,7 +19,9 @@ package sidecart3
 // (checkPlan). QuorumLoss and DriveMiss run on T3's 4-host file-cluster layouts alone (cluster_faults.go),
 // and a Net on the local stack's one MinIO process refuses both. Every blob request carries its deadline in
 // the store's time, and the store clock, when on, sits beneath these wrappers, so what a plan lets through
-// is recorded on the schedule's clock (clock.go). Wrappers are safe for concurrent use.
+// is recorded on the schedule's clock (clock.go). After a move of the Net's clock, the clusters' admin info is
+// read again once, before the first request, and every request arriving meanwhile waits for that reread
+// (clockCatchUp). Wrappers are safe for concurrent use.
 
 import (
 	"context"
@@ -73,43 +75,159 @@ func blobTransportError(write bool) error {
 	return fmt.Errorf("blob request failed: %w", errTransport)
 }
 
-// server.FileClusters with the Net's plans, over blobs, the clusters themselves or the store clock on them.
-// Each cluster it hands out is wrapped, and before a request it reads the clusters' admin info again
-// whenever the Net's clock has moved since it last did, so a schedule's Advance never leaves a write
-// refused on admin info the fake clock made stale.
-type faultBlobs struct {
-	blobs    sidecar.BlobStore
-	clusters *server.FileClusters
-	net      *sidecartest.Net
-	// QuorumLoss and DriveMiss on a layout, nil on the local stack
-	clusterFaults *clusterFaults
+// What this package's tests see of a Net's catch-ups with its clock (clockCatchUp), from Settings: set before the
+// Net opens and never changed after, so nothing guards it.
+type catchUpHooks struct {
+	// Runs each catch-up's work, by calling work: a test holds one in flight here, or counts them. what names the
+	// catch-up: "admin info reread" or "store clock aging". nil runs work alone.
+	work func(ctx context.Context, what string, work func())
+	// Told when a request finds a catch-up in flight, before it waits for it. nil tells no one.
+	waiting func(ctx context.Context, what string)
+}
+
+// The work a move of the Net's clock calls for before any request after it goes on to the stores (QD-1111):
+// faultBlobs' reread of the clusters' admin info, without which a cluster refuses every write and delete once its
+// admin info is CheckStaleAfter old on the Net's clock, and the store clock's aging of the Redis families' ttls
+// (clock.go).
+//
+// The first request to find the clock moved past the last catch-up runs the work up to that time, and every request
+// that arrives while it is in flight waits for it to finish and then looks at the clock again, so no request after a
+// move goes on before the work that move called for has finished, whatever their order. One that went on during a
+// reread would be refused on admin info still stale (ErrFileClusterPools, which evs answers 503 UNAVAILABLE), and its
+// client's retry would wait on a fake clock no one moves. The work runs once a move, with no lock held, and the time
+// is recorded only once it has finished. This is QD-1111's lock held across the check, built so that a wait still
+// ends with its request's ctx and a killed actor parks holding nothing.
+//
+// A request waits with the baton given up, as a fake that parks a caller does, and stops waiting when its ctx ends.
+// Requests queue behind the work for its real duration, which on a layout under a cluster fault may be a check's
+// timeout. Safe for concurrent use.
+type clockCatchUp struct {
+	net *sidecartest.Net
+	// what the hooks and a waiting request's error call this catch-up
+	what  string
+	hooks *catchUpHooks
 
 	stateLock sync.Mutex
-	// the Net's time at the last check
-	checkedTime time.Time
+	// the Net's time the last finished catch-up ran to
+	caughtUpTime time.Time
+	// closed when the catch-up in flight ends, nil while none is
+	inFlight chan struct{}
+}
+
+// A catch-up with nothing to do until the Net's clock moves past caughtUpTime. hooks nil tells no test anything.
+func newClockCatchUp(net *sidecartest.Net, what string, caughtUpTime time.Time, hooks *catchUpHooks) *clockCatchUp {
+	return &clockCatchUp{net: net, what: what, hooks: hooks, caughtUpTime: caughtUpTime}
+}
+
+// Runs work from the time the last catch-up ran to up to the Net's now, once the clock has moved past it, after
+// waiting for any catch-up in flight. An error is ctx's, which ended while the request waited: the request goes no
+// further, and a dead actor's goroutine parks here as it would at a fake.
+func (self *clockCatchUp) catchUp(ctx context.Context, work func(fromTime time.Time, toTime time.Time)) error {
+	for {
+		// read outside the lock, which calls no one: a move after this read is the next request's to catch up, as a
+		// move after the lock is released would be
+		now := self.net.Clock().Now()
+		var fromTime time.Time
+		var inFlight chan struct{}
+		run := func() bool {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if self.inFlight != nil {
+				inFlight = self.inFlight
+				return false
+			}
+			if !self.caughtUpTime.Before(now) {
+				return false
+			}
+			fromTime = self.caughtUpTime
+			self.inFlight = make(chan struct{})
+			return true
+		}()
+		switch {
+		case run:
+			self.runWork(ctx, func() {
+				work(fromTime, now)
+			}, now)
+			return nil
+		case inFlight == nil:
+			return nil
+		}
+		if self.hooks != nil && self.hooks.waiting != nil {
+			self.hooks.waiting(ctx, self.what)
+		}
+		var err error
+		self.net.Barriers().Blocking(func() {
+			select {
+			case <-inFlight:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+		})
+		if err != nil {
+			sidecartest.StopIfDead(ctx)
+			return fmt.Errorf("waiting for the %s a move of the Net's clock called for: %w", self.what, err)
+		}
+		// the clock may have moved again while the work ran
+	}
+}
+
+// Runs the work of the catch-up this request started, through the hooks, then records toTime and ends the
+// catch-up. Work that never returns, as at a test's Fatal, still ends it, recording nothing, so the next request
+// runs it again.
+func (self *clockCatchUp) runWork(ctx context.Context, work func(), toTime time.Time) {
+	finished := false
+	defer func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if finished {
+			self.caughtUpTime = toTime
+		}
+		close(self.inFlight)
+		self.inFlight = nil
+	}()
+	if self.hooks != nil && self.hooks.work != nil {
+		self.hooks.work(ctx, self.what, work)
+	} else {
+		work()
+	}
+	finished = true
+}
+
+// server.FileClusters with the Net's plans, over blobs, the clusters themselves or the store clock on them.
+// Each cluster it hands out is wrapped, and before a request it reads the clusters' admin info again
+// whenever the Net's clock has moved since it last did, every request after a move waiting for that reread
+// (clockCatchUp), so a schedule's Advance never leaves a write refused on admin info the fake clock made stale.
+type faultBlobs struct {
+	blobs sidecar.BlobStore
+	// reads every cluster's admin info and sentinel again: server.FileClusters.Check
+	check func(ctx context.Context)
+	net   *sidecartest.Net
+	// QuorumLoss and DriveMiss on a layout, nil on the local stack
+	clusterFaults *clusterFaults
+	// the reread after each move of the Net's clock
+	rereads *clockCatchUp
 }
 
 var _ sidecar.BlobStore = (*faultBlobs)(nil)
 
-func newFaultBlobs(blobs sidecar.BlobStore, clusters *server.FileClusters, net *sidecartest.Net, clusterFaults *clusterFaults) *faultBlobs {
-	return &faultBlobs{blobs: blobs, clusters: clusters, net: net, clusterFaults: clusterFaults}
+// check is the clusters' Check. hooks nil tells no test anything.
+func newFaultBlobs(blobs sidecar.BlobStore, check func(ctx context.Context), net *sidecartest.Net, clusterFaults *clusterFaults, hooks *catchUpHooks) *faultBlobs {
+	return &faultBlobs{
+		blobs:         blobs,
+		check:         check,
+		net:           net,
+		clusterFaults: clusterFaults,
+		// the first request reads admin info again whatever the clock says, as the zero time is before every time
+		rereads: newClockCatchUp(net, "admin info reread", time.Time{}, hooks),
+	}
 }
 
-// Rereads admin info once the Net's clock has moved since the last read.
-func (self *faultBlobs) fresh(ctx context.Context) {
-	now := self.net.Clock().Now()
-	stale := func() bool {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.checkedTime.Equal(now) {
-			return false
-		}
-		self.checkedTime = now
-		return true
-	}()
-	if stale {
-		self.clusters.Check(context.WithoutCancel(ctx))
-	}
+// Rereads admin info once the Net's clock has moved since the last reread, or waits for the reread in flight. An
+// error is ctx's, which ended while the request waited.
+func (self *faultBlobs) fresh(ctx context.Context) error {
+	return self.rereads.catchUp(ctx, func(fromTime time.Time, toTime time.Time) {
+		self.check(context.WithoutCancel(ctx))
+	})
 }
 
 func (self *faultBlobs) wrap(cluster sidecar.BlobCluster, err error) (sidecar.BlobCluster, error) {
@@ -151,7 +269,10 @@ var _ sidecar.BlobCluster = (*faultBlobCluster)(nil)
 // caller's, with its deadline header in the store's time.
 func (self *faultBlobCluster) request(ctx context.Context, op string, key string, write bool, serve func(ctx context.Context) error) error {
 	sidecartest.StopIfDead(ctx)
-	self.blobs.fresh(ctx)
+	if err := self.blobs.fresh(ctx); err != nil {
+		// sent nothing and took no plan
+		return err
+	}
 	plan := self.blobs.net.Faults().Take(ctx, op, self.cluster.ClusterId(), key, write)
 	result := planResult(plan)
 	switch result {
@@ -345,8 +466,13 @@ func (self *faultRedis) call(ctx context.Context, op string, keys []string, serv
 		return err
 	}
 	if self.storeClock != nil {
-		// a failure is the store clock's to report: the call itself goes on
+		// a failure to age is the store clock's to report: the call itself goes on, unless its ctx ended, as a wait
+		// for an aging in flight may end
 		self.storeClock.age(ctx)
+		if err := ctx.Err(); err != nil {
+			sidecartest.StopIfDead(ctx)
+			return err
+		}
 	}
 	if !slices.Contains(redisReadOps, op) {
 		func() {

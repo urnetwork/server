@@ -689,20 +689,43 @@ func (self *testBreakerListing) RedAddresses(ctx context.Context, addresses []ne
 	return []netip.Addr{}, true
 }
 
+// Points this test's vault and config at empty homes of its own, below its temp directory, which a test binary reads
+// as a fixture vault, with WARP_ENV local, so nothing the run's environment names reaches it: the checked-in fixture
+// vault, which test-env.sh selects in portable mode, holds the local test stack's stand-ins for the breakers'
+// credentials. Returns the vault's and config's local directories, where a test puts the files it reads.
+func testBreakerSourceHomes(t *testing.T) (vaultLocalDir string, configLocalDir string) {
+	t.Helper()
+	root := t.TempDir()
+	vaultLocalDir = filepath.Join(root, "vault", "local")
+	configLocalDir = filepath.Join(root, "config", "local")
+	for _, dir := range []string{vaultLocalDir, configLocalDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("WARP_ENV", "local")
+	t.Setenv("WARP_VAULT_HOME", filepath.Join(root, "vault"))
+	t.Setenv("WARP_CONFIG_HOME", filepath.Join(root, "config"))
+	return vaultLocalDir, configLocalDir
+}
+
+// The shared sending configuration the breakers' sources read: smtpedge.yml's <root> and two RFC 5737 addresses.
+const testBreakerSmtpEdgeYaml = "root: root.example\nreport_host: rpt.report.example\nhelo_domain: out.report.example\n" +
+	"sending_addresses:\n  - {address: 192.0.2.10, helo: o1.out.report.example}\n  - {address: 192.0.2.11, helo: o2.out.report.example}\n"
+
 // QD-1069's install from a taskworker's files: with none, every outside source is missing and each is said, so a
 // sample reads the store's complaint rate alone; with smtpedge.yml, both credentials and the feed mirror's copy,
-// every source is built, over <root> and the shared sending addresses alone. Nothing here asks a built source
+// every source is built, over <root> and the shared sending addresses alone. The homes are the test's own, so the
+// case with no files holds whatever vault and config the run's environment names. Nothing here asks a built source
 // anything, since the clients over the vault's credentials would reach their services.
 func TestMailBreakerSourcesOfFiles(t *testing.T) {
+	testBreakerSourceHomes(t)
 	sources, missing := mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{})
 	if sources.Root != "" || len(sources.SendingAddresses) != 0 || sources.Postmaster != nil || sources.Snds != nil || sources.Listing != nil || len(missing) != 4 {
 		t.Fatalf("with no files: %+v, missing %q", sources, missing)
 	}
 
-	defer server.Config.PushSimpleResource("smtpedge.yml", []byte(
-		"root: root.example\nreport_host: rpt.report.example\nhelo_domain: out.report.example\n"+
-			"sending_addresses:\n  - {address: 192.0.2.10, helo: o1.out.report.example}\n  - {address: 192.0.2.11, helo: o2.out.report.example}\n",
-	))()
+	defer server.Config.PushSimpleResource("smtpedge.yml", []byte(testBreakerSmtpEdgeYaml))()
 	defer server.Vault.PushSimpleResource(server.PostmasterToolsCredentialFileName, []byte(
 		"client_id: test-client\nclient_secret: test-secret-value\nrefresh_token: test-refresh-value\n",
 	))()
@@ -743,5 +766,53 @@ func TestMailBreakerSourcesOfFiles(t *testing.T) {
 	sources, missing = mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{FeedDirectory: "../../testdata/mail_measures/mirror"})
 	if sources.Snds != nil || len(missing) != 1 || strings.Contains(missing[0], "test-key-value") {
 		t.Fatalf("an empty key: %+v, missing %q", sources, missing)
+	}
+}
+
+// The local test stack's stand-ins for the two credentials (QD-1069): local/testdata/vault/local holds each under the
+// name taskworker reads, in the real file's shape and naming no account, so a taskworker over that vault builds the
+// Postmaster Tools and SNDS sources from them, reading the files from disk through the vault as
+// InstallMailBreakerSources does at start, and lacks only the listing, since it is given no feed mirror's copy, as no
+// taskworker is until the feed's pull lands. A file holding {}, which the owner may place before an account exists so
+// the block starts, reads as not usable: its source is left out and said. Nothing here asks a built source anything,
+// since the clients would reach their services.
+func TestMailBreakerSourcesReadTheLocalStacksFakes(t *testing.T) {
+	credentialFileNames := []string{server.PostmasterToolsCredentialFileName, server.SndsCredentialFileName}
+	writeFile := func(path string, data []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	noFeedMirror := "no feed mirror directory, so the listing is unknown"
+
+	vaultLocalDir, configLocalDir := testBreakerSourceHomes(t)
+	writeFile(filepath.Join(configLocalDir, "smtpedge.yml"), []byte(testBreakerSmtpEdgeYaml))
+	for _, name := range credentialFileNames {
+		data, err := os.ReadFile(filepath.Join("..", "..", "local", "testdata", "vault", "local", name))
+		if err != nil {
+			t.Fatalf("the local test stack's vault holds no %s: %v", name, err)
+		}
+		writeFile(filepath.Join(vaultLocalDir, name), data)
+	}
+	sources, missing := mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{})
+	if sources.Postmaster == nil || sources.Snds == nil || sources.Listing != nil || !slices.Equal(missing, []string{noFeedMirror}) {
+		t.Fatalf("over the local test stack's credentials: %+v, missing %q", sources, missing)
+	}
+	if sources.Root != "root.example" || !slices.Equal(sources.SendingAddresses, []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("192.0.2.11")}) {
+		t.Fatalf("the root and addresses: %q, %v", sources.Root, sources.SendingAddresses)
+	}
+
+	// {} in place of each credential: the block starts, and each measure is unknown and said
+	vaultLocalDir, configLocalDir = testBreakerSourceHomes(t)
+	writeFile(filepath.Join(configLocalDir, "smtpedge.yml"), []byte(testBreakerSmtpEdgeYaml))
+	for _, name := range credentialFileNames {
+		writeFile(filepath.Join(vaultLocalDir, name), []byte("{}\n"))
+	}
+	sources, missing = mailBreakerSourcesOfFiles(&MailBreakerSourcesArgs{})
+	if sources.Postmaster != nil || sources.Snds != nil || len(missing) != 3 ||
+		!strings.HasPrefix(missing[0], server.ErrPostmasterToolsCredential.Error()) ||
+		!strings.HasPrefix(missing[1], server.ErrSndsCredential.Error()) || missing[2] != noFeedMirror {
+		t.Fatalf("with {} for each credential: %+v, missing %q", sources, missing)
 	}
 }
