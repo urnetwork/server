@@ -26,7 +26,7 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	frontMetrics := newFrontMetrics(registry)
 	frontMetrics.requests.WithLabelValues("api", "h2", "2xx", "g1").Inc()
 	frontMetrics.responseHeaderSeconds.WithLabelValues("api", "h2", "2xx", "g1").Observe(0.01)
-	frontMetrics.limitRefusals.WithLabelValues("request").Inc()
+	frontMetrics.limitRefusals.WithLabelValues("request", limitDefaultZone).Inc()
 	frontMetrics.certificateExpiry.WithLabelValues().Set(1)
 	frontMetrics.quicClientHellos.WithLabelValues(tlsQuicPortWhodis, tlsQuicNameClassAlt, "true").Inc()
 
