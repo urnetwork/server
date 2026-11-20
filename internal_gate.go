@@ -77,10 +77,9 @@ const (
 	// reaches only the route that mints the block's own urnetwork-edge clients' jwts and, beside each, the
 	// client's sockets token (EdgeClientMintPath; QD-1054)
 	InternalGateCallerEdge InternalGateCaller = "edge"
-	// the platform listener's role-mail intake (owner decision 612; question
-	// abuse-notice-pager-install-platform-gate-class, option 1, the recommendation): mxedge-platform alone mounts it,
-	// and it reaches only the route that files a role mail's notice (AbuseNoticeGatePath), whose one effect is a
-	// page at any hour, so no edge block's bearer can page the rota
+	// the platform listener's role-mail intake (owner decision 612; QD-1121): mxedge-platform alone mounts it, and it
+	// reaches only the route that files a role mail's notice (AbuseNoticeGatePath), whose one effect is a page at
+	// any hour, so no edge block's bearer can page the rota
 	InternalGateCallerMxedgePlatform InternalGateCaller = "mxedge-platform"
 )
 

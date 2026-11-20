@@ -16,9 +16,9 @@
 // sockets token, which api's edge client route answers beside the client's jwt (QD-1054).
 //
 // The platform role files role mail's notices at api (-api_url) on a gate bearer of its own,
-// internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612, question
-// abuse-notice-pager-install-platform-gate-class). Without the url or the file it files none, says so at start, and
-// answers role mail as before; it stays ready either way, since the intake's reports need neither.
+// internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612; QD-1121), which its block
+// mounts. Without the url or the file it files none, says so at start, and answers role mail as before; it stays
+// ready either way, since the intake's reports need neither.
 //
 // Which Postgres file each role reads: server's main pool reads the file of the process's own service where its
 // vault holds one, and the platform's pg.yml only where it holds none (QD-992; server/db.go's
