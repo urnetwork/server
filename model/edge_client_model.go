@@ -210,30 +210,79 @@ func init() {
 
 // Owes a rev/ object for each client the removal ends in urnetwork-edge, as sidecar.yml names it: each may hold
 // a sockets token api's edge client route answered it (QD-1054), whose network_id is that network, so its object
-// is the one sockets reads for it. Clients of every other network are the chain's own rev effect's. With no
-// urnetwork_edge in sidecar.yml it owes nothing, since sockets then takes no edge caller's token at all.
+// is the one sockets reads for it. Clients of every other network are the chain's own rev effect's. With a good
+// read the file is the only source: naming no urnetwork_edge, it owes nothing, since sockets then takes no edge
+// caller's token at all. An absent file owes nothing too: it is no failed read, and names no edge network to
+// protect.
+//
+// A failed first read (server.SidecarConfig.FailedFirstRead; QD-1079) names no urnetwork_edge whatever the file
+// says, while sockets, which keeps a good read through a broken push, may still take the edge's tokens, so owing
+// nothing would leave a removed edge client's token honored for the rest of its 15 minutes, against I-15. Under
+// that mark the effect owes the object for each removed client whose device is an edge device (EdgeClientDeviceSpec,
+// which MintEdgeClient sets on every edge client's device), in the client's own network, the one its row and so its
+// token name (QD-1114). One query in the removal's transaction reads which clients those are, and it runs only under
+// the mark. A user's device that names itself edge owes a harmless extra object then, for a client already removed.
 func applyEdgeClientRevocationEffectInTx(ctx context.Context, tx server.PgTx, removal *Removal) error {
 	clients := removal.SubjectsOf(sidecar.RevocationKindClient)
 	if len(clients) == 0 {
 		return nil
 	}
-	edgeNetworkId, ok := server.CurrentSidecarConfig().UrnetworkEdge()
-	if !ok {
+	sidecarConfig := server.CurrentSidecarConfig()
+	edgeClients := []*RemovalSubject{}
+	if edgeNetworkId, ok := sidecarConfig.UrnetworkEdge(); ok {
+		for _, client := range clients {
+			if client.NetworkId == edgeNetworkId {
+				edgeClients = append(edgeClients, client)
+			}
+		}
+	} else if sidecarConfig.FailedFirstRead() {
+		clientIds := make([]server.Id, 0, len(clients))
+		for _, client := range clients {
+			clientIds = append(clientIds, client.SubjectId)
+		}
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT network_client.client_id, network_client.network_id
+				FROM network_client
+				JOIN device ON device.device_id = network_client.device_id
+				WHERE
+					network_client.client_id = ANY($1) AND
+					device.device_spec = $2
+			`,
+			clientIds,
+			EdgeClientDeviceSpec,
+		)
+		if err != nil {
+			return err
+		}
+		for result.Next() {
+			client := &RemovalSubject{Kind: sidecar.RevocationKindClient}
+			if err := result.Scan(&client.SubjectId, &client.NetworkId); err != nil {
+				result.Close()
+				return err
+			}
+			edgeClients = append(edgeClients, client)
+		}
+		result.Close()
+		if err := result.Err(); err != nil {
+			return err
+		}
+	}
+	if len(edgeClients) == 0 {
 		return nil
 	}
-	revocations := []*SidecarRevocation{}
-	for _, client := range clients {
-		if client.NetworkId != edgeNetworkId {
-			continue
-		}
-		if removal.Time.IsZero() {
-			return errors.New("a removal with no time")
-		}
+	if removal.Time.IsZero() {
+		return errors.New("a removal with no time")
+	}
+	notBefore := SidecarRevocationNotBefore(removal.Time, DefaultSidecarRevSettings())
+	revocations := make([]*SidecarRevocation, 0, len(edgeClients))
+	for _, client := range edgeClients {
 		revocations = append(revocations, &SidecarRevocation{
 			NetworkId: client.NetworkId,
 			Kind:      sidecar.RevocationKindClient,
 			SubjectId: client.SubjectId,
-			NotBefore: SidecarRevocationNotBefore(removal.Time, DefaultSidecarRevSettings()),
+			NotBefore: notBefore,
 			Reason:    removal.Reason,
 		})
 	}
