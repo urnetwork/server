@@ -451,6 +451,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	// an edge block's urnetwork-edge client jwts (TLS-M5-11; QD-812): the edge class's internal bearer, verified by
 	// hash, is its credential, and api admits only the clients config/<env>/edge.yml names
 	"POST /internal/gate/edge-client": routeAccessPublic,
+	// a role mail's notice from the platform listener (QD-1070, owner decision 612): the platform listener's internal
+	// bearer, verified by hash, is its credential, never a client's or staff member's token, and the body is header
+	// facts alone
+	"POST /internal/gate/abuse-notice": routeAccessPublic,
 
 	// §13.15's certificate routes (TLS-M5-16). The two order routes take a service token, aud certs, as their
 	// credential, and the subject is the token's. GET /tls/certs serves the bearer's network's certificates and
