@@ -501,12 +501,12 @@ Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrink
 
   Before, the announcement held 4 (rounds, test schedule, verify refresh, passive samples), the lease 2, the resident 3 and the forward 1. What's left is the resident's client's send sequence deadline and route write timer, 2.0 a connection, the stream hop listener's poll, 1.0, and the sweep's 10 drivers, 0.16 a connection here.
 - **One heap walk** (`BenchmarkTimerHeapWalkCost`): one P, its heap at §3.4's 55,000 timers before and 31,786 after, the table's 42% taken out, with random deadlines so the walk misses cache as a server's does. Each op moves a pending timer ahead of the rest, so the P walks its heap.
-  - CPU a walk: 379–412 µs before and 156–179 µs after, over three runs of 3,000 walks each; 389 and 143 µs over 100,000.
-  - `runtime.(*timers).check` is 89–92% of the benchmark's CPU on both sides. Over 3,000 walks it fell from 1.02–1.03 s to 0.40–0.49 s.
-  - That's 7.4 ns a timer before and 5.1 ns after: the smaller heap stays in cache better, so the CPU falls further than the timer count. If production's walks scale the same way, `timers.check`'s 10–12% of connect would fall by 42–60% at the same walk rate, before R14's first half lowers the rate.
+  - CPU a walk: 367–412 µs before and 131–179 µs after, over six runs of 3,000 walks each; 389 and 143 µs over 100,000.
+  - `runtime.(*timers).check` is 78–95% of the benchmark's CPU on both sides. Over 3,000 walks it fell from 0.97–1.16 s to 0.35–0.49 s.
+  - That's about 7 ns a timer before and 5 ns after: the smaller heap stays in cache better, so the CPU falls further than the timer count, by 60–64%. If production's walks scale between the two, `timers.check`'s 10–12% of connect would fall by 42–64% at the same walk rate, before R14's first half lowers the rate.
 - **The sweep's own cost:**
-  - arming and stopping a timer, 31–33 ns an op on 10 Ps in parallel, without allocating; a runtime timer's is 15–21 ns;
-  - a fire and its receipt, the owner's wake included, 1.0–1.2 µs of CPU, against 0.83–0.94 µs for a runtime channel timer (4,096 owners, 1 ms tick);
+  - arming and stopping a timer, 31–63 ns an op on 10 Ps in parallel, without allocating, about twice a runtime timer's 15–21 ns;
+  - a fire and its receipt, the owner's wake included, 1.0–1.5 µs of CPU, against 0.83–0.96 µs for a runtime channel timer (4,096 owners, 1 ms tick);
   - the drivers' ticks over 550,000 armed timers, 15–26 µs a shard tick, or 2.7–4.7 ns a timer a second: about 2 ms a second for a process's 600,000;
   - memory, 192 bytes and 2 allocations a timer with its channel, against 248 bytes and 3 for a runtime timer.
 
