@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -319,6 +320,17 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		}
 	}
 	return config
+}
+
+// ReadSidecarConfigFile reads a single config snapshot for offline acceptance
+// checks. A missing or broken file has no known effective gate state because a
+// running reader may still be serving its last successful read.
+func ReadSidecarConfigFile(path string) (*SidecarConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseSidecarConfig(data)
 }
 
 // Parses the text of a sidecar.yml as a read of the file does.

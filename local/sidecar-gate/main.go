@@ -269,6 +269,9 @@ func main() {
 // open rows do not fail the run: owner decision 194 keeps the build moving past
 // a gate, and the report says what stayed missing and open.
 func run(args []string, out io.Writer, errOut io.Writer) int {
+	if len(args) > 0 && args[0] == "read-t6-gates" {
+		return readT6Gates(args[1:], out, errOut)
+	}
 	flags := flag.NewFlagSet("sidecar-gate", flag.ContinueOnError)
 	flags.SetOutput(errOut)
 	base := flags.String("base", "sidecar", "N's ref for FS-55: built as a release leg it is N, and with the gate's groups promoted N+1")
