@@ -282,7 +282,7 @@ func TestHostGateUsesTheVerifiedMailSendGrant(t *testing.T) {
 	if err := proto.Unmarshal(rawRows, rows); err != nil {
 		t.Fatal(err)
 	}
-	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "sales", Owner: &bridge.TeamScopeRow_MemberId{MemberId: admission.Owner().MemberId.Bytes()}}}
+	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "sales", MemberId: admission.Owner().MemberId.Bytes()}}
 	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(rows)
 	if err != nil {
 		t.Fatal(err)
