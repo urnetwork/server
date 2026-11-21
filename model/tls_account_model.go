@@ -1901,10 +1901,10 @@ func (self *TlsCustomStore) RaiseCustomWarnings(ctx context.Context, now time.Ti
 				`
 					SELECT a.network_id, a.orderer_seen, a.lock_until, a.hold_new_until, a.hold_all_until,
 						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state IN ('custom_queued', 'custom_ordering', 'custom_issued', 'custom_revoking')),
-						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state = 'custom_queued' AND c.state_time < $2)
+						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state = 'custom_queued' AND c.state_time < $1)
 					FROM network_tls_account a
 				`,
-				now.UTC(),
+				// one parameter: one the text does not use has no type Postgres can read, and the query is refused
 				now.Add(-settings.QueueStallAfter).UTC(),
 			)
 			server.WithPgResult(accountResult, err, func() {
