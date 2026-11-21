@@ -145,8 +145,8 @@ type T3WorldSettings struct {
 	// With RealKeys, how long, in real time, a joining device's follower may take to stand, in place of SyncTimeout: its
 	// join waits on a late delivery of the config repo's generation (§10.6), which a holder makes up to
 	// LateDeliverJitter, 15 s, after gkm's hint, and which gkm refuses while its 5 s repo/ cache still holds the config
-	// repo as keying, after which the joiner asks again only LateAskInterval, a minute, after its first ask. 3 min,
-	// twice that cadence.
+	// repo as keying. The joiner then asks again at its follower's first retry past LateAskInterval, a minute, which
+	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
 	KeyJoinTimeout time.Duration
 }
 
@@ -171,7 +171,7 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		StatementLife:           time.Hour,
 		SyncTimeout:             60 * time.Second,
 		KeyResyncInterval:       time.Second,
-		KeyJoinTimeout:          3 * time.Minute,
+		KeyJoinTimeout:          5 * time.Minute,
 	}
 }
 

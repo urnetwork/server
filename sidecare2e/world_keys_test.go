@@ -27,8 +27,9 @@
 //     KF1's group create, just before its activation, refuses 409 a late delivery judged inside those 5 s ("a keying
 //     repo takes only its creation's deliveries"), DeliverLate drops a 409 for the next hint, and the joiner's next late
 //     ask is LateAskInterval, a minute, away. Of five runs, the three whose owner delivered 1.7 s, 4.8 s and 4.8 s after
-//     the activation stalled past the world's 60 s follow bound; the two at 12.3 s and 15.1 s joined at once. The world's
-//     join bound (T3WorldSettings.KeyJoinTimeout) now covers that minute;
+//     the activation stalled past the world's 60 s follow bound; the two at 12.3 s and 15.1 s joined at once. Under the
+//     world's join bound (T3WorldSettings.KeyJoinTimeout) a sixth, refused 4.3 s after the activation, joined 124 s
+//     after it, at its follower's retry past that minute: a joiner admitted at its network's start waits two minutes;
 //   - the repo's group, open: CreateSharedRepo fails "evs: the repo's group: gkm refused: 404" in every run that got
 //     that far. When the RepoCreate lands, every reader's group client, the creator's own included, syncs the new repo
 //     (GkmGroupClient.syncNewReaderRepos: GET /gkm/repos/<id>/forms), before the creator's PUT /evs/v1/repos/<id> has
