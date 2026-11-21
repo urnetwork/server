@@ -34,7 +34,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -357,21 +356,19 @@ type specDoc struct {
 }
 
 func loadSpec(t *testing.T) *specDoc {
-	return loadSpecAt(t, "..", "..", "connect", "api", "bringyour.yml")
+	return loadSpecAt(t, "URNETWORK_CONNECT_OPENAPI_SPEC", "..", "..", "connect", "api", "bringyour.yml")
 }
 
 func loadCompetitionSpec(t *testing.T) *specDoc {
-	return loadSpecAt(t, "..", "..", "sn", "api", "competition.yml")
+	return loadSpecAt(t, "URNETWORK_COMPETITION_OPENAPI_SPEC", "..", "..", "sn", "api", "competition.yml")
 }
 
-func loadSpecAt(t *testing.T, pathParts ...string) *specDoc {
+func loadSpecAt(t *testing.T, pathEnv string, pathParts ...string) *specDoc {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
+	specPath := os.Getenv(pathEnv)
+	if specPath == "" {
+		specPath = filepath.Join(pathParts...)
 	}
-	dir := filepath.Dir(thisFile)
-	specPath := filepath.Join(append([]string{dir}, pathParts...)...)
 
 	data, err := os.ReadFile(specPath)
 	if err != nil {
