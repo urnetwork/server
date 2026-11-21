@@ -6,8 +6,8 @@ package model
 // deadline, and HeldNetworkIds, the small set every server sweep reads before it deletes an in-scope row.
 //
 // A hold's part 0 is the hold itself (plan-ABUSE-hold-format #2): kind, scope, placement, the NCMEC report's time
-// for report_2258a, the renewal and the expiry. Parts 1 and up hold its copied rows (ABUSE-M5-15) with the hold's
-// own columns NULL. The deadlines are statute, so constants, not settings:
+// for report_2258a, the renewal and the expiry. Part 1 reserves these terms until the worker commits the
+// placement manifest. The remaining parts carry the captured records (ABUSE-M5-15). The deadlines are statute, so constants, not settings:
 //
 //	preserve_2703f  90 days from placement (18 U.S.C. §2703(f)(1)), renewed once for 90 days more by a renewed
 //	                request (§2703(f)(2)), so 180 days from placement at most; a second renewal is refused
@@ -870,11 +870,11 @@ func PlaceLegalHoldWithClock(ctx context.Context, args *LegalHoldArgs, clock fun
 		if !args.sameAs(snapshot) || (found && !placing.PlaceTime.Equal(snapshot.PlaceTime)) {
 			return nil, false, ErrLegalHoldConflict
 		}
-		if !snapshot.Live(now) {
-			return nil, false, ErrLegalHoldExpired
-		}
 		placing = snapshot
 		placing.CopyState = LegalHoldCopyState(server.LegalHoldPlacementSnapshot)
+	}
+	if !placing.Live(legalHoldTime(clock())) {
+		return nil, false, ErrLegalHoldExpired
 	}
 	stored, err := store.Create(ctx, placing.Record())
 	if err != nil {
@@ -885,6 +885,11 @@ func PlaceLegalHoldWithClock(ctx context.Context, args *LegalHoldArgs, clock fun
 	}
 	legalHoldStep(LegalHoldStepObjectAfter)
 	server.Tx(ctx, func(tx server.PgTx) {
+		now = legalHoldTime(clock())
+		if !placing.Live(now) {
+			returnErr = ErrLegalHoldExpired
+			return
+		}
 		hold, inserted = insertLegalHoldInTx(ctx, tx, placing)
 		if !inserted {
 			if !args.sameAs(hold) || !hold.Live(now) {

@@ -173,6 +173,9 @@ func prepareLegalHoldSnapshot(ctx context.Context, placing *LegalHold, mirrorExi
 		if err != nil {
 			return err
 		}
+		if !placing.Live(placing.PlaceTime) {
+			return ErrLegalHoldExpired
+		}
 		// Reserve the manifest before collecting anything. Concurrent
 		// requests either see the winner or retry a serialization conflict.
 		tag, err := stage.Exec(ctx, `INSERT INTO abuse_legal_hold
@@ -213,6 +216,9 @@ func prepareLegalHoldSnapshot(ctx context.Context, placing *LegalHold, mirrorExi
 		}
 		if err := copyPlacementContracts(ctx, stage, placing, &part, settings); err != nil {
 			return err
+		}
+		if !placing.Live(legalHoldTime(clock())) {
+			return ErrLegalHoldExpired
 		}
 		header := &HoldCopyPartHeader{Version: holdCopyPartVersion, CaseId: placing.CaseId,
 			Kind: holdPlacementManifest, Complete: true, PlacementLastPart: part}
