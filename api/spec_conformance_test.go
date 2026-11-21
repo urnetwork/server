@@ -310,6 +310,8 @@ func registry() []specEndpoint {
 		{"POST", "/internal/gate/abuse-notice", rt(server.AbuseNoticeGateArgs{}), rt(server.AbuseNoticeGateResult{})},
 		// a Team direct MX's probe outcome from mxedge's prober (QD-1103, owner decision 639)
 		{"POST", "/internal/gate/mail-direct-mx-probe", rt(server.MailDirectMxProbeGateArgs{}), rt(server.MailDirectMxProbeGateResult{})},
+		// §5.15's sidecar_id to client lookup (plan-KEYS-hint-addressing, QD-146, QD-1171)
+		{"POST", "/internal/gate/sidecar-identity-clients", rt(server.SidecarIdentityClientsGateArgs{}), rt(server.SidecarIdentityClientsGateResult{})},
 		// §21.16's customer routes (ABUSE-M5-11)
 		{"POST", "/abuse/report", rt(handlers.AbuseReportArgs{}), rt(handlers.AbuseReportResult{})},
 		{"GET", "/abuse/cases", nil, rt(model.AbuseNetworkCasesResult{})},

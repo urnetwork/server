@@ -459,6 +459,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	// bearer, verified by hash, is its credential, never a client's or staff member's token, and the body is header
 	// facts alone
 	"POST /internal/gate/abuse-notice": routeAccessPublic,
+	// §5.15's sidecar_id to client lookup for §6.8's hints (plan-KEYS-hint-addressing, QD-146): gkm's or mxedge's
+	// internal bearer, verified by hash, is its credential, never a client's token, and it logs no per-target record
+	"POST /internal/gate/sidecar-identity-clients": routeAccessPublic,
 
 	// §13.15's certificate routes (TLS-M5-16). The two order routes take a service token, aud certs, as their
 	// credential, and the subject is the token's. GET /tls/certs serves the bearer's network's certificates and
