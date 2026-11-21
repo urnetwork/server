@@ -110,6 +110,7 @@ type ConnectionAnnounceBatchSettings struct {
 	// non-positive count takes one item a batch.
 	MaxBatchCount int
 	// bounds one batch's I/O, its retries included. Its callers wait for it.
+	// A non-positive timeout leaves a batch to its I/O's own timeouts.
 	BatchTimeout time.Duration
 }
 
@@ -377,7 +378,10 @@ func (self *announceBatchQueue[Item, Result]) runBatch(calls []*announceBatchCal
 	if self.batchRanForTest != nil {
 		self.batchRanForTest(len(items))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), self.settings.BatchTimeout)
+	ctx, cancel := context.WithCancel(context.Background())
+	if 0 < self.settings.BatchTimeout {
+		ctx, cancel = context.WithTimeout(context.Background(), self.settings.BatchTimeout)
+	}
 	defer cancel()
 	var outcomes []announceBatchOutcome[Result]
 	raised := func() (raised any) {

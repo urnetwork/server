@@ -399,3 +399,41 @@ func TestAnnounceBatchQueueSubmitWithoutRaise(t *testing.T) {
 		t.Fatal("a withdrawn best-effort item's caller kept waiting")
 	}
 }
+
+// A batch runs under BatchTimeout, and a non-positive timeout leaves it
+// unbounded rather than expired at once.
+func TestAnnounceBatchQueueBatchTimeout(t *testing.T) {
+	for _, testCase := range []struct {
+		timeout     time.Duration
+		wantBounded bool
+	}{
+		{timeout: time.Minute, wantBounded: true},
+		{timeout: 0, wantBounded: false},
+		{timeout: -time.Second, wantBounded: false},
+	} {
+		settings := DefaultConnectionAnnounceBatchSettings()
+		settings.BatchTimeout = testCase.timeout
+		queue := newAnnounceBatchQueue(
+			announceBatchKindSyncRead,
+			settings,
+			func(ctx context.Context, items []int) []announceBatchOutcome[int] {
+				if err := ctx.Err(); err != nil {
+					panic(err)
+				}
+				_, bounded := ctx.Deadline()
+				outcome := announceBatchOutcome[int]{}
+				if bounded {
+					outcome.result = 1
+				}
+				return []announceBatchOutcome[int]{outcome}
+			},
+		)
+		result, raised := submitForTest(context.Background(), queue, 1)
+		if raised != nil {
+			t.Fatalf("timeout %s: the batch raised %v", testCase.timeout, raised)
+		}
+		if bounded := result == 1; bounded != testCase.wantBounded {
+			t.Fatalf("timeout %s: the batch had a deadline %t, want %t", testCase.timeout, bounded, testCase.wantBounded)
+		}
+	}
+}
