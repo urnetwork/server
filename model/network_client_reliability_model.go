@@ -314,6 +314,41 @@ func reliabilityBlockNumber(t time.Time) int64 {
 	return t.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 }
 
+// The blocks a stats range writes, [startBlockNumber, endBlockNumber], and
+// whether it writes any. A writer never writes to a block the rollup may
+// already have drained: writers touch only the current and previous block,
+// and the rollup drains a block only after two full blocks have elapsed, so
+// the two can never race. A range that starts earlier is clamped, and one
+// that ends earlier writes nothing.
+func clientReliabilityStatsBlockRange(clientId server.Id, statsStartTime time.Time, statsEndTime time.Time) (startBlockNumber int64, endBlockNumber int64, ok bool) {
+	startBlockNumber = reliabilityBlockNumber(statsStartTime)
+	endBlockNumber = reliabilityBlockNumber(statsEndTime)
+	minBlockNumber := reliabilityBlockNumber(server.NowUtc()) - 1
+	if startBlockNumber < minBlockNumber {
+		// routine (a late stats write clamped to the drainable window), and
+		// once per client per write — at fleet scale that is thousands of
+		// lines, so keep it at V(1) rather than default output.
+		glog.V(1).Infof(
+			"[ncr]drop reliability stats for stale blocks [%d, %d) client_id=%s\n",
+			startBlockNumber,
+			min(minBlockNumber, endBlockNumber+1),
+			clientId,
+		)
+		startBlockNumber = minBlockNumber
+		if endBlockNumber < startBlockNumber {
+			return startBlockNumber, endBlockNumber, false
+		}
+	}
+	return startBlockNumber, endBlockNumber, true
+}
+
+// The packed binary field prefix of a client's counters (32B hash + 16B
+// network id + 16B client id): under half the bytes of the legacy ascii form,
+// repeated up to 8x per client per block.
+func clientReliabilityStatsFieldPrefix(networkId server.Id, clientId server.Id, clientAddressHash [32]byte) string {
+	return string(clientAddressHash[:]) + string(networkId.Bytes()) + string(clientId.Bytes())
+}
+
 // RecordClientReliabilityStatsRange is the hot-path replacement for
 // AddClientReliabilityStatsRange: it accumulates the stats in redis and never
 // writes pg. It is best-effort — a redis error is swallowed (with a log) so a
@@ -328,34 +363,13 @@ func RecordClientReliabilityStatsRange(
 	stats *ClientReliabilityStats,
 ) {
 	server.HandleError(func() {
-		startBlockNumber := reliabilityBlockNumber(statsStartTime)
-		endBlockNumber := reliabilityBlockNumber(statsEndTime)
-
-		// never write to a block the rollup may already have drained. Writers
-		// touch only the current and previous block; the rollup drains a block
-		// only after two full blocks have elapsed, so the two can never race.
-		minBlockNumber := reliabilityBlockNumber(server.NowUtc()) - 1
-		if startBlockNumber < minBlockNumber {
-			// routine (a late stats write clamped to the drainable window), and
-			// once per client per write — at fleet scale that is thousands of
-			// lines, so keep it at V(1) rather than default output.
-			glog.V(1).Infof(
-				"[ncr]drop reliability stats for stale blocks [%d, %d) client_id=%s\n",
-				startBlockNumber,
-				min(minBlockNumber, endBlockNumber+1),
-				clientId,
-			)
-			startBlockNumber = minBlockNumber
-			if endBlockNumber < startBlockNumber {
-				return
-			}
+		startBlockNumber, endBlockNumber, ok := clientReliabilityStatsBlockRange(clientId, statsStartTime, statsEndTime)
+		if !ok {
+			return
 		}
 
 		counters := stats.counters()
-		// packed binary field prefix (32B hash + 16B network id + 16B client
-		// id): under half the bytes of the legacy ascii form, repeated up to
-		// 8x per client per block
-		fieldPrefix := string(clientAddressHash[:]) + string(networkId.Bytes()) + string(clientId.Bytes())
+		fieldPrefix := clientReliabilityStatsFieldPrefix(networkId, clientId, clientAddressHash)
 		shard := clientReliabilityStatsShard(clientId)
 
 		server.Redis(ctx, func(r server.RedisClient) {

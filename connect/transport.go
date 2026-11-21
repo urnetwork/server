@@ -1112,6 +1112,10 @@ func newConnectHandlerWithPacketConns(
 	// One timer sweep per process: the announcements' and the authorization
 	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
 	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
+	// One batcher per handler: its announcements' sync round reads and stats
+	// writes, verify egress lease refreshes and measurement writes that come
+	// due together share their round trips (LBALTOPT2.md R18).
+	settings.ConnectionAnnounceSettings.batcher = newConnectionAnnounceBatcher(&settings.ConnectionAnnounceSettings.Batch)
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
