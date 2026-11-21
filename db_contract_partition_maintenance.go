@@ -292,6 +292,9 @@ func contractWeekBlocker(ctx context.Context, conn contractCatalogQuerier, week 
 		})
 		return
 	}
+	if pendingContractCopies(ctx, conn) && exists(fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM public.%s candidate WHERE `+ContractPlacementCopyPendingSQL()+`)`, quoteIdentifier(week.leaf("transfer_contract")))) {
+		return "a preservation hold has an unfinished contract copy"
+	}
 	if exists(fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM public.%s WHERE outcome IS NULL)`, quoteIdentifier(week.leaf("transfer_contract")))) {
 		return "an unresolved contract"
 	}

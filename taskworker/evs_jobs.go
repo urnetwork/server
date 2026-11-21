@@ -151,6 +151,7 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	if firstCluster, err := clusters.FirstCluster(); err == nil {
 		holdStore = model.NewAbuseHoldStore(firstCluster)
 		model.SetAbuseHoldStore(holdStore)
+		model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
 		// The worker's scoped credentials sweep expired revocations. Signing
 		// and all revocation writes belong to the issuer.
 		model.SetSidecarRevStore(model.NewSidecarRevStore(firstCluster, nil, nil))
@@ -162,6 +163,7 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	}
 	startEvsJobsOnHost(ctx, lifetime, host, evsSettings, evsJobs, func() {
 		if holdStore != nil {
+			model.SetAbuseHoldSoftStateSource(nil)
 			model.SetAbuseHoldStore(nil)
 			model.SetSidecarRevStore(nil)
 			if server.SidecarMg2Linked() {

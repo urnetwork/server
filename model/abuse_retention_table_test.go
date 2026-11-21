@@ -57,9 +57,8 @@ var retentionSweepHoldLines = []retentionSweepHoldLine{
 	{sweep: RetentionTableSmtpHalt, row: "smtp-4", how: retentionSweepHonors, detail: "removeExpiredSmtpHaltsSql skips a network with a live part 0"},
 	{sweep: RetentionTableSmtpDkimKey, row: "smtp-6", how: retentionSweepHonors, detail: "removeExpiredSmtpDkimKeysSql skips a network with a live part 0"},
 
-	// connect-1 (QD-036: connect-1 joins copied_rows)
-	{sweep: "contract", row: "connect-1", how: retentionSweepGap, detail: "the weekly drops and the horizon reaper call AbuseHoldCopyPending, and connect-1's tables register a copy by client, on QD-036; neither is built"},
-	{sweep: "close_evidence", row: "connect-1", how: retentionSweepGap, detail: "RemoveExpiredCloseEvidence and its drops call AbuseHoldCopyPending on QD-036; not built"},
+	{sweep: "contract", row: "connect-1", how: retentionSweepHonors, detail: "the horizon and due-contract reapers and weekly drops wait for the placement copies of both clients' contract rows"},
+	{sweep: "close_evidence", row: "connect-1", how: retentionSweepHonors, detail: "the evidence reaper and its weekly drops wait for unfinished placement copies"},
 
 	// §7's and §8's sidecar rows, whose sweeps predate holds
 	{sweep: RetentionTableNetworkAdminEvent, row: "api-8", how: retentionSweepGap, detail: "TEAM-M1-09's sweep deletes past 400 days whatever holds stand; its SQL owes a HeldNetworkIds clause"},

@@ -21,6 +21,88 @@ import (
 // resumption, the drop precondition and the parts' fate at a hold's end on MG5's tables, in a build with
 // sidecar_pending.
 
+// Both sides of a contract may identify the held network. A retry after deletion
+// must serve the placement snapshot, and a missing source never certifies a hold.
+func TestHoldPlacementSnapshotsContractsAndFailsClosed(t *testing.T) {
+	requireLegalHoldTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		newTestLegalHoldStore(t)
+		network, firstCase := newTestLegalHoldCase(t, ctx)
+		other := server.NewId()
+		at := server.NowUtc().Add(time.Hour).Truncate(time.Millisecond)
+		var ids []server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, pair := range [][2]server.Id{{network, other}, {other, network}, {other, other}} {
+				id := server.NewId()
+				ids = append(ids, id)
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+				   (contract_id,source_id,source_network_id,destination_id,destination_network_id,transfer_byte_count,create_time)
+				   VALUES ($1,$2,$3,$4,$5,32,$6)`, id, server.NewId(), pair[0], server.NewId(), pair[1], at.Add(-time.Minute)))
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close (contract_id,party,used_transfer_byte_count,close_time) VALUES ($1,'source',17,$2)`, id, at.Add(-time.Second)))
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report (contract_id,party,report_id,used_transfer_byte_count,checkpoint,create_time) VALUES ($1,'source',$2,17,false,$3)`, id, server.NewId(), at.Add(-time.Second)))
+			}
+		})
+		args := &LegalHoldArgs{NetworkId: network, CaseId: firstCase, Kind: sidecar.HoldKindPreserve2703f}
+		SetAbuseHoldSoftStateSource(nil)
+		if _, _, err := PlaceLegalHold(ctx, args, at, nil); !errors.Is(err, ErrHoldPlacementSnapshotUnavailable) || GetLegalHold(ctx, network, firstCase) != nil {
+			t.Fatalf("unavailable placement snapshot: %v", err)
+		}
+		repo := server.NewId()
+		reads := 0
+		SetAbuseHoldSoftStateSource(&testHoldSoftStateSource{repoIds: []server.Id{repo}, read: func(id server.Id) []*AbuseHoldSoftStateKey {
+			reads++
+			return []*AbuseHoldSoftStateKey{{Key: "synthetic-lease", Fields: map[string]string{"revision": fmt.Sprint(reads)}}}
+		}})
+		if _, _, err := PlaceLegalHold(ctx, args, at, nil); !errors.Is(err, ErrHoldPlacementSnapshotUnavailable) {
+			t.Fatalf("a changing lease was accepted: %v", err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var parts int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM abuse_legal_hold WHERE network_id=$1 AND case_id=$2`, network, firstCase).Scan(&parts))
+			if parts != 0 {
+				t.Fatalf("an incomplete snapshot published %d parts", parts)
+			}
+		})
+		SetAbuseHoldSoftStateSource(&testHoldSoftStateSource{})
+		if _, inserted, err := PlaceLegalHold(ctx, args, at, nil); err != nil || !inserted {
+			t.Fatalf("placement: %t, %v", inserted, err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, "UPDATE abuse_legal_hold SET copy_state='copied' WHERE network_id=$1 AND case_id=$2 AND part=0", network, firstCase))
+			if allowed := contractsOutsidePendingHolds(ctx, tx, ids); !slices.Equal(allowed, ids[2:]) {
+				t.Fatalf("legacy copy released held contracts: %v", allowed)
+			}
+			server.RaisePgResult(tx.Exec(ctx, "UPDATE abuse_legal_hold SET copy_state=$3 WHERE network_id=$1 AND case_id=$2 AND part=0", network, firstCase, server.LegalHoldPlacementSnapshot))
+			if allowed := contractsOutsidePendingHolds(ctx, tx, ids); len(allowed) != len(ids) {
+				t.Fatalf("complete placement retained contracts: %v", allowed)
+			}
+			server.RaisePgResult(tx.Exec(ctx, "DELETE FROM contract_close_report WHERE contract_id=ANY($1::uuid[])", ids))
+			server.RaisePgResult(tx.Exec(ctx, "DELETE FROM contract_close WHERE contract_id=ANY($1::uuid[])", ids))
+			server.RaisePgResult(tx.Exec(ctx, "DELETE FROM transfer_contract WHERE contract_id=ANY($1::uuid[])", ids))
+		})
+		SetAbuseHoldSoftStateSource(nil)
+		complete, err := RunAbuseHoldCopy(ctx, network, firstCase, at, time.Now().Add(time.Minute), DefaultAbuseHoldCopySettings())
+		if err != nil || !complete {
+			t.Fatalf("copy after source deletion: %t, %v", complete, err)
+		}
+		for _, table := range holdContractTables {
+			copied, _ := testHoldCopiedRows(t, ctx, network, firstCase, table.name)
+			if len(copied) != 2 || !slices.Contains(copied, ids[0].String()) || !slices.Contains(copied, ids[1].String()) {
+				t.Fatalf("%s captured %v", table.name, copied)
+			}
+		}
+		// A legacy "copied" state cannot vouch for a missing dataset.
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, "DELETE FROM abuse_legal_hold WHERE network_id=$1 AND case_id=$2 AND part=1", network, firstCase))
+			server.RaisePgResult(tx.Exec(ctx, "UPDATE abuse_legal_hold SET copy_state='copied' WHERE network_id=$1 AND case_id=$2 AND part=0", network, firstCase))
+		})
+		if complete, err = RunAbuseHoldCopy(ctx, network, firstCase, at, time.Now().Add(time.Minute), DefaultAbuseHoldCopySettings()); complete || !errors.Is(err, ErrHoldPlacementSnapshotUnavailable) {
+			t.Fatalf("unverified legacy copy: %t, %v", complete, err)
+		}
+	})
+}
+
 // A table registered for the copy that only the one test reading it links, so no other hold copies it.
 var testHoldCopyTableLinked atomic.Bool
 
@@ -96,13 +178,17 @@ func TestHoldCopyPartRoundTripsWithinItsBound(t *testing.T) {
 type testHoldSoftStateSource struct {
 	repoIds  []server.Id
 	repoKeys map[server.Id][]*AbuseHoldSoftStateKey
+	read     func(server.Id) []*AbuseHoldSoftStateKey
 }
 
-func (self *testHoldSoftStateSource) NetworkRepoIds(ctx context.Context, networkId server.Id) ([]server.Id, error) {
+func (self *testHoldSoftStateSource) NetworkRepoIds(ctx context.Context, tx server.PgTx, networkId server.Id) ([]server.Id, error) {
 	return self.repoIds, nil
 }
 
-func (self *testHoldSoftStateSource) RepoSoftState(ctx context.Context, repoId server.Id) ([]*AbuseHoldSoftStateKey, error) {
+func (self *testHoldSoftStateSource) RepoSoftState(ctx context.Context, repoId server.Id, at time.Time) ([]*AbuseHoldSoftStateKey, error) {
+	if self.read != nil {
+		return self.read(repoId), nil
+	}
 	return self.repoKeys[repoId], nil
 }
 
@@ -213,9 +299,9 @@ func TestHoldCopyTakesOnlyWhatExistedAtPlacement(t *testing.T) {
 		if hold := GetLegalHold(ctx, networkId, caseId); hold.CopyState != LegalHoldCopyStateCopied {
 			t.Fatalf("copy state %q", hold.CopyState)
 		}
-		// no source: the soft state part says so
+		// A successful read of an empty source is a completed placement snapshot.
 		headers, _ := testHoldSoftStateParts(t, ctx, networkId, caseId)
-		if len(headers) != 1 || !headers[0].Unavailable {
+		if len(headers) != 1 || headers[0].Unavailable || !headers[0].Complete {
 			t.Fatalf("soft state parts %+v", headers)
 		}
 		if complete, err := RunAbuseHoldCopy(ctx, networkId, caseId, placeTime.Add(time.Hour), time.Now().Add(time.Minute), settings); err != nil || !complete {
@@ -495,14 +581,14 @@ func TestEndedHoldCopiesMoveToALaterHoldOrGo(t *testing.T) {
 		if len(keys) != 1 {
 			t.Fatalf("the later hold took %d rows", len(keys))
 		}
-		if headers, _ := testHoldSoftStateParts(t, ctx, networkId, laterCase); len(headers) != 0 {
+		if headers, _ := testHoldSoftStateParts(t, ctx, networkId, laterCase); len(headers) != 1 || headers[0].RepoId != nil || headers[0].CaseId != laterCase {
 			t.Fatalf("soft state of a repo the later hold does not cover moved: %+v", headers)
 		}
 		settings := DefaultAbuseHoldCopySettings()
 		server.Db(ctx, func(conn server.PgConn) {
 			parts, _ := readHoldCopyParts(ctx, conn, networkId, laterCase, settings)
 			for _, part := range parts {
-				if part.header.CaseId != firstCase {
+				if part.header.CaseId != firstCase && part.header.CaseId != laterCase {
 					t.Errorf("a moved part says it came from %s", part.header.CaseId)
 				}
 			}

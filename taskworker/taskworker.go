@@ -831,6 +831,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.AbuseClosureGrowth,
 			work.AbuseClosureGrowthPost,
 		),
+		task.NewTaskTarget(controller.LegalHoldPlacementTask),
 		// a hold's placed, renewed or ended record for the legal-request
 		// mailbox, owed in the transaction that commits it
 		task.NewTaskTargetWithPost(

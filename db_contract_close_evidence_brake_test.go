@@ -101,7 +101,7 @@ func TestCloseEvidenceGuardFloorOf(t *testing.T) {
 // (TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing runs this
 // against PostgreSQL).
 func TestCloseEvidenceRetentionBatchNamesOnlyItsTarget(t *testing.T) {
-	sql := fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier("a_target"))
+	sql := fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier("a_target"), evidencePlacementCopyPendingSQL())
 	target := `ONLY public."a_target" evidence`
 	for _, statement := range []string{"FROM " + target, "DELETE FROM " + target} {
 		if !strings.Contains(sql, statement) {

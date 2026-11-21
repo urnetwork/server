@@ -167,7 +167,7 @@ func TestCloseEvidenceRetentionBatchDeletesByCtid(t *testing.T) {
 			RaisePgResult(tx.Exec(ctx, `SET LOCAL enable_seqscan = off`))
 			result, err := tx.Query(
 				ctx,
-				"EXPLAIN "+fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(closeEvidenceTable)),
+				"EXPLAIN "+fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(closeEvidenceTable), evidencePlacementCopyPendingSQL()),
 				Id{},
 				Id{},
 				Id{},
