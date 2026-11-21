@@ -1098,9 +1098,13 @@ func TestAuthVerifyAddedUserAuth(t *testing.T) {
 		connect.AssertEqual(t, loginResult.Error, nil)
 		connect.AssertNotEqual(t, loginResult.VerificationRequired, nil)
 
+		// the code the sign-in sends (controller authLoginWithPassword): the
+		// password it proved keeps the added sign-in, which nothing else
+		// verifies without the account
 		createResult, err := AuthVerifyCreateCode(
 			AuthVerifyCreateCodeArgs{
-				UserAuth: loginResult.VerificationRequired.UserAuth,
+				UserAuth:       loginResult.VerificationRequired.UserAuth,
+				PasswordUserId: loginResult.VerificationRequired.PasswordUserId,
 			},
 			clientSession,
 		)

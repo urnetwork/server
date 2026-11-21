@@ -161,7 +161,7 @@ func TestAuthVerifyOwesTheWelcomeOnlyForANewAccount(t *testing.T) {
 		connect.AssertEqual(t, verifyWithNewCode(t, ctx, userAuth).NewAccount, false)
 		phone := "+1 555-555-0123"
 		addUnverifiedUserAuth(t, ctx, userId, phone)
-		connect.AssertEqual(t, verifyWithNewCode(t, ctx, phone).NewAccount, false)
+		connect.AssertEqual(t, verifySignedInWithNewCode(t, ctx, phone, networkId, userId).NewAccount, false)
 		connect.AssertEqual(t, modelOutboxMessageCount(ctx, networkId, NetworkWelcomeTemplateName), 1)
 
 		ssoNetworkId := server.NewId()
@@ -177,7 +177,7 @@ func TestAuthVerifyOwesTheWelcomeOnlyForANewAccount(t *testing.T) {
 		)
 		addedEmail := fmt.Sprintf("added-%s@synthetic.example", ssoNetworkId)
 		addUnverifiedUserAuth(t, ctx, ssoUserId, addedEmail)
-		connect.AssertEqual(t, verifyWithNewCode(t, ctx, addedEmail).NewAccount, false)
+		connect.AssertEqual(t, verifySignedInWithNewCode(t, ctx, addedEmail, ssoNetworkId, ssoUserId).NewAccount, false)
 		connect.AssertEqual(t, modelOutboxMessageCount(ctx, ssoNetworkId, NetworkWelcomeTemplateName), 0)
 	})
 }
