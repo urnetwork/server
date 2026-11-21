@@ -41,8 +41,10 @@ package sidecart3
 // every T3 test does. Its sidecars run until it closes, whatever context a call that added them carried. Safe for
 // concurrent use once made.
 //
-// Not here yet: gkm's host and the devices' MLS key clients, so no KeyPackage, Welcome or LeafWrap is made, and a key
-// reaches a device through FakeGkm's deliveries; and the config repo's heads on evs.
+// keys with RealKeys: each device's real key client at the gkm origin and its EvsClient over it, the config repo's
+// heads on evs, and each network bootstrapped by its first owner's follower, as ur daemon runs them (world_keys.go).
+// A joining device does not take the config repo's key yet (sidecare2e's world_keys_test.go), so RealKeys is off by
+// default, and a key reaches a device through FakeGkm's deliveries.
 
 import (
 	"context"
@@ -127,6 +129,15 @@ type T3WorldSettings struct {
 	// How long, in real time, a wait for a gate's load, a follower's catch-up or a sidecar's standing may take: 60 s,
 	// only a broken run's bound.
 	SyncTimeout time.Duration
+	// Whether each device's keys go through gkm's host with its own real key client (world_keys.go, as ur daemon
+	// composes it), the config repo's heads live on evs, and the network's bootstrap is its first owner's follower's
+	// own (§7.9, QD-824): what a world that serves gkm and evs at their origins runs. false keeps FakeGkm's deliveries
+	// and the config heads in memory.
+	RealKeys bool
+	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval): gkm's hint writer resolves no
+	// sidecar id yet (plan-KEYS-hint-addressing), so a hint by sidecar id is lost in production too and the hourly
+	// resync covers it, which a world waits seconds for, not an hour. 1 s.
+	KeyResyncInterval time.Duration
 }
 
 func DefaultT3WorldSettings() *T3WorldSettings {
@@ -149,6 +160,7 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		EnrollConcurrency:       4,
 		StatementLife:           time.Hour,
 		SyncTimeout:             60 * time.Second,
+		KeyResyncInterval:       time.Second,
 	}
 }
 
@@ -835,6 +847,9 @@ func (self *T3Network) enroll(ctx context.Context, name string, settings func(na
 		return nil, err
 	}
 	sidecarSettings := sidecar.DefaultSidecarSettings()
+	if self.world.settings.RealKeys {
+		sidecarSettings.Gkm.ResyncInterval = self.world.settings.KeyResyncInterval
+	}
 	if settings != nil {
 		settings(name, sidecarSettings)
 	}
@@ -852,6 +867,19 @@ func (self *T3Network) enroll(ctx context.Context, name string, settings func(na
 		return nil, fmt.Errorf("%s enrolled in no network of %s's", name, self.Name)
 	}
 	device := &T3Device{T3Sidecar: running, Network: self}
+	if self.world.settings.RealKeys {
+		keys, err := newT3WorldKeys(running.Sidecar(), running.Settings.Log, func(ctx context.Context, signedType bridge.SignedType, body proto.Message) error {
+			_, err := self.FileStatement(ctx, device, signedType, body)
+			return err
+		})
+		if err != nil {
+			running.Close()
+			return nil, err
+		}
+		device.keys = keys
+		device.Gkm = keys.gkm
+		return device, nil
+	}
 	device.Gkm = &t3WorldGkmClient{
 		GkmClient: self.world.gkm.Client(identity.SidecarId, func(purpose string, signedType bridge.SignedType, body []byte, agentId *sidecar.Id) (*bridge.Signed, error) {
 			return running.Sidecar().Sign(purpose, signedType, body, agentId)
@@ -928,6 +956,9 @@ func (self *T3Network) Bootstrap(ctx context.Context, owner *T3Device) error {
 	if owner.Network != self {
 		return fmt.Errorf("%s is no sidecar of %s", owner.Name, self.Name)
 	}
+	if owner.keys != nil {
+		return self.bootstrapByFollower(ctx, owner)
+	}
 	running := owner.Sidecar()
 	identity := running.Identity()
 	sign := func(purpose string, signedType bridge.SignedType, body []byte) (*bridge.Signed, error) {
@@ -963,6 +994,46 @@ func (self *T3Network) Bootstrap(ctx context.Context, owner *T3Device) error {
 		return err
 	}
 	return self.Sync(ctx, bootstrap.Pin.GetVersion())
+}
+
+// With RealKeys, owner's follower bootstraps the network itself, as ur daemon's first owner does (§7.9, QD-824): its
+// draft, KF1's draft of the config group at gkm, the first head's push sealed on evs, base 1 through api and the config
+// repo's activation, until it stands; the genesis A_0 it then anchors at is the network's.
+func (self *T3Network) bootstrapByFollower(ctx context.Context, owner *T3Device) error {
+	follower, err := owner.Sidecar().FollowConfig(&sidecar.SidecarConfigFollowerArgs{
+		BootstrapFirstOwner: true,
+		Heads:               owner.keys.heads,
+		Gkm:                 owner.keys.gkm,
+		Settings:            t3WorldKeysFollowerSettings(),
+	})
+	if err != nil {
+		return fmt.Errorf("%s's follower: %w", owner.Name, err)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, self.world.settings.SyncTimeout)
+	defer cancel()
+	if _, err := follower.WaitStanding(waitCtx); err != nil {
+		status := follower.Status()
+		follower.Close()
+		return fmt.Errorf("%s's follower did not bootstrap %s (%s: %s): %w", owner.Name, self.Name, status.State, status.Reason, err)
+	}
+	anchor, err := owner.Sidecar().Anchor()
+	if err != nil || len(anchor.GenesisSha256) != sha256.Size {
+		follower.Close()
+		return fmt.Errorf("%s anchors at no genesis after its bootstrap: %v", owner.Name, err)
+	}
+	genesis := [sha256.Size]byte(anchor.GenesisSha256)
+	func() {
+		owner.stateLock.Lock()
+		defer owner.stateLock.Unlock()
+		owner.follower = follower
+	}()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.owner = owner
+		self.genesis = &genesis
+	}()
+	return self.Sync(ctx, follower.Client().Pin().GetVersion())
 }
 
 // The owner admits each device, a new device of its member, as `ur approve` does on its approval item (§5.6, §7.9's
@@ -1136,8 +1207,11 @@ func (self *T3Network) Grant(ctx context.Context, admin *T3Device, repoId sideca
 type T3Device struct {
 	*T3Sidecar
 	Network *T3Network
-	// Its key client: FakeGkm's client for its identity, signing by its identity key (the file's keys row).
+	// Its key client: FakeGkm's client for its identity, signing by its identity key (the file's keys row), or with
+	// RealKeys its real one (keys).
 	Gkm sidecar.GkmClient
+	// With RealKeys, its key and evs clients as ur daemon composes them (world_keys.go); nil otherwise.
+	keys *t3WorldKeys
 
 	stateLock sync.Mutex
 	follower  *sidecar.SidecarConfigFollower
@@ -1176,21 +1250,28 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 	if err := running.TrustFirstUse(genesis[:]); err != nil {
 		return fmt.Errorf("%s's anchor: %w", self.Name, err)
 	}
-	heads := &t3WorldConfigHeads{
+	var heads sidecar.ConfigHeadReader = &t3WorldConfigHeads{
 		FakeConfigHeads: self.Network.heads,
 		ref: self.Network.heads.ForSigner(running.Identity().SidecarId, func(purpose string, signedType bridge.SignedType, body []byte) (*bridge.Signed, error) {
 			return running.Sign(purpose, signedType, body, nil)
 		}),
 	}
-	follower, err := running.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads, Gkm: self.Gkm})
+	var followerSettings *sidecar.SidecarConfigFollowerSettings
+	if self.keys != nil {
+		// the config repo's heads on evs, read through the device's own EvsClient, as ur daemon's follower reads them
+		heads = self.keys.heads
+		followerSettings = t3WorldKeysFollowerSettings()
+	}
+	follower, err := running.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads, Gkm: self.Gkm, Settings: followerSettings})
 	if err != nil {
 		return fmt.Errorf("%s's follower: %w", self.Name, err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, self.Network.world.settings.SyncTimeout)
 	defer cancel()
 	if _, err := follower.WaitStanding(ctx); err != nil {
+		status := follower.Status()
 		follower.Close()
-		return fmt.Errorf("%s's follower did not stand: %w", self.Name, err)
+		return fmt.Errorf("%s's follower did not stand, %s (%s): %w", self.Name, status.State, status.Reason, err)
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -1213,6 +1294,9 @@ func (self *T3Device) EvsClient() (*sidecar.EvsClient, error) {
 	}
 	if follower == nil {
 		return nil, fmt.Errorf("%s reads evs by a follower that stands", self.Name)
+	}
+	if self.keys != nil {
+		return self.keys.evsClient()
 	}
 	config := func() sidecar.GkmAuthView {
 		// never a typed nil: no state verifies before the first
@@ -1263,6 +1347,9 @@ func (self *T3Device) close() {
 	}
 	if follower != nil {
 		follower.Close()
+	}
+	if self.keys != nil {
+		self.keys.close()
 	}
 	self.T3Sidecar.Close()
 }
