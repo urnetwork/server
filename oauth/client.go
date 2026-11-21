@@ -69,7 +69,9 @@ type Client struct {
 	Scopes          []string
 }
 
-// Reports whether a redirect uri was registered by this client.
+// Reports whether a redirect uri was registered by this client, and is one this
+// server sends a user agent to (redirect_uri.go). A client registered before
+// those rules keeps the uris it registered, so they are applied on every use.
 //
 // Compared exactly, per oauth 2.1: no prefix or wildcard matching, because a
 // loose match is how an open redirector turns into token exfiltration. Native
@@ -77,6 +79,10 @@ type Client struct {
 // which rfc 8252 requires the server to allow since the client cannot reserve
 // one in advance.
 func (self *Client) ValidRedirectUri(redirectUri string) bool {
+	if checkRedirectUri(redirectUri, self.ApplicationType) != nil {
+		return false
+	}
+
 	for _, registered := range self.RedirectUris {
 		if registered == redirectUri {
 			return true
@@ -290,30 +296,14 @@ func RegisterClient(ctx context.Context, document *clientMetadataDocument) (*Cli
 	return client, nil
 }
 
-// A native client may register a loopback redirect; a web client must use
-// https. This is what lets claude desktop and the cli work without allowing a
-// web client to redirect a code to localhost.
+// A native client may register a loopback redirect or a private-use scheme; a
+// web client must use https (redirect_uri.go). This is what lets claude desktop
+// and the cli work without allowing a web client to redirect a code to
+// localhost.
 func validateRedirectUris(redirectUris []string, applicationType string) error {
 	for _, redirectUri := range redirectUris {
-		redirectUrl, err := url.Parse(redirectUri)
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrInvalidRedirect, redirectUri)
-		}
-		if redirectUrl.Fragment != "" {
-			return fmt.Errorf("%w: fragment not allowed", ErrInvalidRedirect)
-		}
-
-		switch redirectUrl.Scheme {
-		case "https":
-		case "http":
-			if applicationType != ApplicationTypeNative || !isLoopbackHost(redirectUrl.Hostname()) {
-				return fmt.Errorf("%w: http is only allowed for native loopback", ErrInvalidRedirect)
-			}
-		default:
-			// a private uri scheme is how a native app receives a redirect
-			if applicationType != ApplicationTypeNative {
-				return fmt.Errorf("%w: unsupported scheme %s", ErrInvalidRedirect, redirectUrl.Scheme)
-			}
+		if err := checkRedirectUri(redirectUri, applicationType); err != nil {
+			return err
 		}
 	}
 	return nil

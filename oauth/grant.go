@@ -182,6 +182,11 @@ func ExchangeCode(ctx context.Context, args *ExchangeCodeArgs) (*TokenResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
+	// the redirect uri rules hold at the token step too: no code is exchanged
+	// for a redirect uri that no client may use
+	if err := checkRedirectUri(args.RedirectUri, ApplicationTypeNative); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidGrant, err)
+	}
 
 	code, err := RedeemAuthorizationCode(
 		ctx,
