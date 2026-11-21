@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	servermonitor "github.com/urnetwork/server/monitor"
@@ -82,13 +83,13 @@ func TestCheckBurnRequiresTheReadyFirstEdgeAtTheReleaseVersionThroughoutTheCanar
 		{"drained during canary", ready, strings.Replace(ready, "ok", "draining", 1), 1, false},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
-			checks := 0
+			var checks atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/status" {
 					http.NotFound(w, r)
 					return
 				}
-				if checks == 0 {
+				if checks.Load() == 0 {
 					fmt.Fprint(w, tc.start)
 				} else {
 					fmt.Fprint(w, tc.end)
@@ -96,12 +97,13 @@ func TestCheckBurnRequiresTheReadyFirstEdgeAtTheReleaseVersionThroughoutTheCanar
 			}))
 			defer server.Close()
 			check := func(ctx context.Context, settings servermonitor.SignalSettings, service string) (*servermonitor.SloBurnCheck, error) {
-				checks++
+				checks.Add(1)
 				return fixedCheckBurn(servermonitor.SloBurnClear, nil)(ctx, settings, service)
 			}
-			err := runCheckBurnCommand(t.Context(), []string{"--service=dnsedge-1", "--expected-version=new", "--status-url=" + server.URL + "/status"}, &bytes.Buffer{}, loadedCheckBurnSettings, check)
-			if (err == nil) != tc.clear || checks != tc.wantChecks {
-				t.Fatalf("result %v, canary ran %d times", err, checks)
+			var output bytes.Buffer
+			err := runCheckBurnCommand(t.Context(), []string{"--service=dnsedge-1", "--expected-version=new", "--status-url=" + server.URL + "/status"}, &output, loadedCheckBurnSettings, check)
+			if (err == nil) != tc.clear || int(checks.Load()) != tc.wantChecks || strings.Contains(output.String(), "dnsedge-1/g1 ready new dns-canary clear\n") != tc.clear {
+				t.Fatalf("result %v, canary ran %d times: %q", err, checks.Load(), output.String())
 			}
 		})
 	}

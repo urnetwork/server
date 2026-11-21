@@ -19,6 +19,7 @@ import (
 	"time"
 
 	servermonitor "github.com/urnetwork/server/monitor"
+	"github.com/urnetwork/server/router"
 )
 
 // The check behind the command; tests replace it.
@@ -65,6 +66,9 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 	if result.State != servermonitor.SloBurnClear {
 		return fmt.Errorf("%s: %s", *service, result.State)
 	}
+	if *expected != "" {
+		fmt.Fprintf(stdout, "dnsedge-1/g1 ready %s dns-canary clear\n", *expected)
+	}
 	return nil
 }
 
@@ -82,14 +86,14 @@ func checkDnsEdgeVersion(ctx context.Context, statusURL, expected string) error 
 		return fmt.Errorf("dnsedge-1 readiness: %w", err)
 	}
 	defer response.Body.Close()
-	var status struct{ Service, Block, Version, Status string }
+	var status router.WarpStatusResult
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("dnsedge-1 readiness returned HTTP %d", response.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&status); err != nil {
 		return fmt.Errorf("dnsedge-1 readiness: %w", err)
 	}
-	if status.Service != "dnsedge-1" || status.Block != "g1" || status.Version != expected || status.Status != "ok" {
+	if status.Service != "dnsedge-1" || status.Block != "g1" || (status.Version == nil || *status.Version != expected) || status.Status != "ok" {
 		return fmt.Errorf("dnsedge-1/g1 is not ready at %s", expected)
 	}
 	return nil
