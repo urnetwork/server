@@ -224,7 +224,9 @@ func sloBurnObjectiveQueries(environment string, settings *SidecarSloSettings, s
 		// A stopped canary can leave its collector on a healthy scrape target.
 		fresh += " and (" + increase(all, settings.MetricFreshness) + " > 0)"
 		daily = "(" + increase(all, settings.HistoryWindow) + " and " + daily + ")"
-		start += " and (sum(increase(" + all + sidecarStorageRange(settings.MetricFreshness) + " offset " + period + ")) > 0)"
+		// Count the first observations inside the budget. A 30-day budget needs no samples from before its start.
+		firstWindowOffset := seconds(settings.BudgetPeriod - settings.MetricFreshness)
+		start += " and (sum(increase(" + all + sidecarStorageRange(settings.MetricFreshness) + " offset " + firstWindowOffset + ")) > 0)"
 	}
 	// Require evidence at the full budget age and in every intervening daily window. Reaching into
 	// the oldest day of the budget alone would admit a new series almost a day early.
