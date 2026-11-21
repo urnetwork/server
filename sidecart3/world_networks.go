@@ -523,7 +523,8 @@ func (self *T3Network) authKey(ctx context.Context) (string, error) {
 
 // count sidecars, each enrolled through api from an auth key of its own and Online on server's exchange, at most
 // EnrollConcurrency at once, named for the network and their order. settings, called for each, adjusts a sidecar's
-// settings past the defaults; nil for none. A failure closes what it enrolled and answers the first error.
+// settings past the defaults; nil for none. A failure closes what it enrolled and answers every error. One call at a
+// time per network, so the names stay apart.
 func (self *T3Network) AddSidecars(ctx context.Context, count int, settings func(name string, sidecarSettings *sidecar.SidecarSettings)) ([]*T3Device, error) {
 	start := len(self.Devices())
 	added := make([]*T3Device, count)
@@ -715,7 +716,10 @@ func (self *T3Network) Admit(ctx context.Context, devices []*T3Device) error {
 			return fmt.Errorf("%s's admission: %w", device.Name, err)
 		}
 	}
-	client := owner.follower.Client()
+	client := owner.Follower().Client()
+	if client == nil {
+		return fmt.Errorf("%s's follower no longer stands", owner.Name)
+	}
 	if err := client.CatchUp(ctx); err != nil {
 		return err
 	}
@@ -889,12 +893,14 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 // exchange, its identity key, its key client, its follower's verified state, and its statements filed as
 // FileStatement files them. Its follower must stand.
 func (self *T3Device) EvsClient() (*sidecar.EvsClient, error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.evs != nil {
-		return self.evs, nil
+	evs, follower := func() (*sidecar.EvsClient, *sidecar.SidecarConfigFollower) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.evs, self.follower
+	}()
+	if evs != nil {
+		return evs, nil
 	}
-	follower := self.follower
 	if follower == nil {
 		return nil, fmt.Errorf("%s reads evs by a follower that stands", self.Name)
 	}
@@ -917,8 +923,19 @@ func (self *T3Device) EvsClient() (*sidecar.EvsClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	self.evs = client
-	return client, nil
+	// a racing caller's, if it made one first
+	held := func() *sidecar.EvsClient {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.evs == nil {
+			self.evs = client
+		}
+		return self.evs
+	}()
+	if held != client {
+		client.Close()
+	}
+	return held, nil
 }
 
 // Ends the device's EvsClient and follower, then the sidecar.

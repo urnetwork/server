@@ -121,13 +121,20 @@ func (self *T3World) ServeEvs(ctx context.Context, settings *T3EvsSettings) (ser
 		return nil, err
 	}
 	served = &T3Evs{world: self, host: evsHost, gate: gate}
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.closed {
+	kept := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return false
+		}
+		self.closes = append(self.closes, served.closeServed)
+		return true
+	}()
+	if !kept {
+		// closed with no lock held, since closing takes the world's
 		served.closeServed()
 		return nil, errors.New("the world has closed")
 	}
-	self.closes = append(self.closes, served.closeServed)
 	return served, nil
 }
 
@@ -154,7 +161,8 @@ func (self *T3Evs) Host() *evshost.Host {
 	return self.host
 }
 
-// Stops serving the origin, then drains and closes the block and its gate cache.
+// Stops serving the origin, then drains and closes the block and its gate cache. Called with no lock of the world's
+// held, once.
 func (self *T3Evs) closeServed() {
 	self.world.api.ServeService("evs", nil)
 	self.host.Drain()
