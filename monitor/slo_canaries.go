@@ -26,6 +26,9 @@ func (self *SloWarmTlsSettings) valid() bool {
 }
 
 func (self *SloWarmTlsSettings) measure(ctx context.Context, handshake func(context.Context, string, string, string) (TLSCertificateObservation, error), now func() time.Time) (time.Duration, bool) {
+	if !self.valid() {
+		return 0, false
+	}
 	run := func(address string) (time.Duration, bool) {
 		start := now()
 		peer, err := handshake(ctx, "tcp", address, self.ServerName)
@@ -91,7 +94,7 @@ func authoritativeCanaryPresent(reply *dns.Msg, owner string, value string) bool
 
 // A read at each authority must complete by the deadline. A canceled monitor run yields no measurement.
 func observeDnsPropagation(ctx context.Context, started time.Time, settings *DnsCanarySettings, root, value string, serves func(context.Context, string, []netip.AddrPort, string) bool) string {
-	if len(settings.Dns.Ns) < 2 {
+	if len(settings.Dns.Ns) < 2 || settings.PropagationTarget <= 0 || settings.PropagationPoll <= 0 {
 		return ""
 	}
 	deadline := started.Add(settings.PropagationTarget)

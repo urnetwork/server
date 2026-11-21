@@ -47,6 +47,9 @@ func TestSloBurnWarmTlsComparesTwoVerifiedWarmPaths(t *testing.T) {
 	if target.valid() {
 		t.Fatal("the same path was accepted as the direct control")
 	}
+	if _, ok := target.measure(t.Context(), nil, time.Now); ok {
+		t.Fatal("an invalid programmatic target produced an observation")
+	}
 }
 
 func TestSloBurnDnsPropagationObservesTheCommittedValueAtBothAuthorities(t *testing.T) {
