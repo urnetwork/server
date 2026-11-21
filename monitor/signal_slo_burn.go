@@ -430,7 +430,7 @@ const (
 )
 
 // The dns roles' stop rule beside their SLO (Q-OPS-5): the canary's classes that count as burning.
-var sloBurnDnsCanaryBurningClasses = []string{dnsCanaryClassSignature, dnsCanaryClassDivergence}
+var sloBurnDnsCanaryBurningClasses = []string{dnsCanaryClassSignature, dnsCanaryClassDivergence, dnsCanaryClassNsDown, dnsCanaryClassNsFailing}
 
 // What check-burn runs for the dns canary; tests replace it.
 var sloBurnDnsCanaryCheck = func(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -439,7 +439,7 @@ var sloBurnDnsCanaryCheck = func(ctx context.Context, env *probeEnv) ([]finding,
 
 // One service's burn now, for `monitor check-burn` and so for warp_rollout_gate. A
 // service whose row has not joined monitor.yml's sidecar_services, or has no row, is unknown. dns and
-// each dns edge also run the dns canary, where an open signature or serial divergence counts as burning
+// each dns edge also run the dns canary, where a failed authority, open signature or serial divergence counts as burning
 // (Q-OPS-5); the edges have no SLO row of their own, so the canary is their whole check.
 func CheckSloBurn(ctx context.Context, signalSettings SignalSettings, service string) (*SloBurnCheck, error) {
 	signalSettings = signalSettings.withDefaults()
@@ -505,7 +505,7 @@ func checkSloBurn(ctx context.Context, env *probeEnv, probe sloBurnProbe, servic
 			}
 		}
 		if err == nil && len(findings) == 0 {
-			worsen(SloBurnUnknown, "dns canary: unknown: it reported nothing")
+			worsen(SloBurnClear, "dns canary: clear")
 		}
 	}
 	return check

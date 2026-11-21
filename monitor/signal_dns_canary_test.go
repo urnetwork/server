@@ -659,3 +659,22 @@ func TestDnsCanaryOnlyTheRegisteredProbeKeepsTheCount(t *testing.T) {
 		t.Errorf("gauges %v %v", world.cleanDays, world.dsReady)
 	}
 }
+
+func TestDnsCanaryRequiresRootsAndBothNameservers(t *testing.T) {
+	for _, missing := range []string{"zone settings", "roots", "second authority"} {
+		c, _ := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+		switch missing {
+		case "zone settings":
+			c.settings.Dns = nil
+		case "roots":
+			c.settings.Dns.Roots = nil
+		case "second authority":
+			c.settings.Dns.Ns = c.settings.Dns.Ns[:1]
+		}
+		env := &probeEnv{cfg: &monitorConfig{dnsCanary: c.settings}}
+		got, err := (dnsCanaryProbe{}).check(t.Context(), env)
+		if err != nil || len(got) != 1 || !got[0].isUnobservable() {
+			t.Fatalf("missing %s: findings %v, error %v", missing, got, err)
+		}
+	}
+}

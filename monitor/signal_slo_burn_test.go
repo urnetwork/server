@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/sidecar/dnsservice"
 )
 
 // evs's availability within budget: a million requests in 30 days at 99.9%, so a budget of 1,000, with
@@ -260,7 +262,7 @@ func TestCheckSloBurnReadsClearBurningOrUnknown(t *testing.T) {
 		service string
 		want    string
 	}{
-		{label: "clean", canary: []finding{healthyFinding(dnsCanaryProbeId, tierPage, dnsCanaryClassSignature, "example.com")}, service: "dnsedge-2", want: SloBurnClear},
+		{label: "clean", service: "dnsedge-2", want: SloBurnClear},
 		{label: "signature", canary: []finding{{probeId: dnsCanaryProbeId, class: dnsCanaryClassSignature, target: "example.com"}}, service: "dnsedge-2", want: SloBurnBurning},
 		{label: "divergence", canary: []finding{{probeId: dnsCanaryProbeId, class: dnsCanaryClassDivergence, target: "example.com"}}, service: "dnsedge-1", want: SloBurnBurning},
 		{label: "propagation alone", canary: []finding{{probeId: dnsCanaryProbeId, class: dnsCanaryClassPropagation, target: "example.com"}}, service: "dnsedge-2", want: SloBurnClear},
@@ -272,6 +274,32 @@ func TestCheckSloBurnReadsClearBurningOrUnknown(t *testing.T) {
 		canary, canaryErr = c.canary, c.err
 		if result := check(c.service, nil); result.State != c.want {
 			t.Errorf("%s: %+v, want %s", c.label, result, c.want)
+		}
+	}
+}
+
+// The one-shot rollout decision uses the same results as the scheduled probe.
+func TestDnsRolloutUsesTheCanaryVerdictAfterReadingBothNameservers(t *testing.T) {
+	original := sloBurnDnsCanaryCheck
+	t.Cleanup(func() { sloBurnDnsCanaryCheck = original })
+	for down := 0; down <= 2; down++ {
+		canary, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+		if down >= 1 {
+			delete(world.nsReads, dnsCanaryTestNs1.String())
+		}
+		if down >= 2 {
+			delete(world.nsReads, dnsCanaryTestNs2.String())
+		}
+		sloBurnDnsCanaryCheck = func(ctx context.Context, _ *probeEnv) ([]finding, error) {
+			return canary.run(ctx, dnsCanaryTestNow), nil
+		}
+		result := checkSloBurn(t.Context(), sloBurnTestEnv(sloBurnTestSettings("dns")), sloBurnProbe{}, "dnsedge-1")
+		want := SloBurnClear
+		if down != 0 {
+			want = SloBurnBurning
+		}
+		if result.State != want {
+			t.Errorf("%d unavailable nameservers: %+v, want %s", down, result, want)
 		}
 	}
 }
