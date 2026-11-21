@@ -1518,6 +1518,9 @@ type TaskWorkerSettings struct {
 	// Filtering precedes the candidate limit, including the owner of a RunPost
 	// retry, so an unrelated backlog cannot starve registered work.
 	ClaimRegisteredTargetsOnly bool
+	// Canonical functions owned by another process, including post retries
+	// whose persisted finished rows belong to these functions.
+	ExcludedClaimFunctions []string
 	// Run and EvalTasks alternate indexed function lanes with the ordinary queue.
 	// Owners enable this only after the matching migration is available.
 	FairClaimFunctions bool
