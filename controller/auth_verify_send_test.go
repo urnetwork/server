@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -199,10 +200,54 @@ func TestAuthLoginWithPasswordVerifySent(t *testing.T) {
 
 func TestSendVerificationReportsVerifySendError(t *testing.T) {
 	// sign-up shares this with login; an unexpected error also means no code
-	sendError := sendVerification(verifySendTestUserAuth, false, verifySendTestSession(), func(AuthVerifySendArgs, *session.ClientSession) (*AuthVerifySendResult, error) {
+	sendError := sendVerification(verifySendTestUserAuth, false, nil, verifySendTestSession(), func(AuthVerifySendArgs, *session.ClientSession) (*AuthVerifySendResult, error) {
 		return nil, errors.New("Invalid login.")
 	})
 	if sendError == nil || sendError.Code != model.AuthVerifySendErrorCodeSendFailed {
 		t.Fatalf("send error = %+v", sendError)
+	}
+}
+
+// A password sign-in that needs its address verified proved the password, and
+// the code it sends carries that proof to the model, which binds the code to
+// the client network (model.AuthVerifyCreateCodeArgs.PasswordUserId). Neither
+// a request body nor a response carries the proof: /auth/verify-send cannot
+// claim one, and the sign-in's answer does not show it.
+func TestPasswordSignInSendsItsPasswordProofWithTheCode(t *testing.T) {
+	userId := server.NewId()
+	created := []model.AuthVerifyCreateCodeArgs{}
+	createCode := func(args model.AuthVerifyCreateCodeArgs, clientSession *session.ClientSession) (*model.AuthVerifyCreateCodeResult, error) {
+		created = append(created, args)
+		return createCodeOk(args, clientSession)
+	}
+	sender := &fakeVerifySendMessageSender{}
+	verifySend := func(args AuthVerifySendArgs, clientSession *session.ClientSession) (*AuthVerifySendResult, error) {
+		return authVerifySend(args, clientSession, createCode, sender)
+	}
+	login := func(args model.AuthLoginWithPasswordArgs, clientSession *session.ClientSession) (*model.AuthLoginWithPasswordResult, error) {
+		result, err := verificationRequiredLogin(args, clientSession)
+		result.VerificationRequired.PasswordUserId = &userId
+		return result, err
+	}
+	result, err := authLoginWithPassword(
+		model.AuthLoginWithPasswordArgs{UserAuth: verifySendTestUserAuth, Password: "password"},
+		verifySendTestSession(),
+		login,
+		verifySend,
+	)
+	if err != nil || len(created) != 1 || created[0].PasswordUserId == nil || *created[0].PasswordUserId != userId {
+		t.Fatalf("created %+v (err %v), want one code carrying the sign-in's password proof", created, err)
+	}
+	body, err := json.Marshal(result)
+	if err != nil || strings.Contains(string(body), userId.String()) {
+		t.Fatalf("the sign-in's answer shows the proof: %s", body)
+	}
+
+	var sendArgs AuthVerifySendArgs
+	if err := json.Unmarshal([]byte(`{"user_auth":"verify-send@example.com","PasswordUserId":"`+userId.String()+`","password_user_id":"`+userId.String()+`"}`), &sendArgs); err != nil {
+		t.Fatal(err)
+	}
+	if sendArgs.PasswordUserId != nil {
+		t.Fatalf("a /auth/verify-send body set the password proof")
 	}
 }

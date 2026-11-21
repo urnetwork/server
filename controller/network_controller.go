@@ -113,6 +113,8 @@ func NetworkCreate(
 		result.VerificationRequired.SendError = sendVerification(
 			result.VerificationRequired.UserAuth,
 			verifyUseNumeric,
+			// the sign-up set the password
+			result.VerificationRequired.PasswordUserId,
 			clientSession,
 			authVerifySendResult,
 		)
