@@ -271,6 +271,10 @@ type configLogNetwork struct {
 	lastTick       bool
 }
 
+func newConfigLogNetwork(networkId server.Id) *configLogNetwork {
+	return &configLogNetwork{networkId: networkId, basePins: map[[sha256.Size]byte]*bridge.AuthPin{}}
+}
+
 // A base's facts retention needs.
 type configLogBaseInfo struct {
 	n             uint64
@@ -368,7 +372,7 @@ func (self *ConfigLogSequencer) network(networkId server.Id) *configLogNetwork {
 			// request loads the network again from the store
 			delete(self.networks, oldest.networkId)
 		}
-		network = &configLogNetwork{networkId: networkId, basePins: map[[sha256.Size]byte]*bridge.AuthPin{}}
+		network = newConfigLogNetwork(networkId)
 		self.networks[networkId] = network
 	}
 	network.lastUse = self.now()
@@ -488,13 +492,16 @@ func (self *configLogNetwork) loadWithLock(ctx context.Context, sequencer *Confi
 		}
 		signedGenesis = genesisHint
 	}
-	var log *sidecar.ConfigLog
-	if len(entries) == 0 || positions[0] == 1 {
-		log, err = sidecar.NewConfigLogRowsOnly(sequencer.verifierSettings(), signedGenesis)
-		if err == nil && 0 < len(entries) {
-			_, err = log.ApplyRun(entries, sequencer.rowsSource(ctx))
-		}
-	} else {
+	log, err := sidecar.NewConfigLogRowsOnly(sequencer.verifierSettings(), signedGenesis)
+	if err != nil {
+		return err
+	}
+	if log.State().NetworkId() != networkId {
+		return &sidecar.ConfigRunError{Reason: "genesis names another network"}
+	}
+	if len(entries) > 0 && positions[0] == 1 {
+		_, err = log.ApplyRun(entries, sequencer.rowsSource(ctx))
+	} else if len(entries) > 0 {
 		retained := &sidecar.ConfigRetained{SignedGenesis: signedGenesis, Entries: entries}
 		log, err = sidecar.RestoreConfigLogRowsOnly(sequencer.verifierSettings(), retained, sequencer.rowsSource(ctx), nil)
 	}
@@ -538,12 +545,14 @@ func (self *configLogNetwork) noteBaseWithLock(entryBytes []byte) {
 	})
 }
 
-// Applies an entry this instance or another wrote to the verifier. One that
-// does not apply, another genesis's base 1 that won a race or a fork, drops the
-// verifier, which the next request loads again from the store: the store,
-// never this memory, says what the log is.
+// Applies an entry this instance or another wrote. A malformed or misrouted entry
+// leaves the verified state available for a retry. A fork or missing history forces
+// a fresh read, including when another genesis's base 1 won a race.
 func (self *configLogNetwork) applyWithLock(ctx context.Context, sequencer *ConfigLogSequencer, entryBytes []byte) error {
 	if _, err := self.log.Apply(entryBytes, sequencer.rowsSource(ctx)); err != nil {
+		if errors.Is(err, sidecar.ErrConfigEntryMalformed) {
+			return err
+		}
 		glog.Errorf("[config]%s dropping the verifier: %v\n", self.networkId, err)
 		self.log, self.signedGenesis = nil, nil
 		clear(self.basePins)

@@ -16,8 +16,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The network's verified state at the store's tip, nil with no error before base 1. An entry that does not apply drops
-// the verifier, as an append's does, and answers its error.
+// The network's verified state at the store's tip, nil with no error before base 1.
+// An unreadable or unverifiable entry answers its error.
 func (self *ConfigLogSequencer) CaughtUpState(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error) {
 	network := self.network(networkId)
 	network.stateLock.Lock()

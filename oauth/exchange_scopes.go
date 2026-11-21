@@ -52,9 +52,8 @@ package oauth
 // suspended, whose not_after passed or whose member left (invalid_grant); an
 // unadmitted client asking anything but its own recovery scope at gkm
 // (invalid_grant); a request no scope of which is granted (invalid_scope); and
-// the api's audience, which is never issued (invalid_target). A network whose
-// state the gate has not loaded is refused as unavailable, never guessed: a
-// network the gate has never heard of is told to it, so its load starts.
+// the api's audience, which is never issued (invalid_target). A missing
+// verified snapshot queues a load and makes the exchange temporarily unavailable.
 //
 // Nothing here reads a token or a proof; the exchange checked both. Safe for
 // concurrent use.
@@ -196,15 +195,7 @@ func verifiedGateSnapshot(gate ExchangeGate, networkId server.Id) (*sidecar.AclG
 	if gate == nil {
 		return nil, fmt.Errorf("%w: no gate", ErrExchangeUnavailable)
 	}
-	snapshot, status := gate.State(sidecar.Id(networkId))
-	switch status {
-	case sidecar.AclGateLoaded:
-	case sidecar.AclGateUnknown:
-		gate.Changed(sidecar.Id(networkId))
-		return nil, fmt.Errorf("%w: the network's state is not loaded yet", ErrExchangeUnavailable)
-	default:
-		return nil, fmt.Errorf("%w: the network's state is not loaded", ErrExchangeUnavailable)
-	}
+	snapshot := sidecar.RequestAclGateSnapshot(gate, sidecar.Id(networkId))
 	if snapshot == nil || snapshot.Config == nil || snapshot.Acl == nil {
 		return nil, fmt.Errorf("%w: the network's state is not loaded", ErrExchangeUnavailable)
 	}
