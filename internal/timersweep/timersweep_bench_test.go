@@ -1,6 +1,7 @@
 package timersweep
 
 import (
+	mathrand "math/rand/v2"
 	"runtime"
 	"sync"
 	"syscall"
@@ -22,18 +23,20 @@ func processCpu() time.Duration {
 const productionTimersPerP = 55_000
 
 // The share of those made by the owners this change moves to the sweep, as
-// the profile counted them: the announce rounds (147k), the passive samples
-// (86k), the lease horizons (81k) and the resident (78k) and forward (73k)
-// idle watches, 465k of 1.1M. The lease recheck tickers, the resident
-// registration refreshes and the verify egress refreshes also moved; the
-// profile's table does not count them, so the "after" heap here keeps them,
-// and the census (connect/timer_census_db_test.go) counts one of each for
-// every lease, resident and verifying connection.
+// the profile's table counts them: the announce rounds (147k), the passive
+// samples (86k), the lease horizons (81k) and the resident (78k) and forward
+// (73k) idle watches, 465k of 1.1M. The table counts none of the lease
+// recheck tickers, resident registration refreshes, stream grant republishes
+// or verify egress refreshes, which moved too, so production's heap before
+// may be larger than "before" here. The census
+// (connect/timer_census_db_test.go) counts one of each for every lease,
+// resident and verifying connection.
 const productionSweptShare = 465.0 / 1100.0
 
 // Spreads count far-off runtime timers over the Ps' heaps, each next to a
-// filler allocation, as a server's are scattered through memory: a heap
-// walk's cost is a cache miss per timer. Returns the stop.
+// filler allocation, as a server's are scattered through memory, with random
+// deadlines, so a heap's order has nothing to do with where its timers are:
+// a heap walk's cost is a cache miss per timer. Returns the stop.
 func spreadRuntimeTimers(count int) func() {
 	workers := runtime.GOMAXPROCS(0)
 	timers := make([][]*time.Timer, workers)
@@ -43,8 +46,9 @@ func spreadRuntimeTimers(count int) func() {
 		setup.Add(1)
 		go func() {
 			defer setup.Done()
+			random := mathrand.New(mathrand.NewPCG(uint64(w), 1))
 			for i := 0; i < count/workers; i += 1 {
-				timers[w] = append(timers[w], time.AfterFunc(time.Hour+time.Duration(i)*time.Millisecond, func() {}))
+				timers[w] = append(timers[w], time.AfterFunc(time.Hour+time.Duration(random.Int64N(int64(time.Hour))), func() {}))
 				filler[w] = append(filler[w], make([]byte, 512))
 				if i%1024 == 0 {
 					runtime.Gosched()
@@ -80,53 +84,69 @@ func spreadSweepTimers(sweep *Sweep, count int) func() {
 	}
 }
 
-// A connect process's timer heaps before and after the converted owners'
-// timers moved to a sweep, under the modifications that set off the walks.
-// Each op moves a pending runtime timer a short horizon ahead, as a socket
-// deadline refresh does (§3.4: some modification keeps a deadline about
-// 100–250 ms ahead), from goroutines spread over the Ps, so every P walks its
-// heap when the moved deadline arrives, and idle Ps walk others' heaps as they
-// steal. The process CPU per op includes those walks, and in "after" the
-// sweep's own ticks. Profile with -cpuprofile for runtime.(*timers).check.
-func BenchmarkTimerHeapWalk(b *testing.B) {
+// The CPU of one walk of a P's timer heap, at a connect process's heap size
+// before and after the converted owners' timers left it. With one P, each op
+// moves a pending timer ahead of the heap's other modifications, as a socket
+// deadline refresh does, so the P walks its whole heap when that deadline
+// arrives microseconds later, and the moved timer then fires. The CPU per op
+// is one walk and a fixed overhead. Profile with -cpuprofile for
+// runtime.(*timers).check.
+func BenchmarkTimerHeapWalkCost(b *testing.B) {
 	for _, c := range []struct {
-		name       string
-		sweptShare float64
+		name   string
+		timers int
 	}{
-		{name: "before", sweptShare: 0},
-		{name: "after", sweptShare: productionSweptShare},
+		{name: "before", timers: productionTimersPerP},
+		{name: "after", timers: int(productionTimersPerP * (1 - productionSweptShare))},
 	} {
 		b.Run(c.name, func(b *testing.B) {
-			total := productionTimersPerP * runtime.GOMAXPROCS(0)
-			sweptCount := int(float64(total) * c.sweptShare)
-			stopRuntime := spreadRuntimeTimers(total - sweptCount)
-			defer stopRuntime()
-			sweep := New(DefaultTick)
-			stopSwept := spreadSweepTimers(sweep, sweptCount)
-			defer stopSwept()
-			b.ReportMetric(float64(total-sweptCount)/float64(runtime.GOMAXPROCS(0)), "heap-timers/P")
+			procs := runtime.GOMAXPROCS(1)
+			defer runtime.GOMAXPROCS(procs)
+			stop := spreadRuntimeTimers(c.timers)
+			defer stop()
+			fired := make(chan struct{}, 1)
+			moved := time.AfterFunc(time.Hour, func() {
+				select {
+				case fired <- struct{}{}:
+				default:
+				}
+			})
+			defer moved.Stop()
+			b.ReportMetric(float64(c.timers), "heap-timers")
 			runtime.GC()
-
-			loops := 4 * runtime.GOMAXPROCS(0)
 			startCpu := processCpu()
 			b.ResetTimer()
-			var run sync.WaitGroup
-			for l := range loops {
-				run.Add(1)
-				go func() {
-					defer run.Done()
-					deadline := time.AfterFunc(time.Hour, func() {})
-					defer deadline.Stop()
-					for i := l; i < b.N; i += loops {
-						deadline.Reset(150 * time.Millisecond)
-						time.Sleep(time.Millisecond)
+			for range b.N {
+				// re-armed after its last fire, then moved earlier: the move
+				// makes the next timer check walk the heap
+				moved.Reset(time.Hour)
+				moved.Reset(10 * time.Microsecond)
+				for waiting := true; waiting; {
+					select {
+					case <-fired:
+						waiting = false
+					default:
+						runtime.Gosched()
 					}
-				}()
+				}
 			}
-			run.Wait()
 			b.StopTimer()
 			b.ReportMetric(float64(processCpu()-startCpu)/float64(b.N), "cpu-ns/op")
 		})
+	}
+}
+
+// Keeps every shard's driver running, as a busy process's are, so a benchmark
+// measures its timers rather than drivers starting. Returns the stop.
+func keepDriversRunning(sweep *Sweep) func() {
+	keep := make([]*Timer, len(sweep.shards))
+	for i := range keep {
+		keep[i] = sweep.NewTimer(1000 * time.Hour)
+	}
+	return func() {
+		for _, timer := range keep {
+			timer.Stop()
+		}
 	}
 }
 
@@ -135,9 +155,7 @@ func BenchmarkTimerHeapWalk(b *testing.B) {
 func BenchmarkTimerArmStop(b *testing.B) {
 	b.Run("sweep", func(b *testing.B) {
 		sweep := New(DefaultTick)
-		// a shard's driver runs while any timer is armed, as in a process
-		keep := sweep.NewTimer(time.Hour)
-		defer keep.Stop()
+		defer keepDriversRunning(sweep)()
 		b.RunParallel(func(pb *testing.PB) {
 			timer := sweep.NewTimer(time.Hour)
 			defer timer.Stop()
@@ -211,8 +229,7 @@ func BenchmarkTimerFire(b *testing.B) {
 func BenchmarkNewTimer(b *testing.B) {
 	b.Run("sweep", func(b *testing.B) {
 		sweep := New(DefaultTick)
-		keep := sweep.NewTimer(time.Hour)
-		defer keep.Stop()
+		defer keepDriversRunning(sweep)()
 		timers := make([]*Timer, 0, b.N)
 		b.ReportAllocs()
 		b.ResetTimer()

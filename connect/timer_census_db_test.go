@@ -234,8 +234,10 @@ func TestConnectionTimerCensus(t *testing.T) {
 			}
 			connection.lease = lease
 		}
-		// every owner waits in its select
-		time.Sleep(2 * time.Second)
+		// every owner waits in its select, and every resident's stream hop
+		// listener has made its first poll, at most 6 s in, and sent its
+		// client the resulting stream reset, as an older resident has
+		time.Sleep(8 * time.Second)
 
 		after := liveRuntimeTimersByCreator()
 		sweepRegistrations := censusSweepArmedCount(exchange) - sweepBefore
