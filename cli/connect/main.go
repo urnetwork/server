@@ -65,12 +65,14 @@ Options:
 	// serves: over the smallest ServiceHost connect's own services fill, the
 	// db, Redis, metrics, the service token authenticator, sidecar.yml's
 	// gates and task scheduling, every other service refusing
-	if _, err := core.SetProcessEnv("connect", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
+	if _, err := core.SetProcessEnv("connect", host); err != nil {
 		panic(err)
 	}
 	// §21's hard deny for the residents' CreateContract (ABUSE-M5-07); a binary
 	// that does not link MG5 installs none
-	controller.InstallAbuseHardDeny(ctx)
+	defer controller.InstallAbuseHardDeny(ctx)()
+	defer controller.InstallConnectAuthorization(ctx, host)()
 	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {
 		panic(err)
 	}

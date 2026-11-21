@@ -97,9 +97,11 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 	model.SetConfigLogSequencer(sequencer)
 	model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
 	apiAclCache.Store(cache)
+	closeContracts := installContractGateWhenEnabled(ctx, cache)
 	restoreScopes := oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(cache, &oauth.ExchangeScopeSettings{Clock: host.Clock}))
 	return func() {
 		restoreScopes()
+		closeContracts()
 		apiAclCache.CompareAndSwap(cache, nil)
 		model.SetApprovalGateStates(nil)
 		model.SetConfigLogSequencer(nil)

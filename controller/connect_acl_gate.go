@@ -2,8 +2,8 @@ package controller
 
 // §8.10's contract gate in CreateContract (ACL-M4-01; D-ACL-4, D-ACL-5, D-PROTO-18, R-ACL-8, I-10, I-12). A process
 // that hosts §8.9's gate cache installs one sidecar.AclContractGate over it (SetAclContractGate), and CreateContract
-// consults it while sidecar.yml's acl_contract_gate switch is on; with no gate, or the switch off, every network takes
-// today's path.
+// consults it while sidecar.yml's acl_contract_gate switch is on. An enabled host without verified heads refuses
+// protected operations. With the switch off every network takes the legacy path.
 //
 // The relationship's one query reads each end's facts (model.GetProvideRelationshipDetailsWithAcl) whether or not a
 // gate is on, since C13 seals the subject among them (PROTO-M4-02), so the gate adds no query, and decideContractAcl
@@ -14,9 +14,8 @@ package controller
 // (plan-ACL-network-reply-contracts). A gate refusal answers ContractError_NoPermission and is never recorded as the
 // route's rejection, since a grant can activate at any moment.
 //
-// Which processes install a gate: connect over api's internal gate surface (sidecar.AclGateApiSource), api and
-// taskworker over their first metadata cluster (sidecar.AclGateDirectSource). Neither source is wired into a process
-// yet, so none installs one and the gate stays dark wherever the switch says.
+// Connect follows api's internal gate surface (sidecar.AclGateApiSource). Api follows its first metadata cluster
+// (sidecar.AclGateDirectSource). Both install a contract gate only while the rollout switch is enabled.
 //
 // §21's hard deny runs first, whether or not a gate is installed or switched on (ABUSE-M5-07; D-ABUSE-4, I-12): §8.6's
 // "abuse halt (§21)". A §21 suspension refuses new contracts for sidecar subjects only, shares included, so an
@@ -51,23 +50,33 @@ import (
 // The process's contract gate, nil while none is installed.
 var aclContractGate atomic.Pointer[sidecar.AclContractGate]
 
+// A gate with no heads refuses contracts and peer lists until the configured
+// process has installed its verifier. The protocol's platform exception holds.
+var unloadedContractGate sidecar.AclContractGate
+var contractGateChanges = connect.NewMonitor()
+
+// Wakes residents waiting for a switch or for a new gate to start serving.
+func AclContractGateChanges() <-chan struct{} {
+	return contractGateChanges.NotifyChannel()
+}
+
 // Installs the process's contract gate, nil removing it, and answers what restores the one before.
 func SetAclContractGate(gate *sidecar.AclContractGate) (restore func()) {
 	previous := aclContractGate.Swap(gate)
+	contractGateChanges.NotifyAll()
 	return func() {
 		aclContractGate.Store(previous)
+		contractGateChanges.NotifyAll()
 	}
 }
 
-// The contract gate CreateContract consults now, nil while none is installed or sidecar.yml's acl_contract_gate switch
-// is off: what §8.19's peer-list filter reads too (server/connect's resident, ACL-M6-04).
+// The gate for CreateContract and §8.19 peer lists. Nil selects the disabled legacy path.
 func ActiveAclContractGate() *sidecar.AclContractGate {
 	gate, _ := activeAclContractGate()
 	return gate
 }
 
-// Whether this process installed a contract gate, whatever sidecar.yml's switch says: a process with none, every
-// process today, starts no §8.19 recheck at all.
+// Whether this process has installed a verified projection reader for its contract gate.
 func AclContractGateInstalled() bool {
 	return aclContractGate.Load() != nil
 }
@@ -173,13 +182,13 @@ func contractAbuseHardDeny(clientId server.Id, destinationId server.Id, details 
 // The gate CreateContract consults and the sidecar.yml read that enabled it: the installed gate while the
 // acl_contract_gate switch is on, else nil.
 func activeAclContractGate() (*sidecar.AclContractGate, *server.SidecarConfig) {
-	gate := aclContractGate.Load()
-	if gate == nil {
-		return nil, nil
-	}
 	config := server.CurrentSidecarConfig()
 	if !config.AclContractGate() {
 		return nil, nil
+	}
+	gate := aclContractGate.Load()
+	if gate == nil {
+		gate = &unloadedContractGate
 	}
 	return gate, config
 }

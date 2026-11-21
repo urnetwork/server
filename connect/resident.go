@@ -4939,23 +4939,8 @@ func (self *Resident) Run() {
 			defer removePeerListener()
 			networkPeerListener.Resync()
 		}
-		// only a process that installed a contract gate rechecks, so the rest
-		// pay no timer a resident
-		if controller.AclContractGateInstalled() {
-			recheckCtx, recheckCancel := context.WithCancel(self.ctx)
-			recheckDone := make(chan struct{})
-			go func() {
-				defer close(recheckDone)
-				server.HandleError(func() {
-					self.recheckNetworkPeerAcl(recheckCtx, networkPeerListener, aclView)
-				})
-			}()
-			// stopped and joined before the listener closes
-			defer func() {
-				recheckCancel()
-				<-recheckDone
-			}()
-		}
+		self.recheckNetworkPeerAcl(networkPeerListener, aclView)
+		return
 	}
 
 	select {
@@ -5051,20 +5036,24 @@ func (self *Resident) networkPeerAclView() sidecar.AclPeerView {
 // state moved, forces the listener's full read, which delivers the whole list
 // again, filtered at the new state: a grant's activation or revocation reaches
 // the list within §8.9's targets, though the registry did not change.
-func (self *Resident) recheckNetworkPeerAcl(ctx context.Context, listener *model.NetworkPeerListener, view sidecar.AclPeerView) {
-	interval := self.exchange.settings.NetworkPeerAclRecheckInterval
-	if interval <= 0 {
-		return
-	}
+func (self *Resident) recheckNetworkPeerAcl(listener *model.NetworkPeerListener, view sidecar.AclPeerView) {
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(interval):
+		changed := controller.AclContractGateChanges()
+		var tick <-chan time.Time
+		if interval := self.exchange.settings.NetworkPeerAclRecheckInterval; interval > 0 && controller.ActiveAclContractGate() != nil {
+			tick = time.After(interval)
 		}
 		if next := self.networkPeerAclView(); next != view {
 			view = next
 			listener.Resync()
+		}
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-self.client.Done():
+			return
+		case <-changed:
+		case <-tick:
 		}
 	}
 }
