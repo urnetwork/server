@@ -488,12 +488,21 @@ func StripePaymentSheet(
 // stripeCustomerIdForSession returns the network's Stripe customer, creating it
 // (metadata network_id) on first use. stripe.Key must be set.
 func stripeCustomerIdForSession(clientSession *session.ClientSession) (string, error) {
+	return stripeCustomerIdForSessionWithKey(clientSession.Ctx, clientSession, stripe.Key)
+}
+
+// Gives concurrent purchases one customer even when a create response was lost.
+func stripeCustomerIdForSessionWithKey(ctx context.Context, clientSession *session.ClientSession, key string) (string, error) {
 	if existing, _ := model.GetStripeCustomer(clientSession); existing != nil && *existing != "" {
 		return *existing, nil
 	}
-	created, err := customer.New(&stripe.CustomerParams{
+	params := &stripe.CustomerParams{
 		Metadata: map[string]string{stripeMetadataNetworkId: clientSession.ByJwt.NetworkId.String()},
-	})
+	}
+	params.Context = ctx
+	params.SetIdempotencyKey("network-customer/" + clientSession.ByJwt.NetworkId.String())
+	client := customer.Client{B: stripe.GetBackend(stripe.APIBackend), Key: key}
+	created, err := client.New(params)
 	if err != nil {
 		return "", err
 	}

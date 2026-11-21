@@ -32,12 +32,16 @@ func stripeSubscriptionTerminal(status string) bool {
 
 // Searches all exact-network metadata pages and rejects ambiguous pagination.
 func stripeSearchNetworkSubscriptions(ctx context.Context, networkId server.Id) ([]*stripeCustomerSubscription, error) {
+	return stripeSearchSubscriptionsByMetadata(ctx, stripeMetadataNetworkId, networkId.String(), nil)
+}
+
+var errStripeSubscriptionSearchBudget = errors.New("subscription search exhausted the reconciliation budget")
+
+// The Team reconciliation charges one API budget unit per page. Account deletion
+// and checkout use the same validation and pagination under their caller's deadline.
+func stripeSearchSubscriptionsByMetadata(ctx context.Context, key string, value string, spend func() bool) ([]*stripeCustomerSubscription, error) {
 	const maxPages = 1000
-	queryText := fmt.Sprintf(
-		"metadata['%s']:'%s'",
-		stripeMetadataNetworkId,
-		networkId.String(),
-	)
+	queryText := fmt.Sprintf("metadata['%s']:'%s'", key, value)
 	subs := []*stripeCustomerSubscription{}
 	seenSubscriptionIds := map[string]bool{}
 	seenPageTokens := map[string]bool{}
@@ -45,6 +49,9 @@ func stripeSearchNetworkSubscriptions(ctx context.Context, networkId server.Id) 
 	for pageIndex := 0; ; pageIndex += 1 {
 		if maxPages <= pageIndex {
 			return nil, errors.New("search subscriptions exceeded the page limit")
+		}
+		if spend != nil && !spend() {
+			return nil, errStripeSubscriptionSearchBudget
 		}
 		query := url.Values{
 			"query": []string{queryText},
@@ -69,8 +76,8 @@ func stripeSearchNetworkSubscriptions(ctx context.Context, networkId server.Id) 
 			if sub == nil || sub.Id == "" || sub.Status == "" {
 				return nil, errors.New("search subscriptions returned a malformed subscription")
 			}
-			if sub.Metadata[stripeMetadataNetworkId] != networkId.String() {
-				return nil, errors.New("search subscriptions returned mismatched network metadata")
+			if sub.Metadata[key] != value {
+				return nil, errors.New("search subscriptions returned mismatched metadata")
 			}
 			if !seenSubscriptionIds[sub.Id] {
 				seenSubscriptionIds[sub.Id] = true

@@ -149,16 +149,36 @@ func stripeHandleTeamInvoicePaidInConn(
 
 	var credited bool
 	var returnErr error
-	if r := server.HandleError(func() {
-		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-			credited, returnErr = stripeCreditTeamInvoicePaidInTx(tx, ctx, invoice, credit, subscription, subscriptionEnded, now)
-		}, server.TxReadCommitted, server.OptNoRetry())
-	}); r != nil {
-		return nil, fmt.Errorf("team invoice %s: %v", invoice.Id, r)
+	confirmed := ""
+	for {
+		if r := server.HandleError(func() {
+			server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+				credited, returnErr = stripeCreditTeamInvoicePaidInTx(tx, ctx, invoice, credit, subscription, subscriptionEnded, confirmed, now)
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}); r != nil {
+			return nil, fmt.Errorf("team invoice %s: %v", invoice.Id, r)
+		}
+		var conflict *teamSubscriptionConflict
+		if !errors.As(returnErr, &conflict) {
+			break
+		}
+		if !stripeTeamMarked(sub.Metadata) || sub.Metadata[stripeMetadataNetworkId] != credit.networkId.String() {
+			return nil, fmt.Errorf("team invoice %s: the conflicting subscription does not name its network", invoice.Id)
+		}
+		confirmed, err = stripeCheckTeamIncumbent(connOwner, ctx, credit.networkId, conflict.subscriptionId, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if errors.Is(returnErr, errDuplicateTeamSubscription) {
+		if err := stripeStopDuplicateTeam(connOwner, ctx, credit.networkId, sub); err != nil {
+			return nil, err
+		}
+		return &StripeWebhookResult{}, nil
 	}
 	if errors.Is(returnErr, errStripeTeamInvoiceNotTeam) {
 		// never credited to anyone; on file for support, as an invoice that names no network is
-		added, err := stripeRecordUnresolvedInvoice(ctx, &model.PaymentReconciliationEvent{
+		added, err := model.AddPaymentReconciliationEventOnceInConn(connOwner, ctx, &model.PaymentReconciliationEvent{
 			RunId:     server.NewId(),
 			Store:     model.SubscriptionMarketStripe,
 			Action:    model.PaymentReconcileActionCreditUnfulfillable,
@@ -246,14 +266,30 @@ func stripeCreditTeamInvoicePaidInTx(
 	credit *stripeInvoiceCredit,
 	subscription *model.TeamSubscription,
 	subscriptionEnded bool,
+	confirmed string,
 	now time.Time,
 ) (credited bool, returnErr error) {
 	networkId := credit.networkId
 	if err := model.LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
 		return false, err
 	}
-	if model.GetNetworkTeamInTx(ctx, tx, networkId) == nil {
+	if !model.LockTeamBillingInTx(ctx, tx, networkId) {
 		return false, errStripeTeamInvoiceNotTeam
+	}
+	if subscription != nil && subscription.CustomerId == "" {
+		return false, fmt.Errorf("team invoice %s names no customer", invoice.Id)
+	}
+	if err := stripeTeamContractInTx(ctx, tx, networkId, credit.subscriptionId, confirmed, subscription != nil, now); err != nil {
+		if errors.Is(err, errDuplicateTeamSubscription) {
+			// Keep the paid invoice for refund review before acknowledging or canceling.
+			_, auditErr := model.AddPaymentReconciliationEventOnceInTx(tx, ctx, &model.PaymentReconciliationEvent{
+				RunId: server.NewId(), Store: model.SubscriptionMarketStripe, NetworkId: &networkId,
+				Action: model.PaymentReconcileActionCreditUnfulfillable, Evidence: invoice.Id,
+				Details: map[string]any{"reason": model.PaymentReconcileActionDuplicateTeamSubscription, "subscription": credit.subscriptionId, "amount_total": invoice.Total, "currency": invoice.Currency},
+			})
+			server.Raise(auditErr)
+		}
+		return false, err
 	}
 
 	ledgerTag := server.RaisePgResult(tx.Exec(
@@ -297,10 +333,12 @@ func stripeCreditTeamInvoicePaidInTx(
 	}
 	// the first paid invoice of the subscription records it; a later one, or a redelivery whose
 	// ledger row this transaction wrote again, changes nothing
-	if subscription != nil && subscription.CustomerId != "" {
-		model.AddTeamSubscriptionInTx(ctx, tx, subscription)
-	} else if subscription != nil {
-		glog.Errorf("[sub][team]invoice %s of network %s names no customer; its subscription is not recorded\n", invoice.Id, networkId)
+	if subscription != nil && !model.AddTeamSubscriptionInTx(ctx, tx, subscription) {
+		held := model.GetTeamSubscriptionInTx(ctx, tx, networkId, credit.subscriptionId)
+		if held == nil {
+			server.Raise(errors.New("the paid Team subscription lost its claim"))
+		}
+		subscriptionEnded = subscriptionEnded || held.EndTime != nil
 	}
 
 	switch {
@@ -335,7 +373,7 @@ func stripeCreditTeamInvoicePaidInTx(
 // invoice.payment_failed of a Team subscription, once the dunning holds the failure open: ends
 // the network's credit lines. An error means Stripe delivers the event again; a redelivery ends
 // nothing twice.
-func stripeTeamPaymentFailed(ctx context.Context, networkId server.Id, now time.Time) error {
+func stripeTeamPaymentFailed(ctx context.Context, networkId server.Id, subscriptionId string, now time.Time) error {
 	if !server.SidecarMg6Linked() {
 		return fmt.Errorf("team payment failure of network %s: this binary does not link MG6", networkId)
 	}
@@ -344,6 +382,12 @@ func stripeTeamPaymentFailed(ctx context.Context, networkId server.Id, now time.
 	if r := server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			if returnErr = model.LockPaymentNetworkInTx(tx, ctx, networkId); returnErr != nil {
+				return
+			}
+			if !model.LockTeamBillingInTx(ctx, tx, networkId) {
+				return
+			}
+			if live := model.GetLiveTeamSubscriptionWithQuery(ctx, tx, networkId); live == nil || live.SubscriptionId != subscriptionId {
 				return
 			}
 			ended = len(model.EndTeamCreditLinesInTx(ctx, tx, networkId, now))
@@ -419,6 +463,9 @@ func stripeEndTeamSubscriptionInConn(connOwner server.PgConn, ctx context.Contex
 			if returnErr = model.LockPaymentNetworkInTx(tx, ctx, networkId); returnErr != nil {
 				return
 			}
+			if !model.LockTeamBillingInTx(ctx, tx, networkId) {
+				return
+			}
 			var endedBalanceIds []server.Id
 			ended, endedBalanceIds = model.EndTeamSubscriptionInTx(ctx, tx, networkId, subscriptionId, now)
 			endedBalanceCount = len(endedBalanceIds)
@@ -468,9 +515,21 @@ func reconcileStripeTeamSubscriptions(run *paymentReconcileRun) (complete bool, 
 	store := model.SubscriptionMarketStripe
 	dunningSettings := stripeDunningSettingsFunc()
 	settings := stripeTeamReconcileSettingsFunc()
+	if !stripeReconcileRejectedTeamSubscriptions(run, settings.PageCount) {
+		return false, nil
+	}
 	var after *server.Id
 	for {
 		page := model.ListLiveTeamSubscriptionsInConn(run.connOwner, ctx, after, settings.PageCount)
+		if after == nil && len(page) > 0 {
+			complete, err := stripeReconcileOtherTeamSubscriptions(run)
+			if err != nil {
+				run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{"leg": "team_duplicates", "error": err.Error()})
+			}
+			if !complete {
+				return false, nil
+			}
+		}
 		for _, subscription := range page {
 			run.examine(store)
 			if !run.spend(store) {
@@ -480,6 +539,10 @@ func reconcileStripeTeamSubscriptions(run *paymentReconcileRun) (complete bool, 
 			sub, err := stripeDunningFetchSubscription(ctx, subscription.SubscriptionId, dunningSettings)
 			if err != nil {
 				run.record(store, model.PaymentReconcileActionError, &networkId, subscription.SubscriptionId, map[string]any{"error": err.Error(), "leg": "team"})
+				continue
+			}
+			if !stripeTeamMarked(sub.Metadata) || sub.Metadata[stripeMetadataNetworkId] != networkId.String() {
+				run.record(store, model.PaymentReconcileActionError, &networkId, sub.Id, map[string]any{"leg": "team", "error": "retained subscription metadata differs"})
 				continue
 			}
 			if !stripeSubscriptionTerminal(sub.Status) {

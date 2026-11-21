@@ -35,6 +35,10 @@ const (
 	// after complete authority reads. This is a durable operator-disposition
 	// event, not a provider/listing error and not a successful credit.
 	PaymentReconcileActionCreditUnfulfillable = "credit_unfulfillable"
+	// A Team contract another live contract already serves. Its subscription id
+	// stays rejected across invoice retries, cancellation and future purchases.
+	PaymentReconcileActionDuplicateTeamSubscription = "duplicate_team_subscription"
+	PaymentReconcileActionDuplicateTeamStopped      = "duplicate_team_stopped"
 	// The store said it does not know the store object a renewal names (the
 	// App Store's TransactionIdNotFoundError in every environment the
 	// deployment accepts) through the reconciler's whole bounded retry. A
@@ -188,36 +192,31 @@ func AddPaymentReconciliationEventOnceInConn(connOwner server.PgConn,
 ) (added bool, err error) {
 	server.HandleError(func() {
 		server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
-			added = false
-			result, queryErr := tx.Query(
-				ctx,
-				`
-				SELECT 1 FROM payment_reconciliation_event
-				WHERE store = $1
-				  AND action = $2
-				  AND evidence = $3
-				  AND NOT dry_run
-				LIMIT 1
-				`,
-				event.Store,
-				event.Action,
-				event.Evidence,
-			)
-			exists := false
-			server.WithPgResult(result, queryErr, func() {
-				exists = result.Next()
-			})
-			if exists {
-				return
-			}
-			server.Raise(AddPaymentReconciliationEventInTx(tx, ctx, event))
-			added = true
+			added, err = AddPaymentReconciliationEventOnceInTx(tx, ctx, event)
+			server.Raise(err)
 		})
 	}, func(handledErr error) {
 		added = false
 		err = handledErr
 	})
 	return
+}
+
+// The caller can hold its billing lock across the decision and the operator record.
+func AddPaymentReconciliationEventOnceInTx(tx server.PgTx, ctx context.Context, event *PaymentReconciliationEvent) (bool, error) {
+	var exists bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM payment_reconciliation_event
+			WHERE store = $1 AND action = $2 AND evidence = $3 AND NOT dry_run
+		)
+	`, event.Store, event.Action, event.Evidence).Scan(&exists); err != nil || exists {
+		return false, err
+	}
+	if err := AddPaymentReconciliationEventInTx(tx, ctx, event); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetPaymentReconcileUnknownToStore reads the bounded-retry state of a store

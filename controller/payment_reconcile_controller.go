@@ -1183,6 +1183,22 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 					run.recordCreditUnfulfillable(store, invoice.Id, "destination_deleted")
 					continue
 				}
+				if credit.team != nil && server.SidecarMg6Linked() {
+					duplicate, complete, err := stripeTeamDryRunInvoice(run, credit)
+					if !complete {
+						return false, nil
+					}
+					if err != nil {
+						run.recordStripeCreditError(invoice, err)
+						continue
+					}
+					if duplicate {
+						run.recordCreditUnfulfillableOnce(store, &credit.networkId, invoice.Id, map[string]any{
+							"reason": model.PaymentReconcileActionDuplicateTeamSubscription, "subscription": credit.subscriptionId,
+						})
+						continue
+					}
+				}
 				run.record(
 					store,
 					model.PaymentReconcileActionWouldCredit,

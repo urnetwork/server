@@ -440,6 +440,12 @@ func stripeDunningProcessInvoice(
 	}
 
 	if dryRun {
+		if outcome.Team && server.SidecarMg6Linked() {
+			if live := model.GetLiveTeamSubscription(ctx, *networkId); live == nil || live.SubscriptionId != outcome.SubscriptionId {
+				outcome.Skip = "another or ended Team subscription"
+				return outcome, nil
+			}
+		}
 		recorded := model.GetStripeInvoicePaymentFailure(ctx, invoiceId)
 		outcome.Notice = stripePaymentFailedNoticeDue(invoice, recorded, settings)
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -455,11 +461,23 @@ func stripeDunningProcessInvoice(
 		outcome.Notice = stripePaymentFailedNoticeNone
 		outcome.HasEmail = false
 		outcome.Skip = ""
+		outcome.Failing = false
+		if outcome.Team && server.SidecarMg6Linked() {
+			if !model.LockTeamBillingInTx(ctx, tx, *networkId) {
+				outcome.Skip = "no Team network"
+				return
+			}
+			if live := model.GetLiveTeamSubscriptionWithQuery(ctx, tx, *networkId); live == nil || live.SubscriptionId != outcome.SubscriptionId {
+				outcome.Skip = "another or ended Team subscription"
+				return
+			}
+		}
 
 		recorded := model.RecordStripeInvoicePaymentFailureInTx(ctx, tx, failure, now)
 		if recorded == nil {
 			server.Raise(fmt.Errorf("invoice %s: the failure was not recorded", invoiceId))
 		}
+		outcome.Failing = recorded.ResolveTime == nil
 		if recorded.NetworkId != *networkId {
 			// the first record fixed the network; a subscription whose metadata
 			// changed since does not move the notices
@@ -499,8 +517,6 @@ func stripeDunningProcessInvoice(
 			},
 		})
 	}, server.TxReadCommitted)
-
-	outcome.Failing = true
 
 	// the past-due notice shows at once
 	clearSubscriptionDetailsCached(ctx, *outcome.NetworkId)
@@ -606,7 +622,7 @@ func stripeHandleInvoicePaymentFailed(object json.RawMessage, clientSession *ses
 	if outcome.Team && outcome.Failing && outcome.NetworkId != nil {
 		// a Team's failed renewal ends its credit line: overage refuses at once
 		// while the included bytes run out (team_stripe_events.go)
-		if err := stripeTeamPaymentFailed(clientSession.Ctx, *outcome.NetworkId, stripeDunningNow()); err != nil {
+		if err := stripeTeamPaymentFailed(clientSession.Ctx, *outcome.NetworkId, outcome.SubscriptionId, stripeDunningNow()); err != nil {
 			glog.Errorf("[stripe]dunning: invoice %s: %s\n", invoice.Id, err)
 			return nil, err
 		}

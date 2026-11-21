@@ -8,6 +8,8 @@ package controller
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -70,6 +72,112 @@ func setTestTeamCycleInvoice(env *teamStripeTestEnv, periods *testTeamPeriods, s
 		testTeamInvoiceLine(subscriptionId, testTeamPriceTransfer, 293, periods.firstStart, periods.anchor),
 		testTeamInvoiceLine(subscriptionId, testTeamPriceBase, 10000, periods.anchor, periods.secondEnd),
 	)
+}
+
+func TestTeamDuplicatePaidSubscriptionAndLegitimateReplacement(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		env := newTeamStripeTestEnv(t)
+		defer model.Testing_SetEscrowDrawOrder(true)()
+		periods := newTestTeamPeriods()
+		networkId, clientSession, retained := newTestPaidTeam(t, ctx, env, periods, "retained")
+		const duplicate = "sub_synthetic_duplicate"
+		const invoice = "in_synthetic_duplicate"
+		env.setSubscription(duplicate, networkId, true, "past_due")
+		setTestTeamCycleInvoice(env, periods, duplicate, invoice, "open")
+		env.deliverInvoiceEvent(t, clientSession, "invoice.payment_failed", invoice)
+		connect.AssertEqual(t, model.GetStripeInvoicePaymentFailure(ctx, invoice) == nil, true)
+		env.setSubscriptionStatus(duplicate, "active")
+		setTestTeamCycleInvoice(env, periods, duplicate, invoice, "paid")
+		for range 2 {
+			env.deliverInvoiceEvent(t, clientSession, "invoice.paid", invoice)
+		}
+		connect.AssertEqual(t, env.confirmedCancellations()[duplicate], 1)
+		connect.AssertEqual(t, env.confirmedCancellations()[retained], 0)
+		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, networkId).SubscriptionId, retained)
+		connect.AssertEqual(t, len(testTeamRenewals(t, ctx, networkId, model.SubscriptionTypeTeam)), 1)
+		connect.AssertEqual(t, len(testTeamBalances(t, ctx, networkId)), 2)
+		_, credited := model.GetStripeInvoiceNetworkId(ctx, invoice)
+		connect.AssertEqual(t, credited, false)
+		store := model.SubscriptionMarketStripe
+		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, store, model.PaymentReconcileActionCreditUnfulfillable, invoice), 1)
+		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, store, model.PaymentReconcileActionDuplicateTeamSubscription, duplicate), 1)
+
+		// Stripe ended the incumbent; its deletion webhook has not arrived yet.
+		env.setSubscriptionStatus(retained, "canceled")
+		const replacement = "sub_synthetic_replacement"
+		env.setSubscription(replacement, networkId, true, "active")
+		setTestTeamCycleInvoice(env, periods, replacement, "in_synthetic_replacement", "paid")
+		env.deliverInvoiceEvent(t, clientSession, "invoice.paid", "in_synthetic_replacement")
+		env.deliverInvoiceEvent(t, clientSession, "invoice.paid", invoice)
+		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, networkId).SubscriptionId, replacement)
+		connect.AssertEqual(t, len(model.GetTeamSubscriptions(ctx, networkId)), 2)
+		connect.AssertEqual(t, len(testTeamRenewals(t, ctx, networkId, model.SubscriptionTypeTeam)), 2)
+		connect.AssertEqual(t, env.confirmedCancellations()[replacement], 0)
+		connect.AssertEqual(t, env.confirmedCancellations()[duplicate], 1)
+	})
+}
+
+func TestTeamConcurrentLegacyFirstInvoicesKeepOneContract(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		env := newTeamStripeTestEnv(t)
+		defer model.Testing_SetEscrowDrawOrder(true)()
+		networkId, clientSession := newTeamStripeTestNetwork(t, ctx)
+		periods := newTestTeamPeriods()
+		defer testSetStripeDunningNow(periods.firstStart.Add(5 * time.Minute))()
+		var events []*StripeWebhookArgs
+		ids := []string{"sub_synthetic_first_a", "sub_synthetic_first_b"}
+		for i, id := range ids {
+			invoiceId := "in_" + id
+			env.setSubscription(id, networkId, true, "active")
+			env.setInvoice(invoiceId, id, "paid", "subscription_create", 139,
+				testTeamInvoiceLine(id, testTeamPriceBase, 139, periods.firstStart.Add(time.Duration(i)*time.Minute), periods.anchor))
+			events = append(events, stripeWebhookEvent(t, "invoice.paid", map[string]any{
+				"id": invoiceId, "total": 139, "currency": "usd", "billing_reason": "subscription_create",
+				"status": "paid", "customer": "cus_synthetic_" + id,
+			}))
+		}
+		ready, release := make(chan struct{}, 2), make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		var reads atomic.Int32
+		env.afterSubscriptionRead = func(string) {
+			if reads.Add(1) <= 2 {
+				ready <- struct{}{}
+				<-release
+			}
+		}
+		finished := make(chan error, len(events))
+		for _, event := range events {
+			go func() {
+				_, err := StripeWebhook(event, clientSession)
+				finished <- err
+			}()
+		}
+		for range 2 {
+			select {
+			case <-ready:
+			case err := <-finished:
+				t.Fatalf("invoice ended before reading both provider contracts: %v", err)
+			}
+		}
+		unblock()
+		for range 2 {
+			connect.AssertEqual(t, <-finished, nil)
+		}
+		live := model.GetLiveTeamSubscription(ctx, networkId)
+		if live == nil || len(testTeamRenewals(t, ctx, networkId, model.SubscriptionTypeTeam)) != 1 || len(testTeamBalances(t, ctx, networkId)) != 2 {
+			t.Fatal("the two first invoices must leave one live contract, one renewal and one pair of balances")
+		}
+		for _, id := range ids {
+			if id == live.SubscriptionId {
+				connect.AssertEqual(t, env.confirmedCancellations()[id], 0)
+			} else {
+				connect.AssertEqual(t, env.confirmedCancellations()[id], 1)
+			}
+		}
+	})
 }
 
 // The first invoice writes the team renewal, the team grant and the credit line for the period
