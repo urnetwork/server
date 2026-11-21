@@ -266,14 +266,20 @@ func TestInternalGateEdgeClientMintsTheDerivedClient(t *testing.T) {
 		}
 		// beside the jwt, the client's sockets token (QD-1054)
 		checkEdgeClientTestSocketsToken(t, verifier, first, networkId, wantClientId)
-		// a restart's ask: the same client
+		// A restarted slot receives the same client and a fresh durable stream range.
 		code, second := world.post(world.edge, admitted)
 		if code != http.StatusOK || second.ClientId != first.ClientId {
 			t.Fatalf("a second ask: %d %s", code, second.ClientId)
 		}
+		if first.AuthTimeMillis <= 0 || second.AuthTimeMillis <= first.AuthTimeMillis {
+			t.Fatalf("slot restart returned authentication milliseconds %d then %d", first.AuthTimeMillis, second.AuthTimeMillis)
+		}
 		code, slotZero := world.post(world.edge, `{"block":"tlsedge","host":"lb-a.example","slot":0,"index":1}`)
 		if code != http.StatusOK || slotZero.ClientId != first.ClientId {
 			t.Fatalf("slot 0 named: %d %s", code, slotZero.ClientId)
+		}
+		if slotZero.AuthTimeMillis <= second.AuthTimeMillis {
+			t.Fatalf("explicit slot zero reused authentication milliseconds %d after %d", slotZero.AuthTimeMillis, second.AuthTimeMillis)
 		}
 
 		// a deploy's new process in slot 1 beside the old one in slot 0: another client, which connect's
