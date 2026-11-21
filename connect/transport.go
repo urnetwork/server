@@ -24,6 +24,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/qlogwriter"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
@@ -875,7 +876,13 @@ func newConnectQuicConfig(
 		config.AllowConnectionWindowIncrease = budget.grant
 	}
 	if settings.H3QuicPacketStats != nil {
-		config.Tracer = settings.H3QuicPacketStats.Tracer
+		// The tracer's signature names the quic-go module connect builds.
+		// connect moves to URnetwork's quic-go one push before the server
+		// does, and until both build the same module the types differ and
+		// the server runs without these opt-in diagnostics.
+		if tracer, ok := any(settings.H3QuicPacketStats.Tracer).(func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace); ok {
+			config.Tracer = tracer
+		}
 	}
 	return config
 }
