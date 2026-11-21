@@ -26,6 +26,7 @@ var tlsSchemaTables = []string{
 	"tls_connection_day",
 	"network_tls_account",
 	"network_tls_custom_spend",
+	"network_tls_custom_challenge",
 }
 
 // Which of the four the database holds.
@@ -134,6 +135,30 @@ var tlsSchemaColumnRows = map[string][2]string{
 	"network_tls_custom_spend.kind":              {"cert-1", "orders, certificates and failed authorizations"},
 	"network_tls_custom_spend.cert_id":           {"cert-1", "cert_id"},
 	"network_tls_custom_spend.at":                {"cert-1", "the times of orders"},
+
+	// a delegated DNS-01 challenge's receipt (QD-1165)
+	"network_tls_custom_challenge.challenge_id":       {"cert-1", "a delegated DNS-01 challenge's receipt"},
+	"network_tls_custom_challenge.network_id":         {"cert-1", "network_id"},
+	"network_tls_custom_challenge.domain":             {"cert-1", "per domain and claim"},
+	"network_tls_custom_challenge.claim_seq":          {"cert-1", "claim sequence, holder sidecar"},
+	"network_tls_custom_challenge.cert_id":            {"cert-1", "with its certificate row"},
+	"network_tls_custom_challenge.sidecar_id":         {"cert-1", "holder sidecar"},
+	"network_tls_custom_challenge.root":               {"cert-1", "acme name and root"},
+	"network_tls_custom_challenge.name":               {"cert-1", "acme name and root"},
+	"network_tls_custom_challenge.value":              {"cert-1", "digest"},
+	"network_tls_custom_challenge.state":              {"cert-1", "the certs worker's write, its state"},
+	"network_tls_custom_challenge.capture_time":       {"cert-1", "its capture and expiry"},
+	"network_tls_custom_challenge.expire_time":        {"cert-1", "its capture and expiry"},
+	"network_tls_custom_challenge.dispatch_count":     {"cert-1", "its dispatches with the last one's time"},
+	"network_tls_custom_challenge.dispatch_time":      {"cert-1", "its dispatches with the last one's time"},
+	"network_tls_custom_challenge.floor_serial":       {"cert-1", "the root's serial then"},
+	"network_tls_custom_challenge.serial":             {"cert-1", "the DNS serial it took"},
+	"network_tls_custom_challenge.write_time":         {"cert-1", "the DNS serial it took and when"},
+	"network_tls_custom_challenge.refusal":            {"cert-1", "why none was made"},
+	"network_tls_custom_challenge.retry_time":         {"cert-1", "when to retry"},
+	"network_tls_custom_challenge.ready_answer":       {"cert-1", "the newest answer of /dns/ready for that serial"},
+	"network_tls_custom_challenge.ready_time":         {"cert-1", "when it was read and asked for"},
+	"network_tls_custom_challenge.ready_request_time": {"cert-1", "when it was read and asked for"},
 
 	"network_tls_suspension.network_id": {"tls-4", "kill-switch entries"},
 	"network_tls_suspension.host":       {"tls-4", "a host or all the network's hosts"},

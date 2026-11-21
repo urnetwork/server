@@ -22,11 +22,16 @@ package model
 //   - A row expires an hour after its last write (dnsCommitInTx), and taskworker
 //     removes it through the journal (RemoveExpiredDnsChallenges).
 //   - Challenges are free of dns_entries and add no admin event (§12.7, §12.8).
+//   - A write takes no idempotency key: every write is a new serial. So what certs needs to settle a write whose
+//     answer it never heard (QD-1165) is here: the journal's commit of a value at a custom domain's challenge
+//     target above a serial, read under the zone's lock (FindDnsAcmeChallengeCommitInTx), and the target's writes
+//     in the cap's window (GetDnsAcmeChallengeWindowInTx).
 //
 // Nothing here runs unless the binary links MG2 and MG5.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -52,14 +57,24 @@ var (
 // The label every challenge sits under (RFC 8555 §8.4).
 const DnsChallengeLabel = "_acme-challenge"
 
-// The most values one challenge RRset holds: a wildcard's and the apex's.
-const dnsChallengeValueMaxCount = 2
+// What a challenge may hold, and the window its cap counts over (§12.8, R-DNS-7).
+type DnsChallengeSettings struct {
+	// The most values one challenge RRset holds: a wildcard's and the apex's, which validate at one name (RFC 8555
+	// §8.4). A protocol limit: certs never writes more.
+	ValueMaxCount int
+	// The longest value a TXT string holds (RFC 1035 §3.3.14).
+	ValueMaxByteCount int
+	// The window dns_challenges_per_name_hour counts a name's writes over.
+	RateWindow time.Duration
+}
 
-// The longest value a TXT string holds.
-const dnsChallengeValueMaxByteCount = 255
-
-// The window dns_challenges_per_name_hour counts over.
-const dnsChallengeRateWindow = 1 * time.Hour
+func DefaultDnsChallengeSettings() *DnsChallengeSettings {
+	return &DnsChallengeSettings{
+		ValueMaxCount:     2,
+		ValueMaxByteCount: 255,
+		RateWindow:        1 * time.Hour,
+	}
+}
 
 // What one challenge write names.
 type DnsChallengeArgs struct {
@@ -78,6 +93,11 @@ type DnsChallengeArgs struct {
 // missing value reads zero, which refuses every write: the closed direction.
 var dnsChallengesPerNameHour = func() int64 {
 	return Pro().SidecarAbuse.Limit("dns_challenges_per_name_hour")
+}
+
+// The challenges' cap a name an hour, as the write path reads it.
+func DnsChallengesPerNameHour() int64 {
+	return dnsChallengesPerNameHour()
 }
 
 // Sets the cap's source for a test, returning what puts it back.
@@ -147,14 +167,15 @@ func resolveDnsAcmeChallengeTargetInTx(ctx context.Context, query server.PgCanQu
 }
 
 // The values as TXT rdata: each printable ASCII with no quote or backslash, at
-// most 255 bytes, no value twice.
+// most ValueMaxByteCount bytes, no value twice.
 func dnsChallengeRdata(values []string) ([]string, error) {
-	if dnsChallengeValueMaxCount < len(values) {
+	settings := DefaultDnsChallengeSettings()
+	if settings.ValueMaxCount < len(values) {
 		return nil, fmt.Errorf("%w: %d values", ErrDnsChallengeValues, len(values))
 	}
 	rdata := []string{}
 	for _, value := range values {
-		if value == "" || dnsChallengeValueMaxByteCount < len(value) {
+		if value == "" || settings.ValueMaxByteCount < len(value) {
 			return nil, fmt.Errorf("%w: a value of %d bytes", ErrDnsChallengeValues, len(value))
 		}
 		for index := range len(value) {
@@ -197,7 +218,7 @@ func DnsPutChallengeInTx(ctx context.Context, tx server.PgTx, args *DnsChallenge
 	// the zone's lock first, so two writes for one name count each other
 	lockDnsZoneInTx(ctx, tx, root, networkId)
 	limit := dnsChallengesPerNameHour()
-	if limit <= int64(countDnsChallengeWritesInTx(ctx, tx, root, networkId, owner, server.NowUtc().Add(-dnsChallengeRateWindow))) {
+	if limit <= int64(countDnsChallengeWritesInTx(ctx, tx, root, networkId, owner, server.NowUtc().Add(-DefaultDnsChallengeSettings().RateWindow))) {
 		return nil, fmt.Errorf("%w: %s", ErrDnsChallengeRate, owner)
 	}
 	return DnsWriteInTx(ctx, tx, &DnsWriteArgs{
@@ -258,6 +279,92 @@ func countDnsChallengeWritesInTx(ctx context.Context, query server.PgCanQuery, r
 		}
 	})
 	return count
+}
+
+// A custom domain's challenge target in root as the journal names its owner, name canonical with no *., for a
+// name <acme_token>.acme.<root>; false for any other name.
+func dnsAcmeChallengeOwner(root string, name string) (string, bool) {
+	root = dnsLabelRoot(root)
+	owner := strings.TrimPrefix(dns.CanonicalName(name), "*.")
+	acmeToken, ok := strings.CutSuffix(owner, "."+dnsAcmeChallengeLabel+"."+root)
+	if !ok || acmeToken == "" || strings.Contains(acmeToken, ".") {
+		return "", false
+	}
+	return owner, true
+}
+
+// The serial of the journal's first commit above afterSerial that upserts value in the TXT at name, a custom
+// domain's challenge target in root (QD-175), or zero for none: how certs learns that a write whose answer it never
+// heard was made (QD-1165). The zone's lock comes first, the lock every write of <root>'s own rows holds through its
+// commit, so a write inside its transaction has ended and its row is read; tx must be read committed, so the read
+// sees what committed before the lock. Any other name answers zero.
+func FindDnsAcmeChallengeCommitInTx(ctx context.Context, tx server.PgTx, root string, name string, value string, afterSerial uint64) uint64 {
+	owner, ok := dnsAcmeChallengeOwner(root, name)
+	if !ok {
+		return 0
+	}
+	root = dnsLabelRoot(root)
+	lockDnsZoneInTx(ctx, tx, root, server.Id{})
+	match, err := json.Marshal(map[string]any{
+		"upserts": []any{map[string]any{"owner": owner, "type": dns.TypeTXT, "rdata": []string{`"` + value + `"`}}},
+	})
+	server.Raise(err)
+	var serial uint64
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT serial FROM dns_zone_journal
+			WHERE root = $1 AND network_id IS NULL AND $2 < serial AND diff @> $3::jsonb
+			ORDER BY serial
+			LIMIT 1
+		`,
+		root,
+		dnsSerialColumn(afterSerial),
+		string(match),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var serialColumn int64
+			server.Raise(result.Scan(&serialColumn))
+			serial = dnsSerialFromColumn(serialColumn)
+		}
+	})
+	return serial
+}
+
+// How many writes name, a custom domain's challenge target in root, took in the cap's window ending at now, and
+// when the oldest of them leaves the window, zero with none: what the write path counts against
+// dns_challenges_per_name_hour, which certs reads before it charges a write (QD-1165). Any other name took none.
+func GetDnsAcmeChallengeWindowInTx(ctx context.Context, query server.PgCanQuery, root string, name string, now time.Time) (int, time.Time) {
+	owner, ok := dnsAcmeChallengeOwner(root, name)
+	if !ok {
+		return 0, time.Time{}
+	}
+	root = dnsLabelRoot(root)
+	window := DefaultDnsChallengeSettings().RateWindow
+	match, err := json.Marshal(map[string]any{"upserts": []any{map[string]any{"owner": owner, "type": dns.TypeTXT}}})
+	server.Raise(err)
+	count := 0
+	var oldest *time.Time
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT count(*), min(commit_time) FROM dns_zone_journal
+			WHERE network_id IS NULL AND $1 <= commit_time AND root = $2 AND diff @> $3::jsonb
+		`,
+		now.Add(-window).UTC(),
+		root,
+		string(match),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&count, &oldest))
+		}
+	})
+	if oldest == nil {
+		return count, time.Time{}
+	}
+	return count, oldest.UTC().Add(window)
 }
 
 // Removes every challenge and canary past its hour at now, through the journal,

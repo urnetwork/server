@@ -870,6 +870,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.TlsCustomSweep,
 			work.TlsCustomSweepPost,
 		),
+		// a delegated DNS-01 challenge api handed over (QD-1165), queued by its capture
+		task.NewTaskTargetWithPost(
+			controller.TlsCustomChallengeWork,
+			controller.TlsCustomChallengeWorkPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,
 			work.DnsMaintenancePost,

@@ -47,6 +47,7 @@ import (
 	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -262,10 +263,15 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 		return refuse("the engine: %s", err)
 	}
 	installed := setTlsCertChains(&TlsCertChainDeps{Service: service, RevocationSource: deps.RevocationSource})
-	// the custom-domain sweep on the same engine (TLS-M6-05)
+	// the custom-domain sweep on the same engine (TLS-M6-05), and the delegated DNS-01 challenges api hands over
+	// (QD-1165), only where certs reaches the dns api, since their writes go through its client alone
 	var installedSweep *TlsCustomSweepDeps
+	var installedChallenges *controller.TlsCustomChallengeWorkerDeps
 	if customStore, err := model.NewTlsCustomStore(&model.TlsCustomStoreOptions{Roots: config.CaaOperatorZones[:1]}); err == nil {
 		installedSweep = SetTlsCustomSweep(&TlsCustomSweepDeps{Service: service, Store: customStore, Settings: certsservice.DefaultCertsCustomSettings()})
+		if dnsClient != nil {
+			installedChallenges = controller.SetTlsCustomChallengeWorker(&controller.TlsCustomChallengeWorkerDeps{Store: customStore, Dns: dnsClient})
+		}
 	} else {
 		glog.Warningf("[certs]the custom sweep is not installed: %v\n", err)
 	}
@@ -288,6 +294,7 @@ func buildTlsCertChains(ctx context.Context, deps *TlsCertChainsInstallDeps, set
 		// only this install's deps: a later install's stay
 		tlsCertChainDeps.CompareAndSwap(installed, nil)
 		tlsCustomSweepDeps.CompareAndSwap(installedSweep, nil)
+		controller.UnsetTlsCustomChallengeWorker(installedChallenges)
 		uninstallCaa()
 	}, nil
 }
