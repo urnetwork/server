@@ -29,7 +29,7 @@ var (
 	})
 	snTopSnapshotUnits = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_top", Name: "snapshot_units",
-		Help: "What the newest SN Top snapshot counted, by kind: ranked_networks, eligible_providers, measured_providers (the verify cohort), claimed_fleets (UIDs), open_seats, trail_hops (non-seed hops of complete trails in the tempo) and withheld_providers (providers whose unit rule (a) withheld: neither Speed nor Quality admitted, nor Online in a UDP-off country).",
+		Help: "What the newest SN Top snapshot counted, by kind: ranked_networks, eligible_providers, measured_providers (the verify cohort), claimed_fleets (UIDs), open_seats, trail_hops (non-seed hops of complete trails in the tempo) and withheld_providers (providers whose unit rule (a) withheld at the fold, on the shadow board before the rule's first epoch: not admitted over the rolling window, with no UDP excuse, or marked).",
 	}, []string{"kind"})
 	snTopProjectedCutoff = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_top", Name: "projected_cutoff",

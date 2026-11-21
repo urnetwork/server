@@ -22,6 +22,8 @@ import (
 
 type snTopDbFixture struct {
 	ctx context.Context
+	// the settlement epoch of the stub chain
+	epoch uint64
 	// the export's admission set the fixture publishes (rule (a),
 	// sn_top_admission.go): every provider it creates is admitted unless a
 	// test withholds it
@@ -45,14 +47,19 @@ const (
 )
 
 func newSnTopDbFixture(t testing.TB, ctx context.Context) *snTopDbFixture {
-	self := &snTopDbFixture{ctx: ctx, admission: map[server.Id]*model.SnTopAdmissionProvider{}}
+	return newSnTopDbFixtureAtEpoch(t, ctx, snTopDbEpoch)
+}
+
+// The fixture with the stub chain in the given settlement epoch.
+func newSnTopDbFixtureAtEpoch(t testing.TB, ctx context.Context, epoch uint64) *snTopDbFixture {
+	self := &snTopDbFixture{ctx: ctx, epoch: epoch, admission: map[server.Id]*model.SnTopAdmissionProvider{}}
 	self.anchor = server.NowUtc().Truncate(time.Minute)
 	self.start = self.anchor.Add(-460 * model.SnTopBlockTime)
 	self.end = self.anchor.Add(-100 * model.SnTopBlockTime)
 
 	self.cfg = &StConfig{Enabled: true, ChainId: 945, ContractAddress: common.HexToAddress("0x2000000000000000000000000000000000000025")}
 	self.client = newStubStClient(&StEpochState{
-		Epoch:           snTopDbEpoch,
+		Epoch:           epoch,
 		EpochStartBlock: snTopDbEpochStart,
 		TEpochBlocks:    50400,
 		HeadBlock:       snTopDbHead,
@@ -76,7 +83,7 @@ func newSnTopDbFixture(t testing.TB, ctx context.Context) *snTopDbFixture {
 	self.settings.CohortDeploymentKey = self.cfg.DeploymentKey()
 	SetVerifySettings(self.settings)
 	model.SetStEpochSummaryCache(ctx, self.cfg.DeploymentKey(), &model.StEpochSummary{
-		Epoch:        snTopDbEpoch,
+		Epoch:        epoch,
 		StartBlock:   snTopDbEpochStart,
 		TEpochBlocks: 50400,
 	}, time.Hour)
@@ -128,7 +135,7 @@ func (self *snTopDbFixture) provider(t testing.TB, networkId server.Id, ip strin
 // set is stamped a day past the anchor, so every fold the test runs reads it
 // fresh.
 func (self *snTopDbFixture) admit(clientId server.Id, admitted bool) {
-	self.admission[clientId] = &model.SnTopAdmissionProvider{ClientId: clientId, CountryCode: "us", Admitted: admitted, Online: admitted}
+	self.admission[clientId] = model.Testing_SnTopAdmissionProvider(clientId, "us", admitted, admitted, admitted)
 	model.Testing_SetSnTopAdmission(self.ctx, &model.SnTopAdmission{
 		MeasuredAt: self.anchor.Add(24 * time.Hour),
 		Providers:  self.admission,
