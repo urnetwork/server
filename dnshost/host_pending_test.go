@@ -79,8 +79,14 @@ func (hostTestServedSoas) ReadSoa(ctx context.Context, root, ns string) (uint32,
 	return uint32(state.Serial), nil
 }
 
+// certs' DNS-01 path through the hosted API block: /dns/ready answers ready at a serial once a canary reports it clean
+// and not while a later report fails, the verdicts persist, and certs' solver presents, waits on and cleans up an
+// issuance's challenge and a renewal's.
 func TestHostedDnsCanaryDrivesDns01IssuanceAndRenewal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// §12.7's 10 challenge writes a name an hour come from pro.yml's sidecar_abuse:, which reads zero and refuses
+		// every write without one, as on the private stack (the closed direction); this test writes the name 3 times
+		defer model.Testing_SetDnsChallengesPerNameHour(10)()
 		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 		defer cancel()
 		fake := sidecartest.NewFakeHost(ctx, nil, nil, nil, nil)
