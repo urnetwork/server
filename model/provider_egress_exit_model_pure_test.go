@@ -1,10 +1,8 @@
 // A provider is judged by its probed exit (provider_egress_exit_model.go).
-// Pure: a connection's ARIN facts become its exit's Quality facts and take
-// its risk, a provider whose residential connection exits from a datacenter
-// leaves Quality but stays in Speed and Online while a risky exit leaves every
-// bucket, and an exit differs from the networks a provider connects from only
-// on positive evidence. The comparison's networks are synthetic: hashing an
-// address needs the test environment's pepper (provider_egress_exit_model_test.go).
+// Pure: a connection's ARIN facts become its exit's Quality facts, and a
+// provider whose residential connection exits from a datacenter leaves Quality
+// but stays in Speed and Online. The network comparison needs the address hash
+// pepper, so it is tested with the database (provider_egress_exit_model_test.go).
 package model
 
 import (
@@ -63,9 +61,8 @@ func TestProviderEgressExitJudgesQualityByTheExit(t *testing.T) {
 	}
 }
 
-// A verified exit never verifies or clears a risky connection: the
-// connection's own risk holds in each slot, and a risky slot is never
-// verified.
+// A verified exit never verifies a risky connection: risk stays the
+// connection address's in each slot, and a risky slot is never verified.
 func TestProviderEgressExitKeepsTheConnectionsRisk(t *testing.T) {
 	scores := testProviderExitResidentialScores()
 	scores.ArinRisk = true
@@ -146,90 +143,5 @@ func TestProviderEgressExitLeavesQualityKeepsSpeedAndOnline(t *testing.T) {
 	}
 	if byExit.reason != ProviderExcludedArinNonQuality {
 		t.Fatalf("judged by its exit, the reason is %q, want %q", byExit.reason, ProviderExcludedArinNonQuality)
-	}
-}
-
-// A risky exit, a known VPN, Tor or proxy address, makes a clean residential
-// connection risky in each slot the exit has, as if it connected from there,
-// and never verified; the provider then leaves every bucket, Speed and Online
-// included, as a hard exclusion.
-func TestProviderEgressExitRiskyExitMakesTheConnectionRisky(t *testing.T) {
-	scores := testProviderExitResidentialScores()
-	riskyExit := &ProviderEgressExitJudgement{
-		ArinRisk:                  true,
-		ArinQualityVerified:       false,
-		ArinNonQuality:            true,
-		ArinDatabaseBuildEpoch:    testProviderExitLatestEpoch,
-		ArinOldRisk:               true,
-		ArinOldNonQuality:         true,
-		ArinOldDatabaseBuildEpoch: testProviderExitOldEpoch,
-	}
-	riskyExit.ApplyArinFacts(&scores)
-	if !scores.ArinRisk || scores.ArinQualityVerified || !scores.ArinOldRisk || scores.ArinOldQualityVerified {
-		t.Fatalf("a risky exit left the connection clean: %+v", scores)
-	}
-
-	quality := true
-	decision := decideProviderEgress(&providerEgressFacts{
-		arinRisk:       scores.ArinRisk,
-		arinNonQuality: scores.ArinNonQuality || !scores.ArinQualityVerified,
-		egressQuality:  &quality,
-		qualityRunsMet: true,
-		speedRunsMet:   true,
-	}, true)
-	if !decision.hardExcluded || decision.quality || decision.speed || decision.online || decision.counted {
-		t.Fatalf("a provider with a risky exit is %+v, want out of every bucket", decision)
-	}
-	if decision.reason != ProviderExcludedArinRisk {
-		t.Fatalf("the reason is %q, want %q", decision.reason, ProviderExcludedArinRisk)
-	}
-
-	// the exit's old risk follows the old slot only while the exit has one
-	scores = testProviderExitResidentialScores()
-	latestOnly := *riskyExit
-	latestOnly.ArinOldDatabaseBuildEpoch = 0
-	latestOnly.ApplyArinFacts(&scores)
-	if !scores.ArinRisk || scores.ArinOldRisk || scores.ArinOldDatabaseBuildEpoch != 0 {
-		t.Fatalf("an exit without old facts: %+v, want the latest slot risky and the old slot cleared", scores)
-	}
-}
-
-// An exit differs from the networks its provider connected from only on
-// positive evidence: no network shares its network in its family or its
-// autonomous system in either family, and every system is known.
-func TestCompareProviderEgressExitOnPositiveEvidence(t *testing.T) {
-	network := func(family int, addressHash byte, asn uint32) providerEgressNetwork {
-		return providerEgressNetwork{
-			family:      family,
-			addressHash: [32]byte{addressHash},
-			asn:         asn,
-		}
-	}
-	exit := network(4, 1, 64497)
-	cases := []struct {
-		name        string
-		exit        providerEgressNetwork
-		networks    []providerEgressNetwork
-		differs     bool
-		crossFamily bool
-	}{
-		{name: "no network to compare", exit: exit, networks: nil, differs: false, crossFamily: false},
-		{name: "the exit's own network", exit: exit, networks: []providerEgressNetwork{network(4, 1, 64497)}, differs: false},
-		{name: "the exit's network, its system unknown", exit: exit, networks: []providerEgressNetwork{network(4, 1, 0)}, differs: false},
-		{name: "another network of the exit's system: a carrier NAT, a second line", exit: exit, networks: []providerEgressNetwork{network(4, 2, 64497)}, differs: false},
-		{name: "an IPv6 network of the exit's system", exit: exit, networks: []providerEgressNetwork{network(6, 3, 64497)}, differs: false, crossFamily: true},
-		{name: "a proxy in another system", exit: exit, networks: []providerEgressNetwork{network(4, 2, 64496)}, differs: true},
-		{name: "an IPv6 proxy in another system", exit: exit, networks: []providerEgressNetwork{network(6, 3, 64499)}, differs: true, crossFamily: true},
-		{name: "a network whose system is unknown", exit: exit, networks: []providerEgressNetwork{network(4, 2, 0)}, differs: false},
-		{name: "one proxy known, one network unknown", exit: exit, networks: []providerEgressNetwork{network(4, 2, 64496), network(4, 4, 0)}, differs: false},
-		{name: "one proxy, one network in the exit's system", exit: exit, networks: []providerEgressNetwork{network(4, 2, 64496), network(6, 3, 64497)}, differs: false},
-		{name: "two proxies in other systems", exit: exit, networks: []providerEgressNetwork{network(4, 2, 64496), network(6, 3, 64499)}, differs: true},
-		{name: "an exit whose system is unknown", exit: network(4, 1, 0), networks: []providerEgressNetwork{network(4, 2, 64496)}, differs: false},
-	}
-	for _, c := range cases {
-		comparison := compareProviderEgressExit(c.exit, c.networks)
-		if comparison.differs != c.differs || comparison.crossFamily != c.crossFamily {
-			t.Errorf("%s: %+v, want differs %t, cross family %t", c.name, comparison, c.differs, c.crossFamily)
-		}
 	}
 }

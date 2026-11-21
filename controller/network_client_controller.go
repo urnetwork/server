@@ -283,12 +283,10 @@ func freshProviderEgressLocationForConnection(
 //
 // A provider with a fresh probe is judged by its exit
 // (model/provider_egress_exit_model.go): every path stores the exit's ARIN
-// Quality facts and the exit's risk beside its own, the system of the network
-// it connects from is recorded for the comparison of its next probe, and when
-// its exit differs from every network it connects from, the probe places it
-// ahead of a derived location and however coarse (probePlacesConnection),
-// since both other answers then describe the network it connects from, not
-// the one its users' traffic leaves from.
+// Quality facts, and when its exit is in none of the networks it connects
+// from, the probe places it ahead of a derived location and however coarse
+// (probePlacesConnection), since both other answers then describe the network
+// it connects from, not the one its users' traffic leaves from.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -361,19 +359,9 @@ func SetConnectionLocation(
 			},
 		)
 	}
-	// the lookup's scores, which the derived and mmdb paths store, are judged
-	// by the exit
+	// the lookup's scores, which the derived and mmdb paths store, carry the
+	// exit's Quality facts
 	exit.ApplyArinFacts(connectionLocationScores)
-	if egress != nil {
-		// the autonomous system of the network this connection came from:
-		// the evidence the comparison of the provider's next probe needs
-		// (model.JudgeProviderEgressExit). Non-fatal like the lookups above.
-		if r := server.HandleError(func() {
-			model.SetProviderConnectionNetworkAsn(ctx, egress.ClientId, clientIp)
-		}); r != nil {
-			glog.Infof("[ncc][%s]could not record the connection's network system. err = %s\n", connectionId, r)
-		}
-	}
 
 	// A fresh probe decides the location only. It used to carry hosting and
 	// proxy verdicts onto the connection's net-type scores as well, and those
@@ -437,7 +425,7 @@ func SetConnectionLocation(
 			}
 			return true
 		}
-		// a provider whose exit differs from every network it connects from is
+		// a provider whose exit is in none of the networks it connects from is
 		// placed by its probe: its derived location refines the lookup of its
 		// connection's address, another network than the exit
 		if derived := derivedLocation(); derived != nil && !exit.Differs() {
@@ -548,7 +536,7 @@ func SetConnectionLocation(
 //     granularity. mmdb wins.
 //
 // All of this assumes the exit is the connection's own network. When the
-// provider's exit differs from every network it connects from, the probe wins
+// provider's exit is in none of the networks it connects from, the probe wins
 // before this rule is asked (probePlacesConnection).
 //
 // CityConfident is used as the probed row's granularity because the schema
@@ -578,7 +566,7 @@ func probedLocationPreferred(
 }
 
 // Whether a fresh probe (egress, nil without one) places the connection. When
-// the provider's exit differs from every network it connects from (exit, nil
+// the provider's exit is in none of the networks it connects from (exit, nil
 // without a judgement), always: the lookup of the connection's own address
 // then describes another network than the one its users' traffic leaves from,
 // so its finer place is no evidence about the exit, and never coarsening does
