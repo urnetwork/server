@@ -446,6 +446,7 @@ var routeAccessByRoute = map[string]routeAccess{
 
 	// the authorization log for the gate hosts that read it through api (ACL-M4-05): a gate host's internal bearer,
 	// verified by hash; api carries the log, and the gate checks its chain and holds the rows to their hash (QD-680)
+	"GET /internal/gate/listen-facts/([^/]+)": routeAccessPublic, // sockets service bearer is verified in the handler
 	"GET /internal/gate/projection/([^/]+)":   routeAccessPublic,
 	"GET /internal/gate/rows/([^/]+)/([^/]+)": routeAccessPublic,
 	// an edge block's urnetwork-edge client jwts (TLS-M5-11; QD-812): the edge class's internal bearer, verified by

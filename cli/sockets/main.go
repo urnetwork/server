@@ -35,12 +35,9 @@
 // Readiness is §19.4's sockets column: Redis answering the engine's probe, a ticket key that signs, the gate ready
 // (a source and one over-limit answer) and the key-event families subscribed. A block with no rev/ reader, its
 // file-clusters-sockets.yml missing or unreadable, is said once at start and leaves readiness as §19.4 has it: each
-// authenticated route answers unavailable until it has one. What server has no implementation of yet fails
-// closed, each said once at start: tls/'s ValidateListen (TLS-M5-22) opens only over a listen facts source, which
-// the block reads from api's GET /internal/gate/listen-facts/<network_id> (plan-SOCK-gate-data), a route not built
-// yet, so with no source in hostDeps tls/ is not registered; smtp/'s (MAIL-M7-22) does not exist. The engine refuses
-// every entry of a namespace that is not registered. ur/ is the platform's (SOCK-M9-01) and opens with the block:
-// urnetwork-edge's clients list its services, and any sidecar Finds them.
+// authenticated route answers unavailable until it has one. TLS and SMTP share the sockets-only facts
+// read from the internal API. Both namespaces require that source before the block reports ready.
+// Each registration still requires its own verified listen grant. ur/ opens with the block.
 //
 // The key file is the owner's to create in vault (SOCK.md's external list). The command that writes one is an
 // operations command, which sidecarctl holds (owner, 2026-11-07; server/sidecarctl since QD-750), so it is not
@@ -64,6 +61,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/mxedgeservice"
 	"github.com/urnetwork/sidecar/pushservice"
 	"github.com/urnetwork/sidecar/socketsservice"
 
@@ -100,17 +98,20 @@ type hostSettings struct {
 	KeyEventsRetryInterval time.Duration
 	// tls/'s hooks' (TLS-M5-22). nil: socketsservice.DefaultTlsNamespaceSettings.
 	Tls *socketsservice.TlsNamespaceSettings
+	// Bounds one internal response for a large Team's listen facts.
+	ListenFactsMaxByteCount int64
 }
 
 // The defaults.
 func defaultHostSettings() *hostSettings {
 	return &hostSettings{
-		Sockets:                socketsservice.DefaultSocketsSettings(),
-		TicketKeys:             socketsservice.DefaultSocketTicketKeySettings(),
-		Revocation:             sidecar.DefaultRevocationSettings(),
-		ControlQpsInterval:     60 * time.Second,
-		KeyEventsRetryInterval: 5 * time.Second,
-		Tls:                    socketsservice.DefaultTlsNamespaceSettings(),
+		Sockets:                 socketsservice.DefaultSocketsSettings(),
+		TicketKeys:              socketsservice.DefaultSocketTicketKeySettings(),
+		Revocation:              sidecar.DefaultRevocationSettings(),
+		ControlQpsInterval:      60 * time.Second,
+		KeyEventsRetryInterval:  5 * time.Second,
+		Tls:                     socketsservice.DefaultTlsNamespaceSettings(),
+		ListenFactsMaxByteCount: 16 * 1024 * 1024,
 	}
 }
 
@@ -144,7 +145,7 @@ type hostDeps struct {
 	// What the key events reach: the engine. A test records them instead.
 	Events hostEngineEvents
 	// tls/'s listen facts (TLS-M5-22): api's GET /internal/gate/listen-facts/<network_id> on the block's bearer
-	// (plan-SOCK-gate-data), which no route serves yet. nil leaves tls/ unregistered, refusing every entry.
+	// (plan-SOCK-gate-data). Both public namespaces use its cache. A missing source leaves the host unready.
 	TlsListenFacts socketsservice.TlsListenFactsSource
 }
 
@@ -248,6 +249,12 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	if deps.Source == nil {
 		self.missing = append(self.missing, "a projection source, api's internal projection route (QD-055, ACL-M4-02)")
 	}
+	if noRevocations {
+		self.missing = append(self.missing, "a revocation reader for authenticated sockets routes")
+	}
+	if deps.TlsListenFacts == nil {
+		self.missing = append(self.missing, "the sockets listen facts source for TLS and SMTP")
+	}
 	store := deps.Store
 	if store == nil {
 		store = model.NewSocketStore(host.ClockOrReal(), nil)
@@ -283,6 +290,10 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 			tlsHooks.SetScopeConsent(gate)
 			err = engine.RegisterNamespace(sidecar.SocketNamespaceTls, tlsHooks)
 		}
+		if err == nil {
+			mail := mxedgeservice.NewSmtpListenHooks(&mxedgeservice.SmtpListenHooksArgs{Networks: tlsHooks, Scopes: gate})
+			err = engine.RegisterSmtpNamespace(mail, gate)
+		}
 		if err != nil {
 			if tlsHooks != nil {
 				tlsHooks.Close()
@@ -304,6 +315,9 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	keySet, err := socketsservice.NewSocketTicketKeySet(hostCtx, keyFile, host.ClockOrReal(), log, settings.TicketKeys)
 	if err != nil {
 		engine.Close()
+		if self.tlsHooks != nil {
+			self.tlsHooks.Close()
+		}
 		gate.Close()
 		return fail(err)
 	}
@@ -314,10 +328,6 @@ func newSocketsHost(ctx context.Context, settings *hostSettings, deps *hostDeps)
 	if noRevocations {
 		log.Errorf("[%s]every authenticated route answers unavailable: no rev/ reader, since the block has no first metadata cluster (file-clusters-sockets.yml)", hostService)
 	}
-	if self.tlsHooks == nil {
-		log.Infof("[%s]tls/ refuses every entry until the block has a listen facts source (plan-SOCK-gate-data)", hostService)
-	}
-	log.Infof("[%s]smtp/ refuses every entry until its ValidateListen lands (MAIL-M7-22)", hostService)
 	// the first try at once, so a block whose Redis answers is ready as soon as the engine is
 	if failed := self.subscribe(self.keyEventFamilies()); 0 < len(failed) {
 		self.group.Add(1)
@@ -517,10 +527,10 @@ func (notReadyEngine) Ready() bool { return false }
 func (notReadyEngine) Drain()      {}
 func (notReadyEngine) Close()      {}
 
-// The block's own deps: Quota and the projection source over api's internal gate at apiUrl on the block's bearer,
+// The block's own deps: quota, projections and listen facts over api's internal gate on the block's bearer,
 // and the first metadata cluster's reader for rev/ (vault's file-clusters-sockets.yml), each left out, and said,
 // when it is missing. quotaCtx outlives the drain, so the open usage window is sent; the clusters close with it.
-func blockDeps(quotaCtx context.Context, apiUrl string) (*hostDeps, func()) {
+func blockDeps(quotaCtx context.Context, apiUrl string, settings *hostSettings) (*hostDeps, func()) {
 	deps := &hostDeps{}
 	ends := []func(){}
 	drain := func() {
@@ -547,12 +557,9 @@ func blockDeps(quotaCtx context.Context, apiUrl string) (*hostDeps, func()) {
 		glog.Errorf("[%s]no projection source: %v\n", hostService, err)
 		return deps, drain
 	}
-	source, err := sidecar.NewAclGateApiSource(apiUrl, &http.Client{}, func() (string, error) { return bearer, nil }, nil)
-	if err != nil {
-		glog.Errorf("[%s]no projection source: %v\n", hostService, err)
-		return deps, drain
+	if err := deps.setGateApiSources(apiUrl, bearer, nil, settings.ListenFactsMaxByteCount); err != nil {
+		glog.Errorf("[%s]no internal gate sources: %v\n", hostService, err)
 	}
-	deps.Source = source
 	return deps, drain
 }
 
@@ -622,9 +629,10 @@ func main() {
 	// on a context of its own, so a SIGTERM's drain can still send the open usage window, drained after the block
 	quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer quotaCancel()
-	deps, drainQuota := blockDeps(quotaCtx, apiUrl.Url())
+	settings := defaultHostSettings()
+	deps, drainQuota := blockDeps(quotaCtx, apiUrl.Url(), settings)
 	defer drainQuota()
-	if err := run(ctx, &runOptions{Port: *port, Deps: deps}); err != nil {
+	if err := run(ctx, &runOptions{Port: *port, Settings: settings, Deps: deps}); err != nil {
 		panic(err)
 	}
 }
