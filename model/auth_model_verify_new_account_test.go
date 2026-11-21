@@ -104,6 +104,33 @@ func verifyWithNewCode(t testing.TB, ctx context.Context, userAuth string) *Auth
 	return verifyResult
 }
 
+// verifySignedInWithNewCode creates a code for userAuth and verifies it signed
+// in to the account, as the apps verify an email or phone added in Account:
+// one added to an account is verified only by a caller who controls it.
+func verifySignedInWithNewCode(t testing.TB, ctx context.Context, userAuth string, networkId server.Id, userId server.Id) *AuthVerifyResult {
+	signed, err := session.MintNetworkSession(ctx, session.NewByJwt(networkId, userId, "test", false, false), "password")
+	connect.AssertEqual(t, err, nil)
+	clientSession := session.Testing_CreateClientSession(ctx, nil)
+	createResult, err := AuthVerifyCreateCode(
+		AuthVerifyCreateCodeArgs{UserAuth: userAuth},
+		clientSession,
+	)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, createResult.VerifyCode, nil)
+	clientSession.Header["Authorization"] = []string{"Bearer " + signed}
+	verifyResult, err := AuthVerify(
+		AuthVerifyArgs{
+			UserAuth:   userAuth,
+			VerifyCode: *createResult.VerifyCode,
+		},
+		clientSession,
+	)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, verifyResult.Error, nil)
+	connect.AssertNotEqual(t, verifyResult.Network, nil)
+	return verifyResult
+}
+
 func addUnverifiedUserAuth(t testing.TB, ctx context.Context, userId server.Id, userAuth string) {
 	passwordSalt := createPasswordSalt()
 	err := addUserAuth(
@@ -142,7 +169,7 @@ func TestAuthVerifyNewAccount(t *testing.T) {
 		// nor is a phone added to the verified account
 		phone := "+1 609-737-0012"
 		addUnverifiedUserAuth(t, ctx, userId, phone)
-		connect.AssertEqual(t, verifyWithNewCode(t, ctx, phone).NewAccount, false)
+		connect.AssertEqual(t, verifySignedInWithNewCode(t, ctx, phone, networkId, userId).NewAccount, false)
 
 		// a Google network that adds an email
 		ssoNetworkId := server.NewId()
@@ -158,6 +185,6 @@ func TestAuthVerifyNewAccount(t *testing.T) {
 		)
 		addedEmail := fmt.Sprintf("added-%s@bringyour.com", ssoNetworkId)
 		addUnverifiedUserAuth(t, ctx, ssoUserId, addedEmail)
-		connect.AssertEqual(t, verifyWithNewCode(t, ctx, addedEmail).NewAccount, false)
+		connect.AssertEqual(t, verifySignedInWithNewCode(t, ctx, addedEmail, ssoNetworkId, ssoUserId).NewAccount, false)
 	})
 }

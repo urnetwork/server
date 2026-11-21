@@ -12,7 +12,8 @@
 //     the network (session.RotateCredentialRecordsInTx) and sets the user's
 //     credential_change_time. Every API and connect token created before the
 //     cutoff is refused at once, by the revocation record readers on every
-//     instance and by the SQL state query alike.
+//     instance and by the SQL state query alike. The user's OAuth grants end
+//     with it (oauth.RevokeUserGrantsInTx).
 //   - with --remove-clients, the deactivation behind /network/remove-clients
 //     (deactivateNetworkClientsInTx): each client's revocation record
 //     tombstone, its provide keys, and the close of its connections and
@@ -50,6 +51,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 )
 
@@ -463,6 +465,8 @@ type NetworkSignOutResult struct {
 	Cutoff                       time.Time `json:"cutoff"`
 	PreviousCredentialChangeTime time.Time `json:"previous_credential_change_time"`
 	RetiredAuthCodeCount         int64     `json:"retired_auth_code_count"`
+	// the applications the user approved, disconnected
+	RevokedOauthGrantCount int64 `json:"revoked_oauth_grant_count"`
 	// the clients --remove-clients deactivated
 	DeactivatedClientCount int64 `json:"deactivated_client_count"`
 	// the sessions the enforcement after the commit revoked
@@ -486,7 +490,7 @@ func (self *NetworkSignOutResult) AuditLine() string {
 		)
 	}
 	return fmt.Sprintf(
-		"[audit]network sign-out-all network_id=%s user_id=%s operation_id=%s cutoff=%s previous_credential_change_time=%s remove_clients=%t deactivated_clients=%d retired_auth_codes=%d live_sessions=%d digest=%s",
+		"[audit]network sign-out-all network_id=%s user_id=%s operation_id=%s cutoff=%s previous_credential_change_time=%s remove_clients=%t deactivated_clients=%d retired_auth_codes=%d revoked_oauth_grants=%d live_sessions=%d digest=%s",
 		self.Plan.NetworkId,
 		self.Plan.UserId,
 		self.OperationId,
@@ -495,6 +499,7 @@ func (self *NetworkSignOutResult) AuditLine() string {
 		self.Plan.RemoveClients,
 		self.DeactivatedClientCount,
 		self.RetiredAuthCodeCount,
+		self.RevokedOauthGrantCount,
 		len(self.Plan.Sessions),
 		self.Plan.Digest,
 	)
@@ -597,6 +602,8 @@ func CommitNetworkSignOut(
 			plan.UserId,
 			cutoff,
 		))
+		// the applications the user approved end with the credentials
+		revokedOauthGrantCount := oauth.RevokeUserGrantsInTx(ctx, tx, plan.UserId, cutoff)
 
 		// the deactivation of /network/remove-clients
 		var deactivatedClientCount int64
@@ -617,6 +624,7 @@ func CommitNetworkSignOut(
 			Cutoff:                       cutoff,
 			PreviousCredentialChangeTime: plan.CredentialChangeTime,
 			RetiredAuthCodeCount:         authCodeTag.RowsAffected(),
+			RevokedOauthGrantCount:       revokedOauthGrantCount,
 			DeactivatedClientCount:       deactivatedClientCount,
 		}
 	}, server.TxReadCommitted, server.TxLockTimeout(removeNetworkClientsBatchLockTimeout))

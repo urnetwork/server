@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 var (
@@ -27,7 +28,15 @@ var (
 var (
 	errUnauthorizedGuestNetwork = fmt.Errorf("%w: upgrade the guest network before authorizing", ErrUnauthorizedUser)
 	errUnauthorizedNoNetwork    = fmt.Errorf("%w: no network", ErrUnauthorizedUser)
+	errUnauthorizedSignInAgain  = fmt.Errorf("%w: sign in again before authorizing", ErrUnauthorizedUser)
 )
+
+// The declared reasons, whose words reach the user.
+var unauthorizedReasons = []error{
+	errUnauthorizedGuestNetwork,
+	errUnauthorizedNoNetwork,
+	errUnauthorizedSignInAgain,
+}
 
 // What the authorization endpoint received from the client.
 type AuthorizationRequest struct {
@@ -96,10 +105,21 @@ type AuthorizingUser struct {
 	Principal   string
 	Roles       []string
 	AuthTime    time.Time
+	// When the approving sign-in's credential was created
+	// (session.ByJwt.CreateTime). A credential rotation after it (a password
+	// reset, a sign-out-all) retires the sign-in, so the approval is refused.
+	CredentialTime time.Time
 }
 
 // Mints an authorization code for a consented request. The caller has already
 // authenticated the user and shown consent when required.
+//
+// The consent and the code are written in one transaction that holds the
+// network's session lifecycle lock shared. A credential rotation holds it
+// exclusively while it revokes the user's grants (RevokeUserGrantsInTx), so an
+// approval either commits before the rotation and is revoked by it, or waits
+// for it and is refused because the approving credential is older than the
+// rotation.
 func Authorize(
 	ctx context.Context,
 	request *AuthorizationRequest,
@@ -128,21 +148,18 @@ func Authorize(
 		return "", fmt.Errorf("%w: %s", ErrInvalidRequest, err)
 	}
 
-	// consent is recorded here rather than at the consent screen, so a screen
-	// that is shown but abandoned grants nothing
-	SaveConsent(ctx, &Consent{
-		UserId:    user.UserId,
-		ClientId:  client.ClientId,
-		NetworkId: user.NetworkId,
-		Scopes:    scopes,
-	})
-
 	authTime := user.AuthTime
 	if authTime.IsZero() {
 		authTime = server.NowUtc()
 	}
 
-	return CreateAuthorizationCode(ctx, &AuthorizationCode{
+	consent := &Consent{
+		UserId:    user.UserId,
+		ClientId:  client.ClientId,
+		NetworkId: user.NetworkId,
+		Scopes:    scopes,
+	}
+	code := &AuthorizationCode{
 		ClientId:            client.ClientId,
 		UserId:              user.UserId,
 		NetworkId:           user.NetworkId,
@@ -155,7 +172,35 @@ func Authorize(
 		Principal:           user.Principal,
 		Roles:               user.Roles,
 		AuthTime:            authTime,
-	})
+	}
+	codeStr, err := newAuthorizationCode(code)
+	if err != nil {
+		return "", err
+	}
+
+	var returnErr error
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Tx may rerun the callback
+		returnErr = nil
+
+		server.Raise(session.LockSessionLifecycle(ctx, tx, user.NetworkId, false))
+		// read after the lock, so a rotation that committed while this waited
+		// is seen
+		if !credentialCurrentInTx(ctx, tx, user.UserId, user.CredentialTime) {
+			returnErr = errUnauthorizedSignInAgain
+			return
+		}
+
+		// consent is recorded here rather than at the consent screen, so a
+		// screen that is shown but abandoned grants nothing
+		saveConsentInTx(ctx, tx, consent)
+		insertAuthorizationCodeInTx(ctx, tx, codeStr, code)
+	}, server.TxReadCommitted)
+	if returnErr != nil {
+		return "", returnErr
+	}
+
+	return codeStr, nil
 }
 
 // The token endpoint response.
@@ -181,6 +226,11 @@ func ExchangeCode(ctx context.Context, args *ExchangeCodeArgs) (*TokenResponse, 
 	resource, err := CanonicalResource(args.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, err)
+	}
+	// the redirect uri rules hold at the token step too: no code is exchanged
+	// for a redirect uri that no client may use
+	if err := checkRedirectUri(args.RedirectUri, ApplicationTypeNative); err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidGrant, err)
 	}
 
 	code, err := RedeemAuthorizationCode(

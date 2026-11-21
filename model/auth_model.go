@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 
 	"github.com/gagliardetto/solana-go"
@@ -532,9 +533,8 @@ func handleLoginParsedAuthJwtWithStore(
 
 	var userId *server.Id
 
-	ssoExists := false
-	userAuthExists := false
-	userAuthEmailVerified := false
+	// the account already has a sign-in with the token's provider and email
+	matchingSso := false
 	legacySsoExists := false
 
 	// sign-in rows are stored under the normalized user auth (trimmed,
@@ -544,7 +544,8 @@ func handleLoginParsedAuthJwtWithStore(
 	normalUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
 
 	/**
-	 * get sso auths
+	 * an Apple or Google sign-in with the email: the account with the token's
+	 * own provider first, else the account with another provider's
 	 */
 	var ssoAuths []NetworkUserSsoAuth
 	if normalUserAuth != "" {
@@ -554,30 +555,40 @@ func handleLoginParsedAuthJwtWithStore(
 			return nil, fmt.Errorf("failed to get SSO auths: %w", err)
 		}
 	}
-	if len(ssoAuths) > 0 {
-		ssoExists = true
-		userId = ssoAuths[0].UserId
+	for _, ssoAuth := range ssoAuths {
+		if ssoAuth.UserId != nil && ssoAuth.AuthType == authJwt.AuthType {
+			userId = ssoAuth.UserId
+			matchingSso = true
+			break
+		}
+	}
+	if userId == nil {
+		for _, ssoAuth := range ssoAuths {
+			if ssoAuth.UserId != nil {
+				userId = ssoAuth.UserId
+				break
+			}
+		}
 	}
 
 	/**
-	 * check if userAuth exists with this email in network_user_auth_password
+	 * An email or phone sign-in its owner verified: the provider's proof of the
+	 * same email joins that account. An unverified one is only a claim, which
+	 * anyone can make with someone else's email, so the proof never joins it:
+	 * the sign-in goes on as a new user, and creating its network releases the
+	 * claim (claimUserAuthInTx). Joining it put the provider's owner in the
+	 * claimant's account, and linked the provider there.
 	 */
-	if normalUserAuth != "" {
-		if id, verified, found := store.passwordAuthByUserAuth(ctx, normalUserAuth); found {
-			userAuthExists = true
-			userAuthEmailVerified = verified
-
-			if id != nil {
-				glog.Infof("setting user id inside of user auth as %s", id.String())
-				userId = id
-			}
+	if userId == nil && normalUserAuth != "" {
+		if id, verified, found := store.passwordAuthByUserAuth(ctx, normalUserAuth); found && verified && id != nil {
+			userId = id
 		}
 	}
 
 	if userId == nil {
 		/**
-		 * no sso or password row: an Apple account whose sign-in row was
-		 * never migrated still logs in, and its sso row is backfilled below
+		 * no sso or verified password row: an Apple account whose sign-in row
+		 * was never migrated still logs in, and its sso row is backfilled below
 		 */
 		legacyUserId, err := legacyAppleSsoUserId(ctx, authJwt, store)
 		if err != nil {
@@ -608,33 +619,6 @@ func handleLoginParsedAuthJwtWithStore(
 		return nil, fmt.Errorf("network not found for user %s", *userId)
 	}
 
-	if !userAuthEmailVerified && userAuthExists && ssoExists {
-		// todo - mark userauth as verified
-	}
-
-	if !ssoExists && !userAuthExists && !legacySsoExists {
-
-		/**
-		 * this generally would only happen for guest users
-		 * users signing in with SSO would usually have SSO or user auth
-		 * no user auth exists, create a new user
-		 */
-		return &AuthLoginResult{
-			UserName: &authJwt.UserName,
-		}, nil
-	}
-
-	/**
-	 * check for matching sso auth types
-	 */
-	var matchingSso *NetworkUserSsoAuth
-	for _, ssoAuth := range ssoAuths {
-		if ssoAuth.AuthType == authJwt.AuthType {
-			matchingSso = &ssoAuth
-			break
-		}
-	}
-
 	store.setUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId)
 
 	// The session first: a sign-in the session cap refuses (409
@@ -643,7 +627,7 @@ func handleLoginParsedAuthJwtWithStore(
 	// (session1118 C).
 	signed := store.signByJwt(context.WithValue(ctx, sessionSignInKindKey{}, string(args.AuthJwt.AuthType)), networkId, *userId, networkName)
 
-	if matchingSso == nil {
+	if !matchingSso {
 
 		/**
 		 * User is logging in with an SSO that does not exist
@@ -661,6 +645,8 @@ func handleLoginParsedAuthJwtWithStore(
 				// linking a new provider to the account is a sign-in method
 				// added; a legacy Apple account's backfill adds no new way in
 				Notify: !legacySsoExists,
+				// the provider verified the email of this token
+				Proven: true,
 			},
 			ctx,
 		)
@@ -951,6 +937,9 @@ type AuthLoginWithPasswordResultVerification struct {
 	// set when no code was sent for this verification (rate limited or the
 	// send failed). Clients that predate the field ignore it.
 	SendError *AuthVerifySendError `json:"send_error,omitempty"`
+	// the user whose password this sign-in proved, for the code it sends
+	// (AuthVerifyCreateCodeArgs.PasswordUserId). Never sent to the client.
+	PasswordUserId *server.Id `json:"-"`
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
@@ -1111,7 +1100,8 @@ func AuthLoginWithPassword(
 		} else {
 			result := &AuthLoginWithPasswordResult{
 				VerificationRequired: &AuthLoginWithPasswordResultVerification{
-					UserAuth: *userAuth,
+					UserAuth:       *userAuth,
+					PasswordUserId: userId,
 				},
 				Network: &AuthLoginWithPasswordResultNetwork{
 					NetworkName: &networkName,
@@ -1189,6 +1179,10 @@ func AuthVerify(
 	var userAuthVerifyId *server.Id
 	var networkId server.Id
 	var networkName string
+	// the address's sign-in was unverified when read. Its verification can
+	// rotate the account's credentials, which takes the network's session
+	// lifecycle lock exclusively, as a password reset does.
+	pending := false
 
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		authUserId := findUserIdByUserAuth(
@@ -1205,7 +1199,14 @@ func AuthVerify(
 					user_auth_verify.user_id,
 					user_auth_verify.user_auth_verify_id,
 					network.network_id,
-					network.network_name
+					network.network_name,
+					EXISTS (
+						SELECT 1 FROM network_user_auth_password
+						WHERE
+							network_user_auth_password.user_id = user_auth_verify.user_id AND
+							network_user_auth_password.user_auth = $4 AND
+							NOT network_user_auth_password.verified
+					)
 				FROM user_auth_verify
 				INNER JOIN network ON network.admin_user_id = user_auth_verify.user_id
 				WHERE
@@ -1217,26 +1218,31 @@ func AuthVerify(
 			normalVerifyCode,
 			int(VerifyCodeTimeout/time.Second),
 			*authUserId,
+			*userAuth,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				result.Scan(
+				server.Raise(result.Scan(
 					&userId,
 					&userAuthVerifyId,
 					&networkId,
 					&networkName,
-				)
+					&pending,
+				))
 			}
 		})
 	})
 
-	if userAuthVerifyId == nil {
-		result := &AuthVerifyResult{
+	invalidCode := func() (*AuthVerifyResult, error) {
+		return &AuthVerifyResult{
 			Error: &AuthVerifyResultError{
 				Message: "Invalid code.",
 			},
-		}
-		return result, nil
+		}, nil
+	}
+
+	if userAuthVerifyId == nil {
+		return invalidCode()
 	}
 
 	// verified: the code proved the sign-in method
@@ -1271,18 +1277,93 @@ func AuthVerify(
 		isPro,
 	)
 	session.PrepareSessionMint(fresh, true)
+	// a credential of the account, network or client token, that shows the
+	// caller controls it (auth_verify_claim.go)
+	signedInCredential := presentedAccountCredential(clientSession, networkId, userId)
+	clientKey := verifyCodeClientKey(clientSession)
+	operationId := server.NewId()
 
 	newAccount := false
+	invalid := false
+	outcome := authVerifySignIn
 	var signed string
 	var signedCredential *session.ByJwt
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		newAccount = false
+		invalid = false
+		outcome = authVerifySignIn
+		signed = ""
+		signedCredential = nil
+
 		// The verification commits with the session it returns: a session
 		// the cap refuses (409 session_limit_reached) leaves the code unused
 		// and the sign-in method unverified, so the same code works once a
 		// session is signed out. It committed first, and the retry answered
 		// "Invalid code." (session1118 C). The lifecycle lock comes first, as
 		// in every mint, before the rows a credential rotation also writes.
-		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, networkId, false))
+		server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, networkId, pending))
+
+		if !verifyCodeUnusedInTx(clientSession.Ctx, tx, *userAuthVerifyId) {
+			// another verification used the code first
+			invalid = true
+			return
+		}
+
+		// What the code proves (auth_verify_code_binding.go), and what the
+		// caller does to the address (auth_verify_claim.go): a code proves
+		// the address it was sent to, never the account that holds it.
+		hold, otherUserAuths, accountProven := authVerifyHoldInTx(clientSession.Ctx, tx, userId, *userAuth)
+		binding, issuedAfterPassword := classifyVerifyCode(
+			*userAuthVerifyId,
+			userId,
+			normalVerifyCode,
+			*userAuth,
+			otherUserAuths,
+			clientKey,
+		)
+		proof := authVerifyProof{
+			passwordElsewhere: issuedAfterPassword,
+		}
+		switch binding {
+		case verifyCodeBoundElsewhere:
+			// a code sent to another of the account's addresses
+			invalid = true
+			return
+		case verifyCodeUnbound:
+			// A code a server sent before codes were bound, at most
+			// VerifyCodeTimeout ago. It proves an address only for an account
+			// that has no other, and it keeps that sign-in's behavior.
+			if 0 < len(otherUserAuths) {
+				invalid = true
+				return
+			}
+			proof.password = true
+		case verifyCodeBoundAddressPassword:
+			proof.password = true
+		}
+		proof.signedIn = authVerifySignedInTx(clientSession.Ctx, tx, signedInCredential)
+
+		outcome = decideAuthVerify(hold, accountProven, proof)
+		switch outcome {
+		case authVerifyRefuse:
+			return
+		case authVerifyRelease:
+			releaseUserAuthHoldInTx(clientSession.Ctx, tx, *userAuth, hold)
+			useVerifyCodeInTx(clientSession.Ctx, tx, *userAuthVerifyId)
+			return
+		case authVerifyTakeOver:
+			if !pending {
+				// the address was verified when read, so the lifecycle lock is
+				// shared; the caller verifies again
+				invalid = true
+				return
+			}
+			cutoff := takeOverAccountInTx(clientSession.Ctx, tx, networkId, userId, *userAuth, operationId)
+			// the verifier's session starts at the cutoff, so the rotation
+			// spares it
+			fresh.CreateTime = server.CodecTime(cutoff)
+		}
 
 		// classify before marking this sign-in verified
 		newAccount = isNewAccountVerification(
@@ -1300,16 +1381,14 @@ func AuthVerify(
 			userId,
 			userAuth,
 		))
+		switch outcome {
+		case authVerifyVerifyRetiringPassword, authVerifyTakeOver:
+			// a password set before the address was verified, by whoever
+			// signed up, stops working unless this client proved it
+			retirePasswordInTx(clientSession.Ctx, tx, userId, *userAuth)
+		}
 
-		server.RaisePgResult(tx.Exec(
-			clientSession.Ctx,
-			`
-				UPDATE user_auth_verify
-				SET used = true
-				WHERE user_auth_verify_id = $1
-			`,
-			userAuthVerifyId,
-		))
+		useVerifyCodeInTx(clientSession.Ctx, tx, *userAuthVerifyId)
 
 		if newAccount {
 			// the welcome commits with the verification that completes the
@@ -1319,6 +1398,24 @@ func AuthVerify(
 
 		signed, signedCredential = signAuthVerifyInTx(clientSession.Ctx, tx, presented, renewal, fresh)
 	}, server.TxReadCommitted)
+
+	if invalid {
+		return invalidCode()
+	}
+	switch outcome {
+	case authVerifyRelease:
+		return &AuthVerifyResult{
+			Error: &AuthVerifyResultError{
+				Message: AuthVerifyReleasedMessage,
+			},
+		}, nil
+	case authVerifyRefuse:
+		return &AuthVerifyResult{
+			Error: &AuthVerifyResultError{
+				Message: AuthVerifySignInAgainMessage,
+			},
+		}, nil
+	}
 
 	clientSession.WithByJwt(signedCredential).ObserveAuthenticatedUse()
 	result := &AuthVerifyResult{
@@ -1492,30 +1589,15 @@ func (self *pgUserAuthUserIdLookup) legacyUserAuthUserId(userAuth string) *serve
 	)
 }
 
-// passwordAuthUnverified reports whether the email or phone sign-in at
-// userAuth exists and was never verified.
-func (self *pgUserAuthUserIdLookup) passwordAuthUnverified(userAuth string) (unverified bool) {
-	result, err := self.conn.Query(
-		self.ctx,
-		`
-			SELECT EXISTS (
-				SELECT 1 FROM network_user_auth_password
-				WHERE user_auth = $1 AND verified = false
-			)
-		`,
-		userAuth,
-	)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&unverified))
-		}
-	})
-	return
-}
-
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
 	CodeType VerifyCodeType
+	// The user whose password the request asking for this code proved for the
+	// address: a password sign-in that needs the address verified, or the
+	// sign-up that set it. A code sent so is bound to the client network that
+	// proved it, and verifying it there keeps the password
+	// (auth_verify_code_binding.go). Never read from a request body.
+	PasswordUserId *server.Id `json:"-"`
 }
 
 type AuthVerifyCreateCodeResult struct {
@@ -1570,6 +1652,18 @@ func AuthVerifyCreateCode(
 			return
 		}
 
+		// The code is bound to the address, and to this client network when
+		// this request proved the account's password, or when it asks again
+		// for a code that this client was sent after proving it (a resend).
+		clientKey := verifyCodeClientKey(clientSession)
+		var passwordClientKey *[32]byte
+		if clientKey != nil {
+			passwordProven := verifyCreateCode.PasswordUserId != nil && *verifyCreateCode.PasswordUserId == *userId
+			if passwordProven || liveVerifyCodeProvenInTx(clientSession.Ctx, tx, *userId, *userAuth, *clientKey) {
+				passwordClientKey = clientKey
+			}
+		}
+
 		// invalidate existing codes and create a new code.
 		// `used = false` bounds the update to the user's live codes; without it
 		// every code send rewrote the user's entire code history (already-used
@@ -1585,8 +1679,8 @@ func AuthVerifyCreateCode(
 		))
 
 		created = true
-		userAuthVerifyId := server.NewId()
 		verifyCode = createVerifyCode(verifyCreateCode.CodeType)
+		userAuthVerifyId := newVerifyCodeId(*userId, verifyCode, *userAuth, passwordClientKey)
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -1670,8 +1764,14 @@ func AuthPasswordResetCreateCode(
 		// address was sent a reset code on every request (support inbox 835).
 		// An address that is only the identity the account was created with,
 		// such as a Google or Apple account's email, has no sign-in row to
-		// check and is sent its code as before.
-		if lookup.passwordAuthUnverified(*userAuth) {
+		// check and is sent its code as before; so is one the account holds by
+		// an Apple or Google sign-in. An email or phone sign-up nobody verified
+		// within UnverifiedUserAuthClaimTimeout is abandoned, or held with
+		// someone else's address: its address is sent the code, and the reset
+		// replaces the password whoever signed up set and ends every
+		// credential (AuthPasswordSet). Signing in then verifies the address.
+		hold, _, _ := authVerifyHoldInTx(clientSession.Ctx, tx, *userId, *userAuth)
+		if hold.pending() && !(hold.signUp() && hold.stale(server.NowUtc())) {
 			sendErr = errors.New("400 " + AuthPasswordResetUnverifiedMessage)
 			return
 		}
@@ -1888,6 +1988,8 @@ func AuthPasswordSet(
 			`,
 			userId, cutoff,
 		))
+		// and it ends the applications the user approved
+		oauth.RevokeUserGrantsInTx(clientSession.Ctx, tx, userId, cutoff)
 
 		// the password-changed notice commits with the change
 		addPasswordSetNoticeInTx(clientSession.Ctx, tx, networkId, *userAuthResetId)

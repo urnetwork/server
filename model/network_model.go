@@ -161,6 +161,9 @@ type NetworkCreateResultVerification struct {
 	// set when no code was sent for this verification (rate limited or the
 	// send failed). Clients that predate the field ignore it.
 	SendError *AuthVerifySendError `json:"send_error,omitempty"`
+	// the user whose password this sign-up set, for the code it sends
+	// (AuthVerifyCreateCodeArgs.PasswordUserId). Never sent to the client.
+	PasswordUserId *server.Id `json:"-"`
 }
 
 type NetworkCreateResultError struct {
@@ -479,9 +482,12 @@ func NetworkCreate(
 				}, nil
 			}
 
+			createdUserId := resultNetworkCreate.UserId
 			result := &NetworkCreateResult{
 				VerificationRequired: &NetworkCreateResultVerification{
 					UserAuth: *userAuth,
+					// this sign-up set the password, for the code it sends
+					PasswordUserId: &createdUserId,
 				},
 				Network: &NetworkCreateResultNetwork{
 					NetworkName: networkCreate.NetworkName,
@@ -925,35 +931,20 @@ func networkCreateAuthJwt(
 		refusalMessage = ""
 		isPro = false
 		giftRedemption = nil
-		var userId *server.Id
-
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
-			normalizedUserAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
-
-		if userId != nil {
-			// server.Logger().Printf("User already exists\n")
-			refusalStatus = http.StatusConflict
-			return
-		}
 
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
-		// Another user can hold the identity in a child table only, without it
-		// on their network_user row (a sign-in or an email added to an existing
-		// account). addSsoAuthInTx would refuse it after the user is written,
-		// so it is refused here, before anything is written.
-		if validateUserAuthAvailability(ctx, tx, normalizedUserAuth, createdUserId) != nil {
+		// Another user can hold the identity: as the email its account was
+		// created with (network_user.user_auth), or in a child table only (a
+		// sign-in or an email added to an existing account). The verified
+		// token proves the email, so a hold that is only an unverified claim
+		// yields to it and is released below; any other is refused here,
+		// before anything is written (claimUserAuthInTx). An unverified claim
+		// used to refuse the email's owner, or Google or Apple sign-in joined
+		// the claimant's account instead.
+		released, err := userAuthClaimInTx(ctx, tx, normalizedUserAuth, createdUserId, true)
+		if err != nil {
 			refusalStatus = http.StatusConflict
 			return
 		}
@@ -965,6 +956,8 @@ func networkCreateAuthJwt(
 			refusalMessage = networkNameNotAvailableMessage
 			return
 		}
+
+		releaseUserAuthHoldsInTx(ctx, tx, normalizedUserAuth, released)
 
 		_, err = tx.Exec(
 			ctx,
@@ -994,6 +987,7 @@ func networkCreateAuthJwt(
 				AuthJwt:       *networkCreate.AuthJwt,
 				ParsedAuthJwt: parsedAuthJwt,
 				AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
+				Proven:        true,
 			},
 		))
 
@@ -1067,37 +1061,21 @@ func networkCreateUserAuth(
 		refusalMessage = ""
 		isPro = false
 		giftRedemption = nil
-		var result server.PgResult
 		var err error
-
-		var userId *server.Id
-
-		result, err = tx.Query(
-			ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
-			userAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
-
-		if userId != nil {
-			refusalStatus = http.StatusConflict
-			return
-		}
 
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
-		// Another user can hold the user auth in a child table only, without it
-		// on their network_user row (an auth added to an existing account).
-		// addUserAuthInTx would refuse it after the user is written, so it is
-		// refused here, before anything is written.
-		if validateUserAuthAvailability(ctx, tx, *userAuth, createdUserId) != nil {
+		// Another user can hold the user auth: as the identity its account was
+		// created with (network_user.user_auth), or in a child table only (an
+		// auth added to an existing account). A sign-up is a claim, not a
+		// proof: only an unverified claim older than
+		// UnverifiedUserAuthClaimTimeout yields to it, and is released below.
+		// Any other hold is refused here, before anything is written
+		// (claimUserAuthInTx). An unverified sign-up used to keep its address's
+		// owner out for good.
+		released, claimErr := userAuthClaimInTx(ctx, tx, *userAuth, createdUserId, false)
+		if claimErr != nil {
 			refusalStatus = http.StatusConflict
 			return
 		}
@@ -1109,6 +1087,8 @@ func networkCreateUserAuth(
 			refusalMessage = networkNameNotAvailableMessage
 			return
 		}
+
+		releaseUserAuthHoldsInTx(ctx, tx, *userAuth, released)
 
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
