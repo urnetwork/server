@@ -14,13 +14,13 @@
 //     does once confirmed (its base waiting out §7.9's one base a minute), writes smoke's TXT record in its zone through
 //     dns's api, since §21.7's probation publishes no address record for a new network, and the dns edge answers it
 //     signed over UDP; the second network's owner is refused the same name, and the edge still answers the first's;
-//   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, with no violation on
-//     api's side;
+//   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, and api's own budget
+//     its sequencer's spend for the networks' statements;
 //   - chaos: evs stopped mid-run and started again on its stores, after which every write reads back as it was
 //     answered, through the restarted block;
 //   - the quota ledgers: evs's drain at the restart sent its usage window through api's quota surface, so each
 //     network's quota state holds the bytes its writes stored, and its transfer was drawn from its balance, never past
-//     it.
+//     it, every byte drawn a debit on a meter (the evs meter's here), exactly.
 //
 // Each phase has its bound and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -221,8 +221,14 @@ func TestE2eWorldSmoke(t *testing.T) {
 			reports, _ := json.Marshal(ledgers.BudgetReports)
 			t.Fatalf("no block reported the writes against the metadata clusters' budget: %s", reports)
 		}
-		if 0 < len(ledgers.BudgetViolations) {
-			t.Fatalf("api's budget saw violations: %v", ledgers.BudgetViolations)
+		// api's sequencer spent its statements' objects on its own budget, P0 every one, beside the blocks'
+		apiSpent := int64(0)
+		for clusterId := range ledgers.BudgetReports {
+			apiSpent += ledgers.ApiBudgetByteCount(clusterId)
+		}
+		if ledgers.ApiProcessId == "" || apiSpent <= 0 {
+			reports, _ := json.Marshal(ledgers.BudgetReports)
+			t.Fatalf("api's process %q reported no spend for the networks' statements: %s", ledgers.ApiProcessId, reports)
 		}
 		// the second network reads none of the first's, at its client and at evs
 		first, second := networks[0], networks[1]
@@ -354,6 +360,10 @@ func TestE2eWorldSmoke(t *testing.T) {
 				t.Fatalf("%s's quota ledger stores nothing after its writes: %+v", network.Name, ledger)
 			case ledger.DebitedByteCount() <= 0 || ledger.BalanceByteCount <= 0 || ledger.Spent:
 				t.Fatalf("%s's balance after its writes and reads: %+v", network.Name, ledger)
+			}
+			// every byte drawn from its balances is a service debit on a meter, the evs meter's for its writes and reads
+			if ledgers.Meters.ByteCount(network.NetworkId, sidecar.QuotaMeterEvs) <= 0 || ledgers.Meters.TotalByteCount(network.NetworkId) != ledger.DebitedByteCount() {
+				t.Fatalf("%s's balances were debited %d, its meters: %s", network.Name, ledger.DebitedByteCount(), ledgers.Meters.Describe(network.NetworkId))
 			}
 		}
 	})

@@ -9,8 +9,11 @@
 //	          file clusters in buckets of the world's own on the local stack's MinIO; every block holds those clusters
 //	          and that Redis, as production's blocks share the site's
 //	api       T3Api, server's api and oauth in process, with api's installs over its gate cache (the sequencer, the
-//	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker) and api's
-//	          internal gate surface on the world's throwaway bearers (ServeInternalGate), as a block reaches api
+//	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker, and §8.10's
+//	          contract gate when WorldSettings.AclContractGate turns sidecar.yml's switch on), the sequencer and rev/'s
+//	          store spending on api's own write budget over the world's Redis, which reports beside each block's
+//	          (T3WorldSettings.ApiWriteBudget), and api's internal gate surface on the world's throwaway bearers
+//	          (ServeInternalGate), as a block reaches api
 //	exchange  server's exchange and its connect handler on loopback, which every sidecar's and edge client's connect
 //	          client dials, with sidecar.yml's push switch on, so each sidecar's client hears its hints from the
 //	          exchange's resident publisher as in production (WorldSettings.Push)
@@ -131,9 +134,13 @@ type WorldSettings struct {
 	// M, the networks AddNetworks makes, and N, the sidecars each enrolls.
 	NetworkCount      int
 	ClientsPerNetwork int
-	// The storage format evs's block runs as, which evs.yml names (QD-854): format 1, as T3World's evs and M2's rows
-	// run it.
+	// The storage format evs's block runs as, which evs.yml names (QD-854): format 2, production's from M10's release;
+	// format 1 runs a rollback's block, its guard refusing format-2 pushes.
 	EvsInstanceFormat uint32
+	// sidecar.yml's acl_contract_gate switch (ACL-M4-01): on, connect's CreateContract consults §8.10's contract gate,
+	// which the T3World installs over api's gate cache as api's process does when the switch is on at its start. false,
+	// as production ships the switch.
+	AclContractGate bool
 	// The bytes of each internal gate caller's bearer: the format's (server.DefaultInternalGateSettings).
 	InternalGateBearerByteCount int
 	// How long a block may take to stop, its Run returning, when the world closes or chaos stops it.
@@ -167,7 +174,8 @@ func DefaultWorldSettings() *WorldSettings {
 		StartStatus:                 map[string]string{},
 		NetworkCount:                2,
 		ClientsPerNetwork:           3,
-		EvsInstanceFormat:           sidecar.EvsRepoFormat1,
+		EvsInstanceFormat:           sidecar.EvsRepoFormat2,
+		AclContractGate:             false,
 		InternalGateBearerByteCount: server.DefaultInternalGateSettings().BearerByteCount,
 		StopTimeout:                 90 * time.Second,
 		EdgeHost:                    "e2e-edge-1",
@@ -187,8 +195,9 @@ const (
 )
 
 // sidecar.yml as a world puts it: preview_networks, every service's gate open to every network, evs's with the env's
-// one block, urnetwork_edge the edges' clients' network, and the push switch when push is on.
-func worldSidecarYaml(urnetworkEdge server.Id, push bool) func(previewNetworkIds []string) string {
+// one block, urnetwork_edge the edges' clients' network, the push switch when push is on, and the contract gate's when
+// the world turns it on.
+func worldSidecarYaml(urnetworkEdge server.Id, push bool, aclContractGate bool) func(previewNetworkIds []string) string {
 	return func(previewNetworkIds []string) string {
 		lines := []string{
 			"sidecar:",
@@ -204,6 +213,9 @@ func worldSidecarYaml(urnetworkEdge server.Id, push bool) func(previewNetworkIds
 		}
 		if push {
 			lines = append(lines, "  push: {enabled: true}")
+		}
+		if aclContractGate {
+			lines = append(lines, "  "+server.SidecarSwitchAclContractGate+": {enabled: true}")
 		}
 		return strings.Join(lines, "\n") + "\n"
 	}
@@ -268,8 +280,10 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		copied := *t3Settings
 		t3Settings = &copied
 	}
-	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push)
+	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate)
 	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
+	// api spends on a budget of its own over the world's Redis, as its process does, never the Net's fake
+	t3Settings.ApiWriteBudget = true
 	exchangeSettings := sidecart3.DefaultExchangeSettings()
 	if t3Settings.Exchange != nil {
 		copied := *t3Settings.Exchange

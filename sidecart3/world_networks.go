@@ -14,7 +14,9 @@ package sidecart3
 //	          from that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's
 //	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the edge
 //	          logins' source, rev/'s store on the first cluster and the issuer's worker that claims its tasks, and the
-//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts
+//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts; the sequencer and rev/'s store
+//	          spend on the Net's fake write budget, or with ApiWriteBudget on api's own over the world's Redis, which
+//	          reports its spend beside the blocks' as api's process does
 //	limits    §7.9's append limits and §20.4's caps run, on the numbers SidecarLimits gives pro.yml's sidecar keys for
 //	          the world's life (§20.4's Community column by default), since the test stack's pro.yml carries none;
 //	          AdjustConfigLog may still take them off for a test that needs it
@@ -148,6 +150,11 @@ type T3WorldSettings struct {
 	// repo as keying. The joiner then asks again at its follower's first retry past LateAskInterval, a minute, which
 	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
 	KeyJoinTimeout time.Duration
+	// Whether api's sequencer and rev/ store spend on a write budget of api's own over the world's Redis
+	// (evsservice.NewWriteBudget on the world's host, as controller.InstallApiAuthorization builds api's), reporting its
+	// spend beside every block's (ApiWriteBudget), rather than on the Net's fake budget: what a world of hosts runs
+	// (sidecare2e's World). false keeps the Net's fake, whose violations a test reads.
+	ApiWriteBudget bool
 }
 
 func DefaultT3WorldSettings() *T3WorldSettings {
@@ -172,6 +179,7 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		SyncTimeout:             60 * time.Second,
 		KeyResyncInterval:       time.Second,
 		KeyJoinTimeout:          5 * time.Minute,
+		ApiWriteBudget:          false,
 	}
 }
 
@@ -306,6 +314,8 @@ type T3World struct {
 	api           *T3Api
 	exchange      *T3SidecarExchange
 	gkm           *sidecartest.FakeGkm
+	// api's own write budget with ApiWriteBudget, nil otherwise
+	apiBudget *evsservice.WriteBudgetClient
 
 	stateLock sync.Mutex
 	gates     []*t3WorldGate
@@ -378,6 +388,13 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	host.Clock = sidecar.RealClock{}
 	host.Authenticator = sidecarhost.NewAuthenticatorWithVerifier(serviceTokens)
 	self.host = &host
+	// sidecar.yml from the start, before api's installs read its switches (the contract gate's) and so a host the
+	// world serves reads its gates before the first network is added
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.gateNetworksWithLock()
+	}()
 
 	// pro.yml's sidecar limits for the world's life, before api takes a statement
 	if settings.SidecarLimits != nil {
@@ -392,14 +409,25 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	if err != nil {
 		return nil, err
 	}
+	// what api's sequencer and rev/ store spend on: its own budget, as api's process builds one, or the Net's fake
+	apiHost := *self.host
+	if settings.ApiWriteBudget {
+		budget, err := evsservice.NewWriteBudget(ctx, &apiHost, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("api's write budget: %w", err)
+		}
+		self.closes = append(self.closes, budget.Close)
+		apiHost.Budget = budget
+		self.apiBudget = budget
+	}
 	configLogSettings := model.NewApiConfigLogSettings()
 	if settings.AdjustConfigLog != nil {
 		settings.AdjustConfigLog(configLogSettings)
 	}
-	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(self.host, first, configLogSettings))
+	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(&apiHost, first, configLogSettings))
 	self.closes = append(self.closes, func() { model.SetConfigLogSequencer(nil) })
 	self.closes = append(self.closes, oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(apiGate.cache, &oauth.ExchangeScopeSettings{Clock: host.Clock})))
-	self.closes = append(self.closes, installT3WorldApi(ctx, self.host, first, apiGate.cache))
+	self.closes = append(self.closes, installT3WorldApi(ctx, &apiHost, first, apiGate.cache))
 
 	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	exchange, err := NewT3SidecarExchange(ctx, t, settings.Exchange)
@@ -409,12 +437,6 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	self.exchange = exchange
 	self.closes = append(self.closes, exchange.Close)
 	self.gkm = sidecartest.NewFakeGkm(host.Clock, host.Blobs, nil)
-	// sidecar.yml from the start, so a host the world serves reads its gates before the first network is added
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.gateNetworksWithLock()
-	}()
 	return self, nil
 }
 
@@ -568,6 +590,12 @@ func (self *T3World) AddGate(name string) (*sidecar.AclGateCache, func(), error)
 		self.removeGate(gate)
 		gate.close()
 	}, nil
+}
+
+// api's own write budget, whose process reports its spend on every metadata cluster beside the blocks': nil unless
+// ApiWriteBudget, when api spends on the Net's fake budget.
+func (self *T3World) ApiWriteBudget() *evsservice.WriteBudgetClient {
+	return self.apiBudget
 }
 
 // The verifier of the world's svc- key, which every host the world serves verifies service tokens and rev/ under.

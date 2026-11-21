@@ -2,8 +2,8 @@
 
 // Every read and write of server state the world makes outside the hosts and api's routes, in one file (the e2e
 // conventions; QD-1028's layout move will move sidecar's model code): urnetwork-edge's network row, each block's Quota
-// over api's internal quota surface, and the quota ledgers a scenario reconciles, read after the debit journal is
-// flushed as taskworker's flush would.
+// over api's internal quota surface, the quota ledgers a scenario reconciles, read after the debit journal is flushed
+// as taskworker's flush would, and the service debits by meter in service_debit_journal and network_service_usage.
 
 package sidecare2e
 
@@ -70,6 +70,71 @@ func worldFlushServiceDebits(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// networkId's service debits in service_debit_journal the flush has not applied yet, by meter: each row is one usage
+// batch's or carve's debit of one balance (§20.6), and its balance names the network. What the flush has applied is
+// network_service_usage's (worldAppliedServiceUsage), an applied row's release still keeping it here a moment.
+func worldJournaledServiceDebits(ctx context.Context, networkId server.Id) (meterByteCounts map[string]int64, returnErr error) {
+	meterByteCounts = map[string]int64{}
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT service_debit_journal.meter, SUM(service_debit_journal.debit_byte_count)
+					FROM service_debit_journal
+					INNER JOIN transfer_balance ON transfer_balance.balance_id = service_debit_journal.balance_id
+					WHERE transfer_balance.network_id = $1 AND NOT service_debit_journal.applied
+					GROUP BY service_debit_journal.meter
+				`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var meter string
+					var byteCount int64
+					server.Raise(result.Scan(&meter, &byteCount))
+					meterByteCounts[meter] += byteCount
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("service_debit_journal: %w", err)
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return meterByteCounts, nil
+}
+
+// networkId's applied service debits by meter: network_service_usage's quantity, bytes for every transfer meter,
+// summed over its days, which the flush adds each applied journal row to on the day it applies it.
+func worldAppliedServiceUsage(ctx context.Context, networkId server.Id) (meterByteCounts map[string]int64, returnErr error) {
+	meterByteCounts = map[string]int64{}
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT meter, SUM(quantity) FROM network_service_usage WHERE network_id = $1 GROUP BY meter`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var meter string
+					var quantity int64
+					server.Raise(result.Scan(&meter, &quantity))
+					meterByteCounts[meter] += quantity
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("network_service_usage: %w", err)
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return meterByteCounts, nil
 }
 
 // networkId's quota ledger as server holds it: its in-window transfer balances, what each started with and what is
