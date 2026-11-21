@@ -49,7 +49,7 @@ func runFsKeysT3(t *testing.T, rowId string, caseName string, schedule func(t gk
 	clusters := gkmStackClusters(t)
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
 		redis := sidecarhost.NewRedis(nil)
-		// each world's store clock, which schedules build from their own goroutine
+		// each world's store clock; a schedule builds its worlds on its own goroutine, so this takes no lock
 		storeClocks := []*sidecart3.StoreClock{}
 		schedule(tb, func(kind protocol.RepoKind) *gkmschedule.FsKeysWorld {
 			// the fake clock starts at the stores' own time, which a case without the store clock reads
