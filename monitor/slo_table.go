@@ -20,6 +20,8 @@ const (
 	sloObjectiveAvailability sloObjectiveKind = iota
 	// a latency histogram: an event over the bound is bad, read from its le bucket
 	sloObjectiveLatency
+	// A result-labelled counter. Its good and bad outcomes define the eligible events.
+	sloObjectiveOutcome
 	// the SLI is not published yet: the objective reads unobservable
 	sloObjectiveUnmeasured
 )
@@ -35,8 +37,17 @@ type sloObjective struct {
 	histogram string
 	// sloObjectiveLatency: the bound in seconds, which must be one of the histogram's buckets
 	boundSeconds float64
+	metric       string
+	goodResults  string
+	badResults   string
+	// Recurring monitor observations also need evidence that the probe ran recently.
+	probed bool
 	// sloObjectiveUnmeasured: what the objective waits for
 	waitsFor string
+}
+
+func sloOutcome(name string, target float64, metric string, good string, bad string) sloObjective {
+	return sloObjective{name: name, kind: sloObjectiveOutcome, target: target, metric: metric, goodResults: good, badResults: bad}
 }
 
 // One §19.8 row: a service and its objectives.
@@ -56,7 +67,7 @@ var sloTable = []sloRow{
 		terms:   "99.9% non-5xx; head -> hint p99 <= 2 s",
 		objectives: []sloObjective{
 			{name: "availability", kind: sloObjectiveAvailability, target: 0.999},
-			{name: "head-to-hint", kind: sloObjectiveUnmeasured, target: 0.99, waitsFor: "evs's head-to-hint histogram (EVS1), with a bucket at 2 s"},
+			sloOutcome("head-to-hint", 0.99, "urnetwork_evs_head_hints_total", "on_time", "late|failed"),
 		},
 	},
 	{
@@ -64,7 +75,7 @@ var sloTable = []sloRow{
 		terms:   "99.9%; commit p99 <= 300 ms",
 		objectives: []sloObjective{
 			{name: "availability", kind: sloObjectiveAvailability, target: 0.999},
-			{name: "commit", kind: sloObjectiveUnmeasured, target: 0.99, waitsFor: "gkm's commit histogram (KEYS), with a bucket at 0.3 s; urnetwork_gkm_request_seconds has none"},
+			{name: "commit", kind: sloObjectiveLatency, target: 0.99, histogram: "urnetwork_gkm_commit_seconds", boundSeconds: 0.3},
 		},
 	},
 	{
@@ -79,31 +90,39 @@ var sloTable = []sloRow{
 		service: "tlsedge",
 		terms:   "99.9% of connections reach a listener; warm setup p95 <= +300 ms",
 		objectives: []sloObjective{
-			{name: "listener-reached", kind: sloObjectiveUnmeasured, target: 0.999, waitsFor: "tlsedge's connection outcomes (TLS)"},
-			{name: "warm-setup", kind: sloObjectiveUnmeasured, target: 0.95, waitsFor: "tlsedge's setup latency against a direct connection (TLS)"},
+			sloOutcome("listener-reached", 0.999, "urnetwork_tlsedge_connections_total", "spliced", "process_cap|not_ready|busy|no_listener|negative_no_listener|unavailable|setup_failed"),
+			{name: "warm-setup", kind: sloObjectiveLatency, target: 0.95, histogram: "urnetwork_monitor_tlsedge_warm_setup_overhead_seconds", boundSeconds: 0.3, probed: true},
 		},
 	},
 	{
 		service: "mxedge",
 		terms:   "99.9% of splices, 99.5% of preambles",
 		objectives: []sloObjective{
-			{name: "splices", kind: sloObjectiveUnmeasured, target: 0.999, waitsFor: "mxedge's splice outcomes (MAIL)"},
-			{name: "preambles", kind: sloObjectiveUnmeasured, target: 0.995, waitsFor: "mxedge's preamble outcomes (MAIL)"},
+			sloOutcome("splices", 0.999, "urnetwork_mxedge_sessions_total", "splice_closed", "not_ready|route_unavailable|no_receiver|receiver_busy|sockets_unavailable|setup_failed|splice_(receiver_reset|sender_reset|idle|slow|session_timeout|drain)"),
+			sloOutcome("preambles", 0.995, "urnetwork_mxedge_preambles_total", "router_ready", "router_ended"),
+		},
+	},
+	{
+		service: "mxedge-platform",
+		terms:   "99.9% of eligible messages taken, 99.5% of preambles",
+		objectives: []sloObjective{
+			sloOutcome("intake", 0.999, "urnetwork_mxedge_platform_messages_total", "taken", "failed|buffer_full"),
+			sloOutcome("preambles", 0.995, "urnetwork_mxedge_preambles_total", "platform_ready", "platform_ended"),
 		},
 	},
 	{
 		service: "smtpedge",
 		terms:   "99.9% of splices, 99.5% of preambles",
 		objectives: []sloObjective{
-			{name: "splices", kind: sloObjectiveUnmeasured, target: 0.999, waitsFor: "smtpedge's splice outcomes (SMTP)"},
-			{name: "preambles", kind: sloObjectiveUnmeasured, target: 0.995, waitsFor: "smtpedge's preamble outcomes (SMTP)"},
+			sloOutcome("splices", 0.999, "urnetwork_smtpedge_connections_total", "sent", "refused|timeout|ended"),
+			sloOutcome("preambles", 0.995, "urnetwork_smtpedge_preambles_total", "ok", "no_mx|no_tls|try_later|keys"),
 		},
 	},
 	{
 		service: "dns",
 		terms:   "write -> served at both NS p99 <= 60 s (R-DNS-7)",
 		objectives: []sloObjective{
-			{name: "write-to-served", kind: sloObjectiveUnmeasured, target: 0.99, waitsFor: "dns's write-to-served histogram at both NS (DNS), with a bucket at 60 s"},
+			{name: "write-to-served", kind: sloObjectiveOutcome, target: 0.99, metric: "urnetwork_monitor_dns_propagation_total", goodResults: "on_time", badResults: "late", probed: true},
 		},
 	},
 	{

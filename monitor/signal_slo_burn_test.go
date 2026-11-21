@@ -218,8 +218,47 @@ func TestSloBurnQueriesHoldNoIdLabel(t *testing.T) {
 			t.Errorf("a query keeps labels: %s", query)
 		}
 		for _, matcher := range regexp.MustCompile(`([a-z_]+)(=~|=)"`).FindAllStringSubmatch(query, -1) {
-			if !slices.Contains([]string{"env", "code", "le"}, matcher[1]) {
+			if !slices.Contains([]string{"env", "code", "le", "result"}, matcher[1]) {
 				t.Errorf("a query matches on %s", matcher[1])
+			}
+		}
+	}
+}
+
+// Every independently rolled service needs genuine evidence for every objective.
+func TestRolloutSloObjectivesRequireFullHistory(t *testing.T) {
+	for _, service := range []string{"evs", "gkm", "sockets", "tlsedge", "mxedge", "mxedge-platform", "smtpedge", "dns"} {
+		row, ok := sloRowOf(service)
+		if !ok || len(row.objectives) == 0 {
+			t.Fatalf("%s has no objectives", service)
+		}
+		settings := sloBurnTestSettings(service)
+		for _, objective := range row.objectives {
+			query := strings.Join(sloBurnObjectiveQueries("synthetic", settings, service, objective), " ")
+			if !strings.Contains(query, "offset 2592000s") || !strings.Contains(query, "min_over_time(") {
+				t.Fatalf("%s %s lacks a full measured budget period", service, objective.name)
+			}
+			if objective.probed && !strings.Contains(query, "[180s]") {
+				t.Fatalf("%s %s accepts a dormant probe", service, objective.name)
+			}
+			samples := sloBurnTestSamples(service, objective.name)
+			state := func(samples []*sidecarStorageSample) *sloObjectiveBurn {
+				for _, burn := range sloBurnStates(settings, []string{service}, samples, nil) {
+					if burn.objective == objective.name {
+						return burn
+					}
+				}
+				t.Fatal("missing objective")
+				return nil
+			}
+			if burn := state(samples); burn.unobservable != "" {
+				t.Errorf("%s %s with full history: %s", service, objective.name, burn.unobservable)
+			}
+			for _, part := range []string{sloBurnPartHistory, sloBurnPartFresh, sloBurnPartPage, sloBurnPartWarn} {
+				missing := setSloBurnTestValue(samples, sloBurnCheck(service, objective.name, part), 0, true)
+				if state(missing).unobservable == "" {
+					t.Errorf("%s %s read clear without %s", service, objective.name, part)
+				}
 			}
 		}
 	}
@@ -240,7 +279,7 @@ func TestCheckSloBurnReadsClearBurningOrUnknown(t *testing.T) {
 	if result := check("sockets", burning); result.State != SloBurnBurning {
 		t.Errorf("sockets burning = %+v", result)
 	}
-	// evs's head to hint has no SLI yet, so evs stays unknown however its availability reads
+	// No head-to-hint observations have arrived, so availability alone cannot clear evs.
 	if result := check("evs", sloBurnTestSamples("evs", "availability")); result.State != SloBurnUnknown {
 		t.Errorf("evs = %+v", result)
 	}

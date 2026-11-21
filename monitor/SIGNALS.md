@@ -49482,12 +49482,32 @@ Probe: `slo-burn`
 Each minute, from Mimir, for each objective of each listed service's row: its
 events over 30 days, its bad events over the last hour and 6 h, whether its
 series is current, and whether it reaches back 30 days. An availability
-objective counts `urnetwork_<svc>_http_requests_total`, a 5xx bad; a latency
-objective counts its histogram, an event past its bound (which must be one of
-its buckets) bad. The budget is 1 - target of the 30 days' events. Objectives
-whose SLI their owner has not published yet (evs's head to hint, gkm's commit,
-tlsedge's, mxedge's, smtpedge's, dns's, certs', wakes', projections' and the
-file cluster's) read unobservable, never healthy.
+objective counts HTTP responses and 5xx errors. Latency objectives count
+observations over the threshold with a histogram bucket or a timed outcome.
+The budget is the observed event count multiplied by one minus the target.
+Each objective requires a current source, a source a full 30 days ago and
+observations in every intervening daily window. An absent outcome is zero
+only when its eligible counter was observed in the same burn window.
+
+EVS measures each subscribed head from its successful compare-and-swap until
+push accepts the hint, including heads covered by a coalesced notification.
+GKM times each newly committed epoch through its response. Sockets measures
+Find at 50 ms. TLS uses listener connection outcomes. For warm setup, set
+`sidecar_services.warm_tls` with `server_name`, `edge` and `direct`. The two
+IP:port addresses must reach the same published TLS origin. Each recurring
+observation warms both paths, verifies the same server name on both and
+measures the difference between the two following handshakes.
+
+The MX router measures splice outcomes and its pre-TLS dialog through the
+STARTTLS reply. The platform listener terminates mail locally, so its row
+measures eligible messages taken by its intake and its own STARTTLS dialog.
+SMTP uses outbound connection and preamble results. The result sets in
+`slo_table.go` exclude policy denials and quota refusals. The site DNS canary
+times its journal write until the exact new TXT value answers authoritatively
+at both configured nameservers. A missed 60-second deadline counts as bad.
+A canceled probe publishes no event. The TLS and DNS objectives require
+recent probe events as well as current scraped counters. Certs, wakes,
+projections and file clusters still require their respective source metrics.
 
 Classes:
 

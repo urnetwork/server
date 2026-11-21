@@ -715,6 +715,15 @@ func TestFs25RouteResponseLostAfterCommit(t *testing.T) {
 		if status, body := world.post(t, 0, twin, twinId, late, nil); status != http.StatusOK || world.held(t, ctx) != "use-71" {
 			t.Errorf("the twin: %d %s, the zone holding %q", status, body, world.held(t, ctx))
 		}
+		model.SetApprovalGateStates(nil)
+		if status, body := world.post(t, 1, decision, approvalId, action, nil); status != http.StatusOK || body != first {
+			t.Fatalf("committed retry while policy reloads: %d %s", status, body)
+		}
+		freshId := sidecar.NewId()
+		fresh := world.decision(t, late, freshId, 1, world.clock.Now().Add(time.Hour))
+		if status, _ := world.post(t, 1, fresh, freshId, late, nil); status != http.StatusServiceUnavailable {
+			t.Fatalf("first spend while policy reloads: %d", status)
+		}
 	})
 }
 

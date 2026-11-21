@@ -591,7 +591,8 @@ func TestApprovalUseSweepAndUnavailable(t *testing.T) {
 		}
 		newAction := testApprovalDnsAction(t, "192.0.2.61", false)
 		newId := sidecar.NewId()
-		if _, err := world.consume(ctx, world.request(world.decision(t, newAction, newId, 1, now.Add(3*24*time.Hour), world.phone), newId, newAction, nil), now, effect.apply); err != nil {
+		committed := world.request(world.decision(t, newAction, newId, 1, now.Add(3*24*time.Hour), world.phone), newId, newAction, nil)
+		if _, err := world.consume(ctx, committed, now, effect.apply); err != nil {
 			t.Fatal(err)
 		}
 		removed := RemoveExpiredApprovalUses(ctx, now.Add(2*24*time.Hour).Add(-DefaultApprovalUseSettings().Retention))
@@ -600,26 +601,64 @@ func TestApprovalUseSweepAndUnavailable(t *testing.T) {
 		}
 
 		SetApprovalGateStates(nil)
+		var outcome *ApprovalUseOutcome
 		var err error
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, err = ConsumeApprovalUseInTx(ctx, tx, world.request(world.decision(t, newAction, newId, 1, now.Add(time.Hour), world.phone), newId, newAction, nil), now, effect.apply)
+			outcome, err = ConsumeApprovalUseInTx(ctx, tx, committed, now.Add(4*24*time.Hour), effect.apply)
 		})
+		if err != nil || outcome == nil || !outcome.Replayed || string(outcome.Result) != "effect 2 of use 0" {
+			t.Fatalf("the committed request with no projection: %+v %v", outcome, err)
+		}
 		approvalErr := &ApprovalUseError{}
+		for _, change := range []func(*ApprovalUseRequest){
+			func(request *ApprovalUseRequest) { request.SpenderSidecarId = server.Id(world.stranger.sidecarId) },
+			func(request *ApprovalUseRequest) {
+				request.Decisions = [][]byte{world.decision(t, newAction, newId, 1, now.Add(time.Hour), world.phone)}
+			},
+			func(request *ApprovalUseRequest) {
+				fields := *request.Fields
+				fields.DnsValue = "192.0.2.62"
+				request.Fields = &fields
+			},
+		} {
+			changed := *committed
+			change(&changed)
+			server.Tx(ctx, func(tx server.PgTx) { outcome, err = ConsumeApprovalUseInTx(ctx, tx, &changed, now, effect.apply) })
+			if outcome != nil || !errors.As(err, &approvalErr) || approvalErr.Status != http.StatusForbidden {
+				t.Fatalf("a different request read the committed result: %+v %v", outcome, err)
+			}
+		}
+		freshId := sidecar.NewId()
+		fresh := world.request(world.decision(t, newAction, freshId, 1, now.Add(time.Hour), world.phone), freshId, newAction, nil)
+		server.Tx(ctx, func(tx server.PgTx) { _, err = ConsumeApprovalUseInTx(ctx, tx, fresh, now, effect.apply) })
 		if !errors.As(err, &approvalErr) || approvalErr.Status != http.StatusServiceUnavailable {
 			t.Errorf("the gate with no states: %v", err)
 		}
 		if _, err := CancelApprovalUses(ctx, world.networkId, []byte{1}, []byte{1}, now, nil); !errors.As(err, &approvalErr) || approvalErr.Status != http.StatusServiceUnavailable {
 			t.Errorf("the cancel with no states: %v", err)
 		}
+		// Existing rows predate request authenticators. They need the historical spend check.
+		server.Tx(ctx, func(tx server.PgTx) {
+			_, err = tx.Exec(ctx, "UPDATE approval_use SET result = $1 WHERE approval_id = $2", []byte("legacy"), server.Id(newId))
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			outcome, err = ConsumeApprovalUseInTx(ctx, tx, committed, now, effect.apply)
+		})
+		if outcome != nil || !errors.As(err, &approvalErr) || approvalErr.Status != http.StatusServiceUnavailable {
+			t.Fatalf("unauthenticated legacy result: %+v %v", outcome, err)
+		}
 		SetApprovalGateStates(func(ctx context.Context, networkId server.Id) (sidecar.SpendState, error) {
 			return world.state, nil
 		})
 		defer SetApprovalGateStates(nil)
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, err = ConsumeApprovalUseInTx(ctx, tx, world.request(world.decision(t, newAction, newId, 1, now.Add(time.Hour), world.phone), newId, newAction, nil), now, effect.apply)
+			outcome, err = ConsumeApprovalUseInTx(ctx, tx, committed, now.Add(4*24*time.Hour), effect.apply)
 		})
-		if err != nil {
-			t.Errorf("the gate with states installed, a replay: %v", err)
+		if err != nil || outcome == nil || !outcome.Replayed || string(outcome.Result) != "legacy" || effect.count.Load() != 2 {
+			t.Errorf("legacy replay with its gate states: %+v %v, effects %d", outcome, err, effect.count.Load())
 		}
 	})
 }

@@ -38,13 +38,15 @@ package model
 //
 // The gate judges on the network's verified state as a gate holds it, which the
 // api process installs with SetApprovalGateStates (ACL-M2-13's AclGateCache, C-09,
-// through ApprovalGateStatesOf). Until it does, and until the binary links MG5,
-// which registers at M5's Gn-out (plan-MCP-fs25-gate-before-dns), every call
-// answers unavailable and spends nothing.
+// through ApprovalGateStatesOf). New spends and cancels require a loaded gate.
+// MG5 must be linked for every operation, including reading a committed use.
 
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -136,6 +138,9 @@ type ApprovalUseRequest struct {
 	// What the gate's own request shows: host, port, audience, expiry, name and
 	// rdata.
 	Fields *sidecar.SpendGateFields
+	// DNS's zone precondition and configured root are part of the request whose result a retry reads.
+	DnsRoot          string
+	DnsExpectVersion *uint64
 }
 
 // What the gate answered.
@@ -159,7 +164,7 @@ type ApprovalGateStates func(ctx context.Context, networkId server.Id) (sidecar.
 var approvalGateStates atomic.Pointer[ApprovalGateStates]
 
 // Installs where this process's gates read each network's verified state; nil
-// removes it, and every gate and cancel answers unavailable.
+// removes it, and new spends and cancels answer unavailable.
 func SetApprovalGateStates(states ApprovalGateStates) {
 	if states == nil {
 		approvalGateStates.Store(nil)
@@ -206,11 +211,10 @@ func ConsumeApprovalUseInTx(ctx context.Context, tx server.PgTx, request *Approv
 	if request == nil {
 		return nil, approvalUseInvalid(errors.New("no request"))
 	}
-	state, err := approvalGateState(ctx, request.NetworkId)
-	if err != nil {
-		return nil, err
+	if !server.SidecarMg5Linked() {
+		return nil, approvalUseUnavailable(errors.New(approvalUseUnavailableMessage))
 	}
-	return consumeApprovalUseInTx(ctx, tx, request, state, now, apply)
+	return consumeApprovalUseInTx(ctx, tx, request, nil, now, apply)
 }
 
 // What a request parses to.
@@ -282,21 +286,114 @@ func approvalGateSpend(parsed *approvalUseParsed, request *ApprovalUseRequest, s
 	return sidecar.SpendableSet(parsed.decisions, input, state, settings)
 }
 
-// ConsumeApprovalUseInTx on state: what a test drives with a fixture's state.
+// A done result authenticates the wire decisions and the route's independently authenticated caller and fields.
+// The gate keeps only the result with its authenticator. Neither decisions nor DNS data are copied into the row.
+const approvalUseReceiptV1 = "\x00ur-approval-result-v1\x00"
+
+// Key for a result's authenticator. The sequence is the v1 format; each decision includes its signature.
+func approvalUseReceiptKey(request *ApprovalUseRequest) ([]byte, error) {
+	fields := request.Fields
+	hash := sha256.New()
+	err := json.NewEncoder(hash).Encode([]any{approvalUseReceiptV1, request.NetworkId, request.SpenderSidecarId,
+		request.Decisions, request.Action, request.Template, request.EffectKey, fields.Kind, fields.Host, fields.Port,
+		fields.Audience, fields.ExpiresMillis, fields.DnsName, fields.DnsType, fields.DnsValue, fields.DnsTtl,
+		request.DnsRoot, request.DnsExpectVersion})
+	return hash.Sum(nil), err
+}
+
+// The authenticator of committed result bytes, under the request the gate originally verified.
+func approvalUseResultTag(key []byte, result []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write(result)
+	return mac.Sum(nil)
+}
+
+// DNS is v0's only production effect. Its receipt is also a valid DNS answer so a rolling older
+// gate, which returns the stored bytes directly, returns exactly the first response to the client.
+type approvalUseDnsReceipt struct {
+	sidecar.DnsRecordsAnswer
+	Receipt []byte `json:"approval_receipt_v1"`
+}
+
+func storeApprovalUseResult(request *ApprovalUseRequest, key []byte, result []byte) (stored []byte, answer []byte, err error) {
+	if request.DnsRoot != "" {
+		var dns approvalUseDnsReceipt
+		if err := json.Unmarshal(result, &dns.DnsRecordsAnswer); err != nil {
+			return nil, nil, err
+		}
+		body, err := json.Marshal(dns.DnsRecordsAnswer)
+		if err != nil {
+			return nil, nil, err
+		}
+		dns.Receipt = approvalUseResultTag(key, body)
+		stored, err = json.Marshal(dns)
+		return stored, stored, err
+	}
+	// Other callers can have an opaque (non-JSON) result.
+	stored = bytes.Join([][]byte{[]byte(approvalUseReceiptV1), approvalUseResultTag(key, result), result}, nil)
+	return stored, result, nil
+}
+
+// Reads a committed use first. Only a first spend or a legacy result needs the current projection.
 func consumeApprovalUseInTx(ctx context.Context, tx server.PgTx, request *ApprovalUseRequest, state sidecar.SpendState, now time.Time, apply ApprovalUseEffect) (*ApprovalUseOutcome, error) {
 	parsed, err := parseApprovalUseRequest(request)
 	if err != nil {
 		return nil, err
 	}
 	approvalId := server.Id(parsed.approvalId)
+	if err := sidecar.CheckSpendGateFields(parsed.use, request.Fields); err != nil {
+		return nil, approvalUseRefused(err)
+	}
+	receiptKey, err := approvalUseReceiptKey(request)
+	if err != nil {
+		return nil, err
+	}
+	spend := func(at time.Time) (*sidecar.SpendBudget, error) {
+		if state == nil {
+			var err error
+			state, err = approvalGateState(ctx, request.NetworkId)
+			if err != nil {
+				return nil, err
+			}
+		}
+		budget, err := approvalGateSpend(parsed, request, state, at)
+		if err != nil {
+			return nil, approvalUseRefused(err)
+		}
+		return budget, nil
+	}
+	lookup := func() (*ApprovalUseOutcome, bool, error) {
+		outcome, at, found, err := selectApprovalUseInTx(ctx, tx, request.NetworkId, approvalId, request.EffectKey)
+		if err != nil || !found {
+			return outcome, found, err
+		}
+		if stored, ok := bytes.CutPrefix(outcome.Result, []byte(approvalUseReceiptV1)); ok {
+			if len(stored) < sha256.Size || !hmac.Equal(stored[:sha256.Size], approvalUseResultTag(receiptKey, stored[sha256.Size:])) {
+				return nil, true, approvalUseRefused(errors.New("the request differs from the committed use"))
+			}
+			outcome.Result = stored[sha256.Size:]
+		} else {
+			var dns approvalUseDnsReceipt
+			if json.Unmarshal(outcome.Result, &dns) == nil && dns.Receipt != nil {
+				body, err := json.Marshal(dns.DnsRecordsAnswer)
+				if err != nil || !hmac.Equal(dns.Receipt, approvalUseResultTag(receiptKey, body)) {
+					return nil, true, approvalUseRefused(errors.New("the request differs from the committed use"))
+				}
+			} else if _, err := spend(at); err != nil {
+				// Earlier releases kept only the raw result. Verify the spend at its commit time before disclosing it.
+				return nil, true, err
+			}
+		}
+		return outcome, true, nil
+	}
 
-	// 1: a use committed under this effect key answers, with no check and no write
-	if outcome, found, err := selectApprovalUseInTx(ctx, tx, request.NetworkId, approvalId, request.EffectKey); err != nil || found {
+	// 1: an authenticated retry returns its committed result before reading current state.
+	if outcome, found, err := lookup(); err != nil || found {
 		return outcome, err
 	}
-	budget, err := approvalGateSpend(parsed, request, state, now)
+	budget, err := spend(now)
 	if err != nil {
-		return nil, approvalUseRefused(err)
+		return nil, err
 	}
 	// 2: the first free use this request inserts is its own; a use another request
 	// takes after this read is its insert's conflict, which skips to the next
@@ -344,7 +441,7 @@ func consumeApprovalUseInTx(ctx context.Context, tx server.PgTx, request *Approv
 	}
 	if useIndex < 0 {
 		// none left: a racer that committed this effect key answers, else spent
-		if outcome, found, err := selectApprovalUseInTx(ctx, tx, request.NetworkId, approvalId, request.EffectKey); err != nil || found {
+		if outcome, found, err := lookup(); err != nil || found {
 			return outcome, err
 		}
 		return nil, &ApprovalUseError{Status: http.StatusConflict, Code: "spent", Err: ErrApprovalUseSpent}
@@ -358,6 +455,10 @@ func consumeApprovalUseInTx(ctx context.Context, tx server.PgTx, request *Approv
 	if result == nil {
 		result = []byte{}
 	}
+	stored, answer, err := storeApprovalUseResult(request, receiptKey, result)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(
 		ctx,
 		`
@@ -367,21 +468,22 @@ func consumeApprovalUseInTx(ctx context.Context, tx server.PgTx, request *Approv
 		`,
 		approvalId,
 		useIndex,
-		result,
+		stored,
 	); err != nil {
 		return nil, err
 	}
-	return &ApprovalUseOutcome{ApprovalId: approvalId, UseIndex: useIndex, Result: result}, nil
+	return &ApprovalUseOutcome{ApprovalId: approvalId, UseIndex: useIndex, Result: answer}, nil
 }
 
 // The done use committed under effectKey, replayed, and false for none.
-func selectApprovalUseInTx(ctx context.Context, tx server.PgTx, networkId server.Id, approvalId server.Id, effectKey []byte) (*ApprovalUseOutcome, bool, error) {
+func selectApprovalUseInTx(ctx context.Context, tx server.PgTx, networkId server.Id, approvalId server.Id, effectKey []byte) (*ApprovalUseOutcome, time.Time, bool, error) {
 	var useIndex int
 	var result []byte
+	var created time.Time
 	err := tx.QueryRow(
 		ctx,
 		`
-			SELECT use_index, result
+			SELECT use_index, result, create_time
 			FROM approval_use
 			WHERE approval_id = $1 AND effect_key = $2 AND network_id = $3 AND state = $4
 		`,
@@ -389,17 +491,17 @@ func selectApprovalUseInTx(ctx context.Context, tx server.PgTx, networkId server
 		effectKey,
 		networkId,
 		approvalUseStateDone,
-	).Scan(&useIndex, &result)
+	).Scan(&useIndex, &result, &created)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
+		return nil, created, false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, created, false, err
 	}
 	if result == nil {
 		result = []byte{}
 	}
-	return &ApprovalUseOutcome{ApprovalId: approvalId, UseIndex: useIndex, Result: result, Replayed: true}, true, nil
+	return &ApprovalUseOutcome{ApprovalId: approvalId, UseIndex: useIndex, Result: result, Replayed: true}, created, true, nil
 }
 
 // The use indexes rows hold for the approval, done and cancelled.

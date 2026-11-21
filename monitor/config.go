@@ -1741,6 +1741,8 @@ func loadSidecarStorageSettings(fileClusters *fileClustersMonitorYaml, sidecarDu
 // this monitor reads, named as slo_table.go names it, joining as the service does.
 type sidecarServicesMonitorYaml struct {
 	Services []string `yaml:"services"`
+	// Two routes to the same published origin, used exclusively by the recurring TLS SLO observation.
+	WarmTls *SloWarmTlsSettings `yaml:"warm_tls"`
 }
 
 // §30's settings from the block: nil without one, so its signals report themselves configured off; with a
@@ -1750,6 +1752,14 @@ func loadSidecarSloSettings(block *sidecarServicesMonitorYaml) *SidecarSloSettin
 		return nil
 	}
 	settings := DefaultSidecarSloSettings()
+	if block.WarmTls != nil {
+		probe := *block.WarmTls
+		if !probe.valid() {
+			settings.ConfigError = "sidecar_services.warm_tls needs a server_name and two distinct IP:port endpoints"
+			return settings
+		}
+		settings.WarmTls = &probe
+	}
 	seen := map[string]bool{}
 	for _, service := range block.Services {
 		if _, ok := sloRowOf(service); !ok {

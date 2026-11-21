@@ -10,6 +10,7 @@ package model
 // Testing_SetDnsLimits); the decisions are real, signed by approval_use_model_test.go's fixture devices.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -636,12 +637,24 @@ func TestDnsRecordsDecisionRetryAnswersTheStoredBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 		serial := world.serial(t, ctx)
+		var stored []byte
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, "SELECT result FROM approval_use WHERE approval_id = $1", server.Id(approvalId)).Scan(&stored))
+		})
+		var legacyReader sidecar.DnsRecordsAnswer
+		if !bytes.Equal(stored, first) || json.Unmarshal(stored, &legacyReader) != nil || legacyReader.Version == 0 {
+			t.Fatalf("older gate's stored response %q differs from the client's %q", stored, first)
+		}
+		SetApprovalGateStates(nil)
 		retry, err := world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", &read, now.Add(2*time.Hour))
 		if err != nil || string(retry) != string(first) {
 			t.Fatalf("the retry: %q %v, want %q", retry, err, first)
 		}
 		if world.serial(t, ctx) != serial {
 			t.Fatalf("the retry wrote")
+		}
+		if _, err = world.decisionWrite(ctx, approvalId, decision, use, nil, "11.22.33.30", nil, now); testDnsApiError(t, err).Status != http.StatusForbidden {
+			t.Fatalf("a different zone precondition read the result: %v", err)
 		}
 	})
 }
