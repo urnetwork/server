@@ -9,7 +9,8 @@ package model
 //  1. a host, from a reported url or a bare name, or a mail address, through
 //     §12's label map (ResolveNetworkLabel): shop.<label>.<root> names
 //     <label>'s network, by its label or an alias, a retiring one included, and
-//     a burner address names its <net> (sidecar.ParseMailRecipient);
+//     an active custom web host names its mapped owner, and a burner address
+//     names its <net> (sidecar.ParseMailRecipient);
 //  2. a header block, by §14.8's header-only parse
 //     (smtpedgeservice.ParseHeaderBlock): until SMTP-M9-15's attribution reads
 //     send records, the block joins only by a DKIM d= or From domain under a
@@ -288,6 +289,38 @@ func abuseJoinName(ctx context.Context, name string, settings *AbuseSettings) (*
 	return join, nil
 }
 
+// Reported URLs may also name an active custom web host. Retain the reported
+// hostname as the join key, and target the canonical owner the TLS and DNS
+// gates enforce. A pending, withheld or strict-MX mapping serves no web URL.
+func abuseJoinURLHost(ctx context.Context, name string, settings *AbuseSettings) (*AbuseReportJoin, error) {
+	if _, _, _, underRoot := abuseNameUnderRoot(name, settings.RootNames); underRoot {
+		return abuseJoinName(ctx, name, settings)
+	}
+	if !dnsCustomHostLinked() {
+		return nil, nil
+	}
+	var mapped *DnsCustomHostRow
+	server.Db(ctx, func(conn server.PgConn) {
+		rows := getDnsCustomHostRowsInTx(ctx, conn, `host = $1 AND state = $2`, name, sidecar.DnsCustomHostStateActive)
+		if len(rows) == 1 && !rows[0].StrictMx() {
+			mapped = rows[0]
+		}
+	})
+	if mapped == nil {
+		return nil, nil
+	}
+	root, label, owner, ok := abuseNameUnderRoot(mapped.Owner, settings.RootNames)
+	if !ok || root != mapped.Root || owner == "" {
+		return nil, nil
+	}
+	return &AbuseReportJoin{
+		NetworkId: mapped.NetworkId,
+		JoinKey:   name,
+		LabelName: label + "." + root,
+		Target:    AbuseTarget{Kind: AbuseTargetKindHost, Name: mapped.Owner},
+	}, nil
+}
+
 // §14.8's parse bounds for a header block the form takes, under root. The
 // parse reads the root only to know a setting is whole.
 func abuseHeaderParseSettings(root string) *smtpedgeservice.SmtpEdgeSettings {
@@ -328,7 +361,7 @@ func JoinAbuseReport(ctx context.Context, report *AbuseReport, now time.Time, se
 
 	// 1. a host, then an address
 	if host := abuseReportUrlHost(report.Url, settings); host != "" {
-		join, err := abuseJoinName(ctx, host, settings)
+		join, err := abuseJoinURLHost(ctx, host, settings)
 		if err != nil {
 			return nil, err
 		}
