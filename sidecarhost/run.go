@@ -31,6 +31,7 @@ import (
 	"go/token"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -57,6 +58,9 @@ var runServicePattern = regexp.MustCompile(`^[a-z0-9]+$`)
 type RunListener struct {
 	// The block's port for it, mapped to the host's as warp maps its ports.
 	Port int
+	// Exact allocated host sockets when Warp supplies separate public address families.
+	// Empty uses the block's usual listener.
+	Addresses []netip.AddrPort
 	// Wraps the bound listener before the engine serves it, as TLS-M5-07's NewProxyHeaderListener does
 	// for a port behind the lb's PROXY header, so this package imports no engine. nil serves it as bound.
 	Wrap func(listener net.Listener) (net.Listener, error)
@@ -118,6 +122,8 @@ type RunOptions struct {
 	Metrics sidecar.Metrics
 	// The block's /status latch. nil: one of Run's own, pending until readiness latches.
 	WarpStatus *router.WarpStatusState
+	// Optional process-owned evidence on the same response as the block's readiness and version.
+	StatusHeaders func(http.Header, *http.Request)
 	// The clock readiness waits on. nil: real time.
 	Clock sidecar.Clock
 	// nil: the defaults.
@@ -277,19 +283,35 @@ func (self *runDependencies) readiness(ctx context.Context, options *RunOptions,
 		}
 	}()
 	for _, runListener := range options.Listeners {
-		listener, err := self.listen(ctx, runListener.Port)
-		if err != nil {
-			return listeners, fmt.Errorf("port %d: %w", runListener.Port, err)
-		}
-		if runListener.Wrap != nil {
-			wrapped, err := runListener.Wrap(listener)
+		first := len(listeners)
+		if len(runListener.Addresses) == 0 {
+			listener, err := self.listen(ctx, runListener.Port)
 			if err != nil {
-				listener.Close()
 				return listeners, fmt.Errorf("port %d: %w", runListener.Port, err)
 			}
-			listener = wrapped
+			listeners = append(listeners, listener)
 		}
-		listeners = append(listeners, listener)
+		for _, address := range runListener.Addresses {
+			var listenConfig net.ListenConfig
+			network := "tcp6"
+			if address.Addr().Is4() {
+				network = "tcp4"
+			}
+			listener, err := listenConfig.Listen(ctx, network, address.String())
+			if err != nil {
+				return listeners, fmt.Errorf("%s port %d: %w", network, runListener.Port, err)
+			}
+			listeners = append(listeners, listener)
+		}
+		if runListener.Wrap != nil {
+			for index := first; index < len(listeners); index++ {
+				wrapped, err := runListener.Wrap(listeners[index])
+				if err != nil {
+					return listeners, fmt.Errorf("port %d: %w", runListener.Port, err)
+				}
+				listeners[index] = wrapped
+			}
+		}
 	}
 	return listeners, nil
 }
@@ -341,7 +363,12 @@ func run(ctx context.Context, options *RunOptions, deps *runDependencies) error 
 	// the engine's routes answer once readiness latches, and not after the drain begins to matter:
 	// the HTTP server's own drain ends them
 	var admitted atomic.Bool
-	routes := []*router.Route{router.NewRoute("GET", "/status", status.Handler)}
+	routes := []*router.Route{router.NewRoute("GET", "/status", func(w http.ResponseWriter, r *http.Request) {
+		if options.StatusHeaders != nil {
+			options.StatusHeaders(w.Header(), r)
+		}
+		status.Handler(w, r)
+	})}
 	if options.Http != nil {
 		engineHandler := newRouteMetrics(metrics, options.Service, clock).wrap(options.Http.Handler())
 		notReadySeconds := strconv.Itoa(max(int(settings.ReadyPollInterval/time.Second), 1))

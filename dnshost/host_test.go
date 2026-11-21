@@ -3,9 +3,12 @@ package dnshost
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"errors"
 	"maps"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -211,6 +214,34 @@ func TestEdgeHostServesFromItsFeedWithNoPostgres(t *testing.T) {
 	if reply.Rcode != dns.RcodeSuccess || len(reply.Answer) != 1 || reply.Answer[0].(*dns.SOA).Serial != 1 {
 		t.Fatalf("reply %v", reply)
 	}
+	nonce := dnsservice.DnsRolloutNonce{1}
+	request := httptest.NewRequest(http.MethodGet, "/status", nil)
+	request.Header.Set(dnsservice.DnsRolloutProofHeader, hex.EncodeToString(nonce[:])+" "+hostTestRoot)
+	headers := http.Header{}
+	edgeHost.rolloutStatusHeaders(headers, request)
+	if headers.Get(dnsservice.DnsRolloutProofHeader) != "" {
+		t.Fatal("private lookup signed an unserved question")
+	}
+	query.SetQuestion(nonce.Owner(hostTestRoot), dns.TypeA)
+	query.SetEdns0(dns.DefaultMsgSize, true)
+	reply, _, err = client.ExchangeContext(ctx, query, conn.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nsec dns.RR
+	var signature *dns.RRSIG
+	for _, record := range reply.Ns {
+		if record.Header().Rrtype == dns.TypeNSEC {
+			nsec = record
+		}
+		if rrsig, ok := record.(*dns.RRSIG); ok && rrsig.TypeCovered == dns.TypeNSEC {
+			signature = rrsig
+		}
+	}
+	edgeHost.rolloutStatusHeaders(headers, request)
+	if proof := dnsservice.DnsRolloutRecordProof(nsec, signature); proof == "" || headers.Get(dnsservice.DnsRolloutProofHeader) != "1 "+proof {
+		t.Fatal("the private process receipt did not match the signature from the UDP listener")
+	}
 	if count := attempts(); count != 0 {
 		t.Fatalf("the edge tried Postgres %d times", count)
 	}
@@ -415,7 +446,7 @@ func TestEdgeHostRequiresItsUdpListenerBeforeReadiness(t *testing.T) {
 	defer occupied.Close()
 	engine := &hostTestReadyEngine{}
 	options := &sidecarhost.RunOptions{Engine: engine}
-	err = runWithHostUdp(t.Context(), options, occupied.LocalAddr().String(), func(net.PacketConn) error {
+	err = runWithHostUdp(t.Context(), options, []netip.AddrPort{netip.MustParseAddrPort("[::1]:0"), occupied.LocalAddr().(*net.UDPAddr).AddrPort()}, func(net.PacketConn) error {
 		t.Error("started with an occupied UDP port")
 		return nil
 	}, func(_ context.Context, options *sidecarhost.RunOptions) error {
@@ -440,13 +471,19 @@ func (self *hostTestReadyEngine) Drain()      {}
 // A packet loop ending after startup takes down the block, even if its TCP listener remains healthy.
 func TestEdgeHostWithdrawsAfterItsPacketListenerEnds(t *testing.T) {
 	started := make(chan struct{})
+	bound := make(chan netip.Addr, 2)
 	lost := errors.New("synthetic listener loss")
-	err := runWithHostUdp(t.Context(), &sidecarhost.RunOptions{Engine: &hostTestReadyEngine{}}, "127.0.0.1:0", func(net.PacketConn) error {
+	err := runWithHostUdp(t.Context(), &sidecarhost.RunOptions{Engine: &hostTestReadyEngine{}}, []netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:0"), netip.MustParseAddrPort("[::1]:0")}, func(conn net.PacketConn) error {
+		bound <- conn.LocalAddr().(*net.UDPAddr).AddrPort().Addr().Unmap()
 		<-started
 		return lost
 	}, func(ctx context.Context, options *sidecarhost.RunOptions) error {
 		if !options.Engine.Ready() {
 			t.Fatal("bound edge was not ready")
+		}
+		first, second := <-bound, <-bound
+		if first.Is4() == second.Is4() || !first.IsLoopback() || !second.IsLoopback() {
+			t.Errorf("unexpected DNS listeners %v, %v", first, second)
 		}
 		close(started)
 		<-ctx.Done()

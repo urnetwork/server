@@ -10,16 +10,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
 
 	servermonitor "github.com/urnetwork/server/monitor"
-	"github.com/urnetwork/server/router"
 )
 
 // The check behind the command; tests replace it.
@@ -44,7 +40,7 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 		return fmt.Errorf("%s: %s: the monitor's settings did not load: %w", *service, servermonitor.SloBurnUnknown, err)
 	}
 	if *expected != "" {
-		if err := checkDnsEdgeVersion(ctx, *statusURL, *expected); err != nil {
+		if err := checkDnsEdgeServing(ctx, settings.DnsCanary, *statusURL, *expected, false); err != nil {
 			return err
 		}
 	}
@@ -55,7 +51,7 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 	}
 	// A drain or rollback during the canary invalidates its evidence.
 	if *expected != "" && result.State == servermonitor.SloBurnClear {
-		if err := checkDnsEdgeVersion(ctx, *statusURL, *expected); err != nil {
+		if err := checkDnsEdgeServing(ctx, settings.DnsCanary, *statusURL, *expected, true); err != nil {
 			return err
 		}
 	}
@@ -67,34 +63,7 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 		return fmt.Errorf("%s: %s", *service, result.State)
 	}
 	if *expected != "" {
-		fmt.Fprintf(stdout, "dnsedge-1/g1 ready %s dns-canary clear\n", *expected)
-	}
-	return nil
-}
-
-// The direct block port is reachable on the operator's private route to ns1.
-// Reading its process-owned status binds the DNS observations to this release.
-func checkDnsEdgeVersion(ctx context.Context, statusURL, expected string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Cache-Control", "no-cache, no-store")
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("dnsedge-1 readiness: %w", err)
-	}
-	defer response.Body.Close()
-	var status router.WarpStatusResult
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("dnsedge-1 readiness returned HTTP %d", response.StatusCode)
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&status); err != nil {
-		return fmt.Errorf("dnsedge-1 readiness: %w", err)
-	}
-	if status.Service != "dnsedge-1" || status.Block != "g1" || (status.Version == nil || *status.Version != expected) || status.Status != "ok" {
-		return fmt.Errorf("dnsedge-1/g1 is not ready at %s", expected)
+		fmt.Fprintf(stdout, "dnsedge-1/g1 serving %s tcp+udp dns-canary clear\n", *expected)
 	}
 	return nil
 }

@@ -582,9 +582,24 @@ func RunHost(ctx context.Context, role string, settings *HostSettings, deps *Hos
 			Listeners: []*sidecarhost.RunListener{{Port: ports.Dns}},
 		}
 		if edgeHost, ok := engine.(*EdgeHost); ok {
-			ipv4, _, hostPort := server.RequireListenIpPort(ports.Dns)
-			address := net.JoinHostPort(ipv4, strconv.Itoa(hostPort))
-			return runWithHostUdp(ctx, options, address, edgeHost.ServeUdp, sidecarhost.Run)
+			options.StatusHeaders = edgeHost.rolloutStatusHeaders
+			ipv4, ipv6, hostPort := server.RequireListenIpPort(ports.Dns)
+			var addresses []netip.AddrPort
+			for _, ip := range []string{ipv4, ipv6} {
+				if ip == "" {
+					continue
+				}
+				address, err := netip.ParseAddrPort(net.JoinHostPort(ip, strconv.Itoa(hostPort)))
+				if err != nil {
+					edgeHost.Close()
+					return errors.New("invalid allocated DNS listener")
+				}
+				addresses = append(addresses, address)
+			}
+			if ipv6 != "" {
+				options.Listeners[0].Addresses = addresses
+			}
+			return runWithHostUdp(ctx, options, addresses, edgeHost.ServeUdp, sidecarhost.Run)
 		}
 		return sidecarhost.Run(ctx, options)
 	}
@@ -593,30 +608,48 @@ func RunHost(ctx context.Context, role string, settings *HostSettings, deps *Hos
 
 // Bind before the shared host can signal ready. Losing the packet listener ends the block and
 // withdraws its TCP and status listeners as well.
-func runWithHostUdp(ctx context.Context, options *sidecarhost.RunOptions, address string, serve func(net.PacketConn) error, run func(context.Context, *sidecarhost.RunOptions) error) error {
+func runWithHostUdp(ctx context.Context, options *sidecarhost.RunOptions, addresses []netip.AddrPort, serve func(net.PacketConn) error, run func(context.Context, *sidecarhost.RunOptions) error) error {
 	var listenConfig net.ListenConfig
-	conn, err := listenConfig.ListenPacket(ctx, "udp", address)
-	if err != nil {
-		glog.Errorf("[dns]UDP listener unavailable: %v\n", hostErrorWithoutAddress(err))
-		options.Engine.Close()
-		options.Stream = notReadyStreamEngine{}
-		options.Engine = options.Stream
-		return run(ctx, options)
+	var conns []net.PacketConn
+	closeConns := func() {
+		for _, conn := range conns {
+			conn.Close()
+		}
+	}
+	for _, address := range addresses {
+		network := "udp"
+		if address.Addr().Is6() {
+			network = "udp6"
+		} else if len(addresses) > 1 {
+			network = "udp4"
+		}
+		conn, err := listenConfig.ListenPacket(ctx, network, address.String())
+		if err != nil {
+			closeConns()
+			glog.Errorf("[dns]UDP listener unavailable: %v\n", hostErrorWithoutAddress(err))
+			options.Engine.Close()
+			options.Stream = notReadyStreamEngine{}
+			options.Engine = options.Stream
+			options.StatusHeaders = nil
+			return run(ctx, options)
+		}
+		conns = append(conns, conn)
 	}
 	runCtx, cancel := context.WithCancelCause(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		err := serve(conn)
-		if err == nil {
-			err = errors.New("UDP listener stopped")
-		}
-		cancel(fmt.Errorf("dns UDP listener ended: %w", hostErrorWithoutAddress(err)))
-	}()
-	err = run(runCtx, options)
+	var done sync.WaitGroup
+	for _, conn := range conns {
+		done.Go(func() {
+			err := serve(conn)
+			if err == nil {
+				err = errors.New("UDP listener stopped")
+			}
+			cancel(fmt.Errorf("dns UDP listener ended: %w", hostErrorWithoutAddress(err)))
+		})
+	}
+	err := run(runCtx, options)
 	cancel(context.Canceled)
-	conn.Close()
-	<-done
+	closeConns()
+	done.Wait()
 	if ctx.Err() == nil && !errors.Is(context.Cause(runCtx), context.Canceled) {
 		return context.Cause(runCtx)
 	}
