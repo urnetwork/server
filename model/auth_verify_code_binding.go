@@ -145,7 +145,9 @@ func classifyVerifyCode(
 // Whether the user has a live code for userAuth that was sent after clientKey's
 // client network proved the account's password, read in the caller's
 // transaction. A resend from that client keeps the proof, so a person who asks
-// for another code while signing up keeps their password.
+// for another code while signing up keeps their password. So does a code that
+// wrong tries killed (killVerifyCode) before it expired: the person who
+// mistyped it asks for another.
 func liveVerifyCodeProvenInTx(ctx context.Context, tx server.PgTx, userId server.Id, userAuth string, clientKey [32]byte) (proven bool) {
 	result, err := tx.Query(
 		ctx,
@@ -154,11 +156,20 @@ func liveVerifyCodeProvenInTx(ctx context.Context, tx server.PgTx, userId server
 			FROM user_auth_verify
 			WHERE
 				user_id = $1 AND
-				used = false AND
-				now() - INTERVAL '1 seconds' * $2 <= verify_time
+				now() - INTERVAL '1 seconds' * $2 <= verify_time AND
+				(
+					used = false OR
+					EXISTS (
+						SELECT 1 FROM network_user_action_attempt
+						WHERE
+							network_user_action_attempt.user_id = user_auth_verify.user_auth_verify_id AND
+							network_user_action_attempt.action = $3
+					)
+				)
 		`,
 		userId,
 		int(VerifyCodeTimeout/time.Second),
+		AccountActionVerifyCodeKilled,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
