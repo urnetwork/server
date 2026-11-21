@@ -3,10 +3,12 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -167,6 +169,137 @@ func TestIdentityNeverReturnsUserId(t *testing.T) {
 		otherSession, _ := newSidecarBindTestClient(t, ctx, "sidecar-identity-other")
 		if _, err := GetSidecarIdentity(&GetSidecarIdentityArgs{SidecarId: &keys.sidecarId}, otherSession); err == nil || !strings.HasPrefix(err.Error(), "404 ") {
 			t.Fatalf("another network: %v", err)
+		}
+	})
+}
+
+func TestOwnBoundBrowserAdmissionIdentity(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId, ownerId := server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "browser-identity", ownerId)
+		t.Cleanup(server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", networkId)))
+		parent := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: ownerId, NetworkName: "browser-identity"})
+		bind := func(keys *sidecarBindTestKeys, generation int64, ephemeral bool) (*session.ClientSession, []byte) {
+			t.Helper()
+			mint, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{Description: "sidecar", DeviceSpec: "synthetic",
+				AdminRefused: true, StrictExp: true, DeclaresNoEgress: true, Ephemeral: ephemeral}, parent)
+			if err != nil || mint == nil || mint.Error != nil || mint.ByClientJwt == nil {
+				t.Fatalf("mint: %v %+v", err, mint)
+			}
+			jwt, err := session.ParseByJwt(ctx, *mint.ByClientJwt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			device := session.Testing_CreateClientSession(ctx, jwt)
+			binding := keys.bind(t, device, generation)
+			if _, err := SidecarBind(&SidecarBindArgs{Binding: binding}, device); err != nil {
+				t.Fatal(err)
+			}
+			return device, binding
+		}
+		signer, page, burner := newSidecarBindTestKeys(t), newSidecarBindTestKeys(t), newSidecarBindTestKeys(t)
+		consumer, _ := bind(signer, 1, false)
+		_, pageBinding := bind(page, 1, false)
+		_, burnerBinding := bind(burner, 1, true)
+		check := func(who *session.ClientSession, target *sidecarBindTestKeys, mode string, before int64, want []byte) {
+			t.Helper()
+			args := &GetSidecarIdentityArgs{SidecarId: &target.sidecarId, BeforeGeneration: before}
+			if mode != "" {
+				args.BrowserAdmission = &mode
+			}
+			reply, err := GetSidecarIdentity(args, who)
+			if want == nil {
+				if reply != nil || err == nil || !strings.HasPrefix(err.Error(), "404 ") {
+					t.Fatalf("%s before %d: %+v %v", mode, before, reply, err)
+				}
+				return
+			}
+			if err != nil || reply == nil || reply.BrowserAdmission != mode || !bytes.Equal(reply.Binding, want) {
+				t.Fatalf("%s binding: %+v %v", mode, reply, err)
+			}
+			encoded, err := json.Marshal(reply)
+			if err != nil || strings.Contains(string(encoded), ownerId.String()) || (mode == "") != !strings.Contains(string(encoded), "browser_admission") {
+				t.Fatalf("identity response fields: %v %s", err, encoded)
+			}
+		}
+		check(consumer, page, "page", 0, pageBinding)
+		check(consumer, burner, "burner", 0, burnerBinding)
+		check(consumer, page, "burner", 0, nil)
+		check(consumer, burner, "page", 0, nil)
+		check(consumer, page, "page", 1, nil)
+		check(consumer, page, "unknown", 0, nil)
+		check(parent, page, "page", 0, nil)
+		other, _ := newSidecarBindTestClient(t, ctx, "browser-other-member")
+		check(other, page, "page", 0, nil)
+		check(consumer, page, "", 0, pageBinding)
+		current, _ := bind(signer, 2, false)
+		check(consumer, page, "page", 0, nil)
+		check(current, page, "page", 0, pageBinding)
+	})
+}
+
+func TestTeamEnrollmentCarriesItsCurrentMembershipIntoBrowserApproval(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		f := newEnrollFixture(t, true)
+		creatorId := server.NewId()
+		model.Testing_CreateNetwork(f.ctx, server.NewId(), "browser-team-member", creatorId)
+		var member *model.NetworkMember
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(f.ctx, `INSERT INTO network_team(network_id) VALUES($1)`, f.networkId))
+			var err error
+			member, err = model.AddNetworkMemberInTx(f.ctx, tx, &model.AddNetworkMemberArgs{NetworkId: f.networkId, UserId: creatorId, Role: model.NetworkMemberRoleAdmin})
+			server.Raise(err)
+		})
+		signIn := model.ResolveNetworkSignIn(f.ctx, creatorId, f.networkId, server.NowUtc())
+		if signIn == nil || signIn.MemberId == nil || *signIn.MemberId != member.MemberId {
+			t.Fatal("team member missing")
+		}
+		f.root = session.Testing_CreateClientSession(f.ctx, model.NewNetworkSignInByJwt(signIn, false))
+		bearer, _ := f.authKey(t, &model.CreateAuthKeyArgs{})
+		enrolled, err := f.enroll(&model.NetworkEnrollArgs{AuthKey: bearer, DeviceSpec: "native member device", ClientPublicKey: newEnrollClientKey(t), DeclaresNoEgress: true})
+		if err != nil || enrolled == nil {
+			t.Fatalf("enroll: %v", err)
+		}
+		jwt, err := session.ParseByJwt(f.ctx, enrolled.ByClientJwt)
+		if err != nil || jwt.MemberId == nil || *jwt.MemberId != member.MemberId {
+			t.Fatalf("team device membership: %v", err)
+		}
+		row := readEnrollOwnerRow(t, f.ctx, enrolled.ClientId)
+		if row == nil || row.memberId == nil || *row.memberId != member.MemberId || row.ownerUserId == nil || *row.ownerUserId != creatorId {
+			t.Fatalf("team enrollment owner: %+v", row)
+		}
+		signer := session.Testing_CreateClientSession(f.ctx, jwt)
+		keys := newSidecarBindTestKeys(t)
+		if _, err := SidecarBind(&SidecarBindArgs{Binding: keys.bind(t, signer, 1)}, signer); err != nil {
+			t.Fatal(err)
+		}
+		mint, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{DeviceSpec: "browser", Description: "browser", AdminRefused: true, StrictExp: true, DeclaresNoEgress: true}, f.root)
+		if err != nil || mint == nil || mint.ByClientJwt == nil {
+			t.Fatalf("page mint: %v %+v", err, mint)
+		}
+		jwt, err = session.ParseByJwt(f.ctx, *mint.ByClientJwt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := session.Testing_CreateClientSession(f.ctx, jwt)
+		candidate := newSidecarBindTestKeys(t)
+		if _, err := SidecarBind(&SidecarBindArgs{Binding: candidate.bind(t, page, 1)}, page); err != nil {
+			t.Fatal(err)
+		}
+		mode := "page"
+		lookup := &GetSidecarIdentityArgs{SidecarId: &candidate.sidecarId, BrowserAdmission: &mode}
+		if reply, err := GetSidecarIdentity(lookup, signer); err != nil || reply == nil || reply.BrowserAdmission != "page" {
+			t.Fatalf("eligible team page: %v %+v", err, reply)
+		}
+		// A returning user has a new member_id. The old signer and old page still name the prior membership.
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM network_member WHERE member_id=$1`, member.MemberId))
+			_, err := model.AddNetworkMemberInTx(f.ctx, tx, &model.AddNetworkMemberArgs{NetworkId: f.networkId, UserId: creatorId, Role: model.NetworkMemberRoleAdmin})
+			server.Raise(err)
+		})
+		if reply, err := GetSidecarIdentity(lookup, signer); reply != nil || err == nil || !strings.HasPrefix(err.Error(), "404 ") {
+			t.Fatalf("old team membership: %v %+v", err, reply)
 		}
 	})
 }

@@ -914,7 +914,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					if hook := Testing_EnrollBeforeConsume; hook != nil {
 						hook()
 					}
-					authKey, err := ConsumeAuthKeyInTx(clientSession.Ctx, tx, enrollment.bearer)
+					authKey, err := enrollment.consume(clientSession.Ctx, tx, clientSession.ByJwt)
 					if errors.Is(err, ErrAuthKeyRefused) {
 						enrollment.refusal = err
 						authClientResult = &AuthNetworkClientResult{
@@ -1105,6 +1105,14 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					ephemeral:       authClient.Ephemeral,
 					marks:           marks,
 					clientPublicKey: forwardOnlyMintKey(authClient, parentMarks),
+				}
+				// Keep the authenticated membership on marked, directly minted devices too. In a team a
+				// removed and rejoined member has a different member_id despite retaining the same user_id.
+				if marks.adminRefused && marks.strictExp && !marks.forwardOnly {
+					ownerRow.memberId = clientSession.ByJwt.MemberId
+					if ownerRow.memberId == nil {
+						ownerRow.memberId = &ownerUserId
+					}
 				}
 			}
 			closeCapability := ""
