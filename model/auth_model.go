@@ -21,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 
 	"github.com/gagliardetto/solana-go"
@@ -1987,6 +1988,8 @@ func AuthPasswordSet(
 			`,
 			userId, cutoff,
 		))
+		// and it ends the applications the user approved
+		oauth.RevokeUserGrantsInTx(clientSession.Ctx, tx, userId, cutoff)
 
 		// the password-changed notice commits with the change
 		addPasswordSetNoticeInTx(clientSession.Ctx, tx, networkId, *userAuthResetId)

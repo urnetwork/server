@@ -31,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 )
 
@@ -199,10 +200,10 @@ func retirePasswordInTx(ctx context.Context, tx server.PgTx, userId server.Id, u
 // The account holds no address by a proof (decideAuthVerify), so nothing it
 // has was set up by the address's owner. Every credential created before the
 // returned cutoff is refused, as after a password reset; the account's sign-in
-// codes and API keys end; and every other sign-in method (an unverified email
-// or phone, a wallet, a seed phrase) is removed. The caller retires the
-// address's password and marks it verified. The account's admin is owed the
-// API key and sign-in notices, as for any such change.
+// codes, API keys and OAuth grants end; and every other sign-in method (an
+// unverified email or phone, a wallet, a seed phrase) is removed. The caller
+// retires the address's password and marks it verified. The account's admin
+// is owed the API key and sign-in notices, as for any such change.
 func takeOverAccountInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -234,6 +235,8 @@ func takeOverAccountInTx(
 		userId,
 		cutoff,
 	))
+	// the applications approved for the account end with its credentials
+	oauth.RevokeUserGrantsInTx(ctx, tx, userId, cutoff)
 
 	// an API key is a credential no rotation ends
 	type deletedApiKey struct {

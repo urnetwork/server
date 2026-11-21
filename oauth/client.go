@@ -607,41 +607,59 @@ func GetConsent(ctx context.Context, userId server.Id, clientId string) *Consent
 // Records approval, unioning with anything already approved so a narrower
 // later grant does not silently drop permissions the client still relies on.
 func SaveConsent(ctx context.Context, consent *Consent) {
-	scopes := consent.Scopes
-	if existing := GetConsent(ctx, consent.UserId, consent.ClientId); existing != nil {
-		for _, scope := range existing.Scopes {
-			if !HasScope(scopes, scope) {
-				scopes = append(scopes, scope)
+	server.Tx(ctx, func(tx server.PgTx) {
+		saveConsentInTx(ctx, tx, consent)
+	})
+}
+
+func saveConsentInTx(ctx context.Context, tx server.PgTx, consent *Consent) {
+	scopes := append([]string{}, consent.Scopes...)
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT scope
+		FROM oauth_consent
+		WHERE user_id = $1 AND client_id = $2
+		`,
+		consent.UserId,
+		consent.ClientId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var scope string
+			server.Raise(result.Scan(&scope))
+			for _, existing := range ParseScope(scope) {
+				if !HasScope(scopes, existing) {
+					scopes = append(scopes, existing)
+				}
 			}
 		}
-	}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO oauth_consent (
-				user_id,
-				client_id,
-				network_id,
-				scope,
-				create_time,
-				update_time
-			)
-			VALUES ($1, $2, $3, $4, $5, $5)
-			ON CONFLICT (user_id, client_id) DO UPDATE
-			SET
-				network_id = $3,
-				scope = $4,
-				update_time = $5
-			`,
-			consent.UserId,
-			consent.ClientId,
-			consent.NetworkId,
-			FormatScope(scopes),
-			server.NowUtc(),
-		))
 	})
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO oauth_consent (
+			user_id,
+			client_id,
+			network_id,
+			scope,
+			create_time,
+			update_time
+		)
+		VALUES ($1, $2, $3, $4, $5, $5)
+		ON CONFLICT (user_id, client_id) DO UPDATE
+		SET
+			network_id = $3,
+			scope = $4,
+			update_time = $5
+		`,
+		consent.UserId,
+		consent.ClientId,
+		consent.NetworkId,
+		FormatScope(scopes),
+		server.NowUtc(),
+	))
 }
 
 // Disconnects a client: the remembered consent is dropped and every refresh

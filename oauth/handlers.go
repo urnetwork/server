@@ -83,7 +83,7 @@ func writeGrantError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrUnauthorizedUser):
 		// a declared reason tells the user what to do; any other detail is logged
 		description := ErrUnauthorizedUser.Error()
-		for _, reason := range []error{errUnauthorizedGuestNetwork, errUnauthorizedNoNetwork} {
+		for _, reason := range unauthorizedReasons {
 			if errors.Is(err, reason) {
 				description = reason.Error()
 			}
@@ -358,9 +358,10 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		GuestMode:   byJwt.GuestMode,
 		// the principal identifies the user; roles carry through from the
 		// authorizing session, which for an ordinary login is empty
-		Principal: byJwt.Principal,
-		Roles:     byJwt.Roles,
-		AuthTime:  server.NowUtc(),
+		Principal:      byJwt.Principal,
+		Roles:          byJwt.Roles,
+		AuthTime:       server.NowUtc(),
+		CredentialTime: byJwt.CreateTime,
 	})
 	if err != nil {
 		writeGrantError(w, err)

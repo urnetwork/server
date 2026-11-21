@@ -94,6 +94,7 @@ func runNetworkSignOutAll(
 	fmt.Fprintf(stdout, "  user %s credential_change_time %s -> %s\n", plan.UserId, formatNetworkSignOutTime(result.PreviousCredentialChangeTime), formatNetworkSignOutTime(result.Cutoff))
 	fmt.Fprintf(stdout, "  credential cutoff raised in the network's 64 Redis revocation records\n")
 	fmt.Fprintf(stdout, "  auth codes retired: %d\n", result.RetiredAuthCodeCount)
+	fmt.Fprintf(stdout, "  OAuth applications disconnected: %d\n", result.RevokedOauthGrantCount)
 	if plan.RemoveClients {
 		fmt.Fprintf(stdout, "  clients deactivated: %d\n", result.DeactivatedClientCount)
 	}
@@ -157,6 +158,7 @@ func writeNetworkSignOutPlan(out io.Writer, plan *model.NetworkSignOutPlan) {
 	fmt.Fprintf(out, "  - raises the credential cutoff in the network's 64 Redis revocation records before it commits, as a password reset does\n")
 	fmt.Fprintf(out, "  - journals session operation %s (reset); after the commit it revokes the %d live sessions created before the cutoff, as the session maintenance task would, and deactivates the %d active clients bound to them\n", plan.OperationId, len(plan.Sessions), plan.SessionBoundClientCount())
 	fmt.Fprintf(out, "  - retires the %d active auth codes\n", len(plan.AuthCodeIds))
+	fmt.Fprintf(out, "  - disconnects every OAuth application the user approved: its remembered approval and unexchanged codes are removed and its refresh tokens revoked, so it must be approved again\n")
 	if plan.RemoveClients {
 		fmt.Fprintf(out, "  - deactivates every client active at the commit (now %d, at most %d) as /network/remove-clients does: revocation record tombstones, provide keys removed, connections and contracts closed\n", len(plan.Clients), model.NetworkSignOutMaxRemovedClients)
 	} else {
