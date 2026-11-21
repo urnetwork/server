@@ -3445,45 +3445,58 @@ func confirmProvideMirror(ctx context.Context, clientId server.Id, secretKeys ma
 // list, else from the keys in postgres, which also refill the mirror. A mirror
 // that cannot be decoded is replaced from postgres by the read that finds it.
 func GetProvideModes(ctx context.Context, clientId server.Id) (provideModes map[ProvideMode]bool, returnErr error) {
-	undecodableProvideModesListJson := ""
+	provideModesListJson := ""
 	server.Redis(ctx, func(r server.RedisClient) {
-		provideModesListJson, _ := r.Get(ctx, provideModesKey(clientId)).Result()
-		if provideModesListJson == "" {
-			// not in redis; fall back to the db below
-			return
-		}
-		var provideModesList []ProvideMode
-		err := json.Unmarshal([]byte(provideModesListJson), &provideModesList)
-		if err != nil {
-			undecodableProvideModesListJson = provideModesListJson
-			return
-		}
-		provideModes = map[ProvideMode]bool{}
-		for _, provideMode := range provideModesList {
-			provideModes[provideMode] = true
-		}
+		// a failed read is a missing mirror: the db below answers
+		provideModesListJson, _ = r.Get(ctx, provideModesKey(clientId)).Result()
 	})
-	// An undecodable mirror would stay for its ttl, since the refill never
-	// overwrites a mirror, and every read of it would go to postgres. Drop it
-	// while it still holds the value read, then refill from postgres below.
-	if undecodableProvideModesListJson != "" {
-		dropUndecodableProvideMirror(ctx, clientId, undecodableProvideModesListJson)
+	provideModes = provideModesFromMirror(ctx, clientId, provideModesListJson)
+	return
+}
+
+// The provide modes a mirror holds, and whether it held a decodable list. An
+// empty read holds none.
+func decodeProvideModesMirror(provideModesListJson string) (map[ProvideMode]bool, bool) {
+	if provideModesListJson == "" {
+		return nil, false
+	}
+	var provideModesList []ProvideMode
+	if err := json.Unmarshal([]byte(provideModesListJson), &provideModesList); err != nil {
+		return nil, false
+	}
+	provideModes := map[ProvideMode]bool{}
+	for _, provideMode := range provideModesList {
+		provideModes[provideMode] = true
+	}
+	return provideModes, true
+}
+
+// The provide modes a mirror read returned: the decoded list, or for an
+// empty read or an undecodable list, the keys in postgres, which also refill
+// the mirror. Raises when postgres does.
+func provideModesFromMirror(ctx context.Context, clientId server.Id, provideModesListJson string) map[ProvideMode]bool {
+	if provideModes, ok := decodeProvideModesMirror(provideModesListJson); ok {
+		return provideModes
+	}
+	if provideModesListJson != "" {
+		// An undecodable mirror would stay for its ttl, since the refill never
+		// overwrites a mirror, and every read of it would go to postgres. Drop
+		// it while it still holds the value read, then refill from postgres
+		// below.
+		dropUndecodableProvideMirror(ctx, clientId, provideModesListJson)
 	}
 
 	// the redis mirror carries a ttl (provideMirrorTtl), so this db fallback
 	// is load-bearing for idle clients whose keys expired, not just for
 	// provide_key rows older than the redis layer. It refills the mirror so
 	// only the first read after an expiry reaches postgres.
-	if provideModes == nil && returnErr == nil {
-		secretKeys := loadProvideSecretKeys(ctx, clientId)
-		refillProvideMirror(ctx, clientId, secretKeys)
-		provideModes = map[ProvideMode]bool{}
-		for provideMode := range secretKeys {
-			provideModes[provideMode] = true
-		}
+	secretKeys := loadProvideSecretKeys(ctx, clientId)
+	refillProvideMirror(ctx, clientId, secretKeys)
+	provideModes := map[ProvideMode]bool{}
+	for provideMode := range secretKeys {
+		provideModes[provideMode] = true
 	}
-
-	return
+	return provideModes
 }
 
 func GetProvideSecretKey(

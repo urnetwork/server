@@ -250,6 +250,18 @@ const (
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
 
+// The payload index of one ready batch on a framed writer. It escaped to the
+// heap on every write, passed through the writer's interface: 768 bytes a
+// write, 6% of connect's allocation in a production profile (LBALTOPT2.md
+// §3.5, R23). The framed writer copies each payload into its own scratch and
+// keeps no reference to the index (FramedMessageConn.WriteMessages), so an
+// index returns to the pool, cleared, when its write returns.
+var connectH1FramedPayloadsPool = sync.Pool{
+	New: func() any {
+		return new([connectH1WriteBatchMaxMessageCount][]byte)
+	},
+}
+
 func connectH1WriteBatchCanDrain(messageCount int, messageByteCount int) bool {
 	return messageCount < connectH1WriteBatchMaxMessageCount &&
 		messageByteCount < connectH1WriteBatchDrainByteCount
@@ -396,7 +408,12 @@ func writeConnectH1UserReadyBatch(
 		return open, err
 	}
 	if framed {
-		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+		payloads := connectH1FramedPayloadsPool.Get().(*[connectH1WriteBatchMaxMessageCount][]byte)
+		// runs before the deferred return of the messages it indexes
+		defer func() {
+			clear(payloads[:])
+			connectH1FramedPayloadsPool.Put(payloads)
+		}()
 		n := 0
 		for _, message := range messageStorage[:messageCount] {
 			if len(message) > 16 {
@@ -1095,6 +1112,10 @@ func newConnectHandlerWithPacketConns(
 	// One timer sweep per process: the announcements' and the authorization
 	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
 	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
+	// One batcher per handler: its announcements' sync round reads and stats
+	// writes, verify egress lease refreshes and measurement writes that come
+	// due together share their round trips (LBALTOPT2.md R18).
+	settings.ConnectionAnnounceSettings.batcher = newConnectionAnnounceBatcher(&settings.ConnectionAnnounceSettings.Batch)
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,

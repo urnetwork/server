@@ -124,6 +124,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		// aligned with the `bytesPerSecondCutoff` used by provider ranking
 		SyntheticSpeedBytesPerSecond: 4 * model.Mib,
 		SyntheticSpeedTimeout:        60 * time.Second,
+
+		Batch: *DefaultConnectionAnnounceBatchSettings(),
 	}
 }
 
@@ -172,6 +174,12 @@ type ConnectionAnnounceSettings struct {
 	SyntheticSpeedBytesPerSecond ByteCount
 	SyntheticSpeedTimeout        time.Duration
 
+	// the batcher the handler makes from these settings, which commits the
+	// announcements' sync round reads and stats writes, verify egress lease
+	// refreshes and measurement writes in groups
+	// (transport_announce_batch.go)
+	Batch ConnectionAnnounceBatchSettings
+
 	// LifecycleStarted and LifecycleDone are optional, nonblocking observers
 	// for test fixtures that must join asynchronous connection cleanup. They
 	// are nil in production.
@@ -208,6 +216,9 @@ type ConnectionAnnounceSettings struct {
 	// deadline or at most one sweep tick after it (LBALTOPT2.md §8.1). Nil
 	// gives each of those timers a sweep of its own.
 	timerSweep *timersweep.Sweep
+	// the handler's batcher, made from Batch in NewConnectHandler. Nil, as
+	// for an announcement a test builds, uses the process's default batcher.
+	batcher *connectionAnnounceBatcher
 }
 
 type LatencyTest struct {
@@ -603,7 +614,14 @@ func (self *ConnectionAnnounce) run() {
 		feedFailureCount := 0
 		feed := func() {
 			if feedErr := self.recoverLiveCall(func() {
-				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
+				// The lease refresh goes out with the process's other due
+				// refreshes, in one batch.
+				self.batcher().feedVerifyEgress(self.ctx, model.VerifyConnectionEgressFeed{
+					ClientId:     self.clientId,
+					ConnectionId: connectionId,
+					Ip:           verifyEgressIp,
+					Settings:     verifySettings,
+				})
 			}); feedErr != nil {
 				feedFailureCount += 1
 				defaultLiveFailureLog.record(liveFailureOperationVerifyEgressLease, feedFailureCount, feedErr)
@@ -800,7 +818,8 @@ func (self *ConnectionAnnounce) run() {
 			var changedCount int
 			var currentProvideModes map[model.ProvideMode]bool
 			if readErr := self.recoverLiveCall(func() {
-				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
+				// with the process's other due rounds, in one batch
+				changedCount, currentProvideModes = self.batcher().getProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
 			}); readErr != nil {
 				syncFailureCount += 1
 				defaultLiveFailureLog.record(liveFailureOperationSyncRead, syncFailureCount, readErr)
@@ -909,16 +928,16 @@ func (self *ConnectionAnnounce) run() {
 				// record to redis only (never pg): the per-sync stats of every
 				// connected provider were the single largest statement load on
 				// the database. RollupClientReliabilityStats drains the redis
-				// counters into `client_reliability` per block.
-				model.RecordClientReliabilityStatsRange(
-					self.ctx,
-					self.networkId,
-					self.clientId,
-					clientAddressHash,
-					startTime,
-					nextStartTime,
-					stats,
-				)
+				// counters into `client_reliability` per block. With the
+				// process's other due rounds, in one batch.
+				self.batcher().recordReliabilityStats(self.ctx, model.ClientReliabilityStatsRecord{
+					NetworkId:         self.networkId,
+					ClientId:          self.clientId,
+					ClientAddressHash: clientAddressHash,
+					StatsStartTime:    startTime,
+					StatsEndTime:      nextStartTime,
+					Stats:             *stats,
+				})
 				if recorded := self.settings.reliabilityStatsRecordedForTest; recorded != nil {
 					recorded(self.clientId, *stats)
 				}
@@ -1414,7 +1433,14 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 			}()
 			if pending {
 				if writeErr := self.recoverLiveCall(func() {
-					self.writeMeasurements(measurements)
+					if self.beforeMeasurementWriteForTest != nil {
+						// a test holds this connection's own transaction
+						self.writeMeasurements(measurements)
+					} else {
+						// with the process's other pending snapshots, in one
+						// batch
+						self.batcher().writeMeasurements(self.ctx, measurements)
+					}
 				}); writeErr != nil {
 					writeFailureCount += 1
 					defaultLiveFailureLog.record(liveFailureOperationMeasurementWrite, writeFailureCount, writeErr)
@@ -1444,12 +1470,19 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 // fence makes replay after an ambiguous transaction result idempotent and
 // prevents an older snapshot from regressing either metric independently.
 func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasurements) {
-	server.Tx(self.ctx, func(tx server.PgTx) {
-		if self.beforeMeasurementWriteForTest != nil {
-			self.beforeMeasurementWriteForTest()
+	writeConnectionMeasurements(self.ctx, measurements, self.beforeMeasurementWriteForTest)
+}
+
+// One snapshot's write in its own transaction, writeMeasurements' and a
+// batch's for a snapshot that cannot share its statements. beforeWrite, nil
+// in production, runs inside the transaction before its statements.
+func writeConnectionMeasurements(ctx context.Context, measurements connectionMeasurements, beforeWrite func()) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		if beforeWrite != nil {
+			beforeWrite()
 		}
 		if measurements.latency {
-			server.RaisePgResult(tx.Exec(self.ctx, `
+			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO network_client_latency (connection_id, latency_ms, sample_count)
 				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
@@ -1458,7 +1491,7 @@ func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasure
 			`, measurements.connectionId, measurements.latencyMillis, measurements.latencySampleCount))
 		}
 		if measurements.speed {
-			server.RaisePgResult(tx.Exec(self.ctx, `
+			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count)
 				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
@@ -1467,4 +1500,12 @@ func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasure
 			`, measurements.connectionId, measurements.bytesPerSecond, measurements.speedSampleCount))
 		}
 	})
+}
+
+// The announcement's batcher: its handler's, or the process's default.
+func (self *ConnectionAnnounce) batcher() *connectionAnnounceBatcher {
+	if self.settings.batcher != nil {
+		return self.settings.batcher
+	}
+	return defaultConnectionAnnounceBatcher
 }
