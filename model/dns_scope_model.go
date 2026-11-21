@@ -55,33 +55,18 @@ var dnsScopeLabelSource atomic.Pointer[DnsScopeLabelSource]
 
 // Both the administrative API and the standalone DNS block resolve scopes from verified rows.
 // The first request for a network queues its load and cannot spend an unknown scope's authority.
-func dnsVerifiedScopeConfig(cache *sidecar.AclGateCache, networkId sidecar.Id) *sidecar.ConfigState {
-	if cache == nil {
-		return nil
-	}
-	snapshot, status := cache.State(networkId)
-	if status != sidecar.AclGateLoaded {
-		cache.Changed(networkId)
-		return nil
-	}
-	return snapshot.Config
-}
-
 func DnsScopeLabelSourceOf(cache *sidecar.AclGateCache) DnsScopeLabelSource {
 	return func(ctx context.Context, networkId server.Id) ([]string, bool) {
-		if state := dnsVerifiedScopeConfig(cache, sidecar.Id(networkId)); state != nil {
-			return state.TeamScopeLabels(), true
+		if cache == nil {
+			return nil, false
 		}
-		return nil, false
-	}
-}
-
-func DnsKeyRecordScopeOf(cache *sidecar.AclGateCache) dnsservice.DnsKeyRecordScopeOf {
-	return func(networkId sidecar.Id, label string) (sidecar.AclScope, bool) {
-		if state := dnsVerifiedScopeConfig(cache, networkId); state != nil {
-			return state.TeamScope(label)
+		id := sidecar.Id(networkId)
+		snapshot, status := cache.State(id)
+		if status != sidecar.AclGateLoaded || snapshot == nil || snapshot.Config == nil {
+			cache.Changed(id)
+			return nil, false
 		}
-		return sidecar.AclScope{}, false
+		return snapshot.Config.TeamScopeLabels(), true
 	}
 }
 

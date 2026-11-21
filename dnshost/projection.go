@@ -43,7 +43,7 @@ func installDnsProjection(ctx context.Context, host *sidecar.ServiceHost, settin
 		deps.RecordGate = dnsservice.NewDnsAclRecordGate(view, cache)
 	}
 	if deps.KeyRecordGate == nil {
-		deps.KeyRecordGate = dnsservice.NewDnsAclScopedKeyRecordGate(view, model.DnsKeyRecordScopeOf(cache))
+		deps.KeyRecordGate = dnsservice.NewDnsAclKeyRecordGate(view)
 	}
 	restoreScopes := model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache))
 	restoreApproval := model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
