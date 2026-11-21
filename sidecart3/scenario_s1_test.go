@@ -588,9 +588,97 @@ func TestScenarioS1GenesisOnT3(t *testing.T) {
 			if pin.GetVersion() != bootstrap.Pin.GetVersion() || !bytes.Equal(pin.GetChain(), bootstrap.Pin.GetChain()) {
 				return fmt.Errorf("the invited device stands at %d, not base 1", pin.GetVersion())
 			}
-			return nil
+			return network.approveSignedInPage(ctx, owner.Sidecar(), heads, bootstrap.GenesisChain)
 		}}, nil)
 	})
+}
+
+// The owner who signed Genesis authorizes a page signed in with the owner's one-use code. Every
+// mint, identity binding, lookup and approval statement passes through the API's normal router.
+func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.Sidecar, heads *sidecartest.FakeConfigHeads, genesis [sha256.Size]byte) error {
+	if err := signer.TrustFirstUse(genesis[:]); err != nil {
+		return err
+	}
+	follower, err := signer.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads})
+	if err != nil {
+		return err
+	}
+	client, err := follower.WaitStanding(ctx)
+	if err != nil {
+		return err
+	}
+	memberId := sidecar.Id(self.userId)
+	if !client.Authority().Consented(signer.Identity().SidecarId, memberId) {
+		return errors.New("the enrolling owner has no verified consent")
+	}
+	post := func(path, authorization string, args, result any) error {
+		status, body, err := self.api.Call(ctx, http.MethodPost, path, authorization, args)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("POST %s returned %d", path, status)
+		}
+		return json.Unmarshal(body, result)
+	}
+	code := &model.AuthCodeCreateResult{}
+	if err := post("/auth/code-create", self.root, &model.AuthCodeCreateArgs{Uses: 1, DurationMinutes: 5}, code); err != nil {
+		return err
+	}
+	login := &model.AuthCodeLoginResult{}
+	if err := post("/auth/code-login", "", &model.AuthCodeLoginArgs{AuthCode: code.AuthCode}, login); err != nil {
+		return err
+	}
+	if login.ByJwt == "" {
+		return errors.New("the page did not sign in with its one-use code")
+	}
+	page, err := StartT3Sidecar(ctx, self.run.Net, "member page", self.api, self.exchange, nil)
+	if err != nil {
+		return err
+	}
+	defer page.Close()
+	err = page.EnrollOnline(ctx, &sidecar.SidecarEnrollCredential{MintChild: func(context.Context, []byte) (*sidecar.SidecarAuthClientResult, error) {
+		mint := &model.AuthNetworkClientResult{}
+		if err := post("/network/auth-client", "Bearer "+login.ByJwt, &model.AuthNetworkClientArgs{
+			DeviceSpec: "page", Description: "page", StrictExp: true, AdminRefused: true, DeclaresNoEgress: true,
+		}, mint); err != nil {
+			return nil, err
+		}
+		if mint.ByClientJwt == nil || mint.ClientId == nil || !mint.DeclaresNoEgress {
+			return nil, errors.New("the page did not receive its own limited client")
+		}
+		return &sidecar.SidecarAuthClientResult{ClientId: sidecar.Id(*mint.ClientId), ByClientJwt: *mint.ByClientJwt, AdminRefused: mint.AdminRefused, StrictExp: mint.StrictExp}, nil
+	}})
+	if err != nil {
+		return err
+	}
+	if err := page.Sidecar().TrustFirstUse(genesis[:]); err != nil {
+		return err
+	}
+	safety, err := page.Sidecar().SafetyNumber()
+	if err != nil {
+		return err
+	}
+	id := page.Sidecar().Identity().SidecarId
+	preview, err := signer.PreviewBrowserAdmission(ctx, id, sidecar.BrowserAdmissionTerms{Mode: sidecar.BrowserAdmissionPage})
+	if err != nil {
+		return err
+	}
+	if preview.SafetyNumber != safety || preview.NetworkId != sidecar.Id(self.networkId) || preview.MemberId != memberId || client.Authority().Admission(id) != nil {
+		return errors.New("the preview did not match the unadmitted page and signed-in member")
+	}
+	if err := signer.ConfirmBrowserAdmission(ctx, id, *preview, nil); err != nil {
+		return err
+	}
+	if err := client.CatchUp(ctx); err != nil {
+		return err
+	}
+	row := client.State().SidecarRow(id)
+	if !client.Authority().Consented(id, memberId) || row.GetOwnerConfirmedAt() == 0 || !bytes.Equal(row.GetOwnerConfirmSigner(), signer.Identity().SidecarId.Bytes()) ||
+		row.GetCapabilities() != uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_READ_ONLY) || !bytes.Equal(row.GetIdentityPublicKey(), page.Sidecar().Identity().IdentityPublicKey) {
+		return errors.New("the verified log lacks the page's exact read-only owner confirmation")
+	}
+	return nil
 }
 
 // S1's token clause has teeth: the same enrollment, with the token put where the clause says it must never be, as a
