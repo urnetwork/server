@@ -28,6 +28,7 @@ require (
 	github.com/letsencrypt/pebble/v2 v2.10.3
 	github.com/mailgun/proxyproto v1.0.0
 	github.com/maxmind/mmdbwriter v1.1.0
+	github.com/mholt/acmez/v3 v3.1.7
 	github.com/miekg/dns v1.1.72
 	github.com/minio/minio-go/v7 v7.2.1
 	github.com/modelcontextprotocol/go-sdk v1.7.0
@@ -144,7 +145,6 @@ require (
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mholt/acmez/v3 v3.1.7 // indirect
 	github.com/mimoo/StrobeGo v0.0.0-20220103164710-9a04d6ca976b // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
