@@ -9,15 +9,13 @@ package main
 //	            and refreshed each FactsRefreshInterval while a preamble asked within FactsKeepInterval; past
 //	            FactsMaxCount networks a new one is not loaded
 //	community   Community's tier limits from pro.yml, refreshed with the facts
-//	mail_send   AclGateView over the network's projection: no projection reader is wired into this block yet
-//	            (plan-SOCK-gate-data's route for smtpedge), so every network answers no state, TRY_LATER
+//	mail_send   AclGateView over the network's verified and watched projection
 //	breaker     §21.5's level and listed sending addresses from model.GetMailBreakerState (ABUSE-M9-02), read
 //	            with the facts each FactsRefreshInterval. A read that fails, or rows that do not read whole, leave
 //	            none loaded, TRY_LATER: a state last read a refresh ago is not kept, since the level it lacks could
 //	            be a pause
 //
-// So this gate admits nothing until mail_send's row is wired, the direction R-SMTP-13 wants while D-SMTP-16 has
-// not passed. Safe for concurrent use; no method that SmtpGate names does I/O.
+// Safe for concurrent use. A preamble reads only in-memory decisions.
 
 import (
 	"context"
@@ -138,6 +136,7 @@ type hostGateEntry struct {
 
 // The gate. newHostGate makes one, running until ctx ends.
 type hostGate struct {
+	mail     *sidecar.AclGateView
 	ctx      context.Context
 	source   hostGateSource
 	clock    sidecar.Clock
@@ -223,9 +222,9 @@ func (self *hostGate) load(networkId sidecar.Id, askTime time.Time) {
 	self.networkIdFacts[networkId] = &hostGateEntry{facts: facts, askTime: askTime}
 }
 
-// See smtpedgeservice.SmtpGate: no projection is read into this block yet, so no network's state is loaded.
+// The authenticated stream ticket names the subject of the mail-send grant.
 func (self *hostGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) sidecar.AclDecision {
-	return sidecar.AclDecision{Reason: sidecar.AclReasonNoState}
+	return self.mail.MaySendMail(networkId, sidecar.AclSidecarSubject(sidecarId), now)
 }
 
 // See smtpedgeservice.SmtpGate: §21.5's state as the last refresh read it, a copy, or not loaded.
