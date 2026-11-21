@@ -4,8 +4,9 @@ package sidecart3
 // tier builds it (evs_tier.go), on the world's host on real time, with the seams its main gives it from the block's own
 // process rather than a fault world's: a gate cache of its own over the log server's sequencer writes, the network's
 // newest verified state as AuthState (evsservice.NewAclEvsAuthState with a rev/ reader) and GateViews
-// (evsservice.NewAclGateViews), as evshost's own block builds them (host.go's newBlockEngine), and upload receipt keys
-// the world makes, never vault's. Its instance format reaches it through the block's config standing in for evs.yml,
+// (evsservice.NewAclGateViews), as evshost's own block builds them (host.go's newBlockEngine), its rev/ reader and
+// the world's host's Authenticator verifying under the world's svc- key (HostDeps.ServiceTokens' way), and upload
+// receipt keys the world makes, never vault's. Its instance format reaches it through the block's config standing in for evs.yml,
 // as an operator's does (QD-854). The host's Quota, Push, ClockCheck, Budget, Abuse and Gates are the Net's fakes, as
 // on a T3 Net's evs tier; its gate cache is one more the world's syncs wait on, as api's {acl_}v event moves a block's.
 
@@ -14,13 +15,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server/evshost"
-	"github.com/urnetwork/server/oauth"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // What a world's evs runs with.
@@ -33,6 +35,9 @@ type T3EvsSettings struct {
 	ReceiptKeyAge time.Duration
 	// How long, in real time, the block may take to read ready: 60 s, only a broken start's bound.
 	ReadyTimeout time.Duration
+	// What the origin serves in place of the block's handler, given it: a test's hold on evs's answers, as a slow link
+	// holds a reply that left evs. nil serves the block's handler as it is.
+	Handler func(handler http.Handler) http.Handler
 }
 
 func DefaultT3EvsSettings() *T3EvsSettings {
@@ -68,7 +73,7 @@ func (self *T3World) ServeEvs(ctx context.Context, settings *T3EvsSettings) (ser
 	}()
 	revocationSettings := sidecar.DefaultRevocationSettings()
 	revocationSettings.Clock = self.host.Clock
-	checker := sidecar.NewRevocationChecker(self.host.Blobs, oauth.VerifyRevocation, revocationSettings)
+	checker := sidecar.NewRevocationChecker(self.host.Blobs, sidecarhost.RevocationVerify(self.serviceTokens), revocationSettings)
 	receiptKey := make([]byte, 32)
 	if _, err := rand.Read(receiptKey); err != nil {
 		return nil, err
@@ -107,7 +112,11 @@ func (self *T3World) ServeEvs(ctx context.Context, settings *T3EvsSettings) (ser
 		evsHost.Close()
 		return nil, err
 	}
-	if err := self.api.ServeService("evs", evsHost.Handler()); err != nil {
+	handler := evsHost.Handler()
+	if settings.Handler != nil {
+		handler = settings.Handler(handler)
+	}
+	if err := self.api.ServeService("evs", handler); err != nil {
 		evsHost.Close()
 		return nil, err
 	}

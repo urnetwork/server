@@ -25,12 +25,14 @@
 // Each phase has PhaseTimeout and dumps every burst's progress when it stalls; the case has CaseTimeout. Run it with
 // the private stores through the build's wrapper, -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 //
-// TestT3WorldEvsBurstsShareEachClient fails today, and stays failing until the client is fixed (the e2e conventions):
-// one EvsClient's concurrent reads and writes judge a read's reply against the pin and read records another of its
-// calls moved after the read was asked, so a head evs served at or above the read's own pin is refused as a fork
-// (ErrEvsHeadForked, head_alarm), a path's entry as below what this device read (ErrEvsEntryRefused, a tamper alarm),
-// or a write's head as below the pin (ErrEvsPinLower); and the read records it leaves fail a later listing on the same
-// device with no call beside it. Run one call at a time per client, the same case passes.
+// TestT3WorldEvsBurstsShareEachClient fails today, most runs, and TestT3WorldEvsReadAnsweredBeforeItsOwnWrite every run,
+// and both stay failing until the client is fixed (the e2e conventions): one EvsClient's concurrent reads and writes
+// judge a read's reply against the pin and read records another of its calls moved after the read was asked, so a head
+// evs served at or above the read's own pin is refused as a fork (ErrEvsHeadForked, head_alarm), a path's entry as
+// below what this device read (ErrEvsEntryRefused, a tamper alarm), or a write's head as below the pin
+// (ErrEvsPinLower); and the read records it leaves fail a later listing on the same device with no call beside it.
+// Run one call at a time per client, the burst case passes. The read-answered case fixes the order with a hold at evs's
+// origin (T3EvsSettings.Handler), so it fails the same way every run.
 
 package sidecart3
 
@@ -42,6 +44,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -527,4 +530,159 @@ func TestT3WorldEvsBurstsShareEachClient(t *testing.T) {
 	settings := defaultT3EvsBurstSettings()
 	settings.SidecarBurstConcurrency = settings.BurstCount
 	runT3EvsBursts(t, settings)
+}
+
+// Holds evs's answer to the one read a test arms it for: the block answers that read in full, then its answer waits
+// until the test releases it, as a slow link holds a reply that has left evs. Every other request passes.
+type t3EvsReadHold struct {
+	// closed once the armed read's answer waits
+	held chan struct{}
+	// closed by the test
+	release chan struct{}
+
+	stateLock sync.Mutex
+	armed     bool
+}
+
+func newT3EvsReadHold() *t3EvsReadHold {
+	return &t3EvsReadHold{held: make(chan struct{}), release: make(chan struct{})}
+}
+
+// Holds the next read's answer.
+func (self *t3EvsReadHold) arm() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.armed = true
+}
+
+// Whether request is the armed read, which this takes.
+func (self *t3EvsReadHold) take(request *http.Request) bool {
+	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/read") {
+		return false
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	taken := self.armed
+	self.armed = false
+	return taken
+}
+
+// The block's handler with the hold in front of it (T3EvsSettings.Handler).
+func (self *t3EvsReadHold) wrap(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !self.take(r) {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		answer := httptest.NewRecorder()
+		handler.ServeHTTP(answer, r)
+		close(self.held)
+		select {
+		case <-self.release:
+		case <-r.Context().Done():
+			return
+		}
+		for key, values := range answer.Header() {
+			w.Header()[key] = values
+		}
+		w.WriteHeader(answer.Code)
+		w.Write(answer.Body.Bytes())
+	})
+}
+
+// One sidecar's read, answered by evs before the same sidecar's own write commits and reaching it after: evs's answer
+// is the ref's head when the read was asked, at or past the pin the read named, and its chain is the one the sidecar
+// then pinned past, so the read stands, with no alarm. The hold makes the order: the read's answer waits at evs's
+// origin while the sidecar writes another path and reads it back, which pins the newer head, then goes on. Today the
+// client judges the answer against the pin its write moved, refusing it as a fork (ErrEvsHeadForked) and raising
+// head_alarm: TestT3WorldEvsBurstsShareEachClient's failure, in a fixed order. It stays failing until the client is
+// fixed.
+func TestT3WorldEvsReadAnsweredBeforeItsOwnWrite(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		world, err := NewT3World(tb, nil)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		defer world.Close()
+		hold := newT3EvsReadHold()
+		evsSettings := DefaultT3EvsSettings()
+		evsSettings.Handler = hold.wrap
+		if _, err := world.ServeEvs(ctx, evsSettings); err != nil {
+			tb.Fatal(err)
+		}
+		network, err := world.AddNetwork(ctx, "a")
+		if err != nil {
+			tb.Fatal(err)
+		}
+		devices, err := network.AddSidecars(ctx, 1, nil)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		device := devices[0]
+		if err := network.Bootstrap(ctx, device); err != nil {
+			tb.Fatal(err)
+		}
+		repo, err := network.CreateRepo(ctx, device, protocol.RepoKind_REPO_KIND_GENERAL)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		alarms := make(chan sidecar.SidecarEvent, 16)
+		removeAlarms := device.Sidecar().AddEventCallback(func(event sidecar.SidecarEvent) {
+			if event.Kind != sidecar.SidecarEventHeadAlarm && event.Kind != sidecar.SidecarEventEvsAlarm {
+				return
+			}
+			select {
+			case alarms <- event:
+			default:
+			}
+		})
+		defer removeAlarms()
+		write := func(path string, content string) {
+			if _, err := repo.Write(ctx, &sidecar.EvsWriteArgs{Path: path, Content: strings.NewReader(content), Size: int64(len(content))}); err != nil {
+				tb.Fatalf("the write of %s: %v", path, err)
+			}
+		}
+		write("asked.txt", "the version the held read asks for")
+
+		type readResult struct {
+			content string
+			err     error
+		}
+		read := make(chan readResult, 1)
+		hold.arm()
+		go func() {
+			var content bytes.Buffer
+			_, err := repo.ReadHead(ctx, &sidecar.EvsReadArgs{Path: "asked.txt"}, &content)
+			read <- readResult{content: content.String(), err: err}
+		}()
+		select {
+		case <-hold.held:
+		case <-ctx.Done():
+			tb.Fatal("the read's answer never reached the hold")
+		}
+		// the device's own write commits, and its read back pins the head past the held answer's
+		write("written.txt", "a write that commits while the read's answer is held")
+		var pinned bytes.Buffer
+		if _, err := repo.ReadHead(ctx, &sidecar.EvsReadArgs{Path: "written.txt", Fresh: true}, &pinned); err != nil {
+			tb.Fatalf("the read back of the device's own write: %v", err)
+		}
+		close(hold.release)
+
+		var result readResult
+		select {
+		case result = <-read:
+		case <-ctx.Done():
+			tb.Fatal("the held read never returned")
+		}
+		if result.err != nil || result.content != "the version the held read asks for" {
+			tb.Errorf("the read evs answered before the device's own write: %q, %v", result.content, result.err)
+		}
+		select {
+		case alarm := <-alarms:
+			tb.Errorf("the device raised %s (%s) over its own write", alarm.Kind, alarm.HeadAlarm)
+		default:
+		}
+	})
 }

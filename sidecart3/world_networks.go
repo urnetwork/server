@@ -15,7 +15,8 @@ package sidecart3
 //	          grants at the log's newest state
 //	oauth     the issuer is the sidecars' api origin and WARP_DOMAIN the world's domain while it runs, so a DPoP proof's
 //	          htu and a service's origin are what server checks them against; the svc- key is a throwaway the world
-//	          makes, never vault's, and the verifier every host's Authenticator reads holds it
+//	          makes, never vault's, and every host the world builds verifies tokens and rev/ under its own verifier of
+//	          it, as a block given HostDeps.ServiceTokens does, never the process's
 //	networks  each a personal network in preview_networks, funded in the Net's quota and in every gated service's gate
 //	          (AddNetwork): its first sidecar bootstraps it, signing the Genesis and base 1 through api (Bootstrap),
 //	          and admits the others (Admit), each then following the log through its own token with its own key
@@ -156,9 +157,11 @@ type T3World struct {
 	settings *T3WorldSettings
 	net      *sidecartest.Net
 	host     *sidecar.ServiceHost
-	api      *T3Api
-	exchange *T3SidecarExchange
-	gkm      *sidecartest.FakeGkm
+	// the verifier of the world's svc- key, which every host the world builds verifies tokens and rev/ under
+	serviceTokens *oauth.ServiceTokenVerifier
+	api           *T3Api
+	exchange      *T3SidecarExchange
+	gkm           *sidecartest.FakeGkm
 
 	stateLock sync.Mutex
 	gates     []*t3WorldGate
@@ -219,16 +222,18 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	}
 	self.net = sidecartest.NewNet(ctx, NetSettings(t, netSettings))
 	self.closes = append(self.closes, self.net.Close)
-	// the Net's stores on real time: server's api, exchange and oauth judge every token and proof by it
-	host := *self.net.Host()
-	host.Clock = sidecar.RealClock{}
-	self.host = &host
-
-	pops, err := installT3WorldOauth(sidecarSettings.ApiOrigin)
+	serviceTokens, pops, err := installT3WorldOauth(sidecarSettings.ApiOrigin)
 	if err != nil {
 		return nil, err
 	}
 	self.closes = append(self.closes, pops)
+	self.serviceTokens = serviceTokens
+	// the Net's stores on real time, since server's api, exchange and oauth judge every token and proof by it, its
+	// Authenticator verifying under the world's own svc- key as a block given HostDeps.ServiceTokens does
+	host := *self.net.Host()
+	host.Clock = sidecar.RealClock{}
+	host.Authenticator = sidecarhost.NewAuthenticatorWithVerifier(serviceTokens)
+	self.host = &host
 
 	// api's log and exchange, as its process installs them over its first cluster
 	apiGate, err := self.addGate("api")
@@ -258,16 +263,17 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	return self, nil
 }
 
-// The world's issuer at origin, its svc- key, a throwaway made here, and the verifier holding it, as a block's mounted
-// jwks gives one, until the returned pop.
-func installT3WorldOauth(origin string) (func(), error) {
+// The world's issuer at origin and its svc- key, a throwaway made here, which api's process signs service tokens and
+// rev/ objects with, until the returned pop; and the verifier holding the key, as a block's mounted jwks gives one,
+// which the world hands each host it builds (HostDeps.ServiceTokens' way), so no host reads the process's.
+func installT3WorldOauth(origin string) (*oauth.ServiceTokenVerifier, func(), error) {
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	thumbprint, err := oauth.SignerKid(&privateKey.PublicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	key := &oauth.SignerKey{
 		Kid:        oauth.SignerKeySetService.KidPrefix() + thumbprint,
@@ -287,10 +293,9 @@ func installT3WorldOauth(origin string) (func(), error) {
 	})
 	if err != nil {
 		popAll()
-		return nil, err
+		return nil, nil, err
 	}
-	pops = append(pops, oauth.Testing_SetServiceTokenVerifier(verifier))
-	return popAll, nil
+	return verifier, popAll, nil
 }
 
 // A gate cache over the world's host named name, watching the log's {acl_}v events, which every sync waits on until
