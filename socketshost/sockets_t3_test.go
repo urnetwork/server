@@ -769,7 +769,11 @@ func TestT3EdgeFindPassesUnderEachAudiencesPublish(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		for _, audience := range []string{"members", "members-device", "link", "public"} {
-			world := newT3CustomWorldUnder(t, audience)
+			// each audience's world ends before the next is made: a world's Net installs the process's test hooks,
+			// which one Net at a time may hold
+			iteration := &t3IterationTB{TB: t}
+			defer iteration.end()
+			world := newT3CustomWorldUnder(iteration, audience)
 			world.registerOk(world.listener, 1, world.blogRegistration(world.listener, nil))
 
 			var code int
@@ -805,6 +809,27 @@ func TestT3EdgeFindPassesUnderEachAudiencesPublish(t *testing.T) {
 			if counting.OpCount() != 0 {
 				t.Fatalf("%s: a denied edge Find made %v", audience, counting.OpCounts())
 			}
+			iteration.end()
 		}
 	})
+}
+
+// A test's TB whose cleanups run when one iteration of the test ends, not the test: what a loop over worlds that each
+// hold the process's one test hooks installation takes.
+type t3IterationTB struct {
+	testing.TB
+	cleanups []func()
+}
+
+func (self *t3IterationTB) Cleanup(cleanup func()) {
+	self.cleanups = append(self.cleanups, cleanup)
+}
+
+// Runs the iteration's cleanups, last first, once.
+func (self *t3IterationTB) end() {
+	cleanups := self.cleanups
+	self.cleanups = nil
+	for i := len(cleanups) - 1; 0 <= i; i -= 1 {
+		cleanups[i]()
+	}
 }

@@ -346,6 +346,21 @@ func TestHostLogsNoAddressOrSocketName(t *testing.T) {
 		Registrations: []*sidecar.SocketRegistration{{Name: name, ListenId: &listenId, Protocol: "tls"}},
 	}, address+":4444")
 	hostTestServe(host, http.MethodPost, "/socket/find", token, &sidecar.SocketFindArgs{Name: name, NetworkId: &networkId}, address+":4445")
+	// the network's load runs on the cache's own goroutine, which logs its failure before the gate counts the load
+	// taken in: so the scan waits for that count, not for the requests alone
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	for {
+		count, changed := host.gate.Loads()
+		if 1 <= count {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("the gate never took in the network's load")
+		}
+	}
 	lines := world.log.Lines()
 	if len(lines) == 0 {
 		t.Fatal("the block logged nothing, so the scan is blind")
