@@ -304,7 +304,7 @@ func TestFs92HoldsPlacedByApiOnT3(t *testing.T) {
 func TestFs92BetweenVerifyAndDeleteOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-92", "between verify and delete", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-92", "between verify and delete", holdT3RuleSettings(tb))
 	})
 }
 
@@ -312,7 +312,7 @@ func TestFs92BetweenVerifyAndDeleteOnT3(t *testing.T) {
 func TestFs92BetweenDeletesOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-92", "between deletes", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-92", "between deletes", holdT3RuleSettings(tb))
 	})
 }
 
@@ -320,7 +320,7 @@ func TestFs92BetweenDeletesOnT3(t *testing.T) {
 func TestFs92ADeleteInFlightOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-92", "a delete in flight", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-92", "a delete in flight", holdT3RuleSettings(tb))
 	})
 }
 

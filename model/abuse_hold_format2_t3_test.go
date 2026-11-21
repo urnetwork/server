@@ -13,8 +13,6 @@ package model_test
 import (
 	"testing"
 
-	"github.com/urnetwork/sidecar/sidecartest/fault"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/sidecart3"
 )
@@ -32,7 +30,7 @@ func TestFs69HoldsPlacedByApiOnT3(t *testing.T) {
 func TestFs69BetweenSweepDeletesOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-69", "between sweep deletes", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-69", "between sweep deletes", holdT3RuleSettings(tb))
 	})
 }
 
@@ -40,7 +38,7 @@ func TestFs69BetweenSweepDeletesOnT3(t *testing.T) {
 func TestFs69AnEraseUnderTheHoldOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-69", "an erase under the hold", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-69", "an erase under the hold", holdT3RuleSettings(tb))
 	})
 }
 
@@ -58,6 +56,6 @@ func TestFs66HoldPlacedByApiOnT3(t *testing.T) {
 func TestFs6ANowShredUnderAHoldOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		requireHoldTablesOnT3(tb)
-		fault.RunRegisteredClause(tb, "FS-6", "a --now shred under a hold", holdT3RuleSettings(tb))
+		sidecart3.RunRegisteredClause(tb, "FS-6", "a --now shred under a hold", holdT3RuleSettings(tb))
 	})
 }

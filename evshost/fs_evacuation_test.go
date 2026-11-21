@@ -5,7 +5,7 @@
 // goes through server/cli/evs's handler on the private Redis and the local stack's MinIO, and each evacuation run reads
 // and writes those stores. Each row's registered case runs under every rule it takes with T3's nightly seeds
 // (sidecart3.RunRow), with T3's store clock for the cases catalog.yml flags store_clock, which every row here is, and
-// each clause registered beside it under the same rules (fault.RunRegisteredClause), each test named for its clause by
+// each clause registered beside it under the same rules (sidecart3.RunRegisteredClause), each test named for its clause by
 // the gate's convention (QD-1084). FS-60's pending-record clause holds an instance at its head CAS, so this needs
 // sidecar_testhooks; the stack must be up (sidecar/local/stack.sh), and these fail rather than skip without it.
 

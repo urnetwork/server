@@ -363,3 +363,41 @@ func TestRunRowHoldsACaseToItsStoreClockFlag(t *testing.T) {
 		t.Errorf("FS-6 without the store clock: %s", flagged.text())
 	}
 }
+
+// FS-60's registered parcel clause takes its owning case's store clock. An explicit clockless T3 Net
+// is refused at the clause entry point, before it can open a store or return a successful schedule.
+func TestFs60RegisteredClauseRequiresItsStoreClock(t *testing.T) {
+	clause := fault.LookupClause("FS-60", "parcels pack at seven days")
+	if clause == nil {
+		t.Fatal("missing FS-60 parcel clause")
+	}
+	settings := caseRuleSettings(t, fault.DefaultCatalog().Case(clause.Row, clause.Case), nil)
+	if clockOn, _ := netSettingsStoreClocks.Load(settings.Net); clockOn != true {
+		t.Fatal("FS-60's default T3 Net has no store clock")
+	}
+	got := record(t, func(tb testing.TB) {
+		RunRegisteredClause(tb, clause.Row, clause.Name, RuleSettings(tb, nil))
+	})
+	if !strings.Contains(got.text(), "Settings.StoreClock on") {
+		t.Errorf("the clause accepted a clockless Net: %s", got.text())
+	}
+}
+
+// Only a real translation of a recorded write produces a witness. Installing the adapter and reading
+// the fallback age of an unrecorded object cannot satisfy the gate.
+func TestStoreClockOnlyWitnessesAKnownWrite(t *testing.T) {
+	fixture := newStoreClockFixture(t)
+	count := 0
+	fixture.clock.witness = func() { count++ }
+	info := &sidecar.BlobInfo{Key: "clock/fixture", Etag: "one", LastModified: fixture.clock.store.Now()}
+	fixture.clock.translate("fixture", info)
+	if count != 0 {
+		t.Fatal("an unrecorded object's fallback age produced a witness")
+	}
+	sent := fixture.net.Clock().Now()
+	fixture.clock.put("fixture", info.Key, sent, info.Etag, nil)
+	fixture.clock.translate("fixture", info)
+	if count != 1 || !info.LastModified.Equal(sent) {
+		t.Errorf("translated timestamp %v, witnesses %d", info.LastModified, count)
+	}
+}

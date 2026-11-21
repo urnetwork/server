@@ -202,7 +202,7 @@ func gateServerClauseRuns(t *testing.T, directory string, lookup func(rowId stri
 			switch registration := lookup(rowId, clause); {
 			case clause == "twin" || strings.HasSuffix(clause, " twin"):
 			case registration != nil && isUnregistered:
-				faults = append(faults, fmt.Sprintf("%s: %s is registered: take it off the unregistered runs, and run it through fault.RunRegisteredClause", relative, registration))
+				faults = append(faults, fmt.Sprintf("%s: %s is registered: take it off the unregistered runs, and run it through sidecart3.RunRegisteredClause", relative, registration))
 			case registration == nil && !isUnregistered:
 				faults = append(faults, fmt.Sprintf("%s: %s %q runs through fault.%s and is not registered (sidecar's clauses.go), so no gate names it", relative, rowId, clause, selector.Sel.Name))
 			}
@@ -262,7 +262,7 @@ func TestTheServerRunClauseScanCatchesAnUnregisteredRun(t *testing.T) {
 	}
 	want := []string{
 		`evshost/fixture_test.go: FS-1 "nobody registered" runs through fault.RunClause and is not registered (sidecar's clauses.go), so no gate names it`,
-		"evshost/fixture_test.go: FS-1's clause unknown deletes nothing on T2+T3 is registered: take it off the unregistered runs, and run it through fault.RunRegisteredClause",
+		"evshost/fixture_test.go: FS-1's clause unknown deletes nothing on T2+T3 is registered: take it off the unregistered runs, and run it through sidecart3.RunRegisteredClause",
 	}
 	if !slices.Equal(faults, want) {
 		t.Errorf("the scan found %q, want %q", faults, want)

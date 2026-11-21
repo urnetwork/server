@@ -93,28 +93,43 @@ func TestGateRowRunsItsCommands(t *testing.T) {
 	}
 }
 
-// A store_clock row says beside its outcome that its T3 run's ages were translated, and its outcome is its tests'
-// as any row's; one that is not says nothing of it. gates.yml carries the flag from catalog.yml for every case the
-// catalog flags.
+// A flagged row requires evidence from every named store test. A sibling's log and a declaration in
+// list mode supply no runtime evidence. The generated flags still agree with the catalog.
 func TestAStoreClockRowSaysItsTimeWasTranslated(t *testing.T) {
 	gates := `gates:
   M2:
     - row: FS-59
       tests:
-        - {repo: fixture, package: ./widget, names: [TestPasses]}
+        - {repo: fixture, package: ./widget, stores: true, names: [TestWithClock]}
       store_clock: true
     - row: FS-2
       tests:
-        - {repo: fixture, package: ./widget, names: [TestPasses]}
+        - {repo: fixture, package: ./widget, stores: true, names: [TestWithClock, TestWithoutClock]}
+    - row: FS-60
+      tests:
+        - {repo: fixture, package: ./widget, stores: true, names: [TestWithClock, TestWithoutClock]}
+      store_clock: true
 `
 	options := writeGateFixture(t, gates, "ids: {}\n")
 	options.gate = "M2"
+	content := "package widget\nimport \"testing\"\n" +
+		"func TestWithClock(t *testing.T) { t.Log(\"" + fault.GateStoreClockWitness + "\", t.Name()); t.Log(\"" + fault.GateStoreClockWitness + " TestWithoutClock\") }\n" +
+		"func TestWithoutClock(t *testing.T) {}\n"
+	if err := os.WriteFile(filepath.Join(options.root, "fixture", "widget", "clock_test.go"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(options.root, "stores.sh")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\ncd \"$1\" || exit 1\nshift\nexec go test \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	options.environ = append(options.environ, gateStoreWrapperVariable+"="+wrapper)
 	report, err := runGate(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, result := range report.rows {
-		said := slices.Contains(result.details, gateStoreClockDetail)
+		details := strings.Join(result.details, "\n")
+		said := strings.Contains(details, gateStoreClockDetail)
 		switch result.label {
 		case "FS-59":
 			if !said || result.outcome != gatePass {
@@ -124,6 +139,20 @@ func TestAStoreClockRowSaysItsTimeWasTranslated(t *testing.T) {
 			if said || result.outcome != gatePass {
 				t.Errorf("FS-2: %s, %q", result.outcome, result.details)
 			}
+		case "FS-60":
+			if result.outcome != gateMissing || !strings.Contains(details, "TestWithoutClock: passed without") {
+				t.Errorf("FS-60 lacked its own evidence: %s, %q", result.outcome, result.details)
+			}
+		}
+	}
+	options.list = true
+	listed, err := runGate(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range listed.rows {
+		if strings.Contains(strings.Join(result.details, "\n"), gateStoreClockDetail) {
+			t.Errorf("list mode claimed a translation for %s", result.label)
 		}
 	}
 	committed := &gatesFile{}

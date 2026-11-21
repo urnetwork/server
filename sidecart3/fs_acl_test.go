@@ -47,7 +47,7 @@ func TestFs21OnT3(t *testing.T) {
 
 func TestFs62AclGateOnT3(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
-		fault.RunRegisteredClause(tb, "FS-62", "acl gate", RuleSettings(tb, nil))
+		RunRegisteredClause(tb, "FS-62", "acl gate", nil)
 	})
 }
 

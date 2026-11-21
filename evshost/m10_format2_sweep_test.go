@@ -97,11 +97,7 @@ func TestFs89OnT3(t *testing.T) {
 
 func TestFs89NowOnT3(t *testing.T) {
 	fsCommitTestEnv().Run(t, func(tb testing.TB) {
-		settings := sidecart3.DefaultSettings()
-		if fault.DefaultCatalog().Case("FS-89", "").StoreClock {
-			settings.StoreClock = sidecart3.DefaultStoreClockSettings()
-		}
-		fault.RunRegisteredClause(tb, "FS-89", "now", sidecart3.RuleSettings(tb, settings))
+		sidecart3.RunRegisteredClause(tb, "FS-89", "now", nil)
 	})
 }
 
@@ -182,7 +178,7 @@ func TestM10Format2SweepOnT3(t *testing.T) {
 				sweepCase := m10Format2T3Cases()[index]
 				storeClock := ""
 				if testCase.StoreClock {
-					storeClock = ", the store clock translated"
+					storeClock = ", the catalog requires the store clock"
 				}
 				fmt.Fprintf(&report, "  T3: run, %s and its clauses under §22.8's rules at a merge's seeds%s:\n", registration, storeClock)
 				m10Format2T3WriteRun(&report, "registered case", sidecart3.RunRow(tb, testCase.Row.Id, testCase.Name, m10Format2T3RuleSettings(tb, testCase)))
@@ -190,7 +186,7 @@ func TestM10Format2SweepOnT3(t *testing.T) {
 					clauseCount += 1
 					var clauseReport *fault.RowReport
 					if clause.registered {
-						clauseReport = fault.RunRegisteredClause(tb, testCase.Row.Id, clause.name, m10Format2T3RuleSettings(tb, testCase))
+						clauseReport = sidecart3.RunRegisteredClause(tb, testCase.Row.Id, clause.name, m10Format2T3RuleSettings(tb, testCase))
 					} else {
 						clauseReport = fault.RunClause(tb, testCase.Row.Id, clause.name, clause.build, m10Format2T3RuleSettings(tb, testCase))
 					}

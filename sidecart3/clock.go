@@ -91,6 +91,8 @@ type storeClockWrite struct {
 
 // One T3 Net's store clock: LastModified and Redis ttls on the schedule's clock.
 type StoreClock struct {
+	// The gate's per-test witness, emitted only after translating a recorded timestamp or changing a live ttl.
+	witness  func()
 	net      *sidecartest.Net
 	settings *StoreClockSettings
 	// the store's own clock, which LastModified and ttls run on
@@ -253,6 +255,16 @@ func (self *StoreClock) translate(clusterId string, info *sidecar.BlobInfo) {
 		scheduleTime = self.net.Clock().Now().Add(-self.store.Now().Sub(info.LastModified))
 	}
 	info.LastModified = scheduleTime
+	if ok {
+		self.reportTranslation()
+	}
+}
+
+// Record a translation that took effect on the host backing the schedule.
+func (self *StoreClock) reportTranslation() {
+	if self.witness != nil {
+		self.witness()
+	}
 }
 
 // ctx for a DELETE of key on the store: one that names a LastModified (sidecar.WithBlobUnmodified) is judged on the
@@ -361,12 +373,22 @@ func (self *StoreClock) ageKey(ctx context.Context, client server.RedisClient, k
 	// -1 for a key with no ttl and -2 for one gone, which go-redis reads as those nanoseconds
 	if 0 < ttl {
 		if remaining := ttl - timeout; remaining <= 0 {
-			if err := client.Del(ctx, key).Err(); err != nil {
+			deleted, err := client.Del(ctx, key).Result()
+			if err != nil {
 				return fmt.Errorf("DEL %s: %w", key, err)
 			}
+			if deleted > 0 {
+				self.reportTranslation()
+			}
 			return nil
-		} else if err := client.PExpire(ctx, key, remaining).Err(); err != nil {
-			return fmt.Errorf("PEXPIRE %s: %w", key, err)
+		} else {
+			changed, err := client.PExpire(ctx, key, remaining).Result()
+			if err != nil {
+				return fmt.Errorf("PEXPIRE %s: %w", key, err)
+			}
+			if changed {
+				self.reportTranslation()
+			}
 		}
 	}
 	keyType, err := client.Type(ctx, key).Result()
@@ -391,13 +413,21 @@ func (self *StoreClock) ageKey(ctx context.Context, client server.RedisClient, k
 				continue
 			}
 			remaining := time.Duration(fieldTtl)*time.Millisecond - timeout
+			changed := false
 			if remaining <= 0 {
-				err = client.HDel(ctx, key, chunk[index]).Err()
+				var count int64
+				count, err = client.HDel(ctx, key, chunk[index]).Result()
+				changed = count > 0
 			} else {
-				err = client.HPExpire(ctx, key, remaining, chunk[index]).Err()
+				var results []int64
+				results, err = client.HPExpire(ctx, key, remaining, chunk[index]).Result()
+				changed = len(results) == 1 && results[0] == 1
 			}
 			if err != nil {
 				return fmt.Errorf("aging field %s of %s: %w", chunk[index], key, err)
+			}
+			if changed {
+				self.reportTranslation()
 			}
 		}
 	}

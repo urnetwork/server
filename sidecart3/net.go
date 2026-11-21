@@ -123,7 +123,7 @@ func LayoutSettings(t testing.TB) *Settings {
 	return settings
 }
 
-// Whether each NetSettings this package made turns the store clock on, so RunRow can hold a case to its flag.
+// Whether each NetSettings this package made turns the store clock on, so cases and clauses use their catalog flag.
 var netSettingsStoreClocks sync.Map
 
 // Each open T3 Net's Redis wrapper, so a scenario finds the keys the sidecar wrote.
@@ -142,8 +142,9 @@ func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	netSettings.RefusePlatformFakes = refusePlatformFakes
 	// the oracle's read access to server's tables (store_view.go)
 	netSettings.Postgres = PostgresReader()
+	clockWitness := sync.OnceFunc(func() { t.Logf("%s %s", fault.GateStoreClockWitness, t.Name()) })
 	netSettings.Engines = func(ctx context.Context, net *sidecartest.Net) (*sidecar.ServiceHost, func(), error) {
-		return newHost(ctx, t, net, settings)
+		return newHost(ctx, t, net, settings, clockWitness)
 	}
 	netSettings.Platform = func(ctx context.Context, net *sidecartest.Net) (sidecartest.NetPlatform, error) {
 		return newExchangePlatform(ctx, t, settings.Exchange)
@@ -162,7 +163,7 @@ func NewNet(t testing.TB, settings *Settings) *sidecartest.Net {
 }
 
 // The host of one T3 Net, and what closes it.
-func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *Settings) (*sidecar.ServiceHost, func(), error) {
+func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *Settings, clockWitness func()) (*sidecar.ServiceHost, func(), error) {
 	var layoutFaults *clusterFaults
 	if settings.Layout != nil {
 		if err := checkLayoutUp(ctx, settings.Layout, settings.ClusterFaults); err != nil {
@@ -202,6 +203,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	var blobs sidecar.BlobStore = clusters
 	if settings.StoreClock != nil {
 		clocks.storeClock = newStoreClock(net, settings.StoreClock, settings.Store, settings.catchUpHooks)
+		clocks.storeClock.witness = clockWitness
 		blobs = &storeClockBlobs{blobs: clusters, clock: clocks.storeClock}
 	}
 	netClockNets.Store(net, clocks)
