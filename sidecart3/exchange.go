@@ -28,6 +28,7 @@ package sidecart3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -71,6 +72,10 @@ type ExchangeSettings struct {
 	// How long, in real time, closing waits for the http server, the handler and the exchange to go idle. One that
 	// does not fails the test.
 	CloseTimeout time.Duration
+	// How long, in real time, a handler's restart may wait for the kernel to let its port bind again, and how often it
+	// tries meanwhile (T3SidecarExchange.RestartHandler).
+	HandlerRebindTimeout      time.Duration
+	HandlerRebindPollInterval time.Duration
 	// What the Net's network holds, so its clients' contracts escrow, and for how long from the platform's start.
 	NetworkBalanceByteCount model.ByteCount
 	NetworkBalanceDuration  time.Duration
@@ -96,6 +101,8 @@ func DefaultExchangeSettings() *ExchangeSettings {
 		KeyRegistrationTimeout:      60 * time.Second,
 		KeyRegistrationPollInterval: 20 * time.Millisecond,
 		CloseTimeout:                30 * time.Second,
+		HandlerRebindTimeout:        10 * time.Second,
+		HandlerRebindPollInterval:   20 * time.Millisecond,
 		NetworkBalanceByteCount:     model.ByteCount(1024 * 1024 * 1024 * 1024),
 		NetworkBalanceDuration:      24 * time.Hour,
 	}
@@ -116,11 +123,15 @@ type exchangePlatform struct {
 	settings *ExchangeSettings
 
 	exchange       *connectserver.Exchange
-	handler        *connectserver.ConnectHandler
-	httpServer     *server.TestHttpServer
+	httpPort       int
 	platformUrl    string
 	clientStrategy *connect.ClientStrategy
 	userSession    *session.ClientSession
+
+	// the handler and the http server serving it, which RestartHandler replaces
+	stateLock  sync.Mutex
+	handler    *connectserver.ConnectHandler
+	httpServer *server.TestHttpServer
 }
 
 // A loopback listener on a port the OS assigns from its ephemeral range, which holds none of the ports a production
@@ -171,25 +182,14 @@ func newExchangePlatform(ctx context.Context, t testing.TB, settings *ExchangeSe
 	)
 	closes = append(closes, exchange.Close)
 
-	// the handler writes what it derives into its settings, so each platform gets a copy
-	handlerSettings := *settings.Handler
-	handler := func() *connectserver.ConnectHandler {
-		if _, err := server.Config.SimpleResource("tls.yml"); err != nil {
-			defer server.Config.PushSimpleResource("tls.yml", emptyTransportTlsConfig)()
-		}
-		return connectserver.NewConnectHandler(cancelCtx, server.NewId(), exchange, &handlerSettings)
-	}()
+	handler := newExchangeHandler(cancelCtx, settings, exchange)
 	closes = append(closes, handler.Close)
 
 	httpListener, httpPort, err := listenLoopback("tcp4")
 	if err != nil {
 		return nil, err
 	}
-	httpServer := server.NewTestHttpServer(cancelCtx, httpListener, &http.Server{
-		Handler: router.NewRouter(cancelCtx, []*router.Route{
-			router.NewRoute("GET", "/", handler.Connect),
-		}),
-	})
+	httpServer := newExchangeHttpServer(cancelCtx, httpListener, handler)
 	closes = append(closes, func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), settings.CloseTimeout)
 		defer closeCancel()
@@ -216,12 +216,79 @@ func newExchangePlatform(ctx context.Context, t testing.TB, settings *ExchangeSe
 		cancel:         cancel,
 		settings:       settings,
 		exchange:       exchange,
+		httpPort:       httpPort,
 		handler:        handler,
 		httpServer:     httpServer,
 		platformUrl:    fmt.Sprintf("ws://127.0.0.1:%d", httpPort),
 		clientStrategy: clientStrategy,
 		userSession:    userSession,
 	}, nil
+}
+
+// Server's connect handler over exchange, on a copy of settings' handler settings, which the handler writes what it
+// derives into. The environment's tls.yml is read only to construct it, through an empty override when there is none.
+func newExchangeHandler(ctx context.Context, settings *ExchangeSettings, exchange *connectserver.Exchange) *connectserver.ConnectHandler {
+	handlerSettings := *settings.Handler
+	if _, err := server.Config.SimpleResource("tls.yml"); err != nil {
+		defer server.Config.PushSimpleResource("tls.yml", emptyTransportTlsConfig)()
+	}
+	return connectserver.NewConnectHandler(ctx, server.NewId(), exchange, &handlerSettings)
+}
+
+// An http server serving handler's connect route on listener, which it takes.
+func newExchangeHttpServer(ctx context.Context, listener net.Listener, handler *connectserver.ConnectHandler) *server.TestHttpServer {
+	return server.NewTestHttpServer(ctx, listener, &http.Server{
+		Handler: router.NewRouter(ctx, []*router.Route{
+			router.NewRoute("GET", "/", handler.Connect),
+		}),
+	})
+}
+
+// Restarts server's connect handler, as a deploy restarts connect's handler: the http server closes, dropping every
+// client's transport, and the handler goes idle; a new handler on the same exchange then serves the same port, which
+// each client's transport dials again on its own reconnect. The exchange and its residents run on. Answers once the
+// new handler serves, within CloseTimeout for the close and HandlerRebindTimeout for the port to bind again, since
+// the kernel may still hold it a moment.
+func (self *T3SidecarExchange) RestartHandler(ctx context.Context) error {
+	return self.platform.restartHandler(ctx)
+}
+
+func (self *exchangePlatform) restartHandler(ctx context.Context) error {
+	handler, httpServer := func() (*connectserver.ConnectHandler, *server.TestHttpServer) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.handler, self.httpServer
+	}()
+	closeCtx, closeCancel := context.WithTimeout(ctx, self.settings.CloseTimeout)
+	defer closeCancel()
+	if err := httpServer.CloseAndWait(closeCtx); err != nil {
+		return fmt.Errorf("the exchange's http server did not close: %w", err)
+	}
+	handler.Close()
+	if !handler.WaitForIdle(closeCtx) {
+		return errors.New("server's connect handler did not go idle")
+	}
+	bindCtx, bindCancel := context.WithTimeout(ctx, self.settings.HandlerRebindTimeout)
+	defer bindCancel()
+	var listener net.Listener
+	for {
+		var err error
+		listener, err = net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", self.httpPort))
+		if err == nil {
+			break
+		}
+		select {
+		case <-bindCtx.Done():
+			return fmt.Errorf("the exchange's port did not bind again: %w (%w)", err, bindCtx.Err())
+		case <-time.After(self.settings.HandlerRebindPollInterval):
+		}
+	}
+	nextHandler := newExchangeHandler(self.ctx, self.settings, self.exchange)
+	nextHttpServer := newExchangeHttpServer(self.ctx, listener, nextHandler)
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.handler, self.httpServer = nextHandler, nextHttpServer
+	return nil
 }
 
 // Out-of-band control as api's control route answers it, in process: each pack goes to server's controller for the
@@ -503,12 +570,17 @@ func (self *exchangePlatform) openClientAs(clientCtx context.Context, ctx contex
 func (self *exchangePlatform) Close() {
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), self.settings.CloseTimeout)
 	defer closeCancel()
-	if err := self.httpServer.CloseAndWait(closeCtx); err != nil {
+	handler, httpServer := func() (*connectserver.ConnectHandler, *server.TestHttpServer) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.handler, self.httpServer
+	}()
+	if err := httpServer.CloseAndWait(closeCtx); err != nil {
 		self.t.Errorf("the exchange's http server did not close within %s: %v", self.settings.CloseTimeout, err)
 	}
 	self.exchange.Close()
-	self.handler.Close()
-	if !self.handler.WaitForIdle(closeCtx) {
+	handler.Close()
+	if !handler.WaitForIdle(closeCtx) {
 		self.t.Errorf("server's connect handler did not go idle within %s", self.settings.CloseTimeout)
 	}
 	if !self.exchange.WaitForIdle(closeCtx) {
