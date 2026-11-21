@@ -195,19 +195,16 @@ func sortedSnTopPrefixes(presence snTopPresence) [][32]byte {
 
 // snTopProviderContribution is what one provider shows in the tempo: its
 // complete-trail prefixes when the cohort measured it, else its pinned prefix
-// weighted by presence. The zero hash is no prefix: it is what a provider that
-// declared a proxy egress records, and it shows nothing.
+// weighted by presence.
 func snTopProviderContribution(provider *SnTopProvider) snTopPresence {
 	contribution := snTopPresence{}
 	if provider.Measured && 0 < len(provider.TrailPrefixes) {
 		for _, h := range provider.TrailPrefixes {
-			if h != ([32]byte{}) {
-				contribution.add(h, 1)
-			}
+			contribution.add(h, 1)
 		}
 		return contribution
 	}
-	if provider.HasPrefix && provider.PrefixHash != ([32]byte{}) && 0 < provider.Presence {
+	if provider.HasPrefix && 0 < provider.Presence {
 		contribution.add(provider.PrefixHash, min(1, provider.Presence))
 	}
 	return contribution
