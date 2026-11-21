@@ -44,7 +44,14 @@
 //   - scenario_sidecar.go, T3's enrolled sidecars: T3Api, server's api in process, every credential it
 //     answers or is sent handed to the capture, and T3Sidecar, a sidecar.Sidecar enrolled through
 //     server's own routes whose clients run on server's exchange, which S1's token and genesis clauses
-//     run on.
+//     run on. T3Api is also the service origins' lb: a test serves a service's handler at its origin
+//     (ServeService), and a sidecar's requests to it are served in process, streamed (service_origins.go).
+//   - world_networks.go, a T3World: several networks of many T3Sidecars each, enrolled through T3Api
+//     from their owners' auth keys, the first bootstrapping its network and admitting the rest, each
+//     following its log, with api's sequencer and token exchange installed over a gate cache and a
+//     throwaway svc- key; world_evs.go serves evshost's block at the world's evs origin, built as the evs
+//     tier builds it, on the networks' real verified state. world_evs_e2e_test.go, under sidecar_e2e,
+//     runs full sidecars' concurrent pushes and verified reads there.
 //   - disruption.go, §22.8's disruptions beyond the schedules (TEST-M2-15): RedisRestart and
 //     PostgresRestart on the test's own database, ResidentKill on server's exchange, and LbFixture, nginx
 //     from warp's directives (local/sidecar-lb-fixture) whose Drain cuts an upstream block; their rows
@@ -65,9 +72,11 @@
 // Not yet here, and failing closed where a row would reach it:
 //
 //   - a T3 Net's AddSidecar: a T3 Net refuses a row that adds a sidecar through sidecartest's helpers,
-//     whose clients would run on T2's platform fakes, rather than passing it there; a T3 test enrolls a
-//     T3Sidecar through server's api instead (scenario_sidecar.go), which reaches no evs, gkm or sockets
-//     host of server's yet.
+//     whose clients would run on T2's platform fakes, rather than passing it there; a T3 test enrolls
+//     T3Sidecars through server's api instead (scenario_sidecar.go), as many as it needs in each of a
+//     T3World's networks (world_networks.go), whose service requests reach the hosts it serves at their
+//     origins. evs is served so (world_evs.go); gkm's host and the MLS key client are not, so a world's
+//     keys come from sidecartest's FakeGkm on the real stores.
 //   - a link's conditions (SetLink) and a contract's class (SetContractClass) on server's exchange, which
 //     takes neither: a row that asks for one fails as unapplied (sidecartest.Net.Unapplied).
 //   - the capture of the exchange's frames (CC2).

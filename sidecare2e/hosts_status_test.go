@@ -135,16 +135,18 @@ func TestE2eMxedgePlatformHostAnswersItsStatusOnAnOsPort(t *testing.T) {
 }
 
 // The dns API latches ready on the env's tables, releasing the harness's key window, and an edge feeding from it over
-// its bearer answers its own /status, its DNS on TCP and UDP ports the OS picks. The edge stays not ready here: in a
-// run of 2026-11-21 it took no checked view from the in-process API within two minutes, which the world's tracks are
-// to find out (e2e-hosts-in-process's report).
+// its bearer latches ready too, its DNS on TCP and UDP ports the OS picks: the API writes the root's own SOA, NS and
+// glue at its start from dns.yml's root_records, and the edge serves the root once its view holds them and checks
+// under the window. With no root_records, as the harness's dns.yml had until e2e-world, the API writes nothing at the
+// root, the edge's journal stays empty and the edge never reads ready: that was the cause e2e-hosts-in-process left
+// open, the harness's and not the hosts'.
 func TestE2eDnsApiAndEdgeHostsAnswerTheirStatusOnOsPorts(t *testing.T) {
 	e2eTestEnv().Run(t, func(t testing.TB) {
 		process := newE2eProcess(t)
 		api := process.startDnsApi(t)
 		process.awaitStatus(t, api, "ok", e2eStatusReady)
 		edge := process.startDnsEdge(t, api)
-		process.awaitStatus(t, edge, "up", e2eStatusAnswers)
+		process.awaitStatus(t, edge, "ok", e2eStatusReady)
 		process.stop(t, edge)
 		process.stop(t, api)
 	})
@@ -183,7 +185,7 @@ func TestE2eEveryHostRunsInOneProcessAndStopsClean(t *testing.T) {
 			{host: process.startMxedgeRouter(t), what: "ok", want: e2eStatusReady},
 			{host: process.startMxedgePlatform(t), what: "ok", want: e2eStatusReady},
 			{host: dnsApi, what: "ok", want: e2eStatusReady},
-			{host: process.startDnsEdge(t, dnsApi), what: "up", want: e2eStatusAnswers},
+			{host: process.startDnsEdge(t, dnsApi), what: "ok", want: e2eStatusReady},
 			{host: process.startMcp(t), what: "ok", want: e2eStatusReady},
 		}
 		for _, expectation := range expectations {
