@@ -1105,6 +1105,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the per client and day record of probed exits that differ from every
 	// network their provider connects from, versioned by its position
 	[]snMainnetMigrationContract{providerEgressExitDayMigrationContract},
+	// what decided each purchase intent's price tier, versioned by its
+	// position
+	[]snMainnetMigrationContract{priceTierEvidenceMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

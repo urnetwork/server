@@ -31,7 +31,8 @@ type CryptoPaymentQuoteArgs struct {
 	Asset  string `json:"asset"`
 	Plan   string `json:"plan,omitempty"`
 	ItemId string `json:"item_id,omitempty"`
-	// the store's storefront country, when known (the price tier)
+	// a store's storefront country. No store sells this, so the price tier is
+	// never taken from it (price_tier_signals.go)
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
@@ -123,7 +124,8 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 			}
 			offerApplied = true
 		}
-		tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
+		// the tier an invoice made now is priced at
+		tier := ResolvePurchasePriceTier(clientSession, args.StorefrontCountry)
 		priceUsd, ok := solanaPlanPriceUsdForTier(plan, tier.Tier)
 		if !ok || priceUsd <= 0 {
 			return cryptoQuoteError(PurchaseErrorCodePlanUnavailable, "That plan is not available."), nil

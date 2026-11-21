@@ -197,12 +197,14 @@ func (self *winbackStripeTestEnv) lastCheckoutForm() url.Values {
 // sheet's subscription) is replaced with one of the offer's own expiry. At
 // the regional tier the half month (0.25 USD) is below Stripe's minimum
 // charge, so the purchase goes at the regular price. Web Checkout applies the
-// same code, for the customer it was made for.
+// same code, for the customer it was made for. The network's only country
+// signal is its request's address, placed in each purchase's country.
 func TestStripePurchasePathsApplyWinbackOffer(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		installWinbackTestEnv(t)
 		stripeEnv := installWinbackStripeTestEnv(t)
+		addresses := installPriceTierDbAddresses(t)
 
 		networkId := server.NewId()
 		userId := server.NewId()
@@ -224,11 +226,12 @@ func TestStripePurchasePathsApplyWinbackOffer(t *testing.T) {
 		connect.AssertEqual(t, created, true)
 		stripeEnv.addPromotionCode("promo_winback_first", winbackStripeTestCustomerId, 0)
 
-		sheet := func(plan string, storefrontCountry string) *StripePaymentSheetResult {
-			result, err := StripePaymentSheet(&StripePaymentSheetArgs{Plan: plan, StorefrontCountry: storefrontCountry}, clientSession)
+		sheet := func(plan string, country string) *StripePaymentSheetResult {
+			addresses[networkId] = country
+			result, err := StripePaymentSheet(&StripePaymentSheetArgs{Plan: plan}, clientSession)
 			connect.AssertEqual(t, err, nil)
 			if result.Error != nil {
-				t.Fatalf("payment sheet %s %s refused: %+v (unexpected stripe calls %v)", plan, storefrontCountry, result.Error, stripeEnv.unexpected)
+				t.Fatalf("payment sheet %s %s refused: %+v (unexpected stripe calls %v)", plan, country, result.Error, stripeEnv.unexpected)
 			}
 			return result
 		}
@@ -280,16 +283,16 @@ func TestStripePurchasePathsApplyWinbackOffer(t *testing.T) {
 
 		// web Checkout (embedded, inline): the same code, and the session is
 		// made for the customer the code is restricted to
-		checkout := func(itemId string, storefrontCountry string) url.Values {
+		checkout := func(itemId string, country string) url.Values {
+			addresses[networkId] = country
 			result, err := StripeCreateCheckoutSession(&StripeCreateCheckoutSessionArgs{
 				ItemId:               itemId,
-				StorefrontCountry:    storefrontCountry,
 				UiMode:               StripeUiModeEmbedded,
 				RedirectOnCompletion: "never",
 			}, clientSession)
 			connect.AssertEqual(t, err, nil)
 			if result.Error != nil {
-				t.Fatalf("checkout %s %s refused: %+v (unexpected stripe calls %v)", itemId, storefrontCountry, result.Error, stripeEnv.unexpected)
+				t.Fatalf("checkout %s %s refused: %+v (unexpected stripe calls %v)", itemId, country, result.Error, stripeEnv.unexpected)
 			}
 			return stripeEnv.lastCheckoutForm()
 		}

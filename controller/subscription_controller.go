@@ -3384,9 +3384,10 @@ type SolanaPaymentIntentArgs struct {
 	// never taken from the client -- the server derives it from pro.yml. A
 	// client-supplied amount would let anyone quote themselves a year for a cent.
 	Plan string `json:"plan"`
-	// the store's storefront country, when the app knows it; else the tier is
-	// resolved from the Stripe billing country or the client ip (Solana keeps the
-	// estimate: accepted risk on a one-time crypto payment)
+	// a store's storefront country. No store sells this, so the price tier is
+	// never taken from it: the tier is the one the server's country signals
+	// agree on (price_tier_signals.go), and the intent keeps this in the
+	// tier's evidence
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
@@ -3482,8 +3483,8 @@ func CreateSolanaPaymentIntent(
 	}
 
 	// The price comes from pro.yml, keyed by the plan and the caller's regional
-	// price tier. It is NEVER taken from the client.
-	tier := ResolvePriceTier(clientSession, intent.StorefrontCountry)
+	// price tier. Neither is ever taken from the client.
+	tier := ResolvePurchasePriceTier(clientSession, intent.StorefrontCountry)
 	offerApplied := false
 	if intent.Plan == model.SolanaPlanYearlyOnboarding {
 		if EligibleOnboardingOffer(clientSession, clientSession.ByJwt.NetworkId) == nil {
@@ -3517,7 +3518,7 @@ func CreateSolanaPaymentIntent(
 	//
 	// The quote is the price plus a reserved sub-cent suffix, so a payment sent
 	// without the reference is still identified by its exact amount.
-	amountUsd, err := model.CreateSolanaPaymentIntentWithUniqueAmount(
+	amountUsd, err := model.CreateSolanaPlanPaymentIntentWithUniqueAmount(
 		clientSession.Ctx,
 		intent.Reference,
 		clientSession.ByJwt.NetworkId,
@@ -3525,6 +3526,7 @@ func CreateSolanaPaymentIntent(
 		intent.Plan,
 		server.NowUtc().Add(solanaPlanIntentDuration),
 		solanaPickAmountSuffixMicro,
+		tier.Evidence.rowJson(),
 	)
 	if err != nil {
 		glog.Errorf("[sub]could not create solana payment intent: %s\n", err)

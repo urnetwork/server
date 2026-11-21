@@ -120,7 +120,9 @@ type CreateCryptoPaymentIntentArgs struct {
 	Asset  string `json:"asset"`
 	Plan   string `json:"plan,omitempty"`
 	ItemId string `json:"item_id,omitempty"`
-	// the store's storefront country, when the app knows it (the price tier)
+	// a store's storefront country. No store sells this, so the price tier is
+	// never taken from it (price_tier_signals.go); a plan's invoice keeps it
+	// in its tier's evidence
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
@@ -722,6 +724,9 @@ type cryptoIntentRequest struct {
 	regularUsd   float64
 	tier         string
 	offerApplied bool
+	// what decided a plan's tier, json (PriceTierEvidence); "" for a data
+	// pack
+	priceTierEvidence string
 	// open-invoice reuse applies (account and network delivery)
 	reuse bool
 	// the most this invoice may be: 0 is the quote's max_invoice_usd. A gift
@@ -793,8 +798,9 @@ func CreateCryptoPaymentIntent(
 
 	if plan != "" {
 		// the price comes from pro.yml, keyed by the plan and the caller's
-		// regional tier. It is NEVER taken from the client.
-		tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
+		// regional tier. Neither is ever taken from the client: the tier is
+		// the one the server's country signals agree on
+		tier := ResolvePurchasePriceTier(clientSession, args.StorefrontCountry)
 		priceUsd, ok := solanaPlanPriceUsdForTier(plan, tier.Tier)
 		if !ok || priceUsd <= 0 {
 			return cryptoIntentError(PurchaseErrorCodePlanUnavailable, "That plan is not available."), nil
@@ -807,6 +813,7 @@ func CreateCryptoPaymentIntent(
 			request.regularUsd = tier.Tier.YearlyUsd
 		}
 		request.tier = tier.Tier.Name
+		request.priceTierEvidence = tier.Evidence.rowJson()
 	} else {
 		priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 		if !ok {
@@ -997,6 +1004,7 @@ func cryptoStartIntent(
 		OfferApplied:             request.offerApplied,
 		PriceUsdNanoCents:        model.UsdToNanoCents(request.priceUsd),
 		RegularPriceUsdNanoCents: model.UsdToNanoCents(request.regularUsd),
+		PriceTierEvidenceJson:    request.priceTierEvidence,
 		Email:                    request.email,
 		AmountAtomic:             amountAtomic,
 		RateUsd:                  rateQuote.RateUsd,
@@ -1053,6 +1061,7 @@ func cryptoStartUsdcIntent(
 		OfferApplied:             request.offerApplied,
 		PriceUsdNanoCents:        model.UsdToNanoCents(request.priceUsd),
 		RegularPriceUsdNanoCents: model.UsdToNanoCents(request.regularUsd),
+		PriceTierEvidenceJson:    request.priceTierEvidence,
 		Email:                    request.email,
 		Address:                  solanaPaymentRecipient(),
 		SolanaReference:          &reference,

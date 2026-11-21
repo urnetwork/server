@@ -51,8 +51,8 @@ func StripePaymentSheet(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripePaymentSheet, w, r)
 }
 
-// StripePrices returns the caller's tier's Stripe price ids
-// (?storefront_country=XX when the app knows the storefront).
+// StripePrices returns the caller's tier's Stripe price ids. A
+// ?storefront_country=XX is never priced from: Stripe is not a store.
 func StripePrices(w http.ResponseWriter, r *http.Request) {
 	storefrontCountry := r.URL.Query().Get("storefront_country")
 	impl := func(clientSession *session.ClientSession) (*controller.StripePricesResult, error) {
