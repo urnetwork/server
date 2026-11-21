@@ -450,6 +450,73 @@ Ranked by impact over effort, with risk.
 - `./grafana` with promtool;
 - R15's own suites.
 
+### 8.1 R14's second half: logical timers on a sweep
+
+Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrinks the heaps the walks visit (§3.4) by taking a connection's logical timers out of them. Socket deadlines and heartbeats stay as they are.
+
+**The sweep** (`internal/timersweep`):
+- **One per process.** `newExchange` makes it. The handler gives it to every announcement and authorization lease, and the exchange's residents and forwards use it.
+- **Sharded:** one hashed timing wheel per P, GOMAXPROCS shards, each with its own lock. New timers take the shards in turn. A wheel has 1024 slots of one tick, so a rotation is 102.4 s, and a deadline further out waits in its slot through the earlier passes.
+- **Fixed tick, 100 ms.** A timer fires at the first tick boundary at or after its deadline: never early, and at most 100 ms late, before the scheduling delay every timer has. A timer re-armed when it fires drifts by at most a tick a period. A ticker keeps its cadence from its start, as a `time.Ticker` does.
+- **Driven by one runtime timer per shard,** re-armed only after it fires. A timer that's in no heap when it's re-armed is simply added, so the drivers never set off a walk. A shard's driver runs only while the shard holds an armed timer, so an idle sweep has no goroutine and no runtime timer, and needs no close.
+- **A fire never blocks the sweep.** It's a non-blocking send on the owner's one-slot channel, made under the shard's lock, and the owner's goroutine does the work. A fire the owner hasn't received absorbs later ones. The sweep never calls owner code or logging.
+- **Cancellation and teardown:** each owner stops its timer as it returns. Arming, re-arming and stopping each unlink or link one entry, O(1), and a stopped timer leaves no entry behind. As with a Go 1.23 timer, `Reset` and `Stop` discard a fire not yet received, so no stale fire arrives after either returns.
+- **Memory:** an 80-byte timer and its 112-byte channel, 192 bytes in two allocations, plus each shard's 8 KiB of slots. A runtime timer with its channel takes 248 bytes in three.
+- **Without a sweep,** an owner built directly, as tests build them, gives each timer a sweep of its own. Its tick is the process's for a wait of 1.6 s or more, and a sixteenth of a shorter wait, so a test that compresses a 30 s round to 50 ms keeps the sweep's proportions. Inside a synctest bubble that sweep's driver stays in the bubble.
+
+**Converted.** Each fires at its deadline or at most 100 ms after it, never before:
+
+| Timer | Deadline | Why a 100 ms delay is harmless |
+|---|---|---|
+| Announce window, two halves | 2.5 s each | Registration comes at most 200 ms later. The pending marker has 5 s of slack beyond the window. |
+| Announce sync round | 30 s, retries up to 120 s | A round's stats cover the time since the last round ended, so a late round loses nothing, and a 30.1 s round still starts inside the previous 60 s block, which the rollup hasn't drained. |
+| Announce test schedule | 12–24 h, random | Against a random 12–24 h. |
+| Announce verify egress refresh | 2 min | The lease lives 10 min. |
+| Passive speed sample | 5 s window | A window runs 5.0–5.1 s, and the sample divides by its measured length. |
+| Resident idle watch | 300 s from the last activity | An idle resident lives at most 100 ms longer. Activity still moves the deadline, and retirement never comes before it. |
+| Resident registration refresh | 75 s after the last refresh | The registration's ttl is 300 s. |
+| Resident stream grant republish | every 30 s from the resident's start | A grant's lease is 90 s. |
+| Forward idle watch | 3 min from the last payload | An idle forward lives at most 100 ms longer, never ending before its deadline. |
+| Lease horizon | the credential's horizon | The horizon already carries the 30 s clock leeway past the token's expiry, and a recheck also retires a credential past it. |
+| Lease recheck ticker | every 60 s from the lease's start | A lease's deadline is 90 s after its last check starts. |
+
+**Left as they are:**
+- **Socket deadlines,** native, by the 2026-10-30 rule (CPUOPT-KEEPALIVE.md).
+- **Heartbeats:** the h1 writer's ping, reset per idle transition; the exchange writer's pinger (`newExchangePinger`); and a forward's ping worker (`handleExchangeConnection`, the 81k in §3.4). Each promises the peer a frame at least every ping interval, and the exchange's TCP keepalive starts probing 1 s after a missed ping. A tick late would break that promise. Arming a tick early would keep it, at about 1% more pings, but that's a change to a heartbeat and isn't made here.
+- **Per-message bounds:** a forward's write timer (`runWithResidentLookup`) bounds one send into a full queue, and it's in a heap only while such a send waits.
+- **The client library's timers** (`resetOrCreateTimer`, `sequenceDeadlineTimer`) and quic-go's.
+- **Retries during an outage:** the measurement write retry and the lease's unanswered-recheck retry, which run only after a failure.
+- **`registerWhenResident`,** whose first poll is 100 ms: a tick would double it, and it lives at most 30 s.
+- **A resident's stream hop and network peer listeners** (`model`), one of each per resident: jittered polls, every 10 min in production as the backstop to key events. They're the next candidates, but they're in `model`, outside this change.
+
+**Measured** on an Apple M1 Max, 10 cores, shared with other sessions' builds and tests (load averages 110–260). The figures compare the two sides of the change; they don't predict production.
+
+- **Runtime timers a simulated connection holds** (`TestConnectionTimerCensus`, 64 connections on the local stack, counted 8 s in). A connection is a resident nominated on the production path, one forward from it, an announcement with verify refreshes on, and a lease with a credential horizon:
+
+  | | main `68c19400d` | This branch |
+  |---|---|---|
+  | The converted owners' runtime timers | 10.00 | 0 |
+  | Their sweep timers | 0 | 10.00 |
+  | Every runtime timer the connections made | 13.61 | 3.27 |
+
+  Before, the announcement held 4 (rounds, test schedule, verify refresh, passive samples), the lease 2, the resident 3 and the forward 1. What's left is the resident's client's send sequence deadline and route write timer, 2.0 a connection, the stream hop listener's poll, 1.0, and the sweep's 10 drivers, 0.16 a connection here.
+- **One heap walk** (`BenchmarkTimerHeapWalkCost`): one P, its heap at §3.4's 55,000 timers before and 31,786 after, the table's 42% taken out, with random deadlines so the walk misses cache as a server's does. Each op moves a pending timer ahead of the rest, so the P walks its heap.
+  - CPU a walk: 367–412 µs before and 131–179 µs after, over six runs of 3,000 walks each; 389 and 143 µs over 100,000.
+  - `runtime.(*timers).check` is 78–95% of the benchmark's CPU on both sides. Over 3,000 walks it fell from 0.97–1.16 s to 0.35–0.49 s.
+  - That's about 7 ns a timer before and 5 ns after: the smaller heap stays in cache better, so the CPU falls further than the timer count, by 60–64%. If production's walks scale between the two, `timers.check`'s 10–12% of connect would fall by 42–64% at the same walk rate, before R14's first half lowers the rate.
+- **The sweep's own cost:**
+  - arming and stopping a timer, 31–63 ns an op on 10 Ps in parallel, without allocating, about twice a runtime timer's 15–21 ns;
+  - a fire and its receipt, the owner's wake included, 1.0–1.5 µs of CPU, against 0.83–0.96 µs for a runtime channel timer (4,096 owners, 1 ms tick);
+  - the drivers' ticks over 550,000 armed timers, 15–26 µs a shard tick, or 2.7–4.7 ns a timer a second: about 2 ms a second for a process's 600,000;
+  - memory, 192 bytes and 2 allocations a timer with its channel, against 248 bytes and 3 for a runtime timer.
+
+**Tested:**
+- `internal/timersweep`, under the race detector: synctest tests that a timer fires at the first tick at or after its deadline, never early and less than a tick late, through `Reset` and `Stop` (none leaves a stale fire, even at the deadline's own instant), wheel rotations and a deadline past the wheel's range; that a ticker keeps its cadence; that an owner that never receives doesn't hold up the sweep; and that a shard's driver runs only while it holds a timer. In real time, a driver held for three rotations fires every due timer once, and owners on every shard arm, reset and stop at once.
+- **Each converted owner,** in a synctest bubble, with its deadline between two ticks: it fires at its deadline or at most a tick after it, never before, and its timer leaves the sweep when the owner ends. That's the resident's and the forward's idle watches, the registration refresh, the passive samples, and the lease's horizon and recheck cadence. The stream grant republish is checked for its one ticker on the sweep, whose cadence the package's tests cover. The announcement's window, rounds, test schedule and verify refreshes run in `run()`, which needs the database and Redis, so they're tested in real time on the local stack, each fire against its own arm.
+- **The wiring:** the exchange makes the sweep, the handler gives it to its announcements, and h1 and h3 transports' leases wait on it.
+- **The existing tests,** with the timer counts of the announce round and passive sample tests now asserting no runtime timers.
+- **Suites, on the local stack:** `internal/timersweep` with `-race`; the whole `session` package (25 minutes); and 522 of server connect's tests, every announce, resident, forward, client-close, exchange, move, peer, session, stream, transport-auth and timer test (29 minutes). The connect run first found a test fixture's resident without an exchange, whose stream grant ticker now gets a sweep of its own, and two announce tests that compress a 30 s round to 50–100 ms, which a timer's own sweep now scales its tick for.
+
 ## Appendix A. Queries and profile commands
 
 **Queries.** Instant queries over the window, at its end, against Mimir. LBALTOPT1 Appendix A has the CPU, traffic and runtime queries. New here:

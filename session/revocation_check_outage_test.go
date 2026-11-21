@@ -107,7 +107,7 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 			run("api client", func() error { return authenticate(clients[i]) }),
 			run("api session", func() error { return authenticate(sessions[i]) }),
 			run("connect admission", func() error {
-				lease, err := StartConnectionAuthorizationLease(WithStateQuerySource(t.Context(), StateQueryConnectH1), clients[i], server.NewId(), 1, func(code int) { retired.Store(i, code) })
+				lease, err := StartConnectionAuthorizationLease(WithStateQuerySource(t.Context(), StateQueryConnectH1), clients[i], server.NewId(), 1, nil, func(code int) { retired.Store(i, code) })
 				if err == nil {
 					resultLock.Lock()
 					leases = append(leases, lease)

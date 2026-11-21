@@ -20,6 +20,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
 )
 
@@ -195,6 +196,18 @@ type ConnectionAnnounceSettings struct {
 	livenessLeaseWrittenForTest func(outcome string)
 	// Replaces the process's lease writer.
 	livenessLeaseWriterForTest *providerLivenessLeaseWriter
+	// Observe each arm and fire of the announcement's sweep timers, by kind:
+	// announceTimerWindow, announceTimerSync, announceTimerTest and
+	// announceTimerVerify. An arm is reported just before it is made.
+	announceTimerArmedForTest func(kind string, timeout time.Duration)
+	announceTimerFiredForTest func(kind string)
+
+	// the process's timer sweep, set from the exchange in NewConnectHandler.
+	// The announce window, the sync rounds, the test schedule, the verify
+	// egress refreshes and the passive samples wait on it, each firing at its
+	// deadline or at most one sweep tick after it (LBALTOPT2.md §8.1). Nil
+	// gives each of those timers a sweep of its own.
+	timerSweep *timersweep.Sweep
 }
 
 type LatencyTest struct {
@@ -453,10 +466,17 @@ func (self *ConnectionAnnounce) run() {
 	}()
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
+		// both halves of the window on the sweep: the registration comes at
+		// most two ticks after the window, well inside the pending marker's
+		// five seconds of slack
+		self.announceTimerArmedForTest(announceTimerWindow, self.announceTimeout/2)
+		announceWait := self.settings.timerSweep.NewTimer(self.announceTimeout / 2)
+		defer announceWait.Stop()
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.announceTimeout / 2):
+		case <-announceWait.C:
+			self.announceTimerFiredForTest(announceTimerWindow)
 		}
 
 		if self.testConfig.AllowLatency() || self.testConfig.AllowSpeed() {
@@ -485,10 +505,13 @@ func (self *ConnectionAnnounce) run() {
 			}
 		}
 
+		self.announceTimerArmedForTest(announceTimerWindow, self.announceTimeout/2)
+		announceWait.Reset(self.announceTimeout / 2)
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.announceTimeout / 2):
+		case <-announceWait.C:
+			self.announceTimerFiredForTest(announceTimerWindow)
 		}
 	}
 
@@ -601,19 +624,31 @@ func (self *ConnectionAnnounce) run() {
 			feedFailureCount = 0
 		}
 		feed()
-		// only this worker feeds from here on
+		// only this worker feeds from here on. A refresh may come a sweep
+		// tick late, against a lease ttl several refreshes long.
+		feedTimeout := func() time.Duration {
+			timeout := verifySettings.EgressRefreshInterval
+			if 0 < feedFailureCount {
+				timeout = min(timeout, self.retryTimeout(feedFailureCount))
+			}
+			return timeout
+		}
 		self.startWorker(func() {
+			timeout := feedTimeout()
+			self.announceTimerArmedForTest(announceTimerVerify, timeout)
+			feedTimer := self.settings.timerSweep.NewTimer(timeout)
+			defer feedTimer.Stop()
 			for {
-				timeout := verifySettings.EgressRefreshInterval
-				if 0 < feedFailureCount {
-					timeout = min(timeout, self.retryTimeout(feedFailureCount))
-				}
 				select {
 				case <-self.ctx.Done():
 					return
-				case <-time.After(timeout):
+				case <-feedTimer.C:
+					self.announceTimerFiredForTest(announceTimerVerify)
 				}
 				feed()
+				timeout = feedTimeout()
+				self.announceTimerArmedForTest(announceTimerVerify, timeout)
+				feedTimer.Reset(timeout)
 			}
 		})
 	}
@@ -729,25 +764,38 @@ func (self *ConnectionAnnounce) run() {
 	syncFailureCount := 0
 	// One timer for the next test and one for the next sync round, each re-armed
 	// only after it fires. A time.After for both on every round left the one
-	// that did not fire in the timer heap, the test's for 12 to 24 hours.
-	testTimer := time.NewTimer(nextTest())
+	// that did not fire in the timer heap, the test's for 12 to 24 hours. Both
+	// wait on the sweep, outside the runtime's timer heaps: a round may start
+	// a sweep tick late, and its stats cover the time from the last round's
+	// end to its own, so no time is lost.
+	testTimeout := nextTest()
+	self.announceTimerArmedForTest(announceTimerTest, testTimeout)
+	testTimer := self.settings.timerSweep.NewTimer(testTimeout)
 	defer testTimer.Stop()
-	syncTimer := time.NewTimer(self.retryTimeout(syncFailureCount))
+	syncTimeout := self.retryTimeout(syncFailureCount)
+	self.announceTimerArmedForTest(announceTimerSync, syncTimeout)
+	syncTimer := self.settings.timerSweep.NewTimer(syncTimeout)
 	defer syncTimer.Stop()
 	// a fired sync timer is re-armed after the round, for its outcome
 	syncTimerFired := false
 	for {
 		if syncTimerFired {
-			syncTimer.Reset(self.retryTimeout(syncFailureCount))
+			syncTimeout = self.retryTimeout(syncFailureCount)
+			self.announceTimerArmedForTest(announceTimerSync, syncTimeout)
+			syncTimer.Reset(syncTimeout)
 			syncTimerFired = false
 		}
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-testTimer.C:
-			testTimer.Reset(nextTest())
+			self.announceTimerFiredForTest(announceTimerTest)
+			testTimeout = nextTest()
+			self.announceTimerArmedForTest(announceTimerTest, testTimeout)
+			testTimer.Reset(testTimeout)
 		case <-syncTimer.C:
 			syncTimerFired = true
+			self.announceTimerFiredForTest(announceTimerSync)
 			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
@@ -888,6 +936,27 @@ func (self *ConnectionAnnounce) run() {
 				}
 			}
 		}
+	}
+}
+
+// The kinds of the announcement's sweep timers, as its test observers name
+// them.
+const (
+	announceTimerWindow = "window"
+	announceTimerSync   = "sync"
+	announceTimerTest   = "test"
+	announceTimerVerify = "verify"
+)
+
+func (self *ConnectionAnnounce) announceTimerArmedForTest(kind string, timeout time.Duration) {
+	if armed := self.settings.announceTimerArmedForTest; armed != nil {
+		armed(kind, timeout)
+	}
+}
+
+func (self *ConnectionAnnounce) announceTimerFiredForTest(kind string) {
+	if fired := self.settings.announceTimerFiredForTest; fired != nil {
+		fired(kind)
 	}
 }
 
@@ -1312,8 +1381,10 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
 	// one timer for the passive samples, re-armed after each fires: a
-	// time.After per sample created a timer every window for each connection
-	passiveSampleTimer := time.NewTimer(self.settings.PassiveSpeedWindowDuration)
+	// time.After per sample created a timer every window for each connection.
+	// It waits on the sweep, so a window may run a sweep tick long; the sample
+	// divides by the window's measured length.
+	passiveSampleTimer := self.settings.timerSweep.NewTimer(self.settings.PassiveSpeedWindowDuration)
 	defer passiveSampleTimer.Stop()
 	// consecutive failed writes; while a retry waits, no write is attempted
 	writeFailureCount := 0
