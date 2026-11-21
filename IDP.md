@@ -209,9 +209,13 @@ bound redirects, response size, and time; and cache by URL so a `client_id` is
 not refetched on every authorization. DCR's open registration endpoint is rate
 limited.
 
-Native clients (Claude Desktop, the CLI) use loopback redirect URIs. The
-authorization server accepts `http://127.0.0.1:<port>/...` for clients whose
-`application_type` is native, and requires HTTPS otherwise.
+Native clients (Claude Desktop, the CLI) use loopback redirect URIs, or a
+private-use scheme in reverse domain name form (RFC 8252 §7.1). The
+authorization server accepts `http://127.0.0.1:<port>/...` and those schemes
+for clients whose `application_type` is native, and requires HTTPS otherwise.
+The consent page sends the browser to the redirect URI, so every other form
+(`javascript:`, `data:`, scheme-less, ...) is refused, at registration and again
+on every authorization and token request (`oauth/redirect_uri.go`).
 
 ## 9. Authorization flow
 
@@ -238,8 +242,10 @@ authorization server accepts `http://127.0.0.1:<port>/...` for clients whose
    token if `offline_access` was granted, and an ID token if `openid` was.
 
 Consent is remembered per (user, client, scope set) so re-authorization is
-silent when nothing new is being requested. A "connected apps" screen in ur.io
-lists grants and revokes them.
+silent when nothing new is being requested. A credential rotation (a password
+reset, a sign-out-all) ends every grant of the user: the remembered consents,
+unredeemed codes and refresh tokens (`oauth/grant_revoke.go`). A "connected
+apps" screen in ur.io that lists grants and revokes them is still to come.
 
 ## 10. The MCP server as a resource server
 
@@ -303,6 +309,10 @@ settled before the first token is issued.
 - **Refresh reuse is treated as theft** — the family is revoked.
 - **Consent is never silently granted** to a client that has not been approved
   for the requested scopes.
+- **Only a sign-in approves** — the consent endpoints refuse an API key and a
+  client token.
+- **A credential rotation ends grants** — and a grant approved before the
+  user's latest rotation is refused at code exchange and refresh.
 - **Secrets never travel in prompts or tool results.** The MCP `fetch` tool's
   sealed cookie jar and the OAuth tokens are separate concerns, but the same
   rule applies to both.
