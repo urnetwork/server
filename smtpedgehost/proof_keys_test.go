@@ -4,7 +4,7 @@
 // not_after is dropped at start; and a directory that is not its id's leaves the block with no verifier and
 // not ready. Every key set here is a throwaway no ceremony made, which names no shape and holds no key.
 
-package main
+package smtpedgehost
 
 import (
 	"context"
@@ -88,7 +88,7 @@ func TestBlockVerifierHoldsItsTwoKeySetsAndRefusesAThird(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)
-	verifier, err := newProofVerifier(config, home, now)
+	verifier, err := NewProofVerifier(config, home, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,9 +97,9 @@ func TestBlockVerifierHoldsItsTwoKeySetsAndRefusesAThird(t *testing.T) {
 	defer cancel()
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	host := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
-	settings := defaultHostSettings(config)
+	settings := DefaultHostSettings(config)
 	settings.ConfigHome = home
-	block, err := newSmtpEdgeHost(ctx, settings, &hostDeps{
+	block, err := NewBlockHost(ctx, settings, &HostDeps{
 		Quota:    host.Quota,
 		Redis:    host.Redis,
 		Gates:    host.Gates,
@@ -162,7 +162,7 @@ func TestBlockVerifierDropsASetPastItsNotAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := newProofVerifier(config, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+	verifier, err := NewProofVerifier(config, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestBlockVerifierDropsASetPastItsNotAfter(t *testing.T) {
 		}
 	}
 	// a block started after the retiring set's not_after holds the kept set alone
-	later, err := newProofVerifier(config, home, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC))
+	later, err := NewProofVerifier(config, home, time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestBlockVerifierDropsASetPastItsNotAfter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty, err := newProofVerifier(none, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+	empty, err := NewProofVerifier(none, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
 	if err != nil || empty == nil {
 		t.Fatalf("a file with no proof_key_sets: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestBlockHasNoVerifierWhenAListedSetDoesNotOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		verifier, err := newProofVerifier(config, entry.home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+		verifier, err := NewProofVerifier(config, entry.home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
 		if err == nil || verifier != nil {
 			t.Errorf("%s: a verifier was built", name)
 			continue
@@ -245,8 +245,8 @@ func TestBlockHasNoVerifierWhenAListedSetDoesNotOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deps := &hostDeps{Log: &testLog{}}
-	if verifier, err := newProofVerifier(config, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)); err == nil {
+	deps := &HostDeps{Log: &testLog{}}
+	if verifier, err := NewProofVerifier(config, home, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC)); err == nil {
 		deps.Verifier = verifier
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -254,7 +254,7 @@ func TestBlockHasNoVerifierWhenAListedSetDoesNotOpen(t *testing.T) {
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	host := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
 	deps.Quota, deps.Redis, deps.Gates, deps.Clock = host.Quota, host.Redis, host.Gates, clock
-	block, err := newSmtpEdgeHost(ctx, defaultHostSettings(config), deps)
+	block, err := NewBlockHost(ctx, DefaultHostSettings(config), deps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestBlockHasNoVerifierWhenAListedSetDoesNotOpen(t *testing.T) {
 // config/local's smtpedge.yml lists one throwaway key set beside it, which opens against its id: the local
 // block's verifier holds that set and no other, and the set names no shape, so nothing verifies under it.
 func TestLocalSmtpEdgeConfigKeySetOpens(t *testing.T) {
-	configHome := filepath.Join("..", "..", "..", "config", "local")
+	configHome := filepath.Join("..", "..", "config", "local")
 	data, err := os.ReadFile(filepath.Join(configHome, "smtpedge.yml"))
 	if err != nil {
 		t.Fatal(err)
@@ -286,7 +286,7 @@ func TestLocalSmtpEdgeConfigKeySetOpens(t *testing.T) {
 	if !strings.Contains(string(keySetJson), `"shapes": []`) {
 		t.Error("config/local's key set names a shape: a throwaway set holds no key")
 	}
-	verifier, err := newProofVerifier(config, configHome, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
+	verifier, err := NewProofVerifier(config, configHome, time.Date(2026, 11, 18, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
 	}

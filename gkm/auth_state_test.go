@@ -48,7 +48,7 @@ func newAuthStateTestWorld(t *testing.T) *authStateTestWorld {
 		}
 		world.loads <- pin
 	}
-	state, closeState, err := NewAuthState(t.Context(), net.Host(), settings)
+	state, closeState, err := NewAuthState(t.Context(), net.Host(), settings, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,15 +180,15 @@ func TestAuthStateNeedsRedisAndBlobs(t *testing.T) {
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	host := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil).ServiceHost()
 	host.Redis = nil
-	if state, _, err := NewAuthState(t.Context(), host, nil); err == nil || state != nil {
+	if state, _, err := NewAuthState(t.Context(), host, nil, nil); err == nil || state != nil {
 		t.Errorf("a state on a host with no Redis: %v", err)
 	}
 	host = sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil).ServiceHost()
 	host.Blobs = nil
-	if state, _, err := NewAuthState(t.Context(), host, nil); err == nil || state != nil {
+	if state, _, err := NewAuthState(t.Context(), host, nil, nil); err == nil || state != nil {
 		t.Errorf("a state on a host with no clusters: %v", err)
 	}
-	if state, _, err := NewAuthState(t.Context(), nil, nil); err == nil || state != nil {
+	if state, _, err := NewAuthState(t.Context(), nil, nil, nil); err == nil || state != nil {
 		t.Errorf("a state on no host: %v", err)
 	}
 }

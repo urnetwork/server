@@ -1,6 +1,6 @@
 //go:build sidecar_pending
 
-package main
+package tlsedgehost
 
 // TLS-M6-07's custom-host rows through the real splitter (FS-122, FS-42's M6 step; FI-11, FI-12, §13.4, §12.6), on
 // tlsedge_split_t3_test.go's split: real nginx, warp's lb process with lbmap, the dns API on Postgres and tlsedge.

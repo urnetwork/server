@@ -25,6 +25,15 @@
 //
 // Nothing here logs an address, an EHLO name, an SNI, a recipient or a byte of a message (I-13): a log line
 // names a role, a file or a reason, and the engine's own lines follow the same rule.
+//
+// Each credential a role reads is a HostDeps or RouterDeps field a test fills with its own, so a role run in a test
+// reads none: the platform's certificate and key (HostDeps.Certificate), and the router's Quota over
+// internal-gate-mxedge.yml and platform client source on internal-gate-edge.yml (RouterDeps). What stays the
+// process's when several hosts run in one test process (e2e-hosts-in-process): server's Postgres pools, which the
+// router's store and the platform's intake read; the Redis key-event subscriber and the metrics registry, which
+// sidecarhost shares by design; sidecar.yml, which server reads once per process (server.Testing_PushSidecarConfig,
+// or HostDeps.Gates and RouterDeps.Gates for one block's own); and the test hooks (sidecartest.InstallTestHooks).
+// The deps' listeners give a test's block ports the OS picked.
 package mxedgehost
 
 import (
@@ -76,6 +85,8 @@ type HostSettings struct {
 	SecretDirectory string
 	// The lb's PROXY header on the TCP 25 port: §13.5's bounds, tlsedge's. Its Clock is replaced by the host's.
 	ProxyHeader *tlsedgeservice.ProxyHeaderSettings
+	// sidecarhost.Run's: readiness's bounds and the status server's drain. nil: sidecarhost.DefaultRunSettings.
+	Run *sidecarhost.RunSettings
 }
 
 // The defaults, with no mxedge.yml.
@@ -83,6 +94,7 @@ func DefaultHostSettings() *HostSettings {
 	return &HostSettings{
 		SecretDirectory: sidecarhost.ScopedVaultHome,
 		ProxyHeader:     tlsedgeservice.DefaultProxyHeaderSettings(),
+		Run:             sidecarhost.DefaultRunSettings(),
 	}
 }
 
@@ -106,6 +118,10 @@ type HostDeps struct {
 	Log sidecar.Logger
 	// The block's /status latch, so a test reads it. nil: sidecarhost.Run's own.
 	WarpStatus *router.WarpStatusState
+	// Listeners already bound for /status and TCP 25, which RunHost serves in place of binding HostPorts', and
+	// takes: a test's on 127.0.0.1:0, so the OS picks each port. nil binds the port as warp maps it.
+	StatusListener net.Listener
+	SmtpListener   net.Listener
 }
 
 // The ports a block serves on, as warp maps them to the host's (WARP_PORTS).
@@ -357,17 +373,20 @@ func platformRunOptions(ctx context.Context, engine sidecar.StreamEngine, settin
 		proxySettings = tlsedgeservice.DefaultProxyHeaderSettings()
 	}
 	return &sidecarhost.RunOptions{
-		Service:    hostPlatformService,
-		StatusPort: ports.Status,
-		Engine:     engine,
-		Stream:     engine,
+		Service:        hostPlatformService,
+		StatusPort:     ports.Status,
+		StatusListener: deps.StatusListener,
+		Engine:         engine,
+		Stream:         engine,
 		Listeners: []*sidecarhost.RunListener{{
-			Port: ports.Smtp,
-			Wrap: NewProxyListenerWrap(ctx, proxySettings, clock),
+			Port:     ports.Smtp,
+			Listener: deps.SmtpListener,
+			Wrap:     NewProxyListenerWrap(ctx, proxySettings, clock),
 		}},
 		Postgres:   true,
 		Groups:     deps.IntakeGroups,
 		WarpStatus: deps.WarpStatus,
+		Settings:   settings.Run,
 	}
 }
 

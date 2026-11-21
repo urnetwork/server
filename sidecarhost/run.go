@@ -61,6 +61,10 @@ type RunListener struct {
 	// Exact allocated host sockets when Warp supplies separate public address families.
 	// Empty uses the block's usual listener.
 	Addresses []netip.AddrPort
+	// A listener already bound for Port, which Run serves, wrapped, in place of binding Port or Addresses: a
+	// test's on 127.0.0.1:0, so the OS picks the port while Port still names the block's. Run takes it, and
+	// closes it at the drain or when the block never serves. nil: Run binds Port or Addresses.
+	Listener net.Listener
 	// Wraps the bound listener before the engine serves it, as TLS-M5-07's NewProxyHeaderListener does
 	// for a port behind the lb's PROXY header, so this package imports no engine. nil serves it as bound.
 	Wrap func(listener net.Listener) (net.Listener, error)
@@ -106,6 +110,10 @@ type RunOptions struct {
 	Service string
 	// GET /status's port, 80 in a block, which also serves an HttpEngine's routes.
 	StatusPort int
+	// A listener already bound for /status and an HttpEngine's routes, which Run serves in place of binding
+	// StatusPort: a test's on 127.0.0.1:0, so the OS picks the port and several blocks run in one process. Run
+	// takes it and closes it at the drain. nil: Run binds StatusPort as warp maps it.
+	StatusListener net.Listener
 	// The engine whose Ready, Drain and Close Run calls.
 	Engine sidecar.Engine
 	// How Engine serves, as the shape it declares (core-types-engine-shape): Http for routes on the
@@ -135,8 +143,11 @@ func (self *RunOptions) Validate() error {
 	if !runServicePattern.MatchString(self.Service) {
 		return fmt.Errorf("sidecarhost run: service %q is not lowercase letters and digits", self.Service)
 	}
-	if self.StatusPort < 1 || 65_535 < self.StatusPort {
+	if self.StatusListener == nil && (self.StatusPort < 1 || 65_535 < self.StatusPort) {
 		return fmt.Errorf("sidecarhost run: status port %d is outside [1,65535]", self.StatusPort)
+	}
+	if self.StatusListener != nil && (self.StatusPort < 0 || 65_535 < self.StatusPort) {
+		return fmt.Errorf("sidecarhost run: status port %d is outside [0,65535]", self.StatusPort)
 	}
 	if self.Engine == nil {
 		return errors.New("sidecarhost run: no engine")
@@ -147,10 +158,16 @@ func (self *RunOptions) Validate() error {
 	if self.Stream != nil && len(self.Listeners) == 0 {
 		return errors.New("sidecarhost run: a stream engine with no listener")
 	}
-	ports := map[int]bool{self.StatusPort: true}
+	ports := map[int]bool{}
+	if 0 < self.StatusPort {
+		ports[self.StatusPort] = true
+	}
 	for _, listener := range self.Listeners {
 		if listener == nil || listener.Port < 1 || 65_535 < listener.Port {
 			return errors.New("sidecarhost run: a listener with no port in [1,65535]")
+		}
+		if listener.Listener != nil && 0 < len(listener.Addresses) {
+			return fmt.Errorf("sidecarhost run: port %d has both a bound listener and addresses", listener.Port)
 		}
 		if ports[listener.Port] {
 			return fmt.Errorf("sidecarhost run: port %d twice", listener.Port)
@@ -170,7 +187,9 @@ func (self *RunOptions) Validate() error {
 
 // What Run reaches outside itself, so a test can stand in for each.
 type runDependencies struct {
-	listenAndServe       func(ctx context.Context, addr string, handler http.Handler, reusePort bool, options server.HttpServerOptions) error
+	listenAndServe func(ctx context.Context, addr string, handler http.Handler, reusePort bool, options server.HttpServerOptions) error
+	// serves a listener RunOptions.StatusListener gave, as listenAndServe serves the one it binds
+	serve                func(ctx context.Context, listener net.Listener, handler http.Handler, options server.HttpServerOptions) error
 	listen               func(ctx context.Context, port int) (net.Listener, error)
 	startupReadiness     func(ctx context.Context) error
 	startStatsPusher     func(ctx context.Context) func()
@@ -235,6 +254,7 @@ func checkScopedVault(lookupEnv func(string) (string, bool), vaultHomeRoot strin
 func Run(ctx context.Context, options *RunOptions) error {
 	return run(ctx, options, &runDependencies{
 		listenAndServe:       server.HttpListenAndServeWithReusePort,
+		serve:                server.HttpServeListener,
 		listen:               runListen,
 		startupReadiness:     router.CheckStartupReadiness,
 		startStatsPusher:     server.StartStatsPusher,
@@ -284,7 +304,9 @@ func (self *runDependencies) readiness(ctx context.Context, options *RunOptions,
 	}()
 	for _, runListener := range options.Listeners {
 		first := len(listeners)
-		if len(runListener.Addresses) == 0 {
+		if runListener.Listener != nil {
+			listeners = append(listeners, runListener.Listener)
+		} else if len(runListener.Addresses) == 0 {
 			listener, err := self.listen(ctx, runListener.Port)
 			if err != nil {
 				return listeners, fmt.Errorf("port %d: %w", runListener.Port, err)
@@ -329,6 +351,18 @@ func run(ctx context.Context, options *RunOptions, deps *runDependencies) error 
 	if options == nil {
 		return errors.New("sidecarhost run: no options")
 	}
+	// every listener the options gave is Run's from here, closed however Run ends: a second close of one the
+	// drain or the status server already closed does nothing
+	defer func() {
+		if options.StatusListener != nil {
+			options.StatusListener.Close()
+		}
+		for _, runListener := range options.Listeners {
+			if runListener != nil && runListener.Listener != nil {
+				runListener.Listener.Close()
+			}
+		}
+	}()
 	if err := options.Validate(); err != nil {
 		return err
 	}
@@ -383,18 +417,31 @@ func run(ctx context.Context, options *RunOptions, deps *runDependencies) error 
 	}
 	httpRouter := router.NewRouter(processCtx, routes)
 
-	statusAddress, err := runListenAddress(options.StatusPort)
-	if err != nil {
-		options.Engine.Close()
-		return err
-	}
 	// /status from the first moment
 	httpDone := make(chan error, 1)
-	go server.HandleError(func() {
-		httpDone <- deps.listenAndServe(serveCtx, statusAddress, httpRouter, false, settings.HttpServer)
-	})
-	// the port alone: the log carries no address (I-13)
-	glog.Infof("%sserving status on port %d\n", logTag, options.StatusPort)
+	if options.StatusListener != nil {
+		statusListener := options.StatusListener
+		go server.HandleError(func() {
+			httpDone <- deps.serve(serveCtx, statusListener, httpRouter, settings.HttpServer)
+		})
+		// the port alone: the log carries no address (I-13)
+		statusPort := options.StatusPort
+		if address, ok := statusListener.Addr().(*net.TCPAddr); ok {
+			statusPort = address.Port
+		}
+		glog.Infof("%sserving status on port %d\n", logTag, statusPort)
+	} else {
+		statusAddress, err := runListenAddress(options.StatusPort)
+		if err != nil {
+			options.Engine.Close()
+			return err
+		}
+		go server.HandleError(func() {
+			httpDone <- deps.listenAndServe(serveCtx, statusAddress, httpRouter, false, settings.HttpServer)
+		})
+		// the port alone: the log carries no address (I-13)
+		glog.Infof("%sserving status on port %d\n", logTag, options.StatusPort)
+	}
 
 	readinessCtx, readinessCancel := context.WithCancel(ctx)
 	defer readinessCancel()

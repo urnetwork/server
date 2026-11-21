@@ -9,7 +9,7 @@
 // ur/smtpedge lease is granted; the client's jwt in the token's place is refused 401; and once the client's rev/
 // object stands, its token is refused 401 at both routes.
 
-package main
+package socketshost
 
 import (
 	"bytes"
@@ -106,7 +106,7 @@ func TestHostTakesEdgeClientsSocketsTokens(t *testing.T) {
 			t.Fatal(err)
 		}
 		blobs := sidecartest.NewFakeBlobs(world.clock, sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
-		host := world.newHost(t, func(deps *hostDeps) {
+		host := world.newHost(t, func(deps *HostDeps) {
 			deps.Authenticator = nil
 			deps.Blobs = blobs
 		})
@@ -247,7 +247,7 @@ func TestHostTakesEdgeClientsSocketsTokens(t *testing.T) {
 		// token it holds once the block's 5 s answer for it lapses
 		firstClientId := pool.ClientIds()[0]
 		revokeServiceTokenTestSubject(t, blobs, edgeNetworkId, sidecar.RevocationKindClient, server.Id(firstClientId), server.NowUtc().Add(time.Minute))
-		world.clock.Advance(defaultHostSettings().Revocation.CacheTimeout)
+		world.clock.Advance(DefaultHostSettings().Revocation.CacheTimeout)
 		if _, err := dialer.Dial(ctx, dialRequest); err == nil {
 			t.Fatal("a revoked client's Find opened a stream")
 		}

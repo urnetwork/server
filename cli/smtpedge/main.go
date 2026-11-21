@@ -1,51 +1,24 @@
 // server/cli/smtpedge (SMTP-M9-20; D-SMTP-11, R-SMTP-13, R-SMTP-14, D-SMTP-5, D-OPS-10, I-13, X7, §14.9, §19.4): the
-// smtpedge engine on the two sending hosts, run by sidecarhost.Run with GET /status on port 80 and no other port:
-// it listens as ur/smtpedge through its platform client in urnetwork-edge and dials MXs out of its host's sending
-// addresses, so it has no lb route and no inbound port (exposed: false, user 65532, cap_net_admin for SO_MARK: the
-// block's warp settings, OPS's).
+// smtpedge engine on the two sending hosts, run by smtpedgehost.Run through sidecarhost.Run with GET /status on port 80
+// and no other port (smtpedgehost's header says what the block builds and when it is ready).
 //
-// What the block builds around smtpedgeservice:
-//
-//   - its settings: config/<env>/smtpedge.yml through smtpedgeservice.LoadSmtpEdgeConfig, with the block's
-//     WARP_FWMARK (server.RequireFwMark) for a sending address that names no mark, and the X-UR-Ref keys from the
-//     vault secret file smtpedge-x-ur-ref.yml, read at run time and never from the repository;
-//   - ServiceHost: sidecarhost's, with its Postgres pool (config/main/db.yml's 4), Quota over api's internal gate
-//     at -api_url and the AbuseGate on the pool (model.NewAbuseGate);
-//   - the store: model.NewSmtpEdgeStore, the send log, halts, DKIM keys and the halt rule's reads, never on a
-//     preamble's path (I-12);
-//   - the gate: gate.go's, from memory filled off the path;
-//   - the clients: sidecar.NewEdgeClientPool, one platform client in urnetwork-edge (§14.9), its credential from
-//     server.NewPlatformClientSource on the edge bearer; once it exists the engine serves ur/smtpedge on it,
-//     registering at sockets (-sockets_url) on the client's sockets token, the service token of audience sockets
-//     api's edge client route answers beside its jwt (QD-1054). Each URL flag's default is the variable
-//     smtpedge.yml's env_vars give a deployed block, $UR_API_URL and $UR_SOCKETS_URL (sidecarhost.ServiceUrlFlag);
-//   - the dialer: smtpedgeservice.SmtpMxNetDialer, SO_MARK per sending address;
-//   - the proof verifier: smtpproof.NewVerifier over smtpedge.yml's proof_key_sets (OPS-M9-02; DESIGN-DETAILS
-//     3.2.7), each set's directory opened against its id, a set past its not_after dropped at start. A file
-//     that lists none gives a verifier that holds none, so every preamble answers KEYS; a listed set that does
-//     not open leaves the block with no verifier and not ready.
-//
-// config/<env>/sidecar.yml's smtpedge gate is reread every 60 s through sidecarhost's Gates, and the engine
-// answers a preamble out of the gate TRY_LATER while the block stays ready: it stays off until D-SMTP-16 passes
-// (R-SMTP-13).
-//
-// The dialing sidecar, the subject mail_send is judged for, needs no seam here: each stream's admitted ur/ ticket
-// names it in dialer_sidecar_id, which sockets filled at Find from the caller's token and signed (QD-989).
-//
-// A verifier without configured proof keys accepts no preambles.
+// This main reads config/<env>/smtpedge.yml, with the block's WARP_FWMARK and the X-UR-Ref keys from the vault secret
+// file smtpedge-x-ur-ref.yml, into smtpedgehost.HostSettings, and what the block's secret_files hold into
+// smtpedgehost.HostDeps: Quota over api's internal gate at -api_url on internal-gate-smtpedge.yml
+// (quotahost.NewBlockQuota), the send authorization source on the same bearer, the store and the AbuseGate on the
+// block's Postgres pool, the proof verifier over smtpedge.yml's proof_key_sets, and the platform client on the edge
+// bearer (internal-gate-edge.yml), registering ur/smtpedge at the sockets service at -sockets_url. Each URL flag's
+// default is the variable smtpedge.yml's env_vars give a deployed block, $UR_API_URL and $UR_SOCKETS_URL
+// (sidecarhost.ServiceUrlFlag). It sets the process's Env, operator's global one (QD-1027), before the block serves.
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
-	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
-	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -53,328 +26,21 @@ import (
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
-	"github.com/urnetwork/sidecar/smtpproof"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
+	"github.com/urnetwork/server/smtpedgehost"
 )
 
 // The service as urnetwork_<svc>_* and the block's log name it.
 const hostService = "smtpedge"
 
-// The block's file under config/<env>. Its X-UR-Ref key file among its vault secret_files is
-// model.SmtpXUrRefKeyFileName, which mxedge's platform listener reads too.
-const hostSettingsResourceName = "smtpedge.yml"
-
-// The block's tunables beyond the engine's.
-type hostSettings struct {
-	// The engine's, from smtpedge.yml and the key file.
-	Config *smtpedgeservice.SmtpEdgeConfig
-	// The directory smtpedge.yml sits in, which a proof key set's relative directory is under. Empty when the
-	// file has none, and then only an absolute directory opens.
-	ConfigHome string
-	// The pool's: one client (§14.9).
-	Clients *sidecar.EdgeClientPoolSettings
-	Gate    *hostGateSettings
-	// How long the block waits before it makes its client again after the source could not answer: 5 s.
-	ClientsRetryInterval time.Duration
-}
-
-func defaultHostSettings(config *smtpedgeservice.SmtpEdgeConfig) *hostSettings {
-	clients := sidecar.DefaultEdgeClientPoolSettings()
-	clients.ClientCount = 1
-	return &hostSettings{
-		Config:               config,
-		Clients:              clients,
-		Gate:                 defaultHostGateSettings(),
-		ClientsRetryInterval: 5 * time.Second,
-	}
-}
-
-// The block's client, as sidecar.EdgeClientPool is.
-type hostClients interface {
-	Clients() []*sidecar.SocketEdgeClient
-	ClientIds() []sidecar.Id
-	Ready() bool
-	Close()
-}
-
-// The durable send records and reporting queries the executable takes from its Postgres adapter.
-type hostSmtpStore interface {
-	smtpedgeservice.SmtpEdgeStore
-	smtpedgeservice.SmtpReportLookups
-	smtpedgeservice.SmtpHaltLookups
-}
-
-var _ hostSmtpStore = (*model.SmtpEdgeStore)(nil)
-
-// The seams a test, or the change that lands a missing one, fills. Each nil one leaves the block not ready and
-// is said once.
-type hostDeps struct {
-	Quota  sidecar.Quota
-	Source sidecar.ServiceClientSource
-	Abuse  sidecar.AbuseGate
-	Store  hostSmtpStore
-	Gate   smtpedgeservice.SmtpGate
-	// The stock gate verifies the signed projection retrieved with the block's own bearer.
-	Projection sidecar.AclGateSource
-	Facts      hostGateSource
-	Resolver   sidecar.SmtpMxResolver
-	Ptr        smtpedgeservice.SmtpPtrResolver
-	Dialer     sidecar.SmtpMxDialer
-	Verifier   sidecar.SmtpProofVerifier
-	// Makes the block's client. Called again until it answers.
-	NewClients func(ctx context.Context) (hostClients, error)
-	// How the client's ur/smtpedge registration reaches sockets.
-	Registrations *sidecar.SocketPlatformRegistrationsArgs
-	// Each replaces the block's own: a test's.
-	Gates   sidecar.ServiceGates
-	Redis   sidecar.Redis
-	Metrics sidecar.Metrics
-	Clock   sidecar.Clock
-	Log     sidecar.Logger
-}
-
-// The engine as the block runs it. Safe for concurrent use.
-type smtpEdgeHost struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	host      *sidecar.ServiceHost
-	settings  *hostSettings
-	deps      *hostDeps
-	engine    *smtpedgeservice.SmtpEdgeService
-	log       sidecar.Logger
-	closeGate func()
-	// what the engine sends no mail without and the block was not given
-	missing []string
-	group   sync.WaitGroup
-
-	stateLock sync.Mutex
-	clients   hostClients
-	serving   bool
-	closed    bool
-}
-
-var _ sidecar.Engine = (*smtpEdgeHost)(nil)
-
-// The engine on its host, its client made in the background on a context of the block's own, so ctx's end, a
-// SIGTERM, starts the drain without ending what the drain needs. A missing seam leaves the block not ready,
-// never an error.
-func newSmtpEdgeHost(ctx context.Context, settings *hostSettings, deps *hostDeps) (*smtpEdgeHost, error) {
-	if settings == nil || settings.Config == nil || settings.Clients == nil || settings.Gate == nil || settings.ClientsRetryInterval <= 0 {
-		return nil, errors.New("no smtpedge settings")
-	}
-	if deps == nil {
-		deps = &hostDeps{}
-	}
-	log := deps.Log
-	if log == nil {
-		log = hostLogger{}
-	}
-	hostCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
-		Postgres:      true,
-		Quota:         deps.Quota,
-		ServiceClient: deps.Source,
-		Abuse:         deps.Abuse,
-		Clock:         deps.Clock,
-	})
-	if deps.Gates != nil {
-		host.Gates = deps.Gates
-	}
-	if deps.Redis != nil {
-		host.Redis = deps.Redis
-	}
-	if deps.Metrics != nil {
-		host.Metrics = deps.Metrics
-	}
-	self := &smtpEdgeHost{
-		ctx:       hostCtx,
-		cancel:    cancel,
-		host:      host,
-		settings:  settings,
-		deps:      deps,
-		log:       log,
-		closeGate: func() {},
-	}
-	gate := deps.Gate
-	if gate == nil && deps.Projection != nil && deps.Facts != nil {
-		cache, closeCache, err := sidecarhost.WatchAclGate(hostCtx, host, deps.Projection, nil)
-		if err != nil {
-			cancel()
-			return nil, err
-		}
-		hostGate := newHostGate(hostCtx, deps.Facts, host.ClockOrReal(), settings.Gate)
-		hostGate.mail = sidecar.NewAclGateView(cache, deps.Abuse, nil)
-		gate = hostGate
-		self.closeGate = func() {
-			hostGate.wait()
-			closeCache()
-		}
-	}
-	need := func(present bool, what string) {
-		if !present {
-			self.missing = append(self.missing, what)
-		}
-	}
-	need(deps.Quota != nil, "ServiceHost.Quota, api's internal quota surface (QD-055)")
-	need(deps.Store != nil, "the store on the block's Postgres pool")
-	need(gate != nil, "the send gate")
-	need(deps.Resolver != nil, "a DNSSEC-validating MX resolver")
-	need(deps.Ptr != nil, "a PTR resolver for the sending addresses' FCrDNS")
-	need(deps.Dialer != nil, "the MX dialer")
-	need(deps.Verifier != nil, "the proof verifier (smtpproof.NewVerifier over smtpedge.yml's proof_key_sets)")
-	need(deps.NewClients != nil && deps.Registrations != nil, "the platform client, api's edge client route on the edge bearer (QD-812)")
-	var store smtpedgeservice.SmtpEdgeStore
-	engineDeps := &smtpedgeservice.SmtpEdgeDeps{
-		Gate:     gate,
-		Resolver: deps.Resolver,
-		Dialer:   deps.Dialer,
-		Ptr:      deps.Ptr,
-		Sink:     model.NewAbuseSmtpSink(nil),
-	}
-	if deps.Store != nil {
-		store = deps.Store
-		engineDeps.Lookups = deps.Store
-		engineDeps.Halts = deps.Store
-	}
-	engine, err := smtpedgeservice.NewSmtpEdgeServiceWithDeps(hostCtx, host, store, deps.Verifier, engineDeps, settings.Config.Settings)
-	if err != nil {
-		cancel()
-		self.closeGate()
-		return nil, err
-	}
-	self.engine = engine
-	if 0 < len(self.missing) {
-		log.Errorf("[%s]not ready without %s", hostService, strings.Join(self.missing, "; "))
-	}
-	if deps.NewClients != nil && deps.Registrations != nil {
-		self.group.Add(1)
-		go self.runClients()
-	}
-	return self, nil
-}
-
-// Makes the client again each ClientsRetryInterval until it exists, then serves ur/smtpedge on it until the
-// block closes.
-func (self *smtpEdgeHost) runClients() {
-	defer self.group.Done()
-	for {
-		clients, err := self.deps.NewClients(self.ctx)
-		if err == nil {
-			kept := func() bool {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				if self.closed {
-					return false
-				}
-				self.clients = clients
-				return true
-			}()
-			if !kept {
-				clients.Close()
-				return
-			}
-			self.serve(clients)
-			return
-		}
-		if self.ctx.Err() != nil {
-			return
-		}
-		// the pool's and the source's errors name an index, a part or a status, never a secret or an address
-		self.log.Warningf("[%s]no platform client yet: %v", hostService, err)
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-self.host.ClockOrReal().After(self.settings.ClientsRetryInterval):
-		}
-	}
-}
-
-// Serves ur/smtpedge on clients until the engine closes: urnetwork-edge's id comes from sidecar.yml.
-func (self *smtpEdgeHost) serve(clients hostClients) {
-	edge, ok := self.host.GatesOrClosed().UrnetworkEdge()
-	if !ok {
-		self.log.Errorf("[%s]sidecar.yml names no urnetwork_edge: ur/smtpedge is not served", hostService)
-		return
-	}
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.serving = true
-	}()
-	defer func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.serving = false
-	}()
-	err := self.engine.Serve(&sidecar.SocketPlatformListenerArgs{
-		UrnetworkEdge: sidecar.Id(edge),
-		Clients:       clients.Clients(),
-		Registrations: self.deps.Registrations,
-		Clock:         self.deps.Clock,
-		Log:           self.log,
-	})
-	if err != nil {
-		self.log.Errorf("[%s]ur/smtpedge: %v", hostService, err)
-	}
-}
-
-// What the block was not given that the engine sends no mail without: empty once every seam is there.
-func (self *smtpEdgeHost) Missing() []string {
-	return slices.Clone(self.missing)
-}
-
-// §19.4's smtpedge column: every seam given, the engine ready (smtp_* tables reachable, {smq_} on Redis, a
-// sending address bound with its FCrDNS), and ur/smtpedge served on a connected client.
-func (self *smtpEdgeHost) Ready() bool {
-	if 0 < len(self.missing) {
-		return false
-	}
-	clients, serving, closed := func() (hostClients, bool, bool) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.clients, self.serving, self.closed
-	}()
-	return !closed && serving && clients != nil && clients.Ready() && self.engine.Ready()
-}
-
-// The engine takes no new stream and its connections finish, up to its DrainTimeout.
-func (self *smtpEdgeHost) Drain() {
-	self.engine.Drain()
-}
-
-// Ends the engine, the block's loop and its client. Safe after Drain, and more than once.
-func (self *smtpEdgeHost) Close() {
-	clients, closed := func() (hostClients, bool) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.closed {
-			return nil, true
-		}
-		self.closed = true
-		clients := self.clients
-		self.clients = nil
-		return clients, false
-	}()
-	if closed {
-		return
-	}
-	self.engine.Close()
-	self.cancel()
-	self.group.Wait()
-	self.closeGate()
-	if clients != nil {
-		clients.Close()
-	}
-}
-
 // smtpedge.yml from config, with the X-UR-Ref keys from the vault, and the directory the file sits in.
 func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, string, error) {
-	resource, err := server.Config.SimpleResource(hostSettingsResourceName)
+	resource, err := server.Config.SimpleResource(smtpedgehost.HostSettingsResourceName)
 	if err != nil {
 		return nil, "", err
 	}
@@ -391,70 +57,31 @@ func loadSmtpEdgeConfig() (*smtpedgeservice.SmtpEdgeConfig, string, error) {
 		return nil, "", err
 	}
 	configHome := ""
-	if path, err := server.Config.ResourcePath(hostSettingsResourceName); err == nil {
+	if path, err := server.Config.ResourcePath(smtpedgehost.HostSettingsResourceName); err == nil {
 		configHome = filepath.Dir(path)
 	}
 	return config, configHome, nil
 }
 
-// The verifier over smtpedge.yml's proof_key_sets (DESIGN-DETAILS 3.2.7): each set the file lists that is not
-// past its not_after at now, its directory checked against its id and opened, its verifying keys checked
-// against its keyset.json. A session verifies under the set its preamble names, and a preamble that names any
-// other set, an expired one included, answers KEYS. A file that lists none gives a verifier that holds none.
-// A listed set that does not open is an error and no verifier: the block then stays not ready, since a
-// verifier holding fewer sets than the file lists would answer KEYS to hosts the operator meant to accept.
-// The error names the entry by its place and the id it was listed under, which is public, and never a path.
-func newProofVerifier(config *smtpedgeservice.SmtpEdgeConfig, configHome string, now time.Time) (*smtpproof.Verifier, error) {
-	verifierSettings := smtpproof.DefaultVerifierSettings()
-	verifierSettings.KeySetMaxCount = config.Settings.ProofKeySetMaxCount
-	keySets := []*smtpproof.VerifierKeySet{}
-	for _, proofKeySet := range config.ProofKeySetsAt(now) {
-		directory, err := config.ProofKeySetDirectory(proofKeySet, configHome)
-		if err != nil {
-			return nil, err
-		}
-		keySet, err := smtpproof.OpenKeySet(directory, proofKeySet.Id)
-		if err != nil {
-			return nil, fmt.Errorf("proof key set %x does not open", proofKeySet.Id)
-		}
-		keySets = append(keySets, &smtpproof.VerifierKeySet{KeySet: keySet, NotAfter: proofKeySet.NotAfter})
-	}
-	verifier, err := smtpproof.NewVerifier(verifierSettings, keySets)
-	if err != nil {
-		return nil, errors.New("the proof key sets' verifying keys do not load")
-	}
-	return verifier, nil
-}
-
-// SMTP receives ticketed opens and the sender's protocol messages on each platform client.
-func newSmtpEdgeClients(ctx context.Context, args sidecar.EdgeClientPoolArgs) (hostClients, error) {
-	args.Inbound = smtpedgeservice.Inbound
-	pool, err := sidecar.NewEdgeClientPool(ctx, &args)
-	if err != nil {
-		return nil, err
-	}
-	return pool, nil
-}
-
 // The block's own deps: Quota over api's internal gate, the store and the AbuseGate on the block's Postgres
 // pool, the gate, the dialer, and the client with its registrations at socketsUrl. Each is left out, and said,
 // when what it needs is missing. The returned call ends what it started.
-func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socketsUrl string) (*hostDeps, func()) {
+func blockDeps(ctx context.Context, settings *smtpedgehost.HostSettings, apiUrl string, socketsUrl string) (*smtpedgehost.HostDeps, func()) {
 	doh := connect.NewDohCache(connect.DefaultDohSettings())
 	resolver := sidecar.NewSmtpMxDnsResolver(doh, nil, nil, nil)
-	deps := &hostDeps{
+	deps := &smtpedgehost.HostDeps{
 		Store:    model.NewSmtpEdgeStore(nil),
 		Resolver: resolver,
 		Ptr:      resolver,
 		Dialer:   smtpedgeservice.NewSmtpMxNetDialer(settings.Config.Settings),
 		Abuse:    model.NewAbuseGate(ctx, model.NewAbuseHardDenySnapshot(ctx, nil), nil),
 	}
-	if verifier, err := newProofVerifier(settings.Config, settings.ConfigHome, time.Now()); err != nil {
+	if verifier, err := smtpedgehost.NewProofVerifier(settings.Config, settings.ConfigHome, time.Now()); err != nil {
 		glog.Errorf("[%s]no proof verifier: %v\n", hostService, err)
 	} else {
 		deps.Verifier = verifier
 		if live := len(settings.Config.ProofKeySetsAt(time.Now())); live == 0 {
-			glog.Errorf("[%s]%s lists no proof key set to accept: every preamble answers KEYS\n", hostService, hostSettingsResourceName)
+			glog.Errorf("[%s]%s lists no proof key set to accept: every preamble answers KEYS\n", hostService, smtpedgehost.HostSettingsResourceName)
 		} else {
 			glog.Infof("[%s]the proof verifier holds %d key sets\n", hostService, live)
 		}
@@ -471,7 +98,7 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 		deps.Quota = quota
 		ends = append(ends, func() { quota.Drain(context.Background()) })
 	}
-	deps.Facts = &modelGateSource{root: settings.Config.Settings.Root, quota: deps.Quota}
+	deps.Facts = smtpedgehost.NewModelGateSource(settings.Config.Settings.Root, deps.Quota)
 	if credential, err := server.LoadInternalGateCredential(server.InternalGateCallerSmtpedge); err != nil {
 		glog.Errorf("[%s]no send authorization source: %v\n", hostService, err)
 	} else if source, err := sidecar.NewAclGateApiSource(apiUrl, nil, func() (string, error) { return credential, nil }, nil); err != nil {
@@ -516,57 +143,17 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 		return deps, end
 	}
 	deps.Source = source
-	deps.NewClients = func(ctx context.Context) (hostClients, error) {
-		return newSmtpEdgeClients(ctx, sidecar.EdgeClientPoolArgs{
+	deps.NewClients = func(ctx context.Context) (smtpedgehost.HostClients, error) {
+		return smtpedgehost.NewEdgeClients(ctx, sidecar.EdgeClientPoolArgs{
 			Source:   source,
 			Settings: settings.Clients,
-			Log:      hostLogger{},
+			Log:      smtpedgehost.HostLogger(),
 		})
 	}
 	// a registration is the client's own call, on its own sockets token, the service token of audience sockets
 	// api's edge client route answers beside its jwt (QD-1054); a client the source holds no answer for has none
 	deps.Registrations = source.SocketPlatformRegistrationsArgs(socketsUrl)
 	return deps, end
-}
-
-// A block that could not start: never ready, serving nothing but /status.
-type notReadyEngine struct{}
-
-func (notReadyEngine) Ready() bool { return false }
-func (notReadyEngine) Drain()      {}
-func (notReadyEngine) Close()      {}
-
-// The pending groups the block reads: MG5's complaints (the halt rule's counts) and MG9's sends, halts and keys.
-func hostGroups() []*sidecarhost.RunGroup {
-	return []*sidecarhost.RunGroup{
-		{Name: "MG5", Linked: server.SidecarMg5Linked},
-		{Name: "MG9", Linked: server.SidecarMg9Linked},
-	}
-}
-
-// Runs the block until ctx ends through sidecarhost.Run (§19.4): GET /status from the first moment, then at
-// ctx's end the drain and Close. A block that cannot start logs why and serves /status not ready.
-func run(ctx context.Context, port int, settings *hostSettings, deps *hostDeps) error {
-	if settings != nil {
-		host, err := newSmtpEdgeHost(ctx, settings, deps)
-		if err == nil {
-			setProcessEnv(host.host)
-			return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
-				Service:    hostService,
-				StatusPort: port,
-				Engine:     host,
-				Postgres:   true,
-				Groups:     hostGroups(),
-			})
-		}
-		glog.Errorf("[%s]not ready: %v\n", hostService, err)
-	}
-	setProcessEnv(&sidecar.ServiceHost{})
-	return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
-		Service:    hostService,
-		StatusPort: port,
-		Engine:     notReadyEngine{},
-	})
 }
 
 // Sets the process's Env, operator's global one (QD-1027), before the block serves: over the engine's own
@@ -599,62 +186,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
 
-	var settings *hostSettings
-	var deps *hostDeps
+	options := &smtpedgehost.RunOptions{Port: *port, ProcessEnv: setProcessEnv}
 	config, configHome, err := loadSmtpEdgeConfig()
 	if err != nil {
 		// a refused file names the key, never a value, and the key file never a key
-		glog.Errorf("[%s]%s: %v\n", hostService, hostSettingsResourceName, err)
+		glog.Errorf("[%s]%s: %v\n", hostService, smtpedgehost.HostSettingsResourceName, err)
 	} else {
-		settings = defaultHostSettings(config)
-		settings.ConfigHome = configHome
+		options.Settings = smtpedgehost.DefaultHostSettings(config)
+		options.Settings.ConfigHome = configHome
 		// on a context of its own, so a SIGTERM's drain can still send the open usage window
 		depsCtx, depsCancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer depsCancel()
-		var end func()
-		deps, end = blockDeps(depsCtx, settings, apiUrl.Url(), socketsUrl.Url())
+		deps, end := blockDeps(depsCtx, options.Settings, apiUrl.Url(), socketsUrl.Url())
 		defer end()
 		defer depsCancel()
+		options.Deps = deps
 	}
-	if err := run(ctx, *port, settings, deps); err != nil {
+	if err := smtpedgehost.Run(ctx, options); err != nil {
 		panic(err)
 	}
-}
-
-// glog as the engine's sidecar.Logger.
-type hostLogger struct{}
-
-func (self hostLogger) Info(args ...any) {
-	glog.Info(args...)
-}
-
-func (self hostLogger) Infof(format string, args ...any) {
-	glog.Infof(format, args...)
-}
-
-func (self hostLogger) Warningf(format string, args ...any) {
-	glog.Warningf(format, args...)
-}
-
-func (self hostLogger) Errorf(format string, args ...any) {
-	glog.Errorf(format, args...)
-}
-
-func (self hostLogger) V(level int32) sidecar.Verbose {
-	return hostVerbose(glog.V(glog.Level(level)))
-}
-
-// glog's verbose level as the engine's sidecar.Verbose.
-type hostVerbose glog.Verbose
-
-func (self hostVerbose) Enabled() bool {
-	return bool(self)
-}
-
-func (self hostVerbose) Info(args ...any) {
-	glog.Verbose(self).Info(args...)
-}
-
-func (self hostVerbose) Infof(format string, args ...any) {
-	glog.Verbose(self).Infof(format, args...)
 }

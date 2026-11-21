@@ -1,4 +1,4 @@
-package main
+package smtpedgehost
 
 import (
 	"bytes"
@@ -88,9 +88,9 @@ func TestHostGateAndMxResolverReachBlockReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	settings := defaultHostSettings(config)
+	settings := DefaultHostSettings(config)
 	poolArgs.Settings = settings.Clients
-	pool, err := newSmtpEdgeClients(ctx, *poolArgs)
+	pool, err := NewEdgeClients(ctx, *poolArgs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,12 +109,12 @@ func TestHostGateAndMxResolverReachBlockReadiness(t *testing.T) {
 	}
 	defer release()
 	registrations := &startupSmtpRegistrations{registered: make(chan struct{}, 1), edge: edge}
-	block, err := newSmtpEdgeHost(ctx, settings, &hostDeps{
+	block, err := NewBlockHost(ctx, settings, &HostDeps{
 		Quota: fakes.Quota, Abuse: fakes.Abuse, Store: sidecartest.NewFakeSmtpEdgeStore(clock, nil),
 		Projection: sidecar.NewAclGateDirectSource(fakes.Redis, fakes.Blobs, nil),
 		Facts:      &testGateSource{loads: map[sidecar.Id]int{}, breaker: &smtpedgeservice.SmtpBreakerState{}},
 		Resolver:   resolver, Ptr: resolver, Dialer: world, Verifier: sidecartest.NewFakeSmtpProofVerifier(nil),
-		NewClients: func(context.Context) (hostClients, error) { return pool, nil },
+		NewClients: func(context.Context) (HostClients, error) { return pool, nil },
 		Registrations: &sidecar.SocketPlatformRegistrationsArgs{SocketsUrl: "https://sockets.example", Transport: registrations,
 			Bearer: func(context.Context, sidecar.Id) (string, error) { return "fixture", nil }},
 		Gates: fakes.Gates, Redis: fakes.Redis, Metrics: fakes.Metrics, Clock: clock, Log: &testLog{},

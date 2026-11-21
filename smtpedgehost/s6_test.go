@@ -1,10 +1,10 @@
 //go:build sidecar_pending && sidecar_testhooks
 
-package main
+package smtpedgehost
 
 // S6, FS-123 and §14's privacy row at T3 (SMTP-M9-31; §22.7, FS-123, D-SMTP-20, R-SMTP-7, R-SMTP-10, I-2, I-12, I-13):
 // the rows T2 runs on the stub edge, sidecartest's smtp_send_rows.go, run here unchanged on the block's engine as main
-// composes it (newSmtpEdgeHost) over the private stack's Postgres, the test's own database, and its Redis, through
+// composes it (NewBlockHost) over the private stack's Postgres, the test's own database, and its Redis, through
 // .stack/server-test.sh with -tags sidecar_pending,sidecar_testhooks:
 //
 //   - the store is model.NewSmtpEdgeStore: each connection's send record reaches smtp_send through the send log, and
@@ -158,7 +158,7 @@ type t3SendBlock struct {
 	clock  *sidecartest.FakeClock
 	start  time.Time
 	fakes  *sidecartest.FakeHost
-	host   *smtpEdgeHost
+	host   *Host
 	gate   *t3SendGate
 	// the engine's stream and dispatcher, which this test stands in for
 	listener  *smtpedgeservice.SmtpEdgeTestListener
@@ -243,9 +243,9 @@ sending_addresses:
 	self.fakes.Gates.OpenService(sidecar.ServiceGateSmtpedge, connect.Id(networkId))
 	self.fakes.Abuse.Set(connect.Id(networkId), sidecar.AbuseStandingStandard, true)
 
-	hostSettings := defaultHostSettings(config)
+	HostSettings := DefaultHostSettings(config)
 	self.gate = &t3SendGate{
-		hostGate:  newHostGate(ctx, &modelGateSource{root: root, quota: self.fakes.Quota}, clock, hostSettings.Gate),
+		hostGate:  newHostGate(ctx, &modelGateSource{root: root, quota: self.fakes.Quota}, clock, HostSettings.Gate),
 		networkId: networkId,
 		member:    func(sidecarId sidecar.Id) bool { return self.world.MemberDeviceKey(sidecarId) != nil },
 	}
@@ -267,7 +267,7 @@ sending_addresses:
 		log = settings.Capture.Logger("smtpedge block")
 	}
 	self.store = model.NewSmtpEdgeStore(nil)
-	self.host, err = newSmtpEdgeHost(ctx, hostSettings, &hostDeps{
+	self.host, err = NewBlockHost(ctx, HostSettings, &HostDeps{
 		Quota:    self.fakes.Quota,
 		Abuse:    self.fakes.Abuse,
 		Store:    self.store,
@@ -311,7 +311,7 @@ sending_addresses:
 			return items
 		})
 		storeSettings := sidecart3.DefaultCaptureStoresSettings()
-		storeSettings.SidecarColumnsPath = "../../local/sidecar-columns.yml"
+		storeSettings.SidecarColumnsPath = "../local/sidecar-columns.yml"
 		self.storeReport, err = sidecart3.CaptureStoreRows(ctx, capture, storeSettings)
 		if err != nil {
 			t.Fatal(err)

@@ -1,6 +1,6 @@
 //go:build sidecar_pending
 
-package main
+package tlsedgehost
 
 // FS-122's readiness across two lb interfaces through the real splitter (TLS-M6-07; FS-122, FI-11, §13.4): two splits,
 // each warp's lb process with lbmap over its own real nginx, both in the dns API's inventory, before one tlsedge block

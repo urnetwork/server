@@ -1,6 +1,6 @@
 //go:build sidecar_pending
 
-package main
+package tlsedgehost
 
 // FS-35 on T3 through the real splitter (TLS-M6-07; FS-35, FI-11, D-TLS-12, §13.4): tlsedge_t3_test.go's block on the
 // private stack's Postgres and Redis, behind real nginx running the split (NGINX_SPLIT_BINARY, or an nginx on PATH with
@@ -112,7 +112,7 @@ func t3SplitBuildLb(t testing.TB) string {
 	}
 	output := filepath.Join(t.TempDir(), "lb")
 	command := exec.Command(goBinary, "build", "-o", output, ".")
-	command.Dir = filepath.Join("..", "..", "..", "warp", "lb")
+	command.Dir = filepath.Join("..", "..", "warp", "lb")
 	if built, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("building warp's lb: %v\n%s", err, built)
 	}
@@ -263,11 +263,11 @@ type t3SplitApi struct {
 func newT3SplitApi(t testing.TB, world *t3EdgeWorld, interfaces []string) *t3SplitApi {
 	t.Helper()
 	api := &t3SplitApi{
-		bearer:     t3SplitBearer(t),
-		edgeBearer: t3SplitBearer(t),
-		reports:    map[string]*t3SplitReports{},
-		custom:     map[string]tls.Certificate{},
-		customPool: x509.NewCertPool(),
+		bearer:         t3SplitBearer(t),
+		edgeBearer:     t3SplitBearer(t),
+		reports:        map[string]*t3SplitReports{},
+		custom:         map[string]tls.Certificate{},
+		customPool:     x509.NewCertPool(),
 		muted:          map[string]bool{},
 		refusedPolls:   map[string]int{},
 		refusedChanged: make(chan struct{}),

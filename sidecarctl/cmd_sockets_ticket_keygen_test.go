@@ -945,13 +945,13 @@ func TestSidecarctlRegistersSocketsTicketKeygen(t *testing.T) {
 	}
 }
 
-// The name the command gives the file in vault is the one server/cli/sockets mounts and reads.
+// The name the command gives the file in vault is the one server/cli/sockets mounts and its host reads.
 func TestSocketsTicketKeygenNamesTheFileTheSocketsHostReads(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join("..", "cli", "sockets", "main.go"))
+	source, err := os.ReadFile(filepath.Join("..", "socketshost", "host.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := "hostTicketKeyFileName = " + strconv.Quote(socketsTicketKeyResourceName); !strings.Contains(string(source), want) {
-		t.Fatalf("server/cli/sockets/main.go does not read the key file as %s", socketsTicketKeyResourceName)
+		t.Fatalf("server/socketshost/host.go does not read the key file as %s", socketsTicketKeyResourceName)
 	}
 }

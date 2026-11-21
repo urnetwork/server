@@ -28,12 +28,22 @@
 //
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has its
 // clusters, budget and hint queue while requests in flight finish.
+//
+// Each credential the block reads from its secret_files is a HostDeps field a test fills with its own, so a host run
+// in a test reads none from vault: the clusters (file-clusters-gkm.yml), the svc- verifier its Authenticator and rev/
+// reader verify under (oauth-jwks-svc.json) and the Quota over internal-gate-gkm.yml. What stays the process's when
+// several hosts run in one test process (e2e-hosts-in-process): the Redis key-event subscriber and the metrics
+// registry, which sidecarhost shares by design; sidecar.yml, which server reads once per process
+// (server.Testing_PushSidecarConfig sets it for every block at once); the svc- verifier a host given no
+// HostDeps.ServiceTokens reads (oauth.Testing_SetServiceTokenVerifier); and the test hooks
+// (sidecartest.InstallTestHooks). Run sets no process-wide state: the main sets operator's global Env.
 package gkm
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,6 +55,7 @@ import (
 	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -66,6 +77,8 @@ type HostSettings struct {
 	Gate *sidecar.AclGateSettings
 	// The rev/ reader's (§7.8). nil: sidecar.DefaultRevocationSettings.
 	Revocation *sidecar.RevocationSettings
+	// sidecarhost.Run's: readiness's bounds and the status server's drain. nil: sidecarhost.DefaultRunSettings.
+	Run *sidecarhost.RunSettings
 }
 
 // The defaults.
@@ -75,6 +88,7 @@ func DefaultHostSettings() *HostSettings {
 		Budget:     evsservice.DefaultWriteBudgetSettings(),
 		Gate:       sidecar.DefaultAclGateSettings(),
 		Revocation: sidecar.DefaultRevocationSettings(),
+		Run:        sidecarhost.DefaultRunSettings(),
 	}
 }
 
@@ -110,6 +124,10 @@ type HostDeps struct {
 	Quota sidecar.Quota
 	// The hint writer: pushservice's on the block's Redis, with no resolver (plan-KEYS-hint-addressing).
 	Push sidecar.Push
+	// The svc- key set's public verifier, which the Authenticator verifies callers' service tokens under and the rev/
+	// reader each rev/ object's signature: vault's oauth-jwks-svc.json, read once by the process
+	// (oauth.VerifyServiceToken). A test's over keys of its own.
+	ServiceTokens *oauth.ServiceTokenVerifier
 	// The engine's clock: real time.
 	Clock sidecar.Clock
 	// The block's /status latch, so a test reads it: sidecarhost.Run's own.
@@ -212,10 +230,13 @@ func (notReadyEngine) Ready() bool { return false }
 func (notReadyEngine) Drain()      {}
 func (notReadyEngine) Close()      {}
 
-// What a block's main gives Run.
+// What a block's main, or a test, gives Run.
 type RunOptions struct {
 	// GET /status's port, which also serves gkm's routes: 80 in a block.
 	Port int
+	// A listener already bound for /status and gkm's routes, which Run serves in place of binding Port: a test's on
+	// 127.0.0.1:0, so the OS picks the port. Run takes it. nil: Port, as warp maps it.
+	StatusListener net.Listener
 	// nil: DefaultHostSettings.
 	Settings *HostSettings
 	// nil: the block's own stores and its own authorization state (the package header).
@@ -230,8 +251,15 @@ func Run(ctx context.Context, options RunOptions) error {
 	if deps == nil {
 		deps = &HostDeps{}
 	}
-	engine := newBlockEngine(ctx, options.Settings, deps)
-	return sidecarhost.Run(ctx, blockRunOptions(engine, options.Port, deps))
+	settings := options.Settings
+	if settings == nil {
+		settings = DefaultHostSettings()
+	}
+	engine := newBlockEngine(ctx, settings, deps)
+	runOptions := blockRunOptions(engine, options.Port, deps)
+	runOptions.StatusListener = options.StatusListener
+	runOptions.Settings = settings.Run
+	return sidecarhost.Run(ctx, runOptions)
 }
 
 // What sidecarhost.Run takes for engine: no Postgres and no pending group, since gkm keeps nothing in Postgres
@@ -279,9 +307,10 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 	}
 	closers = append(closers, clusters.Close)
 	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
-		Blobs: clusters,
-		Quota: deps.Quota,
-		Clock: deps.Clock,
+		Blobs:         clusters,
+		Quota:         deps.Quota,
+		Clock:         deps.Clock,
+		ServiceTokens: deps.ServiceTokens,
 	})
 	budget := deps.Budget
 	if budget == nil {
@@ -308,7 +337,7 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		hostDeps.ClustersReady = clusters.Ready
 	}
 	if hostDeps.AuthState == nil {
-		authState, closeAuthState, err := NewAuthState(hostCtx, host, settings)
+		authState, closeAuthState, err := NewAuthState(hostCtx, host, settings, deps.ServiceTokens)
 		if err != nil {
 			return notReady(fmt.Errorf("the authorization state: %w", err))
 		}

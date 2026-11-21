@@ -29,8 +29,9 @@ import (
 
 // The state over a gate cache of its own on host, which needs Redis and Blobs, and what ends the cache and its watch.
 // ctx bounds the cache's loads and poll and should outlive the block's drain. settings.Gate and settings.Revocation
-// tune the two; nil takes each one's defaults, logging through glog.
-func NewAuthState(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings) (state gkmservice.GkmAuthState, close func(), err error) {
+// tune the two; nil takes each one's defaults, logging through glog. Each rev/ object's signature is checked under
+// serviceTokens' svc- keys, nil being the process's (oauth.VerifyRevocation).
+func NewAuthState(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, serviceTokens *oauth.ServiceTokenVerifier) (state gkmservice.GkmAuthState, close func(), err error) {
 	if host == nil || host.Redis == nil || host.Blobs == nil {
 		return nil, nil, errors.New("gkm's authorization state needs a host with Redis and Blobs")
 	}
@@ -57,6 +58,6 @@ func NewAuthState(ctx context.Context, host *sidecar.ServiceHost, settings *Host
 	if err != nil {
 		return nil, nil, err
 	}
-	revocations := sidecar.NewRevocationChecker(host.Blobs, oauth.VerifyRevocation, revocationSettings)
+	revocations := sidecar.NewRevocationChecker(host.Blobs, sidecarhost.RevocationVerify(serviceTokens), revocationSettings)
 	return gkmservice.NewAclGkmAuthState(cache, revocations, host.Clock), closeCache, nil
 }

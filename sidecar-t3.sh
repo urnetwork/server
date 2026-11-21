@@ -126,9 +126,9 @@ layout_up() {
 # leak leg's tag.
 scenarios() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestScenario'
-  # §14's S6, FS-123 and privacy row on the smtpedge block over the private stack (SMTP-M9-31; cli/smtpedge's
+  # §14's S6, FS-123 and privacy row on the smtpedge block over the private stack (SMTP-M9-31; smtpedgehost's
   # s6_test.go), sidecartest's rows T2 runs on the stub edge
-  go_t3 ./cli/smtpedge -tags "$tags" -run '^TestT3'
+  go_t3 ./smtpedgehost -tags "$tags" -run '^TestT3'
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_leaktest" -run '^(TestT3EveryStoreClassCatchesItsLeak|TestT3EveryEdgeClassCatchesItsLeak)$'
 }
 
