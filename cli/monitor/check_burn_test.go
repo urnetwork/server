@@ -7,6 +7,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -61,5 +64,45 @@ func TestCheckBurnFailsClosed(t *testing.T) {
 		if err := runCheckBurnCommand(t.Context(), args, &bytes.Buffer{}, loadedCheckBurnSettings, fixedCheckBurn(servermonitor.SloBurnClear, nil)); err == nil || !strings.Contains(err.Error(), "usage") {
 			t.Errorf("%q: %v", args, err)
 		}
+	}
+}
+
+func TestCheckBurnRequiresTheReadyFirstEdgeAtTheReleaseVersionThroughoutTheCanary(t *testing.T) {
+	const ready = `{"service":"dnsedge-1","block":"g1","version":"new","status":"ok"}`
+	for _, tc := range []struct {
+		label, start, end string
+		wantChecks        int
+		clear             bool
+	}{
+		{"ready", ready, ready, 1, true},
+		{"old selector still serving", strings.Replace(ready, "new", "old", 1), ready, 0, false},
+		{"new selector still starting", strings.Replace(ready, "ok", "error not ready", 1), ready, 0, false},
+		{"wrong authority", strings.Replace(ready, "dnsedge-1", "dnsedge-2", 1), ready, 0, false},
+		{"rolled back during canary", ready, strings.Replace(ready, "new", "old", 1), 1, false},
+		{"drained during canary", ready, strings.Replace(ready, "ok", "draining", 1), 1, false},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			checks := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/status" {
+					http.NotFound(w, r)
+					return
+				}
+				if checks == 0 {
+					fmt.Fprint(w, tc.start)
+				} else {
+					fmt.Fprint(w, tc.end)
+				}
+			}))
+			defer server.Close()
+			check := func(ctx context.Context, settings servermonitor.SignalSettings, service string) (*servermonitor.SloBurnCheck, error) {
+				checks++
+				return fixedCheckBurn(servermonitor.SloBurnClear, nil)(ctx, settings, service)
+			}
+			err := runCheckBurnCommand(t.Context(), []string{"--service=dnsedge-1", "--expected-version=new", "--status-url=" + server.URL + "/status"}, &bytes.Buffer{}, loadedCheckBurnSettings, check)
+			if (err == nil) != tc.clear || checks != tc.wantChecks {
+				t.Fatalf("result %v, canary ran %d times", err, checks)
+			}
+		})
 	}
 }
