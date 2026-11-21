@@ -56,20 +56,17 @@
 //   - §13.8's certs worker and its ACME CA: a device's issued certificate row is written as the worker writes it
 //     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
 //     is shown the device's self-signed leaf on that key;
-//   - gkm's hint writer's sidecar_id resolver: plan-KEYS-hint-addressing has api answer it on an internal route, which
-//     keys-late-delivery builds (QD-1171); until it lands production's block loses every hint by sidecar id, so the
-//     world's block resolves them from sidecar_identity_binding instead (worldPushClientResolver,
-//     WorldSettings.GkmHintResolver), so a late delivery's wrap-pending and pending hints reach the sidecars they name;
 //   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
 //     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
 //     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
-//     config repo's key through the resolver above, but a repo's creation is refused by gkm's cached 404 of its
-//     placement, so the world runs FakeGkm by default until keys-late-delivery and gkm-repo-create-race land
+//     config repo's key by a late delivery that gkm's hints by sidecar id ask for, but a repo's creation is refused
+//     by gkm's cached 404 of its placement, so the world runs FakeGkm by default until gkm-repo-create-race lands
 //     (world_keys_test.go has the evidence, and TestE2eWorldSmokeRealKeys runs the smoke's gkm step on real keys).
 //
 // The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
-// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and api's sequencer and
-// rev/ store spend on api's own write budget. A device's §16.6 approval gate is the stock one (World.InstallApprovalGate);
+// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go); api's sequencer and rev/
+// store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's internal route on
+// the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's §16.6 approval gate is the stock one (World.InstallApprovalGate);
 // where it refuses a listen as an action with no effect, a product finding the smoke reports, the step carries on
 // through worldListenGate, which passes a listen alone.
 //
@@ -179,9 +176,9 @@ type WorldSettings struct {
 	// sidecar.yml's push switch and the exchange's EnableSidecarPush, as connect's process reads the switch at its
 	// start: each sidecar's client hears its hints from the exchange's resident publisher (§6.8). true.
 	Push bool
-	// Whether gkm's hint writer resolves sidecar ids through the world's stand-in for api's unbuilt internal route
-	// (worldPushClientResolver), so a hint by sidecar id reaches its sidecar's client: true. false runs gkm's own
-	// writer, which resolves none, as production's block does today.
+	// Whether gkm's hint writer resolves sidecar ids through api's internal route on the block's gkm bearer, as
+	// production's block does (server.SidecarIdentityClientsResolver), so a hint by sidecar id reaches its sidecar's
+	// client: true. false gives the block no resolver, so it loses every hint by sidecar id.
 	GkmHintResolver bool
 	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
 	// one, since the hints reach every sidecar.
@@ -510,6 +507,7 @@ func (self *World) installInternalGate() error {
 			Environment: func() (string, error) { return environment, nil },
 		}).Routes(),
 		handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{Verifier: verifier}).Routes(),
+		handlers.NewInternalGateIdentityClientsHandlers(&handlers.InternalGateIdentityClientsDeps{Verifier: verifier}).Routes(),
 	)
 	self.t3.Api().ServeInternalGate(router.NewRouter(self.t3.Context(), routes))
 	self.closes = append(self.closes, func() { self.t3.Api().ServeInternalGate(nil) })

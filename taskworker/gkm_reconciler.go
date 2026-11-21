@@ -33,9 +33,9 @@ package taskworker
 // start's listing. It reads no row but network_acl_head's and writes nothing, so it adds no server-visible state. A
 // binary that does not link MG2 has no heads to page, and lists nothing.
 //
-// Not yet here: the hint writer's sidecar_id resolver, which plan-KEYS-hint-addressing gives taskworker over
-// sidecar_identity_binding: without it every pending hint is counted unresolved and lost, which the clients' hourly
-// resync covers (§6.8).
+// The hint writer resolves the sidecar ids gkm's hints name from sidecar_identity_binding, which taskworker reads
+// (gkm_push_resolver.go; plan-KEYS-hint-addressing): an unknown or revoked sidecar, or a read that fails, loses its
+// hint, which the clients' hourly resync covers (§6.8).
 
 import (
 	"context"
@@ -171,16 +171,16 @@ func listGkmReconcilerNetworks(ctx context.Context, afterNetworkId *sidecar.Id, 
 	return networkIds, &next, nil
 }
 
-// Starts a reconciler on a copy of host carrying gkm's hint writer, with push when given and else pushservice's with
-// no resolver, makes it current until ctx ends, then closes it, and starts its sweep's chain through host.Tasks. The
+// Starts a reconciler on a copy of host carrying gkm's hint writer, with push when given and else pushservice's
+// resolving from sidecar_identity_binding (gkmPushResolver), makes it current until ctx ends, then closes it, and
+// starts its sweep's chain through host.Tasks. The
 // copy shares host's clusters, budget, Redis and registry. A chain that does not start is said, and the next runtime's
 // start tries again. The reconciler reads the networks pages lists at its start (§10.6's networks row), none when it
 // is nil, on settings, the defaults when nil.
 func startGkmReconcilerOnHost(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, state gkmservice.GkmReconcilerState, push sidecar.Push, pages gkmservice.GkmNetworkPages, settings *gkmservice.GkmReconcilerSettings) (*gkmservice.GkmReconciler, error) {
 	gkmHost := *host
 	if push == nil {
-		// no resolver: a hint by sidecar id is lost and counted until plan-KEYS-hint-addressing's resolver lands
-		writer, err := pushservice.NewHintWriter(host.Redis, nil, nil, host.Metrics)
+		writer, err := pushservice.NewHintWriter(host.Redis, nil, newGkmPushResolver(), host.Metrics)
 		if err != nil {
 			return nil, err
 		}

@@ -5,7 +5,7 @@
 // over api's internal quota surface, the quota ledgers a scenario reconciles, read after the debit journal is flushed
 // as taskworker's flush would, the service debits by meter in service_debit_journal and network_service_usage, a
 // network's verification by a paid balance, a device's issued certificate row standing in for the certs worker, the
-// contract gate's install, api's dns.yml root, and the sidecar_id resolver gkm's hint writer runs with in the world.
+// contract gate's install, and api's dns.yml root.
 
 package sidecare2e
 
@@ -18,48 +18,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/connect"
-
 	"github.com/urnetwork/sidecar"
-	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 )
-
-// gkm's hint writer's resolver in the world (the World's header): each sidecar's current client from
-// sidecar_identity_binding, its newest binding generation while its identity is active, in the world's networks, as
-// plan-KEYS-hint-addressing has api's internal POST /sidecar/identity/clients answer it. That route is not built, so
-// gkm's block in production resolves no sidecar and loses every hint by sidecar id; this stands in for it. An id no
-// network of the world binds is absent, which loses its hint as the route's omission does.
-type worldPushClientResolver struct {
-	world *World
-}
-
-var _ pushservice.PushClientResolver = (*worldPushClientResolver)(nil)
-
-func (self *worldPushClientResolver) PushClientIds(ctx context.Context, sidecarIds []connect.Id) (clientIds map[connect.Id]connect.Id, returnErr error) {
-	clientIds = map[connect.Id]connect.Id{}
-	networks := self.world.t3.Networks()
-	server.HandleError(func() {
-		for _, sidecarId := range sidecarIds {
-			for _, network := range networks {
-				if clientId, found := model.GetSidecarCurrentClientId(ctx, network.NetworkId, server.Id(sidecarId)); found {
-					clientIds[sidecarId] = connect.Id(clientId)
-					break
-				}
-			}
-		}
-	}, func(err error) {
-		returnErr = fmt.Errorf("the world's sidecar_id resolver: %w", err)
-	})
-	if returnErr != nil {
-		return nil, returnErr
-	}
-	return clientIds, nil
-}
 
 // Makes networkId network_verified (§21.7) as a network that bought data is, or one that subscribed to Pro when pro: a
 // transfer balance of byteCount in window from now for duration, paid since it carries netRevenue

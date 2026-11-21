@@ -4,7 +4,9 @@
 // internal gate bearer (internal-gate-gkm.yml) and grafana-push.yml. ServiceHost.Quota reaches api's internal gate at
 // -api_url on that bearer for the write budget's weights (QUOTA-M2-11, QD-055), the flag's default the $UR_API_URL
 // gkm.yml's env_vars give a deployed block (sidecarhost.ServiceUrlFlag); without either, every network weighs as
-// Community's.
+// Community's. The hint writer resolves sidecar ids through the same internal gate on that bearer
+// (server.SidecarIdentityClientsResolver; plan-KEYS-hint-addressing, QD-1171); without either it resolves none, and
+// every hint by sidecar id waits for its clients' hourly resync.
 package main
 
 import (
@@ -13,6 +15,7 @@ import (
 	"flag"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/urnetwork/glog"
@@ -45,6 +48,12 @@ func main() {
 	defer stop()
 
 	deps := &gkm.HostDeps{}
+	if resolver, err := newPushResolver(apiUrl.Url()); err != nil {
+		// the error names what is missing, never the bearer
+		glog.Errorf("[gkm]no sidecar_id resolver, so every hint by sidecar id waits for its clients' resync: %v\n", err)
+	} else {
+		deps.PushResolver = resolver
+	}
 	// on a context of its own, which the drain does not end, drained after the block
 	quotaCtx, quotaCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer quotaCancel()
@@ -67,4 +76,16 @@ func main() {
 	if err := gkm.Run(ctx, gkm.RunOptions{Port: *port, Deps: deps}); err != nil {
 		panic(err)
 	}
+}
+
+// The hint writer's resolver: api's internal sidecar identity clients route at apiUrl on the block's gkm bearer.
+func newPushResolver(apiUrl string) (*server.SidecarIdentityClientsResolver, error) {
+	if apiUrl == "" {
+		return nil, errors.New("no api url for the internal gate")
+	}
+	bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerGkm)
+	if err != nil {
+		return nil, err
+	}
+	return server.NewSidecarIdentityClientsResolver(&server.SidecarIdentityClientsResolverArgs{ApiUrl: strings.TrimSuffix(apiUrl, "/"), Bearer: bearer})
 }

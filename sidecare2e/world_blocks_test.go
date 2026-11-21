@@ -21,7 +21,6 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/gkmservice"
-	"github.com/urnetwork/sidecar/pushservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 	"github.com/urnetwork/sidecar/tlsedgeservice"
@@ -195,14 +194,18 @@ func (self *World) runGkm(ctx context.Context, listeners *worldBlockListeners) e
 		ServiceTokens: self.t3.ServiceTokens(),
 	}
 	if self.settings.GkmHintResolver {
-		// the block's own hint writer on the world's Redis, its sidecar ids resolved as api's unbuilt route would
-		host := self.t3.Host()
-		writer, err := pushservice.NewHintWriter(host.Redis, nil, &worldPushClientResolver{world: self}, host.Metrics)
+		// the block's own hint writer, its sidecar ids resolved through api's internal route on the block's gkm bearer,
+		// as server/cli/gkm builds it (plan-KEYS-hint-addressing, QD-1171)
+		resolver, err := server.NewSidecarIdentityClientsResolver(&server.SidecarIdentityClientsResolverArgs{
+			ApiUrl:     self.apiOrigin(),
+			Bearer:     self.bearer(server.InternalGateCallerGkm),
+			HttpClient: self.apiClient(),
+		})
 		if err != nil {
 			listeners.close()
 			return err
 		}
-		deps.Push = writer
+		deps.PushResolver = resolver
 	}
 	return gkm.Run(ctx, gkm.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }
