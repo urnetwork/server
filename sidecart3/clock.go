@@ -38,6 +38,7 @@ import (
 	"io"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -92,9 +93,10 @@ type storeClockWrite struct {
 // One T3 Net's store clock: LastModified and Redis ttls on the schedule's clock.
 type StoreClock struct {
 	// The gate's per-test witness, emitted only after translating a recorded timestamp or changing a live ttl.
-	witness  func()
-	net      *sidecartest.Net
-	settings *StoreClockSettings
+	witness    func()
+	translated atomic.Bool
+	net        *sidecartest.Net
+	settings   *StoreClockSettings
 	// the store's own clock, which LastModified and ttls run on
 	store sidecar.Clock
 
@@ -262,7 +264,7 @@ func (self *StoreClock) translate(clusterId string, info *sidecar.BlobInfo) {
 
 // Record a translation that took effect on the host backing the schedule.
 func (self *StoreClock) reportTranslation() {
-	if self.witness != nil {
+	if self.translated.CompareAndSwap(false, true) && self.witness != nil {
 		self.witness()
 	}
 }

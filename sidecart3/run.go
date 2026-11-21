@@ -80,15 +80,20 @@ func RunRegisteredClause(t testing.TB, rowId string, clause string, ruleSettings
 	return fault.RunRegisteredClause(t, rowId, clause, caseRuleSettings(t, testCase, ruleSettings))
 }
 
+// The default T3 Net for a catalog case, including cases that run a mailbox directly.
+func defaultCaseSettings(testCase *fault.Case) *Settings {
+	settings := DefaultSettings()
+	if testCase.StoreClock {
+		settings.StoreClock = DefaultStoreClockSettings()
+	}
+	return settings
+}
+
 // Both a case and its clauses require the same store-clock mode on their T3 Nets.
 func caseRuleSettings(t testing.TB, testCase *fault.Case, ruleSettings *fault.RuleSettings) *fault.RuleSettings {
 	t.Helper()
 	if ruleSettings == nil {
-		settings := DefaultSettings()
-		if testCase.StoreClock {
-			settings.StoreClock = DefaultStoreClockSettings()
-		}
-		ruleSettings = RuleSettings(t, settings)
+		ruleSettings = RuleSettings(t, defaultCaseSettings(testCase))
 	}
 	storeClockOn, isT3 := netSettingsStoreClocks.Load(ruleSettings.Net)
 	if !isT3 || ruleSettings.Tier != fault.TierT3 {
