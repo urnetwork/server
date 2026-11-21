@@ -106,6 +106,8 @@ type T3Api struct {
 	clientIdTokens map[server.Id]string
 	// each served service origin's handler, by the origin's host (ServeService)
 	serviceHostHandlers map[string]http.Handler
+	// what serves api's internal gate surface in place of api's own routes there (ServeInternalGate), nil for api's
+	internalGateHandler http.Handler
 }
 
 // Server's api over api's and oauth's routes, its credentials handed to net's capture. settings nil takes the defaults.
@@ -165,6 +167,28 @@ func (self *T3Api) ServeService(service string, handler http.Handler) error {
 	}
 	self.serviceHostHandlers[host] = handler
 	return nil
+}
+
+// Serves api's internal gate surface, every path under server.InternalGatePathPrefix, through handler from now on: a
+// world's own internal gate routes on its throwaway bearers' digests, as api's are on its vault's verify file, which a
+// test's api has none of. nil serves api's own routes there again, which refuse every bearer for want of the file.
+func (self *T3Api) ServeInternalGate(handler http.Handler) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.internalGateHandler = handler
+}
+
+// The handler api serves request with: the internal gate's for a path under its prefix while one is set, else api's
+// router.
+func (self *T3Api) apiHandler(request *http.Request) http.Handler {
+	if request.URL != nil && strings.HasPrefix(request.URL.Path, server.InternalGatePathPrefix) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.internalGateHandler != nil {
+			return self.internalGateHandler
+		}
+	}
+	return self.handler
 }
 
 // The handler serving request's origin, nil for none: an https request to a served service's host.
@@ -272,7 +296,7 @@ func (self *t3ApiTransport) RoundTrip(request *http.Request) (*http.Response, er
 	served.Header = request.Header.Clone()
 	served.RemoteAddr = settings.RemoteAddr
 	recorder := httptest.NewRecorder()
-	self.api.handler.ServeHTTP(recorder, served)
+	self.api.apiHandler(request).ServeHTTP(recorder, served)
 	route := request.Method + " " + request.URL.Path
 	self.api.addAnswerSecrets(route, recorder.Body.Bytes())
 	response := recorder.Result()
@@ -447,6 +471,11 @@ type T3SidecarExchange struct {
 // Closes the exchange, its handler and its http server. Every sidecar on it is closed first.
 func (self *T3SidecarExchange) Close() {
 	self.platform.Close()
+}
+
+// The url a client's platform transport dials: the exchange's connect handler on its loopback listener.
+func (self *T3SidecarExchange) PlatformUrl() string {
+	return self.platform.platformUrl
 }
 
 // One sidecar on T3: its Sidecar, its instance and what ends them.

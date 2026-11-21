@@ -8,15 +8,20 @@ package sidecart3
 //	stores    one T3 Net (NewNet): its buckets on the local stack's MinIO, server's Redis, its capture and its fakes;
 //	          the world's hosts run on a copy of its ServiceHost on real time (Host), since server's api, exchange and
 //	          oauth keep real time and judge every token and proof by it
-//	api       T3Api over server's routes, with what api's process installs for the log and the token exchange
-//	          (controller.InstallApiAuthorization's projection part): server's sequencer over the Net's first metadata
-//	          cluster (controller.NewHostedConfigLogSequencer), a gate cache over it, and the exchange's scopes from
-//	          that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's table
-//	          grants at the log's newest state
+//	api       T3Api over server's routes, with what api's process installs over its gate cache
+//	          (controller.InstallApiAuthorization and its projection part): server's sequencer over the Net's first
+//	          metadata cluster (controller.NewHostedConfigLogSequencer), a gate cache over it, the exchange's scopes
+//	          from that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's
+//	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the edge
+//	          logins' source, rev/'s store on the first cluster and the issuer's worker that claims its tasks, and the
+//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts
+//	limits    §7.9's append limits and §20.4's caps run, on the numbers SidecarLimits gives pro.yml's sidecar keys for
+//	          the world's life (§20.4's Community column by default), since the test stack's pro.yml carries none;
+//	          AdjustConfigLog may still take them off for a test that needs it
 //	oauth     the issuer is the sidecars' api origin and WARP_DOMAIN the world's domain while it runs, so a DPoP proof's
-//	          htu and a service's origin are what server checks them against; the svc- key is a throwaway the world
-//	          makes, never vault's, and every host the world builds verifies tokens and rev/ under its own verifier of
-//	          it, as a block given HostDeps.ServiceTokens does, never the process's
+//	          htu and a service's origin are what server checks them against; the svc- key and the access tokens' key
+//	          are throwaways the world makes, never vault's, and every host the world builds verifies tokens and rev/
+//	          under its own verifier of the svc- key, as a block given HostDeps.ServiceTokens does, never the process's
 //	networks  each a personal network in preview_networks, funded in the Net's quota and in every gated service's gate
 //	          (AddNetwork): its first sidecar bootstraps it, signing the Genesis and base 1 through api (Bootstrap),
 //	          and admits the others (Admit), each then following the log through its own token with its own key
@@ -30,14 +35,13 @@ package sidecart3
 //	          clause keeps them: the config group's KF1 on gkm is not this world's either
 //
 // Every wait is on a monitor, a follow or a gate's load, bounded by SyncTimeout in real time only to fail a broken run.
-// What the world installs process-wide (the sequencer, the exchange's source, oauth's issuer and keys, WARP_DOMAIN,
-// sidecar.yml's preview_networks) is restored by Close, so worlds run one at a time, as every T3 test does. Its
-// sidecars run until it closes, whatever context a call that added them carried. Safe for concurrent use once made.
+// What the world installs process-wide (the sequencer, the exchange's source and api's other installs, oauth's issuer
+// and keys, WARP_DOMAIN, sidecar.yml, pro.yml's sidecar limits) is restored by Close, so worlds run one at a time, as
+// every T3 test does. Its sidecars run until it closes, whatever context a call that added them carried. Safe for
+// concurrent use once made.
 //
 // Not here yet: gkm's host and the devices' MLS key clients, so no KeyPackage, Welcome or LeafWrap is made, and a key
-// reaches a device through FakeGkm's deliveries; the config repo's heads on evs; the api's other installs (approvals,
-// dns scopes, edge logins, the contract gate, rev/'s store), which no flow of this world reaches; and §7.9's append
-// limits and §20.4's admission caps, off by default (T3WorldSettings.AdjustConfigLog).
+// reaches a device through FakeGkm's deliveries; and the config repo's heads on evs.
 
 import (
 	"context"
@@ -64,6 +68,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/gkmservice"
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
@@ -75,6 +80,7 @@ import (
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/sidecarhost"
+	"github.com/urnetwork/server/task"
 )
 
 // What a T3 world runs with.
@@ -96,10 +102,15 @@ type T3WorldSettings struct {
 	// The services whose gates the world opens to every network of its, on the Net's sidecar.yml (sidecartest's
 	// FakeServiceGates): evs and gkm.
 	GatedServices []string
-	// What the world's sequencer runs with past api's own (model.NewApiConfigLogSettings), nil for nothing. The
-	// default takes §7.9's append limits and §20.4's admission caps off, the limiter and both caps: their numbers come
-	// from pro.yml's tiers alone, which the test stack's config does not carry, so every append would meet a limit of
-	// none (429 at the bootstrap's base 1).
+	// sidecar.yml as the world puts it for the process while it runs, given each network's id as preview_networks
+	// lists it, quoted: T3WorldPreviewSidecarYaml, preview_networks alone. A world of hosts adds each service's gate.
+	SidecarYaml func(previewNetworkIds []string) string
+	// pro.yml's sidecar limits the world's api and hosts run under for its life (§20.4), which the test stack's
+	// pro.yml does not carry. nil leaves the process's pro.yml as it is, where every sidecar limit reads zero.
+	SidecarLimits *T3WorldSidecarLimits
+	// What the world's sequencer runs with past api's own (model.NewApiConfigLogSettings), nil for nothing: §7.9's
+	// append limits and §20.4's admission caps run on SidecarLimits' numbers. A test that needs them off clears the
+	// limiter and both caps here.
 	AdjustConfigLog func(settings *model.ConfigLogSettings)
 	// What each network holds in the Net's quota: 1 TiB, past what any test writes.
 	NetworkBalanceByteCount int64
@@ -120,22 +131,127 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 	gate.PollJitter = 0
 	gate.FailureBackoff = 0
 	return &T3WorldSettings{
-		Net:           DefaultSettings(),
-		Sidecar:       DefaultT3SidecarSettings(),
-		Exchange:      DefaultExchangeSettings(),
-		Domain:        "sidecart3.example",
-		Gate:          gate,
-		GatedServices: []string{"evs", "gkm"},
-		AdjustConfigLog: func(settings *model.ConfigLogSettings) {
-			settings.Limiter = nil
-			settings.AdmissionCap = nil
-			settings.ActivationCap = nil
-		},
+		Net:                     DefaultSettings(),
+		Sidecar:                 DefaultT3SidecarSettings(),
+		Exchange:                DefaultExchangeSettings(),
+		Domain:                  "sidecart3.example",
+		Gate:                    gate,
+		GatedServices:           []string{"evs", "gkm"},
+		SidecarYaml:             T3WorldPreviewSidecarYaml,
+		SidecarLimits:           DefaultT3WorldSidecarLimits(),
 		NetworkBalanceByteCount: 1024 * 1024 * 1024 * 1024,
 		AuthKeyDuration:         10 * time.Minute,
 		EnrollConcurrency:       4,
 		StatementLife:           time.Hour,
 		SyncTimeout:             60 * time.Second,
+	}
+}
+
+// sidecar.yml with preview_networks alone: the networks a world admits to enrollment (D-TRUST-3).
+func T3WorldPreviewSidecarYaml(previewNetworkIds []string) string {
+	return fmt.Sprintf("sidecar:\n  preview_networks: [%s]\n", strings.Join(previewNetworkIds, ", "))
+}
+
+// pro.yml's sidecar limits a world runs under (§20.4), which model.Testing_SetEnforceSidecarLimits and
+// Testing_SetSidecarLimits put on the process's parsed pro.yml for the world's life.
+type T3WorldSidecarLimits struct {
+	// enforce_sidecar_limits (§20.5): false keeps the limits dark, as production ships them, true refuses past them.
+	Enforce bool
+	// The tier whose sidecar: block a tier key sets: free, the tier model.Testing_CreateNetwork's networks are.
+	Tier model.NetworkTier
+	// Each limit by its pro.yml key, in the unit model.Pro reads it in: bytes for a size, milliseconds for a
+	// duration, 0 or 1 for a switch, -1 for none. A tier key sets Tier's, a sidecar_abuse: key or
+	// evs_unpaid_read_rate every tier's.
+	LimitKeyValues map[string]int64
+}
+
+// §20.4's Community column and its sidecar_abuse: block, enforced: the free tier's numbers, so a scenario runs
+// against the limits a network on it meets. §21.5's breaker rates stay unset, so the breaker never trips: no
+// Postmaster sample reaches a world.
+func DefaultT3WorldSidecarLimits() *T3WorldSidecarLimits {
+	kib := int64(1024)
+	mib := 1024 * kib
+	gib := 1024 * mib
+	return &T3WorldSidecarLimits{
+		Enforce: true,
+		Tier:    model.NetworkTierFree,
+		LimitKeyValues: map[string]int64{
+			"evs_unpaid_read_rate":        mib,
+			"storage":                     gib,
+			"sidecar_clients":             20,
+			"top_level_client_limit":      100,
+			"dns_entries":                 5,
+			"tls_endpoints":               1,
+			"config_admissions":           50,
+			"config_statements_per_min":   60,
+			"config_statements_burst":     600,
+			"config_statements_per_day":   2000,
+			"config_bases_per_min":        1,
+			"config_bases_per_day":        200,
+			"store_weight":                1,
+			"evs_drops_per_day":           20,
+			"acl_rules":                   50,
+			"acl_groups":                  0,
+			"acl_requests":                1,
+			"acl_approvers_two":           0,
+			"acl_network_shares":          0,
+			"smtp_connections_per_day":    5,
+			"smtp_bytes_per_day":          5 * mib,
+			"smtp_recipients_per_message": 5,
+			"smtp_recipients_per_day":     25,
+			"smtp_message_bytes":          5 * mib,
+			"smtp_burst":                  5,
+			"smtp_burst_window":           int64(10 * time.Minute / time.Millisecond),
+			"smtp_concurrent_connections": 1,
+			"mail_inbound_message_bytes":  25 * mib,
+			"mail_burners_active":         10,
+			"mail_burner_creates_per_day": 3,
+			"tls_endpoint_concurrent":     256,
+			"tls_endpoint_new_per_s":      50,
+			"tls_endpoint_mbit_per_s":     20,
+			// sidecar_abuse:, every tier
+			"mail_group_members":                    100,
+			"mail_inbound_recipients":               100,
+			"mail_inbound_repos_per_message":        8,
+			"probation_dns_entries":                 5,
+			"evs_closure_bytes_per_day":             64 * mib,
+			"evs_closure_bytes_floor":               4 * mib,
+			"evs_closure_uploads_per_s":             4,
+			"evs_closure_uploads_per_min":           60,
+			"evs_erasure_pushes_per_min":            60,
+			"evs_drop_previews_per_day":             20,
+			"evs_subscribers_per_repo":              1000,
+			"evs_repos_per_client":                  500,
+			"evs_read_receipts_per_repo_day":        256,
+			"evs_read_receipt_bytes":                4 * kib,
+			"dns_changes_per_hour":                  60,
+			"dns_challenges_per_name_hour":          10,
+			"dns_dkim_selectors":                    64,
+			"tls_visitor_concurrent":                64,
+			"tls_visitor_new_per_s":                 20,
+			"tls_visitor_aggregate_multiple":        4,
+			"smtp_community_connections_per_hour":   500,
+			"smtp_community_median_multiple":        3,
+			"smtp_destination_connections_per_hour": 200,
+			"smtp_destination_concurrency":          10,
+			"smtp_hard_bounce_percent":              10,
+			"smtp_hard_bounce_floor":                10,
+			"directory_requests_pending":            20,
+			"directory_requests_per_day":            50,
+			"directory_requests_per_run":            5,
+			"directory_target_pending":              100,
+			"directory_card_bytes":                  16 * kib,
+		},
+	}
+}
+
+// Puts limits on the process's parsed pro.yml until the returned pop.
+func installT3WorldSidecarLimits(limits *T3WorldSidecarLimits) func() {
+	popEnforce := model.Testing_SetEnforceSidecarLimits(limits.Enforce)
+	popLimits := model.Testing_SetSidecarLimits(limits.Tier, limits.LimitKeyValues)
+	return func() {
+		popLimits()
+		popEnforce()
 	}
 }
 
@@ -235,6 +351,10 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	host.Authenticator = sidecarhost.NewAuthenticatorWithVerifier(serviceTokens)
 	self.host = &host
 
+	// pro.yml's sidecar limits for the world's life, before api takes a statement
+	if settings.SidecarLimits != nil {
+		self.closes = append(self.closes, installT3WorldSidecarLimits(settings.SidecarLimits))
+	}
 	// api's log and exchange, as its process installs them over its first cluster
 	apiGate, err := self.addGate("api")
 	if err != nil {
@@ -251,6 +371,7 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(self.host, first, configLogSettings))
 	self.closes = append(self.closes, func() { model.SetConfigLogSequencer(nil) })
 	self.closes = append(self.closes, oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(apiGate.cache, &oauth.ExchangeScopeSettings{Clock: host.Clock})))
+	self.closes = append(self.closes, installT3WorldApi(ctx, self.host, first, apiGate.cache))
 
 	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	exchange, err := NewT3SidecarExchange(ctx, t, settings.Exchange)
@@ -260,28 +381,103 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	self.exchange = exchange
 	self.closes = append(self.closes, exchange.Close)
 	self.gkm = sidecartest.NewFakeGkm(host.Clock, host.Blobs, nil)
+	// sidecar.yml from the start, so a host the world serves reads its gates before the first network is added
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.gateNetworksWithLock()
+	}()
 	return self, nil
 }
 
-// The world's issuer at origin and its svc- key, a throwaway made here, which api's process signs service tokens and
-// rev/ objects with, until the returned pop; and the verifier holding the key, as a block's mounted jwks gives one,
-// which the world hands each host it builds (HostDeps.ServiceTokens' way), so no host reads the process's.
+// What api's process installs over its gate cache beside the sequencer and the exchange's scopes
+// (controller.InstallApiAuthorization, installApiProjection), on the world's host and its first cluster, until the
+// returned pop: the approval gate's states, the dns scopes' labels, the edge logins' source, rev/'s store signing under
+// the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and their hooks), and the
+// contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch at api's start.
+func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sidecar.BlobCluster, cache *sidecar.AclGateCache) func() {
+	pops := []func(){}
+	pops = append(pops, model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache)))
+	pops = append(pops, model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache)))
+	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
+	pops = append(pops, func() { oauth.SetEdgeLoginSource(nil) })
+	revSettings := model.DefaultSidecarRevSettings()
+	revSettings.Clock = host.Clock
+	revStore := model.NewSidecarRevStore(first, oauth.SignRevocation, revSettings)
+	if host.Budget != nil {
+		prices := evsservice.DefaultPriceTable4KiB()
+		revStore.SetWriteBudget(host.Budget, func(byteCount int64) int64 {
+			price, _ := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
+			return price
+		})
+	}
+	model.SetSidecarRevStore(revStore)
+	pops = append(pops, func() { model.SetSidecarRevStore(nil) })
+	if server.CurrentSidecarConfig().AclContractGate() {
+		gate := controller.NewAclContractGate(ctx, cache, nil)
+		restore := controller.SetAclContractGate(gate)
+		pops = append(pops, func() {
+			restore()
+			gate.Close()
+		})
+	}
+	workerSettings := task.DefaultTaskWorkerSettings()
+	workerSettings.ClaimRegisteredTargetsOnly = true
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	worker := task.NewTaskWorker(workerCtx, workerSettings)
+	worker.AddTargets(model.AuthorizationIssuerTargets()...)
+	var lifetime sync.WaitGroup
+	lifetime.Go(func() {
+		// as api's own supervision: an error ends a pass, and the next starts after the worker's retry wait
+		for workerCtx.Err() == nil {
+			if server.HandleError(worker.Run) == nil {
+				return
+			}
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-time.After(workerSettings.RetryTimeoutAfterError):
+			}
+		}
+	})
+	pops = append(pops, func() {
+		stopWorker()
+		worker.Drain()
+		worker.Close()
+		lifetime.Wait()
+	})
+	return func() {
+		for index := len(pops) - 1; 0 <= index; index -= 1 {
+			pops[index]()
+		}
+	}
+}
+
+// The world's issuer at origin and its two signer keys, throwaways made here, until the returned pop: the svc- key,
+// which api's process signs service tokens and rev/ objects with, and the access tokens' key, which the issuer signs
+// a resource's tokens with (mcp's among them); and the verifier holding the svc- key, as a block's mounted jwks gives
+// one, which the world hands each host it builds (HostDeps.ServiceTokens' way), so no host reads the process's.
 func installT3WorldOauth(origin string) (*oauth.ServiceTokenVerifier, func(), error) {
-	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	signerKey := func(set oauth.SignerKeySet) (*oauth.SignerKey, error) {
+		privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, err
+		}
+		thumbprint, err := oauth.SignerKid(&privateKey.PublicKey)
+		if err != nil {
+			return nil, err
+		}
+		return &oauth.SignerKey{Kid: set.KidPrefix() + thumbprint, Alg: "ES256", Set: set, PrivateKey: privateKey}, nil
+	}
+	key, err := signerKey(oauth.SignerKeySetService)
 	if err != nil {
 		return nil, nil, err
 	}
-	thumbprint, err := oauth.SignerKid(&privateKey.PublicKey)
+	accessKey, err := signerKey(oauth.SignerKeySetMcp)
 	if err != nil {
 		return nil, nil, err
 	}
-	key := &oauth.SignerKey{
-		Kid:        oauth.SignerKeySetService.KidPrefix() + thumbprint,
-		Alg:        "ES256",
-		Set:        oauth.SignerKeySetService,
-		PrivateKey: privateKey,
-	}
-	pops := []func(){oauth.Testing_SetIssuer(origin), oauth.Testing_SetSignerKeys(key)}
+	pops := []func(){oauth.Testing_SetIssuer(origin), oauth.Testing_SetSignerKeys(key, accessKey)}
 	popAll := func() {
 		for index := len(pops) - 1; 0 <= index; index -= 1 {
 			pops[index]()
@@ -329,6 +525,59 @@ func (self *T3World) removeGate(gate *t3WorldGate) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.gates = slices.DeleteFunc(self.gates, func(held *t3WorldGate) bool { return held == gate })
+}
+
+// A gate cache named name over the world's host, as a block's own follows the log, which every sync waits on
+// (SyncGates) until the returned close, which also ends the cache: what a host the world serves reads its
+// authorization state from, so a statement's filer knows the host holds it before it acts. Its close is safe to call
+// again, and the world's Close calls it in its turn.
+func (self *T3World) AddGate(name string) (*sidecar.AclGateCache, func(), error) {
+	gate, err := self.addGate(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	return gate.cache, func() {
+		self.removeGate(gate)
+		gate.close()
+	}, nil
+}
+
+// The verifier of the world's svc- key, which every host the world serves verifies service tokens and rev/ under.
+func (self *T3World) ServiceTokens() *oauth.ServiceTokenVerifier {
+	return self.serviceTokens
+}
+
+// Server's exchange the world's sidecars connect on.
+func (self *T3World) Exchange() *T3SidecarExchange {
+	return self.exchange
+}
+
+// The world's context, which ends at its Close.
+func (self *T3World) Context() context.Context {
+	return self.ctx
+}
+
+// The platform the world's sidecars open their clients on, T3Api for their requests and server's exchange for their
+// connect clients: what an edge block's client pool opens its urnetwork-edge clients on too.
+func (self *T3World) Platform() sidecar.SidecarPlatform {
+	return &t3SidecarPlatform{api: self.api, exchange: self.exchange.platform}
+}
+
+// Runs close at the world's Close, before what the world made itself is ended, newest first; at once when the world
+// has closed.
+func (self *T3World) OnClose(close func()) {
+	kept := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return false
+		}
+		self.closes = append(self.closes, close)
+		return true
+	}()
+	if !kept {
+		close()
+	}
 }
 
 // The Net whose stores, capture and fakes the world's are.
@@ -386,6 +635,15 @@ func (self *T3World) Close() {
 	self.cancel()
 }
 
+// Closes every network's sidecars now, each network's newest first, as Close does before it ends the services: what a
+// world of hosts runs before it stops them, so no host drains under a sidecar's retries. Safe to call again, and Close
+// calls it in its turn.
+func (self *T3World) CloseNetworks() {
+	for _, network := range self.Networks() {
+		network.close()
+	}
+}
+
 // Waits until every gate cache of the world holds networkId at version or past it, asking each to load: what a
 // statement's filer waits on before a device acts on it at a gate, as api's {acl_}v event brings a block's gate
 // within 5 s (§8.9). SyncTimeout bounds it.
@@ -430,7 +688,11 @@ func (self *T3World) gateNetworksWithLock() {
 	if self.popConfig != nil {
 		self.popConfig()
 	}
-	self.popConfig = server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%s]\n", strings.Join(networkIds, ", ")))
+	sidecarYaml := self.settings.SidecarYaml
+	if sidecarYaml == nil {
+		sidecarYaml = T3WorldPreviewSidecarYaml
+	}
+	self.popConfig = server.Testing_PushSidecarConfig(sidecarYaml(networkIds))
 	for _, service := range self.settings.GatedServices {
 		self.net.Fakes().Gates.OpenService(service, connectIds...)
 	}
