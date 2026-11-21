@@ -346,7 +346,7 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, apiKey *TlsCertRevokeApiKey,
 //	POST /tls/custom-progress      what the holder learned at the CA
 //	POST /tls/cert-register        the chain of the row the caller holds the lock for
 //	POST /tls/custom-account       create the account row; begin, end, abort or repair a key change
-//	POST /tls/custom-challenge     a delegated DNS-01 value, which certs writes (QD-175)
+//	POST /tls/custom-challenge     a delegated DNS-01 value, which certs writes (QD-175, QD-1165)
 //	GET  /tls/custom-challenge/<id> whether the dns edges serve it
 //
 // The caller is built from the token and the network's verified projection (TlsCustomDeps.Caller): its §8 publish
@@ -354,9 +354,11 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, apiKey *TlsCertRevokeApiKey,
 // transaction each; a refusal is a *sidecar.TlsCustomError, whose body and status the router answers. Nothing here
 // reaches a CA: the ordering desktops do, under the customer's own account. A process with nothing installed
 // answers 503, and the custom branch of an order is chosen before certsservice.Accept is reached, so no custom CSR
-// is ever queued for certs' own passes (17.3's C9).
+// is ever queued for certs' own passes (17.3's C9). Nothing here reaches a zone either: certs' DNS credential is
+// taskworker's alone (QD-027), so the challenge routes hand their writes and reads to the certs worker's command
+// (tls_custom_challenge_work.go) through a receipt (model's tls_custom_challenge_model.go).
 
-// What the custom routes run on, beside TlsCertsDeps. Every field but Dns is required.
+// What the custom routes run on, beside TlsCertsDeps. Every field but Challenges is required.
 type TlsCustomDeps struct {
 	Store *model.TlsCustomStore
 	// The caller of a certs token at now, from its network's verified projection. An error is a projection that
@@ -364,17 +366,26 @@ type TlsCustomDeps struct {
 	Caller func(ctx context.Context, principal *sidecar.Principal, now time.Time) (*model.TlsCustomCaller, error)
 	// certs' roots, under none of which a custom host sits: the custom branch's test.
 	Roots []string
-	// QD-175's challenge writes. nil answers the challenge routes 503.
-	Dns certsservice.CertsDns
 	// How long a device waits before asking for its custom order again.
 	OrderRetryAfter time.Duration
+	// The challenge handoff's tunables (QD-1165). nil takes model.DefaultTlsCustomChallengeSettings.
+	Challenges *model.TlsCustomChallengeSettings
+}
+
+// The challenge handoff's tunables.
+func (self *TlsCustomDeps) challengeSettings() *model.TlsCustomChallengeSettings {
+	if self.Challenges != nil {
+		return self.Challenges
+	}
+	return model.DefaultTlsCustomChallengeSettings()
 }
 
 var tlsCustomDeps atomic.Pointer[TlsCustomDeps]
 
-// Installs what this process's custom routes run on; nil, or deps missing a field, removes it.
+// Installs what this process's custom routes run on; nil, deps missing a field, or challenge settings that do not
+// validate remove it.
 func SetTlsCustom(deps *TlsCustomDeps) {
-	if deps == nil || deps.Store == nil || deps.Caller == nil || len(deps.Roots) == 0 {
+	if deps == nil || deps.Store == nil || deps.Caller == nil || len(deps.Roots) == 0 || (deps.Challenges != nil && deps.Challenges.Validate() != nil) {
 		tlsCustomDeps.Store(nil)
 		return
 	}
@@ -513,43 +524,169 @@ func TlsCustomAccountOp(ctx context.Context, token string, args *sidecar.TlsCust
 	return result, nil
 }
 
-// POST /tls/custom-challenge (QD-175): certs, the only writer, writes the value at the domain's
-// <acme_token>.acme.<root> for a caller holding a publish grant on a host mapped under the domain.
+// A challenge GET names no receipt of the caller's.
+var errTlsCustomChallengeNotFound = fmt.Errorf("%d Challenge not found.", http.StatusNotFound)
+
+// Whether value is a DNS-01 value: base64url, unpadded, of a SHA-256 digest (RFC 8555 §8.4).
+func tlsCustomChallengeValueValid(value string) bool {
+	if len(value) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+		return false
+	}
+	digest, err := base64.RawURLEncoding.DecodeString(value)
+	return err == nil && len(digest) == sha256.Size
+}
+
+// A refused receipt's answer: 409 claim, 404 no_account and 429 budget with the window's wait as the custom routes
+// answer them, and 503 for a write the DNS path refused otherwise or that was never made.
+func tlsCustomChallengeRefusal(receipt *model.TlsCustomChallengeReceipt) error {
+	refusal := func(status int, reason string) error {
+		return &sidecar.TlsCustomError{Status: status, Refusal: sidecar.TlsCustomRefusal{Reason: reason, RetryAfterMs: tlsCustomChallengeMs(receipt.RetryAfter)}}
+	}
+	switch receipt.Refusal {
+	case model.TlsCustomChallengeRefusalClaim:
+		return refusal(http.StatusConflict, sidecar.TlsCustomRefusalClaim)
+	case model.TlsCustomChallengeRefusalNoAccount:
+		return refusal(http.StatusNotFound, sidecar.TlsCustomRefusalNoAccount)
+	case model.TlsCustomChallengeRefusalBudget:
+		return refusal(http.StatusTooManyRequests, sidecar.TlsCustomRefusalBudget)
+	}
+	glog.Infof("[tls]custom-challenge %s refused: %s\n", receipt.ChallengeId, receipt.Refusal)
+	return errTlsCertsUnavailable
+}
+
+// Milliseconds of d from the answer, at least 1 for a positive wait, saturating.
+func tlsCustomChallengeMs(d time.Duration) uint32 {
+	if d <= 0 {
+		return 0
+	}
+	ms := (d + time.Millisecond - 1) / time.Millisecond
+	return uint32(min(ms, time.Duration(^uint32(0))))
+}
+
+// Reads the receipt again every pollInterval until done holds or wait passes: the receipt as last read, nil when it
+// went past its retention. ctx's end ends the wait with its error.
+func waitTlsCustomChallenge(ctx context.Context, store *model.TlsCustomStore, receipt *model.TlsCustomChallengeReceipt, wait time.Duration, pollInterval time.Duration, done func(*model.TlsCustomChallengeReceipt) bool) (*model.TlsCustomChallengeReceipt, error) {
+	timeout := time.After(wait)
+	for !done(receipt) {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timeout:
+			return receipt, nil
+		case <-time.After(pollInterval):
+		}
+		next, err := store.ChallengeReceipt(ctx, receipt.ChallengeId)
+		if err != nil || next == nil {
+			return next, err
+		}
+		receipt = next
+	}
+	return receipt, nil
+}
+
+// POST /tls/custom-challenge (QD-175, QD-1165): the delegated DNS-01 value at the domain's <acme_token>.acme.<root>,
+// which certs, the only writer, writes from taskworker. api captures the write as a receipt under the caller's claim
+// on the account's lock, queuing the certs worker's command in the same transaction
+// (model.TlsCustomStore.CaptureChallenge), then waits up to WriteWait for the serial the write took. A retry under
+// the claim with the same value recovers the receipt, never a second write, and after a stale answer owes a new one.
+// A wait that ends with the write still owed answers 503, the receipt kept for the retry.
 func TlsCustomChallenge(ctx context.Context, token string, args *sidecar.TlsCustomChallengeArgs) (*sidecar.TlsCustomChallengeResult, error) {
 	customDeps, caller, err := tlsCustomCaller(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if customDeps.Dns == nil {
-		return nil, errTlsCertsUnavailable
-	}
-	// a DNS-01 value is base64url of a SHA-256 digest
-	if args == nil || len(args.Value) != base64.RawURLEncoding.EncodedLen(sha256.Size) {
+	if args == nil || args.Domain == "" || !tlsCustomChallengeValueValid(args.Value) {
 		return nil, errTlsCertsRequest
 	}
-	name, err := customDeps.Store.ChallengeName(ctx, caller, args.Domain)
+	settings := customDeps.challengeSettings()
+	owner := session.NewLocalClientSession(ctx, "", nil)
+	defer owner.Cancel()
+	receipt, err := customDeps.Store.CaptureChallenge(ctx, caller, args.Domain, args.Value, settings, func(tx server.PgTx, challengeId server.Id) {
+		scheduleTlsCustomChallengeWorkInTx(tx, owner, challengeId, time.Time{}, settings)
+	})
 	if err != nil {
 		return nil, tlsCustomError("custom-challenge", err)
 	}
-	serial, err := customDeps.Dns.WriteAcmeChallenge(ctx, name, []string{args.Value})
-	if err != nil {
+	tlsCustomChallengeBarrier(TlsCustomChallengeBarrierCaptured, receipt.ChallengeId)
+	receipt, err = waitTlsCustomChallenge(ctx, customDeps.Store, receipt, settings.WriteWait, settings.PollInterval, func(receipt *model.TlsCustomChallengeReceipt) bool {
+		return receipt.State == model.TlsCustomChallengeStateWritten || receipt.State == model.TlsCustomChallengeStateRefused
+	})
+	switch {
+	case err != nil:
 		return nil, tlsCustomError("custom-challenge", err)
+	case receipt == nil:
+		return nil, errTlsCertsUnavailable
+	case receipt.State == model.TlsCustomChallengeStateWritten:
+		return &sidecar.TlsCustomChallengeResult{ChallengeId: receipt.Serial}, nil
+	case receipt.State == model.TlsCustomChallengeStateRefused:
+		return nil, tlsCustomChallengeRefusal(receipt)
 	}
-	return &sidecar.TlsCustomChallengeResult{ChallengeId: serial}, nil
+	// still owed: the receipt waits for the retry
+	return nil, errTlsCertsUnavailable
 }
 
-// GET /tls/custom-challenge/<id>: GET /dns/ready for the write's serial, every answer passed through.
+// GET /tls/custom-challenge/<id> (QD-175, QD-1165): GET /dns/ready's answer for the serial a write took, every answer
+// passed through, which the certs worker reads, since api holds no DNS credential. The caller's own receipt of its
+// network and sidecar written at the serial answers, else 404. stale is final for the serial, and an answer younger
+// than ReadyFreshness is answered as it is; otherwise the worker is asked for a fresh read and the route waits up to
+// ReadyWait for it, answering waiting when none comes in time, as /dns/ready does when its hold ends.
 func TlsCustomChallengeStatus(ctx context.Context, token string, challengeId uint64) (*sidecar.TlsCustomChallengeResult, error) {
-	customDeps, _, err := tlsCustomCaller(ctx, token)
+	customDeps, caller, err := tlsCustomCaller(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	if customDeps.Dns == nil || challengeId == 0 {
-		return nil, errTlsCertsUnavailable
+	if challengeId == 0 {
+		return nil, errTlsCustomChallengeNotFound
 	}
-	readiness, err := customDeps.Dns.Ready(ctx, challengeId)
+	settings := customDeps.challengeSettings()
+	answer := func(readiness string) *sidecar.TlsCustomChallengeResult {
+		return &sidecar.TlsCustomChallengeResult{ChallengeId: challengeId, Readiness: readiness}
+	}
+	receipt, err := customDeps.Store.ChallengeReceiptBySerial(ctx, caller, challengeId)
 	if err != nil {
 		return nil, tlsCustomError("custom-challenge status", err)
 	}
-	return &sidecar.TlsCustomChallengeResult{ChallengeId: challengeId, Readiness: string(readiness)}, nil
+	if receipt == nil {
+		return nil, errTlsCustomChallengeNotFound
+	}
+	if receipt.ReadyAnswer == model.TlsCustomChallengeReadyStale || (receipt.ReadyAnswer != "" && receipt.Now.Sub(receipt.ReadyTime) < settings.ReadyFreshness) {
+		return answer(receipt.ReadyAnswer), nil
+	}
+	owner := session.NewLocalClientSession(ctx, "", nil)
+	defer owner.Cancel()
+	requestTime, err := customDeps.Store.RequestChallengeReadiness(ctx, receipt.ChallengeId, challengeId, func(tx server.PgTx, challengeId server.Id) {
+		scheduleTlsCustomChallengeWorkInTx(tx, owner, challengeId, time.Time{}, settings)
+	})
+	if err != nil {
+		return nil, tlsCustomError("custom-challenge status", err)
+	}
+	if requestTime.IsZero() {
+		// the receipt moved since the read: a stale answer recorded, a new write under the claim, or its retention's end
+		receipt, err = customDeps.Store.ChallengeReceiptBySerial(ctx, caller, challengeId)
+		switch {
+		case err != nil:
+			return nil, tlsCustomError("custom-challenge status", err)
+		case receipt == nil:
+			return nil, errTlsCustomChallengeNotFound
+		case receipt.ReadyAnswer == model.TlsCustomChallengeReadyStale:
+			return answer(receipt.ReadyAnswer), nil
+		}
+		return answer(string(certsservice.CertsDnsWaiting)), nil
+	}
+	tlsCustomChallengeBarrier(TlsCustomChallengeBarrierReadyAsked, receipt.ChallengeId)
+	answered := func(receipt *model.TlsCustomChallengeReceipt) bool {
+		return receipt.State != model.TlsCustomChallengeStateWritten || receipt.Serial != challengeId ||
+			(receipt.ReadyAnswer != "" && !receipt.ReadyTime.Before(requestTime))
+	}
+	receipt, err = waitTlsCustomChallenge(ctx, customDeps.Store, receipt, settings.ReadyWait, settings.PollInterval, answered)
+	switch {
+	case err != nil:
+		return nil, tlsCustomError("custom-challenge status", err)
+	case receipt == nil || receipt.State != model.TlsCustomChallengeStateWritten || receipt.Serial != challengeId:
+		// the receipt went, or a new write under the claim replaced this serial's
+		return nil, errTlsCustomChallengeNotFound
+	case receipt.ReadyAnswer != "" && (receipt.ReadyAnswer == model.TlsCustomChallengeReadyStale || !receipt.ReadyTime.Before(requestTime)):
+		return answer(receipt.ReadyAnswer), nil
+	}
+	return answer(string(certsservice.CertsDnsWaiting)), nil
 }

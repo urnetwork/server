@@ -20,9 +20,11 @@ import (
 // past their 400 days (dns-1), tombstones the ownerless retiring names a
 // restore's replay left that nobody re-bound in 90 days, tombstones the aliases
 // a release or a change retired 90 days ago, their rows and CAA leaving the
-// root (D-DNS-10, I-14), and drops the custom-host map's versions past their 7
-// days, the newest kept (§12.14). A binary that does not link MG5 neither
-// schedules the chain nor, should an older row run, touches anything.
+// root (D-DNS-10, I-14), drops the custom-host map's versions past their 7
+// days, the newest kept (§12.14), and deletes the receipts of delegated DNS-01
+// challenges past their hour (QD-1165), as their values go. A binary that does
+// not link MG5 neither schedules the chain nor, should an older row run,
+// touches anything.
 
 // Cadences of the chain.
 type DnsMaintenanceSettings struct {
@@ -55,6 +57,7 @@ type DnsMaintenanceResult struct {
 	PurgedIncidentCount    int  `json:"purged_incident_count"`
 	TombstonedAliasCount   int  `json:"tombstoned_alias_count"`
 	PurgedMapVersionCount  int  `json:"purged_map_version_count"`
+	PurgedChallengeCount   int  `json:"purged_challenge_count"`
 	More                   bool `json:"more"`
 }
 
@@ -138,6 +141,12 @@ func DnsMaintenance(
 		glog.Warningf("[dns]custom-host map purge: %v\n", err)
 		result.More = true
 	}
+	purgedChallengeCount, more, err := model.PurgeExpiredTlsCustomChallenges(ctx, now, model.DefaultTlsCustomChallengeSettings().PurgeBatchSize)
+	result.PurgedChallengeCount = purgedChallengeCount
+	if err != nil {
+		glog.Warningf("[dns]custom challenge receipt purge: %v\n", err)
+	}
+	result.More = result.More || more || err != nil
 	return result, nil
 }
 

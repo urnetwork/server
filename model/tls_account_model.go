@@ -1710,31 +1710,6 @@ func getTlsCustomListenFactsInTx(ctx context.Context, query server.PgCanQuery, n
 	return certified, acme
 }
 
-// The name a delegated DNS-01 value for domain is written at, <acme_token>.acme.<root> (QD-175), for a caller
-// holding an active publish grant on a host mapped under the domain; 403 grant otherwise.
-func (self *TlsCustomStore) ChallengeName(ctx context.Context, caller *TlsCustomCaller, domain string) (name string, returnErr error) {
-	if !dnsCustomHostLinked() {
-		return "", ErrDnsUnlinked
-	}
-	if err := tlsCustomRun(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			if !self.ordererInTx(ctx, tx, caller, domain, false) {
-				returnErr = tlsCustomRefusal(http.StatusForbidden, sidecar.TlsCustomRefusalGrant)
-				return
-			}
-			acmeToken := getTlsCustomAcmeTokenInTx(ctx, tx, caller.NetworkId, domain)
-			if acmeToken == "" {
-				returnErr = tlsCustomRefusal(http.StatusNotFound, sidecar.TlsCustomRefusalNoAccount)
-				return
-			}
-			name = DnsAcmeChallengeTarget(self.roots[0], acmeToken)
-		})
-	}); err != nil {
-		return "", err
-	}
-	return
-}
-
 var _ certsservice.CertsCustomStore = (*TlsCustomStore)(nil)
 
 // The sweep's renewal candidates (17.2.11): custom_issued rows with no successor whose device's sidecar is active,
