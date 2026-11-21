@@ -33,7 +33,10 @@
 //     is live, and an internet sender's message reaches the member's mailbox through the world's lb, mxedge's router
 //     and the receiver, held to the dns edge's signed TLSA, and is read back by the member's reader; then the second
 //     network, aged past probation at its enrollment, turns mail on and its owner's device sends to the first's alias
-//     through smtpedge, the LAN splice to mxedge's router and the receiver, and the first network's reader reads it.
+//     through smtpedge, the LAN splice to mxedge's router and the receiver, and the first network's reader reads it;
+//   - the ledgers at the end: the blocks that metered the TLS and mail steps restarted, so each drained its usage
+//     window, and every byte drawn from each network's balances a debit on a meter, exactly, no balance overdrawn,
+//     mxedge's meter holding the first network's mail, and smtpedge's and tlsedge's the second's mail and visit.
 //
 // Each phase has its bound and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -105,6 +108,9 @@ type worldSmokeSettings struct {
 	Keys *worldKeysSettings
 	// The mail step's grants, addresses, message and bounds (world_smoke_mail_test.go).
 	Mail *worldSmokeMailSettings
+	// The blocks restarted at the end so each drains, sending its open usage window, before the last ledgers: every
+	// block that metered the TLS and mail steps.
+	FinalDrainBlocks []string
 }
 
 func defaultWorldSmokeSettings() *worldSmokeSettings {
@@ -135,6 +141,7 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		Tls:                DefaultWorldTlsSettings(),
 		Keys:               defaultWorldKeysSettings(),
 		Mail:               defaultWorldSmokeMailSettings(),
+		FinalDrainBlocks:   []string{WorldBlockTlsedge, WorldBlockSockets, WorldBlockSmtpedge, WorldBlockMxedge, WorldBlockEvs},
 	}
 }
 
@@ -454,6 +461,43 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 		// the second, verified by its Pro balance, sends to it through smtpedge
 		mailbox := worldSmokeMailInbound(t, world, settings, first, append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...))
 		worldSmokeMailOutbound(t, world, settings, second, mailbox)
+
+		// the ledgers at the end: every block that metered the TLS and mail steps drained by a restart, as a deploy's
+		// SIGTERM drains it, its open usage window sent through api's quota surface, so every byte drawn from each
+		// network's balances is a debit on a meter, exactly, and no balance was overdrawn
+		for _, name := range settings.FinalDrainBlocks {
+			if err := world.Restart(name); err != nil {
+				world.FailProgress(t, name+"'s restart for its drain", err, nil)
+			}
+		}
+		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
+		ledgers, err = world.ReadLedgers(ctx, time.Time{})
+		cancel()
+		if err != nil {
+			t.Fatalf("the ledgers at the end: %v", err)
+		}
+		for _, network := range networks {
+			ledger := ledgers.Networks[network.NetworkId]
+			switch {
+			case ledger == nil:
+				t.Fatalf("%s has no quota ledger at the end", network.Name)
+			case ledger.Spent || ledger.BalanceByteCount < 0:
+				t.Fatalf("%s's balance at the end: %+v", network.Name, ledger)
+			case ledgers.Meters.TotalByteCount(network.NetworkId) != ledger.DebitedByteCount():
+				t.Fatalf("%s's balances were debited %d by the end, its meters: %s", network.Name, ledger.DebitedByteCount(), ledgers.Meters.Describe(network.NetworkId))
+			}
+			t.Logf("%s's meters at the end: %s", network.Name, ledgers.Meters.Describe(network.NetworkId))
+		}
+		// each edge's own meter holds its step's bytes: the mail the first network took through mxedge, and the mail
+		// the second sent through smtpedge and the visit it was answered through tlsedge
+		for _, metered := range []struct {
+			network *WorldNetwork
+			meter   string
+		}{{first, sidecar.QuotaMeterMx}, {second, sidecar.QuotaMeterSmtp}, {second, sidecar.QuotaMeterTls}} {
+			if ledgers.Meters.ByteCount(metered.network.NetworkId, metered.meter) <= 0 {
+				t.Fatalf("%s's %s meter holds nothing at the end: %s", metered.network.Name, metered.meter, ledgers.Meters.Describe(metered.network.NetworkId))
+			}
+		}
 	})
 }
 

@@ -227,7 +227,7 @@ func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSetti
 		world.FailProgress(t, network.Name+"'s mailbox", err, nil)
 	}
 	worldSmokeMailCheck(t, owner, got, mailSettings.Sender, messageId, mailSettings.Body, sidecar.MailTrustUntrusted)
-	worldSmokeMailIngestByHint(t, owner, got, changes.Count(), mailSettings.Mail)
+	worldSmokeMailIngestByHint(t, owner, got, "the receiver's first deposit to the mailbox", changes.Count(), mailSettings.Mail)
 	return &worldSmokeMailbox{Network: network, Address: address, Reader: owner, Mail: ownerMail, MailboxId: mailboxId}
 }
 
@@ -314,7 +314,7 @@ func worldSmokeMailOutbound(t testing.TB, world *World, settings *worldSmokeSett
 	// mail from another network is internet mail at its readers, not a member's, its Message-ID under the sender's
 	// network domain (§14.6)
 	worldSmokeMailCheck(t, mailbox.Reader, got, from, "@"+domain, mailSettings.SendBody, sidecar.MailTrustUntrusted)
-	worldSmokeMailIngestByHint(t, mailbox.Reader, got, changes.Count(), mailSettings.Mail)
+	worldSmokeMailIngestByHint(t, mailbox.Reader, got, "the receiver's second deposit to the mailbox", changes.Count(), mailSettings.Mail)
 	if approvals < 2 {
 		t.Logf("%s's alias and send passed %d stand-in approvals", owner.Name, approvals)
 	}
@@ -324,10 +324,10 @@ func worldSmokeMailOutbound(t testing.TB, world *World, settings *worldSmokeSett
 // watches every ref of the mailbox, a deposit ref's among them (mail_ingest_reader.go's Watch), and §19.8's
 // head-to-hint target is 2 s, so a deposit should wake it long before IngestHintTimeout; the wait woke it itself past
 // that, as an app's wake does, and carried on.
-func worldSmokeMailIngestByHint(t testing.TB, reader *sidecart3.T3Device, got *WorldMailMessage, changes int64, settings *WorldMailSettings) {
+func worldSmokeMailIngestByHint(t testing.TB, reader *sidecart3.T3Device, got *WorldMailMessage, deposit string, changes int64, settings *WorldMailSettings) {
 	t.Helper()
 	if !got.ByHint {
-		t.Errorf("%s ingested the deposit only on a wake (MailClient.Resync) past %s, never on the deposit's hint: the receiver's deposit push committed, and the ingestor, which watches every ref of the mailbox, ran no pass for it, while the reader's EvsClient raised %d changes of the mailbox before the wake; whether evs's block sent no hint for the deposit ref, the hint never reached the reader, or its read raised no change the ingestor took is not located further here", reader.Name, settings.IngestHintTimeout, changes)
+		t.Errorf("%s ingested %s only on a wake (MailClient.Resync) past %s, never on the deposit's hint: the receiver's deposit push committed, and the ingestor, which watches every ref of the mailbox, ran no pass for it, while the reader's EvsClient raised %d changes of the mailbox before the wake; whether evs's block sent no hint for the receiver's new deposit ref, the hint never reached the reader, or its read raised no change the ingestor took is not located further here", reader.Name, deposit, settings.IngestHintTimeout, changes)
 	}
 }
 
