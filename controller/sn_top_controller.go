@@ -244,12 +244,6 @@ type SnTopRow struct {
 	ClaimPrompt    bool         `json:"claim_prompt"`
 	IsMe           bool         `json:"is_me"`
 	Fleets         []SnTopFleet `json:"fleets"`
-	// a shadow board's row only (board=shadow, sn_top_shadow.go): the
-	// network's live position and units beside its shadow ones, and its
-	// providers rule (a) withheld
-	LivePosition      *int `json:"live_position,omitempty"`
-	LivePrefixes      *int `json:"live_prefixes,omitempty"`
-	WithheldProviders *int `json:"withheld_providers,omitempty"`
 }
 
 type SnTopHistoryPoint struct {
@@ -266,11 +260,6 @@ type SnTopMe struct {
 	SharedWithUnits     int                 `json:"shared_with_units"`
 	NotMeasurableReason string              `json:"not_measurable_reason"`
 	History             []SnTopHistoryPoint `json:"history"`
-	// rule (a) at the newest fold: which of the network's providers count and
-	// why the others do not, and the network's row on the shadow board while
-	// one runs (sn_top_shadow.go)
-	Units  *model.SnTopNetworkUnits `json:"units,omitempty"`
-	Shadow *SnTopRow                `json:"shadow,omitempty"`
 }
 
 // SnTopArgs are the `GET /sn/top` query parameters.
@@ -279,9 +268,6 @@ type SnTopArgs struct {
 	Cursor   string `json:"cursor,omitempty"`
 	Filter   string `json:"filter,omitempty"`
 	Snapshot string `json:"snapshot,omitempty"`
-	// "shadow" pages the shadow board (sn_top_shadow.go); empty or "live" the
-	// live one
-	Board string `json:"board,omitempty"`
 }
 
 type SnTopResult struct {
@@ -289,10 +275,6 @@ type SnTopResult struct {
 	Rows     []SnTopRow     `json:"rows"`
 	Me       *SnTopRow      `json:"me"`
 	Next     *string        `json:"next"`
-	// the shadow board only: "shadow", and the first settlement epoch the
-	// rule ranks the live board
-	Board          string `json:"board,omitempty"`
-	RuleFirstEpoch uint64 `json:"rule_first_epoch,omitempty"`
 }
 
 type SnTopMeResult struct {
@@ -496,13 +478,6 @@ func snTopCallerNetworkId(clientSession *session.ClientSession) *server.Id {
 func GetSnTop(args *SnTopArgs, clientSession *session.ClientSession) (*SnTopResult, error) {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
-	switch args.Board {
-	case "", snTopBoardLive:
-	case snTopBoardShadow:
-		return getSnTopShadow(ctx, args, snTopCallerNetworkId(clientSession), now)
-	default:
-		return nil, errors.New("400 Unknown board.")
-	}
 	filter, ok := snTopFilter(args.Filter)
 	if !ok {
 		return nil, errors.New("400 Unknown filter.")
@@ -656,8 +631,6 @@ func GetSnTopMe(clientSession *session.ClientSession) (*SnTopMeResult, error) {
 	if snTopHistoryDays < len(me.History) {
 		me.History = me.History[len(me.History)-snTopHistoryDays:]
 	}
-	// rule (a): the network's unit status and its shadow row (sn_top_shadow.go)
-	me.Units, me.Shadow = getSnTopMeUnits(ctx, networkId)
 	return result, nil
 }
 
@@ -857,33 +830,6 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 		result.Skipped = inputs.unavailable
 		return result, nil
 	}
-	// Rule (a), units only from admitted providers (sn_top_admission.go): it
-	// ranks the live board from its first settlement epoch, and before it the
-	// fold ranks a shadow board under it.
-	ruleLive := model.SnTopUnitRuleLive(tempo.SettlementEpoch)
-	rule, unavailable := loadSnTopUnitRule(ctx, now, inputs.projection)
-	if rule == nil && ruleLive {
-		result.Skipped = unavailable
-		return result, nil
-	}
-	var ruled *snTopRuledProviders
-	var shadowInput *model.SnTopProjectionInput
-	if rule != nil {
-		ruled = snTopApplyUnitRule(inputs.projection.Providers, rule)
-		shadowTempoIndex, shadowStates, err := model.GetSnTopShadowStates(ctx)
-		if err != nil {
-			glog.Errorf("[sntop]the shadow board's states are unreadable; the shadow starts again: %s\n", err)
-			shadowStates = nil
-		}
-		latestRuleLive := latest != nil && model.SnTopUnitRuleLive(latest.SettlementEpoch)
-		plan := planSnTopUnitRule(inputs.projection, ruled, ruleLive, latestRuleLive, tempo.Index, shadowTempoIndex, shadowStates)
-		inputs.projection = plan.live
-		shadowInput = plan.shadow
-		// on the live board from the rule's first epoch, on the shadow before
-		inputs.withheldProviders = ruled.withheld
-	} else {
-		glog.Infof("[sntop]tempo %d folds without the shadow board: %s\n", tempo.Index, unavailable)
-	}
 	projection := model.ProjectSnTop(inputs.projection)
 	snTopMeasureReplica(&inputs.agreement, projection, summary)
 	snTopMeasureIncentive(&inputs.agreement, summary, inputs.incentive)
@@ -925,25 +871,6 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 	snTopResetLatestSnapshotCache()
 	// tier B of the verify cohort's rolling census, from this fold's ranking
 	snTopRefreshVerifyCohortRanked(ctx, settings, projection, inputs.projection)
-	// each network's unit status, and the shadow board before the rule's
-	// first epoch; neither fails the fold
-	if ruled != nil {
-		snTopStampNetworkUnits(ruled.networks, tempo, now, ruleLive)
-		server.HandleError(func() {
-			model.SetSnTopNetworkUnits(ctx, ruled.networks)
-		}, func(err error) {
-			glog.Errorf("[sntop]storing the networks' unit status failed: %s\n", err)
-		})
-	}
-	if shadowInput != nil {
-		server.HandleError(func() {
-			shadowProjection := model.ProjectSnTop(shadowInput)
-			model.SetSnTopShadow(ctx, snTopShadowBoardOf(tempo, now, shadowProjection, projection, ruled.networks), shadowProjection.NetworkStates)
-			glog.Infof("[sntop]shadow board tempo %d: %d ranked under rule (a), %d providers withheld\n", tempo.Index, shadowProjection.TotalRanked, ruled.withheld)
-		}, func(err error) {
-			glog.Errorf("[sntop]the shadow board failed: %s\n", err)
-		})
-	}
 	result.RemovedTrailHops = model.RemoveOldSnTopData(ctx, now)
 
 	result.SnapshotId = &snapshot.SnapshotId
@@ -952,9 +879,9 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 	result.TrailHops = inputs.trailHops
 	observeSnTopSnapshot(snapshot, projection, inputs, time.Since(start))
 	glog.Infof(
-		"[sntop]snapshot %s tempo %d (%s): %d ranked, %d eligible providers (%d measured, %d units withheld), %d trail hops, cutoff %.4f, %d claimed fleets, presence %s, %s\n",
+		"[sntop]snapshot %s tempo %d (%s): %d ranked, %d eligible providers (%d measured), %d trail hops, cutoff %.4f, %d claimed fleets, presence %s, %s\n",
 		snapshot.SnapshotId, tempo.Index, tempo.Source, projection.TotalRanked, projection.EligibleProviders,
-		inputs.measuredProviders, inputs.withheldProviders, inputs.trailHops, projection.ProjectedCutoff, projection.ClaimedFleets,
+		inputs.measuredProviders, inputs.trailHops, projection.ProjectedCutoff, projection.ClaimedFleets,
 		inputs.presenceSource, time.Since(start),
 	)
 	return result, nil
@@ -970,8 +897,6 @@ type snTopInputs struct {
 	agreement         snTopAgreement
 	replicaCheckpoint *model.SnTopReplicaCheckpoint
 	unavailable       string
-	// providers whose unit rule (a) withheld (sn_top_admission.go)
-	withheldProviders int
 }
 
 const (

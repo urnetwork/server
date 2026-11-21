@@ -78,13 +78,6 @@ type SnTopProvider struct {
 	Measured bool
 	// the prefixes its non-seed hops of complete trails showed in the tempo
 	TrailPrefixes [][32]byte
-	// The fold found it neither a native Speed or Quality member nor, in a
-	// country whose URL probes make no UDP leg, an Online one
-	// (sn_top_admission_model.go, owner decision 2026-11-20): it shows no
-	// prefix, pinned or trail, as a zero hash shows none. It is still eligible,
-	// measured and present, so its network is still providing. The zero value
-	// counts, as before the rule.
-	UnitWithheld bool
 }
 
 // SnTopFleetInput is one live claimed fleet identity and what the validator
@@ -203,14 +196,9 @@ func sortedSnTopPrefixes(presence snTopPresence) [][32]byte {
 // snTopProviderContribution is what one provider shows in the tempo: its
 // complete-trail prefixes when the cohort measured it, else its pinned prefix
 // weighted by presence. The zero hash is no prefix: it is what a provider that
-// declared a proxy egress records, and it shows nothing. A provider whose unit
-// the fold withheld (UnitWithheld) shows nothing either, whatever it pinned or
-// its trails showed.
+// declared a proxy egress records, and it shows nothing.
 func snTopProviderContribution(provider *SnTopProvider) snTopPresence {
 	contribution := snTopPresence{}
-	if provider.UnitWithheld {
-		return contribution
-	}
 	if provider.Measured && 0 < len(provider.TrailPrefixes) {
 		for _, h := range provider.TrailPrefixes {
 			if h != ([32]byte{}) {
