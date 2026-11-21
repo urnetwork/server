@@ -128,7 +128,7 @@ func stripeStopDuplicateTeam(connOwner server.PgConn, ctx context.Context, netwo
 }
 
 // An interrupted cancellation still runs when its original Team has since ended.
-func stripeReconcileRejectedTeamSubscriptions(run *paymentReconcileRun, pageCount int) bool {
+func stripeReconcileRejectedTeamSubscriptions(run *paymentReconcileRun, pageCount int, rejected map[string]bool) bool {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
 	var after server.Id
@@ -139,6 +139,7 @@ func stripeReconcileRejectedTeamSubscriptions(run *paymentReconcileRun, pageCoun
 				return false
 			}
 			run.examine(store)
+			rejected[event.Evidence] = true
 			sub, err := stripeDunningFetchSubscription(ctx, event.Evidence, stripeDunningSettingsFunc())
 			details := map[string]any{"leg": "team", "reason": model.PaymentReconcileActionDuplicateTeamSubscription}
 			if err == nil {
@@ -169,7 +170,7 @@ func stripeReconcileRejectedTeamSubscriptions(run *paymentReconcileRun, pageCoun
 
 // Older purchases could use different customers. A paged search of the Team mark
 // costs one request per hundred subscriptions and finds contracts missing locally.
-func stripeReconcileOtherTeamSubscriptions(run *paymentReconcileRun) (bool, error) {
+func stripeReconcileOtherTeamSubscriptions(run *paymentReconcileRun, rejected map[string]bool) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
 	lookupCtx, cancel := context.WithTimeout(ctx, stripeDunningSettingsFunc().StripeReadTimeout)
@@ -182,7 +183,7 @@ func stripeReconcileOtherTeamSubscriptions(run *paymentReconcileRun) (bool, erro
 		return true, err
 	}
 	for _, listed := range subs {
-		if stripeSubscriptionTerminal(listed.Status) {
+		if rejected[listed.Id] || stripeSubscriptionTerminal(listed.Status) {
 			continue
 		}
 		networkId, err := server.ParseId(listed.Metadata[stripeMetadataNetworkId])
@@ -194,6 +195,7 @@ func stripeReconcileOtherTeamSubscriptions(run *paymentReconcileRun) (bool, erro
 		if retained == nil || listed.Id == retained.SubscriptionId {
 			continue
 		}
+		run.examine(store)
 		complete, err := stripeReconcileTeamConflict(run, retained, listed.Id)
 		if err != nil {
 			run.record(store, model.PaymentReconcileActionError, &networkId, listed.Id, map[string]any{"leg": "team_duplicates", "error": err.Error()})
