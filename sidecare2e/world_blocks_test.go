@@ -140,8 +140,8 @@ func (self *worldBlockListeners) close() {
 }
 
 // evs on the world's clusters and Redis, its receipt keys and svc- verifier, its authorization state and gate views
-// over a gate cache the world's syncs wait on, its write budget its own over the clusters, and the clock check and
-// Quota faked (the file's header).
+// over a gate cache the world's syncs wait on, its write budget its own over the clusters, its Quota over api's
+// internal quota surface on its bearer, and the clock check faked (the World's header).
 func (self *World) runEvs(ctx context.Context, listeners *worldBlockListeners) error {
 	cache, closeCache, err := self.t3.AddGate("evs")
 	if err != nil {
@@ -149,6 +149,12 @@ func (self *World) runEvs(ctx context.Context, listeners *worldBlockListeners) e
 		return err
 	}
 	defer closeCache()
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerEvs)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	settings := evshost.DefaultHostSettings()
 	settings.Run = self.HostsSettings().Run
 	deps := &evshost.HostDeps{
@@ -157,7 +163,7 @@ func (self *World) runEvs(ctx context.Context, listeners *worldBlockListeners) e
 		ReceiptKeys:    self.credentials.receiptKeys,
 		Clusters:       self.clusters(),
 		ClockCheck:     sidecartest.NewFakeClockCheck(nil),
-		Quota:          self.t3.Net().Fakes().Quota,
+		Quota:          quota,
 		ServiceTokens:  self.t3.ServiceTokens(),
 		StatusListener: listeners.status,
 	}
@@ -165,7 +171,7 @@ func (self *World) runEvs(ctx context.Context, listeners *worldBlockListeners) e
 }
 
 // gkm on the world's clusters and Redis, its svc- verifier, its authorization state over a gate cache the world's
-// syncs wait on, its write budget its own, and the Quota faked.
+// syncs wait on, its write budget its own, and its Quota over api's internal quota surface on its bearer.
 func (self *World) runGkm(ctx context.Context, listeners *worldBlockListeners) error {
 	cache, closeCache, err := self.t3.AddGate("gkm")
 	if err != nil {
@@ -173,26 +179,38 @@ func (self *World) runGkm(ctx context.Context, listeners *worldBlockListeners) e
 		return err
 	}
 	defer closeCache()
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerGkm)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	settings := gkm.DefaultHostSettings()
 	settings.Run = self.HostsSettings().Run
 	deps := &gkm.HostDeps{
 		AuthState:     gkmservice.NewAclGkmAuthState(cache, self.revocations(), sidecar.RealClock{}),
 		Clusters:      self.clusters(),
-		Quota:         self.t3.Net().Fakes().Quota,
+		Quota:         quota,
 		ServiceTokens: self.t3.ServiceTokens(),
 	}
 	return gkm.Run(ctx, gkm.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }
 
 // sockets on the world's Redis and its store model's, its ticket key file, its svc- verifier and rev/ reader on the
-// world's clusters, and the log and tls/'s listen facts through api's internal gate on its own bearer, as its main
-// sets them (SetGateApiSources); the Quota faked.
+// world's clusters, the log and tls/'s listen facts through api's internal gate on its own bearer, as its main
+// sets them (SetGateApiSources), and its Quota over api's internal quota surface on that bearer.
 func (self *World) runSockets(ctx context.Context, listeners *worldBlockListeners) error {
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerSockets)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	settings := socketshost.DefaultHostSettings()
 	settings.Run = self.HostsSettings().Run
 	ticketKeyFile := self.credentials.ticketKeyFile
 	deps := &socketshost.HostDeps{
-		Quota:         self.t3.Net().Fakes().Quota,
+		Quota:         quota,
 		Blobs:         self.t3.Host().Blobs,
 		KeyFile:       func() ([]byte, error) { return ticketKeyFile, nil },
 		ServiceTokens: self.t3.ServiceTokens(),
@@ -249,8 +267,8 @@ func (self *World) socketFindArgs(source *server.PlatformClientSource) *sidecar.
 
 // tlsedge on the world's Redis and its store in the test's Postgres (model.NewTlsEdgeStore), its four ports on
 // listeners of their own behind its PROXY listener, and its K platform clients in urnetwork-edge on the exchange,
-// minted by api's edge client route on the edge bearer, each Find at sockets' origin; the Quota faked (the file's
-// header).
+// minted by api's edge client route on the edge bearer, each Find at sockets' origin, and its Quota over api's internal
+// quota surface on its bearer.
 func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListeners) error {
 	hostsSettings := self.HostsSettings()
 	tlsEdge := worldTlsEdgeSettings(hostsSettings)
@@ -262,8 +280,14 @@ func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListener
 		return err
 	}
 	defer endSource()
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerTlsedge)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	deps := &tlsedgehost.HostDeps{
-		Quota:  self.t3.Net().Fakes().Quota,
+		Quota:  quota,
 		Source: source,
 		Store:  model.NewTlsEdgeStore(nil),
 		NewClients: func(ctx context.Context) (tlsedgehost.HostClients, error) {
@@ -306,8 +330,9 @@ func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListener
 
 // smtpedge on the world's Postgres and Redis: its send store (model.NewSmtpEdgeStore), the abuse gate, the stock
 // gate over the log through api's internal gate on its bearer and the model's facts, its X-UR-Ref keys; sidecartest's
-// MX world for its resolver, PTR and dialer, a fake proof verifier, its client and the Quota faked (the file's
-// header), so ur/smtpedge is not served and the block answers not ready.
+// MX world for its resolver, PTR and dialer and a fake proof verifier (the World's header); its platform clients in
+// urnetwork-edge, registered with sockets on their own sockets tokens, and its Quota over api's internal quota surface
+// on its bearer.
 func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListeners) error {
 	hostsSettings := self.HostsSettings()
 	config, err := smtpedgeservice.LoadSmtpEdgeConfig([]byte(fmt.Sprintf(
@@ -350,7 +375,12 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 	defer endSource()
 	registrations := source.SocketPlatformRegistrationsArgs(self.t3.Api().ServiceOrigin("sockets"))
 	registrations.Transport = self.t3.Api().Transport()
-	quota := self.t3.Net().Fakes().Quota
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerSmtpedge)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	deps := &smtpedgehost.HostDeps{
 		Quota:      quota,
 		Source:     source,
@@ -377,7 +407,8 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 
 // mxedge's router on the world's Postgres and Redis and its store (model.NewMxEdgeStore), TCP 25 on a listener of its
 // own, and its K platform clients in urnetwork-edge on the exchange, minted by api's edge client route on the edge
-// bearer, each Find at sockets' origin; its PTR and host lookups and the Quota faked (the file's header).
+// bearer, each Find at sockets' origin, and its Quota over api's internal quota surface on its bearer; its PTR and host
+// lookups faked (the World's header).
 func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockListeners) error {
 	settings := e2eMxEdgeSettings(self.HostsSettings())
 	mxEdge := settings.MxEdge
@@ -388,8 +419,14 @@ func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockLis
 	}
 	defer endSource()
 	poolSettings := mxedgehost.DefaultRouterSettings(mxEdge).Clients
+	quota, endQuota, err := self.blockQuota(server.InternalGateCallerMxedge)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endQuota()
 	deps := &mxedgehost.RouterDeps{
-		Quota:       self.t3.Net().Fakes().Quota,
+		Quota:       quota,
 		Source:      source,
 		Store:       model.NewMxEdgeStore(nil),
 		StoreGroups: mxedgehost.RouterStoreGroups(),

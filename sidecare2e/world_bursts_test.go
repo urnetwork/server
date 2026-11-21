@@ -24,8 +24,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/connect"
-	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
@@ -193,10 +191,8 @@ func (self *World) FailProgress(t testing.TB, phase string, err error, bursts []
 
 // The ledgers a scenario reconciles at its end, as they stand when read.
 type WorldLedgers struct {
-	// Each network's quota ledger, by its id.
+	// Each network's quota ledger, by its id, as server holds it once the debit journal is flushed.
 	Networks map[server.Id]*WorldNetworkLedger
-	// Every usage batch a block reported to the Quota, in the order they arrived, sent or not.
-	UsageBatches []*sidecar.UsageBatch
 	// Each metadata cluster's write budget reports, by cluster id: every block process's spend as it last reported it
 	// (§11.13's report:<process> fields, which expire 15 s after a process's last write).
 	BudgetReports map[string][]*evsservice.WriteBudgetReport
@@ -204,28 +200,19 @@ type WorldLedgers struct {
 	BudgetViolations []string
 }
 
-// One network's quota ledger.
+// One network's quota ledger: its in-window transfer balances and its quota state.
 type WorldNetworkLedger struct {
-	// The transfer balance left, in bytes.
-	BalanceByteCount int64
-	// The stored bytes the usage batches added, net of what they freed.
-	StoredDeltaByteCount int64
-	// Usage charged to no balance.
-	UnbilledByteCount int64
+	// What its in-window balances started with, and what is left of them, in bytes.
+	StartBalanceByteCount int64
+	BalanceByteCount      int64
+	// network_quota_state's stored bytes, the usage batches' stored deltas summed, and whether it is spent.
+	StoredByteCount int64
+	Spent           bool
 }
 
-// The transfer bytes the usage batches charged networkId under meter, summed over every batch: what a scenario's own
-// count of its traffic reconciles with.
-func (self *WorldLedgers) UsageByteCount(networkId server.Id, meter string) int64 {
-	total := int64(0)
-	for _, batch := range self.UsageBatches {
-		for _, event := range batch.Events {
-			if server.Id(event.NetworkId) == networkId && event.Meter == meter {
-				total += event.TransferByteCount
-			}
-		}
-	}
-	return total
+// What the debits drew from the network's balances.
+func (self *WorldNetworkLedger) DebitedByteCount() int64 {
+	return self.StartBalanceByteCount - self.BalanceByteCount
 }
 
 // The priced bytes every process reported against clusterId's write budget, P0 by kind, P1 and P2 together: what a
@@ -242,8 +229,8 @@ func (self *WorldLedgers) BudgetByteCount(clusterId string) int64 {
 }
 
 // The ledgers once every block process's budget report was written at since or after: each network's quota ledger
-// from the world's Quota, the usage batches its blocks reported, every metadata cluster's budget reports from the
-// world's Redis, and the api-side budget's violations. A process reports every WriteBudgetSettings.Interval (5 s), so
+// as server holds it, the debit journal flushed, every metadata cluster's budget reports from the world's Redis, and
+// the api-side budget's violations. A process reports every WriteBudgetSettings.Interval (5 s), so
 // a scenario passes the time its writes ended and reads what each process had spent by then; the zero time reads the
 // reports as they stand. The reports are asked every BudgetPollInterval, since a report has no hook to wait on,
 // within the hosts' StatusTimeout and the case's deadline.
@@ -275,21 +262,21 @@ func (self *World) ReadLedgers(ctx context.Context, since time.Time) (*WorldLedg
 	}
 }
 
-// The ledgers as they stand.
+// The ledgers as they stand, the debit journal flushed first.
 func (self *World) readLedgers(ctx context.Context) (*WorldLedgers, error) {
-	quota := self.t3.Net().Fakes().Quota
 	ledgers := &WorldLedgers{
 		Networks:      map[server.Id]*WorldNetworkLedger{},
-		UsageBatches:  quota.Batches(),
 		BudgetReports: map[string][]*evsservice.WriteBudgetReport{},
 	}
+	if err := worldFlushServiceDebits(ctx); err != nil {
+		return nil, err
+	}
 	for _, network := range self.t3.Networks() {
-		networkId := connect.Id(network.NetworkId)
-		ledgers.Networks[network.NetworkId] = &WorldNetworkLedger{
-			BalanceByteCount:     quota.Balance(networkId),
-			StoredDeltaByteCount: quota.StoredDelta(networkId),
-			UnbilledByteCount:    quota.UnbilledByteCount(networkId),
+		ledger, err := worldNetworkLedger(ctx, network.NetworkId)
+		if err != nil {
+			return nil, fmt.Errorf("%s's quota ledger: %w", network.Name, err)
 		}
+		ledgers.Networks[network.NetworkId] = ledger
 	}
 	host := self.t3.Host()
 	for _, clusterId := range host.Blobs.MetadataClusterIds() {

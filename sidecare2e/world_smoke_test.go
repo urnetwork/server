@@ -11,9 +11,12 @@
 //   - mcp: a tools/list call with an access token the world's issuer minted for mcp's origin lists mcp's tools, and
 //     the same call with no token is answered 401 with the protected resource's challenge;
 //   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, with no violation on
-//     api's side, and the quota ledger holds each network's balance;
+//     api's side;
 //   - chaos: evs stopped mid-run and started again on its stores, after which every write reads back as it was
-//     answered, through the restarted block.
+//     answered, through the restarted block;
+//   - the quota ledgers: evs's drain at the restart sent its usage window through api's quota surface, so each
+//     network's quota state holds the bytes its writes stored, and its transfer was drawn from its balance, never past
+//     it.
 //
 // Each phase has its bound and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -279,7 +282,8 @@ func TestE2eWorldSmoke(t *testing.T) {
 		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
 		readAll("the evs reads after evs's restart")
 
-		// ledgers: each network funded in the quota
+		// ledgers: evs's drain sent its usage window, so each network holds what its writes stored, its transfer drawn
+		// from its balance and never past it
 		ledgers, err = world.ReadLedgers(ctx, time.Time{})
 		cancel()
 		if err != nil {
@@ -287,8 +291,13 @@ func TestE2eWorldSmoke(t *testing.T) {
 		}
 		for _, network := range networks {
 			ledger := ledgers.Networks[network.NetworkId]
-			if ledger == nil || ledger.BalanceByteCount <= 0 {
-				t.Fatalf("%s's quota ledger is %+v", network.Name, ledger)
+			switch {
+			case ledger == nil:
+				t.Fatalf("%s has no quota ledger", network.Name)
+			case ledger.StoredByteCount <= 0:
+				t.Fatalf("%s's quota ledger stores nothing after its writes: %+v", network.Name, ledger)
+			case ledger.DebitedByteCount() <= 0 || ledger.BalanceByteCount <= 0 || ledger.Spent:
+				t.Fatalf("%s's balance after its writes and reads: %+v", network.Name, ledger)
 			}
 		}
 	})

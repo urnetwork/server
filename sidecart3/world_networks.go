@@ -22,7 +22,8 @@ package sidecart3
 //	          htu and a service's origin are what server checks them against; the svc- key and the access tokens' key
 //	          are throwaways the world makes, never vault's, and every host the world builds verifies tokens and rev/
 //	          under its own verifier of the svc- key, as a block given HostDeps.ServiceTokens does, never the process's
-//	networks  each a personal network in preview_networks, funded in the Net's quota and in every gated service's gate
+//	networks  each a personal network in preview_networks, funded in the Net's quota and in a transfer balance of
+//	          server's, and in every gated service's gate
 //	          (AddNetwork): its first sidecar bootstraps it, signing the Genesis and base 1 through api (Bootstrap),
 //	          and admits the others (Admit), each then following the log through its own token with its own key
 //	          client; statements a device files go through POST /network/config/delta with its token (FileStatement)
@@ -112,8 +113,11 @@ type T3WorldSettings struct {
 	// append limits and §20.4's admission caps run on SidecarLimits' numbers. A test that needs them off clears the
 	// limiter and both caps here.
 	AdjustConfigLog func(settings *model.ConfigLogSettings)
-	// What each network holds in the Net's quota: 1 TiB, past what any test writes.
+	// What each network holds in the Net's quota, and in a transfer balance of server's that api's quota surface reads:
+	// 1 TiB, past what any test writes.
 	NetworkBalanceByteCount int64
+	// How long that transfer balance is in window from the network's creation: 24 h, past any test.
+	NetworkBalanceDuration time.Duration
 	// How long an auth key an owner makes for one enrollment lives: 10 min.
 	AuthKeyDuration time.Duration
 	// How many sidecars enroll at once: 4.
@@ -140,6 +144,7 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		SidecarYaml:             T3WorldPreviewSidecarYaml,
 		SidecarLimits:           DefaultT3WorldSidecarLimits(),
 		NetworkBalanceByteCount: 1024 * 1024 * 1024 * 1024,
+		NetworkBalanceDuration:  24 * time.Hour,
 		AuthKeyDuration:         10 * time.Minute,
 		EnrollConcurrency:       4,
 		StatementLife:           time.Hour,
@@ -713,6 +718,11 @@ func (self *T3World) AddNetwork(ctx context.Context, name string) (*T3Network, e
 	network.root = "Bearer " + session.NewByJwt(network.NetworkId, network.OwnerUserId, networkName, false, false).Testing_Sign()
 	network.heads = sidecartest.NewFakeConfigHeads(network.configRepoId)
 	self.net.Fakes().Quota.SetBalance(connect.Id(network.NetworkId), self.settings.NetworkBalanceByteCount)
+	// and in server's balances, which a block's Quota reads through api's internal quota surface
+	now := server.NowUtc()
+	if err := model.AddBasicTransferBalance(ctx, network.NetworkId, model.ByteCount(self.settings.NetworkBalanceByteCount), now, now.Add(self.settings.NetworkBalanceDuration)); err != nil {
+		return nil, fmt.Errorf("%s's transfer balance: %w", name, err)
+	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.closed {

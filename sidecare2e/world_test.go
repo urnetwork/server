@@ -17,6 +17,8 @@
 //	          its origin through T3Api.ServeService by the world's lb (worldLb: http over loopback to the block, with
 //	          X-UR-Forwarded-For set as warp's nginx sets it), and its direct ports on listeners of their own:
 //	          tlsedge's TLS behind its PROXY listener, smtpedge's and mxedge's SMTP, dnsedge's DNS on TCP and UDP
+//	quota     every block's Quota reads and writes server's ledgers through api's internal quota surface on its own
+//	          bearer (quotahost's api-backed HostQuota), each network funded by a transfer balance of server's
 //	edges     tlsedge, smtpedge and mxedge's router hold their K platform clients in urnetwork-edge, a network the world
 //	          makes: each run's server.PlatformClientSource asks api's edge client route on the edge bearer for each
 //	          client's jwt and sockets token, under the world's edge.yml, and sidecar.EdgeClientPool opens the clients
@@ -37,8 +39,6 @@
 //
 //   - the clock check (evs): chronyd on warp's services network, which no test host runs; sidecartest's FakeClockCheck
 //     answers an offset of zero;
-//   - the Quota of every block: sidecartest's FakeQuota, the T3World's Net's, which funds each network; api's internal
-//     quota surface over a funded network's ledgers is not wired here yet;
 //   - smtpedge's MX world (resolver, PTR, dialer, proof verifier): sidecartest's MxWorld and FakeSmtpProofVerifier,
 //     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
 //     answer nothing for the same reason;
@@ -76,7 +76,6 @@ import (
 	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/evshost"
 	"github.com/urnetwork/server/mcp"
-	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/sidecart3"
 )
@@ -253,7 +252,7 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 	self.closes = append(self.closes, func() { mcp.McpResource = previousMcpResource })
 	self.closes = append(self.closes, server.Config.PushSimpleResource(evshost.BlockConfigFileName, []byte(fmt.Sprintf("# the e2e world's evs\ninstance_format: %d\n", settings.EvsInstanceFormat))))
 	// urnetwork-edge's row, which api's edge client route mints the edges' clients in
-	model.Testing_CreateNetwork(t.Context(), self.urnetworkEdge, "e2eedge"+strings.ToLower(strings.ReplaceAll(self.urnetworkEdge.String(), "-", "")[:12]), server.NewId())
+	worldCreateEdgeNetwork(t.Context(), self.urnetworkEdge)
 
 	if err := self.installInternalGate(); err != nil {
 		t.Fatalf("api's internal gate: %v", err)
