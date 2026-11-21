@@ -1021,6 +1021,17 @@ func (self *T3Network) bootstrapByFollower(ctx context.Context, owner *T3Device)
 		follower.Close()
 		return fmt.Errorf("%s anchors at no genesis after its bootstrap: %v", owner.Name, err)
 	}
+	// the bootstrap formed the config group at gkm (KF1 after base 1), whose generation 1 the owner holds
+	state := follower.VerifiedState()
+	configRepoId, err := sidecar.IdFromBytes(state.Genesis().GetConfigRepoId())
+	if err != nil {
+		follower.Close()
+		return fmt.Errorf("%s's genesis names no config repo: %w", self.Name, err)
+	}
+	if _, err := owner.keys.gkm.CurrentRepoKey(waitCtx, configRepoId); err != nil {
+		follower.Close()
+		return fmt.Errorf("%s's bootstrap stood holding no key of the config repo's group: %w", owner.Name, err)
+	}
 	genesis := [sha256.Size]byte(anchor.GenesisSha256)
 	func() {
 		owner.stateLock.Lock()
