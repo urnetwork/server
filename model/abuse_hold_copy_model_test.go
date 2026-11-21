@@ -33,6 +33,18 @@ func TestHoldPlacementSnapshotsContractsAndFailsClosed(t *testing.T) {
 		at := server.NowUtc().Add(time.Hour).Truncate(time.Millisecond)
 		var ids []server.Id
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Decision 529 names whole rows of these three tables. Check the explicit
+			// copy columns against the installed schema, including nullable accounting fields.
+			for _, table := range holdContractTables {
+				var columns []string
+				server.Raise(tx.QueryRow(ctx, `SELECT array_agg(attname::text ORDER BY attname)
+					FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped`, "public."+table.name).Scan(&columns))
+				expected := slices.Clone(table.columns)
+				slices.Sort(expected)
+				if !slices.Equal(columns, expected) {
+					t.Fatalf("%s holds columns %v, its placement copies %v", table.name, columns, expected)
+				}
+			}
 			for _, pair := range [][2]server.Id{{network, other}, {other, network}, {other, other}} {
 				id := server.NewId()
 				ids = append(ids, id)
@@ -100,6 +112,37 @@ func TestHoldPlacementSnapshotsContractsAndFailsClosed(t *testing.T) {
 		if complete, err = RunAbuseHoldCopy(ctx, network, firstCase, at, time.Now().Add(time.Minute), DefaultAbuseHoldCopySettings()); complete || !errors.Is(err, ErrHoldPlacementSnapshotUnavailable) {
 			t.Fatalf("unverified legacy copy: %t, %v", complete, err)
 		}
+	})
+}
+
+// A report can reach its absolute deadline while the worker verifies the second reading.
+func TestHoldExpiryRollsBackPlacementSnapshot(t *testing.T) {
+	requireLegalHoldTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		_, clock := newTestLegalHoldStore(t)
+		networkId, caseId := newTestLegalHoldCase(t, ctx)
+		reported := clock.Now().AddDate(-LegalHoldReportYears, 0, 0).Add(time.Second)
+		reads := 0
+		SetAbuseHoldSoftStateSource(&testHoldSoftStateSource{repoIds: []server.Id{server.NewId()}, read: func(server.Id) []*AbuseHoldSoftStateKey {
+			reads++
+			if reads == 2 {
+				clock.Advance(time.Second)
+			}
+			return nil
+		}})
+		args := &LegalHoldArgs{NetworkId: networkId, CaseId: caseId, Kind: sidecar.HoldKindReport2258a, ReportTime: &reported}
+		hold, _, err := PlaceLegalHoldWithClock(ctx, args, clock.Now, nil)
+		if !errors.Is(err, ErrLegalHoldExpired) || hold != nil || reads != 2 {
+			t.Fatalf("expired snapshot returned a hold %t, error %v after %d reads", hold != nil, err, reads)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var count int
+			server.Raise(conn.QueryRow(ctx, "SELECT count(*) FROM abuse_legal_hold WHERE network_id=$1 AND case_id=$2", networkId, caseId).Scan(&count))
+			if count != 0 {
+				t.Fatalf("expired placement left %d parts", count)
+			}
+		})
 	})
 }
 

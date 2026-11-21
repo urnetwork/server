@@ -708,9 +708,8 @@ func RunAbuseHoldCopies(ctx context.Context, now time.Time, settings *AbuseHoldC
 // The copy pass's run-once key, which a placement kicks.
 const AbuseHoldCopyRunOnceKey = "abuse_hold_copy"
 
-// Pulls the pending copy pass to now: what a placement does once its hold stands, so its copy starts at once and
-// the Redis soft state it reads is as close to the placement as it can be. A kick that fails changes nothing the
-// pass's own interval does not bound.
+// Starts copying the immutable partition rows once the placement is durable. A failed kick leaves
+// the same work pending for the next scheduled pass.
 func KickAbuseHoldCopy(ctx context.Context) {
 	server.HandleError(func() {
 		task.KickTasks(ctx, AbuseHoldCopyRunOnceKey)

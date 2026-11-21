@@ -173,6 +173,9 @@ func prepareLegalHoldSnapshot(ctx context.Context, placing *LegalHold, mirrorExi
 		if err != nil {
 			return err
 		}
+		if !placing.Live(placing.PlaceTime) {
+			return ErrLegalHoldExpired
+		}
 		// Reserve the manifest before collecting anything. Concurrent
 		// requests either see the winner or retry a serialization conflict.
 		tag, err := stage.Exec(ctx, `INSERT INTO abuse_legal_hold
@@ -213,6 +216,9 @@ func prepareLegalHoldSnapshot(ctx context.Context, placing *LegalHold, mirrorExi
 		}
 		if err := copyPlacementContracts(ctx, stage, placing, &part, settings); err != nil {
 			return err
+		}
+		if !placing.Live(legalHoldTime(clock())) {
+			return ErrLegalHoldExpired
 		}
 		header := &HoldCopyPartHeader{Version: holdCopyPartVersion, CaseId: placing.CaseId,
 			Kind: holdPlacementManifest, Complete: true, PlacementLastPart: part}
@@ -276,10 +282,10 @@ type holdContractTable struct {
 
 var holdContractTables = []holdContractTable{
 	{"transfer_contract",
-		[]string{"contract_id", "source_id", "destination_id", "source_network_id", "destination_network_id", "payer_network_id", "transfer_byte_count", "create_time", "close_time", "open", "dispute", "outcome", "companion_contract_id", "priority", "reap_time", "stream_id", "expiration_time"},
+		[]string{"contract_id", "source_id", "destination_id", "source_network_id", "destination_network_id", "payer_network_id", "transfer_byte_count", "create_time", "close_time", "open", "dispute", "outcome", "companion_contract_id", "priority", "reap_time", "stream_id", "expiration_time", "usage_origin_is_source", "usage_unverified", "provider_usage"},
 		"transfer_contract c", "c.create_time"},
 	{"contract_close",
-		[]string{"contract_id", "party", "used_transfer_byte_count", "checkpoint", "close_time"},
+		[]string{"contract_id", "party", "used_transfer_byte_count", "checkpoint", "close_time", "legacy_checkpoint_byte_count", "identified_checkpoint_byte_count", "settlement_completion", "settlement_completion_checkpoint_byte_count"},
 		"contract_close r JOIN transfer_contract c USING (contract_id)", "r.close_time"},
 	{"contract_close_report",
 		[]string{"contract_id", "party", "report_id", "used_transfer_byte_count", "checkpoint", "create_time"},
