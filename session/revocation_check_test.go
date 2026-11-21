@@ -81,6 +81,8 @@ func TestRevocationCheckPathNamesTheCaller(t *testing.T) {
 // the hosted parent authority. Each refusal waited the two second
 // authentication budget first. Now every caller accepts within the check
 // budget, counts the acceptance by path and credential, and asks SQL nothing.
+// The hosted path's budget is HostedRevocationCheckBudget (2026-11-21): a
+// hosted check Redis does not answer waits it out, then accepts.
 func TestRevocationRecordUnansweredAcceptsWithinTheCheckBudget(t *testing.T) {
 	defer Testing_SetRevocationRecordEnabled(true)()
 	stalled, pop := server.Testing_StallAuthRedisDials(48)
@@ -94,14 +96,15 @@ func TestRevocationRecordUnansweredAcceptsWithinTheCheckBudget(t *testing.T) {
 		path          string
 		label         string
 		requireClient bool
+		budget        time.Duration
 	}{
-		{"api client", StateQueryApiControl, testingTaggedClientCredential(), nil, revocationCheckPathApi, revocationCheckCredentialClient, false},
-		{"api session", StateQueryApiOther, testingTaggedSessionCredential(), nil, revocationCheckPathApi, revocationCheckCredentialSession, false},
-		{"connect h1", StateQueryConnectH1, testingTaggedClientCredential(), nil, revocationCheckPathConnectH1, revocationCheckCredentialClient, true},
-		{"connect h3", StateQueryConnectH3, testingTaggedClientCredential(), nil, revocationCheckPathConnectH3, revocationCheckCredentialClient, true},
-		{"hosted parent", StateQueryHostedControl, testingTaggedChildCredential(parent), parent.ClientId, revocationCheckPathHosted, revocationCheckCredentialClient, true},
-		{"prober", StateQueryProberControl, testingTaggedClientCredential(), nil, revocationCheckPathProber, revocationCheckCredentialClient, true},
-		{"other", StateQueryUnknown, testingTaggedClientCredential(), nil, revocationCheckPathOther, revocationCheckCredentialClient, true},
+		{"api client", StateQueryApiControl, testingTaggedClientCredential(), nil, revocationCheckPathApi, revocationCheckCredentialClient, false, RevocationCheckBudget},
+		{"api session", StateQueryApiOther, testingTaggedSessionCredential(), nil, revocationCheckPathApi, revocationCheckCredentialSession, false, RevocationCheckBudget},
+		{"connect h1", StateQueryConnectH1, testingTaggedClientCredential(), nil, revocationCheckPathConnectH1, revocationCheckCredentialClient, true, RevocationCheckBudget},
+		{"connect h3", StateQueryConnectH3, testingTaggedClientCredential(), nil, revocationCheckPathConnectH3, revocationCheckCredentialClient, true, RevocationCheckBudget},
+		{"hosted parent", StateQueryHostedControl, testingTaggedChildCredential(parent), parent.ClientId, revocationCheckPathHosted, revocationCheckCredentialClient, true, HostedRevocationCheckBudget},
+		{"prober", StateQueryProberControl, testingTaggedClientCredential(), nil, revocationCheckPathProber, revocationCheckCredentialClient, true, RevocationCheckBudget},
+		{"other", StateQueryUnknown, testingTaggedClientCredential(), nil, revocationCheckPathOther, revocationCheckCredentialClient, true, RevocationCheckBudget},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := WithStateQuerySource(t.Context(), test.source)
@@ -119,8 +122,8 @@ func TestRevocationRecordUnansweredAcceptsWithinTheCheckBudget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("an unanswered revocation check refused the credential: %v", err)
 			}
-			if elapsed < RevocationCheckBudget || RevocationCheckBudget+uncheckedAcceptanceSlack < elapsed {
-				t.Errorf("the unanswered check took %s, want the %s budget", elapsed, RevocationCheckBudget)
+			if elapsed < test.budget || test.budget+uncheckedAcceptanceSlack < elapsed {
+				t.Errorf("the unanswered check took %s, want the %s budget", elapsed, test.budget)
 			}
 			if got := testingUncheckedAcceptances(test.path, test.label) - accepted; got != 1 {
 				t.Errorf("counted %.0f unchecked acceptances on %s/%s, want 1", got, test.path, test.label)

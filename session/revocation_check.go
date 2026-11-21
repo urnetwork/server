@@ -4,8 +4,10 @@
 // check is the Redis read that says whether a credential was revoked: the
 // revocation record of a tagged credential (revocation_record.go) and the
 // session marker (CheckSession). When that read fails, or takes longer than
-// RevocationCheckBudget, while the caller still waits for its answer, the
-// credential is accepted and the acceptance is counted in
+// its check budget (revocationCheckBudget: RevocationCheckBudget, or
+// HostedRevocationCheckBudget on the hosted path), while the caller still
+// waits for its answer, the credential is accepted and the acceptance is
+// counted in
 // urnetwork_session_check_unavailable_total{path,credential}. No caller gets a
 // 503 for this reason: not the api's authentication, connect admission, a
 // lease recheck, the hosted parent authority or a mint's own check.
@@ -41,6 +43,38 @@ import (
 // their 100ms budget, while the api and proxy reads of the record failed about
 // one time in 1,000 to 2,000 with two seconds to answer.
 const RevocationCheckBudget = 250 * time.Millisecond
+
+// The check budget on the hosted path: the proxy's local authority checking
+// its devices' credentials (localclient), outside any transaction. The budget
+// above did not hold there. On 2026-11-21 the proxy hosts ran their CPUs at
+// 99.6-99.8%, each process collecting garbage 4 to 12 times a minute at its
+// memory limit, and 5-15% of the hosted record reads took longer than 250ms
+// inside the process, before any connection was used, while Redis answered
+// in microseconds: about 9% of the hosted checks were accepted unchecked, the
+// SessionChecksUnchecked alert's 5% held for hours. With two seconds,
+// RedisAuth's own budget and the hosted checks' budget before decision 3,
+// 0.07% went unanswered on the same hosts at the same load.
+//
+// A hosted caller waits on connect's request timeout (15s by default), so a
+// Redis outage still ends in an unchecked acceptance, two seconds in, as it
+// ended in a refusal before decision 3. The hosted read holds no database
+// connection: the record read and its fallback's marker read come before the
+// fallback's state query.
+const HostedRevocationCheckBudget = 2 * time.Second
+
+// The check budget of a revocation check made under ctx outside a
+// transaction: HostedRevocationCheckBudget on the hosted path, except a
+// hosted mint, else RevocationCheckBudget. A hosted mint keeps the default: it
+// holds one of its owner's few registration slots (localclient
+// MintAdmission), where a longer wait costs other devices' registrations, not
+// one request's latency. A check inside a transaction takes the transaction's
+// Redis budget instead (SessionMintRedisBudgetFor).
+func revocationCheckBudget(ctx context.Context) time.Duration {
+	if revocationCheckPathFromContext(ctx) == revocationCheckPathHosted && stateQuerySourceFromContext(ctx) != StateQueryHostedMint {
+		return HostedRevocationCheckBudget
+	}
+	return RevocationCheckBudget
+}
 
 // The auth paths a check is counted under, a closed vocabulary.
 const (
@@ -171,11 +205,13 @@ func acceptUncheckedRevocation(ctx context.Context, byJwt *ByJwt) error {
 	return nil
 }
 
-// The session marker read with the check budget. unchecked is true, and err
-// nil, when Redis did not answer while the caller still waits: the marker is
-// skipped and the caller's other checks decide.
-func checkSessionWithinBudget(ctx context.Context, byJwt *ByJwt) (unchecked bool, err error) {
-	checkCtx, cancel := context.WithTimeout(ctx, RevocationCheckBudget)
+// The session marker read within budget: the check budget outside a
+// transaction (revocationCheckBudget), the transaction's Redis budget inside
+// one (SessionMintRedisBudgetFor). unchecked is true, and err nil, when Redis
+// did not answer while the caller still waits: the marker is skipped and the
+// caller's other checks decide.
+func checkSessionWithinBudget(ctx context.Context, byJwt *ByJwt, budget time.Duration) (unchecked bool, err error) {
+	checkCtx, cancel := context.WithTimeout(ctx, budget)
 	err = CheckSession(checkCtx, byJwt.NetworkId, *byJwt.SessionId)
 	cancel()
 	if err == nil || errors.Is(err, ErrSessionRevoked) {
@@ -204,5 +240,5 @@ func noteUncheckedAcceptanceLog(path string) {
 		return
 	}
 	count := uncheckedAcceptanceLog.count.Swap(0)
-	glog.Warningf("[session]%d credentials accepted without their revocation check since the last report (last on %s): Redis did not answer within %s (decision 3)\n", count, path, RevocationCheckBudget)
+	glog.Warningf("[session]%d credentials accepted without their revocation check since the last report (last on %s): Redis did not answer within the check budget, %s (%s on the hosted path) (decision 3)\n", count, path, RevocationCheckBudget, HostedRevocationCheckBudget)
 }

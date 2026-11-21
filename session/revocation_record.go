@@ -328,16 +328,18 @@ func injectedRevocationRecordWriteFailure() error {
 
 // Answers a tagged credential's state check from its record, or through the
 // SQL fallback when the record cannot answer. When Redis does not answer the
-// read within RevocationCheckBudget, the credential is accepted unchecked
-// (decision 3, revocation_check.go): SQL is not asked instead, so an outage of
-// Redis does not move every tagged check onto PgBouncer.
+// read within its check budget (revocationCheckBudget: two seconds on the
+// hosted path, else RevocationCheckBudget), the credential is accepted
+// unchecked (decision 3, revocation_check.go): SQL is not asked instead, so an
+// outage of Redis does not move every tagged check onto PgBouncer. The record
+// is never read inside a transaction (ValidateByJwtStateInTx asks SQL).
 func validateByJwtStateRecord(ctx context.Context, byJwt *ByJwt, parentClientId *server.Id) error {
 	if err := refuseRememberedByJwtState(ctx, byJwt, parentClientId); err != nil {
 		return err
 	}
 	lineage, _ := revocationRecordLineage(byJwt)
 	query := newRevocationRecordQuery(byJwt, lineage, parentClientId)
-	readCtx, cancelRead := context.WithTimeout(ctx, RevocationCheckBudget)
+	readCtx, cancelRead := context.WithTimeout(ctx, revocationCheckBudget(ctx))
 	values, err := readRevocationRecord(readCtx, query.key, query.fields)
 	cancelRead()
 	if err != nil {
@@ -416,14 +418,16 @@ type revocationRecordFacts struct {
 // session operation journal, which outlives the marker through every
 // affected credential's horizon, so lost Redis state cannot revive it.
 //
-// A marker Redis does not answer is skipped (decision 3): the journal and the
-// state query still decide, the acceptance is counted, and nothing is
-// projected, since the projection would say the session is not revoked.
+// A marker Redis does not answer within the check budget is skipped
+// (decision 3): the journal and the state query still decide, the acceptance
+// is counted, and nothing is projected, since the projection would say the
+// session is not revoked. The marker is read before the state query takes its
+// connection, so the hosted path's longer budget holds none.
 func validateByJwtStateRecordFallback(ctx context.Context, byJwt *ByJwt, lineage server.Id, parentClientId *server.Id) (returnErr error) {
 	observed := server.NowUtc()
 	markerUnchecked := false
 	if byJwt.SessionId != nil {
-		unchecked, err := checkSessionWithinBudget(ctx, byJwt)
+		unchecked, err := checkSessionWithinBudget(ctx, byJwt, revocationCheckBudget(ctx))
 		if err != nil {
 			return err
 		}
