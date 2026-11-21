@@ -39,6 +39,14 @@ const defaultSlotCount = 1024
 // one timer, so its wheel needs few slots.
 const privateSlotCount = 16
 
+// The tick of a timer's own sweep, set as its driver starts: the process's
+// tick for a wait of 1.6 s or more, and a sixteenth of a shorter wait, down to
+// a millisecond. A test that compresses a production wait to milliseconds
+// keeps the sweep's proportions, and the driver wakes about 16 times a wait.
+func privateTick(d time.Duration) time.Duration {
+	return min(DefaultTick, max(time.Millisecond, d/16))
+}
+
 // A Sweep is safe for concurrent use. Its shards start their drivers only
 // while they hold an armed timer, so an idle sweep has no goroutine and no
 // runtime timer, and needs no close.
@@ -78,7 +86,7 @@ func newSweep(tick time.Duration, shardCount int, slotCount int) *Sweep {
 }
 
 // Tick is the most a timer of this sweep fires after its deadline. A nil sweep
-// gives each timer a sweep of its own with DefaultTick.
+// gives each timer a sweep of its own, whose tick is at most DefaultTick.
 func (self *Sweep) Tick() time.Duration {
 	if self == nil {
 		return DefaultTick
@@ -103,7 +111,9 @@ func (self *Sweep) ArmedCount() int {
 // timing, and inside a synctest bubble its driver stays in that bubble.
 func (self *Sweep) nextTimerShard() *shard {
 	if self == nil {
-		return newSweep(DefaultTick, 1, privateSlotCount).shards[0]
+		shard := newSweep(DefaultTick, 1, privateSlotCount).shards[0]
+		shard.private = true
+		return shard
 	}
 	i := self.nextShard.Add(1)
 	return self.shards[int(i%uint32(len(self.shards)))]
@@ -189,10 +199,13 @@ type entry struct {
 
 // One hashed timing wheel and the driver that sweeps it.
 type shard struct {
-	tick time.Duration
 	mask int64
+	// a timer's own sweep, whose tick follows its wait (privateTick)
+	private bool
 
-	stateLock  sync.Mutex
+	stateLock sync.Mutex
+	// fixed, except that a private shard sets it as its driver starts
+	tick       time.Duration
 	slots      []*entry
 	armedCount int
 	// the running driver, nil while no timer is armed
@@ -230,6 +243,9 @@ func (self *shard) arm(e *entry, d time.Duration, period time.Duration) bool {
 		return pending
 	}
 	if self.driver == nil {
+		if self.private {
+			self.tick = privateTick(d)
+		}
 		self.startDriverWithLock()
 	}
 	e.when = time.Since(self.epoch) + d
