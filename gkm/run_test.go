@@ -33,7 +33,8 @@ const hostTestStepTimeout = 30 * time.Second
 const hostTestStatusPort = 80
 
 // What a test says gkm's newest verified state holds: each admitted sidecar's identity key and the rights it holds on
-// every repo, the log at position 10 on one chain, and no holder dropped anywhere.
+// every repo, the log at position 10 on one chain, no holder dropped anywhere and no member's recovery code covering a
+// repo.
 type hostTestAuthState struct {
 	stateLock     sync.Mutex
 	identityKeys  map[sidecar.Id][]byte
@@ -119,6 +120,13 @@ func (self *hostTestAuthState) LateHolders(principal *sidecar.Principal, repoId 
 
 func (self *hostTestAuthState) HoldersDropped(principal *sidecar.Principal, repoId sidecar.Id, pin *bridge.AuthPin, since time.Time, now time.Time) gkmservice.GkmAuthAnswer {
 	return gkmservice.GkmAuthDenied
+}
+
+// No member's recovery code covers a repo in these tests, so a claim at v0's defaults, which must find a recovery wrap
+// of its generation for each binding that covers its repo, finds none to look for. With no answer at all it would be
+// unavailable, 503, as on a state not loaded.
+func (self *hostTestAuthState) RepoRecoveryBindings(principal *sidecar.Principal, repoId sidecar.Id, now time.Time) (map[sidecar.Id][]byte, gkmservice.GkmAuthAnswer) {
+	return map[sidecar.Id][]byte{}, gkmservice.GkmAuthAllowed
 }
 
 // The fake clusters, whose sentinel the test says is read or not, as server.FileClusters.Ready answers.
