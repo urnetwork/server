@@ -19,6 +19,7 @@ import (
 	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/warp"
 )
 
@@ -237,11 +238,11 @@ func TestApiHostNotReadyWithoutItsTables(t *testing.T) {
 		SecretDirectory: hostTestSecrets(t, map[string]string{
 			HostServicesFileName: "domain: example\nversions:\n  - lb:\n      interfaces:\n        a-edge-1.example:\n          eth0: {ipv4: 192.0.2.10, ipv6: \"2001:db8::10\"}\n",
 		}),
-	}, &HostDeps{Store: store})
+	}, &HostDeps{Store: store, RecordGate: dnsservice.DnsUnloadedRecordGate{}, KeyRecordGate: dnsservice.NewDnsAclKeyRecordGate(nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := engine.(*dnsservice.DnsApi)
+	api := engine.(*apiHost)
 	defer api.Close()
 	for {
 		count, changed := api.Probes()
@@ -402,5 +403,56 @@ func TestHostLbInterfaceNameIsLbmapsName(t *testing.T) {
 		if name, lbmap := hostLbInterfaceName(c.host, c.interfaceName), warp.LbMapInterfaceName(c.block, c.domain); name != lbmap {
 			t.Errorf("%s %s: the feed names %q, lbmap %q", c.host, c.interfaceName, name, lbmap)
 		}
+	}
+}
+
+// A bound TCP listener and signed zone cannot make a block ready when the UDP port is occupied.
+func TestEdgeHostRequiresItsUdpListenerBeforeReadiness(t *testing.T) {
+	occupied, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	engine := &hostTestReadyEngine{}
+	options := &sidecarhost.RunOptions{Engine: engine}
+	err = runWithHostUdp(t.Context(), options, occupied.LocalAddr().String(), func(net.PacketConn) error {
+		t.Error("started with an occupied UDP port")
+		return nil
+	}, func(_ context.Context, options *sidecarhost.RunOptions) error {
+		if options.Engine.Ready() || !engine.closed {
+			t.Error("binding failure left the signed zone ready or its feed running")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type hostTestReadyEngine struct {
+	closed bool
+}
+
+func (self *hostTestReadyEngine) Ready() bool { return !self.closed }
+func (self *hostTestReadyEngine) Close()      { self.closed = true }
+func (self *hostTestReadyEngine) Drain()      {}
+
+// A packet loop ending after startup takes down the block, even if its TCP listener remains healthy.
+func TestEdgeHostWithdrawsAfterItsPacketListenerEnds(t *testing.T) {
+	started := make(chan struct{})
+	lost := errors.New("synthetic listener loss")
+	err := runWithHostUdp(t.Context(), &sidecarhost.RunOptions{Engine: &hostTestReadyEngine{}}, "127.0.0.1:0", func(net.PacketConn) error {
+		<-started
+		return lost
+	}, func(ctx context.Context, options *sidecarhost.RunOptions) error {
+		if !options.Engine.Ready() {
+			t.Fatal("bound edge was not ready")
+		}
+		close(started)
+		<-ctx.Done()
+		return nil
+	})
+	if !errors.Is(err, lost) {
+		t.Fatalf("lost listener: %v", err)
 	}
 }

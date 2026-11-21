@@ -123,7 +123,7 @@ func runTestDnsApi(ctx context.Context, state string, settings *TestDnsSettings)
 	return dnshost.RunHost(ctx, dnshost.HostRoleApi, &dnshost.HostSettings{
 		Dns:             dnsSettings,
 		SecretDirectory: filepath.Join(state, testDnsApiDirectoryName),
-	}, &dnshost.HostDeps{KeyWindow: keys.Window}, &dnshost.HostPorts{Status: testDnsStatusPort})
+	}, &dnshost.HostDeps{KeyWindow: keys.Window, RecordGate: dnsservice.DnsUnloadedRecordGate{}, KeyRecordGate: dnsservice.NewDnsAclKeyRecordGate(nil)}, &dnshost.HostPorts{Status: testDnsStatusPort})
 }
 
 // The edge, following the API at apiUrl. It reads only the public half of the KSK.

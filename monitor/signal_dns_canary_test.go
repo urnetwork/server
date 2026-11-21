@@ -659,3 +659,23 @@ func TestDnsCanaryOnlyTheRegisteredProbeKeepsTheCount(t *testing.T) {
 		t.Errorf("gauges %v %v", world.cleanDays, world.dsReady)
 	}
 }
+
+func TestDnsCanaryChecksRunningAuthoritiesAndKeepsRolloutStrict(t *testing.T) {
+	check, world := newDnsCanaryTestCheck(t, dnsservice.DnsCanarySourceSite)
+	delete(world.nsReads, dnsCanaryTestNs2.String())
+	check.runningNs = func(context.Context, string) ([]string, error) { return []string{"ns1"}, nil }
+	check.run(t.Context(), dnsCanaryTestNow)
+	if !world.reports[len(world.reports)-1].Ok {
+		t.Fatal("the running authority did not pass")
+	}
+	check.runningNs = func(context.Context, string) ([]string, error) { return []string{}, nil }
+	check.run(t.Context(), dnsCanaryTestNow)
+	if world.reports[len(world.reports)-1].Ok {
+		t.Fatal("an empty inventory passed")
+	}
+	check.runningNs = nil
+	check.run(t.Context(), dnsCanaryTestNow)
+	if world.reports[len(world.reports)-1].Ok {
+		t.Fatal("the rollout passed with a configured authority unavailable")
+	}
+}

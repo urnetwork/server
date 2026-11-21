@@ -53,6 +53,23 @@ type DnsScopeLabelSource func(ctx context.Context, networkId server.Id) (labels 
 
 var dnsScopeLabelSource atomic.Pointer[DnsScopeLabelSource]
 
+// Both the administrative API and the standalone DNS block resolve scopes from verified rows.
+// The first request for a network queues its load and cannot spend an unknown scope's authority.
+func DnsScopeLabelSourceOf(cache *sidecar.AclGateCache) DnsScopeLabelSource {
+	return func(ctx context.Context, networkId server.Id) ([]string, bool) {
+		if cache == nil {
+			return nil, false
+		}
+		id := sidecar.Id(networkId)
+		snapshot, status := cache.State(id)
+		if status != sidecar.AclGateLoaded || snapshot == nil || snapshot.Config == nil {
+			cache.Changed(id)
+			return nil, false
+		}
+		return snapshot.Config.TeamScopeLabels(), true
+	}
+}
+
 // Installs where this process reads scope labels. nil removes it. Answers what puts the previous one back.
 func SetDnsScopeLabelSource(source DnsScopeLabelSource) (restore func()) {
 	var previous *DnsScopeLabelSource

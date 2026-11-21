@@ -113,7 +113,7 @@ func newInternalGateTestWorld(t *testing.T, memberAdmitCount int, pageCount int)
 		bearers:   map[server.InternalGateCaller]string{},
 	}
 	verifyFile := ""
-	for _, caller := range []server.InternalGateCaller{server.InternalGateCallerConnect, server.InternalGateCallerSockets, server.InternalGateCallerEvs} {
+	for _, caller := range []server.InternalGateCaller{server.InternalGateCallerConnect, server.InternalGateCallerDns, server.InternalGateCallerSockets, server.InternalGateCallerEvs} {
 		bearer, digest := newInternalGateTestBearer(t)
 		self.bearers[caller] = bearer
 		verifyFile += string(caller) + ": {class: " + string(caller) + ", sha256: [" + digest + "]}\n"
@@ -288,6 +288,9 @@ func TestInternalGateProjectionRefusals(t *testing.T) {
 			if status, _ := world.get(path, authorization); status != http.StatusForbidden {
 				t.Errorf("%s with %q answered %d", path, authorization, status)
 			}
+		}
+		if status, _ := world.get(path, "Bearer "+world.bearers[server.InternalGateCallerDns]); status != http.StatusOK {
+			t.Errorf("%s with the DNS projection bearer answered %d", path, status)
 		}
 		if status, _ := world.get(path, connect); status != http.StatusOK {
 			t.Errorf("%s with connect's bearer answered %d", path, status)

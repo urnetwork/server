@@ -28,19 +28,18 @@ func networkDnsRoot() (string, error) {
 	return root, nil
 }
 
-// sidecar.yml's dns gate for the network (§19.11): it must admit the network, and take writes for a write. A closed
-// gate answers unavailable, as the dns block's routes do.
-func networkDnsGate(networkId server.Id, write bool) error {
+// The deployment-wide DNS switch also controls the administrative routes (§19.11).
+func networkDnsGate(write bool) error {
 	gate := server.CurrentSidecarConfig().Service(sidecar.ServiceGateDns)
-	if !gate.Admits(networkId) || (write && !gate.Writes()) {
-		return &sidecar.DnsApiError{Status: http.StatusServiceUnavailable, Code: sidecar.DnsApiCodeUnavailable, Message: "dns is not open to this network"}
+	if !gate.Enabled() || (write && !gate.Writes()) {
+		return &sidecar.DnsApiError{Status: http.StatusServiceUnavailable, Code: sidecar.DnsApiCodeUnavailable, Message: "dns is unavailable"}
 	}
 	return nil
 }
 
 // GET /network/dns: the network's label, allocated on first need, its alias, its records and dns_entries' quota.
 func GetNetworkDns(clientSession *session.ClientSession) (*sidecar.NetworkDns, error) {
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, false); err != nil {
+	if err := networkDnsGate(false); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -58,7 +57,7 @@ func WriteNetworkDnsRecords(request *sidecar.DnsRecordsRequest, clientSession *s
 	if request.Approval != nil {
 		return nil, &sidecar.DnsApiError{Status: http.StatusBadRequest, Code: sidecar.DnsApiCodeInvalid, Message: "a network credential writes under no decision"}
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -97,7 +96,7 @@ func ReclaimNetworkDnsLabel(request *sidecar.DnsLabelReclaimRequest, clientSessi
 	if request == nil {
 		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A reclaim names its tuple.")
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -133,7 +132,7 @@ func ClaimNetworkDnsAlias(request *sidecar.DnsAliasClaimRequest, clientSession *
 	if request == nil {
 		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A claim names its alias.")
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -157,7 +156,7 @@ func ReleaseNetworkDnsAlias(request *sidecar.DnsAliasReleaseRequest, clientSessi
 	if request == nil {
 		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A release names its alias.")
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -181,7 +180,7 @@ func AddNetworkDnsCustomHost(request *sidecar.DnsCustomHostAddRequest, clientSes
 	if request == nil {
 		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "An add names its host.")
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()
@@ -205,7 +204,7 @@ func RemoveNetworkDnsCustomHost(request *sidecar.DnsCustomHostRemoveRequest, cli
 	if request == nil {
 		return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "A removal names its host.")
 	}
-	if err := networkDnsGate(clientSession.ByJwt.NetworkId, true); err != nil {
+	if err := networkDnsGate(true); err != nil {
 		return nil, err
 	}
 	root, err := networkDnsRoot()

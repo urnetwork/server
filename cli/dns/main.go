@@ -28,7 +28,7 @@ var (
 	port          = flag.Int("port", 80, "the block's status port")
 	dnsPort       = flag.Int("dns_port", 53, "edge: the block's UDP and TCP port for DNS")
 	secretDir     = flag.String("secret_dir", sidecarhost.ScopedVaultHome, "where the block's secret_files mount")
-	apiUrl        = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "edge: the dns API block's base URL")
+	apiUrl        = sidecarhost.NewServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName, "api: the core API projection origin; edge: the DNS feed origin")
 	snapshotDir   = flag.String("snapshot_dir", "/srv/warp/data/dnsedge", "edge: where each root's local snapshot lives")
 	credential    = flag.String("credential_file", "", "edge: its bearer's file in secret_dir; empty is internal-<WARP_SERVICE>.yml")
 	requireReload = flag.Bool("require_reload", false, "edge: serve nothing until a reload (§19.10's start for a stopped NS)")

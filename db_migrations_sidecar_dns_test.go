@@ -43,7 +43,7 @@ func TestSidecarDnsPartsAreAdditive(t *testing.T) {
 		{
 			name:       "MG5's §12 part",
 			migrations: sidecarMg5DnsMigrations(),
-			statement: regexp.MustCompile(`(?is)^\s*(CREATE TABLE (dns_root|network_dns_zone|network_dns_record|dns_zone_journal|network_dns_custom_host|dns_custom_host_map|dns_custom_host_map_applied|dns_restore_incident)\b|` +
+			statement: regexp.MustCompile(`(?is)^\s*(CREATE TABLE (dns_root|dns_canary_verdict|dns_ns|network_dns_zone|network_dns_record|dns_zone_journal|network_dns_custom_host|dns_custom_host_map|dns_custom_host_map_applied|dns_restore_incident)\b|` +
 				`CREATE INDEX (network_dns_zone|network_dns_record|dns_zone_journal|network_dns_custom_host|dns_custom_host_map|dns_restore_incident)_\w+ ON (network_dns_zone|network_dns_record|dns_zone_journal|network_dns_custom_host|dns_custom_host_map|dns_restore_incident)\b)`),
 		},
 		{

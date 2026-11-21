@@ -526,8 +526,7 @@ func sidecarMg5Migrations() []any {
 // interface's report. No column holds a client address or a query (I-13), and
 // kinds and states are varchar, never ENUM. A serial is a bigint (plan reading
 // 4), whose low 32 bits the SOA carries. dns_label is MG2's
-// (plan-DNS-labels-before-m5). dns_ns, dns_canary_verdict and
-// network_dns_host_suspension wait for §2.8's v9 rows (plan-DNS-metadata-
+// (plan-DNS-labels-before-m5). network_dns_host_suspension waits for §2.8's v9 rows (plan-DNS-metadata-
 // rows), which §22.7's guard needs before a table is created; until then a
 // restore's posted diffs and lists ride dns_root, the restore's incident record
 // v8 names, and a host suspension is a withheld owner's row in
@@ -558,6 +557,20 @@ func sidecarMg5DnsMigrations() []any {
 				restore_lists jsonb NOT NULL DEFAULT '[]',
 
 				PRIMARY KEY (root)
+			)
+		`),
+		newSqlMigration(`
+			CREATE TABLE dns_canary_verdict (
+				root varchar(256) NOT NULL, source varchar(16) NOT NULL,
+				serial bigint NOT NULL, ok bool NOT NULL, report_time timestamp NOT NULL,
+				PRIMARY KEY (root, source)
+			)
+		`),
+		newSqlMigration(`
+			CREATE TABLE dns_ns (
+				root varchar(256) NOT NULL, ns varchar(64) NOT NULL, state varchar(16) NOT NULL,
+				stopped_time timestamp NULL, reason varchar(64) NULL,
+				PRIMARY KEY (root, ns)
 			)
 		`),
 		// a network's zone in a root (plan reading 2: per-network state, not a

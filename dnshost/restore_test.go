@@ -16,8 +16,8 @@ import (
 )
 
 // sidecartest.RunDnsRestoreStoreSuite on Postgres (D-TEST-2): labels through dns_label, open cases
-// through abuse_case, admin events through network_admin_event, and no NS state kept until dns_ns
-// exists.
+// through abuse_case, admin events through network_admin_event, and the running and stopped
+// authorities through dns_ns.
 func TestRestoreStoreRunsItsSuite(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		sidecartest.RunDnsRestoreStoreSuite(t, &sidecartest.DnsRestoreStoreSubject{

@@ -296,32 +296,35 @@ func changeDnsMapInterfaces(ctx context.Context, names []string, add bool, chang
 	if !dnsCustomHostLinked() {
 		return ErrDnsUnlinked
 	}
-	names = slices.Sorted(slices.Values(names))
-	names = slices.Compact(names)
 	server.Tx(ctx, func(tx server.PgTx) {
-		for _, name := range names {
-			if add {
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`INSERT INTO dns_custom_host_map_applied (interface_name) VALUES ($1) ON CONFLICT (interface_name) DO NOTHING`,
-					name,
-				))
-			}
-			var lbInterface *dnsservice.DnsMapInterface
-			result, err := tx.Query(ctx, `SELECT `+dnsMapAppliedColumns+` FROM dns_custom_host_map_applied WHERE interface_name = $1 FOR UPDATE`, name)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					lbInterface = scanDnsMapInterface(result)
-				}
-			})
-			if lbInterface == nil {
-				continue
-			}
-			change(lbInterface)
-			updateDnsMapInterfaceInTx(ctx, tx, lbInterface)
-		}
+		changeDnsMapInterfacesInTx(ctx, tx, names, add, change)
 	}, server.TxReadCommitted)
 	return nil
+}
+
+func changeDnsMapInterfacesInTx(ctx context.Context, tx server.PgTx, names []string, add bool, change func(*dnsservice.DnsMapInterface)) {
+	names = slices.Compact(slices.Sorted(slices.Values(names)))
+	for _, name := range names {
+		if add {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO dns_custom_host_map_applied (interface_name) VALUES ($1) ON CONFLICT (interface_name) DO NOTHING`,
+				name,
+			))
+		}
+		var lbInterface *dnsservice.DnsMapInterface
+		result, err := tx.Query(ctx, `SELECT `+dnsMapAppliedColumns+` FROM dns_custom_host_map_applied WHERE interface_name = $1 FOR UPDATE`, name)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				lbInterface = scanDnsMapInterface(result)
+			}
+		})
+		if lbInterface == nil {
+			continue
+		}
+		change(lbInterface)
+		updateDnsMapInterfaceInTx(ctx, tx, lbInterface)
+	}
 }
 
 // Records lbmap's poll by dnsservice.ApplyDnsMapPoll.
@@ -333,9 +336,24 @@ func RecordDnsCustomHostMapPoll(ctx context.Context, poll *dnsservice.DnsMapPoll
 
 // Records lbmap's report at now by dnsservice.ApplyDnsMapReport.
 func RecordDnsCustomHostMapReport(ctx context.Context, report *dnsservice.DnsCustomHostMapReport, now time.Time, routeHostCount int, droppedMaxCount int) error {
-	return changeDnsMapInterfaces(ctx, []string{report.Interface}, true, func(lbInterface *dnsservice.DnsMapInterface) {
-		dnsservice.ApplyDnsMapReport(lbInterface, report, now, routeHostCount, droppedMaxCount)
-	})
+	return RecordDnsCustomHostMapReportForRoot(ctx, "", report, now, routeHostCount, droppedMaxCount)
+}
+
+// The hosted route commits its live probe sample and its full incident receipt together. Root lister
+// locks precede interface row locks, the order used by the restore raise.
+func RecordDnsCustomHostMapReportForRoot(ctx context.Context, root string, report *dnsservice.DnsCustomHostMapReport, now time.Time, routeHostCount, droppedMaxCount int) error {
+	if !dnsCustomHostLinked() {
+		return ErrDnsUnlinked
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		if root != "" {
+			recordDnsRestoreMapReportInTx(ctx, tx, dnsLabelRoot(root), report)
+		}
+		changeDnsMapInterfacesInTx(ctx, tx, []string{report.Interface}, true, func(row *dnsservice.DnsMapInterface) {
+			dnsservice.ApplyDnsMapReport(row, report, now, routeHostCount, droppedMaxCount)
+		})
+	}, server.TxReadCommitted)
+	return nil
 }
 
 // Records an edge's round of route probes at now by dnsservice.ApplyDnsRouteProbes, for interfaces with rows.

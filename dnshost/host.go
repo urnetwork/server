@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -96,7 +97,7 @@ type HostSettings struct {
 	SecretDirectory string
 	// edge: its bearer's file in SecretDirectory, internal-<service>.yml.
 	CredentialFileName string
-	// edge: the API block's base URL.
+	// Core API projection origin for the API role, or DNS feed origin for the edge.
 	ApiUrl string
 	// edge: where each root's local snapshot lives, which must outlive the process.
 	SnapshotDirectory string
@@ -115,11 +116,13 @@ type HostDeps struct {
 	// api: the store. nil is Store over host.Redis. Only a Store has <root>'s records written at start,
 	// since they go through model to Postgres, which a fake does not read.
 	Store dnsservice.DnsStore
-	// api: §8.10's gate on dns:<host> for the record routes (DNS-M5-12). nil is
-	// none, so a write under a grant answers 503 and the zone view is empty.
+	// api: the projection carrier. nil reads through the dedicated core API credential.
+	Projection sidecar.AclGateSource
+	// api: optional SOA reader for a local authority.
+	SoaReader dnsservice.DnsSoaReader
+	// api: optional record authorization override. The hosted default uses the verified cache.
 	RecordGate dnsservice.DnsRecordGate
-	// api: §8.10's receiver gate for POST /dns/key-record (DNS-M7-02). nil is
-	// none, so every key record answers 503.
+	// api: optional TLSA receiver authorization override. The hosted default uses the same cache.
 	KeyRecordGate dnsservice.DnsKeyRecordGate
 	// api: each root's DNSKEY window released at now (§12.6's Keys). nil is DNS-M5-19's
 	// KeyWindowRelease over the window files in secret_files (hostKeyWindowRelease); server/local's test
@@ -276,24 +279,40 @@ func hostKeyWindowRelease(settings *HostSettings, host *sidecar.ServiceHost) (*d
 
 // The API role (see the file header). Returns the block, or a not-ready engine
 // and why when it cannot start.
-func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (sidecar.Engine, error) {
+func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (engine sidecar.Engine, returnErr error) {
 	if deps == nil {
 		deps = &HostDeps{}
 	}
+	cleanup := []func(){}
+	stop := sync.OnceFunc(func() {
+		for i := len(cleanup) - 1; i >= 0; i-- {
+			cleanup[i]()
+		}
+	})
+	defer func() {
+		if returnErr != nil {
+			stop()
+		}
+	}()
 	store := deps.Store
 	if store == nil {
 		if host.Redis == nil {
 			return notReadyEngine{}, errors.New("dns api: no redis")
 		}
-		var err error
-		if store, err = NewStore(host.Redis); err != nil {
+		pgStore, err := NewStore(host.Redis)
+		if err != nil {
 			return notReadyEngine{}, err
 		}
+		store = pgStore
+		cleanup = append(cleanup, pgStore.Close)
 	}
+	canaries := NewCanaries()
 	apiDeps := &dnsservice.DnsApiDeps{
-		SoaReader:  dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
-		Challenges: NewChallenges(),
-		Canaries:   NewCanaries(),
+		SoaReader:      dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
+		Challenges:     NewChallenges(),
+		Canaries:       canaries,
+		ReadyStore:     canaries,
+		CanaryVerdicts: canaries,
 		// certs' CAA canaries for a strong-mode custom host's probe (DNS-M6-05)
 		CaaCanaries: NewCaaCanaries(),
 		// the custom-host map for lbmap and the edges' route probes (DNS-M6-03)
@@ -302,18 +321,11 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		Records:        NewRecords(),
 		Reclaims:       NewReclaims(),
 		KeyRecords:     NewKeyRecords(),
-		// no gate cache is wired here yet either, so every key record
-		// answers 503 until one is
-		KeyRecordGate: deps.KeyRecordGate,
-		// no gate cache is wired into this block yet (plan-SOCK-gate-data's
-		// source for it), so a write under a grant answers 503 and GET
-		// /dns/zone shows no RRset: the closed direction
-		RecordGate: deps.RecordGate,
+		KeyRecordGate:  deps.KeyRecordGate,
+		RecordGate:     deps.RecordGate,
 	}
-	// the record writes read §21.7's standing and network_verified from the
-	// host's memory (ServiceHost.Abuse); a host with none answers them 503
-	if host.Abuse != nil {
-		model.SetDnsRecordsAbuseGate(host.Abuse)
+	if deps.SoaReader != nil {
+		apiDeps.SoaReader = deps.SoaReader
 	}
 	if apiDeps.KeyWindow == nil {
 		release, err := hostKeyWindowRelease(settings, host)
@@ -342,6 +354,19 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return notReadyEngine{}, err
 	}
+	if _, postgres := store.(*Store); postgres {
+		apiDeps.ProbeReadiness = canaries.ProbeReadiness
+	}
+	if apiDeps.RecordGate == nil || apiDeps.KeyRecordGate == nil {
+		stop, err := installDnsProjection(ctx, host, settings, deps.Projection, nil, apiDeps)
+		if err != nil {
+			return notReadyEngine{}, err
+		}
+		cleanup = append(cleanup, stop)
+	}
+	if host.Abuse != nil {
+		cleanup = append(cleanup, model.SetDnsRecordsAbuseGate(host.Abuse))
+	}
 	api, err := dnsservice.NewDnsApi(ctx, host, settings.Dns, store, apiDeps)
 	if err != nil {
 		return notReadyEngine{}, err
@@ -353,7 +378,18 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 			glog.Warningf("[dns]root records wait for the next start: %v\n", err)
 		}
 	}
-	return api, nil
+	return &apiHost{DnsApi: api, stop: stop}, nil
+}
+
+// Release the process's projection watcher and model views after draining the API.
+type apiHost struct {
+	*dnsservice.DnsApi
+	stop func()
+}
+
+func (self *apiHost) Close() {
+	self.DnsApi.Close()
+	self.stop()
 }
 
 // The edge role: an edge, its feed loop and its prober as one engine.
@@ -541,35 +577,50 @@ func RunHost(ctx context.Context, role string, settings *HostSettings, deps *Hos
 		if err != nil {
 			glog.Errorf("[dns]the edge role is not ready: %v\n", err)
 		}
-		if edgeHost, ok := engine.(*EdgeHost); ok {
-			go serveHostUdp(ctx, edgeHost, ports.Dns)
+		options := &sidecarhost.RunOptions{
+			Service: "dnsedge", StatusPort: ports.Status, Engine: engine, Stream: engine,
+			Listeners: []*sidecarhost.RunListener{{Port: ports.Dns}},
 		}
-		return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
-			Service:    "dnsedge",
-			StatusPort: ports.Status,
-			Engine:     engine,
-			Stream:     engine,
-			Listeners:  []*sidecarhost.RunListener{{Port: ports.Dns}},
-		})
+		if edgeHost, ok := engine.(*EdgeHost); ok {
+			ipv4, _, hostPort := server.RequireListenIpPort(ports.Dns)
+			address := net.JoinHostPort(ipv4, strconv.Itoa(hostPort))
+			return runWithHostUdp(ctx, options, address, edgeHost.ServeUdp, sidecarhost.Run)
+		}
+		return sidecarhost.Run(ctx, options)
 	}
 	return fmt.Errorf("dns host: role %q is neither %s nor %s", role, HostRoleApi, HostRoleEdge)
 }
 
-// Binds the block's UDP port as warp maps it and serves it until ctx ends.
-func serveHostUdp(ctx context.Context, edgeHost *EdgeHost, port int) {
-	ipv4, _, hostPort := server.RequireListenIpPort(port)
-	listenConfig := net.ListenConfig{}
-	conn, err := listenConfig.ListenPacket(ctx, "udp", net.JoinHostPort(ipv4, strconv.Itoa(hostPort)))
+// Bind before the shared host can signal ready. Losing the packet listener ends the block and
+// withdraws its TCP and status listeners as well.
+func runWithHostUdp(ctx context.Context, options *sidecarhost.RunOptions, address string, serve func(net.PacketConn) error, run func(context.Context, *sidecarhost.RunOptions) error) error {
+	var listenConfig net.ListenConfig
+	conn, err := listenConfig.ListenPacket(ctx, "udp", address)
 	if err != nil {
-		glog.Errorf("[dns]udp %d: %v\n", port, hostErrorWithoutAddress(err))
-		return
+		glog.Errorf("[dns]UDP listener unavailable: %v\n", hostErrorWithoutAddress(err))
+		options.Engine.Close()
+		options.Stream = notReadyStreamEngine{}
+		options.Engine = options.Stream
+		return run(ctx, options)
 	}
-	context.AfterFunc(ctx, func() {
-		conn.Close()
-	})
-	if err := edgeHost.ServeUdp(conn); err != nil && ctx.Err() == nil {
-		glog.Errorf("[dns]udp %d ended: %v\n", port, hostErrorWithoutAddress(err))
+	runCtx, cancel := context.WithCancelCause(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		err := serve(conn)
+		if err == nil {
+			err = errors.New("UDP listener stopped")
+		}
+		cancel(fmt.Errorf("dns UDP listener ended: %w", hostErrorWithoutAddress(err)))
+	}()
+	err = run(runCtx, options)
+	cancel(context.Canceled)
+	conn.Close()
+	<-done
+	if ctx.Err() == nil && !errors.Is(context.Cause(runCtx), context.Canceled) {
+		return context.Cause(runCtx)
 	}
+	return err
 }
 
 // The port alone names a socket in the log, which carries no address (I-13), and a net.OpError prints

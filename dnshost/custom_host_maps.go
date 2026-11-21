@@ -54,7 +54,7 @@ func (self *CustomHostMaps) RecordMapPoll(ctx context.Context, root string, poll
 // model.RecordDnsCustomHostMapReport.
 func (self *CustomHostMaps) RecordMapReport(ctx context.Context, root string, report *dnsservice.DnsCustomHostMapReport, now time.Time, routeHostCount int, droppedMaxCount int) error {
 	return storeCall(func() error {
-		return model.RecordDnsCustomHostMapReport(ctx, report, now, routeHostCount, droppedMaxCount)
+		return model.RecordDnsCustomHostMapReportForRoot(ctx, root, report, now, routeHostCount, droppedMaxCount)
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -52,6 +53,34 @@ func TestCanariesWriteThroughTheJournal(t *testing.T) {
 		}
 		if state, _ := model.GetDnsRootState(ctx, root); state.Serial != serial {
 			t.Errorf("a refused canary took serial %d", state.Serial)
+		}
+	})
+}
+
+func TestCanaryVerdictsKeepTheLatestReceiptPerSource(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		root := "v" + strings.ReplaceAll(server.NewId().String(), "-", "") + ".example."
+		now := server.NowUtc().Truncate(time.Microsecond)
+		store := NewCanaries()
+		put := func(source string, at time.Time, ok bool) {
+			t.Helper()
+			if err := store.PutCanaryVerdict(ctx, root, dnsservice.DnsCanaryVerdict{Source: source, Serial: 99, ReportTime: at, Ok: ok}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		put(dnsservice.DnsCanarySourceSite, now, true)
+		put(dnsservice.DnsCanarySourceOutside, now, false)
+		put(dnsservice.DnsCanarySourceOutside, now.Add(-time.Second), true)
+		put(dnsservice.DnsCanarySourceOutside, now, true)
+		rows, err := NewCanaries().CanaryVerdicts(ctx, root)
+		if err != nil || len(rows) != 2 || dnsservice.DnsCanaryClean(rows, now, time.Minute) {
+			t.Fatalf("fresh outside failure: %+v %v", rows, err)
+		}
+		put(dnsservice.DnsCanarySourceOutside, now.Add(time.Second), true)
+		rows, err = NewCanaries().CanaryVerdicts(ctx, root)
+		if err != nil || !dnsservice.DnsCanaryClean(rows, now.Add(time.Second), time.Minute) || dnsservice.DnsCanaryClean(rows, now.Add(time.Minute), time.Minute) {
+			t.Fatalf("recovery and expiry: %+v %v", rows, err)
 		}
 	})
 }

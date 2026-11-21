@@ -847,7 +847,7 @@ gates:
     - row: FS-42
       case: m5
       tests:
-        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges, TestFs42DnsStepOnTheRestoreFrame, TestFs42DnsStepCountsAnNsItCannotStop]}
+        - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges, TestFs42DnsStepOnTheRestoreFrame, TestFs42DnsStepPersistsAnNsStopAcrossRerun]}
         - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughAPostgresRestore, TestT3TlsedgeTakesASnapshotAfterALabelMapRestore]}
         - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
         - {repo: server, package: ./sidecarrestore, names: [TestM5StepsAreRegisteredInTheProcesssFrame, TestM5StepsRunInTheFramesOrder, TestAbuseStepPlansFirstAndAppliesOnlyWhenTold, TestM5StepsSkipADatabaseBeforeMg5AndRefuseAnUnlinkedBinary, TestDnsStepRunsEachRootToItsEndUnderTheIncident, TestLabelsStepSchedulesEachRootsReplayFromTheSidecarDump]}

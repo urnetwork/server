@@ -126,7 +126,7 @@ func TestInternalGateCredentialSendsItsCurrentBearer(t *testing.T) {
 // has neither. The edge and platform listener classes, which sidecarctl's bearer keygen draws first, are listed.
 func TestInternalGateCallersAreTheClassesTheGateTakes(t *testing.T) {
 	callers := InternalGateCallers()
-	for _, caller := range []InternalGateCaller{InternalGateCallerEdge, InternalGateCallerMxedgePlatform} {
+	for _, caller := range []InternalGateCaller{InternalGateCallerEdge, InternalGateCallerMxedgePlatform, InternalGateCallerDns} {
 		if !slices.Contains(callers, caller) {
 			t.Errorf("%q is not listed", caller)
 		}
