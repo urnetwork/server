@@ -15,8 +15,10 @@ package model
 // yet. Anyone can make such a hold with someone else's address, so it grants
 // nothing: it never signs in or joins an Apple or Google sign-in. And it
 // yields:
-//   - at once, to a proof of the address: an Apple or Google sign-in or link
-//     with the email, or a verification code sent to the address;
+//   - at once, to a proof of the address. An Apple or Google sign-up or link
+//     with the email releases it. A verification code sent to the address
+//     releases it too, or hands a sign-up to the verifier with every earlier
+//     credential ended (auth_verify_claim.go);
 //   - to another claim (a sign-up, an address added to another account) once
 //     it is older than UnverifiedUserAuthClaimTimeout, so an unverified sign-up
 //     cannot hold someone else's address for good.

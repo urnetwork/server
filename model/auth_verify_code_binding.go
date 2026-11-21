@@ -25,7 +25,7 @@ import (
 //     random. The low bit of byte 15 says which.
 //
 // The client binding lets the person who set a sign-up's password keep it when
-// they verify (VerifyCodeBoundAddressPassword), while a code that reaches the
+// they verify (verifyCodeBoundAddressPassword), while a code that reaches the
 // address any other way, including one mailed after someone else's password
 // sign-in, proves the address alone. Ids written before this have random bytes
 // and are unbound: AuthVerify still takes one for an account whose only
