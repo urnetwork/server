@@ -21,17 +21,11 @@ import (
 )
 
 type snTopDbFixture struct {
-	ctx context.Context
-	// the settlement epoch of the stub chain
-	epoch uint64
-	// the export's admission set the fixture publishes (rule (a),
-	// sn_top_admission.go): every provider it creates is admitted unless a
-	// test withholds it
-	admission map[server.Id]*model.SnTopAdmissionProvider
-	settings  *model.VerifySettings
-	cfg       *StConfig
-	client    *stubStClient
-	anchor    time.Time
+	ctx      context.Context
+	settings *model.VerifySettings
+	cfg      *StConfig
+	client   *stubStClient
+	anchor   time.Time
 	// the completed tempo's window: [start, end)
 	start time.Time
 	end   time.Time
@@ -47,19 +41,14 @@ const (
 )
 
 func newSnTopDbFixture(t testing.TB, ctx context.Context) *snTopDbFixture {
-	return newSnTopDbFixtureAtEpoch(t, ctx, snTopDbEpoch)
-}
-
-// The fixture with the stub chain in the given settlement epoch.
-func newSnTopDbFixtureAtEpoch(t testing.TB, ctx context.Context, epoch uint64) *snTopDbFixture {
-	self := &snTopDbFixture{ctx: ctx, epoch: epoch, admission: map[server.Id]*model.SnTopAdmissionProvider{}}
+	self := &snTopDbFixture{ctx: ctx}
 	self.anchor = server.NowUtc().Truncate(time.Minute)
 	self.start = self.anchor.Add(-460 * model.SnTopBlockTime)
 	self.end = self.anchor.Add(-100 * model.SnTopBlockTime)
 
 	self.cfg = &StConfig{Enabled: true, ChainId: 945, ContractAddress: common.HexToAddress("0x2000000000000000000000000000000000000025")}
 	self.client = newStubStClient(&StEpochState{
-		Epoch:           epoch,
+		Epoch:           snTopDbEpoch,
 		EpochStartBlock: snTopDbEpochStart,
 		TEpochBlocks:    50400,
 		HeadBlock:       snTopDbHead,
@@ -83,7 +72,7 @@ func newSnTopDbFixtureAtEpoch(t testing.TB, ctx context.Context, epoch uint64) *
 	self.settings.CohortDeploymentKey = self.cfg.DeploymentKey()
 	SetVerifySettings(self.settings)
 	model.SetStEpochSummaryCache(ctx, self.cfg.DeploymentKey(), &model.StEpochSummary{
-		Epoch:        epoch,
+		Epoch:        snTopDbEpoch,
 		StartBlock:   snTopDbEpochStart,
 		TEpochBlocks: 50400,
 	}, time.Hour)
@@ -127,19 +116,7 @@ func (self *snTopDbFixture) provider(t testing.TB, networkId server.Id, ip strin
 		SendMessageCount:           1,
 		SendByteCount:              1024,
 	})
-	self.admit(clientId, true)
 	return clientId
-}
-
-// Publishes the export's admission set with the client admitted or not. The
-// set is stamped a day past the anchor, so every fold the test runs reads it
-// fresh.
-func (self *snTopDbFixture) admit(clientId server.Id, admitted bool) {
-	self.admission[clientId] = model.Testing_SnTopAdmissionProvider(clientId, "us", admitted, admitted, admitted)
-	model.Testing_SetSnTopAdmission(self.ctx, &model.SnTopAdmission{
-		MeasuredAt: self.anchor.Add(24 * time.Hour),
-		Providers:  self.admission,
-	})
 }
 
 // Hops of a complete trail through the client, confirmed inside the tempo.

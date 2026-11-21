@@ -85,7 +85,6 @@ func NewConnectionAnnounceWithIpFamily(
 		clientId,
 		clientAddress,
 		ipFamilyIntent,
-		false,
 		appVersion,
 		handlerId,
 		nil,

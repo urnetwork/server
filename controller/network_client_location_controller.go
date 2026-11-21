@@ -16,11 +16,6 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The ARIN pair lookup that classifies both a connection's own address and a
-// probed exit (server.GetArinInfoPair). Immutable in production; replaced by
-// tests, which classify their synthetic addresses.
-var arinInfoPairForAddr = server.GetArinInfoPair
-
 func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *model.ConnectionLocationScores, error) {
 	addr, err := netip.ParseAddr(clientIp)
 	if err != nil {
@@ -54,10 +49,9 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 
 	// Legacy net-type columns stay neutral. Reviewed hosting and geographic
 	// exceptions come from the actual connected address's ARIN lookups below,
-	// in both databases of the pair. A provider with a fresh probe has its
-	// Quality facts replaced by its exit's afterwards (SetConnectionLocation,
-	// model/provider_egress_exit_model.go); its risk stays this address's.
-	arinInfo, oldArinInfo, err := arinInfoPairForAddr(addr)
+	// in both databases of the pair; a location probe cannot substitute its
+	// country or vendor flags.
+	arinInfo, oldArinInfo, err := server.GetArinInfoPair(addr)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -70,12 +70,6 @@ type VerifyCohortRankedProvider struct {
 	HasPrefix  bool
 }
 
-// Whether the provider has a prefix pin. The zero hash is none: it is what a
-// provider that declared a proxy egress records, which shows no unit.
-func (self VerifyCohortRankedProvider) hasPrefix() bool {
-	return self.HasPrefix && self.PrefixHash != ([32]byte{})
-}
-
 // SelectVerifyCohortRanked picks tier B's representatives, in rank order: for
 // each unclaimed network ranked 1 to 400 now and in at least 3 of the last 4
 // folds (recentTop, newest first, the current fold first), one eligible
@@ -130,8 +124,8 @@ func SelectVerifyCohortRanked(
 				}
 				return 1
 			}
-			if a.hasPrefix() != b.hasPrefix() {
-				if a.hasPrefix() {
+			if a.HasPrefix != b.HasPrefix {
+				if a.HasPrefix {
 					return -1
 				}
 				return 1
@@ -145,10 +139,10 @@ func SelectVerifyCohortRanked(
 	representatives := []server.Id{}
 	for _, network := range ranked {
 		for _, provider := range candidates[network.NetworkId] {
-			if chosen[provider.ClientId] || provider.hasPrefix() && taken[provider.PrefixHash] {
+			if chosen[provider.ClientId] || provider.HasPrefix && taken[provider.PrefixHash] {
 				continue
 			}
-			if provider.hasPrefix() {
+			if provider.HasPrefix {
 				taken[provider.PrefixHash] = true
 			}
 			chosen[provider.ClientId] = true

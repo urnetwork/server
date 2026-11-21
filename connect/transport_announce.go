@@ -279,10 +279,6 @@ type ConnectionAnnounce struct {
 	// prove: 0 (legacy), 4 or 6. Recorded with the connection; the observed
 	// family is derived from clientAddress at the model.
 	ipFamilyIntent int
-	// proxiedEgress is whether the transport declared it was dialed through
-	// a proxy (transport_egress_proxy.go): its egress lease marks the client
-	// first, so the client shows no unit
-	proxiedEgress bool
 	// the client's app version from its auth, for the provider rollout gauge
 	// (providerVersionConnection); "" when it sent none
 	appVersion string
@@ -363,9 +359,9 @@ type connectionMeasurements struct {
 // production: connectionReconcile is that handler's, holds the row while the
 // transport lives, and retires it if its final disconnect fails. ipFamilyIntent
 // is the address family the transport declared it intends to prove (0, 4 or
-// 6), proxiedEgress whether it declared it was dialed through a proxy, and
-// appVersion the client's app version from its auth. Tests announce without a
-// reconcile through NewConnectionAnnounce* (transport_announce_testing_test.go).
+// 6) and appVersion the client's app version from its auth. Tests announce
+// without a reconcile through NewConnectionAnnounce*
+// (transport_announce_testing_test.go).
 func newConnectionAnnounceWithReconcile(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -373,7 +369,6 @@ func newConnectionAnnounceWithReconcile(
 	clientId server.Id,
 	clientAddress string,
 	ipFamilyIntent int,
-	proxiedEgress bool,
 	appVersion string,
 	handlerId server.Id,
 	connectionReconcile *handlerConnectionReconcile,
@@ -388,7 +383,6 @@ func newConnectionAnnounceWithReconcile(
 		clientId:               clientId,
 		clientAddress:          clientAddress,
 		ipFamilyIntent:         ipFamilyIntent,
-		proxiedEgress:          proxiedEgress,
 		appVersion:             appVersion,
 		handlerId:              handlerId,
 		connectionReconcile:    connectionReconcile,
@@ -609,13 +603,7 @@ func (self *ConnectionAnnounce) run() {
 		feedFailureCount := 0
 		feed := func() {
 			if feedErr := self.recoverLiveCall(func() {
-				if self.proxiedEgress {
-					// marks the client before the lease, so the index never
-					// attributes this transport to an unmarked client
-					model.FeedVerifyProxiedConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
-				} else {
-					model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
-				}
+				model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
 			}); feedErr != nil {
 				feedFailureCount += 1
 				defaultLiveFailureLog.record(liveFailureOperationVerifyEgressLease, feedFailureCount, feedErr)

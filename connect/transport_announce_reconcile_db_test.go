@@ -55,7 +55,6 @@ func startReconcileAnnounceForTest(ctx context.Context, handlerId server.Id, rec
 		clientId,
 		locationAnnounceClientAddress,
 		0,
-		false,
 		"",
 		handlerId,
 		reconcile,

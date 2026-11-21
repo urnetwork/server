@@ -1690,16 +1690,8 @@ queried, including a successful lookup without a matching record.
 
 [network_client_location_controller.go](../controller/network_client_location_controller.go)
 classifies the actual connection address and stores risk, subscriber verification,
-non-Quality state, database build epoch, and lookup time. A provider with a fresh
-egress probe is judged by its exit instead (owner decision 2026-11-20,
-[provider_egress_exit_model.go](../model/provider_egress_exit_model.go)): the
-ingest classifies the probed exit with its own pair, and each of the provider's
-connections, live or new, stores the exit's subscriber verification, non-Quality
-state and epoch in both slots, and its risk beside the connection address's own:
-a risky exit takes the provider out of Speed and Online as well (owner decision
-2026-11-20, "apply exit risk too"). The exit address is never stored; the
-judgement lives in Redis while the probe is fresh, and a lost one judges the
-connection address until the next probe. Existing stored
+non-Quality state, database build epoch, and lookup time. A probed egress location
+does not replace the classification of that connection address. Existing stored
 facts are not rewritten merely because a new MMDB is selected. Fresh connection
 observations and provider rollups must converge afterward. The database's masked
 address representation is insufficient to reconstruct exact historical IPs for

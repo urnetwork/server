@@ -6024,9 +6024,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// capture the flag's presence reads these decisions (ctf_presence_model.go);
 	// off unless ctf.yml turns it on, and never a reason for the export to fail
 	publishCtfPresenceProviders(ctx, nativeSourceStartedAt, locationClientScores, clientIdEgresses)
-	// the SN Top board counts units only from these decisions
-	// (sn_top_admission_model.go); never a reason for the export to fail
-	publishSnTopAdmission(ctx, nativeSourceStartedAt, locationClientScores, clientIdEgresses, clientIdEgressDecisions)
 	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	nativeCensus.Arindb = arindbDecision.nativeSummary()
 

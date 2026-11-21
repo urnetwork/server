@@ -576,17 +576,11 @@ func ctfSampledUnits(presences []*model.CtfPresence) map[server.Id][]*ctfSampled
 // that saw the pin. Without a pin, the latest unit the samples recorded, in
 // the provider's end country first, as the sampler read it from the same pins
 // or, for a provider the model cannot pin, from its live address; else the
-// prefix of its live address at the capture. A provider that declared its
-// transports leave through a proxy has no unit, whatever a sample recorded
-// before it declared it: the census then excludes it as having no unit.
+// prefix of its live address at the capture.
 func ctfResolveProviderUnit(egress *model.CtfEgress, sampled []*ctfSampledUnit, countryCode string) *model.CtfEgress {
 	resolved := &model.CtfEgress{}
 	if egress != nil {
 		resolved.Addresses = egress.Addresses
-	}
-	if egress != nil && egress.Proxied {
-		resolved.Proxied = true
-		return resolved
 	}
 	if egress != nil && egress.Pinned && egress.Unit != nil {
 		unit := *egress.Unit
