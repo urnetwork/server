@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -539,6 +540,34 @@ func TestTlsCustomChallengeReceiptGoesWithItsHour(t *testing.T) {
 		fresh := world.mustCapture(t, world.desktop, value)
 		if fresh.ChallengeId == receipt.ChallengeId || fresh.State != TlsCustomChallengeStateQueued {
 			t.Fatalf("a capture after the hour: %+v", fresh)
+		}
+	})
+}
+
+// A domain whose acme name moved under the claim: the worker refuses a write still owed at the old name, and the next
+// capture of the same digest owes a write at the new one rather than recovering the old one's serial.
+func TestTlsCustomChallengeFollowsAMovedAcmeName(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		world := newTestTlsCustomChallengeWorld(t, ctx)
+		value := testTlsCustomChallengeValue("token12.thumbprint")
+		receipt := world.mustCapture(t, world.desktop, value)
+		step := world.step(t, receipt.ChallengeId)
+		serial := world.write(t, step)
+		if err := world.store.RecordChallengeWrite(ctx, receipt.ChallengeId, step.DispatchCount, serial, nil); err != nil {
+			t.Fatal(err)
+		}
+		movedToken := "a" + strings.Repeat("b", 25)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_domain SET acme_token = $3 WHERE network_id = $1 AND domain = $2`, world.networkId, world.domain, movedToken))
+		})
+		moved := world.mustCapture(t, world.desktop, value)
+		if moved.ChallengeId != receipt.ChallengeId || moved.State != TlsCustomChallengeStateQueued || moved.Serial != 0 {
+			t.Fatalf("a capture after the name moved: %+v", moved)
+		}
+		step = world.step(t, receipt.ChallengeId)
+		if want := DnsAcmeChallengeTarget(world.root, movedToken); step.WriteName != want || step.WriteValue != value {
+			t.Fatalf("the write after the name moved: %+v, want %s", step, want)
 		}
 	})
 }

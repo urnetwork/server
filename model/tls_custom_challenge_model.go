@@ -285,18 +285,20 @@ func updateTlsCustomChallengeInTx(ctx context.Context, tx server.PgTx, challenge
 	))
 }
 
-// Owes a new write of value under the receipt's claim: everything of the earlier write is cleared, and the expiry
-// counts from now.
-func requeueTlsCustomChallengeInTx(ctx context.Context, tx server.PgTx, challengeId server.Id, value string, now time.Time, settings *TlsCustomChallengeSettings) {
+// Owes a new write of value at name in root under the receipt's claim: everything of the earlier write is cleared,
+// and the expiry counts from now.
+func requeueTlsCustomChallengeInTx(ctx context.Context, tx server.PgTx, challengeId server.Id, root string, name string, value string, now time.Time, settings *TlsCustomChallengeSettings) {
 	updateTlsCustomChallengeInTx(
 		ctx,
 		tx,
 		challengeId,
 		`
-			value = $2, state = $3, capture_time = $4, expire_time = $5, dispatch_count = 0, dispatch_time = NULL,
-			floor_serial = NULL, serial = NULL, write_time = NULL, refusal = NULL, retry_time = NULL, ready_answer = NULL,
-			ready_time = NULL, ready_request_time = NULL
+			root = $2, name = $3, value = $4, state = $5, capture_time = $6, expire_time = $7, dispatch_count = 0,
+			dispatch_time = NULL, floor_serial = NULL, serial = NULL, write_time = NULL, refusal = NULL, retry_time = NULL,
+			ready_answer = NULL, ready_time = NULL, ready_request_time = NULL
 		`,
+		root,
+		name,
 		value,
 		TlsCustomChallengeStateQueued,
 		now,
@@ -407,15 +409,17 @@ func (self *TlsCustomStore) captureChallengeInTx(ctx context.Context, tx server.
 		schedule(tx, challengeId)
 		return getTlsCustomChallengeInTx(ctx, tx, `challenge_id = $1`, false, challengeId).receipt(now), nil
 	}
+	// the same digest at the same name: a retry
+	same := row.value == value && row.name == name && row.root == root
 	owed := false
 	switch {
-	case row.value == value && row.state == TlsCustomChallengeStateWritten:
+	case same && row.state == TlsCustomChallengeStateWritten:
 		// a retry recovers the write; only a confirmed stale verdict owes another of the same digest
 		owed = row.stale()
-	case row.value == value && (row.state == TlsCustomChallengeStateQueued || row.state == TlsCustomChallengeStateDispatched):
+	case same && (row.state == TlsCustomChallengeStateQueued || row.state == TlsCustomChallengeStateDispatched):
 		// the write is owed already: asking again only wakes a command a restart may have left
 		schedule(tx, row.challengeId)
-	case row.value == value && row.state == TlsCustomChallengeStateRefused:
+	case same && row.state == TlsCustomChallengeStateRefused:
 		// a full window keeps its refusal until it frees; any other refusal is retried by a new capture
 		owed = !(row.refusal != nil && *row.refusal == TlsCustomChallengeRefusalBudget && row.retryTime != nil && now.Before(*row.retryTime))
 	case row.state == TlsCustomChallengeStateDispatched:
@@ -427,11 +431,12 @@ func (self *TlsCustomStore) captureChallengeInTx(ctx context.Context, tx server.
 		}
 		return nil, refusal
 	default:
-		// another digest, a new order's under the claim, with nothing of the earlier write in flight
+		// another digest, a new order's under the claim, or a name the domain moved to, with nothing of the earlier
+		// write in flight
 		owed = true
 	}
 	if owed {
-		requeueTlsCustomChallengeInTx(ctx, tx, row.challengeId, value, now, settings)
+		requeueTlsCustomChallengeInTx(ctx, tx, row.challengeId, root, name, value, now, settings)
 		schedule(tx, row.challengeId)
 	}
 	return getTlsCustomChallengeInTx(ctx, tx, `challenge_id = $1`, false, row.challengeId).receipt(now), nil
