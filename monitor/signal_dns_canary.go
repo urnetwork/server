@@ -95,6 +95,8 @@ type DnsCanarySettings struct {
 	UnboundHostPath string
 	// Each read and the validation's bound.
 	Timeout time.Duration
+	// The private DNS edge status body a one-shot rollout check will decode.
+	RolloutStatusMaxBytes int64
 	// §19.8's write-to-both-authorities bound and poll cadence.
 	PropagationTarget time.Duration
 	PropagationPoll   time.Duration
@@ -124,18 +126,19 @@ type DnsCanarySettings struct {
 // The production defaults. Source, ApiUrl, Bearer, Dns and the resolvers are the deployment's.
 func DefaultDnsCanarySettings() *DnsCanarySettings {
 	return &DnsCanarySettings{
-		Source:             dnsservice.DnsCanarySourceSite,
-		Timeout:            10 * time.Second,
-		PropagationTarget:  60 * time.Second,
-		PropagationPoll:    time.Second,
-		Fresh:              180 * time.Second,
-		MinWindowLeft:      7 * 24 * time.Hour,
-		PageSustain:        2,
-		NsFailingSustain:   60,
-		DivergenceSustain:  3,
-		PropagationSustain: 5,
-		DsReadyCleanDays:   30,
-		CleanGap:           10 * time.Minute,
+		Source:                dnsservice.DnsCanarySourceSite,
+		Timeout:               10 * time.Second,
+		RolloutStatusMaxBytes: 8 * 1024,
+		PropagationTarget:     60 * time.Second,
+		PropagationPoll:       time.Second,
+		Fresh:                 180 * time.Second,
+		MinWindowLeft:         7 * 24 * time.Hour,
+		PageSustain:           2,
+		NsFailingSustain:      60,
+		DivergenceSustain:     3,
+		PropagationSustain:    5,
+		DsReadyCleanDays:      30,
+		CleanGap:              10 * time.Minute,
 	}
 }
 

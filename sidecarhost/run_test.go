@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -517,6 +518,49 @@ func TestRunWithoutPostgresNeedsNoPgYml(t *testing.T) {
 	cancel()
 	if err := awaitRunEnd(t, done); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A public dual-stack service latches its private status after both exact addresses bind.
+func TestRunServesBothAllocatedDnsAddressesBeforePublishingReady(t *testing.T) {
+	fixture := newRunFixture(t)
+	fixture.engine.ready.Store(true)
+	options := fixture.httpOptions()
+	options.Stream = fixture.engine
+	options.Listeners = []*RunListener{{Port: 53, Addresses: []netip.AddrPort{
+		netip.MustParseAddrPort("127.0.0.1:0"), netip.MustParseAddrPort("[::1]:0"),
+	}}}
+	options.StatusHeaders = func(headers http.Header, _ *http.Request) {
+		headers.Set("X-Test-Process", "same-status")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := fixture.start(ctx, options)
+	defer func() {
+		cancel()
+		if err := awaitRunEnd(t, done); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := fixture.awaitLatch(); err != nil {
+		t.Fatal(err)
+	}
+	families := map[bool]bool{}
+	for range 2 {
+		select {
+		case listener := <-fixture.engine.served:
+			addr := listener.Addr().(*net.TCPAddr).AddrPort()
+			families[addr.Addr().Is6()] = true
+			conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn.Close()
+		case <-time.After(runStepTimeout):
+			t.Fatal("a bound DNS family never served")
+		}
+	}
+	if len(families) != 2 || fixture.request("GET", "/status").Header().Get("X-Test-Process") != "same-status" {
+		t.Fatal("missing a public listener or the private status evidence")
 	}
 }
 

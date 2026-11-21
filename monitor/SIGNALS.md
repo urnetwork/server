@@ -49476,10 +49476,14 @@ canary once. An unreachable authority, invalid signature or divergent serial
 stops the rollout (Q-OPS-5). For the second NS, set `DNS_ROLLOUT_CHECK` to
 `monitor check-burn --status-url=<private ns1 block /status URL>`. The build
 supplies `--service=dnsedge-1 --expected-version=<WARP_VERSION>`. The
-command checks the ready g1 process and version before and after the DNS
-queries. It then prints the version-matched readiness receipt the build
-requires. Use the direct status port through ns1's private management route or
-tunnel. A missing route, stale version or absent receipt stops the second NS.
+command asks for the SOA serial on every configured nameserver address over TCP
+and UDP before and after the canary. Each ns1 exchange uses a fresh random child
+of `canary.<root>`. Its signed denial carries the SOA. On the private management
+route or tunnel, the ready g1 status response at the requested version must
+confirm the same serial and exact signed denial from its process-local cache.
+After the canary, it must also confirm the signed, fresh canary TXT received
+over each public ns1 socket. A partial cutover, a previous monitor without
+this receipt, or any missing proof stops the second NS.
 
 ### 30.1 Sidecar SLO budget burn
 
