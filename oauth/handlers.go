@@ -239,6 +239,20 @@ func UserinfoHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const signInRequiredDescription = "Sign in to approve an application."
+
+// The consent screen and the approval answer only a person signed in to the
+// account, with the network token a sign-in holds. An API key authenticates as
+// the network too, but it is a credential for programs, and an application it
+// approved would keep its grant after the key is removed. A client token is
+// refused at the router as well (api/route_authz.go).
+func signedInUser(clientSession *session.ClientSession) bool {
+	return !clientSession.ApiKeyAuthenticated &&
+		!clientSession.UnsignedIdentity &&
+		clientSession.ByJwt != nil &&
+		clientSession.ByJwt.ClientId == nil
+}
+
 // What the consent page needs to render: who is asking, and for what.
 type ConsentRequest struct {
 	ClientId            string `json:"client_id"`
@@ -283,6 +297,10 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := clientSession.Auth(r); err != nil {
 		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
+		return
+	}
+	if !signedInUser(clientSession) {
+		writeOauthError(w, http.StatusForbidden, "access_denied", signInRequiredDescription)
 		return
 	}
 
@@ -339,6 +357,10 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := clientSession.Auth(r); err != nil {
 		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
+		return
+	}
+	if !signedInUser(clientSession) {
+		writeOauthError(w, http.StatusForbidden, "access_denied", signInRequiredDescription)
 		return
 	}
 
