@@ -60,7 +60,9 @@ type exchangeScopesWorld struct {
 	world          *sidecartest.ConfigLogSuiteWorld
 	sequencer      *model.ConfigLogSequencer
 	cache          *sidecar.AclGateCache
+	faults         *sidecartest.FaultQueue
 	loadPins       chan *bridge.AuthPin
+	loadFailures   chan error
 	tip            *bridge.AuthPin
 }
 
@@ -94,14 +96,21 @@ func newExchangeScopesWorldFor(t testing.TB, networkId server.Id, ownerMemberId 
 		ownerSidecarId: ownerSidecarId,
 		world:          world,
 		sequencer:      sequencer,
+		faults:         blobs.Faults(),
 		loadPins:       make(chan *bridge.AuthPin, 64),
+		loadFailures:   make(chan error, 64),
 	}
 	gateSettings := sidecar.DefaultAclGateSettings()
 	gateSettings.PollInterval = 0
 	gateSettings.FailureBackoff = 0
 	gateSettings.Log = sidecar.NewNoopLogger()
 	gateSettings.OnLoad = func(loadedNetworkId sidecar.Id, pin *bridge.AuthPin, err error) {
-		if loadedNetworkId == sidecar.Id(networkId) && err == nil && pin != nil {
+		if loadedNetworkId != sidecar.Id(networkId) {
+			return
+		}
+		if err != nil {
+			self.loadFailures <- err
+		} else if pin != nil {
 			self.loadPins <- pin
 		}
 	}
@@ -407,16 +416,27 @@ func TestExchangeScopesProjVersionIsTheStateRead(t *testing.T) {
 	connect.AssertEqual(t, grant.ProjVersion, snapshot.Pin.GetVersion()+1)
 }
 
-// A cold gate refuses rather than guesses: a network the gate never heard of is
-// refused and told to the gate, which loads it, and then it is answered; one
-// that is tracked and not loaded is refused.
+// An exchange retries a failed first read on demand without waiting for a projection change.
 func TestExchangeScopesColdGateRefuses(t *testing.T) {
 	self := newExchangeScopesWorld(t)
 	source := self.source()
 	request := self.request(&self.ownerSidecarId, self.ownerMemberId, "dns")
 
-	_, err := source.Grant(self.ctx, request)
+	_, err := self.faults.Add(&sidecartest.FaultPlan{
+		Op: sidecartest.FaultOpGet, KeyPrefix: sidecar.ConfigEntryKey(sidecar.Id(self.networkId), 0), Result: sidecartest.FailBeforeApply,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = source.Grant(self.ctx, request)
 	requireExchangeRefused(t, "an unknown network", err, ErrExchangeUnavailable)
+	select {
+	case <-self.loadFailures:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the first load did not report the interrupted read")
+	}
+	_, err = source.Grant(self.ctx, request)
+	requireExchangeRefused(t, "the retry before verification", err, ErrExchangeUnavailable)
 	select {
 	case pin := <-self.loadPins:
 		connect.AssertEqual(t, pin.GetVersion(), self.tip.GetVersion())
@@ -430,7 +450,7 @@ func TestExchangeScopesColdGateRefuses(t *testing.T) {
 	notLoaded := &testExchangeGate{status: sidecar.AclGateNotLoaded}
 	_, err = NewProjectionExchangeScopeSource(notLoaded, nil).Grant(self.ctx, request)
 	requireExchangeRefused(t, "a network not loaded", err, ErrExchangeUnavailable)
-	connect.AssertEqual(t, len(notLoaded.changed), 0)
+	connect.AssertEqual(t, notLoaded.changed, []sidecar.Id{sidecar.Id(self.networkId)})
 	unknown := &testExchangeGate{status: sidecar.AclGateUnknown}
 	_, err = NewProjectionExchangeScopeSource(unknown, nil).Grant(self.ctx, request)
 	requireExchangeRefused(t, "an unknown network", err, ErrExchangeUnavailable)
