@@ -100,3 +100,86 @@ func testingStalledDialAuthOptions(nodes int, dial redisDialFunc) *redis.Cluster
 		DisableRoutingPolicies: true,
 	}
 }
+
+// Testing_DelayAuthRedisCommands holds every command and pipeline of the
+// authentication pool for delay before it is sent, or until its context ends:
+// a Redis that answers, but later than a check budget, as the proxy
+// processes' in-process calls did on 2026-11-21 (5-15% of them past 250ms,
+// before any connection was used). It reopens the pool with the hold; the
+// returned function closes that pool, so the next call opens one without.
+// Tests only, against the local test Redis.
+func Testing_DelayAuthRedisCommands(delay time.Duration) (pop func()) {
+	safeAuthClient.reset()
+	client := safeAuthClient.open()
+	client.AddHook(testingAuthRedisDelay{delay: delay})
+	return func() {
+		if safeAuthClient.current() == client {
+			safeAuthClient.reset()
+		}
+	}
+}
+
+// Holds each command and pipeline for delay before it goes on, or ends it
+// with its context's error, unsent, when the context ends first.
+type testingAuthRedisDelay struct {
+	delay time.Duration
+}
+
+// The connection handshake passes unheld: go-redis sends a new connection's
+// HELLO, AUTH, SELECT, READONLY and CLIENT commands through the client's
+// hooks too, and the stand-in holds what a caller sends, not each new
+// connection's setup.
+func testingAuthRedisHandshake(cmd redis.Cmder) bool {
+	switch cmd.Name() {
+	case "hello", "auth", "select", "readonly", "client":
+		return true
+	}
+	return false
+}
+
+func (self testingAuthRedisDelay) hold(ctx context.Context) error {
+	timer := time.NewTimer(self.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (self testingAuthRedisDelay) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (self testingAuthRedisDelay) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if testingAuthRedisHandshake(cmd) {
+			return next(ctx, cmd)
+		}
+		if err := self.hold(ctx); err != nil {
+			cmd.SetErr(err)
+			return err
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (self testingAuthRedisDelay) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		handshake := true
+		for _, cmd := range cmds {
+			handshake = handshake && testingAuthRedisHandshake(cmd)
+		}
+		if handshake {
+			return next(ctx, cmds)
+		}
+		if err := self.hold(ctx); err != nil {
+			for _, cmd := range cmds {
+				cmd.SetErr(err)
+			}
+			return err
+		}
+		return next(ctx, cmds)
+	}
+}
