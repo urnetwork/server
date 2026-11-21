@@ -517,7 +517,7 @@ func StripeWebhook(
 
 		/**
 		 * the payment sheet's card is attached: finalize the regional price
-		 * tier from the card's billing country before the trial ends and
+		 * tier with the card's billing country before the trial ends and
 		 * credit the held trial invoice (onboarding_stripe_controller.go)
 		 */
 
@@ -2266,10 +2266,10 @@ const (
 
 type StripeCreateCheckoutSessionArgs struct {
 	ItemId string `json:"item_id"`
-	// the store's storefront country, when the caller knows it; resolves the
-	// regional price tier for the Pro items (else the Stripe billing country,
-	// else the client ip as an estimate; the charged tier is finalized from the
-	// card's billing country once it is attached)
+	// a store's storefront country. Stripe is not a store, so the Pro items'
+	// price tier is never taken from it: the tier is the one the server's
+	// country signals agree on (price_tier_signals.go), and the card's billing
+	// country joins them once it is attached
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 	// "hosted" (default) or "embedded". Defaults to hosted so existing callers, which
 	// only ever read checkout_url, keep working unchanged.

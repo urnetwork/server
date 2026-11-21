@@ -291,7 +291,8 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 			gammaPerTao = view.terms.GammaPerTao
 		}
 	}
-	tier := ResolvePriceTier(clientSession, "")
+	// the tier an intent made now is priced at
+	tier := ResolvePurchasePriceTier(clientSession, "")
 	result.PriceTier = tier.Tier.Name
 	largest := int64(0)
 	for _, plan := range []string{model.SolanaPlanMonthly, model.SolanaPlanYearly} {
@@ -352,7 +353,10 @@ type CreateGammaPaymentIntentArgs struct {
 	// code: a data pack as a balance code
 	Delivery string `json:"delivery,omitempty"`
 	// delivery code: where the code is also emailed
-	Email             string `json:"email,omitempty"`
+	Email string `json:"email,omitempty"`
+	// a store's storefront country. No store sells this, so the price tier is
+	// never taken from it (price_tier_signals.go); a plan's intent keeps it
+	// in its tier's evidence
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 	// the SS58 coldkey that will mint: picks a hotkey whose deposit that
 	// coldkey can open or already owns
@@ -515,8 +519,9 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 
 	var priceUsd, regularUsd float64
 	tierName := ""
+	priceTierEvidence := ""
 	if plan != "" {
-		tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
+		tier := ResolvePurchasePriceTier(clientSession, args.StorefrontCountry)
 		var ok bool
 		priceUsd, ok = solanaPlanPriceUsdForTier(plan, tier.Tier)
 		if !ok || priceUsd <= 0 {
@@ -527,6 +532,7 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 			regularUsd = tier.Tier.YearlyUsd
 		}
 		tierName = tier.Tier.Name
+		priceTierEvidence = tier.Evidence.rowJson()
 	} else {
 		var ok bool
 		priceUsd, ok = dataPackPriceUsd(itemId, model.DataRailGamma)
@@ -541,14 +547,15 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	}
 
 	start, refusal := gammaStartPurchase(clientSession, view, &gammaPurchase{
-		item:         item,
-		delivery:     delivery,
-		tier:         tierName,
-		offerApplied: offerApplied,
-		priceUsd:     priceUsd,
-		regularUsd:   regularUsd,
-		email:        email,
-		coldkey:      coldkey,
+		item:              item,
+		delivery:          delivery,
+		tier:              tierName,
+		offerApplied:      offerApplied,
+		priceTierEvidence: priceTierEvidence,
+		priceUsd:          priceUsd,
+		regularUsd:        regularUsd,
+		email:             email,
+		coldkey:           coldkey,
 	})
 	if refusal != nil {
 		return refusal, nil
@@ -591,8 +598,11 @@ type gammaPurchase struct {
 	// when neither priced it (a data pack, a gift order)
 	tier         string
 	offerApplied bool
-	priceUsd     float64
-	regularUsd   float64
+	// what decided the tier, json (PriceTierEvidence); "" when no tier
+	// priced it
+	priceTierEvidence string
+	priceUsd          float64
+	regularUsd        float64
 	// delivery code: where the code is also emailed; "" for none
 	email string
 	// the SS58 coldkey that will mint (gammaColdkeyArg); "" for none
@@ -728,6 +738,7 @@ func (self *gammaPurchaseStart) issue(
 		OfferApplied:             purchase.offerApplied,
 		PriceUsdNanoCents:        model.UsdToNanoCents(purchase.priceUsd),
 		RegularPriceUsdNanoCents: model.UsdToNanoCents(purchase.regularUsd),
+		PriceTierEvidenceJson:    purchase.priceTierEvidence,
 		Email:                    purchase.email,
 		CreateTime:               self.now,
 		ExpiresAt:                self.now.Add(ttl),
