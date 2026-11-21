@@ -41,6 +41,8 @@ import (
 //	           time api's clock, read once for the verdict and the entry
 //	412        another api instance won the position: read its entry, apply it
 //	           and verify again at the new tip
+//	catch-up   a refused statement naming a later pin can meet the same entry
+//	           before its PUT. Verify the store's next entry and retry.
 //	unknown    a timeout or lost response: GET the position; the same bytes are
 //	           success, another entry a loss (apply it and go on at the next
 //	           position), 404 repeats the PUT with the same bytes
@@ -583,6 +585,56 @@ type configLogAppend struct {
 	after  func(ctx context.Context) error
 }
 
+// A refused statement's claimed pin can prompt a store read. Only a committed
+// entry applied by the normal verifier advances the tip, one per append attempt.
+func (self *ConfigLogSequencer) followStatementPinWithLock(ctx context.Context, network *configLogNetwork, signedBytes []byte) (bool, error) {
+	signed := &bridge.Signed{}
+	if err := proto.Unmarshal(signedBytes, signed); err != nil {
+		return false, nil
+	}
+	signedType := bridge.SignedType(signed.GetType())
+	purpose, ok := sidecar.ConfigStatementPurpose(signedType)
+	if !ok {
+		return false, nil
+	}
+	body, err := sidecar.ParseConfigStatement(purpose, signedType, signed.GetBody())
+	statement, ok := body.(interface {
+		GetHeader() *bridge.StatementHeader
+	})
+	if err != nil || !ok {
+		return false, nil
+	}
+	header := statement.GetHeader()
+	networkId := sidecar.Id(network.networkId)
+	tip := network.log.Pin().GetVersion()
+	if !bytes.Equal(header.GetNetworkId(), networkId.Bytes()) || header.GetAt().GetVersion() <= tip {
+		return false, nil
+	}
+
+	positions, _, err := self.listPositions(ctx, network.networkId, tip, 1)
+	if err != nil || len(positions) == 0 {
+		return false, err
+	}
+	next := tip + 1
+	if positions[0] != next {
+		return false, fmt.Errorf("entry %d missing before stored entry %d", next, positions[0])
+	}
+	entry, found, err := configLogGet(ctx, self.cluster, sidecar.ConfigEntryKey(networkId, next))
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, fmt.Errorf("entry %d listed and gone", next)
+	}
+	if err := network.applyWithLock(ctx, self, entry); err != nil {
+		return false, err
+	}
+	if network.log.Pin().GetVersion() != next {
+		return false, fmt.Errorf("stored entry %d did not advance the verifier", next)
+	}
+	return true, nil
+}
+
 // §7.9's sequencing steps for one entry.
 func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id, request *configLogAppend) (pin *bridge.AuthPin, returnErr error) {
 	kindLabel := fmt.Sprintf("%d", request.kind)
@@ -650,6 +702,16 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 		timeMs := self.now().UnixMilli()
 		found, err := request.verify(network, timeMs)
 		if err != nil {
+			if request.kind == bridge.AuthEntryKindStatement && (errors.Is(err, sidecar.ErrConfigReplay) || errors.Is(err, sidecar.ErrConfigSigner)) {
+				tip := network.log.Pin()
+				progressed, readErr := self.followStatementPinWithLock(ctx, network, request.body)
+				if readErr != nil {
+					return nil, unavailable(tip, readErr)
+				}
+				if progressed {
+					continue
+				}
+			}
 			// a cap's refusal answers as the QuotaRefusal itself (§20.7)
 			quotaRefusal := &QuotaRefusalError{}
 			if errors.As(err, &quotaRefusal) {

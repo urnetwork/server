@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -79,6 +80,40 @@ func testConfigLogFakeCluster(t *testing.T) sidecar.BlobCluster {
 // the fake api has it.
 func TestConfigLogSequencerPassesTheStoreSuite(t *testing.T) {
 	sidecartest.RunConfigLogStoreSuite(t, testConfigLogFakeCluster(t), testConfigLogSuiteFactory(nil))
+}
+
+// An owner can sign at one instance's committed pin and submit to an instance that last saw the bootstrap.
+func TestConfigLogAppendsAtAnotherSequencersCommittedPin(t *testing.T) {
+	cluster := testConfigLogFakeCluster(t)
+	world := sidecartest.NewConfigLogSuiteWorld(t.Context(), cluster)
+	newSequencer := testConfigLogSuiteFactory(nil)
+	first := newSequencer(world.Clock(), cluster)
+	second := newSequencer(world.Clock(), cluster)
+	if err := world.Start(first); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := world.PostMemberAdmit(second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	signed := world.MemberAdmit()
+	pin, err := first.AppendStatement(t.Context(), world.NetworkId(), signed)
+	if err != nil || pin.GetVersion() != 4 {
+		t.Fatalf("append after both entries committed by the other sequencer: %v, %v", pin, err)
+	}
+	world.SetTip(pin)
+	delayed := world.MemberAdmit()
+	world.Clock().Advance(2 * time.Hour)
+	_, err = second.AppendStatement(t.Context(), world.NetworkId(), delayed)
+	refusal := &sidecartest.ConfigLogRefusal{}
+	if !errors.As(err, &refusal) || refusal.Status != http.StatusForbidden || !errors.Is(err, sidecar.ErrConfigReplay) || !proto.Equal(refusal.Tip, pin) {
+		t.Fatalf("an admission delivered after expiry should be refused at the committed pin: %v", err)
+	}
+	again, err := second.AppendStatement(t.Context(), world.NetworkId(), signed)
+	if err != nil || !proto.Equal(again, pin) {
+		t.Fatalf("repeating the signed statement returned %v, %v, want %v", again, err, pin)
+	}
 }
 
 // Each append advances network_acl_head to its pin, and a head that cannot advance leaves the append
