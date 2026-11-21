@@ -5,7 +5,7 @@ package handlers
 // other end. Both routes sit under server.InternalGatePathPrefix and take only a gate host's bearer, verified by its
 // hash in constant time (server.InternalGateVerifier, QD-027), answering every other request 403 before a read:
 //
-//	GET /internal/gate/projection/{network_id}?after=<n>  connect sockets tlsedge mxedge  ConfigLogSequencer.Read
+//	GET /internal/gate/projection/{network_id}?after=<n>  connect dns sockets tlsedge mxedge  ConfigLogSequencer.Read
 //	    GET /network/config/projection's body (controller.NetworkConfigProjectionResult): the entries after n, a
 //	    page at most and from the retention point when n is before it, the rows of each base among them and, from
 //	    0, the Signed Genesis, every message verbatim in base64
@@ -49,6 +49,7 @@ const (
 // The classes both routes take: the gate services that read projections through api (C-09, QD-055).
 var internalGateProjectionCallers = []server.InternalGateCaller{
 	server.InternalGateCallerConnect,
+	server.InternalGateCallerDns,
 	server.InternalGateCallerSockets,
 	server.InternalGateCallerTlsedge,
 	server.InternalGateCallerMxedge,

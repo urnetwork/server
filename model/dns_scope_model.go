@@ -53,6 +53,38 @@ type DnsScopeLabelSource func(ctx context.Context, networkId server.Id) (labels 
 
 var dnsScopeLabelSource atomic.Pointer[DnsScopeLabelSource]
 
+// Both the administrative API and the standalone DNS block resolve scopes from verified rows.
+// The first request for a network queues its load and cannot spend an unknown scope's authority.
+func dnsVerifiedScopeConfig(cache *sidecar.AclGateCache, networkId sidecar.Id) *sidecar.ConfigState {
+	if cache == nil {
+		return nil
+	}
+	snapshot, status := cache.State(networkId)
+	if status != sidecar.AclGateLoaded {
+		cache.Changed(networkId)
+		return nil
+	}
+	return snapshot.Config
+}
+
+func DnsScopeLabelSourceOf(cache *sidecar.AclGateCache) DnsScopeLabelSource {
+	return func(ctx context.Context, networkId server.Id) ([]string, bool) {
+		if state := dnsVerifiedScopeConfig(cache, sidecar.Id(networkId)); state != nil {
+			return state.TeamScopeLabels(), true
+		}
+		return nil, false
+	}
+}
+
+func DnsKeyRecordScopeOf(cache *sidecar.AclGateCache) dnsservice.DnsKeyRecordScopeOf {
+	return func(networkId sidecar.Id, label string) (sidecar.AclScope, bool) {
+		if state := dnsVerifiedScopeConfig(cache, networkId); state != nil {
+			return state.TeamScope(label)
+		}
+		return sidecar.AclScope{}, false
+	}
+}
+
 // Installs where this process reads scope labels. nil removes it. Answers what puts the previous one back.
 func SetDnsScopeLabelSource(source DnsScopeLabelSource) (restore func()) {
 	var previous *DnsScopeLabelSource

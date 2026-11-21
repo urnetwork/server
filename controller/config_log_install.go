@@ -131,7 +131,8 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 		return nil, err
 	}
 	model.SetConfigLogSequencer(NewHostedConfigLogSequencer(host, first, model.NewApiConfigLogSettings()))
-	model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
+	restoreApprovals := model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
+	restoreDnsScopes := model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache))
 	apiAclCache.Store(cache)
 	closeContracts := installContractGateWhenEnabled(ctx, cache)
 	restoreScopes := oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(cache, &oauth.ExchangeScopeSettings{Clock: host.Clock}))
@@ -139,7 +140,8 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 		restoreScopes()
 		closeContracts()
 		apiAclCache.CompareAndSwap(cache, nil)
-		model.SetApprovalGateStates(nil)
+		restoreDnsScopes()
+		restoreApprovals()
 		model.SetConfigLogSequencer(nil)
 		closeGate()
 	}, nil

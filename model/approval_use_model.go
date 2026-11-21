@@ -160,12 +160,14 @@ var approvalGateStates atomic.Pointer[ApprovalGateStates]
 
 // Installs where this process's gates read each network's verified state; nil
 // removes it, and every gate and cancel answers unavailable.
-func SetApprovalGateStates(states ApprovalGateStates) {
+func SetApprovalGateStates(states ApprovalGateStates) (restore func()) {
+	var previous *ApprovalGateStates
 	if states == nil {
-		approvalGateStates.Store(nil)
-		return
+		previous = approvalGateStates.Swap(nil)
+	} else {
+		previous = approvalGateStates.Swap(&states)
 	}
-	approvalGateStates.Store(&states)
+	return func() { approvalGateStates.Store(previous) }
 }
 
 // A gate's states from ACL-M2-13's gate cache: the newest verified rows-only
@@ -176,6 +178,7 @@ func ApprovalGateStatesOf(cache *sidecar.AclGateCache) ApprovalGateStates {
 	return func(ctx context.Context, networkId server.Id) (sidecar.SpendState, error) {
 		snapshot, status := cache.State(sidecar.Id(networkId))
 		if status != sidecar.AclGateLoaded || snapshot == nil {
+			cache.Changed(sidecar.Id(networkId))
 			return nil, errors.New("the network's verified state is not loaded")
 		}
 		return sidecar.NewConfigSpendState(snapshot.Config, false)

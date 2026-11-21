@@ -73,6 +73,7 @@ const (
 	InternalGateCallerEvs     InternalGateCaller = "evs"
 	InternalGateCallerGkm     InternalGateCaller = "gkm"
 	InternalGateCallerSockets InternalGateCaller = "sockets"
+	InternalGateCallerDns     InternalGateCaller = "dns"
 	InternalGateCallerTlsedge InternalGateCaller = "tlsedge"
 	InternalGateCallerMxedge  InternalGateCaller = "mxedge"
 	// smtpedge's quota surface and its gate's reads (SMTP-M9-20)
@@ -97,6 +98,7 @@ func InternalGateCallers() []InternalGateCaller {
 		InternalGateCallerEvs,
 		InternalGateCallerGkm,
 		InternalGateCallerSockets,
+		InternalGateCallerDns,
 		InternalGateCallerTlsedge,
 		InternalGateCallerMxedge,
 		InternalGateCallerSmtpedge,
