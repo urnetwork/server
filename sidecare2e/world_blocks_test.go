@@ -498,7 +498,8 @@ func (self *World) dnsSettings() (*dnsservice.DnsSettings, error) {
 }
 
 // The dns API's run on the world's Postgres and Redis, releasing the credentials' key window, with the edge's bearer
-// digests, no lb inventory, and the log through api's internal gate on its own bearer (HostDeps.Projection).
+// digests, the world's one lb interface as its inventory (world_lb_test.go), and the log through api's internal gate on
+// its own bearer (HostDeps.Projection).
 func (self *World) dnsApiRun() (func(ctx context.Context, listeners *worldBlockListeners) error, error) {
 	dnsSettings, err := self.dnsSettings()
 	if err != nil {
@@ -528,7 +529,7 @@ func (self *World) dnsApiRun() (func(ctx context.Context, listeners *worldBlockL
 				return window
 			},
 			Auth:           self.credentials.dnsAuth,
-			Interfaces:     []dnsservice.DnsLbInterface{},
+			Interfaces:     self.lbInterfaces(),
 			SoaReader:      &worldSoaReader{world: self},
 			Projection:     projection,
 			ServiceTokens:  self.t3.ServiceTokens(),
@@ -557,8 +558,9 @@ func (self *worldSoaReader) ReadSoa(ctx context.Context, root string, ns string)
 }
 
 // The dns edge's run, feeding from the dns API at its origin through the world's lb, as an edge reaches
-// dns.bringyour.com, with its ZSK and bearer, its probes refused, and DNS on TCP and UDP on listeners of its own; its
-// local snapshot in a directory every run of the world's shares, which a restart serves from.
+// dns.bringyour.com, with its ZSK and bearer, its probes through the world's lb interface to its tlsedge and mxedge
+// (world_lb_test.go), and DNS on TCP and UDP on listeners of its own; its local snapshot in a directory every run of
+// the world's shares, which a restart serves from.
 func (self *World) dnsEdgeRun() (func(ctx context.Context, listeners *worldBlockListeners) error, error) {
 	dnsSettings, err := self.dnsSettings()
 	if err != nil {
@@ -597,7 +599,7 @@ func (self *World) dnsEdgeRun() (func(ctx context.Context, listeners *worldBlock
 			Zsk:            self.credentials.dnsZsk,
 			Feed:           feed,
 			RouteProbes:    routeProbes,
-			ProbeDialer:    e2eNoLbDialer{},
+			ProbeDialer:    &worldLbProbeDialer{world: self},
 			StatusListener: listeners.status,
 			DnsListener:    listeners.direct[worldDnsPort],
 			DnsPacketConn:  listeners.udp,

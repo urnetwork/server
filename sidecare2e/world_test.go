@@ -41,25 +41,42 @@
 //
 // What stays a fake, each because the test stack cannot give the real part, named where it is built:
 //
-//   - the clock check (evs): chronyd on warp's services network, which no test host runs; sidecartest's FakeClockCheck
-//     answers an offset of zero;
-//   - smtpedge's MX world (resolver, PTR, dialer, proof verifier): sidecartest's MxWorld and FakeSmtpProofVerifier,
-//     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
-//     answer nothing for the same reason;
-//   - the dns edge's lb probes: refused, since no lb interface answers in the test stack;
-//   - gkm's hint writer's sidecar_id resolver: plan-KEYS-hint-addressing has api answer it on an internal route, POST
-//     /sidecar/identity/clients, which is not built, so production's block loses every hint by sidecar id; the world's
-//     block resolves them from sidecar_identity_binding instead (worldPushClientResolver, WorldSettings.GkmHintResolver),
-//     so a late delivery's wrap-pending and pending hints reach the sidecars they name;
+//   - the clock check (evs): chronyd on warp's services network, which no test host runs and nothing may be fetched to
+//     run; sidecartest's FakeClockCheck answers an offset of zero;
+//   - smtpedge's MX world, its resolver, PTR and dialer: sidecartest's MxWorld. Its resolver validates DNSSEC down from
+//     the release's IANA root anchors (sidecar.NewSmtpMxDnsResolver), and the world's DNS is authoritative only under
+//     its own root, so no chain from the root reaches a network's MX; and its dialer reaches public MXs from a sending
+//     address's SO_MARK. A mail scenario points MxWorld's MX at the world's lb interface instead (World.DialLb reaches
+//     mxedge's router on 25 behind the lb's PROXY header);
+//   - smtpedge's proof verifier: sidecartest's FakeSmtpProofVerifier. smtpproof's Groth16 keys come from a production
+//     setup that has not run (smtpproof's SPEC.md section 12), so its real verifier holds no key set and refuses every
+//     part, as its prover does;
+//   - mxedge's router's PTR and host lookups: they answer nothing, since the test stack serves no in-addr.arpa zone and
+//     resolves no public name;
+//   - §13.8's certs worker and its ACME CA: a device's issued certificate row is written as the worker writes it
+//     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
+//     is shown the device's self-signed leaf on that key;
+//   - gkm's hint writer's sidecar_id resolver: plan-KEYS-hint-addressing has api answer it on an internal route, which
+//     keys-late-delivery builds (QD-1171); until it lands production's block loses every hint by sidecar id, so the
+//     world's block resolves them from sidecar_identity_binding instead (worldPushClientResolver,
+//     WorldSettings.GkmHintResolver), so a late delivery's wrap-pending and pending hints reach the sidecars they name;
 //   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
 //     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
 //     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
 //     config repo's key through the resolver above, but a repo's creation is refused by gkm's cached 404 of its
-//     placement, so the world runs FakeGkm by default (world_keys_test.go has the evidence).
+//     placement, so the world runs FakeGkm by default until keys-late-delivery and gkm-repo-create-race land
+//     (world_keys_test.go has the evidence, and TestE2eWorldSmokeRealKeys runs the smoke's gkm step on real keys).
+//
+// The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
+// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and api's sequencer and
+// rev/ store spend on api's own write budget. A device's §16.6 approval gate is the stock one (World.InstallApprovalGate);
+// where it refuses a listen as an action with no effect, a product finding the smoke reports, the step carries on
+// through worldListenGate, which passes a listen alone.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
-// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), evs.yml, mcp's seal secret and McpResource, and the
-// T3Api's internal gate handler. mcp's /status latch is router's global one, so the world runs one mcp.
+// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), pro.yml's pro: limits, api's dns.yml root, evs.yml,
+// mcp's seal secret and McpResource, and the T3Api's internal gate handler. mcp's /status latch is router's global
+// one, so the world runs one mcp.
 
 package sidecare2e
 
@@ -74,6 +91,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -168,6 +186,56 @@ type WorldSettings struct {
 	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
 	// one, since the hints reach every sidecar.
 	KeyResyncInterval time.Duration
+	// pro.yml's pro: sidecar: block for the world's life, beside the T3World's tier (§20.4's Community column), so a
+	// network a scenario makes Pro runs under Pro's numbers: §20.4's Pro column. nil leaves the process's, where every
+	// Pro limit reads zero. sidecar_abuse:'s keys are every tier's and the T3World's.
+	ProSidecarLimits map[string]int64
+	// The world's one lb interface (world_lb_test.go): its inventory name and its address, a documentation address, and
+	// the source the dns edge's probes come from as the lb's PROXY header names it.
+	LbName        string
+	LbAddress     netip.Addr
+	LbProbeSource netip.AddrPort
+}
+
+// §20.4's Pro column, pro.yml's pro: sidecar: keys: what a network a scenario makes Pro runs under.
+func DefaultWorldProSidecarLimits() map[string]int64 {
+	kib := int64(1024)
+	mib := 1024 * kib
+	gib := 1024 * mib
+	return map[string]int64{
+		"storage":                     20 * gib,
+		"sidecar_clients":             200,
+		"top_level_client_limit":      100,
+		"dns_entries":                 200,
+		"tls_endpoints":               20,
+		"config_admissions":           500,
+		"config_statements_per_min":   60,
+		"config_statements_burst":     600,
+		"config_statements_per_day":   2000,
+		"config_bases_per_min":        1,
+		"config_bases_per_day":        200,
+		"store_weight":                4,
+		"evs_drops_per_day":           100,
+		"acl_rules":                   500,
+		"acl_groups":                  1,
+		"acl_requests":                1,
+		"acl_approvers_two":           0,
+		"acl_network_shares":          1,
+		"smtp_connections_per_day":    200,
+		"smtp_bytes_per_day":          gib,
+		"smtp_recipients_per_message": 50,
+		"smtp_recipients_per_day":     1000,
+		"smtp_message_bytes":          25 * mib,
+		"smtp_burst":                  50,
+		"smtp_burst_window":           int64(10 * time.Minute / time.Millisecond),
+		"smtp_concurrent_connections": 4,
+		"mail_inbound_message_bytes":  50 * mib,
+		"mail_burners_active":         500,
+		"mail_burner_creates_per_day": 50,
+		"tls_endpoint_concurrent":     2048,
+		"tls_endpoint_new_per_s":      200,
+		"tls_endpoint_mbit_per_s":     200,
+	}
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -189,6 +257,10 @@ func DefaultWorldSettings() *WorldSettings {
 		Push:                        true,
 		GkmHintResolver:             true,
 		KeyResyncInterval:           0,
+		ProSidecarLimits:            DefaultWorldProSidecarLimits(),
+		LbName:                      "e2e-lb-1",
+		LbAddress:                   netip.MustParseAddr("192.0.2.80"),
+		LbProbeSource:               netip.MustParseAddrPort("203.0.113.53:40053"),
 	}
 }
 
@@ -321,6 +393,11 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 	self.closes = append(self.closes, server.Config.PushSimpleResource(evshost.BlockConfigFileName, []byte(fmt.Sprintf("# the e2e world's evs\ninstance_format: %d\n", settings.EvsInstanceFormat))))
 	// urnetwork-edge's row, which api's edge client route mints the edges' clients in
 	worldCreateEdgeNetwork(t.Context(), self.urnetworkEdge)
+	if settings.ProSidecarLimits != nil {
+		self.closes = append(self.closes, worldInstallProLimits(settings.ProSidecarLimits))
+	}
+	// api's root the dns API's, as one dns.yml gives both
+	self.closes = append(self.closes, worldSetDnsUserRoot(hostsSettings.DnsRoot))
 
 	if err := self.installInternalGate(); err != nil {
 		t.Fatalf("api's internal gate: %v", err)
