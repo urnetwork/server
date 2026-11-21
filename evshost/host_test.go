@@ -769,8 +769,11 @@ func TestRunHostServesStatusOnThePrivateStores(t *testing.T) {
 // them, which is none of the document's: api serves no evs route.
 func evsSpecOperations(t testing.TB) map[string]bool {
 	t.Helper()
-	// go test runs in the package's directory, and connect sits beside server
-	data, err := os.ReadFile(filepath.Join("..", "..", "connect", "api", "bringyour.yml"))
+	path := os.Getenv("URNETWORK_CONNECT_OPENAPI_SPEC")
+	if path == "" {
+		path = filepath.Join("..", "..", "connect", "api", "bringyour.yml")
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
