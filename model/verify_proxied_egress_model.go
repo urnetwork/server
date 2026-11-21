@@ -25,11 +25,11 @@ package model
 // changes nothing.
 //
 // A probe writes the same mark without a declaration (owner decision
-// 2026-11-20, provider_egress_exit_model.go): a provider whose probed exit
-// differs from every network its connections came from, in network and in
-// autonomous system, connects from somewhere its users' traffic does not
-// leave from, as a slot on a build that sends that traffic out of its host
-// rather than its proxy does, and it counts at no unit in the same way.
+// 2026-11-20, provider_egress_exit_model.go): a provider whose probed exit is
+// in none of the networks its connections came from connects from somewhere
+// its users' traffic does not leave from, as a slot on a build that sends that
+// traffic out of its host rather than its proxy does, and it counts at no unit
+// in the same way.
 
 import (
 	"context"
