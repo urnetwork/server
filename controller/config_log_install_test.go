@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"errors"
 	"testing"
 	"time"
 
@@ -119,6 +120,20 @@ func TestIssuerPublishesNormalAndRetriedRevocation(t *testing.T) {
 		}
 		if read(queued) == nil || read(direct) == nil {
 			t.Fatal("the issuer did not publish the queued revocation and preserve the direct one")
+		}
+		checkSettings := sidecar.DefaultRevocationSettings()
+		checkSettings.Clock = clock
+		checker := sidecar.NewRevocationChecker(host.Blobs, verifier.VerifyRevocation, checkSettings)
+		for _, revocation := range []*model.SidecarRevocation{direct, queued} {
+			for _, audience := range []string{"evs", "gkm", "sockets"} {
+				issued := &sidecar.Principal{
+					NetworkId: [16]byte(revocation.NetworkId), ClientId: [16]byte(revocation.SubjectId),
+					Audience: audience, IssuedAt: revocation.NotBefore.Add(-time.Second),
+				}
+				if err := checker.Check(ctx, issued); !errors.Is(err, sidecar.ErrRevocationVoidsToken) {
+					t.Fatalf("%s accepted a token issued before removal: %v", audience, err)
+				}
+			}
 		}
 	})
 }
