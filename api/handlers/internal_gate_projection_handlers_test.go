@@ -113,7 +113,13 @@ func newInternalGateTestWorld(t *testing.T, memberAdmitCount int, pageCount int)
 		bearers:   map[server.InternalGateCaller]string{},
 	}
 	verifyFile := ""
-	for _, caller := range []server.InternalGateCaller{server.InternalGateCallerConnect, server.InternalGateCallerDns, server.InternalGateCallerSockets, server.InternalGateCallerEvs} {
+	for _, caller := range []server.InternalGateCaller{
+		server.InternalGateCallerConnect,
+		server.InternalGateCallerDns,
+		server.InternalGateCallerSockets,
+		server.InternalGateCallerSmtpedge,
+		server.InternalGateCallerEvs,
+	} {
 		bearer, digest := newInternalGateTestBearer(t)
 		self.bearers[caller] = bearer
 		verifyFile += string(caller) + ": {class: " + string(caller) + ", sha256: [" + digest + "]}\n"
@@ -194,6 +200,13 @@ func TestInternalGateProjectionServesAGateSource(t *testing.T) {
 	}
 	if _, err := world.source(server.InternalGateCallerSockets).Entries(world.ctx, networkId, nil); err != nil {
 		t.Errorf("sockets' bearer: %v", err)
+	}
+	smtp := world.source(server.InternalGateCallerSmtpedge)
+	if _, err := smtp.Entries(world.ctx, networkId, nil); err != nil {
+		t.Errorf("smtpedge projection: %v", err)
+	}
+	if _, err := smtp.Rows(world.ctx, networkId, rowsSha256[:]); err != nil {
+		t.Errorf("smtpedge rows: %v", err)
 	}
 	if _, err := world.source(server.InternalGateCallerEvs).Entries(world.ctx, networkId, nil); err == nil {
 		t.Error("evs's bearer read the log, which evs reads from the store itself")

@@ -19,7 +19,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 
@@ -222,7 +224,7 @@ func TestHostGateLoadsTheBreakerOnItsRefresh(t *testing.T) {
 	}
 }
 
-// mail_send has no source in this block yet, and a breaker whose source cannot read is not loaded: TRY_LATER.
+// Missing projection or breaker state holds the send for a later retry.
 func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -234,6 +236,50 @@ func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	}
 	if state, ok := gate.Breaker(); ok || state != nil {
 		t.Fatal("a breaker whose source cannot read answered")
+	}
+}
+
+// A cold projection holds a send. After the signed policy loads only the ticket's admitted sender can use it.
+func TestHostGateUsesTheVerifiedMailSendGrant(t *testing.T) {
+	net := sidecartest.NewNet(t.Context(), nil)
+	defer net.Close()
+	tier, err := net.AdmissionTier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tier.AclCompile = sidecartest.AclAdmissionCompile
+	admission := sidecartest.NewAdmissionNet(t, tier)
+	defer admission.Close()
+	admission.SaveAclPolicy([]byte(`{"grants":[{"src":["autogroup:member"],"dst":["mail:*"],"allow":["send"]}]}`), nil)
+	id := admission.NetworkId()
+	abuse := sidecartest.NewFakeAbuseGate()
+	abuse.Set(connect.Id(id), sidecar.AbuseStandingStandard, true)
+	settings := sidecar.DefaultAclGateSettings()
+	loaded := make(chan error, 1)
+	settings.OnLoad = func(_ sidecar.Id, _ *bridge.AuthPin, err error) { loaded <- err }
+	cache, closeCache, err := sidecarhost.WatchAclGate(t.Context(), net.Host(), nil, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeCache()
+	gate := &hostGate{mail: sidecar.NewAclGateView(cache, abuse, nil)}
+	now := admission.Clock().Now()
+	if got := gate.MaySendMail(id, admission.Owner().SidecarId, now); got.Allowed || got.Reason != sidecar.AclReasonNoState {
+		t.Fatalf("cold grant: %+v", got)
+	}
+	select {
+	case err := <-loaded:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	if got := gate.MaySendMail(id, admission.Owner().SidecarId, now); !got.Allowed {
+		t.Fatalf("admitted sender: %+v", got)
+	}
+	if got := gate.MaySendMail(id, sidecar.NewId(), now); got.Allowed {
+		t.Fatal("an unknown sidecar sent under another sidecar's grant")
 	}
 }
 
