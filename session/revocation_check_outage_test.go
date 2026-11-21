@@ -41,8 +41,10 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 	const networks = 64
 	// how long any one caller may take: a budget for each Redis step it makes
 	// (an api check and its last-used sample; a connect handshake's final
-	// check and its authority publication), plus scheduling
+	// check and its authority publication), plus scheduling. The hosted parent
+	// makes one record read, within the hosted path's budget.
 	bound := 2*RevocationCheckBudget + time.Second
+	bounds := map[string]time.Duration{"hosted parent": HostedRevocationCheckBudget + time.Second}
 
 	clients := make([]*ByJwt, networks)
 	children := make([]*ByJwt, networks)
@@ -136,8 +138,12 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 		t.Fatalf("%d of %d callers were refused during the outage, first: %s", len(failures), 4*networks, failures[0])
 	}
 	for name, elapsed := range slowest {
-		if bound < elapsed {
-			t.Errorf("the slowest %s took %s, want at most %s", name, elapsed, bound)
+		limit := bound
+		if hosted, ok := bounds[name]; ok {
+			limit = hosted
+		}
+		if limit < elapsed {
+			t.Errorf("the slowest %s took %s, want at most %s", name, elapsed, limit)
 		}
 	}
 

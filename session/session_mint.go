@@ -225,7 +225,7 @@ func publishRegisteredSessionInTx(ctx context.Context, tx server.PgTx, networkId
 	due := time.UnixMilli(registered.AcceptUntil).UTC()
 	// the Redis step within the mint budget (session_mint_untagged.go); the
 	// outbox write keeps the transaction's context
-	publishCtx, cancelPublish := context.WithTimeout(ctx, sessionMintRedisBudget)
+	publishCtx, cancelPublish := context.WithTimeout(ctx, SessionMintRedisBudgetFor(ctx))
 	publishErr := publishSessionIndexOnMint(publishCtx, networkId, due, server.NewId().String())
 	cancelPublish()
 	if publishErr != nil {
@@ -380,7 +380,14 @@ func SignInternalProbeInTx(ctx context.Context, tx server.PgTx, credential *ByJw
 // it is removed, or when its own session is revoked: the journal refuses the
 // revoked binding and the session's cleanup deactivates the client, so it can
 // never bootstrap another.
+//
+// Each Redis step of the mint waits hostedSessionMintRedisBudget, the hosted
+// path's check budget, not the mint budget: a stored binding Redis does not
+// register within it fails the device's open (session_mint_untagged.go), and
+// a bootstrap is signed untagged, while the proxy hosts' in-process Redis
+// calls overran the mint budget 5-15% of the time on 2026-11-21.
 func MintHostedSession(ctx context.Context, credential *ByJwt) (signed string, err error) {
+	ctx = withSessionMintRedisBudget(ctx, hostedSessionMintRedisBudget)
 	candidate := server.NewId()
 	created := server.CodecTime(server.NowUtc())
 	err = sessionTx(ctx, func(tx server.PgTx) error {
