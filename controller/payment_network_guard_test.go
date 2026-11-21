@@ -153,7 +153,9 @@ func TestX402GrantsRefuseDeletedNetwork(t *testing.T) {
 }
 
 // TestPlayCreditRefusesDeletedNetworkBeforeGrant proves the Google writer owns
-// the shared guard before either its renewal or transfer-balance write.
+// the shared guard before either its renewal or transfer-balance write. The
+// writer returns the refusal; the scheduled poll's entry,
+// PlaySubscriptionRenewal, ends on it (play_precharge_extension_test.go).
 func TestPlayCreditRefusesDeletedNetworkBeforeGrant(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -178,7 +180,7 @@ func TestPlayCreditRefusesDeletedNetworkBeforeGrant(t *testing.T) {
 			server.NowUtc().Add(-time.Hour),
 			server.NowUtc().Add(time.Hour),
 		)
-		result, err := PlaySubscriptionRenewal(
+		result, err := PlaySubscriptionRenewalInConn(nil,
 			&PlaySubscriptionRenewalArgs{
 				NetworkId:      networkId,
 				PackageName:    env.packageName,

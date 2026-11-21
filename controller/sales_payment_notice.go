@@ -665,7 +665,9 @@ const playShortestPaidPeriod = 27 * 24 * time.Hour
 // (a license tester's minutes, or a window ended early) is not a trial.
 const playShortestTrial = 2 * 24 * time.Hour
 
-// playCredit is what a credited Play window was, for the sales notice.
+// playCredit is what a Play window was: for the credit gate, which grants
+// nothing for a window Play did not charge (playCreditWindowInTx), and for the
+// sales notice.
 type playCredit int
 
 const (
@@ -680,7 +682,8 @@ const (
 	// a window Play moved out without a new charge. Before nearly every
 	// renewal Play moves the expiry out by a day while the renewal's charge
 	// is pending: 368 of the Play windows credited by 2026-11-08 were such a
-	// day.
+	// day. The window is not credited: it moves the entitlement's end, and
+	// grants no data (owner, 2026-11-21).
 	playCreditNotCharged
 )
 
@@ -705,14 +708,16 @@ func playFirstWindowIsTrial(sub *PlaySubscription, productId string, startTime t
 		playWindowHasTrialLength(startTime, maxExpiryTime)
 }
 
-// classifyPlayCredit is what the window credited through maxExpiryTime was.
+// classifyPlayCredit is what the window through maxExpiryTime is.
 // earlierExpiries are the expiries of the purchase's earlier credits, oldest
-// first, from its renewal rows, which nothing prunes
-// (playEarlierCreditExpiriesInTx). A window is charged when it moves the
-// expiry at least playShortestPaidPeriod past the last charged window's.
-// Measuring from the last charged window, not the last credited one, keeps a
-// renewal that follows Play's extra days: a February renewal lands 27 days
-// after the first of them, and less after any later one.
+// first (playEarlierCreditExpiriesInTx). A purchase's first window is always
+// charged or a trial. A later window is charged when it moves the expiry at
+// least playShortestPaidPeriod past the last charged window's. Measuring from
+// the last charged window, not the last credited one, keeps a renewal that
+// follows Play's extra days: a February renewal lands 27 days after the first
+// of them, and less after any later one. It also reads the extra days the
+// gate credited before it held them, which the history still holds, as not
+// charged.
 func classifyPlayCredit(
 	sub *PlaySubscription,
 	productId string,
@@ -752,27 +757,33 @@ func classifyPlayCredit(
 }
 
 // playEarlierCreditExpiriesInTx is the expiry of each earlier credit of the
-// network's purchase, oldest first: its renewal rows
-// (model.GetPlayPurchaseCreditEndTimesInTx), which end SubscriptionGracePeriod
-// past the store's expiry. Its balances are no history: retention deletes them
-// 7 days after they end. A data pack writes no renewal row and has none, so
-// its order id alone tells new from renewal. The read runs under its own
-// savepoint: a read that fails leaves the credit's transaction usable, ok is
-// false, and the window posts no notice.
-func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) (expiries []time.Time, ok bool) {
-	server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT play_sales_history`))
+// network's purchase, oldest first. A UR Pro purchase's are its renewal rows
+// (model.GetPlayPurchaseCreditEndTimesInTx), which nothing prunes; its
+// balances are no history, since retention deletes them 7 days after they
+// end. A data plan writes no renewal row, so its are its data balances
+// (model.GetPlayPurchaseDataCreditEndTimesInTx). Both end
+// SubscriptionGracePeriod past the store's expiry. The credit gate decides by
+// this history whether Play charged the window, so a read that fails credits
+// nothing: the read runs under its own savepoint, which leaves the credit's
+// transaction usable, and its error goes back to the caller, which retries.
+func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string, supporter bool) (expiries []time.Time, returnErr error) {
+	server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT play_credit_history`))
 	if r := server.HandleError(func() {
-		for _, endTime := range model.GetPlayPurchaseCreditEndTimesInTx(tx, ctx, networkId, purchaseToken) {
+		var endTimes []time.Time
+		if supporter {
+			endTimes = model.GetPlayPurchaseCreditEndTimesInTx(tx, ctx, networkId, purchaseToken)
+		} else {
+			endTimes = model.GetPlayPurchaseDataCreditEndTimesInTx(tx, ctx, networkId, purchaseToken)
+		}
+		for _, endTime := range endTimes {
 			expiries = append(expiries, endTime.Add(-SubscriptionGracePeriod))
 		}
 	}); r != nil {
-		server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT play_sales_history`))
-		model.CountSalesPaymentNotice(model.SalesPaymentNoticeResultBuildError)
-		glog.Errorf("[sales]play purchase history could not be read; the window posts no notice: %v\n", r)
-		return nil, false
+		server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT play_credit_history`))
+		return nil, fmt.Errorf("the Play purchase's credit history could not be read: %v", r)
 	}
-	server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT play_sales_history`))
-	return expiries, true
+	server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT play_credit_history`))
+	return expiries, nil
 }
 
 // playSalesRecurringPrice is a line item's recurring price as Play reports
@@ -828,7 +839,8 @@ func playSalesAmount(sub *PlaySubscription, sku *Sku, productId string, firstCha
 }
 
 // playSalesNotice is the notice of a credited Play purchase window: a sale,
-// a trial's start, or nil for a window Play moved out without a charge.
+// a trial's start, or nil for a window Play moved out without a charge (which
+// the credit gate no longer credits).
 func playSalesNotice(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	sub *PlaySubscription,
