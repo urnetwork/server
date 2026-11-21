@@ -73,7 +73,8 @@ func TestInternalGateVerifierRefusesFilesItCannotUse(t *testing.T) {
 	_, digest := newTestInternalGateBearer(t)
 	files := []string{
 		"",
-		"evs: {class: dns, sha256: [" + digest + "]}\n",
+		// a class the gate does not take
+		"evs: {class: api, sha256: [" + digest + "]}\n",
 		"evs: {class: evs, sha256: []}\n",
 		"evs: {class: evs}\n",
 		"evs: {class: evs, sha256: [" + digest[:20] + "]}\n",
@@ -155,7 +156,8 @@ func TestInternalGateCallersAreTheClassesTheGateTakes(t *testing.T) {
 			t.Errorf("%s: its file does not load: %v", caller, err)
 		}
 	}
-	for _, stranger := range []InternalGateCaller{"", "dns", "verify", "EDGE", "../pg"} {
+	// api hosts the gate and is never its caller; dns has been a class since d2e25bbb8
+	for _, stranger := range []InternalGateCaller{"", "api", "verify", "EDGE", "../pg"} {
 		if stranger.known() {
 			t.Errorf("%q is known", stranger)
 		}
