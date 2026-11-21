@@ -8,18 +8,26 @@ package sidecart3
 //     api's and oauth's route tables, as api's listener serves it, from a documentation address. Every credential an
 //     answer carries (by_client_jwt, by_jwt, auth_key, close) and every bearer a request presents is handed to the Net's
 //     capture as a secret, so the scan looks for each in every form, everywhere it reads.
+//   - T3Api is the service origins' lb too: a request whose host is a service's origin (ServiceOrigin), for a service a
+//     test serves through ServeService, goes to that service's handler, as warp routes the service's host to its
+//     block, served in process from the same documentation address with its bearer handed to the capture; its answer
+//     streams, so a long-lived one reaches its client as the handler writes it. A service nobody serves answers as api
+//     does, as before: server's router, which knows none of its routes. The services a test may serve are
+//     T3SidecarSettings.ServiceNames: the four a sidecar's settings name (evs, gkm, sockets, dns) and those whose
+//     api-facing routes a test reaches beside them (tlsedge, smtpedge, mxedge, mcp).
 //   - A T3Sidecar is a sidecar on a memory instance whose SidecarApi reaches T3Api (sidecar.SidecarApiPlatform) and
 //     whose client generations run on server's exchange (exchange.go): its own client id and token, an h1 transport to
 //     server's ConnectHandler, which checks the token, and server's controller for its control. Everything it logs, up to
 //     verbosity 1, goes to the capture (CC4). Its host reports no credential store of this machine's, as a T2 sidecar's
-//     does (D-TRUST-3).
+//     does (D-TRUST-3). Its service clients send on SidecarApi's transport, so each reaches the service a test serves at
+//     its origin.
 //
 // Time is real, as server's api and exchange keep it: a T3 sidecar's DPoP proofs and refreshes are judged on server's
 // clock, so it runs on sidecar.RealClock, never the Net's fake one.
 //
-// Not here: a T3 Net's AddSidecar, whose Net helpers are sidecartest's and stand on its fake api; a sidecar's services
-// (evs, gkm, sockets) reached through server's own hosts; and its control over api's /connect/control route, which
-// server's controller answers in process here, as exchange.go's clients' does.
+// Not here: a T3 Net's AddSidecar, whose Net helpers are sidecartest's and stand on its fake api, which a T3 test
+// replaces with a T3World's networks (world_networks.go); and a sidecar's control over api's /connect/control route,
+// which server's controller answers in process here, as exchange.go's clients' does.
 
 import (
 	"bytes"
@@ -29,6 +37,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -51,9 +60,13 @@ type T3SidecarSettings struct {
 	// The origin a T3 sidecar names for api and auth: a .example host nothing dials, since T3Api serves every request in
 	// process whatever its host.
 	ApiOrigin string
-	// The origin it names for each service, the service's name in place of %s: .example hosts nothing dials, since T3
-	// hosts no service a sidecar reaches yet.
+	// The origin it names for each service, the service's name in place of %s: .example hosts nothing dials, since
+	// T3Api serves each in process, through the handler a test serves it with (T3Api.ServeService).
 	ServiceOriginFormat string
+	// The services a test may serve at their origins: evs, gkm, sockets and dns, which a sidecar's settings name, and
+	// tlsedge, smtpedge, mxedge and mcp, whose api-facing routes a test reaches through T3Api. A name outside it is
+	// refused, so a misspelt service never answers as api.
+	ServiceNames []string
 	// The documentation address each request comes from (RFC 5737), which server hashes for its rate limits.
 	RemoteAddr string
 	// The verbosity a sidecar's log reaches the capture up to: connect's per-frame tracing stays out of memory.
@@ -71,6 +84,7 @@ func DefaultT3SidecarSettings() *T3SidecarSettings {
 	return &T3SidecarSettings{
 		ApiOrigin:           "https://api.sidecart3.example",
 		ServiceOriginFormat: "https://%s.sidecart3.example",
+		ServiceNames:        []string{"evs", "gkm", "sockets", "dns", "tlsedge", "smtpedge", "mxedge", "mcp"},
 		RemoteAddr:          "198.51.100.72:4000",
 		MaxLogLevel:         1,
 		StateTimeout:        60 * time.Second,
@@ -90,6 +104,8 @@ type T3Api struct {
 	secrets map[string]bool
 	// the newest token an enrollment or a mint answered for each client
 	clientIdTokens map[server.Id]string
+	// each served service origin's handler, by the origin's host (ServeService)
+	serviceHostHandlers map[string]http.Handler
 }
 
 // Server's api over api's and oauth's routes, its credentials handed to net's capture. settings nil takes the defaults.
@@ -98,12 +114,68 @@ func NewT3Api(ctx context.Context, net *sidecartest.Net, settings *T3SidecarSett
 		settings = DefaultT3SidecarSettings()
 	}
 	return &T3Api{
-		settings:       settings,
-		handler:        router.NewRouter(ctx, slices.Concat(api.Routes(), oauth.Routes())),
-		capture:        net.Capture(),
-		secrets:        map[string]bool{},
-		clientIdTokens: map[server.Id]string{},
+		settings:            settings,
+		handler:             router.NewRouter(ctx, slices.Concat(api.Routes(), oauth.Routes())),
+		capture:             net.Capture(),
+		secrets:             map[string]bool{},
+		clientIdTokens:      map[server.Id]string{},
+		serviceHostHandlers: map[string]http.Handler{},
 	}
+}
+
+// The settings T3Api runs with, which its sidecars take their origins from.
+func (self *T3Api) Settings() *T3SidecarSettings {
+	return self.settings
+}
+
+// The origin a sidecar names for service: ServiceOriginFormat with service's name.
+func (self *T3Api) ServiceOrigin(service string) string {
+	return fmt.Sprintf(self.settings.ServiceOriginFormat, service)
+}
+
+// The host of service's origin, lowercased as a request's host is matched, or an error for a service ServiceNames
+// does not name or an origin that is no https url with a host.
+func (self *T3Api) serviceHost(service string) (string, error) {
+	if !slices.Contains(self.settings.ServiceNames, service) {
+		return "", fmt.Errorf("%q is no service T3Api serves at an origin (T3SidecarSettings.ServiceNames)", service)
+	}
+	origin, err := url.Parse(self.ServiceOrigin(service))
+	if err != nil || origin.Scheme != "https" || origin.Host == "" {
+		return "", fmt.Errorf("the origin of %s, %q, is no https origin", service, self.ServiceOrigin(service))
+	}
+	return strings.ToLower(origin.Host), nil
+}
+
+// Serves service's origin through handler from now on, as the lb routes the service's host to its block (the file's
+// header); nil stops serving it, and its origin answers as api does again. A service ServiceNames does not name is
+// refused, and so is a second handler for a service already served, which a test stops first.
+func (self *T3Api) ServeService(service string, handler http.Handler) error {
+	host, err := self.serviceHost(service)
+	if err != nil {
+		return err
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if handler == nil {
+		delete(self.serviceHostHandlers, host)
+		return nil
+	}
+	if _, served := self.serviceHostHandlers[host]; served {
+		return fmt.Errorf("%s is served already", service)
+	}
+	self.serviceHostHandlers[host] = handler
+	return nil
+}
+
+// The handler serving request's origin, nil for none: an https request to a served service's host.
+func (self *T3Api) serviceHandler(request *http.Request) http.Handler {
+	if request.URL == nil || request.URL.Scheme != "https" {
+		return nil
+	}
+	host := strings.ToLower(request.URL.Host)
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.serviceHostHandlers[host]
 }
 
 // A credential the scan looks for, added once.
@@ -178,6 +250,12 @@ type t3ApiTransport struct {
 
 func (self *t3ApiTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	settings := self.api.settings
+	if handler := self.api.serviceHandler(request); handler != nil {
+		if bearer, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer "); ok {
+			self.api.addSecret("a bearer sent to "+request.URL.Host, bearer)
+		}
+		return serveServiceRequest(handler, request, settings.RemoteAddr)
+	}
 	if bearer, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer "); ok {
 		self.api.addSecret("a bearer sent to api", bearer)
 	}
@@ -393,10 +471,10 @@ func StartT3Sidecar(ctx context.Context, net *sidecartest.Net, name string, t3Ap
 	settings.ApiUrl = t3Settings.ApiOrigin
 	settings.AuthUrl = t3Settings.ApiOrigin
 	settings.PlatformUrl = exchange.platform.platformUrl
-	settings.EvsUrl = fmt.Sprintf(t3Settings.ServiceOriginFormat, "evs")
-	settings.GkmUrl = fmt.Sprintf(t3Settings.ServiceOriginFormat, "gkm")
-	settings.SocketsUrl = fmt.Sprintf(t3Settings.ServiceOriginFormat, "sockets")
-	settings.DnsUrl = fmt.Sprintf(t3Settings.ServiceOriginFormat, "dns")
+	settings.EvsUrl = t3Api.ServiceOrigin("evs")
+	settings.GkmUrl = t3Api.ServiceOrigin("gkm")
+	settings.SocketsUrl = t3Api.ServiceOrigin("sockets")
+	settings.DnsUrl = t3Api.ServiceOrigin("dns")
 	settings.Clock = sidecar.RealClock{}
 	settings.Log = &t3SidecarLogger{capture: net.Capture().Logger("sidecar " + name), maxLevel: t3Settings.MaxLogLevel}
 	settings.KeychainSettings.AutoLockTimeout = 0
