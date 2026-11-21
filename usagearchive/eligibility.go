@@ -3,31 +3,77 @@ package usagearchive
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
 // Which weeks may leave PostgreSQL, the same for the exporter and for the
-// server's drop fence. The owner's decisions on the boundary are open, so the
-// rule is the conservative one: nothing an SN epoch or a payout audit can
-// read leaves PostgreSQL.
+// server's drop fence. Nothing an SN epoch can still read leaves PostgreSQL.
 //
 //   - Every row of the week has a close time (a terminal row without one stops
 //     every epoch read, and must keep doing so), and the week's latest close
 //     time is before the close time floor.
 //   - The week itself ends no later than the floor.
 //   - The floor is DefaultCloseTimeFloor until the export control sets
-//     another date, and never later than MinCloseAge before now, whatever the
-//     control sets: 35 days past the lowest horizon the contract reaper can
-//     run (35 days).
+//     another date, or rolling, which sets none; it is never later than
+//     MinCloseAge before now, whatever the control sets.
+//   - The server's drop never lets the floor pass a week before the window of
+//     the earliest SN epoch not yet recorded either
+//     (server/db_provider_usage_archive_export.go), so a rolling floor moves
+//     without anyone checking the epochs first.
 //
 // DefaultCloseTimeFloor is a month before the earliest SN earning cutoff, so
 // no epoch window, census or recovery reads a row closed before it.
 var DefaultCloseTimeFloor = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
-// A row closed within this long before now never leaves PostgreSQL.
-const MinCloseAge = 70 * 24 * time.Hour
+// A row closed within this long before now never leaves PostgreSQL: the
+// lowest horizon the contract reaper can run (35 days) and its weekly rescan
+// (7 days), which deletes the contracts its first read kept because they
+// closed late, so a week's contracts are archived in the week and not in the
+// DEFAULT partition, which is never dropped. An SN epoch, a 7-day window, is
+// recorded about 9 days after its window opens. Owner, 2026-11-21: 42 days,
+// down from 70.
+const MinCloseAge = 42 * 24 * time.Hour
+
+// The floor that names no date, for the export control and the exporter: the
+// floor in force rolls with the clock, MinCloseAge before now.
+const RollingCloseTimeFloorValue = "rolling"
+
+// The date rolling stands for: later than any clock reaches, so MinCloseAge
+// before now is always the floor in force.
+var RollingCloseTimeFloor = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+
+// A floor as an operator writes it: rolling, a UTC date (YYYY-MM-DD) or
+// RFC 3339.
+func ParseCloseTimeFloor(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == RollingCloseTimeFloorValue {
+		return RollingCloseTimeFloor, nil
+	}
+	if floor, err := time.Parse(time.DateOnly, value); err == nil {
+		return floor.UTC(), nil
+	}
+	if floor, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return floor.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("close time floor %q is neither %s, YYYY-MM-DD nor RFC 3339", value, RollingCloseTimeFloorValue)
+}
+
+// A floor as an operator writes it: rolling, a date at midnight UTC, or
+// RFC 3339.
+func FormatCloseTimeFloor(floor time.Time) string {
+	floor = floor.UTC()
+	switch {
+	case !floor.Before(RollingCloseTimeFloor):
+		return RollingCloseTimeFloorValue
+	case floor.Equal(floor.Truncate(24 * time.Hour)):
+		return floor.Format(time.DateOnly)
+	default:
+		return floor.Format(time.RFC3339Nano)
+	}
+}
 
 // The floor in force at now: floor, never later than MinCloseAge before now.
 func EffectiveCloseTimeFloor(floor time.Time, now time.Time) time.Time {
