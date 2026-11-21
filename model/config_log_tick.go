@@ -200,6 +200,8 @@ type AppendConfigLogTickArgs struct {
 }
 
 type AppendConfigLogTickResult struct {
+	// Taskworker's completed timer commits its handoff to the API issuer.
+	PublishAtIssuer bool `json:"publish_at_issuer,omitempty"`
 	// the tick's position, nil for no tick
 	N *uint64 `json:"n,omitempty"`
 	// reaps left for the next tick
@@ -245,6 +247,9 @@ func AppendConfigLogTickTask(
 	if err != nil {
 		return nil, task.WithRetryDelay(err, settings.TickInterval)
 	}
+	if sequencer.settings.QueueTicksAtIssuer {
+		return &AppendConfigLogTickResult{PublishAtIssuer: true}, nil
+	}
 	return appendConfigLogTickAt(clientSession.Ctx, sequencer, appendConfigLogTick.NetworkId, settings)
 }
 
@@ -287,6 +292,11 @@ func AppendConfigLogTickTaskPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if appendConfigLogTickResult.PublishAtIssuer {
+		task.ScheduleTaskInTx(tx, PublishConfigLogTickTask, appendConfigLogTick, clientSession,
+			task.RunOnce("config_log_publish_tick", appendConfigLogTick.NetworkId), task.MaxTime(DefaultConfigLogTickSettings().MaxTime))
+		return nil
+	}
 	if appendConfigLogTickResult.More {
 		settings := DefaultConfigLogTickSettings()
 		scheduleConfigLogTickInTx(tx, clientSession, appendConfigLogTick.NetworkId, server.NowUtc().Add(settings.TickInterval), settings)
@@ -422,6 +432,8 @@ type AppendConfigLogActivationArgs struct {
 }
 
 type AppendConfigLogActivationResult struct {
+	// Taskworker's completed timer commits its handoff to the API issuer.
+	PublishAtIssuer bool `json:"publish_at_issuer,omitempty"`
 	// the activating tick's position, nil for no tick
 	N *uint64 `json:"n,omitempty"`
 	// when the task runs again, nil for never
@@ -470,6 +482,9 @@ func AppendConfigLogActivationTask(
 	if err != nil {
 		return nil, task.WithRetryDelay(err, settings.TickInterval)
 	}
+	if sequencer.settings.QueueTicksAtIssuer {
+		return &AppendConfigLogActivationResult{PublishAtIssuer: true}, nil
+	}
 	return appendConfigLogActivationAt(clientSession.Ctx, sequencer, appendConfigLogActivation.NetworkId, appendConfigLogActivation.ProposalId, settings)
 }
 
@@ -516,9 +531,24 @@ func AppendConfigLogActivationTaskPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if appendConfigLogActivationResult.PublishAtIssuer {
+		task.ScheduleTaskInTx(tx, PublishConfigLogActivationTask, appendConfigLogActivation, clientSession,
+			task.RunOnce("config_log_publish_activation", appendConfigLogActivation.NetworkId, hex.EncodeToString(appendConfigLogActivation.ProposalId)), task.MaxTime(DefaultConfigLogTickSettings().MaxTime))
+		return nil
+	}
 	if appendConfigLogActivationResult.RunAt != nil {
 		scheduleConfigLogActivationInTx(tx, clientSession, appendConfigLogActivation.NetworkId, appendConfigLogActivation.ProposalId,
 			*appendConfigLogActivationResult.RunAt, DefaultConfigLogTickSettings())
 	}
 	return nil
+}
+
+// The issuer rechecks the current projection when it runs each timer's durable
+// handoff. A late, repeated, vetoed or already satisfied timer changes nothing.
+func PublishConfigLogTickTask(args *AppendConfigLogTickArgs, client *session.ClientSession) (*AppendConfigLogTickResult, error) {
+	return AppendConfigLogTickTask(args, client)
+}
+
+func PublishConfigLogActivationTask(args *AppendConfigLogActivationArgs, client *session.ClientSession) (*AppendConfigLogActivationResult, error) {
+	return AppendConfigLogActivationTask(args, client)
 }

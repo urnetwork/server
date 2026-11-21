@@ -5,7 +5,7 @@ package model
 // taskworker's deletion of each 20 minutes after its last write. The format and
 // the reader evs, gkm and sockets' block use (sockets' since QD-1029) are the
 // root's (sidecar/config_rev.go); the signature is oauth.SignRevocation's, which
-// api and taskworker pass in, since model may not import oauth.
+// the API issuer provides. The taskworker holds only the expiry sweep.
 //
 //	owe     WriteRevocation, in the caller's transaction: schedules a write
 //	        task that retries until it lands, and after the commit tries the
@@ -116,7 +116,7 @@ var sidecarRevP0ByteCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "sidecar_rev",
 	Name:      "p0_bytes_total",
-	Help:      "Bytes of rev/ objects api and taskworker sent to the store, each try counted, P0 and never queued (§11.13)",
+	Help:      "Bytes of rev/ objects the API issuer sent to the store, each try counted, P0 and never queued (§11.13)",
 })
 
 var sidecarRevDeleteCounter = prometheus.NewCounter(prometheus.CounterOpts{
@@ -151,7 +151,7 @@ func SidecarRevocationNotBefore(at time.Time, settings *SidecarRevSettings) time
 	return sidecar.RevocationNotBefore(at.Add(settings.NotBeforeMargin))
 }
 
-// api's and taskworker's rev/ writer, on the first metadata cluster. Safe for
+// The issuer's writer, or the worker's expiry sweep, on the first metadata cluster. Safe for
 // concurrent use.
 type SidecarRevStore struct {
 	cluster  sidecar.BlobCluster
@@ -167,7 +167,7 @@ type SidecarRevStore struct {
 }
 
 // A writer on cluster, signing each object's payload with sign
-// (oauth.SignRevocation). settings may be nil for the defaults.
+// (oauth.SignRevocation). A nil signer gives the expiry sweep alone.
 func NewSidecarRevStore(cluster sidecar.BlobCluster, sign func(payload []byte) ([]byte, error), settings *SidecarRevSettings) *SidecarRevStore {
 	if settings == nil {
 		settings = DefaultSidecarRevSettings()
@@ -212,10 +212,8 @@ func (self *SidecarRevStore) issueP0(ctx context.Context, byteCount int) context
 	return budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindRevocation, pricedByteCount)
 }
 
-// This process's writer, which api and taskworker install once their first
-// metadata cluster is wired (OPS's ServiceHost.Blobs); until then the post-commit
-// write does nothing and each write task fails and retries, so an owed object is
-// never dropped.
+// The API issuer's writer or taskworker's expiry sweep on the process's own
+// metadata cluster. Unpublished objects stay owed in the durable queue.
 var sidecarRevStore atomic.Pointer[SidecarRevStore]
 
 // Installs this process's writer; nil removes it.
@@ -257,6 +255,9 @@ var Testing_SidecarRevBeforePut func(key string)
 // or finds it already there. An error leaves the outcome to the caller's retry,
 // which reads again.
 func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevocation) error {
+	if self.sign == nil {
+		return errors.New("revocations are signed by the API issuer")
+	}
 	key := revocation.key()
 	notBefore := sidecar.RevocationNotBefore(revocation.NotBefore)
 	for attempt := 0; attempt < self.settings.WriteAttemptCount; attempt += 1 {
@@ -398,8 +399,8 @@ func WriteRevocations(ctx context.Context, tx server.PgTx, revocations []*Sideca
 			return nil
 		}
 		store, err := currentSidecarRevStore()
-		if err != nil {
-			// the task lands them once a writer is installed
+		if err != nil || store.sign == nil {
+			// the issuer claims the durable task
 			return nil
 		}
 		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), server.TxPostCommitTimeout)
@@ -479,4 +480,14 @@ func SweepSidecarRevocations(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	return store.Sweep(ctx)
+}
+
+// Only the issuer publishes signed revocations and sequenced ticks. A worker
+// profile leaves these persisted target names, including versioned rows, for API.
+func AuthorizationIssuerTargets() []task.Target {
+	return []task.Target{
+		task.NewTaskTargetWithPost(WriteSidecarRevTask, WriteSidecarRevTaskPost),
+		task.NewTaskTargetWithPost(PublishConfigLogTickTask, AppendConfigLogTickTaskPost),
+		task.NewTaskTargetWithPost(PublishConfigLogActivationTask, AppendConfigLogActivationTaskPost),
+	}
 }

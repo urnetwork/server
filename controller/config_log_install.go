@@ -17,6 +17,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/sidecarhost"
+	"github.com/urnetwork/server/task"
 )
 
 var apiAclCache atomic.Pointer[sidecar.AclGateCache]
@@ -41,10 +42,17 @@ func runAuthorizationInstall(ctx context.Context, install *server.SidecarSwitchI
 
 // Starts the issuer's authorization services before routes can be served.
 func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHost) func() {
-	install := server.NewSidecarSwitchInstall("api-authorization", server.SidecarMg2Linked, func(ctx context.Context) (func(), error) {
+	install := server.NewSidecarSwitchInstall("api-authorization", func() bool {
+		return server.SidecarMg1Linked() || server.SidecarMg2Linked()
+	}, func(ctx context.Context) (func(), error) {
 		clusters, err := server.LoadFileClusters(ctx, "api", nil)
 		if err != nil {
 			return nil, errors.New("the API metadata cluster configuration is unavailable")
+		}
+		first, err := clusters.FirstCluster()
+		if err != nil {
+			clusters.Close()
+			return nil, err
 		}
 		host := *processHost
 		host.Blobs = clusters
@@ -54,19 +62,62 @@ func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 			return nil, err
 		}
 		host.Budget = budget
-		closeViews, err := installApiProjection(ctx, &host)
-		if err != nil {
-			budget.Close()
-			clusters.Close()
-			return nil, err
-		}
+		closeRevocations := installApiRevocations(&host, first)
+		worker := newAuthorizationIssuerWorker(context.WithoutCancel(ctx))
+		var lifetime sync.WaitGroup
+		lifetime.Go(worker.Run)
+		// A missing projection mount or subscription must not interrupt revocations.
+		projection := server.NewSidecarSwitchInstall("api-projection", server.SidecarMg2Linked, func(ctx context.Context) (func(), error) {
+			return installApiProjection(ctx, &host)
+		}, nil)
+		closeViews := runAuthorizationInstall(ctx, projection)
 		return func() {
 			closeViews()
+			worker.Drain()
+			worker.Close()
+			lifetime.Wait()
+			closeRevocations()
 			budget.Close()
 			clusters.Close()
 		}, nil
 	}, nil)
 	return runAuthorizationInstall(ctx, install)
+}
+
+// The API issuer alone holds the service signing keys and may PUT rev/.
+// Its worker claims revocations, due tick handoffs and their own post hooks.
+func newAuthorizationIssuerWorker(ctx context.Context) *task.TaskWorker {
+	settings := task.DefaultTaskWorkerSettings()
+	settings.ClaimRegisteredTargetsOnly = true
+	worker := task.NewTaskWorker(ctx, settings)
+	worker.AddTargets(model.AuthorizationIssuerTargets()...)
+	return worker
+}
+
+func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
+	settings := model.DefaultSidecarRevSettings()
+	settings.Clock = host.Clock
+	store := model.NewSidecarRevStore(first, oauth.SignRevocation, settings)
+	store.SetWriteBudget(host.Budget, priceMetadataCreate)
+	model.SetSidecarRevStore(store)
+	return func() { model.SetSidecarRevStore(nil) }
+}
+
+var metadataPrices = evsservice.DefaultPriceTable4KiB()
+
+func priceMetadataCreate(byteCount int64) int64 {
+	price, _ := metadataPrices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
+	return price
+}
+
+// The API's writer and the worker's retention and effects reader use the same
+// verifier on their own scoped cluster. Settings select each process's duties.
+func NewHostedConfigLogSequencer(host *sidecar.ServiceHost, first sidecar.BlobCluster, settings *model.ConfigLogSettings) *model.ConfigLogSequencer {
+	settings.AclSpendCheck = sidecar.NewSpendCheck(nil)
+	settings.Clock = host.Clock
+	sequencer := model.NewConfigLogSequencer(first, settings, model.AdvanceNetworkAclHead)
+	sequencer.SetWriteBudget(host.Budget, priceMetadataCreate)
+	return sequencer
 }
 
 // Publishes model and OAuth dependencies only after the watcher is installed.
@@ -79,22 +130,7 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 	if err != nil {
 		return nil, err
 	}
-	settings := model.NewApiConfigLogSettings()
-	settings.AclSpendCheck = sidecar.NewSpendCheck(nil)
-	settings.Clock = host.Clock
-	sequencer := model.NewConfigLogSequencer(first, settings, model.AdvanceNetworkAclHead)
-	prices := evsservice.DefaultPriceTable4KiB()
-	priceCreate := func(byteCount int64) int64 {
-		price, _ := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
-		return price
-	}
-	sequencer.SetWriteBudget(host.Budget, priceCreate)
-	revSettings := model.DefaultSidecarRevSettings()
-	revSettings.Clock = host.Clock
-	revocations := model.NewSidecarRevStore(first, oauth.SignRevocation, revSettings)
-	revocations.SetWriteBudget(host.Budget, priceCreate)
-	model.SetSidecarRevStore(revocations)
-	model.SetConfigLogSequencer(sequencer)
+	model.SetConfigLogSequencer(NewHostedConfigLogSequencer(host, first, model.NewApiConfigLogSettings()))
 	model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
 	apiAclCache.Store(cache)
 	closeContracts := installContractGateWhenEnabled(ctx, cache)
@@ -105,7 +141,6 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 		apiAclCache.CompareAndSwap(cache, nil)
 		model.SetApprovalGateStates(nil)
 		model.SetConfigLogSequencer(nil)
-		model.SetSidecarRevStore(nil)
 		closeGate()
 	}, nil
 }

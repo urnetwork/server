@@ -4,6 +4,7 @@ package taskworker
 
 import (
 	"maps"
+	"slices"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -45,6 +46,12 @@ func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile Wor
 		settings = task.DefaultTaskWorkerSettings()
 	}
 	ownerSettings := *settings
+	// The issuer alone publishes signed revocations and verified ticks.
+	// Both worker profiles leave its durable writes, including retained rows.
+	ownerSettings.ExcludedClaimFunctions = slices.Clone(settings.ExcludedClaimFunctions)
+	for _, issuerTarget := range model.AuthorizationIssuerTargets() {
+		ownerSettings.ExcludedClaimFunctions = append(ownerSettings.ExcludedClaimFunctions, issuerTarget.TargetFunctionName())
+	}
 	// All entry points, including InitTaskWorker/EvalTasks, need the same
 	// indexed admission lanes as Run. A close backlog must not hide its
 	// downstream financial owners or recurring maintenance.

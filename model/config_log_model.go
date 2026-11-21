@@ -91,6 +91,9 @@ import (
 
 // Tunables of the sequencer. §7.9's 4,096 is ConfigLog's.
 type ConfigLogSettings struct {
+	// Taskworker dispatches due timers to API, the projection and cache writer.
+	// Its own sequencer verifies inputs for retention and effects.
+	QueueTicksAtIssuer bool
 	// How many positions one append tries before it answers 503: each try is
 	// another instance's landed entry or a lost race, so this bounds only a
 	// stream of them.
