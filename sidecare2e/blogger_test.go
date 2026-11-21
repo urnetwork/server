@@ -46,6 +46,10 @@
 // §16.6's stock gate refusing a listen as an action with no effect (worldListenGate; fix track listen-approval-effect)
 // and a label drawn outside its zone's serial order (the TXT write; fix track dns-label-serial-order).
 //
+// Its sub-case, TestE2eBloggerChangeAfterTheReadersOwnRead (blogger_changes_test.go), runs the cache clearing's
+// change path alone: a commit must reach the other writer's change listener whether or not that writer's client read
+// the path first.
+//
 // Each phase has its bound and dumps the world's and the blogs' progress when it stalls; the case has the conventions'
 // 10 minutes. Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
