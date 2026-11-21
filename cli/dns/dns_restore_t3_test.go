@@ -116,7 +116,7 @@ func TestRestoreStepRegeneratesTheCustomHostMap(t *testing.T) {
 		// loaded
 		lostDigest := dnsservice.DnsCustomHostMapDigest([]string{"kept." + domain, "late." + domain})
 		for _, name := range interfaces {
-			if err := model.RecordDnsCustomHostMapReport(ctx, &dnsservice.DnsCustomHostMapReport{
+			if err := model.RecordDnsCustomHostMapReportForRoot(ctx, root, &dnsservice.DnsCustomHostMapReport{
 				Format: dnsservice.DnsFormat, Interface: name, Version: 7, Digest: lostDigest,
 				Master: &dnsservice.DnsMapMaster{Pid: 1, StartTimeMillis: 1},
 			}, server.NowUtc(), 16, 16); err != nil {
@@ -174,7 +174,7 @@ func TestRestoreStepRegeneratesTheCustomHostMap(t *testing.T) {
 		}
 		// each lbmap loads the restored map: removed back, late gone
 		for _, name := range interfaces {
-			if err := model.RecordDnsCustomHostMapReport(ctx, &dnsservice.DnsCustomHostMapReport{
+			if err := model.RecordDnsCustomHostMapReportForRoot(ctx, root, &dnsservice.DnsCustomHostMapReport{
 				Format: dnsservice.DnsFormat, Interface: name, Version: want, Digest: customHostMap.Digest,
 				Master: &dnsservice.DnsMapMaster{Pid: 1, StartTimeMillis: 1},
 				Added:  []string{"removed." + domain}, Dropped: []string{"late." + domain},

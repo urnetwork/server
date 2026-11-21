@@ -87,7 +87,8 @@ type dnsRestoreListRow struct {
 	CustomHost       string `json:"custom_host,omitempty"`
 	CustomHostChange string `json:"custom_host_change,omitempty"`
 	// the incident's map raise: the version it raised to
-	MapVersion uint64 `json:"map_version,omitempty"`
+	MapVersion uint64                                     `json:"map_version,omitempty"`
+	MapReports map[string]*dnsservice.DnsMapRestoreReport `json:"map_reports,omitzero"`
 }
 
 // Whether the row is the incident's map raise rather than an entry.
@@ -324,16 +325,105 @@ func DnsRaiseCustomHostMapForRestore(ctx context.Context, root string, incidentI
 		base := max(dnsSerialFromColumn(counter), dnsSerialFromColumn(hostMax), dnsSerialFromColumn(appliedMax))
 		version = base + dnsservice.DnsRestoreSerialJump
 		setDnsCustomHostMapVersionInTx(ctx, tx, root, version, getDnsCustomHostMapHostsInTx(ctx, tx, root), `true`)
-		// Capture each interface's first load of this map before regular map updates can replace its report.
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE dns_custom_host_map_applied
-			SET host_probes = jsonb_set(COALESCE(host_probes, '{}'::jsonb), '{restore}', jsonb_build_object('version', $1::bigint))`, dnsSerialColumn(version)))
-		listRows = append(listRows, &dnsRestoreListRow{IncidentId: incidentId, ListTime: now.UTC().Truncate(time.Microsecond), MapVersion: version})
+		reports := map[string]*dnsservice.DnsMapRestoreReport{}
+		for name := range dnsRestoreMapInterfacesInTx(ctx, tx) {
+			reports[name] = nil
+		}
+		listRows = append(listRows, &dnsRestoreListRow{IncidentId: incidentId, ListTime: now.UTC().Truncate(time.Microsecond), MapVersion: version, MapReports: reports})
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE dns_root SET restore_lists = $2::jsonb WHERE root = $1`, root, dnsJsonArray(listRows)))
 	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return 0, returnErr
 	}
 	return version, nil
+}
+
+// Snapshot the interfaces owed at the raise; later arrivals do not owe this incident a report.
+func dnsRestoreMapInterfacesInTx(ctx context.Context, tx server.PgTx) map[string]bool {
+	names := map[string]bool{}
+	result, err := tx.Query(ctx, `SELECT interface_name FROM dns_custom_host_map_applied`)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var name string
+			server.Raise(result.Scan(&name))
+			names[name] = true
+		}
+	})
+	return names
+}
+
+func dnsRestoreMapMarkersInTx(ctx context.Context, tx server.PgTx, root string) []*dnsRestoreListRow {
+	var listRows []*dnsRestoreListRow
+	result, err := tx.Query(ctx, `SELECT restore_lists FROM dns_root WHERE root = $1 AND restore_lists <> '[]'::jsonb`, root)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var data []byte
+			server.Raise(result.Scan(&data))
+			server.Raise(json.Unmarshal(data, &listRows))
+		}
+	})
+	return listRows
+}
+
+// Preserve the first acknowledged load at this version or later under its own incident. The table's
+// ordinary probe sample can then roll forward or disappear when an interface is decommissioned.
+func recordDnsRestoreMapReportInTx(ctx context.Context, tx server.PgTx, root string, report *dnsservice.DnsCustomHostMapReport) {
+	if report.Version == 0 {
+		return
+	}
+	lockDnsRestoreListsInTx(ctx, tx, root)
+	rows := dnsRestoreMapMarkersInTx(ctx, tx, root)
+	var marker *dnsRestoreListRow
+	for _, row := range rows {
+		if row.mapRaise() && row.MapVersion <= report.Version && (marker == nil || marker.MapVersion < row.MapVersion) {
+			marker = row
+		}
+	}
+	if marker == nil {
+		return
+	}
+	if receipt, expected := marker.MapReports[report.Interface]; !expected || receipt != nil {
+		return
+	}
+	marker.MapReports[report.Interface] = &dnsservice.DnsMapRestoreReport{Added: report.Added, Dropped: report.Dropped}
+	server.RaisePgResult(tx.Exec(ctx, `UPDATE dns_root SET restore_lists = $2::jsonb WHERE root = $1`, root, dnsJsonArray(rows)))
+}
+
+// Read this incident's persisted receipts, including retired interfaces. Unreported retired interfaces
+// no longer hold the wait. An interface first configured after the raise is outside this snapshot.
+func GetDnsRestoreMapReports(ctx context.Context, root string, incidentId server.Id) (map[string]*dnsservice.DnsMapRestoreReport, error) {
+	if !dnsCustomHostLinked() {
+		return nil, ErrDnsUnlinked
+	}
+	var reports map[string]*dnsservice.DnsMapRestoreReport
+	var legacy bool
+	server.Tx(ctx, func(tx server.PgTx) {
+		rows := dnsRestoreMapMarkersInTx(ctx, tx, dnsLabelRoot(root))
+		for _, row := range rows {
+			if row.IncidentId != incidentId || !row.mapRaise() {
+				continue
+			}
+			if row.MapReports == nil {
+				legacy = true
+				break
+			}
+			reports = map[string]*dnsservice.DnsMapRestoreReport{}
+			active := dnsRestoreMapInterfacesInTx(ctx, tx)
+			for name, receipt := range row.MapReports {
+				if receipt != nil || active[name] {
+					reports[name] = receipt
+				}
+			}
+			break
+		}
+	}, server.TxReadCommitted)
+	if legacy {
+		return nil, fmt.Errorf("complete interface reports were not retained for restore %s", incidentId)
+	}
+	if reports == nil {
+		return nil, fmt.Errorf("%w: no map marker for %s", dnsservice.ErrDnsRestoreIncident, incidentId)
+	}
+	return reports, nil
 }
 
 // The network a custom host the regenerated map named is under: its row's, or

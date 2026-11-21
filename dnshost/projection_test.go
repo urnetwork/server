@@ -62,8 +62,16 @@ func TestHostedDnsGatesUseTheVerifiedProjection(t *testing.T) {
 	rule := func(name string, action protocol.AclAction) *protocol.AclRule {
 		return &protocol.AclRule{RuleId: sidecar.NewId().Bytes(), SrcAtoms: [][]byte{atom}, Targets: []*protocol.AclTarget{{PublicName: name}}, Actions: []uint32{uint32(action)}}
 	}
+	rows.TeamScopes = []*bridge.TeamScopeRow{
+		{Label: "foreign-unit", Owner: &bridge.TeamScopeRow_MemberId{MemberId: sidecar.NewId().Bytes()}},
+		{Label: "tag-unit", Owner: &bridge.TeamScopeRow_TagAtom{TagAtom: sidecar.NewId().Bytes()}},
+	}
 	rows.Acl = marshal(&protocol.AclRows{HasDocument: true, Atoms: []*protocol.AclAtom{{Atom: atom, SidecarIds: [][]byte{owner.Bytes()}}}, Rules: []*protocol.AclRule{
-		rule("write", protocol.AclAction_ACL_ACTION_ADMIN), rule("view", protocol.AclAction_ACL_ACTION_PUBLISH), rule("smtp/25/mx", protocol.AclAction_ACL_ACTION_LISTEN),
+		rule("write", protocol.AclAction_ACL_ACTION_ADMIN),
+		rule("view", protocol.AclAction_ACL_ACTION_PUBLISH),
+		rule("smtp/25/mx", protocol.AclAction_ACL_ACTION_LISTEN),
+		rule("smtp/25/mx.foreign-unit", protocol.AclAction_ACL_ACTION_LISTEN),
+		rule("smtp/25/mx.tag-unit", protocol.AclAction_ACL_ACTION_LISTEN),
 	}})
 	body := marshal(rows)
 	digest := sha256.Sum256(body)
@@ -128,6 +136,8 @@ func TestHostedDnsGatesUseTheVerifiedProjection(t *testing.T) {
 		{"publish only", deps.RecordGate.MayAdmin(network, owner, "view", now), dnsservice.DnsGateDenied},
 		{"ungranted", deps.RecordGate.MayView(network, owner, "elsewhere", now), dnsservice.DnsGateDenied},
 		{"receiver", deps.KeyRecordGate.MayReceive(network, owner, "", now), dnsservice.DnsGateAllowed},
+		{"signed tag scope", deps.KeyRecordGate.MayReceive(network, owner, "tag-unit", now), dnsservice.DnsGateAllowed},
+		{"other member scope", deps.KeyRecordGate.MayReceive(network, owner, "foreign-unit", now), dnsservice.DnsGateDenied},
 		{"other receiver", deps.KeyRecordGate.MayReceive(network, stranger, "", now), dnsservice.DnsGateDenied},
 		{"unknown scope", deps.KeyRecordGate.MayReceive(network, owner, "absent", now), dnsservice.DnsGateUnavailable},
 	} {

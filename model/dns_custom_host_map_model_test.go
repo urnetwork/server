@@ -274,7 +274,8 @@ func TestDnsRestoreInventorySurvivesTheNextMapReport(t *testing.T) {
 		if err := SyncDnsCustomHostMapInterfaces(ctx, []string{"lb-1"}); err != nil {
 			t.Fatal(err)
 		}
-		target, err := DnsRaiseCustomHostMapForRestore(ctx, root, server.NewId(), now)
+		incident := server.NewId()
+		target, err := DnsRaiseCustomHostMapForRestore(ctx, root, incident, now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,14 +284,14 @@ func TestDnsRestoreInventorySurvivesTheNextMapReport(t *testing.T) {
 			names[i] = fmt.Sprintf("host-%02d.example", i)
 		}
 		report := &dnsservice.DnsCustomHostMapReport{Interface: "lb-1", Version: target, Digest: dnsservice.DnsCustomHostMapDigest(names), Master: &dnsservice.DnsMapMaster{Pid: 7}, Added: names, Dropped: []string{"retired.example"}}
-		if err := RecordDnsCustomHostMapReport(ctx, report, now, 16, 128); err != nil {
+		if err := RecordDnsCustomHostMapReportForRoot(ctx, root, report, now, 16, 128); err != nil {
 			t.Fatal(err)
 		}
 		report.Version++
 		report.Added = []string{"later.example"}
 		report.Dropped = nil
 		report.Digest = dnsservice.DnsCustomHostMapDigest(report.Added)
-		if err := RecordDnsCustomHostMapReport(ctx, report, now.Add(time.Second), 16, 128); err != nil {
+		if err := RecordDnsCustomHostMapReportForRoot(ctx, root, report, now.Add(time.Second), 16, 128); err != nil {
 			t.Fatal(err)
 		}
 		state, err := GetDnsCustomHostMapState(ctx, root)
@@ -298,9 +299,19 @@ func TestDnsRestoreInventorySurvivesTheNextMapReport(t *testing.T) {
 			t.Fatalf("interfaces: %+v %v", state, err)
 		}
 		row := state.Interfaces[0]
-		if !slices.Equal(row.AddedHosts, report.Added) || row.Restore == nil || !row.Restore.Received || row.Restore.Version != target ||
-			!slices.Equal(row.Restore.Added, names) || !slices.Equal(row.Restore.Dropped, []string{"retired.example"}) {
-			t.Fatalf("ordinary report and retained inventory: %+v", row)
+		if !slices.Equal(row.AddedHosts, report.Added) {
+			t.Fatalf("current sample: %+v", row)
+		}
+		if err := SyncDnsCustomHostMapInterfaces(ctx, []string{"replacement"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DnsRaiseCustomHostMapForRestore(ctx, root, server.NewId(), now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		reports, err := GetDnsRestoreMapReports(ctx, root, incident)
+		receipt := reports["lb-1"]
+		if err != nil || len(reports) != 1 || receipt == nil || !slices.Equal(receipt.Added, names) || !slices.Equal(receipt.Dropped, []string{"retired.example"}) {
+			t.Fatalf("incident's receipt after a new restore and interface retirement: %+v %v", reports, err)
 		}
 	})
 }

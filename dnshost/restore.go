@@ -62,11 +62,21 @@ func (self *RestoreStore) RaiseCustomHostMapForRestore(ctx context.Context, root
 	return
 }
 
-// model.GetDnsCustomHostMapState: each interface's report.
+// The current map state, including the bounded sample used by readiness probes.
 func (self *RestoreStore) CustomHostMapState(ctx context.Context, root string) (state *dnsservice.DnsMapState, returnErr error) {
 	returnErr = storeCall(func() error {
 		var err error
 		state, err = model.GetDnsCustomHostMapState(ctx, root)
+		return err
+	})
+	return
+}
+
+// The complete receipts for this incident, independently of the current probe samples.
+func (self *RestoreStore) RestoreMapReports(ctx context.Context, root string, incidentId sidecar.Id) (reports map[string]*dnsservice.DnsMapRestoreReport, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		reports, err = model.GetDnsRestoreMapReports(ctx, root, server.Id(incidentId))
 		return err
 	})
 	return
