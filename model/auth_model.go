@@ -1174,16 +1174,29 @@ func AuthVerify(
 
 	normalVerifyCode := strings.ToLower(strings.TrimSpace(verify.VerifyCode))
 
+	// The tries a code, the address and the caller get
+	// (auth_verify_code_limit.go). An address locked out by wrong codes, or a
+	// caller that has spent its wrong tries, is refused before any code is
+	// read.
+	tryLimits := newVerifyCodeTryLimits(clientSession, *userAuth)
+	if err := tryLimits.admit(); err != nil {
+		return nil, err
+	}
+
 	var userId server.Id
-	var userAuthVerifyId *server.Id
 	var networkId server.Id
 	var networkName string
 	// the address's sign-in was unverified when read. Its verification can
 	// rotate the account's credentials, which takes the network's session
 	// lifecycle lock exclusively, as a password reset does.
 	pending := false
+	// The live codes of the address's holder. A new code ends the ones sent
+	// before it, so there is normally one. The guess is compared with them
+	// here (tryGuess), once each has counted the try.
+	liveCodes := []liveVerifyCode{}
 
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
+		liveCodes = []liveVerifyCode{}
 		authUserId := findUserIdByUserAuth(
 			&pgUserAuthUserIdLookup{ctx: clientSession.Ctx, conn: conn},
 			*userAuth,
@@ -1191,43 +1204,45 @@ func AuthVerify(
 		if authUserId == nil {
 			return
 		}
+		userId = *authUserId
 		result, err := conn.Query(
 			clientSession.Ctx,
 			`
 				SELECT
-					user_auth_verify.user_id,
 					user_auth_verify.user_auth_verify_id,
+					user_auth_verify.verify_code,
 					network.network_id,
 					network.network_name,
 					EXISTS (
 						SELECT 1 FROM network_user_auth_password
 						WHERE
 							network_user_auth_password.user_id = user_auth_verify.user_id AND
-							network_user_auth_password.user_auth = $4 AND
+							network_user_auth_password.user_auth = $3 AND
 							NOT network_user_auth_password.verified
 					)
 				FROM user_auth_verify
 				INNER JOIN network ON network.admin_user_id = user_auth_verify.user_id
 				WHERE
-					user_auth_verify.user_id = $3 AND
-					user_auth_verify.verify_code = $1 AND
+					user_auth_verify.user_id = $2 AND
 					user_auth_verify.used = false AND
-					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
+					now() - INTERVAL '1 seconds' * $1 <= user_auth_verify.verify_time
+				ORDER BY user_auth_verify.verify_time DESC, user_auth_verify.user_auth_verify_id
 			`,
-			normalVerifyCode,
 			int(VerifyCodeTimeout/time.Second),
 			*authUserId,
 			*userAuth,
 		)
 		server.WithPgResult(result, err, func() {
-			if result.Next() {
+			for result.Next() {
+				var liveCode liveVerifyCode
 				server.Raise(result.Scan(
-					&userId,
-					&userAuthVerifyId,
+					&liveCode.userAuthVerifyId,
+					&liveCode.verifyCode,
 					&networkId,
 					&networkName,
 					&pending,
 				))
+				liveCodes = append(liveCodes, liveCode)
 			}
 		})
 	})
@@ -1240,9 +1255,20 @@ func AuthVerify(
 		}, nil
 	}
 
-	if userAuthVerifyId == nil {
+	// the guess takes a try of each live code: a code past its tries is not
+	// compared, and one whose last try this was is killed
+	match, spentMessage := tryLimits.tryGuess(userId, liveCodes, normalVerifyCode)
+	if match == nil {
+		if spentMessage != "" {
+			return &AuthVerifyResult{
+				Error: &AuthVerifyResultError{
+					Message: spentMessage,
+				},
+			}, nil
+		}
 		return invalidCode()
 	}
+	userAuthVerifyId := &match.userAuthVerifyId
 
 	// verified: the code proved the sign-in method
 	SetUserAuthAttemptSuccess(clientSession.Ctx, userAuthAttemptId, true)
@@ -1415,6 +1441,9 @@ func AuthVerify(
 			},
 		}, nil
 	}
+
+	// the address proved itself: its strikes and any lockout end
+	tryLimits.address.clear(clientSession.Ctx)
 
 	clientSession.WithByJwt(signedCredential).ObserveAuthenticatedUse()
 	result := &AuthVerifyResult{
@@ -1628,6 +1657,13 @@ func AuthVerifyCreateCode(
 	// Each send intentionally consumes attempt budget (not marked success).
 	if _, allow := UserAuthAttempt(userAuth, clientSession); !allow {
 		return nil, maxUserAuthAttemptsError(userAuth)
+	}
+
+	// no code is sent to an address locked out by wrong codes
+	// (auth_verify_code_limit.go): it could not be verified until the
+	// lockout ends
+	if err := verifyCodeSendRefusal(clientSession, *userAuth); err != nil {
+		return nil, err
 	}
 
 	created := false
