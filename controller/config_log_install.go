@@ -152,11 +152,13 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 	restoreApprovals := model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
 	restoreDnsScopes := model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache))
 	apiAclCache.Store(cache)
+	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
 	closeContracts := installContractGateWhenEnabled(ctx, cache)
 	restoreScopes := oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(cache, &oauth.ExchangeScopeSettings{Clock: host.Clock}))
 	return func() {
 		restoreScopes()
 		closeContracts()
+		oauth.SetEdgeLoginSource(nil)
 		apiAclCache.CompareAndSwap(cache, nil)
 		restoreDnsScopes()
 		restoreApprovals()

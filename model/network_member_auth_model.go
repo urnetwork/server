@@ -187,7 +187,9 @@ func MintNetworkSignIn(ctx context.Context, userId server.Id, networkId server.I
 	if signIn.SsoRequired && !viaIdp {
 		return "", nil, ErrNetworkSsoRequired
 	}
-	signed, err := session.MintNetworkSession(ctx, NewNetworkSignInByJwt(signIn, IsProFresh(ctx, &networkId)), kind)
+	credential := NewNetworkSignInByJwt(signIn, IsProFresh(ctx, &networkId))
+	credential.TeamSso = viaIdp && signIn.MemberId != nil
+	signed, err := session.MintNetworkSession(ctx, credential, kind)
 	if err != nil {
 		return "", nil, err
 	}

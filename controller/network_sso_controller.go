@@ -256,7 +256,7 @@ func NetworkSsoCallback(callback *NetworkSsoCallbackArgs, clientSession *session
 		result.Pending = true
 		return result, nil
 	}
-	signed, signIn, err := model.MintNetworkSignIn(clientSession.Ctx, login.UserId, idp.NetworkId, "sso", true)
+	signed, signIn, err := model.MintNetworkSignIn(clientSession.Ctx, login.UserId, idp.NetworkId, session.NetworkSsoSessionKind, true)
 	if err != nil {
 		return nil, err
 	}

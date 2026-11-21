@@ -183,6 +183,35 @@ func sessionMemberKeys(networkId, sid server.Id) []string {
 	return []string{SessionKey(networkId, "s:"+sid.String()), SessionKey(networkId, "u:"+sid.String()), SessionMarkerKey(networkId, sid)}
 }
 
+const NetworkSsoSessionKind = "sso"
+
+// AuthenticatedWithTeamIdp checks the original Team sign-in. Older tracked sessions
+// predate the signed claim and retain the method of their first mint in Redis.
+func (credential *ByJwt) AuthenticatedWithTeamIdp(ctx context.Context) (bool, error) {
+	if credential == nil || credential.MemberId == nil {
+		return false, nil
+	}
+	if credential.TeamSso {
+		return true, nil
+	}
+	if credential.SessionId == nil {
+		return false, nil
+	}
+	var kind string
+	err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+		var err error
+		kind, err = r.HGet(ctx, SessionKey(credential.NetworkId, "s:"+credential.SessionId.String()), "kind").Result()
+		return err
+	})
+	if errors.Is(err, server.RedisNil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, ErrAuthUnavailable
+	}
+	return kind == NetworkSsoSessionKind, nil
+}
+
 // Registering before signing is required even while new session creation is dark.
 func RegisterNetworkSession(ctx context.Context, credential *ByJwt, kind string, origin *server.Id, fenceOrigin bool, now time.Time) (*registeredSession, error) {
 	if credential.SessionId == nil || credential.ExpiresAt == nil {

@@ -98,6 +98,8 @@ func writeGrantError(w http.ResponseWriter, err error) {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request is malformed.")
 	case errors.Is(err, ErrInvalidRedirect):
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The redirect_uri is not registered for this client.")
+	case errors.Is(err, ErrExchangeUnavailable), errors.Is(err, session.ErrAuthUnavailable):
+		writeOauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "Please try again.")
 	case errors.Is(err, ErrUnknownClient), errors.Is(err, ErrInvalidClientMeta):
 		writeOauthError(w, http.StatusBadRequest, "invalid_client", "The client could not be resolved.")
 	case errors.Is(err, ErrPkceFailed), errors.Is(err, ErrInvalidCode),
@@ -455,6 +457,26 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 
 	authorizationRequest := consentRequest.authorizationRequest()
 
+	if origin, edge, err := resolveEdgeOrigin(clientSession.Ctx, authorizationRequest.ClientId); edge || err != nil {
+		if err != nil {
+			writeGrantError(w, err)
+			return
+		}
+		signIn, err := validateEdgeSignIn(clientSession.Ctx, origin, authorizationRequest, edgeAuthorizingUser(clientSession))
+		if err != nil {
+			writeGrantError(w, err)
+			return
+		}
+		writeJson(w, http.StatusOK, &ConsentResult{
+			ClientName:      strings.TrimPrefix(origin.Origin, "https://"),
+			ClientUri:       origin.Origin,
+			Scopes:          []string{EdgeScopeOpenid},
+			NetworkName:     signIn.NetworkName,
+			Issuer:          Issuer(),
+			ConsentRequired: false,
+		})
+		return
+	}
 	client, err := ValidateAuthorizationRequest(clientSession.Ctx, authorizationRequest)
 	if err != nil {
 		writeGrantError(w, err)
@@ -482,20 +504,6 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 			result.AdminCommand = adminCommand
 		}
 		writeJson(w, http.StatusOK, result)
-		return
-	}
-
-	if client.ClientType == ClientTypeEdge {
-		// a network's own published name signs in its members: nothing to
-		// consent to, only a sign-in (edge_login.go)
-		writeJson(w, http.StatusOK, &ConsentResult{
-			ClientName:      client.ClientName,
-			ClientUri:       client.ClientUri,
-			Scopes:          []string{EdgeScopeOpenid},
-			NetworkName:     clientSession.ByJwt.NetworkName,
-			Issuer:          Issuer(),
-			ConsentRequired: false,
-		})
 		return
 	}
 
@@ -563,8 +571,14 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 			Roles:       byJwt.Roles,
 			AuthTime:    byJwt.CreateTime,
 		}, consentRequest.ConsentReceipt)
+	} else if origin, edge, resolveErr := resolveEdgeOrigin(clientSession.Ctx, authorizationRequest.ClientId); edge || resolveErr != nil {
+		if resolveErr != nil {
+			writeGrantError(w, resolveErr)
+			return
+		}
+		code, err = authorizeEdgeVisitor(clientSession.Ctx, origin, authorizationRequest, edgeAuthorizingUser(clientSession))
 	} else {
-		code, err = Authorize(clientSession.Ctx, authorizationRequest, &AuthorizingUser{
+		code, err = authorizeRegisteredClient(clientSession.Ctx, authorizationRequest, &AuthorizingUser{
 			UserId:      byJwt.UserId,
 			NetworkId:   byJwt.NetworkId,
 			NetworkName: byJwt.NetworkName,
@@ -588,6 +602,20 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJson(w, http.StatusOK, &AuthorizeResult{RedirectUri: redirectUri})
+}
+
+// Only an authenticated person's own network credential can present the visitor's identity.
+func edgeAuthorizingUser(s *session.ClientSession) *AuthorizingUser {
+	if s.ByJwt == nil || s.ByJwt.ClientId != nil || s.ByJwt.ApiKeyId != nil || s.ApiKeyAuthenticated || s.UnsignedIdentity {
+		return nil
+	}
+	return &AuthorizingUser{
+		UserId:         s.ByJwt.UserId,
+		NetworkId:      s.ByJwt.NetworkId,
+		GuestMode:      s.ByJwt.GuestMode,
+		AuthTime:       s.ByJwt.CreateTime,
+		edgeCredential: s.ByJwt,
+	}
 }
 
 // Builds the redirect back to the client. `iss` is included per rfc 9207 so

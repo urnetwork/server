@@ -189,14 +189,18 @@ func parseExchangeRecoveryScope(scope string) (sidecar.Id, bool) {
 // The network's newest verified state, or ErrExchangeUnavailable while the gate
 // holds none.
 func (self *ProjectionExchangeScopeSource) snapshot(networkId server.Id) (*sidecar.AclGateSnapshot, error) {
-	if self.gate == nil {
+	return verifiedGateSnapshot(self.gate, networkId)
+}
+
+func verifiedGateSnapshot(gate ExchangeGate, networkId server.Id) (*sidecar.AclGateSnapshot, error) {
+	if gate == nil {
 		return nil, fmt.Errorf("%w: no gate", ErrExchangeUnavailable)
 	}
-	snapshot, status := self.gate.State(sidecar.Id(networkId))
+	snapshot, status := gate.State(sidecar.Id(networkId))
 	switch status {
 	case sidecar.AclGateLoaded:
 	case sidecar.AclGateUnknown:
-		self.gate.Changed(sidecar.Id(networkId))
+		gate.Changed(sidecar.Id(networkId))
 		return nil, fmt.Errorf("%w: the network's state is not loaded yet", ErrExchangeUnavailable)
 	default:
 		return nil, fmt.Errorf("%w: the network's state is not loaded", ErrExchangeUnavailable)

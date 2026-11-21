@@ -229,6 +229,8 @@ type roleCredential struct {
 	memberId *server.Id
 	// nil for no scopes of the credential's own
 	scopes []string
+	// A signed person's session may visit a site published by a Team they belong to.
+	signedInPerson bool
 }
 
 // The role credential of the request, false for none the gate asks about: no
@@ -259,7 +261,11 @@ func roleCredentialOf(r *http.Request) (*roleCredential, bool) {
 			return nil, false
 		}
 		memberId := *byJwt.MemberId
-		return &roleCredential{networkId: byJwt.NetworkId, memberId: &memberId}, true
+		return &roleCredential{
+			networkId:      byJwt.NetworkId,
+			memberId:       &memberId,
+			signedInPerson: byJwt.ClientId == nil && byJwt.ApiKeyId == nil && !byJwt.GuestMode,
+		}, true
 	case strings.HasPrefix(authorization, "DPoP "):
 		claims := &oauth.AdminTokenClaims{}
 		if _, _, err := gojwt.NewParser().ParseUnverified(authorization[len("DPoP "):], claims); err != nil {
@@ -293,6 +299,13 @@ func refuseRolePermission(r *http.Request, routeKey string) bool {
 	} else {
 		role, ok := model.MemberRole(r.Context(), credential.networkId, *credential.memberId)
 		refused = !ok || !model.RoleAndScopesPermit(role, credential.scopes, permission)
+		// The same two routes also sign a visitor in to a first-party members site.
+		// Only that distinct OIDC request may proceed to the destination's membership check.
+		if refused && ok && credential.signedInPerson &&
+			(routeKey == "POST /oauth/consent" || routeKey == "POST /oauth/authorize") &&
+			oauth.IsEdgeSignInRequest(r) {
+			return false
+		}
 	}
 	if refused {
 		rolePermissionRefusalCounter.WithLabelValues(routeKey, string(permission)).Inc()
