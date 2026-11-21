@@ -73,6 +73,9 @@ import (
 
 // The harness's tunables (QD-702): each bound on a wait, and how the blocks run.
 type e2eHostsSettings struct {
+	// The most one test case may take from its process's start, every wait below bounded by what is left of it as
+	// well as by its own: the e2e conventions' 10 minutes.
+	CaseTimeout time.Duration
 	// How long a block's /status may take to answer as a test wants it, ready or merely up: a bound on a hang, never
 	// a pause the outcome rests on.
 	StatusTimeout time.Duration
@@ -117,6 +120,7 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 	run.HttpServer.KeepaliveDrainTimeout = 0
 	run.HttpServer.ShutdownTimeout = 30 * time.Second
 	return &e2eHostsSettings{
+		CaseTimeout:                10 * time.Minute,
 		StatusTimeout:              120 * time.Second,
 		StatusPollInterval:         50 * time.Millisecond,
 		StopTimeout:                90 * time.Second,
@@ -305,6 +309,8 @@ type e2eProcess struct {
 	settings      *e2eHostsSettings
 	credentials   *e2eCredentials
 	urnetworkEdge connect.Id
+	// CaseTimeout from the process's start
+	caseDeadline time.Time
 	// GET /status with no connection kept, so nothing of the client outlives a test.
 	client *http.Client
 }
@@ -318,12 +324,18 @@ func newE2eProcess(t testing.TB) *e2eProcess {
 		settings:      settings,
 		credentials:   newE2eCredentials(t, settings, time.Now()),
 		urnetworkEdge: connect.NewId(),
+		caseDeadline:  time.Now().Add(settings.CaseTimeout),
 		client:        &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
 	}
 	t.Cleanup(server.Testing_PushSidecarConfig(e2eSidecarYaml(self.urnetworkEdge)))
 	t.Cleanup(mcp.Testing_SetSealSecret(self.credentials.sealSecret))
 	t.Cleanup(oauth.Testing_SetIssuer(settings.ServiceTokenIssuer))
 	return self
+}
+
+// Fires once timeout has passed or the case's deadline has, whichever is first.
+func (self *e2eProcess) stepDeadline(timeout time.Duration) <-chan time.Time {
+	return time.After(min(timeout, time.Until(self.caseDeadline)))
 }
 
 // A loopback listener on a port the OS picks.
@@ -403,7 +415,7 @@ func (self *e2eProcess) status(host *e2eHost) (string, bool) {
 // past StatusTimeout.
 func (self *e2eProcess) awaitStatus(t testing.TB, host *e2eHost, what string, want func(status string) bool) string {
 	t.Helper()
-	deadline := time.After(self.settings.StatusTimeout)
+	deadline := self.stepDeadline(self.settings.StatusTimeout)
 	last := "no answer"
 	for {
 		if status, ok := self.status(host); ok {
@@ -417,7 +429,7 @@ func (self *e2eProcess) awaitStatus(t testing.TB, host *e2eHost, what string, wa
 		case <-host.done:
 			t.Fatalf("%s ended before its /status was %s: %v", host.name, what, host.err)
 		case <-deadline:
-			t.Fatalf("%s's /status was never %s; last %q", host.name, what, last)
+			t.Fatalf("%s's /status was never %s within its step's or the case's bound; last %q", host.name, what, last)
 		case <-time.After(self.settings.StatusPollInterval):
 		}
 	}
@@ -495,8 +507,8 @@ func (self *e2eProcess) stop(t testing.TB, host *e2eHost) {
 		if host.err != nil {
 			t.Fatalf("%s's Run returned %v", host.name, host.err)
 		}
-	case <-time.After(self.settings.StopTimeout):
-		t.Fatalf("%s's Run did not return within %v of its end", host.name, self.settings.StopTimeout)
+	case <-self.stepDeadline(self.settings.StopTimeout):
+		t.Fatalf("%s's Run did not return within its step's or the case's bound after its end", host.name)
 	}
 }
 
@@ -898,7 +910,7 @@ func (self *e2eProcess) openProcessPools(t testing.TB) {
 // that remain past GoroutineSettleTimeout.
 func (self *e2eProcess) awaitNoGoroutinesBeyond(t testing.TB, before map[uint64]string) {
 	t.Helper()
-	deadline := time.After(self.settings.GoroutineSettleTimeout)
+	deadline := self.stepDeadline(self.settings.GoroutineSettleTimeout)
 	for {
 		left := []string{}
 		for id, stack := range e2eGoroutines() {
