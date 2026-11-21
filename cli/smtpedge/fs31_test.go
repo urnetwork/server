@@ -381,7 +381,7 @@ sending_addresses:
 		t.Fatal(err)
 	}
 	keyFile := "issue_key_id: 1\nkeys:\n  - {id: 1, key: " + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32)) + "}\n"
-	if err := applyXUrRefKeys(config.Settings, []byte(keyFile)); err != nil {
+	if err := model.ApplySmtpXUrRefKeyFile(config.Settings, []byte(keyFile)); err != nil {
 		t.Fatal(err)
 	}
 	config.Settings.MxRefusedPrefixes = slices.DeleteFunc(slices.Clone(config.Settings.MxRefusedPrefixes), func(prefix netip.Prefix) bool {
