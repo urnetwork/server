@@ -1104,6 +1104,25 @@ func (self *T3Network) CreateRepo(ctx context.Context, creator *T3Device, kind p
 	return repo, nil
 }
 
+// device, a config writer of the network whose follower stands, saves source as the network's ACL document, as
+// `ur acl push` does once a person confirms its preview (§8.8): the plan over its verified state and the config head,
+// then the save with the plan's digest as a confirmed act, its base published through api; synced at the base's pin.
+// A base past §7.9's config_bases_per_min is refused 429 by api, which a caller waits out and saves again.
+func (self *T3Network) SaveAclPolicy(ctx context.Context, device *T3Device, source []byte) (*bridge.AuthPin, error) {
+	plan, err := device.Sidecar().PlanAclPolicy(ctx, source)
+	if err != nil {
+		return nil, fmt.Errorf("%s's ACL plan: %w", device.Name, err)
+	}
+	if err := plan.Tests.Err(); err != nil {
+		return nil, fmt.Errorf("%s's ACL document fails its tests: %w", device.Name, err)
+	}
+	pin, err := device.Sidecar().SaveAclPolicy(ctx, source, plan.Digest, sidecar.SidecarActConfirmed)
+	if err != nil {
+		return nil, fmt.Errorf("%s's ACL save: %w", device.Name, err)
+	}
+	return pin, self.Sync(ctx, pin.GetVersion())
+}
+
 // admin grants subject, a sidecar or a member, role on repoId by a RepoGrant it files (§8.8), synced at its entry.
 func (self *T3Network) Grant(ctx context.Context, admin *T3Device, repoId sidecar.Id, subject sidecar.Id, role protocol.RepoGrantRole) (*bridge.AuthPin, error) {
 	return self.FileStatement(ctx, admin, bridge.SignedType_SIGNED_REPO_GRANT, &protocol.RepoGrant{
@@ -1137,6 +1156,19 @@ func (self *T3Device) Follower() *sidecar.SidecarConfigFollower {
 	return self.follower
 }
 
+// The network's config heads as a device's follower reads them, with a ref the device saves a confirmed ACL document
+// through (sidecar.ConfirmedAclConfigRefProvider): the heads' ref signing as the device, which only a device the log
+// names a config writer may use (CheckConfigHeadWriter), and which runs no periodic fold, as a native host's
+// read-only follower with a ref dedicated to explicit ACL confirmation.
+type t3WorldConfigHeads struct {
+	*sidecartest.FakeConfigHeads
+	ref *sidecartest.FakeConfigHeadRef
+}
+
+func (self *t3WorldConfigHeads) ConfirmedAclConfigRef() sidecar.ConfigHeadRef {
+	return self.ref
+}
+
 // Trusts genesis and follows the log on the network's config heads with the device's key client, which the follower
 // hands each verified state, until it stands.
 func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) error {
@@ -1144,7 +1176,13 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 	if err := running.TrustFirstUse(genesis[:]); err != nil {
 		return fmt.Errorf("%s's anchor: %w", self.Name, err)
 	}
-	follower, err := running.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: self.Network.heads, Gkm: self.Gkm})
+	heads := &t3WorldConfigHeads{
+		FakeConfigHeads: self.Network.heads,
+		ref: self.Network.heads.ForSigner(running.Identity().SidecarId, func(purpose string, signedType bridge.SignedType, body []byte) (*bridge.Signed, error) {
+			return running.Sign(purpose, signedType, body, nil)
+		}),
+	}
+	follower, err := running.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads, Gkm: self.Gkm})
 	if err != nil {
 		return fmt.Errorf("%s's follower: %w", self.Name, err)
 	}

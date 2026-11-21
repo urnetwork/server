@@ -10,6 +10,10 @@
 //     first's, refused by its own client and by evs's 403 to its token;
 //   - mcp: a tools/list call with an access token the world's issuer minted for mcp's origin lists mcp's tools, and
 //     the same call with no token is answered 401 with the protected resource's challenge;
+//   - dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, as `ur acl push`
+//     does once confirmed (its base waiting out §7.9's one base a minute), writes smoke's TXT record in its zone through
+//     dns's api, since §21.7's probation publishes no address record for a new network, and the dns edge answers it
+//     signed over UDP; the second network's owner is refused the same name, and the edge still answers the first's;
 //   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, with no violation on
 //     api's side;
 //   - chaos: evs stopped mid-run and started again on its stores, after which every write reads back as it was
@@ -37,6 +41,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
+
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/protocol"
 
@@ -60,6 +66,13 @@ type worldSmokeSettings struct {
 	// How long the mcp call's access token lives: the issuer's own default is minted, this bounds nothing but the
 	// call's wait.
 	McpCallTimeout time.Duration
+	// The ACL document that grants the first network's members admin on the record's host, the host and the text its
+	// TXT record holds, and the text the second network's refused write names: one character-string each, so no space,
+	// which the API's presentation format reads as two.
+	DnsAclPolicy   string
+	DnsRecordHost  string
+	DnsRecordText  string
+	DnsForeignText string
 }
 
 func defaultWorldSmokeSettings() *worldSmokeSettings {
@@ -71,6 +84,10 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		McpToolsListBody:  `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 		McpToolNames:      []string{"providerLocations", "fetch"},
 		McpCallTimeout:    60 * time.Second,
+		DnsAclPolicy:      `{"grants": [{"src": ["autogroup:member"], "dst": ["dns:smoke"], "allow": ["admin"]}]}`,
+		DnsRecordHost:     "smoke",
+		DnsRecordText:     "e2e-world-smoke",
+		DnsForeignText:    "written-from-another-network",
 	}
 }
 
@@ -269,6 +286,45 @@ func TestE2eWorldSmoke(t *testing.T) {
 		}
 		if status, answer := worldCall(ctx, world, http.MethodPost, mcpOrigin+"/", "", settings.McpToolsListBody); status != http.StatusUnauthorized {
 			t.Fatalf("mcp answered a tools/list with no token %d, not 401: %s", status, answer)
+		}
+		cancel()
+
+		// dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, writes smoke's A
+		// record through dns's api, and the dns edge answers it signed; the second network's owner writes nothing there
+		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
+		if _, err := world.SaveAclPolicy(ctx, first, first.Owner(), settings.DnsAclPolicy); err != nil {
+			cancel()
+			world.FailProgress(t, "the dns grant", err, nil)
+		}
+		dnsClient, err := first.Owner().Sidecar().Dns()
+		if err != nil {
+			cancel()
+			t.Fatalf("%s's dns client: %v", first.Owner().Name, err)
+		}
+		zone, err := dnsClient.Zone(ctx)
+		if err != nil || zone.Apex() == "" || dns.CanonicalName(zone.Root) != dns.CanonicalName(world.HostsSettings().DnsRoot) {
+			cancel()
+			t.Fatalf("%s's zone: %+v, %v", first.Name, zone, err)
+		}
+		recordName := settings.DnsRecordHost + "." + zone.Apex()
+		// a TXT record: a new network is on §21.7's probation, which publishes no A, AAAA or CNAME
+		if _, err := world.SetDnsRecord(ctx, first.Owner(), &sidecar.DnsRecordUpsert{Name: recordName, Type: "TXT", Values: []string{settings.DnsRecordText}}, nil); err != nil {
+			cancel()
+			world.FailProgress(t, "the dns write", err, nil)
+		}
+		if answer, err := world.AwaitDnsAnswer(ctx, recordName, dns.TypeTXT, func(answer *dns.Msg) bool {
+			return dnsAnswerHoldsSignedTxt(answer, recordName, settings.DnsRecordText)
+		}, nil); err != nil {
+			cancel()
+			t.Fatalf("the dns edge's answer for %s: %v: %v", recordName, err, answer)
+		}
+		if _, err := world.SetDnsRecord(ctx, second.Owner(), &sidecar.DnsRecordUpsert{Name: recordName, Type: "TXT", Values: []string{settings.DnsForeignText}}, nil); err == nil {
+			cancel()
+			t.Fatalf("%s of %s wrote %s in %s's zone", second.Owner().Name, second.Name, recordName, first.Name)
+		}
+		if answer, err := world.DnsQuery(ctx, recordName, dns.TypeTXT, nil); err != nil || !dnsAnswerHoldsSignedTxt(answer, recordName, settings.DnsRecordText) {
+			cancel()
+			t.Fatalf("the dns edge answers %s with %v after a refused write: %v", recordName, answer, err)
 		}
 		cancel()
 

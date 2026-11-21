@@ -138,6 +138,9 @@ type WorldSettings struct {
 	// ids under: plain names of the world's own.
 	EdgeHost        string
 	EdgeEnvironment string
+	// How long a helper waits out api's 429 on a base or statement past §7.9's limits, its retry_after, before it
+	// gives up: a base a minute, so past one minute.
+	RateLimitWaitTimeout time.Duration
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -153,6 +156,7 @@ func DefaultWorldSettings() *WorldSettings {
 		StopTimeout:                 90 * time.Second,
 		EdgeHost:                    "e2e-edge-1",
 		EdgeEnvironment:             "e2e",
+		RateLimitWaitTimeout:        3 * time.Minute,
 	}
 }
 
