@@ -204,25 +204,100 @@ func (self *World) runSockets(ctx context.Context, listeners *worldBlockListener
 	return socketshost.Run(ctx, &socketshost.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }
 
-// tlsedge on the world's Redis and its store in the test's Postgres (model.NewTlsEdgeStore), its four ports on
-// listeners of their own behind its PROXY listener; its K platform clients and the Quota faked (the file's header).
-func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListeners) error {
-	hostsSettings := self.HostsSettings()
+// tlsedge.yml for the hosts' root, the env's one block.
+func worldTlsEdgeSettings(hostsSettings *e2eHostsSettings) *tlsedgeservice.TlsEdgeSettings {
 	tlsEdge := tlsedgeservice.DefaultTlsEdgeSettings()
 	tlsEdge.Root = hostsSettings.TlsEdgeRoot
 	tlsEdge.Blocks = 1
+	return tlsEdge
+}
+
+// One run of an edge block's platform client source, as its main builds it on the edge bearer: api's edge client
+// route through T3Api for clientCount clients of block on the world's edge host at slot 0, each client's jwt and
+// sockets token minted in urnetwork-edge. It runs until the returned end, which the run calls once its Run has
+// returned, so the drain still has its credentials.
+func (self *World) edgeClientSource(block string, clientCount int) (*server.PlatformClientSource, func(), error) {
+	settings := server.DefaultPlatformClientSourceSettings()
+	settings.ClientCount = clientCount
+	ctx, cancel := context.WithCancel(context.Background())
+	source, err := server.NewPlatformClientSource(ctx, &server.PlatformClientSourceArgs{
+		ApiUrl:     self.apiOrigin(),
+		Block:      block,
+		Host:       self.settings.EdgeHost,
+		Slot:       0,
+		Bearer:     self.bearer(server.InternalGateCallerEdge),
+		HttpClient: self.apiClient(),
+		Settings:   settings,
+	})
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	return source, func() {
+		source.Close()
+		cancel()
+	}, nil
+}
+
+// How an edge block's dialer sends its Finds to sockets: at sockets' origin through the world's lb, on the first of
+// its clients' sockets tokens.
+func (self *World) socketFindArgs(source *server.PlatformClientSource) *sidecar.SocketFindHttpArgs {
+	find := source.SocketFindHttpArgs(self.t3.Api().ServiceOrigin("sockets"))
+	find.Transport = self.t3.Api().Transport()
+	return find
+}
+
+// tlsedge on the world's Redis and its store in the test's Postgres (model.NewTlsEdgeStore), its four ports on
+// listeners of their own behind its PROXY listener, and its K platform clients in urnetwork-edge on the exchange,
+// minted by api's edge client route on the edge bearer, each Find at sockets' origin; the Quota faked (the file's
+// header).
+func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListeners) error {
+	hostsSettings := self.HostsSettings()
+	tlsEdge := worldTlsEdgeSettings(hostsSettings)
 	settings := tlsedgehost.DefaultHostSettings(tlsEdge)
 	settings.Run = hostsSettings.Run
-	clients := newE2eEdgeClients(tlsEdge.Clients)
+	source, endSource, err := self.edgeClientSource("tlsedge", tlsEdge.Clients)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endSource()
 	deps := &tlsedgehost.HostDeps{
-		Quota: self.t3.Net().Fakes().Quota,
-		Store: model.NewTlsEdgeStore(nil),
+		Quota:  self.t3.Net().Fakes().Quota,
+		Source: source,
+		Store:  model.NewTlsEdgeStore(nil),
 		NewClients: func(ctx context.Context) (tlsedgehost.HostClients, error) {
-			return clients, nil
+			pool, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
+				Source:   source,
+				Platform: self.t3.Platform(),
+				Settings: settings.Clients,
+				Log:      tlsedgehost.HostLogger(),
+			})
+			if err != nil {
+				return nil, err
+			}
+			return pool, nil
 		},
 		NewDial: func(clients tlsedgehost.HostClients) (tlsedgehost.HostSocketDial, error) {
+			dialer, err := sidecar.NewSocketEdgeDialer(&sidecar.SocketEdgeDialerArgs{
+				Clients: clients.Clients(),
+				Find:    self.socketFindArgs(source),
+				Settings: &sidecar.SocketEdgeDialSettings{
+					FindTimeout:   tlsEdge.FindTimeout,
+					FindCount:     tlsEdge.FindMaxCount,
+					AcceptTimeout: tlsEdge.AcceptTicketTimeout,
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
 			return func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (tlsedgeservice.TlsEdgeStream, error) {
-				return nil, errE2eNoListener
+				stream, err := dialer.Dial(ctx, request)
+				if err != nil {
+					// never a typed nil as the engine's stream
+					return nil, err
+				}
+				return stream, nil
 			}, nil
 		},
 	}
@@ -267,10 +342,18 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 	}
 	settings := smtpedgehost.DefaultHostSettings(config)
 	settings.Run = hostsSettings.Run
-	clients := newE2eEdgeClients(settings.Clients.ClientCount)
+	source, endSource, err := self.edgeClientSource("smtpedge", settings.Clients.ClientCount)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endSource()
+	registrations := source.SocketPlatformRegistrationsArgs(self.t3.Api().ServiceOrigin("sockets"))
+	registrations.Transport = self.t3.Api().Transport()
 	quota := self.t3.Net().Fakes().Quota
 	deps := &smtpedgehost.HostDeps{
 		Quota:      quota,
+		Source:     source,
 		Abuse:      model.NewAbuseGate(ctx, model.NewAbuseHardDenySnapshot(ctx, nil), nil),
 		Store:      model.NewSmtpEdgeStore(nil),
 		Projection: projection,
@@ -280,34 +363,62 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 		Dialer:     world,
 		Verifier:   sidecartest.NewFakeSmtpProofVerifier(nil),
 		NewClients: func(ctx context.Context) (smtpedgehost.HostClients, error) {
-			return clients, nil
+			return smtpedgehost.NewEdgeClients(ctx, sidecar.EdgeClientPoolArgs{
+				Source:   source,
+				Platform: self.t3.Platform(),
+				Settings: settings.Clients,
+				Log:      smtpedgehost.HostLogger(),
+			})
 		},
-		Registrations: &sidecar.SocketPlatformRegistrationsArgs{
-			SocketsUrl: self.t3.Api().ServiceOrigin("sockets"),
-			Bearer: func(context.Context, sidecar.Id) (string, error) {
-				return "", errors.New("no platform client of the world's holds a sockets token")
-			},
-		},
+		Registrations: registrations,
 	}
 	return smtpedgehost.Run(ctx, &smtpedgehost.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }
 
 // mxedge's router on the world's Postgres and Redis and its store (model.NewMxEdgeStore), TCP 25 on a listener of its
-// own; its K platform clients, its PTR and host lookups and the Quota faked (the file's header).
+// own, and its K platform clients in urnetwork-edge on the exchange, minted by api's edge client route on the edge
+// bearer, each Find at sockets' origin; its PTR and host lookups and the Quota faked (the file's header).
 func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockListeners) error {
 	settings := e2eMxEdgeSettings(self.HostsSettings())
-	clients := newE2eEdgeClients(settings.MxEdge.Clients)
+	mxEdge := settings.MxEdge
+	source, endSource, err := self.edgeClientSource("mxedge", mxEdge.Clients)
+	if err != nil {
+		listeners.close()
+		return err
+	}
+	defer endSource()
+	poolSettings := mxedgehost.DefaultRouterSettings(mxEdge).Clients
 	deps := &mxedgehost.RouterDeps{
 		Quota:       self.t3.Net().Fakes().Quota,
+		Source:      source,
 		Store:       model.NewMxEdgeStore(nil),
 		StoreGroups: mxedgehost.RouterStoreGroups(),
 		NewClients: func(ctx context.Context) (mxedgehost.RouterClients, error) {
-			return clients, nil
+			pool, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
+				Source:   source,
+				Platform: self.t3.Platform(),
+				Settings: poolSettings,
+				Log:      mxedgehost.HostLogger(),
+			})
+			if err != nil {
+				return nil, err
+			}
+			return pool, nil
 		},
 		NewDial: func(clients mxedgehost.RouterClients) (mxedgehost.RouterSocketDial, error) {
-			return func(ctx context.Context, request *sidecar.SocketEdgeDialRequest) (*sidecar.SocketEdgeStream, error) {
-				return nil, errE2eNoListener
-			}, nil
+			dialer, err := sidecar.NewSocketEdgeDialer(&sidecar.SocketEdgeDialerArgs{
+				Clients: clients.Clients(),
+				Find:    self.socketFindArgs(source),
+				Settings: &sidecar.SocketEdgeDialSettings{
+					FindTimeout:   mxEdge.FindTimeout,
+					FindCount:     mxEdge.FindCount,
+					AcceptTimeout: mxEdge.AcceptTicketTimeout,
+				},
+			})
+			if err != nil {
+				return nil, err
+			}
+			return dialer.Dial, nil
 		},
 		LookupPtr: func(ctx context.Context, sender netip.Addr) ([]string, error) {
 			return nil, errors.New("the test stack resolves no PTR")

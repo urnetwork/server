@@ -17,6 +17,11 @@
 //	          its origin through T3Api.ServeService by the world's lb (worldLb: http over loopback to the block, with
 //	          X-UR-Forwarded-For set as warp's nginx sets it), and its direct ports on listeners of their own:
 //	          tlsedge's TLS behind its PROXY listener, smtpedge's and mxedge's SMTP, dnsedge's DNS on TCP and UDP
+//	edges     tlsedge, smtpedge and mxedge's router hold their K platform clients in urnetwork-edge, a network the world
+//	          makes: each run's server.PlatformClientSource asks api's edge client route on the edge bearer for each
+//	          client's jwt and sockets token, under the world's edge.yml, and sidecar.EdgeClientPool opens the clients
+//	          on the exchange, their Finds and registrations at sockets' origin, so each edge reads ready as in
+//	          production
 //	clients   sidecart3's T3Network and T3Device: full sidecar.Sidecar cores on memory instances, enrolled through
 //	          T3Api from their owners' auth keys, Online on the exchange, their service origins at the blocks
 //
@@ -34,9 +39,6 @@
 //     answers an offset of zero;
 //   - the Quota of every block: sidecartest's FakeQuota, the T3World's Net's, which funds each network; api's internal
 //     quota surface over a funded network's ledgers is not wired here yet;
-//   - the edges' platform clients (tlsedge, smtpedge, mxedge's router): fixed client ids with no connect client, so no
-//     edge reaches a listener and smtpedge stays not ready; api's edge client route over urnetwork-edge's clients on
-//     the exchange is not wired here yet;
 //   - smtpedge's MX world (resolver, PTR, dialer, proof verifier): sidecartest's MxWorld and FakeSmtpProofVerifier,
 //     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
 //     answer nothing for the same reason;
@@ -133,6 +135,10 @@ type WorldSettings struct {
 	InternalGateBearerByteCount int
 	// How long a block may take to stop, its Run returning, when the world closes or chaos stops it.
 	StopTimeout time.Duration
+	// The host every edge block's platform clients name, as edge.yml lists it, and the environment api derives their
+	// ids under: plain names of the world's own.
+	EdgeHost        string
+	EdgeEnvironment string
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -140,14 +146,14 @@ func DefaultWorldSettings() *WorldSettings {
 	return &WorldSettings{
 		Hosts:  defaultE2eHostsSettings(),
 		Blocks: WorldBlockNames(),
-		StartStatus: map[string]string{
-			WorldBlockSmtpedge: worldStatusUp,
-		},
+		StartStatus: map[string]string{},
 		NetworkCount:                2,
 		ClientsPerNetwork:           3,
 		EvsInstanceFormat:           sidecar.EvsRepoFormat1,
 		InternalGateBearerByteCount: server.DefaultInternalGateSettings().BearerByteCount,
 		StopTimeout:                 90 * time.Second,
+		EdgeHost:                    "e2e-edge-1",
+		EdgeEnvironment:             "e2e",
 	}
 }
 
@@ -324,18 +330,40 @@ func (self *World) installInternalGate() error {
 		return err
 	}
 	urnetworkEdge := self.urnetworkEdge
+	edgeConfig, err := server.ParseEdgeClientsConfig([]byte(self.edgeClientsYaml()), nil)
+	if err != nil {
+		return err
+	}
+	environment := self.settings.EdgeEnvironment
 	routes := slices.Concat(
 		handlers.NewQuotaServiceHandlers(nil, &handlers.QuotaServiceDeps{Verifier: verifier}).Routes(),
 		handlers.NewInternalGateProjectionHandlers(&handlers.InternalGateProjectionDeps{Verifier: verifier}).Routes(),
 		handlers.NewInternalGateEdgeClientHandlers(&handlers.InternalGateEdgeClientDeps{
 			Verifier:    verifier,
+			Config:      func() (*server.EdgeClientsConfig, error) { return edgeConfig, nil },
 			EdgeNetwork: func() (server.Id, bool) { return urnetworkEdge, true },
+			Environment: func() (string, error) { return environment, nil },
 		}).Routes(),
 		handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{Verifier: verifier}).Routes(),
 	)
 	self.t3.Api().ServeInternalGate(router.NewRouter(self.t3.Context(), routes))
 	self.closes = append(self.closes, func() { self.t3.Api().ServeInternalGate(nil) })
 	return nil
+}
+
+// edge.yml as api reads it for the world: the exchange's url, and each edge block's K clients on the world's one edge
+// host.
+func (self *World) edgeClientsYaml() string {
+	hostsSettings := self.HostsSettings()
+	host := self.settings.EdgeHost
+	lines := []string{
+		"platform_url: " + self.t3.Exchange().PlatformUrl(),
+		"blocks:",
+		fmt.Sprintf("  tlsedge: {clients: %d, hosts: [%s]}", worldTlsEdgeSettings(hostsSettings).Clients, host),
+		fmt.Sprintf("  smtpedge: {clients: %d, hosts: [%s]}", sidecar.DefaultEdgeClientPoolSettings().ClientCount, host),
+		fmt.Sprintf("  mxedge: {clients: %d, hosts: [%s]}", e2eMxEdgeSettings(hostsSettings).MxEdge.Clients, host),
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // The bearer caller sends to api's internal gate.
