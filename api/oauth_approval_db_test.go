@@ -104,10 +104,10 @@ func TestOauthApprovalNeedsASignedInUser(t *testing.T) {
 }
 
 // A client registered with a javascript: redirect before the redirect uri
-// rules, as three were, cannot use it. The consent page navigates to the
-// redirect on Allow and on Cancel, so the javascript ran in ur.io's origin,
-// where the session token is. Now the screen's request is refused, the page has
-// nothing to cancel to, and Allow returns no redirect.
+// rules cannot use it. The consent page navigates to the redirect on Allow and
+// on Cancel, so the javascript ran in ur.io's origin, where the session token
+// is. Now the screen's request is refused, the page has nothing to cancel to,
+// and Allow returns no redirect.
 func TestOauthConsentRefusesARegisteredJavascriptRedirect(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())

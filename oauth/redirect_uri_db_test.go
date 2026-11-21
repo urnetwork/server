@@ -59,9 +59,9 @@ func TestRegisterClientRefusesSchemesTheBrowserRuns(t *testing.T) {
 	})
 }
 
-// A client registered with a javascript: redirect before the rules, as three
-// were, cannot use it: the consent screen's validation and the approval refuse
-// it, and a code minted for it before the rules is not exchanged.
+// A client registered with a javascript: redirect before the rules cannot use
+// it: the consent screen's validation and the approval refuse it, and a code
+// minted for it before the rules is not exchanged.
 func TestRegisteredJavascriptRedirectIsRefusedAtEveryStep(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
