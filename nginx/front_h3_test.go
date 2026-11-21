@@ -1,7 +1,7 @@
 package nginx
 
 // The front's api handler over a real http3 server, for what depends on
-// the vendored http3 (third_party/quic-go): the forwarder's per-read body
+// URnetwork's http3 (../quic-go): the forwarder's per-read body
 // timeout reaches an h3 request's stream through http.ResponseController.
 
 import (
@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // On h3 the forwarder bounds each read of a request body by

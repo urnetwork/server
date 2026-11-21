@@ -10,7 +10,7 @@ package nginx
 // connection before it canceled the stream's context.
 //
 // The errors here are the ones real servers return: Go's own TCP, h1 and h2
-// stacks and the vendored http3 (third_party/quic-go), each read through a
+// stacks and URnetwork's http3 (../quic-go), each read through a
 // handler while a raw client resets at a barrier, the handler's first read
 // of the body. Each is then classified with a context that never ends, so
 // the test shows what the error alone says.
@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )

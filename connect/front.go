@@ -62,7 +62,7 @@ import (
 	"sync"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
+	quic "github.com/urnetwork/quic-go"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"

@@ -40,7 +40,6 @@ require (
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
-	github.com/quic-go/quic-go v0.61.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v82 v82.5.1
@@ -50,6 +49,7 @@ require (
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/proxy v0.0.0
+	github.com/urnetwork/quic-go v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
 	github.com/vedhavyas/go-subkey/v2 v2.0.0
@@ -184,7 +184,6 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/urnetwork/goidenticons v0.0.0 // indirect
-	github.com/urnetwork/quic-go v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -246,11 +245,6 @@ replace gvisor.dev/gvisor => ../gvisor
 // The slow write timer arms a new timer per write instead of resetting the last
 // one while it is still in the runtime's timer heap (third_party/pgx/URNETWORK.md).
 replace github.com/jackc/pgx/v5 => ./third_party/pgx
-
-// The connection's run loop timer keeps a pending unchanged deadline and arms a
-// new timer for another, instead of resetting one still in the runtime's timer
-// heap (third_party/quic-go/URNETWORK.md).
-replace github.com/quic-go/quic-go => ./third_party/quic-go
 
 // The pool can skip its per-checkout socket check for a connection put back
 // within a window, SkipConnCheckWithin, which the pools with command retries

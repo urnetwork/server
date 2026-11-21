@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // The front's request count of the api service with no block, by protocol

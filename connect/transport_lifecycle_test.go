@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/quic-go"
 	"github.com/urnetwork/server"
 )
 

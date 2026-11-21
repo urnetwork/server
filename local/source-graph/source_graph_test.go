@@ -176,7 +176,7 @@ func TestReleaseSourceGraphLockOmitsRetiredSiblings(t *testing.T) {
 }
 
 func TestReleaseSourceGraphPinsRemainingServiceSiblings(t *testing.T) {
-	for _, sibling := range []string{"proxy", "glog", "goidenticons", "userwireguard"} {
+	for _, sibling := range []string{"proxy", "glog", "goidenticons", "userwireguard", "quic-go"} {
 		t.Run(sibling, func(t *testing.T) {
 			requireReviewedSibling(t, "github.com/urnetwork/"+sibling, sibling, "urnetwork/"+sibling, "")
 		})

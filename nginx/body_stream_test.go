@@ -15,7 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // A streamed body's first read keeps a declared body it returns whole, as

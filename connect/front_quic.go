@@ -45,10 +45,10 @@ package connect
 // front's limits: the cap bounds how many one address holds, and the h3
 // server resets a request stream whose HEADERS don't arrive within the
 // client header timeout, reading them into a buffer that grows with what
-// arrives (third_party/quic-go/URNETWORK.md). Without the cap, an address
-// could hold any number of connections; without the timeout, each could
-// hold up to a hundred streams that never send their headers, for as long as
-// its client acks the public config's PINGs, which keep the QUIC idle
+// arrives (quic-go's URNETWORK.md, ../quic-go). Without the cap, an
+// address could hold any number of connections; without the timeout, each
+// could hold up to a hundred streams that never send their headers, for as
+// long as its client acks the public config's PINGs, which keep the QUIC idle
 // timeout from ever firing.
 //
 // Each api connection gets an http3.Server of its own. The drain shuts each
@@ -58,8 +58,8 @@ package connect
 // graceful accept loop spins, one GOAWAY writer per pass, for as long as a
 // connection is closed but not done, whether its client closed it, its idle
 // timeout did or its transport was destroyed: the old alt's exit burst of
-// 700k goroutines (LBALT.md §3.3, D12). The vendored http3 ends the loop
-// there instead (third_party/quic-go/URNETWORK.md), so each api connection
+// 700k goroutines (LBALT.md §3.3, D12). URnetwork's http3 ends the loop
+// there instead (quic-go's URNETWORK.md), so each api connection
 // gets one GOAWAY however it closes. With one server per connection the
 // bounded close of one stuck handler holds nothing else, and no connection
 // waits on another's server.
@@ -76,8 +76,8 @@ import (
 	"sync"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	quic "github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"

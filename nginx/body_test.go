@@ -20,7 +20,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // A body reader that hands out its bytes in chunks and counts what was

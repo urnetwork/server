@@ -4,8 +4,8 @@ package connect
 import (
 	"testing"
 
-	quic "github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
+	quic "github.com/urnetwork/quic-go"
 )
 
 func TestConnectH3InitialDatagramPathByteCountUsesQuicLimit(t *testing.T) {

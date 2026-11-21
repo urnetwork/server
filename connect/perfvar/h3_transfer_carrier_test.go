@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
+	quic "github.com/urnetwork/quic-go"
 )
 
 const (

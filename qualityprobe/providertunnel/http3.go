@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 
 	"github.com/urnetwork/connect"
 )

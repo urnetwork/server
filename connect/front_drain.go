@@ -31,7 +31,7 @@ package connect
 // the h3 servers before any transport. The accept loop that spun there spins
 // for any connection that closes during a graceful shutdown, a client closing
 // after its GOAWAY included, so the vendored http3 ends it instead, one GOAWAY
-// per connection (third_party/quic-go/URNETWORK.md).
+// per connection (quic-go's URNETWORK.md, ../quic-go).
 
 import (
 	"context"
