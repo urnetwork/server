@@ -1050,6 +1050,47 @@
           "legendFormat": "{{kind}}"
         }
       ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "exchange frames per socket call, by op and direction",
+      "description": "Exchange link frames over socket calls: sent, frames a write or writev carries; received, frames a read of the link's buffered reader takes. A call that waits in the poller is still one call (LBALTOPT2 R21).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op, direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (op, direction) (rate(urnetwork_connect_exchange_io_calls_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{op}} {{direction}}"
+        }
+      ]
     }
   ]
 }
