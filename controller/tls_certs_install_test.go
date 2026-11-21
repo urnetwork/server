@@ -6,12 +6,15 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
@@ -275,6 +278,9 @@ func newTlsInstallTestWorld(t *testing.T) *tlsInstallTestWorld {
 			return world.labels[networkId], world.aliases[networkId], nil
 		},
 		ScopeOf: func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
+			if snapshot.Config != nil {
+				return tlsCertScopeOf(snapshot, sidecarId)
+			}
 			scope, ok := world.scopes[sidecarId]
 			return scope, ok
 		},
@@ -284,6 +290,87 @@ func newTlsInstallTestWorld(t *testing.T) *tlsInstallTestWorld {
 	})
 	t.Cleanup(world.install.Close)
 	return world
+}
+
+// The fixture serves one synthetic projection to the normal signed, rows-only verifier.
+type tlsInstallScopeRows struct {
+	sidecar.ConfigNoRowsSource
+	rows []byte
+}
+
+func (self tlsInstallScopeRows) Rows(networkId sidecar.Id, rowsSha256 []byte) ([]byte, error) {
+	return self.rows, nil
+}
+
+// An authenticated cert-order call uses the consented device's scope from a signed projection. The same
+// caller, CSR key and grant cannot order the network's wildcard.
+func TestTlsCertOrderUsesSignedScopeOwnership(t *testing.T) {
+	world := newTlsInstallTestWorld(t)
+	cluster := sidecartest.NewNet(world.ctx, nil)
+	defer cluster.Close()
+	tier, err := cluster.AdmissionTier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tier.AclCompile = sidecartest.AclAdmissionCompile
+	network := sidecartest.NewAdmissionNet(t, tier)
+	defer network.Close()
+	memberId, member := network.ConsentedMember("receiver")
+	network.SaveAclPolicy([]byte(`{"grants":[{"src":["autogroup:member"],"dst":["sock:smtp/*"],"allow":["listen"]}]}`), nil)
+	reader := network.ForkedReader(true)
+	_, raw := network.BaseKeepingTheFold(network.Owner(), nil)
+	rows := &bridge.ProjectionRows{}
+	if err := proto.Unmarshal(raw, rows); err != nil {
+		t.Fatal(err)
+	}
+	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "crew", Owner: &bridge.TeamScopeRow_MemberId{MemberId: memberId.Bytes()}}}
+	raw, err = (proto.MarshalOptions{Deterministic: true}).Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	signed, _ := network.BaseKeepingTheFold(network.Owner(), func(header *bridge.ProjectionHeader) {
+		header.RowsSha256 = digest[:]
+		header.RowsByteCount = uint32(len(raw))
+	})
+	entry, err := proto.Marshal(&bridge.AuthEntry{
+		NetworkId: network.NetworkId().Bytes(), N: network.Tip().GetVersion() + 1, PrevChain: network.Tip().GetChain(),
+		Kind: bridge.AuthEntryKindBase, TimeMs: network.Clock().Now().UnixMilli(), Body: signed,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdicts, err := reader.ApplyRun([][]byte{entry}, tlsInstallScopeRows{rows: raw})
+	if err != nil || len(verdicts) != 1 || !verdicts[0].Accepted() {
+		t.Fatalf("signed scope projection: %v, %v", verdicts, err)
+	}
+	config := reader.State()
+	acl, err := config.Acl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	networkId := network.NetworkId()
+	world.labels[networkId] = "network"
+	world.abuse.Set(connect.Id(networkId), sidecar.AbuseStandingStandard, true)
+	world.states.install(networkId, &sidecar.AclGateSnapshot{Pin: config.Pin(), Acl: acl, Config: config})
+	world.on = true
+	if !world.install.Sync(world.ctx) {
+		t.Fatalf("certificates unavailable: %v", world.lines)
+	}
+	device := world.tlsTestWorld.device(networkId, "network")
+	device.sidecarId, device.identityKey = member.SidecarId, member.Key
+	device.token = world.token(device, TlsCertsAudience)
+	scopeNames, err := sidecar.TlsIdentifierSet(tlsTestRoot, "network", "crew", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := TlsCertOrder(world.ctx, device.token, world.orderArgs(device, scopeNames))
+	if err != nil || result.State != sidecar.TlsCertStateQueued {
+		t.Fatalf("the signed scope's identifier set: %+v, %v", result, err)
+	}
+	if _, err := world.order(device); !tlsTestStatus(err, "400") {
+		t.Fatalf("the network set from the same scoped device: %v", err)
+	}
 }
 
 // A network in good standing with a label, and no state loaded yet.
@@ -632,14 +719,18 @@ func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
 
 // TLS-M6-03: a Team scope's device orders its scope's pair alone, granted by its scope's hosts; its CSR for the
 // network's pair is refused, as a network device's CSR for a scope's pair is; and a member scope's device that is no
-// consented device of the member is granted nothing. With no scope source a device is the network's (tlsCertScopeOf).
+// consented device of the member is granted nothing. An unloaded ownership projection withholds every set.
 func TestTlsCertsInstallSubjectGivesAScopeDeviceItsScopePairAlone(t *testing.T) {
 	world := newTlsInstallTestWorld(t)
 	network := world.network("acme", "shop")
 	scoped := network.device([]string{"app.team", "tls/443/app.team"}, tlsInstallTestPublish...)
 	networkDevice := network.device(tlsInstallTestImplicitTargets, tlsInstallTestPublish...)
 	unconsented := network.device([]string{"app.crew", "tls/443/app.crew"}, tlsInstallTestPublish...)
+	scopedMail := network.device([]string{"smtp/25/mx.team"}, protocol.AclAction_ACL_ACTION_LISTEN)
+	wrongMail := network.device([]string{"smtp/25/mx"}, protocol.AclAction_ACL_ACTION_LISTEN)
 	network.load()
+	world.scopes[scopedMail.sidecarId] = sidecar.AclScope{Label: "team"}
+	world.scopes[wrongMail.sidecarId] = sidecar.AclScope{Label: "team"}
 	world.scopes[scoped.sidecarId] = sidecar.AclScope{Label: "team"}
 	world.scopes[unconsented.sidecarId] = sidecar.AclScope{Label: "crew", MemberId: sidecar.NewId()}
 	world.on = true
@@ -668,8 +759,14 @@ func TestTlsCertsInstallSubjectGivesAScopeDeviceItsScopePairAlone(t *testing.T) 
 	if _, err := world.order(unconsented); !tlsTestStatus(err, "403") {
 		t.Fatalf("an unconsented member scope device's order answered %v", err)
 	}
-	if rows := world.store.Rows(); len(rows) != 2 {
-		t.Fatalf("%d rows for two granted orders", len(rows))
+	if result, err := TlsCertOrder(world.ctx, scopedMail.token, world.orderArgs(scopedMail, scopeSet)); err != nil || result.State != sidecar.TlsCertStateQueued {
+		t.Fatalf("mail in its own scope: %+v, %v", result, err)
+	}
+	if _, err := TlsCertOrder(world.ctx, wrongMail.token, world.orderArgs(wrongMail, scopeSet)); !tlsTestStatus(err, "403") {
+		t.Fatalf("the network MX grant gave a scoped certificate: %v", err)
+	}
+	if rows := world.store.Rows(); len(rows) != 3 {
+		t.Fatalf("%d rows for three granted orders", len(rows))
 	}
 }
 
@@ -687,7 +784,7 @@ func TestTlsCertSubjectIdentifierSet(t *testing.T) {
 	if _, err := tlsCertSubjectIdentifierSet(tlsTestRoot, "acme", sidecar.AclScope{}, true, nil); err == nil {
 		t.Fatal("a scope with no label gave a set")
 	}
-	if _, ok := tlsCertScopeOf(nil, sidecar.NewId()); ok {
-		t.Fatal("the default scope source placed a device in a scope")
+	if scope, scoped := tlsCertScopeOf(nil, sidecar.NewId()); !scoped || scope.Label != "" {
+		t.Fatal("a missing projection must withhold every identifier set")
 	}
 }
