@@ -646,7 +646,7 @@ func (self *s1Network) approveSignedInBrowsers(ctx context.Context, signer *side
 	}
 	for _, terms := range []sidecar.BrowserAdmissionTerms{{Mode: sidecar.BrowserAdmissionPage},
 		{Mode: sidecar.BrowserAdmissionBurner, MailboxId: mailbox, NotAfterMs: time.Now().Add(10 * time.Minute).UnixMilli()}} {
-		if err := self.confirmSignedInBrowser(ctx, signer, client, genesis, terms, post); err != nil {
+		if err := self.confirmSignedInBrowser(ctx, signer, client, heads, genesis, terms, post); err != nil {
 			return err
 		}
 	}
@@ -655,7 +655,7 @@ func (self *s1Network) approveSignedInBrowsers(ctx context.Context, signer *side
 
 // Each candidate consumes its own code, mints its marked client, binds its keys and independently
 // computes the safety number. Only the native signer's confirmed terms may appear in the verified log.
-func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidecar.Sidecar, client *sidecar.ConfigClient, genesis [sha256.Size]byte, terms sidecar.BrowserAdmissionTerms, post func(string, string, any, any) error) error {
+func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidecar.Sidecar, client *sidecar.ConfigClient, heads sidecar.ConfigHeadReader, genesis [sha256.Size]byte, terms sidecar.BrowserAdmissionTerms, post func(string, string, any, any) error) error {
 	memberId := sidecar.Id(self.userId)
 	burner := terms.Mode == sidecar.BrowserAdmissionBurner
 	code := &model.AuthCodeCreateResult{}
@@ -749,6 +749,25 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 	if !client.Authority().Consented(id, memberId) || row.GetOwnerConfirmedAt() == 0 || !bytes.Equal(row.GetOwnerConfirmSigner(), signer.Identity().SidecarId.Bytes()) ||
 		row.GetEphemeral() || row.GetCapabilities() != uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_READ_ONLY) {
 		return errors.New("the verified log lacks the page's exact read-only owner confirmation")
+	}
+	pageFollower, err := page.Sidecar().FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads})
+	if err != nil {
+		return err
+	}
+	if _, err := pageFollower.WaitStanding(ctx); err != nil {
+		return err
+	}
+	if err := page.Sidecar().Logout(ctx); err != nil {
+		return fmt.Errorf("the read-only page could not sign out: %w", err)
+	}
+	if err := client.CatchUp(ctx); err != nil {
+		return err
+	}
+	if client.State().SidecarRow(id).GetRevokedAt() == 0 {
+		return errors.New("the page's self-revocation never reached the log")
+	}
+	if _, err := model.FindActiveClientNetwork(ctx, server.Id(identity.ClientId)); !errors.Is(err, model.ErrActiveClientNotFound) {
+		return fmt.Errorf("the page client still stood after signing out: %v", err)
 	}
 	return nil
 }
