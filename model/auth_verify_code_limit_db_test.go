@@ -462,6 +462,38 @@ func TestVerifyCodeWrongTriesOfOneNetworkAreBounded(t *testing.T) {
 	})
 }
 
+// Only wrong tries count toward a code's death. A right code that is refused
+// after it is compared, here a code sent to the account's phone and tried on
+// its email, gives its try back: it is tried more often than the limit and
+// still verifies the phone.
+func TestVerifyCodeRightCodeRefusedLaterKeepsItsTries(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		sources := &verifyCodeTestSources{ctx: ctx}
+		_, userId, signed, byJwt := emailClaimSeedphraseAccount(t, ctx)
+		phone := verifyCodeTestPhone()
+		normalPhone, _ := NormalUserAuth(phone)
+		email := emailClaimTestAddress("refused-later")
+		emailClaimAddAuth(t, ctx, byJwt, phone, "own-password")
+		emailClaimAddAuth(t, ctx, byJwt, email, "own-password")
+
+		phoneCode := emailClaimCode(t, ctx, sources.signedIn(signed), normalPhone)
+		for i := 0; i < VerifyCodeTryLimit+1; i++ {
+			result := emailClaimVerify(t, sources.signedIn(signed), email, phoneCode)
+			if result.Network != nil || result.Error == nil || result.Error.Message != "Invalid code." {
+				t.Fatalf("try %d of the phone's code on the email was answered %+v", i+1, result)
+			}
+		}
+		result := emailClaimVerify(t, sources.signedIn(signed), normalPhone, phoneCode)
+		if result.Error != nil || result.Network == nil {
+			t.Fatalf("after %d tries on the email the phone's code no longer verifies the phone: %+v", VerifyCodeTryLimit+1, result)
+		}
+		if count := countRows(ctx, `SELECT COUNT(*) FROM network_user_auth_password WHERE user_id = $1 AND user_auth = $2 AND verified`, userId, normalPhone); count != 1 {
+			t.Fatalf("the phone was not verified")
+		}
+	})
+}
+
 // Tries made at once each take one of the code's tries before any compares
 // its guess, so however many arrive together, the code is killed once, by its
 // fifth try, and its address is struck once: the next code killed is the

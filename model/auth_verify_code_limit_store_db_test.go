@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -87,8 +88,9 @@ func TestVerifyCodeTriesAreTakenBeforeTheGuessIsCompared(t *testing.T) {
 	})
 }
 
-// A guess the try finds right gives its places in the caller's budgets back:
-// right codes do not spend a client network's wrong tries.
+// A guess the try finds right gives back its places in the caller's budgets
+// and its try of the code: right codes spend neither a client network's wrong
+// tries nor the code's.
 func TestVerifyCodeRightGuessGivesBackItsPlaces(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -116,6 +118,16 @@ func TestVerifyCodeRightGuessGivesBackItsPlaces(t *testing.T) {
 			})
 			return count
 		}
+		triesKey := fmt.Sprintf("%s{code_%s}.tries", verifyCodeLimitKeyPrefix, liveCode.userAuthVerifyId)
+		tries := func() int64 {
+			var count int64
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				count, err = r.Get(ctx, triesKey).Int64()
+				server.Raise(err)
+			})
+			return count
+		}
 
 		limits := newVerifyCodeTryLimits(caller, userAuth)
 		if limits.sourceKey == "" {
@@ -133,6 +145,9 @@ func TestVerifyCodeRightGuessGivesBackItsPlaces(t *testing.T) {
 		if got := places(limits.sourceKey); got != 0 {
 			t.Fatalf("the right guess kept %d places", got)
 		}
+		if got := tries(); got != 0 {
+			t.Fatalf("the right guess kept %d tries of the code", got)
+		}
 
 		wrong := newVerifyCodeTryLimits(caller, userAuth)
 		if err := wrong.admit(); err != nil {
@@ -143,6 +158,9 @@ func TestVerifyCodeRightGuessGivesBackItsPlaces(t *testing.T) {
 		}
 		if got := places(wrong.sourceKey); got != 1 {
 			t.Fatalf("the wrong guess holds %d places, want 1", got)
+		}
+		if got := tries(); got != 1 {
+			t.Fatalf("the wrong guess took %d tries of the code, want 1", got)
 		}
 	})
 }
