@@ -5669,6 +5669,15 @@ func (self *Resident) Done() <-chan struct{} {
 	return self.ctx.Done()
 }
 
+// The exchange's timer sweep. A resident a test builds without an exchange
+// gives each of its timers a sweep of its own.
+func (self *Resident) timerSweep() *timersweep.Sweep {
+	if self.exchange == nil {
+		return nil
+	}
+	return self.exchange.timerSweep
+}
+
 func (self *Resident) Cancel() {
 	self.cancel()
 	self.client.Cancel()

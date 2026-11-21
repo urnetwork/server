@@ -21,7 +21,7 @@ const streamAuthorizationRepublishInterval = 30 * time.Second
 // most one sweep tick late, against a grant lease of
 // session.AuthorizationLeaseDuration (LBALTOPT2.md §8.1).
 func (self *Resident) runStreamAuthorizations(snapshots <-chan []model.StreamHop) {
-	ticker := self.exchange.timerSweep.NewTicker(streamAuthorizationRepublishInterval)
+	ticker := self.timerSweep().NewTicker(streamAuthorizationRepublishInterval)
 	defer ticker.Stop()
 	hops := map[server.Id]model.StreamHop{}
 	sent := map[server.Id]model.StreamAuthorization{}
