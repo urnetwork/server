@@ -20,8 +20,7 @@ package model
 // A network that does not exist is an error, never empty facts, so the hooks keep it undecided. A table the binary
 // does not link holds no row here: no certificate, no mail_network row, no binding. Nothing here is on a
 // connection's path (I-12). A process that holds Postgres hands GetTlsListenFacts to the hooks as their source; the
-// sockets block holds none and reads these through api's internal route, which plan-SOCK-gate-data names and which
-// is not built yet.
+// sockets block holds none and reads these through api's internal route, on its internal sockets bearer.
 
 import (
 	"context"
@@ -39,6 +38,9 @@ import (
 
 	"github.com/urnetwork/server"
 )
+
+// The internal sockets route for a network's listen facts. Its caller appends the network id.
+const TlsListenFactsPath = server.InternalGatePathPrefix + "listen-facts/"
 
 // The network does not exist, so nothing about it may pass.
 var ErrTlsListenFactsNetworkNotFound = errors.New("tls listen facts: no such network")

@@ -2,7 +2,7 @@ package handlers
 
 // api's end of the internal gate's projection reads (ACL-M4-05; QD-680, QD-055's plan-SOCK-gate-data): how a gate
 // service with no reach to the metadata tier reads a network's authorization log, sidecar.AclGateApiSource being the
-// other end. Both routes sit under server.InternalGatePathPrefix and take only a gate host's bearer, verified by its
+// other end. These routes sit under server.InternalGatePathPrefix and take only a gate host's bearer, verified by its
 // hash in constant time (server.InternalGateVerifier, QD-027), answering every other request 403 before a read:
 //
 //	GET /internal/gate/projection/{network_id}?after=<n>  connect sockets tlsedge mxedge  ConfigLogSequencer.Read
@@ -12,6 +12,7 @@ package handlers
 //	GET /internal/gate/rows/{network_id}/{rows_sha256}    the same                        ConfigLogSequencer.ReadRows
 //	    one base's ProjectionRows, verbatim, as application/octet-stream, the hash in lower-case hex; 404 when the
 //	    store holds none by that hash
+//	GET /internal/gate/listen-facts/{network_id}          sockets only                    model.GetTlsListenFacts
 //
 // api is a carrier and decides nothing: a gate checks every entry's chain from its own pin and holds rows to their
 // hash (sidecar.AclGateCache), so a stale or short answer costs it a load and never a lower n. evs and gkm read
@@ -31,8 +32,10 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/socketsservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -42,8 +45,9 @@ import (
 
 // Each route by the name its refusals count under.
 const (
-	internalGateRouteProjection = "projection"
-	internalGateRouteRows       = "rows"
+	internalGateRouteProjection  = "projection"
+	internalGateRouteRows        = "rows"
+	internalGateRouteListenFacts = "listen-facts"
 )
 
 // The classes both routes take: the gate services that read projections through api (C-09, QD-055).
@@ -61,12 +65,15 @@ type InternalGateProjectionDeps struct {
 	Verifier *server.InternalGateVerifier
 	// The log's sequencer. nil: model.CurrentConfigLogSequencer, this process's, 503 while api has none.
 	Sequencer func() (*model.ConfigLogSequencer, error)
+	// Defaults to the network model on the API database.
+	ListenFacts socketsservice.TlsListenFactsSource
 }
 
 // See the file header.
 type InternalGateProjectionHandlers struct {
-	verifier  func() *server.InternalGateVerifier
-	sequencer func() (*model.ConfigLogSequencer, error)
+	verifier    func() *server.InternalGateVerifier
+	sequencer   func() (*model.ConfigLogSequencer, error)
+	listenFacts socketsservice.TlsListenFactsSource
 }
 
 // The handlers on deps, nil taking api's own.
@@ -92,24 +99,30 @@ func NewInternalGateProjectionHandlers(deps *InternalGateProjectionDeps) *Intern
 	if sequencer == nil {
 		sequencer = model.CurrentConfigLogSequencer
 	}
+	listenFacts := deps.ListenFacts
+	if listenFacts == nil {
+		listenFacts = model.TlsListenFactsSource(nil)
+	}
 	return &InternalGateProjectionHandlers{
-		verifier:  verifier,
-		sequencer: sequencer,
+		listenFacts: listenFacts,
+		verifier:    verifier,
+		sequencer:   sequencer,
 	}
 }
 
-// The two routes, each pattern the client's path (sidecar.AclGateApiProjectionPath, AclGateApiRowsPath), so both ends
+// The routes, each pattern the client's path (sidecar.AclGateApiProjectionPath, AclGateApiRowsPath), so both ends
 // name one route.
 func (self *InternalGateProjectionHandlers) Routes() []*router.Route {
 	return []*router.Route{
 		router.NewRoute("GET", sidecar.AclGateApiProjectionPath+"([^/]+)", self.GetProjection),
 		router.NewRoute("GET", sidecar.AclGateApiRowsPath+"([^/]+)/([^/]+)", self.GetRows),
+		router.NewRoute("GET", model.TlsListenFactsPath+"([^/]+)", self.GetListenFacts),
 	}
 }
 
 // Whether the request carries the bearer of a class the routes take; otherwise it is answered 403 and counted, before
 // anything is read.
-func (self *InternalGateProjectionHandlers) authenticate(w http.ResponseWriter, r *http.Request, route string) bool {
+func (self *InternalGateProjectionHandlers) authenticate(w http.ResponseWriter, r *http.Request, route string, callers ...server.InternalGateCaller) bool {
 	refuse := func(refusal string) bool {
 		quotaServiceRefusalCounter.WithLabelValues(route, refusal).Inc()
 		http.Error(w, "Forbidden.", http.StatusForbidden)
@@ -123,7 +136,7 @@ func (self *InternalGateProjectionHandlers) authenticate(w http.ResponseWriter, 
 	if !ok {
 		return refuse("credential")
 	}
-	if !slices.Contains(internalGateProjectionCallers, caller) {
+	if !slices.Contains(callers, caller) {
 		if glog.V(1) {
 			glog.Infof("[internalgate]%s's bearer refused on %s\n", caller, route)
 		}
@@ -157,7 +170,7 @@ func internalGateProjectionUnavailable(w http.ResponseWriter, route string, err 
 // GET /internal/gate/projection/{network_id}?after=<n>: controller.NetworkConfigProjectionResult, a thin wrap of
 // ConfigLogSequencer.Read. A missing after reads from 0, and one that is no decimal position is answered 400.
 func (self *InternalGateProjectionHandlers) GetProjection(w http.ResponseWriter, r *http.Request) {
-	if !self.authenticate(w, r, internalGateRouteProjection) {
+	if !self.authenticate(w, r, internalGateRouteProjection, internalGateProjectionCallers...) {
 		return
 	}
 	networkId, ok := internalGateProjectionNetworkId(w, router.GetPathValues(r))
@@ -202,7 +215,7 @@ func (self *InternalGateProjectionHandlers) GetProjection(w http.ResponseWriter,
 
 // GET /internal/gate/rows/{network_id}/{rows_sha256}: one base's ProjectionRows, verbatim.
 func (self *InternalGateProjectionHandlers) GetRows(w http.ResponseWriter, r *http.Request) {
-	if !self.authenticate(w, r, internalGateRouteRows) {
+	if !self.authenticate(w, r, internalGateRouteRows, internalGateProjectionCallers...) {
 		return
 	}
 	pathValues := router.GetPathValues(r)
@@ -237,5 +250,31 @@ func (self *InternalGateProjectionHandlers) GetRows(w http.ResponseWriter, r *ht
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if _, err := w.Write(rows); err != nil {
 		glog.Infof("[internalgate]could not write rows: %s\n", err)
+	}
+}
+
+// Reads the network's server-owned listen facts for the sockets block. These
+// narrow a registration that has already passed the verified projection.
+func (self *InternalGateProjectionHandlers) GetListenFacts(w http.ResponseWriter, r *http.Request) {
+	if !self.authenticate(w, r, internalGateRouteListenFacts, server.InternalGateCallerSockets) {
+		return
+	}
+	networkId, ok := internalGateProjectionNetworkId(w, router.GetPathValues(r))
+	if !ok {
+		return
+	}
+	facts, err := self.listenFacts.ListenFacts(r.Context(), connect.Id(networkId))
+	if errors.Is(err, model.ErrTlsListenFactsNetworkNotFound) {
+		http.Error(w, "Not found.", http.StatusNotFound)
+		return
+	}
+	if err != nil || facts == nil {
+		http.Error(w, "Unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(w).Encode(facts); err != nil {
+		glog.Infof("[internalgate]could not write listen facts")
 	}
 }

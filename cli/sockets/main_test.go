@@ -142,8 +142,11 @@ func newHostTestWorld(t testing.TB) *hostTestWorld {
 func (self *hostTestWorld) newHost(t testing.TB, mutate func(deps *hostDeps)) *socketsHost {
 	t.Helper()
 	deps := &hostDeps{
-		Quota:         self.quota,
-		Source:        hostTestSource{},
+		Quota:  self.quota,
+		Source: hostTestSource{},
+		TlsListenFacts: socketsservice.TlsListenFactsFunc(func(ctx context.Context, networkId connect.Id) (*socketsservice.TlsListenFacts, error) {
+			return nil, errors.New("unknown test network")
+		}),
 		KeyFile:       hostTestKeyFile(t, self.clock.Now()),
 		Authenticator: self.authenticator,
 		Gates:         self.gates,
@@ -234,15 +237,19 @@ func TestHostIsReadyOnlyWithATicketKey(t *testing.T) {
 	}
 }
 
-// A block given no Quota and no projection source says so and is never ready, the closed direction.
+// Missing quota, projection, revocations and listen facts keep the block unready.
 func TestHostWithNoQuotaOrSourceIsNotReady(t *testing.T) {
 	world := newHostTestWorld(t)
-	host, err := newSocketsHost(t.Context(), nil, &hostDeps{KeyFile: hostTestKeyFile(t, world.clock.Now()), Clock: world.clock, Log: world.log})
+	host, err := newSocketsHost(t.Context(), nil, &hostDeps{
+		KeyFile: hostTestKeyFile(t, world.clock.Now()), Clock: world.clock, Log: world.log,
+		Gates: world.gates, Redis: sidecartest.NewFakeRedis(t.Context(), world.clock, world.faults, nil, nil),
+		Store: sidecartest.NewFakeSocketStore(world.clock, nil, world.faults),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	if missing := host.Missing(); len(missing) != 2 {
+	if missing := host.Missing(); len(missing) != 4 {
 		t.Fatalf("missing %v", missing)
 	}
 	if host.Ready() {
@@ -372,30 +379,30 @@ func TestHostLogsNoAddressOrSocketName(t *testing.T) {
 	}
 }
 
-// tls/ opens only over a listen facts source (TLS-M5-22): a block with none registers no tls/ hooks and says so once,
-// and one given a source holds the hooks its engine refers tls/ entries to, which Close stops with the engine.
-func TestHostRegistersTlsOnlyWithAListenFactsSource(t *testing.T) {
+// Both public namespaces require a source before the block advertises readiness.
+// The production source wiring uses the API and never queries the sockets database.
+func TestHostRequiresListenFactsForBothNamespaces(t *testing.T) {
 	world := newHostTestWorld(t)
-	without := world.newHost(t, nil)
-	if without.tlsHooks != nil {
-		t.Fatal("a block with no listen facts source holds tls/ hooks")
-	}
-	said := false
-	for _, line := range world.log.Lines() {
-		said = said || strings.Contains(line, "tls/ refuses every entry until the block has a listen facts source")
-	}
-	if !said {
-		t.Fatalf("the block did not say why tls/ is closed: %v", world.log.Lines())
-	}
-	with := world.newHost(t, func(deps *hostDeps) {
-		deps.TlsListenFacts = socketsservice.TlsListenFactsFunc(func(ctx context.Context, networkId connect.Id) (*socketsservice.TlsListenFacts, error) {
-			return nil, errors.New("no listen facts route yet")
+	makeHost := func(withFacts bool) *socketsHost {
+		return world.newHost(t, func(deps *hostDeps) {
+			deps.Redis = sidecartest.NewFakeRedis(t.Context(), world.clock, world.faults, nil, nil)
+			deps.Store = sidecartest.NewFakeSocketStore(world.clock, nil, world.faults)
+			if !withFacts {
+				deps.TlsListenFacts = nil
+			}
 		})
-	})
-	if with.tlsHooks == nil {
-		t.Fatal("a block given a listen facts source holds no tls/ hooks")
 	}
-	if err := with.engine.RegisterNamespace(sidecar.SocketNamespaceTls, with.tlsHooks); err == nil {
-		t.Fatal("tls/ took hooks twice: the block's were not registered")
+	without := makeHost(false)
+	if without.Ready() || without.tlsHooks != nil || len(without.Missing()) != 1 {
+		t.Fatalf("host without facts ready=%t missing=%v", without.Ready(), without.Missing())
+	}
+	with := makeHost(true)
+	if !with.Ready() || with.tlsHooks == nil {
+		t.Fatal("host with facts has no ready listener namespaces")
+	}
+	for _, namespace := range []sidecar.SocketNamespace{sidecar.SocketNamespaceTls, sidecar.SocketNamespaceSmtp} {
+		if err := with.engine.RegisterNamespace(namespace, with.tlsHooks); err == nil {
+			t.Fatalf("namespace %v was not installed by startup", namespace)
+		}
 	}
 }
