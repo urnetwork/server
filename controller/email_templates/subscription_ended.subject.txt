@@ -1,1 +1,1 @@
-Your UR Pro subscription ended
+{{if .DataOnly}}Your URnetwork data subscription ended{{else}}Your UR Pro subscription ended{{end}}

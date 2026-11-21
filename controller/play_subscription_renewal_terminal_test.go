@@ -300,6 +300,9 @@ func TestPlaySubscriptionRenewalPostWithoutEmailCompletes(t *testing.T) {
 func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// the notice reads the product from play.yml's products, which this
+		// env has none of: an unknown product's notice says UR Pro
+		newPlayWebhookTestEnv(t, map[string]*Sku{})
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateGuestNetwork(ctx, networkId, "synthetic-email-recipient", userId)
