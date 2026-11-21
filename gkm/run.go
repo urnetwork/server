@@ -11,9 +11,11 @@
 //   - Blobs: every metadata cluster vault's file-clusters-gkm.yml names (server.LoadFileClusters), one bucket each;
 //   - Budget: §11.13's write budget for this process over those clusters (evsservice.NewWriteBudget), which every gkm
 //     write spends before it is sent (gkmservice's budget.go);
-//   - Push: pushservice's hint writer on the block's Redis, with no sidecar_id resolver until
-//     plan-KEYS-hint-addressing's internal route, POST /sidecar/identity/clients, and its credential land, so a hint
-//     by sidecar id is counted as unresolved and lost, which the clients' hourly resync covers (§6.8);
+//   - Push: pushservice's hint writer on the block's Redis, its sidecar ids resolved through api's internal route,
+//     POST /internal/gate/sidecar-identity-clients, on the block's gkm bearer behind a 5-minute map
+//     (server.SidecarIdentityClientsResolver; plan-KEYS-hint-addressing, QD-146, QD-1171), which the main builds into
+//     HostDeps.PushResolver; a block with none counts every hint by sidecar id unresolved and loses it, and a lookup
+//     that fails does the same, which the clients' hourly resync covers (§6.8);
 //   - Redis, Metrics, Gates and the service token Authenticator from sidecarhost.NewServiceHost, the gates read from
 //     sidecar.yml's gkm: {enabled, networks, percent} and reseed every 60 s (§19.11);
 //   - AuthState: gkm's newest verified authorization state, gkmservice.AclGkmAuthState over the block's one gate
@@ -122,8 +124,12 @@ type HostDeps struct {
 	// server/cli/gkm's quotahost.NewBlockQuota over api's internal gate (QUOTA-M2-11). nil weighs every network as
 	// Community's, and readiness does not wait on it.
 	Quota sidecar.Quota
-	// The hint writer: pushservice's on the block's Redis, with no resolver (plan-KEYS-hint-addressing).
+	// The hint writer: pushservice's on the block's Redis, resolving sidecar ids through PushResolver.
 	Push sidecar.Push
+	// What the block's own hint writer turns sidecar ids into clients with: api's internal route behind a 5-minute map
+	// (server.NewSidecarIdentityClientsResolver on the block's gkm bearer), which the main builds. nil: none, so every
+	// hint by sidecar id is counted unresolved and lost until the clients' hourly resync. Unused when Push is given.
+	PushResolver pushservice.PushClientResolver
 	// The svc- key set's public verifier, which the Authenticator verifies callers' service tokens under and the rev/
 	// reader each rev/ object's signature: vault's oauth-jwks-svc.json, read once by the process
 	// (oauth.VerifyServiceToken). A test's over keys of its own.
@@ -324,8 +330,8 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 	host.Budget = budget
 	push := deps.Push
 	if push == nil {
-		// no resolver: a hint by sidecar id is lost and counted until plan-KEYS-hint-addressing's route lands
-		writer, err := pushservice.NewHintWriter(host.Redis, nil, nil, host.Metrics)
+		// without a resolver a hint by sidecar id is lost and counted, which the clients' hourly resync covers
+		writer, err := pushservice.NewHintWriter(host.Redis, nil, deps.PushResolver, host.Metrics)
 		if err != nil {
 			return notReady(fmt.Errorf("the hint writer: %w", err))
 		}
