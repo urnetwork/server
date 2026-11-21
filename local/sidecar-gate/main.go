@@ -16,6 +16,9 @@
 // means no test exists yet, which is never a pass, so nothing looks finished
 // before it is.
 //
+// nightly-clauses runs each registered T3 clause's named test in its owning package. It requires
+// a passing outcome for every clause. Its list mode checks declarations only.
+//
 // A gate is G0, Mn-in for milestone n's entry review, Mn for its exit review,
 // held for §23.6's later-of cases, case by case once both their exits have
 // passed (TEST-M10-06), every for each Gn-out's rows alone, or next. An exit
@@ -108,9 +111,10 @@ type gateTest struct {
 	Names   []string `yaml:"names"`
 	Tags    string   `yaml:"tags"`
 	// Zero when the entry names none, which runs it under the settings' TestTimeout.
-	Timeout gateTimeout `yaml:"timeout"`
-	Stores  bool        `yaml:"stores"`
-	Args    []string    `yaml:"args"`
+	Timeout           gateTimeout `yaml:"timeout"`
+	Stores            bool        `yaml:"stores"`
+	Args              []string    `yaml:"args"`
+	requireStoreClock bool
 }
 
 // The bound an entry's go test runs under: its own timeout, or the settings' when it names none.
@@ -163,12 +167,12 @@ type gateRow struct {
 	Tests    []gateTest    `yaml:"tests"`
 	Commands []gateCommand `yaml:"commands"`
 	External string        `yaml:"external"`
-	// The case's T3 run reads stored ages through T3's store clock, which the report says (QD-264).
+	// Each named T3 test must observe translation of stored ages to satisfy this case (QD-264).
 	StoreClock bool `yaml:"store_clock"`
 }
 
 // What a report says of a store_clock row beside its outcome.
-const gateStoreClockDetail = "store clock translated: its T3 run read LastModified and ttls on the schedule's clock through server/sidecart3/clock.go, not the stores' own (QD-264)"
+const gateStoreClockDetail = "store clock translated: the named T3 test observed a schedule-time object timestamp or Redis expiry (QD-264)"
 
 func (self *gateRow) label() string {
 	label := self.Row
@@ -276,7 +280,7 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 	serverDirectory := flags.String("server", ".", "the server checkout, inside the monoroot")
 	list := flags.Bool("list", false, "resolve each named test from its package's files, and run nothing")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
-		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] [-list] <gate | trace | assembly | stage>\n")
+		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] [-list] <gate | trace | assembly | stage | nightly-clauses>\n")
 		return 64
 	}
 	absoluteServer, err := filepath.Abs(*serverDirectory)
@@ -310,6 +314,12 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 	var buffer bytes.Buffer
 	failed := false
 	switch {
+	case options.gate == "nightly-clauses":
+		var destination io.Writer = &buffer
+		if *outPath == "" {
+			destination = out
+		}
+		failed = !runNightlyClauses(context.Background(), options, fault.RegisteredClauses(), destination, errOut)
 	case options.gate == "trace":
 		report, err := runTrace(context.Background(), options, filepath.Join(toolDirectory, "trace.yml"))
 		if err != nil {
@@ -496,7 +506,7 @@ func readCommitSet(root string, repos []string) []gateCommit {
 func runGateRow(ctx context.Context, options *gateOptions, report *gateReport, row *gateRow) *gateResult {
 	result := &gateResult{label: row.label()}
 	if row.StoreClock {
-		result.details = append(result.details, gateStoreClockDetail)
+		result.details = append(result.details, "the catalog requires store-clock evidence from each T3 test")
 	}
 	if row.External != "" && len(row.Tests) == 0 && len(row.Commands) == 0 {
 		result.outcome = gateOpen
@@ -509,10 +519,17 @@ func runGateRow(ctx context.Context, options *gateOptions, report *gateReport, r
 		return result
 	}
 	outcomes := []string{}
+	hasStoreTest := false
 	for _, test := range row.Tests {
+		test.requireStoreClock = row.StoreClock && test.Stores
+		hasStoreTest = hasStoreTest || test.Stores
 		outcome, details := runGateTest(ctx, options, report, test)
 		outcomes = append(outcomes, outcome)
 		result.details = append(result.details, details...)
+	}
+	if row.StoreClock && !hasStoreTest {
+		outcomes = append(outcomes, gateMissing)
+		result.details = append(result.details, "no T3 store test is named to show the required clock translation")
 	}
 	for _, command := range row.Commands {
 		if options.list {
@@ -577,7 +594,7 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 			return gateOpen, []string{where + ": the gate registers no migration group, so there is no group to check"}
 		}
 	}
-	key := fmt.Sprintf("%s|%s|%s|%s|%s|%t|%q|%q", test.Repo, test.Dir, test.Package, test.Tags, test.testTimeout(options.settings), test.Stores, test.Names, expandGateArgs(test.Args, report))
+	key := fmt.Sprintf("%s|%s|%s|%s|%s|%t|%t|%q|%q", test.Repo, test.Dir, test.Package, test.Tags, test.testTimeout(options.settings), test.Stores, test.requireStoreClock, test.Names, expandGateArgs(test.Args, report))
 	if run, ok := report.testRuns[key]; ok {
 		return run.outcome, slices.Clone(run.details)
 	}
@@ -644,13 +661,32 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 		verdicts[match[2]] = match[1]
 	}
 	messages := lastTestMessages(string(output), options.settings.MessageLimit)
+	witnessed := map[string]bool{}
+	if test.requireStoreClock {
+		current := ""
+		for line := range strings.SplitSeq(string(output), "\n") {
+			if match := gateTestSwitchPattern.FindStringSubmatch(line); match != nil {
+				current = match[1]
+			} else if match := gateStoreClockWitnessPattern.FindStringSubmatch(line); match != nil && current == match[1] {
+				witnessed[current] = true
+			}
+		}
+	}
 	outcomes := []string{}
 	details := []string{}
 	for _, name := range test.Names {
 		switch verdicts[name] {
 		case "PASS":
+			if test.requireStoreClock && !witnessed[name] {
+				outcomes = append(outcomes, gateMissing)
+				details = append(details, fmt.Sprintf("%s %s: passed without the required T3 store-clock evidence", where, name))
+				continue
+			}
 			outcomes = append(outcomes, gatePass)
 			details = append(details, fmt.Sprintf("%s %s: pass", where, name))
+			if test.requireStoreClock {
+				details = append(details, fmt.Sprintf("%s %s: %s", where, name, gateStoreClockDetail))
+			}
 		case "FAIL":
 			outcomes = append(outcomes, gateFail)
 			if message := messages[name]; message != "" {
@@ -684,10 +720,15 @@ func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateRepo
 	if endedAtBound {
 		details = append(details, fmt.Sprintf("%s: the run outlived its bound, %s and the %s grace after it, and was killed", where, timeout, options.settings.TestTimeoutGrace))
 	}
+	if runErr != nil {
+		outcomes = append(outcomes, gateFail)
+		details = append(details, fmt.Sprintf("%s: test process failed: %v: %s", where, runErr, lastLines(string(output), options.settings.DetailLineCount)))
+	}
 	return combineOutcomes(outcomes), details
 }
 
 var (
+	gateStoreClockWitnessPattern = regexp.MustCompile(`(?m)^[ \t]+\S+\.go:[0-9]+: ` + regexp.QuoteMeta(fault.GateStoreClockWitness) + ` (\S+)[ \t]*$`)
 	// go test -v's line for the test whose output follows
 	gateTestSwitchPattern = regexp.MustCompile(`^=== (?:RUN|CONT|NAME)\s+(\S+)`)
 	// a test's own message, file:line first, or the panic that ended the binary

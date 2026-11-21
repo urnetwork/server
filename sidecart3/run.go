@@ -57,17 +57,7 @@ func RunRow(t testing.TB, rowId string, caseName string, ruleSettings *fault.Rul
 		t.Fatalf("%s %q has no T3 builder registered: missing", rowId, caseName)
 	}
 	testCase := fault.DefaultCatalog().Case(rowId, caseName)
-	if ruleSettings == nil {
-		settings := DefaultSettings()
-		if testCase.StoreClock {
-			settings.StoreClock = DefaultStoreClockSettings()
-		}
-		ruleSettings = RuleSettings(t, settings)
-	}
-	storeClockOn, _ := netSettingsStoreClocks.Load(ruleSettings.Net)
-	if err := storeClockCaseErr(testCase, storeClockOn == true); err != nil {
-		t.Fatalf("%v", err)
-	}
+	ruleSettings = caseRuleSettings(t, testCase, ruleSettings)
 	report := fault.CheckRow(t.Context(), registration, ruleSettings)
 	t.Log(report.String())
 	for _, failure := range report.Failures {
@@ -77,6 +67,37 @@ func RunRow(t testing.TB, rowId string, caseName string, ruleSettings *fault.Rul
 		t.Errorf("%v", err)
 	}
 	return report
+}
+
+// Run the registered T3 clause with its owning case's clock requirement and the package's host setup.
+func RunRegisteredClause(t testing.TB, rowId string, clause string, ruleSettings *fault.RuleSettings) *fault.RowReport {
+	t.Helper()
+	registration := fault.LookupClause(rowId, clause)
+	if registration == nil {
+		t.Fatalf("%s has no clause %q registered: missing", rowId, clause)
+	}
+	testCase := fault.DefaultCatalog().Case(rowId, registration.Case)
+	return fault.RunRegisteredClause(t, rowId, clause, caseRuleSettings(t, testCase, ruleSettings))
+}
+
+// Both a case and its clauses require the same store-clock mode on their T3 Nets.
+func caseRuleSettings(t testing.TB, testCase *fault.Case, ruleSettings *fault.RuleSettings) *fault.RuleSettings {
+	t.Helper()
+	if ruleSettings == nil {
+		settings := DefaultSettings()
+		if testCase.StoreClock {
+			settings.StoreClock = DefaultStoreClockSettings()
+		}
+		ruleSettings = RuleSettings(t, settings)
+	}
+	storeClockOn, isT3 := netSettingsStoreClocks.Load(ruleSettings.Net)
+	if !isT3 || ruleSettings.Tier != fault.TierT3 {
+		t.Fatalf("%s requires T3 rule settings and a T3 Net", testCase)
+	}
+	if err := storeClockCaseErr(testCase, storeClockOn == true); err != nil {
+		t.Fatalf("%v", err)
+	}
+	return ruleSettings
 }
 
 // What one builder did on each tier.

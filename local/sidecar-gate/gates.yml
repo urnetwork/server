@@ -14,8 +14,8 @@
 # run in a repo's directory and pass on exit 0, or read the outcome a last "sidecar-gate outcome: <outcome>" line
 # names, a nonzero exit still failing. A row with nothing to run is missing. external says what outside the build
 # (hardware, production, people) the row also waits on, or the later gate a later-of case passes at, and reads open.
-# store_clock: true says the case's T3 run reads stored ages through T3's store clock (QD-264), which the report
-# names beside its outcome. A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test
+# store_clock: true requires a runtime translation witness from each named T3 test (QD-264). The report records
+# observed translations beside their tests. A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test
 # TestFs<n><Case>OnT3 in server's sidecart3 under sidecar_localstack too, by convention, so this file does not
 # change as rows land. Each clause registered for a case (fault.RegisterClause; QD-1084) adds its tests to the
 # case's row by the same convention, TestFs<n><Case><Clause> in sidecar's sidecartest/fault and, where it runs on

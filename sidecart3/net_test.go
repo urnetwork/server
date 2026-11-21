@@ -465,13 +465,12 @@ func TestT3Rows(t *testing.T) {
 		}
 	}
 	if len(registrations) == 0 {
-		t.Log("no FS row registers a T3 builder yet: each lands with its row's task")
-		return
+		t.Fatal("no FS row registered on T3")
 	}
 	// a row's clients run on server's exchange, which needs the schema
 	testEnvWithSchema().Run(t, func(tb testing.TB) {
 		for _, registration := range registrations {
-			RunRow(t, registration.Row, registration.Case, nil)
+			RunRow(tb, registration.Row, registration.Case, nil)
 		}
 	})
 }

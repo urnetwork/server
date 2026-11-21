@@ -16,8 +16,8 @@
 //   - faults.go, what makes the base's plans happen on real stores: put, get, list and delete on the
 //     Blobs, redis on the Redis, pg-commit through server.Tx's test hook, and http on a client's
 //     transport to server's api.
-//   - run.go, Run, RunRow under §22.8's rules with the nightly seeds, and Diverge, the check Q-TEST-1
-//     asks for.
+//   - run.go, Run, RunRow and RunRegisteredClause under §22.8's rules with the nightly seeds, and
+//     Diverge, the check Q-TEST-1 asks for.
 //   - suites.go, RunSuites, each sidecartest store suite on its real store, and RunCrossslot, §22.4's
 //     runtime CROSSSLOT lint over the scripts and multi-key calls T3's engines made.
 //   - store_view.go, the Postgres fault's StoreView reads on T3, read-only, which NetSettings sets on
@@ -27,8 +27,9 @@
 //     (TEST-M2-02).
 //   - clock.go, the store clock (TEST-M2-07; QD-264): every request's deadline in the store's time
 //     (StoreTime), and, with Settings.StoreClock, LastModified and the named Redis families' ttls on the
-//     schedule's clock, Advance aging them at once; RunRow runs a case with it exactly when catalog.yml
-//     flags the case store_clock, and FS-114 never.
+//     schedule's clock, Advance aging them at once. The registered case and its clauses use the store clock
+//     when catalog.yml flags the case. The gate requires a translation observed by each named T3 test.
+//     FS-114 always reads the stores' own clock.
 //   - cluster_faults.go, T3's 4-host file-cluster layouts (Settings.Layout, EVSB-M2-17's
 //     local/file-cluster-t3) and their faults: HostDown, HostUp, QuorumLoss and DriveMiss carried out on
 //     the minio fork's containers, and HostCluster for a read through one host.
@@ -59,7 +60,7 @@
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
-// each merge, and its nightly cadence with the rows and their seeds.
+// each merge, and its nightly cadence with the registered cases and clauses in their owning packages.
 //
 // Not yet here, and failing closed where a row would reach it:
 //

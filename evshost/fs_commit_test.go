@@ -5,15 +5,14 @@
 // so every push goes through server/cli/evs's handler and evshost's segment route on the private Redis and the local
 // stack's MinIO, its devices presenting tokens server's oauth mints. Each row's registered case runs under every rule
 // it takes with T3's nightly seeds (sidecart3.RunRow), and each clause registered beside it under the same rules
-// (fault.RunRegisteredClause), each test named for its clause by the gate's convention (QD-1084). The schedules hold instances at barriers, so this needs sidecar_testhooks; the stack must be up
+// (sidecart3.RunRegisteredClause), each test named for its clause by the gate's convention (QD-1084).
+// The schedules hold instances at barriers, so this needs sidecar_testhooks; the stack must be up
 // (sidecar/local/stack.sh), and these fail rather than skip without it.
 
 package evshost_test
 
 import (
 	"testing"
-
-	"github.com/urnetwork/sidecar/sidecartest/fault"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/sidecart3"
@@ -28,7 +27,7 @@ func fsCommitTestEnv() *server.TestEnv {
 // twin, which must succeed.
 func runClauseOnT3(t *testing.T, rowId string, clause string) {
 	fsCommitTestEnv().Run(t, func(tb testing.TB) {
-		fault.RunRegisteredClause(tb, rowId, clause, sidecart3.RuleSettings(tb, nil))
+		sidecart3.RunRegisteredClause(tb, rowId, clause, nil)
 	})
 }
 

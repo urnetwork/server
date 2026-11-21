@@ -6,7 +6,7 @@
 #                           of T3 itself, and, when lock.yml's connect pin moved since the last run here,
 #                           the T3 rows at once (Q-TEST-1: a connect pin change reruns both tiers; T2's
 #                           run every merge in sidecar/test.sh)
-#   sidecar-t3.sh nightly   the suites, then every FS row registered on T3, under §22.8's rules with the
+#   sidecar-t3.sh nightly   the suites, then every FS row and clause registered on T3, under §22.8's rules with the
 #                           100 nightly explorer seeds, then §22.7's scenarios and CC3's leak self-test, then
 #                           FS-86's card commits on the 4-host file-cluster layouts
 #                           (server/local/file-cluster-t3/t3.sh up), a whole peak hour at the Team limit's
@@ -104,15 +104,18 @@ suites() {
     go_t3 . -tags "$tags,sidecar_localstack" -run '^TestFileClustersConformOnTheLocalStack$'
     go_t3 ./model -tags "$tags,sidecar_localstack" -run '^TestConfigLogSequencerPassesTheStoreSuiteOnMinio$'
     go_t3 ./gkm -tags "$tags,sidecar_localstack" -run '^(TestGkmStoreSuiteOnTheLocalStack|TestGkmRoutesOnTheLocalStack)$'
-    go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestT3'
+    go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestT3' -skip '^TestT3Rows$'
   else
     skip "blobsuite on FileClusters, the config log on MinIO, gkm's store suite and routes and T3's Nets: the local stack's MinIO does not answer (sidecar/local/stack.sh up)"
   fi
 }
 
-# Every FS row registered on T3, with the nightly seeds.
+# Each registered case, then each registered clause in the package that supplies its real test host.
 rows() {
   go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestT3Rows$'
+  (cd "$here" && GO="$GO" TEST_TIMEOUT="$TEST_TIMEOUT" \
+    SIDECAR_GATE_STORE_WRAPPER="${SIDECAR_GATE_STORE_WRAPPER:-$here/local/sidecar-gate/test-stores.sh}" \
+    "$GO" run ./local/sidecar-gate nightly-clauses) || exit $?
 }
 
 layout_up() {
