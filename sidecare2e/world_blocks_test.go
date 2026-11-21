@@ -21,6 +21,7 @@ import (
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/gkmservice"
+	"github.com/urnetwork/sidecar/pushservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 	"github.com/urnetwork/sidecar/tlsedgeservice"
@@ -192,6 +193,16 @@ func (self *World) runGkm(ctx context.Context, listeners *worldBlockListeners) e
 		Clusters:      self.clusters(),
 		Quota:         quota,
 		ServiceTokens: self.t3.ServiceTokens(),
+	}
+	if self.settings.GkmHintResolver {
+		// the block's own hint writer on the world's Redis, its sidecar ids resolved as api's unbuilt route would
+		host := self.t3.Host()
+		writer, err := pushservice.NewHintWriter(host.Redis, nil, &worldPushClientResolver{world: self}, host.Metrics)
+		if err != nil {
+			listeners.close()
+			return err
+		}
+		deps.Push = writer
 	}
 	return gkm.Run(ctx, gkm.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }

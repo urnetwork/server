@@ -43,8 +43,10 @@ package sidecart3
 //
 // keys with RealKeys: each device's real key client at the gkm origin and its EvsClient over it, the config repo's
 // heads on evs, and each network bootstrapped by its first owner's follower, as ur daemon runs them (world_keys.go).
-// A joining device does not take the config repo's key yet (sidecare2e's world_keys_test.go), so RealKeys is off by
-// default, and a key reaches a device through FakeGkm's deliveries.
+// A joining device takes the config repo's key only by a late delivery that gkm's hint by sidecar id asks for, which
+// gkm's own hint writer cannot address, and a repo's creation is refused by gkm's cached 404 of its placement
+// (sidecare2e's world_keys_test.go has the evidence), so RealKeys is off by default, and a key reaches a device through
+// FakeGkm's deliveries.
 
 import (
 	"context"
@@ -134,10 +136,18 @@ type T3WorldSettings struct {
 	// own (§7.9, QD-824): what a world that serves gkm and evs at their origins runs. false keeps FakeGkm's deliveries
 	// and the config heads in memory.
 	RealKeys bool
-	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval): gkm's hint writer resolves no
-	// sidecar id yet (plan-KEYS-hint-addressing), so a hint by sidecar id is lost in production too and the hourly
-	// resync covers it, which a world waits seconds for, not an hour. 1 s.
+	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval), 0 keeping the sidecar's own
+	// hourly one: 1 s, since gkm's hint writer resolves no sidecar id yet (plan-KEYS-hint-addressing) and the world's
+	// exchange publishes no hint unless its settings turn sidecar push on, so a resync stands in for the hints. A world
+	// of hosts whose gkm block resolves sidecar ids and whose exchange publishes hints keeps the sidecar's own
+	// (sidecare2e's World).
 	KeyResyncInterval time.Duration
+	// With RealKeys, how long, in real time, a joining device's follower may take to stand, in place of SyncTimeout: its
+	// join waits on a late delivery of the config repo's generation (§10.6), which a holder makes up to
+	// LateDeliverJitter, 15 s, after gkm's hint, and which gkm refuses while its 5 s repo/ cache still holds the config
+	// repo as keying. The joiner then asks again at its follower's first retry past LateAskInterval, a minute, which
+	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
+	KeyJoinTimeout time.Duration
 }
 
 func DefaultT3WorldSettings() *T3WorldSettings {
@@ -161,6 +171,7 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		StatementLife:           time.Hour,
 		SyncTimeout:             60 * time.Second,
 		KeyResyncInterval:       time.Second,
+		KeyJoinTimeout:          5 * time.Minute,
 	}
 }
 
@@ -847,7 +858,7 @@ func (self *T3Network) enroll(ctx context.Context, name string, settings func(na
 		return nil, err
 	}
 	sidecarSettings := sidecar.DefaultSidecarSettings()
-	if self.world.settings.RealKeys {
+	if self.world.settings.RealKeys && 0 < self.world.settings.KeyResyncInterval {
 		sidecarSettings.Gkm.ResyncInterval = self.world.settings.KeyResyncInterval
 	}
 	if settings != nil {
@@ -1277,7 +1288,11 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 	if err != nil {
 		return fmt.Errorf("%s's follower: %w", self.Name, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, self.Network.world.settings.SyncTimeout)
+	timeout := self.Network.world.settings.SyncTimeout
+	if self.keys != nil && 0 < self.Network.world.settings.KeyJoinTimeout {
+		timeout = self.Network.world.settings.KeyJoinTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if _, err := follower.WaitStanding(ctx); err != nil {
 		status := follower.Status()

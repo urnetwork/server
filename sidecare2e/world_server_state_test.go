@@ -2,8 +2,8 @@
 
 // Every read and write of server state the world makes outside the hosts and api's routes, in one file (the e2e
 // conventions; QD-1028's layout move will move sidecar's model code): urnetwork-edge's network row, each block's Quota
-// over api's internal quota surface, and the quota ledgers a scenario reconciles, read after the debit journal is
-// flushed as taskworker's flush would.
+// over api's internal quota surface, the quota ledgers a scenario reconciles, read after the debit journal is flushed
+// as taskworker's flush would, and the sidecar_id resolver gkm's hint writer runs with in the world.
 
 package sidecare2e
 
@@ -12,12 +12,47 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
 )
+
+// gkm's hint writer's resolver in the world (the World's header): each sidecar's current client from
+// sidecar_identity_binding, its newest binding generation while its identity is active, in the world's networks, as
+// plan-KEYS-hint-addressing has api's internal POST /sidecar/identity/clients answer it. That route is not built, so
+// gkm's block in production resolves no sidecar and loses every hint by sidecar id; this stands in for it. An id no
+// network of the world binds is absent, which loses its hint as the route's omission does.
+type worldPushClientResolver struct {
+	world *World
+}
+
+var _ pushservice.PushClientResolver = (*worldPushClientResolver)(nil)
+
+func (self *worldPushClientResolver) PushClientIds(ctx context.Context, sidecarIds []connect.Id) (clientIds map[connect.Id]connect.Id, returnErr error) {
+	clientIds = map[connect.Id]connect.Id{}
+	networks := self.world.t3.Networks()
+	server.HandleError(func() {
+		for _, sidecarId := range sidecarIds {
+			for _, network := range networks {
+				if clientId, found := model.GetSidecarCurrentClientId(ctx, network.NetworkId, server.Id(sidecarId)); found {
+					clientIds[sidecarId] = connect.Id(clientId)
+					break
+				}
+			}
+		}
+	}, func(err error) {
+		returnErr = fmt.Errorf("the world's sidecar_id resolver: %w", err)
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return clientIds, nil
+}
 
 // urnetwork-edge's network row, which api's edge client route mints the edges' clients in.
 func worldCreateEdgeNetwork(ctx context.Context, networkId server.Id) {

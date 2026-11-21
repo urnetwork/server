@@ -12,7 +12,8 @@
 //	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker) and api's
 //	          internal gate surface on the world's throwaway bearers (ServeInternalGate), as a block reaches api
 //	exchange  server's exchange and its connect handler on loopback, which every sidecar's and edge client's connect
-//	          client dials
+//	          client dials, with sidecar.yml's push switch on, so each sidecar's client hears its hints from the
+//	          exchange's resident publisher as in production (WorldSettings.Push)
 //	blocks    each new service's block through its own exported Run, on a listener the OS picks, its routes served at
 //	          its origin through T3Api.ServeService by the world's lb (worldLb: http over loopback to the block, with
 //	          X-UR-Forwarded-For set as warp's nginx sets it), and its direct ports on listeners of their own:
@@ -43,10 +44,15 @@
 //     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
 //     answer nothing for the same reason;
 //   - the dns edge's lb probes: refused, since no lb interface answers in the test stack;
+//   - gkm's hint writer's sidecar_id resolver: plan-KEYS-hint-addressing has api answer it on an internal route, POST
+//     /sidecar/identity/clients, which is not built, so production's block loses every hint by sidecar id; the world's
+//     block resolves them from sidecar_identity_binding instead (worldPushClientResolver, WorldSettings.GkmHintResolver),
+//     so a late delivery's wrap-pending and pending hints reach the sidecars they name;
 //   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
 //     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
-//     block and the config heads on evs, as ur daemon composes them (world_keys.go), but a joining device never takes
-//     the config repo's key there yet, so the world runs FakeGkm by default (world_keys_test.go has the evidence).
+//     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
+//     config repo's key through the resolver above, but a repo's creation is refused by gkm's cached 404 of its
+//     placement, so the world runs FakeGkm by default (world_keys_test.go has the evidence).
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
 // limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), evs.yml, mcp's seal secret and McpResource, and the
@@ -145,6 +151,16 @@ type WorldSettings struct {
 	RateLimitWaitTimeout time.Duration
 	// How many of each sidecar's newest log lines the world keeps for a stalled phase's dump (FailProgress).
 	DumpLogLineCount int
+	// sidecar.yml's push switch and the exchange's EnableSidecarPush, as connect's process reads the switch at its
+	// start: each sidecar's client hears its hints from the exchange's resident publisher (§6.8). true.
+	Push bool
+	// Whether gkm's hint writer resolves sidecar ids through the world's stand-in for api's unbuilt internal route
+	// (worldPushClientResolver), so a hint by sidecar id reaches its sidecar's client: true. false runs gkm's own
+	// writer, which resolves none, as production's block does today.
+	GkmHintResolver bool
+	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
+	// one, since the hints reach every sidecar.
+	KeyResyncInterval time.Duration
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -162,6 +178,9 @@ func DefaultWorldSettings() *WorldSettings {
 		EdgeEnvironment:             "e2e",
 		RateLimitWaitTimeout:        3 * time.Minute,
 		DumpLogLineCount:            40,
+		Push:                        true,
+		GkmHintResolver:             true,
+		KeyResyncInterval:           0,
 	}
 }
 
@@ -172,10 +191,10 @@ const (
 )
 
 // sidecar.yml as a world puts it: preview_networks, every service's gate open to every network, evs's with the env's
-// one block, and urnetwork_edge the edges' clients' network.
-func worldSidecarYaml(urnetworkEdge server.Id) func(previewNetworkIds []string) string {
+// one block, urnetwork_edge the edges' clients' network, and the push switch when push is on.
+func worldSidecarYaml(urnetworkEdge server.Id, push bool) func(previewNetworkIds []string) string {
 	return func(previewNetworkIds []string) string {
-		return strings.Join([]string{
+		lines := []string{
 			"sidecar:",
 			"  preview_networks: [" + strings.Join(previewNetworkIds, ", ") + "]",
 			"  evs: {enabled: true, percent: 100, blocks: 1}",
@@ -186,8 +205,11 @@ func worldSidecarYaml(urnetworkEdge server.Id) func(previewNetworkIds []string) 
 			"  smtpedge: {enabled: true, percent: 100}",
 			"  dns: {enabled: true, percent: 100}",
 			"  urnetwork_edge: " + urnetworkEdge.String(),
-			"",
-		}, "\n")
+		}
+		if push {
+			lines = append(lines, "  push: {enabled: true}")
+		}
+		return strings.Join(lines, "\n") + "\n"
 	}
 }
 
@@ -250,7 +272,19 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		copied := *t3Settings
 		t3Settings = &copied
 	}
-	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge)
+	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push)
+	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
+	exchangeSettings := sidecart3.DefaultExchangeSettings()
+	if t3Settings.Exchange != nil {
+		copied := *t3Settings.Exchange
+		exchangeSettings = &copied
+	}
+	if exchangeSettings.Exchange != nil {
+		copied := *exchangeSettings.Exchange
+		copied.EnableSidecarPush = settings.Push
+		exchangeSettings.Exchange = &copied
+	}
+	t3Settings.Exchange = exchangeSettings
 	sidecarSettings := sidecart3.DefaultT3SidecarSettings()
 	if t3Settings.Sidecar != nil {
 		copied := *t3Settings.Sidecar
