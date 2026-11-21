@@ -144,9 +144,9 @@ type WorldSettings struct {
 // The defaults: every block, two networks of three sidecars.
 func DefaultWorldSettings() *WorldSettings {
 	return &WorldSettings{
-		Hosts:  defaultE2eHostsSettings(),
-		Blocks: WorldBlockNames(),
-		StartStatus: map[string]string{},
+		Hosts:                       defaultE2eHostsSettings(),
+		Blocks:                      WorldBlockNames(),
+		StartStatus:                 map[string]string{},
 		NetworkCount:                2,
 		ClientsPerNetwork:           3,
 		EvsInstanceFormat:           sidecar.EvsRepoFormat1,
