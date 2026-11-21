@@ -106,6 +106,11 @@ type e2eHostsSettings struct {
 	SmtpAddress    netip.Addr
 	// How long the platform certificate is valid on either side of the test's start.
 	CertificateValidity time.Duration
+	// The DNSKEY window the KSK signs: from DnsWindowBefore before the test's start to DnsWindowAfter after it,
+	// inside §12.6's two weeks, and the TTL of its records.
+	DnsWindowBefore time.Duration
+	DnsWindowAfter  time.Duration
+	DnsRecordTtl    uint32
 	// dns.yml's environment values, which have no default: the edge's signing rate, its TCP connections a source
 	// may hold, and its response rate limit.
 	DnsSignaturesPerSecond     int
@@ -140,6 +145,9 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 		SmtpHeloName:               "o1.out.report.e2e.example",
 		SmtpAddress:                netip.MustParseAddr("192.0.2.10"),
 		CertificateValidity:        24 * time.Hour,
+		DnsWindowBefore:            24 * time.Hour,
+		DnsWindowAfter:             13 * 24 * time.Hour,
+		DnsRecordTtl:               3600,
 		DnsSignaturesPerSecond:     1000,
 		DnsTcpConnectionsPerSource: 2,
 		DnsRrlResponsesPerSecond:   1000,
@@ -239,7 +247,7 @@ func newE2eCredentials(t testing.TB, settings *e2eHostsSettings, now time.Time) 
 	}
 	dnsKey := func(flags uint16) (*ecdsa.PrivateKey, *dns.DNSKEY) {
 		record := &dns.DNSKEY{
-			Hdr:       dns.RR_Header{Name: settings.DnsRoot, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+			Hdr:       dns.RR_Header{Name: settings.DnsRoot, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: settings.DnsRecordTtl},
 			Flags:     flags,
 			Protocol:  3,
 			Algorithm: dns.ECDSAP256SHA256,
@@ -252,10 +260,10 @@ func newE2eCredentials(t testing.TB, settings *e2eHostsSettings, now time.Time) 
 	}
 	ksk, kskRecord := dnsKey(dns.ZONE | dns.SEP)
 	zsk, zskRecord := dnsKey(dns.ZONE)
-	notBefore := now.Add(-24 * time.Hour)
-	notAfter := now.Add(13 * 24 * time.Hour)
+	notBefore := now.Add(-settings.DnsWindowBefore)
+	notAfter := now.Add(settings.DnsWindowAfter)
 	rrsig := &dns.RRSIG{
-		Hdr:        dns.RR_Header{Name: settings.DnsRoot, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		Hdr:        dns.RR_Header{Name: settings.DnsRoot, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: settings.DnsRecordTtl},
 		Algorithm:  dns.ECDSAP256SHA256,
 		KeyTag:     kskRecord.KeyTag(),
 		SignerName: settings.DnsRoot,
