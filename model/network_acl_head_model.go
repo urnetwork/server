@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
@@ -130,25 +131,24 @@ func GetNetworkAclHead(ctx context.Context, networkId server.Id) (head *NetworkA
 		return nil, ErrNetworkAclHeadUnavailable
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT version, chain, has_document
-				FROM network_acl_head
-				WHERE network_id = $1
-			`,
-			networkId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				head = &NetworkAclHead{NetworkId: networkId}
-				var version int64
-				server.Raise(result.Scan(&version, &head.Chain, &head.HasDocument))
-				head.Version = uint64(version)
-			}
-		})
+		head, returnErr = getNetworkAclHeadIn(ctx, conn, networkId)
 	})
 	return
+}
+
+func getNetworkAclHeadIn(ctx context.Context, conn server.PgQuerier, networkId server.Id) (*NetworkAclHead, error) {
+	head := &NetworkAclHead{NetworkId: networkId}
+	var version int64
+	err := conn.QueryRow(ctx, `SELECT version, chain, has_document FROM network_acl_head WHERE network_id=$1`, networkId).
+		Scan(&version, &head.Chain, &head.HasDocument)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	head.Version = uint64(version)
+	return head, nil
 }
 
 // Every network's head, for ACL-M4-01's 5 s snapshot: a network the map lacks

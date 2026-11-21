@@ -1315,6 +1315,7 @@ func (self *proberShardRetentionRun) removeContractBatch(
 				&batch.eligibleIds,
 			))
 			batch.busy = batch.read - lockedCount
+			batch.eligibleIds = contractsOutsidePendingHolds(ctx, tx, batch.eligibleIds)
 			if dry || len(batch.eligibleIds) == 0 {
 				return
 			}

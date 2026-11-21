@@ -175,6 +175,8 @@ func newTestLegalHoldStore(t testing.TB) (*sidecartest.FakeBlobs, *sidecartest.F
 		t.Fatal(err)
 	}
 	SetAbuseHoldStore(NewAbuseHoldStore(first))
+	SetAbuseHoldSoftStateSource(&testHoldSoftStateSource{})
+	t.Cleanup(func() { SetAbuseHoldSoftStateSource(nil) })
 	popConfig := server.Testing_PushAbuseConfig("holds_enabled: true\n")
 	t.Cleanup(func() {
 		SetAbuseHoldStore(nil)
@@ -376,9 +378,13 @@ func TestLegalHoldCrashBetweenObjectAndRowKeepsData(t *testing.T) {
 			t.Fatalf("the object keeps data past its expiry: %+v, %v", later, err)
 		}
 
+		SetAbuseHoldSoftStateSource(nil)
 		hold, inserted, err := PlaceLegalHold(ctx, args, testLegalHoldDay(2), nil)
 		if err != nil || !inserted || !hold.PlaceTime.Equal(testLegalHoldDay0) || !hold.ExpireTime.Equal(testLegalHoldDay(90)) {
 			t.Fatalf("the retry: %+v, %t, %v", hold, inserted, err)
+		}
+		if complete, err := RunAbuseHoldCopy(ctx, networkId, caseId, testLegalHoldDay(2), time.Now().Add(time.Minute), DefaultAbuseHoldCopySettings()); err != nil || !complete {
+			t.Fatalf("the placement snapshot did not survive the crash: complete=%t err=%v", complete, err)
 		}
 	})
 }

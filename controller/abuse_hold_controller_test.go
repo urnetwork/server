@@ -24,6 +24,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // §21.9's holds as api and the abuse worker run them (abuse_hold_controller.go; ABUSE-M5-14): the legal-request
@@ -35,6 +36,60 @@ var testHoldDay0 = time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
 
 func testHoldDay(day int) time.Time {
 	return testHoldDay0.AddDate(0, 0, day)
+}
+
+func TestLegalHoldDispatchWaitsForCommittedWorkerPlacement(t *testing.T) {
+	if !server.SidecarMg5Linked() {
+		t.Skip("requires MG5")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		newTestHoldWorld(t)
+		network, report := newTestHoldCase(t, ctx)
+		settings := task.DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		worker := task.NewTaskWorker(ctx, settings)
+		defer worker.Close()
+		worker.AddTargets(task.NewTaskTarget(LegalHoldPlacementTask))
+		type reply struct {
+			result *LegalHoldResult
+			err    error
+		}
+		finished := make(chan reply, 1)
+		go func() {
+			result, err := dispatchLegalHold(ctx, &model.LegalHoldArgs{
+				NetworkId: network, CaseId: report, Kind: sidecar.HoldKindPreserve2703f,
+			})
+			finished <- reply{result: result, err: err}
+		}()
+		for {
+			if ctx.Err() != nil {
+				t.Fatal(ctx.Err())
+			}
+			ids, retried, posts, err := worker.EvalTasks(1)
+			if err != nil || len(retried) != 0 || len(posts) != 0 {
+				t.Fatalf("placement worker: finished=%v retried=%v posts=%v err=%v", ids, retried, posts, err)
+			}
+			if len(ids) > 0 {
+				saved := task.GetFinishedTasks(ctx, ids[0])[ids[0]]
+				var identifiers map[string]server.Id
+				if saved == nil || json.Unmarshal([]byte(saved.ArgsJson), &identifiers) != nil || len(identifiers) != 2 || identifiers["case_id"] != report || identifiers["network_id"] != network {
+					t.Fatal("placement task persisted more than its two lookup IDs")
+				}
+				break
+			}
+			select {
+			case denied := <-finished:
+				t.Fatalf("placement returned before worker committed: %v", denied.err)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		got := <-finished
+		if got.err != nil || got.result == nil || !got.result.Inserted || got.result.Hold.CaseId != report || len(testOwedLegalHoldRecords(t, ctx)) != 1 {
+			t.Fatalf("placement result: %+v, %v", got.result, got.err)
+		}
+	})
 }
 
 // A legal-request record reads back as written, under its MAC; a changed field, another key, a missing MAC or
@@ -158,11 +213,15 @@ func newTestHoldWorld(t testing.TB) *testHoldWorld {
 		mailer: &testLegalHoldRecordMailer{},
 	}
 	model.SetAbuseHoldStore(world.store)
+	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(&sidecar.ServiceHost{
+		Blobs: blobs, Clock: clock, Redis: sidecartest.NewFakeRedis(context.Background(), clock, blobs.Faults(), nil, nil),
+	}, nil))
 	popConfig := server.Testing_PushAbuseConfig("holds_enabled: true\nprotected_names: {roots: [root.example], platform: [platform.example]}\n")
 	restoreMailer := SetLegalHoldRecordMailer(world.mailer)
 	restoreNow := Testing_SetLegalHoldNow(clock.Now)
 	t.Cleanup(func() {
 		model.SetAbuseHoldStore(nil)
+		model.SetAbuseHoldSoftStateSource(nil)
 		popConfig()
 		restoreMailer()
 		restoreNow()

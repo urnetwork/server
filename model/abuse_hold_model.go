@@ -67,6 +67,9 @@ const (
 	LegalHoldCopyStatePending LegalHoldCopyState = "pending"
 	// every registered table and the Redis soft state copied
 	LegalHoldCopyStateCopied LegalHoldCopyState = "copied"
+	// Older "copied" rows did not certify contracts or Redis. Only a new
+	// placement with a complete snapshot may release a retention guard.
+	legalHoldVerifiedCopy = server.LegalHoldVerifiedCopy
 )
 
 // scope's one string value (plan-ABUSE-hold-format #1), as the column and the object hold it.
@@ -100,6 +103,8 @@ type AbuseHoldSettings struct {
 	PassMaxTime time.Duration
 	// The task runner's bound on one pass, past PassMaxTime, so a pass ends itself before the runner ends it.
 	PassTaskMaxTime time.Duration
+	// Interval at which the API checks the worker's placement receipt.
+	PlacementPollInterval time.Duration
 	// Keys one LIST page of hold/ asks for, while the pass looks for objects with no row. Must be positive.
 	ListPageCount int
 	// How long a record mail that failed waits before its task tries again: a minute, as the action pass retries
@@ -119,6 +124,7 @@ func DefaultAbuseHoldSettings() *AbuseHoldSettings {
 		PassBatchSize:         100,
 		PassMaxTime:           5 * time.Minute,
 		PassTaskMaxTime:       10 * time.Minute,
+		PlacementPollInterval: time.Second,
 		ListPageCount:         1000,
 		RecordMailRetryDelay:  time.Minute,
 		RecordMailTaskMaxTime: 5 * time.Minute,
@@ -540,7 +546,14 @@ func scanLegalHold(result server.PgResult) *LegalHold {
 		hold.RenewTime = &renewTime
 	}
 	if copyState != nil {
-		hold.CopyState = LegalHoldCopyState(*copyState)
+		switch *copyState {
+		case legalHoldVerifiedCopy:
+			hold.CopyState = LegalHoldCopyStateCopied
+		case string(LegalHoldCopyStateCopied), server.LegalHoldPlacementSnapshot:
+			hold.CopyState = LegalHoldCopyStatePending
+		default:
+			hold.CopyState = LegalHoldCopyState(*copyState)
+		}
 	}
 	return hold
 }
@@ -768,13 +781,20 @@ func PlaceLegalHold(
 	now time.Time,
 	owe func(ctx context.Context, tx server.PgTx, hold *LegalHold),
 ) (hold *LegalHold, inserted bool, returnErr error) {
+	return PlaceLegalHoldWithClock(ctx, args, func() time.Time { return now }, owe)
+}
+
+// The worker samples its clock at the PostgreSQL snapshot, between two
+// matching reads of the scoped Redis families. A fixed clock supports
+// deterministic placement and recovery.
+func PlaceLegalHoldWithClock(ctx context.Context, args *LegalHoldArgs, clock func() time.Time, owe func(context.Context, server.PgTx, *LegalHold)) (hold *LegalHold, inserted bool, returnErr error) {
 	if !server.SidecarMg5Linked() {
 		return nil, false, ErrAbuseUnlinked
 	}
 	if !server.GetAbuseConfig().HoldsEnabled() {
 		return nil, false, ErrLegalHoldsDisabled
 	}
-	now = legalHoldTime(now)
+	now := legalHoldTime(clock())
 	if err := args.validate(now); err != nil {
 		return nil, false, err
 	}
@@ -820,42 +840,63 @@ func PlaceLegalHold(
 		ExpireTime: legalHoldTime(expireTime),
 		CopyState:  LegalHoldCopyStatePending,
 	}
+	previous, found, err := store.Read(ctx, args.NetworkId, args.CaseId)
+	if err != nil {
+		return nil, false, err
+	}
+	if found {
+		// Recover an orphaned mirror's original terms. An older placement
+		// may have no durable snapshot; recreating it now would collect new
+		// data.
+		if previous.Record == nil || previous.Record.Kind != args.Kind ||
+			!slices.Equal(previous.Record.Scope.RepoIds, placing.Scope.RepoIds) {
+			return nil, false, ErrLegalHoldConflict
+		}
+		placing.PlaceTime = legalHoldTime(previous.Record.PlaceTime)
+		expireTime, err := LegalHoldDeadline(args.Kind, placing.PlaceTime, args.reportTime())
+		if err != nil || !previous.Record.ExpireTime.Equal(expireTime) {
+			return nil, false, ErrLegalHoldConflict
+		}
+		placing.ExpireTime = legalHoldTime(expireTime)
+		if !placing.Live(now) {
+			return nil, false, ErrLegalHoldExpired
+		}
+	}
+	snapshot, err := prepareLegalHoldSnapshot(ctx, placing, found, clock)
+	if err != nil {
+		return nil, false, err
+	}
+	if snapshot != nil {
+		if !args.sameAs(snapshot) || (found && !placing.PlaceTime.Equal(snapshot.PlaceTime)) {
+			return nil, false, ErrLegalHoldConflict
+		}
+		if !snapshot.Live(now) {
+			return nil, false, ErrLegalHoldExpired
+		}
+		placing = snapshot
+		placing.CopyState = LegalHoldCopyState(server.LegalHoldPlacementSnapshot)
+	}
 	stored, err := store.Create(ctx, placing.Record())
 	if err != nil {
 		return nil, false, err
 	}
 	if !stored.PlaceTime.Equal(placing.PlaceTime) {
-		// an earlier attempt's object: its placement stands, chosen once
-		placing.PlaceTime = legalHoldTime(stored.PlaceTime)
-		expireTime, err := LegalHoldDeadline(args.Kind, placing.PlaceTime, args.reportTime())
-		if err != nil {
-			return nil, false, err
-		}
-		placing.ExpireTime = legalHoldTime(expireTime)
-		if !stored.ExpireTime.Equal(placing.ExpireTime) {
-			return nil, false, fmt.Errorf("%w: the object holds another expiry", ErrLegalHoldConflict)
-		}
-		if !placing.Live(now) {
-			return nil, false, ErrLegalHoldExpired
-		}
+		return nil, false, ErrLegalHoldConflict
 	}
 	legalHoldStep(LegalHoldStepObjectAfter)
-
 	server.Tx(ctx, func(tx server.PgTx) {
-		var rowInserted bool
-		hold, rowInserted = insertLegalHoldInTx(ctx, tx, placing)
-		if !rowInserted {
-			// a concurrent placement of the same hold committed first
-			if !args.sameAs(hold) || !hold.PlaceTime.Equal(placing.PlaceTime) {
-				hold, returnErr = nil, ErrLegalHoldConflict
+		hold, inserted = insertLegalHoldInTx(ctx, tx, placing)
+		if !inserted {
+			if !args.sameAs(hold) || !hold.Live(now) {
+				returnErr = ErrLegalHoldConflict
 			}
 			return
 		}
-		inserted = true
 		if owe != nil {
 			owe(ctx, tx, hold)
 		}
-	})
+	}, server.OptNoRetry())
+
 	if returnErr != nil {
 		return nil, false, returnErr
 	}

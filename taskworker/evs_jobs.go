@@ -150,9 +150,11 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	if firstCluster, err := clusters.FirstCluster(); err == nil {
 		holdStore = model.NewAbuseHoldStore(firstCluster)
 		model.SetAbuseHoldStore(holdStore)
+		model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
 	}
 	startEvsJobsOnHost(ctx, lifetime, host, evsSettings, evsJobs, func() {
 		if holdStore != nil {
+			model.SetAbuseHoldSoftStateSource(nil)
 			model.SetAbuseHoldStore(nil)
 		}
 		budget.Close()

@@ -635,7 +635,8 @@ const closeEvidenceRetentionBatchSql = `
 			evidence.contract_id,
 			evidence.client_id,
 			evidence.report_id,
-			evidence.accepted_at < (now() AT TIME ZONE 'UTC') - make_interval(secs => $6) AS aged
+			evidence.accepted_at < (now() AT TIME ZONE 'UTC') - make_interval(secs => $6) AS aged,
+			%[2]s AS held
 		FROM ONLY public.%[1]s evidence
 		WHERE
 			(evidence.contract_id, evidence.client_id, evidence.report_id) > ($1::uuid, $2::uuid, $3::uuid) AND
@@ -647,6 +648,7 @@ const closeEvidenceRetentionBatchSql = `
 			scanned.row_ctid,
 			scanned.contract_id,
 			scanned.aged,
+			scanned.held,
 			EXISTS (
 				SELECT 1 FROM transfer_contract
 				WHERE transfer_contract.contract_id = scanned.contract_id AND transfer_contract.outcome IS NULL
@@ -654,7 +656,7 @@ const closeEvidenceRetentionBatchSql = `
 		FROM scanned
 	), removed AS (
 		DELETE FROM ONLY public.%[1]s evidence
-		WHERE evidence.ctid = ANY (ARRAY(SELECT classified.row_ctid FROM classified WHERE classified.aged AND NOT classified.unresolved))
+		WHERE evidence.ctid = ANY (ARRAY(SELECT classified.row_ctid FROM classified WHERE classified.aged AND NOT classified.unresolved AND NOT classified.held))
 		RETURNING 1
 	)
 	SELECT
@@ -663,7 +665,7 @@ const closeEvidenceRetentionBatchSql = `
 		last.contract_id,
 		last.client_id,
 		last.report_id,
-		(SELECT classified.contract_id FROM classified WHERE NOT classified.aged ORDER BY classified.contract_id LIMIT 1)
+		(SELECT classified.contract_id FROM classified WHERE NOT classified.aged OR classified.held ORDER BY classified.contract_id LIMIT 1)
 	FROM (SELECT 1) AS one
 	LEFT JOIN LATERAL (
 		SELECT scanned.contract_id, scanned.client_id, scanned.report_id
@@ -689,7 +691,7 @@ func removeCloseEvidenceBatchIn(ctx context.Context, tx PgTx, args closeEvidence
 	var lastContractId, lastClientId, lastReportId, lowWater *Id
 	Raise(tx.QueryRow(
 		ctx,
-		fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(args.leaf)),
+		fmt.Sprintf(closeEvidenceRetentionBatchSql, quoteIdentifier(args.leaf), evidencePlacementCopyPendingSQL()),
 		args.after.contractId,
 		args.after.clientId,
 		args.after.reportId,

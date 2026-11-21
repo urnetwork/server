@@ -503,8 +503,15 @@ func legalHoldBindTime(now time.Time) time.Time {
 // hook, which runs for a hold that stood already too, since a retry after a crash finishes what the first call
 // began. Refuses unless holds_enabled. The result says from when the hold binds every deleter.
 func PlaceLegalHold(ctx context.Context, args *model.LegalHoldArgs) (*LegalHoldResult, error) {
+	if legalHoldDispatch.Load() {
+		return dispatchLegalHold(ctx, args)
+	}
+	return placeLegalHoldLocally(ctx, args)
+}
+
+func placeLegalHoldLocally(ctx context.Context, args *model.LegalHoldArgs) (*LegalHoldResult, error) {
 	_, placed, now := currentAbuseHoldDeps()
-	hold, inserted, err := model.PlaceLegalHold(ctx, args, now(), func(ctx context.Context, tx server.PgTx, hold *model.LegalHold) {
+	hold, inserted, err := model.PlaceLegalHoldWithClock(ctx, args, now, func(ctx context.Context, tx server.PgTx, hold *model.LegalHold) {
 		oweLegalHoldRecordInTx(ctx, tx, LegalHoldEventPlaced, hold)
 	})
 	if err != nil {
@@ -843,6 +850,9 @@ func RunAbuseHoldPass(ctx context.Context, deps *AbuseHoldPassDeps) *AbuseHoldPa
 	}
 	counts := model.AbuseHoldCounts{}
 	complete := true
+
+	for !outOfTime() && model.RemoveExpiredHoldPreparations(ctx, now, settings.PassBatchSize) == settings.PassBatchSize {
+	}
 
 	// holds past their expiry
 	cursor := model.LegalHoldCursor{}

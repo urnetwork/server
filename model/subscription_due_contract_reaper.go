@@ -242,8 +242,8 @@ func (self *dueContractReaper) removeBatch(ctx context.Context) (processedCount 
 		// newly due contracts remain for the next pass. This read keeps the
 		// default plan: the ordered reap_time index scan needs index scans.
 		var contractIds []server.Id
-		rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract
- WHERE reap_time IS NOT NULL AND reap_time<$1 ORDER BY reap_time LIMIT $2`, self.minTime, self.batchSize)
+		rows, err := tx.Query(ctx, `SELECT contract_id FROM transfer_contract candidate
+ WHERE reap_time IS NOT NULL AND reap_time<$1 AND NOT `+server.ContractPlacementCopyPendingSQL()+` ORDER BY reap_time LIMIT $2`, self.minTime, self.batchSize)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var id server.Id
@@ -342,6 +342,7 @@ func (self *dueContractReaper) removeBatch(ctx context.Context) (processedCount 
 			stop = dueContractReapStopDrained
 			return
 		}
+		candidateIds = contractsOutsidePendingHolds(ctx, tx, candidateIds)
 		if len(candidateIds) == 0 {
 			return
 		}

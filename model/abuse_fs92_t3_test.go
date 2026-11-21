@@ -125,6 +125,7 @@ func (self *apiHoldApi) PlaceHold(ctx context.Context, placement *sidecartest.Ho
 		return nil, err
 	}
 	model.SetAbuseHoldStore(store)
+	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(self.net.Host(), nil))
 	restoreNow := controller.Testing_SetLegalHoldNow(self.net.Clock().Now)
 	defer restoreNow()
 	args := &model.LegalHoldArgs{NetworkId: networkId, CaseId: caseId, Kind: placement.Kind, Scope: placement.Scope}
@@ -266,6 +267,7 @@ func holdT3RuleSettings(t testing.TB) *fault.RuleSettings {
 	popConfig := server.Testing_PushAbuseConfig("holds_enabled: true\n")
 	t.Cleanup(func() {
 		model.SetAbuseHoldStore(nil)
+		model.SetAbuseHoldSoftStateSource(nil)
 		popConfig()
 	})
 	settings := sidecart3.DefaultSettings()

@@ -63,6 +63,7 @@ Options:
 	controller.InstallAbuseEffects()
 	controller.InstallAbuseRecordMailer()
 	controller.InstallLegalHoldRecordMailer()
+	controller.InstallLegalHoldDispatch()
 	// §21.8's notice pager: the monitor's webhook from monitor.yml under a
 	// retrying sink (QD-1070); none built leaves every notice's page owed
 	controller.InstallAbuseNoticePager()

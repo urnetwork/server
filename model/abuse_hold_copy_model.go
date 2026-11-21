@@ -9,14 +9,14 @@ package model
 //	            16 MiB, each value in its text form: tls-3's tls_connection_record here; ABUSE-M7-01's
 //	            mail_connection_record and ABUSE-M9-01's smtp_send register theirs
 //	soft state  evs-8's {evsl_<repo_id>} lease fields and gkm-10's acks of the network's repos in the hold's
-//	            scope, read once from the process's AbuseHoldSoftStateSource; a missing key is no error, what
-//	            existed is recorded, and a copy with no source says so in its part
+//	            scope, read at placement from the process's AbuseHoldSoftStateSource; a missing key is no error, what
+//	            existed is recorded, and a missing source refuses placement
 //
 // A part's copied_rows is u8(1) || u32 big-endian header length || its header's JSON (HoldCopyPartHeader) || one
 // gzip stream of JSON lines, a row's text values or a key's fields each. The header stays outside the stream, so a
 // copy reads where it stands from the first bytes of each part alone. It carries the case whose copy wrote the part
 // and, for rows, the table and the cursor after its last row, so a copy cut short resumes from its own parts with
-// no row twice, and a part that moves to another hold keeps saying where it came from. Once every table is copied,
+// no row twice, and a part that moves to another hold keeps saying where it came from. The three connect-1 tables and Redis are captured with placement. Once every table is copied,
 // part 0's copy_state reads copied.
 //
 // Only rows existing at placement are copied: a row written later is new collection, which a hold never makes. A
@@ -186,6 +186,8 @@ type HoldCopyPartHeader struct {
 	LastKey  string `json:"last_key,omitempty"`
 	// rows: the table's last part
 	Complete bool `json:"complete,omitempty"`
+	// placement manifest: the last contiguous part made in its transaction
+	PlacementLastPart int `json:"placement_last_part,omitempty"`
 	// soft state: the repo whose keys these are
 	RepoId *server.Id `json:"repo_id,omitempty"`
 	// soft state no source could read, recorded so no one reads its absence as none existing
@@ -281,12 +283,11 @@ type AbuseHoldSoftStateKey struct {
 // Where a copy reads the Redis soft state existing at placement: the network's repos, and each repo's lease fields
 // and its group's acks. A key that does not exist is left out, never an error.
 type AbuseHoldSoftStateSource interface {
-	NetworkRepoIds(ctx context.Context, networkId server.Id) ([]server.Id, error)
-	RepoSoftState(ctx context.Context, repoId server.Id) ([]*AbuseHoldSoftStateKey, error)
+	NetworkRepoIds(ctx context.Context, tx server.PgTx, networkId server.Id) ([]server.Id, error)
+	RepoSoftState(ctx context.Context, repoId server.Id, at time.Time) ([]*AbuseHoldSoftStateKey, error)
 }
 
-// This process's soft state source, which taskworker installs with its evs host's Redis and projection reads.
-// Until then a copy records its soft state as unavailable.
+// This process's placement-time Redis and projection source. A placement requires a complete read.
 var abuseHoldSoftStateSource atomic.Pointer[AbuseHoldSoftStateSource]
 
 // Installs this process's soft state source; nil removes it.
@@ -344,20 +345,27 @@ func readHoldCopyParts(ctx context.Context, conn server.PgCanQuery, networkId se
 
 // Appends one part after the hold's highest, in its own transaction. A part number another writer took first
 // refuses with no write, which the copy's next run resumes past.
-func appendHoldCopyPart(ctx context.Context, networkId server.Id, caseId server.Id, part int, body []byte) {
+func appendHoldCopyPart(ctx context.Context, hold *LegalHold, part int, body []byte) error {
+	var returnErr error
 	server.Tx(ctx, func(tx server.PgTx) {
+		current := getLegalHoldInTx(ctx, tx, hold.NetworkId, hold.CaseId, true)
+		if current == nil || !current.PlaceTime.Equal(hold.PlaceTime) {
+			returnErr = ErrLegalHoldExpired
+			return
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO abuse_legal_hold (network_id, case_id, part, copied_rows)
 				VALUES ($1, $2, $3, $4)
 			`,
-			networkId,
-			caseId,
+			hold.NetworkId,
+			hold.CaseId,
 			part,
 			body,
 		))
 	})
+	return returnErr
 }
 
 // Called before each part's write with the table or kind it holds: how a test ends a copy midway, as a crash
@@ -389,6 +397,8 @@ func RunAbuseHoldCopy(ctx context.Context, networkId server.Id, caseId server.Id
 		parts, maxPart = readHoldCopyParts(ctx, conn, networkId, caseId, settings)
 	})
 	softStateDone := false
+	placementLastPart := 0
+	placementParts := map[int]bool{}
 	tableProgress := map[string]*holdCopyTableProgress{}
 	for _, part := range parts {
 		if part.header.CaseId != caseId {
@@ -396,9 +406,20 @@ func RunAbuseHoldCopy(ctx context.Context, networkId server.Id, caseId server.Id
 			continue
 		}
 		switch part.header.Kind {
+		case holdPlacementManifest:
+			if part.part == 1 && part.header.Complete {
+				placementLastPart = part.header.PlacementLastPart
+			}
 		case HoldCopyPartKindSoftState:
-			softStateDone = true
+			placementParts[part.part] = !part.header.Unavailable
+			softStateDone = softStateDone || (part.header.Complete && !part.header.Unavailable)
 		case HoldCopyPartKindRows:
+			for _, table := range holdContractTables {
+				if part.header.Table == table.name {
+					placementParts[part.part] = true
+					break
+				}
+			}
 			tableProgress[part.header.Table] = &holdCopyTableProgress{
 				complete: part.header.Complete,
 				lastTime: part.header.LastTime,
@@ -411,9 +432,16 @@ func RunAbuseHoldCopy(ctx context.Context, networkId server.Id, caseId server.Id
 		return maxPart
 	}
 
-	if !softStateDone {
-		if err := copyHoldSoftState(ctx, hold, settings, nextPart); err != nil {
-			return false, err
+	missingPlacement := !softStateDone || placementLastPart < 2 || placementLastPart > maxPart
+	for i := 2; !missingPlacement && i <= placementLastPart; i++ {
+		if !placementParts[i] {
+			missingPlacement = true
+		}
+	}
+	for _, table := range holdContractTables {
+		progress := tableProgress[table.name]
+		if progress == nil || !progress.complete {
+			missingPlacement = true
 		}
 	}
 
@@ -442,108 +470,28 @@ func RunAbuseHoldCopy(ctx context.Context, networkId server.Id, caseId server.Id
 	if tableErr != nil {
 		return false, tableErr
 	}
+	if missingPlacement {
+		return false, ErrHoldPlacementSnapshotUnavailable
+	}
+
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				UPDATE abuse_legal_hold
 				SET copy_state = $3
 				WHERE network_id = $1 AND case_id = $2 AND part = 0
+				  AND place_time = $4 AND (expire_time IS NULL OR expire_time > $5)
 			`,
 			networkId,
 			caseId,
-			string(LegalHoldCopyStateCopied),
+			legalHoldVerifiedCopy,
+			hold.PlaceTime,
+			now,
 		))
+		complete = tag.RowsAffected() == 1
 	})
-	return true, nil
-}
-
-// The soft state of the hold's repos in scope, one part per repo with any key, or one part saying no source could
-// read it.
-func copyHoldSoftState(ctx context.Context, hold *LegalHold, settings *AbuseHoldCopySettings, nextPart func() int) error {
-	source := currentAbuseHoldSoftStateSource()
-	if source == nil {
-		body, err := encodeHoldCopyPart(&HoldCopyPartHeader{
-			Version:     holdCopyPartVersion,
-			CaseId:      hold.CaseId,
-			Kind:        HoldCopyPartKindSoftState,
-			Unavailable: true,
-		}, nil, settings)
-		if err != nil {
-			return err
-		}
-		if hook := Testing_HoldCopyBeforePart; hook != nil {
-			hook(HoldCopyPartKindSoftState)
-		}
-		appendHoldCopyPart(ctx, hold.NetworkId, hold.CaseId, nextPart(), body)
-		return nil
-	}
-	repoIds, err := source.NetworkRepoIds(ctx, hold.NetworkId)
-	if err != nil {
-		return err
-	}
-	type repoKeys struct {
-		repoId server.Id
-		lines  [][]byte
-	}
-	repos := []*repoKeys{}
-	for _, repoId := range repoIds {
-		if !hold.Scope.Covers(sidecar.Id(repoId)) {
-			continue
-		}
-		keys, err := source.RepoSoftState(ctx, repoId)
-		if err != nil {
-			return err
-		}
-		lines := [][]byte{}
-		for _, key := range keys {
-			line, err := json.Marshal(key)
-			if err != nil {
-				return err
-			}
-			lines = append(lines, line)
-		}
-		repos = append(repos, &repoKeys{repoId: repoId, lines: lines})
-	}
-	// every repo read before any part is written, so a failed read leaves no partial record
-	written := 0
-	for _, repo := range repos {
-		if len(repo.lines) == 0 {
-			continue
-		}
-		repoId := repo.repoId
-		body, err := encodeHoldCopyPart(&HoldCopyPartHeader{
-			Version:  holdCopyPartVersion,
-			CaseId:   hold.CaseId,
-			Kind:     HoldCopyPartKindSoftState,
-			RepoId:   &repoId,
-			RowCount: len(repo.lines),
-		}, repo.lines, settings)
-		if err != nil {
-			return err
-		}
-		if hook := Testing_HoldCopyBeforePart; hook != nil {
-			hook(HoldCopyPartKindSoftState)
-		}
-		appendHoldCopyPart(ctx, hold.NetworkId, hold.CaseId, nextPart(), body)
-		written += 1
-	}
-	if written == 0 {
-		// a part all the same, so the copy knows its soft state is read: nothing existed
-		body, err := encodeHoldCopyPart(&HoldCopyPartHeader{
-			Version: holdCopyPartVersion,
-			CaseId:  hold.CaseId,
-			Kind:    HoldCopyPartKindSoftState,
-		}, nil, settings)
-		if err != nil {
-			return err
-		}
-		if hook := Testing_HoldCopyBeforePart; hook != nil {
-			hook(HoldCopyPartKindSoftState)
-		}
-		appendHoldCopyPart(ctx, hold.NetworkId, hold.CaseId, nextPart(), body)
-	}
-	return nil
+	return complete, nil
 }
 
 // The cursor's floor: before every row.
@@ -618,7 +566,9 @@ func copyHoldTable(
 		if hook := Testing_HoldCopyBeforePart; hook != nil {
 			hook(table.Table)
 		}
-		appendHoldCopyPart(ctx, hold.NetworkId, hold.CaseId, nextPart(), body)
+		if err := appendHoldCopyPart(ctx, hold, nextPart(), body); err != nil {
+			return err
+		}
 		lines, rawByteCount, hasPart = [][]byte{}, 0, true
 		return nil
 	}
@@ -694,7 +644,7 @@ func ListPendingHoldCopies(ctx context.Context, now time.Time, cursor HoldCopyCu
 				ORDER BY abuse_legal_hold.network_id, abuse_legal_hold.case_id
 				LIMIT $5
 			`,
-			string(LegalHoldCopyStateCopied),
+			legalHoldVerifiedCopy,
 			now.UTC(),
 			cursor.NetworkId,
 			cursor.CaseId,
@@ -816,7 +766,7 @@ func AbuseHoldCopyPending(ctx context.Context, conn server.PgQuerier, table stri
 		),
 		r.Lower.UTC(),
 		now.UTC(),
-		string(LegalHoldCopyStateCopied),
+		legalHoldVerifiedCopy,
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {

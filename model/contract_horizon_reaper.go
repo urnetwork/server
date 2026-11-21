@@ -399,7 +399,8 @@ const (
 	// resolved, but its close time is not past the horizon
 	contractHorizonProtectedRecentClose = "recent_close"
 	// another transaction holds the contract or one of its sweeps
-	contractHorizonProtectedBusy = "busy"
+	contractHorizonProtectedBusy     = "busy"
+	contractHorizonProtectedHoldCopy = "hold_copy"
 	// an escrow is not settled
 	contractHorizonProtectedUnsettled = "unsettled"
 	// a sweep belongs to a payment that holds retention
@@ -427,6 +428,7 @@ var contractHorizonProtectedReasons = []string{
 	contractHorizonProtectedUnresolved,
 	contractHorizonProtectedRecentClose,
 	contractHorizonProtectedBusy,
+	contractHorizonProtectedHoldCopy,
 	contractHorizonProtectedUnsettled,
 	contractHorizonProtectedPaymentHold,
 	contractHorizonProtectedPaymentIncomplete,
@@ -1172,6 +1174,9 @@ func (self *contractHorizonReaper) removeBatch(
 			batch.protected[contractHorizonProtectedPlanStaged] = planStagedCount
 			batch.protected[contractHorizonProtectedBlockPoints] = blockPointsCount
 			batch.protected[contractHorizonProtectedPaymentReview] = paymentReviewCount
+			beforeHolds := len(batch.eligibleIds)
+			batch.eligibleIds = contractsOutsidePendingHolds(ctx, tx, batch.eligibleIds)
+			batch.protected[contractHorizonProtectedHoldCopy] = int64(beforeHolds - len(batch.eligibleIds))
 			if dryRun || len(batch.eligibleIds) == 0 {
 				return
 			}

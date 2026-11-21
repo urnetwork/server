@@ -470,6 +470,13 @@ func closeEvidenceWeekBlocker(ctx context.Context, conn PgQuerier, r PartitionRa
 		return "the legacy and DEFAULT partitions are never dropped"
 	}
 	leaf := closeEvidencePartitionFamily.LeafName(closeEvidenceTable, r)
+	if pendingContractCopies(ctx, conn) {
+		var pending bool
+		Raise(conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM public.`+quoteIdentifier(leaf)+` evidence WHERE `+evidencePlacementCopyPendingSQL()+`)`).Scan(&pending))
+		if pending {
+			return "a preservation hold has an unfinished contract copy"
+		}
+	}
 	var blocker string
 	Raise(conn.QueryRow(ctx, closeEvidenceWeekBlockerSql(leaf, r, closeEvidenceRetentionIn(ctx, conn))).Scan(&blocker))
 	return blocker
