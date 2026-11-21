@@ -158,6 +158,9 @@ type CryptoPaymentIntent struct {
 	// price for yearly_onboarding)
 	PriceUsdNanoCents        NanoCents
 	RegularPriceUsdNanoCents NanoCents
+	// what decided a plan's tier, json (controller.PriceTierEvidence); "" for
+	// a data item, and cleared at the unlink with the network it describes
+	PriceTierEvidenceJson string
 	// code delivery only; cleared at the unlink
 	Email        string
 	Address      string
@@ -210,6 +213,7 @@ const cryptoPaymentIntentColumns = `
 	offer_applied,
 	price_usd_nano_cents,
 	regular_price_usd_nano_cents,
+	price_tier_evidence::text,
 	email,
 	address,
 	address_index,
@@ -233,6 +237,7 @@ const cryptoPaymentIntentColumns = `
 func scanCryptoPaymentIntent(result pgx.Rows) *CryptoPaymentIntent {
 	intent := &CryptoPaymentIntent{}
 	var tier *string
+	var priceTierEvidence *string
 	var email *string
 	var rateSources *string
 	server.Raise(result.Scan(
@@ -247,6 +252,7 @@ func scanCryptoPaymentIntent(result pgx.Rows) *CryptoPaymentIntent {
 		&intent.OfferApplied,
 		&intent.PriceUsdNanoCents,
 		&intent.RegularPriceUsdNanoCents,
+		&priceTierEvidence,
 		&email,
 		&intent.Address,
 		&intent.AddressIndex,
@@ -268,6 +274,9 @@ func scanCryptoPaymentIntent(result pgx.Rows) *CryptoPaymentIntent {
 	))
 	if tier != nil {
 		intent.Tier = *tier
+	}
+	if priceTierEvidence != nil {
+		intent.PriceTierEvidenceJson = *priceTierEvidence
 	}
 	if email != nil {
 		intent.Email = *email
@@ -320,9 +329,10 @@ func CreateCryptoPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *
 				rate_sources,
 				quoted_at,
 				expires_at,
-				create_time
+				create_time,
+				price_tier_evidence
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20, $21)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb, $19, $20, $21, $22::jsonb)
 		`,
 		intent.IntentId,
 		intent.StatusTokenHash,
@@ -345,6 +355,7 @@ func CreateCryptoPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *
 		intent.QuotedAt,
 		intent.ExpiresAt,
 		intent.CreateTime,
+		nullIfEmptyString(intent.PriceTierEvidenceJson),
 	))
 	addCryptoPaymentQuoteInTx(tx, ctx, intent.IntentId, intent.QuotedAt, intent.AmountAtomic, intent.RateUsd, intent.RateSourcesJson, intent.ExpiresAt)
 }
@@ -2312,9 +2323,11 @@ type CryptoPaymentUnlinkResult struct {
 //     and, once no friend's email is owed, the buyer's email
 //     (unlinkCryptoGiftOrderInTx). The order keeps its codes, so its cards
 //     still deliver and its codes still redeem;
-//   - the invoice forgets its network, email and grant handles, and its times
-//     are truncated to the day, as are its receipts' and its pool address's;
-//     its quote history is deleted (the invoice keeps the final quote);
+//   - the invoice forgets its network, email and grant handles, and the
+//     evidence of its price tier (the network's countries; its tier stays),
+//     and its times are truncated to the day, as are its receipts' and its
+//     pool address's; its quote history is deleted (the invoice keeps the
+//     final quote);
 //   - the reconciliation events about it (by the invoice id, or one of its
 //     receipts' transactions) lose their network.
 //
@@ -2467,6 +2480,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 						email = NULL,
 						balance_id = NULL,
 						balance_code_id = NULL,
+						price_tier_evidence = NULL,
 						quoted_at = date_trunc('day', quoted_at),
 						expires_at = date_trunc('day', expires_at),
 						create_time = date_trunc('day', create_time),
