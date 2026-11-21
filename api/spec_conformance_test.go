@@ -21,10 +21,9 @@ package api
 //     Routes(), and every route Routes() serves, streaming routes included, is
 //     documented: a /competition/ route in sn/api/competition.yml, every other
 //     route here. An undocumented route fails. A path whose own `servers:`
-//     names none of the spec's top-level servers is another host's: /gkm/'s,
-//     held to sidecar's gkmservice table by connect/api/check-routes.sh, /evs/'s,
-//     held to the engine's by server/evshost's route table test, and
-//     /socket/'s. The spec's need none in Routes(), and one in Routes() fails.
+//     names none of the spec's top-level servers belongs to another host.
+//     connect/api/check-routes.sh runs the GKM, EVS and socket engine checks
+//     alongside the API check. A foreign route in Routes() fails.
 //
 // Security/auth parity is intentionally out of scope (not reflectable).
 
@@ -45,6 +44,7 @@ import (
 	snprotocol "github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/socketsservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
@@ -303,6 +303,7 @@ func registry() []specEndpoint {
 		// the internal gate's projection reads (ACL-M4-05): the client route's body, and a base's rows as raw bytes
 		{"GET", "/internal/gate/projection/{network_id}", nil, rt(controller.NetworkConfigProjectionResult{})},
 		{"GET", "/internal/gate/rows/{network_id}/{rows_sha256}", nil, nil},
+		{"GET", "/internal/gate/listen-facts/{network_id}", nil, rt(socketsservice.TlsListenFacts{})},
 		// an edge block's client mint (TLS-M5-11, QD-812)
 		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
 		// a role mail's notice from the platform listener (QD-1070, owner decision 612)
