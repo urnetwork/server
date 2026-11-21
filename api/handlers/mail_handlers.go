@@ -76,12 +76,13 @@ func MailEnable(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireClient(router.PrivateErrors(impl), w, r)
 }
 
-// GET /mail/status: {enabled, storage_full, spent, direct_mx, strict_domains}
-// for the bearer's network (model.MailStatus). A receiver reads it at most
+// GET /mail/status for the bearer's network (model.MailStatus). The current bound receiver gets its own direct MX
+// addresses, including any whose first probe is pending. Each receiver gets the network's verified domains for
+// signed recipient lookup. A receiver reads the status at most
 // every 30 s for RCPT's 452 4.2.2. A sending sidecar reads strict_domains, the
 // network's verified custom domains in strict mode (QD-1129), at each send of
 // a custom domain's mail: the set smtpedge's gate derives envelope_domain from,
-// read through the same model function (model.GetSmtpStrictCustomDomains), so
+// read from the same verified-domain and strict-MX rows, so
 // the sidecar's MAIL FROM, bounces+<token>@b.<domain> for a strict domain and
 // b.<net>.<root> for any other, is where the edge holds Z4 to. A domain is
 // strict while the network maps an active strict-mode MX host at or under it
@@ -94,7 +95,9 @@ func GetMailStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	impl := func(clientSession *session.ClientSession) (*model.MailStatus, error) {
-		return model.GetMailStatus(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		networkId := clientSession.ByJwt.NetworkId
+		receiverId, _ := smtpClientSidecar(clientSession.Ctx, networkId, *clientSession.ByJwt.ClientId)
+		return model.GetMailReceiverStatus(clientSession.Ctx, networkId, receiverId, model.DefaultSmtpCustomDomainSettings())
 	}
 	router.WrapRequireClient(router.PrivateErrors(impl), w, r)
 }

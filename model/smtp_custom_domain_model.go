@@ -104,19 +104,28 @@ func GetSmtpStrictCustomDomains(ctx context.Context, networkId server.Id, settin
 	if !settings.StrictEnvelope {
 		return []string{}
 	}
+	_, strict := smtpCustomDomainSets(ctx, networkId, settings)
+	return strict
+}
+
+// Take one snapshot of the verified domains for the receiver and the gate's strict subset.
+func smtpCustomDomainSets(ctx context.Context, networkId server.Id, settings *SmtpCustomDomainSettings) (verified, strict []string) {
+	verified = GetNetworkVerifiedDomains(ctx, networkId)
+	if !settings.StrictEnvelope || len(verified) == 0 {
+		return verified, []string{}
+	}
 	hosts := []string{}
 	for _, row := range DnsStrictMxHostRows(ctx, networkId) {
 		if row.State == sidecar.DnsCustomHostStateActive {
 			hosts = append(hosts, strings.ToLower(strings.TrimSuffix(row.Host, ".")))
 		}
 	}
-	return smtpStrictCustomDomains(GetNetworkVerifiedDomains(ctx, networkId), hosts)
+	return verified, smtpStrictCustomDomains(verified, hosts)
 }
 
 // Fills facts' custom-domain fields for the network: its verified domains, their withhold time and the strict ones.
 func fillSmtpGateCustomDomainFacts(ctx context.Context, networkId server.Id, facts *smtpedgeservice.SmtpGateFacts, settings *SmtpCustomDomainSettings) {
-	facts.VerifiedDomains = GetNetworkVerifiedDomains(ctx, networkId)
-	facts.StrictDomains = GetSmtpStrictCustomDomains(ctx, networkId, settings)
+	facts.VerifiedDomains, facts.StrictDomains = smtpCustomDomainSets(ctx, networkId, settings)
 	facts.CustomDomainWithholdTime = GetSmtpCustomDomainWithholdTime(ctx, networkId, settings)
 }
 

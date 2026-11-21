@@ -194,6 +194,9 @@ func TestSmtpGateFactsCarryTheCustomDomains(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if !slices.Equal(status.VerifiedDomains, facts.VerifiedDomains) {
+			t.Fatalf("recipient domains %v, gate domains %v", status.VerifiedDomains, facts.VerifiedDomains)
+		}
 		if !slices.Equal(status.StrictDomains, facts.StrictDomains) {
 			t.Fatalf("GET /mail/status names %v and the gate %v", status.StrictDomains, facts.StrictDomains)
 		}

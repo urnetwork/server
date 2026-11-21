@@ -393,6 +393,19 @@ func TestMailRouteListsPublishedReceiversAndDropsADirectMx(t *testing.T) {
 		if err != nil || !slices.Equal(projection.Routed, []string{label}) {
 			t.Fatalf("a pending direct MX: %+v %v", projection, err)
 		}
+		checkAssigned := func() {
+			t.Helper()
+			for _, tc := range []struct {
+				receiver server.Id
+				want     []string
+			}{{newer, []string{address.String()}}, {older, []string{}}, {server.Id{}, []string{}}} {
+				status, err := GetMailReceiverStatus(ctx, networkId, tc.receiver, DefaultSmtpCustomDomainSettings())
+				if err != nil || status == nil || !status.DirectMx || !slices.Equal(status.DirectMxAddresses, tc.want) {
+					t.Fatalf("direct MX addresses for %s, want %v: %+v %v", tc.receiver, tc.want, status, err)
+				}
+			}
+		}
+		checkAssigned()
 		server.Tx(ctx, func(tx server.PgTx) {
 			if err := SetMailDirectMxProbeInTx(ctx, tx, networkId, newer, address, true); err != nil {
 				t.Fatal(err)
@@ -403,6 +416,8 @@ func TestMailRouteListsPublishedReceiversAndDropsADirectMx(t *testing.T) {
 		if err != nil || len(projection.Routed) != 0 || !slices.Equal(projection.Removed, []string{label, "eng." + label}) || testMailRoute(t, ctx, label) != nil {
 			t.Fatalf("a verified direct MX: %+v %v", projection, err)
 		}
+
+		checkAssigned()
 		if status, err := GetMailStatus(ctx, networkId); err != nil || !status.DirectMx || !status.Enabled {
 			t.Fatalf("status with a direct MX: %+v %v", status, err)
 		}

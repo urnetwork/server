@@ -634,6 +634,10 @@ type MailStatus struct {
 	Spent bool `json:"spent"`
 	// The network names a direct MX, in any state (§15.4).
 	DirectMx bool `json:"direct_mx"`
+	// Only the active caller's assigned addresses, including pending probes. Other receivers' addresses stay private.
+	DirectMxAddresses []string `json:"direct_mx_addresses"`
+	// Customer domains whose ownership this network has verified. Receivers still resolve each alias through signed mailcfg.
+	VerifiedDomains []string `json:"verified_domains"`
 	// The network's verified custom domains in strict mode (QD-1129): each at
 	// or above an active strict-mode MX host the network maps (§12.8 step 4),
 	// whose mail's envelope is b.<domain>. The set smtpedge's gate derives
@@ -652,15 +656,28 @@ func GetMailStatus(ctx context.Context, networkId server.Id) (*MailStatus, error
 // GetMailStatus with the custom domains' settings, which must be the ones the
 // gate's facts are read under (GetSmtpGateFactsWithSettings).
 func GetMailStatusWithSettings(ctx context.Context, networkId server.Id, settings *SmtpCustomDomainSettings) (*MailStatus, error) {
+	return GetMailReceiverStatus(ctx, networkId, server.Id{}, settings)
+}
+
+// The network status for one authenticated receiver. An unbound client has no direct listener to start.
+func GetMailReceiverStatus(ctx context.Context, networkId server.Id, receiverId server.Id, settings *SmtpCustomDomainSettings) (*MailStatus, error) {
+	verified, strict := smtpCustomDomainSets(ctx, networkId, settings)
 	status := &MailStatus{
-		// the gate's own read: one set for the edge and the sender (QD-1129)
-		StrictDomains: GetSmtpStrictCustomDomains(ctx, networkId, settings),
+		StrictDomains:     strict,
+		VerifiedDomains:   verified,
+		DirectMxAddresses: []string{},
 	}
 	if !server.SidecarMg7Linked() {
 		return status, nil
 	}
 	status.Enabled = GetMailNetwork(ctx, networkId) != nil
-	status.DirectMx = 0 < len(ListMailDirectMx(ctx, networkId))
+	rows := ListMailDirectMx(ctx, networkId)
+	status.DirectMx = len(rows) != 0
+	for _, row := range rows {
+		if receiverId != (server.Id{}) && row.ReceiverSidecarId == receiverId {
+			status.DirectMxAddresses = append(status.DirectMxAddresses, row.Address.String())
+		}
+	}
 	if server.SidecarMg2Linked() {
 		state, err := GetNetworkQuotaState(ctx, networkId)
 		if err != nil {
