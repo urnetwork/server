@@ -323,7 +323,7 @@ func TestTlsCertOrderUsesSignedScopeOwnership(t *testing.T) {
 	if err := proto.Unmarshal(raw, rows); err != nil {
 		t.Fatal(err)
 	}
-	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "crew", Owner: &bridge.TeamScopeRow_MemberId{MemberId: memberId.Bytes()}}}
+	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "crew", MemberId: memberId.Bytes()}}
 	raw, err = (proto.MarshalOptions{Deterministic: true}).Marshal(rows)
 	if err != nil {
 		t.Fatal(err)
