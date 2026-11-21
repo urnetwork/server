@@ -139,10 +139,9 @@ var (
 // Renders a policy template with vars, as Ansible's template module does (StrictUndefined, trim_blocks),
 // for the part of Jinja2 the policy templates use: {# comments #}, {{ a.b }} and {% if %}, {% else %} and
 // {% endif %}, whose condition is a path, `not` a path, or a path compared by == or != with a quoted string,
-// joined by `and` and `or` without parentheses. Anything else is an error, so a template that grows past
-// this subset fails here rather than rendering wrong.
+// joined by `and` and `or` without parentheses, with default(false) on optional flags. Other syntax is an error.
 func renderFileClusterPolicyTemplate(text string, vars map[string]any) (string, error) {
-	lookup := func(path string) (any, error) {
+	lookup := func(path string, defaultFalse bool) (any, error) {
 		if !fileClusterTemplatePathRegex.MatchString(path) {
 			return nil, fmt.Errorf("%q is not a path this renderer reads", path)
 		}
@@ -153,6 +152,9 @@ func renderFileClusterPolicyTemplate(text string, vars map[string]any) (string, 
 				return nil, fmt.Errorf("%q: %s is not a mapping", path, name)
 			}
 			if value, ok = mapping[name]; !ok {
+				if defaultFalse {
+					return false, nil
+				}
 				return nil, fmt.Errorf("%q is undefined", path)
 			}
 		}
@@ -174,7 +176,7 @@ func renderFileClusterPolicyTemplate(text string, vars map[string]any) (string, 
 	evaluateAtom := func(atom string) (bool, error) {
 		atom = strings.TrimSpace(atom)
 		if match := fileClusterTemplateCompareRegex.FindStringSubmatch(atom); match != nil {
-			value, err := lookup(match[1])
+			value, err := lookup(match[1], false)
 			if err != nil {
 				return false, err
 			}
@@ -190,7 +192,8 @@ func renderFileClusterPolicyTemplate(text string, vars map[string]any) (string, 
 			negate = true
 			atom = strings.TrimSpace(rest)
 		}
-		value, err := lookup(atom)
+		path, defaultFalse := strings.CutSuffix(atom, " | default(false)")
+		value, err := lookup(path, defaultFalse)
 		if err != nil {
 			return false, err
 		}
@@ -241,7 +244,7 @@ func renderFileClusterPolicyTemplate(text string, vars map[string]any) (string, 
 			if !rendering() {
 				continue
 			}
-			value, err := lookup(text[match[4]:match[5]])
+			value, err := lookup(text[match[4]:match[5]], false)
 			if err != nil {
 				return "", err
 			}
@@ -298,9 +301,14 @@ func TestFileClusterPolicyRendererReadsItsSubset(t *testing.T) {
 	if want := "[\n  \"meta\",\n  \"first\",\n  \"meta-1\"\n]\n"; rendered != want {
 		t.Errorf("rendered %q, want %q", rendered, want)
 	}
+	rendered, err = renderFileClusterPolicyTemplate("{% if file_cluster.absent | default(false) %}first{% else %}other{% endif %}", vars)
+	if err != nil || rendered != "other" {
+		t.Errorf("an omitted optional flag rendered %q: %v", rendered, err)
+	}
 	for _, refused := range []string{
 		"{{ missing.name }}",
 		"{{ file_cluster.bucket | upper }}",
+		"{% if file_cluster.bucket | upper | default(false) %}{% endif %}",
 		"{% for x in y %}{% endfor %}",
 		"{% if file_cluster.kind == segment %}{% endif %}",
 		"{% if switch %}",

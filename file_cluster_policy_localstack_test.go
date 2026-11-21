@@ -8,10 +8,8 @@
 // rather than skips, when either is missing. It works in buckets, users and policies of its own, each name
 // carrying a fresh suffix, and removes its users and policies when it ends.
 //
-// One MinIO stands in for each cluster's own: in production every cluster is its own MinIO with its own
-// users, so a block with no user on a cluster is refused there outright. Here a block's user is made per
-// cluster it reaches, from that cluster's rendering, and a cluster it does not reach is shown refused by
-// its users' policies.
+// Each block's user is made per cluster it reaches, from that cluster's rendering. The service policy tests
+// use separate buckets on one MinIO. The restore test uses two independent MinIO servers and IAM databases.
 
 package server
 
@@ -186,65 +184,87 @@ func (self *fileClusterStackAdmin) makeBlockUser(t *testing.T, block string, clu
 	}
 
 	config := *cluster
-	config.Endpoints = []string{fileClusterStackEndpoint}
+	config.Endpoints = []string{self.endpoint}
 	config.AccessKey = name
 	config.SecretKey = secretKey
 	return &config
 }
 
-// The clusters a test works in, fresh buckets on the stack's MinIO, each with the sentinel xops writes,
-// and the root's client for checking what a refused request left.
-func fileClusterPolicyStack(t *testing.T) (*fileClusterStackAdmin, *FileClusterConfig, *FileClusterConfig, *minio.Client) {
+// An isolated bucket on the private MinIO with the deployed sentinel, cleaned up with its contents.
+func (self *fileClusterStackAdmin) policyBucket(t *testing.T, id string, kind string, first bool) (*FileClusterConfig, *minio.Client) {
 	t.Helper()
-	ctx := t.Context()
-	if err := localstack.CheckStackAddress(fileClusterStackEndpoint); err != nil {
+	if err := localstack.CheckStackAddress(self.endpoint); err != nil {
 		t.Fatal(err)
 	}
-	suffix := make([]byte, 4)
-	if _, err := rand.Read(suffix); err != nil {
-		t.Fatal(err)
+	config := &FileClusterConfig{
+		ClusterId: id, Kind: kind, First: first, Region: "us-east-1",
+		Endpoints: []string{self.endpoint}, AccessKey: self.accessKey, SecretKey: self.secretKey,
+		Bucket: "sidecar-test-policy-" + id + "-" + NewId().String(),
 	}
-	meta := &FileClusterConfig{
-		ClusterId: "meta-1",
-		Kind:      FileClusterKindMetadata,
-		First:     true,
-		Bucket:    fmt.Sprintf("sidecar-test-policy-meta-%x", suffix),
-		Region:    "us-east-1",
-	}
-	segment := &FileClusterConfig{
-		ClusterId: "seg-1",
-		Kind:      FileClusterKindSegment,
-		Bucket:    fmt.Sprintf("sidecar-test-policy-seg-%x", suffix),
-		Region:    "us-east-1",
-	}
-	makeFileClusterStackBuckets(ctx, t, []*FileClusterConfig{meta, segment})
-	root, err := minio.New(fileClusterStackEndpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(fileClusterStackAccessKey, fileClusterStackSecretKey, ""),
-		Region: "us-east-1",
+	root, err := minio.New(self.endpoint, &minio.Options{
+		Creds: credentials.NewStaticV4(self.accessKey, self.secretKey, ""), Region: config.Region,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, config := range []*FileClusterConfig{meta, segment} {
-		putFileClusterPolicyObject(t, root, config.Bucket, fileClusterSentinelKey)
+	if err := root.MakeBucket(t.Context(), config.Bucket, minio.MakeBucketOptions{Region: config.Region}); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		for _, config := range []*FileClusterConfig{meta, segment} {
-			for object := range root.ListObjects(cleanupCtx, config.Bucket, minio.ListObjectsOptions{Recursive: true}) {
-				if object.Err == nil {
-					root.RemoveObject(cleanupCtx, config.Bucket, object.Key, minio.RemoveObjectOptions{})
-				}
+		ctx := context.Background()
+		for object := range root.ListObjects(ctx, config.Bucket, minio.ListObjectsOptions{Recursive: true}) {
+			if object.Err == nil {
+				root.RemoveObject(ctx, config.Bucket, object.Key, minio.RemoveObjectOptions{})
 			}
-			root.RemoveBucket(cleanupCtx, config.Bucket)
+		}
+		if err := root.RemoveBucket(ctx, config.Bucket); err != nil {
+			t.Errorf("remove private bucket: %v", err)
 		}
 	})
-	admin := &fileClusterStackAdmin{
-		endpoint:  fileClusterStackEndpoint,
-		accessKey: fileClusterStackAccessKey,
-		secretKey: fileClusterStackSecretKey,
-	}
+	putFileClusterPolicyObject(t, root, config.Bucket, fileClusterSentinelKey)
+	return config, root
+}
+
+// The local stack's synthetic administrator.
+func fileClusterPolicyAdmin() *fileClusterStackAdmin {
+	return &fileClusterStackAdmin{endpoint: fileClusterStackEndpoint, accessKey: fileClusterStackAccessKey, secretKey: fileClusterStackSecretKey}
+}
+
+// A fresh metadata and segment bucket and the writer for verifying the policy outcomes.
+func fileClusterPolicyStack(t *testing.T) (*fileClusterStackAdmin, *FileClusterConfig, *FileClusterConfig, *minio.Client) {
+	t.Helper()
+	admin := fileClusterPolicyAdmin()
+	meta, root := admin.policyBucket(t, "meta-1", FileClusterKindMetadata, true)
+	segment, _ := admin.policyBucket(t, "seg-1", FileClusterKindSegment, false)
 	return admin, meta, segment, root
+}
+
+// Supplies the registered close step with its rendered policies on two metadata clusters. The caller
+// uses a separate fixture writer to seed the same buckets. Only the recovery identities go in its resource.
+func TestingRestorePolicyClusters(t *testing.T) *FileClusters {
+	t.Helper()
+	resource := &bytes.Buffer{}
+	resource.WriteString("clusters:\n")
+	configs := []*FileClusterConfig{}
+	for index, admin := range []*fileClusterStackAdmin{fileClusterPolicyAdmin(), secondRestorePolicyAdmin(t)} {
+		cluster, _ := admin.policyBucket(t, fmt.Sprintf("meta-%d", index+1), FileClusterKindMetadata, index == 0)
+		configs = append(configs, cluster)
+		reader := admin.makeBlockUser(t, "restore", cluster, nil)
+		fmt.Fprintf(resource, "  %s:\n    kind: metadata\n    first: %t\n    bucket: %s\n    endpoints: [%s]\n    access_key: %s\n    secret_key: %s\n    region: %s\n",
+			reader.ClusterId, reader.First, reader.Bucket, admin.endpoint, reader.AccessKey, reader.SecretKey, reader.Region)
+		client, err := minio.New(admin.endpoint, &minio.Options{
+			Creds: credentials.NewStaticV4(reader.AccessKey, reader.SecretKey, ""), Region: reader.Region,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = client.PutObject(t.Context(), reader.Bucket, "repo/refused", bytes.NewReader([]byte("x")), 1, minio.PutObjectOptions{})
+		requireFileClusterAccessDenied(t, "restore writes", err)
+		_, err = client.StatObject(t.Context(), reader.Bucket, fileClusterSentinelKey, minio.StatObjectOptions{})
+		requireFileClusterAccessDenied(t, "restore reads unrelated objects", err)
+	}
+	t.Cleanup(Vault.PushSimpleResource("file-clusters-restore.yml", resource.Bytes()))
+	return fileClusterPolicyClusters(t, configs...)
 }
 
 // An object the root writes, as another block would have.

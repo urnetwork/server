@@ -309,11 +309,13 @@ func addCloseAdminEvent(ctx context.Context, event *model.AdminEvent) (returnErr
 	return nil
 }
 
-// The close step as the process's frame runs it: the new clusters through api's own file-clusters-api.yml, as the
-// api step reads them, a sequencer of its own over the first, and sidecar.yml's reseed as this process reads it.
+// The close reads projections and placements on the first metadata cluster and follows placements to any
+// metadata cluster. Its operator credential can only read those objects and list the required prefixes.
 func init() {
 	RegisterStep(StepClose, func(ctx context.Context, run *StepRun) error {
-		clusters, err := server.LoadFileClusters(ctx, apiStepFileClustersService, nil)
+		settings := server.DefaultFileClusterSettings()
+		settings.NoChecks = true
+		clusters, err := server.LoadFileClusters(ctx, "restore", settings)
 		if err != nil {
 			return fmt.Errorf("the file clusters: %w", err)
 		}
@@ -322,7 +324,7 @@ func init() {
 		if err != nil {
 			return err
 		}
-		sequencer := model.NewConfigLogSequencer(firstCluster, nil, model.AdvanceNetworkAclHead)
+		sequencer := model.NewConfigLogSequencer(firstCluster, nil, nil)
 		return RunCloseStep(ctx, &CloseStepDeps{
 			RepoRows: sequencer.RestoreRepoRows,
 			Blobs:    clusters,
