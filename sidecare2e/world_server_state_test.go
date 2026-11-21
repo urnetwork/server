@@ -6,7 +6,8 @@
 // as taskworker's flush would, the service debits by meter in service_debit_journal and network_service_usage, a
 // network's verification by a paid balance, a device's issued certificate row standing in for the certs worker, the
 // contract gate's install, api's dns.yml root, a network's age and its mail enable's, which no route moves, and api's
-// smtp routes' §8 checks, which api's process does not install.
+// smtp routes' §8 checks, which api's process does not install; and tlsedge's connection records, which the blogger
+// case's privacy capture reads.
 
 package sidecare2e
 
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/tlsedgeservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -127,6 +129,16 @@ func worldTlsServerState(ctx context.Context, networkId server.Id, root string) 
 		lines = append(lines, fmt.Sprintf("the server state: %v", err))
 	})
 	return strings.Join(lines, "; ")
+}
+
+// tlsedge's connection records of networkId ending at or after since, as its store wrote them
+// (model.Testing_ReadTlsConnectionRecords): what the world's privacy capture reads at each scan (tls-3's records). None
+// where the read fails, which the capture's count of edge records shows.
+func worldTlsConnectionRecords(ctx context.Context, networkId server.Id, since time.Time) (records []*tlsedgeservice.TlsConnectionRecord) {
+	server.HandleError(func() {
+		records = model.Testing_ReadTlsConnectionRecords(ctx, sidecar.Id(networkId), since)
+	})
+	return records
 }
 
 // networkId's label's change serial in root's label map, which tlsedge's reads since its last serial follow
