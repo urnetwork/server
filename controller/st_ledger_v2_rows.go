@@ -3,10 +3,9 @@ package controller
 // st_ledger_v2_rows.go — a covered epoch's provider rows (VERSION2-FINAL.md
 // §6.2, §8.2) from v1's inputs, at a million providers: the usage census over
 // the epoch's earning window; wallet selection by the signed roster or
-// retained consents, in bulk over consent chains verified once per head; head
-// exclusion at both of the epoch's boundary blocks, reading bindingAt only for
-// FleetBound candidates; and, from SN25 epoch 7, the exit rule
-// (stLedgerV2ExitDiffers). Reliability is not an input.
+// retained consents, in bulk over consent chains verified once per head; and
+// head exclusion at both of the epoch's boundary blocks, reading bindingAt
+// only for FleetBound candidates. Reliability is not an input.
 
 import (
 	"context"
@@ -17,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/urfoundation/sn/protocol"
-	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -27,43 +25,13 @@ import (
 // cutoff_utc would clip; every v2 epoch starts after the cutoff (§6.2).
 var ErrStLedgerV2WindowClipped = errors.New("st ledger v2: the cutoff_utc clips the epoch's earning window")
 
-// stLedgerV2ExitFirstEpoch is the first SN25 epoch whose provider rows judge a
-// provider by its probed exit (owner decision 2026-11-20, "forward-only rule
-// from epoch 7"; sn WHITEPAPER.md §8.2). Every earlier epoch, epoch 6
-// included, is built exactly as before.
-const stLedgerV2ExitFirstEpoch uint64 = 7
-
-// Whether the exit rule judges an epoch's providers.
-func stLedgerV2ExitRuleInForce(epoch uint64) bool {
-	return stLedgerV2ExitFirstEpoch <= epoch
-}
-
-// stLedgerV2ExitDiffers is an epoch's exit rule: the providers that earn no
-// usage in it because a probe judged their exit different from every network
-// they connected from, at a judgement observed in the epoch's earning window
-// [timestamp(start), timestamp(end)) (model/provider_egress_exit_model.go,
-// model.GetProviderEgressExitDiffersClientIds). Their users' traffic leaves
-// from somewhere other than where they connect, as a proxy slot's does when it
-// connects through a residential proxy and sends its users' traffic out of a
-// datacenter. Only the durable record's positive evidence counts: a provider
-// it holds nothing for in the window earns as before, and so does every one
-// active only before the record existed. An epoch before
-// stLedgerV2ExitFirstEpoch has none.
-func stLedgerV2ExitDiffers(ctx context.Context, epoch uint64, authority *StPayoutEpochAuthority) map[server.Id]bool {
-	if !stLedgerV2ExitRuleInForce(epoch) {
-		return map[server.Id]bool{}
-	}
-	return model.GetProviderEgressExitDiffersClientIds(ctx, authority.StartTime, authority.EndTime)
-}
-
 // stLedgerV2NewEpochRows builds a covered epoch's provider rows for the
 // configured pool from v1's inputs, read as v1 reads them: one row per
 // provider with settled bytes in the earning window [timestamp(start),
 // timestamp(end)) of the epoch's boundary blocks, in client id order, with
-// the coldkey its wallet selection picks (zero without one, and, from epoch 7,
-// for a provider the exit rule holds) and the head flag of an active fleet
-// binding at either boundary. The selected wallets' resolutions are retained
-// as v1 retains them, before the rows are recorded.
+// the coldkey its wallet selection picks (zero without one) and the head flag
+// of an active fleet binding at either boundary. The selected wallets'
+// resolutions are retained as v1 retains them, before the rows are recorded.
 func stLedgerV2NewEpochRows(ctx context.Context, epoch uint64) ([]protocol.LedgerUsageRow, error) {
 	rows, _, _, err := stLedgerV2NewAmendedEpochRows(ctx, epoch, model.StExtenderAmendment{}, nil)
 	return rows, err
@@ -148,21 +116,8 @@ func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment mod
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// The exit rule, from epoch 7. A provider it holds is ineligible as one
-	// without a selected wallet is: its row keeps its settled bytes, which the
-	// epoch's usage statement counts as it counts every row, with a zero
-	// coldkey, which the allocation never pays, and no resolution is retained
-	// for it. The population and its usage stay the census's, and the head
-	// flag stays the chain's, which validators check (§6.2, §9.2), so nothing
-	// a validator checks changes.
-	differs := stLedgerV2ExitDiffers(ctx, epoch, authority)
-	for clientId := range differs {
-		delete(resolutions, clientId)
-	}
 	rows := make([]protocol.LedgerUsageRow, 0, len(usages))
 	clientIds := make([][16]byte, 0, len(usages))
-	var differsRows int
-	var differsBytes, rowBytes uint64
 	for _, usage := range usages {
 		// a row has settled bytes; a roster's zero rows have none
 		if usage.PayoutByteCount <= 0 {
@@ -172,17 +127,8 @@ func stLedgerV2AmendedEpochRows(ctx context.Context, epoch uint64, amendment mod
 		if resolution := resolutions[usage.ClientId]; resolution != nil {
 			row.Coldkey = resolution.Coldkey
 		}
-		rowBytes += row.UsageBytes
-		if differs[usage.ClientId] {
-			differsRows++
-			differsBytes += row.UsageBytes
-		}
 		rows = append(rows, row)
 		clientIds = append(clientIds, row.ClientID)
-	}
-	if stLedgerV2ExitRuleInForce(epoch) {
-		glog.Infof("[st]v2 epoch %d exit rule: %d of %d provider rows, with %d of %d bytes, earn no usage by a differing probed exit; the record holds %d differing clients in the window\n",
-			epoch, differsRows, len(rows), differsBytes, rowBytes, len(differs))
 	}
 	excluded, err := stHeadExcludedClients(ctx, cfg, client, epoch, authority.Start.Block, authority.End.Block, clientIds)
 	if err != nil {

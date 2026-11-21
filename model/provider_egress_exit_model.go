@@ -24,10 +24,7 @@ package model
 //     it connected from at the probe (ExitDiffers) gets the mark of a declared
 //     proxy egress (MarkVerifyProxiedEgress), so it counts at no SN Top,
 //     capture the flag or extender unit, and its day is recorded durably for
-//     the settlement epoch (provider_egress_exit_day). From SN25 epoch 7, a
-//     provider with a differing judgement in an epoch's window earns no usage
-//     in it (GetProviderEgressExitDiffersClientIds, read by the epoch's
-//     provider rows).
+//     the settlement epoch (provider_egress_exit_day).
 //
 // The exit differs only on positive evidence (compareProviderEgressExit): no
 // network the provider connected from at the probe is the exit's network in
@@ -414,55 +411,6 @@ func recordProviderEgressExitDay(ctx context.Context, clientId server.Id, observ
 			observedAt,
 		))
 	})
-}
-
-// The clients the durable record holds a differing judgement for whose probe
-// observed the exit in [startTime, endTime): the first or the last judgement
-// of one of their days. Both are judgements a probe made, so a day counts only
-// on its own evidence, never on one inferred between them. In a window of a
-// day or more that is exact: a day's judgements span less than a day, so when
-// any lies in the window, its first or its last does. A client the record has
-// nothing for in the window is not in it, whether its probes found its exit
-// in its own networks, found no evidence, or never ran. The settlement epoch
-// reads this after the epoch (controller st_ledger_v2_rows.go).
-func GetProviderEgressExitDiffersClientIds(ctx context.Context, startTime time.Time, endTime time.Time) map[server.Id]bool {
-	clientIds := map[server.Id]bool{}
-	startTime, endTime = startTime.UTC(), endTime.UTC()
-	if !startTime.Before(endTime) {
-		return clientIds
-	}
-	// a row's judgements all fall on its own day
-	firstDay := time.Date(startTime.Year(), startTime.Month(), startTime.Day(), 0, 0, 0, 0, time.UTC)
-	lastDay := time.Date(endTime.Year(), endTime.Month(), endTime.Day(), 0, 0, 0, 0, time.UTC)
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT DISTINCT client_id
-			FROM provider_egress_exit_day
-			WHERE
-				$1 <= day AND
-				day <= $2 AND
-				0 < differs_count AND
-				(
-					($3 <= first_observed_at AND first_observed_at < $4) OR
-					($3 <= last_observed_at AND last_observed_at < $4)
-				)
-			`,
-			firstDay,
-			lastDay,
-			startTime,
-			endTime,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds[clientId] = true
-			}
-		})
-	})
-	return clientIds
 }
 
 // Judges a provider by the exit a probe observed at judgement.ObservedAt,
