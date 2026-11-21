@@ -43,6 +43,7 @@ func TestProviderUsageArchiveExportControlNarrows(t *testing.T) {
 	for _, fields := range []map[string]string{
 		{"mode": "ON"},
 		{"mode": "on", "closeTimeFloor": "next week"},
+		{"mode": "on", "closeTimeFloor": "Rolling"},
 		{"mode": "on", "maxWeeksPerPass": "0"},
 		{"mode": "on", "maxWeeksPerPass": "-1"},
 		{"mode": "on", "maxWeeksPerPass": "two"},
@@ -52,16 +53,41 @@ func TestProviderUsageArchiveExportControlNarrows(t *testing.T) {
 		}
 	}
 
-	// whatever the floor, no row closed within 70 days of now leaves
+	// whatever the floor, no row closed within 42 days of now leaves
 	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
 	late := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": "on", "closeTimeFloor": "2027-01-01"}, settings)
-	connect.AssertEqual(t, late.EffectiveFloor(now), now.Add(-70*24*time.Hour))
+	connect.AssertEqual(t, late.EffectiveFloor(now), now.Add(-42*24*time.Hour))
 	connect.AssertEqual(t, on.EffectiveFloor(now), time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC))
+
+	// rolling sets no date: the floor in force is 42 days before now, at any
+	// now
+	rolling := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": "on", "closeTimeFloor": "rolling"}, settings)
+	connect.AssertEqual(t, rolling.Invalid, "")
+	connect.AssertEqual(t, rolling.Mode, ProviderUsageArchiveExportModeOn)
+	for _, at := range []time.Time{now, time.Date(2026, 11, 21, 22, 30, 0, 0, time.UTC), time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)} {
+		connect.AssertEqual(t, rolling.EffectiveFloor(at), at.Add(-42*24*time.Hour))
+	}
 
 	// the brake hands out its weeks once
 	connect.AssertEqual(t, absent.takeWeek(), true)
 	connect.AssertEqual(t, absent.takeWeek(), false)
 	connect.AssertEqual(t, absent.weeksLeft(), false)
+}
+
+// The control's floor reads back as an operator writes it: rolling, or the
+// date.
+func TestProviderUsageArchiveExportControlFloorText(t *testing.T) {
+	settings := DefaultProviderUsageArchiveExportSettings()
+	for value, want := range map[string]string{
+		ProviderUsageArchiveExportRollingFloor: "rolling",
+		"2026-11-05":                           "2026-11-05",
+		"2026-11-05T12:00:00Z":                 "2026-11-05T12:00:00Z",
+	} {
+		control := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": "on", "closeTimeFloor": value}, settings)
+		connect.AssertEqual(t, control.Invalid, "")
+		connect.AssertEqual(t, control.CloseTimeFloorText(), want)
+	}
+	connect.AssertEqual(t, NarrowProviderUsageArchiveExportControl(map[string]string{}, settings).CloseTimeFloorText(), "2026-09-01")
 }
 
 // Without an active control a week expires at its 52 weeks only; with one, a
@@ -85,13 +111,27 @@ func TestProviderUsageArchiveExportRangeExpiry(t *testing.T) {
 	connect.AssertEqual(t, family.IsExpired(on, now, august), true)
 	connect.AssertEqual(t, family.IsExpired(on, now, september), false)
 	connect.AssertEqual(t, family.IsExpired(ctxOf(map[string]string{"mode": "dry_run"}), now, june), true)
-	// 70 days before now caps any floor: on 11-03 the week ending 08-31 is
+	// 42 days before now caps any floor: on 10-10 the week ending 08-31 is
 	// within them, whatever the floor
-	earlier := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+	earlier := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
 	connect.AssertEqual(t, family.IsExpired(on, earlier, august), false)
 	connect.AssertEqual(t, family.IsExpired(ctxOf(map[string]string{"mode": "on", "closeTimeFloor": "2027-01-01"}), earlier, august), false)
 	connect.AssertEqual(t, family.IsExpired(ctxOf(map[string]string{"mode": "on", "closeTimeFloor": "2027-01-01"}), now, september), true)
 	connect.AssertEqual(t, family.IsExpired(on, now, PartitionRange{Default: true}), false)
+
+	// rolling: on 11-21 22:30Z every week that ended by 10-10 22:30Z is due,
+	// the week of 09-28 (ended 10-05) among them, which 70 days kept until
+	// 12-14; the week of 10-05 (ends 10-12) is not, nor is the 11-05 floor's
+	// first week past it
+	rolling := ctxOf(map[string]string{"mode": "on", "closeTimeFloor": "rolling"})
+	at := time.Date(2026, 11, 21, 22, 30, 0, 0, time.UTC)
+	connect.AssertEqual(t, family.IsExpired(rolling, at, family.RangeAt(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))), true)
+	connect.AssertEqual(t, family.IsExpired(rolling, at, family.RangeAt(time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC))), true)
+	connect.AssertEqual(t, family.IsExpired(rolling, at, family.RangeAt(time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC))), false)
+	// and it keeps rolling: on 2027-01-26 the week of 2026-12-07 (ends 12-14)
+	// is due, where the date of 2026-11-05 still holds it
+	connect.AssertEqual(t, family.IsExpired(rolling, time.Date(2027, 1, 26, 0, 0, 0, 0, time.UTC), family.RangeAt(time.Date(2026, 12, 7, 0, 0, 0, 0, time.UTC))), true)
+	connect.AssertEqual(t, family.IsExpired(ctxOf(map[string]string{"mode": "on", "closeTimeFloor": "2026-11-05"}), time.Date(2027, 1, 26, 0, 0, 0, 0, time.UTC), family.RangeAt(time.Date(2026, 12, 7, 0, 0, 0, 0, time.UTC))), false)
 }
 
 // A terminal contract of the week holding at, closed at closeTime, archived by
