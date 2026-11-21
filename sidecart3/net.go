@@ -45,9 +45,10 @@ import (
 )
 
 // Why a T3 Net refuses the fake contract issuer and ControlId sink, which on T3 only a sidecar reaches: a
-// sidecar enrolls through an api and opens its clients with what that api mints, and sidecart3 hosts
-// server's exchange but not yet an api a sidecar's enrollment runs through.
-const refusePlatformFakes = "a T3 sidecar enrolls through server's api, which sidecart3 does not host yet, so its clients would run on the fake issuer and ControlId sink: a row with sidecars proves nothing on T3 until it does (TEST-M1-08)"
+// sidecar enrolls through an api and opens its clients with what that api mints, and a Net's sidecars are
+// sidecartest's, enrolled through T2's fake api. A T3 test enrolls its sidecars through server's api in
+// process instead: T3Api, and as many as it needs in each of a T3World's networks (world_networks.go).
+const refusePlatformFakes = "a T3 Net's sidecars enroll through sidecartest's fake api, so their clients would run on the fake issuer and ControlId sink, which proves nothing on T3: enroll them through server's api, a T3World's networks (TEST-M1-08)"
 
 // What a T3 Net is built from.
 type Settings struct {
