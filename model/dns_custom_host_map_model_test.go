@@ -11,6 +11,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -260,6 +261,46 @@ func TestDnsCustomHostMapPurgeKeepsTheNewest(t *testing.T) {
 		}
 		if customHostMap := world.customHostMap(t, ctx); customHostMap.Version != 2 {
 			t.Fatalf("the newest %+v", customHostMap)
+		}
+	})
+}
+
+// A later poll or reload can replace the live probe sample before the incident is listed.
+func TestDnsRestoreInventorySurvivesTheNextMapReport(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		root := testDnsRoot(t, ctx)
+		now := server.NowUtc()
+		if err := SyncDnsCustomHostMapInterfaces(ctx, []string{"lb-1"}); err != nil {
+			t.Fatal(err)
+		}
+		target, err := DnsRaiseCustomHostMapForRestore(ctx, root, server.NewId(), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 23)
+		for i := range names {
+			names[i] = fmt.Sprintf("host-%02d.example", i)
+		}
+		report := &dnsservice.DnsCustomHostMapReport{Interface: "lb-1", Version: target, Digest: dnsservice.DnsCustomHostMapDigest(names), Master: &dnsservice.DnsMapMaster{Pid: 7}, Added: names, Dropped: []string{"retired.example"}}
+		if err := RecordDnsCustomHostMapReport(ctx, report, now, 16, 128); err != nil {
+			t.Fatal(err)
+		}
+		report.Version++
+		report.Added = []string{"later.example"}
+		report.Dropped = nil
+		report.Digest = dnsservice.DnsCustomHostMapDigest(report.Added)
+		if err := RecordDnsCustomHostMapReport(ctx, report, now.Add(time.Second), 16, 128); err != nil {
+			t.Fatal(err)
+		}
+		state, err := GetDnsCustomHostMapState(ctx, root)
+		if err != nil || len(state.Interfaces) != 1 {
+			t.Fatalf("interfaces: %+v %v", state, err)
+		}
+		row := state.Interfaces[0]
+		if !slices.Equal(row.AddedHosts, report.Added) || row.Restore == nil || !row.Restore.Received || row.Restore.Version != target ||
+			!slices.Equal(row.Restore.Added, names) || !slices.Equal(row.Restore.Dropped, []string{"retired.example"}) {
+			t.Fatalf("ordinary report and retained inventory: %+v", row)
 		}
 	})
 }

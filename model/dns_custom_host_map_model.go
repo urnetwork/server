@@ -205,9 +205,10 @@ func GetDnsCustomHostMap(ctx context.Context, root string) (*dnsservice.DnsCusto
 
 // host_probes as the applied row holds it.
 type dnsMapHostProbesJson struct {
-	Added   []string        `json:"added,omitempty"`
-	Dropped []string        `json:"dropped,omitempty"`
-	Results map[string]bool `json:"results,omitempty"`
+	Restore *dnsservice.DnsMapRestoreReport `json:"restore,omitempty"`
+	Added   []string                        `json:"added,omitempty"`
+	Dropped []string                        `json:"dropped,omitempty"`
+	Results map[string]bool                 `json:"results,omitempty"`
 }
 
 const dnsMapAppliedColumns = `interface_name, reported_version, digest, nginx_master, poll_time, probe_version, probe_time, host_probes`
@@ -239,6 +240,7 @@ func scanDnsMapInterface(result server.PgResult) *dnsservice.DnsMapInterface {
 	}
 	hostProbes := &dnsMapHostProbesJson{}
 	if err := json.Unmarshal(hostProbesJson, hostProbes); err == nil {
+		lbInterface.Restore = hostProbes.Restore
 		lbInterface.AddedHosts = hostProbes.Added
 		lbInterface.DroppedHosts = hostProbes.Dropped
 		for host, passed := range hostProbes.Results {
@@ -267,6 +269,7 @@ func updateDnsMapInterfaceInTx(ctx context.Context, tx server.PgTx, lbInterface 
 		probeTime = &lbInterface.ProbeTime
 	}
 	hostProbes, err := json.Marshal(&dnsMapHostProbesJson{
+		Restore: lbInterface.Restore,
 		Added:   lbInterface.AddedHosts,
 		Dropped: lbInterface.DroppedHosts,
 		Results: lbInterface.HostProbes,

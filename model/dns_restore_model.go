@@ -324,6 +324,9 @@ func DnsRaiseCustomHostMapForRestore(ctx context.Context, root string, incidentI
 		base := max(dnsSerialFromColumn(counter), dnsSerialFromColumn(hostMax), dnsSerialFromColumn(appliedMax))
 		version = base + dnsservice.DnsRestoreSerialJump
 		setDnsCustomHostMapVersionInTx(ctx, tx, root, version, getDnsCustomHostMapHostsInTx(ctx, tx, root), `true`)
+		// Capture each interface's first load of this map before regular map updates can replace its report.
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE dns_custom_host_map_applied
+			SET host_probes = jsonb_set(COALESCE(host_probes, '{}'::jsonb), '{restore}', jsonb_build_object('version', $1::bigint))`, dnsSerialColumn(version)))
 		listRows = append(listRows, &dnsRestoreListRow{IncidentId: incidentId, ListTime: now.UTC().Truncate(time.Microsecond), MapVersion: version})
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE dns_root SET restore_lists = $2::jsonb WHERE root = $1`, root, dnsJsonArray(listRows)))
 	}, server.TxReadCommitted)
