@@ -4,28 +4,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/netip"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/urnetwork/connect"
+	connectprotocol "github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/smtpedgeservice"
 )
-
-type startupSmtpClients struct {
-	client *sidecar.SocketEdgeClient
-}
-
-func (self startupSmtpClients) Clients() []*sidecar.SocketEdgeClient {
-	return []*sidecar.SocketEdgeClient{self.client}
-}
-func (self startupSmtpClients) ClientIds() []sidecar.Id { return []sidecar.Id{self.client.ClientId} }
-func (self startupSmtpClients) Ready() bool             { return true }
-func (self startupSmtpClients) Close()                  {}
 
 // The registrations endpoint of this test. It receives ordinary requests entirely in memory.
 type startupSmtpRegistrations struct {
@@ -88,22 +82,34 @@ func TestHostGateAndMxResolverReachBlockReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolver := sidecar.NewSmtpMxDnsResolver(world, anchors, nil, clock)
-	id := connect.NewId()
-	clientSettings := connect.DefaultClientSettings()
-	sidecar.ApplySidecarClientSettings(clientSettings)
-	client := connect.NewClient(ctx, id, connect.NewNoContractClientOob(), clientSettings)
-	defer client.Cancel()
-	protocolSettings := sidecar.DefaultSidecarProtocolSettings()
-	dispatcher, err := sidecar.NewSubprotocol(ctx, &sidecar.SubprotocolEnv{Client: client, Role: sidecar.SubprotocolRoleEdge,
-		Inbound: sidecar.SubprotocolInboundWithoutPolicy, Settings: protocolSettings,
-		Budget: sidecar.NewSubprotocolBudget(protocolSettings, 128*1024*1024), Clock: clock, Log: sidecar.NewNoopLogger()})
+	clientsNet := sidecartest.NewNet(ctx, nil)
+	defer clientsNet.Close()
+	poolArgs, err := clientsNet.EdgeClientPoolArgs(sidecar.Id(edge))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dispatcher.Close()
-	pool := startupSmtpClients{client: &sidecar.SocketEdgeClient{ClientId: sidecar.Id(id), Subprotocol: dispatcher}}
+	settings := defaultHostSettings(config)
+	poolArgs.Settings = settings.Clients
+	pool, err := newSmtpEdgeClients(ctx, *poolArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	senders, _, err := clientsNet.AddSubprotocolSidecars("sender")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := senders[0]
+	edgeId := pool.ClientIds()[0]
+	clientsNet.SetContractProvideMode(sender.ClientId(), connect.Id(edgeId), connectprotocol.ProvideMode_Service)
+	clientsNet.SetContractProvideMode(connect.Id(edgeId), sender.ClientId(), connectprotocol.ProvideMode_Service)
+	release, err := sender.Subprotocol().HoldProvideMode(connectprotocol.ProvideMode_Service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
 	registrations := &startupSmtpRegistrations{registered: make(chan struct{}, 1), edge: edge}
-	block, err := newSmtpEdgeHost(ctx, defaultHostSettings(config), &hostDeps{
+	block, err := newSmtpEdgeHost(ctx, settings, &hostDeps{
 		Quota: fakes.Quota, Abuse: fakes.Abuse, Store: sidecartest.NewFakeSmtpEdgeStore(clock, nil),
 		Projection: sidecar.NewAclGateDirectSource(fakes.Redis, fakes.Blobs, nil),
 		Facts:      &testGateSource{loads: map[sidecar.Id]int{}, breaker: &smtpedgeservice.SmtpBreakerState{}},
@@ -135,6 +141,28 @@ func TestHostGateAndMxResolverReachBlockReadiness(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatal("the registered block did not become ready")
 		}
+	}
+	// Registration and RPC handler installation run concurrently. The live engine answers a handshake
+	// naming no active send with its typed result once its handler has been installed.
+	for {
+		body, err := sender.Subprotocol().Call(ctx, edgeId, protocol.MessageType_SMTP_HANDSHAKE, nil, &sidecar.CallOptions{Edge: true})
+		var callError *sidecar.SubprotocolError
+		if errors.As(err, &callError) && callError.Code == protocol.ErrorCode_ERR_UNIMPLEMENTED && ctx.Err() == nil {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reply protocol.SmtpHandshakeResult
+		if err := proto.Unmarshal(body, &reply); err != nil || reply.GetCode() != uint32(protocol.SmtpHandshakeCode_SMTP_HANDSHAKE_INVALID) {
+			t.Fatalf("the registered SMTP handler answered %v, %v", &reply, err)
+		}
+		break
+	}
+	_, err = sender.Subprotocol().OpenStream(ctx, edgeId, &sidecar.StreamOpenRequest{Target: smtpedgeservice.SmtpEdgeSocketName, Edge: true})
+	var rejection *sidecar.StreamRejectError
+	if !errors.As(err, &rejection) || rejection.Code != protocol.StreamRejectCode_SR_INVALID {
+		t.Fatalf("the SMTP listener's ticket check answered %v", err)
 	}
 	block.Drain()
 	if block.Ready() {

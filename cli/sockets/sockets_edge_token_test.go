@@ -40,7 +40,7 @@ type edgeTokenTestAnswer struct {
 
 // A transport to the test's sockets server that keeps every answer, its body read whole and handed on.
 type edgeTokenTestTransport struct {
-	transport *http.Transport
+	transport http.RoundTripper
 
 	stateLock sync.Mutex
 	answers   []*edgeTokenTestAnswer
@@ -112,8 +112,9 @@ func TestHostTakesEdgeClientsSocketsTokens(t *testing.T) {
 		})
 		socketsServer := httptest.NewServer(host.Handler())
 		t.Cleanup(socketsServer.Close)
-		transport := &edgeTokenTestTransport{transport: &http.Transport{}}
-		t.Cleanup(transport.transport.CloseIdleConnections)
+		httpTransport := &http.Transport{}
+		t.Cleanup(httpTransport.CloseIdleConnections)
+		transport := &edgeTokenTestTransport{transport: httpTransport}
 
 		// api's edge client route as the test stands it up: each ask's derived client, a real client jwt, and the
 		// sockets token the route mints
