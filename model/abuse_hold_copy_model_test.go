@@ -33,6 +33,18 @@ func TestHoldPlacementSnapshotsContractsAndFailsClosed(t *testing.T) {
 		at := server.NowUtc().Add(time.Hour).Truncate(time.Millisecond)
 		var ids []server.Id
 		server.Tx(ctx, func(tx server.PgTx) {
+			// Decision 529 names whole rows of these three tables. Check the explicit
+			// copy columns against the installed schema, including nullable accounting fields.
+			for _, table := range holdContractTables {
+				var columns []string
+				server.Raise(tx.QueryRow(ctx, `SELECT array_agg(attname::text ORDER BY attname)
+					FROM pg_attribute WHERE attrelid=to_regclass($1) AND attnum>0 AND NOT attisdropped`, "public."+table.name).Scan(&columns))
+				expected := slices.Clone(table.columns)
+				slices.Sort(expected)
+				if !slices.Equal(columns, expected) {
+					t.Fatalf("%s holds columns %v, its placement copies %v", table.name, columns, expected)
+				}
+			}
 			for _, pair := range [][2]server.Id{{network, other}, {other, network}, {other, other}} {
 				id := server.NewId()
 				ids = append(ids, id)
