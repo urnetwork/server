@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 var (
@@ -94,13 +95,14 @@ func ValidateAuthorizationRequest(
 
 // The authenticated user approving a request.
 type AuthorizingUser struct {
-	UserId      server.Id
-	NetworkId   server.Id
-	NetworkName string
-	GuestMode   bool
-	Principal   string
-	Roles       []string
-	AuthTime    time.Time
+	edgeCredential *session.ByJwt
+	UserId         server.Id
+	NetworkId      server.Id
+	NetworkName    string
+	GuestMode      bool
+	Principal      string
+	Roles          []string
+	AuthTime       time.Time
 }
 
 // Mints an authorization code for a consented request. The caller has already
@@ -115,13 +117,17 @@ func Authorize(
 		return "", ErrUrcliConsentRequired
 	}
 	// an edge origin signs in its network's members alone (edge_login.go)
-	if _, isOrigin, err := resolveEdgeOrigin(ctx, request.ClientId); isOrigin || err != nil {
+	if origin, isOrigin, err := resolveEdgeOrigin(ctx, request.ClientId); isOrigin || err != nil {
 		if err != nil {
 			return "", err
 		}
-		return AuthorizeEdgeOrigin(ctx, request, user)
+		return authorizeEdgeVisitor(ctx, origin, request, user)
 	}
 
+	return authorizeRegisteredClient(ctx, request, user)
+}
+
+func authorizeRegisteredClient(ctx context.Context, request *AuthorizationRequest, user *AuthorizingUser) (string, error) {
 	client, err := ValidateAuthorizationRequest(ctx, request)
 	if err != nil {
 		return "", err

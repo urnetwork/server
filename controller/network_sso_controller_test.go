@@ -274,7 +274,7 @@ func TestSsoFlowLinksOnlyAfterTheUsersOwnSignIn(t *testing.T) {
 			t.Fatalf("an admitted member's sign-in: %+v", result.Error)
 		}
 		byJwt, err := session.ParseByJwt(self.ctx, result.ByJwt)
-		if err != nil || byJwt.NetworkId != self.teamId || byJwt.MemberId == nil || byJwt.UserId != passwordUserId {
+		if err != nil || byJwt.NetworkId != self.teamId || byJwt.MemberId == nil || byJwt.UserId != passwordUserId || !byJwt.TeamSso {
 			t.Fatalf("the credential: %v", err)
 		}
 		connect.AssertEqual(t, session.ValidateByJwtState(self.ctx, byJwt, false), nil)

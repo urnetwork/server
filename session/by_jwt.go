@@ -213,6 +213,9 @@ type ByJwt struct {
 	// credential is minted for the membership; renewal and every credential
 	// derived from it keep it.
 	MemberId *server.Id `json:"member_id,omitempty"`
+	// The original Team sign-in completed its own IdP callback. Renewal preserves
+	// this signed claim even when session tracking is disabled.
+	TeamSso bool `json:"team_sso,omitempty"`
 	gojwt.RegisteredClaims
 }
 

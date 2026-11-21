@@ -623,6 +623,11 @@ func TestAclMembersPublishGranted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	source := NewProjectionEdgeLoginSource(&testExchangeGate{
+		status:   sidecar.AclGateLoaded,
+		snapshot: &sidecar.AclGateSnapshot{Config: &sidecar.ConfigState{}, Acl: state},
+	})
+	networkId := server.NewId()
 	for _, c := range []struct {
 		host    string
 		port    int
@@ -658,6 +663,10 @@ func TestAclMembersPublishGranted(t *testing.T) {
 	} {
 		if granted := AclMembersPublishGranted(state, c.host, c.port, now); granted != c.granted {
 			t.Errorf("%s on %d: granted %t", c.host, c.port, granted)
+		}
+		granted, err := source.MembersPublishGranted(t.Context(), networkId, c.host, c.port, now)
+		if err != nil || granted != c.granted {
+			t.Fatalf("published %s at %d: %t, %v", c.host, c.port, granted, err)
 		}
 	}
 	connect.AssertEqual(t, AclMembersPublishGranted(nil, "web", 443, now), false)

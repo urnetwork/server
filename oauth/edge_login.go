@@ -18,9 +18,8 @@ package oauth
 //	           redirect: no other uri, port, path or query
 //	visitor    signed in on ur.io (a team IdP where a team requires one, with
 //	           TEAM-M6-05), and only an active member of the network: in a
-//	           personal network its owner's own sign-in; a team's members wait
-//	           on TEAM-M6's member rows, so a team network's origin refuses
-//	           every visitor until then
+//	           personal network its owner's own sign-in, in a Team the current
+//	           membership of the signed-in visitor
 //	token      the code redeems, with its PKCE verifier, for an ID token alone:
 //	           {iss, aud = origin, its port as written, network_id, nonce, exp
 //	           = 60 s (EdgeLoginSettings.IdTokenDuration), sub =
@@ -31,15 +30,18 @@ package oauth
 //	           member, network, origin, time and nonce
 //
 // The issuer reads no projection itself: EdgeLoginSource answers which network
-// an origin's host names and whether its port's grant is live, and api installs one
-// (SetEdgeLoginSource) once it hosts §8.9's gate cache (ACL's AclGateCache).
+// an origin's host names and whether its port's grant is live. The API installs
+// that source with its verified §8.9 gate cache.
 // With none installed every edge origin is refused, never fetched as a client
 // metadata document.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -217,7 +219,8 @@ func resolveEdgeOrigin(ctx context.Context, clientId string) (origin *EdgeOrigin
 	}
 	source := currentEdgeLoginSource()
 	if source == nil {
-		if edgeLoginRootHolds(ctx, originHost) {
+		root, err := edgeLoginRoot(ctx, originHost)
+		if err != nil || root != "" {
 			return nil, true, ErrEdgeOriginRefused
 		}
 		return nil, false, nil
@@ -234,31 +237,6 @@ func resolveEdgeOrigin(ctx context.Context, clientId string) (origin *EdgeOrigin
 		return nil, true, ErrEdgeOriginRefused
 	}
 	return &EdgeOrigin{Origin: clientId, NetworkId: networkId, Host: host, Port: port}, true, nil
-}
-
-// Whether a dns root this server serves holds host, read from §12's dns_root
-// (MG5), so an edge origin is never fetched as a client metadata document even
-// while no source is installed. False in a binary that does not link MG5.
-func edgeLoginRootHolds(ctx context.Context, host string) bool {
-	if !server.SidecarMg5Linked() {
-		return false
-	}
-	holds := false
-	server.HandleError(func() {
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
-				ctx,
-				`SELECT EXISTS (SELECT 1 FROM dns_root WHERE $1 LIKE '%.' || root)`,
-				host,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&holds))
-				}
-			})
-		})
-	})
-	return holds
 }
 
 // Whether the grant of the origin's host on its port is live now, refusing when
@@ -295,23 +273,69 @@ func edgeOriginClient(ctx context.Context, origin *EdgeOrigin) (*Client, error) 
 	}, nil
 }
 
-// Whether the user may sign in to the network's origins: an active member of
-// it. In a personal network that is its owner, signed in to that network, its
-// member_id its user id; in a team, a live membership of the user's, not JIT
-// pending and inside its reauth_deadline, its member_id the row's (TEAM-M6-02).
-// A team's owner of record never signs in.
-func edgeVisitorIsMember(ctx context.Context, networkId server.Id, user *AuthorizingUser) (memberId server.Id, err error) {
-	if user.GuestMode || user.NetworkId != networkId {
-		return server.Id{}, ErrEdgeVisitorRefused
+// The resource-less OIDC request is distinct from every third-party or command grant.
+func isEdgeSignIn(request *AuthorizationRequest) bool {
+	_, isOrigin := edgeOriginHost(request.ClientId)
+	return isOrigin && request.Resource == "" && request.ResponseType == "code" &&
+		request.RedirectUri == request.ClientId+EdgeCallbackPath && request.CodeChallengeMethod == PkceMethodS256 &&
+		request.CodeChallenge != "" && request.Nonce != "" && slices.Equal(request.Scopes, []string{EdgeScopeOpenid})
+}
+
+// IsEdgeSignInRequest lets the role middleware admit a person who lacks key-management
+// permission to the edge handler. The handler authenticates the visitor, verifies the origin
+// and its grant and checks destination membership. No other grant accepts this request.
+func IsEdgeSignInRequest(r *http.Request) bool {
+	if r.Body == nil {
+		return false
+	}
+	limit := DefaultOauthHandlerSettings().ConsentRequestMaxByteCount
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil || int64(len(body)) > limit {
+		return false
+	}
+	var request ConsentRequest
+	return json.Unmarshal(body, &request) == nil && isEdgeSignIn(request.authorizationRequest())
+}
+
+// A personal sign-in is portable to a Team with an active membership for its user.
+// A personal origin still requires its owner's own network. A Team requiring its IdP
+// accepts only a session established there through that IdP.
+func edgeVisitorSignIn(ctx context.Context, networkId server.Id, user *AuthorizingUser) (*model.NetworkSignIn, error) {
+	if user == nil || user.GuestMode || user.NetworkId == (server.Id{}) || user.UserId == (server.Id{}) {
+		return nil, ErrEdgeVisitorRefused
 	}
 	signIn := model.ResolveNetworkSignIn(ctx, user.UserId, networkId, server.NowUtc())
-	if signIn == nil {
-		return server.Id{}, ErrEdgeVisitorRefused
+	if signIn == nil || (signIn.MemberId == nil && user.NetworkId != networkId) {
+		return nil, ErrEdgeVisitorRefused
 	}
-	if signIn.MemberId != nil {
-		return *signIn.MemberId, nil
+	if signIn.SsoRequired {
+		if user.NetworkId != networkId {
+			return nil, ErrEdgeVisitorRefused
+		}
+		sso, err := user.edgeCredential.AuthenticatedWithTeamIdp(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !sso {
+			return nil, ErrEdgeVisitorRefused
+		}
 	}
-	return user.UserId, nil
+	return signIn, nil
+}
+
+func validateEdgeSignIn(ctx context.Context, origin *EdgeOrigin, request *AuthorizationRequest, user *AuthorizingUser) (*model.NetworkSignIn, error) {
+	if request.RedirectUri != origin.RedirectUri() {
+		return nil, ErrInvalidRedirect
+	}
+	if !isEdgeSignIn(request) {
+		return nil, fmt.Errorf("%w: an edge login asks openid with PKCE S256 and a nonce", ErrInvalidRequest)
+	}
+	if err := checkEdgeOriginGrant(ctx, origin, server.NowUtc()); err != nil {
+		return nil, err
+	}
+	return edgeVisitorSignIn(ctx, origin.NetworkId, user)
 }
 
 // Mints the code of an edge login (§7.8's issuer row): the origin's grant live,
@@ -326,20 +350,17 @@ func AuthorizeEdgeOrigin(ctx context.Context, request *AuthorizationRequest, use
 	if !isOrigin {
 		return "", ErrUnknownClient
 	}
-	client, err := edgeOriginClient(ctx, origin)
+	return authorizeEdgeVisitor(ctx, origin, request, user)
+}
+
+func authorizeEdgeVisitor(ctx context.Context, origin *EdgeOrigin, request *AuthorizationRequest, user *AuthorizingUser) (string, error) {
+	signIn, err := validateEdgeSignIn(ctx, origin, request, user)
 	if err != nil {
 		return "", err
 	}
-	if !client.ValidRedirectUri(request.RedirectUri) {
-		return "", ErrInvalidRedirect
-	}
-	if request.ResponseType != "code" || request.CodeChallengeMethod != PkceMethodS256 || request.CodeChallenge == "" ||
-		request.Nonce == "" || !slices.Equal(request.Scopes, []string{EdgeScopeOpenid}) || request.Resource != "" {
-		return "", fmt.Errorf("%w: an edge login asks openid with PKCE S256 and a nonce", ErrInvalidRequest)
-	}
-	memberId, err := edgeVisitorIsMember(ctx, origin.NetworkId, user)
-	if err != nil {
-		return "", err
+	memberId := signIn.UserId
+	if signIn.MemberId != nil {
+		memberId = *signIn.MemberId
 	}
 	authTime := user.AuthTime
 	if authTime.IsZero() {
@@ -397,6 +418,17 @@ func ExchangeEdgeCode(ctx context.Context, args *ExchangeCodeArgs) (*EdgeTokenRe
 	}
 	if code.NetworkId != origin.NetworkId {
 		return nil, ErrInvalidCode
+	}
+	// A code names the membership that authorized it. Removal or a rejoin between
+	// authorization and redemption must not turn that code into a fresh session.
+	userId := code.UserId
+	if member := model.GetNetworkMember(ctx, code.UserId); member != nil {
+		userId = member.UserId
+	}
+	signIn := model.ResolveNetworkSignIn(ctx, userId, origin.NetworkId, server.NowUtc())
+	if signIn == nil || (signIn.MemberId != nil && *signIn.MemberId != code.UserId) ||
+		(signIn.MemberId == nil && signIn.UserId != code.UserId) {
+		return nil, ErrEdgeVisitorRefused
 	}
 	settings := currentEdgeLoginSettings()
 	idToken, err := mintEdgeIdToken(origin.Origin, code.NetworkId, code.UserId, code.Nonce, server.NowUtc(), settings)
