@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 )
 
@@ -167,6 +169,51 @@ func TestJoinAbuseReportByHost(t *testing.T) {
 		settings.RootNames = nil
 		if join, err := JoinAbuseReport(ctx, report("https://"+host+"/"), now, settings); err != nil || join != nil {
 			t.Fatalf("a join with no roots: %+v, %v", join, err)
+		}
+	})
+}
+
+func TestAbuseURLResolvesOnlyActiveCustomWebHosts(t *testing.T) {
+	if !dnsCustomHostLinked() {
+		t.Skip("custom hosts require MG6")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId, label := testAbuseJoinNetwork(t, ctx)
+		apex := label + "." + testAbuseJoinRoot
+		domain := networkId.String() + ".example"
+		settings := testAbuseJoinSettings()
+		for _, fixture := range []struct{ name, state, owner string }{
+			{"live", sidecar.DnsCustomHostStateActive, "blog"},
+			{"pending", sidecar.DnsCustomHostStatePending, "blog"},
+			{"withheld", DnsCustomHostStateWithheld, "blog"},
+			{"mail", sidecar.DnsCustomHostStateActive, dnsMailHostLabel},
+		} {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO network_dns_custom_host (host, root, network_id, owner, state, caa_mode, create_time)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+				`, fixture.name+"."+domain, testAbuseJoinRoot, networkId, fixture.owner+"."+apex,
+					fixture.state, sidecar.DnsCustomHostModeStrong, now))
+			})
+		}
+		for _, prefix := range []string{"pending", "withheld", "mail", "unknown", "below.live"} {
+			if got := testJoinAbuseReport(t, ctx, &AbuseReport{Url: prefix + "." + domain}, now); got != nil {
+				t.Fatalf("%s unexpectedly joined its network", prefix)
+			}
+		}
+		name := "live." + domain
+		report := &AbuseReport{Category: AbuseCategoryPhishing, ReporterClass: AbuseReporterClassPublic, Url: "https://" + strings.ToUpper(name) + "/"}
+		join := testJoinAbuseReport(t, ctx, report, now)
+		if join == nil || join.NetworkId != networkId || join.JoinKind != AbuseJoinKindHost || !join.NamesUrl ||
+			join.JoinKey != name || join.Target != (AbuseTarget{Kind: AbuseTargetKindHost, Name: "blog." + apex}) {
+			t.Fatalf("unexpected custom-host join %+v", join)
+		}
+		signal := AbuseSignalOfReport(report.ReporterClass, report.Category, join.NamesUrl)
+		opened, err := OpenAbuseReportCase(ctx, report, join, signal, now, settings)
+		if err != nil || !opened.Opened || GetAbuseCase(ctx, opened.CaseId).JoinKey != name {
+			t.Fatalf("opening the custom-host case: %+v, %v", opened, err)
 		}
 	})
 }
