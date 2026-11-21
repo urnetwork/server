@@ -63,8 +63,8 @@ func TestHostedDnsGatesUseTheVerifiedProjection(t *testing.T) {
 		return &protocol.AclRule{RuleId: sidecar.NewId().Bytes(), SrcAtoms: [][]byte{atom}, Targets: []*protocol.AclTarget{{PublicName: name}}, Actions: []uint32{uint32(action)}}
 	}
 	rows.TeamScopes = []*bridge.TeamScopeRow{
-		{Label: "foreign-unit", Owner: &bridge.TeamScopeRow_MemberId{MemberId: sidecar.NewId().Bytes()}},
-		{Label: "tag-unit", Owner: &bridge.TeamScopeRow_TagAtom{TagAtom: sidecar.NewId().Bytes()}},
+		{Label: "foreign-unit", MemberId: sidecar.NewId().Bytes()},
+		{Label: "tag-unit", TagAtom: sidecar.NewId().Bytes()},
 	}
 	rows.Acl = marshal(&protocol.AclRows{HasDocument: true, Atoms: []*protocol.AclAtom{{Atom: atom, SidecarIds: [][]byte{owner.Bytes()}}}, Rules: []*protocol.AclRule{
 		rule("write", protocol.AclAction_ACL_ACTION_ADMIN),
