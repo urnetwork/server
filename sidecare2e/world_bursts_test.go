@@ -197,11 +197,14 @@ func (self *World) FailProgress(t testing.TB, phase string, err error, bursts []
 type WorldLedgers struct {
 	// Each network's quota ledger, by its id, as server holds it once the debit journal is flushed.
 	Networks map[server.Id]*WorldNetworkLedger
-	// Each metadata cluster's write budget reports, by cluster id: every block process's spend as it last reported it
-	// (§11.13's report:<process> fields, which expire 15 s after a process's last write).
+	// Each metadata cluster's write budget reports, by cluster id: every process's spend as it last reported it, each
+	// block's and api's (§11.13's report:<process> fields, which expire 15 s after a process's last write).
 	BudgetReports map[string][]*evsservice.WriteBudgetReport
-	// What the world's api-side budget (the sequencer's and rev/'s, the T3World's) saw spent against its rules.
-	BudgetViolations []string
+	// api's process among them: the budget its sequencer and rev/'s store spend on (T3World.ApiWriteBudget).
+	ApiProcessId string
+	// Each network's service debits by meter, read from service_debit_journal before the flush applied them and from
+	// network_service_usage after (WorldMeterLedger).
+	Meters *WorldMeterLedger
 }
 
 // One network's quota ledger: its in-window transfer balances and its quota state.
@@ -217,6 +220,43 @@ type WorldNetworkLedger struct {
 // What the debits drew from the network's balances.
 func (self *WorldNetworkLedger) DebitedByteCount() int64 {
 	return self.StartBalanceByteCount - self.BalanceByteCount
+}
+
+// Each network's service debits by meter (§20.6's meters: evs, tls, mx, smtp and relay), as server holds them: what
+// service_debit_journal held when the ledgers were read, before the flush applied it, and what network_service_usage
+// holds once the flush has, with the rows the flush still left in the journal. A scenario reconciles the bytes it moved
+// through a service with its meter here, exactly.
+type WorldMeterLedger struct {
+	// By network and meter: the journal's rows not yet applied when read, before the flush.
+	Journaled map[server.Id]map[string]int64
+	// By network and meter: network_service_usage's quantity summed over its days, after the flush: every row it
+	// applied, the one an applied row's release still keeps in the journal included.
+	Applied map[server.Id]map[string]int64
+	// By network and meter: the journal's rows the flush left unapplied, a balance it found busy, which no balance
+	// shows yet.
+	Unapplied map[server.Id]map[string]int64
+}
+
+// Every byte networkId was debited on meter: what the flush applied, and what the journal still holds unapplied.
+func (self *WorldMeterLedger) ByteCount(networkId server.Id, meter string) int64 {
+	return self.Applied[networkId][meter] + self.Unapplied[networkId][meter]
+}
+
+// Every byte networkId was debited on every meter, applied or still journaled.
+func (self *WorldMeterLedger) TotalByteCount(networkId server.Id) int64 {
+	total := int64(0)
+	for _, byteCount := range self.Applied[networkId] {
+		total += byteCount
+	}
+	for _, byteCount := range self.Unapplied[networkId] {
+		total += byteCount
+	}
+	return total
+}
+
+// The ledger's meters for networkId, journaled, applied and unapplied, as one line for a failure's message.
+func (self *WorldMeterLedger) Describe(networkId server.Id) string {
+	return fmt.Sprintf("journaled before the flush %v, applied %v, left unapplied %v", self.Journaled[networkId], self.Applied[networkId], self.Unapplied[networkId])
 }
 
 // The priced bytes every process reported against clusterId's write budget, P0 by kind, P1 and P2 together: what a
@@ -266,21 +306,45 @@ func (self *World) ReadLedgers(ctx context.Context, since time.Time) (*WorldLedg
 	}
 }
 
-// The ledgers as they stand, the debit journal flushed first.
+// The ledgers as they stand: the debit journal read by meter, then flushed, then each network's balances, quota state
+// and applied usage by meter.
 func (self *World) readLedgers(ctx context.Context) (*WorldLedgers, error) {
 	ledgers := &WorldLedgers{
 		Networks:      map[server.Id]*WorldNetworkLedger{},
 		BudgetReports: map[string][]*evsservice.WriteBudgetReport{},
+		Meters: &WorldMeterLedger{
+			Journaled: map[server.Id]map[string]int64{},
+			Applied:   map[server.Id]map[string]int64{},
+			Unapplied: map[server.Id]map[string]int64{},
+		},
+	}
+	networks := self.t3.Networks()
+	for _, network := range networks {
+		unapplied, err := worldJournaledServiceDebits(ctx, network.NetworkId)
+		if err != nil {
+			return nil, fmt.Errorf("%s's debits: %w", network.Name, err)
+		}
+		ledgers.Meters.Journaled[network.NetworkId] = unapplied
 	}
 	if err := worldFlushServiceDebits(ctx); err != nil {
 		return nil, err
 	}
-	for _, network := range self.t3.Networks() {
+	for _, network := range networks {
 		ledger, err := worldNetworkLedger(ctx, network.NetworkId)
 		if err != nil {
 			return nil, fmt.Errorf("%s's quota ledger: %w", network.Name, err)
 		}
 		ledgers.Networks[network.NetworkId] = ledger
+		applied, err := worldAppliedServiceUsage(ctx, network.NetworkId)
+		if err != nil {
+			return nil, fmt.Errorf("%s's usage: %w", network.Name, err)
+		}
+		ledgers.Meters.Applied[network.NetworkId] = applied
+		unapplied, err := worldJournaledServiceDebits(ctx, network.NetworkId)
+		if err != nil {
+			return nil, fmt.Errorf("%s's debits after the flush: %w", network.Name, err)
+		}
+		ledgers.Meters.Unapplied[network.NetworkId] = unapplied
 	}
 	host := self.t3.Host()
 	for _, clusterId := range host.Blobs.MetadataClusterIds() {
@@ -290,6 +354,24 @@ func (self *World) readLedgers(ctx context.Context) (*WorldLedgers, error) {
 		}
 		ledgers.BudgetReports[clusterId] = reports
 	}
-	ledgers.BudgetViolations = self.t3.Net().Fakes().Budget.Violations()
+	if budget := self.t3.ApiWriteBudget(); budget != nil {
+		ledgers.ApiProcessId = budget.ProcessId()
+	}
 	return ledgers, nil
+}
+
+// The priced bytes api's process reported against clusterId's write budget: its sequencer's and rev/'s writes, every
+// one P0 (owner decision 186). 0 while api's report is absent.
+func (self *WorldLedgers) ApiBudgetByteCount(clusterId string) int64 {
+	total := int64(0)
+	for _, report := range self.BudgetReports[clusterId] {
+		if report.ProcessId != self.ApiProcessId || self.ApiProcessId == "" {
+			continue
+		}
+		for _, byteCount := range report.P0ByteCounts {
+			total += byteCount
+		}
+		total += report.P1ByteCount + report.UnfundedByteCount + report.FundedByteCount
+	}
+	return total
 }
