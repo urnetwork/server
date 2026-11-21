@@ -44,10 +44,6 @@
 //     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
 //     answer nothing for the same reason;
 //   - the dns edge's lb probes: refused, since no lb interface answers in the test stack;
-//   - gkm's hint writer's sidecar_id resolver: plan-KEYS-hint-addressing has api answer it on an internal route, POST
-//     /sidecar/identity/clients, which is not built, so production's block loses every hint by sidecar id; the world's
-//     block resolves them from sidecar_identity_binding instead (worldPushClientResolver, WorldSettings.GkmHintResolver),
-//     so a late delivery's wrap-pending and pending hints reach the sidecars they name;
 //   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
 //     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
 //     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
@@ -154,9 +150,9 @@ type WorldSettings struct {
 	// sidecar.yml's push switch and the exchange's EnableSidecarPush, as connect's process reads the switch at its
 	// start: each sidecar's client hears its hints from the exchange's resident publisher (§6.8). true.
 	Push bool
-	// Whether gkm's hint writer resolves sidecar ids through the world's stand-in for api's unbuilt internal route
-	// (worldPushClientResolver), so a hint by sidecar id reaches its sidecar's client: true. false runs gkm's own
-	// writer, which resolves none, as production's block does today.
+	// Whether gkm's hint writer resolves sidecar ids through api's internal route on the block's gkm bearer, as
+	// production's block does (server.SidecarIdentityClientsResolver), so a hint by sidecar id reaches its sidecar's
+	// client: true. false gives the block no resolver, so it loses every hint by sidecar id.
 	GkmHintResolver bool
 	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
 	// one, since the hints reach every sidecar.
@@ -419,6 +415,7 @@ func (self *World) installInternalGate() error {
 			Environment: func() (string, error) { return environment, nil },
 		}).Routes(),
 		handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{Verifier: verifier}).Routes(),
+		handlers.NewInternalGateIdentityClientsHandlers(&handlers.InternalGateIdentityClientsDeps{Verifier: verifier}).Routes(),
 	)
 	self.t3.Api().ServeInternalGate(router.NewRouter(self.t3.Context(), routes))
 	self.closes = append(self.closes, func() { self.t3.Api().ServeInternalGate(nil) })
