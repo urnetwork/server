@@ -12,18 +12,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/mholt/acmez/v3/acme"
-	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/certsservice"
-	"testing"
-
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
