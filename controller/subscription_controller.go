@@ -1998,18 +1998,46 @@ func endTerminalPlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	}, nil
 }
 
+// The schedule of the Play renewal poll (PlaySubscriptionRenewalPost).
+type playRenewalPollSettings struct {
+	// The least time from a post to the next poll. A lapse inside its grace
+	// period is polled again after this, and so is an expiry closer than this,
+	// so a purchase whose expiry keeps passing is polled at most once per
+	// interval. One hour: about 24 checks across a lapse's day of grace, and at
+	// most one Play read an hour for any purchase. Non-positive polls again at
+	// once.
+	minPollInterval time.Duration
+}
+
+// A new instance on every call.
+func defaultPlayRenewalPollSettings() *playRenewalPollSettings {
+	return &playRenewalPollSettings{
+		minPollInterval: 1 * time.Hour,
+	}
+}
+
 // Runs in the transaction that finishes the renewal task and schedules the
-// next poll there. The subscription-ended notice is added to the account
-// message outbox in the same transaction: a finish that rolls back leaves no
-// notice, a finish that reruns its callback (or a retried post) owes one
-// notice, and a crash after the commit no longer loses it. The delivery task
-// sends it after the commit.
+// next poll there. This poll is the purchase's only one: a store notification
+// that asks for a poll while this one is pending merges into it
+// (task.RunOnce), so a purchase paid through a future expiry is always polled
+// again at that expiry, whoever credited it. The notification credits a
+// renewal the moment Play charges it, and the poll that runs next finds the
+// expiry already credited and reports it not renewed: nothing has ended.
+//
+// The subscription-ended notice is owed only once the expiry and its grace
+// period have passed with nothing renewed. It is added to the account message
+// outbox in the same transaction: a finish that rolls back leaves no notice, a
+// finish that reruns its callback (or a retried post) owes one notice, and a
+// crash after the commit no longer loses it. The delivery task sends it after
+// the commit.
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	settings := defaultPlayRenewalPollSettings()
+
 	if playSubscriptionRenewalResult.Canceled {
 		if !playSubscriptionRenewalResult.Terminal &&
 			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
@@ -2035,7 +2063,7 @@ func PlaySubscriptionRenewalPost(
 		// The recovery's notification usually gets there first.
 		playSubscriptionRenewal.CheckTime = server.MaxTime(
 			playSubscriptionRenewalResult.ExpiryTime,
-			server.NowUtc().Add(1*time.Hour),
+			server.NowUtc().Add(settings.minPollInterval),
 		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
@@ -2045,27 +2073,30 @@ func PlaySubscriptionRenewalPost(
 		return nil
 	}
 
-	if playSubscriptionRenewalResult.Renewed {
-		// FIXME is the expiry time messed up sometimes?
+	now := server.NowUtc()
+	if playSubscriptionRenewalResult.Renewed || now.Before(playSubscriptionRenewalResult.ExpiryTime) {
+		// paid through a future expiry, credited by this poll or by another
+		// owner before it (the store's notification): poll again at the expiry
 		playSubscriptionRenewal.CheckTime = server.MaxTime(
 			playSubscriptionRenewalResult.ExpiryTime,
-			server.NowUtc().Add(1*time.Hour),
+			now.Add(settings.minPollInterval),
 		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else if now := server.NowUtc(); playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
-		// check again in an hour
-		playSubscriptionRenewal.CheckTime = now.Add(1 * time.Hour)
+	} else if now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+		// the expiry passed inside its grace period: check again later
+		playSubscriptionRenewal.CheckTime = now.Add(settings.minPollInterval)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
 			playSubscriptionRenewal,
 		)
 	} else {
-		// else not renewed, stop trying
+		// the expiry and its grace period passed with nothing renewed: stop
+		// polling, and tell the admin
 		networkId := playSubscriptionRenewal.NetworkId
 		userAuth, err := model.GetUserAuthInTx(clientSession.Ctx, tx, networkId)
 		if err != nil {
@@ -2080,6 +2111,9 @@ func PlaySubscriptionRenewalPost(
 			// the network or its admin is gone
 			return nil
 		}
+		// a data plan's notice does not say UR Pro. An unknown product reads
+		// as UR Pro, as every notice did before
+		sku, ok := playSkusFunc()[playSubscriptionRenewal.SubscriptionId]
 		// one notice per lapse of this purchase on this network
 		addAccountMessageInTx(clientSession.Ctx, tx, &accountMessage{
 			key: fmt.Sprintf(
@@ -2090,7 +2124,9 @@ func PlaySubscriptionRenewalPost(
 			),
 			networkId: &networkId,
 			userAuth:  userAuth,
-			template:  &SubscriptionEndedTemplate{},
+			template: &SubscriptionEndedTemplate{
+				DataOnly: ok && !sku.Supporter,
+			},
 		})
 	}
 
