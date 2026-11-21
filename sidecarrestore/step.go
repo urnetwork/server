@@ -1,9 +1,8 @@
 package sidecarrestore
 
-// The frame's order and its runner (§19.10). The order is fixed here once: ops, abuse, dns, api, labels, rows,
-// billing, then for a site loss hardware, authority, groups, repos, drops and close. A task that builds a step
-// registers its function by name (RegisterStep), so the frame never learns a step's mechanism, and a step no task has
-// registered yet is run by hand and its end stated by hand (EndStepByHand), which the list records as such.
+// The frame's order and its runner (§19.10). A site incident qualifies replacement storage before ops reads it.
+// Its authority step resumes configuration logs before daemons can re-register during rows. A step registers
+// its own function. The operator records the completion of manual steps with EndStepByHand.
 //
 // A step runs only once every step before it in the order has ended under its incident, and only in an incident of
 // its kind: the site steps refuse a Postgres incident. Every step is idempotent and keyed by the incident id, so a
@@ -19,7 +18,7 @@ import (
 	"time"
 )
 
-// The steps §19.10 names, in its order.
+// The step names recorded in an incident.
 const (
 	StepOps       = "ops"
 	StepAbuse     = "abuse"
@@ -43,18 +42,18 @@ type frameStepPlace struct {
 	siteOnly bool
 }
 
-// §19.10's order. The site rows follow the Postgres rows: a site loss restores both dumps first.
+// The incident list and both dumps already exist. Ops and api need an answering metadata cluster.
 func frameOrder() []frameStepPlace {
 	return []frameStepPlace{
+		{name: StepHardware, siteOnly: true},
 		{name: StepOps},
 		{name: StepAbuse},
 		{name: StepDns},
 		{name: StepApi},
 		{name: StepLabels},
+		{name: StepAuthority, siteOnly: true},
 		{name: StepRows},
 		{name: StepBilling},
-		{name: StepHardware, siteOnly: true},
-		{name: StepAuthority, siteOnly: true},
 		{name: StepGroups, siteOnly: true},
 		{name: StepRepos, siteOnly: true},
 		{name: StepDrops, siteOnly: true},
@@ -194,7 +193,7 @@ func (self *Frame) step(name string) (*Step, error) {
 	return nil, fmt.Errorf("%w: %q", ErrStepUnknown, name)
 }
 
-// The steps the incident runs, in order: the Postgres steps, and the site steps too after a site loss.
+// The steps for this incident, including replacement storage and re-seeding only for a site loss.
 func (self *Frame) incidentSteps(incident *Incident) ([]*Step, error) {
 	kind, ok, err := incident.Kind()
 	if err != nil {

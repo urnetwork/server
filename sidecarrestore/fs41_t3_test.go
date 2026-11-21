@@ -3,9 +3,9 @@
 package sidecarrestore
 
 // FS-41's frame at M3 on T3 (D-OPS-14, R-OPS-9, FS-41, FI-5, FI-12; OPS-M3-05): a site loss through §19.10's order
-// whole, the Postgres steps then the site's, each step twice, on SiteLossFixture: both dumps restored through xops's
-// real scripts on the private server under a site incident, every bucket lost, reseed on. Three networks' logs were
-// on the site; after the loss the hardware step finds the new store empty and answering, the authority step resumes
+// whole, qualifying replacement storage before the first cluster read and running each step twice. The fixture
+// restores both dumps through xops's real scripts on the private server. Three networks' logs were
+// on the site; after the loss the hardware step creates the new store and enables reseed, the authority step resumes
 // each log verbatim, the repos step re-seeds one network's config repo whole and another's only under an EvsReseed,
 // and the third's not at all. Then the close: refused before §19.10's 30 days and while reseed is on; after, it names
 // the third's config repo as nothing re-seeded and the second's as back only under an EvsReseed, in the incident and
@@ -98,33 +98,45 @@ func runFs41SiteLoss(t testing.TB) {
 	fixture.TakeSidecarDump()
 
 	incident := fixture.LoseSite(server.NewId())
-	connect.AssertEqual(t, server.CurrentSidecarConfig().Reseed(), true)
-	newBlobs := fixture.NewBlobs()
-	newFirst, err := newBlobs.FirstCluster()
-	if err != nil {
-		t.Fatal(err)
-	}
+	connect.AssertEqual(t, fixture.NewBlobs() == nil, true)
+	connect.AssertEqual(t, server.CurrentSidecarConfig().Reseed(), false)
 
 	closeNow := time.Time{}
 	frame := NewFrame()
+	frame.Register(StepHardware, func(ctx context.Context, run *StepRun) error {
+		if incident.StepEnded(StepHardware) {
+			return nil
+		}
+		return fixture.ProvisionStorage(ctx)
+	})
 	frame.Register(StepOps, func(ctx context.Context, run *StepRun) error {
-		settings := model.DefaultConfigLogSettings()
+		blobs := fixture.NewBlobs()
+		if blobs == nil {
+			return errors.New("replacement storage is unavailable")
+		}
+		first, err := blobs.FirstCluster()
+		if err != nil {
+			return err
+		}
 		return RunOpsStep(ctx, &OrphanLogDeps{
-			Blobs:     newBlobs,
-			Sequencer: model.NewConfigLogSequencer(newFirst, settings, nil),
+			Blobs:     blobs,
+			Sequencer: model.NewConfigLogSequencer(first, nil, nil),
 			Tasks:     sidecartest.NewFakeTasks(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil),
 			Now:       server.NowUtc,
 		}, run)
 	})
-	frame.Register(StepHardware, func(ctx context.Context, run *StepRun) error {
-		// §19.10's hardware row: new hardware with empty buckets passes §22's suite, which runs on T3's real
-		// clusters (EVSB-M2-17's filecluster-suite); here the new store is empty and answers
-		if incident.StepEnded(StepHardware) {
-			return nil
+	frame.Register(StepApi, func(ctx context.Context, run *StepRun) error {
+		first, err := fixture.NewBlobs().FirstCluster()
+		if err != nil {
+			return err
 		}
-		return fixture.NewStoreEmpty(ctx)
+		return RunApiStep(ctx, testApiStepDeps(first, sidecar.RealClock{}, server.CurrentSidecarConfig().RestoreHold(), server.NowUtc()), run)
 	})
 	frame.Register(StepAuthority, func(ctx context.Context, run *StepRun) error {
+		config := server.CurrentSidecarConfig()
+		if config.RestoreHold() || !config.Reseed() {
+			return errors.New("authority uploads are unavailable")
+		}
 		for _, network := range networks {
 			fixture.ResumeLog(ctx, network.networkId)
 		}
@@ -136,9 +148,13 @@ func runFs41SiteLoss(t testing.TB) {
 		return nil
 	})
 	frame.Register(StepClose, func(ctx context.Context, run *StepRun) error {
+		first, err := fixture.NewBlobs().FirstCluster()
+		if err != nil {
+			return err
+		}
 		return RunCloseStep(ctx, &CloseStepDeps{
-			RepoRows: model.NewConfigLogSequencer(newFirst, nil, nil).RestoreRepoRows,
-			Blobs:    newBlobs,
+			RepoRows: model.NewConfigLogSequencer(first, nil, nil).RestoreRepoRows,
+			Blobs:    fixture.NewBlobs(),
 			ReseedOn: func() bool { return server.CurrentSidecarConfig().Reseed() },
 			Now:      func() time.Time { return closeNow },
 		}, run)
@@ -146,7 +162,6 @@ func runFs41SiteLoss(t testing.TB) {
 	byHand := map[string]string{
 		StepAbuse:   "no abuse mailbox record after the sidecar dump in this drill",
 		StepDns:     "no dns tables are restored before M5 in this drill",
-		StepApi:     "a site loss's api replay waits for the resumed log; the authority row's api re-creates rev/ from tombstones",
 		StepLabels:  "no dns_label replay before M5 in this drill",
 		StepRows:    "the daemons re-register on restore_required (§19.10's rows step), outside the server",
 		StepBilling: "no meter rows before MG6 in this drill",
@@ -156,13 +171,29 @@ func runFs41SiteLoss(t testing.TB) {
 	out := &bytes.Buffer{}
 
 	// every step through drops, the close refused before 30 days of re-seeding and while reseed is on
-	err = fixture.RunFrameThrough(ctx, frame, StepDrops, byHand, out, nil)
+	connect.AssertEqual(t, errors.Is(frame.RunStep(ctx, incident, StepOps, out, ""), ErrStepOutOfOrder), true)
+	err = fixture.RunFrameThrough(ctx, frame, StepDrops, byHand, out, func(step string) {
+		if step == StepApi {
+			fixture.setGates(false, true)
+		}
+		if step == StepRows {
+			// Re-registration reads the network's resumed authority to admit each daemon's identity.
+			connect.AssertEqual(t, incident.StepEnded(StepAuthority), true)
+			first, err := fixture.NewBlobs().FirstCluster()
+			connect.AssertEqual(t, err, nil)
+			for _, network := range networks {
+				connect.AssertEqual(t, fs41ConfigRepoId(t, ctx, first, network.networkId), configRepoIds[network.networkId])
+			}
+		}
+	})
 	connect.AssertEqual(t, err, nil)
-	hardwareEnd, err := hardwareStepEnd(incident)
+	connect.AssertEqual(t, len(incident.RowsOfKind(ListKindRestoreHold)), 1)
+	connect.AssertEqual(t, server.CurrentSidecarConfig().Reseed(), true)
+	reseedStart, err := reseedWindowStart(incident)
 	connect.AssertEqual(t, err, nil)
-	closeNow = hardwareEnd.Add(29 * 24 * time.Hour)
+	closeNow = reseedStart.Add(29 * 24 * time.Hour)
 	connect.AssertEqual(t, errors.Is(frame.RunStep(ctx, incident, StepClose, out, ""), ErrCloseTooEarly), true)
-	closeNow = hardwareEnd.Add(31 * 24 * time.Hour)
+	closeNow = reseedStart.Add(31 * 24 * time.Hour)
 	connect.AssertEqual(t, errors.Is(frame.RunStep(ctx, incident, StepClose, out, ""), ErrCloseReseedOn), true)
 	connect.AssertEqual(t, incident.StepEnded(StepClose), false)
 

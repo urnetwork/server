@@ -2,8 +2,8 @@
 // env WARP_ENV names, after xops's bringyour-pg-sidecar-restore.sh has loaded the dumps and started the incident's list:
 //
 //   - `sidecar restore <step>` runs one step, once every step before it in §19.10's order has ended under the
-//     incident: ops, abuse, dns, api, labels, rows and billing, and after a site loss hardware, authority, groups,
-//     repos, drops and close. A step that ended may run again: every step is idempotent and keyed by the incident.
+//     incident. Site loss qualifies hardware before ops and resumes authority before rows. A step that ended
+//     may run again: every step is idempotent and keyed by the incident.
 //   - `sidecar restore run` runs every step that has not ended, in order, stopping at the first that fails or that no
 //     task has registered yet.
 //   - `sidecar restore end <step> --by-hand=<how>` records that the operator ran a step no task has registered, as the

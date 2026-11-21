@@ -15,6 +15,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -56,7 +57,7 @@ func testCloseReseedRepo(t testing.TB, ctx context.Context, blobs *sidecartest.F
 		t.Fatal(err)
 	}
 	if underStatement {
-		if _, err := first.PutIfNoneMatch(ctx, "reseed/"+repoId.String()+"/"+sidecar.NewId().String(), []byte("a signed EvsReseed"), nil); err != nil {
+		if _, err := first.PutIfNoneMatch(ctx, evsservice.ReseedKey(repoId, sidecar.NewId()), []byte("a signed EvsReseed"), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -83,12 +84,12 @@ func testCloseRepoRow(repoId sidecar.Id, deletedAt time.Time, now bool) *protoco
 	return row
 }
 
-// A site incident whose steps through hardware have ended, by hand, now.
+// A site incident with qualified hardware and a completed API replay.
 func testSiteIncidentPastHardware(t testing.TB) *Incident {
 	t.Helper()
 	incident := testIncident(t, IncidentKindSite)
 	frame := NewFrame()
-	for _, step := range []string{StepOps, StepAbuse, StepDns, StepApi, StepLabels, StepRows, StepBilling, StepHardware} {
+	for _, step := range []string{StepHardware, StepOps, StepAbuse, StepDns, StepApi} {
 		if err := frame.EndStepByHand(incident, step, "by hand in this test"); err != nil {
 			t.Fatal(err)
 		}
@@ -106,9 +107,9 @@ func TestCloseStepNamesWhatTheRestoreCouldNotBringBack(t *testing.T) {
 	testCloseReseedRepo(t, ctx, blobs, networkId, underReseed, true)
 
 	incident := testSiteIncidentPastHardware(t)
-	hardwareEnd, err := hardwareStepEnd(incident)
+	reseedStart, err := reseedWindowStart(incident)
 	connect.AssertEqual(t, err, nil)
-	now := hardwareEnd.Add(29 * 24 * time.Hour)
+	now := reseedStart.Add(29 * 24 * time.Hour)
 	reseedOn := true
 	events := []*model.AdminEvent{}
 	deps := &CloseStepDeps{
@@ -136,7 +137,7 @@ func TestCloseStepNamesWhatTheRestoreCouldNotBringBack(t *testing.T) {
 
 	// 29 days after the hardware step: re-seeding still runs
 	connect.AssertEqual(t, errors.Is(RunCloseStep(ctx, deps, run), ErrCloseTooEarly), true)
-	now = hardwareEnd.Add(31 * 24 * time.Hour)
+	now = reseedStart.Add(31 * 24 * time.Hour)
 	deps.RepoRows = func(ctx context.Context, logNetworkId server.Id) ([]*protocol.AclRepo, bool, error) {
 		return []*protocol.AclRepo{
 			testCloseRepoRow(back, time.Time{}, false),
@@ -191,6 +192,22 @@ func TestCloseStepNeedsTheHardwareStepsEnd(t *testing.T) {
 	connect.AssertEqual(t, errors.Is(err, ErrCloseNoHardwareEnd), true)
 }
 
+// The protected replay can take days. A newer incident opens at api, and an older one opened at hardware.
+func TestCloseWindowStartsAfterBothHardwareAndApi(t *testing.T) {
+	start := time.Date(2026, time.November, 6, 0, 0, 0, 0, time.UTC)
+	for _, order := range [][]string{{StepHardware, StepApi}, {StepApi, StepHardware}} {
+		incident := testIncident(t, IncidentKindSite)
+		for index, step := range order {
+			if err := incident.recordStepEnded(step, start.Add(time.Duration(index)*24*time.Hour), stepEndedRan); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := reseedWindowStart(incident)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, got, start.Add(24*time.Hour))
+	}
+}
+
 // A log the step cannot read is listed, its repos unnamed, and the report goes on.
 func TestCloseStepListsALogItCannotRead(t *testing.T) {
 	ctx := t.Context()
@@ -198,7 +215,7 @@ func TestCloseStepListsALogItCannotRead(t *testing.T) {
 	networkId := server.NewId()
 	testCloseLogEntry(t, ctx, blobs, networkId)
 	incident := testSiteIncidentPastHardware(t)
-	hardwareEnd, _ := hardwareStepEnd(incident)
+	reseedStart, _ := reseedWindowStart(incident)
 	deps := &CloseStepDeps{
 		RepoRows: func(ctx context.Context, networkId server.Id) ([]*protocol.AclRepo, bool, error) {
 			return nil, true, model.ErrRestoreRepoIdsUnreadable
@@ -206,7 +223,7 @@ func TestCloseStepListsALogItCannotRead(t *testing.T) {
 		Blobs:      blobs,
 		ReseedOn:   func() bool { return false },
 		AddEvent:   func(ctx context.Context, event *model.AdminEvent) error { return errors.New("no event expected") },
-		Now:        func() time.Time { return hardwareEnd.Add(31 * 24 * time.Hour) },
+		Now:        func() time.Time { return reseedStart.Add(31 * 24 * time.Hour) },
 		SkipMarker: true,
 	}
 	connect.AssertEqual(t, RunCloseStep(ctx, deps, &StepRun{Incident: incident, Out: &bytes.Buffer{}}), nil)
