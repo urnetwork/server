@@ -596,7 +596,8 @@ type RunOptions struct {
 	StatusListener net.Listener
 	// A listener already bound for each of HostServicePorts the block serves, by that service port, which Run serves
 	// behind its PROXY listener in place of binding the port: a test's on 127.0.0.1:0, still answering the service
-	// port to the engine. Run takes them. A port with none is bound as warp maps it.
+	// port to the engine. Run takes them. A port with none is bound as warp maps it; a listener under any other port
+	// is not served and stays the caller's.
 	Listeners map[int]net.Listener
 	// The engine's settings and the block's. nil: the block could not read its tlsedge.yml, and serves /status
 	// not ready.
@@ -653,8 +654,11 @@ func Run(ctx context.Context, options *RunOptions) error {
 	if options.ProcessEnv != nil {
 		options.ProcessEnv(&sidecar.ServiceHost{})
 	}
-	for _, listener := range options.Listeners {
-		listener.Close()
+	// the block serves none of its ports, so it closes the ones it was given to serve
+	for _, servicePort := range HostServicePorts {
+		if listener := options.Listeners[servicePort]; listener != nil {
+			listener.Close()
+		}
 	}
 	var runSettings *sidecarhost.RunSettings
 	if options.Settings != nil {
