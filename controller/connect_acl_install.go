@@ -6,7 +6,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"net/http"
 	"os"
 
 	"github.com/urnetwork/server"
@@ -48,11 +47,13 @@ func InstallConnectAuthorization(ctx context.Context, host *sidecar.ServiceHost)
 				return nil, err
 			}
 		}
-		bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerConnect)
-		if err != nil {
+		credential := func() (string, error) {
+			return server.LoadInternalGateCredential(server.InternalGateCallerConnect)
+		}
+		if _, err := credential(); err != nil {
 			return nil, errors.New("the connect projection credential is unavailable")
 		}
-		source, err := sidecar.NewAclGateApiSource(apiUrl, &http.Client{}, func() (string, error) { return bearer, nil }, nil)
+		source, err := sidecar.NewAclGateApiSource(apiUrl, nil, credential, nil)
 		if err != nil {
 			return nil, err
 		}
