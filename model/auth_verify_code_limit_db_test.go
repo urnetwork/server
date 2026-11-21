@@ -206,34 +206,38 @@ func TestVerifyCodeDiesAtItsFifthWrongTry(t *testing.T) {
 			return verifyPath{name: "sign-in after a reset", userAuth: userAuth, userId: userId, code: code, verifier: owner}
 		}
 
-		for _, path := range []verifyPath{
-			signUp("email sign-up", emailClaimTestAddress("dies"), VerifyCodeDefault),
-			signUp("phone sign-up", verifyCodeTestPhone(), VerifyCodeNumeric),
-			added(),
-			reset(),
-		} {
+		// each path is checked on its own, so every path that fails is named
+		check := func(path verifyPath) {
 			replies := verifyCodeTestWrongTries(t, sources, path.bearer, path.userAuth, path.code, VerifyCodeTryLimit)
 
 			right := emailClaimVerify(t, path.verifier, path.userAuth, path.code)
 			if right.Network != nil {
-				t.Fatalf("%s: the right code verified after %d wrong tries", path.name, VerifyCodeTryLimit)
+				t.Errorf("%s: the right code verified after %d wrong tries", path.name, VerifyCodeTryLimit)
+				return
 			}
 			if right.Error == nil || right.Error.Message != "Invalid code." {
-				t.Fatalf("%s: the right code of the killed code was answered %+v", path.name, right.Error)
+				t.Errorf("%s: the right code of the killed code was answered %+v", path.name, right.Error)
+				return
 			}
 			for i, reply := range replies[:VerifyCodeTryLimit-1] {
 				if reply != "Invalid code." {
-					t.Fatalf("%s: wrong try %d was answered %q", path.name, i+1, reply)
+					t.Errorf("%s: wrong try %d was answered %q", path.name, i+1, reply)
+					return
 				}
 			}
 			if reply := replies[VerifyCodeTryLimit-1]; reply != AuthVerifyCodeSpentMessage {
-				t.Fatalf("%s: the fifth wrong try was answered %q, want %q", path.name, reply, AuthVerifyCodeSpentMessage)
+				t.Errorf("%s: the fifth wrong try was answered %q, want %q", path.name, reply, AuthVerifyCodeSpentMessage)
+				return
 			}
 			normalUserAuth, _ := NormalUserAuth(path.userAuth)
 			if count := countRows(ctx, `SELECT COUNT(*) FROM network_user_auth_password WHERE user_id = $1 AND user_auth = $2 AND verified`, path.userId, normalUserAuth); count != 0 {
-				t.Fatalf("%s: the address was verified", path.name)
+				t.Errorf("%s: the address was verified", path.name)
 			}
 		}
+		check(signUp("email sign-up", emailClaimTestAddress("dies"), VerifyCodeDefault))
+		check(signUp("phone sign-up", verifyCodeTestPhone(), VerifyCodeNumeric))
+		check(added())
+		check(reset())
 	})
 }
 
