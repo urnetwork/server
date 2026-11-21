@@ -138,9 +138,7 @@ func GetSmtpDkimCustomDomains(ctx context.Context, networkId server.Id, root str
 	if len(verifiedDomains) == 0 {
 		return domains
 	}
-	tier := string(smtpCustomDomainTierOf(ctx, networkId))
-	withholdTime := GetSmtpCustomDomainWithholdTime(ctx, networkId, settings)
-	if !smtpedgeservice.SmtpCustomDomainSendable(tier, withholdTime, now) {
+	if !smtpMaySendFromCustomDomains(ctx, networkId, now, settings) {
 		return domains
 	}
 	for _, domain := range verifiedDomains {
@@ -149,6 +147,13 @@ func GetSmtpDkimCustomDomains(ctx context.Context, networkId server.Id, root str
 		}
 	}
 	return domains
+}
+
+// The entitlement the device, selector publisher and edge apply to a verified customer domain.
+func smtpMaySendFromCustomDomains(ctx context.Context, networkId server.Id, now time.Time, settings *SmtpCustomDomainSettings) bool {
+	tier := string(smtpCustomDomainTierOf(ctx, networkId))
+	withholdTime := GetSmtpCustomDomainWithholdTime(ctx, networkId, settings)
+	return smtpedgeservice.SmtpCustomDomainSendable(tier, withholdTime, now)
 }
 
 // The network's verified domains whose _domainkey apex its delegated row in root can name, read in tx: those outside

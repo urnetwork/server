@@ -638,6 +638,8 @@ type MailStatus struct {
 	DirectMxAddresses []string `json:"direct_mx_addresses"`
 	// Customer domains whose ownership this network has verified. Receivers still resolve each alias through signed mailcfg.
 	VerifiedDomains []string `json:"verified_domains"`
+	// The sender may currently use a verified domain as its header From under the same entitlement as smtpedge.
+	MaySendFromCustomDomains bool `json:"may_send_from_custom_domains"`
 	// The network's verified custom domains in strict mode (QD-1129): each at
 	// or above an active strict-mode MX host the network maps (§12.8 step 4),
 	// whose mail's envelope is b.<domain>. The set smtpedge's gate derives
@@ -663,9 +665,10 @@ func GetMailStatusWithSettings(ctx context.Context, networkId server.Id, setting
 func GetMailReceiverStatus(ctx context.Context, networkId server.Id, receiverId server.Id, settings *SmtpCustomDomainSettings) (*MailStatus, error) {
 	verified, strict := smtpCustomDomainSets(ctx, networkId, settings)
 	status := &MailStatus{
-		StrictDomains:     strict,
-		VerifiedDomains:   verified,
-		DirectMxAddresses: []string{},
+		StrictDomains:            strict,
+		VerifiedDomains:          verified,
+		MaySendFromCustomDomains: len(verified) != 0 && smtpMaySendFromCustomDomains(ctx, networkId, server.NowUtc(), settings),
+		DirectMxAddresses:        []string{},
 	}
 	if !server.SidecarMg7Linked() {
 		return status, nil
