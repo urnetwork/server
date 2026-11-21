@@ -132,7 +132,8 @@ func SidecarBind(bind *SidecarBindArgs, clientSession *session.ClientSession) (*
 // The lookup GET /sidecar/identity takes: a sidecar_id with a page of its
 // bindings, or a client of any generation.
 type GetSidecarIdentityArgs struct {
-	SidecarId *server.Id
+	BrowserAdmission *string
+	SidecarId        *server.Id
 	// 0: the newest page; else the page below this generation.
 	BeforeGeneration int64
 	ClientId         *server.Id
@@ -140,6 +141,7 @@ type GetSidecarIdentityArgs struct {
 
 // GET /sidecar/identity's answer (§5.15): never a user_id.
 type GetSidecarIdentityResult struct {
+	BrowserAdmission  string    `json:"browser_admission,omitempty"`
 	SidecarId         server.Id `json:"sidecar_id"`
 	IdentityPublicKey []byte    `json:"identity_public_key"`
 	IdentityAlg       string    `json:"identity_alg"`
@@ -160,6 +162,18 @@ func GetSidecarIdentity(lookup *GetSidecarIdentityArgs, clientSession *session.C
 	notFound := fmt.Errorf("%d No such sidecar identity.", http.StatusNotFound)
 	var view *model.SidecarIdentityView
 	switch {
+	case lookup.BrowserAdmission != nil:
+		mode := *lookup.BrowserAdmission
+		jwt := clientSession.ByJwt
+		if lookup.SidecarId == nil || lookup.ClientId != nil || lookup.BeforeGeneration != 0 || jwt == nil || jwt.ClientId == nil ||
+			(mode != sidecar.BrowserAdmissionPage && mode != sidecar.BrowserAdmissionBurner) {
+			return nil, notFound
+		}
+		member := model.ResolveNetworkSignIn(clientSession.Ctx, jwt.UserId, jwt.NetworkId, server.NowUtc())
+		if member == nil || (member.MemberId == nil) != (jwt.MemberId == nil) || member.MemberId != nil && *member.MemberId != *jwt.MemberId {
+			return nil, notFound
+		}
+		view = model.GetOwnBrowserAdmissionIdentity(clientSession.Ctx, member, *jwt.ClientId, *lookup.SidecarId, mode == sidecar.BrowserAdmissionBurner)
 	case lookup.SidecarId != nil && lookup.ClientId == nil:
 		if lookup.BeforeGeneration < 0 {
 			return nil, fmt.Errorf("%d Invalid generation.", http.StatusBadRequest)
@@ -179,6 +193,9 @@ func GetSidecarIdentity(lookup *GetSidecarIdentityArgs, clientSession *session.C
 		IdentityAlg:       view.IdentityAlg,
 		Status:            view.Status,
 		Binding:           view.Binding,
+	}
+	if lookup.BrowserAdmission != nil {
+		result.BrowserAdmission = *lookup.BrowserAdmission
 	}
 	if lookup.SidecarId != nil {
 		result.Bindings = view.Bindings

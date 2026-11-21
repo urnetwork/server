@@ -520,9 +520,26 @@ type networkClientEnrollment struct {
 	bearer      string
 	authKeyId   server.Id
 	declaresKey []byte
+	memberId    *server.Id // an untagged durable team client's live membership at enrollment
 	// set in the mint's transaction: the key it spent, or why it spent none
 	authKey *NetworkAuthKey
 	refusal error
+}
+
+// Order a team device mint with removal or reauthentication of the exact membership it will carry.
+func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx, creator *session.ByJwt) (*NetworkAuthKey, error) {
+	if self.memberId != nil {
+		rows, err := tx.Query(ctx, `SELECT member_id FROM network_member
+			WHERE network_id = $1 AND user_id = $2 AND member_id = $3 AND NOT pending
+				AND (reauth_deadline IS NULL OR reauth_deadline > $4) FOR SHARE`,
+			creator.NetworkId, creator.UserId, *self.memberId, server.NowUtc())
+		live := false
+		server.WithPgResult(rows, err, func() { live = rows.Next() })
+		if !live {
+			return nil, ErrAuthKeyRefused
+		}
+	}
+	return ConsumeAuthKeyInTx(ctx, tx, self.bearer)
 }
 
 // The owner row of the client the enrollment mints, from the key it spent.
@@ -543,7 +560,10 @@ func (self *networkClientEnrollment) ownerRow(marks clientMarks) *clientOwnerIns
 		// the creator's own device; its member is the creator's user in a
 		// personal network (§7.5)
 		row.ownerUserId = &creatorUserId
-		row.memberId = &creatorUserId
+		row.memberId = self.memberId
+		if row.memberId == nil {
+			row.memberId = &creatorUserId
+		}
 	}
 	return row
 }
@@ -648,6 +668,14 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	if refusal := SidecarClientsExceeded(ctx, key.networkId); refusal != nil {
 		return nil, NewQuotaRefusalError(refusal)
 	}
+	creator := session.NewByJwt(key.networkId, key.creatorUserId, key.networkName, false, false)
+	if !key.tagged && !key.ephemeral {
+		signIn := ResolveNetworkSignIn(ctx, key.creatorUserId, key.networkId, server.NowUtc())
+		if signIn == nil {
+			return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
+		}
+		creator = NewNetworkSignInByJwt(signIn, false)
+	}
 	approvalState := NetworkEnrollApprovalStatePending
 	if admission != nil {
 		if _, err := landNetworkEnrollAdmission(ctx, enroll.AuthKey, key, admission); err != nil {
@@ -659,13 +687,14 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	creatorSession := session.NewLocalClientSession(
 		ctx,
 		clientAddress,
-		session.NewByJwt(key.networkId, key.creatorUserId, key.networkName, false, false),
+		creator,
 	)
 	defer creatorSession.Cancel()
 	enrollment := &networkClientEnrollment{
 		bearer:      enroll.AuthKey,
 		authKeyId:   authKeyId,
 		declaresKey: bytes.Clone(enroll.ClientPublicKey),
+		memberId:    creator.MemberId,
 	}
 	result, err := authNetworkClientWithParentState(&AuthNetworkClientArgs{
 		DeviceSpec:       enroll.DeviceSpec,

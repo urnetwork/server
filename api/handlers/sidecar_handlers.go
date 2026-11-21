@@ -26,8 +26,16 @@ func GetSidecarIdentity(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid sidecar id.", http.StatusBadRequest)
 		return
 	}
+	query := r.URL.Query()
 	lookup := &controller.GetSidecarIdentityArgs{SidecarId: &sidecarId}
-	if before := r.URL.Query().Get("before_generation"); before != "" {
+	if modes, requested := query["browser_admission"]; requested {
+		mode := ""
+		if len(modes) == 1 {
+			mode = modes[0]
+		}
+		lookup.BrowserAdmission = &mode
+	}
+	if before := query.Get("before_generation"); before != "" {
 		beforeGeneration, err := strconv.ParseInt(before, 10, 64)
 		if err != nil || beforeGeneration < 1 {
 			http.Error(w, "Invalid generation.", http.StatusBadRequest)
