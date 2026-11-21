@@ -9,6 +9,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
@@ -45,7 +46,9 @@ func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 	install := server.NewSidecarSwitchInstall("api-authorization", func() bool {
 		return server.SidecarMg1Linked() || server.SidecarMg2Linked()
 	}, func(ctx context.Context) (func(), error) {
-		clusters, err := server.LoadFileClusters(ctx, "api", nil)
+		// The issuer drains already claimed writes before closing these resources.
+		hostCtx := context.WithoutCancel(ctx)
+		clusters, err := server.LoadFileClusters(hostCtx, "api", nil)
 		if err != nil {
 			return nil, errors.New("the API metadata cluster configuration is unavailable")
 		}
@@ -56,26 +59,41 @@ func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 		}
 		host := *processHost
 		host.Blobs = clusters
-		budget, err := evsservice.NewWriteBudget(ctx, &host, nil, nil)
+		budget, err := evsservice.NewWriteBudget(hostCtx, &host, nil, nil)
 		if err != nil {
 			clusters.Close()
 			return nil, err
 		}
 		host.Budget = budget
 		closeRevocations := installApiRevocations(&host, first)
-		worker := newAuthorizationIssuerWorker(context.WithoutCancel(ctx))
+		worker := newAuthorizationIssuerWorker(hostCtx)
+		claimCtx, stopClaims := context.WithCancel(ctx)
 		var lifetime sync.WaitGroup
-		lifetime.Go(worker.Run)
+		lifetime.Go(func() {
+			// The ordinary taskworker also supervises its claim loop. An
+			// unavailable direct database resource can recover on a later poll.
+			for claimCtx.Err() == nil {
+				if server.HandleError(worker.Run) == nil {
+					return
+				}
+				select {
+				case <-claimCtx.Done():
+					return
+				case <-time.After(task.DefaultTaskWorkerSettings().RetryTimeoutAfterError):
+				}
+			}
+		})
 		// A missing projection mount or subscription must not interrupt revocations.
 		projection := server.NewSidecarSwitchInstall("api-projection", server.SidecarMg2Linked, func(ctx context.Context) (func(), error) {
 			return installApiProjection(ctx, &host)
 		}, nil)
-		closeViews := runAuthorizationInstall(ctx, projection)
+		closeViews := runAuthorizationInstall(hostCtx, projection)
 		return func() {
-			closeViews()
+			stopClaims()
 			worker.Drain()
 			worker.Close()
 			lifetime.Wait()
+			closeViews()
 			closeRevocations()
 			budget.Close()
 			clusters.Close()
