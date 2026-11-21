@@ -36,6 +36,7 @@ func snTopArgsFromQuery(query url.Values) (*controller.SnTopArgs, error) {
 		Cursor:   query.Get("cursor"),
 		Filter:   query.Get("filter"),
 		Snapshot: query.Get("snapshot"),
+		Board:    query.Get("board"),
 	}
 	if limit := query.Get("limit"); limit != "" {
 		value, err := strconv.Atoi(limit)
