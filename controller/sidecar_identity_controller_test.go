@@ -5,6 +5,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,12 @@ func (self *sidecarBindTestKeys) bind(t testing.TB, clientSession *session.Clien
 	if _, err := rand.Read(clientKeySeed); err != nil {
 		t.Fatal(err)
 	}
+	return self.bindWithClientKey(t, clientSession, generation, clientKeySeed)
+}
+
+// Auth-key enrollment commits the new client's public key before its dual-signed binding arrives.
+func (self *sidecarBindTestKeys) bindWithClientKey(t testing.TB, clientSession *session.ClientSession, generation int64, clientKeySeed []byte) []byte {
+	t.Helper()
 	signedBinding, err := sidecar.NewSidecarIdentityBinding(&sidecar.SidecarIdentityBinding{
 		NetworkId:  sidecar.Id(clientSession.ByJwt.NetworkId),
 		SidecarId:  sidecar.Id(self.sidecarId),
@@ -257,7 +264,11 @@ func TestTeamEnrollmentCarriesItsCurrentMembershipIntoBrowserApproval(t *testing
 		}
 		f.root = session.Testing_CreateClientSession(f.ctx, model.NewNetworkSignInByJwt(signIn, false))
 		bearer, _ := f.authKey(t, &model.CreateAuthKeyArgs{})
-		enrolled, err := f.enroll(&model.NetworkEnrollArgs{AuthKey: bearer, DeviceSpec: "native member device", ClientPublicKey: newEnrollClientKey(t), DeclaresNoEgress: true})
+		clientPub, clientKey, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enrolled, err := f.enroll(&model.NetworkEnrollArgs{AuthKey: bearer, DeviceSpec: "native member device", ClientPublicKey: clientPub, DeclaresNoEgress: true})
 		if err != nil || enrolled == nil {
 			t.Fatalf("enroll: %v", err)
 		}
@@ -271,7 +282,7 @@ func TestTeamEnrollmentCarriesItsCurrentMembershipIntoBrowserApproval(t *testing
 		}
 		signer := session.Testing_CreateClientSession(f.ctx, jwt)
 		keys := newSidecarBindTestKeys(t)
-		if _, err := SidecarBind(&SidecarBindArgs{Binding: keys.bind(t, signer, 1)}, signer); err != nil {
+		if _, err := SidecarBind(&SidecarBindArgs{Binding: keys.bindWithClientKey(t, signer, 1, clientKey.Seed())}, signer); err != nil {
 			t.Fatal(err)
 		}
 		mint, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{DeviceSpec: "browser", Description: "browser", AdminRefused: true, StrictExp: true, DeclaresNoEgress: true}, f.root)
