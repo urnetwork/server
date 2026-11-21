@@ -277,19 +277,25 @@ func newTlsInstallTestWorld(t *testing.T) *tlsInstallTestWorld {
 			}
 			return world.labels[networkId], world.aliases[networkId], nil
 		},
-		ScopeOf: func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
-			if snapshot.Config != nil {
-				return tlsCertScopeOf(snapshot, sidecarId)
-			}
-			scope, ok := world.scopes[sidecarId]
-			return scope, ok
-		},
+		ScopeOf: world.scopeOf,
 	}, settings)
 	world.install.Testing_SetLog(func(format string, arguments ...any) {
 		world.lines = append(world.lines, fmt.Sprintf(format, arguments...))
 	})
 	t.Cleanup(world.install.Close)
 	return world
+}
+
+// The scope source of every install the fixture builds. Its networks' states are rows-only AclStates with no
+// verified projection, which api's own source (tlsCertScopeOf) reads as withholding every set (§13.8: a scope comes
+// only from the verified projection), so a state with no projection stands for one whose signed declarations place
+// each sidecar as scopes says, and none for a network-level device. A state carrying the projection reads its rows.
+func (self *tlsInstallTestWorld) scopeOf(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
+	if snapshot.Config != nil {
+		return tlsCertScopeOf(snapshot, sidecarId)
+	}
+	scope, ok := self.scopes[sidecarId]
+	return scope, ok
 }
 
 // The fixture serves one synthetic projection to the normal signed, rows-only verifier.
@@ -665,7 +671,8 @@ func TestTlsCertsInstallMissingFilesLeaveItUninstalled(t *testing.T) {
 
 // The install as api starts it reads the process's own sidecar.yml and config
 // mount: off in sidecar.yml the routes answer 503, and on, with certs.yml in
-// the mount, an order queues.
+// the mount, an order queues. The state's side stays the fixture's, its scope
+// source with it, since the fixture's states carry no verified projection.
 func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
 	world := newTlsInstallTestWorld(t)
 	network := world.network("acme")
@@ -682,6 +689,7 @@ func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
 		Names: func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (string, []string, error) {
 			return world.labels[networkId], world.aliases[networkId], nil
 		},
+		ScopeOf: world.scopeOf,
 	}, settings)
 	install.Testing_SetLog(func(format string, arguments ...any) {
 		world.lines = append(world.lines, fmt.Sprintf(format, arguments...))
@@ -715,6 +723,56 @@ func TestTlsCertsInstallFollowsSidecarYmlAndTheConfigMount(t *testing.T) {
 			t.Fatalf("an order once sidecar.yml names no certs switch answered %v", err)
 		}
 	}()
+}
+
+// api's own scope source takes a device's Team scope only from the verified projection (§13.8; owner decision 678),
+// so a state that carries none withholds every set: an install with no ScopeOf grants a device of the implicit
+// document nothing on such a state and writes no row, where the fixture's scope source, standing for a projection
+// that places the device in no scope, queues the same order.
+func TestTlsCertsInstallWithholdsEverySetWithoutTheProjection(t *testing.T) {
+	world := newTlsInstallTestWorld(t)
+	network := world.network("acme")
+	device := network.device(tlsInstallTestImplicitTargets, tlsInstallTestPublish...)
+	network.load()
+	if snapshot, _ := world.states.State(network.networkId); snapshot == nil || snapshot.Config != nil {
+		t.Fatal("the fixture's state is not one with no projection")
+	}
+	settings := DefaultTlsCertsInstallSettings()
+	settings.SubjectLoadWait = 0
+	install := NewTlsCertsInstall(&TlsCertsInstallDeps{
+		SwitchOn: func() bool {
+			return true
+		},
+		ReadConfigFile: func(name string) ([]byte, error) {
+			return world.certsConfig, nil
+		},
+		Gate: func(ctx context.Context) (*TlsCertsGate, error) {
+			return &TlsCertsGate{Host: world.host.ServiceHost(), States: world.states, Abuse: world.abuse}, nil
+		},
+		Store: world.store,
+		Names: func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (string, []string, error) {
+			return world.labels[networkId], world.aliases[networkId], nil
+		},
+	}, settings)
+	defer install.Close()
+	if !install.Sync(world.ctx) {
+		t.Fatalf("not installed: %q", world.lines)
+	}
+	if _, err := world.order(device); !tlsTestStatus(err, "403") {
+		t.Fatalf("an order on a state with no projection answered %v", err)
+	}
+	if rows := world.store.Rows(); len(rows) != 0 {
+		t.Fatalf("%d rows written with no projection", len(rows))
+	}
+
+	install.Close()
+	world.on = true
+	if !world.install.Sync(world.ctx) {
+		t.Fatalf("the fixture's install: %q", world.lines)
+	}
+	if result, err := world.order(device); err != nil || result.State != sidecar.TlsCertStateQueued {
+		t.Fatalf("the same order through the fixture's scope source: %+v, %v", result, err)
+	}
 }
 
 // TLS-M6-03: a Team scope's device orders its scope's pair alone, granted by its scope's hosts; its CSR for the

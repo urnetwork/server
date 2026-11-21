@@ -43,9 +43,9 @@ package tlsedgehost
 // test's loopback splits: it validates TLS-ALPN-01 by dialing each lb interface's split itself, as RFC 8737's
 // validation would dial each address the host advertises. The orderer's custom routes are TLS-M6-05's
 // model.TlsCustomStore, called with the caller its routes would build; POST /tls/custom-challenge, which writes a
-// delegated DNS-01 value through certs and DNS, answers unavailable here, so the DNS-01 order starts and goes no
-// further. A desktop's TLS-ALPN-01 path is the test's over its own front, since no composition gives the orderer one
-// yet (Sidecar.TlsCustomOrdererDeps leaves it nil).
+// delegated DNS-01 value through certs and DNS, is no route here and answers 404, so the DNS-01 order starts and goes
+// no further, its desktop releasing the claim. A desktop's TLS-ALPN-01 path is the test's over its own front, since no
+// composition gives the orderer one yet (Sidecar.TlsCustomOrdererDeps leaves it nil).
 
 import (
 	"bytes"
@@ -1451,8 +1451,10 @@ func (self *t3RouteCa) KeyAuthorization(key crypto.Signer, token string) (string
 }
 
 // TLS-M6-05's custom routes as an ordering desktop calls them, here TLS-M6-05's store under the caller the routes would
-// build. POST /tls/custom-challenge, which writes a delegated DNS-01 value through certs and DNS, answers unavailable
-// on this stack: each value asked for is kept.
+// build. POST /tls/custom-challenge, which writes a delegated DNS-01 value through certs and DNS, is no route on this
+// stack and answers 404: a refusal no retry under the claim changes, so the desktop releases its claim, its order
+// recorded, where it sends a value again under the claim when no answer came or the server failed (owner decision
+// 680). Each value asked for is kept.
 type t3RouteCustomApi struct {
 	world  *t3RouteWorld
 	caller *model.TlsCustomCaller
@@ -1488,11 +1490,11 @@ func (self *t3RouteCustomApi) Challenge(ctx context.Context, args *sidecar.TlsCu
 	defer self.stateLock.Unlock()
 	argsCopy := *args
 	self.challenges = append(self.challenges, &argsCopy)
-	return nil, errors.New("no delegated DNS-01 route on this stack")
+	return nil, &sidecar.SidecarApiError{Route: "POST /tls/custom-challenge", Status: http.StatusNotFound}
 }
 
 func (self *t3RouteCustomApi) ChallengeStatus(ctx context.Context, challengeId uint64) (*sidecar.TlsCustomChallengeResult, error) {
-	return nil, errors.New("no delegated DNS-01 route on this stack")
+	return nil, &sidecar.SidecarApiError{Route: "GET /tls/custom-challenge/<id>", Status: http.StatusNotFound}
 }
 
 // The DNS-01 values a desktop asked to have written.
