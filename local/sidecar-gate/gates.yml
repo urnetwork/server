@@ -505,7 +505,7 @@ gates:
     - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
       commands:
         - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M2-out]}
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-6, FS-8, FS-53, FS-59, FS-60, FS-61, FS-95''s format-1, FS-103, FS-106 read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-6, FS-8, FS-53, FS-59, FS-60, FS-61, FS-95's format-1, FS-103, FS-106 each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -762,7 +762,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestBridgePublicExitsRefuseOverlayAndPrivateDestinations]}
     - item: '§22.7''s flow-pins assertion (BRIDGE-M4-22): a TCP flow idle 300-600 s keeps its link across a withdraw'
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-106''s page-worker read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-106's page-worker each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -922,7 +922,7 @@ gates:
     - item: '§22.7''s certificates assertion (TLS-M5-25, TLS-M6-03): no certificate whose key URnetwork holds names *.<root> or *.<net>.<root>'
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestTlsNoCertificateRestsOnAKeyUrnetworkHolds]}
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-66''s hold, FS-69, FS-92 read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-66's hold, FS-69, FS-92 each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -1230,7 +1230,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest, names: [TestDirectoryPlaintextHoldsNoCanary]}
         - {repo: sidecar, package: ./sidecartest, names: [TestDirectoryACanaryPastAPromptsFirstLineInAnEntryFails]}
         - {repo: sidecar, package: ./sidecartest, names: [TestDirectoryARevokedNameStillReadableFails]}
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-86''s announce-entries, FS-86''s cards, FS-111''s team-record read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-86's announce-entries, FS-86's cards, FS-111's team-record each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -1362,7 +1362,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestScenarioS7ReceiveMail]}
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestFs39LabelsAsStatedThroughTheReceiver]}
     - item: '§22.7''s mta-sts-claims assertion (MAIL-M7-10): no UI or API claims MTA-STS protection for mail to a burner domain'
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-111''s mailbox read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-111's mailbox each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -2151,7 +2151,7 @@ gates:
     - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
       commands:
         - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=M10-out]}
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-66''s hold, FS-69, FS-71, FS-73, FS-81, FS-86''s cards, FS-89, FS-91, FS-92, FS-111, FS-111''s mailbox, FS-111''s team-record read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-66's hold, FS-69, FS-71, FS-73, FS-81, FS-86's cards, FS-89, FS-91, FS-92, FS-111, FS-111's mailbox, FS-111's team-record each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
@@ -2455,7 +2455,7 @@ gates:
     - item: every FI the rows check answers through its oracle, bound with fault.RegisterInvariant, so no row's check fails as unbuilt (§22.8's oracle rule; TEST.md's FI table)
       commands:
         - {repo: sidecar, command: [go, test, -count=1, -v, -tags, sidecar_testhooks, -run, ^TestGateInvariantsBound$, ./sidecartest/fault, -fault.gate-invariants=held]}
-    - item: 'T3''s store clock (QD-264; TEST-M2-07): FS-66''s hold, FS-69, FS-86''s cards, FS-92, FS-111''s mailbox, FS-111''s team-record read LastModified and their ttls on the schedule''s clock, and FS-114 never does'
+    - item: T3's store clock controls (QD-264, TEST-M2-07) check that LastModified and Redis expiries use schedule time and that FS-114 never does. The named T3 tests for FS-66's hold, FS-69, FS-86's cards, FS-92, FS-111's mailbox, FS-111's team-record each require their own observed translation.
       tests:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending,sidecar_localstack', stores: true, names: [TestT3StoreClockReadsAgesOnTheScheduleClock, TestT3AnAdvancePassesATtl, TestT3EachNetHasItsOwnStoreClock]}
         - {repo: server, package: ./sidecart3, names: [TestFs114RefusesTheStoreClock]}
