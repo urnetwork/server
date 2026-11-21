@@ -1,4 +1,4 @@
-package model
+package model_test
 
 import (
 	"errors"
@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/gkmservice"
@@ -18,9 +19,15 @@ import (
 )
 
 func TestLegalHoldSourceReadsOnlyPlacementLeaseAndAckHashes(t *testing.T) {
-	ctx := t.Context()
 	at := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
-	host := sidecartest.NewFakeHost(ctx, sidecartest.NewFakeClock(at), nil, nil, nil)
+	host := sidecartest.NewFakeHost(t.Context(), sidecartest.NewFakeClock(at), nil, nil, nil)
+	t.Cleanup(host.Redis.Close)
+	checkHoldPlacementSoftState(t, host.ServiceHost(), at)
+}
+
+func checkHoldPlacementSoftState(t testing.TB, host *sidecar.ServiceHost, at time.Time) {
+	t.Helper()
+	ctx := t.Context()
 	cluster, err := host.Blobs.FirstCluster()
 	if err != nil {
 		t.Fatal(err)
@@ -45,10 +52,13 @@ func TestLegalHoldSourceReadsOnlyPlacementLeaseAndAckHashes(t *testing.T) {
 		return body
 	}
 	put(sidecar.EvsPlaceKey(repo), placement)
-	form := encode(&protocol.GroupForm{RepoId: repo.Bytes(), GroupId: group.Bytes(), Generation: 1})
-	put(gkmservice.GkmFormKey(repo, 1), encode(&bridge.Signed{Body: form, Type: uint32(bridge.SignedType_SIGNED_GROUP_FORM),
-		SignerId: client.Bytes(), Signature: make([]byte, 64)}))
-	put(gkmservice.GkmGroupOwnerKey(group), encode(&protocol.GkmGroupOwner{RepoId: repo.Bytes(), NetworkId: sidecar.NewId().Bytes()}))
+	putForm := func(groupId sidecar.Id, generation uint64) {
+		t.Helper()
+		form := encode(&protocol.GroupForm{RepoId: repo.Bytes(), GroupId: groupId.Bytes(), Generation: generation})
+		put(gkmservice.GkmFormKey(repo, generation), encode(&bridge.Signed{Body: form, Type: uint32(bridge.SignedType_SIGNED_GROUP_FORM),
+			SignerId: client.Bytes(), Signature: make([]byte, 64)}))
+	}
+	putForm(group, 1)
 	leaseKey, ackKey := evsservice.LeaseKey(repo), gkmservice.GkmAckRedisKey(group)
 	lease := strconv.FormatInt(at.Add(evsservice.DefaultEvsSettings().LeaseLife).UnixMilli(), 10)
 	ack := "5:" + strconv.FormatInt(at.UnixMilli(), 10)
@@ -58,15 +68,27 @@ func TestLegalHoldSourceReadsOnlyPlacementLeaseAndAckHashes(t *testing.T) {
 	if err := host.Redis.HashSet(ctx, ackKey, map[string][]byte{"synthetic-client": []byte(ack)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Redis.HashSet(ctx, gkmservice.GkmAckRedisKey(sidecar.NewId()), map[string][]byte{"unrelated": []byte(ack)}); err != nil {
+	otherGroup := sidecar.NewId()
+	if err := host.Redis.HashSet(ctx, gkmservice.GkmAckRedisKey(otherGroup), map[string][]byte{"unrelated": []byte(ack)}); err != nil {
 		t.Fatal(err)
 	}
-	source := NewAbuseHoldSoftStateSource(host.ServiceHost(), nil)
+	source := model.NewAbuseHoldSoftStateSource(host, nil)
+	requireNoCopy := func(reason string) {
+		t.Helper()
+		if keys, err := source.RepoSoftState(ctx, server.Id(repo), at); err == nil || len(keys) != 0 {
+			t.Fatalf("%s returned %d keys, error %v", reason, len(keys), err)
+		}
+	}
+	requireNoCopy("missing group owner")
+	put(gkmservice.GkmGroupOwnerKey(group), encode(&protocol.GkmGroupOwner{RepoId: repo.Bytes(), NetworkId: sidecar.NewId().Bytes()}))
 	keys, err := source.RepoSoftState(ctx, server.Id(repo), at)
 	if err != nil || len(keys) != 2 || keys[0].Key != leaseKey || keys[0].Fields["synthetic-lease"] != lease || keys[1].Key != ackKey || keys[1].Fields["synthetic-client"] != ack {
 		t.Fatalf("scoped placement fields: %+v, %v", keys, err)
 	}
-	if _, err := source.RepoSoftState(ctx, server.Id(repo), at.Add(-time.Millisecond)); !errors.Is(err, ErrHoldPlacementSnapshotUnavailable) {
+	if _, err := source.RepoSoftState(ctx, server.Id(repo), at.Add(-time.Millisecond)); !errors.Is(err, model.ErrHoldPlacementSnapshotUnavailable) {
 		t.Fatalf("later fields reached an earlier placement: %v", err)
 	}
+	putForm(otherGroup, 2)
+	put(gkmservice.GkmGroupOwnerKey(otherGroup), encode(&protocol.GkmGroupOwner{RepoId: sidecar.NewId().Bytes(), NetworkId: sidecar.NewId().Bytes()}))
+	requireNoCopy("foreign group owner")
 }
