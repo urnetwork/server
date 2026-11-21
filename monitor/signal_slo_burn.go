@@ -61,6 +61,7 @@ type SidecarSloSettings struct {
 	// The services whose SLO rows and failure warns run: monitor.yml's sidecar_services block, each a row of
 	// slo_table.go. nil settings, or no block, report §30's signals configured off.
 	Services []string
+	WarmTls  *SloWarmTlsSettings
 	// Why the block did not read: an unknown service, or one listed twice. Set, every service reads
 	// unobservable. Never holds a credential.
 	ConfigError string
@@ -74,7 +75,7 @@ type SidecarSloSettings struct {
 	WarnBudgetShare float64
 	WarnWindow      time.Duration
 	// The window at the start of the period an objective's series must reach into, or its history is under
-	// the period and it has no budget: 1 d, so a series begun within the period's last day still counts.
+	// the period and it has no budget. Also bounds the gap permitted between observations: 1 d.
 	HistoryWindow time.Duration
 	// How old a series' newest sample may be and still count as current: 3 min, several missed 15 s pushes.
 	MetricFreshness time.Duration
@@ -120,6 +121,10 @@ func cloneSidecarSloSettings(settings *SidecarSloSettings) *SidecarSloSettings {
 	}
 	clone := *settings
 	clone.Services = slices.Clone(settings.Services)
+	if settings.WarmTls != nil {
+		probe := *settings.WarmTls
+		clone.WarmTls = &probe
+	}
 	return &clone
 }
 
@@ -179,32 +184,52 @@ func sloBurnSelector(environment string, metric string, matchers ...string) stri
 // events over the page and warn windows, and whether its series is current. An unmeasured objective asks
 // nothing.
 func sloBurnObjectiveQueries(environment string, settings *SidecarSloSettings, service string, objective sloObjective) []string {
-	historyOffset := settings.BudgetPeriod - settings.HistoryWindow
-	var total, history, fresh string
-	var bad func(window time.Duration) string
+	var all, evidence, failures, good string
 	switch objective.kind {
 	case sloObjectiveAvailability:
 		metric := "urnetwork_" + service + "_http_requests_total"
-		all := sloBurnSelector(environment, metric)
-		total = "sum(increase(" + all + sidecarStorageRange(settings.BudgetPeriod) + "))"
-		history = "sum(increase(" + all + sidecarStorageRange(settings.HistoryWindow) + " offset " + strconv.FormatInt(int64(historyOffset/time.Second), 10) + "s))"
-		fresh = "count" + sidecarStorageFresh(all, settings.MetricFreshness)
-		bad = func(window time.Duration) string {
-			return "sum(increase(" + sloBurnSelector(environment, metric, `code=~"5.."`) + sidecarStorageRange(window) + "))"
-		}
+		all = sloBurnSelector(environment, metric)
+		failures = sloBurnSelector(environment, metric, `code=~"5.."`)
+	case sloObjectiveOutcome:
+		all = sloBurnSelector(environment, objective.metric, "result=~"+strconv.Quote(objective.goodResults+"|"+objective.badResults))
+		failures = sloBurnSelector(environment, objective.metric, "result=~"+strconv.Quote(objective.badResults))
 	case sloObjectiveLatency:
-		count := sloBurnSelector(environment, objective.histogram+"_count")
-		good := sloBurnSelector(environment, objective.histogram+"_bucket", "le="+strconv.Quote(strconv.FormatFloat(objective.boundSeconds, 'g', -1, 64)))
-		total = "sum(increase(" + count + sidecarStorageRange(settings.BudgetPeriod) + "))"
-		history = "sum(increase(" + count + sidecarStorageRange(settings.HistoryWindow) + " offset " + strconv.FormatInt(int64(historyOffset/time.Second), 10) + "s))"
-		fresh = "count" + sidecarStorageFresh(count, settings.MetricFreshness)
-		// absent while the bound is no bucket of the histogram, which reads unobservable
-		bad = func(window time.Duration) string {
-			return "(sum(increase(" + count + sidecarStorageRange(window) + ")) - sum(increase(" + good + sidecarStorageRange(window) + ")))"
-		}
+		all = sloBurnSelector(environment, objective.histogram+"_count")
+		good = sloBurnSelector(environment, objective.histogram+"_bucket", "le="+strconv.Quote(strconv.FormatFloat(objective.boundSeconds, 'g', -1, 64)))
 	default:
 		return nil
 	}
+	increase := func(selector string, window time.Duration) string {
+		return "sum(increase(" + selector + sidecarStorageRange(window) + "))"
+	}
+	bad := func(window time.Duration) string {
+		if good != "" {
+			return "(" + increase(all, window) + " - " + increase(good, window) + ")"
+		}
+		// A counter can have no failure-labelled series until the first failure. Only zero-fill against
+		// this same objective's observed traffic in the same window.
+		return "(" + increase(failures, window) + " or (0 * " + increase(all, window) + "))"
+	}
+	evidence = all
+	if good != "" {
+		evidence = good
+	}
+	total := increase(all, settings.BudgetPeriod)
+	fresh := "count" + sidecarStorageFresh(evidence, settings.MetricFreshness)
+	daily := "sum(present_over_time(" + evidence + sidecarStorageRange(settings.HistoryWindow) + "))"
+	seconds := func(duration time.Duration) string { return strconv.FormatInt(int64(duration/time.Second), 10) + "s" }
+	period, step := seconds(settings.BudgetPeriod), seconds(settings.HistoryWindow)
+	start := "count(" + evidence + " offset " + period + ")"
+	if objective.probed {
+		// A stopped canary can leave its collector on a healthy scrape target.
+		fresh += " and (" + increase(all, settings.MetricFreshness) + " > 0)"
+		daily = "(" + increase(all, settings.HistoryWindow) + " and " + daily + ")"
+		start += " and (sum(increase(" + all + sidecarStorageRange(settings.MetricFreshness) + " offset " + period + ")) > 0)"
+	}
+	// Require evidence at the full budget age and in every intervening daily window. Reaching into
+	// the oldest day of the budget alone would admit a new series almost a day early.
+	historySpan := seconds(settings.BudgetPeriod - settings.HistoryWindow)
+	history := start + " and (min_over_time((" + daily + " or vector(0))[" + historySpan + ":" + step + "]) > 0)"
 	return []string{
 		sidecarStorageTag(total, sloBurnCheck(service, objective.name, sloBurnPartTotal)),
 		sidecarStorageTag(history, sloBurnCheck(service, objective.name, sloBurnPartHistory)),
@@ -287,22 +312,18 @@ func sloBurnStates(settings *SidecarSloSettings, services []string, samples []*s
 			}
 			fresh, hasFresh := value(sloBurnPartFresh)
 			total, hasTotal := value(sloBurnPartTotal)
-			_, hasHistory := value(sloBurnPartHistory)
+			history, hasHistory := value(sloBurnPartHistory)
 			pageBad, hasPageBad := value(sloBurnPartPage)
 			warnBad, hasWarnBad := value(sloBurnPartWarn)
-			if objective.kind == sloObjectiveAvailability {
-				// no 5xx series is no 5xx
-				hasPageBad, hasWarnBad = true, true
-			}
 			switch {
 			case !hasFresh || fresh <= 0 || !hasTotal:
 				burn.unobservable = "the service publishes no current series for it"
-			case !hasHistory:
+			case !hasHistory || history <= 0:
 				burn.unobservable = "its series is under 30 days old, so its budget has no denominator"
 			case total <= 0:
 				burn.unobservable = "it saw no event in 30 days, so its budget is empty"
 			case !hasPageBad || !hasWarnBad:
-				burn.unobservable = "its bound is no bucket of its histogram, so a slow event cannot be told apart"
+				burn.unobservable = "its bad events could not be measured over both burn windows"
 			}
 			if burn.unobservable != "" {
 				continue
@@ -353,6 +374,11 @@ func (self sloBurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, e
 	settings := env.cfg.sidecarSlo
 	if gate, ok := sidecarSloSignalGate(settings, sloBurnProbeId, sloBurnClassUnobservable); ok {
 		return []finding{gate}, nil
+	}
+	if target := settings.WarmTls; target != nil && slices.Contains(settings.Services, "tlsedge") {
+		if overhead, ok := target.measure(ctx, env.runner.tlsCertificates, time.Now); ok {
+			defaultSloCanaryMetrics().warmTls.Observe(overhead.Seconds())
+		}
 	}
 	findings := []finding{}
 	for _, burn := range self.burns(ctx, env, settings.Services) {

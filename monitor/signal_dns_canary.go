@@ -93,6 +93,9 @@ type DnsCanarySettings struct {
 	UnboundHostPath string
 	// Each read and the validation's bound.
 	Timeout time.Duration
+	// §19.8's write-to-both-authorities bound and poll cadence.
+	PropagationTarget time.Duration
+	PropagationPoll   time.Duration
 	// How old a canary value may be: plan-DNS-canary-route-state's 180 s.
 	Fresh time.Duration
 	// The least the served DNSKEY window may have left: §12.6's 7 d.
@@ -121,6 +124,8 @@ func DefaultDnsCanarySettings() *DnsCanarySettings {
 	return &DnsCanarySettings{
 		Source:             dnsservice.DnsCanarySourceSite,
 		Timeout:            10 * time.Second,
+		PropagationTarget:  60 * time.Second,
+		PropagationPoll:    time.Second,
 		Fresh:              180 * time.Second,
 		MinWindowLeft:      7 * 24 * time.Hour,
 		PageSustain:        2,
@@ -249,7 +254,22 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		stateDir:  stateDir,
 		gauges:    gauges,
 	}
-	return check.run(ctx, env.now()), nil
+	var observations sync.WaitGroup
+	if self.clean != nil && settings.Source == dnsservice.DnsCanarySourceSite {
+		// A release's one-shot check never contributes samples to the recurring SLO.
+		direct := &dnsCanaryDirectNs{timeout: timeout}
+		check.observePropagation = func(root string, value string, started time.Time) {
+			observations.Go(func() {
+				result := observeDnsPropagation(ctx, started, settings, root, value, direct.servesCanary)
+				if result != "" {
+					defaultSloCanaryMetrics().dns.WithLabelValues(result).Inc()
+				}
+			})
+		}
+	}
+	findings := check.run(ctx, env.now())
+	observations.Wait()
+	return findings, nil
 }
 
 // One minute's check over its seams.
@@ -263,7 +283,8 @@ type dnsCanaryCheck struct {
 	clean    *dnsCanaryCleanCounter
 	stateDir string
 	// nil reports to nothing
-	gauges dnsCanaryGauges
+	gauges             dnsCanaryGauges
+	observePropagation func(root string, value string, started time.Time)
 }
 
 // Every root's findings at now.
@@ -324,8 +345,11 @@ func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.T
 	nsCount := len(self.settings.Dns.Ns)
 	if self.settings.Source == dnsservice.DnsCanarySourceSite {
 		value := strconv.FormatInt(now.UnixMilli(), 10) + " " + self.settings.Source
+		started := time.Now()
 		if _, err := self.api.writeCanary(ctx, root, value); err != nil {
 			findings = append(findings, self.finding(dnsCanaryClassUnobservable, root, "the canary could not be written through the journal", err.Error()))
+		} else if self.observePropagation != nil {
+			self.observePropagation(root, value, started)
 		}
 	}
 	anchors := self.settings.Dns.TrustAnchors[root]
