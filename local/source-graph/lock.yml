@@ -15,7 +15,7 @@ siblings:
   # module from the same revision. Build's sidecar gitlink pins this commit too.
   - repository: urnetwork/sidecar
     path: sidecar
-    ref: fd0c644a5a310544be1ae017e373491fb8e7a250
+    ref: 34d902539307df38d546ffee10b6b0054f0f168f
   # Server and sidecar require this module, the host contract between them
   # (owner decision 251), and server its nested coretest module from the same
   # revision. Build's operator-core gitlink pins this commit too.
