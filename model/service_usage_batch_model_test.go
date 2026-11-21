@@ -219,6 +219,67 @@ func TestUsageBatchProducersRaceOnOneNetwork(t *testing.T) {
 	})
 }
 
+// Two transfer-only batches overlap while the included grant is nearly exhausted.
+// Its remainder is used once and only the excess reaches the earlier-expiring credit line.
+func TestUsageBatchConcurrentReadsAllocateTheIncludedBalanceOnce(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		included := testingBalance(100, now.Add(-time.Hour), now.Add(24*time.Hour))
+		credit := testingBalance(200, now.Add(-time.Hour), now.Add(time.Hour))
+		credit.Credit = true
+		testingSetQuotaBalances(ctx, now, networkId, []*sidecartest.QuotaBalance{credit, included})
+		first, second := testingEvsBatch(networkId, 80, 0), testingEvsBatch(networkId, 80, 0)
+		firstStaged, secondStarted, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		notifyFirst := sync.OnceFunc(func() { close(firstStaged) })
+		notifySecond := sync.OnceFunc(func() { close(secondStarted) })
+		open := sync.OnceFunc(func() { close(release) })
+		defer open()
+		finished := make(chan error, 2)
+		apply := func(batch *sidecar.UsageBatch, hooks *usageBatchHooks) {
+			_, err := applyUsageBatch(ctx, batch, nil, now, hooks)
+			finished <- err
+		}
+		go apply(first, &usageBatchHooks{beforeCommit: func() error {
+			notifyFirst()
+			<-release
+			return nil
+		}})
+		select {
+		case <-firstStaged:
+		case err := <-finished:
+			t.Fatalf("first batch ended before staging its debit: %v", err)
+		}
+		// The first batch still owns the network even though it wrote no storage or spent state.
+		var ownerBusy bool
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(tx.QueryRow(ctx, `SELECT NOT pg_try_advisory_xact_lock(hashtextextended('network_quota:' || $1::uuid::text, 0))`, networkId).Scan(&ownerBusy))
+		})
+		go apply(second, &usageBatchHooks{beforeAllocation: notifySecond})
+		select {
+		case <-secondStarted:
+		case err := <-finished:
+			t.Fatalf("second batch ended before drawing: %v", err)
+		}
+		open()
+		for range 2 {
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+		}
+		connect.AssertEqual(t, ownerBusy, true)
+		applied, err := ApplyUsageBatch(ctx, second, nil, now)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, applied, false)
+		connect.AssertEqual(t, testingSettleServiceDebits(ctx, sidecartest.NewFakeClock(now)), nil)
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, server.Id(included.BalanceId)), int64(0))
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, server.Id(credit.BalanceId)), int64(140))
+	})
+}
+
 // One batch carries stored deltas and transfer: the deltas move the counts and the transfer journals,
 // and an event with no transfer journals nothing.
 func TestUsageBatchCarriesStoredDeltasAndTransfer(t *testing.T) {

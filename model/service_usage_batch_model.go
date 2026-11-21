@@ -244,6 +244,8 @@ type serviceDebitRow struct {
 
 // Seams a test holds the apply at. Nil in production.
 type usageBatchHooks struct {
+	// after claiming the batch, before reading a network's balances
+	beforeAllocation func()
 	// inside the transaction, after the batch's rows and before its commit; an error rolls it back
 	beforeCommit func() error
 }
@@ -285,7 +287,7 @@ func applyUsageBatch(ctx context.Context, batch *sidecar.UsageBatch, carves []*U
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			applyUsageBatchInTx(ctx, tx, batch, batchId, networkIds, networkTotals, networkIdLimitByteCounts, now, hooks, outcome)
-		}, server.TxLockTimeout(settings.LockTimeout))
+		}, server.TxReadCommitted, server.TxLockTimeout(settings.LockTimeout))
 	}, func(err error) {
 		returnErr = err
 	})
@@ -347,6 +349,9 @@ func applyUsageBatchInTx(
 		// applied before: success, having done nothing
 		return
 	}
+	if hooks != nil && hooks.beforeAllocation != nil {
+		hooks.beforeAllocation()
+	}
 
 	rows := []*serviceDebitRow{}
 	networkIdChanges := map[server.Id]*networkQuotaChange{}
@@ -368,6 +373,9 @@ func applyUsageBatchInTx(
 		slices.Sort(meters)
 		var balances []*DrawOrderBalance
 		if 0 < len(meters) {
+			// Network ids are sorted. Read committed gives this read the prior
+			// holder's journal entries even when both batches began together.
+			LockNetworkQuotaInTx(ctx, tx, networkId)
 			balances = loadDrawOrderBalancesWithQuery(ctx, tx, networkId, now)
 		}
 		idBalances := map[server.Id]*DrawOrderBalance{}
