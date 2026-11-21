@@ -14,14 +14,16 @@
 //
 // It fails today, and stays behind its own tag, sidecar_e2e_realkeys, until it passes, so the world's default run stays
 // a signal: in e2e-world's runs of 2026-11-21 the owner's follower bootstraps the network on real keys (the draft,
-// base 1, the first head, standing at the admissions), but the first admitted sidecar never stands. Its follower
+// base 1, the first head, the config repo's group formed at gkm and its generation 1 held by the owner's key client,
+// standing at the admissions), but the first admitted sidecar never stands. Its follower
 // reads "joining: the log applied rows-only to 3 waits for the config repo's key and a full re-read" until the phase's
 // bound, and the dump shows its group client saying "pending: gkm unavailable: no verified state yet" throughout; the
 // owner's log holds "config join: gkm GET /gkm/repos/{repo_id}/forms: no service token: sidecar api POST /oauth/token
 // refused: 503 temporarily_unavailable" and "reader grant: gkm key missing: gkm holds no group for the repo", and the
-// sidecars not yet following "ReaderKey upkeep: gkm: no repo scope to present". Whether the config group's KF1 ever
-// reached gkm, and why the joiner's join never completes, is not found: the cause may be the world's composition
-// (world_keys.go, ported from ur daemon's) or the clients'. Run it through the build's wrapper with -tags
+// sidecars not yet following "ReaderKey upkeep: gkm: no repo scope to present", and the owner logs nothing of a
+// delivery to the joiner. Why the joiner's join never completes, whether its ReaderKey reaches gkm and whether the
+// owner's group client ever delivers it the config repo's generation, is not found: the cause may be the world's
+// composition (world_keys.go, ported from ur daemon's) or the clients'. Run it through the build's wrapper with -tags
 // 'sidecar_e2e sidecar_pending sidecar_localstack sidecar_e2e_realkeys'; the dump carries each sidecar's newest log.
 
 package sidecare2e
