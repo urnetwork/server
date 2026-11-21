@@ -426,9 +426,14 @@ func newProofVerifier(config *smtpedgeservice.SmtpEdgeConfig, configHome string,
 	return verifier, nil
 }
 
-// The pool as the block's client.
-type poolClients struct {
-	*sidecar.EdgeClientPool
+// SMTP receives ticketed opens and the sender's protocol messages on each platform client.
+func newSmtpEdgeClients(ctx context.Context, args sidecar.EdgeClientPoolArgs) (hostClients, error) {
+	args.Inbound = smtpedgeservice.Inbound
+	pool, err := sidecar.NewEdgeClientPool(ctx, &args)
+	if err != nil {
+		return nil, err
+	}
+	return pool, nil
 }
 
 // The block's own deps: Quota over api's internal gate, the store and the AbuseGate on the block's Postgres
@@ -512,15 +517,11 @@ func blockDeps(ctx context.Context, settings *hostSettings, apiUrl string, socke
 	}
 	deps.Source = source
 	deps.NewClients = func(ctx context.Context) (hostClients, error) {
-		made, err := sidecar.NewEdgeClientPool(ctx, &sidecar.EdgeClientPoolArgs{
+		return newSmtpEdgeClients(ctx, sidecar.EdgeClientPoolArgs{
 			Source:   source,
 			Settings: settings.Clients,
 			Log:      hostLogger{},
 		})
-		if err != nil {
-			return nil, err
-		}
-		return poolClients{EdgeClientPool: made}, nil
 	}
 	// a registration is the client's own call, on its own sockets token, the service token of audience sockets
 	// api's edge client route answers beside its jwt (QD-1054); a client the source holds no answer for has none
