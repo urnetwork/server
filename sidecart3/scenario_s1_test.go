@@ -674,6 +674,7 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 		return err
 	}
 	defer page.Close()
+	var closeCapability string
 	err = page.EnrollOnline(ctx, &sidecar.SidecarEnrollCredential{Ephemeral: burner, MintChild: func(context.Context, []byte) (*sidecar.SidecarAuthClientResult, error) {
 		mint := &model.AuthNetworkClientResult{}
 		if err := post("/network/auth-client", "Bearer "+login.ByJwt, &model.AuthNetworkClientArgs{
@@ -684,6 +685,7 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 		if mint.ByClientJwt == nil || mint.ClientId == nil || !mint.DeclaresNoEgress || (mint.Close != "") != burner {
 			return nil, errors.New("the page did not receive its own limited client")
 		}
+		closeCapability = mint.Close
 		return &sidecar.SidecarAuthClientResult{ClientId: sidecar.Id(*mint.ClientId), ByClientJwt: *mint.ByClientJwt, AdminRefused: mint.AdminRefused, StrictExp: mint.StrictExp, Close: mint.Close}, nil
 	}})
 	if err != nil {
@@ -696,7 +698,8 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 	if err != nil {
 		return err
 	}
-	id := page.Sidecar().Identity().SidecarId
+	identity := page.Sidecar().Identity()
+	id := identity.SidecarId
 	preview, err := signer.PreviewBrowserAdmission(ctx, id, terms)
 	if err != nil {
 		return err
@@ -712,7 +715,7 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 	}
 	state := client.State()
 	row := state.SidecarRow(id)
-	if !bytes.Equal(row.GetIdentityPublicKey(), page.Sidecar().Identity().IdentityPublicKey) || !bytes.Equal(row.GetMemberId(), memberId.Bytes()) {
+	if !bytes.Equal(row.GetIdentityPublicKey(), identity.IdentityPublicKey) || !bytes.Equal(row.GetMemberId(), memberId.Bytes()) {
 		return errors.New("the log admitted a different identity")
 	}
 	if burner {
@@ -723,6 +726,23 @@ func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidec
 			}) || !slices.Contains(state.RepoReadersAt(terms.MailboxId, time.Now()), id) || slices.Contains(state.RepoWriters(terms.MailboxId), id) ||
 			slices.Contains(state.RepoReadersAt(terms.MailboxId, time.UnixMilli(terms.NotAfterMs)), id) {
 			return errors.New("the burner grant does not match its mailbox, signer and expiry")
+		}
+		// The unload beacon carries only its close capability. It revokes the very client just approved.
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, self.api.settings.ApiOrigin+"/sidecar/close", strings.NewReader(closeCapability))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Content-Type", "text/plain")
+		response, err := self.api.Transport().RoundTrip(request)
+		if err != nil {
+			return err
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			return fmt.Errorf("POST /sidecar/close returned %d", response.StatusCode)
+		}
+		if _, err := model.FindActiveClientNetwork(ctx, server.Id(identity.ClientId)); !errors.Is(err, model.ErrActiveClientNotFound) {
+			return fmt.Errorf("the burner client still stood after its close beacon: %v", err)
 		}
 		return nil
 	}
