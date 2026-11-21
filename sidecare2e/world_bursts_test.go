@@ -153,7 +153,8 @@ func FailBurstErrors(t testing.TB, bursts []*WorldBurst) {
 }
 
 // The progress dump, as connect's failProgress: every block's /status and run count, every sidecar's state with its
-// reason, and every burst's progress and errors, logged, then t fails with phase and err. What a stalled phase
+// reason, its follower's position and its newest log lines, and every burst's progress and errors, logged, then t
+// fails with phase and err. What a stalled phase
 // shows, before cleanup turns the stall into a shutdown's error.
 func (self *World) FailProgress(t testing.TB, phase string, err error, bursts []*WorldBurst) {
 	t.Helper()
@@ -178,6 +179,9 @@ func (self *World) FailProgress(t testing.TB, phase string, err error, bursts []
 				}
 			}
 			lines = append(lines, line)
+			for _, logLine := range self.SidecarLogLines(device.Name) {
+				lines = append(lines, "    | "+logLine)
+			}
 		}
 	}
 	for _, burst := range bursts {

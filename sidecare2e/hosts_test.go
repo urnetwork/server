@@ -9,12 +9,13 @@
 //
 // The process-wide state the blocks share is set here once, for every block: sidecar.yml (server.Testing_PushSidecarConfig),
 // and mcp's seal key and issuer (mcp.Testing_SetSealSecret, oauth.Testing_SetIssuer). Everything else a block reads
-// it is given in its own deps. A world of
-// clients and the scenarios over it are later tracks' (e2e-world-clients): this file gathers what they build on.
+// it is given in its own deps. The world of clients over these blocks is world_test.go's, which takes the credentials,
+// settings and dns.yml from here; the scenarios over it are later tracks'.
 //
-// The blocks' engines take real time and the stores the env gives: Redis for every block's soft state and key events,
-// Postgres for the blocks that hold a pool. The file clusters, quotas, write budgets and platform clients are
-// sidecartest's fakes, each block's own, until the world brings the localstack MinIO and the in-process api.
+// The blocks' engines here take real time and the stores the env gives: Redis for every block's soft state and key
+// events, Postgres for the blocks that hold a pool. The file clusters, quotas, write budgets and platform clients are
+// sidecartest's fakes, each block's own: the world (world_test.go) runs each block on the local stack's MinIO and the
+// in-process api instead.
 
 package sidecare2e
 

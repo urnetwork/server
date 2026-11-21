@@ -78,6 +78,9 @@ type T3SidecarSettings struct {
 	CloseTimeout time.Duration
 	// The keys of an answer's JSON whose string values are credentials.
 	SecretAnswerKeys []string
+	// Told each line a sidecar logs up to MaxLogLevel, with the sidecar's name, beside the capture: what a world keeps
+	// for a stalled phase's dump. nil tells nothing. Called on the logging goroutine, so it must not block.
+	LogTee func(name string, line string)
 }
 
 func DefaultT3SidecarSettings() *T3SidecarSettings {
@@ -421,33 +424,67 @@ func (self *t3SidecarPlatform) OpenClient(ctx context.Context, args *sidecar.Sid
 	}, nil
 }
 
-// The capture's logger up to a verbosity.
+// The capture's logger up to a verbosity, each line also told to tee where it is set.
 type t3SidecarLogger struct {
 	capture  sidecar.Logger
 	maxLevel int32
+	tee      func(line string)
+}
+
+func (self *t3SidecarLogger) told(line string) {
+	if self.tee != nil {
+		self.tee(line)
+	}
 }
 
 func (self *t3SidecarLogger) Info(args ...any) {
 	self.capture.Info(args...)
+	self.told(fmt.Sprint(args...))
 }
 
 func (self *t3SidecarLogger) Infof(format string, args ...any) {
 	self.capture.Infof(format, args...)
+	self.told(fmt.Sprintf(format, args...))
 }
 
 func (self *t3SidecarLogger) Warningf(format string, args ...any) {
 	self.capture.Warningf(format, args...)
+	self.told(fmt.Sprintf(format, args...))
 }
 
 func (self *t3SidecarLogger) Errorf(format string, args ...any) {
 	self.capture.Errorf(format, args...)
+	self.told(fmt.Sprintf(format, args...))
 }
 
 func (self *t3SidecarLogger) V(level int32) sidecar.Verbose {
 	if self.maxLevel < level {
 		return sidecar.NewNoopLogger().V(level)
 	}
-	return self.capture.V(level)
+	if self.tee == nil {
+		return self.capture.V(level)
+	}
+	return &t3SidecarVerbose{Verbose: self.capture.V(level), logger: self}
+}
+
+// A verbosity of the capture's whose lines are told to the tee too.
+type t3SidecarVerbose struct {
+	sidecar.Verbose
+	logger *t3SidecarLogger
+}
+
+func (self *t3SidecarVerbose) Info(args ...any) {
+	self.Verbose.Info(args...)
+	if self.Verbose.Enabled() {
+		self.logger.told(fmt.Sprint(args...))
+	}
+}
+
+func (self *t3SidecarVerbose) Infof(format string, args ...any) {
+	self.Verbose.Infof(format, args...)
+	if self.Verbose.Enabled() {
+		self.logger.told(fmt.Sprintf(format, args...))
+	}
 }
 
 // Server's exchange for a scenario's T3 sidecars, until ctx ends or the returned close. Needs server's schema and the
@@ -505,7 +542,11 @@ func StartT3Sidecar(ctx context.Context, net *sidecartest.Net, name string, t3Ap
 	settings.SocketsUrl = t3Api.ServiceOrigin("sockets")
 	settings.DnsUrl = t3Api.ServiceOrigin("dns")
 	settings.Clock = sidecar.RealClock{}
-	settings.Log = &t3SidecarLogger{capture: net.Capture().Logger("sidecar " + name), maxLevel: t3Settings.MaxLogLevel}
+	logger := &t3SidecarLogger{capture: net.Capture().Logger("sidecar " + name), maxLevel: t3Settings.MaxLogLevel}
+	if logTee := t3Settings.LogTee; logTee != nil {
+		logger.tee = func(line string) { logTee(name, line) }
+	}
+	settings.Log = logger
 	settings.KeychainSettings.AutoLockTimeout = 0
 	settings.Connect.Platform = &t3SidecarPlatform{api: t3Api, exchange: exchange.platform}
 
