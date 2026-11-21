@@ -126,31 +126,6 @@ type SnTopTrailEvidence struct {
 	Hops     int
 }
 
-// Adds one non-seed hop of a complete trail, seen deduplicating each
-// provider's prefixes. A hop that recorded the zero hash, as a provider that
-// declared a proxy egress records (PinVerifyHopEgressIpHash), counts as a hop
-// and names its network, but it shows no prefix, as the validator scores it.
-func (self *SnTopTrailEvidence) addHop(seen map[server.Id]map[[32]byte]bool, clientId server.Id, networkId *server.Id, prefixHash []byte) {
-	if len(prefixHash) != 32 {
-		return
-	}
-	self.Hops += 1
-	if networkId != nil {
-		self.Networks[clientId] = *networkId
-	}
-	h := [32]byte(prefixHash)
-	if h == ([32]byte{}) {
-		return
-	}
-	if seen[clientId] == nil {
-		seen[clientId] = map[[32]byte]bool{}
-	}
-	if !seen[clientId][h] {
-		seen[clientId][h] = true
-		self.Prefixes[clientId] = append(self.Prefixes[clientId], h)
-	}
-}
-
 // GetSnTopTrailEvidence reads the non-seed hops of complete trails confirmed
 // in [startTime, endTime) through the confirm_time index.
 func GetSnTopTrailEvidence(ctx context.Context, startTime time.Time, endTime time.Time) *SnTopTrailEvidence {
@@ -176,7 +151,21 @@ func GetSnTopTrailEvidence(ctx context.Context, startTime time.Time, endTime tim
 				var networkId *server.Id
 				var prefixHash []byte
 				server.Raise(result.Scan(&clientId, &networkId, &prefixHash))
-				evidence.addHop(seen, clientId, networkId, prefixHash)
+				if len(prefixHash) != 32 {
+					continue
+				}
+				evidence.Hops += 1
+				if networkId != nil {
+					evidence.Networks[clientId] = *networkId
+				}
+				h := [32]byte(prefixHash)
+				if seen[clientId] == nil {
+					seen[clientId] = map[[32]byte]bool{}
+				}
+				if !seen[clientId][h] {
+					seen[clientId][h] = true
+					evidence.Prefixes[clientId] = append(evidence.Prefixes[clientId], h)
+				}
 			}
 		})
 	})
