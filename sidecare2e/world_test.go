@@ -43,8 +43,10 @@
 //     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
 //     answer nothing for the same reason;
 //   - the dns edge's lb probes: refused, since no lb interface answers in the test stack;
-//   - keys: the T3World's FakeGkm, whose deliveries reach each device; gkm's block runs and answers, but no device's
-//     key client reaches it yet (sidecart3's world_networks.go names the gap).
+//   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
+//     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
+//     block and the config heads on evs, as ur daemon composes them (world_keys.go), but a joining device never takes
+//     the config repo's key there yet, so the world runs FakeGkm by default (world_keys_test.go has the evidence).
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
 // limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), evs.yml, mcp's seal secret and McpResource, and the
@@ -141,6 +143,8 @@ type WorldSettings struct {
 	// How long a helper waits out api's 429 on a base or statement past §7.9's limits, its retry_after, before it
 	// gives up: a base a minute, so past one minute.
 	RateLimitWaitTimeout time.Duration
+	// How many of each sidecar's newest log lines the world keeps for a stalled phase's dump (FailProgress).
+	DumpLogLineCount int
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -157,6 +161,7 @@ func DefaultWorldSettings() *WorldSettings {
 		EdgeHost:                    "e2e-edge-1",
 		EdgeEnvironment:             "e2e",
 		RateLimitWaitTimeout:        3 * time.Minute,
+		DumpLogLineCount:            40,
 	}
 }
 
@@ -205,6 +210,10 @@ type World struct {
 
 	blocks []*worldBlock
 
+	// each sidecar's newest log lines, by its name, at most DumpLogLineCount
+	logLock         sync.Mutex
+	sidecarLogLines map[string][]string
+
 	stateLock sync.Mutex
 	networks  []*WorldNetwork
 	// what Close undoes, newest first
@@ -242,6 +251,13 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		t3Settings = &copied
 	}
 	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge)
+	sidecarSettings := sidecart3.DefaultT3SidecarSettings()
+	if t3Settings.Sidecar != nil {
+		copied := *t3Settings.Sidecar
+		sidecarSettings = &copied
+	}
+	sidecarSettings.LogTee = self.keepSidecarLogLine
+	t3Settings.Sidecar = sidecarSettings
 	t3, err := sidecart3.NewT3World(t, t3Settings)
 	if err != nil {
 		t.Fatalf("the T3 world: %v", err)
@@ -279,6 +295,27 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		}
 	}
 	return self
+}
+
+// Keeps line as name's newest, dropping its oldest past DumpLogLineCount. Never blocks on anything but its own lock.
+func (self *World) keepSidecarLogLine(name string, line string) {
+	self.logLock.Lock()
+	defer self.logLock.Unlock()
+	if self.sidecarLogLines == nil {
+		self.sidecarLogLines = map[string][]string{}
+	}
+	lines := append(self.sidecarLogLines[name], line)
+	if excess := len(lines) - self.settings.DumpLogLineCount; 0 < excess {
+		lines = slices.Clone(lines[excess:])
+	}
+	self.sidecarLogLines[name] = lines
+}
+
+// name's newest log lines, oldest first.
+func (self *World) SidecarLogLines(name string) []string {
+	self.logLock.Lock()
+	defer self.logLock.Unlock()
+	return slices.Clone(self.sidecarLogLines[name])
 }
 
 // The T3World under the world: its api, exchange, networks and syncs.
