@@ -49472,8 +49472,14 @@ unobservable, a service not joined, or no settings); build/all's
 `warp_rollout_gate` runs it before every rollout wave, and an operator
 overrides a stop by naming the service in `ROLLOUT_STOP_OVERRIDE`
 (plan-OPS-small-readings #11). For `dns` and the dns edges it also runs §28.1's
-canary once, an open `dns-canary-signature` or `dns-ns-serial-divergence`
-counting as burning (Q-OPS-5).
+canary once. An unreachable authority, invalid signature or divergent serial
+stops the rollout (Q-OPS-5). For the second NS, set `DNS_ROLLOUT_CHECK` to
+`monitor check-burn --status-url=<private ns1 block /status URL>`. The build
+supplies `--service=dnsedge-1 --expected-version=<WARP_VERSION>`. The
+command checks the ready g1 process and version before and after the DNS
+queries. It then prints the version-matched readiness receipt the build
+requires. Use the direct status port through ns1's private management route or
+tunnel. A missing route, stale version or absent receipt stops the second NS.
 
 ### 30.1 Sidecar SLO budget burn
 

@@ -7,7 +7,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	servermonitor "github.com/urnetwork/server/monitor"
@@ -61,5 +65,46 @@ func TestCheckBurnFailsClosed(t *testing.T) {
 		if err := runCheckBurnCommand(t.Context(), args, &bytes.Buffer{}, loadedCheckBurnSettings, fixedCheckBurn(servermonitor.SloBurnClear, nil)); err == nil || !strings.Contains(err.Error(), "usage") {
 			t.Errorf("%q: %v", args, err)
 		}
+	}
+}
+
+func TestCheckBurnRequiresTheReadyFirstEdgeAtTheReleaseVersionThroughoutTheCanary(t *testing.T) {
+	const ready = `{"service":"dnsedge-1","block":"g1","version":"new","status":"ok"}`
+	for _, tc := range []struct {
+		label, start, end string
+		wantChecks        int
+		clear             bool
+	}{
+		{"ready", ready, ready, 1, true},
+		{"old selector still serving", strings.Replace(ready, "new", "old", 1), ready, 0, false},
+		{"new selector still starting", strings.Replace(ready, "ok", "error not ready", 1), ready, 0, false},
+		{"wrong authority", strings.Replace(ready, "dnsedge-1", "dnsedge-2", 1), ready, 0, false},
+		{"rolled back during canary", ready, strings.Replace(ready, "new", "old", 1), 1, false},
+		{"drained during canary", ready, strings.Replace(ready, "ok", "draining", 1), 1, false},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			var checks atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/status" {
+					http.NotFound(w, r)
+					return
+				}
+				if checks.Load() == 0 {
+					fmt.Fprint(w, tc.start)
+				} else {
+					fmt.Fprint(w, tc.end)
+				}
+			}))
+			defer server.Close()
+			check := func(ctx context.Context, settings servermonitor.SignalSettings, service string) (*servermonitor.SloBurnCheck, error) {
+				checks.Add(1)
+				return fixedCheckBurn(servermonitor.SloBurnClear, nil)(ctx, settings, service)
+			}
+			var output bytes.Buffer
+			err := runCheckBurnCommand(t.Context(), []string{"--service=dnsedge-1", "--expected-version=new", "--status-url=" + server.URL + "/status"}, &output, loadedCheckBurnSettings, check)
+			if (err == nil) != tc.clear || int(checks.Load()) != tc.wantChecks || strings.Contains(output.String(), "dnsedge-1/g1 ready new dns-canary clear\n") != tc.clear {
+				t.Fatalf("result %v, canary ran %d times: %q", err, checks.Load(), output.String())
+			}
+		})
 	}
 }

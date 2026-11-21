@@ -10,12 +10,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"time"
 
 	servermonitor "github.com/urnetwork/server/monitor"
+	"github.com/urnetwork/server/router"
 )
 
 // The check behind the command; tests replace it.
@@ -26,10 +30,12 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 	flags := flag.NewFlagSet("check-burn", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	service := flags.String("service", "", "the service whose burn to read, as warp names it")
+	expected := flags.String("expected-version", "", "the Warp version dnsedge-1 must be serving")
+	statusURL := flags.String("status-url", "", "the private /status URL of dnsedge-1's g1 block")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("usage: monitor check-burn --service=<svc>: %w", err)
 	}
-	if *service == "" || flags.NArg() != 0 {
+	if *service == "" || flags.NArg() != 0 || (*expected == "") != (*statusURL == "") || (*expected != "" && *service != "dnsedge-1") {
 		return errors.New("usage: monitor check-burn --service=<svc>")
 	}
 	settings, err := loadSettings()
@@ -37,10 +43,21 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 		fmt.Fprintf(stdout, "%s: %s\n", *service, servermonitor.SloBurnUnknown)
 		return fmt.Errorf("%s: %s: the monitor's settings did not load: %w", *service, servermonitor.SloBurnUnknown, err)
 	}
+	if *expected != "" {
+		if err := checkDnsEdgeVersion(ctx, *statusURL, *expected); err != nil {
+			return err
+		}
+	}
 	result, err := check(ctx, settings, *service)
 	if err != nil {
 		fmt.Fprintf(stdout, "%s: %s\n", *service, servermonitor.SloBurnUnknown)
 		return fmt.Errorf("%s: %s: %w", *service, servermonitor.SloBurnUnknown, err)
+	}
+	// A drain or rollback during the canary invalidates its evidence.
+	if *expected != "" && result.State == servermonitor.SloBurnClear {
+		if err := checkDnsEdgeVersion(ctx, *statusURL, *expected); err != nil {
+			return err
+		}
 	}
 	for _, line := range result.Lines {
 		fmt.Fprintf(stdout, "%s %s\n", *service, line)
@@ -48,6 +65,36 @@ func runCheckBurnCommand(ctx context.Context, args []string, stdout io.Writer, l
 	fmt.Fprintf(stdout, "%s: %s\n", *service, result.State)
 	if result.State != servermonitor.SloBurnClear {
 		return fmt.Errorf("%s: %s", *service, result.State)
+	}
+	if *expected != "" {
+		fmt.Fprintf(stdout, "dnsedge-1/g1 ready %s dns-canary clear\n", *expected)
+	}
+	return nil
+}
+
+// The direct block port is reachable on the operator's private route to ns1.
+// Reading its process-owned status binds the DNS observations to this release.
+func checkDnsEdgeVersion(ctx context.Context, statusURL, expected string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Cache-Control", "no-cache, no-store")
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("dnsedge-1 readiness: %w", err)
+	}
+	defer response.Body.Close()
+	var status router.WarpStatusResult
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("dnsedge-1 readiness returned HTTP %d", response.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&status); err != nil {
+		return fmt.Errorf("dnsedge-1 readiness: %w", err)
+	}
+	if status.Service != "dnsedge-1" || status.Block != "g1" || (status.Version == nil || *status.Version != expected) || status.Status != "ok" {
+		return fmt.Errorf("dnsedge-1/g1 is not ready at %s", expected)
 	}
 	return nil
 }

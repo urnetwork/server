@@ -227,7 +227,7 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 			symptom: "monitor.yml has no dns_canary block",
 		}}, nil
 	}
-	if settings.ConfigError != "" || settings.Dns == nil {
+	if settings.ConfigError != "" || settings.Dns == nil || len(settings.Dns.Roots) == 0 || len(settings.Dns.Ns) < 2 {
 		return []finding{{
 			probeId: dnsCanaryProbeId, tier: tierWarn, class: dnsCanaryClassUnobservable, target: "dns-canary",
 			sustain: 1, unobservable: true,
