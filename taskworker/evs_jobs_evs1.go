@@ -6,7 +6,7 @@ package taskworker
 //   - evs.lease_sweep: daily, every repo's expired leases dropped from {evsl_<repo_id>} (§11.10's renew row), its
 //     next run scheduled under its own key first;
 //   - evs.erasure_finish: queued by evs when an ERASE's slot rewrites did not finish before its answer, a minute on,
-//     its args the repo id; it finishes every committed ERASE in the repo's erasure ref's window (§11.12's push row).
+//     and by the nightly inventory of erasure refs. A task reconciles one page and queues its predecessor.
 //
 // Both are idempotent: a sweep drops only what has lapsed, and a rewrite drops only keys a slot still holds.
 
@@ -56,11 +56,10 @@ func runEvsLeaseSweep(ctx context.Context, host *sidecar.ServiceHost, args []byt
 
 // One repo's ERASEs finished. Args that name no repo are dropped, said once: a retry could never succeed.
 func runEvsErasureFinish(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
-	repoId, err := sidecar.IdFromBytes(args)
-	if err != nil {
+	repoId, through, ok := evsservice.ParseErasureFinishArgs(args)
+	if !ok {
 		glog.Errorf("[evsjobs]%s with args that name no repo: dropped\n", evsservice.EvsErasureFinishTaskName)
 		return nil
 	}
-	_, err = evsservice.FinishErasures(ctx, host, repoId)
-	return err
+	return evsservice.RunErasureFinish(ctx, host, repoId, through)
 }
