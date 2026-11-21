@@ -617,17 +617,17 @@ func getNetworkDnsCustomInTx(ctx context.Context, query server.PgCanQuery, root 
 	if !server.SidecarMg6Linked() {
 		return hosts, domains
 	}
+	hosts = getDnsZoneCustomHostsInTx(ctx, query, root, networkId)
 	readiness := map[string]*DnsCustomHostReadinessRow{}
 	for _, row := range getDnsCustomHostReadinessInTx(ctx, query, root, networkId, server.NowUtc()) {
 		readiness[row.Host] = row
 	}
-	for _, row := range getNetworkDnsCustomHostsInTx(ctx, query, networkId) {
-		answer := row.answer()
-		// a host not yet ready names the interfaces not current for it (DNS-M6-03, §13.4)
-		if hostReadiness, ok := readiness[row.Host]; ok && !answer.Ready {
-			answer.PendingInterfaces = hostReadiness.PendingInterfaces
+	// The console identifies pending interfaces. A device needs only each mapping's ready flag.
+	for index := range hosts {
+		host := &hosts[index]
+		if row := readiness[host.Host]; row != nil && !host.Ready {
+			host.PendingInterfaces = row.PendingInterfaces
 		}
-		hosts = append(hosts, *answer)
 	}
 	result, err := query.Query(
 		ctx,
@@ -644,12 +644,26 @@ func getNetworkDnsCustomInTx(ctx context.Context, query server.PgCanQuery, root 
 			var acmeToken string
 			server.Raise(result.Scan(&domain, &acmeToken))
 			domains = append(domains, sidecar.DnsCustomDomain{
-				Domain:              domain,
-				AcmeChallengeTarget: DnsAcmeChallengeTarget(root, acmeToken),
+				Domain: domain, AcmeChallengeTarget: DnsAcmeChallengeTarget(root, acmeToken),
 			})
 		}
 	})
 	return hosts, domains
+}
+
+// The custom mappings and their current readiness in this zone.
+func getDnsZoneCustomHostsInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id) []sidecar.DnsCustomHost {
+	hosts := []sidecar.DnsCustomHost{}
+	if !server.SidecarMg6Linked() {
+		return hosts
+	}
+	for _, row := range getNetworkDnsCustomHostsInTx(ctx, query, networkId) {
+		if row.Root != root {
+			continue
+		}
+		hosts = append(hosts, *row.answer())
+	}
+	return hosts
 }
 
 // The label below <root> a custom domain's delegated challenges sit under (QD-175).

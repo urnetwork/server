@@ -865,6 +865,7 @@ func GetDnsZoneView(ctx context.Context, root string, networkId server.Id) (*sid
 			if returnErr != nil {
 				panic(dnsWriteRefusal{err: returnErr})
 			}
+			zone.CustomHosts = getDnsZoneCustomHostsInTx(ctx, tx, root, networkId)
 		}, server.TxReadCommitted)
 	})
 	if err != nil {
