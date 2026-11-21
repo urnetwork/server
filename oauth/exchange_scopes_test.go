@@ -74,6 +74,8 @@ func newExchangeScopesWorld(t testing.TB) *exchangeScopesWorld {
 
 func newExchangeScopesWorldFor(t testing.TB, networkId server.Id, ownerMemberId server.Id, ownerSidecarId server.Id) *exchangeScopesWorld {
 	t.Helper()
+	// Fixture clients have no database rows. Forwarding tests supply their own client-to-sidecar mappings.
+	setExchangeScopeForwarding(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
