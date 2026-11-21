@@ -15,3 +15,5 @@ files:
   server/session/intended_network_test.go: a name under the root, refused where only a network id may stand
   server/local/sidecar-gate/trace_test.go: PLAN.md's mail host under the root, which the design gate's fixture quotes
   server/model/network_health_model_test.go: a public status reason naming the root, which the reason rules refuse
+  sidecar/sidecartest/fault/gate_m5.go: M5's exit gate item, which quotes §23.4's row on moving platform names and company MX off the root before the NS switch
+  sidecar/sidecartest/fault/gate_m5_test.go: the same gate item's title, which the M5 gate's test names
