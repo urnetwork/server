@@ -22,6 +22,19 @@ package dnshost
 // so its block serves /status, never answers queries, and a deploy reverts.
 // RunHost runs either as a block, for server/cli/dns and for server/local's
 // test dns edge, which hands the API its own key windows.
+//
+// Each secret file a role reads is a HostDeps field a test fills with its own,
+// so a role run in a test reads none: the API's bearer digests, lb inventory,
+// projection credential (as Projection) and DNSKEY windows (as KeyWindow), the
+// edge's ZSK and bearer, and the svc- verifier the API's service-token routes
+// verify under. What stays the process's when several hosts run in one test
+// process (e2e-hosts-in-process): server's Postgres pools and Redis key-event
+// subscriber; sidecar.yml, which server reads once per process
+// (server.Testing_PushSidecarConfig); and model's record seams the API installs
+// while it runs (SetDnsScopeLabelSource, SetApprovalGateStates,
+// SetDnsRecordsAbuseGate), which api's own process installs too, so a test
+// runs one dns API per process and stops it before the api it shares them with.
+// HostDeps' listeners give a test's block ports the OS picked.
 
 import (
 	"context"
@@ -48,6 +61,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -103,6 +117,8 @@ type HostSettings struct {
 	SnapshotDirectory string
 	// edge: §19.10's start for a stopped NS, serving nothing until a reload.
 	RequireReload bool
+	// sidecarhost.Run's: readiness's bounds and the status server's drain. nil: sidecarhost.DefaultRunSettings.
+	Run *sidecarhost.RunSettings
 }
 
 // The seams a test replaces. nil takes the real one.
@@ -128,6 +144,27 @@ type HostDeps struct {
 	// KeyWindowRelease over the window files in secret_files (hostKeyWindowRelease); server/local's test
 	// dns edge signs its own.
 	KeyWindow func(root string, now time.Time) *dnsservice.DnsKeyWindow
+	// api: the internal routes' bearer digests. nil reads HostVerifyFileName from the secret directory,
+	// and a block with no file has none, so every internal route refuses.
+	Auth dnsservice.DnsInternalAuth
+	// api: the lb inventory every feed answer names. nil reads HostServicesFileName from the secret
+	// directory, and a block with no file names none.
+	Interfaces []dnsservice.DnsLbInterface
+	// edge: the ZSK the edge signs with. nil reads HostZskFileName from the secret directory.
+	Zsk crypto.Signer
+	// edge: the bearer its feed and route probes send. nil reads the credential file from the secret
+	// directory; unread when Feed and RouteProbes are both given.
+	Bearer string
+	// The svc- key set's public verifier, which the API's service-token routes verify callers' tokens
+	// under: vault's oauth-jwks-svc.json, read once by the process (oauth.VerifyServiceToken). RunHost's
+	// alone, as the ServiceHost it builds.
+	ServiceTokens *oauth.ServiceTokenVerifier
+	// Listeners already bound, which RunHost serves in place of binding HostPorts', and takes: a test's
+	// on 127.0.0.1:0, so the OS picks each port. StatusListener serves /status, and the API's routes;
+	// DnsListener and DnsPacketConn the edge's TCP and UDP DNS. nil binds the port as warp maps it.
+	StatusListener net.Listener
+	DnsListener    net.Listener
+	DnsPacketConn  net.PacketConn
 }
 
 // The ports a role's block serves on, as warp maps them to the host's (WARP_PORTS).
@@ -334,7 +371,9 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		}
 		apiDeps.KeyWindow = release.Window
 	}
-	if verifyYaml, err := readHostSecret(settings, HostVerifyFileName); err == nil {
+	if deps.Auth != nil {
+		apiDeps.Auth = deps.Auth
+	} else if verifyYaml, err := readHostSecret(settings, HostVerifyFileName); err == nil {
 		auth, err := dnsservice.NewDnsInternalVerifier(verifyYaml)
 		if err != nil {
 			return notReadyEngine{}, err
@@ -343,7 +382,12 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return notReadyEngine{}, err
 	}
-	if servicesYaml, err := readHostSecret(settings, HostServicesFileName); err == nil {
+	if deps.Interfaces != nil {
+		interfaces := append([]dnsservice.DnsLbInterface{}, deps.Interfaces...)
+		apiDeps.Interfaces = func() []dnsservice.DnsLbInterface {
+			return interfaces
+		}
+	} else if servicesYaml, err := readHostSecret(settings, HostServicesFileName); err == nil {
 		interfaces, err := hostLbInterfaces(servicesYaml, settings.Dns.Probe.SmtpPort)
 		if err != nil {
 			return notReadyEngine{}, err
@@ -408,13 +452,15 @@ func NewEdgeHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostS
 	if deps == nil {
 		deps = &HostDeps{}
 	}
-	zskData, err := readHostSecret(settings, HostZskFileName)
-	if err != nil {
-		return notReadyStreamEngine{}, fmt.Errorf("dnsedge: zsk: %w", err)
-	}
-	var zsk crypto.Signer
-	if zsk, err = dnsservice.LoadZsk(zskData); err != nil {
-		return notReadyStreamEngine{}, fmt.Errorf("dnsedge: zsk: %w", err)
+	zsk := deps.Zsk
+	if zsk == nil {
+		zskData, err := readHostSecret(settings, HostZskFileName)
+		if err != nil {
+			return notReadyStreamEngine{}, fmt.Errorf("dnsedge: zsk: %w", err)
+		}
+		if zsk, err = dnsservice.LoadZsk(zskData); err != nil {
+			return notReadyStreamEngine{}, fmt.Errorf("dnsedge: zsk: %w", err)
+		}
 	}
 	anchors := map[string][]*dns.DNSKEY{}
 	for _, root := range settings.Dns.Roots {
@@ -427,15 +473,18 @@ func NewEdgeHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostS
 	feed := deps.Feed
 	routeProbes := deps.RouteProbes
 	if feed == nil || routeProbes == nil {
-		credentialData, err := readHostSecret(settings, settings.CredentialFileName)
-		if err != nil {
-			return notReadyStreamEngine{}, fmt.Errorf("dnsedge: credential: %w", err)
-		}
-		bearer, err := dnsservice.LoadDnsInternalCredential(credentialData)
-		if err != nil {
-			return notReadyStreamEngine{}, err
+		bearer := deps.Bearer
+		if bearer == "" {
+			credentialData, err := readHostSecret(settings, settings.CredentialFileName)
+			if err != nil {
+				return notReadyStreamEngine{}, fmt.Errorf("dnsedge: credential: %w", err)
+			}
+			if bearer, err = dnsservice.LoadDnsInternalCredential(credentialData); err != nil {
+				return notReadyStreamEngine{}, err
+			}
 		}
 		client := &http.Client{}
+		var err error
 		if feed == nil {
 			if feed, err = dnsservice.NewDnsFeedHttp(settings.ApiUrl, bearer, client, settings.Dns); err != nil {
 				return notReadyStreamEngine{}, err
@@ -543,23 +592,36 @@ func NewHost(ctx context.Context, role string, host *sidecar.ServiceHost, settin
 // serves /status not ready. Returns early only for a role that is neither, or
 // options no block could run.
 func RunHost(ctx context.Context, role string, settings *HostSettings, deps *HostDeps, ports *HostPorts) error {
+	if deps == nil {
+		deps = &HostDeps{}
+	}
+	if ports == nil {
+		ports = &HostPorts{}
+	}
+	var runSettings *sidecarhost.RunSettings
+	if settings != nil {
+		runSettings = settings.Run
+	}
 	switch role {
 	case HostRoleApi:
 		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
 			Postgres: true,
 			// §21.7's standing and network_verified in memory, loaded from
 			// this host's Postgres off the record writes' path (ABUSE-M5-07)
-			Abuse: model.NewAbuseGate(ctx, nil, nil),
+			Abuse:         model.NewAbuseGate(ctx, nil, nil),
+			ServiceTokens: deps.ServiceTokens,
 		})
 		engine, err := NewApiHost(ctx, host, settings, deps)
 		if err != nil {
 			glog.Errorf("[dns]the api role is not ready: %v\n", err)
 		}
 		options := &sidecarhost.RunOptions{
-			Service:    "dns",
-			StatusPort: ports.Status,
-			Engine:     engine,
-			Postgres:   true,
+			Service:        "dns",
+			StatusPort:     ports.Status,
+			StatusListener: deps.StatusListener,
+			Settings:       runSettings,
+			Engine:         engine,
+			Postgres:       true,
 			Groups: []*sidecarhost.RunGroup{
 				{Name: "MG2", Linked: server.SidecarMg2Linked},
 				{Name: "MG5", Linked: server.SidecarMg5Linked},
@@ -570,16 +632,34 @@ func RunHost(ctx context.Context, role string, settings *HostSettings, deps *Hos
 		}
 		return sidecarhost.Run(ctx, options)
 	case HostRoleEdge:
-		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{})
+		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{ServiceTokens: deps.ServiceTokens})
 		// an edge holds no Redis or Postgres handle at all (I-12)
 		host.Redis = nil
 		engine, err := NewEdgeHost(ctx, host, settings, deps)
 		if err != nil {
 			glog.Errorf("[dns]the edge role is not ready: %v\n", err)
 		}
+		dnsPort := ports.Dns
+		if deps.DnsListener != nil && dnsPort == 0 {
+			// the block's port as the listener names it, which is warp's DNS port in a block
+			dnsPort = hostDnsPort
+		}
 		options := &sidecarhost.RunOptions{
-			Service: "dnsedge", StatusPort: ports.Status, Engine: engine, Stream: engine,
-			Listeners: []*sidecarhost.RunListener{{Port: ports.Dns}},
+			Service: "dnsedge", StatusPort: ports.Status, StatusListener: deps.StatusListener, Settings: runSettings,
+			Engine: engine, Stream: engine,
+			Listeners: []*sidecarhost.RunListener{{Port: dnsPort, Listener: deps.DnsListener}},
+		}
+		if edgeHost, ok := engine.(*EdgeHost); ok && deps.DnsListener != nil {
+			options.StatusHeaders = edgeHost.rolloutStatusHeaders
+			// a test's bound sockets: UDP served beside the TCP listener it gave, as a block's are
+			conns := []net.PacketConn{}
+			if deps.DnsPacketConn != nil {
+				conns = append(conns, deps.DnsPacketConn)
+			}
+			return runWithHostConns(ctx, options, conns, edgeHost.ServeUdp, sidecarhost.Run)
+		}
+		if deps.DnsPacketConn != nil {
+			deps.DnsPacketConn.Close()
 		}
 		if edgeHost, ok := engine.(*EdgeHost); ok {
 			options.StatusHeaders = edgeHost.rolloutStatusHeaders
@@ -634,6 +714,16 @@ func runWithHostUdp(ctx context.Context, options *sidecarhost.RunOptions, addres
 			return run(ctx, options)
 		}
 		conns = append(conns, conn)
+	}
+	return runWithHostConns(ctx, options, conns, serve, run)
+}
+
+// runWithHostUdp's serve and run over conns already bound, which it takes and closes.
+func runWithHostConns(ctx context.Context, options *sidecarhost.RunOptions, conns []net.PacketConn, serve func(net.PacketConn) error, run func(context.Context, *sidecarhost.RunOptions) error) error {
+	closeConns := func() {
+		for _, conn := range conns {
+			conn.Close()
+		}
 	}
 	runCtx, cancel := context.WithCancelCause(ctx)
 	var done sync.WaitGroup

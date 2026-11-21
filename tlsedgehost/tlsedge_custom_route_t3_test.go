@@ -1,6 +1,6 @@
 //go:build sidecar_pending && sidecar_testhooks
 
-package main
+package tlsedgehost
 
 // 17.6's challenge-routing and eligibility rows on T3, FS-122's TLS-ALPN-01 clause and FS-41's custom-host step
 // (TLS-M6-07; DESIGN-DETAILS 17.2.9, 17.2.10, 17.6; FS-35, FS-41, FS-122, §22.5's custom-host rows), through the real
@@ -175,7 +175,7 @@ func newT3RouteWorld(t testing.TB) *t3RouteWorld {
 		}
 		return admission.State().TeamScopeLabels(), true
 	}))
-	edge := newT3EdgeWorldOn(t, net.Clock(), &networkId, func(settings *hostSettings) {
+	edge := newT3EdgeWorldOn(t, net.Clock(), &networkId, func(settings *HostSettings) {
 		settings.TlsEdge.ColdLimits = &tlsedgeservice.TlsEndpointLimits{
 			EndpointConcurrent: none, EndpointNewPerS: none, EndpointMbitPerS: none,
 			VisitorConcurrent: none, VisitorNewPerS: none, VisitorAggregateMultiple: none,

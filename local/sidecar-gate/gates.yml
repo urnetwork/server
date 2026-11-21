@@ -830,7 +830,7 @@ gates:
       tests:
         - {repo: sidecar, package: ., names: [TestTlsFrontZeroBytesBeforeAuthentication]}
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsFrontSuiteNoByteReachesAPrivateAudiencesService]}
-        - {repo: server, package: ./cli/tlsedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs34NoByteReachesAPrivateAudiencesService]}
+        - {repo: server, package: ./tlsedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs34NoByteReachesAPrivateAudiencesService]}
     - row: FS-39
       case: report-intake
       tests:
@@ -842,15 +842,15 @@ gates:
       tests:
         - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges]}
         - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestDnsCtReplayInsertsOnlyMissingNames, TestDnsLabelReclaimRebindsTheName, TestDnsLabelReclaimRefusals]}
-        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughARedisLoss]}
+        - {repo: server, package: ./socketshost, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughARedisLoss]}
         - {repo: server, package: ./sidecarrestore, names: [TestLabelsStepSchedulesEachRootsReplayFromTheSidecarDump]}
     - row: FS-42
       case: m5
       tests:
         - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestFs42DnsStepThroughBothEdges, TestFs42DnsStepOnTheRestoreFrame, TestFs42DnsStepPersistsAnNsStopAcrossRerun]}
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughAPostgresRestore, TestT3TlsedgeTakesASnapshotAfterALabelMapRestore]}
-        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillsHoldThroughAPostgresRestore, TestT3TlsedgeTakesASnapshotAfterALabelMapRestore]}
+        - {repo: server, package: ./socketshost, stores: true, names: [TestT3RedisLossHealsByTheNextHeartbeat]}
         - {repo: server, package: ./sidecarrestore, names: [TestM5StepsAreRegisteredInTheProcesssFrame, TestM5StepsRunInTheFramesOrder, TestAbuseStepPlansFirstAndAppliesOnlyWhenTold, TestM5StepsSkipADatabaseBeforeMg5AndRefuseAnUnlinkedBinary, TestDnsStepRunsEachRootToItsEndUnderTheIncident, TestLabelsStepSchedulesEachRootsReplayFromTheSidecarDump]}
     - row: FS-47
       case: section-21
@@ -945,13 +945,13 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsSuiteAdmitsEachAudienceAndHoldsCommunityToSevenDays, TestTlsSuiteRefusesWhatTheGrantsOrFactsDoNotAllow, TestTlsSuitePassthroughCompletesTlsOnTheDeviceKey, TestTlsSuiteEdgeFindPassesUnderEachAudiencesPublish, TestTlsSuiteEdgeFindIsDeniedWithNoPublish, TestTlsFrontSuiteMembersVisitorWithoutASessionReachesEdgeLogin, TestTlsRevocationEndsARemovedDevicesCertificateAndSockets]}
         - {repo: sidecar, package: ., names: [TestTlsEdgeLoginFullFlow, TestTlsEdgeLoginRefusesBadTokens, TestTlsEdgeLoginRefusesANonMember, TestTlsEdgeLoginStateIsSingleUse]}
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgePassthroughEndsOnTheDeviceKey]}
-        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3EdgeFindPassesUnderEachAudiencesPublish]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3TlsedgePassthroughEndsOnTheDeviceKey]}
+        - {repo: server, package: ./socketshost, stores: true, names: [TestT3EdgeFindPassesUnderEachAudiencesPublish]}
       external: 'production: S5''s T6 cell in main, dark, on test roots and LE staging (§19.11)'
     - item: 'the kill switch within 5 s (§23.4''s M5 exit; §13.9; TLS-M5-25, TLS-M5-26): new and open connections of a killed host end within five seconds on the fake clock and Find refuses too, a kill read in the middle of a Find keeps the listener''s lease, and a publish ends its sweep before a kill can meet it, on T2; new and open connections on T3'
       tests:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestTlsSuiteKillSwitchEndsNewAndOpenConnectionsWithinFiveSeconds, TestTlsSuiteKillWaitKeepsTheListenersLeaseThroughAKillReadMidFind, TestTlsSuitePublishEndsItsSweepBeforeAKillCanMeetIt]}
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillSwitchEndsNewAndOpenConnections]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeKillSwitchEndsNewAndOpenConnections]}
     - item: 'the CT and zone watches alarm on a test certificate and record (§23.4''s M5 exit; owner decision 98): a certificate no attestation covers and one on a key no row holds alarm while an attested one and an order in flight do not, and an operator''s change to a watched record, split answers and resolvers disagreeing with the zone alarm while a requested change does not, each on fixtures'
       tests:
         - {repo: sidecar, package: ., names: [TestTlsCtWatchAnUnattestedCertificateAlarms, TestTlsCtWatchAnAttestedCertificateDoesNotAlarm, TestTlsCtWatchAnOrderInFlightDoesNotAlarm, TestTlsCtWatchATamperedAttestationAlarms, TestTlsCtWatchACustomCertificateOnAKeyNoRowHoldsAlarms, TestTlsComponentRunsTheCtWatch, TestDnsWatchAlarmsOnAnOperatorChangeAndNotARequestedOne, TestDnsWatchSplitAnswersAlarm, TestDnsWatchResolversDisagreeingWithTheZoneAlarm]}
@@ -986,8 +986,8 @@ gates:
       external: 'hardware and people: Chrome, Firefox, Safari and curl against a published host, through Playwright specs nobody has written for §13.7''s rows'
     - item: 'the inline paths and the CROSSSLOT lints on M5''s engines (§22.5''s hot-path gates, §22.4; I-12; SOCK-M5-17, TLS-M5-26, DNS-M5-24): Find one script with Postgres refused, every script of the sockets engine in one slot, tlsedge''s route holding to its inline-path row with its keys sharing their slot, a route probe making no Find, and dns''s Redis calls naming one hash tag'
       tests:
-        - {repo: server, package: ./cli/sockets, stores: true, names: [TestT3FindIsOneScriptWithPostgresRefused, TestT3EveryScriptOfTheEngineKeepsToOneSlot, TestT3ThreeThousandNamesInThreePages]}
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeRouteHoldsToItsInlinePathRow, TestT3TlsedgeKeysShareTheirSlot, TestT3TlsedgeRouteProbeMakesNoFind]}
+        - {repo: server, package: ./socketshost, stores: true, names: [TestT3FindIsOneScriptWithPostgresRefused, TestT3EveryScriptOfTheEngineKeepsToOneSlot, TestT3ThreeThousandNamesInThreePages]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3TlsedgeRouteHoldsToItsInlinePathRow, TestT3TlsedgeKeysShareTheirSlot, TestT3TlsedgeRouteProbeMakesNoFind]}
         - {repo: server, package: ./cli/dns, tags: sidecar_pending, stores: true, names: [TestDnsT3RedisCallsNameOneHashTag]}
     - item: 'the tls meter end to end (§20.6; D-QUOTA-3, D-QUOTA-4; QUOTA-M5-01): a lease, its spends, a batch, the journal rows, the flush and network_service_usage on T3 under FI-13 (a), and an empty balance marking spent, Find answering quota and open streams resetting as leases run out'
       tests:
@@ -1054,7 +1054,7 @@ gates:
         - {repo: sidecar, package: ./certsservice, names: [TestCertsCaaChecksRefuseAnAliasIntoAnOperatorZone, TestCertsCaaChecksRefuseAWildcardAliasIntoAnOperatorZone, TestCertsCaaChecksTellADelegatedChallengeFromADelegatedHost, TestCertsCaaChecksRefuseAHostWithNoPin, TestCertsCaaChecksAtSetupRefuseAFlatteningAliasAndPassAnAddressOnlyOne, TestCertsCaaChecksAtRenewalExposeAFlatteningAliasAndKeepItMapped, TestCertsCaaChecksPublishAgainOnStaleAndRestartTheWindow, TestCertsCaaChecksFailOnACanaryInTheWalksSet, TestCertsCaaChecksFailOnACachedCanaryInTheAnswers, TestCertsCaaChecksReadCanaryFailingAsReady, TestCertsCaaChecksFailOnACanaryRefusal, TestCertsCaaChecksJudgeNothingWhileAServerNeverAnswers, TestCertsCaaChecksWaitOutABusyOwner, TestCertsCaaChecksApplyNothingToAHostThatWent]}
     - row: FS-35
       tests:
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3Fs35CustomHostThroughTheRealSplitter]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3Fs35CustomHostThroughTheRealSplitter]}
     - row: FS-38
       case: shares
       tests:
@@ -1063,12 +1063,12 @@ gates:
     - row: FS-41
       case: m6
       tests:
-        - {repo: server, package: ./cli/tlsedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs41CustomHostListenersComeBackByTheirNextHeartbeat]}
+        - {repo: server, package: ./tlsedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs41CustomHostListenersComeBackByTheirNextHeartbeat]}
         - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestRecomputeStripeMeterReportsResendsWithoutDoubleBilling]}
     - row: FS-42
       case: m6
       tests:
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3Fs42CustomHostsAfterTheDumpLeaveOrReturnToTheRestoredMap]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3Fs42CustomHostsAfterTheDumpLeaveOrReturnToTheRestoredMap]}
         - {repo: server, package: ./model, tags: sidecar_pending, stores: true, names: [TestDnsRestoreRaisesTheCustomHostMapAndListsItsLoad]}
         - {repo: server, package: ./controller, tags: sidecar_pending, stores: true, names: [TestRecomputeStripeMeterReportsResendsWithoutDoubleBilling]}
         - {repo: server, package: ./sidecarrestore, names: [TestBillingStepRecomputesFromTheSidecarDumpAfterTheRowsStep, TestBillingStepSkipsADatabaseBeforeMg6AndRefusesAnUnlinkedBinary]}
@@ -1194,8 +1194,8 @@ gates:
       store_clock: true
     - row: FS-122
       tests:
-        - {repo: server, package: ./cli/tlsedge, tags: sidecar_pending, stores: true, names: [TestT3Fs122AnLbRestartedOnAnOldMapLoadsTheCurrentVersionFirst, TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion, TestT3Fs122AHostAddedWhileOneInterfaceIsDownStaysPendingNamingIt, TestT3Fs122AMapNginxRefusesKeepsTheHostPending, TestT3Fs122AnLbmapReportingAVersionItsNginxDidNotLoadStaysNotCurrent, TestT3Fs122AMapThatDropsAnAddedHostFailsItsProbeUntilAReload, TestT3Fs122ChangesInsideOneWindowLoadInOneReload]}
-        - {repo: server, package: ./cli/tlsedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs122TlsAlpnOrdersWaitForTheHostToBeReady]}
+        - {repo: server, package: ./tlsedgehost, tags: sidecar_pending, stores: true, names: [TestT3Fs122AnLbRestartedOnAnOldMapLoadsTheCurrentVersionFirst, TestT3Fs122TheDnsApiDownAtStartLeavesTheSplitOnNoVersion, TestT3Fs122AHostAddedWhileOneInterfaceIsDownStaysPendingNamingIt, TestT3Fs122AMapNginxRefusesKeepsTheHostPending, TestT3Fs122AnLbmapReportingAVersionItsNginxDidNotLoadStaysNotCurrent, TestT3Fs122AMapThatDropsAnAddedHostFailsItsProbeUntilAReload, TestT3Fs122ChangesInsideOneWindowLoadInOneReload]}
+        - {repo: server, package: ./tlsedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs122TlsAlpnOrdersWaitForTheHostToBeReady]}
     - row: FS-124
       case: team
       tests:
@@ -1514,7 +1514,7 @@ gates:
       tests:
         - {repo: sidecar, dir: smtpproof, package: ., names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31MatrixTable, TestFs31TranscriptOracleSeesARecordTheSenderDidNotWrite, FuzzSmtpTranscript]}
         - {repo: sidecar, dir: smtpproof, package: ., tags: sidecar_testhooks, names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31TheSenderKeepsAMessageTheEdgeForgedSent]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
     - row: FS-42
       case: m9
       tests:
@@ -1525,7 +1525,7 @@ gates:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestFs123MailOutcomesStandInTheSendingMailbox, TestFs123CoverageCopySaysNothingOfSending]}
         - {repo: sidecar, package: ., names: [TestMailCheckSendHandsTheBoundSenderTheMessageSendWouldMake, TestMailCheckSendWithNoSenderPricesOnTheMembersProverRecords, TestMailSendResultReadsASendByItsId, TestMailSendWatchRaisesOncePerChangedOutcome, TestDaemonMailCheckSendAnswersADraftsDomains, TestDaemonMailSendResultAnswersAKnownSendAndRefusesAnUnknownId]}
         - {repo: sdk, package: ., names: [TestCheckSendPredictsPerDomain, TestSendResultsReachGetSendResultAndMailSend, TestSendCopyNamesNoIndexer]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs123SentFromADesktop, TestT3Fs123QueuedFromAPhone, TestT3Fs123OtherOutcomesReachTheResult]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs123SentFromADesktop, TestT3Fs123QueuedFromAPhone, TestT3Fs123OtherOutcomesReachTheResult]}
     - item: '§22.8''s rules on every row: on T2 each case''s fixed schedule, its twin where it refuses, 10 explorer seeds over both, or the first alone, its report saying so, where the fixed run passed no barrier, no action outlived its step and the baton moved only as each step began (QD-1151; the cases with a schedule taking it: none at this gate), every write''s lost answer for the unknown list (none at this gate) and each committed trace; on T3 the same with the nightly form''s 100 seeds, a forged case''s twin among them; each row''s FI checks after every step and at the end'
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestGateRunsItsRowsUnderSection228sRules, TestABarrierFreeScheduleRunsOneSeed, TestOneBarrierEventBringsBackEverySeed, TestABackgroundStepBringsBackEverySeed, TestAStepEndingWhenItsFaultFiresBringsBackEverySeed, TestAnActionStartingRunsOfItsOwnBringsBackEverySeed, TestAFirstSeedLeavingTheFixedOrderBringsBackEverySeed, TestAShortFormForACaseTheRulesItemLeavesOutFails, TestTheRulesItemNamesTheCasesTheExplorerRunsOneSeedFor, TestTheRulesItemNamesEveryCaseWithABarrierFreeScheduleAndNoOther]}
@@ -1595,7 +1595,7 @@ gates:
       tests:
         - {repo: sidecar, dir: smtpproof, package: ., names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31MatrixTable, TestFs31TranscriptOracleSeesARecordTheSenderDidNotWrite, FuzzSmtpTranscript]}
         - {repo: sidecar, dir: smtpproof, package: ., tags: sidecar_testhooks, names: [TestFs31HonestControls, TestFs31ScriptedMxs, TestFs31MaliciousSender, TestFs31PartsBoundToOneKeyPart, TestFs31BdatBodyRecords, TestFs31MaliciousEdge, TestFs31TheSenderKeepsAMessageTheEdgeForgedSent]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3Fs31AnHonestSend, TestT3Fs31AnHonestSendTo100Recipients, TestT3Fs31AnHonestSendWithA16KibHeaderBlock, TestT3Fs31NoChunking, TestT3Fs31ChunkingOnlyBeforeTls, TestT3Fs31NoPipelining, TestT3Fs31MailRefused, TestT3Fs31RcptRefused, TestT3Fs31MixedRecipients, TestT3Fs31No354, TestT3Fs31A451, TestT3Fs31ASecondTransactionInTheBdatBody, TestT3Fs31ReplyCountOneFewer, TestT3Fs31ReplyCountOneMore, TestT3Fs31AMessageRecordBeforeTheEnvelopesReplies]}
     - item: 'the bytes M9''s exit freezes reproduce (§23.8''s M9 freeze; SMTP-M9-33): each part''s statement as field elements, its counts and carries, the edge''s templates and a key-part proof under a test setup''s verifying key, from fixed connections that prove under every production shape and set every flag a shape reads'
       tests:
         - {repo: sidecar, dir: smtpproof, package: ., names: [TestSpecVectorsReproduce, TestSpecVectorsCoverEveryShape, TestSpecPi1ProofVectorVerifies]}
@@ -1653,7 +1653,7 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest, names: [TestS6NoRecordReachesTheMxBeforeItsPart, TestS6NoUnauthenticatedMx, TestS6TooLargeForTheNonChunkingDomainAlone]}
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestS6ForwardingAddressIsConfirmedByACodeThroughSmtp, TestS6ForwardAndRelayThroughMailsCode]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
     - item: 'S6''s §15.10 forwarding rows on T3 (§22.7''s S6 tiers; MAIL-M9-06): no test this sweep found runs the forwarding code, forwards and relays on server''s stores, which MAIL-M9-06 ran on T2 alone'
     - item: 'S10''s records (§22.7; §14.6; DNS-M9-01): a replying burner''s first selector writing <blabel>''s copies of the wildcard''s MX, A and AAAA in its journal write and its last deleting them, a receive-only burner creating no child, a copy answering the wildcard''s current records, and S10 registered whole on T2 and T3'
       tests:
@@ -1664,7 +1664,7 @@ gates:
       tests:
         - {repo: sidecar, package: ., names: [TestSmtpDaneEeMatchesTheLeafWhateverItsNameAndExpiry, TestSmtpDaneTaAnchorsTheLeafsChain, TestSmtpDanePkixUsagesAreIgnored, TestSmtpDaneMismatchRefusesTheMx, TestSmtpDaneWithoutAProvenTlsaIsNoAuthentication, TestSmtpDaneOnlyMxIsReached, TestSmtpTlsReachesTl1ByDane, TestSmtpTlsDaneMismatchIsNotOverridden, TestSmtpTlsStrippedTlsaUnderATl1PinSendsNoData]}
         - {repo: sidecar, package: ./sidecartest, names: [TestS6NoUnauthenticatedMx]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3S6NoRecordReachesTheMxBeforeItsPart, TestT3S6NoUnauthenticatedMx, TestT3S6TooLargeForTheNonChunkingDomainAlone]}
       external: 'production: DANE-only MXs among real recipients, which no local run reaches'
     - item: 'halt, ARF and RUA joins (§23.4''s M9 exit; §14.8; SMTP-M9-15, SMTP-M9-16, SMTP-M9-17, ABUSE-M9-01): high, medium and low joins against the send log, replays and forgeries dropped and no Received address kept; an allowlisted loop''s ARF a complaint once its join lands; a halt reaching the edge within one reload and the sender holding its message deferred; an aggregate counted once a reporter and report id; RUA counts past proven sends by over 20% and 5 opening a case with no halt; and §21 taking each halt to a case and an action, each complaint to review and the RUA case to no action'
       tests:
@@ -1673,7 +1673,7 @@ gates:
     - item: '§14''s privacy rows (§22.7; R-SMTP-7, R-SMTP-10, I-2, I-13; SMTP-M9-31): canaries in a mail body, its subject, its From display name and a recipient''s local part found in nothing the edge read, answered or kept, and no DKIM key anywhere, on T2 and T3; a feedback loop''s report and an abuse@ mail''s canaries only in mx-4''s listener input and in copies sealed to the network''s mail key, on T2'
       tests:
         - {repo: sidecar, package: ./sidecartest, tags: sidecar_testhooks, names: [TestSmtpSendCarriesNoCanaryPastTheDevice, TestSmtpReportCanariesStayInTheListenerInput, TestSmtpAttributedReportCanariesStaySealed]}
-        - {repo: server, package: ./cli/smtpedge, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3SmtpSendCarriesNoCanaryPastTheDevice]}
+        - {repo: server, package: ./smtpedgehost, tags: 'sidecar_pending,sidecar_testhooks', stores: true, names: [TestT3SmtpSendCarriesNoCanaryPastTheDevice]}
     - item: '§14''s report canary rows on T3 (SMTP-M9-31): no test this sweep found scans a report''s canaries on server''s stores, since mxedge''s platform intake attributes and seals nothing there yet'
     - item: 'the schema guard at M9 (I-18; SMTP-M9-31): every smtp field maps to its row, smtp-1 to smtp-6 among them with smtp-3, smtp-5 and smtp-6 on server''s tables, and {smq_} is a Redis family of its own'
       tests:

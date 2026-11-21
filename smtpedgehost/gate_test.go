@@ -1,16 +1,14 @@
-// T2 for server/cli/smtpedge (SMTP-M9-20): the block scrubs its logs first and reads its urls from its environment;
-// its gate loads a network once on a miss and answers from memory, its unwired row answering not loaded and §21.5's
-// breaker following its source within a refresh (ABUSE-M9-02); and the block is not ready while a seam is missing, a
-// sending address with no FCrDNS included. The X-UR-Ref key file's reader is model's (smtp_x_ur_ref_key_file.go),
+// T2 for smtpedgehost (SMTP-M9-20), server/cli/smtpedge's host: its gate loads a network once on a miss and answers
+// from memory, its unwired row answering not loaded and §21.5's breaker following its source within a refresh
+// (ABUSE-M9-02); and the block is not ready while a seam is missing, a sending address with no FCrDNS included. The X-UR-Ref key file's reader is model's (smtp_x_ur_ref_key_file.go),
 // tested there. Time is a fake clock and nothing waits on a sleep.
 
-package main
+package smtpedgehost
 
 import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"flag"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -31,36 +29,6 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecarhost"
 )
-
-func TestMainScrubsLogsFirst(t *testing.T) {
-	if err := sidecarhost.CheckMainScrubsLogsFirst("main.go"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A deployed block is given api's base URL in its environment, $UR_API_URL, from smtpedge.yml's env_vars, which
-// -api_url reads as its default (sidecarhost.ServiceUrlFlag).
-func TestApiUrlFlagDefaultsToTheBlocksEnvironment(t *testing.T) {
-	if err := sidecarhost.CheckServiceUrlFlag(flag.CommandLine, "api_url", sidecarhost.ApiUrlEnvName); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(sidecarhost.ApiUrlEnvName, "https://api.example.com")
-	if apiUrl.Url() != "https://api.example.com" {
-		t.Fatalf("-api_url reads %q", apiUrl.Url())
-	}
-}
-
-// A deployed block is given the sockets service's base URL in its environment, $UR_SOCKETS_URL, from smtpedge.yml's
-// env_vars, which -sockets_url reads as its default (sidecarhost.ServiceUrlFlag).
-func TestSocketsUrlFlagDefaultsToTheBlocksEnvironment(t *testing.T) {
-	if err := sidecarhost.CheckServiceUrlFlag(flag.CommandLine, "sockets_url", sidecarhost.SocketsUrlEnvName); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(sidecarhost.SocketsUrlEnvName, "https://sockets.example.com")
-	if socketsUrl.Url() != "https://sockets.example.com" {
-		t.Fatalf("-sockets_url reads %q", socketsUrl.Url())
-	}
-}
 
 // A gate source counting its loads.
 type testGateSource struct {
@@ -117,7 +85,7 @@ func TestHostGateLoadsOnAMissAndAnswersFromMemory(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 	source := &testGateSource{loads: map[sidecar.Id]int{}, facts: &smtpedgeservice.SmtpGateFacts{Label: "n1", MailEnableTime: clock.Now().Add(-48 * time.Hour)}}
-	gate := newHostGate(ctx, source, clock, defaultHostGateSettings())
+	gate := newHostGate(ctx, source, clock, DefaultHostGateSettings())
 	networkId := sidecar.NewId()
 	// a miss answers not loaded and asks for one load, however many preambles miss before it lands
 	for range 3 {
@@ -151,7 +119,7 @@ func TestHostGateForgetsNamesAfterFailedRefresh(t *testing.T) {
 	source := &testGateSource{loads: map[sidecar.Id]int{}, facts: &smtpedgeservice.SmtpGateFacts{
 		Aliases: []string{"live-alias"}, ReviewAllowedNames: []string{"cleared"},
 	}}
-	gate := &hostGate{ctx: t.Context(), source: source, clock: clock, settings: defaultHostGateSettings(),
+	gate := &hostGate{ctx: t.Context(), source: source, clock: clock, settings: DefaultHostGateSettings(),
 		networkIdFacts: map[sidecar.Id]*hostGateEntry{}, loading: map[sidecar.Id]bool{}}
 	gate.load(networkId, clock.Now())
 	if facts, ok := gate.Facts(networkId); !ok || len(facts.Aliases) != 1 || len(facts.ReviewAllowedNames) != 1 {
@@ -193,7 +161,7 @@ func TestHostGateLoadsTheBreakerOnItsRefresh(t *testing.T) {
 		breaker:   &smtpedgeservice.SmtpBreakerState{Level: smtpedgeservice.SmtpBreakerLevelRestrict},
 		refreshed: make(chan struct{}, 16),
 	}
-	settings := defaultHostGateSettings()
+	settings := DefaultHostGateSettings()
 	gate := newHostGate(ctx, source, clock, settings)
 	defer gate.wait()
 	defer cancel()
@@ -253,7 +221,7 @@ func TestHostGateLoadsTheBreakerOnItsRefresh(t *testing.T) {
 func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	gate := newHostGate(ctx, &testGateSource{loads: map[sidecar.Id]int{}}, sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), defaultHostGateSettings())
+	gate := newHostGate(ctx, &testGateSource{loads: map[sidecar.Id]int{}}, sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), DefaultHostGateSettings())
 	defer gate.wait()
 	defer cancel()
 	if _, decision := gate.SendFacts(sidecar.NewId(), sidecar.NewId(), time.Now()); decision.Allowed || decision.Reason != sidecar.AclReasonNoState {
@@ -347,7 +315,7 @@ sending_addresses:
 		t.Fatal(err)
 	}
 	log := &testLog{}
-	block, err := newSmtpEdgeHost(ctx, defaultHostSettings(config), &hostDeps{
+	block, err := NewBlockHost(ctx, DefaultHostSettings(config), &HostDeps{
 		Quota: host.Quota,
 		Redis: host.Redis,
 		Gates: host.Gates,
@@ -410,7 +378,7 @@ func (testVerbose) Infof(format string, args ...any) {}
 // RFC 5737's, and its root and report host are mxedge.yml's platform ones, which the platform block's intake
 // requires of the same file.
 func TestLocalSmtpEdgeConfigLoads(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "local", "smtpedge.yml"))
+	data, err := os.ReadFile(filepath.Join("..", "..", "config", "local", "smtpedge.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +392,7 @@ func TestLocalSmtpEdgeConfigLoads(t *testing.T) {
 			t.Fatalf("a sending address that is not documentation's: %+v", address)
 		}
 	}
-	mxedge, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "local", "mxedge.yml"))
+	mxedge, err := os.ReadFile(filepath.Join("..", "..", "config", "local", "mxedge.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

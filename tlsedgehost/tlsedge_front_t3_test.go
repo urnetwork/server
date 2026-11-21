@@ -1,6 +1,6 @@
 //go:build sidecar_pending && sidecar_testhooks
 
-package main
+package tlsedgehost
 
 // FS-34 on T3 (TLS-M5-26; FS-34, FI-11, D-TLS-13, §13.7): tlsedge_t3_test.go's block on the private stack's Postgres
 // and Redis in front of §13.7's production front, one for each published host, each holding the device's own
@@ -125,7 +125,7 @@ func newT3FrontWorld(t testing.TB, publishes ...t3FrontPublish) (*t3EdgeWorld, m
 	t.Helper()
 	// one visitor opens every connection inside one second of the fake clock, which §13.9's visitor caps would refuse
 	none := int64(-1)
-	world := newT3EdgeWorld(t, func(settings *hostSettings) {
+	world := newT3EdgeWorld(t, func(settings *HostSettings) {
 		settings.TlsEdge.ColdLimits = &tlsedgeservice.TlsEndpointLimits{
 			EndpointConcurrent: none, EndpointNewPerS: none, EndpointMbitPerS: none,
 			VisitorConcurrent: none, VisitorNewPerS: none, VisitorAggregateMultiple: none,

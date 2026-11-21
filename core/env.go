@@ -105,6 +105,12 @@ func NewProcessEnv(process string, host *sidecar.ServiceHost) (*Env, error) {
 // none, the smallest one its existing services fill, so every service the process lacks refuses. A
 // process ProcessGrants does not name, or a nil host, sets nothing and leaves the global Env as it
 // stood, which at a process's start refuses every service.
+//
+// It is the mains' alone: no host package calls it, so a test that runs several blocks in one process
+// (e2e-hosts-in-process) sets no Env by starting them. The hosts whose Run builds the engine's
+// ServiceHost (socketshost, tlsedgehost, smtpedgehost) hand it to their main through
+// RunOptions.ProcessEnv, which a test leaves nil; a test that needs a global Env sets one itself
+// (operator-core's coretest.SetGlobalEnv).
 func SetProcessEnv(process string, host *sidecar.ServiceHost) (*Env, error) {
 	env, err := NewProcessEnv(process, host)
 	if err != nil {

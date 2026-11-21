@@ -60,7 +60,11 @@ func loadSealAead() (cipher.AEAD, error) {
 	if secret == "" {
 		return nil, errors.New("proxy.yml has no non-blank secret to derive the seal key from")
 	}
+	return sealAeadOfSecret(secret)
+}
 
+// The seal cipher keyed from secret under the seal label.
+func sealAeadOfSecret(secret string) (cipher.AEAD, error) {
 	h := sha256.New()
 	h.Write([]byte(sealKeyLabel))
 	h.Write([]byte(secret))

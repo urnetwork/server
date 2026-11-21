@@ -75,10 +75,10 @@ type edgeRoleBlock struct {
 	notRun map[string]string
 }
 
-// tlsedge (server/cli/tlsedge): its store alone.
+// tlsedge (server/cli/tlsedge and server/tlsedgehost): its store alone.
 var edgeRoleTlsedge = &edgeRoleBlock{
 	service: "tlsedge",
-	files:   edgeRoleGoFiles("cli/tlsedge"),
+	files:   append(edgeRoleGoFiles("cli/tlsedge"), edgeRoleGoFiles("tlsedgehost")...),
 	names: map[string][]string{
 		"NewTlsEdgeStore": {"new:NewTlsEdgeStore"},
 	},
@@ -123,16 +123,16 @@ var edgeRoleMxedge = &edgeRoleBlock{
 	},
 }
 
-// smtpedge (server/cli/smtpedge): its store as the engine calls it in this process, the send gate's facts and the
-// mail breaker (gate.go), §21.7's abuse gate, and the abuse sink's suspension request. The store's other methods are
-// other processes': complaints, aggregates, DKIM keys and the join are the report intake's (mxedge-platform), the
-// reconcile is taskworker's, a halt's lift is api's appeal, and SendingClients is the status hints', which need a
-// Push this block's host is not given. The sink's OpenSmtpCase is the report intake's, and a ladder's only for a
-// complaint event, which smtpedge's ladder is never given (it judges cuts and hard bounces), so it is no root here,
-// and the test holds that the role refuses it.
+// smtpedge (server/cli/smtpedge and server/smtpedgehost): its store as the engine calls it in this process, the send
+// gate's facts and the mail breaker (gate.go), §21.7's abuse gate, and the abuse sink's suspension request. The
+// store's other methods are other processes': complaints, aggregates, DKIM keys and the join are the report
+// intake's (mxedge-platform), the reconcile is taskworker's, a halt's lift is api's appeal, and SendingClients is the
+// status hints', which need a Push this block's host is not given. The sink's OpenSmtpCase is the report intake's,
+// and a ladder's only for a complaint event, which smtpedge's ladder is never given (it judges cuts and hard
+// bounces), so it is no root here, and the test holds that the role refuses it.
 var edgeRoleSmtpedge = &edgeRoleBlock{
 	service: "smtpedge",
-	files:   edgeRoleGoFiles("cli/smtpedge"),
+	files:   append(edgeRoleGoFiles("cli/smtpedge"), edgeRoleGoFiles("smtpedgehost")...),
 	names: map[string][]string{
 		"NewSmtpEdgeStore": {
 			"NewSmtpEdgeStore",

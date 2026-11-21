@@ -1,6 +1,6 @@
 //go:build sidecar_pending
 
-package main
+package tlsedgehost
 
 // FS-41's and FS-42's M5 steps for tlsedge on T3 (TLS-M5-26; §19.10, §21.10, FI-12), on tlsedge_t3_test.go's world:
 // the block on the private stack's Postgres and Redis, with network_tls_suspension restored as a dump holds it.

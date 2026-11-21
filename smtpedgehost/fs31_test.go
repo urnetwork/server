@@ -1,10 +1,10 @@
 //go:build sidecar_pending && sidecar_testhooks
 
-package main
+package smtpedgehost
 
 // FS-31 at T3 (SMTP-M9-30; §22.5's FS-31 row, D-SMTP-16's adversarial corpus, DESIGN-DETAILS 3.6): the rows
 // sidecar/smtpproof's fs31_test.go marks T3, each in every cell a crypto/tls-based ScriptedMx serves, rerun on the
-// block's engine as main composes it (newSmtpEdgeHost) over the private stack's Postgres, the test's own database, and
+// block's engine as main composes it (NewBlockHost) over the private stack's Postgres, the test's own database, and
 // its Redis, through .stack/server-test.sh with -tags sidecar_pending,sidecar_testhooks, as s6_test.go runs S6:
 //
 //   - the store is model.NewSmtpEdgeStore, whose smtp_send gets each connection's record through the send log;
@@ -311,7 +311,7 @@ type t3Fs31Block struct {
 	clock    *sidecartest.FakeClock
 	start    time.Time
 	world    *sidecartest.MxWorld
-	host     *smtpEdgeHost
+	host     *Host
 	gate     *t3SendGate
 	store    *model.SmtpEdgeStore
 	listener *smtpedgeservice.SmtpEdgeTestListener
@@ -398,9 +398,9 @@ sending_addresses:
 	fakes.Gates.OpenService(sidecar.ServiceGateSmtpedge, connect.Id(networkId))
 	fakes.Abuse.Set(connect.Id(networkId), sidecar.AbuseStandingStandard, true)
 
-	hostSettings := defaultHostSettings(config)
+	HostSettings := DefaultHostSettings(config)
 	self.gate = &t3SendGate{
-		hostGate:  newHostGate(ctx, &modelGateSource{root: root, quota: fakes.Quota}, clock, hostSettings.Gate),
+		hostGate:  newHostGate(ctx, &modelGateSource{root: root, quota: fakes.Quota}, clock, HostSettings.Gate),
 		networkId: networkId,
 		member:    func(sidecarId sidecar.Id) bool { return sidecarId == self.sidecarId },
 	}
@@ -410,7 +410,7 @@ sending_addresses:
 		t.Fatalf("the gate loaded %+v, %t", facts, ok)
 	}
 	self.store = model.NewSmtpEdgeStore(nil)
-	self.host, err = newSmtpEdgeHost(ctx, hostSettings, &hostDeps{
+	self.host, err = NewBlockHost(ctx, HostSettings, &HostDeps{
 		Quota:    fakes.Quota,
 		Abuse:    fakes.Abuse,
 		Store:    self.store,

@@ -6,7 +6,7 @@
 // no_listener rather than a stale ticket, and the listener's next heartbeat brings its lease back. Real time, as every
 // disruption row is, so it runs in sidecar-t3.sh's nightly form under sidecar_disruption.
 
-package main
+package socketshost
 
 import (
 	"testing"

@@ -11,7 +11,7 @@ import (
 
 // What smtpedge's production send gate loads of one network, off every
 // preamble's path (SMTP-M9-20; §14.5, §14.7, §7.6, §12.7): the block's gate
-// (server/cli/smtpedge/gate.go) calls this when a preamble missed its memory
+// (server/smtpedgehost/gate.go) calls this when a preamble missed its memory
 // and on its refresh, never inside a preamble (I-12, §22.5). Each fact comes
 // from the table that owns it, read only in a binary that links its group, and
 // a group not linked leaves its fact empty, which the gate's rows answer as

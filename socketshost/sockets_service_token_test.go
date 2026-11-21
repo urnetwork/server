@@ -4,7 +4,7 @@
 // block's first metadata cluster (here sidecartest's fake blobs). The block answers GET /socket/list, which reads only
 // the store once the caller is authenticated, so its answer is the authentication's: a listing, 401 or unavailable.
 
-package main
+package socketshost
 
 import (
 	"context"
@@ -111,7 +111,7 @@ func revokeServiceTokenTestSubject(t testing.TB, blobs *sidecartest.FakeBlobs, n
 }
 
 // One GET /socket/list with token: its status and, for a 200, its body.
-func serviceTokenTestList(t testing.TB, host *socketsHost, token string) (int, *sidecar.SocketListResult) {
+func serviceTokenTestList(t testing.TB, host *Host, token string) (int, *sidecar.SocketListResult) {
 	t.Helper()
 	recorder := hostTestServe(host, http.MethodGet, "/socket/list", token, nil, "")
 	if recorder.Code != http.StatusOK {
@@ -134,7 +134,7 @@ func TestHostTakesSocketsServiceTokens(t *testing.T) {
 		verifier := installServiceTokenTestKeys(t)
 		world := newHostTestWorld(t)
 		blobs := sidecartest.NewFakeBlobs(world.clock, sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
-		host := world.newHost(t, func(deps *hostDeps) {
+		host := world.newHost(t, func(deps *HostDeps) {
 			deps.Authenticator = nil
 			deps.Blobs = blobs
 		})
@@ -167,7 +167,7 @@ func TestHostTakesSocketsServiceTokens(t *testing.T) {
 				sidecar.RevocationKindMember:  caller.memberId,
 			}[kind]
 			revokeServiceTokenTestSubject(t, blobs, caller.networkId, kind, subjectId, server.NowUtc().Add(time.Minute))
-			world.clock.Advance(defaultHostSettings().Revocation.CacheTimeout)
+			world.clock.Advance(DefaultHostSettings().Revocation.CacheTimeout)
 			if code, result := serviceTokenTestList(t, host, caller.token); code != http.StatusUnauthorized {
 				t.Fatalf("a token whose %s a rev/ object voids answered %d, %+v", kind, code, result)
 			}
@@ -183,7 +183,7 @@ func TestHostWithNoClusterAnswersUnavailable(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		installServiceTokenTestKeys(t)
 		world := newHostTestWorld(t)
-		host := world.newHost(t, func(deps *hostDeps) {
+		host := world.newHost(t, func(deps *HostDeps) {
 			deps.Authenticator = nil
 		})
 		caller := mintServiceTokenTestCaller(t, "sockets")

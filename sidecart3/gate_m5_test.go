@@ -2,7 +2,7 @@ package sidecart3
 
 // M5's sweeps on server's side (TEST-M5-02; sidecar's gate_m5.go). None of M5's own rows has a registered builder, so
 // nothing of them runs through this package's Run: each T3 run is where its owner wrote it, in api (FS-25's dns
-// route), cli/tlsedge (FS-34, the kill switch through a loss), cli/dns (FS-42's dns step, FS-52), cli/sockets,
+// route), tlsedgehost (FS-34, the kill switch through a loss), cli/dns (FS-42's dns step, FS-52), socketshost,
 // sidecarrestore, quotahost, model and controller, and the hold cases, which keep the convention here, are
 // TEST-M10-06's. local/sidecar-gate's TestGateSweepsNameServerTestsDeclaredUnderTheirTags holds the rows' entries;
 // this holds the items', so one that is renamed, or whose file's build tags drift from its entry's, fails here before
@@ -48,9 +48,9 @@ func TestGateM5ItemsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"./sidecart3 TestGateT3RunsTheNightlySeeds",
 		"./sidecart3 TestT3EdgeRecordsOfServersTlsStoreAreScanned",
 		"./sidecart3 TestT3EveryEdgeClassCatchesItsLeak",
-		"./cli/tlsedge TestT3TlsedgePassthroughEndsOnTheDeviceKey",
-		"./cli/tlsedge TestT3TlsedgeKillSwitchEndsNewAndOpenConnections",
-		"./cli/sockets TestT3FindIsOneScriptWithPostgresRefused",
+		"./tlsedgehost TestT3TlsedgePassthroughEndsOnTheDeviceKey",
+		"./tlsedgehost TestT3TlsedgeKillSwitchEndsNewAndOpenConnections",
+		"./socketshost TestT3FindIsOneScriptWithPostgresRefused",
 		"./cli/dns TestDnsT3BothNsAnswerAlikeAtOneSerial",
 		"./cli/dns TestDnsConformanceUnboundValidatesAgainstTheKsk",
 		"./cli/mxedge TestS7AbuseMailWithNoSniIsDroppedUnreadAndKeptNowhere",
@@ -69,13 +69,13 @@ func TestGateM5ItemsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 }
 
 // A test on rows a pending migration group holds skips without the group linked, and a skip reads open at the gate, so
-// each such entry of M5's rows and items carries sidecar_pending: every server entry on the stores but cli/sockets',
+// each such entry of M5's rows and items carries sidecar_pending: every server entry on the stores but socketshost's,
 // whose world needs no pending table, and this package's convention entries, which carry it already.
 func TestGateM5ServerEntriesOnTheStoresLinkThePendingGroups(t *testing.T) {
 	entries := 0
 	for _, row := range fault.GateRows(fault.DefaultCatalog(), "M5") {
 		for _, test := range row.Tests {
-			if test.Repo != "server" || !test.Stores || test.Package == "./cli/sockets" {
+			if test.Repo != "server" || !test.Stores || test.Package == "./socketshost" {
 				continue
 			}
 			entries += 1

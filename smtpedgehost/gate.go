@@ -1,4 +1,4 @@
-package main
+package smtpedgehost
 
 // smtpedge's production send gate (SMTP-M9-20; §14.5, §14.7, plan-SMTP-small-readings#20, plan-SOCK-gate-data,
 // I-12): smtpedgeservice.SmtpGate answered from memory, filled off every preamble's path. A miss asks for the
@@ -35,7 +35,7 @@ import (
 )
 
 // The gate's tunables.
-type hostGateSettings struct {
+type HostGateSettings struct {
 	// How often loaded facts and Community's limits are read again: 60 s, the gate data's refresh
 	// (plan-SOCK-gate-data).
 	FactsRefreshInterval time.Duration
@@ -47,8 +47,9 @@ type hostGateSettings struct {
 	LoadTimeout time.Duration
 }
 
-func defaultHostGateSettings() *hostGateSettings {
-	return &hostGateSettings{
+// The defaults.
+func DefaultHostGateSettings() *HostGateSettings {
+	return &HostGateSettings{
 		FactsRefreshInterval: 60 * time.Second,
 		FactsKeepInterval:    time.Hour,
 		FactsMaxCount:        100000,
@@ -57,7 +58,7 @@ func defaultHostGateSettings() *hostGateSettings {
 }
 
 // What the gate loads from, a test's in place of Postgres and api.
-type hostGateSource interface {
+type HostGateSource interface {
 	// The network's facts, its limits among them.
 	Facts(ctx context.Context, networkId sidecar.Id) (*smtpedgeservice.SmtpGateFacts, error)
 	// Community's tier limits.
@@ -70,6 +71,12 @@ type hostGateSource interface {
 type modelGateSource struct {
 	root  string
 	quota sidecar.Quota
+}
+
+// The block's gate source: the model on the process's Postgres pool for the networks under root, and quota's
+// limits, nil answering every network's facts not loaded.
+func NewModelGateSource(root string, quota sidecar.Quota) HostGateSource {
+	return &modelGateSource{root: root, quota: quota}
 }
 
 func (self *modelGateSource) Facts(ctx context.Context, networkId sidecar.Id) (facts *smtpedgeservice.SmtpGateFacts, returnErr error) {
@@ -138,9 +145,9 @@ type hostGateEntry struct {
 type hostGate struct {
 	mail     *sidecar.AclGateView
 	ctx      context.Context
-	source   hostGateSource
+	source   HostGateSource
 	clock    sidecar.Clock
-	settings *hostGateSettings
+	settings *HostGateSettings
 	group    sync.WaitGroup
 
 	stateLock      sync.Mutex
@@ -153,7 +160,7 @@ type hostGate struct {
 
 var _ smtpedgeservice.SmtpGate = (*hostGate)(nil)
 
-func newHostGate(ctx context.Context, source hostGateSource, clock sidecar.Clock, settings *hostGateSettings) *hostGate {
+func newHostGate(ctx context.Context, source HostGateSource, clock sidecar.Clock, settings *HostGateSettings) *hostGate {
 	self := &hostGate{
 		ctx:            ctx,
 		source:         source,
