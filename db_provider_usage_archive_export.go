@@ -14,16 +14,22 @@
 //
 // # The rule (usagearchive/eligibility.go)
 //
-// The owner's decisions on the boundary and on subnet and payout audit data
-// are open, so a week leaves only when nothing an
-// SN epoch or a payout audit can read is in it: every row has a close time,
-// the latest is before the close time floor, and the week ends by the floor.
-// The floor is one date, usagearchive.DefaultCloseTimeFloor (2026-09-01, a
-// month before the earliest SN earning cutoff) until the export control sets
-// another, and never later than usagearchive.MinCloseAge (70 days) before the
-// database's clock. Moving the floor needs no code change: whoever moves it
-// confirms first that every SN epoch whose window starts before the new date
-// is recorded, with no recovery pending on it.
+// A week leaves only when nothing an SN epoch can still read is in it: every
+// row has a close time, the latest is before the close time floor, and the
+// week ends by the floor. The floor in force is the earliest of:
+//   - the export control's floor: usagearchive.DefaultCloseTimeFloor
+//     (2026-09-01, a month before the earliest SN earning cutoff) until the
+//     control sets a date, and no date at all when it sets rolling;
+//   - usagearchive.MinCloseAge (42 days) before the database's clock;
+//   - a week before the window of the earliest SN epoch not yet recorded, in
+//     the drop's own snapshot (providerUsageArchiveSnFloorSql).
+//
+// An epoch's window is read until the epoch is recorded: its close, its
+// census and any rebuild asked of it. So the floor never passes a window that
+// can still be read, however late its epoch is recorded, and a rolling floor
+// moves without anyone checking the epochs first. The owner approved the
+// 42-day floor (2026-11-21); payout audits of older windows restore the
+// weeks they need from their copies.
 //
 // The week also waits until the contract horizon reaper has passed it, so the
 // contracts the reaper still archives land in the week rather than in the
@@ -66,8 +72,10 @@
 // drop holds its locks. Its fields, all optional:
 //   - `mode`: on, dry_run or off. Absent, or any other value, is off: a
 //     deploy drops nothing early until an operator sets it.
-//   - `closeTimeFloor`: the floor, as YYYY-MM-DD or RFC 3339. A value that
-//     does not parse turns the mode off.
+//   - `closeTimeFloor`: the floor, as YYYY-MM-DD or RFC 3339, or `rolling`
+//     for none: the floor in force then rolls 42 days behind the database's
+//     clock, held back by SN epochs not yet recorded. A value that does not
+//     parse turns the mode off.
 //   - `maxWeeksPerPass`: early drops (or dry-run verifications) per pass, at
 //     most ProviderUsageArchiveExportSettings.MaxWeeksPerPass; zero, or a
 //     value that does not parse, turns the mode off.
@@ -146,6 +154,10 @@ const (
 	ProviderUsageArchiveExportControlFieldCloseTimeFloor  = "closeTimeFloor"
 	ProviderUsageArchiveExportControlFieldMaxWeeksPerPass = "maxWeeksPerPass"
 )
+
+// The closeTimeFloor that sets no date: the floor in force rolls with the
+// database's clock.
+const ProviderUsageArchiveExportRollingFloor = usagearchive.RollingCloseTimeFloorValue
 
 // What the export control lets the retention pass do with exported weeks.
 type ProviderUsageArchiveExportMode int
@@ -242,19 +254,22 @@ func NarrowProviderUsageArchiveExportControl(fields map[string]string, settings 
 }
 
 func parseProviderUsageArchiveExportFloor(value string) (time.Time, error) {
-	value = strings.TrimSpace(value)
-	if floor, err := time.Parse(time.DateOnly, value); err == nil {
-		return floor.UTC(), nil
+	floor, err := usagearchive.ParseCloseTimeFloor(value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("closeTimeFloor: %w", err)
 	}
-	if floor, err := time.Parse(time.RFC3339Nano, value); err == nil {
-		return floor.UTC(), nil
-	}
-	return time.Time{}, fmt.Errorf("closeTimeFloor %q is neither YYYY-MM-DD nor RFC 3339", value)
+	return floor, nil
 }
 
-// The floor in force at now.
+// The floor in force at now, before the SN epochs hold it back (the drop
+// reads those in its own snapshot).
 func (self *ProviderUsageArchiveExportControl) EffectiveFloor(now time.Time) time.Time {
 	return usagearchive.EffectiveCloseTimeFloor(self.CloseTimeFloor, now)
+}
+
+// The control's floor as an operator writes it: rolling, or a date.
+func (self *ProviderUsageArchiveExportControl) CloseTimeFloorText() string {
+	return usagearchive.FormatCloseTimeFloor(self.CloseTimeFloor)
 }
 
 // Takes one of the pass's weeks, or reports the brake reached.
@@ -367,14 +382,90 @@ func providerUsageArchiveRangeExpired(ctx context.Context, now time.Time, r Part
 	return !control.EffectiveFloor(now).Before(r.Upper)
 }
 
+// How far before the window of the earliest SN epoch not yet recorded the
+// floor stays, and the block time that places a window: the margin absorbs
+// the placement's error, a chain halt of up to a week included. While epochs
+// are recorded on time (about 9 days after their window opens), the floor in
+// force is MinCloseAge before now, a month earlier, and this never binds.
+const (
+	providerUsageArchiveSnFloorMargin  = 7 * 24 * time.Hour
+	providerUsageArchiveSnBlockSeconds = 12
+)
+
+// The SN epochs' floor, as one timestamp: a week before the window of the
+// earliest epoch an epoch read can still read; '-infinity', so nothing drops
+// early, when such a window cannot be placed; NULL when the database holds no
+// epoch, which least() ignores. An epoch is recorded when
+//   - before its deployment's v2 first epoch (st_ledger_v2_activation), or
+//     with no activation: its st_epoch status is finalized;
+//   - from the v2 first epoch on: a root of the activation's pool is
+//     finalized with its amounts recorded (recorded_time), no root of the
+//     epoch is pending, and no rebuild of its rows is requested.
+//
+// Every deployment's latest epoch counts as not recorded: an epoch the chain
+// sync has not mirrored yet starts after it. A v2 root or rows of an epoch
+// st_epoch does not hold have no window to place. A window opens at its
+// start_block, placed 12 s a block before the deployment's chain sync
+// high-water block at its update time; a deployment without a chain sync row
+// has no placed windows. Every deployment counts: one retired with epochs
+// never recorded holds the floor until those rows are dealt with.
+var providerUsageArchiveSnFloorSql = fmt.Sprintf(`
+	SELECT min(unrecorded.window_start) - interval '%[1]d seconds'
+	FROM (
+		SELECT CASE
+			WHEN anchor.high_water_block IS NULL THEN '-infinity'::timestamp
+			ELSE anchor.update_time - (anchor.high_water_block - epoch.start_block) * interval '%[2]d seconds'
+		END AS window_start
+		FROM st_epoch AS epoch
+		LEFT JOIN st_chain_sync AS anchor ON anchor.deployment_key = epoch.deployment_key AND anchor.singleton_id = 1
+		LEFT JOIN st_ledger_v2_activation AS activation ON activation.deployment_key = epoch.deployment_key
+		WHERE epoch.epoch = (SELECT max(latest.epoch) FROM st_epoch AS latest WHERE latest.deployment_key = epoch.deployment_key)
+			OR NOT CASE
+				WHEN activation.first_epoch IS NULL OR epoch.epoch < activation.first_epoch THEN epoch.status = 'finalized'
+				ELSE EXISTS (
+						SELECT 1 FROM st_ledger_v2_root AS root
+						WHERE root.deployment_key = epoch.deployment_key AND root.no_id = activation.no_id AND root.epoch = epoch.epoch
+							AND root.status = 'finalized' AND root.recorded_time IS NOT NULL
+					)
+					AND NOT EXISTS (
+						SELECT 1 FROM st_ledger_v2_root AS root
+						WHERE root.deployment_key = epoch.deployment_key AND root.no_id = activation.no_id AND root.epoch = epoch.epoch
+							AND root.status = 'pending'
+					)
+					AND NOT EXISTS (
+						SELECT 1 FROM st_ledger_v2_epoch_rows AS epoch_rows
+						WHERE epoch_rows.deployment_key = epoch.deployment_key AND epoch_rows.no_id = activation.no_id AND epoch_rows.epoch = epoch.epoch
+							AND epoch_rows.rebuild_requested_by IS NOT NULL
+					)
+			END
+		UNION ALL
+		SELECT '-infinity'::timestamp
+		WHERE EXISTS (
+			SELECT 1
+			FROM (
+				SELECT deployment_key, epoch FROM st_ledger_v2_root
+				UNION ALL
+				SELECT deployment_key, epoch FROM st_ledger_v2_epoch_rows
+			) AS v2
+			WHERE NOT EXISTS (SELECT 1 FROM st_epoch AS known WHERE known.deployment_key = v2.deployment_key AND known.epoch = v2.epoch)
+		)
+	) AS unrecorded
+`, int64(providerUsageArchiveSnFloorMargin/time.Second), providerUsageArchiveSnBlockSeconds)
+
 // The week's figures and its ledger row, in one snapshot. $1 the week's upper
 // bound, $2 the control's floor, $3 the leaf's name, $4 and $5 the week's
-// contract id bounds.
+// contract id bounds. The floor in force is the earliest of the control's,
+// MinCloseAge before now, and the SN epochs' floor.
 func providerUsageArchiveWeekFiguresSql(leaf string) string {
 	quoted := "public." + quoteIdentifier(leaf)
 	return fmt.Sprintf(`
-		WITH clock AS (
-			SELECT least($2::timestamp, (now() AT TIME ZONE 'UTC') - interval '%[2]d seconds') AS floor
+		WITH sn AS (
+			SELECT (%[4]s) AS floor
+		), clock AS (
+			SELECT
+				least($2::timestamp, (now() AT TIME ZONE 'UTC') - interval '%[2]d seconds', sn.floor) AS floor,
+				sn.floor AS sn_floor
+			FROM sn
 		), figures AS (
 			SELECT
 				$1::timestamp + interval '%[3]d seconds' <= (now() AT TIME ZONE 'UTC') AS retention_due,
@@ -392,7 +483,8 @@ func providerUsageArchiveWeekFiguresSql(leaf string) string {
 			figures.row_count,
 			coalesce(export.export_id::text, ''),
 			coalesce(export.row_digest::text, ''),
-			coalesce(export.file_name, '')
+			coalesce(export.file_name, ''),
+			coalesce(clock.floor = clock.sn_floor, false)
 		FROM figures
 		CROSS JOIN clock
 		LEFT JOIN LATERAL (
@@ -404,7 +496,7 @@ func providerUsageArchiveWeekFiguresSql(leaf string) string {
 			ORDER BY ledger.verified_time DESC, ledger.export_id
 			LIMIT 1
 		) AS export ON true
-	`, quoted, int64(usagearchive.MinCloseAge/time.Second), int64(providerUsageArchiveRetention/time.Second))
+	`, quoted, int64(usagearchive.MinCloseAge/time.Second), int64(providerUsageArchiveRetention/time.Second), providerUsageArchiveSnFloorSql)
 }
 
 // The week's figures, as the precondition reads them.
@@ -419,6 +511,16 @@ type providerUsageArchiveWeekFigures struct {
 	exportId     string
 	exportDigest string
 	exportFile   string
+	// the SN epochs' floor is the floor in force
+	snHolds bool
+}
+
+// Why the floor in force is where it is, for a blocker that names it.
+func (self *providerUsageArchiveWeekFigures) floorText() string {
+	if self.snHolds {
+		return self.floor + " (a week before the window of an SN epoch not yet recorded)"
+	}
+	return self.floor
 }
 
 func readProviderUsageArchiveWeekFigures(ctx context.Context, conn PgQuerier, r PartitionRange, floor time.Time) (*providerUsageArchiveWeekFigures, error) {
@@ -436,6 +538,7 @@ func readProviderUsageArchiveWeekFigures(ctx context.Context, conn PgQuerier, r 
 		&figures.retentionDue, &figures.weekByFloor, &figures.floor, &figures.nullClose,
 		&figures.maxClose, &figures.closedBefore, &figures.rows,
 		&figures.exportId, &figures.exportDigest, &figures.exportFile,
+		&figures.snHolds,
 	)
 	if err != nil {
 		return nil, err
@@ -474,11 +577,11 @@ func providerUsageArchiveWeekBlocker(ctx context.Context, conn PgQuerier, r Part
 	}
 	switch {
 	case !figures.weekByFloor:
-		return fmt.Sprintf("the week ends after the close time floor %s", figures.floor)
+		return fmt.Sprintf("the week ends after the close time floor %s", figures.floorText())
 	case figures.nullClose:
 		return "a row has no close time"
 	case !figures.closedBefore:
-		return fmt.Sprintf("a row closed at %s, not before the close time floor %s", figures.maxClose, figures.floor)
+		return fmt.Sprintf("a row closed at %s, not before the close time floor %s", figures.maxClose, figures.floorText())
 	case figures.exportId == "":
 		return fmt.Sprintf("no verified export holds the week's %d rows", figures.rows)
 	}
@@ -564,8 +667,8 @@ func providerUsageArchiveLeafDigest(ctx context.Context, conn PgQuerier, leaf st
 
 // The fence's branch for a week before its 52 weeks, in the drop transaction
 // after the opt-in: the export control is on, the pass's brake has a week
-// left, and the week ends by the floor on the database's clock. It raises to
-// refuse.
+// left, and the week ends by the floor in force on the database's clock and
+// its SN epochs. It raises to refuse.
 func providerUsageArchiveExportFence(ctx context.Context, tx PgTx, r PartitionRange) {
 	keptUntil := r.Upper.Add(providerUsageArchiveRetention).Format(time.RFC3339)
 	control := providerUsageArchiveExportControlIn(ctx)
@@ -575,7 +678,11 @@ func providerUsageArchiveExportFence(ctx context.Context, tx PgTx, r PartitionRa
 	var byFloor bool
 	Raise(tx.QueryRow(
 		ctx,
-		fmt.Sprintf(`SELECT $1::timestamp <= least($2::timestamp, (now() AT TIME ZONE 'UTC') - interval '%d seconds')`, int64(usagearchive.MinCloseAge/time.Second)),
+		fmt.Sprintf(
+			`SELECT coalesce($1::timestamp <= least($2::timestamp, (now() AT TIME ZONE 'UTC') - interval '%d seconds', (%s)), false)`,
+			int64(usagearchive.MinCloseAge/time.Second),
+			providerUsageArchiveSnFloorSql,
+		),
 		r.Upper.UTC().Format(partitionTimestampLayout),
 		control.CloseTimeFloor.UTC().Format(partitionTimestampLayout),
 	).Scan(&byFloor))

@@ -8,14 +8,16 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/usagearchive"
 )
 
 // The usage archive export control command parses to the fields it sets: none
-// shows the control, a mode, a floor and a weekly brake set those fields, and
-// --remove deletes it. Every set it accepts is one the retention pass reads as
-// set, never as off for a field it cannot parse; a mode other than on, dry_run
-// or off, a floor that is not a date, a brake outside 1 to the settings' most,
-// and --remove with fields are refused.
+// shows the control, a mode, a floor (a date, or rolling for none) and a
+// weekly brake set those fields, and --remove deletes it. Every set it accepts
+// is one the retention pass reads as set, never as off for a field it cannot
+// parse; a mode other than on, dry_run or off, a floor that is neither a date
+// nor rolling, a brake outside 1 to the settings' most, and --remove with
+// fields are refused.
 func TestUsageArchiveExportCommandParses(t *testing.T) {
 	settings := server.DefaultProviderUsageArchiveExportSettings()
 	for _, test := range []struct {
@@ -38,6 +40,11 @@ func TestUsageArchiveExportCommandParses(t *testing.T) {
 			server.ProviderUsageArchiveExportControlFieldMaxWeeksPerPass: "2",
 		}, mode: server.ProviderUsageArchiveExportModeOn, floor: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), weeks: 2},
 		{args: []string{"--close-time-floor=2026-08-17"}, fields: map[string]string{server.ProviderUsageArchiveExportControlFieldCloseTimeFloor: "2026-08-17"}, mode: server.ProviderUsageArchiveExportModeOff, floor: time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC), weeks: 1},
+		// the rolling floor, as the 2026-11-21 rollout sets it
+		{args: []string{"--mode=on", "--close-time-floor=rolling"}, fields: map[string]string{
+			server.ProviderUsageArchiveExportControlFieldMode:           "on",
+			server.ProviderUsageArchiveExportControlFieldCloseTimeFloor: "rolling",
+		}, mode: server.ProviderUsageArchiveExportModeOn, floor: usagearchive.RollingCloseTimeFloor, weeks: 1},
 		{args: []string{"--remove"}, fields: map[string]string{}, remove: true, mode: server.ProviderUsageArchiveExportModeOff, floor: time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), weeks: 1},
 	} {
 		opts, err := docopt.ParseArgs(bringyourctlUsage, append([]string{"db", "usage-archive-export"}, test.args...), "synthetic")
@@ -65,6 +72,8 @@ func TestUsageArchiveExportCommandParses(t *testing.T) {
 		{"--mode=ON"},
 		{"--close-time-floor=09/01/2026"},
 		{"--close-time-floor=2026-09-01T00:00:00Z"},
+		{"--close-time-floor=Rolling"},
+		{"--close-time-floor=roll"},
 		{"--max-weeks-per-pass=0"},
 		{"--max-weeks-per-pass=5"},
 		{"--max-weeks-per-pass=two"},

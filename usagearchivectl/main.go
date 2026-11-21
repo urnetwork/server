@@ -8,7 +8,7 @@
 // It never deletes a row: weeks leave PostgreSQL only through the server's
 // drop fence, under the export control (server/db_provider_usage_archive_export.go).
 //
-//	usagearchivectl export --pg=<yml> --dir=<dir> [--floor=<date>] [--max-weeks=<n>] [--week=<date>] [--register] [--location=<where>] [--threads=<n>] [--plan]
+//	usagearchivectl export --pg=<yml> --dir=<dir> [--floor=<date>|rolling] [--max-weeks=<n>] [--week=<date>] [--register] [--location=<where>] [--threads=<n>] [--plan]
 //	usagearchivectl verify --dir=<dir> [--manifest=<path>]
 //	usagearchivectl register --pg=<yml> --location=<where> <manifest>...
 //	usagearchivectl restore --pg=<yml> --manifest=<path> --table=<name>
@@ -135,7 +135,7 @@ func runExport(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("export", flag.ContinueOnError)
 	pgPath := flags.String("pg", "/srv/warp/main/vault/pg_maintenance.yml", "the PostgreSQL resource")
 	dir := flags.String("dir", "", "where the copies go")
-	floor := flags.String("floor", usagearchive.DefaultCloseTimeFloor.Format(time.DateOnly), "the close time floor: only weeks that end by it and whose rows all closed before it are exported (never later than 70 days ago)")
+	floor := flags.String("floor", usagearchive.DefaultCloseTimeFloor.Format(time.DateOnly), "the close time floor, YYYY-MM-DD or rolling for none: only weeks that end by it and whose rows all closed before it are exported (never later than 42 days ago)")
 	maxWeeks := flags.Int("max-weeks", 4, "weeks exported at most in this run")
 	var weeks weekList
 	flags.Var(&weeks, "week", "export only this week (its Monday, YYYY-MM-DD); repeatable")
@@ -152,9 +152,9 @@ func runExport(ctx context.Context, args []string) error {
 	if *dir == "" {
 		return errors.New("--dir is required")
 	}
-	floorTime, err := time.Parse(time.DateOnly, *floor)
+	floorTime, effectiveFloor, err := exportFloor(*floor, time.Now())
 	if err != nil {
-		return fmt.Errorf("--floor: %w", err)
+		return err
 	}
 	host, _ := os.Hostname()
 	if *location == "" {
@@ -179,7 +179,6 @@ func runExport(ctx context.Context, args []string) error {
 	}
 	defer conn.Close(context.WithoutCancel(ctx))
 
-	effectiveFloor := usagearchive.EffectiveCloseTimeFloor(floorTime, time.Now())
 	leaves, err := usagearchive.ListWeekLeaves(ctx, conn)
 	if err != nil {
 		return err
@@ -192,7 +191,7 @@ func runExport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("floor %s (effective %s), %d week leaves, ledger present: %t\n", floorTime.Format(time.DateOnly), effectiveFloor.Format(time.RFC3339), len(leaves), ledgerExists)
+	fmt.Printf("floor %s (effective %s), %d week leaves, ledger present: %t\n", usagearchive.FormatCloseTimeFloor(floorTime), effectiveFloor.Format(time.RFC3339), len(leaves), ledgerExists)
 	if *register && ledgerExists {
 		// copies verified before the ledger existed, or whose registration
 		// failed, are recorded now; each is read back once more first
@@ -253,6 +252,23 @@ func runExport(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+// The --floor an export runs under, and the floor in force at now: a date,
+// or rolling, which names none, so the floor in force is
+// usagearchive.MinCloseAge before now. An export only copies; the server's
+// drop holds the floor behind SN epochs not yet recorded on its own.
+func exportFloor(value string, now time.Time) (floor time.Time, effective time.Time, returnErr error) {
+	if value != usagearchive.RollingCloseTimeFloorValue {
+		if _, err := time.Parse(time.DateOnly, value); err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("--floor must be YYYY-MM-DD or %s, not %q", usagearchive.RollingCloseTimeFloorValue, value)
+		}
+	}
+	floor, err := usagearchive.ParseCloseTimeFloor(value)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("--floor: %w", err)
+	}
+	return floor, usagearchive.EffectiveCloseTimeFloor(floor, now), nil
 }
 
 func containsString(values []string, value string) bool {
