@@ -381,11 +381,21 @@ func TestNonPreviewNetworkRefusesStrictExpThroughTheRoute(t *testing.T) {
 	})
 }
 
+// The route test's admission: its client is admitted and holds an empty grant.
+// An exchange with no scope source installed is refused as unavailable
+// (e608ce252), and admission is the projection's, which this test does not build.
+type routeExchangeTestAdmission struct{}
+
+func (self routeExchangeTestAdmission) Grant(ctx context.Context, request *oauth.ExchangeScopeRequest) (*oauth.ExchangeScopeGrant, error) {
+	return &oauth.ExchangeScopeGrant{}, nil
+}
+
 // §7.8's token exchange through the router, on a real sidecar client: its token
 // in the form and its key's proof buy a service token for evs with its client's
 // and sidecar's ids, with no bearer on the request; the same token as a bearer
 // is refused on the route, a copy without the proof buys nothing, and the api
-// audience is never issued. The issuer and its keys are the test's own.
+// audience is never issued. The issuer, its keys and its admission are the
+// test's own.
 func TestStrictExpClientExchangesItsTokenThroughTheRoute(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -404,6 +414,7 @@ func TestStrictExpClientExchangesItsTokenThroughTheRoute(t *testing.T) {
 			signerKeys = append(signerKeys, &oauth.SignerKey{Kid: set.KidPrefix() + thumbprint, Alg: "ES256", Set: set, PrivateKey: privateKey})
 		}
 		defer oauth.Testing_SetSignerKeys(signerKeys...)()
+		defer oauth.SetExchangeScopeSource(routeExchangeTestAdmission{})()
 
 		exchange := func(authorization string, resource string, proof bool) *httptest.ResponseRecorder {
 			form := url.Values{
