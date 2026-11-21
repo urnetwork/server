@@ -136,6 +136,12 @@ type RouterDeps struct {
 	Log sidecar.Logger
 	// The block's /status latch, so a test reads it. nil: sidecarhost.Run's own.
 	WarpStatus *router.WarpStatusState
+	// Listeners already bound for /status, TCP 25 and the LAN port, which RunRouterHost serves in place of binding
+	// HostPorts', and takes: a test's on 127.0.0.1:0, so the OS picks each port. nil binds the port as warp maps it;
+	// LanListener serves only where HostPorts names a LAN port.
+	StatusListener net.Listener
+	SmtpListener   net.Listener
+	LanListener    net.Listener
 }
 
 // The clients and the dial over them, once both exist.
@@ -528,14 +534,16 @@ func routerRunOptions(ctx context.Context, engine sidecar.StreamEngine, settings
 		proxySettings = DefaultHostSettings().ProxyHeader
 	}
 	listeners := []*sidecarhost.RunListener{{
-		Port: ports.Smtp,
-		Wrap: NewProxyListenerWrap(ctx, proxySettings, clock),
+		Port:     ports.Smtp,
+		Listener: deps.SmtpListener,
+		Wrap:     NewProxyListenerWrap(ctx, proxySettings, clock),
 	}}
 	if ports.Lan != 0 {
 		// D-SMTP-13's LAN port: smtpedge's hosts alone, then the same PROXY header, then a normal sender's session
 		proxyWrap := NewProxyListenerWrap(ctx, proxySettings, clock)
 		listeners = append(listeners, &sidecarhost.RunListener{
-			Port: ports.Lan,
+			Port:     ports.Lan,
+			Listener: deps.LanListener,
 			Wrap: func(listener net.Listener) (net.Listener, error) {
 				lan, err := mxedgeservice.NewMxLanListener(listener, settings.MxEdge)
 				if err != nil {
@@ -546,14 +554,16 @@ func routerRunOptions(ctx context.Context, engine sidecar.StreamEngine, settings
 		})
 	}
 	return &sidecarhost.RunOptions{
-		Service:    hostRouterService,
-		StatusPort: ports.Status,
-		Engine:     engine,
-		Stream:     engine,
-		Listeners:  listeners,
-		Postgres:   true,
-		Groups:     deps.StoreGroups,
-		WarpStatus: deps.WarpStatus,
+		Service:        hostRouterService,
+		StatusPort:     ports.Status,
+		StatusListener: deps.StatusListener,
+		Engine:         engine,
+		Stream:         engine,
+		Listeners:      listeners,
+		Postgres:       true,
+		Groups:         deps.StoreGroups,
+		WarpStatus:     deps.WarpStatus,
+		Settings:       settings.Run,
 	}
 }
 
@@ -570,11 +580,18 @@ func RunRouterHost(ctx context.Context, settings *HostSettings, routerSettings *
 	routerHost, err := NewRouterHost(ctx, settings, routerSettings, deps)
 	if err != nil {
 		glog.Errorf("[%s]the router role is not ready: %v\n", hostRouterService, err)
+		for _, listener := range []net.Listener{deps.SmtpListener, deps.LanListener} {
+			if listener != nil {
+				listener.Close()
+			}
+		}
 		return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
-			Service:    hostRouterService,
-			StatusPort: ports.Status,
-			Engine:     notReadyStreamEngine{},
-			WarpStatus: deps.WarpStatus,
+			Service:        hostRouterService,
+			StatusPort:     ports.Status,
+			StatusListener: deps.StatusListener,
+			Engine:         notReadyStreamEngine{},
+			WarpStatus:     deps.WarpStatus,
+			Settings:       settings.Run,
 		})
 	}
 	// on the host's own context, so the listener outlives ctx until the drain closes it

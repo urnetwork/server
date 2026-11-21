@@ -46,12 +46,23 @@
 //
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has
 // its clusters, clock check, budget and batches while requests in flight finish.
+//
+// Each credential the block reads from its secret_files is a HostDeps field a test fills with its own, so a host run
+// in a test reads none from vault: the clusters (file-clusters-evs.yml), the receipt keys (evs-receipt-keys.json),
+// the svc- verifier its Authenticator and rev/ reader verify under (oauth-jwks-svc.json) and the Quota over
+// internal-gate-evs.yml. What stays the process's when several hosts run in one test process (e2e-hosts-in-process):
+// the Redis key-event subscriber and the metrics registry, which sidecarhost shares by design; sidecar.yml, whose evs
+// gate and blocks count NewHost reads, and evs.yml, the block config, both of which server reads once per process
+// (server.Testing_PushSidecarConfig sets sidecar.yml for every block at once); the svc- verifier a host given no
+// HostDeps.ServiceTokens reads (oauth.Testing_SetServiceTokenVerifier); and the test hooks
+// (sidecartest.InstallTestHooks). RunHost sets no process-wide state: the main sets operator's global Env.
 package evshost
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -102,6 +113,8 @@ type HostSettings struct {
 	// The versionless purge's: §11.13's 60 s allowance, 200 deletes a second, 1M ids queued and a 70 s drain. nil:
 	// evsservice.DefaultPurgerSettings. Settings past §11.13's floors are an error: the block does not start.
 	Purger *evsservice.PurgerSettings
+	// sidecarhost.Run's: readiness's bounds and the status server's drain. nil: sidecarhost.DefaultRunSettings.
+	Run *sidecarhost.RunSettings
 }
 
 // The defaults.
@@ -112,6 +125,7 @@ func DefaultHostSettings() *HostSettings {
 		UsageDrainTimeout: 10 * time.Second,
 		QuotaGate:         evsservice.DefaultQuotaGateSettings(),
 		Purger:            evsservice.DefaultPurgerSettings(),
+		Run:               sidecarhost.DefaultRunSettings(),
 	}
 }
 
@@ -153,8 +167,15 @@ type HostDeps struct {
 	Budget sidecar.WriteBudget
 	// The engine's clock: real time.
 	Clock sidecar.Clock
+	// The svc- key set's public verifier, which the Authenticator verifies callers' service tokens under and the rev/
+	// reader each rev/ object's signature: vault's oauth-jwks-svc.json, read once by the process
+	// (oauth.VerifyServiceToken). A test's over keys of its own.
+	ServiceTokens *oauth.ServiceTokenVerifier
 	// The block's /status latch, so a test reads it: sidecarhost.Run's own.
 	WarpStatus *router.WarpStatusState
+	// A listener already bound for /status and evs's routes, which RunHost serves in place of binding its status
+	// port: a test's on 127.0.0.1:0, so the OS picks the port. RunHost takes it. nil: the port, as warp maps it.
+	StatusListener net.Listener
 }
 
 // The engine as the block runs it, with what it owns. Safe for concurrent use.
@@ -468,8 +489,14 @@ func RunHost(ctx context.Context, settings *HostSettings, deps *HostDeps, status
 	if deps == nil {
 		deps = &HostDeps{}
 	}
+	if settings == nil {
+		settings = DefaultHostSettings()
+	}
 	engine := newBlockEngine(ctx, settings, deps)
-	return sidecarhost.Run(ctx, blockRunOptions(engine, statusPort, deps))
+	options := blockRunOptions(engine, statusPort, deps)
+	options.StatusListener = deps.StatusListener
+	options.Settings = settings.Run
+	return sidecarhost.Run(ctx, options)
 }
 
 // What sidecarhost.Run takes for engine: no Postgres and no pending group, since evs keeps nothing in Postgres
@@ -534,10 +561,11 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		clockCheck = server.NewChronyClockCheck(hostCtx, settings.Chrony)
 	}
 	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
-		Blobs:      clusters,
-		ClockCheck: clockCheck,
-		Quota:      deps.Quota,
-		Clock:      deps.Clock,
+		Blobs:         clusters,
+		ClockCheck:    clockCheck,
+		Quota:         deps.Quota,
+		Clock:         deps.Clock,
+		ServiceTokens: deps.ServiceTokens,
 	})
 	budget := deps.Budget
 	if budget == nil {
@@ -572,7 +600,7 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		if hostDeps.AuthState == nil {
 			revSettings := sidecar.DefaultRevocationSettings()
 			revSettings.Clock = host.Clock
-			checker := sidecar.NewRevocationChecker(host.Blobs, oauth.VerifyRevocation, revSettings)
+			checker := sidecar.NewRevocationChecker(host.Blobs, sidecarhost.RevocationVerify(deps.ServiceTokens), revSettings)
 			hostDeps.AuthState = evsservice.NewAclEvsAuthState(cache, checker)
 		}
 		if hostDeps.GateViews == nil {
