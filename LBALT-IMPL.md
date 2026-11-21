@@ -582,7 +582,7 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 
 ### 8.3 The vendored `ConnGroup`
 
-`third_party/quic-go/urnetwork_conn_group.go`, a new file; no upstream file changes.
+`../quic-go/urnetwork_conn_group.go`, a new file in URnetwork's quic-go (../quic-go/URNETWORK.md); no upstream file changes.
 
 - `quic.NewConnGroup(localAddr)` returns the conn of one `Transport`. `ConnGroup.Add(conn)` wraps a socket as `Transport.init` wraps the conn it is given, and starts reading it.
 - The `ConnGroupMember` that `Add` returns reports when its socket stops (`Done`, `Err`), and `Close` takes the socket out of the group and closes it. `ConnGroup.Close` closes every socket.
@@ -644,7 +644,7 @@ Whodis doesn't need 3: its transport reads the decode53 translation, which isn't
 
 darwin delivers a reuseport group's datagrams to its newest socket, where Linux hashes each flow to one, so every test moves a flow deterministically: either a group narrowed to one socket while the connection is made, whose loss leaves only siblings, or sockets bound to distinct ports behind a relay the test steers, which also stands in for a NAT rebinding.
 
-Vendored (`third_party/quic-go`, `GOFLAGS= go test -run '^TestUrnetwork' .`), each failing when its behavior is taken out of `urnetwork_conn_group.go`:
+URnetwork's quic-go (`../quic-go`, `GOFLAGS= go test -run '^TestUrnetwork' .`), each failing when its behavior is taken out of `urnetwork_conn_group.go`:
 - `TestUrnetworkConnGroupKeepsAConnectionWhoseFlowMovesBetweenSockets`: a connection keeps echoing when its flow moves to another socket, and again after a rebinding changes its source port too;
 - `TestUrnetworkConnGroupKeepsAConnectionThroughTheLossOfItsSocket`: a socket whose reads fail reports the error and leaves the write set, and its connection goes on through a sibling;
 - `TestUrnetworkConnGroupWritesThroughOneLiveSocketPerDestination`: one socket per destination, another once it is lost, a drop with no error with none left, `net.ErrClosed` once closed;
