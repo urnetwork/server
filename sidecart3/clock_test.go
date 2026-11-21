@@ -383,6 +383,20 @@ func TestFs60RegisteredClauseRequiresItsStoreClock(t *testing.T) {
 	}
 }
 
+// FS-111's held mailbox uses the store clock. Its three companion mailbox cases use store time.
+func TestFs111MailboxTakesItsCatalogClock(t *testing.T) {
+	for _, rowId := range []string{"FS-76", "FS-78", "FS-111", "FS-112"} {
+		testCase := fault.DefaultCatalog().Case(rowId, "mailbox")
+		if testCase == nil {
+			t.Fatalf("%s has no mailbox case", rowId)
+		}
+		want := rowId == "FS-111"
+		if got := defaultCaseSettings(testCase).StoreClock != nil; got != want {
+			t.Errorf("%s has store clock %t, want %t", testCase, got, want)
+		}
+	}
+}
+
 // Only a real translation of a recorded write produces a witness. Installing the adapter and reading
 // the fallback age of an unrecorded object cannot satisfy the gate.
 func TestStoreClockOnlyWitnessesAKnownWrite(t *testing.T) {
@@ -391,13 +405,13 @@ func TestStoreClockOnlyWitnessesAKnownWrite(t *testing.T) {
 	fixture.clock.witness = func() { count++ }
 	info := &sidecar.BlobInfo{Key: "clock/fixture", Etag: "one", LastModified: fixture.clock.store.Now()}
 	fixture.clock.translate("fixture", info)
-	if count != 0 {
+	if count != 0 || fixture.clock.translated.Load() {
 		t.Fatal("an unrecorded object's fallback age produced a witness")
 	}
 	sent := fixture.net.Clock().Now()
 	fixture.clock.put("fixture", info.Key, sent, info.Etag, nil)
 	fixture.clock.translate("fixture", info)
-	if count != 1 || !info.LastModified.Equal(sent) {
+	if count != 1 || !fixture.clock.translated.Load() || !info.LastModified.Equal(sent) {
 		t.Errorf("translated timestamp %v, witnesses %d", info.LastModified, count)
 	}
 }
