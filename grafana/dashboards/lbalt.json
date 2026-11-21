@@ -963,6 +963,134 @@
           "legendFormat": "{{resumption}} resumed={{resumed}}"
         }
       ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "announce batches / s and mean items a batch, by kind",
+      "description": "Batches of live connection announcement I/O a second, by kind, and the mean items a batch: sync_read, the sync rounds' provide key change and provide mode reads; verify_egress_lease, the verify egress lease refreshes; reliability_stats, the rounds' stats writes; measurement_write, the measurement snapshots. Each item was its own round trips before (LBALTOPT2 R18).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batches_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}} batches/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batch_items_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (kind) (rate(urnetwork_connect_announce_batches_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}} items/batch"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "announce batches failed as a whole / s, by kind",
+      "description": "Announcement batches that failed as a whole, an outage of their database or Redis: each of their items failed, and its connection counted it as its own read or write failure (connection_sync_read_failures_total, connection_worker_failures_total) and retried on its own backoff (LBALTOPT2 R18).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batch_raises_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "exchange frames per socket call, by op and direction",
+      "description": "Exchange link frames over socket calls: sent, frames a write or writev carries; received, frames a read of the link's buffered reader takes. A call that waits in the poller is still one call (LBALTOPT2 R21).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op, direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (op, direction) (rate(urnetwork_connect_exchange_io_calls_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{op}} {{direction}}"
+        }
+      ]
     }
   ]
 }
