@@ -104,6 +104,9 @@ type EdgeClientMintResult struct {
 	ByClientJwt string `json:"by_client_jwt"`
 	// When the jwt ends, with no grace.
 	ExpireTimeMillis int64 `json:"expire_time_millis"`
+	// The slot's authentication time, in milliseconds (DESIGN §2.8, api-4).
+	// Each newer mint under the client's row lock advances it.
+	AuthTimeMillis int64 `json:"auth_time_millis,omitempty"`
 	// Where the client connects, ws or wss.
 	PlatformUrl string `json:"platform_url"`
 	// The client's service token of audience sockets (QD-1054): network_id urnetwork-edge's and ur_client_id this
@@ -399,7 +402,8 @@ type PlatformClientSourceArgs struct {
 
 // One index's last answer.
 type platformClientCredential struct {
-	auth *sidecar.ServiceClientAuth
+	auth          *sidecar.ServiceClientAuth
+	streamIdRange uint64
 	// the client's service token of audience sockets, a secret, and when it ends
 	socketsToken           string
 	socketsTokenExpireTime time.Time
@@ -414,6 +418,9 @@ type platformClientIndex struct {
 	// fixed once the first answer names it
 	clientId   connect.Id
 	credential *platformClientCredential
+	// The latest range from a mint that this process has not given to a dispatcher.
+	unusedStreamIdRange uint64
+	lastStreamIdRange   uint64
 }
 
 // sidecar.ServiceClientSource over api's edge client route. Safe for concurrent use.
@@ -583,6 +590,7 @@ func (self *PlatformClientSource) ask(ctx context.Context, index int) (*platform
 			ApiUrl:      self.args.ApiUrl,
 			PlatformUrl: result.PlatformUrl,
 		},
+		streamIdRange:          edgeStreamIdRange(result.AuthTimeMillis),
 		socketsToken:           result.SocketsToken,
 		socketsTokenExpireTime: socketsTokenExpireTime,
 		expireTime:             expireTime,
@@ -618,6 +626,12 @@ func (self *PlatformClientSource) refresh(ctx context.Context, index int, than *
 			state.clientId = credential.auth.ClientId
 		} else if state.clientId != credential.auth.ClientId {
 			return fmt.Errorf("%w: api answered client %d another id", ErrPlatformClientSource, index)
+		}
+		if credential.streamIdRange > state.lastStreamIdRange {
+			state.unusedStreamIdRange = credential.streamIdRange
+			state.lastStreamIdRange = credential.streamIdRange
+		} else {
+			credential.streamIdRange = 0
 		}
 		state.credential = credential
 		return nil
@@ -696,6 +710,51 @@ func (self *PlatformClientSource) ServiceClient(ctx context.Context, clientIndex
 	}
 	auth := *credential.auth
 	return &auth, nil
+}
+
+// A v1 stream ID has 42 range bits. Counting authentication milliseconds
+// since 2020 leaves room through 2159. A missing time is an older mint.
+func edgeStreamIdRange(authTimeMillis int64) uint64 {
+	const epochMillis = 1577836800000
+	if authTimeMillis <= epochMillis || authTimeMillis-epochMillis >= 1<<42 {
+		return 0
+	}
+	return uint64(authTimeMillis - epochMillis)
+}
+
+// ReserveStreamIdRange consumes a minted timestamp once for this stable slot.
+// When the cached mint has already supplied a range, authenticate again.
+func (self *PlatformClientSource) ReserveStreamIdRange(ctx context.Context, index int, clientId sidecar.Id) (uint64, error) {
+	if index < 0 || len(self.indexes) <= index || self.ctx.Err() != nil {
+		return 0, ErrPlatformClientSource
+	}
+	for {
+		self.stateLock.Lock()
+		state := self.indexes[index]
+		held := state.credential
+		if held == nil || state.clientId != connect.Id(clientId) {
+			self.stateLock.Unlock()
+			return 0, fmt.Errorf("%w: no credential for this client", ErrPlatformClientSource)
+		}
+		if err := ctx.Err(); err != nil {
+			self.stateLock.Unlock()
+			return 0, err
+		}
+		if state.unusedStreamIdRange != 0 {
+			idRange := state.unusedStreamIdRange
+			state.unusedStreamIdRange = 0
+			self.stateLock.Unlock()
+			return idRange, nil
+		}
+		self.stateLock.Unlock()
+		credential, err := self.refresh(ctx, index, held)
+		if err != nil {
+			return 0, err
+		}
+		if credential.streamIdRange == 0 {
+			return 0, fmt.Errorf("%w: mint did not supply stream IDs", ErrPlatformClientSource)
+		}
+	}
 }
 
 // The index's service token of audience sockets (QD-1054), as current answers it, an outage ridden on the held

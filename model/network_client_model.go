@@ -1424,7 +1424,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					UPDATE network_client
 					SET
 						description = $3,
-						auth_time = $4
+						auth_time = GREATEST(auth_time, $4)
 					WHERE
 						client_id = $1 AND
 						network_id = $2 AND

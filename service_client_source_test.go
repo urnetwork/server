@@ -202,6 +202,8 @@ type platformClientTestApi struct {
 	stateLock sync.Mutex
 	// {slot, index} -> asks answered
 	slotIndexAskCounts map[[2]int]int
+	// The fake mint advances each stable slot's authentication time under its lock.
+	slotAuthTimes map[[2]int]int64
 	// while not 0, every ask is answered with this status
 	failStatus int
 	// while set, every answer names this client id for every index
@@ -218,6 +220,7 @@ func newPlatformClientTestApi(t testing.TB, clock *sidecartest.FakeClock) *platf
 		life:               time.Hour,
 		socketsTokenLife:   15 * time.Minute,
 		slotIndexAskCounts: map[[2]int]int{},
+		slotAuthTimes:      map[[2]int]int64{},
 	}
 	self.server = httptest.NewServer(http.HandlerFunc(self.serve))
 	t.Cleanup(self.server.Close)
@@ -243,12 +246,14 @@ func (self *platformClientTestApi) serve(w http.ResponseWriter, r *http.Request)
 	}
 	key := [2]int{args.Slot, args.Index}
 	self.slotIndexAskCounts[key] += 1
+	self.slotAuthTimes[key] = max(self.clock.Now().UnixMilli(), self.slotAuthTimes[key]+1)
 	clientId := DeriveEdgeClientId("test", args.Host, args.Block, args.Slot, args.Index).String()
 	if self.clientIdOverride != "" {
 		clientId = self.clientIdOverride
 	}
 	result := &EdgeClientMintResult{
 		ClientId:                     clientId,
+		AuthTimeMillis:               self.slotAuthTimes[key],
 		ByClientJwt:                  fmt.Sprintf("jwt-secret-%d-%d-%d", args.Slot, args.Index, self.slotIndexAskCounts[key]),
 		ExpireTimeMillis:             self.clock.Now().Add(self.life).UnixMilli(),
 		PlatformUrl:                  "wss://connect.edge.example",
@@ -577,6 +582,29 @@ func TestPlatformClientSourceRepeatsItsSlotsClientsAcrossRestarts(t *testing.T) 
 		if auth.ByJwt != fmt.Sprintf("jwt-secret-1-%d-2", index) {
 			t.Fatalf("index %d's jwt after a restart", index)
 		}
+	}
+}
+
+func TestPlatformClientSourceReservesRangesAcrossSlotRestart(t *testing.T) {
+	clock := sidecartest.NewFakeClock(time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC))
+	api := newPlatformClientTestApi(t, clock)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	var previous uint64
+	for range 2 {
+		source := api.newSource(ctx, 1)
+		auth, err := source.ServiceClient(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 2 {
+			idRange, err := source.ReserveStreamIdRange(ctx, 0, sidecar.Id(auth.ClientId))
+			if err != nil || idRange <= previous {
+				t.Fatalf("range %d after %d: %v", idRange, previous, err)
+			}
+			previous = idRange
+		}
+		source.Close()
 	}
 }
 

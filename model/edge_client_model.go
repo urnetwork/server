@@ -81,6 +81,7 @@ type EdgeClientMint struct {
 	// A secret: never logged.
 	ByClientJwt string
 	ExpireTime  time.Time
+	AuthTime    time.Time
 }
 
 // The client key's jwt in the urnetwork-edge network networkId, with its client and device created on first
@@ -144,11 +145,21 @@ func MintEdgeClient(ctx context.Context, networkId server.Id, key *EdgeClientKey
 			}
 		})
 		now := server.NowUtc()
+		authTime := now
 		if clientFound {
 			if clientNetworkId != networkId || clientDeviceId == nil || *clientDeviceId != deviceId || !clientActive {
 				returnErr = ErrEdgeClientRetired
 				return
 			}
+			// The stable slot reserves stream IDs from its existing authentication
+			// time (DESIGN §2.8 api-4). The row lock orders simultaneous mints,
+			// even within one millisecond or after a clock correction.
+			server.Raise(tx.QueryRow(ctx, `
+				UPDATE network_client
+				SET auth_time = GREATEST(auth_time + interval '1 millisecond', $2)
+				WHERE client_id = $1
+				RETURNING auth_time
+			`, clientId, now).Scan(&authTime))
 		} else {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -191,6 +202,7 @@ func MintEdgeClient(ctx context.Context, networkId server.Id, key *EdgeClientKey
 		mint = &EdgeClientMint{
 			ClientId:    clientId,
 			ByClientJwt: signed,
+			AuthTime:    authTime,
 			// as the jwt carries it, in whole seconds
 			ExpireTime: credential.ExpiresAt.Time,
 		}

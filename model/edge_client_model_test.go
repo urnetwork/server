@@ -82,6 +82,10 @@ func TestMintEdgeClientReusesItsDerivedClient(t *testing.T) {
 			t.Fatalf("a second ask made another client or the same jwt: %d clients", clientCount())
 		}
 
+		if first.AuthTime.IsZero() || second.AuthTime.UnixMilli() <= first.AuthTime.UnixMilli() {
+			t.Fatalf("edge authentication time did not advance: %s after %s", second.AuthTime, first.AuthTime)
+		}
+
 		// another index is another client
 		other, err := MintEdgeClient(ctx, networkId, &EdgeClientKey{Environment: "test", Block: "tlsedge", Host: "lb-a.example", Slot: 1, Index: 0}, settings)
 		if err != nil {
