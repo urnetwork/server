@@ -8,8 +8,8 @@ package model
 // network over minutes, and of the address over half an hour, and every try
 // was a fresh guess at the same live code. These limits bound the tries in
 // total (owner decision 2026-11-21):
-//   - A code takes at most VerifyCodeTryLimit tries. The fifth wrong try kills
-//     it: the person who mistyped asks for a new code (a resend), which starts
+//   - A code takes at most VerifyCodeTryLimit wrong tries. The fifth kills it:
+//     the person who mistyped asks for a new code (a resend), which starts
 //     over.
 //   - Each code of an email or phone killed so is a strike against the
 //     address. Its strikes in the trailing VerifyCodeStrikeWindow lock the
@@ -22,9 +22,9 @@ package model
 //
 // A lockout or a spent budget is refused (429 with Retry-After) before any code
 // is read, so a refused try learns nothing about a code. Every try holds its
-// place in the caller's budgets and its code's tries before its guess is
+// place in the caller's budgets and takes its code's try before its guess is
 // compared, so tries made at once cannot pass a limit together; a right guess
-// gives its places in the caller's budgets back.
+// gives both back, so only wrong tries count.
 //
 // The counts live in Redis, as the auth attempt limits do; a killed code is
 // marked used in user_auth_verify. The fixed acceptance phone fixture skips
@@ -48,7 +48,8 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// A code takes this many tries. The last of them, when wrong, kills it.
+// A code takes this many wrong tries; the last of them kills it. A try is
+// counted before its guess is compared, and a right one gives it back.
 const VerifyCodeTryLimit = 5
 
 // The record of a code killed by wrong tries, an account action attempt keyed
@@ -335,6 +336,8 @@ type verifyCodeTryLimits struct {
 	// this try's place in the budgets it holds
 	member string
 	held   []string
+	// the try counts of the codes this try took a try of
+	triedKeys []string
 }
 
 func newVerifyCodeTryLimits(clientSession *session.ClientSession, userAuth string) *verifyCodeTryLimits {
@@ -473,8 +476,23 @@ func (self *verifyCodeTryLimits) tryCodes(liveCodes []liveVerifyCode) []int64 {
 			server.Raise(err)
 			tries[i] = count.Val()
 		})
+		self.triedKeys = append(self.triedKeys, key)
 	}
 	return tries
+}
+
+// Gives back the tries this try took of the codes: its guess was right, so only
+// wrong tries count toward a code's death. A right code that is refused after
+// it is compared (a session cap, a code sent to another address) is tried
+// again as often as needed.
+func (self *verifyCodeTryLimits) untryCodes() {
+	triedKeys := self.triedKeys
+	self.triedKeys = nil
+	for _, key := range triedKeys {
+		server.Redis(self.ctx, func(r server.RedisClient) {
+			server.Raise(r.Decr(self.ctx, key).Err())
+		})
+	}
 }
 
 // What one try of a guess does to the live codes it is tried against.
@@ -518,8 +536,8 @@ func decideVerifyCodeTry(verifyCodes []string, tries []int64, guess string) veri
 // Tries guess against the live codes of userId, the holder of the address. Each
 // code takes one more try (tryCodes), and the codes that have taken their
 // tries are killed. Returns the code the guess is, with the try's places in the
-// caller's budgets given back; or nil and the message of a code that took its
-// tries, "" for a plain wrong code.
+// caller's budgets and its tries of the codes given back; or nil and the
+// message of a code that took its tries, "" for a plain wrong code.
 func (self *verifyCodeTryLimits) tryGuess(userId server.Id, liveCodes []liveVerifyCode, guess string) (match *liveVerifyCode, spentMessage string) {
 	verifyCodes := make([]string, len(liveCodes))
 	for i, liveCode := range liveCodes {
@@ -531,6 +549,7 @@ func (self *verifyCodeTryLimits) tryGuess(userId server.Id, liveCodes []liveVeri
 	}
 	if 0 <= outcome.match {
 		self.release()
+		self.untryCodes()
 		return &liveCodes[outcome.match], ""
 	}
 	if outcome.strike {
