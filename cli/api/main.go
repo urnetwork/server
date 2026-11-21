@@ -54,7 +54,8 @@ Options:
 	// api's own services fill, so the db, Redis, metrics, the service token
 	// authenticator, sidecar.yml's gates and task scheduling answer, and
 	// every service api builds none of here refuses
-	if _, err := core.SetProcessEnv("api", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
+	if _, err := core.SetProcessEnv("api", host); err != nil {
 		panic(err)
 	}
 	// §21's effects for the actions this process applies (ABUSE-M5-06), and
@@ -70,6 +71,7 @@ Options:
 	// routes, and the hard deny its control route's CreateContract reads
 	// (ABUSE-M5-07)
 	controller.InstallAbuseStanding(ctx)
+	defer controller.InstallApiAuthorization(ctx, host)()
 	// RFC 8628's device grant for ur-cli: device authorizations wait in
 	// Redis (QD-830), so POST /oauth/device_authorization serves and the
 	// issuer's metadata names it
