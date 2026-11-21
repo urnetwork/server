@@ -830,6 +830,13 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 		result.Skipped = inputs.unavailable
 		return result, nil
 	}
+	// rule (a): units only from admitted providers (sn_top_admission.go)
+	unitAdmission, unavailable := loadSnTopUnitAdmission(ctx, now)
+	if unavailable != "" {
+		result.Skipped = unavailable
+		return result, nil
+	}
+	inputs.withheldProviders = snTopApplyUnitAdmission(inputs.projection.Providers, unitAdmission)
 	projection := model.ProjectSnTop(inputs.projection)
 	snTopMeasureReplica(&inputs.agreement, projection, summary)
 	snTopMeasureIncentive(&inputs.agreement, summary, inputs.incentive)
@@ -879,9 +886,9 @@ func computeSnTopSnapshotAt(args *ComputeSnTopSnapshotArgs, clientSession *sessi
 	result.TrailHops = inputs.trailHops
 	observeSnTopSnapshot(snapshot, projection, inputs, time.Since(start))
 	glog.Infof(
-		"[sntop]snapshot %s tempo %d (%s): %d ranked, %d eligible providers (%d measured), %d trail hops, cutoff %.4f, %d claimed fleets, presence %s, %s\n",
+		"[sntop]snapshot %s tempo %d (%s): %d ranked, %d eligible providers (%d measured, %d units withheld), %d trail hops, cutoff %.4f, %d claimed fleets, presence %s, %s\n",
 		snapshot.SnapshotId, tempo.Index, tempo.Source, projection.TotalRanked, projection.EligibleProviders,
-		inputs.measuredProviders, inputs.trailHops, projection.ProjectedCutoff, projection.ClaimedFleets,
+		inputs.measuredProviders, inputs.withheldProviders, inputs.trailHops, projection.ProjectedCutoff, projection.ClaimedFleets,
 		inputs.presenceSource, time.Since(start),
 	)
 	return result, nil
@@ -897,6 +904,8 @@ type snTopInputs struct {
 	agreement         snTopAgreement
 	replicaCheckpoint *model.SnTopReplicaCheckpoint
 	unavailable       string
+	// providers whose unit rule (a) withheld (sn_top_admission.go)
+	withheldProviders int
 }
 
 const (

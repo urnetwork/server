@@ -21,11 +21,15 @@ import (
 )
 
 type snTopDbFixture struct {
-	ctx      context.Context
-	settings *model.VerifySettings
-	cfg      *StConfig
-	client   *stubStClient
-	anchor   time.Time
+	ctx context.Context
+	// the export's admission set the fixture publishes (rule (a),
+	// sn_top_admission.go): every provider it creates is admitted unless a
+	// test withholds it
+	admission map[server.Id]*model.SnTopAdmissionProvider
+	settings  *model.VerifySettings
+	cfg       *StConfig
+	client    *stubStClient
+	anchor    time.Time
 	// the completed tempo's window: [start, end)
 	start time.Time
 	end   time.Time
@@ -41,7 +45,7 @@ const (
 )
 
 func newSnTopDbFixture(t testing.TB, ctx context.Context) *snTopDbFixture {
-	self := &snTopDbFixture{ctx: ctx}
+	self := &snTopDbFixture{ctx: ctx, admission: map[server.Id]*model.SnTopAdmissionProvider{}}
 	self.anchor = server.NowUtc().Truncate(time.Minute)
 	self.start = self.anchor.Add(-460 * model.SnTopBlockTime)
 	self.end = self.anchor.Add(-100 * model.SnTopBlockTime)
@@ -116,7 +120,19 @@ func (self *snTopDbFixture) provider(t testing.TB, networkId server.Id, ip strin
 		SendMessageCount:           1,
 		SendByteCount:              1024,
 	})
+	self.admit(clientId, true)
 	return clientId
+}
+
+// Publishes the export's admission set with the client admitted or not. The
+// set is stamped a day past the anchor, so every fold the test runs reads it
+// fresh.
+func (self *snTopDbFixture) admit(clientId server.Id, admitted bool) {
+	self.admission[clientId] = &model.SnTopAdmissionProvider{ClientId: clientId, CountryCode: "us", Admitted: admitted, Online: admitted}
+	model.Testing_SetSnTopAdmission(self.ctx, &model.SnTopAdmission{
+		MeasuredAt: self.anchor.Add(24 * time.Hour),
+		Providers:  self.admission,
+	})
 }
 
 // Hops of a complete trail through the client, confirmed inside the tempo.

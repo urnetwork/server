@@ -33,13 +33,10 @@ func snTopRefreshVerifyCohortRanked(ctx context.Context, settings *model.VerifyS
 		for _, row := range projection.Networks {
 			networks = append(networks, model.VerifyCohortRankedNetwork{NetworkId: row.NetworkId, Position: row.Position, Claimed: row.Claimed})
 		}
-		providers := make([]model.VerifyCohortRankedProvider, 0, len(input.Providers))
+		// a provider whose unit rule (a) withheld has no prefix here either
+		providers := snTopVerifyCohortRankedProviders(input.Providers)
 		clientIds := []server.Id{}
 		for _, provider := range input.Providers {
-			providers = append(providers, model.VerifyCohortRankedProvider{
-				ClientId: provider.ClientId, NetworkId: provider.NetworkId, Eligible: provider.Eligible,
-				PrefixHash: provider.PrefixHash, HasPrefix: provider.HasPrefix,
-			})
 			if provider.Eligible {
 				clientIds = append(clientIds, provider.ClientId)
 			}

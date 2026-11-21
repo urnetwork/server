@@ -29,7 +29,7 @@ var (
 	})
 	snTopSnapshotUnits = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_top", Name: "snapshot_units",
-		Help: "What the newest SN Top snapshot counted, by kind: ranked_networks, eligible_providers, measured_providers (the verify cohort), claimed_fleets (UIDs), open_seats and trail_hops (non-seed hops of complete trails in the tempo).",
+		Help: "What the newest SN Top snapshot counted, by kind: ranked_networks, eligible_providers, measured_providers (the verify cohort), claimed_fleets (UIDs), open_seats, trail_hops (non-seed hops of complete trails in the tempo) and withheld_providers (providers whose unit rule (a) withheld: neither Speed nor Quality admitted, nor Online in a UDP-off country).",
 	}, []string{"kind"})
 	snTopProjectedCutoff = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_top", Name: "projected_cutoff",
@@ -101,6 +101,8 @@ func observeSnTopSnapshot(snapshot *model.SnTopSnapshot, projection *model.SnTop
 	snTopSnapshotUnits.WithLabelValues("claimed_fleets").Set(float64(projection.ClaimedFleets))
 	snTopSnapshotUnits.WithLabelValues("open_seats").Set(float64(projection.OpenSeats))
 	snTopSnapshotUnits.WithLabelValues("trail_hops").Set(float64(inputs.trailHops))
+	// providers whose unit rule (a) withheld (sn_top_admission.go)
+	snTopSnapshotUnits.WithLabelValues("withheld_providers").Set(float64(inputs.withheldProviders))
 	snTopProjectedCutoff.Set(model.SnTopFinite(projection.ProjectedCutoff))
 	snTopClaimedCutoff.Set(snTopNullableGauge(projection.ClaimedCutoff))
 	snTopReplicaAgreement.WithLabelValues("match").Set(float64(inputs.agreement.replicaMatches))
