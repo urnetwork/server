@@ -8,7 +8,7 @@
 // host's (the load harness, sidecartest.SocketLoad). The benchmarks run inside a test, since the test Redis comes only
 // through server's test environment, and log what testing.Benchmark measured; -short skips them.
 
-package main
+package socketshost
 
 import (
 	"context"

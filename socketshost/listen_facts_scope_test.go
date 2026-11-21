@@ -1,4 +1,4 @@
-package main
+package socketshost
 
 import (
 	"context"
@@ -24,8 +24,8 @@ func TestSocketBlockRequiresKnownScopeLabels(t *testing.T) {
 			return labels, known && id == networkId
 		}))
 		client, bearer, _ := listenFactsClient(t, nil)
-		deps := &hostDeps{}
-		if err := deps.setGateApiSources("https://api.example", bearer, client, defaultHostSettings().ListenFactsMaxByteCount); err != nil {
+		deps := &HostDeps{}
+		if err := deps.SetGateApiSources("https://api.example", bearer, client, DefaultHostSettings().ListenFactsMaxByteCount); err != nil {
 			t.Fatal(err)
 		}
 		facts, err := deps.TlsListenFacts.ListenFacts(ctx, connect.Id(networkId))

@@ -1,9 +1,9 @@
 //go:build sidecar_pending
 
-package main
+package tlsedgehost
 
 // T3 for tlsedge on server's host (TLS-M5-26; R-TLS-2, R-TLS-9, D-TLS-9, FS-34, I-12, I-13, X11; §22.5's §13 row and its
-// hot-path gate): the block's host as main composes it (newTlsEdgeHost) on model.NewTlsEdgeStore over the private
+// hot-path gate): the block's host as main composes it (NewBlockHost) on model.NewTlsEdgeStore over the private
 // stack's Postgres, the test's own database, and the stack's Redis, through .stack/server-test.sh (Q-TEST-1), with
 // sidecartest's Quota, gates and metrics and a fake clock that starts at the wall clock's second, so the records land in
 // an hour the store keeps. The names are model's: a root, a network and its label made as publishing makes them, and
@@ -466,8 +466,8 @@ type t3EdgeWorld struct {
 	stack     sidecar.Redis
 	redis     *t3EdgeSwitchRedis
 	tags      *t3EdgeTags
-	settings  *hostSettings
-	host      *tlsEdgeHost
+	settings  *HostSettings
+	host      *Host
 	dial      *t3EdgeDial
 	device    *t3EdgeDeviceCertificate
 	root      string
@@ -513,14 +513,14 @@ func newT3EdgeNetwork(t testing.TB, ctx context.Context, root string, givenNetwo
 
 // A block on the stack's Postgres and Redis serving its network's names behind a loopback PROXY listener on 443, ready,
 // its settings changed by configure first.
-func newT3EdgeWorld(t testing.TB, configure func(settings *hostSettings)) *t3EdgeWorld {
+func newT3EdgeWorld(t testing.TB, configure func(settings *HostSettings)) *t3EdgeWorld {
 	t.Helper()
 	return newT3EdgeWorldOn(t, sidecartest.NewFakeClock(time.Now().UTC().Truncate(time.Second)), nil, configure)
 }
 
 // newT3EdgeWorld on clock, which a world of other engines shares, for the network networkId when one is given: one an
 // authorization log of its own already names.
-func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId *sidecar.Id, configure func(settings *hostSettings)) *t3EdgeWorld {
+func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId *sidecar.Id, configure func(settings *HostSettings)) *t3EdgeWorld {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -549,7 +549,7 @@ func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId
 	tlsEdge.Blocks = 1
 	// the records wait for the engine's last write, at its close
 	tlsEdge.RecordFlushInterval = 1000 * time.Hour
-	settings := defaultHostSettings(tlsEdge)
+	settings := DefaultHostSettings(tlsEdge)
 	if configure != nil {
 		configure(settings)
 	}
@@ -561,13 +561,13 @@ func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId
 	}
 	clients := newHostTestClients(settings.TlsEdge.Clients)
 	log := &hostTestLog{}
-	deps := &hostDeps{
+	deps := &HostDeps{
 		Quota: fakes.Quota,
 		Store: model.NewTlsEdgeStore(nil),
-		NewClients: func(ctx context.Context) (hostClients, error) {
+		NewClients: func(ctx context.Context) (HostClients, error) {
 			return clients, nil
 		},
-		NewDial: func(clients hostClients) (hostSocketDial, error) {
+		NewDial: func(clients HostClients) (HostSocketDial, error) {
 			return dial.dial, nil
 		},
 		Gates:   fakes.Gates,
@@ -576,7 +576,7 @@ func newT3EdgeWorldOn(t testing.TB, clock *sidecartest.FakeClock, givenNetworkId
 		Clock:   clock,
 		Log:     log,
 	}
-	host, err := newTlsEdgeHost(ctx, settings, deps)
+	host, err := NewBlockHost(ctx, settings, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,8 +945,8 @@ func TestT3TlsedgeKeysShareTheirSlot(t *testing.T) {
 			directory string
 			patterns  []string
 		}{
-			{directory: "../..", patterns: []string{"./cli/tlsedge"}},
-			{directory: "../../../sidecar", patterns: []string{"./certsservice", "./tlsedgeservice"}},
+			{directory: "..", patterns: []string{"./tlsedgehost", "./cli/tlsedge"}},
+			{directory: "../../sidecar", patterns: []string{"./certsservice", "./tlsedgeservice"}},
 		} {
 			findings, err := crossslot.Check(check.directory, check.patterns...)
 			if err != nil {

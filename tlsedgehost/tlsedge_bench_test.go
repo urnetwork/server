@@ -1,4 +1,4 @@
-package main
+package tlsedgehost
 
 // §13.5's setup baseline (TLS-M5-26; §22.8, §13.5's targets: setup adds at most 300 ms warm and 1.5 s cold at p95,
 // the contract round trip and the end-to-end handshake included): BenchmarkTlsEdgeSetup times one visitor's setup
@@ -119,11 +119,11 @@ func newBenchSetupWorld(b testing.TB) (address string, visit []byte, closeWorld 
 		return newBenchSetupStream(), nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	host, err := newTlsEdgeHost(ctx, settings, &hostDeps{
+	host, err := NewBlockHost(ctx, settings, &HostDeps{
 		Quota:      world.quota,
 		Store:      world.store,
-		NewClients: func(ctx context.Context) (hostClients, error) { return world.clients, nil },
-		NewDial:    func(clients hostClients) (hostSocketDial, error) { return dial, nil },
+		NewClients: func(ctx context.Context) (HostClients, error) { return world.clients, nil },
+		NewDial:    func(clients HostClients) (HostSocketDial, error) { return dial, nil },
 		Gates:      world.gates,
 		Redis:      world.redis,
 		Clock:      world.clock,

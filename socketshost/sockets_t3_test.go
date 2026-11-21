@@ -1,6 +1,6 @@
 // T3 for the sockets engine on server (SOCK-M5-17; R-SOCK-6, D-SOCK-7, D-SOCK-10, D-SOCK-15, I-12): SOCK-M5-16's
 // cross-component rows on server's host with real Redis (Q-TEST-1). The host is built as a block builds it
-// (newSocketsHost), on model.NewSocketStore over the private test Redis that test-env.sh attests, with the production
+// (NewBlockHost), on model.NewSocketStore over the private test Redis that test-env.sh attests, with the production
 // gate reading a network's real authorization log (the admission world on a Net, through the direct source standing
 // for api's internal route), and the Net's fake clock, authenticator, Quota, Push and gates. On it:
 //
@@ -20,7 +20,7 @@
 // script's benchmark sockets_bench_test.go's. Nothing sleeps: the engine's first probe, the gate's first over-limit read
 // and its loads are awaited by count, and time moves on the Net's clock.
 
-package main
+package socketshost
 
 import (
 	"bytes"
@@ -95,7 +95,7 @@ type t3World struct {
 	world     *hostTestWorld
 	store     *model.SocketStore
 	scripts   *t3Scripts
-	host      *socketsHost
+	host      *Host
 	networkId connect.Id
 	keys      *sidecar.SocketKeys
 	listener  *t3Sidecar
@@ -116,7 +116,7 @@ func newT3World(t testing.TB) *t3World {
 
 // newT3World with grants beside the app/* one, each a JSON grant written at the world's start time, and the host's
 // seams changed by mutate once the world's devices and urnetwork_edge are known.
-func newT3WorldWith(t testing.TB, grants func(now time.Time) []string, mutate func(world *t3World, deps *hostDeps)) *t3World {
+func newT3WorldWith(t testing.TB, grants func(now time.Time) []string, mutate func(world *t3World, deps *HostDeps)) *t3World {
 	t.Helper()
 	ctx := t.Context()
 	net := sidecartest.NewNet(ctx, nil)
@@ -168,7 +168,7 @@ func newT3WorldWith(t testing.TB, grants func(now time.Time) []string, mutate fu
 	scripts := &t3Scripts{t: t, counts: map[string]int{}}
 	store := model.NewSocketStore(clock, nil)
 	store.Testing_ObserveScripts(scripts.observe)
-	settings := defaultHostSettings()
+	settings := DefaultHostSettings()
 	settings.Sockets.Gate.Cache.PollJitter = 0
 	settings.Sockets.Gate.Cache.FailureBackoff = 0
 	settings.Sockets.Gate.BehindReloadInterval = time.Hour
@@ -186,7 +186,7 @@ func newT3WorldWith(t testing.TB, grants func(now time.Time) []string, mutate fu
 	}
 	self.listener = self.sidecarOf(listenerDevice)
 	self.dialer = self.sidecarOf(dialerDevice)
-	deps := &hostDeps{
+	deps := &HostDeps{
 		Quota:         world.quota,
 		Source:        sidecar.NewAclGateDirectSource(nil, net.Host().Blobs, nil),
 		KeyFile:       hostTestKeyFile(t, clock.Now()),
@@ -200,7 +200,7 @@ func newT3WorldWith(t testing.TB, grants func(now time.Time) []string, mutate fu
 	if mutate != nil {
 		mutate(self, deps)
 	}
-	host, err := newSocketsHost(ctx, settings, deps)
+	host, err := NewBlockHost(ctx, settings, deps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,7 @@ func newT3CustomWorldUnder(t testing.TB, audience string) *t3CustomWorld {
 			audience, now.Add(24*time.Hour).UTC().Format(time.RFC3339))}
 	}
 	var facts *socketsservice.TlsListenFacts
-	world := newT3WorldWith(t, publish, func(world *t3World, deps *hostDeps) {
+	world := newT3WorldWith(t, publish, func(world *t3World, deps *HostDeps) {
 		now := world.world.clock.Now()
 		facts = &socketsservice.TlsListenFacts{Verified: true, Standing: sidecar.AbuseStandingStandard, Tier: "team"}
 		for _, device := range []*t3Sidecar{world.listener, world.dialer} {

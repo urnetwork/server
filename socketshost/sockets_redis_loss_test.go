@@ -8,7 +8,7 @@
 // and its pages take the same path. The restart itself, with every connection to the database cut, is
 // sidecart3.RedisRestart's under sidecar_disruption (sockets_redis_restart_test.go), as §22.8's nightly runs it.
 
-package main
+package socketshost
 
 import (
 	"net/http"

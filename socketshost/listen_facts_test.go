@@ -1,4 +1,4 @@
-package main
+package socketshost
 
 // The block's production internal-gate source talks to the registered API router
 // entirely in process. Only the authoritative facts model is replaced in this test.
@@ -74,9 +74,9 @@ func TestSocketBlockLoadsAuthoritativeListenFacts(t *testing.T) {
 		return &socketsservice.TlsListenFacts{MailNetwork: true, Verified: true, Certs: []*socketsservice.TlsListenCert{{SidecarId: deviceId, NetworkPair: true, NotAfter: expires}}}, nil
 	})
 	client, socketsBearer, otherBearer := listenFactsClient(t, source)
-	deps := &hostDeps{}
+	deps := &HostDeps{}
 	for _, bearer := range []string{otherBearer, socketsBearer} {
-		if err := deps.setGateApiSources("https://api.example", bearer, client, defaultHostSettings().ListenFactsMaxByteCount); err != nil {
+		if err := deps.SetGateApiSources("https://api.example", bearer, client, DefaultHostSettings().ListenFactsMaxByteCount); err != nil {
 			t.Fatal(err)
 		}
 		facts, err := deps.TlsListenFacts.ListenFacts(t.Context(), networkId)
@@ -101,7 +101,7 @@ func TestSocketBlockPublishesTlsAndSmtpToEdge(t *testing.T) {
 			fmt.Sprintf(`{"src":["autogroup:member"],"dst":["dns:blog","sock:tls/443/blog"],"allow":["publish","listen"],"audience":"public","expires":%q}`, now.Add(time.Hour).UTC().Format(time.RFC3339)),
 			`{"src":["autogroup:member"],"dst":["sock:smtp/25/mx"],"allow":["listen"]}`,
 		}
-	}, func(world *t3World, deps *hostDeps) {
+	}, func(world *t3World, deps *HostDeps) {
 		deps.Redis = sidecartest.NewFakeRedis(t.Context(), world.world.clock, world.world.faults, nil, nil)
 		deps.Store = sidecartest.NewFakeSocketStore(world.world.clock, nil, world.world.faults)
 		facts := &socketsservice.TlsListenFacts{
@@ -114,8 +114,8 @@ func TestSocketBlockPublishesTlsAndSmtpToEdge(t *testing.T) {
 			}
 			return facts, nil
 		}))
-		apiDeps := &hostDeps{}
-		if err := apiDeps.setGateApiSources("https://api.example", bearer, client, defaultHostSettings().ListenFactsMaxByteCount); err != nil {
+		apiDeps := &HostDeps{}
+		if err := apiDeps.SetGateApiSources("https://api.example", bearer, client, DefaultHostSettings().ListenFactsMaxByteCount); err != nil {
 			t.Fatal(err)
 		}
 		deps.TlsListenFacts = apiDeps.TlsListenFacts

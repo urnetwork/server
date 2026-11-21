@@ -18,6 +18,8 @@ import (
 	"context"
 
 	"github.com/urnetwork/sidecar"
+
+	"github.com/urnetwork/server/oauth"
 )
 
 // What a block's main gives NewServiceHost.
@@ -42,6 +44,10 @@ type ServiceHostOptions struct {
 	Abuse sidecar.AbuseGate
 	// The engines' clock. nil is real time.
 	Clock sidecar.Clock
+	// The svc- key set's public verifier, which the Authenticator verifies callers' service tokens under: a test's
+	// over keys of its own. nil: the process's, a block's mounted oauth-jwks-svc.json, else the issuer's own set
+	// (oauth.VerifyServiceToken).
+	ServiceTokens *oauth.ServiceTokenVerifier
 
 	// nil takes each one's defaults.
 	Redis *RedisSettings
@@ -49,14 +55,14 @@ type ServiceHostOptions struct {
 }
 
 // The ServiceHost a block's engine takes: Redis on server's pools, Metrics on the default registry,
-// the service token Authenticator, the gates read from sidecar.yml until ctx ends, Tasks for a process
-// with Postgres, and the rest as options gave them.
+// the service token Authenticator under options' verifier or the process's, the gates read from
+// sidecar.yml until ctx ends, Tasks for a process with Postgres, and the rest as options gave them.
 func NewServiceHost(ctx context.Context, options *ServiceHostOptions) *sidecar.ServiceHost {
 	if options == nil {
 		options = &ServiceHostOptions{}
 	}
 	host := &sidecar.ServiceHost{
-		Authenticator: NewAuthenticator(),
+		Authenticator: NewAuthenticatorWithVerifier(options.ServiceTokens),
 		Quota:         options.Quota,
 		Metrics:       NewMetrics(),
 		Redis:         NewRedis(options.Redis),

@@ -1,4 +1,4 @@
-package main
+package socketshost
 
 // The sockets block reads server-owned listen facts from the API on its own
 // internal bearer. The namespace cache calls this transport off the inline path.
@@ -20,7 +20,7 @@ import (
 )
 
 // Installs the authorization log source and the facts source at the same configured API.
-func (self *hostDeps) setGateApiSources(apiUrl string, bearer string, client *http.Client, maxFactsBytes int64) error {
+func (self *HostDeps) SetGateApiSources(apiUrl string, bearer string, client *http.Client, maxFactsBytes int64) error {
 	if bearer == "" || maxFactsBytes <= 0 {
 		return errors.New("sockets needs an internal bearer and a positive listen facts bound")
 	}
