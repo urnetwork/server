@@ -27,17 +27,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Installs a scope source answering scopes for networkId, and nothing known for any other network.
-func testDnsScopeSource(t testing.TB, networkId server.Id, scopes ...string) {
-	t.Helper()
-	t.Cleanup(SetDnsScopeLabelSource(func(ctx context.Context, id server.Id) ([]string, bool) {
-		if id != networkId {
-			return nil, false
-		}
-		return scopes, true
-	}))
-}
-
 // The zone's rows at or below owner, as lines.
 func testDnsZoneLinesBelow(t testing.TB, ctx context.Context, root string, networkId server.Id, owner string) []string {
 	t.Helper()

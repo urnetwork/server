@@ -133,8 +133,8 @@ func newT3SendNetwork(t testing.TB, ctx context.Context, start time.Time) (strin
 	return root, sidecar.Id(networkId), label
 }
 
-// The block's gate with §8's mail_send answered for the member's admitted devices: no projection reader brings the
-// network's rows into this block yet (gate.go, plan-SOCK-gate-data), and every other row is the gate's own.
+// This fixture supplies mail_send for the member's admitted devices in a network with no Team
+// scopes. The host gate loads its other facts from the private stack.
 type t3SendGate struct {
 	*hostGate
 	networkId sidecar.Id
@@ -142,11 +142,12 @@ type t3SendGate struct {
 }
 
 // See smtpedgeservice.SmtpGate: allowed for a device of the member in the world's network, else no grant.
-func (self *t3SendGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) sidecar.AclDecision {
+func (self *t3SendGate) SendFacts(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) (*smtpedgeservice.SmtpGateFacts, sidecar.AclDecision) {
+	facts, _ := self.Facts(networkId)
 	if networkId == self.networkId && self.member(sidecarId) {
-		return sidecar.AclDecision{Allowed: true, Reason: sidecar.AclReasonRule}
+		return facts, sidecar.AclDecision{Allowed: true, Reason: sidecar.AclReasonRule}
 	}
-	return sidecar.AclDecision{Reason: sidecar.AclReasonNoGrant}
+	return facts, sidecar.AclDecision{Reason: sidecar.AclReasonNoGrant}
 }
 
 // The block a row's world sends through, and what the T3 checks read after the row.

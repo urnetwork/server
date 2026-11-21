@@ -152,11 +152,12 @@ type smtpMeterGate struct {
 }
 
 // See smtpedgeservice.SmtpGate: allowed for a device of the member in the world's network, else no grant.
-func (self *smtpMeterGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) sidecar.AclDecision {
+func (self *smtpMeterGate) SendFacts(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) (*smtpedgeservice.SmtpGateFacts, sidecar.AclDecision) {
+	facts, _ := self.Facts(networkId)
 	if networkId == self.networkId && self.member(sidecarId) {
-		return sidecar.AclDecision{Allowed: true, Reason: sidecar.AclReasonRule}
+		return facts, sidecar.AclDecision{Allowed: true, Reason: sidecar.AclReasonRule}
 	}
-	return sidecar.AclDecision{Reason: sidecar.AclReasonNoGrant}
+	return facts, sidecar.AclDecision{Reason: sidecar.AclReasonNoGrant}
 }
 
 // Reads the network's limits again, as the gate's refresh does every §20.7's 5 s.

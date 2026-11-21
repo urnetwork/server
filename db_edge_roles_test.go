@@ -163,6 +163,7 @@ var edgeRoleSmtpedge = &edgeRoleBlock{
 		"SmtpRecipientCount":              "RecipientCount",
 		"GetSmtpGateFactsWithSettings":    "GetSmtpGateFactsWithSettings",
 		"getNetworkLabelInTx":             "GetSmtpGateFactsWithSettings",
+		"getNetworkLiveAliasesInTx":       "GetSmtpGateFactsWithSettings",
 		"GetNetworkVerifiedDomains":       "GetSmtpGateFactsWithSettings",
 		"getDnsCustomHostRowsInTx":        "GetSmtpGateFactsWithSettings with strict_envelope on, DnsStrictMxHostRows' where clause",
 		"NetworkDowngradeTime":            "GetSmtpGateFactsWithSettings",
@@ -172,6 +173,8 @@ var edgeRoleSmtpedge = &edgeRoleBlock{
 		"loadAbuseHardDeny":               "the hard-deny snapshot's load",
 		"loadNetworkAbuseFactsWithConn":   "the abuse gate's load, whose columns and joins its binary's groups choose",
 		"loadNetworkAbuseTrustedWithConn": "the abuse gate's load",
+
+		"GetNetworkScreenAllowedNamesInTx": "GetSmtpGateFactsWithSettings",
 	},
 	notRun: map[string]string{
 		"smtpSendTablePartitioned":    "the partition family's Partitioned hook, on the maintenance pool, which the block does not have: the runway's and the retirement's in taskworker, and EnsureRangeFor's in a batch whose day has no partition, which fails",
@@ -1278,6 +1281,11 @@ func TestEdgeRoleSmtpedgeRunsUnderItsGrants(t *testing.T) {
 			`INSERT INTO dns_label (root, label, network_id, kind, state, state_time) VALUES ($1, 'abcdefghij', $2, $3, $4, $5)`: {
 				edgeRoleRoot, networkId, model.DnsLabelKindLabel, model.DnsLabelStateLive, now,
 			},
+			`INSERT INTO dns_label (root, label, network_id, kind, state, state_time) VALUES
+				($1, 'live-alias', $2, $3, $4, $6), ($1, 'retired-alias', $2, $3, $5, $6),
+				($1, 'other-alias', $7, $3, $4, $6), ('other.example.', 'other-root', $2, $3, $4, $6)`: {
+				edgeRoleRoot, networkId, model.DnsLabelKindAlias, model.DnsLabelStateLive, model.DnsLabelStateRetiring, now, server.NewId(),
+			},
 			`INSERT INTO mail_network (network_id, create_time) VALUES ($1, $2)`: {networkId, now},
 			`INSERT INTO network_domain (network_id, domain, challenge, verify_time) VALUES ($1, 'customer.example', 'challenge', $2)`: {
 				networkId, now,
@@ -1363,7 +1371,7 @@ func TestEdgeRoleSmtpedgeRunsUnderItsGrants(t *testing.T) {
 			if err != nil {
 				t.Fatal("GetSmtpGateFactsWithSettings under smtpedge's role:", err)
 			}
-			if facts.Label != "abcdefghij" || facts.MailEnableTime.IsZero() || !slices.Equal(facts.VerifiedDomains, []string{"customer.example"}) ||
+			if facts.Label != "abcdefghij" || !slices.Equal(facts.Aliases, []string{"live-alias"}) || facts.MailEnableTime.IsZero() || !slices.Equal(facts.VerifiedDomains, []string{"customer.example"}) ||
 				!slices.Equal(facts.StrictDomains, []string{"customer.example"}) || facts.ReportToken != "token" {
 				t.Fatalf("the gate's facts under smtpedge's role: %+v", facts)
 			}
@@ -1440,6 +1448,7 @@ func TestEdgeRoleSmtpedgeRunsUnderItsGrants(t *testing.T) {
 				`SELECT user_auth FROM network_user_auth_password LIMIT 1`,
 				`SELECT network_name FROM network LIMIT 1`,
 				`SELECT challenge FROM network_domain LIMIT 1`,
+				`SELECT state_time FROM dns_label LIMIT 1`,
 				// no table the block does not read
 				`SELECT 1 FROM network_user LIMIT 1`,
 				`SELECT 1 FROM mail_direct_mx LIMIT 1`,

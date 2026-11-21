@@ -206,6 +206,10 @@ func TestScreenNetworkNameReviewsOnceUntilAllowed(t *testing.T) {
 		if err := ScreenNetworkName(ctx, networkId, "paypal-support"); err != nil {
 			t.Fatalf("the retry after the allow: %v", err)
 		}
+		gateFacts, err := GetSmtpGateFacts(ctx, networkId, "root.example")
+		if err != nil || !slices.Equal(gateFacts.ReviewAllowedNames, []string{"paypal-support"}) {
+			t.Fatalf("SMTP name clearance: %+v, %v", gateFacts, err)
+		}
 		if names := GetNetworkScreenAllowedNames(ctx, networkId); !slices.Equal(names, []string{"paypal-support"}) {
 			t.Fatalf("allowed names %v", names)
 		}
@@ -230,6 +234,10 @@ func TestScreenNetworkNameReviewsOnceUntilAllowed(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+		gateFacts, err = GetSmtpGateFacts(ctx, networkId, "root.example")
+		if err != nil || len(gateFacts.ReviewAllowedNames) != 0 {
+			t.Fatalf("SMTP name clearance after lift: %+v, %v", gateFacts, err)
+		}
 		if review := AbuseScreenReviewOf(ScreenNetworkName(ctx, networkId, "paypal-support")); review == nil {
 			t.Fatal("the name passed after its allow was lifted")
 		}
@@ -358,6 +366,7 @@ func TestTlsListenFactsCarryScreenAllows(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := testScreenNetwork(t, ctx)
+		testDnsScopeSource(t, networkId)
 		review := AbuseScreenReviewOf(ScreenNetworkHost(ctx, networkId, "apple-login"))
 		if review == nil || review.CaseId == nil {
 			t.Fatalf("the review: %+v", review)

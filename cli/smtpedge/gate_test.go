@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"net/netip"
@@ -18,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
@@ -141,6 +144,28 @@ func TestHostGateLoadsOnAMissAndAnswersFromMemory(t *testing.T) {
 	}
 }
 
+// A failed model refresh cannot extend a live alias or an unlifted reviewer clearance indefinitely.
+func TestHostGateForgetsNamesAfterFailedRefresh(t *testing.T) {
+	networkId := sidecar.NewId()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	source := &testGateSource{loads: map[sidecar.Id]int{}, facts: &smtpedgeservice.SmtpGateFacts{
+		Aliases: []string{"live-alias"}, ReviewAllowedNames: []string{"cleared"},
+	}}
+	gate := &hostGate{ctx: t.Context(), source: source, clock: clock, settings: defaultHostGateSettings(),
+		networkIdFacts: map[sidecar.Id]*hostGateEntry{}, loading: map[sidecar.Id]bool{}}
+	gate.load(networkId, clock.Now())
+	if facts, ok := gate.Facts(networkId); !ok || len(facts.Aliases) != 1 || len(facts.ReviewAllowedNames) != 1 {
+		t.Fatalf("initial alias and clearance: %+v, %t", facts, ok)
+	}
+	source.facts = nil
+	gate.load(networkId, clock.Now())
+	facts, ok := gate.Facts(networkId)
+	gate.wait()
+	if ok || facts != nil {
+		t.Fatalf("failed refresh retained %+v", facts)
+	}
+}
+
 // Community's limits carry enforce_sidecar_limits's state as NetworkQuotaLimits sets it, beside the plan, which
 // they report whatever it says (owner decision 520).
 func TestModelGateSourceCommunityLimitsCarryTheSwitch(t *testing.T) {
@@ -231,7 +256,7 @@ func TestHostGateUnwiredRowsAnswerNotLoaded(t *testing.T) {
 	gate := newHostGate(ctx, &testGateSource{loads: map[sidecar.Id]int{}}, sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), defaultHostGateSettings())
 	defer gate.wait()
 	defer cancel()
-	if decision := gate.MaySendMail(sidecar.NewId(), sidecar.NewId(), time.Now()); decision.Allowed || decision.Reason != sidecar.AclReasonNoState {
+	if _, decision := gate.SendFacts(sidecar.NewId(), sidecar.NewId(), time.Now()); decision.Allowed || decision.Reason != sidecar.AclReasonNoState {
 		t.Fatalf("mail_send %+v", decision)
 	}
 	if state, ok := gate.Breaker(); ok || state != nil {
@@ -251,7 +276,26 @@ func TestHostGateUsesTheVerifiedMailSendGrant(t *testing.T) {
 	admission := sidecartest.NewAdmissionNet(t, tier)
 	defer admission.Close()
 	admission.SaveAclPolicy([]byte(`{"grants":[{"src":["autogroup:member"],"dst":["mail:*"],"allow":["send"]}]}`), nil)
+	// The SMTP gate reads signed rows from the sequencer's store on this host.
+	_, rawRows := admission.BaseKeepingTheFold(admission.WriterDevice(), nil)
+	rows := &bridge.ProjectionRows{}
+	if err := proto.Unmarshal(rawRows, rows); err != nil {
+		t.Fatal(err)
+	}
+	rows.TeamScopes = []*bridge.TeamScopeRow{{Label: "sales", Owner: &bridge.TeamScopeRow_MemberId{MemberId: admission.Owner().MemberId.Bytes()}}}
+	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(body)
+	header, _ := admission.BaseKeepingTheFold(admission.WriterDevice(), func(header *bridge.ProjectionHeader) {
+		header.RowsSha256, header.RowsByteCount = digest[:], uint32(len(body))
+	})
 	id := admission.NetworkId()
+	api := tier.NewApi(admission.Clock(), tier.Cluster)
+	if _, err := api.AppendBase(t.Context(), id, header, body, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	abuse := sidecartest.NewFakeAbuseGate()
 	abuse.Set(connect.Id(id), sidecar.AbuseStandingStandard, true)
 	settings := sidecar.DefaultAclGateSettings()
@@ -262,9 +306,11 @@ func TestHostGateUsesTheVerifiedMailSendGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeCache()
-	gate := &hostGate{mail: sidecar.NewAclGateView(cache, abuse, nil)}
 	now := admission.Clock().Now()
-	if got := gate.MaySendMail(id, admission.Owner().SidecarId, now); got.Allowed || got.Reason != sidecar.AclReasonNoState {
+	gate := &hostGate{mail: sidecar.NewAclGateView(cache, abuse, nil), clock: admission.Clock(), networkIdFacts: map[sidecar.Id]*hostGateEntry{
+		id: {facts: &smtpedgeservice.SmtpGateFacts{Label: "network"}},
+	}}
+	if _, got := gate.SendFacts(id, admission.Owner().SidecarId, now); got.Allowed || got.Reason != sidecar.AclReasonNoState {
 		t.Fatalf("cold grant: %+v", got)
 	}
 	select {
@@ -275,10 +321,10 @@ func TestHostGateUsesTheVerifiedMailSendGrant(t *testing.T) {
 	case <-t.Context().Done():
 		t.Fatal(t.Context().Err())
 	}
-	if got := gate.MaySendMail(id, admission.Owner().SidecarId, now); !got.Allowed {
-		t.Fatalf("admitted sender: %+v", got)
+	if facts, got := gate.SendFacts(id, admission.Owner().SidecarId, now); !got.Allowed || facts == nil || !slices.Equal(facts.ScopeLabels, []string{"sales"}) {
+		t.Fatalf("admitted sender and signed From scopes: %+v, %+v", got, facts)
 	}
-	if got := gate.MaySendMail(id, sidecar.NewId(), now); got.Allowed {
+	if _, got := gate.SendFacts(id, sidecar.NewId(), now); got.Allowed {
 		t.Fatal("an unknown sidecar sent under another sidecar's grant")
 	}
 }

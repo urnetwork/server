@@ -38,12 +38,7 @@ func GetNetworkTlsCertNames(ctx context.Context, networkId server.Id, root strin
 			}, server.TxReadCommitted)
 			return
 		}
-		server.Db(ctx, func(conn server.PgConn) {
-			label = getNetworkLabelInTx(ctx, conn, networkId, root)
-			if label != "" {
-				aliases = getNetworkLiveAliasesInTx(ctx, conn, networkId, root)
-			}
-		})
+		label, aliases = getNetworkLabelAndLiveAliases(ctx, networkId, root)
 	}); r != nil {
 		return "", nil, ErrTlsCertNamesUnavailable
 	}
@@ -51,4 +46,18 @@ func GetNetworkTlsCertNames(ctx context.Context, networkId server.Id, root strin
 		return "", nil, returnErr
 	}
 	return label, aliases, nil
+}
+
+// The network's label and live aliases for a non-allocating certificate or SMTP gate read.
+func getNetworkLabelAndLiveAliases(ctx context.Context, networkId server.Id, root string) (label string, aliases []string) {
+	if !server.SidecarMg2Linked() {
+		return "", nil
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		label = getNetworkLabelInTx(ctx, conn, networkId, root)
+		if label != "" {
+			aliases = getNetworkLiveAliasesInTx(ctx, conn, networkId, root)
+		}
+	})
+	return
 }

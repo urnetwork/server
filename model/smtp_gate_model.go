@@ -26,18 +26,20 @@ import (
 // domains, their withhold time and the strict ones, are
 // smtp_custom_domain_model.go's (SMTP-M9-34).
 //
-// Not loaded here yet, each answering closed where the gate reads it: a live
-// alias's and a Team scope's zones (§12.7) and the names a reviewer allowed
-// (ABUSE-M5-08). The limits are Quota.Limits', which the gate reads beside
-// this.
+// The SMTP host adds its signed Team scope labels from its watched projection
+// and its limits from Quota.Limits. A cold projection keeps the gate unavailable.
 func GetSmtpGateFacts(ctx context.Context, networkId server.Id, root string) (*smtpedgeservice.SmtpGateFacts, error) {
 	return GetSmtpGateFactsWithSettings(ctx, networkId, root, DefaultSmtpCustomDomainSettings())
 }
 
 // GetSmtpGateFacts with the custom domains' settings.
 func GetSmtpGateFactsWithSettings(ctx context.Context, networkId server.Id, root string, settings *SmtpCustomDomainSettings) (*smtpedgeservice.SmtpGateFacts, error) {
+	root = dnsLabelRoot(root)
+	label, aliases := getNetworkLabelAndLiveAliases(ctx, networkId, root)
 	facts := &smtpedgeservice.SmtpGateFacts{
-		Label: GetNetworkLabel(ctx, networkId, root),
+		Label:              label,
+		Aliases:            aliases,
+		ReviewAllowedNames: GetNetworkScreenAllowedNames(ctx, networkId),
 	}
 	if server.SidecarMg7Linked() {
 		server.Db(ctx, func(conn server.PgConn) {
@@ -58,7 +60,7 @@ func GetSmtpGateFactsWithSettings(ctx context.Context, networkId server.Id, root
 			result, err := conn.Query(
 				ctx,
 				`SELECT report_token FROM network_dns_zone WHERE root = $1 AND network_id = $2`,
-				dnsLabelRoot(root),
+				root,
 				networkId,
 			)
 			server.WithPgResult(result, err, func() {

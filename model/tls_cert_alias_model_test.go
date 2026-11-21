@@ -108,6 +108,7 @@ func TestTlsCertIssueCertifiesTheAliasesItsSetNames(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		world, name := newTestDnsAliasWorld(t, ctx, sidecar.AbuseStandingStandard, true)
+		testDnsScopeSource(t, world.networkId)
 		if _, err := world.claimAlias(ctx, name); err != nil {
 			t.Fatal(err)
 		}
