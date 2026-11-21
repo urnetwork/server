@@ -330,6 +330,87 @@ func TestAdoptedRunResumesTheLogAtUnchangedPositions(t *testing.T) {
 	}
 }
 
+func TestConfigReseedAdoptsAndWritesOnlyTheRequestedNetwork(t *testing.T) {
+	requested := newReseedWorld(t, false)
+	other := newReseedWorld(t, false)
+	foreign := other.kept(other.ownerSidecarId)
+	if adoption, err := adoptConfigRun(&requested.networkId, nil, []*ConfigReseedUpload{foreign}); adoption != nil || !errors.Is(err, ErrConfigReseedRunRefused) {
+		t.Fatalf("another network's upload: %v", err)
+	}
+	adoption, err := adoptConfigRun(&requested.networkId, nil, []*ConfigReseedUpload{foreign, requested.kept(requested.ownerSidecarId)})
+	if err != nil || !adoption.belongsTo(requested.networkId) {
+		t.Fatalf("the requested network's upload among older uploads: %v", err)
+	}
+	cluster := testReseedFakeCluster(t)
+	sequencer := NewConfigLogSequencer(cluster, nil, nil)
+	if err := sequencer.WriteAdoptedRun(t.Context(), other.networkId, adoption); !errors.Is(err, ErrConfigReseedRunRefused) {
+		t.Fatalf("writing the run for another network: %v", err)
+	}
+	if _, err := cluster.Head(t.Context(), sidecar.ConfigEntryKey(sidecar.Id(other.networkId), 0)); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Fatalf("the rejected write changed the destination genesis: %v", err)
+	}
+	wrongGenesis := *adoption
+	wrongGenesis.SignedGenesis = foreign.SignedGenesis
+	if err := sequencer.WriteAdoptedRun(t.Context(), requested.networkId, &wrongGenesis); !errors.Is(err, ErrConfigReseedRunRefused) {
+		t.Fatalf("writing genesis bytes that differ from the verified adoption: %v", err)
+	}
+}
+
+func TestConfigSequencerRetainsItsTipAfterAMisroutedRebuild(t *testing.T) {
+	requested, other := newReseedWorld(t, false), newReseedWorld(t, false)
+	held, err := requested.sequencer.CaughtUpState(t.Context(), requested.networkId)
+	if err != nil || held == nil {
+		t.Fatalf("the requested network's state: %v", err)
+	}
+	valid := requested.kept(requested.ownerSidecarId)
+	foreign := other.kept(other.ownerSidecarId)
+	cluster := requested.sequencer.cluster
+	setSource := func(upload *ConfigReseedUpload) {
+		t.Helper()
+		for n, body := range append([][]byte{upload.SignedGenesis}, upload.Entries...) {
+			key := sidecar.ConfigEntryKey(sidecar.Id(requested.networkId), uint64(n))
+			held, err := cluster.Head(t.Context(), key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cluster.PutIfMatch(t.Context(), key, held.Etag, body, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, row := range foreign.Rows {
+		digest := sha256.Sum256(row)
+		if _, err := cluster.PutIfNoneMatch(t.Context(), sidecar.ConfigRowsKey(sidecar.Id(other.networkId), digest[:]), row, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setSource(foreign)
+	cold := NewConfigLogSequencer(cluster, nil, nil)
+	if state, err := cold.CaughtUpState(t.Context(), requested.networkId); state != nil || !errors.Is(err, sidecar.ErrConfigRunRefused) {
+		t.Fatalf("cold load of another network's signed run: %v", err)
+	}
+	if pin, _, err := requested.sequencer.verifiedTip(t.Context(), requested.networkId, held.Pin()); pin != nil || !errors.Is(err, sidecar.ErrConfigRunRefused) {
+		t.Fatalf("fresh restore check of another network's signed run: %v", err)
+	}
+	tail := sidecar.ConfigEntryKey(sidecar.Id(requested.networkId), held.Pin().GetVersion()+1)
+	if _, err := cluster.PutIfNoneMatch(t.Context(), tail, foreign.Entries[0], nil); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := requested.sequencer.CaughtUpState(t.Context(), requested.networkId); state != nil || !errors.Is(err, sidecar.ErrConfigEntryMalformed) {
+		t.Fatalf("reading a misrouted next entry: %v", err)
+	}
+	if err := cluster.Delete(t.Context(), tail); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := requested.sequencer.CaughtUpState(t.Context(), requested.networkId); state != held || err != nil {
+		t.Fatalf("lost the previously verified state: %v", err)
+	}
+	setSource(valid)
+	if pin, _, err := requested.sequencer.verifiedTip(t.Context(), requested.networkId, held.Pin()); err != nil || !proto.Equal(pin, held.Pin()) {
+		t.Fatalf("recovering the requested network: %v", err)
+	}
+}
+
 // Uploads are taken only while sidecar.yml's reseed is true.
 func TestConfigReseedIsRefusedOutsideARestore(t *testing.T) {
 	_, err := postConfigReseed(&ConfigReseedArgs{}, nil, NewConfigReseedUploads(nil), DefaultConfigReseedSettings())

@@ -89,21 +89,31 @@ func (self *ConfigLogSequencer) verifiedTip(ctx context.Context, networkId serve
 	network := self.network(networkId)
 	network.stateLock.Lock()
 	defer network.stateLock.Unlock()
-	// load afresh: the store, never this memory, says what the log is
-	network.log, network.signedGenesis = nil, nil
-	clear(network.basePins)
-	network.bases = nil
-	if err := network.loadWithLock(ctx, self, nil); err != nil {
+	// Verify the store afresh before replacing the last verified state and its indexes.
+	fresh := newConfigLogNetwork(networkId)
+	if err := fresh.loadWithLock(ctx, self, nil); err != nil {
 		return nil, false, err
 	}
-	if network.log == nil {
+	if fresh.log == nil {
+		if network.log != nil {
+			return nil, false, fmt.Errorf("%w: the verified log is absent", ErrConfigLogRestoreOffChain)
+		}
 		return nil, false, nil
 	}
-	state := network.log.State()
+	state := fresh.log.State()
 	pin := state.Pin()
 	if head.GetVersion() <= pin.GetVersion() && state.RetentionPoint() <= head.GetVersion() && !state.OnChain(head) {
 		return nil, false, fmt.Errorf("%w: at %d", ErrConfigLogRestoreOffChain, head.GetVersion())
 	}
+	if network.log != nil {
+		held := network.log.Pin()
+		if pin.GetVersion() < held.GetVersion() || (state.RetentionPoint() <= held.GetVersion() && !state.OnChain(held)) {
+			return nil, false, fmt.Errorf("%w: at the verified tip %d", ErrConfigLogRestoreOffChain, held.GetVersion())
+		}
+	}
+	network.log, network.signedGenesis = fresh.log, fresh.signedGenesis
+	network.basePins, network.bases = fresh.basePins, fresh.bases
+	network.lastTickTimeMs, network.lastTick = fresh.lastTickTimeMs, fresh.lastTick
 	hasDocument := false
 	if acl, err := state.Acl(); err == nil {
 		hasDocument = acl.HasDocument()

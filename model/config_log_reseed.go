@@ -156,6 +156,14 @@ type ConfigReseedAdoption struct {
 	state *sidecar.ConfigState
 }
 
+func (self *ConfigReseedAdoption) belongsTo(networkId server.Id) bool {
+	if self == nil || self.state == nil || self.state.NetworkId() != sidecar.Id(networkId) {
+		return false
+	}
+	genesis := bridge.GenesisChain(self.SignedGenesis)
+	return self.state.OnChain(&bridge.AuthPin{Version: 0, Chain: genesis[:]})
+}
+
 // The newest adopted base's header, nil when the run holds none.
 func (self *ConfigReseedAdoption) NewestBase() *bridge.ProjectionHeader {
 	if self.state == nil {
@@ -259,6 +267,10 @@ func configReseedRequiredMembers(state *sidecar.ConfigState) int {
 // verified under each genesis some upload holds, then adopted position by
 // position. restoredHead is the restored network_acl_head's pin, nil for none.
 func AdoptConfigRun(restoredHead *bridge.AuthPin, uploads []*ConfigReseedUpload) (*ConfigReseedAdoption, error) {
+	return adoptConfigRun(nil, restoredHead, uploads)
+}
+
+func adoptConfigRun(networkId *server.Id, restoredHead *bridge.AuthPin, uploads []*ConfigReseedUpload) (*ConfigReseedAdoption, error) {
 	genesisCandidates := [][]byte{}
 	for _, upload := range uploads {
 		if upload.SignedGenesis != nil && !slices.ContainsFunc(genesisCandidates, func(candidate []byte) bool { return bytes.Equal(candidate, upload.SignedGenesis) }) {
@@ -271,6 +283,10 @@ func AdoptConfigRun(restoredHead *bridge.AuthPin, uploads []*ConfigReseedUpload)
 		adoption, err := adoptConfigRunUnder(signedGenesis, restoredHead, uploads)
 		if err != nil {
 			lastErr = err
+			continue
+		}
+		if networkId != nil && !adoption.belongsTo(*networkId) {
+			lastErr = fmt.Errorf("%w: the genesis names another network", ErrConfigReseedRunRefused)
 			continue
 		}
 		if adopted != nil {
@@ -498,6 +514,9 @@ func CheckConfigReseedPushes(adoption *ConfigReseedAdoption, configPushes [][]by
 // writing nothing past it. The network's verifier is then loaded again from the
 // store.
 func (self *ConfigLogSequencer) WriteAdoptedRun(ctx context.Context, networkId server.Id, adoption *ConfigReseedAdoption) error {
+	if !adoption.belongsTo(networkId) {
+		return fmt.Errorf("%w: no verified adoption for this network", ErrConfigReseedRunRefused)
+	}
 	putOnce := func(key string, value []byte) error {
 		_, err := self.cluster.PutIfNoneMatch(self.issueP0(ctx, len(value)), key, value, nil)
 		var unknown *sidecar.BlobUnknownError
@@ -642,7 +661,7 @@ func postConfigReseed(args *ConfigReseedArgs, clientSession *session.ClientSessi
 	if err != nil {
 		return nil, unavailable(fmt.Errorf("the uploads cannot be read: %w", err))
 	}
-	adoption, err := AdoptConfigRun(restoredHead, held.Uploads)
+	adoption, err := adoptConfigRun(&networkId, restoredHead, held.Uploads)
 	if err != nil {
 		if errors.Is(err, ErrConfigReseedNoRun) {
 			return &ConfigReseedResult{}, nil
