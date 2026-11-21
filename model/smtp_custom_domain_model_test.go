@@ -62,6 +62,23 @@ func testSmtpCustomDomainClock(t testing.TB, tier NetworkTier, downgradeTime tim
 	})
 }
 
+// The status and selector publisher use the edge's same time boundary for a Team downgrade.
+func TestSmtpDeviceCustomFromUsesTheEdgeEntitlementClock(t *testing.T) {
+	settings := DefaultSmtpCustomDomainSettings()
+	network := server.NewId()
+	downgrade := time.Unix(1700000000, 0).UTC()
+	testSmtpCustomDomainClock(t, NetworkTierPro, downgrade, true)
+	cut := downgrade.Add(settings.DowngradeGrace)
+	if !smtpMaySendFromCustomDomains(t.Context(), network, cut.Add(-time.Nanosecond), settings) ||
+		smtpMaySendFromCustomDomains(t.Context(), network, cut, settings) {
+		t.Fatal("the sender did not stop at the edge's downgrade deadline")
+	}
+	testSmtpCustomDomainClock(t, NetworkTierTeam, time.Time{}, false)
+	if !smtpMaySendFromCustomDomains(t.Context(), network, cut, settings) {
+		t.Fatal("a Team could not use its verified sending domain")
+	}
+}
+
 // Verifies domain for the network, as POST /network/domain-verify leaves its row.
 func testSmtpVerifyDomain(ctx context.Context, networkId server.Id, domain string) {
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -194,7 +211,7 @@ func TestSmtpGateFactsCarryTheCustomDomains(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(status.VerifiedDomains, facts.VerifiedDomains) {
+		if !status.MaySendFromCustomDomains || !slices.Equal(status.VerifiedDomains, facts.VerifiedDomains) {
 			t.Fatalf("recipient domains %v, gate domains %v", status.VerifiedDomains, facts.VerifiedDomains)
 		}
 		if !slices.Equal(status.StrictDomains, facts.StrictDomains) {
