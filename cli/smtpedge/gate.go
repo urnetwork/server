@@ -9,7 +9,7 @@ package main
 //	            and refreshed each FactsRefreshInterval while a preamble asked within FactsKeepInterval; past
 //	            FactsMaxCount networks a new one is not loaded
 //	community   Community's tier limits from pro.yml, refreshed with the facts
-//	mail_send   AclGateView over the network's verified and watched projection
+//	mail_send   the subject's grant and Team scope labels from the same watched projection
 //	breaker     §21.5's level and listed sending addresses from model.GetMailBreakerState (ABUSE-M9-02), read
 //	            with the facts each FactsRefreshInterval. A read that fails, or rows that do not read whole, leave
 //	            none loaded, TRY_LATER: a state last read a refresh ago is not kept, since the level it lacks could
@@ -172,7 +172,7 @@ func (self *hostGate) wait() {
 	self.group.Wait()
 }
 
-// See smtpedgeservice.SmtpGate.
+// The network's database facts. A miss starts their background load.
 func (self *hostGate) Facts(networkId sidecar.Id) (*smtpedgeservice.SmtpGateFacts, bool) {
 	now := self.clock.Now()
 	load := false
@@ -199,7 +199,7 @@ func (self *hostGate) Facts(networkId sidecar.Id) (*smtpedgeservice.SmtpGateFact
 	if !ok {
 		return nil, false
 	}
-	// a copy, so a refresh never changes one handed out
+	// A copy for the projection's scope labels.
 	kept := *facts
 	return &kept, true
 }
@@ -217,14 +217,21 @@ func (self *hostGate) load(networkId sidecar.Id, askTime time.Time) {
 	defer self.stateLock.Unlock()
 	delete(self.loading, networkId)
 	if err != nil || facts == nil {
+		delete(self.networkIdFacts, networkId)
 		return
 	}
 	self.networkIdFacts[networkId] = &hostGateEntry{facts: facts, askTime: askTime}
 }
 
-// The authenticated stream ticket names the subject of the mail-send grant.
-func (self *hostGate) MaySendMail(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) sidecar.AclDecision {
-	return self.mail.MaySendMail(networkId, sidecar.AclSidecarSubject(sidecarId), now)
+// Each preamble takes its subject's grant and scopes from one watched projection. Database facts
+// refresh separately. Reading both starts both loads even when neither has arrived.
+func (self *hostGate) SendFacts(networkId sidecar.Id, sidecarId sidecar.Id, now time.Time) (*smtpedgeservice.SmtpGateFacts, sidecar.AclDecision) {
+	facts, _ := self.Facts(networkId)
+	grant, labels := self.mail.MaySendMailWithScopes(networkId, sidecar.AclSidecarSubject(sidecarId), now)
+	if facts != nil {
+		facts.ScopeLabels = labels
+	}
+	return facts, grant
 }
 
 // See smtpedgeservice.SmtpGate: §21.5's state as the last refresh read it, a copy, or not loaded.

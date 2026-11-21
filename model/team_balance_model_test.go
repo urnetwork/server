@@ -438,6 +438,7 @@ func TestNetworkDowngradeTimeIsTheTeamGrantsEnd(t *testing.T) {
 		renewalStart := renewalEnd.AddDate(0, -1, 0)
 
 		networkId := testingCreateTeamNetwork(t, ctx)
+		testDnsScopeSource(t, networkId)
 		testingAddDowngradeRenewal(t, ctx, networkId, SubscriptionTypeTeam, renewalStart, renewalEnd)
 		// the paid period, as invoice.paid writes it, then the unpaid one the job wrote at the anchor
 		paidGrant := testingAddTeamGrant(t, ctx, networkId, renewalStart, renewalEnd)

@@ -28,6 +28,17 @@ import (
 // The root the tests' labels are allocated in.
 const tlsListenFactsTestRoot = "sidecar.example"
 
+// Installs a scope source answering scopes for networkId, and nothing known for any other network.
+func testDnsScopeSource(t testing.TB, networkId server.Id, scopes ...string) {
+	t.Helper()
+	t.Cleanup(SetDnsScopeLabelSource(func(ctx context.Context, id server.Id) ([]string, bool) {
+		if id != networkId {
+			return nil, false
+		}
+		return scopes, true
+	}))
+}
+
 // A P-256 CSR naming names.
 func tlsListenFactsTestCsr(t testing.TB, names ...string) []byte {
 	t.Helper()
@@ -111,6 +122,7 @@ func TestTlsListenFactsOfANewNetwork(t *testing.T) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "tlsfacts"+networkId.String(), server.NewId())
+		testDnsScopeSource(t, networkId)
 		facts, err := GetTlsListenFacts(ctx, networkId, server.NowUtc())
 		if err != nil {
 			t.Fatal(err)
@@ -121,15 +133,6 @@ func TestTlsListenFactsOfANewNetwork(t *testing.T) {
 		if len(facts.Certs) != 0 || facts.MailNetwork || len(facts.HostedSidecarIds) != 0 || !facts.StandingGrantsEndTime.IsZero() {
 			t.Fatalf("a new network holds %+v", facts)
 		}
-		guestNetworkId := server.NewId()
-		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, server.NewId())
-		guestFacts, err := GetTlsListenFacts(ctx, guestNetworkId, server.NowUtc())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if guestFacts.Verified {
-			t.Fatal("a guest network reads verified")
-		}
 		// past probation's age the standing is standard
 		later, err := GetTlsListenFacts(ctx, networkId, server.NowUtc().Add(DefaultAbuseSettings().ProbationAge+time.Hour))
 		if err != nil {
@@ -137,6 +140,16 @@ func TestTlsListenFactsOfANewNetwork(t *testing.T) {
 		}
 		if later.Standing != sidecar.AbuseStandingStandard {
 			t.Fatalf("past probation the standing is %s", later.Standing)
+		}
+		guestNetworkId := server.NewId()
+		Testing_CreateLegacyGuestNetwork(ctx, guestNetworkId, server.NewId())
+		testDnsScopeSource(t, guestNetworkId)
+		guestFacts, err := GetTlsListenFacts(ctx, guestNetworkId, server.NowUtc())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if guestFacts.Verified {
+			t.Fatal("a guest network reads verified")
 		}
 	})
 }
@@ -152,6 +165,7 @@ func TestTlsListenFactsReadTheLiveCertificateRows(t *testing.T) {
 		now := server.NowUtc()
 		networkId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "tlsfacts"+networkId.String(), server.NewId())
+		testDnsScopeSource(t, networkId)
 		label, err := EnsureNetworkLabel(ctx, networkId, tlsListenFactsTestRoot)
 		if err != nil {
 			t.Fatal(err)
@@ -232,6 +246,7 @@ func TestTlsListenFactsReadMailAndHostedSidecars(t *testing.T) {
 		now := server.NowUtc()
 		networkId := server.NewId()
 		Testing_CreateNetwork(ctx, networkId, "tlsfacts"+networkId.String(), server.NewId())
+		testDnsScopeSource(t, networkId)
 		hostedClientId, childClientId, ordinaryClientId := server.NewId(), server.NewId(), server.NewId()
 		hostedSidecarId, childSidecarId, ordinarySidecarId := server.NewId(), server.NewId(), server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {

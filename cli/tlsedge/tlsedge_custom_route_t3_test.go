@@ -169,6 +169,12 @@ func newT3RouteWorld(t testing.TB) *t3RouteWorld {
 
 	none := int64(-1)
 	networkId := admission.NetworkId()
+	t.Cleanup(model.SetDnsScopeLabelSource(func(_ context.Context, id server.Id) ([]string, bool) {
+		if id != server.Id(networkId) {
+			return nil, false
+		}
+		return admission.State().TeamScopeLabels(), true
+	}))
 	edge := newT3EdgeWorldOn(t, net.Clock(), &networkId, func(settings *hostSettings) {
 		settings.TlsEdge.ColdLimits = &tlsedgeservice.TlsEndpointLimits{
 			EndpointConcurrent: none, EndpointNewPerS: none, EndpointMbitPerS: none,

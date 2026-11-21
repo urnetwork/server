@@ -43,8 +43,9 @@
 --     the reconcile (taskworker's), a halt's lift (api's appeal), and the status hints' sending clients, which need
 --     a Push this block's host is not given.
 --   - The send gate's facts (cli/smtpedge's gate.go, model.GetSmtpGateFacts), loaded on a miss: the network's
---     label (dns_label), when its mail began (mail_network), its verified domains (network_domain), its strict
---     custom domains while strict_envelope is on (network_dns_custom_host), when it left Pro or Team
+--     label and live aliases (dns_label), cleared names (abuse_action), mail enable time (mail_network), verified
+--     domains (network_domain), strict custom domains while strict_envelope is on (network_dns_custom_host),
+--     when it left Pro or Team
 --     (model.NetworkDowngradeTime: transfer_balance and subscription_renewal), and its zone's report token
 --     (network_dns_zone).
 --   - §21.5's mail breaker, with the facts (model.GetMailBreakerState): the breaker's actions and their case
@@ -108,7 +109,7 @@ GRANT INSERT (send_day, send_id, network_id, client_id, sending_address, recipie
 GRANT SELECT (send_day, send_id, network_id, start_time, result, recipient_count) ON TABLE smtp_send TO smtpedge;
 
 -- the send gate's facts
-GRANT SELECT (network_id, root, kind, label) ON TABLE dns_label TO smtpedge;
+GRANT SELECT (network_id, root, kind, label, state) ON TABLE dns_label TO smtpedge;
 GRANT SELECT (network_id, create_time) ON TABLE mail_network TO smtpedge;
 GRANT SELECT (network_id, domain, verify_time) ON TABLE network_domain TO smtpedge;
 GRANT SELECT (host, root, network_id, owner, state, caa_mode, effective_caa_chain_ok, map_version, ready_time, create_time) ON TABLE network_dns_custom_host TO smtpedge;

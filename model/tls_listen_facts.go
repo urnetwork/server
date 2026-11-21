@@ -14,8 +14,8 @@ package model
 //     preceded its leaf's, read against the network's labels so its own pair and its scopes' pairs are told apart;
 //   - the sidecars bound to a client with a proxy_device_config row, or to that client's child: §18's hosted
 //     devices, which D-TLS-1 bars from tls/;
-//   - ScreenHost's facts: the verified domains, the Team scope labels (none known reads as none, as dns's writes
-//     read them) and the hosts a reviewer allowed, its screen_allow actions not lifted (ABUSE-M5-08).
+//   - ScreenHost's facts: the verified domains, the scope labels in the network's verified projection and the
+//     hosts a reviewer allowed, its screen_allow actions not lifted (ABUSE-M5-08).
 //
 // A network that does not exist is an error, never empty facts, so the hooks keep it undecided. A table the binary
 // does not link holds no row here: no certificate, no mail_network row, no binding. Nothing here is on a
@@ -67,7 +67,8 @@ func DefaultTlsListenFactsSettings() *TlsListenFactsSettings {
 	}
 }
 
-// The network's listen facts at now, read from Postgres with the defaults. Not for an inline path.
+// The network's listen facts at now. ErrDnsScopeUnknown keeps the API unavailable until it has
+// verified the network's scope labels. The database reads run off the registration path.
 func GetTlsListenFacts(ctx context.Context, networkId server.Id, now time.Time) (*socketsservice.TlsListenFacts, error) {
 	return GetTlsListenFactsWithSettings(ctx, networkId, now, DefaultTlsListenFactsSettings())
 }
@@ -112,6 +113,11 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 	if !found {
 		return nil, ErrTlsListenFactsNetworkNotFound
 	}
+	scopeLabels, known := dnsNetworkScopeLabels(ctx, networkId)
+	if !known {
+		return nil, ErrDnsScopeUnknown
+	}
+	facts.ScopeLabels = scopeLabels
 	facts.Tier = string(NetworkTierOf(ctx, networkId))
 	if downgradeTime, _, ok := NetworkDowngradeTime(ctx, networkId); ok {
 		if endTime := downgradeTime.Add(settings.DowngradeGrace); now.Before(endTime) {
@@ -125,9 +131,6 @@ func GetTlsListenFactsWithSettings(ctx context.Context, networkId server.Id, now
 	facts.Certs = certs
 	facts.VerifiedDomains = GetNetworkVerifiedDomains(ctx, networkId)
 	facts.ScreenAllowedHosts = GetNetworkScreenAllowedNames(ctx, networkId)
-	if scopeLabels, ok := dnsNetworkScopeLabels(ctx, networkId); ok {
-		facts.ScopeLabels = scopeLabels
-	}
 	// 17.2.10's two lists, from TLS-M6-05's rows: with none, every listed name is dropped, the closed direction
 	if dnsCustomHostLinked() {
 		server.Db(ctx, func(conn server.PgConn) {
