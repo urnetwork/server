@@ -369,26 +369,46 @@ func TestTimerBeyondTheWheelsRangeNeverFires(t *testing.T) {
 	})
 }
 
-// A timer of a nil sweep has a sweep of its own with the default tick.
+// A timer of a nil sweep has a sweep of its own. Its tick is the process's
+// for a production-length wait and a sixteenth of a shorter one, down to a
+// millisecond, so a test that compresses a wait to milliseconds keeps the
+// sweep's proportions.
 func TestNilSweepTimerHasASweepOfItsOwn(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var sweep *Sweep
-		start := time.Now()
-		timer := sweep.NewTimer(150 * time.Millisecond)
-		ticker := sweep.NewTicker(time.Second)
-		<-timer.C
-		if at := time.Since(start); at != ceilTicks(150*time.Millisecond, DefaultTick) {
-			t.Fatalf("the timer fired at %s", at)
+		for _, c := range []struct {
+			wait time.Duration
+			tick time.Duration
+		}{
+			{wait: 500 * time.Microsecond, tick: time.Millisecond},
+			{wait: 7 * time.Millisecond, tick: time.Millisecond},
+			{wait: 150 * time.Millisecond, tick: 9375 * time.Microsecond},
+			{wait: 1601 * time.Millisecond, tick: DefaultTick},
+			{wait: 5*time.Minute + 3*time.Millisecond, tick: DefaultTick},
+		} {
+			if tick := privateTick(c.wait); tick != c.tick {
+				t.Fatalf("a %s wait has a %s tick, want %s", c.wait, tick, c.tick)
+			}
+			start := time.Now()
+			timer := sweep.NewTimer(c.wait)
+			<-timer.C
+			if at := time.Since(start); at != ceilTicks(c.wait, c.tick) {
+				t.Fatalf("a %s timer fired at %s, want %s", c.wait, at, ceilTicks(c.wait, c.tick))
+			}
 		}
+		other := sweep.NewTimer(time.Hour)
+		start := time.Now()
+		ticker := sweep.NewTicker(time.Second)
 		<-ticker.C
 		<-ticker.C
 		if at := time.Since(start); at != 2*time.Second {
 			t.Fatalf("the ticker's second fire came at %s, want 2s", at)
 		}
-		if timer.shard == ticker.shard {
+		if other.shard == ticker.shard {
 			t.Fatal("two timers of a nil sweep share a shard")
 		}
 		ticker.Stop()
+		other.Stop()
 	})
 }
 

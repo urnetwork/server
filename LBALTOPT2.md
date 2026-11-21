@@ -462,7 +462,7 @@ Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrink
 - **A fire never blocks the sweep.** It's a non-blocking send on the owner's one-slot channel, made under the shard's lock, and the owner's goroutine does the work. A fire the owner hasn't received absorbs later ones. The sweep never calls owner code or logging.
 - **Cancellation and teardown:** each owner stops its timer as it returns. Arming, re-arming and stopping each unlink or link one entry, O(1), and a stopped timer leaves no entry behind. As with a Go 1.23 timer, `Reset` and `Stop` discard a fire not yet received, so no stale fire arrives after either returns.
 - **Memory:** an 80-byte timer and its 112-byte channel, 192 bytes in two allocations, plus each shard's 8 KiB of slots. A runtime timer with its channel takes 248 bytes in three.
-- **Without a sweep,** an owner built directly, as tests build them, gives each timer a sweep of its own with the same tick. Inside a synctest bubble that sweep's driver stays in the bubble.
+- **Without a sweep,** an owner built directly, as tests build them, gives each timer a sweep of its own. Its tick is the process's for a wait of 1.6 s or more, and a sixteenth of a shorter wait, so a test that compresses a 30 s round to 50 ms keeps the sweep's proportions. Inside a synctest bubble that sweep's driver stays in the bubble.
 
 **Converted.** Each fires at its deadline or at most 100 ms after it, never before:
 
