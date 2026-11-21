@@ -304,7 +304,9 @@ func TestPlaySubscriptionEndedNoticeOfADataPlanDoesNotSayPro(t *testing.T) {
 				"text":    bodyText,
 				"sms":     sms,
 			} {
-				if saysPro := strings.Contains(strings.ToLower(text), "ur pro"); saysPro != c.pro {
+				// case matters: every email's footer names the UR protocol
+				saysPro := strings.Contains(text, "UR Pro") || strings.Contains(text, "UR PRO")
+				if saysPro != c.pro {
 					t.Errorf("%s: the %s part says UR Pro: %t, want %t", c.productId, part, saysPro, c.pro)
 				}
 			}
