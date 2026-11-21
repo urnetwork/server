@@ -303,7 +303,7 @@ func TestTheLocalKeySetMakesAnEdgeServeSignedAnswers(t *testing.T) {
 	apiEngine, err := dnshost.NewApiHost(ctx, apiFake.ServiceHost(), &dnshost.HostSettings{
 		Dns:             dnsSettings,
 		SecretDirectory: filepath.Join(state, testDnsApiDirectoryName),
-	}, &dnshost.HostDeps{Store: store, KeyWindow: keys.Window})
+	}, &dnshost.HostDeps{Store: store, KeyWindow: keys.Window, RecordGate: dnsservice.DnsUnloadedRecordGate{}, KeyRecordGate: dnsservice.NewDnsAclKeyRecordGate(nil)})
 	if err != nil {
 		t.Fatal(err)
 	}
