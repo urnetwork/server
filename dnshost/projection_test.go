@@ -69,6 +69,8 @@ func TestHostedDnsGatesUseTheVerifiedProjection(t *testing.T) {
 	rows.Acl = marshal(&protocol.AclRows{HasDocument: true, Atoms: []*protocol.AclAtom{{Atom: atom, SidecarIds: [][]byte{owner.Bytes()}}}, Rules: []*protocol.AclRule{
 		rule("write", protocol.AclAction_ACL_ACTION_ADMIN),
 		rule("view", protocol.AclAction_ACL_ACTION_PUBLISH),
+		rule("app.foreign-unit", protocol.AclAction_ACL_ACTION_PUBLISH),
+		rule("app.tag-unit", protocol.AclAction_ACL_ACTION_PUBLISH),
 		rule("smtp/25/mx", protocol.AclAction_ACL_ACTION_LISTEN),
 		rule("smtp/25/mx.foreign-unit", protocol.AclAction_ACL_ACTION_LISTEN),
 		rule("smtp/25/mx.tag-unit", protocol.AclAction_ACL_ACTION_LISTEN),
@@ -136,6 +138,8 @@ func TestHostedDnsGatesUseTheVerifiedProjection(t *testing.T) {
 		{"publish only", deps.RecordGate.MayAdmin(network, owner, "view", now), dnsservice.DnsGateDenied},
 		{"ungranted", deps.RecordGate.MayView(network, owner, "elsewhere", now), dnsservice.DnsGateDenied},
 		{"receiver", deps.KeyRecordGate.MayReceive(network, owner, "", now), dnsservice.DnsGateAllowed},
+		{"foreign publisher", deps.RecordGate.MayView(network, owner, "app.foreign-unit", now), dnsservice.DnsGateDenied},
+		{"tag publisher", deps.RecordGate.MayView(network, owner, "app.tag-unit", now), dnsservice.DnsGateAllowed},
 		{"signed tag scope", deps.KeyRecordGate.MayReceive(network, owner, "tag-unit", now), dnsservice.DnsGateAllowed},
 		{"other member scope", deps.KeyRecordGate.MayReceive(network, owner, "foreign-unit", now), dnsservice.DnsGateDenied},
 		{"other receiver", deps.KeyRecordGate.MayReceive(network, stranger, "", now), dnsservice.DnsGateDenied},
