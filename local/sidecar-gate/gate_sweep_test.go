@@ -168,6 +168,7 @@ func TestGateSweepsNameServerTestsDeclaredUnderTheirTags(t *testing.T) {
 		"M2 FS-124's forged ./sidecart3 TestFs124ForgedOnT3",
 		"M3 FS-25 ./api TestFs25GateResponseLostAfterCommit",
 		"M3 FS-41 ./sidecarrestore TestFs41SiteLossThroughTheCloseOnT3",
+		"M3 FS-41 . TestSiteCloseWithRestrictedUsersAcrossMetadataClusters",
 		"M3 FS-41 . TestFileClusterReseedStorageLossesOnT3",
 		"M3 FS-42 ./sidecarrestore TestFs42MainDumpOlder",
 		"M3 FS-50 ./monitor TestPageClassAt0200PagesTheSecondPersonAt30MinutesNotBefore",

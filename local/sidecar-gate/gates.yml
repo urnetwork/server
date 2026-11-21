@@ -620,6 +620,7 @@ gates:
     - row: FS-41
       tests:
         - {repo: server, package: ./sidecarrestore, tags: sidecar_pending, stores: true, names: [TestFs41SiteLossThroughTheCloseOnT3]}
+        - {repo: server, package: ., tags: 'sidecar_pending,sidecar_localstack', stores: true, names: [TestSiteCloseWithRestrictedUsersAcrossMetadataClusters]}
         - {repo: server, package: ., tags: 'sidecar_testhooks,sidecar_pending,sidecar_filecluster_t3', names: [TestFileClusterReseedStorageLossesOnT3]}
         - {repo: server, package: ./model, stores: true, names: [TestAdoptConfigRunTakesWhatTwoMembersHold, TestAdoptConfigRunTakesNoPositionOneMemberHoldsAlone, TestAdoptConfigRunHoldsToTheRestoredHead, TestAdoptedRunResumesTheLogAtUnchangedPositions, TestAdoptConfigRunCountsOnlyMembersThatMayUpload, TestConfigReseedIsRefusedOutsideARestore]}
         - {repo: sidecar, package: ., names: [TestConfigClientUploadsItsFullTail, TestConfigClientUploadsAPhonesPins, TestConfigClientUploadRefusals, TestAVaultReformedByItsOwnersDeviceKeepsEveryReader, TestAReformIsRefusedFromADeviceThatMayNotFormTheGroup, TestARepoReseededAsDeletedTakesItsFormAndLadderAlone, TestACodeOnlyDeviceReadsOnlyItsWrapsBeforeAdmission]}
