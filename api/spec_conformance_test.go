@@ -27,6 +27,7 @@ package api
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -781,7 +782,7 @@ func TestSpecRoutesImplemented(t *testing.T) {
 	for path, methodsAny := range spec.paths {
 		for method := range asMap(methodsAny) {
 			switch method {
-			case "get", "post", "put", "delete", "patch":
+			case "get", "head", "post", "put", "delete", "patch":
 			default:
 				continue
 			}
@@ -827,12 +828,29 @@ func specOperationKeys(spec *specDoc) map[string]bool {
 	for path, methodsAny := range spec.paths {
 		for method := range asMap(methodsAny) {
 			switch method {
-			case "get", "post", "put", "delete", "patch":
+			case "get", "head", "post", "put", "delete", "patch":
 				keys[strings.ToUpper(method)+" "+normalizePath(path)] = true
 			}
 		}
 	}
 	return keys
+}
+
+// A served HEAD route, such as HEAD /sn/attempt-artifact, is documented by its
+// path item's head operation; a path item's other keys are not operations.
+func TestSpecOperationKeysReadHead(t *testing.T) {
+	spec := &specDoc{paths: map[string]any{
+		"/sn/attempt-artifact": map[string]any{
+			"parameters": []any{},
+			"get":        map[string]any{},
+			"head":       map[string]any{},
+		},
+	}}
+	got := specOperationKeys(spec)
+	want := map[string]bool{"GET /sn/attempt-artifact": true, "HEAD /sn/attempt-artifact": true}
+	if !maps.Equal(got, want) {
+		t.Errorf("spec operation keys = %v, want %v", got, want)
+	}
 }
 
 // undocumentedRoutes returns, sorted, the served route keys no spec documents.
