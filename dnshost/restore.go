@@ -4,12 +4,6 @@ package dnshost
 // dnsservice.RestoreStep reads and writes beyond Store, and NewRestoreStep
 // builds the step a §19.10 runbook command or OPS's restore frame runs, needing
 // neither api nor the token exchange.
-//
-// dns_ns waits for its §2.8 row (plan-DNS-metadata-rows #7, v9), so until it
-// lands no NS is ever stopped here: StoppedNs reads none and StopNs refuses with
-// dnsservice.ErrDnsNsStateUnavailable, and the step then counts every NS dns.yml
-// lists until each serves the restore serial, plan-DNS-running-ns's interim and
-// the closed direction.
 
 import (
 	"context"
@@ -30,22 +24,22 @@ var (
 	_ dnsservice.DnsRestoreMapStore = (*RestoreStore)(nil)
 )
 
-// No NS is stopped until dns_ns exists.
-func (self *RestoreStore) StoppedNs(ctx context.Context, root string) ([]string, error) {
-	if !server.SidecarMg5Linked() {
-		return nil, model.ErrDnsUnlinked
-	}
-	return nil, nil
+// The stopped names and both state transitions persist across block restarts.
+func (self *RestoreStore) StoppedNs(ctx context.Context, root string) (names []string, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		names, err = model.GetStoppedDnsNameServers(ctx, root)
+		return err
+	})
+	return
 }
 
-// Refuses until dns_ns exists, so the step keeps counting ns.
 func (self *RestoreStore) StopNs(ctx context.Context, root string, ns string, reason string) error {
-	return dnsservice.ErrDnsNsStateUnavailable
+	return storeCall(func() error { return model.SetDnsNameServerStopped(ctx, root, ns, reason, server.NowUtc()) })
 }
 
-// Refuses until dns_ns exists; nothing is stopped to start.
 func (self *RestoreStore) StartNs(ctx context.Context, root string, ns string) error {
-	return dnsservice.ErrDnsNsStateUnavailable
+	return storeCall(func() error { return model.SetDnsNameServerStopped(ctx, root, ns, "", server.NowUtc()) })
 }
 
 // model.ListDnsRestoreChanges at the server's now.

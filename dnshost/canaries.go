@@ -5,11 +5,6 @@ package dnshost
 // §12.6's one write path, a root's own record of kind canary, which expires an
 // hour after its last write like a challenge (dnsCommitInTx) and which
 // taskworker's chain removes through the journal. Safe for concurrent use.
-//
-// dns_canary_verdict waits for its §2.8 row (plan-DNS-metadata-rows #7, v9),
-// so the API block keeps no verdict: it is given no DnsCanaryVerdictStore,
-// answers every report 503, and GET ready answers canary_failing, the
-// resolution's interim.
 
 import (
 	"context"
@@ -23,10 +18,14 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-var _ dnsservice.DnsCanaryWriter = (*Canaries)(nil)
+var (
+	_ dnsservice.DnsCanaryWriter       = (*Canaries)(nil)
+	_ dnsservice.DnsCanaryVerdictStore = (*Canaries)(nil)
+	_ dnsservice.DnsReadyStore         = (*Canaries)(nil)
+)
 
 // The writer. It holds nothing.
-type Canaries struct{}
+type Canaries struct{ RestoreStore }
 
 func NewCanaries() *Canaries {
 	return &Canaries{}
@@ -61,4 +60,29 @@ func (self *Canaries) PutCanary(ctx context.Context, root string, value string, 
 		return err
 	})
 	return
+}
+
+// The same stored verdicts drive the monitoring endpoint and the certs readiness check.
+func (self *Canaries) PutCanaryVerdict(ctx context.Context, root string, verdict dnsservice.DnsCanaryVerdict) error {
+	return storeCall(func() error { return model.PutDnsCanaryVerdict(ctx, root, verdict) })
+}
+
+func (self *Canaries) CanaryVerdicts(ctx context.Context, root string) (verdicts []dnsservice.DnsCanaryVerdict, returnErr error) {
+	returnErr = storeCall(func() error {
+		var err error
+		verdicts, err = model.GetDnsCanaryVerdicts(ctx, root)
+		return err
+	})
+	return
+}
+
+// Reconcile dns.yml before declaring the storage dependencies ready.
+func (self *Canaries) ProbeReadiness(ctx context.Context, root string, names []string) error {
+	return storeCall(func() error {
+		if err := model.SyncDnsNameServers(ctx, root, names); err != nil {
+			return err
+		}
+		_, err := model.GetDnsCanaryVerdicts(ctx, root)
+		return err
+	})
 }

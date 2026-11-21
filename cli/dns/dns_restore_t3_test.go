@@ -714,10 +714,9 @@ func dnsT3ReclaimLeaf(t testing.TB, name string) (*ecdsa.PrivateKey, []byte) {
 	return key, leaf
 }
 
-// plan-DNS-running-ns's interim on Postgres, as production runs until dns_ns lands: dnshost.RestoreStore keeps no NS
-// state, so an NS that misses the SOA read cannot be stopped and is counted; restoring holds every write refused until
-// it too serves restore_serial, and a rerun after its reload ends the step.
-func TestFs42DnsStepCountsAnNsItCannotStop(t *testing.T) {
+// The persisted NS inventory lets the healthy authority reopen writes and retains the stopped authority
+// until its reloaded snapshot reaches the restore serial.
+func TestFs42DnsStepPersistsAnNsStopAcrossRerun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		stack := newDnsT3(t, ctx, nil)
@@ -735,28 +734,31 @@ func TestFs42DnsStepCountsAnNsItCannotStop(t *testing.T) {
 		dump.restore(t, ctx)
 		step := stack.restoreStep(t, &dnshost.RestoreStore{}, &dnshost.RestoreStore{})
 		incidentId := sidecar.NewId()
-		// the step reads ns2 as not answering, cannot stop it, and waits for it past its context
-		runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		progress, err := step.Run(runCtx, stack.root, incidentId)
-		cancel()
-		if !errors.Is(err, context.DeadlineExceeded) || progress == nil || !slices.Equal(progress.CountedNs, []string{ns2}) || !slices.Equal(progress.WaitingNs, []string{ns2}) {
-			t.Fatalf("with ns2 down: %v %+v", err, progress)
-		}
-		if _, err := model.DnsWrite(ctx, &model.DnsWriteArgs{Root: stack.root, NetworkId: net1, Upserts: []dnsservice.DnsRecordSet{dnsT3Txt("refused."+apex1, "refused")}}); !errors.Is(err, dnsservice.ErrDnsRestoring) {
-			t.Errorf("a write while ns2 is counted: %v", err)
-		}
 		waitCtx, cancelWait := context.WithTimeout(ctx, dnsT3WaitTimeout)
 		defer cancelWait()
+		progress, err := step.Run(waitCtx, stack.root, incidentId)
+		if err != nil || !progress.Done || !slices.Equal(progress.StoppedNs, []string{ns2}) || len(progress.WaitingNs) != 0 {
+			t.Fatalf("with ns2 down: %v %+v", err, progress)
+		}
 		if err := stack.harness.AwaitServed(waitCtx, stack.root, progress.RestoreSerial, ns1); err != nil {
 			t.Fatal(err)
+		}
+		if err := model.SyncDnsNameServers(ctx, stack.root, stack.settings.Ns); err != nil {
+			t.Fatal(err)
+		}
+		if stopped, err := model.GetStoppedDnsNameServers(ctx, stack.root); err != nil || !slices.Equal(stopped, []string{ns2}) {
+			t.Fatalf("configuration reread lost stopped authority: %v %v", stopped, err)
 		}
 		// ns2 reloads, and the rerun ends the step
 		stack.harness.SetRequireReload(ns2, true)
 		if err := stack.net.Restart(stack.harness.EdgeProcess(ns2), stack.harness.EdgeProcess(ns2)); err != nil {
 			t.Fatal(err)
 		}
+		if err := stack.harness.AwaitServed(waitCtx, stack.root, progress.RestoreSerial, ns2); err != nil {
+			t.Fatal(err)
+		}
 		progress, err = step.Run(waitCtx, stack.root, incidentId)
-		if err != nil || !progress.Done || len(progress.WaitingNs) != 0 {
+		if err != nil || !progress.Done || len(progress.StoppedNs) != 0 || len(progress.WaitingNs) != 0 {
 			t.Fatalf("after ns2's reload: %v %+v", err, progress)
 		}
 		if _, err := model.DnsWrite(ctx, &model.DnsWriteArgs{Root: stack.root, NetworkId: net1, Upserts: []dnsservice.DnsRecordSet{dnsT3Txt("reopened."+apex1, "reopened")}}); err != nil {

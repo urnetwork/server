@@ -116,7 +116,7 @@ func TestDnsRestoreCommandsRunTheStepOnTheEnvsStore(t *testing.T) {
 		if state.RestoreSerial < serialBefore+1<<24 || state.Serial != state.RestoreSerial {
 			tb.Errorf("the restore landed at %d from %d, want at least 2^24 above", state.RestoreSerial, serialBefore)
 		}
-		for _, want := range []string{"ns that did not answer and are still counted: ns1 ns2", "ns not yet serving it: ns1 ns2"} {
+		for _, want := range []string{"ns stopped until they serve it: ns1 ns2", "ns not yet serving it: ns1 ns2"} {
 			if !strings.Contains(writer.buffer.String(), want) {
 				tb.Errorf("the restore printed %q, want %q in it", writer.buffer.String(), want)
 			}

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -239,9 +241,10 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 	if self.gauges != nil {
 		gauges = self.gauges()
 	}
+	api := &dnsCanaryHttpApi{settings: settings, client: &http.Client{Timeout: timeout}}
 	check := &dnsCanaryCheck{
 		settings:  settings,
-		api:       &dnsCanaryHttpApi{settings: settings, client: &http.Client{Timeout: timeout}},
+		api:       api,
 		ns:        &dnsCanaryDirectNs{timeout: timeout},
 		validator: &dnsCanaryUnbound{path: settings.UnboundHostPath, run: dnsCanaryRunCommand},
 		resolver:  &dnsCanaryDirectNs{timeout: timeout},
@@ -249,11 +252,16 @@ func (self dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 		stateDir:  stateDir,
 		gauges:    gauges,
 	}
+	if self.clean != nil {
+		// The scheduled monitors use the restore inventory. A rollout checks all configured authorities.
+		check.runningNs = api.runningNs
+	}
 	return check.run(ctx, env.now()), nil
 }
 
 // One minute's check over its seams.
 type dnsCanaryCheck struct {
+	runningNs func(context.Context, string) ([]string, error)
 	settings  *DnsCanarySettings
 	api       dnsCanaryApi
 	ns        dnsCanaryNs
@@ -321,7 +329,17 @@ func dnsCanaryFresh(values []string, now time.Time, fresh time.Duration) bool {
 
 func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.Time) []finding {
 	findings := []finding{}
-	nsCount := len(self.settings.Dns.Ns)
+	names := self.settings.Dns.Ns
+	if self.runningNs != nil {
+		running, err := self.runningNs(ctx, root)
+		if err != nil {
+			// With no authenticated inventory, require every configured authority.
+			findings = append(findings, self.finding(dnsCanaryClassUnobservable, root, "the running nameserver inventory could not be read", err.Error()))
+		} else {
+			names = slices.DeleteFunc(slices.Clone(names), func(name string) bool { return !slices.Contains(running, name) })
+		}
+	}
+	nsCount := len(names)
 	if self.settings.Source == dnsservice.DnsCanarySourceSite {
 		value := strconv.FormatInt(now.UnixMilli(), 10) + " " + self.settings.Source
 		if _, err := self.api.writeCanary(ctx, root, value); err != nil {
@@ -334,12 +352,12 @@ func (self *dnsCanaryCheck) runRoot(ctx context.Context, root string, now time.T
 		self.recordClean(root, now, dnsCanaryMinuteUnobserved)
 		return append(findings, self.finding(dnsCanaryClassUnobservable, root, "dns.yml names no trust anchor for the root, so nothing validates", ""))
 	}
-	verdictOk := true
+	verdictOk := nsCount > 0
 	// a canary that did not validate, at an NS or, once the DS is out, at a public resolver
 	signatureFailed := false
 	failingNs := []string{}
 	soaSerials := map[string]uint32{}
-	for _, ns := range self.settings.Dns.Ns {
+	for _, ns := range names {
 		addresses := self.settings.NsAddresses[ns]
 		target := ns + "." + root
 		read, err := self.ns.read(ctx, root, addresses)
@@ -488,13 +506,29 @@ type dnsCanaryHttpApi struct {
 	client   *http.Client
 }
 
-// One POST of body to path, answering into answer when it is not nil.
-func (self *dnsCanaryHttpApi) post(ctx context.Context, path string, body any, answer any) error {
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
+func (self *dnsCanaryHttpApi) runningNs(ctx context.Context, root string) ([]string, error) {
+	reply := &dnsservice.DnsRunningNsAnswer{}
+	path := dnsservice.DnsRunningNsPath + "?" + url.Values{"root": {root}}.Encode()
+	if err := self.call(ctx, http.MethodGet, path, nil, reply); err != nil {
+		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(self.settings.ApiUrl, "/")+path, bytes.NewReader(data))
+	if reply.Ns == nil {
+		return nil, errors.New("DNS returned no authority inventory")
+	}
+	return reply.Ns, nil
+}
+
+// An authenticated request to DNS, decoding its bounded response when requested.
+func (self *dnsCanaryHttpApi) call(ctx context.Context, method string, path string, body any, answer any) error {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(data)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, strings.TrimSuffix(self.settings.ApiUrl, "/")+path, reader)
 	if err != nil {
 		return err
 	}
@@ -511,19 +545,19 @@ func (self *dnsCanaryHttpApi) post(ctx context.Context, path string, body any, a
 	if answer == nil {
 		return nil
 	}
-	return json.NewDecoder(response.Body).Decode(answer)
+	return json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(answer)
 }
 
 func (self *dnsCanaryHttpApi) writeCanary(ctx context.Context, root string, value string) (uint64, error) {
 	answer := &dnsservice.DnsCanaryAnswer{}
-	if err := self.post(ctx, dnsservice.DnsCanaryPath, &dnsservice.DnsCanaryRequest{Root: root, Value: value}, answer); err != nil {
+	if err := self.call(ctx, http.MethodPost, dnsservice.DnsCanaryPath, &dnsservice.DnsCanaryRequest{Root: root, Value: value}, answer); err != nil {
 		return 0, err
 	}
 	return answer.Serial, nil
 }
 
 func (self *dnsCanaryHttpApi) report(ctx context.Context, report *dnsservice.DnsCanaryReport) error {
-	return self.post(ctx, dnsservice.DnsCanaryReportPath, report, nil)
+	return self.call(ctx, http.MethodPost, dnsservice.DnsCanaryReportPath, report, nil)
 }
 
 // Direct DNS reads over TCP: an NS's SOA and DNSKEY signatures, and a public resolver's recursive
