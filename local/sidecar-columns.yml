@@ -186,6 +186,23 @@ tables:
       restoring: dns-1
       root: dns-1
       serial: dns-1
+  # each monitor source's canary verdict, and each NS's state (DNS-M5-17, plan-DNS-running-ns)
+  dns_canary_verdict:
+    group: MG5
+    columns:
+      ok: dns-1
+      report_time: dns-1
+      root: dns-1
+      serial: dns-1
+      source: dns-1
+  dns_ns:
+    group: MG5
+    columns:
+      ns: dns-1
+      reason: dns-1
+      root: dns-1
+      state: dns-1
+      stopped_time: dns-1
   network_dns_zone:
     group: MG5
     columns:
@@ -269,12 +286,20 @@ tables:
       ca: cert-1
       cert_id: cert-1
       chain: cert-1
+      # a Team custom domain's rows (TLS-M6-05), added by MG5's §13 part
+      claim_seq: cert-1
       client_id: cert-1
       csr: cert-1
+      custom_domain: cert-1
+      custom_host: cert-1
+      custom_reason: cert-1
+      exempt: cert-1
       identifier_set_sha256: cert-1
       network_id: cert-1
+      no_replaces: cert-1
       not_after: cert-1
       not_before: cert-1
+      order_url: cert-1
       profile: cert-1
       revocation_reason: cert-1
       serial: cert-1
@@ -283,6 +308,66 @@ tables:
       state: cert-1
       state_time: cert-1
       successor_cert_id: cert-1
+  network_tls_account:
+    group: MG5
+    columns:
+      account_uri: cert-1
+      ca: cert-1
+      create_time: cert-1
+      domain: cert-1
+      hold_all_until: cert-1
+      hold_new_until: cert-1
+      key_repo_id: cert-1
+      key_seq: cert-1
+      key_thumbprint: cert-1
+      lock_cert_id: cert-1
+      lock_purpose: cert-1
+      lock_seq: cert-1
+      lock_sidecar_id: cert-1
+      lock_until: cert-1
+      network_id: cert-1
+      next_key_repo_id: cert-1
+      next_key_thumbprint: cert-1
+      orderer_seen: cert-1
+  # a delegated DNS-01 challenge's receipt, one a domain and claim (QD-1165)
+  network_tls_custom_challenge:
+    group: MG5
+    columns:
+      capture_time: cert-1
+      cert_id: cert-1
+      challenge_id: cert-1
+      claim_seq: cert-1
+      dispatch_count: cert-1
+      dispatch_time: cert-1
+      domain: cert-1
+      expire_time: cert-1
+      floor_serial: cert-1
+      name: cert-1
+      network_id: cert-1
+      ready_answer: cert-1
+      ready_request_time: cert-1
+      ready_time: cert-1
+      refusal: cert-1
+      retry_time: cert-1
+      root: cert-1
+      serial: cert-1
+      sidecar_id: cert-1
+      state: cert-1
+      value: cert-1
+      write_time: cert-1
+  network_tls_custom_spend:
+    group: MG5
+    columns:
+      account_uri: cert-1
+      at: cert-1
+      ca: cert-1
+      cert_id: cert-1
+      custom_host: cert-1
+      domain: cert-1
+      kind: cert-1
+      network_id: cert-1
+      registered_domain: cert-1
+      spend_id: cert-1
   network_tls_name_backoff:
     group: MG5
     columns:

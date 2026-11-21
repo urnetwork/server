@@ -1009,6 +1009,53 @@ func sidecarMg5TlsMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_tls_custom_spend_network_id ON network_tls_custom_spend (network_id, spend_id)
 		`),
+		// a delegated DNS-01 challenge's receipt (QD-1165), one a domain and claim: the certificate row, the claim's
+		// sequence, holder and digest that api captured, the acme name and root it is written at, and the certs
+		// worker's write: its state, its dispatches with the time of the last and the root's serial then, the serial
+		// it took or why none was made, and the newest answer of /dns/ready for that serial with when it was read and
+		// asked for. Its times are the database's clock, and it goes at expire_time, the challenge's own hour from
+		// its capture (model.TlsCustomChallengeSettings.ReceiptLifetime). State, refusal and answer are varchar,
+		// never ENUM.
+		newSqlMigration(`
+			CREATE TABLE network_tls_custom_challenge (
+				challenge_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				domain varchar(253) NOT NULL,
+				claim_seq bigint NOT NULL,
+				cert_id uuid NOT NULL,
+				sidecar_id uuid NOT NULL,
+				root varchar(256) NOT NULL,
+				name varchar(256) NOT NULL,
+				value varchar(64) NOT NULL,
+				state varchar(16) NOT NULL,
+				capture_time timestamp NOT NULL,
+				expire_time timestamp NOT NULL,
+				dispatch_count integer NOT NULL DEFAULT 0,
+				dispatch_time timestamp NULL,
+				floor_serial bigint NULL,
+				serial bigint NULL,
+				write_time timestamp NULL,
+				refusal varchar(16) NULL,
+				retry_time timestamp NULL,
+				ready_answer varchar(16) NULL,
+				ready_time timestamp NULL,
+				ready_request_time timestamp NULL,
+
+				PRIMARY KEY (challenge_id)
+			)
+		`),
+		// one receipt a domain and claim
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_tls_custom_challenge_claim ON network_tls_custom_challenge (network_id, domain, claim_seq)
+		`),
+		// GET /tls/custom-challenge/<serial>
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_challenge_serial ON network_tls_custom_challenge (network_id, serial) WHERE serial IS NOT NULL
+		`),
+		// the retention's purge
+		newSqlMigration(`
+			CREATE INDEX network_tls_custom_challenge_expire_time ON network_tls_custom_challenge (expire_time)
+		`),
 	}
 }
 

@@ -1710,31 +1710,6 @@ func getTlsCustomListenFactsInTx(ctx context.Context, query server.PgCanQuery, n
 	return certified, acme
 }
 
-// The name a delegated DNS-01 value for domain is written at, <acme_token>.acme.<root> (QD-175), for a caller
-// holding an active publish grant on a host mapped under the domain; 403 grant otherwise.
-func (self *TlsCustomStore) ChallengeName(ctx context.Context, caller *TlsCustomCaller, domain string) (name string, returnErr error) {
-	if !dnsCustomHostLinked() {
-		return "", ErrDnsUnlinked
-	}
-	if err := tlsCustomRun(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			if !self.ordererInTx(ctx, tx, caller, domain, false) {
-				returnErr = tlsCustomRefusal(http.StatusForbidden, sidecar.TlsCustomRefusalGrant)
-				return
-			}
-			acmeToken := getTlsCustomAcmeTokenInTx(ctx, tx, caller.NetworkId, domain)
-			if acmeToken == "" {
-				returnErr = tlsCustomRefusal(http.StatusNotFound, sidecar.TlsCustomRefusalNoAccount)
-				return
-			}
-			name = DnsAcmeChallengeTarget(self.roots[0], acmeToken)
-		})
-	}); err != nil {
-		return "", err
-	}
-	return
-}
-
 var _ certsservice.CertsCustomStore = (*TlsCustomStore)(nil)
 
 // The sweep's renewal candidates (17.2.11): custom_issued rows with no successor whose device's sidecar is active,
@@ -1901,10 +1876,10 @@ func (self *TlsCustomStore) RaiseCustomWarnings(ctx context.Context, now time.Ti
 				`
 					SELECT a.network_id, a.orderer_seen, a.lock_until, a.hold_new_until, a.hold_all_until,
 						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state IN ('custom_queued', 'custom_ordering', 'custom_issued', 'custom_revoking')),
-						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state = 'custom_queued' AND c.state_time < $2)
+						EXISTS (SELECT 1 FROM network_tls_cert c WHERE c.network_id = a.network_id AND c.custom_domain = a.domain AND c.state = 'custom_queued' AND c.state_time < $1)
 					FROM network_tls_account a
 				`,
-				now.UTC(),
+				// one parameter: one the text does not use has no type Postgres can read, and the query is refused
 				now.Add(-settings.QueueStallAfter).UTC(),
 			)
 			server.WithPgResult(accountResult, err, func() {
