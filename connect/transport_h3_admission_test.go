@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/quic-go"
 
 	"github.com/urnetwork/server"
 )

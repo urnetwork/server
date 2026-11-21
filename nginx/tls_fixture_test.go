@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/quic-go/quic-go"
+	"github.com/urnetwork/quic-go"
 )
 
 // How long one exchange, or the wait for one session ticket, may take before

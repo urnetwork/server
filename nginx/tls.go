@@ -26,7 +26,7 @@ package nginx
 // built with unless the config its GetConfigForClient returns sets keys of its
 // own (Config.ticketKeys, crypto/tls common.go), and no config here sets any.
 // quic-go under go1.27 uses the listener's config without cloning it
-// (third_party/quic-go/internal/handshake/tls_config_go127.go). So a ticket
+// (quic-go's internal/handshake/tls_config_go127.go). So a ticket
 // resumes on any socket of the process, and on no other process; unless
 // TlsSettings.SessionTicketSecrets is set, when the two base configs hold the
 // day's keys those secrets derive, which every front holding them shares

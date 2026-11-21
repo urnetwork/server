@@ -28,8 +28,8 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
+	quic "github.com/urnetwork/quic-go"
 )
 
 // Latency summaries use nearest-rank samples from one sorted duration vector.

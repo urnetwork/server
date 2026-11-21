@@ -1,7 +1,7 @@
 package nginx
 
 // End-to-end tests of the assembled front's api handler over a real http3
-// server, for what depends on the vendored http3 (third_party/quic-go): it
+// server, for what depends on URnetwork's http3 (../quic-go): it
 // gives a request with no content-length a body of unknown length, ended by
 // the stream's end, and ends a body short of its content-length as the
 // stream's end too, without an error.
@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // The front's api handler for eth1, served by an http3 server on a loopback

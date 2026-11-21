@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
 	connectcore "github.com/urnetwork/connect"
+	"github.com/urnetwork/quic-go"
 )
 
 // The defaults are the probe's documented bounds, and each call returns its

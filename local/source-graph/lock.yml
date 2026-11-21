@@ -10,7 +10,12 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: 0b41b7c1b6e822f3eeb8ace2671a54d7e42da8cd
+    ref: b07d69c201ad9bfaa79ed6749b03ce824fe302b6
+  # URnetwork's quic-go, its own module: connect and the server import
+  # github.com/urnetwork/quic-go from this sibling.
+  - repository: urnetwork/quic-go
+    path: quic-go
+    ref: 981433dd3ad638089c757ee40318d7ab8787bde5
   - repository: urnetwork/glog
     path: glog
     ref: 818f60489ac279ab01f2a625b6428ab1b4e24dd2
