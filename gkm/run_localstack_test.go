@@ -2,9 +2,10 @@
 
 // T3 for gkm (KEYS-M2-17; §22.9, D-TEST-2): gkm's store suite and its routes on server's real stores,
 // server.FileClusters over the local stack's MinIO (sidecar's local/docker-compose.yml: one process, 8 drive
-// directories at EC:4, container sidecar-test-minio on 127.0.0.1:59000), in buckets of this test's own, and
-// sidecarhost.Redis on the private test Redis that test-env.sh attests (.stack/server-test.sh). Like the clusters' own
-// T3 it carries the sidecar_localstack tag and fails, rather than skips, when the stack is down.
+// directories at EC:4, container sidecar-test-minio on 127.0.0.1:59000), in buckets of each test's own, made for it and
+// emptied and removed after it, so no test reads another's objects or an earlier run's, and sidecarhost.Redis on the
+// private test Redis that test-env.sh attests (.stack/server-test.sh). Like the clusters' own T3 it carries the
+// sidecar_localstack tag and fails, rather than skips, when the stack is down.
 //
 // The stack runs a stock MinIO until the fork has a build, so nothing here shows D-OPS-20's settle rules; what it
 // shows is gkm's conditional writes, If-None-Match, If-Match and its deletes, as the store answers them.
@@ -18,6 +19,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,13 +50,23 @@ const (
 )
 
 // Two metadata clusters, the first holding place/ and the per-sidecar objects and the second a repo's group, each a
-// bucket of this test's own, made unversioned as xops makes production's.
+// bucket of this test's own, unversioned as xops makes production's, which the test's end empties and removes. A
+// bucket a failed removal leaves behind is the stack's to drop (sidecar/local/stack.sh down), never another test's to
+// read: every test's buckets are new.
 func gkmStackClusters(t *testing.T) *server.FileClusters {
 	t.Helper()
 	ctx := t.Context()
 	if err := localstack.CheckStackAddress(gkmStackEndpoint); err != nil {
 		t.Fatal(err)
 	}
+	client, err := minio.New(gkmStackEndpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(gkmStackAccessKey, gkmStackSecretKey, ""),
+		Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := strings.ToLower(server.NewId().String())
 	configs := []*server.FileClusterConfig{}
 	for i, clusterId := range []string{"meta-1", "meta-2"} {
 		configs = append(configs, &server.FileClusterConfig{
@@ -64,26 +76,32 @@ func gkmStackClusters(t *testing.T) *server.FileClusters {
 			Endpoints: []string{gkmStackEndpoint},
 			AccessKey: gkmStackAccessKey,
 			SecretKey: gkmStackSecretKey,
-			Bucket:    "sidecar-test-server-gkm-" + clusterId,
+			Bucket:    "sidecar-test-gkm-" + run + "-" + clusterId,
 			Region:    "us-east-1",
 		})
 	}
-	client, err := minio.New(gkmStackEndpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(gkmStackAccessKey, gkmStackSecretKey, ""),
-		Region: "us-east-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, config := range configs {
-		exists, err := client.BucketExists(ctx, config.Bucket)
-		if err != nil {
-			t.Fatalf("the local stack's MinIO does not answer (local/stack.sh up): %v", err)
-		}
-		if !exists {
-			if err := client.MakeBucket(ctx, config.Bucket, minio.MakeBucketOptions{Region: config.Region}); err != nil {
-				t.Fatal(err)
+	// registered before the clusters' close, so it runs after it
+	t.Cleanup(func() {
+		ctx := context.Background()
+		for _, config := range configs {
+			exists, err := client.BucketExists(ctx, config.Bucket)
+			if err != nil || !exists {
+				continue
 			}
+			objects := client.ListObjects(ctx, config.Bucket, minio.ListObjectsOptions{Recursive: true})
+			for removal := range client.RemoveObjects(ctx, config.Bucket, objects, minio.RemoveObjectsOptions{}) {
+				t.Logf("%s kept %s: %v", config.Bucket, removal.ObjectName, removal.Err)
+			}
+			if err := client.RemoveBucket(ctx, config.Bucket); err != nil {
+				t.Logf("%s stays: %v", config.Bucket, err)
+			}
+		}
+	})
+	for _, config := range configs {
+		err := client.MakeBucket(ctx, config.Bucket, minio.MakeBucketOptions{Region: config.Region})
+		// the name is this test's alone, so one this user already owns is the create minio-go retried
+		if err != nil && minio.ToErrorResponse(err).Code != "BucketAlreadyOwnedByYou" {
+			t.Fatalf("the local stack's MinIO made no bucket %s (local/stack.sh up): %v", config.Bucket, err)
 		}
 	}
 	clusters, err := server.NewFileClusters(ctx, configs, nil)
