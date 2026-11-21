@@ -56,6 +56,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/mcp"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -588,14 +589,14 @@ func TestScenarioS1GenesisOnT3(t *testing.T) {
 			if pin.GetVersion() != bootstrap.Pin.GetVersion() || !bytes.Equal(pin.GetChain(), bootstrap.Pin.GetChain()) {
 				return fmt.Errorf("the invited device stands at %d, not base 1", pin.GetVersion())
 			}
-			return network.approveSignedInPage(ctx, owner.Sidecar(), heads, bootstrap.GenesisChain)
+			return network.approveSignedInBrowsers(ctx, owner.Sidecar(), heads, bootstrap.GenesisChain)
 		}}, nil)
 	})
 }
 
-// The owner who signed Genesis authorizes a page signed in with the owner's one-use code. Every
+// The owner who signed Genesis authorizes a page and an expiring mailbox burner. Every
 // mint, identity binding, lookup and approval statement passes through the API's normal router.
-func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.Sidecar, heads *sidecartest.FakeConfigHeads, genesis [sha256.Size]byte) error {
+func (self *s1Network) approveSignedInBrowsers(ctx context.Context, signer *sidecar.Sidecar, heads *sidecartest.FakeConfigHeads, genesis [sha256.Size]byte) error {
 	if err := signer.TrustFirstUse(genesis[:]); err != nil {
 		return err
 	}
@@ -621,6 +622,42 @@ func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.
 		}
 		return json.Unmarshal(body, result)
 	}
+	mailbox := sidecar.NewId()
+	create, err := proto.MarshalOptions{Deterministic: true}.Marshal(&protocol.RepoCreate{Header: &bridge.StatementHeader{
+		NetworkId: signer.Identity().NetworkId.Bytes(), At: client.Pin(), Nonce: sidecar.NewId().Bytes(), NotAfterMs: time.Now().Add(time.Hour).UnixMilli(),
+	}, RepoId: mailbox.Bytes(), Kind: protocol.RepoKind_REPO_KIND_MAILBOX})
+	if err != nil {
+		return err
+	}
+	purpose, _ := sidecar.ConfigStatementPurpose(bridge.SignedType_SIGNED_REPO_CREATE)
+	signed, err := signer.Sign(purpose, bridge.SignedType_SIGNED_REPO_CREATE, create, nil)
+	if err != nil {
+		return err
+	}
+	wire, err := proto.MarshalOptions{Deterministic: true}.Marshal(signed)
+	if err != nil {
+		return err
+	}
+	if err := post("/network/config/delta", "Bearer "+self.api.ClientToken(signer.Identity().ClientId), map[string][]byte{"signed": wire}, &struct{}{}); err != nil {
+		return err
+	}
+	if err := client.CatchUp(ctx); err != nil {
+		return err
+	}
+	for _, terms := range []sidecar.BrowserAdmissionTerms{{Mode: sidecar.BrowserAdmissionPage},
+		{Mode: sidecar.BrowserAdmissionBurner, MailboxId: mailbox, NotAfterMs: time.Now().Add(10 * time.Minute).UnixMilli()}} {
+		if err := self.confirmSignedInBrowser(ctx, signer, client, genesis, terms, post); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Each candidate consumes its own code, mints its marked client, binds its keys and independently
+// computes the safety number. Only the native signer's confirmed terms may appear in the verified log.
+func (self *s1Network) confirmSignedInBrowser(ctx context.Context, signer *sidecar.Sidecar, client *sidecar.ConfigClient, genesis [sha256.Size]byte, terms sidecar.BrowserAdmissionTerms, post func(string, string, any, any) error) error {
+	memberId := sidecar.Id(self.userId)
+	burner := terms.Mode == sidecar.BrowserAdmissionBurner
 	code := &model.AuthCodeCreateResult{}
 	if err := post("/auth/code-create", self.root, &model.AuthCodeCreateArgs{Uses: 1, DurationMinutes: 5}, code); err != nil {
 		return err
@@ -632,22 +669,22 @@ func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.
 	if login.ByJwt == "" {
 		return errors.New("the page did not sign in with its one-use code")
 	}
-	page, err := StartT3Sidecar(ctx, self.run.Net, "member page", self.api, self.exchange, nil)
+	page, err := StartT3Sidecar(ctx, self.run.Net, terms.Mode, self.api, self.exchange, nil)
 	if err != nil {
 		return err
 	}
 	defer page.Close()
-	err = page.EnrollOnline(ctx, &sidecar.SidecarEnrollCredential{MintChild: func(context.Context, []byte) (*sidecar.SidecarAuthClientResult, error) {
+	err = page.EnrollOnline(ctx, &sidecar.SidecarEnrollCredential{Ephemeral: burner, MintChild: func(context.Context, []byte) (*sidecar.SidecarAuthClientResult, error) {
 		mint := &model.AuthNetworkClientResult{}
 		if err := post("/network/auth-client", "Bearer "+login.ByJwt, &model.AuthNetworkClientArgs{
-			DeviceSpec: "page", Description: "page", StrictExp: true, AdminRefused: true, DeclaresNoEgress: true,
+			DeviceSpec: terms.Mode, Description: terms.Mode, StrictExp: true, AdminRefused: true, DeclaresNoEgress: true, Ephemeral: burner,
 		}, mint); err != nil {
 			return nil, err
 		}
-		if mint.ByClientJwt == nil || mint.ClientId == nil || !mint.DeclaresNoEgress {
+		if mint.ByClientJwt == nil || mint.ClientId == nil || !mint.DeclaresNoEgress || (mint.Close != "") != burner {
 			return nil, errors.New("the page did not receive its own limited client")
 		}
-		return &sidecar.SidecarAuthClientResult{ClientId: sidecar.Id(*mint.ClientId), ByClientJwt: *mint.ByClientJwt, AdminRefused: mint.AdminRefused, StrictExp: mint.StrictExp}, nil
+		return &sidecar.SidecarAuthClientResult{ClientId: sidecar.Id(*mint.ClientId), ByClientJwt: *mint.ByClientJwt, AdminRefused: mint.AdminRefused, StrictExp: mint.StrictExp, Close: mint.Close}, nil
 	}})
 	if err != nil {
 		return err
@@ -660,11 +697,11 @@ func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.
 		return err
 	}
 	id := page.Sidecar().Identity().SidecarId
-	preview, err := signer.PreviewBrowserAdmission(ctx, id, sidecar.BrowserAdmissionTerms{Mode: sidecar.BrowserAdmissionPage})
+	preview, err := signer.PreviewBrowserAdmission(ctx, id, terms)
 	if err != nil {
 		return err
 	}
-	if preview.SafetyNumber != safety || preview.NetworkId != sidecar.Id(self.networkId) || preview.MemberId != memberId || client.Authority().Admission(id) != nil {
+	if preview.SafetyNumber != safety || preview.NetworkId != sidecar.Id(self.networkId) || preview.MemberId != memberId || preview.Terms != terms || client.Authority().Admission(id) != nil {
 		return errors.New("the preview did not match the unadmitted page and signed-in member")
 	}
 	if err := signer.ConfirmBrowserAdmission(ctx, id, *preview, nil); err != nil {
@@ -673,9 +710,24 @@ func (self *s1Network) approveSignedInPage(ctx context.Context, signer *sidecar.
 	if err := client.CatchUp(ctx); err != nil {
 		return err
 	}
-	row := client.State().SidecarRow(id)
+	state := client.State()
+	row := state.SidecarRow(id)
+	if !bytes.Equal(row.GetIdentityPublicKey(), page.Sidecar().Identity().IdentityPublicKey) || !bytes.Equal(row.GetMemberId(), memberId.Bytes()) {
+		return errors.New("the log admitted a different identity")
+	}
+	if burner {
+		repo := state.Repo(terms.MailboxId)
+		if !row.GetEphemeral() || row.GetNotAfter() != terms.NotAfterMs || row.GetCapabilities() != 0 || client.Authority().Consented(id, memberId) ||
+			!slices.ContainsFunc(repo.GetShares(), func(share *protocol.AclRepoShareRow) bool {
+				return bytes.Equal(share.GetSubject(), id.Bytes()) && bytes.Equal(share.GetSigner(), signer.Identity().SidecarId.Bytes()) && share.GetExpires() == terms.NotAfterMs
+			}) || !slices.Contains(state.RepoReadersAt(terms.MailboxId, time.Now()), id) || slices.Contains(state.RepoWriters(terms.MailboxId), id) ||
+			slices.Contains(state.RepoReadersAt(terms.MailboxId, time.UnixMilli(terms.NotAfterMs)), id) {
+			return errors.New("the burner grant does not match its mailbox, signer and expiry")
+		}
+		return nil
+	}
 	if !client.Authority().Consented(id, memberId) || row.GetOwnerConfirmedAt() == 0 || !bytes.Equal(row.GetOwnerConfirmSigner(), signer.Identity().SidecarId.Bytes()) ||
-		row.GetCapabilities() != uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_READ_ONLY) || !bytes.Equal(row.GetIdentityPublicKey(), page.Sidecar().Identity().IdentityPublicKey) {
+		row.GetEphemeral() || row.GetCapabilities() != uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_READ_ONLY) {
 		return errors.New("the verified log lacks the page's exact read-only owner confirmation")
 	}
 	return nil
