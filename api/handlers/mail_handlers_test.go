@@ -139,7 +139,8 @@ func TestMailEnableAndStatusRoutes(t *testing.T) {
 		})
 		status, body = testMailCall(t, ctx, "GET", "/mail/status", clientBearer)
 		strictDomains, _ := body["strict_domains"].([]any)
-		if status != http.StatusOK || len(strictDomains) != 1 || strictDomains[0] != domain {
+		verifiedDomains, _ := body["verified_domains"].([]any)
+		if status != http.StatusOK || !slices.Equal(strictDomains, []any{domain}) || !slices.Equal(verifiedDomains, []any{domain}) {
 			t.Fatalf("status with a strict domain: %d %v", status, body)
 		}
 		facts, err := model.GetSmtpGateFacts(ctx, networkId, root)
