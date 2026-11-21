@@ -147,8 +147,10 @@ func TestGetProvideKeyChangesBatchMatchesSingleReads(t *testing.T) {
 		SetProvide(ctx, undecodable, map[ProvideMode][]byte{ProvideModeNetwork: make([]byte, 32)})
 		breakMirrors := func() {
 			server.Redis(ctx, func(r server.RedisClient) {
-				server.Raise(r.Del(ctx, provideModesKey(lapsed)).Err())
-				server.Raise(r.Set(ctx, provideModesKey(undecodable), "not a provide mode list", time.Hour).Err())
+				err := r.Del(ctx, provideModesKey(lapsed)).Err()
+				server.Raise(err)
+				err = r.Set(ctx, provideModesKey(undecodable), "not a provide mode list", time.Hour).Err()
+				server.Raise(err)
 			})
 		}
 		reads := []ProvideKeyChangesRead{
@@ -233,7 +235,8 @@ func testClearClientReliabilityStats(ctx context.Context) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		for blockNumber := currentBlockNumber - 1; blockNumber <= currentBlockNumber; blockNumber += 1 {
 			for shard := 0; shard < clientReliabilityStatsShardCount; shard += 1 {
-				server.Raise(r.Del(ctx, clientReliabilityStatsKey(blockNumber, shard)).Err())
+				err := r.Del(ctx, clientReliabilityStatsKey(blockNumber, shard)).Err()
+				server.Raise(err)
 			}
 		}
 	})
@@ -393,17 +396,22 @@ func testClearVerifyEgressState(ctx context.Context, clientIds []server.Id, ips 
 				// a key a test broke on purpose has no fields to follow
 				fields, _ := r.HGetAll(ctx, reverseKey).Result()
 				for field := range fields {
-					server.Raise(r.Del(ctx, verifyClientEgressLeaseKey(reverseKey, parseVerifyClientEgressField(field).address)).Err())
+					err := r.Del(ctx, verifyClientEgressLeaseKey(reverseKey, parseVerifyClientEgressField(field).address)).Err()
+					server.Raise(err)
 				}
-				server.Raise(r.Del(ctx, reverseKey).Err())
+				err := r.Del(ctx, reverseKey).Err()
+				server.Raise(err)
 			}
-			server.Raise(r.Del(ctx, verifyProxiedEgressKey(clientId)).Err())
-			server.Raise(r.SRem(ctx, verifyEligibleKey, clientId.String()).Err())
+			err := r.Del(ctx, verifyProxiedEgressKey(clientId)).Err()
+			server.Raise(err)
+			err = r.SRem(ctx, verifyEligibleKey, clientId.String()).Err()
+			server.Raise(err)
 		}
 		for _, ip := range ips {
 			_, parsed := verifyClientEgressField(ip, settings)
 			for _, egressHashHex := range parsed.forwardHashes() {
-				server.Raise(r.Del(ctx, verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLeaseKey(egressHashHex)).Err())
+				err := r.Del(ctx, verifyEgressKeyFromHex(egressHashHex), verifyForwardEgressLeaseKey(egressHashHex)).Err()
+				server.Raise(err)
 			}
 		}
 	})
@@ -417,7 +425,8 @@ func testSetProvideModesMirror(ctx context.Context, clientId server.Id, provideM
 	provideModesJson, err := json.Marshal(provideModes)
 	server.Raise(err)
 	server.Redis(ctx, func(r server.RedisClient) {
-		server.Raise(r.Set(ctx, provideModesKey(clientId), provideModesJson, time.Hour).Err())
+		err := r.Set(ctx, provideModesKey(clientId), provideModesJson, time.Hour).Err()
+		server.Raise(err)
 	})
 }
 
@@ -458,7 +467,8 @@ func TestFeedVerifyConnectionEgressBatchMatchesSingleFeeds(t *testing.T) {
 			expiredField, _ := verifyClientEgressField(ips[5], settings)
 			server.Redis(ctx, func(r server.RedisClient) {
 				past := server.NowUtc().Add(-time.Minute).UnixMilli()
-				server.Raise(r.HSet(ctx, verifyClientEgressKey(expired), expiredField, fmt.Sprintf("%d%s", past, verifyClientEgressValueSuffix(ips[5], settings))).Err())
+				err := r.HSet(ctx, verifyClientEgressKey(expired), expiredField, fmt.Sprintf("%d%s", past, verifyClientEgressValueSuffix(ips[5], settings))).Err()
+				server.Raise(err)
 			})
 		}
 
@@ -558,7 +568,8 @@ func TestFeedVerifyConnectionEgressBatchIsolatesAFailedFeed(t *testing.T) {
 		defer testClearVerifyEgressState(ctx, clientIds, ips, settings)
 		const failing = 3
 		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Set(ctx, verifyClientEgressKey(clientIds[failing]), "not a lease index", time.Minute).Err())
+			err := r.Set(ctx, verifyClientEgressKey(clientIds[failing]), "not a lease index", time.Minute).Err()
+			server.Raise(err)
 		})
 		errs := FeedVerifyConnectionEgressBatch(ctx, feeds)
 		for i, err := range errs {

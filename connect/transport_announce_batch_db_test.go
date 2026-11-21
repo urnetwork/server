@@ -275,7 +275,8 @@ func TestConnectionAnnounceVerifyLeaseRefreshesShareOneBatch(t *testing.T) {
 		// the first refreshes wait at the gate; break one client's index first
 		brokenKey := fmt.Sprintf("{vce4_%s}", started.clientIds[brokenIndex])
 		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Set(ctx, brokenKey, "not a lease index", time.Minute).Err())
+			err := r.Set(ctx, brokenKey, "not a lease index", time.Minute).Err()
+			server.Raise(err)
 		})
 		awaitAnnounceBatchWaitingForTest(t, testCtx, batcher.verifyFeeds, announceCount)
 		verifyFeeds.release()
@@ -303,7 +304,8 @@ func TestConnectionAnnounceVerifyLeaseRefreshesShareOneBatch(t *testing.T) {
 
 		// Redis accepts the broken one's lease again; its own retry writes it
 		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Del(ctx, brokenKey).Err())
+			err := r.Del(ctx, brokenKey).Err()
+			server.Raise(err)
 		})
 		for {
 			resolved := model.ResolveVerifyEgress(ctx, started.ips[brokenIndex], verifySettings)

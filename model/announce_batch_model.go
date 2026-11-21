@@ -21,22 +21,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Runs do and returns what it raised, as an error, without the log
-// HandleError writes: a batch reports it as one item's failure.
-func raisedAsError(do func()) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			if raisedErr, ok := r.(error); ok {
-				err = raisedErr
-			} else {
-				err = fmt.Errorf("%v", r)
-			}
-		}
-	}()
-	do()
-	return nil
-}
-
 // GetProvideModes for many clients: their mirrors in one Redis pipeline, and
 // each client whose mirror is missing or undecodable from postgres on its own,
 // as GetProvideModes does. A client whose postgres read raises gets the raise
@@ -66,7 +50,8 @@ func GetProvideModesBatch(ctx context.Context, clientIds []server.Id) (provideMo
 	})
 	// a decoded mirror answers at once; each other client reads postgres on
 	// its own goroutine, as each read did on its connection's, so that the
-	// batch takes as long as its slowest read, not their sum
+	// batch takes as long as its slowest read, not their sum. What a read
+	// raises is its client's error, without the log HandleError writes.
 	var fallbacks sync.WaitGroup
 	for i, clientId := range clientIds {
 		if decoded, ok := decodeProvideModesMirror(provideModesListJsons[i]); ok {
@@ -74,9 +59,16 @@ func GetProvideModesBatch(ctx context.Context, clientIds []server.Id) (provideMo
 			continue
 		}
 		fallbacks.Go(func() {
-			errs[i] = raisedAsError(func() {
-				provideModes[i] = provideModesFromMirror(ctx, clientId, provideModesListJsons[i])
-			})
+			defer func() {
+				if r := recover(); r != nil {
+					if raisedErr, ok := r.(error); ok {
+						errs[i] = raisedErr
+					} else {
+						errs[i] = fmt.Errorf("%v", r)
+					}
+				}
+			}()
+			provideModes[i] = provideModesFromMirror(ctx, clientId, provideModesListJsons[i])
 		})
 	}
 	fallbacks.Wait()
@@ -136,11 +128,13 @@ func GetProvideKeyChangesBatch(ctx context.Context, reads []ProvideKeyChangesRea
 			for result.Next() {
 				var readIndex int64
 				var changedCount int
-				server.Raise(result.Scan(&readIndex, &changedCount))
+				err := result.Scan(&readIndex, &changedCount)
+				server.Raise(err)
 				// the ordinality counts from 1
 				i := int(readIndex) - 1
 				if i < 0 || len(reads) <= i {
-					server.Raise(fmt.Errorf("provide key change read %d is not one of %d", readIndex, len(reads)))
+					err := fmt.Errorf("provide key change read %d is not one of %d", readIndex, len(reads))
+					server.Raise(err)
 				}
 				results[i].ChangedCount = changedCount
 				counted[i] = true
@@ -149,7 +143,8 @@ func GetProvideKeyChangesBatch(ctx context.Context, reads []ProvideKeyChangesRea
 	})
 	for i := range reads {
 		if !counted[i] {
-			server.Raise(fmt.Errorf("provide key change read %d of %d has no count", i+1, len(reads)))
+			err := fmt.Errorf("provide key change read %d of %d has no count", i+1, len(reads))
+			server.Raise(err)
 		}
 	}
 	provideModes, errs := GetProvideModesBatch(ctx, clientIds)
