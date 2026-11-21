@@ -87,6 +87,8 @@ type e2eHostsSettings struct {
 	// are counted meanwhile. An exiting goroutine has no hook to wait on.
 	GoroutineSettleTimeout time.Duration
 	GoroutinePollInterval  time.Duration
+	// How often the world's ledger reader asks Redis for the blocks' write budget reports, which have no hook.
+	BudgetPollInterval time.Duration
 	// sidecarhost.Run's for every block: readiness polled often, and no keepalive grace at the drain, since no lb
 	// holds a test's connections.
 	Run *sidecarhost.RunSettings
@@ -111,6 +113,11 @@ type e2eHostsSettings struct {
 	DnsWindowBefore time.Duration
 	DnsWindowAfter  time.Duration
 	DnsRecordTtl    uint32
+	// The glue of each of dns.yml's NS labels in the root's own records (root_records' glue), documentation
+	// addresses: the root's SOA, NS and their glue are what the API writes at <root> at its start
+	// (model.DnsReconcileRootRecords), and an edge serves a root only once its view holds that SOA, so a dns.yml with
+	// no root_records leaves every edge not ready (e2e-world's finding).
+	DnsNsGlue map[string][]string
 	// dns.yml's environment values, which have no default: the edge's signing rate, its TCP connections a source
 	// may hold, and its response rate limit.
 	DnsSignaturesPerSecond     int
@@ -131,6 +138,7 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 		StopTimeout:                90 * time.Second,
 		GoroutineSettleTimeout:     30 * time.Second,
 		GoroutinePollInterval:      20 * time.Millisecond,
+		BudgetPollInterval:         100 * time.Millisecond,
 		Run:                        run,
 		ServiceTokenIssuer:         "https://auth.e2e.example",
 		TlsEdgeRoot:                "edge.e2e.example",
@@ -148,6 +156,7 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 		DnsWindowBefore:            24 * time.Hour,
 		DnsWindowAfter:             13 * 24 * time.Hour,
 		DnsRecordTtl:               3600,
+		DnsNsGlue:                  map[string][]string{"ns1": {"192.0.2.53"}, "ns2": {"198.51.100.53"}},
 		DnsSignaturesPerSecond:     1000,
 		DnsTcpConnectionsPerSource: 2,
 		DnsRrlResponsesPerSecond:   1000,
@@ -721,16 +730,21 @@ func (self *e2eProcess) startSmtpedge(t testing.TB) *e2eHost {
 
 // mxedge.yml for the harness's names.
 func (self *e2eProcess) mxEdgeSettings() *mxedgehost.HostSettings {
+	return e2eMxEdgeSettings(self.settings)
+}
+
+// mxedge.yml for settings' names.
+func e2eMxEdgeSettings(hostsSettings *e2eHostsSettings) *mxedgehost.HostSettings {
 	mxEdge := mxedgeservice.DefaultMxEdgeSettings()
-	mxEdge.BannerHostName = self.settings.MxBannerHost
+	mxEdge.BannerHostName = hostsSettings.MxBannerHost
 	mxEdge.DeviationUrl = "https://deviation.e2e.example/rfc3207"
-	mxEdge.PlatformReportHostName = self.settings.MxReportHost
-	mxEdge.PlatformRootDomainName = self.settings.MxPlatformRoot
+	mxEdge.PlatformReportHostName = hostsSettings.MxReportHost
+	mxEdge.PlatformRootDomainName = hostsSettings.MxPlatformRoot
 	mxEdge.PlatformAbuseUrl = "https://abuse.e2e.example/form"
-	mxEdge.RouteRootDomainName = self.settings.MxRouteRoot
+	mxEdge.RouteRootDomainName = hostsSettings.MxRouteRoot
 	settings := mxedgehost.DefaultHostSettings()
 	settings.MxEdge = mxEdge
-	settings.Run = self.settings.Run
+	settings.Run = hostsSettings.Run
 	return settings
 }
 
@@ -785,18 +799,33 @@ func (self *e2eProcess) startMxedgePlatform(t testing.TB) *e2eHost {
 // dns.yml for the harness's root, anchored at the credentials' KSK.
 func (self *e2eProcess) dnsSettings(t testing.TB) *dnsservice.DnsSettings {
 	t.Helper()
-	rdata := strings.TrimSpace(strings.TrimPrefix(self.credentials.dnsKskRecord.String(), self.credentials.dnsKskRecord.Header().String()))
-	settings := dnsservice.DefaultDnsSettings()
-	settings.Roots = []string{self.settings.DnsRoot}
-	settings.TrustAnchors = map[string][]string{self.settings.DnsRoot: {rdata}}
-	settings.SignaturesPerSecond = self.settings.DnsSignaturesPerSecond
-	settings.Tcp.ConnectionsPerSource = self.settings.DnsTcpConnectionsPerSource
-	settings.Rrl.ResponsesPerSecond = self.settings.DnsRrlResponsesPerSecond
-	settings.Edge.UdpReaderCount = 1
-	if err := settings.Validate(); err != nil {
+	settings, err := e2eDnsSettings(self.settings, self.credentials, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return settings
+}
+
+// dns.yml for hostsSettings' root, anchored at credentials' KSK, adjusted by adjust where it is not nil, and validated.
+func e2eDnsSettings(hostsSettings *e2eHostsSettings, credentials *e2eCredentials, adjust func(settings *dnsservice.DnsSettings)) (*dnsservice.DnsSettings, error) {
+	rdata := strings.TrimSpace(strings.TrimPrefix(credentials.dnsKskRecord.String(), credentials.dnsKskRecord.Header().String()))
+	settings := dnsservice.DefaultDnsSettings()
+	settings.Roots = []string{hostsSettings.DnsRoot}
+	settings.TrustAnchors = map[string][]string{hostsSettings.DnsRoot: {rdata}}
+	settings.SignaturesPerSecond = hostsSettings.DnsSignaturesPerSecond
+	settings.Tcp.ConnectionsPerSource = hostsSettings.DnsTcpConnectionsPerSource
+	settings.Rrl.ResponsesPerSecond = hostsSettings.DnsRrlResponsesPerSecond
+	settings.Edge.UdpReaderCount = 1
+	settings.RootRecords = map[string]*dnsservice.DnsRootRecordSettings{
+		hostsSettings.DnsRoot: {Glue: hostsSettings.DnsNsGlue},
+	}
+	if adjust != nil {
+		adjust(settings)
+	}
+	if err := settings.Validate(); err != nil {
+		return nil, err
+	}
+	return settings, nil
 }
 
 // The dns API on the env's Postgres and Redis, releasing the credentials' key window, with the edge's bearer
@@ -819,6 +848,7 @@ func (self *e2eProcess) startDnsApi(t testing.TB) *e2eHost {
 		},
 		Auth:           self.credentials.dnsAuth,
 		Interfaces:     []dnsservice.DnsLbInterface{},
+		SoaReader:      e2eNoSoaReader{},
 		Projection:     e2eNoNetworkSource{},
 		ServiceTokens:  self.credentials.serviceTokens,
 		StatusListener: statusListener,
@@ -851,6 +881,14 @@ func (self *e2eProcess) startDnsEdge(t testing.TB, api *e2eHost) *e2eHost {
 	return self.start(t, "dnsedge", statusListener, func(ctx context.Context) error {
 		return dnshost.RunHost(ctx, dnshost.HostRoleEdge, settings, deps, nil)
 	})
+}
+
+// Reads no NS's SOA: no NS answers at the glue's documentation addresses, so the API's rollout reads every NS as
+// unanswered rather than dial them.
+type e2eNoSoaReader struct{}
+
+func (e2eNoSoaReader) ReadSoa(ctx context.Context, root string, ns string) (uint32, error) {
+	return 0, errors.New("no NS answers in this harness")
 }
 
 // Refuses every probe: no lb interface answers in this harness.
