@@ -1,7 +1,9 @@
 package model_test
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -17,6 +19,17 @@ import (
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
+
+// Record each requested hash while preserving the selected tier's storage behavior.
+type holdSourceHashReader struct {
+	sidecar.Redis
+	keys []string
+}
+
+func (self *holdSourceHashReader) HashGetAll(ctx context.Context, key string) (map[string][]byte, error) {
+	self.keys = append(self.keys, key)
+	return self.Redis.HashGetAll(ctx, key)
+}
 
 func TestLegalHoldSourceReadsOnlyPlacementLeaseAndAckHashes(t *testing.T) {
 	at := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
@@ -54,8 +67,11 @@ func checkHoldPlacementSoftState(t testing.TB, host *sidecar.ServiceHost, at tim
 	put(sidecar.EvsPlaceKey(repo), placement)
 	putForm := func(groupId sidecar.Id, generation uint64) {
 		t.Helper()
-		form := encode(&protocol.GroupForm{RepoId: repo.Bytes(), GroupId: groupId.Bytes(), Generation: generation})
-		put(gkmservice.GkmFormKey(repo, generation), encode(&bridge.Signed{Body: form, Type: uint32(bridge.SignedType_SIGNED_GROUP_FORM),
+		form := &protocol.GroupForm{RepoId: repo.Bytes(), GroupId: groupId.Bytes(), Generation: generation}
+		if generation > 1 {
+			form.PreviousGroupId = group.Bytes()
+		}
+		put(gkmservice.GkmFormKey(repo, generation), encode(&bridge.Signed{Body: encode(form), Type: uint32(bridge.SignedType_SIGNED_GROUP_FORM),
 			SignerId: client.Bytes(), Signature: make([]byte, 64)}))
 	}
 	putForm(group, 1)
@@ -72,11 +88,18 @@ func checkHoldPlacementSoftState(t testing.TB, host *sidecar.ServiceHost, at tim
 	if err := host.Redis.HashSet(ctx, gkmservice.GkmAckRedisKey(otherGroup), map[string][]byte{"unrelated": []byte(ack)}); err != nil {
 		t.Fatal(err)
 	}
-	source := model.NewAbuseHoldSoftStateSource(host, nil)
+	reader := &holdSourceHashReader{Redis: host.Redis}
+	sourceHost := *host
+	sourceHost.Redis = reader
+	source := model.NewAbuseHoldSoftStateSource(&sourceHost, nil)
 	requireNoCopy := func(reason string) {
 		t.Helper()
+		reader.keys = nil
 		if keys, err := source.RepoSoftState(ctx, server.Id(repo), at); err == nil || len(keys) != 0 {
 			t.Fatalf("%s returned %d keys, error %v", reason, len(keys), err)
+		}
+		if len(reader.keys) != 0 {
+			t.Fatalf("%s read Redis hashes %v", reason, reader.keys)
 		}
 	}
 	requireNoCopy("missing group owner")
@@ -84,6 +107,9 @@ func checkHoldPlacementSoftState(t testing.TB, host *sidecar.ServiceHost, at tim
 	keys, err := source.RepoSoftState(ctx, server.Id(repo), at)
 	if err != nil || len(keys) != 2 || keys[0].Key != leaseKey || keys[0].Fields["synthetic-lease"] != lease || keys[1].Key != ackKey || keys[1].Fields["synthetic-client"] != ack {
 		t.Fatalf("scoped placement fields: %+v, %v", keys, err)
+	}
+	if !slices.Equal(reader.keys, []string{leaseKey, ackKey}) {
+		t.Fatalf("placement read Redis hashes %v", reader.keys)
 	}
 	if _, err := source.RepoSoftState(ctx, server.Id(repo), at.Add(-time.Millisecond)); !errors.Is(err, model.ErrHoldPlacementSnapshotUnavailable) {
 		t.Fatalf("later fields reached an earlier placement: %v", err)
