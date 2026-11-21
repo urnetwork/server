@@ -465,6 +465,8 @@ func WriteDnsRecords(ctx context.Context, write *DnsRecordsWrite) ([]byte, error
 					Template:         approval.Template,
 					EffectKey:        write.EffectKey,
 					Fields:           parsed.fields,
+					DnsRoot:          root,
+					DnsExpectVersion: write.Request.ExpectVersion,
 				}, now, func(ctx context.Context, tx server.PgTx, useIndex int) ([]byte, error) {
 					return apply(ctx, tx)
 				})
